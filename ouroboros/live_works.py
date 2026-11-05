@@ -94,7 +94,7 @@ def live_works_present(root, *, exclude=""):
     return {"works": works, "last_line_source": "model_authored_focus",
             "incomplete": roster["incomplete"] or any(row.get("unavailable") for row in other),
             **({"other_live_work": other} if other else {}), "note": _HYGIENE_NOTE,
-            **{key: roster[key] for key in ("queue_snapshot", "direct_roots")}}
+            "queue_snapshot": roster["queue_snapshot"]}
 
 
 def context_present(env, task):

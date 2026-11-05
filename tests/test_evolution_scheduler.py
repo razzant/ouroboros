@@ -467,6 +467,17 @@ def test_refused_evolution_respects_current_controls(refused_evolution, monkeypa
         assert refused_evolution.git["calls"] == before
 
 
+def test_evolution_starts_on_a_subscription_main_at_the_reached_global_limit(refused_evolution, monkeypatch):
+    """A reached global limit refuses paid admission only; the "budget" control above is a paid Main's."""
+    from supervisor import queue
+
+    monkeypatch.setenv("OUROBOROS_MODEL", "claudexor::codex=gpt-6-astra")
+    monkeypatch.setattr(queue, "budget_remaining", lambda *a, **k: 0)
+    refused_evolution.bindings.write_text('{"bindings": {}}', encoding="utf-8")
+    queue.enqueue_evolution_task_if_needed()
+    assert len(queue.PENDING) == 1
+
+
 @pytest.mark.parametrize("field,value", [("objective", "Different objective"), ("source", "owner_chat")])
 def test_refused_evolution_changed_campaign_does_not_reuse(refused_evolution, field, value):
     from ouroboros.evolution_fingerprint import canonical_objective_fingerprint

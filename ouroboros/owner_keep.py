@@ -59,13 +59,15 @@ class OwnerKeepResponse(TypedDict):
     reason: str  # why inflight or refused; else empty
     retained: List[str]  # material found on disk now: paths, ``pins:<snapshot>`` for result pins, and
     # ``review_thread:<id>`` for an engine reviewer thread no recorded release has let go
-    retired: List[str]  # material a record names as gone OR accepted for deletion: acceptance alone is no removal
+    retired: List[str]  # gone, accepted for deletion, or managed import ID reuse released; not proof of deleted bytes
     unknown: List[str]  # material classes that could not be read: nothing is claimed about them
     releases: Dict[str, str]  # each ``review_thread:<id>`` -> its release as last observed, never polled:
     # ``release_unconfirmed`` (bound; neither kept nor gone), ``accepted_pending_removal``, ``removed`` (the engine's
     # cleanup result said so), ``purged`` (by the engine's own route), ``not_found`` (the store it asked does not hold
     # it: no purge, in neither list, ``unknown`` names ``review_threads``), or, retained, ``unrecorded`` (a plan seat
-    # named or started it, no release is recorded) and ``held``/``refused``/``abandoned``
+    # named or started it, no release is recorded) and ``held``/``refused``/``abandoned``;
+    # ``managed_import:<key>`` -> held | release_unconfirmed | future_reuse_released | upload_cancelled |
+    # binding_unavailable:<outcome> | release_refused:<code>; none proves deletion of bytes
 
 
 def _valid(task_id: Any) -> bool:
@@ -138,7 +140,8 @@ def _thread_places(row: Dict[str, Any]) -> List[str]:
 
 
 RELEASE_UNCONFIRMED = "release_unconfirmed"
-_THREAD_GONE = frozenset({"accepted_pending_removal", "removed", "purged"})
+_REUSE_RELEASED = "future_reuse_released"
+_THREAD_GONE = frozenset({"accepted_pending_removal", "removed", "purged", _REUSE_RELEASED, "upload_cancelled"})
 _THREAD_ABSENT = "not_found"
 _THREADS_CLASS = "review_threads"  # the ``unknown`` class of a thread nothing here can place
 
@@ -162,8 +165,9 @@ def _thread_release(row: Dict[str, Any], place: str) -> str:
 
 
 def _thread_present(release: str) -> Optional[bool]:
-    """Whether a thread's last observed release leaves it in the engine; ``None`` (nothing claimed) for a store's absence."""
-    return None if release == _THREAD_ABSENT else release not in _THREAD_GONE
+    """Whether the last observation permits keeping this material or reuse; None when it cannot prove that."""
+    return (None if release == _THREAD_ABSENT or release.startswith(("binding_unavailable:", "release_refused:"))
+            else release not in _THREAD_GONE)
 
 
 def inventory(root: pathlib.Path, task_id: str, row: Dict[str, Any]) -> Tuple[List[str], List[str], Dict[str, str]]:
@@ -294,9 +298,10 @@ def set_owner_keep(root: Any, task_id: str, *, keep: bool, source: Dict[str, Any
     current document decides, so a material moved meanwhile is reported retired, never kept. A retirer
     inside its effect holds that lock: then nothing is saved and the answer is ``inflight``. With a
     complete inventory where everything named is already gone nothing is saved (``already_retired``);
-    a class that could not be read keeps the fact saved, since material may remain there, and so does
-    a bound engine-thread release: the keep is saved and the answer is ``release_unconfirmed``."""
+    an unreadable class keeps the fact saved, since material may remain. A bound thread or
+    managed-import release saves Keep with ``release_unconfirmed``."""
     from ouroboros.task_custody import task_custody_lock
+    from ouroboros.delegate_documents import managed_keep_places
     from ouroboros.task_results import load_task_result
     from ouroboros.task_store import patch_document
     from ouroboros.utils import utc_now_iso
@@ -326,13 +331,21 @@ def set_owner_keep(root: Any, task_id: str, *, keep: bool, source: Dict[str, Any
         stands = isinstance(row.get(OWNER_KEEP), dict)
         places = sorted(set(places) | set(_thread_places(row)))  # a thread declared or bound since the first read too
         releases = {place: _thread_release(row, place) for place in places if place.startswith(THREAD_PLACE)}
+        try:
+            documents = managed_keep_places(base, task_id)
+        except Exception:  # unread custody proves no absence, so Keep still saves its fact
+            documents = {}
+            unknown.append("managed_imports")
+        places = sorted(set(places) | set(documents))
+        releases.update(documents)
         releasing = [place for place, state in releases.items() if state == RELEASE_UNCONFIRMED]
         present = {place: _thread_present(releases[place]) if place in releases
                    else _present(base, task_id, place, pins) for place in places if place not in releasing}
         retained = [place for place in present if present[place]]
         retired = [place for place in present if present[place] is False]
         for place in [place for place in present if present[place] is None]:
-            kind = ("private_copies" if place.startswith("pins:") else _THREADS_CLASS if place in releases
+            kind = ("managed_imports" if place.startswith("managed_import:") else
+                    "private_copies" if place.startswith("pins:") else _THREADS_CLASS if place in releases
                     else "environments")
             if kind not in unknown:
                 unknown.append(kind)

@@ -108,7 +108,7 @@ def test_gateway_replacement_reuses_frozen_capture_after_create(setup, monkeypat
     versions = [item for index, item in enumerate(manifests)
                 if index == 0 or item != manifests[index - 1]]
     assert [item.get("operation_id") for item in versions] == [None, "op-0"]
-    assert [item.get("operation_id") for item in request_writes] == [None, "op-0"]
+    assert [item.get("operation_id") for item in request_writes] == [None]  # acceptance merges receipt metadata only
     assert len({item["invocation_id"] for item in manifests}) == 1
     assert len({item["full_payload_ref"]["sha256"] for item in manifests}) == 1
     assert all(item["capture_failure_evidence"] is failure and

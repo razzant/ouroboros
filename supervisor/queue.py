@@ -76,7 +76,7 @@ SCHEDULED_TASKS_FILE = pathlib.Path("state") / "scheduled_tasks.json"
 # OWNER_PID names that process: a child forked after ``init`` inherits INITIALIZED, not the pid.
 INITIALIZED = False
 OWNER_PID: Optional[int] = None
-QUEUE_PUBLICATION = None  # (path, encoded documents, generation) of the last successful publication.
+QUEUE_PUBLICATION = None  # (path, encoded documents, snapshot generation, generation per document) of the last successful publication.
 
 
 def owns_live_queue(drive_root: Any) -> bool:
@@ -253,17 +253,25 @@ def prepare_root_billing(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 _UNRESOLVED = object()
 
 
+def _reads_subagents_settings(task: Dict[str, Any]) -> bool:
+    """A root without an explicit subagents mode reads the settings for its subagent policy."""
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    return not (task.get("parent_task_id") or metadata.get("parent_task_id")) and "subagents_mode" not in metadata
+
+
 @contextlib.contextmanager
 def prepared_root_billing(task: Dict[str, Any], *, resolved: Any = _UNRESOLVED):
-    """Resolve a root's billing BEFORE the caller takes ``_queue_lock``.
-
-    ``enqueue_task`` called inside the block for the same task uses the result
-    instead of reading the ledger under the lock. Written as a context manager
-    so the call shape ``enqueue_task(task, ...)`` stays the same everywhere.
-    ``resolved``: a ``prepare_root_billing`` result the caller read before Q.
+    """Resolve what a root's admission reads BEFORE the caller takes ``_queue_lock``: its billing (the money
+    ledger) and the settings its subagent policy needs. ``enqueue_task`` inside the block uses these instead of
+    reading under the caller's hold (Q spans memory only); the call shape ``enqueue_task(task, ...)`` stays the
+    same. ``resolved``: a ``prepare_root_billing`` result read before Q. The consciousness allowance window is
+    the producer's own off-lock read, passed to ``enqueue_task`` explicitly.
     """
+    from ouroboros.config import load_settings
+
     billing = prepare_root_billing(task) if resolved is _UNRESOLVED else resolved
-    token = _PREPARED_ROOT_BILLING.set((str(task.get("id") or "").strip(), billing))
+    prepared = {"billing": billing, "settings": load_settings() if _reads_subagents_settings(task) else None}
+    token = _PREPARED_ROOT_BILLING.set((str(task.get("id") or "").strip(), prepared))
     try:
         yield
     finally:
@@ -297,11 +305,12 @@ def enqueue_task(
         t.pop("_consciousness_continuation", None)  # never a caller-supplied marker
         if continuation:
             t["_consciousness_continuation"] = True
+    prepared = _PREPARED_ROOT_BILLING.get()  # a caller holding Q read these off the lock (``prepared_root_billing``)
+    prepared = prepared[1] if prepared is not None and prepared[0] == str(t.get("id") or "").strip() else None
     subagents_settings = None
-    if (not restoring_snapshot and not (t.get("parent_task_id") or metadata.get("parent_task_id"))
-            and "subagents_mode" not in metadata):
+    if not restoring_snapshot and _reads_subagents_settings(t):
         from ouroboros.config import load_settings
-        subagents_settings = load_settings()
+        subagents_settings = prepared["settings"] if prepared is not None and prepared["settings"] else load_settings()
     attach_task_contract(apply_consciousness_authority(t))
     from ouroboros.tool_access_roots import freeze_tool_profile
     freeze_tool_profile(t)
@@ -315,9 +324,8 @@ def enqueue_task(
     # cross-process lock; in a cold process a full parse): resolve it here, off
     # the queue lock, and only attach it inside. A caller whose admission
     # transaction already holds the lock resolved it earlier (``prepared_root_billing``).
-    prepared = _PREPARED_ROOT_BILLING.get()
-    if prepared is not None and prepared[0] == str(t.get("id") or "").strip():
-        billing = prepared[1]
+    if prepared is not None:
+        billing = prepared["billing"]
     else:
         billing = None if restoring_snapshot else prepare_root_billing(t)
     project_id = str(t.get("project_id") or "").strip()
@@ -515,13 +523,15 @@ def enqueue_task(
             ) else "none"
         if ADMISSION_RESERVATIONS.get(task_id) == admission_token:
             ADMISSION_RESERVATIONS.pop(task_id, None)
-        if not restoring_snapshot and (durable or agent_restart_pending()):
-            if publish_queue_snapshot(reason="agent_restart_admission") is not True:  # durable before the reply
-                # No accepted reply and no dispatch. A partial disk publication
-                # is outside the named return set and boots held for Resume.
+        durable_before_reply = not restoring_snapshot and (durable or agent_restart_pending())
+    if durable_before_reply:
+        # Durable before the reply, after this function's own hold (Q spans memory only). A failed barrier
+        # withdraws the row under Q again: no accepted reply, no dispatch; a partial publication boots held for Resume.
+        if publish_queue_snapshot(reason="agent_restart_admission") is not True:
+            with _queue_lock:
                 PENDING[:] = [row for row in PENDING if row is not t]
-                publish_queue_snapshot(reason="agent_restart_admission_unconfirmed")
-                return {**t, "_admission_blocked": "restart_admission_unconfirmed"}
+            publish_queue_snapshot(reason="agent_restart_admission_unconfirmed")
+            return {**t, "_admission_blocked": "restart_admission_unconfirmed"}
     return t
 
 
@@ -863,6 +873,9 @@ def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]]
         accounting_available = False
     # Cents are for display; the status is classified on the amount admission itself reads.
     remaining = None if actual_remaining is None else round(actual_remaining, 2)
+    from supervisor.worker_assignment import needs_paid_admission
+    # A reached limit blocks only paid admission: an evolution task opens on Main.
+    exhausted = actual_remaining is not None and actual_remaining <= 0 and needs_paid_admission({"metadata": {}})
     queued_task = next((t for t in PENDING if str(t.get("type") or "") == "evolution"), None)
     running_task = next(
         (
@@ -904,7 +917,7 @@ def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]]
     elif enabled and not owner_chat_id:
         status = "waiting_for_owner_chat"
         detail = "Waiting for the first owner chat binding before scheduling evolution."
-    elif enabled and actual_remaining is not None and actual_remaining <= 0:
+    elif enabled and exhausted:
         status = "budget_blocked"
         detail = "Global budget exhausted: no new cycle starts until the limit allows one. The campaign stays on."
     elif enabled and (PENDING or project):
@@ -970,6 +983,8 @@ from supervisor.queue_publication import (  # noqa: E402, F401 -- intentional pu
     persist_queue_snapshot,
     publish_queue_changes,
     publish_queue_snapshot,
+    start_queue_writer,
+    stop_queue_writer,
     tick_publisher_started,
 )
 from supervisor.queue_timeouts import (  # noqa: E402, F401 -- intentional public re-exports

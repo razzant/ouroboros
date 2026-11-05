@@ -33,11 +33,10 @@ QUESTION = call(("escalate", {"question": "May I start?", "options": [{"label": 
 THREAD_KEY = "slack:T1:C1:1.0"
 
 
-def _park_at_question(world, monkeypatch, then, *, thread="1.0"):
+def _park_at_question(world, then, *, thread="1.0"):
     """A real focus through the Host parks at a real private question with its conversation lent."""
     from ouroboros.conversation_lease import live_author
 
-    monkeypatch.setattr("supervisor.workers.get_event_q", lambda *, create=True: SimpleNamespace(put=lambda _event: None))
     world.focus_steps[:] = [QUESTION, then]
     _source, reply = post(world, 8000, "Please start the migration.", thread=thread, facts=("any_message", "mention"))
     assert reply.status_code == 200, reply.text
@@ -48,7 +47,7 @@ def _park_at_question(world, monkeypatch, then, *, thread="1.0"):
     return author
 
 
-def test_a_real_question_park_wakes_for_an_untagged_message_and_the_same_author_reads_it_holding_its_lease(host, monkeypatch):
+def test_a_real_question_park_wakes_for_an_untagged_message_and_the_same_author_reads_it_holding_its_lease(host):
     from ouroboros.conversation_lease import live_author
     from ouroboros.owner_quiz import quiz_states
 
@@ -61,7 +60,7 @@ def test_a_real_question_park_wakes_for_an_untagged_message_and_the_same_author_
                                                                ensure_ascii=False))
         return finish("Noted; still waiting on the question.")
 
-    author = _park_at_question(world, monkeypatch, read)
+    author = _park_at_question(world, read)
     before = world.h.calls
     source, reply = post(world, text="Also migrate the archive.")
     assert reply.status_code == 200 and reply.json()["outcome"] == "silent", reply.text
@@ -115,7 +114,7 @@ def test_nothing_passive_or_controlled_wakes_a_real_question_park(host, monkeypa
 
     world = host(wakes=("mention",))
     thread = "" if passive == "threadless" else "1.0"
-    author = _park_at_question(world, monkeypatch, finish("Done."), thread=thread)
+    author = _park_at_question(world, finish("Done."), thread=thread)
     calls = world.h.calls
     arguments = {"text": "Words beside the park.", "thread": thread}
     if passive == "reaction":
@@ -156,7 +155,7 @@ def test_nothing_passive_or_controlled_wakes_a_real_question_park(host, monkeypa
     until(lambda: (load_task_result(world.data, author) or {}).get("status") == "completed", "its terminal")
 
 
-def test_a_parked_author_and_a_reading_root_get_one_routing_focus_listing_both_and_exact_tell_wakes_only_that_author(host, monkeypatch):
+def test_a_parked_author_and_a_reading_root_get_one_routing_focus_listing_both_and_exact_tell_wakes_only_that_author(host):
     from ouroboros.conversation_lease import live_author
 
     world = host()
@@ -174,7 +173,6 @@ def test_a_parked_author_and_a_reading_root_get_one_routing_focus_listing_both_a
             return finish("Noted.")
         return QUESTION
 
-    monkeypatch.setattr("supervisor.workers.get_event_q", lambda *, create=True: SimpleNamespace(put=lambda _event: None))
     world.h.script = model
     assert post(world, 8200, "Please start the migration.", facts=("any_message", "mention"))[1].status_code == 200
     seen["author"] = until(lambda: world.h.agents and world.h.calls >= 1 and world.h.agents[-1].tools._ctx.task_id, "the author")
@@ -331,7 +329,7 @@ def test_the_reentry_note_leaves_only_mailed_messages_to_their_mail_and_its_sour
         seen["words"] = json.dumps(messages, ensure_ascii=False)
         return finish("Noted.")
 
-    author = _park_at_question(world, monkeypatch, read)
+    author = _park_at_question(world, read)
     bot, _ = post(world, text="Chatter from a bot.", facts=("any_message", "from_bot"), actor={"platform_actor_id": "B1", "is_bot": True})
     reaction, _ = post(world, text="", facts=(), actor={"platform_actor_id": "U2", "kind": "user"}, message={
         "message_id": "9", "reaction": {"schema_version": 1, "change": "add", "old": [], "new": [{"type": "emoji", "value": "+1"}],
@@ -371,7 +369,7 @@ def test_a_mailbox_read_that_proves_nothing_keeps_every_row_in_the_reentry_note(
     assert _arrivals_in_mail(binding, ctx) is None
 
 
-def test_a_torn_mailbox_at_a_real_park_keeps_the_message_in_the_note_says_why_and_still_delivers_it(host, monkeypatch):
+def test_a_torn_mailbox_at_a_real_park_keeps_the_message_in_the_note_says_why_and_still_delivers_it(host):
     from ouroboros.owner_mailbox import _mailbox_path
 
     world = host()
@@ -381,7 +379,7 @@ def test_a_torn_mailbox_at_a_real_park_keeps_the_message_in_the_note_says_why_an
         seen["words"] = json.dumps(messages, ensure_ascii=False)
         return finish("Noted.")
 
-    author = _park_at_question(world, monkeypatch, read)
+    author = _park_at_question(world, read)
     path = _mailbox_path(world.data, author)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("ab") as handle:

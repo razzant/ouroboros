@@ -833,6 +833,30 @@ def test_an_ended_authors_waiting_wave_rewrites_its_row_only_when_a_seat_closes(
     assert [row.get("pending_invocation_id") for row in saved.triad_raw_results] == [None, "inv-s2"]
 
 
+def test_a_repeated_collection_of_seats_with_named_evidence_costs_no_state_rewrite(tmp_path, monkeypatch):
+    """The saved row keeps a seat's named-evidence inventory as a reference to its producer payload; a repeated
+    collection brings the full inventory back, which saves to the same bytes, so nothing is rewritten."""
+    from ouroboros.tools.review_change_custody import settle_collected_attempt
+
+    world = _commit_world(tmp_path, monkeypatch, adviser=True)
+    rl.settle_from_collected(world.data, world.record_id, [
+        {**_raw("s1", "m1", parts=("change", "coupling")), "operation_id": "op-s1"},
+        {**_raw("s2", "m2"), "operation_id": "op-s2"}])
+    record = rl.load_record(world.data, world.record_id)
+    usage = {"checking_evidence": {"named_evidence": [{"path": "ouroboros/a.py", "lines": "1-9"}]}}
+    seats = [_seat(slot, response_ref=f"obs:{slot}", usage=usage) for slot in ("s1", "s2")]
+    settle_collected_attempt(world.data, world.attempt, seats, record)
+    saved = _saved(world)
+    held = [row for row in saved.triad_raw_results if row.get("slot_id") in ("s1", "s2")]
+    assert held and all(set(row["usage"]["checking_evidence"]["named_evidence"]) == {
+        "retained_in", "sha256", "bytes", "file_count"} for row in held)
+    writes = _state_writes(monkeypatch)
+
+    settle_collected_attempt(world.data, world.attempt, seats, record)
+
+    assert writes == [] and _saved(world) == saved
+
+
 def test_a_counted_outcome_beside_a_running_adviser_costs_no_state_rewrite(tmp_path, monkeypatch):
     """Independent review (perf_lifecycle): once counted completion is projected while an additional adviser still
     runs, every commit call's overlap check and a repeated collection of the same seats leave the review state

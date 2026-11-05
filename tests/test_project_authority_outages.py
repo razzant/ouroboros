@@ -440,7 +440,7 @@ def test_boot_recovery_resumes_a_resolver_restored_from_its_claimed_handoff_once
     claimed, put = [], pool.slot.in_q.put
     def capture_claim(row, *args, **kwargs):
         claimed.append({name: queue.QUEUE_SNAPSHOT_PATH.with_name(name).read_bytes()
-                        for name in ("queue_snapshot.json", "queue_dispatch.json", "direct_roots.json", "queue.alive")})
+                        for name in ("queue_snapshot.json", "queue_dispatch.json", "queue.alive")})
         return put(row, *args, **kwargs)
     pool.slot.in_q.put = capture_claim
     workers.assign_tasks()

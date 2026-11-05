@@ -856,8 +856,9 @@ class TestVitalsFact:
         env = self._env(tmp_path, monkeypatch)
         _section, data = self._runtime(env)
         vitals = data["vitals"]
-        assert set(vitals) <= {"owner_turns_note", "runtime", "wal_gate", "note"}
-        assert {"owner_turns_note", "runtime", "note"} <= set(vitals)
+        assert set(vitals) <= {"owner_turns_note", "runtime", "wal_gate", "note", "engine_pool"}
+        assert {"owner_turns_note", "runtime", "note", "engine_pool"} <= set(vitals)
+        assert "engine" in vitals["engine_pool"]  # the one key that stays: it names the sources it could not read
         assert vitals["owner_turns_note"] == "none since this process started"
         monkeypatch.setenv("OUROBOROS_IN_WORKER", "1")  # a deep self-review's pooled worker: no ring of its own
         _section, data = self._runtime(env)

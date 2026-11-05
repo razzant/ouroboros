@@ -287,7 +287,16 @@ def _enqueue_api_task_durably(
     admission_token: str,
     result_fields: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Atomically enqueue, snapshot, and publish the scheduled task result."""
+    """Enqueue under Q, publish outside it, then the admission's receipt under Q again (Q spans memory only).
+
+    The row is durable before the 202 (the barrier). Its receipt lands on the record as the window left it:
+    the row still queued takes the whole receipt as ``scheduled``; an assignment meanwhile wrote ``running`` and a
+    Stop its terminal, and the receipt keeps that status and every word they wrote (their result text, their
+    metadata), adding only the token and the admission facts the record lacks (the launch and the Stop write
+    under Q, so the read and the merge here see one state). Unknown persistence (a failed or uncertain barrier,
+    a receipt the readback does not show) retains the queue row, its reservation and its resources: unknown is
+    not refusal, and the next generation's restore decides the row.
+    """
     from supervisor import queue
 
     with queue.prepared_root_billing(task), queue._queue_lock:  # the ledger read happens before the lock
@@ -295,24 +304,29 @@ def _enqueue_api_task_durably(
         if isinstance(admitted, dict) and admitted.get("_admission_blocked"):
             admitted.update(_admission_never_admitted=True, _admission_owner_token=admission_token)
             return admitted
-        try:
-            if queue.publish_queue_snapshot(reason="api_task_create") is not True:  # durable before 202
-                raise RuntimeError("Queue snapshot persistence was not confirmed")
-            write_task_result(drive_root, task_id, STATUS_SCHEDULED, **result_fields)
+    try:
+        if queue.publish_queue_snapshot(reason="api_task_create") is not True:  # durable before 202, outside Q
+            raise RuntimeError("Queue snapshot persistence was not confirmed")
+        with queue._queue_lock:
+            current = load_task_result(drive_root, task_id, strict=True) or {}
+            # Another writer's word stands (a Stop's "cancelled" text, a launch's "assigned"): the receipt adds its
+            # token and the admission facts the record has not got.
+            receipt = {key: value for key, value in result_fields.items() if key == "api_admission" or key not in current}
+            write_task_result(drive_root, task_id, str(current.get("status") or STATUS_SCHEDULED), **receipt)
             stored = load_task_result(drive_root, task_id, strict=True) or {}
             if stored.get("api_admission") != result_fields["api_admission"]:
                 raise RuntimeError("The exact API admission receipt was not persisted")
-        except Exception as exc:
-            # An observer may raise AFTER atomic replacement. Read the exact
-            # token; unknown persistence retains the queue row and its resources.
-            try:
-                stored = load_task_result(drive_root, task_id, strict=True) or {}
-            except Exception:
-                stored = {}
-            if stored.get("api_admission") != result_fields["api_admission"]:
-                return {**admitted, "_admission_uncertain": str(exc)}
-        queue.release_task_admission(task_id, admission_token)
-        return admitted
+    except Exception as exc:
+        # An observer may raise AFTER atomic replacement. Read the exact
+        # token; unknown persistence retains the queue row and its resources.
+        try:
+            stored = load_task_result(drive_root, task_id, strict=True) or {}
+        except Exception:
+            stored = {}
+        if stored.get("api_admission") != result_fields["api_admission"]:
+            return {**admitted, "_admission_uncertain": str(exc)}
+    queue.release_task_admission(task_id, admission_token)
+    return admitted
 
 
 def _complete_api_task_admission(

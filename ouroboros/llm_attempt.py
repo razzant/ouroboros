@@ -737,18 +737,18 @@ def bound_reply_allowance(target: Dict[str, Any], payload: Dict[str, Any]) -> Di
     return candidate
 
 
-def _candidate_before_dispatch(candidate: Dict[str, Any], request: AttemptRequest):
+def _candidate_before_dispatch(candidate: Dict[str, Any], request: AttemptRequest, *, prepare=None):
     """Close over one final candidate without putting it in accounting rows."""
     predicate = current_physical_attempt_predicate()
 
     def _persist(reservation):
-        fresh = _attempt_request(
-            {"provider": request.provider, "usage_model": request.model}, candidate,
-            source=request.source,
-        )
+        raw = _canonical_candidate_bytes(candidate)
+        context = _canonical_candidate_bytes({
+            key: candidate[key] for key in ("system", "messages", "tools", "functions") if key in candidate
+        })
         identity = (
-            fresh.candidate_raw_sha256, fresh.candidate_raw_size_bytes,
-            fresh.candidate_context_sha256, fresh.candidate_context_size_bytes,
+            hashlib.sha256(raw).hexdigest(), len(raw),
+            hashlib.sha256(context).hexdigest(), len(context),
         )
         expected = (
             request.candidate_raw_sha256, request.candidate_raw_size_bytes,
@@ -798,6 +798,9 @@ def _candidate_before_dispatch(candidate: Dict[str, Any], request: AttemptReques
                 )
                 failure.candidate_manifest_ref = persisted["manifest_ref"]
                 raise failure
+        if prepare is not None:
+            prepare(reservation, canonical_bytes=raw, sha256=request.candidate_raw_sha256,
+                    size_bytes=request.candidate_raw_size_bytes)
         return persisted["manifest_ref"]
 
     return _persist

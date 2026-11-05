@@ -60,9 +60,9 @@ VIEW_TRACE_KEY = "memory_view"
 # The row fields the room and attribution readers consult (``project_dialogue.room_membership``,
 # ``dialogue_provenance.row_author``) plus the host facts of a task row, its recorded finality and
 # authority included. Texts and bulky payloads (review projections, outcome axes, quiz cards; a secret
-# request keeps only its attribution fact, ``row_meta``) stay in the chain, read by address. Facts
-# stored before a field joined this list keep their old form (the stored prefix is never rewritten
-# for it): a reader shows such a field as unknown.
+# request keeps only its attribution fact, a transport its ``_TRANSPORT_NESTED`` facts: ``row_meta``) stay
+# in the chain, read by address. Facts stored before a field joined this list keep their old form (the
+# stored prefix is never rewritten for it): a reader shows such a field as unknown.
 _META_FIELDS = ("chat_id", "ts", "type", "direction", "task_id", "parent_task_id", "root_task_id",
                 "client_message_id", "subagent_task_id", "delegation_role", "subagent_role", "initiator",
                 "summary_kind", "sender_label", "username", "author", "source", "transport",
@@ -70,9 +70,22 @@ _META_FIELDS = ("chat_id", "ts", "type", "direction", "task_id", "parent_task_id
                 "result_ref", "presence", "presence_provenance", "host_fact", "historical_import", "source_order", "terminal_origin")
 _MEMBERSHIP_FIELDS = ("chat_id", "ts", "type", "task_id", "parent_task_id", "root_task_id", "source_keys")
 _REPLY_FIELDS = ("address", "chat_id", "task_id", "role", "target_home", "unresolved")
-# Bumped when ``row_meta`` gains a fact membership reads: a stored prefix of another version is
-# another source, read live until the maintenance job ``memory_tail`` refills it.
-_META_VERSION = 4
+# What a row's ``transport`` keeps: its scalars, which ``dialogue_provenance.place_row_facts`` spreads as the row's
+# place facts (``place_activity`` reads the event, place and conversation keys) and which name its provider, account,
+# conversation and thread (``dialogue_provenance``, ``RoomLabelResolver.label``), so a row that came over a transport
+# still says so (``_with_transport``, the view's room label); of a nested value, only the keys named here, each whole.
+# The provider's thread copy (``conversation``), the delivered message's details and the event's identity stay in
+# the dialogue row, read by address: on the owner's install they were four fifths of the stored tail.
+_TRANSPORT_NESTED = {
+    "actor": ("display_name", "username", "platform_actor_id", "id",  # who spoke (``dialogue_speaker``)
+              "kind"),  # who made a wordless reaction (``row_author``)
+    "delivery": ("state",  # ``dialogue_provenance``, ``reaction_note``, the view's typed fact, ``place_activity``
+                 "presence_provenance"),  # an older receipt's place facts (``place_row_facts``)
+    "message": ("reaction",),  # the typed reaction (``reaction_fact``): its words, or a row that is that act alone
+}
+# Bumped when ``row_meta``'s facts change (5: a transport keeps only what its readers read): a stored
+# prefix of another version is another source, read live until the maintenance job ``memory_tail`` refills it.
+_META_VERSION = 5
 
 Entry = Tuple[Dict[str, Any], Dict[str, Any], int]
 
@@ -87,6 +100,8 @@ def row_meta(row: Mapping[str, Any]) -> Dict[str, Any]:
     ``source_ref`` matches), so membership needs no text.
     """
     meta = {key: row[key] for key in _META_FIELDS if key in row}
+    if isinstance(meta.get("transport"), Mapping):
+        meta["transport"] = _transport_facts(meta["transport"])
     meta["text_chars"] = len(str(row.get("text") or ""))
     if row.get("wake_silent") is True:
         from ouroboros.task_finalization import quiet_finish
@@ -108,6 +123,19 @@ def row_meta(row: Mapping[str, Any]) -> Dict[str, Any]:
         meta["text_sha256"] = _text_sha256(row.get("text"))
         meta["source_keys"] = tuple(sorted(_entry_source_identities(row)))
     return meta
+
+
+def _transport_facts(transport: Mapping[str, Any]) -> Dict[str, Any]:
+    """A row's transport as its readers read it: its scalars, and of a nested value the keys ``_TRANSPORT_NESTED``
+    names (a nested value that keeps none is left out, as a reader reads it absent)."""
+    facts: Dict[str, Any] = {}
+    for key, value in transport.items():
+        if not isinstance(value, (Mapping, list)):
+            facts[key] = value
+        elif isinstance(value, Mapping) and (kept := {sub: value[sub] for sub in _TRANSPORT_NESTED.get(key, ())
+                                                       if sub in value}):
+            facts[key] = kept
+    return facts
 
 
 class MembershipFacts(NamedTuple):

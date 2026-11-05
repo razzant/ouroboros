@@ -26,8 +26,28 @@ bootstrap nor an omitted repeat of that start mints again, even after the child'
 An answer too malformed to compare leaves the outcome unknown, recovered under the same key.
 The source is the retained staged copy, read only for a fresh intent or while the engine
 reports ``open``, and verified against the recorded digest, so a changed or missing
-original never switches the version. Ready receipts ride inherited manifest rows
-(``engine_imports``), so a child reuses the same resourceId instead of re-importing.
+original never switches the version. Observed receipts, finished and gapped too, ride inherited manifest
+rows (``engine_imports``), so a child replays the same key instead of minting another import.
+
+Managed lifetime exists only where the engine's catalog lists the exact release row
+(``claudexor_uploads.RESOURCE_RELEASE_OPERATION``): there every fresh intent declares
+``lifetime: "managed"``, bound into its key, so every replay of it (lookup-only included)
+resends the same body; inherited receipts and earlier requests replay unchanged. The task
+that minted a managed intent owes its release: the intent's own REQUESTED fact opens it in
+``managed_imports`` on that task's marks row (``opens_release``), never capped like earlier
+records, and only a settlement closes it; the same custody transaction keeps a retirement pass
+that never ran yet from pinning past it (``maintenance_retirement.release_opened``). A child,
+a successor or any other holder of the carried receipt (``owner_task_id`` names the owner)
+replays it and owes nothing. ``release_owed_imports``, run by ``runtime_retirement`` over
+finished tasks, releases only after nothing in the whole work can name the resource in a new
+operation (``review_thread_retention.tree_hold`` with ``every_offer``): the owner's tree, each
+root its owner's Continue admitted after it and their trees, and any Continue still offered
+or undecided, an author's stop and an unrecorded interruption included. A key whose resource
+was never observed is asked lookup-only first; an unfinished open upload is cancelled.
+After waits, closure is checked again and release binds under the existing Keep custody
+lock before HTTP. Earlier Keep prevents release; later Keep discloses the bound uncertainty.
+Unknown outcomes retain their exact identity. A ``released`` key is finished: only an
+explicit ``new`` begins another import.
 """
 from __future__ import annotations
 
@@ -40,7 +60,7 @@ import pathlib
 import re
 import uuid
 from contextlib import contextmanager
-from typing import Any, Dict, Iterator, List, NamedTuple
+from typing import Any, Callable, Dict, Iterator, List, NamedTuple, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
@@ -48,9 +68,22 @@ log = logging.getLogger(__name__)
 DOCUMENT_IMPORT_REQUESTED = "delegate_run_document_import_requested"
 DOCUMENT_IMPORT_SENDING = "delegate_run_document_import_sending"
 DOCUMENT_IMPORT_OBSERVED = "delegate_run_document_import_observed"
-DOCUMENT_IMPORT_TYPES = (DOCUMENT_IMPORT_REQUESTED, DOCUMENT_IMPORT_SENDING, DOCUMENT_IMPORT_OBSERVED)
+DOCUMENT_RELEASE_BOUND = "delegate_run_document_release_bound"
+DOCUMENT_RELEASE_SETTLED = "delegate_run_document_release_settled"
+DOCUMENT_IMPORT_TYPES = (DOCUMENT_IMPORT_REQUESTED, DOCUMENT_IMPORT_SENDING, DOCUMENT_IMPORT_OBSERVED,
+                         DOCUMENT_RELEASE_BOUND, DOCUMENT_RELEASE_SETTLED)
 # Observed states that finish a key: only an explicit new intent could follow them.
-FINISHED_STATES = frozenset({"cancelled", "conflict", "rejected"})
+FINISHED_STATES = frozenset({"cancelled", "conflict", "rejected", "released"})
+_RESOURCE_FIELDS = ("resourceId", "sha256", "sizeBytes", "mime", "name")
+# An owed release whose key holds no observed resource and needs no engine answer: what its state settles as.
+_UNASKED = {"minted": "unsent", "cancelled": "cancelled", "rejected": "rejected", "conflict": "conflict",
+            "gap": "gap", "damaged": "damaged"}
+# The lookup's typed finishes (``_post`` already observed them on the record): what each settles as.
+_LOOKUP_FINISHED = {"document_import_binding_gap": "gap", "document_import_binding_invalid": "damaged",
+                    "document_import_conflict": "conflict", "document_import_rejected": "rejected"}
+# Release refusals that end the obligation without effect: this resource is not one this task may release here.
+_RELEASE_REFUSED = frozenset({"resource_not_found", "resource_purpose_mismatch", "resource_digest_mismatch",
+                              "resource_lifetime_indefinite"})
 # Unrun refusals a later start of the same task settles without a second key: the host's first
 # start wakes its child with them instead of ending it (``subagent_bootstrap``).
 RECOVERABLE_REFUSALS = frozenset({"document_import_outcome_unknown", "document_import_in_flight",
@@ -204,25 +237,42 @@ def material_id(row: Dict[str, Any]) -> str:
 
 
 def fold_document_import(mark: Dict[str, Any], event: Dict[str, Any]) -> None:
-    """Reduce one import fact onto its task's marks row (live publish and chain fold alike)."""
+    """Reduce one import fact onto its task's marks row (live publish and chain fold alike): the input's current
+    record (``document_imports``) and every release this task still owes (``managed_imports``, by key)."""
     material, key, kind = str(event.get("material") or ""), str(event.get("import_key") or ""), event.get("type")
     if not material or not key:
         return
     imports = dict(mark.get("document_imports") or {})
     record = dict(imports.get(material) or {})
+    owed = dict(mark.get("managed_imports") or {})
     if kind == DOCUMENT_IMPORT_REQUESTED:
         previous = list(record.pop("previous", []))
-        if key in {record.get("import_key"), *(item.get("import_key") for item in previous)}:
+        if key in {record.get("import_key"), *(item.get("import_key") for item in previous), *owed}:
             return  # a replayed row
         if record:  # an explicit new intent supersedes; the earlier record stays visible
             previous.append(record)
         record = {name: copy.deepcopy(event[name]) for name in
-                  ("store_id", "import_key", "request", "input", "origin", "intent") if name in event}
-        record["state"] = "send_possible" if event.get("origin") == "inherited" else "minted"
+                  ("store_id", "import_key", "request", "input", "origin", "intent", "owner_task_id") if name in event}
+        record["state"] = str(event.get("state") or "send_possible") if event.get("origin") == "inherited" else "minted"
         if previous:
             record["previous"] = previous[-MAX_PREVIOUS_RECORDS:]
+    elif kind == DOCUMENT_RELEASE_SETTLED:
+        if key in owed:
+            # Keep retains every observed disposition, independently of retry debt and the
+            # capped replay history. Neither a gap nor refusal proves deletion or preservation.
+            outcome = str(event.get("outcome") or "")
+            view = {"released": "future_reuse_released", "cancelled": "upload_cancelled"}.get(outcome)
+            if outcome in {"gap", "damaged", "conflict", "rejected"}:
+                view = "binding_unavailable:" + outcome
+            elif outcome == "refused":
+                view = "release_refused:" + str(event.get("code") or "unknown")
+            if view:
+                mark.setdefault("managed_import_releases", {})[key] = view
+        record = _with_release(record, key, event) if event.get("outcome") == "released" else {}
+    elif kind == DOCUMENT_RELEASE_BOUND:
+        record = {}  # release intent belongs to the owed entry, not the import's observed state
     elif record.get("import_key") != key:
-        return  # a superseded intent's fact stays in the chain only
+        record = {}  # a superseded intent's fact: in the chain, and on its release obligation if one is owed
     elif kind == DOCUMENT_IMPORT_SENDING:
         record["state"] = "send_possible" if record.get("state") == "minted" else record.get("state")
     elif kind == DOCUMENT_IMPORT_OBSERVED:
@@ -232,10 +282,66 @@ def fold_document_import(mark: Dict[str, Any], event: Dict[str, Any]) -> None:
             record["code"] = str(event["code"])
         if isinstance(event.get("resource"), dict):
             record["resource"] = dict(event["resource"])
+        if event.get("released_at"):
+            record["released_at"] = str(event["released_at"])
     else:
         return
-    imports[material] = record
-    mark["document_imports"] = imports
+    _fold_owed(owed, material, key, kind, event)
+    if record:
+        imports[material] = record
+        mark["document_imports"] = imports
+    if owed:
+        mark["managed_imports"] = owed
+    else:
+        mark.pop("managed_imports", None)
+
+
+def opens_release(event: Dict[str, Any]) -> bool:
+    """Is EVENT the one transition that opens a release obligation: the REQUESTED fact of a managed intent this task
+    minted itself (an inherited receipt's never does)? Its custody transaction also keeps the retirement pass's first
+    read at or before this point (``maintenance_retirement.release_opened``)."""
+    request = event.get("request")
+    return (event.get("type") == DOCUMENT_IMPORT_REQUESTED and event.get("origin") == "imported"
+            and isinstance(request, dict) and request.get("lifetime") == "managed")
+
+
+def _fold_owed(owed: Dict[str, Any], material: str, key: str, kind: Any, event: Dict[str, Any]) -> None:
+    """One release obligation: opened by this task's own managed intent (``opens_release``), its sent and observed
+    facts applied whether or not its record is still current, closed only by its settlement."""
+    if kind == DOCUMENT_IMPORT_REQUESTED:
+        if opens_release(event):
+            owed[key] = {"store_id": str(event.get("store_id") or ""), "import_key": key, "material": material,
+                         "request": copy.deepcopy(event["request"]), "state": "minted"}
+        return
+    entry = dict(owed.get(key) or {})
+    if not entry:
+        return
+    if kind == DOCUMENT_RELEASE_SETTLED:
+        owed.pop(key)
+        return
+    if kind == DOCUMENT_IMPORT_SENDING:
+        entry["state"] = "send_possible" if entry.get("state") == "minted" else entry.get("state")
+    elif kind == DOCUMENT_RELEASE_BOUND:
+        entry["release_state"] = "bound"
+    else:
+        entry["state"] = str(event.get("state") or "")
+        if isinstance(event.get("resource"), dict):
+            entry["resource"] = dict(event["resource"])
+        if event.get("released_at"):
+            entry["released_at"] = str(event["released_at"])
+    owed[key] = entry
+
+
+def _with_release(record: Dict[str, Any], key: str, event: Dict[str, Any]) -> Dict[str, Any]:
+    """RECORD with the intent under KEY (it, or an earlier intent it keeps) marked released; ``{}`` when it holds
+    no such intent (an earlier one past ``MAX_PREVIOUS_RECORDS``: its settlement stays in the chain)."""
+    stamp = {"state": "released", **({"released_at": str(event["released_at"])} if event.get("released_at") else {})}
+    if record.get("import_key") == key:
+        return {**record, **stamp}
+    previous = record.get("previous") or []
+    if not any(item.get("import_key") == key for item in previous):
+        return {}
+    return {**record, "previous": [{**item, **stamp} if item.get("import_key") == key else item for item in previous]}
 
 
 def task_document_imports(drive_root: Any, task_id: str) -> Dict[str, Dict[str, Any]]:
@@ -246,7 +352,7 @@ def task_document_imports(drive_root: Any, task_id: str) -> Dict[str, Dict[str, 
 
 
 def carried_receipts(row: Dict[str, Any], records: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """The row's own receipts plus its task's ready imports of the same input, one per store.
+    """The row's own receipts plus its task's observed imports, one per store.
 
     A child copy of the row carries them (``engine_imports``), so its starts replay the
     same key and reuse the same resourceId instead of importing equal bytes again.
@@ -255,19 +361,19 @@ def carried_receipts(row: Dict[str, Any], records: Dict[str, Dict[str, Any]]) ->
 
     receipts = []
     current = records.get(material_id(row)) or {}
-    for record in [current, *reversed(current.get("previous") or [])]:  # newest ready intent first
+    for record in [current, *reversed(current.get("previous") or [])]:  # newest observed intent, even if finished
         resource = record.get("resource") if isinstance(record.get("resource"), dict) else {}
-        if record.get("state") == "ready" and resource.get("resourceId"):
+        if record and record.get("state") != "minted":
             receipts.append({"store_id": record["store_id"], "import_key": record["import_key"],
-                             "request": copy.deepcopy(record["request"]), "resource_id": resource["resourceId"]})
-    unique: Dict[str, Dict[str, Any]] = {}
-    for receipt in normalize_engine_import_receipts([*receipts, *(row.get("engine_imports") or [])], row):
-        unique.setdefault(receipt["store_id"], receipt)
-    return list(unique.values())
+                             "request": copy.deepcopy(record["request"]),
+                             **({"resource_id": resource["resourceId"]} if resource.get("resourceId") else {}),
+                             **({"state": record["state"]} if record.get("state") != "ready" else {}),
+                             **({"owner_task_id": record["owner_task_id"]} if record.get("owner_task_id") else {})})
+    return normalize_engine_import_receipts([*receipts, *(row.get("engine_imports") or [])], row)
 
 
 def carry_owner_receipts(custody_drive: Any, task_id: str, rows: List[Dict[str, Any]]) -> None:
-    """Attach the owner's ready imports to its staged document rows before they are copied to a child.
+    """Attach the owner's observed imports before copying staged document rows to a child, including finished keys.
 
     Every copy of a staged non-image row reads the owner's marks once, selected or not, so a
     later selection by the child reuses the resource; images never become documents and read
@@ -299,11 +405,13 @@ def _refusal(code: str, detail: str, status_code: int = 0) -> Exception:
     return ClaudexorUnavailable(code, detail, status_code=status_code)
 
 
-def _admitted_store(gateway: Any, route_id: str, rows: List[Dict[str, Any]]) -> str:
-    """The store this start imports into, once the engine's own facts admit every row."""
-    from ouroboros.gateways.claudexor_uploads import upload_import_supported
+def _admitted_store(gateway: Any, route_id: str, rows: List[Dict[str, Any]]) -> Tuple[str, bool]:
+    """The store this start imports into, once the engine's own facts admit every row, and whether that engine
+    admits managed lifetime (its catalog lists the release row)."""
+    from ouroboros.gateways.claudexor_uploads import resource_release_supported, upload_import_supported
 
-    if not upload_import_supported(gateway.operations()):
+    operations = gateway.operations()
+    if not upload_import_supported(operations):
         raise _refusal("document_import_unsupported", (
             "This Claudexor engine's catalog has no keyed document import (POST /v2/uploads/imports), so the "
             "selected documents cannot be attached and nothing was started. Omit attachment_paths to keep the "
@@ -331,18 +439,18 @@ def _admitted_store(gateway: Any, route_id: str, rows: List[Dict[str, Any]]) -> 
         if type(limit) is not int or count > limit:
             raise _refusal("document_route_unsupported",
                            f"Route {route_id} admits at most {limit} such documents per run; {count} were selected.")
-    return store
+    return store, resource_release_supported(operations)
 
 
 @contextmanager
-def _import_lock(drive: pathlib.Path, task_id: str, material: str) -> Iterator[None]:
-    """Serialize one input's decide/send/settle, so a parallel start never reads an undelivered
-    first declaration as a gap. The custody actor lock stays network-free."""
+def _import_lock(drive: pathlib.Path, task_id: str, material: str, timeout_sec: float = 30.0) -> Iterator[None]:
+    """Serialize one input's decide/send/settle (and its owner's release of it), so a parallel start never reads an
+    undelivered first declaration as a gap. The custody actor lock stays network-free."""
     from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 
     digest = hashlib.sha256(f"{task_id}\0{material}".encode("utf-8")).hexdigest()[:24]
     path = drive / "state" / "delegate_document_imports" / f"{digest}.lock"
-    fd = acquire_exclusive_file_lock(path, timeout_sec=30.0, stale_sec=600.0, owner_aware_stale=True)
+    fd = acquire_exclusive_file_lock(path, timeout_sec=timeout_sec, stale_sec=600.0, owner_aware_stale=True)
     if fd is None:
         raise _refusal("document_import_busy", "Another start is importing this document now; start again shortly.")
     try:
@@ -376,10 +484,13 @@ def _retained_bytes(row: Dict[str, Any]) -> bytes:
     return sink.getvalue()
 
 
-def _request_for(task_id: str, store: str, row: Dict[str, Any]) -> Dict[str, Any]:
+def _request_for(task_id: str, store: str, row: Dict[str, Any], managed: bool) -> Dict[str, Any]:
+    """A fresh intent's exact declaration; ``lifetime`` only where the engine admits it (absent keeps a body
+    byte-identical to one minted before managed lifetime existed)."""
     return {"expectedStoreId": store, "kind": "file", "mime": row["mime"],
             "name": pathlib.PurePosixPath(row["relpath"]).name,
             "source": f"ouroboros-task-input:{task_id}/{row['relpath']}",
+            **({"lifetime": "managed"} if managed else {}),
             "content": {"sizeBytes": row["size"], "sha256": f"sha256:{row['sha256']}"}}
 
 
@@ -399,20 +510,23 @@ def _checked(answer: Dict[str, Any], record: Dict[str, Any], drive: pathlib.Path
     """The engine's answer for exactly this store and these bytes, or a typed refusal.
 
     An answer naming another store or other bytes is evidence and refuses as such; one too
-    malformed to compare leaves the outcome unknown, so a later start replays the same key."""
+    malformed to compare leaves the outcome unknown, so a later start replays the same key.
+    A ``ready`` or ``released`` resource must also carry exactly the requested lifetime."""
     request, key = record["request"], record["import_key"]
     store, state, resource = answer.get("storeId"), answer.get("state"), answer.get("resource")
     if isinstance(store, str) and store and store != record["store_id"]:
         raise _refusal("document_import_store_mismatch", f"Import {key} was answered by another engine store.")
     upload_id = answer.get("uploadId")
     resource_id = resource.get("resourceId") if isinstance(resource, dict) else None
+    held = state in ("ready", "released")
     if (store != record["store_id"] or not isinstance(state, str)
-            or state not in {"open", "uploading", "ready", "cancelled"}
+            or state not in {"open", "uploading", "ready", "cancelled", "released"}
             or not isinstance(upload_id, str) or not upload_id or not isinstance(answer.get("content"), dict)
-            or (state == "ready" and (not isinstance(resource_id, str) or not resource_id))):
+            or (held and (not isinstance(resource_id, str) or not resource_id))
+            or (state == "released" and not (isinstance(answer.get("releasedAt"), str) and answer["releasedAt"]))):
         raise _outcome_unknown(key, "unusable answer")
-    if answer["content"] != request["content"] or (state == "ready" and (
-            resource.get("purpose") is not None
+    if answer["content"] != request["content"] or (held and (
+            resource.get("purpose") is not None or resource.get("lifetime") != request.get("lifetime")
             or any(resource.get(name) != request.get(name) for name in ("kind", "mime", "name"))
             or resource.get("sha256") != request["content"]["sha256"]
             or resource.get("sizeBytes") != request["content"]["sizeBytes"])):
@@ -471,8 +585,12 @@ def _put(gateway: Any, upload_id: str, data: bytes, row: Dict[str, Any]) -> None
                        exc.status_code) from exc
 
 
+def _resource(answer: Dict[str, Any]) -> Dict[str, Any]:
+    return {name: answer["resource"][name] for name in _RESOURCE_FIELDS if name in answer["resource"]}
+
+
 def _import(gateway: Any, drive: pathlib.Path, task_id: str, store: str, row: Dict[str, Any],
-            new_intent: str, first_start: bool = False) -> Dict[str, Any]:
+            new_intent: str, first_start: bool = False, managed: bool = False) -> Dict[str, Any]:
     from ouroboros.contracts.task_contract import normalize_engine_import_receipts
     from ouroboros.store import StoreError
 
@@ -492,16 +610,22 @@ def _import(gateway: Any, drive: pathlib.Path, task_id: str, store: str, row: Di
             # A first import, or the explicit new intent in the serving store (the earlier record stays visible).
             data, origin = _retained_bytes(row), "imported"  # verified before any effect
             superseded = str((record or {}).get("import_key") or "")
+            # A managed intent's REQUESTED fact is also this task's release obligation (``managed_imports``).
             intent = {"store_id": store, "import_key": f"ouroboros-document-{uuid.uuid4().hex}",
-                      "request": _request_for(task_id, store, row), **({"intent": new_intent} if new_intent else {})}
+                      "request": _request_for(task_id, store, row, managed),
+                      **({"owner_task_id": task_id} if managed else {}),
+                      **({"intent": new_intent} if new_intent else {})}
         elif record is None:  # an inherited receipt; one bound to another store is kept, then refused below
             carried = next((item for item in receipts if item["store_id"] == store), receipts[0])
             origin, intent = "inherited", {"store_id": carried["store_id"], "import_key": carried["import_key"],
-                                           "request": carried["request"]}
+                                           "request": carried["request"],
+                                           "state": carried.get("state", "send_possible"),
+                                           **({"owner_task_id": carried["owner_task_id"]} if "owner_task_id" in carried
+                                              else {})}
         if intent is not None:
             _emit(drive, DOCUMENT_IMPORT_REQUESTED, {"task_id": task_id, "material": material, **intent,
                                                      "input": _input_identity(row), "origin": origin}, required=True)
-            record = {**intent, "state": "minted" if origin == "imported" else "send_possible"}
+            record = {**intent, "state": intent.get("state", "minted" if origin == "imported" else "send_possible")}
         facts = {"task_id": task_id, "material": material, "import_key": record["import_key"]}
         if record.get("store_id") != store:
             raise _refusal("document_import_store_mismatch", (
@@ -513,6 +637,10 @@ def _import(gateway: Any, drive: pathlib.Path, task_id: str, store: str, row: Di
             raise _refusal("document_import_finished", (
                 f"Import {record['import_key']} for {row['relpath']} is {record['state']} "
                 f"({record.get('code') or 'engine'}); no new import is minted automatically."))
+        if record["request"].get("lifetime") == "managed" and not managed:
+            raise _refusal("document_import_unsupported", (
+                f"Import {record['import_key']} requires managed lifetime, which this engine does not advertise. "
+                "Its exact key, body and store are retained; no unsupported field or replacement import is sent."))
         fresh = record.get("state") == "minted"
         if fresh:
             data = data if data is not None else _retained_bytes(row)
@@ -520,7 +648,16 @@ def _import(gateway: Any, drive: pathlib.Path, task_id: str, store: str, row: Di
         answer = _post(gateway, drive, facts, record, fresh)
         if answer["state"] == "open":
             _put(gateway, answer["uploadId"], data if data is not None else _retained_bytes(row), row)
-            answer = _post(gateway, drive, facts, record, fresh)
+            # The binding and PUT were accepted: refusal of this later lookup cannot undo
+            # their effects or turn the release obligation back into an unsent intent.
+            answer = _post(gateway, drive, facts, record, False)
+        if answer["state"] == "released":  # a finished key: never masked by a quiet second import
+            _emit(drive, DOCUMENT_IMPORT_OBSERVED, {**facts, "state": "released", "resource": _resource(answer),
+                                                    "released_at": answer["releasedAt"]}, required=False)
+            raise _refusal("document_import_finished", (
+                f"Import {record['import_key']} for {row['relpath']} was released at {answer['releasedAt']} by the "
+                f"task that owed it ({record.get('owner_task_id') or 'its owner'}): its resource admits no new "
+                "reference and nothing is uploaded again. attachment_import='new' begins another import."))
         if answer["state"] == "cancelled":
             _emit(drive, DOCUMENT_IMPORT_OBSERVED, {**facts, "state": "cancelled"}, required=False)
             raise _refusal("document_import_finished",
@@ -529,8 +666,7 @@ def _import(gateway: Any, drive: pathlib.Path, task_id: str, store: str, row: Di
             raise _refusal("document_import_in_flight", (
                 f"Import {record['import_key']} for {row['relpath']} is still {answer['state']}; "
                 "start again shortly."))
-        resource = {name: answer["resource"][name] for name in ("resourceId", "sha256", "sizeBytes", "mime", "name")
-                    if name in answer["resource"]}
+        resource = _resource(answer)
         _emit(drive, DOCUMENT_IMPORT_OBSERVED, {**facts, "state": "ready", "resource": resource}, required=False)
     return {"path": row["relpath"], "label": str(row.get("label") or ""), "mime": row["mime"], "size": row["size"],
             "sha256": row["sha256"], "store_id": store, "import_key": record["import_key"],
@@ -559,9 +695,9 @@ def attach_selected_documents(ctx: Any, gateway: Any, route_id: str, paths: Any,
             rows = task_inputs(ctx, paths)
         except DocumentSelectionError as exc:
             raise _refusal(exc.code, exc.detail) from exc
-        store = _admitted_store(gateway, route_id, rows)
+        store, managed = _admitted_store(gateway, route_id, rows)
         drive = pathlib.Path(custody.custody_root(ctx))
-        facts = [_import(gateway, drive, task_id, store, row, new_intent, first_start) for row in rows]
+        facts = [_import(gateway, drive, task_id, store, row, new_intent, first_start, managed) for row in rows]
     except ClaudexorUnavailable as exc:
         record_start_blocked(ctx, task_id, exc.code)  # the attempt stays a durable fact (D5)
         raise
@@ -571,10 +707,211 @@ def attach_selected_documents(ctx: Any, gateway: Any, route_id: str, paths: Any,
                                view)
 
 
+# -- the release of what this task minted managed ------------------------------------------------
+
+def release_owed_imports(root: Any, task_id: str, *, engine: Callable[[], Any], live: Callable[[str], Any],
+                         census: Callable[[], Optional[set]], hold: Callable[[str], None], stop: Callable[[], bool],
+                         observed: Callable[[Dict[str, Any]], None]) -> bool:
+    """Release each managed import TASK_ID still owes once nothing can name it in a new operation; True while one is
+    still owed (the task waits for a later pass). Nothing is asked while the owner keeps the task or the whole work
+    holds (``review_thread_retention.tree_hold`` with ``every_offer``). ``engine`` opens the engine on first need
+    (``None``: none), ``hold`` counts why a release waits, ``stop`` ends the pass between two releases and
+    ``observed`` receives each settlement. Never called inside the keep gate or a custody lock."""
+    from ouroboros.delegate_custody_current import marks
+    from ouroboros.owner_keep import is_kept
+    from ouroboros.review_thread_retention import tree_hold
+    from ouroboros.task_store import read_document
+
+    def held(why: str) -> bool:
+        hold("document_" + why.removeprefix("document_"))  # one family beside the thread holds in the pass report
+        return True
+
+    owed = marks(root, task_id).get("managed_imports") or {}
+    if not owed:
+        return False
+    if is_kept(root, task_id):
+        return held("owner_keep")
+
+    def allowed() -> str:
+        if stop():
+            return "stopped"
+        return tree_hold(root, task_id, read_document(root, task_id) or {}, live=live, census=census(),
+                         every_offer=True)[0]
+
+    why = allowed()
+    if why:
+        return held(why)
+    waiting = False
+    for done, entry in enumerate(sorted(owed.values(), key=lambda item: str(item.get("import_key") or ""))):
+        if done and stop():
+            return True
+        why = _release_one(pathlib.Path(root), task_id, entry, engine, observed, allowed)
+        waiting = held(why) if why else waiting
+    return waiting
+
+
+def _release_one(drive: pathlib.Path, task_id: str, entry: Dict[str, Any], engine: Callable[[], Any],
+                 observed: Callable[[Dict[str, Any]], None], allowed: Callable[[], str]) -> str:
+    """Settle one owed release: ``""`` once settled, else why it still waits."""
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    def settle(outcome: str, *, code: str = "", resource: Optional[Dict[str, Any]] = None,
+               released_at: Any = "") -> str:
+        fact = {"task_id": task_id, "material": entry["material"], "import_key": entry["import_key"],
+                "store_id": entry["store_id"], "outcome": outcome, **({"code": code} if code else {}),
+                **({"resource_id": resource["resourceId"]} if (resource or {}).get("resourceId") else {}),
+                **({"released_at": str(released_at)} if released_at else {})}
+        if not _emit_settled(drive, fact):
+            return "settlement_unwritable"  # the same release is asked again: a repeat answers the same
+        observed(fact)
+        return ""
+
+    state = str(entry.get("state") or "")
+    resource = dict(entry["resource"]) if isinstance(entry.get("resource"), dict) else {}
+    if state == "released":  # the engine already answered so (a start's replay, or a settlement not yet written)
+        return settle("released", resource=resource, released_at=entry.get("released_at"))
+    if not resource.get("resourceId") and state in _UNASKED:
+        return settle(_UNASKED[state])  # never sent, or a key no answer can name a resource for
+    gateway = engine()
+    why = _release_unusable(gateway, entry["store_id"])
+    if why:
+        return why
+    try:
+        with _import_lock(drive, task_id, entry["material"], timeout_sec=0.0):
+            # Discovery and lookup can wait. Recheck closure after each, outside the Keep gate
+            # (tree_hold may take the queue lock), then bind the effect under the existing custody lock.
+            def begin() -> str:
+                why = allowed()
+                return why or _bind_release(drive, task_id, entry)
+
+            if not resource.get("resourceId"):
+                why, resource = _lookup(gateway, drive, task_id, entry, settle, begin)
+                if why or not resource:
+                    return why
+            why = begin()
+            if why:
+                return "" if why == "already_settled" else why
+            return _release(gateway, entry, resource, settle)
+    except ClaudexorUnavailable as exc:  # ``document_import_busy``: a start holds this input's import lock
+        return exc.code
+
+
+def _emit_settled(drive: pathlib.Path, fact: Dict[str, Any]) -> bool:
+    from ouroboros import delegate_custody as custody
+
+    return custody.emit(drive, DOCUMENT_RELEASE_SETTLED, fact)
+
+
+def _bind_release(drive: pathlib.Path, task_id: str, entry: Dict[str, Any]) -> str:
+    """Keep and release serialize at one recorded intent, never across HTTP. A later Keep
+    names this intent release_unconfirmed; an earlier Keep prevents the send."""
+    from ouroboros import delegate_custody as custody
+    from ouroboros.delegate_custody_current import marks
+    from ouroboros.owner_keep import gate
+
+    with gate(drive, task_id, timeout_sec=0) as why:
+        if why:
+            return why
+        current = (marks(drive, task_id).get("managed_imports") or {}).get(entry["import_key"])
+        if current is None:
+            return "already_settled"
+        if any(current.get(key) != entry.get(key) for key in ("material", "store_id", "request")):
+            return "binding_changed"
+        if current.get("release_state") == "bound":
+            return ""  # an unresolved send reuses the same resource/body or cancellation ID
+        fact = {"task_id": task_id, "material": entry["material"], "import_key": entry["import_key"]}
+        return "" if custody.emit(drive, DOCUMENT_RELEASE_BOUND, fact) else "release_unwritable"
+
+
+def managed_keep_places(root: Any, task_id: str) -> Dict[str, str]:
+    """Current imports and closed reuse remain Keep facts after their local inputs go.
+    Read inside the caller's custody lock for the final Keep answer; no engine request."""
+    from ouroboros.delegate_custody_current import marks
+
+    mark = marks(root, task_id)
+    places = {f"managed_import:{key}": state for key, state in (mark.get("managed_import_releases") or {}).items()}
+    places.update({f"managed_import:{key}": ("release_unconfirmed" if entry.get("release_state") == "bound" else "held")
+                   for key, entry in (mark.get("managed_imports") or {}).items()})
+    return places
+
+
+def _release_unusable(gateway: Any, store_id: str) -> str:
+    """Why this engine cannot be asked about the release now (``""``: it can)."""
+    from ouroboros.gateways.claudexor_uploads import resource_release_supported
+
+    if gateway is None:
+        return "engine_unavailable"
+    try:
+        if not resource_release_supported(gateway.operations()):
+            return "engine_release_unsupported"
+    except Exception:  # an unread catalog proves no route either way
+        return "engine_unavailable"
+    return "" if str(getattr(gateway, "store_identity", "") or "") == store_id else "store_mismatch"
+
+
+def _lookup(gateway: Any, drive: pathlib.Path, task_id: str, entry: Dict[str, Any],
+            settle: Callable[..., str], begin: Callable[[], str]) -> Tuple[str, Dict[str, Any]]:
+    """A key with no observed resource, asked by a lookup-only replay of its exact recorded body (``lifetime``
+    included): ``("", resource)`` to release, ``("", {})`` once settled here, or ``(why it waits, {})``."""
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    facts = {"task_id": task_id, "material": entry["material"], "import_key": entry["import_key"]}
+    try:
+        answer = _post(gateway, drive, facts, entry, False)
+    except ClaudexorUnavailable as exc:  # ``_post`` observed a typed finish itself; anything else stays unknown
+        finished = _LOOKUP_FINISHED.get(exc.code)
+        return (settle(finished, code=exc.code), {}) if finished else (exc.code or "lookup_unknown", {})
+    state = answer["state"]
+    if state == "uploading":
+        return "import_uploading", {}
+    if state == "open":  # no resource exists, and no start of this ended work sends the bytes
+        why = begin()
+        if why:
+            return ("" if why == "already_settled" else why), {}
+        try:
+            cancelled = gateway.cancel_upload(answer["uploadId"])
+        except ClaudexorUnavailable as exc:
+            return exc.code or "cancel_unknown", {}
+        if cancelled.get("uploadId") != answer["uploadId"] or cancelled.get("state") != "cancelled":
+            return "cancel_unknown", {}
+        _emit(drive, DOCUMENT_IMPORT_OBSERVED, {**facts, "state": "cancelled"}, required=False)
+        return settle("cancelled"), {}
+    if state == "cancelled":
+        _emit(drive, DOCUMENT_IMPORT_OBSERVED, {**facts, "state": "cancelled"}, required=False)
+        return settle("cancelled"), {}
+    resource = _resource(answer)
+    if state == "released":
+        _emit(drive, DOCUMENT_IMPORT_OBSERVED, {**facts, "state": "released", "resource": resource,
+                                                "released_at": answer["releasedAt"]}, required=False)
+        return settle("released", resource=resource, released_at=answer["releasedAt"]), {}
+    _emit(drive, DOCUMENT_IMPORT_OBSERVED, {**facts, "state": "ready", "resource": resource}, required=False)
+    return "", resource
+
+
+def _release(gateway: Any, entry: Dict[str, Any], resource: Dict[str, Any], settle: Callable[..., str]) -> str:
+    """One release of exactly the recorded resource and digest in the recorded store; an unknown outcome waits
+    and is sent again unchanged (a repeat answers the identical body)."""
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    body = {"expectedStoreId": entry["store_id"], "sha256": entry["request"]["content"]["sha256"]}
+    try:
+        answer = gateway.release_resource(resource["resourceId"], body)
+    except ClaudexorUnavailable as exc:
+        if exc.code in _RELEASE_REFUSED:
+            return settle("refused", code=exc.code, resource=resource)
+        return exc.code or "release_unknown"
+    if (answer.get("state"), answer.get("storeId"), answer.get("resourceId"), answer.get("sha256")) != (
+            "released", entry["store_id"], resource["resourceId"], body["sha256"]) or not (
+            isinstance(answer.get("releasedAt"), str) and answer["releasedAt"]):
+        return "release_unknown"
+    return settle("released", resource=resource, released_at=answer["releasedAt"])
+
+
 __all__ = [
-    "DOCUMENT_IMPORT_TYPES", "DocumentAttachments", "DocumentSelectionError", "NO_DOCUMENTS", "RECOVERABLE_REFUSALS",
-    "attach_selected_documents", "attachment_parameters", "carried_receipts", "carry_owner_receipts",
-    "first_start_selection", "fold_document_import", "selection_options",
-    "material_id", "retained_inputs", "select_inputs", "task_document_imports",
+    "DOCUMENT_IMPORT_TYPES", "DOCUMENT_RELEASE_SETTLED", "DocumentAttachments", "DocumentSelectionError",
+    "NO_DOCUMENTS", "RECOVERABLE_REFUSALS", "attach_selected_documents", "attachment_parameters", "carried_receipts",
+    "carry_owner_receipts", "first_start_selection", "fold_document_import", "managed_keep_places", "opens_release",
+    "selection_options",
+    "material_id", "release_owed_imports", "retained_inputs", "select_inputs", "task_document_imports",
     "task_inputs",
 ]

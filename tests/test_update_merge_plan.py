@@ -4,6 +4,7 @@ import subprocess
 
 import supervisor.git_ops as git_ops
 import supervisor.update_merge as update_merge
+from ouroboros.dialogue_store import THREAD_FORMAT
 
 
 def _git(repo, *args):
@@ -20,9 +21,11 @@ def _init_repo(tmp_path):
     (repo / "a.txt").write_text("base\n")
     (repo / "BIBLE.md").write_text("constitution\n")
     (repo / "ouroboros").mkdir()
-    # A tree bearing every store a current release carries: the ordinary rollback resets at once.
+    # A tree bearing every store a current release carries, its dialogue store naming the thread format it
+    # reads: the ordinary rollback resets at once.
     for name in ("store.py", "usage_store.py", "dialogue_store.py"):
         (repo / "ouroboros" / name).write_text("# store\n", encoding="utf-8")
+    (repo / "ouroboros" / "dialogue_store.py").write_text(f"THREAD_FORMAT = {THREAD_FORMAT!r}\n", encoding="utf-8")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "base")
     head = _git(repo, "symbolic-ref", "--short", "HEAD").stdout.strip()

@@ -689,24 +689,32 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
             path += "?" + urlencode(query)
         return _model_object(self._request("GET", path, **({"timeout_sec": timeout_sec} if timeout_sec is not None else {})))
 
-    def upload_model_request(self, request: Dict[str, Any], *,
-                             idempotency_key: str) -> Dict[str, Any]:
+    def upload_model_request(self, request: Dict[str, Any] | bytes, *, idempotency_key: str,
+                             sha256: str = "", size_bytes: int | None = None) -> Dict[str, Any]:
         """Upload exact request JSON without spending a generation or logging content.
 
         Stage keys derive from the caller's invocation identity, never the prompt.
         An explicit retry can finish an uploaded/finalized handle after a lost
         reply. A cancelled or still-writing upload remains a typed refusal; this
         method never creates another upload or inference to hide that outcome.
+        Bytes carry the physical candidate's already-validated digest and size;
+        dictionary callers (including image generation) retain JSON preparation here.
         """
         key = _model_idempotency_key(idempotency_key)
-        if not isinstance(request, dict):
+        if isinstance(request, bytes):
+            data = request
+            if not re.fullmatch(r"[0-9a-f]{64}", sha256) or size_bytes != len(data):
+                raise ClaudexorUnavailable("invalid_model_payload", "Prepared request needs its exact digest and size")
+        elif isinstance(request, dict):
+            try:
+                data = json.dumps(request, ensure_ascii=False, allow_nan=False,
+                                  sort_keys=True, separators=(",", ":")).encode("utf-8")
+            except (TypeError, ValueError, UnicodeError) as exc:
+                raise ClaudexorUnavailable("invalid_model_payload", "Model request is not valid JSON") from exc
+            sha256, size_bytes = hashlib.sha256(data).hexdigest(), len(data)
+        else:
             raise ClaudexorUnavailable("invalid_model_payload", "Model request must be a JSON object")
-        try:
-            data = json.dumps(request, ensure_ascii=False, allow_nan=False,
-                              sort_keys=True, separators=(",", ":")).encode("utf-8")
-        except (TypeError, ValueError, UnicodeError) as exc:
-            raise ClaudexorUnavailable("invalid_model_payload", "Model request is not valid JSON") from exc
-        digest = "sha256:" + hashlib.sha256(data).hexdigest()
+        digest = "sha256:" + sha256
         stage_key = hashlib.sha256(key.encode("utf-8")).hexdigest()
         created = _model_object(self._request(
             "POST", "/v2/uploads",
@@ -714,7 +722,7 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
                        # Bind create's existing metadata identity to the bytes too:
                        # equal length alone would let an open upload change payload.
                        "name": f"model-request-{digest.removeprefix('sha256:')}.json",
-                       "sizeBytes": len(data)},
+                       "sizeBytes": size_bytes},
             headers={"Idempotency-Key": f"model-upload-{stage_key}"},
         ))
         upload_id = created.get("uploadId")
@@ -741,7 +749,7 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
         if resource.get("purpose") != "model":
             raise ClaudexorUnavailable("resource_purpose_mismatch", "Model upload returned an Agent attachment")
         ref = _model_payload_ref({name: resource.get(name) for name in ("resourceId", "sha256", "sizeBytes")})
-        if ref["sha256"] != digest or ref["sizeBytes"] != len(data):
+        if ref["sha256"] != digest or ref["sizeBytes"] != size_bytes:
             raise ClaudexorUnavailable("model_payload_integrity_error", "Finalized model request differs from uploaded bytes")
         return ref
 
@@ -903,9 +911,10 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
     def ensure_full_access(self, root: str) -> Dict[str, Any]:
         """Create a missing scoped full grant; the caller owns when to request it.
 
-        Scoped GET also returns default false for an absent trust file. The
-        actual-file list distinguishes absence from an explicit refusal; its
-        path remains authoritative when a legacy record has no repoRoot.
+        A daemon that names ``source`` distinguishes absence (``default``, grant)
+        from an explicit refusal (``file``). An older daemon omits ``source``;
+        the file list still distinguishes them, and its path stays authoritative
+        when a legacy record has no repoRoot.
         """
         target = str(root)
         body = self._request("GET", f"/v2/trust?repoRoot={quote(target, safe='')}")
@@ -917,20 +926,26 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
             raise ClaudexorUnavailable("malformed_response", "Scoped trust lookup returned a different root")
         if state["allowFullAccess"]:
             return state
-        body = self._request("GET", "/v2/trust")
-        entries = body.get("entries") if isinstance(body, dict) else None
-        if not isinstance(entries, list):
-            raise ClaudexorUnavailable("malformed_response", "Trust listing returned no entries")
-        for entry in entries:
-            entry = _trust_state(entry)
-            if entry["path"] == state["path"]:
-                if entry["allowFullAccess"]:
-                    return entry
-                raise ClaudexorUnavailable(
-                    "trust_full_access_required", "Full access is disabled for this scope; its existing choice was preserved. "
-                    "Lower this call with access=workspace_write or select Working files on the actor row.",
-                    status_code=403,
-                )
+        refusal = ClaudexorUnavailable(
+            "trust_full_access_required", "Full access is disabled for this scope; its existing choice was preserved. "
+            "Lower this call with access=workspace_write or select Working files on the actor row.",
+            status_code=403,
+        )
+        # An unrecognized source keeps the list: only the two named values skip it.
+        source = state.get("source")
+        if source == "file":
+            raise refusal
+        if source != "default":
+            body = self._request("GET", "/v2/trust")
+            entries = body.get("entries") if isinstance(body, dict) else None
+            if not isinstance(entries, list):
+                raise ClaudexorUnavailable("malformed_response", "Trust listing returned no entries")
+            for entry in entries:
+                entry = _trust_state(entry)
+                if entry["path"] == state["path"]:
+                    if entry["allowFullAccess"]:
+                        return entry
+                    raise refusal
         granted = _trust_state(self._request(
             "POST", "/v2/trust", json_body={"repoRoot": target, "allowFullAccess": True},
         ))

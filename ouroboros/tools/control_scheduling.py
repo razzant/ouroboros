@@ -6,7 +6,7 @@ requested-status envelope persisted before emission — and then emitted. The
 lane, the model, the effort, the route and the effective executor are resolved
 once at dispatch, not here, so a queued child's record never names a resolution
 nobody has made yet. What comes back to the parent is the request plus the
-schedule-time facts it cannot see for itself: tree slot occupancy, the child's
+schedule-time facts it cannot see for itself: engine and pool counts, the child's
 predicted authority, and any host-minted shared cooperative tree.
 """
 
@@ -165,48 +165,6 @@ def _emit_swarm_fanout(
         log.debug("Failed to publish swarm_fanout diagnostic event", exc_info=True)
 
 
-def _subagent_slot_note(ctx: ToolContext, root_task_id: str) -> str:
-    """Compact slot-occupancy transparency for the schedule_subagent result (v6.54.3, 1.6).
-
-    Read-only queue-snapshot facts — the LLM decides what to do with them (P5);
-    nothing here gates admission (the supervisor stays authoritative). Counts are
-    from the last persisted snapshot, i.e. BEFORE this wave lands."""
-    try:
-        from ouroboros.task_status import _load_queue_snapshot, queue_snapshot_observation
-
-        status_root = Path(str(getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
-        snap = _load_queue_snapshot(status_root)
-        observed = queue_snapshot_observation(snap)
-    except Exception:
-        return " [tree slot observation unavailable; current occupancy is unknown]"
-    if (snap.get("_snapshot_missing") or snap.get("_snapshot_invalid")
-            or not isinstance(snap.get("running"), list) or not isinstance(snap.get("pending"), list)):
-        return " [tree slot observation unavailable; current occupancy is unknown]"
-
-    def _is_tree_subagent(row: Any) -> bool:
-        if not isinstance(row, dict):
-            return False
-        task = row.get("task") if isinstance(row.get("task"), dict) else row
-        return (
-            str(task.get("delegation_role") or "") == "subagent"
-            and str(task.get("root_task_id") or "") == str(root_task_id or "")
-        )
-
-    active = sum(1 for r in (snap.get("running") or []) if _is_tree_subagent(r))
-    queued = sum(1 for r in (snap.get("pending") or []) if _is_tree_subagent(r))
-    try:
-        from ouroboros.config import get_max_active_subagents_per_root
-        cap = int(get_max_active_subagents_per_root())
-    except Exception:
-        return ""
-    return (
-        f" [tree slots before this wave: last recorded {active}/{cap} active, {queued} queued; "
-        f"source={status_root / observed['source']}, ts={observed['ts']}, "
-        f"age_sec={observed['age_sec']}, freshness={observed['freshness']}. "
-        "This observation does not reserve or prove current capacity.]"
-    )
-
-
 def _capability_mismatch_message(selected_profile: str, missing_caps: Any) -> str:
     """v6.57.0 (1.6): name the CORRECT spawn so the parent fixes a capability mismatch
     in one move instead of burning a round guessing (the prober-without-shell incidents).
@@ -317,7 +275,11 @@ def _finalize_schedule_emission(ctx: ToolContext, emission: Dict[str, Any]) -> s
         )
     except Exception:
         pass
-    slot_note = _subagent_slot_note(ctx, root_task_id)
+    try:
+        from ouroboros.engine_facts import engine_pool_line
+        pool_note = "\n" + engine_pool_line(getattr(ctx, "budget_drive_root", None) or ctx.drive_root)
+    except Exception:
+        pool_note = ""
     # v6.57.0 (1.6): preview the child's EFFECTIVE tool profile (shell/writable) so
     # the parent knows up front whether the child can run shell / write — the wasted
     # rounds where a prober child hit workspace_blocked came from neither side
@@ -360,7 +322,7 @@ def _finalize_schedule_emission(ctx: ToolContext, emission: Dict[str, Any]) -> s
     return (
         f"Subagent request queued {task_ids[0]}: {objective} "
         f"(subagent_id={selected_name}, route={route_kind}, {commitment})"
-        f"{worker_note}{slot_note}{profile_note}{coop_note}{legacy_note}{access_note}{inputs_note}"
+        f"{worker_note}{pool_note}{profile_note}{coop_note}{legacy_note}{access_note}{inputs_note}"
         f"{_effort_request_note(configured, str(emission.get('requested_effort') or ''), getattr(ctx, 'task_metadata', None))}"
     )
 

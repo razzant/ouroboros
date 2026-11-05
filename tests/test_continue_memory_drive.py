@@ -489,6 +489,49 @@ def test_a_long_input_manifest_rides_whole_and_an_unreadable_one_refuses_before_
     assert "Complete input manifest (26 declarations)" in row["text"]
 
 
+@pytest.mark.parametrize("state", ["ready", "send_possible", "gap", "damaged", "cancelled", "conflict", "rejected", "released"])
+def test_a_successor_copies_the_predecessors_document_receipt_and_unreadable_marks_refuse_first(
+        pool, tmp_path_factory, state):
+    """The successor's own copy carries the predecessor's observed receipt (its lifetime and the task that owes
+    its release), so the successor's selection replays that key instead of minting a second import; the release stays
+    owed by that task. Import records that cannot be read refuse before the claim, with nothing written."""
+    from ouroboros import delegate_custody, delegate_documents
+    from ouroboros.store import StoreError
+    from ouroboros.task_results import load_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    source = tmp_path_factory.mktemp("inputs") / "crash.log"
+    source.write_text("ATTACHED BYTES\n", encoding="utf-8")
+    task_id = _interrupted(pool, memory_mode="forked", attachments=[{"path": str(source)}])
+    row, = _declared(pool, task_id)
+    request = {"expectedStoreId": "store-1", "kind": "file", "mime": row["mime"],
+               "name": row["relpath"].rsplit("/", 1)[-1], "source": f"ouroboros-task-input:{task_id}/{row['relpath']}",
+               "lifetime": "managed", "content": {"sizeBytes": row["size"], "sha256": f"sha256:{row['sha256']}"}}
+    fact = {"task_id": task_id, "material": delegate_documents.material_id(row), "import_key": "key-1"}
+    assert delegate_custody.emit(pool.root, delegate_documents.DOCUMENT_IMPORT_REQUESTED, {
+        **fact, "store_id": "store-1", "request": request, "owner_task_id": task_id, "origin": "imported"})
+    assert delegate_custody.emit(pool.root, delegate_documents.DOCUMENT_IMPORT_SENDING, fact)
+    if state != "send_possible":
+        assert delegate_custody.emit(pool.root, delegate_documents.DOCUMENT_IMPORT_OBSERVED, {
+            **fact, "state": state,
+            **({"resource": {"resourceId": "res-1", "sha256": request["content"]["sha256"]}}
+               if state == "ready" else {})})
+    readable = delegate_documents.task_document_imports
+
+    def unreadable(*_args):
+        raise StoreError("the custody marks cannot be read")
+
+    pool.mp.setattr(delegate_documents, "task_document_imports", unreadable)
+    assert admit_continuation(task_id, action_nonce=NONCE) == {"ok": False, "error": "continuation_inputs_unavailable"}
+    assert "continued_by" not in load_task_result(pool.root, task_id) and pool.workers.PENDING == []
+    pool.mp.setattr(delegate_documents, "task_document_imports", readable)
+    successor, _binding = _continue(pool, task_id)
+    assert successor["attachments"][0]["engine_imports"] == [{
+        "store_id": "store-1", "import_key": "key-1", "request": request,
+        **({"resource_id": "res-1"} if state == "ready" else {"state": state}),
+        "owner_task_id": task_id}]
+
+
 def test_a_failed_input_copy_admits_nothing_and_the_same_press_recovers(pool, tmp_path_factory):
     """A copy that fails midway (the disk filled) leaves no file, no queue row and no drive behind; the claim stays,
     so the same nonce is admitted once the copy can land."""

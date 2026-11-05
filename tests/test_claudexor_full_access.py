@@ -117,6 +117,49 @@ def test_post_requires_confirmed_root_path_and_full_access(gateway, response):
     assert [request.method for request in requests] == ["GET", "GET", "POST"]
 
 
+def test_source_default_grants_without_the_trust_list(gateway):
+    instance, replies, requests = gateway
+    granted = state(True, source="default")
+    replies.extend([{"entries": [state(source="default")]}, granted])
+    assert instance.ensure_full_access(ROOT) == granted
+    assert [request.method for request in requests] == ["GET", "POST"]
+    assert requests[0].url.params["repoRoot"] == ROOT
+    assert not requests[1].url.query
+
+
+def test_source_file_refusal_skips_the_trust_list(gateway):
+    instance, replies, requests = gateway
+    replies.append({"entries": [state(source="file")]})
+    with pytest.raises(ClaudexorUnavailable) as refused:
+        instance.ensure_full_access(ROOT)
+    assert refused.value.code == "trust_full_access_required"
+    assert refused.value.status_code == 403
+    assert str(refused.value) == (
+        "Full access is disabled for this scope; its existing choice was preserved. "
+        "Lower this call with access=workspace_write or select Working files on the actor row."
+    )
+    assert [request.method for request in requests] == ["GET"]
+
+
+@pytest.mark.parametrize("scoped", [state(), state(source="other")])
+def test_absent_or_unknown_source_still_lists_before_grant(gateway, scoped):
+    instance, replies, requests = gateway
+    granted = state(True)
+    replies.extend([{"entries": [scoped]}, {"entries": []}, granted])
+    assert instance.ensure_full_access(ROOT) == granted
+    assert [request.method for request in requests] == ["GET", "GET", "POST"]
+    assert not requests[1].url.query
+
+
+@pytest.mark.parametrize("source", ["file", "default"])
+def test_full_grant_returns_on_the_scoped_read_when_source_is_named(gateway, source):
+    instance, replies, requests = gateway
+    expected = state(True, source=source)
+    replies.append({"entries": [expected]})
+    assert instance.ensure_full_access(ROOT) == expected
+    assert [request.method for request in requests] == ["GET"]
+
+
 def test_daemon_refusal_survives_without_a_retry_or_grant(gateway):
     instance, replies, requests = gateway
     replies.append(httpx.Response(403, json={

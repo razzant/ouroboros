@@ -179,12 +179,97 @@ def test_a_degraded_executor_whose_thread_cannot_start_leaves_the_row_admitted_a
             raise RuntimeError("can't start new thread")
 
     monkeypatch.setattr(inline_carrier, "threading", SimpleNamespace(Thread=Refusing))
+    from supervisor.conversation_lane import publish_awaiting_rows
+
     task = {"id": "t-unstarted", "chat_id": 1, "text": "hello", "metadata": {}}
     with workers._queue_lock:
         meta = admit_turn(task, chat_id=1, client_message_id="cm-u")
+    assert publish_awaiting_rows()  # the admission's barrier, outside Q, before any executor may hold the row
+    with workers._queue_lock:
         with pytest.raises(inline_carrier.InlineExecutorUnavailable):
             inline_carrier.start_inline_turn(meta, executor=EXECUTOR_INLINE_DEGRADED, reason="pool_not_started")
     assert workers.RUNNING["t-unstarted"] is meta and meta["worker_id"] is None and "executor" not in meta
     assert meta["task"]["_execution_owner"]["executor"] == EXECUTOR_WORKER
     assert _inline_slot() is None and get_direct_activity_registry().get("t-unstarted") is None
 
+
+
+# ---- a live call's row is the inline executor's from admission to bind (review F1) ------------------------------
+
+def _ready_spare(wid=5):
+    spare = workers.Worker(wid, Process(5000 + wid), InputQueue(), lane=LANE_CONVERSATION, busy_task_id=None)
+    affirm_ready(spare)
+    workers.WORKERS[wid] = spare
+    return spare
+
+
+def test_a_live_call_turn_is_reserved_for_its_inline_executor_from_admission_to_bind(degraded, monkeypatch):
+    """The row's barrier runs outside Q, and the supervisor tick reconciles the lane in that window with a READY idle
+    spare at hand. The row is the admitting executor's: the tick hands it to no carrier, spawns no carrier for it,
+    and the owner's words run once, on the inline executor."""
+    from supervisor.inline_carrier import EXECUTOR_INLINE_CALL
+
+    monkeypatch.setattr(conversation_lane, "reconcile_conversation_lane", _REAL_LANE_RECONCILE)
+    spare = _ready_spare()
+    real_publish, ticked = conversation_lane.publish_awaiting_rows, []
+
+    def publish_then_tick():
+        ok = real_publish()
+        if not ticked:  # the tick's own pass runs the barrier again: once is the window
+            ticked.append(True)
+            conversation_lane.reconcile_conversation_lane()
+        return ok
+
+    monkeypatch.setattr(conversation_lane, "publish_awaiting_rows", publish_then_tick)
+    meta = inline_carrier.run_inline_turn(1, "hello from the call", None, None, {"client_message_id": "cm-live"},
+                                          executor=EXECUTOR_INLINE_CALL)
+    assert ticked and meta is not None
+    assert spare.busy_task_id is None and spare.in_q.empty(), "the tick's dispatch never handed the row to the spare"
+    assert degraded.created == [], "a reserved row awaits no carrier: the tick started none for it"
+    assert meta["executor"] == EXECUTOR_INLINE_CALL and meta["worker_id"] is not None and "_inline_bind" not in meta
+    deadline = time.time() + 10
+    while not degraded.actor.ran and time.time() < deadline:
+        time.sleep(0.02)
+    assert [t["text"] for t in degraded.actor.ran] == ["hello from the call"]
+    assert [row["executor"] for row in inline_carrier.inline_vitals()["inline_executions"]] == [EXECUTOR_INLINE_CALL]
+    for slot in list(workers.WORKERS.values()):
+        if slot.executor == EXECUTOR_INLINE_CALL:
+            slot.proc.join(10)
+
+
+def test_a_reserved_row_gets_its_barrier_and_no_carrier_until_its_executor_binds_it(degraded):
+    """The mechanism under the law above: the admission barrier lands for a reserved row like any other, and the lane's
+    two dispatch doors pass it by while a READY spare sits idle; ``start_inline_turn`` clears the mark as it binds."""
+    from supervisor.conversation_lane import admit_turn
+
+    spare = _ready_spare()
+    task = {"id": "t-reserved", "chat_id": 1, "text": "hello", "metadata": {}}
+    with workers._queue_lock:
+        meta = admit_turn(task, chat_id=1, client_message_id="cm-r", reserved=True)
+    assert meta["_unpublished"] and meta["_inline_bind"]
+    assert conversation_lane.publish_awaiting_rows() and "_unpublished" not in meta
+    with workers._queue_lock:
+        assert conversation_lane.dispatch_awaiting_turns() == 0
+    conversation_lane.dispatch_admitted_turn(meta)
+    assert meta["worker_id"] is None and spare.busy_task_id is None and spare.in_q.empty()
+    with workers._queue_lock:
+        slot = inline_carrier.start_inline_turn(meta, executor=EXECUTOR_INLINE_DEGRADED, reason="test")
+    assert meta["worker_id"] == slot.wid and "_inline_bind" not in meta
+    slot.proc.join(10)
+
+
+def test_start_inline_turn_refuses_a_row_a_carrier_already_holds(degraded):
+    """No second executor: a row bound to a carrier is refused by type, with no pseudo-slot, actor or disclosure."""
+    from supervisor.active_activity import get_direct_activity_registry
+    from supervisor.conversation_lane import admit_turn
+
+    task = {"id": "t-held", "chat_id": 1, "text": "hello", "metadata": {}}
+    with workers._queue_lock:
+        meta = admit_turn(task, chat_id=1, client_message_id="cm-h")
+    assert conversation_lane.publish_awaiting_rows()
+    meta["worker_id"] = 5  # a carrier holds the turn
+    with workers._queue_lock, pytest.raises(RuntimeError, match="held"):
+        inline_carrier.start_inline_turn(meta, executor=EXECUTOR_INLINE_DEGRADED, reason="pool_not_started")
+    assert meta["worker_id"] == 5 and "executor" not in meta and _inline_slot() is None
+    assert get_direct_activity_registry().get("t-held") is None
+    assert inline_carrier.inline_vitals()["inline_executions"] == []

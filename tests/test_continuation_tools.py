@@ -293,7 +293,7 @@ def test_real_loop_measures_sends_and_checkpoints_adoption_without_editing_recov
     saved = SimpleNamespace(tools=registry, messages=messages, llm_trace={}, accumulated_usage={},
                             round_idx=2, tool_schemas=frozen, owner_msg_seen=set())
     wc.save_round(saved, "post_batch")
-    exact = wc.checkpoint_path(tmp_path, ctx.task_id, 1).read_bytes()
+    exact = wc.read_working(tmp_path, ctx.task_id, 1)[0]
     task = {"id": ctx.task_id}
     assert wc.attach_recovery(tmp_path, task, source_task_id=ctx.task_id, from_attempt=1, cause="worker_crash")
     handoff = task["_working_recovery"]
@@ -309,7 +309,7 @@ def test_real_loop_measures_sends_and_checkpoints_adoption_without_editing_recov
 
     def dispatch(call, disposition, **kwargs):
         sent.append(prefix.tools_digest(call.tool_schemas))
-        checkpoint = json.loads(wc.checkpoint_path(tmp_path, ctx.task_id, 2).read_bytes())
+        checkpoint = wc.read_working(tmp_path, ctx.task_id, 2)[1]
         assert prefix.tools_digest(checkpoint["tool_schemas"]) == expected
         assert checkpoint["actor_loaded_tool_names"] == ["read_file"]
         assert read_actor_source_bytes(tmp_path, ctx.task_id, handoff["source_ref"]) == exact

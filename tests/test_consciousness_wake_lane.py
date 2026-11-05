@@ -342,6 +342,17 @@ def test_wake_refusals_are_typed_and_start_nothing(monkeypatch, tmp_path):
     assert not [call for call in sent if "Budget" in str(call[0][1]) or "accounting" in str(call[0][1])]
 
 
+def test_a_wake_on_a_subscription_route_is_admitted_at_the_reached_global_limit(monkeypatch, tmp_path):
+    """A reached global limit refuses paid admission only; the refusal above is a paid Main's."""
+    from supervisor import state
+
+    _lane(monkeypatch, tmp_path)
+    monkeypatch.setenv("OUROBOROS_MODEL_CONSCIOUSNESS", "claudexor::codex=gpt-6-astra")
+    monkeypatch.setattr(state, "budget_remaining", lambda *a, **kw: 0)
+    receipt = workers.handle_wake_direct(1, "wake", dict(WAKE_META))
+    assert receipt["admitted"] is True and receipt["task_id"]
+
+
 def test_wake_runner_failure_is_the_turns_own_terminal_and_reaches_the_clock_as_ok_false(monkeypatch, tmp_path):
     """An exception from the body is the task's own terminal (``worker_process._record_task_exception``),
     written through the agent's env; the clock reads it as a runner failure through the pooled terminal."""

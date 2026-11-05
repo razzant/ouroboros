@@ -53,6 +53,7 @@ of that target.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import Counter
 from pathlib import Path
@@ -942,15 +943,25 @@ def _read_node(root: Path, node_id: str, start: int, limit: int, revision: str =
     return _window(header, document, start, limit, lambda end: f"memory_read(node_id={node_id}{at}, start={end})")
 
 
-def _read_source(root: Path, ref: Any, start: int, limit: int) -> str:
+def _source_bytes(root: Path, ref: Any) -> Tuple[bytes, str]:
+    """A retained source's exact bytes and its header facts; a chat row's address reads the context recorded
+    with that row (``chat_chain.recorded_context``), its provider thread whole."""
     from ouroboros.artifacts import read_actor_source_bytes  # D15->D05 is lazy-only
 
     if not isinstance(ref, dict):
         raise ValueError("source_ref is a retained source reference object")
+    if ref.get("kind") == "chat_row":
+        address, raw = chat_chain.recorded_context(root, ref)
+        return raw, (f"[source {chat_chain.format_address(address)}; recorded with this chat row; {len(raw)} bytes; "
+                     f"sha256 {hashlib.sha256(raw).hexdigest()[:12]}]")
     raw = read_actor_source_bytes(root, str(ref.get("task_id") or ""), ref)
     location = f"; location {ref['location']}" if ref.get("location") else ""
-    head = (f"[source {ref.get('path')}; task {ref.get('task_id')}; {len(raw)} bytes; "
-            f"sha256 {str(ref.get('sha256') or '')[:12]}{location}]")
+    return raw, (f"[source {ref.get('path')}; task {ref.get('task_id')}; {len(raw)} bytes; "
+                 f"sha256 {str(ref.get('sha256') or '')[:12]}{location}]")
+
+
+def _read_source(root: Path, ref: Any, start: int, limit: int) -> str:
+    raw, head = _source_bytes(root, ref)
     return _window(head, raw.decode("utf-8", errors="replace"), start, limit,
                    lambda end: f"memory_read(source_ref=<same>, start={end})")
 
@@ -1146,9 +1157,7 @@ def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: in
 
 def _source_texts(root: Path, ref: Dict[str, Any]) -> List[str]:
     """A retained source as text, plus every string inside it when it is JSON."""
-    from ouroboros.artifacts import read_actor_source_bytes  # D15->D05 is lazy-only
-
-    text = read_actor_source_bytes(root, str(ref.get("task_id") or ""), ref).decode("utf-8", errors="replace")
+    text = _source_bytes(root, ref)[0].decode("utf-8", errors="replace")
     texts = [text]
     try:
         stack = [json.loads(text)]

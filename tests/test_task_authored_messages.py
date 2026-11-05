@@ -307,10 +307,9 @@ def test_the_roster_note_includes_direct_roots_but_skips_subagents_and_discloses
 
 
 @pytest.mark.parametrize("origin", [{}, {"initiator": "consciousness"}], ids=["owner", "consciousness"])
-def test_the_direct_roots_fragment_never_blocks_on_a_held_actor_lock(tmp_path, monkeypatch, origin):
+def test_the_roster_lists_a_lane_turn_from_the_snapshot_without_asking_its_actor(tmp_path, monkeypatch, origin):
     import threading
 
-    from supervisor import direct_roots
     from supervisor.active_activity import get_direct_activity_registry
     from ouroboros.peer_roster import independent_roots
 
@@ -331,11 +330,8 @@ def test_the_direct_roots_fragment_never_blocks_on_a_held_actor_lock(tmp_path, m
     registry.register("turn-free", 1, actor=free_actor)
     registry.register("turn-held", 1, actor=held_actor)
     try:
-        # The fragment is the lane's empty residual: a conversation turn is a RUNNING row of the queue
-        # snapshot, so the roster reads it there and asks no actor for its lock (held or free).
-        payload = direct_roots.collect_direct_roots()
-        write_queue_document(tmp_path / "state/direct_roots.json", payload)
-        assert payload == {"roots": [], "incomplete": False}
+        # A conversation turn is a RUNNING row of the queue snapshot, so the roster reads it there and asks no
+        # actor for its lock (held or free); the retired direct-roots fragment is neither written nor read.
         _snapshot(tmp_path, [{"id": "turn-free", "worker_id": 90, "attempt": 1, "lane": "conversation",
                               "task": {"id": "turn-free", "type": "task", "chat_id": 1, "text": "hello",
                                        "_is_direct_chat": True, "title": "Chat", "metadata": dict(origin)}}])
@@ -352,7 +348,6 @@ def test_the_direct_roots_fragment_never_blocks_on_a_held_actor_lock(tmp_path, m
     assert "live direct conversation" in note
     assert "live owner conversation" not in note and "person is having" not in note
     assert "turn-free" in note, "the direct lane remains addressable"
-    direct_roots.clear_direct_roots(tmp_path)
     _snapshot(tmp_path, [])  # the turn's carrier released its row: the roster lists it no more
     assert independent_roots(tmp_path)["roots"] == []
 

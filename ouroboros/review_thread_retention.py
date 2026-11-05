@@ -39,11 +39,14 @@ its task and a ``read_file`` path another task or a fork resolves, and ``read_th
 
 Candidates are the tasks written terminal since the pass last looked (``task_store.terminal_writes_since``),
 each with the timeout-retried predecessors its reciprocal retry links name, and the tasks the step still
-waits on, kept on the ``runtime_retirement`` job row. The first pass only pins that position and its time; a
-thread whose host runs started before it is never a candidate, so material that predates this code is not
+waits on, kept on the ``runtime_retirement`` job row. The first pass pins its position and time; a managed import's
+prior ``floor`` (``maintenance_retirement.release_opened``) makes it process that older interval in the same pass.
+A thread whose host runs started before activation is never a candidate, so thread material predating this code is not
 released. No timer, poller or retry count: a waiting task is asked again whenever the maintenance child runs
 (``owed``), never a reason to start one. A pass its caller stops between tasks or between a task's operations (a
-delegate capture arrived) leaves the rest waiting for that next run. Why the engine could not be asked at all
+delegate capture arrived) leaves the rest waiting for that next run. Each candidate's managed document imports go
+through the same pass (``delegate_documents.release_owed_imports``, holds named ``document_<why>``); a task waits
+while either still does. Why the engine could not be asked at all
 (``engine_hold``) stands on the job row beside the tasks it leaves waiting, written when it changes. A pass reports what
 it newly saved of the engine's answers as ``observed``, which its caller logs. Each candidate also owes the engine one
 ``taken`` decision per finished delegated result it holds whole, under the same tree proof (``delegate_result_taken``);
@@ -551,12 +554,14 @@ def _continued_roots(root: Any, tree: str) -> Optional[List[Tuple[str, Dict[str,
 
 
 def tree_hold(root: Any, task_id: str, document: Dict[str, Any], *, live: Callable[[str], Any],
-              census: Optional[set]) -> Tuple[str, Dict[str, Any]]:
+              census: Optional[set], every_offer: bool = False) -> Tuple[str, Dict[str, Any]]:
     """Why the task's threads cannot go yet (``""`` when nothing holds them) and its own custody runs in its tree.
     The whole work holds them: the task's tree, the line while it is continuable, then the tree of each root
     the owner's Continue admitted after it, whose own members, reviews and custody must end too (that hold
-    is named ``continued_<why>``). Every answer that cannot be read holds. Never called inside the keep
-    gate (the continuation reader may take the supervisor's queue lock in the server process)."""
+    is named ``continued_<why>``). Every answer that cannot be read holds. ``every_offer`` (a managed document's
+    release, ``delegate_documents``) also holds for an author's stop and an offer not yet decidable
+    (``delegate_continuation.still_continuable``). Never called inside the keep gate (the continuation reader may
+    take the supervisor's queue lock in the server process)."""
     from ouroboros.delegate_continuation import still_continuable
 
     tree = str(document.get("root_task_id") or task_id)
@@ -570,7 +575,7 @@ def tree_hold(root: Any, task_id: str, document: Dict[str, Any], *, live: Callab
         return why, {}
     line = SimpleNamespace(review_owned=False, run_id=f"review-threads:{task_id}", task_id=task_id,
                            root_task_id=tree, invocation_id="")
-    if still_continuable(root, line, census):
+    if still_continuable(root, line, census, every_offer=every_offer):
         return "continuable", {}
     successors = _continued_roots(root, tree)
     if successors is None:
@@ -811,6 +816,14 @@ class _Pass:
                                         releases.get(thread_id) or {}) or verdict, done + 1
         return verdict
 
+    def documents(self, task_id: str) -> bool:
+        """Whether the task's managed document imports still owe a release after this pass asked
+        (``delegate_documents.release_owed_imports``: its own whole-work hold, this pass's engine, stop and report)."""
+        from ouroboros.delegate_documents import release_owed_imports
+
+        return release_owed_imports(self.root, task_id, engine=self.engine, live=self.live, census=self.census,
+                                    hold=self.hold, stop=self.stop, observed=self.report["observed"].append)
+
     def between(self, done: int) -> bool:
         """Whether the caller's stop ends the pass before this task's next operation (a bound release to reconcile,
         then a fresh thread): only after one (``done``), which kept its own; the task waits for the rest."""
@@ -913,7 +926,7 @@ class _Pass:
 
 def owed(row: Dict[str, Any]) -> bool:
     """Whether a pass left tasks waiting, from the job ROW alone. A task written terminal since is no such debt: a row
-    does not say whether its plan record names a thread, and a completion alone leaves retirement at rest."""
+    does not name a review thread. A managed-import terminal writer separately schedules retirement."""
     state = row.get(JOB_FIELD) if isinstance(row.get(JOB_FIELD), dict) else {}
     return bool(state.get("activated_at") and state.get("waiting"))
 
@@ -937,9 +950,14 @@ def retire_finished_review_threads(root: Any, *, engine: Any = None, live: Optio
         counter = int(txn.meta(store.TERMINAL_WRITES) or 0)
         row = txn.meta(maintenance_jobs.PREFIX + JOB) or {}
     state = row.get(JOB_FIELD) if isinstance(row.get(JOB_FIELD), dict) else {}
-    if not state.get("activated_at"):  # the first pass: what was written before it is never read
-        maintenance_jobs.record(root, JOB, **{JOB_FIELD: {"activated_at": utc_now_iso(), "counter": counter, "waiting": []}})
-        return {"activated": True}
+    if not state.get("activated_at"):  # the first pass: what was written before it, or before a floor, is never read
+        floor = state.get("floor")  # a managed document import owed since (``maintenance_retirement.release_opened``)
+        pin = min(counter, floor) if type(floor) is int else counter
+        state = {"activated_at": utc_now_iso(), "counter": pin, "waiting": state.get("waiting") or []}
+        maintenance_jobs.record(root, JOB, **{JOB_FIELD: state})
+        if pin == counter and not state["waiting"]:
+            return {"activated": True}
+        # Process the preserved import interval now: pinning a cursor is not scheduling a second pass.
     written = terminal_writes_since(root, int(state.get("counter") or 0))
     tasks = list(dict.fromkeys([*(state.get("waiting") or []), *(owner for task in written for owner in retry_line(root, task))]))
     run = _Pass(root, str(state["activated_at"]), engine=engine,
@@ -953,14 +971,17 @@ def retire_finished_review_threads(root: Any, *, engine: Any = None, live: Optio
                 run.stopped = True
                 break
             run.report["tasks"] += 1
-            try:
-                held = run.task(task_id) == WAIT
-                if run.stopped or tell_engine(run, task_id) == WAIT or held:
-                    waiting.append(task_id)
-            except Exception as exc:  # one unreadable task never stops the pass; it is asked again
+            wait = False  # the task waits while its threads, managed documents or engine decisions do, each asked on its own
+            for step in (lambda: run.task(task_id) == WAIT, lambda: run.documents(task_id),
+                         lambda: tell_engine(run, task_id) == WAIT):
+                try:
+                    wait = run.stopped or step() or wait
+                except Exception as exc:  # one unreadable task never stops the pass; it is asked again
+                    wait = True
+                    run.report["errors"].append(f"{task_id}: {type(exc).__name__}: {exc}"[:300])
+                    log.warning("Runtime retirement failed for task %s", task_id, exc_info=True)
+            if wait:
                 waiting.append(task_id)
-                run.report["errors"].append(f"{task_id}: {type(exc).__name__}: {exc}"[:300])
-                log.warning("Reviewer thread retention failed for task %s", task_id, exc_info=True)
     finally:
         run.close()
     after = {"activated_at": state["activated_at"], "counter": counter, "waiting": sorted(set(waiting))}

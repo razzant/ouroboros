@@ -335,7 +335,9 @@ async def _dispatch_extension_message(
     try:
         from ouroboros.extension_process_runner import disclose_inprocess_extension_dispatch
 
-        disclose_inprocess_extension_dispatch(
+        # A ledger append under the money lock: off the ASGI loop, as the HTTP path does.
+        await asyncio.to_thread(
+            disclose_inprocess_extension_dispatch,
             handler_spec,
             drive_root=drive_root,
             surface_kind="ws",

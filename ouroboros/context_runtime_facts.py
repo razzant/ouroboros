@@ -678,7 +678,8 @@ def vitals_fact(data_root: Any, *, observed_at: str, captured_at: Optional[str] 
     basis when unobserved, own transactions; the top frame of a stall episode whose end row is still in
     the tail), stall onsets whose end was not observed in the journal's bounded tail (never «current»),
     the last busy minute (counts and summed seconds per store and side, the longest hold's site, never a
-    percentage) and the conversation lane's carriers in that row (count, idle, each one's own last RSS),
+    percentage), the engine-and-pool row (counts and durations; a missing source says it was not observed;
+    no daemon read) and the conversation lane's carriers in that row (count, idle, each one's own last RSS),
     the engine's per-route failure shares (the newest ``claudexor_route_health`` row, kept
     in its own file, which the custody sweep replaces only when they change: failed/runs and the top
     cause per route, most failed first, or a window without runs; no row, no key),
@@ -686,7 +687,8 @@ def vitals_fact(data_root: Any, *, observed_at: str, captured_at: Optional[str] 
     rollback journal), the retained update's before/after, the boot row, and a note that names the
     journal's reader. ``observed_at`` is the fact's own instant (the clocks' day); it is written only
     when it differs from ``captured_at``, the Runtime JSON's ``context_captured_at`` beside it (a stale
-    snapshot), so the same instant is not printed twice. Every absent source omits its key. Never
+    snapshot), so the same instant is not printed twice. Every absent source omits its key, except
+    ``engine_pool``, which stays and names each source it could not read. Never
     raises."""
     import os
 
@@ -711,6 +713,12 @@ def vitals_fact(data_root: Any, *, observed_at: str, captured_at: Optional[str] 
             fact["busy_minute"] = _busy_minute(tail["load"], observed_at)
             if carriers := _carriers(tail["load"], observed_at):
                 fact["conversation_carriers"] = carriers
+        try:
+            from ouroboros.engine_facts import engine_pool_line
+            fact["engine_pool"] = engine_pool_line(root)
+        except Exception:
+            log.debug("engine pool fact unavailable", exc_info=True)
+            fact["engine_pool"] = "engine: not observed"
         if tail.get("inline"):
             # Owner decision 2A: the turns the body ran on a thread of the server instead of a carrier, newest
             # last — the degraded executor's reason (a refused spawn, a marker window) or a live call.
@@ -779,7 +787,7 @@ def vitals_line(fact: Optional[Dict[str, Any]]) -> str:
     if not isinstance(fact, dict):
         return ""
     parts = [f"body as of {fact['observed_at']}" if fact.get("observed_at") else "body"]
-    for key in ("owner_turns", "owner_turns_note", _STALLS_KEY, "busy_minute", "conversation_carriers",
+    for key in ("owner_turns", "owner_turns_note", _STALLS_KEY, "busy_minute", "engine_pool", "conversation_carriers",
                 "inline_executors", "route_health", "runtime", "wal_gate", "last_update", "boot"):
         value = fact.get(key)
         if isinstance(value, list) and value:

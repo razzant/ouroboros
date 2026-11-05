@@ -111,8 +111,8 @@ def test_full_stack_languages_barge_in_mail_sharing_attention_and_real_tool(host
         assert len([r for r in facts if r.get('type') == 'call.offer_wait']) == 1
         assert any(r.get('type') == 'call.input_audio' for r in facts)
         assert any('Synthetic barge-in answered.' in str(r) for r in run.transcript())
-        from ouroboros.working_checkpoint import checkpoint_path
-        saved = json.loads(checkpoint_path(run.root, run.state.ctx.task_id, 1).read_text())
+        from ouroboros.working_checkpoint import read_working
+        saved = read_working(run.root, run.state.ctx.task_id, 1)[1]
         assert any('started showing the screen' in str(r) for r in saved['messages'])
         assert any('Synthetic typed room message.' in str(r) for r in saved['messages'])
         assert any(r.get('tool_call_id') == 'real-read' for r in saved['messages'])

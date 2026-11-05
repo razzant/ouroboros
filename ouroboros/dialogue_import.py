@@ -35,7 +35,8 @@ marker a client holds keeps seeing new arrivals.
 ``export_for_older_body(root)`` appends every row the files do not hold yet (``seq >= files_seq``)
 back to ``logs/<stream>.jsonl`` in the exact line format. Its coordinate map preserves store
 identity when revised bodies change physical spans; ``store_switch`` calls it before a root
-is handed to such a body.
+is handed to such a body. ``expand_for_older_body(root)`` writes every row held with its thread by
+reference as its exact line again, in the store, for a body that reads the file but not references.
 """
 
 from __future__ import annotations
@@ -406,7 +407,7 @@ def _continues_store(root: pathlib.Path, conn: Any, stream: str, segment: Dict[s
                           (stream, segment["base"])).fetchone()
     line = next(iter(segment_rows(first, segment["base"])), None)
     return (stored is not None and line is not None and line.row is not None
-            and line.length == stored["length"] and line.row == ds.decode(stored["body"]))
+            and line.length == stored["length"] and line.row == ds.whole_body(conn, stored["body"]))
 
 
 # --- importing segments ----------------------------------------------------------------------
@@ -766,12 +767,14 @@ def _export_stream(root: pathlib.Path, stream: str) -> Dict[str, Any]:
             # line its skipped interval): the record is stale and this export starts afresh.
             begun = None
         upper = int(begun["to"]) if begun else int(marks["next_seq"])
-        # The rows the files do not hold: appended after ``files_seq`` and not inside an imported segment.
-        records = conn.execute(
+        # The rows the files do not hold: appended after ``files_seq`` and not inside an imported segment, each
+        # as the exact line it was written as (a provider thread held once is spliced back: ``ds.whole_line``).
+        records = [{"seq": record["seq"], "length": record["length"], "line": ds.whole_line(conn, record["body"])}
+                   for record in conn.execute(
             "SELECT seq, length, body FROM dialogue WHERE stream=? AND seq>=? AND seq<? AND NOT EXISTS (SELECT 1 FROM import_ledger "
             "WHERE import_ledger.stream=dialogue.stream AND state='done' AND base<=seq AND seq<base+size) ORDER BY seq",
-            (stream, marks["files_seq"], upper)).fetchall()
-    data = b"".join(record["body"].encode("utf-8") + b"\n" for record in records)
+            (stream, marks["files_seq"], upper)).fetchall()]
+    data = b"".join(record["line"].encode("utf-8") + b"\n" for record in records)
     live = root / ds.LIVE_REL[stream]
     if records:
         live.parent.mkdir(parents=True, exist_ok=True)
@@ -801,7 +804,7 @@ def _export_stream(root: pathlib.Path, stream: str) -> Dict[str, Any]:
                     generation = _gen(data)
                 coordinates = []
                 for record in records:
-                    raw = record["body"].encode("utf-8") + b"\n"
+                    raw = record["line"].encode("utf-8") + b"\n"
                     coordinates.append([offset, record["seq"], record["length"], len(raw), hashlib.sha256(raw).hexdigest()])
                     offset += len(raw)
                 with ds.transaction(root, write=True) as conn:
@@ -839,3 +842,46 @@ def _export_stream(root: pathlib.Path, stream: str) -> Dict[str, Any]:
         report = {**later, "from": report["from"], "rows": report["rows"] + later["rows"],
                   "bytes": report["bytes"] + later.get("bytes", 0)}
     return report
+
+
+def expand_for_older_body(root: Any, *, batch: int = 200) -> Dict[str, Any]:
+    """Store every row held with its provider thread by reference as its exact line again (``ds.whole_line``), root
+    and every descendant drive with a store: a body whose ``dialogue_store`` does not name ``ds.THREAD_FORMAT``
+    reads ``dialog.sqlite`` but no reference. Only a drive whose every such row is whole gets its header back to
+    the version that body opens (``ds.release_shared_version``); a failure before leaves the one it refuses. Run
+    with the writers stopped (the switch seam); ``shared`` stays."""
+    from ouroboros.store_import import descendant_drives
+
+    root = pathlib.Path(root)
+    report: Dict[str, Any] = {}
+    for drive in (root, *descendant_drives(root)):
+        if ds.present(drive):
+            report[str(drive)] = {stream: _expand_stream(drive, stream, batch) for stream in ds.STREAMS}
+            ds.release_shared_version(drive)
+    return report
+
+
+def _expand_stream(root: pathlib.Path, stream: str, batch: int) -> Dict[str, Any]:
+    """The rows from the stream's ``ds.SHARED_FROM`` mark on, one write transaction per ``batch`` of rows naming the
+    identity key: each held by reference becomes its whole line (``length`` already is the whole row's). The mark
+    follows each batch and goes once the stream's end is reached, so a death resumes where it stopped and a stream
+    with no mark holds no such row. A part the store does not hold is ``StoreLost``: its batch rolls back, and no
+    row is ever stored shorter."""
+    key, needle, rows, more = ds.SHARED_FROM + stream, f'"{ds.ROW_SHA_KEY}": "', 0, True
+    while more:
+        with ds.transaction(root, write=True) as conn:
+            lower = ds._meta(conn, key)
+            records = [] if lower is None else conn.execute(
+                "SELECT seq, body FROM dialogue WHERE stream=? AND seq>=? AND instr(body, ?) > 0 ORDER BY seq LIMIT ?",
+                (stream, int(lower), needle, batch)).fetchall()
+            for record in records:
+                line = ds.whole_line(conn, record["body"])
+                if line != record["body"]:
+                    conn.execute("UPDATE dialogue SET body=? WHERE stream=? AND seq=?", (line, stream, record["seq"]))
+                    rows += 1
+            more = len(records) == batch
+            if more:
+                ds._set_meta(conn, key, records[-1]["seq"] + 1)
+            elif lower is not None:
+                conn.execute("DELETE FROM meta WHERE key=?", (key,))
+    return {"rows": rows}

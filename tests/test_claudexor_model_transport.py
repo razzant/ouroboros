@@ -158,6 +158,40 @@ class ModelWire:
                 "response": {"state": "ready", "ref": _ref(self.result)}}
 
 
+def test_prepared_upload_reuses_canonical_bytes_without_serializing_or_hashing(gateway_factory, monkeypatch):
+    from types import SimpleNamespace
+
+    wire = ModelWire()
+    gateway = gateway_factory(wire)
+    raw = _bytes(_request())
+    digest = hashlib.sha256(raw).hexdigest()
+    original_dumps, original_sha = cx.json.dumps, cx.hashlib.sha256
+
+    def dumps(value, **kwargs):
+        assert value != _request(), "Prepared request was serialized again"
+        return original_dumps(value, **kwargs)
+
+    def sha(data=b""):
+        assert data is not raw, "Prepared request was hashed again"
+        return original_sha(data)
+
+    monkeypatch.setattr(cx.json, "dumps", dumps)
+    monkeypatch.setattr(cx, "hashlib", SimpleNamespace(sha256=sha))
+    ref = gateway.upload_model_request(raw, sha256=digest, size_bytes=len(raw), idempotency_key="prepared")
+    assert wire.payload == raw
+    assert ref == {"resourceId": "res-request", "sha256": "sha256:" + digest, "sizeBytes": len(raw)}
+    assert wire.generation_count == 0
+
+
+@pytest.mark.parametrize("facts", [{}, {"sha256": "0" * 64, "size_bytes": 1},
+                                  {"sha256": "not-a-hash", "size_bytes": 2}])
+def test_prepared_upload_requires_measured_identity_before_network(gateway_factory, facts):
+    gateway = gateway_factory(lambda _request: pytest.fail("Invalid preparation reached network"))
+    with pytest.raises(cx.ClaudexorUnavailable) as exc:
+        gateway.upload_model_request(b"{}", idempotency_key="prepared", **facts)
+    assert exc.value.code == "invalid_model_payload"
+
+
 def test_model_roundtrip_preserves_content_and_ack_is_separate(gateway_factory, caplog):
     wire = ModelWire()
     gateway = gateway_factory(wire)

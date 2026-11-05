@@ -211,10 +211,9 @@ def test_fence_outranks_the_blocked_terminal_and_carries_the_route_fact(
     assert raw != ""  # the fence WAKES; no unrun terminal over a possibly-lived run
     out = json.loads(raw)
     assert out["status"] == "configured_session_actor_ready"
-    assert out["route_blocked"] == {
-        "reason": "subscription_window_exhausted",
-        "reset_at": "2030-01-01T00:00:00Z",
-    }
+    assert out["route_blocked"]["reason"] == "subscription_window_exhausted"
+    assert out["route_blocked"]["reset_at"] == "2030-01-01T00:00:00Z"
+    assert "not observed" in out["route_blocked"]["engine_pool"]
     assert getattr(ctx, "_configured_startup_refusal", None) is None
 
 

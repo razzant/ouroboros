@@ -17,8 +17,9 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import queue_observation, task_status
-from supervisor import direct_roots, queue, queue_publication, queue_snapshot
+from supervisor import queue, queue_publication, queue_snapshot
 from supervisor.work_stop_migration import FORMAT_KEY, FORMAT_VERSION
+from tests.test_owner_wait_pool import pool as pool  # noqa: F401 -- fixture: a parked stack on a real store
 
 SENTINEL = "<<the owner's words, published once>>"
 OWNER_TEXT = SENTINEL + " and kept whole " * 2500  # ~40 KB, like a live Main message
@@ -35,7 +36,6 @@ def published(tmp_path, monkeypatch):
         monkeypatch.setattr(queue, name, value)
     monkeypatch.setattr(queue_snapshot, "_RESTORED", set())
     monkeypatch.setattr(queue_snapshot, "_RESTORING", {})
-    monkeypatch.setattr(direct_roots, "collect_direct_roots", lambda: {"roots": [], "incomplete": False})
     monkeypatch.setattr(queue_publication, "utc_now_iso", lambda: datetime.fromtimestamp(now[0], timezone.utc).isoformat())
     monkeypatch.setattr(queue_publication, "time", SimpleNamespace(monotonic=lambda: now[0], sleep=lambda _s: None))
     for module in (queue_observation, task_status):
@@ -98,7 +98,7 @@ def test_marks_under_q_write_no_bytes_and_the_tick_publishes_the_last_state(publ
     assert writes == [] and encodings == [] and queue_publication.queue_revision() == revision + 5
     assert not (root / "state/queue_snapshot.json").exists()
     assert queue_publication.publish_queue_changes() is True
-    assert [name for name, _ in writes] == ["queue_snapshot.json", "queue_dispatch.json", "direct_roots.json", "queue.alive"]
+    assert [name for name, _ in writes] == ["queue_snapshot.json", "queue_dispatch.json", "queue.alive"]
     assert not any(held for _, held in writes), "the tick writes outside Q"
     assert [row["id"] for row in _read(root, "queue_snapshot.json")["pending"]] == [f"t{i}" for i in range(5)]
     writes.clear()
@@ -221,7 +221,7 @@ def test_a_dead_loop_hands_publication_back_to_the_caller(published, monkeypatch
     assert not queue_publication.tick_publisher_alive()
     queue.PENDING.append(_task("t"))
     assert queue.persist_queue_snapshot("admit") is True
-    assert [name for name, _ in writes] == ["queue_snapshot.json", "queue_dispatch.json", "direct_roots.json", "queue.alive"]
+    assert [name for name, _ in writes] == ["queue_snapshot.json", "queue_dispatch.json", "queue.alive"]
 
 
 def test_a_failed_tick_publication_answers_false_for_the_loop_to_count(published, monkeypatch):
@@ -245,15 +245,15 @@ def test_a_failed_tick_publication_answers_false_for_the_loop_to_count(published
     assert queue_publication.publish_queue_changes() is None, "a kept saved queue is a quiet tick, not a crash"
 
 
-@pytest.mark.parametrize("killed_after", ["revoke", "queue_snapshot.json", "queue_dispatch.json", "direct_roots.json"])
+@pytest.mark.parametrize("killed_after", ["revoke", "queue_snapshot.json", "queue_dispatch.json"])
 def test_kill_after_each_step_keeps_order_and_custody(published, monkeypatch, killed_after):
     root, _now = published
     queue.PENDING.append(_task("saved"))
     assert queue.persist_queue_snapshot("seed") is True
-    before = {name: (root / "state" / name).read_bytes()
-              for name in ("queue_snapshot.json", "queue_dispatch.json", "direct_roots.json")}
+    before = {name: (root / "state" / name).read_bytes() for name in ("queue_snapshot.json", "queue_dispatch.json")}
     generation = _read(root, "queue.alive")["generation"]
     queue.PENDING.append(_task("later"))
+    queue.BUDGET_ROOT_FENCES["root"] = {"root_task_id": "root", "fence_id": "fence", "status": "active"}  # both documents change
     writer, unlink = queue.atomic_write_text, Path.unlink
 
     class Killed(BaseException):
@@ -279,24 +279,61 @@ def test_kill_after_each_step_keeps_order_and_custody(published, monkeypatch, ki
     # torn mix; the dispatch probe refuses; the saved queue is not in the new process's custody
     # until a restore read it, so its own empty publication keeps the saved documents as they are.
     assert not (root / "state/queue.alive").exists()
-    for name in ("queue_snapshot.json", "queue_dispatch.json", "direct_roots.json"):
+    for name in ("queue_snapshot.json", "queue_dispatch.json"):
         seen = task_status.queue_snapshot_observation(queue_observation.load_queue_document(root, name))
         assert seen["freshness"] == "unknown"
     with pytest.raises(queue_observation.DispatchPublicationPending):
         queue_observation.dispatch_probe(root)
     written = {name: (root / "state" / name).read_bytes() for name in before}
-    order = ["queue_snapshot.json", "queue_dispatch.json", "direct_roots.json"]
+    order = ["queue_snapshot.json", "queue_dispatch.json"]
     landed = order[:order.index(killed_after) + 1] if killed_after != "revoke" else []
     assert all((written[name] != before[name]) == (name in landed) for name in before), "documents land in order"
     queue_publication.reset()
     monkeypatch.setattr(queue, "QUEUE_PUBLICATION", None)
     monkeypatch.setattr(queue, "PENDING", [])
+    monkeypatch.setattr(queue, "BUDGET_ROOT_FENCES", {})  # the next generation holds nothing of its own yet
     assert queue.persist_queue_snapshot("startup") is None, "an unrestored generation keeps the saved queue"
     assert {name: (root / "state" / name).read_bytes() for name in before} == written
     assert not (root / "state/queue.alive").exists()
     saved = queue_observation.load_queue_document(root, fresh=True)
     assert saved["pending"][0]["task"]["origin_message_text"] == OWNER_TEXT  # whichever generation landed is whole
     assert saved["generation"] != generation or killed_after == "revoke"
+
+
+def test_an_unchanged_dispatch_document_keeps_its_generation_and_stays_certified(published, monkeypatch):
+    """The money paths' fence authority is rewritten only when its bytes change: a row admitted without a fence
+    changes the snapshot alone, so the dispatch document keeps the generation it was written under, the
+    certificate names that generation for it (``documents``), and a send's probe certifies it as before. A
+    fence changes both documents: both are rewritten under one generation and the certificate names one."""
+    root, _now = published
+    writes, _fsyncs = _writes(monkeypatch)
+    queue.PENDING.append(_task("a"))
+    assert queue.persist_queue_snapshot("admit") is True
+    first = _read(root, "queue_dispatch.json")["generation"]
+    assert _read(root, "queue.alive")["generation"] == first and "documents" not in _read(root, "queue.alive")
+    writes.clear()
+    queue.PENDING.append(_task("b"))
+    assert queue.persist_queue_snapshot("admit") is True
+    assert [name for name, _ in writes] == ["queue_snapshot.json", "queue.alive"], "the unchanged dispatch document is not rewritten"
+    alive, snapshot = _read(root, "queue.alive"), _read(root, "queue_snapshot.json")
+    assert alive["generation"] == snapshot["generation"] != first
+    assert alive["documents"] == {"queue_dispatch.json": first} and _read(root, "queue_dispatch.json")["generation"] == first
+    dispatch = queue_observation.load_queue_document(root, "queue_dispatch.json")
+    assert queue_observation.queue_stamp(dispatch)["generation"] == first, "certified by its own generation"
+    assert queue_observation.dispatch_probe(root)["generation"] == first
+    assert task_status.queue_snapshot_observation(dispatch)["fresh"]
+    assert task_status.queue_snapshot_observation(queue_observation.load_queue_document(root))["fresh"]
+    # An older certificate shape (no ``documents``) certifies a document only by the snapshot's generation.
+    (root / "state/queue.alive").write_text(json.dumps({"generation": alive["generation"], "ts": alive["ts"], "heartbeats": {}}))
+    assert not queue_observation.queue_stamp(queue_observation.load_queue_document(root, "queue_dispatch.json"))
+    (root / "state/queue.alive").write_text(json.dumps(alive))
+    writes.clear()
+    queue.BUDGET_ROOT_FENCES["root"] = {"root_task_id": "root", "fence_id": "fence", "status": "active"}
+    assert queue.persist_queue_snapshot("fence") is True
+    assert [name for name, _ in writes] == ["queue_snapshot.json", "queue_dispatch.json", "queue.alive"]
+    alive = _read(root, "queue.alive")
+    assert "documents" not in alive and _read(root, "queue_dispatch.json")["generation"] == alive["generation"] != first
+    assert queue_observation.dispatch_probe(root)["budget_root_fences"][0]["fence_id"] == "fence"
 
 
 def test_rollback_export_embeds_every_row_for_an_older_reader(published):
@@ -351,6 +388,124 @@ def test_a_document_that_does_not_answer_its_own_reference_is_invalid(published)
     (root / "state/queue_snapshot.json").write_text(json.dumps(document), encoding="utf-8")
     assert queue_observation.load_queue_document(root) == {"_snapshot_invalid": True}
     assert queue_observation.load_queue_document(root, fresh=True) == {"_snapshot_invalid": True}
+
+
+# ---- Q spans memory only: a park and a grant are marks; the store is the restore authority ----------------
+
+def _restart_and_restore(root, monkeypatch):
+    """The next generation: nothing in memory, the saved snapshot and the store on disk."""
+    from supervisor import workers
+
+    workers.RUNNING.clear()
+    workers.PENDING.clear()
+    monkeypatch.setattr(queue_snapshot, "_RESTORED", set())
+    monkeypatch.setattr(queue_snapshot, "_RESTORING", {})
+    queue.init(root)
+    fenced: list = []
+    assert queue.restore_pending_from_snapshot(terminalized=fenced) >= 0
+    return list(workers.PENDING), fenced
+
+
+def _restore_facts(task):
+    """What a restore decided for a row: its attempt, its recovery source and its hold; stamps aside."""
+    recovery = task.get("_working_recovery") or {}
+    hold = task.get("_budget_pause_hold") or {}
+    return {"id": task["id"], "attempt": task.get("_attempt"), "source_kind": recovery.get("source_kind"),
+            "source_ref": recovery.get("source_ref"), "wait_id": recovery.get("wait_id"),
+            "from_attempt": recovery.get("from_attempt"), "budget_paused_sec": recovery.get("budget_paused_sec"),
+            "started_at": recovery.get("started_at"), "hold": hold.get("reason"),
+            "owner_wait_resume": task.get("_owner_wait_resume")}
+
+
+@pytest.mark.parametrize("published", [True, False], ids=["published", "unpublished"])
+def test_a_park_restores_alike_whether_or_not_its_mark_was_published(pool, monkeypatch, published):
+    """k4's objection to a mark here (server-saturation k4_astra.r2.md:31: "a crash then restores the wrong
+    state") answered by the kill after the step. The park is a store commit; the queue is marked and the tick
+    publishes the row. Kill the process right after the store commit, before the tick (``unpublished``: the
+    snapshot on disk is the one before the park), or right after the tick (``published``): the next generation
+    restores the same row under the same attempt with the same recovery source, the park's own (the store's
+    wait, its source ref and wait id), held for Resume; the snapshot row's ``owner_wait`` decides nothing."""
+    from supervisor import worker_owner_wait, workers
+    from supervisor.events_budget import HOLD_SAVED_WORK
+
+    root = pool.root
+    assert queue.persist_queue_snapshot("before_park") is True  # the row is on disk without its park
+    before = (root / "state/queue_snapshot.json").read_bytes()
+    worker_owner_wait.handle_owner_wait(pool.event, workers)  # the store commit, the mark (published at once here)
+    assert pool.original.in_q.get_nowait()["phase"] == "parked"
+    stored = task_status.load_task_result(root, "owner")["owner_wait"]
+    assert stored["state"] == "waiting" and stored["wait_id"] == "wait"
+    if not published:
+        (root / "state/queue_snapshot.json").write_bytes(before)  # the kill came before the tick's publication
+        assert _read(root, "queue_snapshot.json")["running"][0].get("owner_wait") is None
+    else:
+        assert _read(root, "queue_snapshot.json")["running"][0]["owner_wait"]["state"] == "waiting"
+    pending, fenced = _restart_and_restore(root, monkeypatch)
+    assert fenced == [] and [row["id"] for row in pending] == ["owner"]
+    assert _restore_facts(pending[0]) == {
+        "id": "owner", "attempt": 4, "source_kind": "owner_wait", "source_ref": pool.wait["source_ref"],
+        "wait_id": "wait", "from_attempt": 3, "budget_paused_sec": 0.0, "started_at": pool.wait["started_at"],
+        "hold": HOLD_SAVED_WORK, "owner_wait_resume": None}
+
+
+@pytest.mark.parametrize("published", [True, False], ids=["published", "unpublished"])
+def test_a_grant_restores_the_newer_work_whether_or_not_its_mark_was_published(pool, monkeypatch, published):
+    """The grant's half of the same objection: the stack resumed (the store says ``resumed``, the worker saved
+    newer work) and the process died before the tick published the row, so the snapshot still shows the wait
+    (``unpublished``). The next generation restores the newer working state, never the old grant: the store,
+    not the snapshot row, says whether the wait stands."""
+    from ouroboros import working_checkpoint as wc
+    from supervisor import worker_owner_wait, workers
+    from supervisor.events_budget import HOLD_SAVED_WORK
+    from tests._budget_pause_exact_helpers import _loop_ctx
+
+    root = pool.root
+    worker_owner_wait.handle_owner_wait(pool.event, workers)
+    assert pool.original.in_q.get_nowait()["phase"] == "parked"
+    assert queue.persist_queue_snapshot("parked") is True
+    parked = (root / "state/queue_snapshot.json").read_bytes()
+    assert _read(root, "queue_snapshot.json")["running"][0]["owner_wait"]["state"] == "waiting"
+    worker_owner_wait.handle_owner_wait({**pool.event, "phase": "resume"}, workers)
+    worker_owner_wait.maintain_owner_wait_capacity()  # the grant: store commit, mark, resume_granted
+    assert pool.original.in_q.get_nowait()["phase"] == "resume_granted"
+    assert task_status.load_task_result(root, "owner")["owner_wait"]["state"] == "resumed"
+    _ctx, limit = _loop_ctx(root, "owner", attempt=3)
+    assert wc.save_round(limit, "pre_effect")  # the resumed stack's newer work
+    if not published:
+        (root / "state/queue_snapshot.json").write_bytes(parked)  # killed before the tick: the row still says waiting
+    else:
+        assert queue.persist_queue_snapshot("resumed") is True
+        assert _read(root, "queue_snapshot.json")["running"][0]["owner_wait"]["state"] == "resumed"
+    pending, fenced = _restart_and_restore(root, monkeypatch)
+    assert fenced == [] and [row["id"] for row in pending] == ["owner"]
+    facts = _restore_facts(pending[0])
+    assert facts["source_kind"] == wc.SOURCE_WORKING and facts["from_attempt"] == 3 and facts["attempt"] == 4
+    assert facts["hold"] == HOLD_SAVED_WORK and facts["owner_wait_resume"] is None
+    assert facts["wait_id"] in (None, ""), "the newer work, never the old grant"
+
+
+@pytest.mark.parametrize("lands", [True, False], ids=["lands", "fails"])
+def test_an_admission_while_a_restart_is_pending_publishes_its_barrier_outside_q(published, monkeypatch, lands):
+    """``enqueue_task``'s own barrier (durable before the reply while a restart is pending, t2 §1.2 queue.py:519)
+    runs after the function's own hold, outside Q; a failed one withdraws the row under Q again and the reply is
+    the typed refusal, as before."""
+    from ouroboros import server_restart
+
+    root, _now = published
+    queue_publication.tick_publisher_started()
+    monkeypatch.setattr(server_restart, "agent_restart_pending", lambda: True)
+    seen, real = [], queue.publish_queue_snapshot
+    monkeypatch.setattr(queue, "publish_queue_snapshot", lambda reason="": seen.append((reason, queue._queue_lock._is_owned()))
+                        or (real(reason=reason) if lands or reason != "agent_restart_admission" else False))
+    admitted = queue.enqueue_task(_task("restart-row"))
+    if lands:
+        assert not admitted.get("_admission_blocked") and seen == [("agent_restart_admission", False)]
+        assert [row["id"] for row in _read(root, "queue_snapshot.json")["pending"]] == ["restart-row"]
+        assert [row["id"] for row in queue.PENDING] == ["restart-row"]
+    else:
+        assert admitted["_admission_blocked"] == "restart_admission_unconfirmed"
+        assert seen == [("agent_restart_admission", False), ("agent_restart_admission_unconfirmed", False)]
+        assert queue.PENDING == [] and _read(root, "queue_snapshot.json")["pending"] == []
 
 
 def test_embedded_and_shared_rows_restore_alike(tmp_path, monkeypatch):

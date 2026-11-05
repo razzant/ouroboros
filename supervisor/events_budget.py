@@ -1143,8 +1143,14 @@ def observe_held_budget_selection(q: Any, task_id: str) -> Dict[str, Any]:
                 error = "" if safe else "dispatch_outcome_unknown"
         else:
             safe, error = pending_member_replay_safe(q, candidate)
+        try:  # read here, off Q: the selection that records it holds the queue lock
+            from supervisor.task_admission import prestart_returned_unsent
+
+            prestart = {"prestart_proof": prestart_returned_unsent(candidate)}
+        except Exception:
+            prestart = {"prestart_proof_unreadable": True}  # the selection then keeps its hold's result as it is
         return {"candidate": task, "authority": authority, "blockers": blockers,
-                "safe": safe, "unsafe_error": error}
+                "safe": safe, "unsafe_error": error, **prestart}
     except Exception:
         log.warning("Held selection observation unavailable for %s", task_id, exc_info=True)
         return {"error": "selection_observation_unavailable"}
@@ -1331,9 +1337,11 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any],
         return {"ok": False, "error": "snapshot_not_persisted" if refused == "snapshot_not_persisted"
                 else "selection_owner_held", **({"detail": refused} if completing else {})}
     try:
-        from supervisor.task_admission import PRESTART_PROOF, prestart_returned_unsent
+        from supervisor.task_admission import PRESTART_PROOF
 
-        proof = prestart_returned_unsent(task)  # a read gap at restore left the proof in its original result
+        if observation.get("prestart_proof_unreadable"):
+            raise RuntimeError("the pre-body proof was unreadable when this selection was observed")
+        proof = observation.get("prestart_proof") or {}  # a read gap at restore left it in its original result
         write_task_result(result_root, task_id, STATUS_SCHEDULED, reason_code="",
                           resource_limit={"status": "resumed", "auto_resume": False,
                                           "exact_continuation": False, **selection,

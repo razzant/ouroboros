@@ -26,7 +26,7 @@ pytestmark = pytest.mark.serial
 def _saved(root, task_id, attempt, boundary="post_batch"):
     _ctx, limit_ctx = _loop_ctx(root, task_id, attempt=attempt)
     wc.save_round(limit_ctx, boundary)
-    return wc.checkpoint_path(root, task_id, attempt).read_bytes()
+    return wc.read_working(root, task_id, attempt)[0]  # the whole state a recovery freezes
 
 
 @pytest.mark.parametrize("saved", [True, False])
@@ -53,7 +53,7 @@ def test_the_existing_crash_retry_continues_the_dead_attempts_saved_work(tmp_pat
     assert read_actor_source_bytes(tmp_path, task_id, handoff["source_ref"]) == exact
     # Kept until the retry's consumer loaded the frozen copy (a crash before the
     # enqueue's publication finds the same file again).
-    assert wc.checkpoint_path(tmp_path, task_id, 1).read_bytes() == exact
+    assert wc.read_working(tmp_path, task_id, 1)[0] == exact
 
 
 def test_a_signal_crash_stays_terminal_saved_work_never_widens_the_retry(tmp_path, monkeypatch):

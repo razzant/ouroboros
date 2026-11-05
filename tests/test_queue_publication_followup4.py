@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import queue_observation, task_status
-from supervisor import direct_roots, queue, queue_publication, queue_snapshot
+from supervisor import queue, queue_publication, queue_snapshot
 
 
 @pytest.fixture
@@ -32,7 +32,6 @@ def published(tmp_path, monkeypatch):
         monkeypatch.setattr(queue, name, value)
     monkeypatch.setattr(queue_snapshot, "_RESTORED", set())
     monkeypatch.setattr(queue_snapshot, "_RESTORING", {})
-    monkeypatch.setattr(direct_roots, "collect_direct_roots", lambda: {"roots": [], "incomplete": False})
     monkeypatch.setattr(queue_publication, "utc_now_iso", lambda: datetime.fromtimestamp(now[0], timezone.utc).isoformat())
     monkeypatch.setattr(queue_publication, "time", SimpleNamespace(monotonic=lambda: now[0], sleep=lambda _s: None))
     for module in (queue_observation, task_status):
@@ -90,12 +89,11 @@ def test_a_reverted_change_after_a_failed_tick_write_is_rewritten_by_the_next_qu
         now[0] += queue_publication.QUEUE_ALIVE_REFRESH_SEC * 2
         answers.append(queue_publication.publish_queue_changes())
     assert answers == [True, True, True, True], "one transient failure never wedges the loop"
-    assert writes[:3] == ["queue_snapshot.json", "queue_dispatch.json", "direct_roots.json"], "a complete rewrite"
-    assert len(writes) == 3, "once: the ticks after it are quiet"
+    assert writes[:2] == ["queue_snapshot.json", "queue_dispatch.json"], "a complete rewrite"
+    assert len(writes) == 2, "once: the ticks after it are quiet"
     alive = _read(root, "queue.alive")
     assert alive["generation"] != generation, "a new generation, never the old one re-certified"
-    assert all(_read(root, name)["generation"] == alive["generation"]
-               for name in ("queue_snapshot.json", "queue_dispatch.json", "direct_roots.json"))
+    assert all(_read(root, name)["generation"] == alive["generation"] for name in ("queue_snapshot.json", "queue_dispatch.json"))
     assert queue_publication._STATE["write_failed"] is False
 
 
@@ -109,7 +107,7 @@ def test_a_failed_census_publication_recovers_when_the_fact_reverts(published, m
     queue.RUNNING["r"].pop("owner_wait")
     writes = _recording_writer(monkeypatch)
     assert [queue_publication.publish_queue_changes() for _ in range(3)] == [True, True, True]
-    assert writes == ["queue_snapshot.json", "queue_dispatch.json", "direct_roots.json"]
+    assert writes == ["queue_snapshot.json", "queue_dispatch.json"]
     assert (root / "state/queue.alive").exists() and queue_publication._STATE["write_failed"] is False
 
 
@@ -137,7 +135,7 @@ def test_a_real_review_wait_that_resolves_after_a_failed_publication_recovers(pu
     assert queue_publication.queue_revision() == revision
     writes = _recording_writer(monkeypatch)
     assert [queue_publication.publish_queue_changes() for _ in range(3)] == [True, True, True]
-    assert writes == ["queue_snapshot.json", "queue_dispatch.json", "direct_roots.json"]
+    assert writes == ["queue_snapshot.json", "queue_dispatch.json"]
     assert (root / "state/queue.alive").exists()
 
 
@@ -149,16 +147,18 @@ def test_a_partial_bundle_is_rewritten_by_a_barrier_even_when_the_facts_match_th
 
     root, now = _seed(published)
     queue.RUNNING["r"]["owner_wait"] = {"kind": "review", "state": "waiting"}
+    queue.BUDGET_ROOT_FENCES["r"] = {"root_task_id": "r", "fence_id": "fence", "status": "active"}  # the dispatch document changes too
     real = queue.atomic_write_text
     with monkeypatch.context() as fail:
         fail.setattr(queue, "atomic_write_text",
                      lambda path, text: False if path.name == "queue_dispatch.json" else real(path, text))
         assert queue_publication.publish_queue_changes() is False
     queue.RUNNING["r"].pop("owner_wait")
+    queue.BUDGET_ROOT_FENCES.pop("r")
     now[0] += queue_publication.QUEUE_ALIVE_REFRESH_SEC * 2
     writes = _recording_writer(monkeypatch)
     assert queue.publish_queue_snapshot("explicit_repair") is True
-    assert writes == ["queue_snapshot.json", "queue_dispatch.json", "direct_roots.json"], "the whole bundle, again"
+    assert writes == ["queue_snapshot.json", "queue_dispatch.json"], "the whole bundle, again"
     document = load_queue_document(root, fresh=True)
     assert queue_stamp(document), "one generation across the bundle, certified"
     assert document["running"][0]["owner_wait"] is None, "the reverted fact is what the repaired bundle says"
@@ -294,6 +294,7 @@ def test_an_overtaken_barrier_never_acknowledges_a_later_torn_bundle(published, 
         assert queue.publish_queue_snapshot("later_success") is True
         with queue._queue_lock:
             queue.RUNNING["r"]["owner_wait"]["revision"] = 2
+            queue.BUDGET_ROOT_FENCES["r"] = {"root_task_id": "r", "fence_id": "fence", "status": "active"}  # both documents change
         real_write = queue.atomic_write_text
         with monkeypatch.context() as fail:
             fail.setattr(queue, "atomic_write_text",

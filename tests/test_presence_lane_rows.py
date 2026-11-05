@@ -23,12 +23,14 @@ def _admit_lane_row(task):
     from tests.conversation_carrier_support import install_lane_spare
 
     spare = install_lane_spare(workers, 90)
+    install_lane_spare(workers, 91)  # Presence leaves one ready carrier for the owner.
     seed = {"id": task["id"], "type": "presence", "source": "presence", "chat_id": task["chat_id"],
             "text": str(task.get("text") or ""), "_is_direct_chat": True, "_presence_turn": True,
             "metadata": dict(task.get("metadata") or {})}
     with queue._queue_lock, workers._repo_writer_gate_lock:
         meta = conversation_lane.admit_turn(seed, chat_id=int(seed["chat_id"]), client_message_id="presence-event",
                                             quiet=True, reply_expected=False)
+    conversation_lane.dispatch_admitted_turn(meta)  # publish outside the queue/gate locks
     assert meta["lane"] == "conversation" and meta["worker_id"] == spare.wid  # a real, dispatched lane row
     published = {row["id"]: row for row in load_queue_document(workers.DRIVE_ROOT)["running"]}
     assert published[task["id"]]["task"]["_execution_owner"]["kind"] == "presence"  # what the readers see

@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import queue_observation, task_status
-from supervisor import direct_roots, queue, queue_publication, queue_snapshot
+from supervisor import queue, queue_publication, queue_snapshot
 
 
 @pytest.fixture
@@ -30,7 +30,6 @@ def published(tmp_path, monkeypatch):
         monkeypatch.setattr(queue, name, value)
     monkeypatch.setattr(queue_snapshot, "_RESTORED", set())
     monkeypatch.setattr(queue_snapshot, "_RESTORING", {})
-    monkeypatch.setattr(direct_roots, "collect_direct_roots", lambda: {"roots": [], "incomplete": False})
     monkeypatch.setattr(queue_publication, "utc_now_iso", lambda: datetime.fromtimestamp(now[0], timezone.utc).isoformat())
     monkeypatch.setattr(queue_publication, "time", SimpleNamespace(monotonic=lambda: now[0], sleep=lambda _s: None))
     for module in (queue_observation, task_status):
@@ -139,12 +138,11 @@ def test_a_newer_capture_is_never_overwritten_by_an_older_one_at_the_same_revisi
     queue.PENDING.append(_task("a"))
     assert queue.persist_queue_snapshot("seed") is True
     queue_publication.tick_publisher_started()
-    direct = {"roots": [], "incomplete": False}
     with queue._queue_lock:
-        older = queue_publication._capture("barrier", direct)  # a barrier's capture, not yet written
+        older = queue_publication._capture("barrier")  # a barrier's capture, not yet written
     queue.PENDING.append(_task("b"))
     with queue._queue_lock:
-        newer = queue_publication._capture("main_loop", direct, census=queue_publication._census())  # the tick's capture
+        newer = queue_publication._capture("main_loop", census=queue_publication._census())  # the tick's capture
     assert newer["revision"] == older["revision"], "the tick captured without a bump: the same revision"
     assert queue_publication._publish(newer) is True
     assert [row["id"] for row in _read(root, "queue_snapshot.json")["pending"]] == ["a", "b"]

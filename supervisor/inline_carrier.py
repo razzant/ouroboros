@@ -184,11 +184,13 @@ def start_inline_turn(meta: Dict[str, Any], *, executor: str, reason: str, agent
                       realtime_turn: Any = None, on_failure: Optional[Callable[[Any, BaseException], bool]] = None) -> Any:
     """Under Q: bind the admitted RUNNING row to a fresh pseudo-slot and start its body thread.
 
-    ``meta`` is the lane's RUNNING meta (``conversation_lane.admit_turn``), still
-    awaiting a carrier. The actor is this process's fresh native agent (the
+    ``meta`` is the lane's RUNNING meta (``conversation_lane.admit_turn``), no carrier's
+    yet: a row not on disk or one a carrier already holds is refused by type (no second
+    executor ever runs a turn). The actor is this process's fresh native agent (the
     pooled owner wait over the pseudo-slot's queue), registered in the direct
     activity registry for the in-process seams; a live call gets its turn attached.
-    Returns the installed slot.
+    A row reserved for this executor (``_inline_bind``) stays reserved until its thread
+    runs. Returns the installed slot.
     """
     import queue as stdqueue
     from functools import partial
@@ -202,6 +204,8 @@ def start_inline_turn(meta: Dict[str, Any], *, executor: str, reason: str, agent
     task_id = str(task["id"])
     if meta.get("_unpublished"):  # the row is not on disk yet: no executor may hold the turn (a truthful refusal)
         raise RuntimeError(f"conversation turn {task_id} was admitted but its row could not be published")
+    if meta.get("worker_id") is not None:
+        raise RuntimeError(f"conversation turn {task_id} is already held by carrier {meta['worker_id']}")
     owner = dict(task.get("_execution_owner") or {})
     owner.update(lane=LANE_CONVERSATION, executor=executor)
     task["_execution_owner"] = owner
@@ -285,6 +289,7 @@ def start_inline_turn(meta: Dict[str, Any], *, executor: str, reason: str, agent
         task["_execution_owner"] = {**owner, "executor": EXECUTOR_WORKER}
         queue.persist_queue_snapshot(reason="conversation_turn_inline_unstarted")
         raise InlineExecutorUnavailable(f"{executor} thread could not start: {exc}") from exc
+    meta.pop("_inline_bind", None)  # bound and running: the reservation has done its work
     return slot
 
 
@@ -319,7 +324,7 @@ def refused_carrier_reason() -> str:
     from supervisor.worker_chat_lane import marker_window_closed
 
     if not armed():
-        return "pool_not_started"  # no pool generation keeps a carrier for the lane: a Host without a pool
+        return spawn_refusal() or "pool_not_started"  # a failed boot spawn, or a Host without a pool
     if marker_window_closed():
         return "repo_writer_gate_closed"
     if any(getattr(slot, "readiness_exhausted", False) for slot in lane_carriers()):
@@ -344,7 +349,7 @@ def run_inline_turn(
     from ouroboros.server_restart import agent_restart_pending
     from supervisor import queue
     from supervisor.active_activity import reply_expected
-    from supervisor.conversation_lane import admit_turn
+    from supervisor.conversation_lane import admit_turn, publish_awaiting_rows
     from supervisor.worker_chat_lane import (
         _announce_turn_start, _client_message_id, _defer_chat_for_restart, _host_operation_failure,
         _report_direct_chat_error, _seed_task, owner_conversation_admitted,
@@ -368,27 +373,36 @@ def run_inline_turn(
                 _pool().send_with_budget(chat_id, "Restart intake is closed. This turn was not accepted; send it after Restart.",
                     **_host_operation_failure(task_metadata), role="system", system_type="task_not_started")
                 return None
-            if agent_restart_pending():
-                deferred = True
-            else:
-                deferred = False
-                meta = admit_turn(task, chat_id=chat_id, client_message_id=client_msg_id, quiet=False,
-                                  reply_expected=reply_expected({"metadata": task_metadata or {}}),
-                                  hold_carrier=True)
-                admitted = {"task": task, "chat_id": chat_id, "client_msg_id": client_msg_id, "kind": "direct_chat",
-                            "task_metadata": task_metadata, "realtime_turn": realtime_turn, "agent": None}
-                try:
+            deferred = agent_restart_pending()
+            # Reserved: the row is this executor's from its admission (the tick's lane pass in the barrier
+            # window hands it to no carrier) until ``start_inline_turn`` binds it.
+            meta = None if deferred else admit_turn(task, chat_id=chat_id, client_message_id=client_msg_id, quiet=False,
+                                                    reply_expected=reply_expected({"metadata": task_metadata or {}}),
+                                                    reserved=True)
+        if meta is not None:
+            admitted = {"task": task, "chat_id": chat_id, "client_msg_id": client_msg_id, "kind": "direct_chat",
+                        "task_metadata": task_metadata, "realtime_turn": realtime_turn, "agent": None}
+            try:
+                # The row's barrier outside Q (Q spans memory only); the process-local executor binds it under Q
+                # again, and only a row on disk (``start_inline_turn`` refuses an unpublished one).
+                publish_awaiting_rows()
+                with queue._queue_lock, _pool()._repo_writer_gate_lock:
+                    if _pool().RUNNING.get(str(task["id"])) is not meta:
+                        raise RuntimeError(f"conversation turn {task['id']} left the queue before its executor started")
                     start_inline_turn(
                         meta, executor=executor, reason="live_call" if realtime_turn is not None else "degraded",
                         realtime_turn=realtime_turn,
                         on_failure=lambda runner, error: _inline_failure({**admitted, "agent": runner}, error),
                     )
-                except Exception:
-                    # The body never started here and no carrier may take a process-local turn:
-                    # the row leaves with the refusal (reported below), never awaiting a carrier.
-                    _pool().RUNNING.pop(str(task.get("id") or ""), None)
+            except Exception:
+                # The body never started here and no carrier may take a process-local turn:
+                # the row leaves with the refusal (reported below), never awaiting a carrier.
+                # (A row some executor does hold keeps it: the refusal names it, nothing unseats it.)
+                with queue._queue_lock:
+                    if _pool().RUNNING.get(str(task["id"])) is meta and meta.get("worker_id") is None:
+                        _pool().RUNNING.pop(str(task["id"]))
                     queue.persist_queue_snapshot(reason="conversation_turn_inline_refused")
-                    raise
+                raise
         if deferred:
             _defer_chat_for_restart(task, chat_id, task_metadata)
             return None

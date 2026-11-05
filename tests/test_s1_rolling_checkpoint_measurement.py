@@ -98,7 +98,9 @@ def _save_sample(root, limit, boundary):
     path = wc.checkpoint_path(root, ctx.task_id, ctx.task_attempt)
     data, state = wc.read_working(root, ctx.task_id, ctx.task_attempt)
     files = sorted(p for p in root.rglob("*") if p.is_file())
-    assert files == [path], "ordinary saves must not accumulate immutable snapshots or temporary files"
+    assert [p for p in files if p.parent == path.parent] == [path], "one rolling file per attempt, no temporary files"
+    assert not any(p.name.startswith(".") for p in files), "no temporary files anywhere"
+    assert not any("context_checkpoints" in p.parts for p in files), "ordinary saves must not accumulate immutable snapshots"
     assert state["messages"] == limit.messages
     assert state["trace"] == limit.llm_trace
     assert state["seen"] == sorted(limit.owner_msg_seen)
@@ -107,11 +109,12 @@ def _save_sample(root, limit, boundary):
     assert state["working"]["pending_tool_call_ids"] == (
         [f"new-{limit.round_idx - 1}"] if boundary == "pre_effect" else [])
     assert "working_checkpoint" not in state["usage"], "measurement counters must not amplify the snapshot"
-    assert len(data) == stats["last_bytes"] == path.stat().st_size
+    assert len(data) == stats["last_whole_bytes"] and stats["last_bytes"] == path.stat().st_size
     if boundary == "candidate":
         assert state["delivery_candidate"]["full_text"] == ctx._delivery_candidate.full_text
     return {"seq": stats["saves"], "round": limit.round_idx, "boundary": boundary,
             "transcript_bytes": len(_json_bytes(limit.messages)), "checkpoint_bytes": len(data),
+            "file_bytes": path.stat().st_size,
             "encode_ms": round(stats["encode_ms"] - previous.get("encode_ms", 0), 3),
             "write_ms": round(stats["write_ms"] - previous.get("write_ms", 0), 3),
             "save_wall_ms": round(wall_ms, 3), "retained_files": len(files),
@@ -145,14 +148,14 @@ def test_repeated_boundaries_measure_real_writer_and_retain_one_snapshot(tmp_pat
     stats = limit.accumulated_usage["working_checkpoint"]
     assert stats["saves"] == ROUNDS * len(wc.BOUNDARIES)
     assert len({sample["sha256"] for sample in samples}) == stats["saves"]
-    assert stats["max_bytes"] == max(sample["checkpoint_bytes"] for sample in samples)
+    assert stats["max_bytes"] == max(sample["file_bytes"] for sample in samples)
     by_boundary = {}
     for boundary in wc.BOUNDARIES:
         rows = [sample for sample in samples if sample["boundary"] == boundary]
         by_boundary[boundary] = {key: {"total": round(sum(row[key] for row in rows), 3),
                                       "median": round(statistics.median(row[key] for row in rows), 3),
                                       "max": max(row[key] for row in rows)}
-                                 for key in ("checkpoint_bytes", "encode_ms", "write_ms", "save_wall_ms")}
+                                 for key in ("checkpoint_bytes", "file_bytes", "encode_ms", "write_ms", "save_wall_ms")}
     sources = [Path(module.__file__).resolve() for module in (wc, owner_wait, utils)] + [Path(__file__).resolve()]
     report = {"schema_version": 1, "initial_transcript_bytes": transcript_bytes,
               "rounds": ROUNDS, "saves": stats["saves"], "unchanged_ready_skips": skipped_ready,
@@ -164,7 +167,8 @@ def test_repeated_boundaries_measure_real_writer_and_retain_one_snapshot(tmp_pat
                                    "write_ms": "production path creation + temp write + atomic replace; no fsync",
                                    "save_wall_ms": "complete save_round; excludes fixture construction, readback and census",
                                    "conditions": "local filesystem; no forced cache flush; first sample included; no performance limits"},
-              "total_written_bytes": sum(sample["checkpoint_bytes"] for sample in samples),
+              "total_written_bytes": sum(sample["file_bytes"] for sample in samples),
+              "total_state_bytes": sum(sample["checkpoint_bytes"] for sample in samples),
               "final_retained_files": samples[-1]["retained_files"],
               "final_retained_bytes": samples[-1]["retained_bytes"],
               "production_stats": stats, "by_boundary": by_boundary, "samples": samples}

@@ -737,6 +737,14 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
         admitted = _readmit_crash_retry(job, queue, task, attempt)
         if admitted is None:
             return
+        if isinstance(admitted, dict) and admitted.get("lane") == "conversation":
+            from supervisor.conversation_lane import dispatch_admitted_turn
+
+            try:
+                dispatch_admitted_turn(admitted)  # outside Q: the retry's barrier, then its carrier
+            except Exception:
+                log.warning("Lane retry of %s admitted; its carrier could not start now (the lane's next pass retries)",
+                            task_id, exc_info=True)
         admission_block = (
             str(admitted.get("_admission_blocked") or "")
             if isinstance(admitted, dict) else ""

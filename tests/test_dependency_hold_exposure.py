@@ -384,7 +384,7 @@ def test_a_child_held_after_its_parent_armed_a_warm_sleep_reaches_the_mind_first
         assert '"task_id": "plain"' in notice and held[0]["identity"] in notice and '"cause": "authority"' in notice
         ctx = registry._ctx
         assert ctx._held_dependencies_seen["plain"] == held[0]["identity"] and not ctx._model_sleep
-        saved = json.loads(working_checkpoint.checkpoint_path(tmp_path, "root-1", ctx.task_attempt).read_text(encoding="utf-8"))
+        saved = working_checkpoint.read_working(tmp_path, "root-1", ctx.task_attempt)[1]
         assert saved["held_dependencies_seen"]["plain"] == held[0]["identity"], "durable before this model round"
         assert notice in [row.get("content") for row in saved["messages"]]
         return _turn(_sleep("again", tasks=["plain"]))
@@ -645,6 +645,9 @@ def test_only_what_was_delivered_of_that_exact_source_shows_a_shortened_hold(tmp
     cut = _read(ctx, _page(ref, middle[1], min(middle[1] + 20_000, last)), fit=measured_fit(window=3_000))[1]
     assert cut.get("result_partial"), "this page reached the transcript shortened"
     assert not getattr(ctx, "_held_dependencies_seen", None), "one page of that source was never delivered whole"
+    repeat = _read(ctx, _page(ref, middle[1], min(middle[1] + 20_000, last)), fit=measured_fit(window=3_000))[1]
+    assert repeat.get("result_partial"), "the same page in the same frame is shortened again"
+    assert not getattr(ctx, "_held_dependencies_seen", None), "repeating a cut page does not deliver its middle"
     again = json.loads(readers._wait_for_tasks(ctx, list(rows), timeout_sec=0))
     assert again["early_return"]["reason"] == "dependency_held", "so the same wait still returns to show them"
     _read(ctx, _page(ref, middle[1], min(middle[1] + 20_000, last)))
