@@ -254,7 +254,8 @@ def test_selected_document_is_imported_once_and_rides_the_recorded_run_body(docs
     assert declaration == {"expectedStoreId": STORE, "kind": "file", "mime": "text/markdown", "name": "brief.md",
                            "source": "ouroboros-task-input:t-docs/attachments/brief.md",
                            "content": {"sizeBytes": len(BRIEF), "sha256": f"sha256:{row['sha256']}"}}
-    assert replay == declaration and key.startswith("ouroboros-document-")
+    assert replay == {k: v for k, v in declaration.items() if k != "content"}
+    assert key.startswith("ouroboros-document-")
     assert [call[2] for call in docs.engine.of("put")] == [BRIEF]
     (_, _, body), = docs.engine.of("run")
     assert body["attachments"] == [{"resourceId": "res_1"}]

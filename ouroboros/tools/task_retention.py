@@ -80,9 +80,10 @@ _DESCRIPTION = (
     "copies, environments, review copies, result pins and call journals stay until the owner releases them. "
     "It never stops running work or lossless compression, and never covers that task's children. "
     "It needs the owner's own words: by default the message this turn answers, or one of your held "
-    "owner_quote_handles. The result says what is kept now, what had already gone or was accepted for deletion "
-    "(`retired`), what could not be checked (`unknown`) and each reviewer thread's release as last seen "
-    "(`releases`); `release_unconfirmed` means the keep is saved while a release already started may still win."
+    "owner_quote_handles. The result lists retained material, retired material or closed future document-ID reuse "
+    "(`retired`), unknowns, and recorded thread/import outcomes (`releases`). A managed import's "
+    "future_reuse_released does not mean accepted work lost its bytes; binding_unavailable or release_refused "
+    "stays unknown. With release_unconfirmed the keep is saved, but an already started release may still win."
 )
 
 

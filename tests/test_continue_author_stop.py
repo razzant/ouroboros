@@ -311,8 +311,14 @@ def test_a_stop_offer_holds_no_resources_while_an_interruption_still_does(tmp_pa
     _queue, _state, workers = _install_queue(data, monkeypatch)
     assert continuation_offer(stored, "stop-root")["eligible"] is True
     assert still_continuable(data, _line("stop-root"), set()) is False
+    assert still_continuable(data, _line("stop-root"), set(), every_offer=True) is True, "a managed document's release"
     write_task_result(data, "broken-root", "failed", chat_id=7, root_task_id="broken-root", reason_code="provider_failure")
     assert still_continuable(data, _line("broken-root"), set()) is True, "an interruption's hold is unchanged"
+    write_task_result(data, "unknown-root", "failed", chat_id=7, root_task_id="unknown-root")  # no cause recorded
+    assert continuation_offer(load_task_result(data, "unknown-root"), "unknown-root")["refusal"] == (
+        "interruption_cause_unrecorded")
+    assert still_continuable(data, _line("unknown-root"), set()) is False, "the registration reading is unchanged"
+    assert still_continuable(data, _line("unknown-root"), set(), every_offer=True) is True, "undecided for documents"
     ack = admit_continuation("stop-root", action_nonce=NONCE)
     assert load_task_result(data, "stop-root")["continued_by"]["successor_task_id"] == ack["successor_task_id"]
     assert still_continuable(data, _line("stop-root"), {ack["successor_task_id"]}) is True

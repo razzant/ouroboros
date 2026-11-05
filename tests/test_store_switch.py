@@ -690,3 +690,27 @@ def test_a_death_inside_the_facts_export_resumes_from_the_intent(switch_root, ta
     owner = Owner(repo)
     assert store_switch.resume_pending_switch(root, repo_dir=repo, owner=owner)["status"] == "switched"
     assert len(owner.calls) == 1 and receipt(root)["attempts"] == 2
+
+
+def test_store_roundtrip_preserves_discovery_of_managed_releases(switch_root, target_repo):
+    from ouroboros import delegate_custody_current as current, maintenance_jobs, maintenance_retirement
+    from ouroboros import review_thread_retention as rt
+    from tests.test_managed_document_imports import _owe, ReleaseEngine
+    from tests.test_review_thread_retention import _row, _publish_queue
+
+    root, (repo, old, _new) = switch_root, target_repo
+    owner = "managed-owner"
+    _row(root, owner, "running", tree=owner)
+    _owe(root, "k-restored", task=owner)
+    _row(root, owner, "completed", tree=owner)
+    intent(root, old)
+    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner(repo))["status"] == "switched"
+    assert ensure_current_store(root)["status"] == "completed"
+    assert current.marks(root, owner)["managed_imports"]["k-restored"]["state"] == "ready"
+    job = maintenance_jobs.job(root, maintenance_retirement.JOB) or {}
+    assert maintenance_retirement.due(root, job, {}, False)
+    _publish_queue(root)  # A missing queue is deliberately unknown, not proof this tree ended.
+    report = rt.retire_finished_review_threads(root, engine=ReleaseEngine(), live=lambda _task: False, census=set())
+    assert any(row.get("import_key") == "k-restored" and row["outcome"] == "released"
+               for row in report.get("observed", [])), repr(report)
+    assert not current.marks(root, owner).get("managed_imports")

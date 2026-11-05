@@ -356,6 +356,22 @@ def _release_unadmitted_drive(q: Any, successor: str, staged: Optional[List[Dict
         log.warning("Continue %s: its unadmitted drive stays for the drive prune", successor, exc_info=True)
 
 
+def _with_document_receipts(q: Any, predecessor: str, inputs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Carry observed document imports (``engine_imports``) from the predecessor's canonical custody marks.
+
+    The successor preserves ready, uncertain and terminal states with their exact key and request; it cannot mint
+    over a gap. Release stays with the originating task, whose whole work includes this successor. Unreadable
+    marks refuse ``continuation_inputs_unavailable`` before a copy can lose that identity.
+    """
+    from ouroboros.delegate_documents import DocumentSelectionError, carry_owner_receipts
+
+    try:
+        carry_owner_receipts(q.DRIVE_ROOT, predecessor, inputs)
+    except DocumentSelectionError as exc:
+        raise ValueError("continuation_inputs_unavailable") from exc
+    return inputs
+
+
 def _carry_inputs(q: Any, task: Dict[str, Any], predecessor: str, inputs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Copy the work's declared inputs into the successor's OWN store and declare them on its row as the API door does
     (manifest, ``attachments``, images, a read line each); returns the copy. A failed copy keeps none of its files and,
@@ -638,7 +654,7 @@ def admit_continuation(predecessor_task_id: str, *, action_nonce: str) -> Dict[s
         return {"ok": False, "error": "owner_source_missing", "gaps": list(sources["gaps"])}
     try:  # before anything is written: an unknown mode or input set leaves the predecessor untouched
         drive_mode = "" if claim else _successor_drive_mode(q, predecessor, result)
-        inputs = declared_inputs(predecessor, result, sources)
+        inputs = _with_document_receipts(q, predecessor, declared_inputs(predecessor, result, sources))
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     try:

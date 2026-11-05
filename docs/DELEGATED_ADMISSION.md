@@ -269,20 +269,54 @@ A lookup 404 is a retained-binding gap and a cancelled, conflicting or content-r
 is finished: all refuse typed and never mint a key on their own. `attachment_import='new'`
 is the explicit decision to begin another import in the serving store (another resource may
 result); one new key per invocation, kept across a restarted host first start; earlier
-records stay on the marks row and in the chain. A child's copied rows carry the parent's
-ready receipts (`engine_imports`, kept only when their request declares exactly the row's
-bytes, kind, MIME and name), so the child replays the parent's key and reuses its
-resourceId. Every schedule that copies a staged non-image input therefore reads the parent's
+records stay on the marks row and in the chain. Copied rows carry observed imports, gaps and
+finished keys included (`engine_imports`, bound to the row's bytes, kind, MIME and name): children
+keep the same identity and state, so only an explicit `new` can replace a finished import. Every schedule copying a non-image input reads the parent's
 custody marks once, whether or not it selects anything, and refuses typed
 (`document_import_custody_unavailable`) before the child exists when they cannot be read,
 rather than letting a copy mint a fresh import; copies of images alone read nothing.
 Scheduling still copies each inherited input's retained staged copy, so a gone copy refuses
 the schedule (`SUBTASK_ATTACHMENT_ERROR`) even when its ready receipt could serve the child;
-only a direct `delegate_start` replays a ready receipt without that copy. Continuations
-inherit no documents: a successor selects again. New stagings get the same Markdown and
-DOCX labels on every interpreter; rows recorded earlier with an unprovable MIME (for example
-Markdown staged as `application/octet-stream`) keep their label and refuse on routes that do
-not declare it.
+only a direct `delegate_start` replays a ready receipt without that copy. A `continue_from`
+continuation inherits no documents and selects again; an owner Continue's successor copies
+the work's inputs with its predecessor's observed receipts (unreadable marks refuse
+`continuation_inputs_unavailable`), so its selection reuses them.
+New stagings get the same Markdown and DOCX labels on every interpreter; rows recorded
+earlier with an unprovable MIME (for example Markdown staged as `application/octet-stream`)
+keep their label and refuse on routes that do not declare it.
+
+Managed lifetime is the engine's opt-in, used only where its catalog lists the exact release
+row (`POST /v2/resources/:id/release`, `ControlResourceReleaseRequest`); no version is
+inferred, and without that row nothing sends `lifetime` or releases anything. There every
+fresh intent declares `lifetime: "managed"`, bound into its key, so each replay (lookup-only
+included) resends it; receipts keep it and name the task that owes the release
+(`owner_task_id`), and earlier requests replay byte-unchanged. The intent's own REQUESTED
+fact opens the obligation on the minting task's custody marks (`managed_imports`, by key,
+never capped), so every explicit `new`, an unknown outcome and an import whose start never
+ran stay owed until settled; a child, a successor or any other holder only replays the
+receipt. The `runtime_retirement` pass reads the owner when its row is written terminal (or
+its timeout retry's is), keeps it waiting while the release is held, and releases only when
+nothing can name the resource in a new operation: the owner's tree has ended (no live,
+unsettled or queued member, open review or pending delegated start), so has every root its
+owner's Continue admitted after it with that root's tree, no Keep stands on the owner, and no
+Continue is offered or still undecided. Unlike native registration retention, an author's
+stop, a bound or unverifiable claim, an interruption whose cause is not recorded and an offer
+whose budget close or deadline is unknown all hold; an ordinary completion is decided. An
+obligation opened before that pass records a terminal-write floor consumed on its first pass;
+an ended owner schedules the pass even without local files or START. Thread cutover keeps
+the first pass's own time. After waits, closure is rechecked; release intent binds under
+Keep's existing custody lock, HTTP runs outside it. Earlier Keep prevents release; later
+Keep saves with `release_unconfirmed`. Managed imports remain Keep material without local
+files. A key with no observed resource is looked up; an open upload is cancelled before its
+obligation settles. Unknown cancellation keeps its identity for readback. Release names the
+recorded store and digest; an unknown outcome, another serving store or an engine without the
+row waits and is sent again unchanged on a later pass. A release closes future references
+only: what an accepted command, turn, draft or export holds keeps its bytes. A `retry_of` that
+re-sends the saved START key and body is that accepted operation, answered as such while the
+engine keeps the command; a new operation naming the resource (a new start, `continue_from`,
+the engine's Exact Retry, or that body once the command was pruned) refuses typed
+(`resource_released`). An import replay of a released key answers `released`, finished like
+`cancelled`, so only `attachment_import='new'` begins another import.
 
 ## 3b. Selected input files (#2593)
 
