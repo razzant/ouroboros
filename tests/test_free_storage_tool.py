@@ -48,6 +48,7 @@ def test_the_minds_request_frees_what_the_owners_press_would_and_keeps_the_rest_
     assert {row["reason"] for row in receipt["preview"]["pool"]["excluded"]} == {"in_use", "owner_keep"}
     assert receipt["outcome"]["removed"] + receipt["outcome"]["deleting"] == 1 and receipt["outcome"]["kept"] == []
     assert len(said) == 1 and said[0].startswith("Free space (mind:task-9): ") and "free now" in said[0]
+    assert "run stopped" not in said[0] and "run failed" not in said[0]
     assert "removed 1 (" in said[0] or "moved 1 aside (" in said[0], said  # moved into the custody trash: the child deletes it
     rows = [json.loads(line) for line in (root / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     event, = [row for row in rows if row["type"] == "storage_free"]
@@ -89,6 +90,19 @@ def test_an_empty_pool_is_a_receipt_that_says_so(tmp_path, monkeypatch):
     receipt = maintenance_jobs.job(root, REQUEST_JOB)
     assert receipt["refusal"] == "nothing_selected" and receipt["preview"]["pool"]["count"] == 0
     assert said == ["Free space (mind:task-9): not run, nothing selected."]
+
+
+def test_a_mind_run_failure_is_a_failed_receipt_and_the_notice_says_failed(tmp_path, monkeypatch):
+    root = tmp_path / "data"
+    _drives(root, [("done", "direct", "completed", OLD)])
+    monkeypatch.setattr("ouroboros.server_maintenance.DATA_DIR", root)
+    _fake_sizer(monkeypatch)
+    owner = FreeSpace(live=lambda _task_id: False, guard=_guard)
+    monkeypatch.setattr(owner, "_free_drives", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+    answer, said = _request(owner, root, tmp_path, request_id="failed-1")
+    receipt = maintenance_jobs.job(root, REQUEST_JOB)
+    assert answer["started"] and receipt["state"] == "failed" and receipt["outcome"]["error"] == "RuntimeError"
+    assert "run failed" in said[0]
 
 
 def test_the_tool_emits_the_control_event_and_returns_the_receipt_it_finds(tmp_path, monkeypatch):

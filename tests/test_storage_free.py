@@ -612,6 +612,8 @@ def test_a_closed_generation_stops_the_run_between_settlements(tmp_path, monkeyp
     monkeypatch.setattr(task_custody, "settle_child_drive", settle_then_close)
     view = _run(owner, root, tmp_path)
     assert view["state"] == "stopped" and view["run"]["stopped"] is True
+    from ouroboros.storage_free import _request_sentence
+    assert "run stopped" in _request_sentence({"actor": "owner", "outcome": view["run"]})
     assert view["run"]["removed"] + view["run"]["deleting"] == 1 and view["run"]["done"] == 1
     assert sum(1 for name in ("one", "two") if (root / "task_drives" / name).is_dir()) == 1, "nothing half-moved"
     row = json.loads((root / "logs" / "supervisor.jsonl").read_text().splitlines()[-1])

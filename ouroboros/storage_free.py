@@ -309,6 +309,10 @@ def _request_sentence(receipt: Dict[str, Any]) -> str:
         parts.append(f"moved {outcome['deleting']} aside ({moving:.1f} GB), deleted by the next maintenance run")
     if not parts:
         parts.append("nothing removed")
+    if outcome.get("stopped"):
+        parts.append("run stopped before all selected items were processed")
+    if outcome.get("error"):
+        parts.append("run failed")
     if kept:
         parts.append(f"kept {sum(row['count'] for row in outcome.get('kept') or ())}: {kept}")
     if outcome.get("failed"):
@@ -993,7 +997,8 @@ class FreeSpace:
                                                **{key: view[key] for key in ("groups", "selected", "removed", "removed_bytes",
                                                                              "deleting", "stuck", "kept", "failed", "not_started",
                                                                              "free_before", "free_after")}})
-        self._finish_request(root, {"state": "done", "outcome": {**view, "kept_items": dict(run["kept_items"])}})
+        self._finish_request(root, {"state": "failed" if run["error"] else "done",
+                                    "outcome": {**view, "kept_items": dict(run["kept_items"])}})
 
     @staticmethod
     def _record(root: pathlib.Path, view: StorageFreeRun, seconds: float, settled: Tuple[List[str], ...],
