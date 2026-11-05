@@ -832,9 +832,12 @@ jobs:
   # The next run's shard weights: every default-lane and UI shard's recorded
   # durations, per OS. Written even after a red run (a red test still took its
   # time); a run without proofs writes nothing and the next run packs by count.
+  # A `scope=tests` dispatch (Ubuntu + Windows, no UI lane) publishes nothing:
+  # `shard-plan` takes the newest table, and one that never measured macOS or
+  # the UI shards would pack the next release run's by count.
   ci-durations:
     needs: [full-test, ui-smoke]
-    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')) }}
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')) && inputs.scope != 'tests' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
