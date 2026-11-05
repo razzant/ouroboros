@@ -20,6 +20,18 @@ from ouroboros.utils import write_bytes_atomic
 
 EVIDENCE_ENV = "OUROBOROS_TEST_EVIDENCE_ROOT"
 EVIDENCE_POINTER = "OUROBOROS_TEST_EVIDENCE.txt"
+# The owner's persisted durations table (tests/ci_verdicts.py spells the same key, stdlib-only): every session
+# an owner starts reads it for its weights and folds its files' seconds into it at its end.
+TEST_DURATIONS_ENV = "OUROBOROS_TEST_DURATIONS"
+DURATIONS_FILE = "test-durations.json"
+DURATIONS_POINTER = "OUROBOROS_TEST_DURATIONS.txt"  # the gate's temp-root pointer, read into its sessions' env
+
+
+def durations_path(data_root) -> Path:
+    """The install's table, `<data root>/state/test-durations.json` (PERSISTENCE): what the gate's sessions keep
+    current and what the diff pulse and the next gate read. Operators' batteries keep theirs beside their
+    evidence parent (scripts/run_tests.py)."""
+    return Path(data_root) / "state" / DURATIONS_FILE
 # Written into every run directory this module creates: that tree is a run's
 # output, never an untracked input of a later or nested recipe (#1908).
 EVIDENCE_RUN_MARKER = "OUROBOROS_TEST_EVIDENCE_RUN.txt"

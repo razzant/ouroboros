@@ -87,7 +87,8 @@ DIAGNOSTIC_OUTPUT_KEYS = (
     "OUROBOROS_UI_SHOTS", "OUROBOROS_UI_SMOKE_SHOT_DIR", "QUIZ_BROWSER_EVIDENCE",
 )
 # Where a run writes, not what it tests: never part of a reusable proof identity.
-OUTPUT_LOCATION_KEYS = ("OUROBOROS_TEST_TEMP_ROOT", "OUROBOROS_TEST_EVIDENCE_ROOT", *DIAGNOSTIC_OUTPUT_KEYS)
+OUTPUT_LOCATION_KEYS = ("OUROBOROS_TEST_TEMP_ROOT", "OUROBOROS_TEST_EVIDENCE_ROOT", "OUROBOROS_TEST_DURATIONS",
+                        *DIAGNOSTIC_OUTPUT_KEYS)
 
 
 def declare_scratch(root, role: str, *, owner: str = "") -> None:

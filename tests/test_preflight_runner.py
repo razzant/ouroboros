@@ -1121,20 +1121,36 @@ def test_each_pass_gets_the_exact_remaining_budget(tmp_path, two_pass_env, stub_
     assert second_timeout <= 60 - 0.5, "pass 2's share was rounded up past the total budget"
 
 
-def test_the_gate_leases_its_admitted_workers_for_the_whole_run(tmp_path, two_pass_env, stub_passes, monkeypatch):
+def test_the_gate_leases_its_workers_and_names_its_durations_table_for_the_whole_run(tmp_path, two_pass_env,
+                                                                                    stub_passes, monkeypatch):
     """A standalone gate (no parent allocation) holds its admitted count in the host ledger from the admission
-    to the end of the run, so a run started meanwhile subtracts it; the row goes with the run."""
+    to the end of the run, so a run started meanwhile subtracts it; the row goes with the run. A caller with a
+    canonical data root points every session of the gate at the install's durations table
+    (`state/test-durations.json`), which the sessions read for their weights and bring up to date; a caller
+    without one names no table."""
+    from types import SimpleNamespace
+
     from ouroboros import preflight_runner as pr
     from ouroboros import test_parallelism as budget
+    from ouroboros.test_evidence import DURATIONS_POINTER, TEST_DURATIONS_ENV
 
-    ledger = tmp_path / "slots"
+    data = tmp_path / "data"
+    assert pr._durations_target(SimpleNamespace(task_metadata={"budget_drive_root": str(data)}, drive_root=data)) == (
+        data / "state" / "test-durations.json")
+    assert pr._durations_target(None) is None
+    ledger, scratch = tmp_path / "slots", tmp_path / "scratch"
+    scratch.mkdir()
+    _pin_preflight_root(monkeypatch, scratch)
     monkeypatch.delenv(budget.NESTED_WORKERS_ENV)
     monkeypatch.setattr(budget, "other_runs", lambda: budget.HostRuns())
     monkeypatch.setattr(budget, "_ledger_dir", lambda: ledger)
-    leases = []
+    monkeypatch.setattr(pr, "_durations_target", lambda ctx: data / "state" / "test-durations.json")
+    leases, tables = [], []
 
     def green():
         leases.append([json.loads(path.read_text(encoding="utf-8")) for path in ledger.glob("*.json")])
+        tables.append(((scratch / DURATIONS_POINTER).read_text(encoding="utf-8"),
+                       pr._preflight_env(scratch, scratch / "repo").get(TEST_DURATIONS_ENV)))
         return (0, "ok", "")
 
     stub_passes([green, green])
@@ -1142,6 +1158,7 @@ def test_the_gate_leases_its_admitted_workers_for_the_whole_run(tmp_path, two_pa
     assert pr.run_hermetic_pytest(repo, timeout=120) is None
     assert [[(row["pid"], row["workers"], row["command"]) for row in rows] for rows in leases] == [
         [(os.getpid(), 2, "hermetic gate")]] * 2
+    assert tables == [(str(data / "state" / "test-durations.json"),) * 2] * 2
     assert list(ledger.glob("*.json")) == []
 
 

@@ -627,10 +627,13 @@ def _preflight_env(temp_root: pathlib.Path, repo_worktree: pathlib.Path, *, crea
     # the serial/legacy passes, which pass no `-n` at all.
     env["PYTEST_XDIST_AUTO_NUM_WORKERS"] = str(_allocated_worker_count(temp_root) if workers is None else workers)
     env[NESTED_WORKERS_ENV] = env["PYTEST_XDIST_AUTO_NUM_WORKERS"]
-    from ouroboros.test_evidence import EVIDENCE_ENV, EVIDENCE_POINTER
+    from ouroboros.test_evidence import DURATIONS_POINTER, EVIDENCE_ENV, EVIDENCE_POINTER, TEST_DURATIONS_ENV
     pointer = temp_root / EVIDENCE_POINTER
     evidence = pointer.read_text(encoding="utf-8").strip() if create and pointer.is_file() else str(temp_root / "evidence")
     env.update({"OUROBOROS_TEST_TEMP_ROOT": str(temp_root), EVIDENCE_ENV: evidence})
+    durations = temp_root / DURATIONS_POINTER  # the install's table (`_durations_target`): read and brought up to date
+    if create and durations.is_file():
+        env[TEST_DURATIONS_ENV] = durations.read_text(encoding="utf-8").strip()
     if create:
         retain_diagnostic_outputs(temp_root, env, cwd=cwd or repo_worktree)
     env.setdefault("OUROBOROS_UI_EVIDENCE_DIR", str(pathlib.Path(evidence) / "ui"))
@@ -1199,6 +1202,15 @@ def _with_retention_notice(verdict: str, unproven: str, worktree: pathlib.Path, 
     return "\n".join(part for part in (header, notice, rest) if part)[:max_output]
 
 
+def _durations_target(ctx) -> Optional[pathlib.Path]:
+    """The install's durations table for a caller with a canonical data root (the receipts' root); None otherwise."""
+    from ouroboros.preflight_receipts import canonical_data_root
+    from ouroboros.test_evidence import durations_path
+
+    root = canonical_data_root(ctx)
+    return durations_path(root) if root is not None else None
+
+
 def _release_hermetic_tree(repo, temp_root, worktree, worktree_added: bool, unproven: str) -> None:
     """Delete the disposable tree, unless a contained lane left its teardown unproven.
 
@@ -1349,9 +1361,11 @@ def _run_hermetic_pytest(
     unproven_teardown = ""
     selection, subject, inventory, lease = None, None, {}, None
     try:
-        from ouroboros.test_evidence import EVIDENCE_POINTER
+        from ouroboros.test_evidence import DURATIONS_POINTER, EVIDENCE_POINTER
         from ouroboros.test_parallelism import SlotLease
         (temp_root / EVIDENCE_POINTER).write_text(str(evidence["path"]), encoding="utf-8")
+        if (durations := _durations_target(ctx)) is not None:  # every session of this gate keeps it current
+            (temp_root / DURATIONS_POINTER).write_text(str(durations), encoding="utf-8")
         # Install before compiling specs: -p must name the actual nonce module.
         probe_module = _install_worker_probe(temp_root)
         # The admitted workers stay leased in the host ledger until this run ends, whatever the verdict.

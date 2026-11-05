@@ -18,7 +18,9 @@ overlap the parallel tests instead of waiting for them; `--sequential` keeps the
 The reviewed-commit gate and CI stay the authority: this script is feedback.
 
 Re-executes through safe_test: isolated HOME/data, owner/provider env scrubbed,
-durable logs/source/diagnostics in <checkout>/../.test-evidence by default.
+durable logs/source/diagnostics in <checkout>/../.test-evidence by default, where
+`test-durations.json` keeps every session's file times (`OUROBOROS_TEST_DURATIONS`,
+tests/ci_evidence.py): the table the serial groups are sized by.
 Ctrl-C reaches each phase's runner, allowing pytest JUnit/results export before escalation.
 Marker exclusions/xdist flags come from the gate's SSOT
 (`LANE_EXCLUSION_EXPR`, `PARALLEL_PASS_FLAGS`); conftest isolates test roots.
@@ -86,33 +88,26 @@ def _serial_share(table: dict | None) -> float | None:
     return sum(serial.values()) / total if total and serial is not None else None
 
 
-def recorded_durations() -> tuple[dict | None, str]:
-    """The table serial groups are sized by, and what it is.
+def point_at_durations() -> None:
+    """Name the owner's durations table for this battery: beside the evidence parent (`.test-evidence/`), unless
+    the caller named one. Every session of the battery reads it for its weights and folds its whole files' seconds
+    into it at its end (tests/ci_evidence.py); without an evidence root nobody owns a table."""
+    from ouroboros.test_evidence import DURATIONS_FILE, EVIDENCE_ENV, TEST_DURATIONS_ENV
 
-    The run's ``OUROBOROS_CI_DURATIONS`` (the table tests/default_lane.py shards CI
-    by), else the one the newest earlier one-run battery beside this run's evidence
-    makes (``tests/ci_evidence.py durations`` over its pass). A battery that did not
-    end (interrupted, stopped at its deadline) is passed over: its reports favour the
-    serial groups, which are handed out first.
-    """
-    from tests.ci_verdicts import collect_durations, durations_table
+    if (root := os.environ.get(EVIDENCE_ENV)) and not os.environ.get(TEST_DURATIONS_ENV):
+        os.environ[TEST_DURATIONS_ENV] = str(pathlib.Path(root).parent / DURATIONS_FILE)
+
+
+def recorded_durations() -> tuple[dict | None, str]:
+    """The table serial groups are sized by, and what it is: the run's ``OUROBOROS_CI_DURATIONS`` (the table
+    tests/default_lane.py shards CI by), else the owner's persisted table (`point_at_durations`)."""
+    from tests.ci_verdicts import durations_table
 
     table, why = durations_table()
-    if table is not None or why:
-        return table, why or f"run {table['source']['run_id']}"
-    current = os.environ.get("OUROBOROS_TEST_EVIDENCE_ROOT")
-    ended = []
-    for run in pathlib.Path(current).parent.glob("run-*") if current else ():
-        try:
-            recorded = (run / "pytest" / "overlapped" / "results.json").stat().st_mtime
-            if json.loads((run / "result.json").read_text(encoding="utf-8")).get("returncode") in (0, 1):
-                ended.append((recorded, run))
-        except (OSError, ValueError, AttributeError):
-            continue
-    if not ended:
-        return None, "no recorded durations"
-    run = max(ended)[1]
-    return collect_durations(run / "pytest", run_id=run.name, sha=""), f"the battery of {run.name}"
+    if table is None:
+        return None, why or "no recorded durations"
+    source = table["source"]["run_id"]
+    return table, source if " " in source else f"run {source}"  # CI names a run id, a session names itself
 
 
 def serial_plan(table: dict | None, source: str, workers: int, shards: int) -> str:
@@ -363,6 +358,7 @@ def main(argv: list[str] | None = None) -> int:
     if not (REPO / "tests" / "conftest.py").is_file():
         print(f"{REPO} is not an Ouroboros checkout (no tests/conftest.py)", file=sys.stderr)
         return 2
+    point_at_durations()
     if args.node:
         if args.selected or args.sequential or pytest_args:
             parser.error("--node runs only the Node lane")

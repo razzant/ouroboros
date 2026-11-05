@@ -12,10 +12,13 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros.preflight_runner import LANE_EXCLUSION_EXPR
+from ouroboros.test_evidence import TEST_DURATIONS_ENV as OWNERS_TABLE_KEY
 from ouroboros.test_parallelism import NESTED_WORKERS_ENV
 from tests import browser_lane, default_lane
 from tests.ci_evidence import file_shards, node_shards, reconcile_shards
-from tests.ci_verdicts import DURATIONS_ENV, collect_durations, platform_name
+from tests.ci_verdicts import (
+    DURATIONS_ENV, TEST_DURATIONS_ENV, collect_durations, durations_table, platform_name, record_session_durations,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 CLI = [sys.executable, "-I", "-S", str(REPO / "tests/ci_evidence.py")]
@@ -117,6 +120,52 @@ def test_the_one_run_battery_records_the_time_of_its_serial_groups(tmp_path):
     table = collect_durations(root, run_id=RUN, sha=SHA)
     assert table["platforms"] == {"darwin": {"tests/test_p.py": 1000, "tests/test_q.py": 250, "tests/test_s.py": 2500}}
     assert table["serial"] == {"darwin": {"tests/test_s.py": 2500}}
+
+
+def test_an_owned_session_folds_its_whole_file_times_into_the_owners_table(tmp_path, monkeypatch):
+    """Each session replaces its files' entries for its system (a file no longer serial leaves `serial`), drops
+    files the tree no longer has and files a crashed worker left partial, keeps the other systems' entries, and
+    starts afresh over an unreadable table. `durations_table` reads the owner's table when CI names none; a table
+    no session wrote yet is no table and no reason; CI's table wins."""
+    assert TEST_DURATIONS_ENV == OWNERS_TABLE_KEY  # the stdlib reader and the product spell one key
+    tree = tmp_path / "tree"
+    (tree / "tests").mkdir(parents=True)
+    for name in ("test_a.py", "test_s.py", "test_n.py"):
+        (tree / "tests" / name).write_text("", encoding="utf-8")
+    table = tmp_path / "state" / "test-durations.json"
+    _write(table, "{garbage")
+    first = [_row("tests/test_a.py::test_one", 0.25, "setup"), _row("tests/test_a.py::test_one", 1.5),
+             _row("tests/test_a.py::test_one", 0.7, subtest=True),  # within its test's call: never counted twice
+             _row("tests/test_s.py::test_s@serial1", 2.0), _row("tests/test_gone.py::test_g", 9.0),
+             _row("tests/test_n.py::test_crash", 1.0), _row("tests/test_n.py::test_crash", 0.0, "crash", "failed")]
+    assert record_session_durations(table, first, system="Darwin", serial_session=False, rootpath=tree,
+                                    run_id="session 1") == ""
+    assert _json(table) == {"format": 1, "platforms": {"darwin": {"tests/test_a.py": 1750, "tests/test_s.py": 2000}},
+                            "serial": {"darwin": {"tests/test_s.py": 2000}}, "source": {"run_id": "session 1", "sha": ""},
+                            "ui_nodes": {}}
+    # A serial session measures a file as serial, a later parallel one takes it back out; another system stays.
+    assert record_session_durations(table, [_row("tests/test_a.py::test_one", 3.0)], system="Darwin",
+                                    serial_session=True, rootpath=tree, run_id="session 2") == ""
+    assert record_session_durations(table, [_row("tests/test_s.py::test_s", 1.0)], system="Linux",
+                                    serial_session=False, rootpath=tree, run_id="session 3", sha="abc") == ""
+    assert _json(table)["platforms"] == {"darwin": {"tests/test_a.py": 3000, "tests/test_s.py": 2000},
+                                         "linux": {"tests/test_s.py": 1000}}
+    assert _json(table)["serial"] == {"darwin": {"tests/test_a.py": 3000, "tests/test_s.py": 2000}, "linux": {}}
+    assert record_session_durations(table, [_row("tests/test_a.py::test_one", 1.0)], system="Darwin",
+                                    serial_session=False, rootpath=tree, run_id="session 4") == ""
+    assert _json(table)["serial"]["darwin"] == {"tests/test_s.py": 2000}
+    assert _json(table)["source"] == {"run_id": "session 4", "sha": ""}
+    assert record_session_durations(table, [_row("tests/test_n.py::t", 1.0, "crash")], system="Darwin",
+                                    serial_session=False, rootpath=tree, run_id="session 5") == "no whole test file ran"
+    assert _json(table)["source"]["run_id"] == "session 4"
+    monkeypatch.delenv(DURATIONS_ENV, raising=False)
+    monkeypatch.setenv(TEST_DURATIONS_ENV, str(table))
+    assert durations_table()[0]["source"]["run_id"] == "session 4"
+    monkeypatch.setenv(TEST_DURATIONS_ENV, str(tmp_path / "nobody" / "test-durations.json"))
+    assert durations_table() == (None, "")
+    monkeypatch.setenv(DURATIONS_ENV, str(_table(tmp_path)))
+    monkeypatch.setenv(TEST_DURATIONS_ENV, str(table))
+    assert durations_table()[0]["source"]["run_id"] == RUN
 
 
 def test_file_weights_are_recorded_time_else_nodes_times_the_median_time_per_node(tmp_path, monkeypatch):
@@ -229,6 +278,23 @@ def test_real_shards_pack_whole_files_by_recorded_time_and_reconcile(tmp_path):
 
 
 @pytest.mark.serial
+@pytest.mark.serial
+def test_an_owned_session_records_its_durations_at_its_end_and_a_narrowed_one_does_not(tmp_path):
+    """The owner names the table through the environment; the session drops the name at collection (its tests'
+    children inherit no table) and folds its whole files' seconds in at its end; a `-k` session writes nothing."""
+    suite, entry = _suite(tmp_path, {
+        "test_a.py": f"import os\ndef test_one():\n    assert {TEST_DURATIONS_ENV!r} not in os.environ\n",
+        "test_b.py": "def test_two():\n    pass\n"})
+    table = tmp_path / "owner" / "test-durations.json"
+    _session(tmp_path, suite, entry, "parallel", tmp_path / "public", env={TEST_DURATIONS_ENV: str(table)})
+    recorded = _json(table)
+    assert set(recorded["platforms"][SYSTEM]) == {"tests/test_a.py", "tests/test_b.py"}
+    assert recorded["serial"][SYSTEM] == {} and recorded["source"]["run_id"].startswith("session ")
+    narrowed = tmp_path / "owner" / "narrowed.json"
+    _session(tmp_path, suite, entry, "parallel", tmp_path / "public-k", "-k", "two", env={TEST_DURATIONS_ENV: str(narrowed)})
+    assert not narrowed.exists()
+
+
 def test_a_shard_without_a_file_of_a_pass_proves_its_empty_slice(tmp_path):
     """Few files carry `serial`: with every OS sharded, a shard can get none of a pass. It runs nothing,
     exits 0 (not pytest's 5) and proves the empty slice the manifest's packing gives it."""

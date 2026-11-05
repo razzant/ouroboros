@@ -124,8 +124,9 @@ def main() -> int:
             # CI requires these test dependencies; without them a missing plugin or Node skips.
             "OUROBOROS_PREFLIGHT_REQUIRE_PLUGINS", "OUROBOROS_PREFLIGHT_REQUIRE_NODE",
             "PLAYWRIGHT_BROWSERS_PATH", "OUROBOROS_E2E_DEEP",
-            # The run's shard weights (ci.yml `shard-plan`): tests/default_lane.py, tests/browser_lane.py.
-            "OUROBOROS_CI_DURATIONS",
+            # The run's shard weights (ci.yml `shard-plan`): tests/default_lane.py, tests/browser_lane.py;
+            # and the owner's persisted table every session brings up to date (tests/ci_evidence.py).
+            "OUROBOROS_CI_DURATIONS", "OUROBOROS_TEST_DURATIONS",
             # Opt-in native desktop qualification; ordinary runs remain skipped.
             "OUROBOROS_WINDOWS_DESKTOP_QA", "OUROBOROS_MACOS_DESKTOP_QA",
             "OUROBOROS_TEST_EVIDENCE_ROOT", *environment["DIAGNOSTIC_OUTPUT_KEYS"],

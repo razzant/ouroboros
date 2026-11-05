@@ -71,30 +71,41 @@ def test_serial_overlap_is_bounded_by_the_worker_count(run_tests, workers, shard
 def test_serial_groups_take_the_recorded_serial_share_of_the_workers(run_tests, recorded, monkeypatch, tmp_path,
                                                                      capsys, standalone_budget):
     """With recorded durations the serial tests get the workers their share of the time needs: at least one
-    group, at most half the workers. A run without a table of its own reads the newest earlier one-run battery
-    beside its evidence that ended (an interrupted one favours the serial groups handed out first); the plan
-    names each group's predicted seconds."""
-    from tests.ci_verdicts import platform_name, serial_group
-    from tests.test_ci_durations import _projection, _row
+    group, at most half the workers. The table is the owner's persisted one beside the evidence parent, named for
+    the battery by `point_at_durations` and brought up to date by every session at its end; the plan names each
+    group's predicted seconds. A caller's own name for the table stands; without an evidence root nobody owns one."""
+    from tests.ci_verdicts import TEST_DURATIONS_ENV, platform_name, serial_group
 
     system = platform_name(run_tests.sys.platform)
     rows = {system: {"tests/test_a.py": 7000, "tests/test_s.py": 3000}}
     assert [run_tests.serial_shards(18, {"platforms": rows, "serial": {system: {"tests/test_s.py": ms}}})
             for ms in (3000, 0, 10_000)] == [5, 1, 9]
     assert run_tests.serial_shards(18, {"platforms": rows}) == 4  # a table that does not split the time
-    for run, code, serial in (("run-ended", 1, 5.0), ("run-interrupted", 130, 1.0)):
-        _projection(tmp_path / run / "pytest" / "overlapped", [_row("tests/test_s.py::test_s@serial0", serial),
-                                                               _row("tests/test_a.py::test_a@tests/test_a.py", 5.0)],
-                    system=run_tests.sys.platform)
-        (tmp_path / run / "result.json").write_text(json.dumps({"returncode": code}), encoding="utf-8")
-    monkeypatch.setenv("OUROBOROS_TEST_EVIDENCE_ROOT", str(tmp_path / "run-now"))
+    evidence = tmp_path / ".test-evidence"
+    evidence.mkdir()
+    (evidence / "test-durations.json").write_text(json.dumps({
+        "format": 1, "platforms": {system: {"tests/test_a.py": 5000, "tests/test_s.py": 5000}},
+        "serial": {system: {"tests/test_s.py": 5000}}, "source": {"run_id": "session 2026-11-05T12:00:00Z", "sha": ""},
+        "ui_nodes": {}}), encoding="utf-8")
+    monkeypatch.delenv("OUROBOROS_CI_DURATIONS", raising=False)
+    monkeypatch.delenv(TEST_DURATIONS_ENV, raising=False)
+    monkeypatch.setenv("OUROBOROS_TEST_EVIDENCE_ROOT", str(evidence / "run-now"))
+    run_tests.point_at_durations()
+    assert os.environ[TEST_DURATIONS_ENV] == str(evidence / "test-durations.json")
     monkeypatch.setattr(run_tests, "recorded_durations", recorded)
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TEST_WORKERS", "8")
     ((_label, command),) = run_tests.battery_commands(sequential=False)
     assert command[-1] == "--serial-shards=4"  # half the time is serial; today's rule would say 2
     plan = capsys.readouterr().out
-    assert "4 serial groups of 8 workers, sized by the battery of run-ended" in plan
+    assert "4 serial groups of 8 workers, sized by session 2026-11-05T12:00:00Z" in plan
     assert f"predicted seconds per group: {serial_group('tests/test_s.py', 4)} 5;" in plan
+    monkeypatch.setenv(TEST_DURATIONS_ENV, "mine.json")
+    run_tests.point_at_durations()
+    assert os.environ[TEST_DURATIONS_ENV] == "mine.json"
+    monkeypatch.delenv(TEST_DURATIONS_ENV)
+    monkeypatch.delenv("OUROBOROS_TEST_EVIDENCE_ROOT")
+    run_tests.point_at_durations()
+    assert TEST_DURATIONS_ENV not in os.environ and recorded() == (None, "no recorded durations")
 
 
 def test_sequential_mode_keeps_the_gate_marker_split_and_xdist_flags(run_tests, monkeypatch):
