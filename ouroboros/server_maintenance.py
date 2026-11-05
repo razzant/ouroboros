@@ -510,6 +510,8 @@ def _run_periodic_custody_sweep(stop_event: Any = None, latch: Any = None) -> No
                 prune()
         if not _stop_requested(stop_event):
             _prune_review_checkouts(stop_event=stop_event)  # ended tasks' copies, a crashed process's orphans
+        if not _stop_requested(stop_event):
+            _record_engine_pass()  # the engine's own last pass, kept as a row for the mind's fact (no call per turn)
     finally:
         (latch or _CUSTODY_SWEEP_LOCK).release()
 
@@ -804,15 +806,26 @@ def _prune_event(event_type: str, keys: tuple, **reports: dict) -> None:
                      {"ts": utc_now_iso(), "type": event_type, **reports})
 
 
+# The server's retirer passes report one shape (``maintenance_jobs.pass_report``: released, typed holds,
+# errors) and are recorded as their job row plus one event ONLY when the pass is evidence: something
+# released, an error, or a hold set different from the row's (``maintenance_jobs.record_pass``). A pass
+# that keeps everything it kept last time writes nothing; what it keeps is a fact Storage and the mind read.
+
 def _prune_worktrees() -> None:
     """Subagent working copies past the GC retention, on the custody pass: a plain copy goes only
-    when the supervisor's settlement probe proves its task not live (unknown keeps it)."""
+    when the supervisor's settlement probe proves its task not live (unknown keeps it); every copy kept
+    is a typed hold (the pass's own reason per copy)."""
     try:
-        from ouroboros import subagent_worktrees
+        from ouroboros import maintenance_jobs, subagent_worktrees
         from supervisor.queue import task_settlement_liveness
 
-        _prune_event("subagent_worktree_prune", ("removed",),
-                     report=subagent_worktrees.prune_orphans(live=task_settlement_liveness))
+        reasons: Dict[str, str] = {}
+        report = subagent_worktrees.prune_orphans(live=task_settlement_liveness, reasons=reasons)
+        holds = maintenance_jobs.Holds()
+        for path, reason in sorted(reasons.items()):
+            holds.note(reason, path)
+        maintenance_jobs.record_pass(DATA_DIR, "copy_retirement", {**maintenance_jobs.pass_report(report["removed"], holds),
+                                                                   "kept": report["kept"]}, event="subagent_worktree_prune")
     except Exception:
         log.debug("Subagent worktree prune failed", exc_info=True)
 
@@ -820,9 +833,10 @@ def _prune_worktrees() -> None:
 def _prune_engine_runtimes() -> None:
     """Engine program copies in ``state/cx`` neither pinned nor serving (owner Q6 = A), on the custody pass."""
     try:
+        from ouroboros import maintenance_jobs
         from ouroboros.claudexor_runtime_retention import prune_unpinned_runtimes
 
-        _prune_event("engine_runtime_prune", ("removed", "errors"), report=prune_unpinned_runtimes())
+        maintenance_jobs.record_pass(DATA_DIR, "engine_runtime_prune", prune_unpinned_runtimes(), event="engine_runtime_prune")
     except Exception:
         log.debug("Engine runtime prune failed", exc_info=True)
 
@@ -831,13 +845,25 @@ def _release_finished_scratch() -> None:
     """Session scratch of tasks proven over goes to the custody trash on this pass, not with the drive
     a retention term later (#2586); the maintenance child deletes it. Unknown liveness keeps it."""
     try:
+        from ouroboros import maintenance_jobs
         from ouroboros.workspace_preflight import release_finished_scratch
         from supervisor.queue import task_settlement_liveness
 
-        _prune_event("session_scratch_release", ("released", "errors"),
-                     report=release_finished_scratch(DATA_DIR, task_settlement_liveness))
+        maintenance_jobs.record_pass(DATA_DIR, "session_scratch_release",
+                                     release_finished_scratch(DATA_DIR, task_settlement_liveness), event="session_scratch_release")
     except Exception:
         log.debug("Session scratch release failed", exc_info=True)
+
+
+def _record_engine_pass() -> None:
+    """The engine's last retention pass, as its own record says, kept as a job row when it changed: the mind's
+    Runtime fact reads the row, never the engine, while a turn is prepared (``storage_removers``)."""
+    try:
+        from ouroboros.storage_removers import record_engine_pass
+
+        record_engine_pass(DATA_DIR)
+    except Exception:
+        log.debug("Engine retention record failed", exc_info=True)
 
 
 from ouroboros.maintenance_retirement import prune_agent_media_uploads as prune_agent_media_uploads
@@ -915,8 +941,12 @@ def _prune_review_checkouts(*, stop_event: Any = None) -> None:
             stop=lambda: _stop_requested(stop_event))
         if report.get("views_done"):
             _REVIEW_VIEWS_OWED[0] = False
-        _prune_event("review_checkout_prune", ("released", "removed", "checkouts_removed", "errors", "skipped"),
-                     report=report)
+        from ouroboros import maintenance_jobs
+
+        if report.get("checkouts_kept"):  # the isolated checkouts the pass judged held (their reason is the pass's, #2710)
+            report["holds"] = [*report.get("holds", ()), {"class": "checkout_held", "count": int(report["checkouts_kept"]), "example": ""}]
+        released = int(report.get("released") or 0) + int(report.get("removed") or 0) + int(report.get("checkouts_removed") or 0)
+        maintenance_jobs.record_pass(DATA_DIR, "review_checkout_prune", {**report, "released": released}, event="review_checkout_prune")
     except Exception:
         log.debug("Review checkout prune failed", exc_info=True)
 
@@ -1224,8 +1254,22 @@ def _run_drive_custody_pass(stop_event: Any = None) -> None:
             maintenance_jobs.record_in(txn, "drive_settlement", cursor=cursors, rest=rests)
             for base_name, task_ids in looked.items():
                 forget_arrivals(txn, base_name, task_ids)  # the published drives this lap looked at
-    _prune_event("headless_task_drive_prune", ("pruned", "errors", "custody_pending", "removed"),
-                 report=reports["headless"], task_drives=reports["direct"], mailboxes=mailboxes)
+    # What the pass holds, as facts: every retained drive's durable verdict (the decoded map) and this pass's
+    # transient and not-yet-terminal skips; the term's wait and a rested verdict are not holds. A pass that
+    # decoded no verdicts (both layouts at rest, or nothing reached) and moved nothing writes nothing.
+    holds = maintenance_jobs.Holds()
+    for task_id, verdict in sorted((loaded.get("map") or {}).items()):
+        holds.note(verdict.get("reason") or "other", task_id)
+    for report in reports.values():
+        for skipped in report.get("skipped") or ():
+            if skipped.get("reason") not in ("younger_than_retention", "custody_unchanged"):
+                holds.note(skipped.get("reason"), skipped.get("task_id"))
+    released = sum(len(report.get("pruned") or ()) for report in reports.values())
+    errors = [f"{row.get('task_id')}: {row.get('error')}" for report in reports.values() for row in report.get("errors") or ()]
+    if "map" in loaded or released or errors:
+        maintenance_jobs.record_pass(root, "drive_settlement", {**maintenance_jobs.pass_report(released, holds, errors),
+                                                                "headless": reports["headless"], "direct": reports["direct"],
+                                                                "mailboxes": mailboxes}, event="headless_task_drive_prune")
 
 
 def _periodic_zombie_reconcile(*, stop_event: Any = None) -> None:

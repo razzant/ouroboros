@@ -103,7 +103,7 @@ EXPECTED_TOOLS = [
     "browse_page", "browser_action", "showSecretHitl",
     "preflight_review", "review_change", "review_status",
     "compact_context", "set_tool_timeout", "request_restart", "prepare_self_change",
-    "inspect_harness", "maintain_harness", "inspect_subagent",
+    "inspect_harness", "maintain_harness", "free_storage", "inspect_subagent",
     "promote_to_stable", "schedule_subagent", "schedule_followup", "manage_schedules",
     "configure_presence",
     "integrate_subagent_patch", "compare_subagent_patches",

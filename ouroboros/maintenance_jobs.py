@@ -20,7 +20,7 @@ retried when those inputs change, never by an elapsed-time or attempt-count rule
 from __future__ import annotations
 
 import pathlib
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from ouroboros import store
 from ouroboros.utils import utc_now_iso
@@ -100,3 +100,90 @@ def forget_in(txn: store.Txn, name: str, *fields: str) -> Dict[str, Any]:
 def is_done(root: Any, name: str) -> bool:
     row = job(root, name)
     return bool(row) and row.get("state") == "done"
+
+
+# ---- a retirer pass's facts: what it released and what it holds, one shape for every retirer -------------
+#
+# The server's five retirers (drive settlement, private copies, review checkouts, session scratch, engine
+# program copies) and the engine's own retention pass report one shape, the engine's ``GcLastPass`` holds
+# (``packages/schema/src/control-gc.ts``): ``{released, holds: [{class, count, example, since}], errors}``.
+# A hold is a typed fact about what the pass kept and why (``class``: the retirer's own reason, such as
+# ``task_live``, ``child_result_unadopted``, ``owner_keep``, ``task_result_unreadable``), with one example
+# and the moment the class was first held in an unbroken run of passes (``since``, carried over while the
+# class stays held). Age waits are not holds: a folder inside the retention term is the rule, not a keep.
+# The row is written only when the pass is evidence: something released, an error, or a hold set that
+# differs from the row's; an unchanged pass writes nothing (the rest law, tests/test_cost_contract.py B7),
+# and a pass that rested (listed nothing) leaves the row as it stands.
+
+HOLD_EXAMPLE_CHARS = 160  # the engine's bound on a hold's example
+
+
+class Holds:
+    """What one pass kept, by class: ``note(class, example)`` per kept item; ``rows()`` the hold list, ONE live
+    list kept sorted by class, so a report that holds it at its start carries every later note (a pass that
+    returns early still reports what it had judged)."""
+
+    def __init__(self) -> None:
+        self._rows: List[Dict[str, Any]] = []
+
+    def note(self, hold_class: Any, example: Any = "") -> None:
+        key = str(hold_class or "other")
+        for row in self._rows:
+            if row["class"] == key:
+                row["count"] += 1
+                return
+        self._rows.append({"class": key, "count": 1, "example": str(example or "")[:HOLD_EXAMPLE_CHARS]})
+        self._rows.sort(key=lambda row: row["class"])
+
+    def rows(self) -> List[Dict[str, Any]]:
+        return self._rows
+
+    def __len__(self) -> int:
+        return sum(row["count"] for row in self._rows)
+
+
+def pass_report(released: Any, holds: Any, errors: Any = ()) -> Dict[str, Any]:
+    """The one shape: ``released`` a count (or the list of what went), ``holds`` a ``Holds`` or rows,
+    ``errors`` the pass's own error strings (item facts belong in ``holds``, as their class)."""
+    rows = holds.rows() if isinstance(holds, Holds) else [dict(row) for row in (holds or ())]
+    return {"released": len(released) if isinstance(released, (list, tuple, set)) else int(released or 0),
+            "holds": rows, "errors": [str(error) for error in (errors or ())]}
+
+
+def _with_since(holds: List[Dict[str, Any]], previous: Any, now: str) -> List[Dict[str, Any]]:
+    """Each hold's ``since``: the retirer's own when it knows one (a record's or marker's time), else the
+    row's while its class stayed held, else this pass's time."""
+    carried = {str(row.get("class")): row.get("since") for row in (previous or ()) if isinstance(row, dict)}
+    return [{**row, "since": row.get("since") or carried.get(row["class"]) or now} for row in holds]
+
+
+def _hold_set(holds: Any) -> List[tuple]:
+    return sorted((str(row.get("class")), int(row.get("count") or 0)) for row in (holds or ()) if isinstance(row, dict))
+
+
+def record_pass(root: Any, name: str, report: Dict[str, Any], *, event: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Record one retirer pass (a ``pass_report``) as the job ``name``'s row, with ``since`` per hold class,
+    when the pass is evidence (something released, an error, or a hold set that differs from the row's); a
+    pass that rested (``report["rested"]``) or changed nothing writes nothing and returns None. ``event``
+    names the events.jsonl row written beside the job row, with the same facts (the custody sweep's evidence
+    of what moved and what holds); the retirer's whole report rides along when something moved or failed."""
+    if report.get("rested"):
+        return None
+    current = job(root, name) or {}
+    released = report.get("released")
+    released_count = len(released) if isinstance(released, (list, tuple, set)) else int(released or 0)
+    changed = _hold_set(report.get("holds")) != _hold_set(current.get("holds"))
+    if not (released_count or report.get("errors") or changed):
+        return None
+    now = utc_now_iso()
+    holds = _with_since(report.get("holds") or [], current.get("holds"), now)
+    row = record(root, name, state="done", released=released_count, holds=holds,
+                 held=sum(int(hold["count"]) for hold in holds),
+                 errors=[str(error) for error in (report.get("errors") or ())][:20], pass_at=now)
+    if event:
+        from ouroboros.utils import append_jsonl
+
+        append_jsonl(pathlib.Path(root) / "logs" / "events.jsonl",
+                     {"ts": now, "type": event, "job": name, "released": released_count, "holds": holds,
+                      "errors": row["errors"], **({"report": report} if released_count or report.get("errors") else {})})
+    return row

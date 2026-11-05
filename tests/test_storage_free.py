@@ -296,7 +296,7 @@ def test_the_run_names_the_folders_it_freed_in_its_event(tmp_path, monkeypatch):
     rows = [json.loads(line) for line in (root / "logs" / "events.jsonl").read_text().splitlines()]
     report, = [row["report"] for row in rows if row["type"] == "storage_free"]
     assert report["removed_ids"] + report["deleting_ids"] == ["direct:gone"] and report["stuck_ids"] == []
-    assert report["removed"] + report["deleting"] == 1 and report["kept"] == [{"reason": "in_use", "count": 1}]
+    assert report["removed"] + report["deleting"] == 1 and report["kept"] == [{"reason": "task_live", "count": 1}]
 
 
 def test_a_folder_not_previewed_is_untouched_and_a_task_live_again_is_kept(tmp_path, monkeypatch):
@@ -312,7 +312,7 @@ def test_a_folder_not_previewed_is_untouched_and_a_task_live_again_is_kept(tmp_p
     run = view["run"]
     assert not (root / "task_drives" / "first").exists()
     assert (root / "task_drives" / "late").is_dir() and (root / "task_drives" / "second").is_dir()
-    assert run["kept"] == [{"reason": "in_use", "count": 1}]
+    assert run["kept"] == [{"reason": "task_live", "count": 1}]
     assert run["removed"] + run["deleting"] == 1 and run["selected"] == 2
 
 
@@ -357,7 +357,7 @@ def test_a_kept_folder_names_its_reason_and_the_next_run_frees_it(tmp_path, monk
     owner = _owner(probes)
     _preview(owner, root, tmp_path)
     view = _run(owner, root, tmp_path)
-    assert view["run"]["kept"] == [{"reason": "results_pending", "count": 1}]
+    assert view["run"]["kept"] == [{"reason": "child_refs_pending", "count": 1}]
     assert (root / "task_drives" / "pending").is_dir()
 
     _preview(owner, root, tmp_path)
@@ -367,16 +367,17 @@ def test_a_kept_folder_names_its_reason_and_the_next_run_frees_it(tmp_path, monk
 
 
 @pytest.mark.parametrize("code, reason", [
-    ("unread_mailbox_uncustodied", "results_pending"),  # late mail: the next pass unions and carries it
-    ("call_inventory_changed", "results_pending"),  # call records moved under the pass: re-armed next time
-    ("unread_mailbox_unreadable", "unreadable_record"),  # a torn mailbox is a read failure, not pending work
-    ("task_result_unreadable", "unreadable_record"),
-    ("custody_error: ValueError('torn')", "unreadable_record"),
-    ("generation_closed", "restart"),
-    ("store_busy", "busy"),  # a store still leased inside the drive: busy right now, tried next pass
-    ("not_own_drive", "other"),  # a code with no owner-facing group stays "for another reason"
+    ("unread_mailbox_uncustodied", "unread_mailbox_uncustodied"),  # late mail: the next pass unions and carries it
+    ("call_inventory_changed", "call_inventory_changed"),  # call records moved under the pass: re-armed next time
+    ("task_result_unreadable", "task_result_unreadable"),
+    ("custody_error: ValueError('torn')", "unreadable_record"),  # the one fact a custody error's class carries
+    ("custody_error: OSError('disk')", "other"),
+    ("generation_closed", "generation_closed"),
+    ("store_busy", "store_busy"),  # a store still leased inside the drive: tried next pass; the client says "busy"
+    ("not_own_drive", "not_own_drive"),  # every retirer code is stored as named (#2709): the client groups the words
+    ("", "other"),
 ])
-def test_the_fail_closed_mailbox_and_call_inventory_codes_name_their_owner_facing_reason(code, reason):
+def test_a_retirers_reason_is_stored_as_named_and_a_custody_error_reads_its_class(code, reason):
     from ouroboros.storage_free import _reason
 
     assert _reason(code) == reason

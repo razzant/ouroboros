@@ -67,19 +67,70 @@ export const FREE_GROUPS = {
     },
 };
 
-/** The server's typed kept reasons in the owner's words. */
+/** The retirers' own typed reasons (stored as they named them, #2709) in the owner's words: this map is where the
+ *  words are grouped; the server folds nothing. A code without words reads as `other`. */
+const RESULTS_PENDING = 'their results are not copied yet';
+const BUSY_NOW = 'busy right now';
+const RECORD_UNREADABLE = 'their task record could not be read';
+const RECORD_MOVED = 'their record changed under the check';
 export const KEPT_REASONS = {
-    results_pending: 'their results are not copied yet',
-    in_use: 'still in use',
-    busy: 'busy right now',
-    unreadable_record: 'their task record could not be read',
-    restart: 'stopped by a restart',
+    // the task that owns it
+    task_live: 'their task is running',
+    liveness_unknown: 'whether their task still runs could not be read',
+    task_not_terminal: 'their task has not finished',
+    parent_not_terminal: 'their parent task has not finished',
+    owner_not_terminal: 'their owner task has not finished',
+    not_proven_over: 'their task is not proven over (running, paused or with a live process)',
+    owner_processes_live: 'a process of their task is still running',
+    owner_paused: 'their task is paused',
+    custody_held: 'a coding run still holds them',
+    run_open: 'their run has not finished',
+    copy_registered: 'their copy is still registered',
+    copy_present: 'their copy still exists',
+    in_use: 'still in use',  // the review seat and checkout listers' word (review_checking_prune)
+    // results and messages not yet in the task record
+    child_result_unadopted: RESULTS_PENDING,
+    child_refs_pending: RESULTS_PENDING,
+    call_inventory_pending: RESULTS_PENDING,
+    call_inventory_changed: RESULTS_PENDING,
+    inputs_uncustodied: RESULTS_PENDING,
+    unread_mailbox_uncustodied: 'their unread messages are not carried yet',
+    verification_receipts_uncustodied: RESULTS_PENDING,
+    raw_evidence_uncustodied: RESULTS_PENDING,
+    canonical_not_settled: 'their task record is not settled yet',
+    post_work_open: 'work after their task is still open',
+    artifacts_not_terminal: 'their files are still being saved',
+    child_drive_mismatch: 'their task record names another folder',
+    artifact_source_missing: 'a captured file is missing from the folder',
+    artifact_source_mismatch: 'a captured file differs from its record',
+    canonical_changed: RECORD_MOVED,
+    drive_occupant_changed: 'the folder gained an occupant under the check',
+    not_own_drive: 'the folder is not their task’s own',
+    admission_rollback_evidence: 'the folder holds evidence of a start',
+    // busy right now
+    busy: BUSY_NOW,
+    store_busy: 'their record store was busy',
+    custody_busy: BUSY_NOW,
+    mailbox_busy: BUSY_NOW,
+    record_busy: BUSY_NOW,
+    // unreadable
+    unreadable_record: RECORD_UNREADABLE,
+    task_result_unreadable: RECORD_UNREADABLE,
+    unread_mailbox_unreadable: 'their mailbox could not be read',
+    record_unreadable: RECORD_UNREADABLE,
+    // saved work and its proofs
     capture_unproven: 'unique work not verified saved',
+    capture_incomplete: 'unique work not verified saved',
     unproven_excluded_inputs: 'files only a patch rule calls disposable',
     retained_evidence: 'marked as evidence, or could not be read through',
+    retained_process_environment: 'marked as evidence, or could not be read through',
     undeclared_environment: 'no recorded owner',
     owner_keep: 'you asked to keep it',
     changed: 'changed after the check',
+    nothing_unsaved: 'changed after the check',
+    nested_repository: 'a repository inside them cannot be saved as a patch',
+    commits_unprotected: 'their commits are not held by a branch',
+    generation_closed: 'stopped by a restart',
     advanced_group: 'saved work: only its saved group can remove it',
     other: 'for another reason',
 };
@@ -442,7 +493,7 @@ function groupWhy(group, days) {
     return [
         said.loss ? fmt(said.loss) : '',
         group.inside_wait ? fmt('{n} of {total} folders finished less than {days} days ago.', { n: number(group.inside_wait), total: number(group.count), days }) : '',
-        group.in_use ? plural(group.in_use, '{n} is in use and stays.', '{count} are in use and stay.') : '',
+        group.in_use ? plural(group.in_use, '{n} stays; each item names its reason below.', '{count} stay; each item names its reason below.') : '',
         group.unreadable ? plural(group.unreadable, '{n} stays: its task record could not be read.', '{count} stay: their task record could not be read.') : '',
     ].filter(Boolean).join(' ');
 }

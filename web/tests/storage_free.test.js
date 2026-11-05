@@ -35,7 +35,7 @@ const saved = () => [group('review_evidence', { count: 40, inside_wait: 0, in_us
     group('result_pins', { count: 3, inside_wait: 0, in_use: 0, bytes: 2e5, items: [] })];
 const run = (overrides = {}) => ({
     groups: [], selected: 1601, done: 1601, removed: 1584, removed_bytes: 8.2 * GB, deleting: 3,
-    deleting_bytes: 0.3 * GB, stuck: 0, failed: 0, not_started: 0, kept: [{ reason: 'results_pending', count: 11 }, { reason: 'in_use', count: 3 }],
+    deleting_bytes: 0.3 * GB, stuck: 0, failed: 0, not_started: 0, kept: [{ reason: 'child_result_unadopted', count: 11 }, { reason: 'in_use', count: 3 }],
     free_before: 140 * GB, free_after: 148 * GB, stopped: false, error: null, outcomes_ready: true, ...overrides,
 });
 /** A flow whose pool was read whole: every id chosen unless named. */
@@ -191,9 +191,9 @@ test('a page that would leave an item missing or counted twice is refused, a mov
 
 test('counts of one read as one: in use, kept, deleting, stuck, failed and not started', () => {
     const one = trayHtml(free('ready', { groups: [group('review_evidence', { count: 2, inside_wait: 0, in_use: 1, unreadable: 1 })] }), { ...read(), saved: true });
-    assert.match(one, /1 is in use and stays\. 1 stays: its task record could not be read\./);
+    assert.match(one, /1 stays; each item names its reason below\. 1 stays: its task record could not be read\./);
     const many = trayHtml(free('ready', { groups: [group('review_evidence', { count: 5, inside_wait: 0, in_use: 2, unreadable: 3 })] }), { ...read(), saved: true });
-    assert.match(many, /2 are in use and stay\. 3 stay: their task record could not be read\./);
+    assert.match(many, /2 stay; each item names its reason below\. 3 stay: their task record could not be read\./);
     assert.deepEqual(doneSentences(free('done', { run: run({ removed: 1, removed_bytes: 1e9, deleting: 1, deleting_bytes: 1e6, stuck: 1, failed: 1, not_started: 1,
         kept: [{ reason: 'in_use', count: 1 }] }) })), [
         '1 could not be deleted.', '1 could not be deleted yet; the app retries at its next maintenance run.',
@@ -365,9 +365,19 @@ test('names from the server are escaped text; titles and accessible names are fi
     assert.deepEqual(attributes(trayHtml(free('done', { groups: both(), run: run() }), read())), []);
 });
 
-// Revision 4 of the backend contract (sections 2 and 3): every typed reason a page, a pool or a run's kept rows can carry.
-const CONTRACT_REASONS = ['results_pending', 'in_use', 'busy', 'unreadable_record', 'restart', 'other', 'capture_unproven', 'retained_evidence',
-    'undeclared_environment', 'owner_keep', 'changed', 'unproven_excluded_inputs', 'advanced_group'];
+// Revision 5 of the backend contract (sections 2 and 3): the retirers' own typed reasons a page, a pool or a run's kept
+// rows carry (stored as the retirer named them, #2709); the words are grouped here, never folded on the server.
+const CONTRACT_REASONS = ['task_live', 'liveness_unknown', 'task_not_terminal', 'parent_not_terminal', 'owner_not_terminal',
+    'not_proven_over', 'owner_processes_live', 'owner_paused', 'custody_held', 'run_open', 'copy_registered', 'copy_present', 'in_use',
+    'child_result_unadopted', 'child_refs_pending', 'call_inventory_pending', 'call_inventory_changed', 'inputs_uncustodied',
+    'unread_mailbox_uncustodied', 'verification_receipts_uncustodied', 'raw_evidence_uncustodied', 'canonical_not_settled',
+    'post_work_open', 'artifacts_not_terminal', 'child_drive_mismatch', 'artifact_source_missing', 'artifact_source_mismatch',
+    'canonical_changed', 'drive_occupant_changed', 'not_own_drive', 'admission_rollback_evidence',
+    'busy', 'store_busy', 'custody_busy', 'mailbox_busy', 'record_busy',
+    'unreadable_record', 'task_result_unreadable', 'unread_mailbox_unreadable', 'record_unreadable',
+    'capture_unproven', 'capture_incomplete', 'unproven_excluded_inputs', 'retained_evidence', 'retained_process_environment',
+    'undeclared_environment', 'owner_keep', 'changed', 'nothing_unsaved', 'nested_repository', 'commits_unprotected',
+    'generation_closed', 'advanced_group', 'other'];
 
 test('every reason the server can send has its own words; none falls through to "another reason"', () => {
     for (const reason of CONTRACT_REASONS.filter((name) => name !== 'other')) {

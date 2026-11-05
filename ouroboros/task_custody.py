@@ -1036,6 +1036,16 @@ def _input_closure(canonical: pathlib.Path, drive: pathlib.Path, task_id: str, c
     return {key: snapshot[key] for key in _INPUT_FIELDS if snapshot.get(key) != current.get(key)}, inputs
 
 
+def _live_hold(live: LiveProbe, occupants: Any) -> Optional[str]:
+    """The retention the probe names for the first occupant not proven absent (``task_live``,
+    ``liveness_unknown``, or the probe's own cause such as ``store_busy``), None when every one is."""
+    for item in occupants:
+        answer = live(item["task_id"])
+        if answer is not False:
+            return "liveness_unknown" if answer is None else getattr(answer, "cause", "task_live")
+    return None
+
+
 def _prepare_occupant(canonical: pathlib.Path, drive: pathlib.Path, task_id: str, *, live: LiveProbe,
                       staging: pathlib.Path, admission_rollback: bool, stop=None) -> Dict[str, Any]:
     """Everything outside the locks: liveness, durable settledness, copy-back, pending refs and
@@ -1044,9 +1054,8 @@ def _prepare_occupant(canonical: pathlib.Path, drive: pathlib.Path, task_id: str
     from ouroboros.store import StoreError
     from ouroboros.task_results import cancellation_blocks_child_result
 
-    alive = live(task_id)
-    if alive is not False:
-        raise _Retained("liveness_unknown" if alive is None else "task_live")
+    if hold := _live_hold(live, ({"task_id": task_id},)):
+        raise _Retained(hold)
     try:
         current = load_task_result(canonical, task_id, strict=True) or {}
         child = load_task_result(drive, task_id, strict=True) or {}
@@ -1310,8 +1319,10 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
                        admission_rollback: bool = False, report: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """The one decision to delete one of TASK's own execution drives; see the module docstring.
 
-    ``live(task_id)`` is the caller's supervisor probe (True live, False proven not live,
-    None unknown); without one nothing is deleted. ``guard()`` is the supervisor's
+    ``live(task_id)`` is the caller's supervisor probe (True live, False proven not live, None
+    unknown, or an unknown carrying its ``cause``, such as ``store_busy``); without one nothing
+    is deleted. It is asked before preparation, again after Phase A's own write (so the row the
+    interlock re-checks is the one this settlement left) and once more under the interlock. ``guard()`` is the supervisor's
     ownership interlock (its queue lock, yielding False once the generation closed): the
     final census, probe and move happen inside it. ``stop()`` closes a maintenance
     generation between phases. ``admission_rollback`` additionally lets a never-started
@@ -1336,8 +1347,8 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
                     for occupant in occupants]
         if closed():
             raise _Retained("generation_closed")
-        if any(live(item["task_id"]) is not False for item in prepared):
-            raise _Retained("task_live")  # ownership back after preparation; asked BEFORE any custody lock
+        if hold := _live_hold(live, prepared):
+            raise _Retained(hold)  # ownership back after preparation: no publication for a task owned again
         with contextlib.ExitStack() as stack:  # Phase A: publication, per occupant, every write fenced
             stack.enter_context(publication_fence(closed))
             for item in prepared:
@@ -1347,13 +1358,18 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
                 outcome["published"] += _secure_occupant(canonical, drive, item, closed)
         if closed():
             raise _Retained("generation_closed")
+        # Ownership read again AFTER this settlement's own canonical write and BEFORE the interlock: the
+        # probe prepares the row it will re-check under the queue lock, so a signature Phase A moved is
+        # the prepared one, never a change (#2709); a write by anyone else after this is still a change.
+        if hold := _live_hold(live, prepared):
+            raise _Retained(hold)
         with (guard() if guard is not None else contextlib.nullcontext(True)) as allowed:  # Phase B: the move
             if not allowed:
                 raise _Retained("generation_closed")
             if _occupants(drive, tid) != occupants:
                 raise _Retained("drive_occupant_changed")
-            if any(live(item["task_id"]) is not False for item in prepared):
-                raise _Retained("task_live")
+            if hold := _live_hold(live, prepared):
+                raise _Retained(hold)
             with contextlib.ExitStack() as stack:
                 for item in prepared:
                     if not stack.enter_context(task_custody_lock(canonical, item["task_id"],

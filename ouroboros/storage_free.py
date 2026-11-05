@@ -83,26 +83,15 @@ GROUP_RESULT_PINS = "result_pins"
 GROUPS = (GROUP_WORK_FOLDERS, GROUP_WORKING_COPIES, GROUP_REVIEW_EVIDENCE, GROUP_REVIEW_CHECKOUTS,
           GROUP_LOST_COPIES, GROUP_SERVICE_FOLDERS, GROUP_RESULT_PINS)
 LARGEST_ITEMS = 20
-# A retirer's typed reason -> the owner's reason (the client's sentences): results or messages
-# still being saved (late mail and call records that moved under the pass included: the next pass
-# carries them), in use again, busy right now, the task record or its mailbox unreadable, a restart.
-_KEPT_REASONS = {
-    "results_pending": ("child_result_unadopted", "child_refs_pending", "call_inventory_pending", "call_inventory_changed",
-                        "inputs_uncustodied", "unread_mailbox_uncustodied", "verification_receipts_uncustodied",
-                        "canonical_changed", "drive_occupant_changed", "canonical_not_settled", "post_work_open",
-                        "artifacts_not_terminal", "child_drive_mismatch"),
-    "in_use": ("task_live", "liveness_unknown", "owner_processes_live", "owner_not_terminal", "task_not_terminal", "parent_not_terminal",
-               "not_proven_over", "custody_held", "owner_paused"),
-    "busy": ("custody_busy", "mailbox_busy", "store_busy", "busy", "record_busy"),
-    "unreadable_record": ("task_result_unreadable", "unread_mailbox_unreadable", "record_unreadable"),
-    "capture_unproven": ("capture_unproven", "capture_incomplete"),
-    "retained_evidence": ("retained_process_environment",),
-    "changed": ("changed", "nothing_unsaved", "nested_repository", "commits_unprotected"),
-    "unproven_excluded_inputs": ("unproven_excluded_inputs",),
-    "owner_keep": ("owner_keep",),
-    "restart": ("generation_closed",),
-}
 _RETIRER_STAMPS = ("scratch_retention", "retiring", "removal_failed", "removal_failed_identity")  # no change of ownership
+
+
+def _liveness_reason(answer: Any) -> str:
+    """The typed hold a liveness probe's answer names: ``""`` for proven absence, ``task_live``,
+    ``liveness_unknown``, or the probe's own cause (``store_busy``: ``supervisor.task_ownership.ProbeUnknown``)."""
+    if answer is False:
+        return ""
+    return "liveness_unknown" if answer is None else str(getattr(answer, "cause", "task_live"))
 
 
 class StorageFreeItem(TypedDict):
@@ -115,7 +104,7 @@ class StorageFreeGroup(TypedDict):
     id: str  # one of GROUPS
     count: int
     inside_wait: int  # finished less than retention_days ago (the background would still wait)
-    in_use: int  # live, pending, unknown or non-terminal: offered nowhere, named here
+    in_use: int  # held: not offered and not unreadable; each item names the typed reason it stays for
     unreadable: int  # no readable task record (or unreadable custody): shown, never freed
     bytes: Optional[int]
     bytes_complete: bool
@@ -191,17 +180,18 @@ class _Candidate:
         # when the owner may discard it by hand
 
 
-def _sorted_into(root: pathlib.Path, group: Dict[str, Any], verdict: str, candidate: "_Candidate", reason: str = "") -> None:
-    """A lister's verdict: offered, or named with its reason; in use or unreadable (shown, never freed)."""
+def _sorted_into(root: pathlib.Path, group: Dict[str, Any], verdict: str, candidate: "_Candidate") -> None:
+    """A lister's verdict: ``offer`` (unless the owner keeps it), ``unreadable`` (shown, never freed), or the typed
+    reason it stays for (the retirer's own word, as the engine names its holds); the client says the words."""
     from ouroboros.owner_keep import OWNER_KEEP, is_kept
 
     if verdict == "offer" and is_kept(root, candidate.owner):
-        verdict, reason = "in_use", OWNER_KEEP
+        verdict = OWNER_KEEP
     if verdict == "offer":
         group["candidates"].append(candidate)
         return
     group["unreadable" if verdict == "unreadable" else "in_use"] += 1
-    candidate.reason = reason or ("unreadable_record" if verdict == "unreadable" else verdict if verdict == OWNER_KEEP else "in_use")
+    candidate.reason = "unreadable_record" if verdict == "unreadable" else verdict
     candidate.ordinary = False
     group["excluded"].append(candidate)
 
@@ -247,6 +237,61 @@ def _free_bytes(root: pathlib.Path) -> Optional[int]:
         return None
 
 
+REQUEST_JOB = "storage_free"  # the mind's last Free request and its receipt (``FreeSpace.request``), a job row
+
+
+def maintenance_jobs_receipt(root: pathlib.Path) -> Dict[str, Any]:
+    """The receipt of the last request the mind made (``{}`` when none, or when the store cannot be read)."""
+    from ouroboros import maintenance_jobs
+
+    try:
+        return maintenance_jobs.job(root, REQUEST_JOB) or {}
+    except Exception:
+        return {}
+
+
+def _write_receipt(root: pathlib.Path, receipt: Dict[str, Any]) -> None:
+    from ouroboros import maintenance_jobs, store
+
+    try:
+        with store.open_store(root, write=True) as txn:
+            previous = txn.meta(maintenance_jobs.PREFIX + REQUEST_JOB)
+            if isinstance(previous, dict):  # one request, one receipt: the previous one is history (events.jsonl)
+                maintenance_jobs.forget_in(txn, REQUEST_JOB, *previous)
+            maintenance_jobs.record_in(txn, REQUEST_JOB, **receipt)
+    except Exception:
+        log.warning("storage_free receipt not recorded", exc_info=True)
+
+
+def _request_sentence(receipt: Dict[str, Any]) -> str:
+    """One plain English sentence for Main about a request the mind made; the client renders it as a system row."""
+    who = str(receipt.get("actor") or "the mind")
+    if receipt.get("refusal"):
+        return f"Free space ({who}): not run, {str(receipt['refusal']).replace('_', ' ')}."
+    outcome = receipt.get("outcome")
+    if not isinstance(outcome, dict):
+        preview = (receipt.get("preview") or {}).get("pool") or {}
+        size = preview.get("bytes")
+        return (f"Free space ({who}): looked only; {preview.get('count', 0)} items could go"
+                + (f", {size / 1e9:.1f} GB" if isinstance(size, int) else "") + ".")
+    kept = ", ".join(f"{row['count']} {str(row['reason']).replace('_', ' ')}" for row in outcome.get("kept") or ())
+    freed = outcome.get("removed_bytes") or 0
+    parts = [f"removed {outcome['removed']} ({freed / 1e9:.1f} GB)"] if outcome.get("removed") else []
+    if outcome.get("deleting"):
+        moving = (outcome.get("deleting_bytes") or 0) / 1e9
+        parts.append(f"moved {outcome['deleting']} aside ({moving:.1f} GB), deleted by the next maintenance run")
+    if not parts:
+        parts.append("nothing removed")
+    if kept:
+        parts.append(f"kept {sum(row['count'] for row in outcome.get('kept') or ())}: {kept}")
+    if outcome.get("failed"):
+        parts.append(f"{outcome['failed']} failed")
+    after = outcome.get("free_after")
+    if isinstance(after, int):
+        parts.append(f"free now {after / 1e9:.1f} GB")
+    return f"Free space ({who}): " + "; ".join(parts) + "."
+
+
 def _name_items(root: pathlib.Path, items: List["_Candidate"]) -> None:
     """Every listed object's name: its task's title when it has one, else the folder's; one display read
     (no bulky evidence) per page of ids."""
@@ -265,13 +310,12 @@ def _name_items(root: pathlib.Path, items: List["_Candidate"]) -> None:
 
 
 def _reason(raw: str) -> str:
+    """A retirer's own reason, kept as it named it (the client groups the words); a custody error's class
+    is read for the one fact it carries (an unreadable row), an unnamed keep is ``other``."""
     raw = str(raw or "")
     if raw.startswith("custody_error"):
         return "unreadable_record" if "ValueError" in raw else "other"
-    for reason, codes in _KEPT_REASONS.items():
-        if raw in codes:
-            return reason
-    return "other"
+    return raw or "other"
 
 
 class FreeSpace:
@@ -292,6 +336,7 @@ class FreeSpace:
         self._run: Optional[Dict[str, Any]] = None
         self._error: Optional[str] = None
         self._progress = {"done": 0, "total": 0}
+        self._request: Optional[Dict[str, Any]] = None  # the mind's request this preview/run serves (``request``)
 
     # ---- the probe and the interlock ------------------------------------------------------
 
@@ -421,6 +466,10 @@ class FreeSpace:
     def _busy(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
+    def _busy_elsewhere(self) -> bool:
+        """``_busy`` as ``start`` asks it: the preview thread handing a request's run on is not busy with itself."""
+        return self._busy() and self._thread is not threading.current_thread()
+
     def preview(self, data_root: Any, repo_dir: Any) -> bool:
         """Start one preview unless one lists or a run runs; False means the caller joined it."""
         with self._lock:
@@ -443,7 +492,7 @@ class FreeSpace:
             return {"started": False, "reason": "selection_conflict"}
         chosen = [str(group) for group in groups] if isinstance(groups, list) else None
         with self._lock:
-            if self._stopped.is_set() or self._busy():
+            if self._stopped.is_set() or self._busy_elsewhere():
                 return {"started": False, "reason": "busy"}
             if self._plan is None or self._state != "ready" or str(plan_id or "") != self._plan["id"]:
                 return {"started": False, "reason": "preview_outdated"}
@@ -504,6 +553,80 @@ class FreeSpace:
             return "unknown_item", set()
         return ("not_offered", set()) if set(ids) - manual_ids(plan) else ("", set(ids))
 
+    # ---- the mind's request (owner Q3 = A, 05.11.2026) --------------------------------------
+
+    def request(self, data_root: Any, repo_dir: Any, *, actor: str, request_id: str, groups: Any = None,
+                dry_run: bool = False, notify: Optional[Callable[[str], Any]] = None) -> Dict[str, Any]:
+        """The same Free the owner presses, asked by the mind (``free_storage``): one preview with the same
+        probes, then a run of the ordinary pool (every work folder, working copy and declared temporary
+        environment the retirers' proofs offer) or of the named saved ``groups``; a ``dry_run`` stops after the
+        preview. The owner's Keep and every retirer proof hold exactly as for the owner. Its receipt is the
+        ``storage_free`` job row (``request_id``, ``actor``, the preview's pool and exclusions, the run's
+        outcome) and ``notify`` is told one sentence for Main when it ends. Refused while a listing or a run
+        is under way (``busy``: the receipt says so) and for a request id already answered."""
+        root = pathlib.Path(data_root)
+        receipt = maintenance_jobs_receipt(root)
+        if receipt.get("request_id") == request_id:
+            return {"started": False, "reason": "duplicate"}
+        with self._lock:
+            if self._stopped.is_set() or self._busy() or self._request is not None:
+                reason = "busy"
+            else:
+                reason = ""
+                self._request = {"request_id": request_id, "actor": actor, "groups": [str(g) for g in (groups or ())],
+                                 "dry_run": bool(dry_run), "notify": notify, "requested_at": utc_now_iso()}
+        if reason:
+            _write_receipt(root, {"request_id": request_id, "actor": actor, "state": "failed", "refusal": reason,
+                                  "requested_at": utc_now_iso()})
+            return {"started": False, "reason": reason}
+        if not self.preview(root, repo_dir):  # a listing started between the lock and here: the receipt says busy
+            with self._lock:
+                self._request = None
+            _write_receipt(root, {"request_id": request_id, "actor": actor, "state": "failed", "refusal": "busy",
+                                  "requested_at": utc_now_iso()})
+            return {"started": False, "reason": "busy"}
+        return {"started": True, "reason": ""}
+
+    def _continue_request(self, root: pathlib.Path, repo_dir: pathlib.Path, plan: Optional[Dict[str, Any]]) -> None:
+        """After the request's preview: start its run, or settle a dry run / an empty pool / a failed listing."""
+        with self._lock:
+            request = self._request
+        if request is None:
+            return
+        if plan is None:
+            self._finish_request(root, {"state": "failed", "refusal": "preview_failed", "error": self._error})
+            return
+        summary = {"pool": pool(plan), "groups": [self._group_view(group) for group in plan["groups"]]}
+        if request["dry_run"]:
+            self._finish_request(root, {"state": "done", "preview": summary})
+            return
+        if request["groups"]:
+            started = self.start(root, repo_dir, plan["id"], request["groups"])
+        else:
+            items = sorted(ordinary_ids(plan))
+            started = self.start(root, repo_dir, plan["id"], None, items=items) if items else {"started": False, "reason": "nothing_selected"}
+        if not started["started"]:
+            self._finish_request(root, {"state": "done", "preview": summary, "refusal": started["reason"]})
+        else:
+            with self._lock:
+                self._request["preview"] = summary
+
+    def _finish_request(self, root: pathlib.Path, facts: Dict[str, Any]) -> None:
+        """Record the request's receipt once, then tell Main (the mind's run is the owner's to see)."""
+        with self._lock:
+            request, self._request = self._request, None
+        if request is None:
+            return
+        notify = request.pop("notify", None)
+        receipt = {**{key: value for key, value in request.items() if key != "preview"},
+                   **({"preview": request["preview"]} if "preview" in request else {}), **facts, "finished_at": utc_now_iso()}
+        _write_receipt(root, receipt)
+        if notify is not None:
+            try:
+                notify(_request_sentence(receipt))
+            except Exception:
+                log.debug("storage_free request notice not delivered", exc_info=True)
+
     def cancel(self) -> bool:
         """Stop the listing (nothing is kept) or the run (what was freed stays freed)."""
         with self._lock:
@@ -559,9 +682,10 @@ class FreeSpace:
                         raise _Stopped()
                     item = _Candidate(GROUP_WORK_FOLDERS, f"{layout}:{task_id}", base / task_id, layout, inside_wait=inside, task=task_id)
                     item.eligible_after = _eligible_after(at, days)
-                    # No readable row: shown, never freed.
-                    _sorted_into(root, group, "unreadable" if not fact else "in_use" if status not in FINAL_STATUSES
-                                 or live(task_id) is not False else "offer", item)
+                    # No readable row: shown, never freed; a row not terminal, or a task the probe cannot prove absent,
+                    # stays with that reason.
+                    _sorted_into(root, group, "unreadable" if not fact else "task_not_terminal" if status not in FINAL_STATUSES
+                                 else _liveness_reason(live(task_id)) or "offer", item)
             groups.append(group)
         read = read_records(root)  # one passive read per copy: no import, no event row; unreadable ones are named
         rows = list(read.rows)
@@ -589,26 +713,26 @@ class FreeSpace:
                     snapshot = str(row.get("snapshot_id") or "")
                     item = _Candidate(GROUP_WORKING_COPIES, f"snapshot:{snapshot}", path, "delegated", task=task_id, row=row)
                     item.eligible_after = _eligible_after(float(row.get("created_at") or 0), 0)
-                    kept = owner_keep.is_kept(root, task_id)  # the proof reads the keep too: name it, not "in use"
-                    _sorted_into(root, group, "in_use" if kept else "unreadable" if open_ids is None else "offer"
-                                 if snapshot_released(row, open_ids, data_dir=root, live=live) else "in_use", item,
-                                 owner_keep.OWNER_KEEP if kept else "")
+                    kept = owner_keep.is_kept(root, task_id)  # the proof reads the keep too: name it, not a held run
+                    _sorted_into(root, group, owner_keep.OWNER_KEEP if kept else "unreadable" if open_ids is None else "offer"
+                                 if snapshot_released(row, open_ids, data_dir=root, live=live) else "custody_held", item)
                     continue
                 item = _Candidate(GROUP_WORKING_COPIES, f"{kind or 'plain'}:{_record_name(path)}", path, kind or "plain",
                                   task=task_id, row=row)
                 item.eligible_after = _eligible_after(max(float(row.get("created_at") or 0), float(row.get("used_at") or 0)), days)
                 over = body_candidate._recorded_terminal(task_id, root) and not body_candidate.live_lineage_processes(root, task_id)
-                reason = ""
+                reason = "" if over else "not_proven_over"
                 if over and kind == "body_candidate":
                     # The retirer's own order (``retention_verdict``), its scratch witness left unwritten.
                     reason = ("retained_evidence" if body_candidate._retained_scratch(row, classify=True, record_witness=False)
                               else "unproven_excluded_inputs" if body_candidate.unique_work(row).get("excluded") else "")
                 elif over:
-                    over = live(task_id) is False
-                    reason = plain_copy_verdict(row, root)["reason"] if over else ""
-                    reason = reason if reason == "capture_unproven" else ""
+                    reason = _liveness_reason(live(task_id))
+                    if not reason:
+                        verdict = plain_copy_verdict(row, root)["reason"]
+                        reason = verdict if verdict == "capture_unproven" else ""
                 reason = "owner_keep" if reason and owner_keep.is_kept(root, task_id) else reason  # the keep is what holds it now
-                _sorted_into(root, group, "in_use" if not over or reason else "offer", item, reason)
+                _sorted_into(root, group, reason or "offer", item)
                 if reason in ("capture_unproven", "unproven_excluded_inputs"):
                     offer = discard_offer(row, root, live, _resolve_root())  # held for the plan's life: the largest paths only
                     item.manual = None if offer["refusal"] else {**offer, "unsaved": offer["unsaved"][:UNSAVED_LISTED],
@@ -653,7 +777,7 @@ class FreeSpace:
                     named_unreadable.add(_record_file(entry, root).name)
                     _sorted_into(root, group, "unreadable", item)  # a record may name it: unread is not unregistered
                     continue
-                _sorted_into(root, group, "in_use" if live(owner) is not False else "offer", item)
+                _sorted_into(root, group, _liveness_reason(live(owner)) or "offer", item)
             groups.append(group)
         if copies_group is not None:  # a record whose folder this listing did not reach is still named
             for name in sorted(read.unreadable - named_unreadable):
@@ -672,11 +796,11 @@ class FreeSpace:
                     if not why:
                         item.kind = "environment"
                         item.eligible_after = _eligible_after((entry / SCRATCH_MARKER).stat().st_mtime, days)
-                    _sorted_into(root, group, "in_use" if live(owner) is not False else "offer", item, why if why == "in_use" else "")
+                    _sorted_into(root, group, _liveness_reason(live(owner)) or "offer", item)
             for runs in (folder / ".test-evidence" for folder in folders):  # runs inside copies without a task drive
                 for run in sorted(runs.iterdir()) if runs.is_dir() and not runs.is_symlink() else ():
                     if run.is_dir() and not run.is_symlink():
-                        _sorted_into(root, group, "offer" if _run_finished(run) else "in_use",
+                        _sorted_into(root, group, "offer" if _run_finished(run) else "run_open",
                                      _Candidate(GROUP_SERVICE_FOLDERS, f"test_run:{_record_name(run)}", run, "test_run"))
             groups.append(group)
         if GROUP_RESULT_PINS in self._offered:
@@ -688,7 +812,7 @@ class FreeSpace:
                         or os.path.lexists(str(row.get("path") or "")) or (open_ids is not None and snap not in open_ids):
                     continue  # a checkout is G2's; a snapshot custody releases goes with the custody GC
                 verdict = "unreadable" if open_ids is None else "offer" if _task_proven_over(
-                    str(row.get("task_id") or ""), root, live) else "in_use"
+                    str(row.get("task_id") or ""), root, live) else "not_proven_over"
                 _sorted_into(root, group, verdict, _Candidate(GROUP_RESULT_PINS, f"pins:{snap}", pathlib.Path(
                     str(row.get("path") or "")), "pins", task=str(row.get("task_id") or ""), row=row))
             groups.append(group)
@@ -761,9 +885,12 @@ class FreeSpace:
             _name_items(root, [item for group in groups for item in [*group["candidates"], *group["excluded"]]])
             with self._lock:
                 self._plan, self._state = {**plan, "finished_at": utc_now_iso()}, "ready"
+                ready = self._plan
         except _Stopped:
             with self._lock:
                 self._state, self._plan = "idle", None
+            self._finish_request(root, {"state": "failed", "refusal": "stopped"})
+            return
         except Exception as exc:
             from ouroboros.launch_roots import WorkRootUnavailable  # its sentence names the setting that decides
 
@@ -772,6 +899,9 @@ class FreeSpace:
                 self._state, self._plan = "failed", None
                 authored = isinstance(exc, (RuntimeError, WorkRootUnavailable))
                 self._error = str(exc) if authored else f"{type(exc).__name__}"
+            self._continue_request(root, repo_dir, None)
+            return
+        self._continue_request(root, repo_dir, ready)  # the mind's request, if this preview served one
 
     # ---- the run ----------------------------------------------------------------------------
 
@@ -807,17 +937,21 @@ class FreeSpace:
             self._plan = {**plan, "finished_at": utc_now_iso()}
         settled = self._settled(root, run)
         view = self._run_view(root, run, settled)
+        with self._lock:
+            actor = str((self._request or {}).get("actor") or "owner")  # who pressed: the owner, or the mind's task
         self._record(root, view, time.monotonic() - started, settled, list(run["failed"]), dict(run["kept_items"]),
                      {item.key: {"unsaved_count": item.manual["unsaved_count"], "unsaved_bytes": item.manual["unsaved_bytes"]}
-                      for item in manual})
-        supervisor_row(root, "storage_free", {"phase": self._state, "duration_seconds": round(time.monotonic() - started, 2),
+                      for item in manual}, actor=actor)
+        supervisor_row(root, "storage_free", {"phase": self._state, "actor": actor, "duration_seconds": round(time.monotonic() - started, 2),
                                                **{key: view[key] for key in ("groups", "selected", "removed", "removed_bytes",
                                                                              "deleting", "stuck", "kept", "failed", "not_started",
                                                                              "free_before", "free_after")}})
+        self._finish_request(root, {"state": "done", "outcome": {**view, "kept_items": dict(run["kept_items"])}})
 
     @staticmethod
     def _record(root: pathlib.Path, view: StorageFreeRun, seconds: float, settled: Tuple[List[str], ...],
-                failed: List[str], kept_ids: Dict[str, str], discards: Optional[Dict[str, Any]] = None) -> None:
+                failed: List[str], kept_ids: Dict[str, str], discards: Optional[Dict[str, Any]] = None,
+                actor: str = "owner") -> None:
         try:
             from ouroboros.server_maintenance import _prune_event
 
@@ -825,7 +959,7 @@ class FreeSpace:
             # cadence's own prune names what it removed: who removed a task's folder is then one search.
             removed, deleting, stuck = settled
             _prune_event("storage_free", ("removed", "deleting", "kept"), report={
-                **view, "duration_seconds": round(seconds, 2), "removed_ids": removed, "deleting_ids": deleting,
+                **view, "actor": actor, "duration_seconds": round(seconds, 2), "removed_ids": removed, "deleting_ids": deleting,
                 "stuck_ids": stuck, "failed_ids": failed, "kept_ids": kept_ids,
                 **({"manual_discards": discards} if discards else {})})
         except Exception:
@@ -995,11 +1129,11 @@ class FreeSpace:
             try:
                 if delegate_custody.custody_log_unreadable(root):
                     return "unreadable_record"
-                return "other" if snapshot_released(item.row, delegate_custody.open_snapshot_ids(root), data_dir=root, live=live) else "in_use"
+                return "other" if snapshot_released(item.row, delegate_custody.open_snapshot_ids(root), data_dir=root, live=live) else "custody_held"
             except Exception:
                 return "unreadable_record"
         if not _task_proven_over(task_id, root, live):
-            return "in_use"
+            return "not_proven_over"
         if item.layout == "body_candidate":
             return "other"
         reason = plain_copy_verdict(item.row, root)["reason"]
@@ -1067,11 +1201,12 @@ class FreeSpace:
                 continue
             registration = checkout_registration(path, root) if item.layout == "lost" else "absent"
             if item.layout == "test_run":
-                holds = not _run_finished(path)
+                reason = "" if _run_finished(path) else "run_open"
             else:
-                holds = live(item.owner) is not False or registration == "registered" or (
-                    item.layout == "env" and os.path.lexists(path.with_name(name[:-len(".env")])))
-            reason = "unreadable_record" if registration == "unknown" else "in_use" if holds else ""
+                reason = _liveness_reason(live(item.owner)) or ("copy_registered" if registration == "registered" else
+                                                                "copy_present" if item.layout == "env"
+                                                                and os.path.lexists(path.with_name(name[:-len(".env")])) else "")
+            reason = "unreadable_record" if registration == "unknown" else reason
             if not reason and os.path.lexists(path):  # gone already counts as removed
                 try:
                     with gate(root, item.owner, timeout_sec=0) as why:
@@ -1122,7 +1257,7 @@ def _release_pins(root: pathlib.Path, snapshot_id: str, live: Callable[[str], Op
         if os.path.lexists(str(row.get("path") or "")) or snapshot_id not in custody.open_snapshot_ids(root):
             return "other"  # a checkout came back, or custody let it go: the custody GC owns it now
         if not sw._task_proven_over(str(row.get("task_id") or ""), root, live):
-            return "in_use"
+            return "not_proven_over"
         with sw._record_lock(row["path"], root, op="release_pins", task_id=str(row.get("task_id") or "")), \
                 gate(root, row.get("task_id"), timeout_sec=0) as why:
             if why:

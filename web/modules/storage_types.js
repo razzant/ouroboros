@@ -151,7 +151,7 @@
  * @property {string} id  // work_folders | working_copies | review_evidence | review_checkouts | lost_copies | service_folders | result_pins
  * @property {number} count
  * @property {number} inside_wait  // finished less than retention_days ago
- * @property {number} in_use  // live, pending, unknown or non-terminal: offered nowhere, named here
+ * @property {number} in_use  // held: not offered and not unreadable; each item names the typed reason it stays for
  * @property {number} unreadable  // no readable task record or custody: shown, never freed
  * @property {number|null} bytes
  * @property {boolean} bytes_complete
@@ -161,7 +161,7 @@
 /**
  * A typed reason and how many items it holds, for what a pool leaves out and what a run kept.
  * @typedef {Object} StorageFreeKept
- * @property {string} reason  // results_pending | in_use | busy | unreadable_record | restart | capture_unproven | unproven_excluded_inputs | retained_evidence | undeclared_environment | owner_keep | changed | other; and, only for what a pool leaves out, advanced_group (offered as a whole saved-work group)
+ * @property {string} reason  // the retirer's own typed reason as stored (task_live | liveness_unknown | store_busy | not_proven_over | custody_held | child_result_unadopted | … | owner_keep | changed | capture_unproven | unproven_excluded_inputs | unreadable_record | generation_closed | other; storage_free.js KEPT_REASONS groups the words) and, only for what a pool leaves out, advanced_group (offered as a whole saved-work group)
  * @property {number} count
  * @property {number=} manual_count  // a pool's row only, when above zero: how many of `count` can be discarded by hand (view=manual). Never subtract the pool's global manual count from a row: each row says its own.
  */
@@ -270,18 +270,20 @@
  */
 
 /**
- * One remover of a place, read fresh: a maintenance job's row or the engine's last retention pass.
+ * One remover of a place, read fresh: a maintenance job's row, a server retirer pass's row or the engine's last retention pass.
  * @typedef {Object} StorageRemover
- * @property {string} id  // engine | runtime_retirement | custody_trash | evidence_packing | record_compression
+ * @property {string} id  // engine | runtime_retirement | custody_trash | evidence_packing | record_compression | drive_settlement | copy_retirement | review_checkout_prune | session_scratch_release | engine_runtime_prune
  * @property {string} state  // a job: pending | running | done | failed | never | unsupported | unavailable; the engine: completed | held | truncated | failed | none | unavailable | unsupported
  * @property {string|null} at  // the job row's last write; the engine pass's end
  * @property {{class: string, at: string}=} last_error  // a job whose last run threw, until a run returns normally
  * @property {number=} compressed  // record_compression: files compressed so far in this place's plane
  * @property {(number|null)=} saved_bytes  // record_compression: that plane's allocation saved; null where unreported
  * @property {number=} freed_bytes  // the engine pass
- * @property {number=} held  // the engine pass: folders it held (project roots and native homes)
+ * @property {number=} released  // a retirer pass: items it released
+ * @property {{class: string, count: number, example: string, since: string}[]=} holds  // a retirer pass or the engine pass: what it keeps, by typed reason, since when
+ * @property {number=} held  // the engine pass: folders it held (project roots and native homes); a retirer pass: items held
  * @property {string=} held_since  // the earliest of those holds
- * @property {number=} errors  // the engine pass's errors
+ * @property {number=} errors  // the engine pass's errors; a retirer pass's pass-level errors
  * @property {(string|null)=} first_error
  */
 

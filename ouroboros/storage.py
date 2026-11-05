@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib
 import json
 import logging
 import os
@@ -79,6 +80,7 @@ PLACES: Tuple[Tuple[str, str, Any], ...] = (
     ("deliverables", "work", "get_deliverables_root"),
     ("work_folders", "temporary", (("task_drives",), ("state", "headless_tasks"))),
     ("working_copies", "temporary", "get_subagent_worktree_root"),
+    ("session_scratch", "temporary", "ouroboros.session_scratch.recorded_scratch_roots"),  # the folders its records name
     ("app_state", "other", (("state",),)),
     ("data_other", "other", ((),)),
     ("program", "other", "REPO_DIR"),
@@ -215,10 +217,8 @@ def _close(fd: Optional[int]) -> None:
 
 def _is_reparse(info: os.stat_result) -> bool:
     """A symlink or Windows junction/reparse point is never traversed."""
-    if stat.S_ISLNK(info.st_mode):
-        return True
-    return bool(getattr(info, "st_file_attributes", 0)
-                & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+    return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0)
+                                             & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
 
 
 def _listing_stat(entry: os.DirEntry, directory_fd: Optional[int]) -> os.stat_result:
@@ -245,9 +245,7 @@ def _identity(path: str) -> Optional[Tuple[int, int]]:
         info = os.stat(path)
     except (OSError, ValueError):
         return None
-    if stat.S_ISDIR(info.st_mode) and info.st_ino:
-        return (info.st_dev, info.st_ino)
-    return None
+    return (info.st_dev, info.st_ino) if stat.S_ISDIR(info.st_mode) and info.st_ino else None
 
 
 def _open_root(base: str, parts: Tuple[str, ...]) -> Tuple[str, Optional[int]]:
@@ -458,7 +456,10 @@ def place_roots(data_root: Any) -> List[Dict[str, Any]]:
     rows = []
     for place_id, group, spec in PLACES:
         undecided = ""
-        if isinstance(spec, str):
+        if isinstance(spec, str) and "." in spec:  # a lister of the roots its records name (session_scratch)
+            module, function = spec.rsplit(".", 1)
+            roots = [(path, ()) for path in getattr(importlib.import_module(module), function)(data)]
+        elif isinstance(spec, str):
             configured = getattr(config, spec)
             try:
                 configured = configured() if callable(configured) else configured
