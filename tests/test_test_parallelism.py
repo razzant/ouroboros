@@ -132,11 +132,11 @@ def test_the_ledger_counts_live_leases_and_the_census_counts_unleased_roots(tmp_
                                  "900 python3 -I -S safe_test.py -- python3 -m pytest")
     # A new lease unlinks the dead, reborn and unreadable rows, keeps the live ones and removes itself on close.
     lease = budget.SlotLease(3, "run_tests.py node")
-    assert {path.name for path in ledger.iterdir()} == {"100.json", "400.json", f"{me}.json"}
+    assert {path.name for path in ledger.glob("*.json")} == {"100.json", "400.json", f"{me}.json"}
     assert json.loads((ledger / f"{me}.json").read_text(encoding="utf-8")) == {
         "pid": me, "birth": "me", "workers": 3, "command": "run_tests.py node"}
     lease.close()
-    assert sorted(path.name for path in ledger.iterdir()) == ["100.json", "400.json"]
+    assert sorted(path.name for path in ledger.glob("*.json")) == ["100.json", "400.json"]
     # A child with a parent allocation holds no row. An unreadable table is disclosed, never a silent zero,
     # and without it lineage is unknown: the ancestor's lease counts too (fewer workers, never more).
     monkeypatch.setenv(budget.NESTED_WORKERS_ENV, "1")
@@ -145,6 +145,99 @@ def test_the_ledger_counts_live_leases_and_the_census_counts_unleased_roots(tmp_
     note = "process census unavailable (OSError): unleased runs were not counted"
     monkeypatch.setattr(budget, "_process_table", lambda: (None, note))
     assert budget.other_runs() == budget.HostRuns(15, ((100, "run_tests.py overlapped"), (400, "my own ancestor")), (), note)
+
+
+def test_the_ledger_directory_is_this_users_own():
+    from ouroboros.test_environment import default_temp_parent
+
+    tag = str(os.getuid()) if hasattr(os, "getuid") else budget._user_tag()
+    assert budget._ledger_dir() == default_temp_parent() / f"ouroboros-test-slots-{tag}.noindex"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership, modes and links")
+def test_a_planted_ledger_is_no_ledger_and_a_row_never_follows_a_link(tmp_path, monkeypatch):
+    """F7 / astra 8: the ledger is this user's 0700 directory in the shared temp parent. A link, a file or another
+    user's directory at its path is no ledger (nothing is read or written through it; the census still counts
+    that user's runs as unleased roots), a directory of ours left wider is narrowed, and a row is staged under a
+    fresh exclusive name and renamed over whatever sits at its own: a planted ``<pid>.json`` link is replaced,
+    the old ``<pid>.json.tmp`` staging name is never opened, so no victim behind either is truncated."""
+    ledger, me = tmp_path / "slots", os.getpid()
+    monkeypatch.setattr(budget, "_ledger_dir", lambda: ledger)
+    monkeypatch.delenv(budget.NESTED_WORKERS_ENV, raising=False)
+    monkeypatch.setattr(budget, "_process_table", lambda: ([(700, 1, ["python3", "-m", "pytest"])], ""))
+    births = {100: "b100", me: "me"}
+    monkeypatch.setattr(pl, "pid_is_alive", lambda pid: pid in births)
+    monkeypatch.setattr(pl, "process_start_time", lambda pid: births.get(pid, ""))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "100.json").write_text(json.dumps({"pid": 100, "birth": "b100", "workers": 6, "command": "planted"}))
+    ledger.symlink_to(elsewhere, target_is_directory=True)
+    assert budget._owned_ledger() is None
+    assert budget.other_runs() == budget.HostRuns(strangers=((700, "python3 -m pytest"),))  # the planted row counts nothing
+    assert budget.SlotLease(3, "x").path is None and sorted(path.name for path in elsewhere.iterdir()) == ["100.json"]
+    ledger.unlink()
+    ledger.write_text("not a directory", encoding="utf-8")
+    assert budget._owned_ledger() is None
+    ledger.unlink()
+    ledger.mkdir()
+    os.chmod(ledger, 0o755)
+    assert budget._owned_ledger() == ledger and os.lstat(ledger).st_mode & 0o777 == 0o700
+    real = os.getuid()
+    with monkeypatch.context() as other_user:
+        other_user.setattr(os, "getuid", lambda: real + 1)
+        assert budget._owned_ledger() is None
+    victim = tmp_path / "victim.json"
+    victim.write_text("keep", encoding="utf-8")
+    (ledger / f"{me}.json").symlink_to(victim)
+    (ledger / f"{me}.json.tmp").symlink_to(victim)
+    lease = budget.SlotLease(3, "run_tests.py x")
+    row = ledger / f"{me}.json"
+    assert lease.path == row and not row.is_symlink() and os.lstat(row).st_mode & 0o777 == 0o600
+    assert json.loads(row.read_text(encoding="utf-8"))["workers"] == 3
+    assert victim.read_text(encoding="utf-8") == "keep" and (ledger / f"{me}.json.tmp").is_symlink()
+    # The exclusive staging file was renamed into the row; the lock file is the directory's only other entry.
+    assert sorted(path.name for path in ledger.iterdir()) == [f"{me}.json", f"{me}.json.tmp", "ledger.lock"]
+    lease.close()
+    assert not row.exists()
+
+
+def test_two_runs_started_at_once_admit_under_one_ledger_lock(tmp_path, monkeypatch):
+    """Astra 8: admission read the ledger and the row was written afterwards, so two runs started at once both
+    saw an empty ledger and each took the whole machine. ``reserve`` holds the ledger's lock from the census to
+    the row: a run arriving while another reserves waits the milliseconds that takes, then sees its row."""
+    ledger = tmp_path / "slots"
+    monkeypatch.setattr(budget, "_ledger_dir", lambda: ledger)
+    monkeypatch.delenv(budget.NESTED_WORKERS_ENV, raising=False)
+    assert budget._owned_ledger() == ledger
+    child_code = textwrap.dedent(f"""
+        import json, os, sys
+        from pathlib import Path
+        sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})
+        from ouroboros import test_parallelism as budget
+        os.environ.pop(budget.NESTED_WORKERS_ENV, None)  # the test seam gives every child one slot; this one is a run of its own
+        ledger = Path({str(ledger)!r})
+        budget._ledger_dir = lambda: ledger
+        budget.physical_memory = lambda: budget.MemorySnapshot(2 ** 40, 2 ** 40)
+        budget._process_table = lambda: ([], "")
+        print("reserving", flush=True)
+        admitted, lease = budget.reserve("child", 8)
+        rows = {{json.loads(p.read_text())["pid"]: json.loads(p.read_text())["workers"] for p in ledger.glob("*.json")}}
+        print(json.dumps({{"workers": admitted.workers, "held": admitted.host.slots, "rows": rows}}), flush=True)
+        lease.close()
+    """)
+    env = {key: value for key, value in os.environ.items() if key not in (budget.NESTED_WORKERS_ENV, budget.WORKERS_ENV)}
+    with budget._ledger_lock(ledger):  # another run, mid-reservation
+        child = subprocess.Popen([sys.executable, "-c", child_code], stdout=subprocess.PIPE, text=True, env=env)
+        assert child.stdout.readline().strip() == "reserving"
+        time.sleep(0.5)  # the child is at the lock by now (or, without one, long past its admission)
+        mine = budget.SlotLease(6, "parent", locked=True)
+    try:
+        out, _ = child.communicate(timeout=120)
+    finally:
+        mine.close()
+    assert child.returncode == 0, out
+    assert json.loads(out.strip().splitlines()[-1]) == {
+        "workers": 2, "held": 6, "rows": {str(os.getpid()): 6, str(child.pid): 2}}
 
 
 @pytest.mark.parametrize("capacity", [2, 3])

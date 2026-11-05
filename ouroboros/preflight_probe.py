@@ -130,16 +130,18 @@ def _recorded_session(temp_root: pathlib.Path) -> Optional[dict]:
     return recorded if isinstance(recorded, dict) else None
 
 
-def _install_worker_probe(temp_root: pathlib.Path) -> str:
+def _install_worker_probe(temp_root: pathlib.Path, admitted=None) -> str:
     """Write the worker-count plugin and return the nonce module name to load.
 
     The nonce is what makes the probe candidate-independent: see the note on
     ``_WORKER_PROBE_MODULE``. Callers must pass the RETURNED name to `-p`.
+    ``admitted`` is the admission the caller reserved (the gate's, with its ledger row); without one the
+    probe admits here.
     """
     module = f"{_WORKER_PROBE_MODULE}_{uuid.uuid4().hex}"
     probe = _probe_dir(temp_root)
     probe.mkdir(parents=True, exist_ok=True)
-    admitted = _preflight_admission()
+    admitted = _preflight_admission() if admitted is None else admitted
     (probe / "admitted-workers").write_text(str(admitted.workers), encoding="utf-8")
     # The admission's facts for the run's evidence: what the host's other runs held when the gate admitted.
     (probe / "admission.json").write_text(json.dumps({

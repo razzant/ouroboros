@@ -1292,14 +1292,15 @@ def _run_hermetic_pytest(
     selection, subject, inventory, lease = None, None, {}, None
     try:
         from ouroboros.test_evidence import DURATIONS_POINTER, EVIDENCE_POINTER
-        from ouroboros.test_parallelism import SlotLease
+        from ouroboros.test_parallelism import reserve
         (temp_root / EVIDENCE_POINTER).write_text(str(evidence["path"]), encoding="utf-8")
         if (durations := _durations_target(ctx)) is not None:  # every session of this gate keeps it current
             (temp_root / DURATIONS_POINTER).write_text(str(durations), encoding="utf-8")
+        # One reservation under the ledger's lock: the admission and this run's row, which stays leased in the
+        # host ledger until the run ends, whatever the verdict.
+        admitted, lease = reserve("hermetic gate")
         # Install before compiling specs: -p must name the actual nonce module.
-        probe_module = _install_worker_probe(temp_root)
-        # The admitted workers stay leased in the host ledger until this run ends, whatever the verdict.
-        lease = SlotLease(_allocated_worker_count(temp_root), "hermetic gate")
+        probe_module = _install_worker_probe(temp_root, admitted)
         evidence["workers"] = _recorded_admission(temp_root)
         passes = _preflight_pass_specs(pytest_args, probe_module=probe_module)
         # Before ANY candidate code is on disk, let alone imported.

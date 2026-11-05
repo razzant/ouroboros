@@ -182,8 +182,8 @@ def preflight_timeout_diagnostics(request, monkeypatch, tmp_path):
         original_probe = preflight_runner._install_worker_probe
         original_kill = preflight_runner._terminate_preflight_tree
 
-        def probe(temp_root):
-            module = original_probe(temp_root)
+        def probe(temp_root, *args, **kwargs):
+            module = original_probe(temp_root, *args, **kwargs)
             path = preflight_runner._probe_dir(temp_root) / (module + ".py")
             # GIL-held stack samples (tests/stack_samples.py says what they cannot see), each
             # process's in its own file beside its event log: one writer per file, whole lines.

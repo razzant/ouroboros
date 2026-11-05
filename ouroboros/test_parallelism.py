@@ -5,20 +5,24 @@ watches its tree for overload. A failed memory probe admits one worker.
 
 Honest workers (owner 10.10, 2026-11-05): a run admits the CPU default (or the
 documented request) within measured memory, minus what the OTHER live test runs
-on this host hold: the slots their owners leased in the host ledger
-(``<default_temp_parent()>/ouroboros-test-slots.noindex/<pid>.json``: pid, birth
-token, admitted workers; ``SlotLease``) and one conservative slot per unleased
-``pytest``/``node --test`` root the process census sees. Floor one; a run never
-waits for a free slot. A child with a parent allocation reads neither: its
-parent accounted for its slots.
+on this host hold: the slots their owners leased in the host ledger (this user's
+own 0700 directory ``<default_temp_parent()>/ouroboros-test-slots-<uid>.noindex``,
+one ``<pid>.json`` row each: pid, birth token, admitted workers; ``SlotLease``)
+and one conservative slot per unleased ``pytest``/``node --test`` root the
+process census sees. ``reserve`` reads the ledger, admits and publishes the row
+under the ledger's one lock, so two runs started at once never both take the
+whole machine. Floor one; a run never waits for a free slot. A child with a
+parent allocation reads neither: its parent accounted for its slots.
 """
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 from typing import Mapping, Optional, Sequence
@@ -177,15 +181,82 @@ def admission(cpu_workers: Optional[int] = None, *, env: Optional[Mapping[str, s
 
 
 # ── The host ledger and the census ──────────────────────────────────────────────────────
-SLOT_LEDGER_DIR = "ouroboros-test-slots.noindex"
+SLOT_LEDGER_DIR = "ouroboros-test-slots-{user}.noindex"  # one directory per user, 0700 (`_owned_ledger`)
 _TEST_EXECUTABLES = frozenset({"pytest", "py.test", "pytest.exe"})
 _NODE_EXECUTABLES = frozenset({"node", "node.exe"})
+
+
+def _user_tag() -> str:
+    """This user in the ledger directory's name: the uid, or the login where there is none (Windows)."""
+    if hasattr(os, "getuid"):
+        return str(os.getuid())
+    import getpass
+
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", getpass.getuser() or "user")
 
 
 def _ledger_dir() -> Path:
     from ouroboros.test_environment import default_temp_parent
 
-    return default_temp_parent() / SLOT_LEDGER_DIR
+    return default_temp_parent() / SLOT_LEDGER_DIR.format(user=_user_tag())
+
+
+def _owned_ledger() -> Optional[Path]:
+    """The ledger directory as this user's own, 0700: None when the path is a link, a file or another user's
+    (a planted entry in a shared temp parent), so no row is read or written through it; the census still
+    counts that user's runs. A directory of ours left wider than 0700 is narrowed."""
+    path = _ledger_dir()
+    try:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        facts = os.lstat(path)
+        if not stat.S_ISDIR(facts.st_mode):
+            return None
+        if hasattr(os, "getuid"):
+            if facts.st_uid != os.getuid():
+                return None
+            if facts.st_mode & 0o077:
+                os.chmod(path, 0o700)
+    except OSError:
+        return None
+    return path
+
+
+@contextlib.contextmanager
+def _ledger_lock(directory: Optional[Path]):
+    """The ledger's one lock while a run reads it, admits and publishes its row: two runs started at once
+    would otherwise both see an empty ledger and both take the whole machine. Held for the milliseconds of
+    one census and one write, never while a run waits for a slot (owner 10.10: a run never waits)."""
+    if directory is None:
+        yield
+        return
+    from ouroboros import platform_layer as pl
+
+    try:
+        descriptor = os.open(directory / "ledger.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError:
+        yield  # no lock to take: the row write below answers for itself
+        return
+    try:
+        pl.file_lock_exclusive(descriptor)
+        yield
+    finally:
+        try:
+            pl.file_unlock(descriptor)
+        except OSError:
+            pass
+        os.close(descriptor)
+
+
+def reserve(command: str, cpu_workers: Optional[int] = None, *,
+            env: Optional[Mapping[str, str]] = None) -> tuple[Admission, "SlotLease"]:
+    """Admit this run's workers and publish its row as ONE reservation under the ledger lock: no other run's
+    census, admission or write comes between this run's. A child with a parent allocation reads no ledger
+    and holds no row."""
+    env = os.environ if env is None else env
+    directory = None if NESTED_WORKERS_ENV in env else _owned_ledger()
+    with _ledger_lock(directory):
+        admitted = admission(cpu_workers, env=env)
+        return admitted, SlotLease(admitted.workers, command, locked=True)
 
 
 def _read_lease(path: Path) -> Optional[dict]:
@@ -211,26 +282,45 @@ class SlotLease:
     and removes it when the run ends; a lease covers the owner's whole process tree. A row whose pid is
     dead or reborn is ignored by every reader and unlinked by the next writer, so nothing piles up: one
     row of about a hundred bytes per live owner. A child with a parent allocation holds no row (its
-    parent's lease covers it), and a ledger the host refuses to write costs nobody a slot: the census
-    still sees the run as one unleased root.
+    parent's lease covers it), and a ledger the host refuses to write, or one that is not this user's
+    own directory (``_owned_ledger``), costs nobody a slot: the census still sees the run as one
+    unleased root.
     """
 
-    def __init__(self, workers: int, command: str = ""):
-        from ouroboros import platform_layer as pl
-
+    def __init__(self, workers: int, command: str = "", *, locked: bool = False):
+        """``locked``: the caller holds the ledger lock already (``reserve``); otherwise the write takes it."""
         self.path: Optional[Path] = None
+        self.workers, self.command = int(workers), command
         if NESTED_WORKERS_ENV in os.environ:
             return
-        path = _ledger_dir() / f"{os.getpid()}.json"
-        row = {"pid": os.getpid(), "birth": pl.process_start_time(os.getpid()), "workers": int(workers),
-               "command": command}
+        directory = _owned_ledger()
+        if directory is None:
+            return
+        if locked:
+            self._publish(directory)
+        else:
+            with _ledger_lock(directory):
+                self._publish(directory)
+
+    def _publish(self, directory: Path) -> None:
+        """Sweep the dead rows and write ours: a fresh staging file opened exclusively without following a
+        link (nothing planted under our name is truncated), then renamed over the row (a planted link there
+        is replaced, not followed)."""
+        import uuid
+
+        from ouroboros import platform_layer as pl
+
+        path = directory / f"{os.getpid()}.json"
+        row = {"pid": os.getpid(), "birth": pl.process_start_time(os.getpid()), "workers": self.workers,
+               "command": self.command}
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            for stale in path.parent.glob("*.json"):
+            for stale in directory.glob("*.json"):
                 if stale != path and ((old := _read_lease(stale)) is None or not _lease_live(old)):
                     stale.unlink(missing_ok=True)
-            staging = path.with_name(path.name + ".tmp")
-            staging.write_text(json.dumps(row), encoding="utf-8")
+            staging = directory / f"{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+            descriptor = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(json.dumps(row))
             os.replace(staging, path)
         except OSError:
             return
@@ -310,8 +400,9 @@ def other_runs() -> HostRuns:
     parents = {pid: ppid for pid, ppid, _ in table} if table else {}
     mine = {me, *_ancestors(me, parents)}
     slots, leases = 0, []
+    directory = _owned_ledger()
     try:
-        rows = sorted(_ledger_dir().glob("*.json"))
+        rows = sorted(directory.glob("*.json")) if directory is not None else []
     except OSError:
         rows = []
     for path in rows:

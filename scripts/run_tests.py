@@ -46,16 +46,21 @@ _OUTER_WORKER_KEYS = ("PYTEST_XDIST_WORKER", "PYTEST_XDIST_TESTRUNUID", "PYTEST_
 _INTERRUPT_EXPORT_SEC, _INTERRUPT_TERM_SEC = 7, 2  # busy xdist workers already spend ~5 s in teardown
 
 
-def _admission():
-    """xdist's CPU default within the physical and inherited allocation, minus what other runs hold."""
-    from ouroboros.test_parallelism import admission
-
-    try:  # xdist prefers physical cores whenever psutil is importable
+def _cpu_default() -> int:
+    """xdist's own CPU default: physical cores whenever psutil is importable, else the logical count."""
+    try:
         import psutil
         physical = psutil.cpu_count(logical=False)
     except Exception:
         physical = None
-    return admission(physical or os.cpu_count() or 1)
+    return physical or os.cpu_count() or 1
+
+
+def _admission():
+    """xdist's CPU default within the physical and inherited allocation, minus what other runs hold."""
+    from ouroboros.test_parallelism import admission
+
+    return admission(_cpu_default())
 
 
 def _workers() -> int:
@@ -99,13 +104,14 @@ def battery_commands() -> list[tuple[str, list[str]]]:
 def _run(label: str, argv: list[str], cwd: pathlib.Path) -> int:
     from ouroboros.preflight_node import node_environment
     from ouroboros.process_containment import ProcessContainer
-    from ouroboros.test_parallelism import NESTED_WORKERS_ENV, SlotLease, bounded_test_command
+    from ouroboros.test_parallelism import NESTED_WORKERS_ENV, bounded_test_command, reserve
 
     started = time.monotonic()
     env = node_environment(os.environ)
     for key in _OUTER_WORKER_KEYS:  # a battery is a run of its own, never a worker of the session that started it
         env.pop(key, None)
-    admitted = _admission()
+    # One reservation: the admission and this pass's row in the host ledger, under the ledger's lock.
+    admitted, lease = reserve(f"run_tests.py {label}", _cpu_default())
     env["PYTEST_XDIST_AUTO_NUM_WORKERS"] = str(admitted.workers)
     env[NESTED_WORKERS_ENV] = env["PYTEST_XDIST_AUTO_NUM_WORKERS"]
     argv = bounded_test_command(argv, env)
@@ -113,7 +119,6 @@ def _run(label: str, argv: list[str], cwd: pathlib.Path) -> int:
     if disclosure := admitted.host.disclosure():
         print(f"=== {label}: {admitted.workers} worker(s); {disclosure}", flush=True)
     container = ProcessContainer(lifeline=True, overload=True)
-    lease = SlotLease(admitted.workers, f"run_tests.py {label}")  # this run's row in the host ledger
     proc = None
     try:
         proc = container.spawn(argv, cwd=str(cwd), env=env)
