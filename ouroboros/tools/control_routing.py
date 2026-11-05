@@ -169,11 +169,16 @@ def _finish_swarm_handoff(
     status: str,
     reason: str = "",
 ) -> str:
-    """Preserve the first Presence admission receipt for its terminal consumers."""
+    """Preserve the first Presence admission receipt for its terminal consumers.
+
+    The owner's private start takes no part: it is no handoff of this conversation, so
+    whatever its outcome, the slot stays free for an outward start or with the one that holds it.
+    """
+    from ouroboros.presence_owner_contact import DESTINATION_OWNER
 
     metadata = getattr(ctx, "task_metadata", {})
     presence_turn = isinstance(metadata, dict) and bool(metadata.get("presence"))
-    if presence_turn and not isinstance(
+    if presence_turn and evt.get("destination") != DESTINATION_OWNER and not isinstance(
         getattr(ctx, "_swarm_handoff_attempt", None), dict
     ):
         ctx._swarm_handoff_attempt = {
@@ -222,6 +227,36 @@ def _task_card_title_arg(title: str, verb: str) -> tuple[str, str]:
     )
 
 
+def _start_destination(ctx: ToolContext, carrier: Dict[str, Any], destination: Any,
+                       owner_quote: Any) -> tuple[Dict[str, Any], str]:
+    """``(private start's event fields, refusal)`` of a start's named destination, read before any effect.
+
+    A caller holding Presence authority (``carrier``) names where each new work belongs; omitted, unknown
+    or contradictory choices refuse and the mind chooses again. Work without one has nothing to choose.
+    """
+    from ouroboros.presence_owner_contact import (
+        DESTINATION_OWNER,
+        DESTINATION_PLACE,
+        ContactRequestInvalid,
+        private_start_fields,
+    )
+
+    refused = "⚠️ TOOL_ARG_ERROR (start_task): {} Nothing was scheduled."
+    if not carrier:
+        return {}, (refused.format("destination and owner_quote apply only to a start from a Presence "
+                                   "conversation or work acting for a place.") if destination or owner_quote else "")
+    if destination not in (DESTINATION_PLACE, DESTINATION_OWNER):
+        return {}, refused.format(
+            f"destination must be {DESTINATION_PLACE!r} (this place's work) or {DESTINATION_OWNER!r} (the owner's "
+            "private work, with owner_quote naming their held answer to a private question).")
+    if destination == DESTINATION_PLACE:
+        return {}, refused.format("owner_quote belongs to destination='owner'.") if owner_quote else ""
+    try:
+        return private_start_fields(ctx, owner_quote), ""
+    except ContactRequestInvalid as exc:
+        return {}, refused.format(str(exc))
+
+
 def _start_task(
     ctx: ToolContext,
     objective: str,
@@ -235,6 +270,8 @@ def _start_task(
     context_requires_self_body_docs: bool = False,
     reasoning_effort: Any = None,
     context_requires_development: Optional[bool] = None,
+    destination: str = "",
+    owner_quote: str = "",
 ) -> str:
     """Start separate new work; the caller keeps its identity and obligations."""
     effort_fields, effort_error, effort_note = _root_effort_arg(reasoning_effort, "start_task")
@@ -246,6 +283,14 @@ def _start_task(
     card_title, title_error = _task_card_title_arg(title, "start_task")
     if title_error:
         return title_error
+    metadata = getattr(ctx, "task_metadata", {})
+    presence_carrier = presence_root_carrier(metadata, task_contract=getattr(ctx, "task_contract", None))
+    private, destination_error = _start_destination(ctx, presence_carrier, destination, owner_quote)
+    if destination_error:
+        return destination_error
+    chosen: Dict[str, Any] = {"destination": destination} if presence_carrier else {}
+    if private:
+        chosen["owner_quote"] = owner_quote
     from ouroboros.project_facts import (
         explicit_project_id_ok,
         project_id_from_display_name,
@@ -270,6 +315,11 @@ def _start_task(
     else:
         # The caller's own room supplies the default, never a sibling's origin.
         pid = sanitize_project_id(_inherited_project_scope(ctx))
+    if private and not str(project_id or "").strip() and not display_name:
+        # A private owner start must not silently inherit the Presence project's room.
+        # Without an explicit owner project, ordinary owner work starts in Main;
+        # a selected project is still honored above.
+        pid = ""
     try:
         current_chat_id = int(getattr(ctx, "current_chat_id", None) or 0)
     except (TypeError, ValueError):
@@ -317,7 +367,7 @@ def _start_task(
         )
         return _finish_swarm_handoff(
             ctx,
-            {"task_id": tid, "routing_token": routing_token},
+            {"task_id": tid, "routing_token": routing_token, **chosen},
             response,
             status="rejected",
             reason=f"worker_pool_unavailable:{disabled_reason}",
@@ -354,10 +404,13 @@ def _start_task(
             if isinstance(getattr(ctx, "task_metadata", {}), dict) else []
         ),
         "ts": utc_now_iso(),
+        **chosen,
     }
-    metadata = getattr(ctx, "task_metadata", {})
-    presence_carrier = presence_root_carrier(metadata, task_contract=getattr(ctx, "task_contract", None))
-    if presence_carrier:
+    if private:
+        # The owner's work this answer asks for: the same ordinary start and relation as a private
+        # late answer's (``presence_owner_contact.private_start_fields``), nothing of this caller's.
+        evt.update(private)
+    elif presence_carrier:
         contract = dict(getattr(ctx, "task_contract", {}) or {})
         evt.update({**presence_carrier, "task_contract": contract})
         if "capability_ceiling" in contract:
@@ -382,10 +435,11 @@ def _start_task(
     # stripping, the wake chooses project/workspace like any Main turn (В9').
     from ouroboros.consciousness_authority import consciousness_origin_metadata
 
-    evt.update(consciousness_origin_metadata({**metadata, "task_id": str(getattr(ctx, "task_id", "") or "")}, started_root=True))
-    _attach_origin_from_metadata(ctx, evt)
+    if not private:
+        evt.update(consciousness_origin_metadata({**metadata, "task_id": str(getattr(ctx, "task_id", "") or "")}, started_root=True))
+        _attach_origin_from_metadata(ctx, evt)
+        _attach_client_surface(ctx, evt)
     _attach_drafted_objective(ctx, evt)
-    _attach_client_surface(ctx, evt)
     mode, confirmation = _emit_and_wait_for_routing(ctx, evt)
     confirmation_status = str(confirmation.get("status") or "unconfirmed")
     reason = str(confirmation.get("reason") or "")
@@ -401,6 +455,8 @@ def _start_task(
             "The task now runs independently, and follow-up chat can steer it. "
             "Use wait_task/get_task_result if its result "
             "is needed in this conversation."
+            + (" It is the owner's private work: nothing it does reaches this conversation by itself, "
+               "and it is not this turn's deferred work." if private else "")
             + (f"\n{effort_note}" if effort_note else "")
         )
         return _finish_swarm_handoff(ctx, evt, response, status="scheduled")

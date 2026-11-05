@@ -342,7 +342,7 @@ def _exercise_late_owner(r, task, monkeypatch):
     assert presence_related_work(r.admission.binding_id, child)
     assert "presence" not in child["metadata"]
     assert presence_caller_binding(ctx) is None, "starting related work cannot narrow its owner"
-    _exercise_related_root(r, ctx, child, host, monkeypatch)
+    _exercise_related_root(r, ctx, child, host, monkeypatch, task["metadata"]["late_answer"]["task_id"])
 
 
 def _pooled_metadata(row):
@@ -352,7 +352,7 @@ def _pooled_metadata(row):
     return {**row["metadata"], **{key: row[key] for key in carried if row.get(key) not in (None, "")}}
 
 
-def _exercise_related_root(r, owner, root, host, monkeypatch):
+def _exercise_related_root(r, owner, root, host, monkeypatch, source_task):
     """#2482: the root the owner's private late answer started is the owner's ordinary work.
 
     It writes to Main, may ask the owner for a secret, answers a relay, keeps its own words, publishes
@@ -381,7 +381,7 @@ def _exercise_related_root(r, owner, root, host, monkeypatch):
     from supervisor.events import _handle_promote_chat_to_task, _handle_steer_task
     from tests.test_presence_own_work import OTHER, _registry, _supervisor
 
-    binding, source_task = r.admission.binding_id, owner.task_metadata["late_answer"]["task_id"]
+    binding = r.admission.binding_id
     # Admitted as the owner's start: its own contract, never the answering turn's, and no Presence authority.
     assert "presence_binding_authority" not in root["metadata"] and not is_presence_task(root)
     assert root["task_contract"]["context_requires_self_body_docs"] is True

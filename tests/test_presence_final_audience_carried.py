@@ -47,7 +47,7 @@ def test_a_root_promoted_from_a_carried_turn_names_its_conversation_and_keeps_it
     carried = {**turn, "_execution_owner": {"kind": "presence", "lane": LANE_CONVERSATION, "executor": EXECUTOR_WORKER}}
     registry._ctx.event_queue = task_event_queue(types.SimpleNamespace(put=supervisor_side, put_nowait=supervisor_side),
                                                  carried)
-    out = _start_task(registry._ctx, "Compile the requested report", title="Report")
+    out = _start_task(registry._ctx, "Compile the requested report", title="Report", destination="place")
     assert out.startswith("OK: task"), out
     [promoted] = pending
     assert promoted["metadata"]["presence"]["event"] == turn["metadata"]["presence"]["event"]

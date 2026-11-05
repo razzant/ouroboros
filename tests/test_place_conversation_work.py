@@ -151,7 +151,8 @@ def promote(world, *, objective="Check the three services", event=None, source="
     focus = capture_presence_event(admission, event, drive_root=world.data)
     tool_ctx = SimpleNamespace(pending_events=[], event_queue=None, current_chat_id=focus["chat_id"], drive_root=world.data,
                                task_metadata=dict(focus["metadata"]), task_contract=focus["task_contract"])
-    assert _start_task(tool_ctx, objective, title=objective, expected_output="A report").startswith("OK: task")
+    assert _start_task(tool_ctx, objective, title=objective, expected_output="A report",
+                       destination="place").startswith("OK: task")
     def enqueued(task):  # the supervisor's admission lane stands here: what it pops, then the row it queues
         for internal in ("_admission_token", "_require_unique_task_id", "_require_worker_pool"):
             task.pop(internal, None)

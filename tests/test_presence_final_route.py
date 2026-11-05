@@ -204,7 +204,7 @@ def test_a_first_attempt_whose_confirmation_timed_out_is_unknown_then_routeless_
         # The supervisor's answer never reached the producer in time: the real timeout's outcome.
         timed_out.setattr("ouroboros.tools.control_routing._emit_and_wait_for_routing",
                           lambda _ctx, evt: sent.append(evt) or ("live", {"status": "unconfirmed", "reason": "confirmation_timeout"}))
-        assert _start_task(ctx, "Compile the requested report", title="Report").startswith("Not confirmed yet")
+        assert _start_task(ctx, "Compile the requested report", title="Report", destination="place").startswith("Not confirmed yet")
     assert ctx._swarm_handoff_attempt["status"] == "unconfirmed" and _handoff_ref(ctx) == ""
     assert "presence_work_ref" not in (load_task_result(root, turn["id"]).get("metadata") or {})  # no reference yet
 

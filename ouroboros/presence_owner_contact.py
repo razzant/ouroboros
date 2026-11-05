@@ -2,7 +2,9 @@
 
 The tools supply words and an optional retry key, never an origin or destination.
 Task/quiz records retain that origin separately from the owner's eventual answer.
-This module neither admits external work nor sends anything to a connector.
+This module neither admits external work nor sends anything to a connector. It also
+reads a live answer as the owner's origin of a private start (``private_start_fields``);
+the start itself is ``start_task``'s, its admission the supervisor's.
 """
 from __future__ import annotations
 
@@ -15,6 +17,9 @@ from urllib.parse import urlsplit
 log = logging.getLogger(__name__)
 
 MAIN_CONTACT_VERSION = 1  # Host-bound private messages, quizzes and live/late answer routing.
+# Where a new separate work from a Presence caller belongs. The mind names one for every start
+# (the owner's choice A of 4 November 2026): no default, and no reading of its objective or title.
+DESTINATION_PLACE, DESTINATION_OWNER = "place", "owner"
 
 
 class ContactRequestConflict(ValueError):
@@ -23,6 +28,13 @@ class ContactRequestConflict(ValueError):
 
 class ContactRequestInvalid(ValueError):
     """The caller must correct its arguments before another attempt."""
+
+
+def _delegated(ctx) -> bool:
+    meta = getattr(ctx, "task_metadata", {}) or {}
+    contract = getattr(ctx, "task_contract", {}) or {}
+    return any(data.get("parent_task_id") or data.get("delegation_role") not in (None, "", "root")
+               for data in (meta, contract, contract.get("lineage") or {}))
 
 
 def contact_origin(ctx, *, allow_unattributed: bool = False) -> dict | None:
@@ -34,11 +46,8 @@ def contact_origin(ctx, *, allow_unattributed: bool = False) -> dict | None:
     binding = presence_caller_binding(ctx)
     if binding is None:
         return None
-    meta = getattr(ctx, "task_metadata", {}) or {}
-    contract = getattr(ctx, "task_contract", {}) or {}
-    for data in (meta, contract, contract.get("lineage") or {}):
-        if data.get("parent_task_id") or data.get("delegation_role") not in (None, "", "root"):
-            raise ValueError("a delegated task reports to its parent")
+    if _delegated(ctx):
+        raise ValueError("a delegated task reports to its parent")
     task_id = str(getattr(ctx, "task_id", "") or "")
     task = load_task_result(canonical_data_root(ctx), task_id, strict=True) if task_id else None
     presence = ((task or {}).get("metadata") or {}).get("presence") or {}
@@ -88,6 +97,94 @@ def private_main_row(row: dict) -> bool:
     quiz = row.get("quiz") if isinstance(row.get("quiz"), dict) else {}
     return row.get("chat_id") == 1 and private_main_contact(
         row if row.get("presence_contact") else quiz, row.get("task_id"))
+
+
+def _private_answer(row) -> bool:
+    return isinstance(row, dict) and row.get("type") == "quiz_answer" and private_main_row(row)
+
+
+def private_answer_row(root, ref) -> dict:
+    """The canonical Main row of the owner's answer to a private question, else ``{}``.
+
+    ``ref`` hashes the owner's words on that card at that time, and history outlives the quiz
+    block. A store that cannot answer raises ``StoreError``: unknown stays the caller's to say."""
+    from ouroboros.owner_relay import _owner_row
+    from ouroboros.project_dialogue import owner_message_ref_is_valid, resolve_owner_message_source
+
+    row = resolve_owner_message_source(root, dict(ref)) if owner_message_ref_is_valid(ref) else None
+    return row if _private_answer(row) and _owner_row(row) else {}
+
+
+def private_start_fields(ctx, handle) -> dict:
+    """What a Presence caller's start of the owner's private work puts on its event, or ``ContactRequestInvalid``.
+
+    ``handle`` names an answer this work holds: the owner's reply to the private question this work
+    or its recorded predecessor asked for the same binding. The event then asks for the root a private
+    late answer starts (``dialogue_provenance.presence_root_relation``): the owner's own words from
+    that Main row by value, the relation its place reads and stops it by, and the Main room. Nothing of
+    the caller rides along (speaker, binding authority, contract, focus, attachments), so the caller's
+    limits stay on the caller, and its live metadata is never written.
+    """
+    from ouroboros.consciousness_authority import WORK_KIND_OWNER
+    from ouroboros.dialogue_provenance import PRESENCE_BINDING_RELATION_KEY, presence_caller_binding, private_contact
+    from ouroboros.owner_quiz import question_task_owned_by
+    from ouroboros.owner_relay import held_owner_messages, owner_text
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.store import StoreError
+    from ouroboros.tool_access import canonical_data_root
+
+    if "capability_ceiling" in (getattr(ctx, "task_contract", None) or {}):
+        raise ContactRequestInvalid("work under a legacy capability ceiling stays the place's; use destination='place'.")
+    if _delegated(ctx):
+        raise ContactRequestInvalid("a delegated task reports to its parent; only the work that asked may start this.")
+    held = held_owner_messages(ctx)
+    row = held.get(handle) if isinstance(handle, str) else None
+    if not _private_answer(row):
+        answers = json.dumps([address for address, value in held.items() if _private_answer(value)], ensure_ascii=False)
+        raise ContactRequestInvalid(f"owner_quote must be one held answer to a private question; held: {answers}.")
+    root, contact = canonical_data_root(ctx), private_contact(row)
+    if contact.get("binding_id") != presence_caller_binding(ctx):
+        raise ContactRequestInvalid("that answer belongs to another place's question.")
+    try:
+        owned = question_task_owned_by(root, str(contact.get("task_id") or ""),
+                                      str(getattr(ctx, "task_id", "") or ""))
+    except StoreError as exc:
+        raise ContactRequestInvalid(f"that answer's question ownership cannot be read now ({type(exc).__name__}); "
+                                    "retry when it can.") from exc
+    if not owned:
+        raise ContactRequestInvalid("that answer replies to a question another work asked.")
+    words = owner_text(row)
+    ref = build_owner_message_ref(chat_id=row["chat_id"], client_message_id=row.get("client_message_id"),
+                                  ts=row.get("ts"), text=words)
+    try:
+        verified = private_answer_row(root, ref)
+    except StoreError as exc:
+        raise ContactRequestInvalid(f"that answer's saved row cannot be read now ({type(exc).__name__}); "
+                                    "retry when it can.") from exc
+    if not verified:
+        raise ContactRequestInvalid("that answer has no matching saved row.")
+    return {"chat_id": ref["chat_id"], "client_message_id": ref["client_message_id"], "attachment_uploads": [],
+            "source_ref": ref, "source_text": words, "work_kind": WORK_KIND_OWNER,
+            PRESENCE_BINDING_RELATION_KEY: {"binding_id": contact["binding_id"]}}
+
+
+def private_start_refusal(root, evt: dict) -> str:
+    """Admission's own read of a private start, before any project, source or workspace effect: its refusal
+    code, else ``""``. The start must name a saved answer of the binding it relates to and carry no Presence
+    authority; the producer's facts are claims here, and any other start is not this reader's."""
+    from ouroboros.dialogue_provenance import PRESENCE_BINDING_RELATION_KEY, presence_root_carrier, private_contact
+    from ouroboros.store import StoreError
+
+    if evt.get("destination") != DESTINATION_OWNER:
+        return ""
+    relation = evt.get(PRESENCE_BINDING_RELATION_KEY)
+    try:
+        row = private_answer_row(root, evt.get("source_ref"))
+    except StoreError:
+        return "private_owner_source_unavailable"
+    related = isinstance(relation, dict) and bool(row) and relation.get("binding_id") == private_contact(row).get("binding_id")
+    carried = presence_root_carrier(evt, task_contract=evt.get("task_contract"))
+    return "" if related and not carried else "private_owner_source_invalid"
 
 
 def send_main_message(ctx, text: str, origin: dict, request_id: str = "") -> str:

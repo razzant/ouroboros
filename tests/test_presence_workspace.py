@@ -184,7 +184,7 @@ def test_focus_promotion_uses_ordinary_scope_and_followup_keeps_admitted_folder(
     monkeypatch.setattr(workers, "DRIVE_ROOT", installed.data)
     monkeypatch.setattr(workers, "REPO_DIR", installed.repo)
     result = _start_task(ctx, "Finish the report", title="Report finish", workspace_root=str(installed.workspace),
-                                   project_name="Selected")
+                                   project_name="Selected", destination="place")
     assert result.startswith("OK: task"), result
     event = ctx.pending_events[0]
     enqueued = []
@@ -251,7 +251,8 @@ def test_promotion_with_an_unusable_presence_folder_returns_the_typed_repair_and
     _confirm_promote(monkeypatch)
     monkeypatch.setattr(workers, "DRIVE_ROOT", installed.data)
     monkeypatch.setattr(workers, "REPO_DIR", installed.repo)
-    result = _start_task(ctx, "Finish the report", title="Report finish", workspace_root=str(installed.workspace))
+    result = _start_task(ctx, "Finish the report", title="Report finish", workspace_root=str(installed.workspace),
+                         destination="place")
     assert result.startswith("OK: task"), result
     event = ctx.pending_events[0]
     shutil.rmtree(installed.workspace)  # the admitted folder disappears before admission

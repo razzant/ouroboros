@@ -208,7 +208,7 @@ def test_a_root_the_still_narrowed_run_starts_keeps_that_runs_carrier_and_proves
     monkeypatch.setattr("ouroboros.tools.control_routing._promotion_pool_disabled_from_snapshot", lambda _ctx: "")
     monkeypatch.setattr("ouroboros.tools.control_routing._emit_and_wait_for_routing",
                         lambda _ctx, evt: (started.append(evt) or "live", {"status": "scheduled"}))
-    assert _start_task(run, "Follow the lead", title="Lead").startswith("OK: task")
+    assert _start_task(run, "Follow the lead", title="Lead", destination="place").startswith("OK: task")
     assert started[0]["presence_binding_authority"] == AUTHORITY["presence_binding_authority"]
     assert "presence_binding_relation" not in started[0] and "task_contract" in started[0]
 

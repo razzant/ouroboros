@@ -108,6 +108,8 @@ _START_TASK_DESCRIPTION = (
     "Give the separate work a short title and objective. project_name creates a named room; "
     "project_id selects an existing room. workspace_root selects its folder; "
     "workspace='none' opts out of the room's default folder. "
+    "From a Presence conversation or work acting for a place, name where each new work belongs with destination; "
+    "without one nothing starts. Elsewhere omit it. "
     "Set context_requires_development=true only when the task itself needs the whole development handbook in every "
     "mode, never for its subject; a route too small for it refuses the task. "
     "A durable pending intent is recorded but not yet confirmed; inspect its recorded "
@@ -118,6 +120,15 @@ _START_TASK_DESCRIPTION = (
 _ROOT_EFFORT_PARAM = {"type": "string", "enum": list(EFFORT_SCALE), "description": (
     "Optional: the reasoning effort the NEW task starts on; applied in Cyber Pro only — otherwise the "
     "task starts at my human's recommended level and the result says so. Omit for that level.")}
+_START_CHOICE_PARAMS = {
+    "reasoning_effort": _ROOT_EFFORT_PARAM,
+    "destination": {"type": "string", "enum": ["place", "owner"], "description": (
+        "Presence callers only. 'place': this place's work, which may answer its conversation. 'owner': the owner's own "
+        "private work, asked for by their answer to a private question; it runs as ordinary owner work in Main or a "
+        "Project chosen here and never speaks in the place, which can still read and stop it.")},
+    "owner_quote": {"type": "string", "default": "", "description": (
+        "With destination='owner': the held owner_quote_handle of the answer that asks for this work.")},
+}
 
 
 # The direct-OpenAI custom projection drops parameter prose and keeps this lead only as far as it fits
@@ -251,7 +262,7 @@ def get_tools() -> List[ToolEntry]:
                     "context_requires_self_body_docs": {"type": "boolean", "description": "True for work on Ouroboros code, including copies elsewhere: this task gets the full development handbook in Max. Low/Nano and helpers keep their usual book maps.", "default": False},
                     "context_requires_development": {"type": "boolean", "description": "true: all of docs/DEVELOPMENT.md in every mode; false: its chapter map."},
                     "source": {"type": "string", "description": "Attach an existing folder or clone a git URL (https://... or git@host:path) server-side into the projects root; private auth failures are typed auth_required. Registers the folder with provenance + trusted_at as the Project/task workspace. Use for work on a supplied repo/folder.", "default": ""},
-                    "reasoning_effort": _ROOT_EFFORT_PARAM,
+                    **_START_CHOICE_PARAMS,
                 },
                 "required": ["objective", "title"],
             },

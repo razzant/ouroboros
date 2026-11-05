@@ -160,7 +160,8 @@ def test_a_place_focus_promotion_into_a_project_reads_that_project_as_this_room(
                            append_jsonl=lambda *_a, **_kw: None, persist_queue_snapshot=lambda **_kw: True,
                            enqueue_task=lambda task: admitted.append(task) or task, load_state=lambda: {"owner_chat_id": 1})
     ctx.event_queue = SimpleNamespace(put_nowait=lambda event: _handle_promote_chat_to_task(event, host))
-    assert _start_task(ctx, "Compile the report", title="Report", project_name="Report").startswith("OK: task")
+    assert _start_task(ctx, "Compile the report", title="Report", project_name="Report",
+                       destination="place").startswith("OK: task")
     [root_task] = admitted
     place_room = turn["chat_id"]
     assert root_task["metadata"]["focus"]["room_chat_id"] == place_room  # the producer carried the focus

@@ -63,7 +63,7 @@ def _promote(root, monkeypatch, turn_task, registry):
     ctx = registry._ctx
     ctx.event_queue = types.SimpleNamespace(
         put_nowait=lambda event: emitted.append(event) or _handle_promote_chat_to_task(event, handler))
-    out = _start_task(ctx, "Compile the requested report", title="Report")
+    out = _start_task(ctx, "Compile the requested report", title="Report", destination="place")
     assert out.startswith("OK: task"), out
     [evt], [promoted] = emitted, pending
     assert evt["presence"]["event"] == turn_task["metadata"]["presence"]["event"]  # the speaker's carrier

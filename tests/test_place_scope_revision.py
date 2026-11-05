@@ -93,7 +93,7 @@ def test_promotion_preserves_requested_scope_unless_legacy_ceiling(focus, monkey
                           current_chat_id=parent["chat_id"], drive_root=root)
     requested = "" if no_folder else str(root / "requested")
     assert routing._start_task(ctx, "Build a report", title="Report", project_id="report-project", workspace_root=requested,
-                               workspace="none" if no_folder else "",
+                               workspace="none" if no_folder else "", destination="place",
                                source="https://example.invalid/report.git").startswith("OK: task")
     evt = events[0]
     assert (evt["project_id"], evt["workspace_root"], evt["source"]) == (
@@ -168,7 +168,7 @@ def test_legacy_presence_promotion_keeps_its_host_scope_and_records_handoff(tmp_
     out = _start_task(
         ctx, "Audit and fix the issue", title="Issue audit and fix", project_id="beta", project_name="Injected Project",
         workspace_root="/tmp/foreign", workspace="none",
-        source="https://example.invalid/repo.git",
+        source="https://example.invalid/repo.git", destination="place",
     )
     assert out.startswith("OK: task")
     evt = ctx.pending_events[0]

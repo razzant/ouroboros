@@ -1255,9 +1255,11 @@ a bound ending is not consent, and terminal questions stay answerable. Neither c
 sends an external reply or accepts an external request as an owner instruction.
 Delegated children still escalate to their parent.
 
-For promised work without a new event, `start_task` and
+For promised work without a new event, `start_task(destination="place")` and
 `schedule_followup(notify=false, relation=...)` retain the existing Presence
-carrier and ordinary resource/control semantics. A scheduled root explicitly
+carrier and ordinary resource/control semantics; every `start_task` from a
+Presence carrier names its destination, and `destination="owner"` is the owner's
+private work, which reaches no connector. A scheduled root explicitly
 uses connector tools to deliver later; it is not discovered by polling the old
 event, its finish reaches no one by itself, and it reads the conversation's
 current previous turn rather than the copy taken when it was scheduled. Any turn

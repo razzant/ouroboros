@@ -128,6 +128,7 @@ def test_presence_promotion_preserves_ceiling_and_cannot_choose_new_scope(tmp_pa
         project_name="Injected",
         workspace_root="/tmp/foreign",
         source="https://example.invalid/repo.git",
+        destination="place",
 
     )
     assert out.startswith("OK: task")
@@ -191,6 +192,7 @@ def test_real_presence_promotion_rebases_root_and_materializes_all_attachments(
         expected_output="A grounded report",
         project_name="forbidden scope",
         workspace_root="/tmp/forbidden",
+        destination="place",
 
     )
     assert result.startswith("OK: task")
@@ -275,7 +277,7 @@ def test_real_presence_promotion_rejection_cleans_promoted_attachment_copy(
         },
         task_contract=presence_task["task_contract"],
     )
-    assert _start_task(tool_ctx, "Long work", title="Long work").startswith("OK: task")
+    assert _start_task(tool_ctx, "Long work", title="Long work", destination="place").startswith("OK: task")
     event = tool_ctx.pending_events[0]
 
     monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
@@ -551,7 +553,7 @@ def test_presence_unconfirmed_promotion_records_handoff_for_reconciliation(tmp_p
         lambda *_args, **_kwargs: {"status": "unconfirmed", "reason": "confirmation_timeout"},
     )
     ctx = _managed_swarm_ctx(tmp_path, task_metadata={"presence": {"binding_id": "presence-binding"}})
-    out = _start_task(ctx, "Audit and fix the issue", title="Issue audit and fix")
+    out = _start_task(ctx, "Audit and fix the issue", title="Issue audit and fix", destination="place")
     assert out.startswith("Not confirmed yet:")
     assert len(ctx.pending_events) == 1
     assert ctx._swarm_handoff_attempt["task_id"] == ctx.pending_events[0]["task_id"]
@@ -582,7 +584,7 @@ def test_presence_rejected_promotion_records_handoff_without_event(tmp_path, mon
         lambda _ctx: "crash_storm",
     )
     ctx = _managed_swarm_ctx(tmp_path, task_metadata={"presence": {"binding_id": "presence-binding"}})
-    out = _start_task(ctx, "Audit and fix the issue", title="Issue audit and fix")
+    out = _start_task(ctx, "Audit and fix the issue", title="Issue audit and fix", destination="place")
     assert out.startswith("⚠️ PROMOTE_REJECTED")
     assert ctx.pending_events == []
     assert ctx._swarm_handoff_attempt["status"] == "rejected"
