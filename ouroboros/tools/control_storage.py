@@ -62,6 +62,8 @@ def _free_storage(ctx: ToolContext, dry_run: bool = False, wait_sec: int = 90) -
         "note": ("The run continues on the server; its receipt lands on the storage_free job row "
                  "(query_data kind=storage reads the removers; the owner sees the outcome in Main)."
                  if status in ("requested", "queued") else
+                 "Not run: a listing or a run of Free was already under way; nothing was recorded or reported."
+                 if receipt.get("refusal") == "busy" else
                  "Recorded as a storage_free event with actor=this task and reported to the owner in Main."),
     }, ensure_ascii=False, default=str)
 
@@ -86,7 +88,7 @@ def storage_tool_entries() -> list[ToolEntry]:
             "parameters": {"type": "object", "properties": {
                 "dry_run": {"type": "boolean", "default": False, "description": "Preview only: what would go and what stays, with reasons."},
                 "wait_sec": {"type": "integer", "default": 90, "minimum": 0, "maximum": WAIT_SEC_MAX,
-                             "description": "How long to wait for the receipt before returning 'requested' (the run goes on)."},
+                             "description": "How long to wait for the receipt before returning 'requested' or 'queued' (the run goes on)."},
             }, "additionalProperties": False},
         }, _free_storage, safety_policy="skip"),  # a trusted built-in: it acts only through the retirers' own proofs
     ]
