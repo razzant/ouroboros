@@ -308,10 +308,33 @@ def prepare_file_outputs(rows, target, *, baseline_sha="", file_baseline=None):
         yield PreparedFileOutputs(rows, target, temporary, baseline_sha, file_baseline)
 
 
+def _direct_named_evidence(root: Path, task: dict, retain_dir: Path, previous: dict | None) -> dict | None:
+    """The folder's ``.review-evidence/`` retained once by a copy capture's own rule
+    (``workspace_patch_capture._held_named_evidence``): with no Git baseline every path there is new except a
+    supplied ``file_baseline`` one, the folder's own product. It stays in place (nothing is held out of a
+    patch); None when nothing new is there."""
+    from ouroboros.delegate_start_instructions import EVIDENCE_DIRNAME
+    from ouroboros.workspace_patch_capture import _held_named_evidence
+
+    declared, changed = root / EVIDENCE_DIRNAME, set()
+    if declared.is_symlink() or (declared.exists() and not declared.is_dir()):
+        changed.add(EVIDENCE_DIRNAME)  # retained as a named gap, never followed
+    elif declared.is_dir():  # a subtree that cannot be listed still asks retention, which then records why
+        for current, dirs, files in os.walk(declared, followlinks=False, onerror=lambda _e: changed.add(EVIDENCE_DIRNAME)):
+            changed.update((Path(current) / name).relative_to(root).as_posix()
+                           for name in [*files, *(d for d in dirs if (Path(current) / d).is_symlink())])
+    meta = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    copy = meta.get("workspace_copy") or task.get("workspace_copy") or {}
+    baseline = meta.get("file_baseline") or copy.get("file_baseline") or {}
+    return _held_named_evidence(root, "", changed, set(baseline), retain_dir, previous)[1]
+
+
 def _directory_direct_artifacts(
-    root: Path, artifact_dir: Path, task: dict, existing: dict,
+    root: Path, artifact_dir: Path, task: dict, existing: dict, *,
+    retain_evidence_dir: Path | None = None, retained_evidence: dict | None = None,
 ) -> tuple[list[dict], dict] | None:
-    """Record direct folder effects without inventing a before-image or scanning the tree."""
+    """Record direct folder effects without inventing a before-image or scanning the tree; given
+    ``retain_evidence_dir``, its new ``.review-evidence/`` is retained once there (``_direct_named_evidence``)."""
     from ouroboros.headless_status import ARTIFACT_STATUS_MISSING, ARTIFACT_STATUS_READY
     from ouroboros.workspace_patch_capture import _acting_constraint_from_task, _preflight_head_from_task
     from ouroboros.utils import atomic_write_json, utc_now_iso
@@ -356,6 +379,12 @@ def _directory_direct_artifacts(
                         note="The selected folder was missing when this work was admitted and is still absent, "
                              "so nothing remains there to capture. Registered outputs retain their captured "
                              "bytes; other shell, GUI or external effects are unknown.")
+    elif retain_evidence_dir is not None:
+        from ouroboros.workspace_patch_capture import _evidence_summary
+
+        evidence = _direct_named_evidence(root, task, retain_evidence_dir, retained_evidence)
+        if evidence is not None:
+            manifest["named_evidence"] = _evidence_summary(evidence)
     path = artifact_dir / "workspace_patch.json"
     atomic_write_json(path, manifest, trailing_newline=True)
     return [*outputs, artifact_record(path, kind="workspace_patch_manifest")], manifest

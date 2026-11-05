@@ -90,6 +90,44 @@ def test_drive_settlement_does_not_count_a_durable_verdict_twice(tmp_path, monke
     assert holds == {"store_busy": 1, "task_live": 1}
 
 
+def test_drive_settlement_holds_a_busy_read_for_the_next_pass_and_an_unreadable_row_as_unreadable(tmp_path, monkeypatch):
+    """A busy store is contention, no fact about the row: the drive is held as ``store_busy`` and that pass
+    leaves the layout no rest, so the next pass reads it again and settles it; a row the store cannot serve
+    holds its drive as ``task_result_unreadable``."""
+    from ouroboros import headless
+    from ouroboros.store import StoreBusy, StoreError
+
+    data = tmp_path / "data"
+    data.mkdir()
+    store_import.ensure_current_store(data)
+    monkeypatch.setattr(server_maintenance, "DATA_DIR", data)
+    monkeypatch.setenv("OUROBOROS_GC_RETENTION_DAYS", "1")
+    monkeypatch.setattr("supervisor.queue.task_settlement_liveness", _probe("none"))
+    for task in ("busy", "torn"):
+        drive = data / "task_drives" / task
+        drive.mkdir(parents=True)
+        seed_result(data, task, {"status": "completed", "ts": OLD, "child_drive_root": str(drive)})
+    real, busy = headless.load_task_result, {"busy"}
+
+    def strict_read(root, task_id, *args, **kwargs):  # the pass's strict row read, which decides eligibility
+        if kwargs.get("strict") and task_id in busy:
+            raise StoreBusy("contended", reason="lock_timeout")
+        if kwargs.get("strict") and task_id == "torn":
+            raise StoreError("simulated unreadable row: torn")
+        return real(root, task_id, *args, **kwargs)
+
+    monkeypatch.setattr(headless, "load_task_result", strict_read)
+    server_maintenance._run_drive_custody_pass()
+    row = maintenance_jobs.job(data, "drive_settlement")
+    assert [(hold["class"], hold["example"]) for hold in row["holds"]] == [("store_busy", "busy"), ("task_result_unreadable", "torn")]
+    assert (data / "task_drives" / "busy").is_dir() and not row["rest"]["direct"], "a busy read leaves the layout no rest"
+    busy.clear()  # the contention passed
+    server_maintenance._run_drive_custody_pass()
+    row = maintenance_jobs.job(data, "drive_settlement")
+    assert not (data / "task_drives" / "busy").exists() and row["released"] == 1
+    assert [(hold["class"], hold["example"]) for hold in row["holds"]] == [("task_result_unreadable", "torn")]
+
+
 # ---- private copies ---------------------------------------------------------------------------------------------
 
 @witness("ouroboros.subagent_worktrees.prune_orphans")

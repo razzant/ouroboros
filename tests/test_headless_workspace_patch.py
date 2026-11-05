@@ -690,3 +690,39 @@ def test_a_failed_evidence_retention_keeps_the_files_in_the_capture(tmp_path, mo
     assert ".review-evidence/safe-test-evidence/run-1/trace.bin" in [row["path"] for row in manifest["file_output_changes"]]
     assert "named_evidence_manifest" not in [row["kind"] for row in result["artifacts"]]
     assert not list(base.glob("**/named_evidence*")) and not list(base.glob("**/.named_evidence*"))
+
+
+def test_a_direct_folders_evidence_folder_is_retained_once_beside_its_direct_capture(tmp_path):
+    """#2711 for an ordinary folder (no Git): its direct capture retains the session's new ``.review-evidence/``
+    files once, as a copy's capture does, while a supplied ``file_baseline`` path there stays the folder's own;
+    a folder with no new evidence retains nothing, and an unchanged one is not copied again."""
+    from hashlib import sha256
+
+    parent, folder = tmp_path / "data", tmp_path / "folder"
+    (folder / ".review-evidence").mkdir(parents=True)
+    parent.mkdir()
+    before = b"a,b\n1,2\n"
+    (folder / ".review-evidence" / "supplied.csv").write_bytes(before)  # a copied input under the evidence name
+    supplied = {"kind": "file", "size": len(before), "sha256": sha256(before).hexdigest(), "mode": 0o644}
+    task = {"id": "task-direct", "workspace_root": str(folder), "metadata": {"file_baseline": {".review-evidence/supplied.csv": supplied}}}
+    write_task_result(parent, task["id"], "completed", workspace_root=str(folder), artifact_status="finalizing")
+    finalize_task_artifacts(parent, task)
+    base = task_artifacts_dir(parent, task["id"])
+    manifest = json.loads((base / "workspace_patch.json").read_text(encoding="utf-8"))
+    assert manifest["capture_kind"] == "directory_direct" and "named_evidence" not in manifest
+    assert "named_evidence_manifest" not in [row["kind"] for row in read_result(parent, task["id"])["artifacts"]]
+    expected = {".review-evidence/safe-test-evidence/run-1/result.json": b'{"returncode": 0}\r\n'}
+    for name, payload in expected.items():
+        (folder / name).parent.mkdir(parents=True, exist_ok=True)
+        (folder / name).write_bytes(payload)
+    finalize_task_artifacts(parent, {**task, **read_result(parent, task["id"])})
+    manifest = json.loads((base / "workspace_patch.json").read_text(encoding="utf-8"))
+    evidence = manifest["named_evidence"]
+    assert manifest["capture_kind"] == "directory_direct" and (evidence["status"], evidence["files"]) == ("retained", 1)
+    assert _retained_files(evidence["summary_path"]) == expected  # the supplied path is no evidence
+    assert [row["kind"] for row in read_result(parent, task["id"])["artifacts"]].count("named_evidence_manifest") == 1
+    assert (folder / ".review-evidence" / "supplied.csv").read_bytes() == before and (folder / next(iter(expected))).is_file()
+    finalize_task_artifacts(parent, {**task, **read_result(parent, task["id"])})  # the folder is unchanged
+    assert json.loads((base / "workspace_patch.json").read_text(encoding="utf-8"))["named_evidence"]["summary_path"] == evidence["summary_path"]
+    assert len(list(base.glob("**/named_evidence*"))) == 1  # one copy, never two
+    assert [row["kind"] for row in read_result(parent, task["id"])["artifacts"]].count("named_evidence_manifest") == 1

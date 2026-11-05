@@ -454,13 +454,16 @@ class FreeSpace:
 
     def _settled(self, root: pathlib.Path, run: Dict[str, Any]) -> Tuple[List[str], List[str], List[str]]:
         """The run's folders as they stand now, by id: a moved folder is removed once its trash entry is gone,
-        stuck once the ``custody_trash`` job recorded that this very entry survived its removal."""
+        stuck once the ``custody_trash`` job recorded that this very entry survived its removal (a moved drive or
+        seat home is named by its task, a discarded scratch handoff by its own entry)."""
         from ouroboros.task_custody import custody_trash_entries
+        from ouroboros.workspace_preflight import _RELEASE_MARK
 
         entries = custody_trash_entries(root) if run["moved"] else []
         survived = self._stuck_trash(root) if entries else {}
-        waiting = {name.rsplit("-", 1)[0] for name, identity in entries if survived.get(name) != identity}
-        blocked = {name.rsplit("-", 1)[0] for name, identity in entries if survived.get(name) == identity}
+        named = {name: name if _RELEASE_MARK in name else name.rsplit("-", 1)[0] for name, _identity in entries}
+        waiting = {named[name] for name, identity in entries if survived.get(name) != identity}
+        blocked = {named[name] for name, identity in entries if survived.get(name) == identity}
         deleting = [key for key in run["moved"] if key.split(":", 1)[-1] in waiting]
         stuck = [key for key in run["moved"] if key not in deleting and key.split(":", 1)[-1] in blocked]
         removed = [key for key in run["moved"] if key not in deleting and key not in stuck] + run["removed"]
@@ -1172,7 +1175,7 @@ class FreeSpace:
             if self._closed():
                 raise _Stopped()
             if item.layout == "producer_retained":
-                self._settle(run, item, self._free_producer_retained(root, item))
+                self._settle(run, item, self._free_producer_retained(root, item), moved=True)
                 continue
             path, reasons = str(item.row.get("path") or ""), {}
             try:
@@ -1189,24 +1192,23 @@ class FreeSpace:
 
     @staticmethod
     def _free_producer_retained(root: pathlib.Path, item: _Candidate) -> str:
-        """Accept the owner's explicit loss choice, then use the custody-trash remover.
-
-        The marker is the producer's hold; removing it is the owner's acceptance.  The existing
-        remover then deletes the recorded scratch and its handoff entry with the same custody
-        checks as the maintenance path.  A surviving entry remains a typed ``producer_retained``
-        hold rather than being reported as a successful discard.
-        """
-        from ouroboros import task_custody
+        """Accept the owner's explicit loss choice: the marker is the producer's hold, and removing it is the
+        owner's acceptance. Exactly this handoff entry then goes like a moved drive, by the maintenance
+        child's custody-trash remover off the serving process: the entry is touched, so its new identity
+        makes that job due, and the child is asked. Deleting (or stuck) until the child settles it."""
+        from ouroboros import maintenance
         from ouroboros.test_environment import retention_markers
 
         try:
             for scratch in item.row.get("scratch_paths") or ():
                 for marker in retention_markers(pathlib.Path(str(scratch))):
                     marker.unlink(missing_ok=True)
-            task_custody.remove_custody_trash(root)
+            with contextlib.suppress(FileNotFoundError):  # gone already: the child settled it meanwhile
+                os.utime(item.path)
         except OSError:
             return "other"
-        return "" if not item.path.exists() else "producer_retained"
+        maintenance.child.request()
+        return ""
 
     @staticmethod
     def _copy_stays(root: pathlib.Path, item: _Candidate, task_id: str, live: Callable[[str], Optional[bool]], named: str = "") -> str:

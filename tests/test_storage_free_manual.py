@@ -145,9 +145,12 @@ def test_nothing_else_reaches_it(copies, monkeypatch):  # noqa: F811
 
 
 def test_a_producer_retained_handoff_is_manual_loss_acceptance_and_not_the_ordinary_pool(tmp_path, monkeypatch):
-    """A marked handoff is named with the producer's words, then the owner's explicit discard removes
-    its scratch and entry through the custody remover; an ordinary item press cannot reach it."""
+    """A marked handoff is named with the producer's words; the owner's explicit discard removes its marker
+    and hands exactly that entry to the maintenance child (its identity touched, the child asked), deleting
+    nothing on Free's thread, so another settled entry waits for the child too; an ordinary item press
+    cannot reach it."""
     from tests.test_session_scratch_release import _started
+    from ouroboros import maintenance
     from ouroboros.workspace_preflight import release_finished_scratch
 
     data, scratch = _started(tmp_path)
@@ -156,7 +159,16 @@ def test_a_producer_retained_handoff_is_manual_loss_acceptance_and_not_the_ordin
     marker_words = "producer kept this evidence for inspection"
     assert environment.retain_tree(nested, marker_words)
     assert release_finished_scratch(data, lambda _task: False)["released"]
-    assert task_custody.remove_custody_trash(data)["holds"][0]["class"] == "producer_retained"
+    monkeypatch.setattr(maintenance, "JOBS", {"custody_trash": maintenance.JOBS["custody_trash"]})
+    assert maintenance.run_job(data, "custody_trash") == {"state": "done", "items": 0}
+    [entry] = (data / "state" / "custody_trash").iterdir()
+    other = data / "state" / "custody_trash" / "other-0123456789ab"  # a settled drive the child has not reached
+    (other / "work").mkdir(parents=True)
+    held_identity, requests = [entry.stat().st_ino, entry.stat().st_mtime_ns], []
+    assert maintenance.run_job(data, "custody_trash") == {"state": "done", "items": 1} and not other.exists()
+    (other / "work").mkdir(parents=True)
+    assert maintenance.due(data) == ["custody_trash"]  # the unrelated new entry; the held one alone rests
+    monkeypatch.setattr(maintenance.child, "request", lambda: requests.append(1))
 
     _fake_sizer(monkeypatch)
     owner = _owner({}, offered=("service_folders",))
@@ -168,7 +180,15 @@ def test_a_producer_retained_handoff_is_manual_loss_acceptance_and_not_the_ordin
     assert row["manual"]["producer_retained"] and marker_words in row["manual"]["loss"]
     assert owner.start(data, data.parent, plan["plan"], None, [row["id"]]) == {"started": False, "reason": "not_offered"}
     assert _discard(owner, (data, data.parent), [row["id"]]) == {"started": True, "reason": ""}
+    assert not (nested / environment.RETENTION_MARKER).exists() and requests, "the owner's acceptance, then the child"
+    assert scratch.is_dir() and entry.is_dir() and (other / "work").is_dir(), "Free's thread deletes nothing"
+    assert [entry.stat().st_ino, entry.stat().st_mtime_ns] != held_identity, "a touched entry makes the job due"
+    run = owner.projection(data)["run"]
+    assert (run["deleting"], run["removed"], run["failed"]) == (1, 0, 0)
+    assert maintenance.run_job(data, "custody_trash") == {"state": "done", "items": 2}
     assert not scratch.exists() and not any((data / "state" / "custody_trash").iterdir())
+    run = owner.projection(data)["run"]
+    assert (run["deleting"], run["removed"], run["stuck"]) == (0, 1, 0)
 
 
 def test_the_background_verdict_is_unchanged_by_a_discard_answer(candidate):  # noqa: F811

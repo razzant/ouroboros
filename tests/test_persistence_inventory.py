@@ -915,7 +915,10 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # the family's ``*.*.gz``; both sit under the observability row.
 # 450 -> 454: the merged storage-footprint cleanup names four additional retained
 # families in the persistence scan; their rows are present in ``docs/PERSISTENCE.md``.
-EXPECTED_SCAN_PATHS = 454
+# 454 -> 452: the custody trash hands a marked scratch record on through ``_retire_record`` (staging, then
+# the whole entry renamed into the trash), so its own ``state/custody_trash/*/session_scratch_owners/*``
+# folder and ``.../scratch.json`` spellings are gone; the custody trash row still covers both.
+EXPECTED_SCAN_PATHS = 452
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

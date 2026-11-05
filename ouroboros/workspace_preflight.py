@@ -399,18 +399,6 @@ def review_scratch_held(data_root: Any, drive: pathlib.Path) -> bool:
     return False
 
 
-def release_session_scratch(drive: pathlib.Path, *, data_root: Any = None) -> List[str]:
-    """Compatibility seam for the custody trash remover: release recorded scratch under DRIVE.
-
-    The holder-aware implementation lives in ``session_scratch``; this wrapper preserves the
-    historical import and returns retained paths for callers that only need a display list.
-    """
-    from ouroboros.session_scratch import release_session_scratch as release
-
-    del data_root  # the records carry their own validated path and identity
-    return [str(row.get("path") or "") for row in release(pathlib.Path(drive))]
-
-
 def restore_seat_scratch_notes(data_root: Any, *, stop: Any = None) -> None:
     """Recover older unnoted task-drive seat records on the existing startup views pass."""
     from ouroboros.task_results import validate_task_id
@@ -447,16 +435,21 @@ def _retire_record(root: pathlib.Path, task_id: str, owner: pathlib.Path) -> boo
     """Hand OWNER's record to the custody trash, then drop OWNER; False when no folder was there. The
     record file itself moves, so it is in exactly one place at every step: the task's drive (the owner's
     Keep still counts the scratch), private staging (a pass interrupted there is published by the next
-    one) or the trash."""
+    one) or the trash. A move that fails leaves no staged entry behind: the record stays where it was."""
     from ouroboros.force_remove import force_rmtree
+    from ouroboros.session_scratch import has_record
     from ouroboros.task_custody import _STAGING_DIR
 
     if not _plain_directory(owner):
         return False
-    if os.path.lexists(owner / "scratch.json"):  # else an uncompleted preparation: nothing to release
+    if has_record(owner):  # else an uncompleted preparation: nothing to release
         staged = root / _STAGING_DIR / f"{task_id}{_RELEASE_MARK}{uuid.uuid4().hex[:12]}"
         (staged / SESSION_SCRATCH_DIRNAME / owner.name).mkdir(parents=True)
-        os.replace(owner / "scratch.json", staged / SESSION_SCRATCH_DIRNAME / owner.name / "scratch.json")
+        try:
+            os.replace(owner / "scratch.json", staged / SESSION_SCRATCH_DIRNAME / owner.name / "scratch.json")
+        except OSError:
+            force_rmtree(staged)  # it holds no record yet
+            raise
         _publish_released(root, staged)
     force_rmtree(owner)  # only its preparation lock is left; a survivor names no scratch
     return True
