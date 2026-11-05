@@ -169,6 +169,58 @@ def test_run_log_job_validates_membership_and_reads_by_job_id(fake, ctx):
     assert gh.calls[1].args == ["run", "view", "--log-failed", "--job", "55", "--attempt", "1"]
     assert gh.calls[1].repo == "github.example/owner/selected"
     assert text.startswith("GitHub Actions log — owner/selected run 11 attempt 1, job 55 test (failure)\n")
+    assert "Format: gh CLI plain-text stdout; selection: failed steps only (--log-failed)" in text
+
+
+@pytest.mark.parametrize("parent_status", ["queued", "in_progress"])
+def test_run_log_reads_a_completed_job_before_the_parent_run_finishes(fake, ctx, parent_status):
+    gh = fake(run={"databaseId": 11, "url": f"{BASE}/actions/runs/11", "status": parent_status,
+                   "attempt": 1, "headSha": SHA, "workflowName": "CI",
+                   "jobs": [{"databaseId": 55, "name": "test", "status": "completed", "conclusion": "success"}]})
+
+    text = _read(ctx, "get", "run", run_id=11, job_id=55)
+
+    assert gh.kinds() == ["run_json", "log"]
+    assert gh.calls[1].args == ["run", "view", "--log", "--job", "55", "--attempt", "1"]
+    assert "run 11 attempt 1, job 55 test (success)" in text
+    assert "selection: full run/job log (--log)" in text
+
+
+@pytest.mark.parametrize("job_status", ["queued", "in_progress"])
+def test_run_log_refuses_a_noncompleted_job_even_when_parent_is_in_progress(fake, ctx, job_status):
+    gh = fake(run={"databaseId": 11, "url": f"{BASE}/actions/runs/11", "status": "in_progress",
+                   "attempt": 1, "headSha": SHA, "workflowName": "CI",
+                   "jobs": [{"databaseId": 55, "name": "test", "status": job_status}]})
+
+    text = _read(ctx, "get", "run", run_id=11, job_id=55)
+
+    assert gh.kinds() == ["run_json"]
+    assert text == (f"⚠️ TOOL_ERROR: job 55 test in run 11 attempt 1 in owner/selected is {job_status}; "
+                    "GitHub serves a job log only after that job is completed, so no log was requested.")
+    assert (_typed(ctx).status, _typed(ctx).code) == ("error", "TOOL_ERROR")
+
+
+def test_run_log_keeps_whole_run_completed_only_with_completed_jobs(fake, ctx):
+    gh = fake(run={"databaseId": 11, "url": f"{BASE}/actions/runs/11", "status": "in_progress",
+                   "attempt": 1, "headSha": SHA, "workflowName": "CI",
+                   "jobs": [{"databaseId": 55, "name": "test", "status": "completed"}]})
+
+    text = _read(ctx, "get", "run", run_id=11)
+
+    assert gh.kinds() == ["run_json"]
+    assert "is in_progress; GitHub serves the log of a completed run only" in text
+
+
+def test_run_log_failed_only_cli_failure_is_typed_without_rest_fallback(fake, ctx):
+    forbidden = github.GhResult(False, "⚠️ GH_ERROR: --log-failed unavailable", 1, None, "exit")
+    gh = fake(failing={"log": forbidden})
+
+    text = _read(ctx, "get", "run", run_id=11, failed_only=True)
+
+    assert gh.kinds() == ["run_json", "log"]
+    assert text.startswith("⚠️ TOOL_ERROR: failed_only requires GitHub CLI --log-failed output")
+    assert "no REST fallback was used" in text and forbidden.text in text
+    assert (_typed(ctx).status, _typed(ctx).code) == ("error", "TOOL_ERROR")
 
 
 def test_run_log_retention_failure_is_typed_incomplete_with_capture_facts(fake, ctx, monkeypatch):

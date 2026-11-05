@@ -12,10 +12,12 @@ import hashlib
 import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from ouroboros.tool_capabilities import tool_result_limit
-from ouroboros.tools.github import _canonical_github_args, _gh_api, _gh_graphql, _gh_run, _graphql_operations, _no_launch_yet, _refuse, _split_repo, github_token_from_env_or_settings
+from ouroboros.tools.github import (_acting_credential, _ambient_repo, _canonical_github_args, _gh_api, _gh_graphql, _gh_run,
+                                     _graphql_operations, _leg_target, _no_launch_yet, _project_is_bound, _refuse,
+                                     _selected_target, _split_repo)
 from ouroboros.tools.registry import ToolContext
 
 METHODS = ("whoami", "get", "list", "search", "checks", "download", "api")
@@ -87,16 +89,8 @@ class _Read:
 
     def slug(self) -> Tuple[str, str]:
         """``(slug, error)``: the explicit repository, or the bound Project's as GitHub names it."""
-        parts = _split_repo(self.repo) if self.repo else None
-        if parts:
-            return f"{parts[1]}/{parts[2]}", ""
-        res = _gh_run(["repo", "view", "--json", "nameWithOwner"], self.ctx, repo="")
-        if not res.ok:
-            return "", res.text
-        try:
-            return str(json.loads(res.text)["nameWithOwner"]), ""
-        except (ValueError, TypeError, KeyError):
-            return "", self.refuse("⚠️ TOOL_ERROR: the bound repository name could not be read from gh.", "TOOL_ERROR")
+        target, refusal = _leg_target(self.ctx, self.repo, require_target=True)
+        return (target.slug, "") if target else ("", refusal.text)
 
     def page(self, route: str, params: Optional[dict] = None) -> Tuple[Optional[list], Optional[dict], str]:
         """One REST page: ``(rows, page_facts, error)``; ``complete`` is read from the Link header."""
@@ -382,8 +376,14 @@ def _thread_shape(read: _Read, t: dict) -> dict:
 
 # ---- methods ---------------------------------------------------------------------------------------
 def _whoami(read: _Read) -> str:
+    """The identity on the addressed host; with no repository to name one, gh's default host answers and says so."""
     repo = read.repo
     host = (_split_repo(repo) or ("", "", ""))[0] if repo else ""
+    if not repo and (_project_is_bound(read.ctx) or _ambient_repo(read.ctx)):
+        target, failed = _selected_target(read.ctx, refuse=False)
+        host = target.host if target else ""
+        if target is None and failed is not None:
+            read.omitted.append(f"this is gh's default host, not the selected repository's: {failed.text.removeprefix('⚠️ ')}")
     args = ["api", "--include", "user"] + (["--hostname", host] if host else [])
     res = _gh_run(args, read.ctx)
     if not res.ok:
@@ -393,19 +393,16 @@ def _whoami(read: _Read) -> str:
         user = json.loads(body)
     except ValueError:
         return read.refuse(f"⚠️ TOOL_ERROR: failed to parse GitHub's user JSON: {body[:300]}", "TOOL_ERROR")
-    token = github_token_from_env_or_settings()
+    host = host or urlsplit(str(user.get("html_url") or "")).hostname or "github.com"
+    token, source = _acting_credential(host)
     kinds = (("ghp_", "classic personal access token"), ("github_pat_", "fine-grained personal access token"),
              ("gho_", "OAuth token (gh login)"), ("ghs_", "GitHub App installation token"), ("ghu_", "GitHub App user token"))
     token_kind = next((label for prefix, label in kinds if token.startswith(prefix)), "token of unknown form" if token else "gh CLI login")
-    import os
-
-    source = ("env GITHUB_TOKEN" if os.environ.get("GITHUB_TOKEN") else "env GH_TOKEN" if os.environ.get("GH_TOKEN")
-              else "settings GITHUB_TOKEN" if token else "gh CLI host configuration")
     scopes = headers.get("x-oauth-scopes", "")
     item = {"login": user.get("login"), "id": user.get("id"), "type": user.get("type"), "name": user.get("name"),
             "url": user.get("html_url"), "token_kind": token_kind, "token_source": source,
             "scopes": [s.strip() for s in scopes.split(",") if s.strip()] if scopes else None,
-            "token_expires": headers.get("github-authentication-token-expiration") or None, "host": host or "github.com"}
+            "token_expires": headers.get("github-authentication-token-expiration") or None, "host": host}
     return read.deliver(f"github_read whoami: @{item['login']} ({token_kind} from {source})", {"item": read.project(item)})
 
 
@@ -856,8 +853,10 @@ SCHEMA: Dict[str, Any] = {
         "total_count; checks = the recorded checks of one commit (target = PR number or full SHA, optional wait_seconds); "
         "api = any REST GET route (query string allowed, {owner}/{repo} placeholders follow repo) or a GraphQL query, "
         "never a mutation (that is github_write(method='api')). get kind='run', target=run_id, include=['log'] reads "
-        "a completed run's log (optional job_id, attempt, failed_only, max_bytes, tail_lines); exact bytes, size and sha256 "
-        "are retained as task artifacts before a bounded preview. The stdout cap does not bound gh's internal cache. "
+        "a completed run's log, or a completed job's plain-text log while its parent run is still queued/in progress "
+        "(optional job_id, attempt, failed_only, max_bytes, tail_lines); exact gh stdout bytes, size and sha256 are "
+        "retained as task artifacts before a bounded preview. failed_only maps to gh --log-failed; a CLI failure is a "
+        "typed error and never silently falls back to REST. The stdout cap does not bound gh's internal cache. "
         "list kind='artifact', target=run_id pages artifacts using limit/cursor; download kind='artifact', target=artifact_id "
         "requires max_bytes and retains the exact zip without extraction. Writes are github_write; merges are pr_merge."
     ),

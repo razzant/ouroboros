@@ -1133,6 +1133,10 @@ Use the connector's ordinary content-hash-bound skill token for:
   topics. Inside such a flow, never make a thread of one message or a reply chain.
   Report your own sends (`/presence/delivery`) with the `thread_id` this rule gives
   them. Files stay confined to the connector's state root.
+  `message.sent_at` (the provider's original send time) and `message.edited_at` (when its
+  words were last edited) are times with a time zone as `datetime.isoformat()` writes them,
+  absent when the provider records none; the focus states them and never substitutes a
+  receipt time.
 - Optional `event.facts`: a list of `direct_message`, `group_dm`, `mention`,
   `reply_to_me`, `my_thread`, `new_issue`, `new_pull_request`, `review_requested`,
   `assigned`, `any_message`, `from_bot`.

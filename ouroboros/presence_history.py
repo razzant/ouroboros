@@ -74,7 +74,7 @@ class HistoryRequest:
     records: tuple[HistoryRecord, ...]
 
 
-def _instant(value: Any) -> datetime | None:
+def instant(value: Any) -> datetime | None:
     """A timezone-qualified ISO time as UTC; None when absent or unreadable (unknown, never invented),
     also when moving it to UTC leaves the calendar (year 1 east of UTC, year 9999 west of it)."""
     if not isinstance(value, str) or not value or len(value) > 64:
@@ -103,7 +103,7 @@ def source_order_block(message: Any, *, received: str, sent: str = "") -> dict |
     and the provider's order. None when neither is known: the row then reads at its ``ts`` with no order
     (``place_arrivals.READING_TIME``)."""
     if not sent:
-        at, receipt = _instant(message.get("sent_at") if isinstance(message, Mapping) else None), _instant(received)
+        at, receipt = instant(message.get("sent_at") if isinstance(message, Mapping) else None), instant(received)
         sent = at.isoformat() if at is not None and (receipt is None or at <= receipt) else ""
     try:
         order = source_order(message)
@@ -121,12 +121,12 @@ def _unicode(value: Any, field: str) -> None:
 
 
 def _source_time(value: Any, field: str, received: datetime, message: Mapping[str, Any]) -> str:
-    parsed = _instant(value)
+    parsed = instant(value)
     if parsed is None:
         raise PresenceHistoryInvalid(field, f"{field} must be an ISO 8601 time with a time zone")
     if parsed > received:  # a time ahead of the Host's clock would sort above live rows
         raise PresenceHistoryInvalid(field, f"{field} is later than the Host's receipt time")
-    if "sent_at" in message and message["sent_at"] is not None and _instant(message["sent_at"]) != parsed:
+    if "sent_at" in message and message["sent_at"] is not None and instant(message["sent_at"]) != parsed:
         raise PresenceHistoryInvalid(field, f"{field} and event.message.sent_at name different times")
     return parsed.isoformat()
 
@@ -235,7 +235,7 @@ def source_message_facts(message: Any) -> dict:
     """The compared provider facts of one ``event.message``; an edit time compares as an instant."""
     message = message if isinstance(message, Mapping) else {}
     facts = {key: message.get(key) for key in SOURCE_MESSAGE_FACTS}
-    if (edited := _instant(facts["edited_at"])) is not None:
+    if (edited := instant(facts["edited_at"])) is not None:
         facts["edited_at"] = edited.isoformat()
     media = message.get("media")
     facts["media"] = ({key: value for key, value in media.items() if key not in _MEDIA_OBSERVATIONS}
@@ -255,7 +255,7 @@ def _matches(row: Mapping[str, Any], identity: str, record: HistoryRecord) -> bo
         return marker.get("authorship") == record.authorship and str(row.get("ts") or "") == record.ts
     # A live capture of the same revision keeps its custody and is never rewritten. Its row
     # time is its receipt, not a send time: only a send time it recorded is compared.
-    sent = _instant(message.get("sent_at"))
+    sent = instant(message.get("sent_at"))
     return sent is None or sent.isoformat() == record.ts
 
 
