@@ -102,6 +102,19 @@ _KEPT_REASONS = {
     "owner_keep": ("owner_keep",),
     "restart": ("generation_closed",),
 }
+# Main is for the owner, so the receipt uses stable group names in owner words rather than retirer codes.
+_OWNER_REASON_WORDS = {
+    "results_pending": "results are not saved yet",
+    "in_use": "still in use",
+    "busy": "busy right now",
+    "unreadable_record": "the task record could not be read",
+    "capture_unproven": "unique work was not verified saved",
+    "retained_evidence": "marked as evidence, or could not be read through",
+    "changed": "changed after the check",
+    "unproven_excluded_inputs": "files only a patch rule calls disposable",
+    "owner_keep": "you asked to keep it",
+    "restart": "stopped by a restart",
+}
 _RETIRER_STAMPS = ("scratch_retention", "retiring", "removal_failed", "removal_failed_identity")  # no change of ownership
 
 
@@ -287,7 +300,8 @@ def _request_sentence(receipt: Dict[str, Any]) -> str:
         size = preview.get("bytes")
         return (f"Free space ({who}): looked only; {preview.get('count', 0)} items could go"
                 + (f", {size / 1e9:.1f} GB" if isinstance(size, int) else "") + ".")
-    kept = ", ".join(f"{row['count']} {str(row['reason']).replace('_', ' ')}" for row in outcome.get("kept") or ())
+    kept = ", ".join(f"{row['count']} {_OWNER_REASON_WORDS.get(str(row.get('reason')), 'could not be freed')}"
+                      for row in outcome.get("kept") or ())
     freed = outcome.get("removed_bytes") or 0
     parts = [f"removed {outcome['removed']} ({freed / 1e9:.1f} GB)"] if outcome.get("removed") else []
     if outcome.get("deleting"):

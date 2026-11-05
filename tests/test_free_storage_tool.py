@@ -93,6 +93,7 @@ def test_an_empty_pool_is_a_receipt_that_says_so(tmp_path, monkeypatch):
 
 def test_the_tool_emits_the_control_event_and_returns_the_receipt_it_finds(tmp_path, monkeypatch):
     from ouroboros.tools import control_storage
+    from ouroboros.storage_free import _request_sentence
 
     root = tmp_path / "data"
     root.mkdir()
@@ -114,6 +115,8 @@ def test_the_tool_emits_the_control_event_and_returns_the_receipt_it_finds(tmp_p
     assert emitted[0]["type"] == "free_storage" and "groups" not in emitted[0] and emitted[0]["task_id"] == "task-9"
     assert answer["ok"] and answer["status"] == "done" and answer["receipt"]["outcome"]["removed"] == 2
     assert answer["request_id"] == emitted[0]["request_id"] and answer["transport"] == "live"
+    owner_words = _request_sentence({"actor": "mind:task-9", "outcome": {"removed": 0, "kept": [{"reason": "in_use", "count": 1}]}})
+    assert "still in use" in owner_words and "task_live" not in owner_words
 
 
 def test_a_receipt_that_has_not_landed_reads_as_running(tmp_path, monkeypatch):
