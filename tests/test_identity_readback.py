@@ -54,6 +54,7 @@ def test_fork_reader_recipe_write_readback_second_write(identity):
     current = reg.execute("read_file", _recipe(first))
     assert "identity_source=canonical" in current, current
     assert delivered_source_prefix(ctx.last_read_view, current, len(current)) == canonical.read_text()
+    assert reg.execute("read_file", _recipe(first)) == current, "a repeat keeps the revision, note and body exactly"
     updated = "I evolve the commitments I just read, keeping a continuous identity. " * 3
     saved = reg.execute("update_identity", {"content": updated, "expected_revision": _revision(current)})
     assert saved.startswith("OK:"), saved
