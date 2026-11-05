@@ -27,17 +27,9 @@ from ouroboros.task_results import (
 from ouroboros.utils import atomic_write_json, utc_now_iso
 from ouroboros.retention import task_result_timestamp as _timestamp_from_result
 from ouroboros.headless_status import (  # noqa: F401
-    ARTIFACT_STATUS_FAILED,
-    ARTIFACT_STATUS_FINALIZING,
-    ARTIFACT_STATUS_MISSING,
-    ARTIFACT_STATUS_PENDING,
-    ARTIFACT_STATUS_READY,
-    ARTIFACT_STATUS_READY_NO_CHANGES,
-    ARTIFACT_STATUS_READY_WITH_CHANGES,
-    ARTIFACT_TERMINAL_STATUSES,
-    _ARTIFACT_LIFECYCLE_FIELDS,
-    _FINAL_STATUSES,
-    _LOCAL_READONLY_SUBAGENT_MODE,
+    ARTIFACT_STATUS_FAILED, ARTIFACT_STATUS_FINALIZING, ARTIFACT_STATUS_MISSING, ARTIFACT_STATUS_PENDING,
+    ARTIFACT_STATUS_READY, ARTIFACT_STATUS_READY_NO_CHANGES, ARTIFACT_STATUS_READY_WITH_CHANGES,
+    ARTIFACT_TERMINAL_STATUSES, _ARTIFACT_LIFECYCLE_FIELDS, _FINAL_STATUSES, _LOCAL_READONLY_SUBAGENT_MODE,
 )
 from ouroboros.workspace_patch_capture import (  # noqa: F401
     SCRATCH_MANIFEST_NAME,
@@ -381,12 +373,10 @@ def _prune_drives(base: pathlib.Path, parent: pathlib.Path, *, drive_of: Any, no
             # selection must be checked here; settlement rechecks custody, not age.
             try:
                 result = load_task_result(parent, task_id, strict=True) or {}
-            except StoreBusy:  # contention is no fact about the row: held now, and no rest, so the next pass reads it
-                busy = True
-                report["skipped"].append({"task_id": task_id, "reason": "store_busy"})
-                continue
-            except (OSError, ValueError, StoreError):  # a quarantined or torn row: this drive's own hold, not the pass's error
-                report["skipped"].append({"task_id": task_id, "reason": "task_result_unreadable"})
+            except (OSError, ValueError, StoreError) as exc:  # this drive's own hold, never the pass's error:
+                busy = busy or isinstance(exc, StoreBusy)  # contention says nothing of the row: no rest, read next pass
+                reason = "store_busy" if isinstance(exc, StoreBusy) else "task_result_unreadable"  # quarantined or torn
+                report["skipped"].append({"task_id": task_id, "reason": reason})
                 continue
             status = str(result.get("status") or "").lower()
             if status not in _FINAL_STATUSES:
