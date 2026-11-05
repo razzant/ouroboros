@@ -129,9 +129,10 @@ Enforcement: `tests/test_body_adoption.py` with `tests/test_body_candidate.py`. 
 - Age-based GC of disposable runtime artifacts shares one owner knob, `OUROBOROS_GC_RETENTION_DAYS` (default and clamp: ARCHITECTURE §7), and the `ouroboros/retention.py` helpers (`age_cutoff`, `clamp_retention_days`, `get_gc_retention_days`); no hand-rolled cutoff math. Prune functions keep an explicit `retention_days=` parameter whose default alone reads the knob; `server_maintenance.py` schedules them.
 - A subsystem needing its own lifetime passes explicit `retention_days=`; an owner-settable one is an ordinary `OUROBOROS_<SUBSYSTEM>_RETENTION_DAYS` in `SETTINGS_DEFAULTS` clamped by `clamp_retention_days`. Never restore the consolidated keys or keep a knob that deletes nothing.
 - Durable artifacts are not age-pruned: genesis projects (`OUROBOROS_SUBAGENT_PROJECTS_ROOT`) and forensic observability blobs (packed, never deleted or counted).
+- Test scratch lasts while something needs it: a test's folder goes only on its processes' proof, never on its exit alone, and one marker never holds a whole root (ARCHITECTURE §9 "Test runs").
 - Review continuations are recovery state, not disposable GC: archive a record (collision-safe move, never delete) only when its owner task is settled, it stayed un-resumed past `task_continuation.RETIRE_SETTLED_CONTINUATION_AFTER_DAYS` and no recorded obligation is open; any uncertainty or move error keeps the live record.
 
-Enforcement: `tests/test_phase3c_observability_gc.py` (knob and cutoff math), `tests/test_observability_retention.py` (preserve indefinitely); the continuation archive rule is review-only.
+Enforcement: `tests/test_phase3c_observability_gc.py` (knob and cutoff math), `tests/test_observability_retention.py` (preserve indefinitely), `tests/test_test_environment.py` and `tests/test_test_storage.py` (test scratch); the continuation archive rule is review-only.
 
 ### Live subagents
 

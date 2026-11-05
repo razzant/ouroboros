@@ -698,6 +698,7 @@ def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
     workeroutput = getattr(session.config, "workeroutput", None)
     if workeroutput is not None:  # xdist worker: hand the leak list to the controller
         workeroutput["thread_leaks"] = list(_THREAD_LEAKS)
+        workeroutput["test_folders"] = dict(_TEST_FOLDERS)
     # The per-process session tree (unique mkdtemp per controller/worker) is RETAINED,
     # never deleted here: a finished session does not prove that every process its
     # tests started is gone, and nothing at this layer can prove it. The terminal
@@ -1429,6 +1430,7 @@ def _fail_if_the_password_resolver_leaked(item):
 # session report line.
 _THREADS_BEFORE_ITEM = pytest.StashKey()
 _THREAD_LEAKS: list = []  # (nodeid, [thread names]) — session-scoped, merged onto the controller
+_TEST_FOLDERS: collections.Counter = collections.Counter()  # released, waited, censuses; merged the same way
 _THREAD_LEAK_GRACE_SEC = 2.0
 # By-design detached threads, listed by name prefix — each entry names its owner and why.
 _DETACHED_THREAD_NAME_PREFIXES = (
@@ -1471,12 +1473,12 @@ def _fail_if_a_thread_leaked(item):
                 f"test it pollutes", pytrace=False)
 
 
-# ---- retention hygiene: name the test whose marker keeps the whole run (#1908) ----
+# ---- retention hygiene: name the test that leaves a marker behind (#1908) ----
 #
 # Under an owner that releases its scratch (scripts/safe_test.py, run_tests.py, the native
-# preflight) one retention marker anywhere beneath its root keeps all of it: 7-11 GB per full
-# battery. A test that manufactures one (an injected fault, a stubbed reap) retires it; one that
-# forgot kept every green battery's root and nothing named it. retain_tree touches the scratch
+# preflight) a retention marker keeps its test's folder past the run, and the run's root with it. A
+# test that manufactures one (an injected fault, a stubbed reap) retires it; one that forgot left
+# that root behind every green battery and nothing named it. retain_tree touches the scratch
 # declaration above the tree it marks, so one stat clears a test under an unmoved declaration.
 _RETENTION_BEFORE_ITEM = pytest.StashKey()
 _BASETEMP_DECLARATION: list = []  # this process's, looked up once
@@ -1503,8 +1505,8 @@ def _fail_if_retention_was_left(item, tmp):
     moved = _basetemp_witness(item) != item.stash[_RETENTION_BEFORE_ITEM]
     left = retention_left_in(tmp) if moved or (tmp / RETENTION_MARKER).exists() else ""
     if left:
-        pytest.fail(f"{item.nodeid} left retention in its tmp_path, which keeps the whole run root "
-                    f"{_SAFE_TEMP_ROOT} with every test's scratch: {left} — retire what this test "
+        pytest.fail(f"{item.nodeid} left retention in its tmp_path, which keeps that folder and the "
+                    f"run root {_SAFE_TEMP_ROOT} past the run: {left} — retire what this test "
                     "manufactured (an injected fault, a stubbed reap) with "
                     "tests._shared.retire_synthetic_retention; a real one means its teardown was never proven",
                     pytrace=False)
@@ -1537,6 +1539,7 @@ def _test_processes_gone() -> bool:
         return True
     from ouroboros.process_containment import pids_with_env_marker
 
+    _TEST_FOLDERS["censuses"] += 1
     return os.name != "nt" and pids_with_env_marker(token) == []
 
 
@@ -1553,17 +1556,20 @@ def _release_passed_test_folder(tmp) -> None:
     if (not isinstance(tmp, pathlib.Path) or _TEST_CUSTODY.failed or not _PYTEST_POPEN_PATCHED
             or (_SAFE_TEMP_ROOT and os.path.lexists(os.path.join(_SAFE_TEMP_ROOT, RETENTION_MARKER)))
             or retention_markers(tmp) or not _test_processes_gone()):
+        _TEST_FOLDERS["waited"] += isinstance(tmp, pathlib.Path)
         return
     try:
         remove_scratch_tree(tmp)
+        _TEST_FOLDERS["released"] += 1
     except OSError:
-        pass
+        _TEST_FOLDERS["waited"] += 1
 
 
 @pytest.hookimpl(optionalhook=True, trylast=True)
 def pytest_testnodedown(node, error):  # noqa: ARG001
     # pytest-xdist controller: merge each worker's leak list (shipped via workeroutput below).
     _THREAD_LEAKS.extend(getattr(node, "workeroutput", {}).get("thread_leaks", []))
+    _TEST_FOLDERS.update(getattr(node, "workeroutput", {}).get("test_folders", {}))
     if error is None:
         return
     session = getattr(node.config, "_ouroboros_session", None)
@@ -1653,6 +1659,8 @@ def pytest_terminal_summary(terminalreporter):
             f"{len(_THREAD_LEAKS)} test(s): {tests}")
     else:
         terminalreporter.write_line("thread hygiene: no leaked threads")
+    terminalreporter.write_line("test folders: " + ", ".join(
+        f"{_TEST_FOLDERS[name]} {name}" for name in ("released", "waited", "censuses")))
     retained = [str(path) for path in (_PYTEST_ROOT, _PYTEST_REPO_FALLBACK) if path is not None]
     basetemp = getattr(getattr(terminalreporter.config, "_tmp_path_factory", None), "_basetemp", None)
     if basetemp is not None and not any(pathlib.Path(basetemp).is_relative_to(path) for path in retained):

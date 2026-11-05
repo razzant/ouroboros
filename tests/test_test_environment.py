@@ -605,3 +605,4 @@ def test_a_passed_tests_folder_goes_with_its_processes_and_all_others_wait_for_t
     assert not {name for name, there in present.items() if there} & gone, present
     assert _final_root(result.stderr)[0] == "SAFE_TEST_RELEASED", result.stderr
     assert not survivors
+    assert f"{len(gone) + 2} released" in result.stdout, result.stdout  # the second cut name and the witness too
