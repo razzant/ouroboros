@@ -180,10 +180,16 @@ def test_staged_output_is_credited_only_after_native_projected_delivery(tmp_path
     executor._observe_sent_view([{"role": "assistant", "tool_calls": [request]}, message], schemas)
     assert output._READ_COVERAGE[f"{target.resolve()}|{entry.output_sha}"] == [[0, end]]
     assert not entry.output_consumed
+    # The same cut read again delivers the same window and credits nothing it did not show.
+    repeat = executor._execute_inspection_call(registry, request, {}, round_idx=2)
+    assert executor._tool_receipts[-1]["source_end_char"] == end
+    executor._observe_sent_view([{"role": "assistant", "tool_calls": [request]}, repeat], schemas)
+    assert output._READ_COVERAGE[f"{target.resolve()}|{entry.output_sha}"] == [[0, end]]
+    assert not entry.output_consumed
     request["function"]["arguments"] = json.dumps({"root": "task_drive", "path": entry.output_artifact,
                                                   "start_char": end})
     monkeypatch.setattr(native, "_EPISODE_TOOL_RESULT_CHAR_CAP", 100_000)
-    second = executor._execute_inspection_call(registry, request, {}, round_idx=2)
+    second = executor._execute_inspection_call(registry, request, {}, round_idx=3)
     assert not entry.output_consumed
     executor._observe_sent_view([{"role": "assistant", "tool_calls": [request]}, second], schemas)
     assert entry.output_consumed

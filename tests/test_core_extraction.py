@@ -28,7 +28,6 @@ _MOVED_NAMES = frozenset({
     "_MEMORY_AT_DRIVE_MEMORY",
     "_SKILL_OWNER_STATE_FILENAMES",
     "_access_or_block",
-    "_annotate_reread",
     "_coerce_line_window",
     "_coerce_start_char",
     "_data_list",

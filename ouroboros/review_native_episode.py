@@ -1254,10 +1254,9 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         returned text, ``line_ends`` the end offsets of the body's complete
         lines on the renderer's own line definition) — nothing is parsed back
         from the header and no newline is recounted here. The stamped offsets
-        hold on the returned text because every host note (``_annotate_reread``'s
-        re-read hint, the registry's route/safety notes via
-        ``_compose_execute_result``) TRAILS the rendered view — a prepended note
-        would shift ``body_start``. The stamp's binding
+        hold on the returned text because every host note (the registry's
+        route/safety notes via ``_compose_execute_result``) TRAILS the rendered
+        view — a prepended note would shift ``body_start``. The stamp's binding
         to THIS call is structural, not a comparison: the reader resets it on
         entry, the caller clears it before every dispatch, the context is
         instance-local, and the caller reads the stamp only for a call that
