@@ -599,10 +599,15 @@ def test_the_copys_evidence_folder_is_retained_once_and_held_out_of_the_patch_an
     as retained evidence files, never again inside ``workspace.patch`` (text) and a file-outputs zip (binaries);
     a second finalization of the unchanged copy copies nothing again."""
     from ouroboros.workspace_patch_rules import NAMED_EVIDENCE_EXCLUSION
+    from ouroboros.workspace_patch_capture import _held_named_evidence
 
     parent = tmp_path / "data"
     parent.mkdir()
     repo, task, expected = _evidence_copy(tmp_path)
+    task["metadata"]["host_evidence"] = "old-evidence"  # stale run metadata cannot rename task evidence
+    delegated = "nested/.review-evidence/run/log"
+    held, summary = _held_named_evidence(repo, "nested/.review-evidence", set(expected) | {delegated}, set(), None, None)
+    assert held == {delegated} and summary is None  # a delegated run still uses its own folder
     write_task_result(parent, task["id"], "completed", workspace_root=str(repo), artifact_status="finalizing")
     finalize_task_artifacts(parent, task)
     result = read_result(parent, task["id"])

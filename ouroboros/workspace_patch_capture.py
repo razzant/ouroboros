@@ -75,15 +75,15 @@ def _held_named_evidence(root: pathlib.Path, host_evidence: str, changed: set, b
                          retain_dir: Optional[pathlib.Path], previous: Optional[Dict[str, Any]],
                          ) -> Tuple[set, Optional[Dict[str, Any]]]:
     """The changed paths a capture holds out as the copy's named evidence, and the retention summary when
-    this capture retains them. The folder is ``EVIDENCE_DIRNAME`` by the one shared name, or the one
-    ``host_evidence`` names for a copy whose run worked in a folder of it; only paths NEW since the recorded
+    this capture retains them. Task retention always uses ``EVIDENCE_DIRNAME``; without ``retain_dir``,
+    ``host_evidence`` can name the delegated run's folder. Only paths NEW since the recorded
     baseline (untracked, staged or committed in the copy) are evidence, a path the baseline holds is the
     project's own (#2711). With ``retain_dir`` the folder is retained there once
     (``delegate_named_evidence.retain_workspace_evidence``, ``previous`` reused while unchanged); when that
     fails nothing is held out, so the files ride the capture as before: never zero copies."""
     from ouroboros.delegate_start_instructions import EVIDENCE_DIRNAME
 
-    evidence = pathlib.PurePosixPath((host_evidence or EVIDENCE_DIRNAME).strip("/"))
+    evidence = pathlib.PurePosixPath((EVIDENCE_DIRNAME if retain_dir is not None else host_evidence or EVIDENCE_DIRNAME).strip("/"))
     under = lambda rel: pathlib.PurePosixPath(rel).is_relative_to(evidence)  # noqa: E731
     held = {rel for rel in changed if rel not in baseline and under(rel)}
     if not held or retain_dir is None:  # a run, not this capture, retains the folder (or there is nothing new)
