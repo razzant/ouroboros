@@ -136,6 +136,10 @@ def two_pass_env(monkeypatch, preflight_timeout_diagnostics):
     # leak into the nested run and turn the lane-partition probes false-red.
     monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
     monkeypatch.delenv("PYTEST_XDIST_TESTRUNUID", raising=False)
+    # The bytecode warm is a real contained root over the candidate; these scenarios are about the passes.
+    # `test_the_gate_warms_its_prefix_once_before_the_passes` runs it for real.
+    from ouroboros import preflight_runner
+    monkeypatch.setattr(preflight_runner, "_warm_bytecode", lambda *args, **kwargs: "")
 
 
 # ── Pass-spec contract (unit) ─────────────────────────────────────────
@@ -1160,6 +1164,40 @@ def test_the_gate_leases_its_workers_and_names_its_durations_table_for_the_whole
         [(os.getpid(), 2, "hermetic gate")]] * 2
     assert tables == [(str(data / "state" / "test-durations.json"),) * 2] * 2
     assert list(ledger.glob("*.json")) == []
+
+
+def test_the_gate_warms_its_prefix_once_before_the_passes(tmp_path, two_pass_env, stub_passes, monkeypatch, capsys):
+    """One contained warm root, under the gate's env and behind the owner's work, writes the candidate's compiled
+    modules and pytest's rewritten test modules into the run's prefix before the first pass; its facts are a lane of
+    the run's evidence, and the passes read the prefix with the write ban kept."""
+    from ouroboros import preflight_runner as pr
+    from ouroboros.test_bytecode import warm_lane
+
+    monkeypatch.setattr(pr, "_warm_bytecode", lambda *args, **kwargs: warm_lane(*args, **kwargs))
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    _pin_preflight_root(monkeypatch, scratch)
+    seen = []
+
+    def green():
+        env = pr._preflight_env(scratch, scratch / "repo")
+        prefix = pathlib.Path(env["PYTHONPYCACHEPREFIX"])
+        mirrored = prefix / pathlib.Path(*(scratch / "repo").resolve().parts[1:]) / "tests"
+        seen.append((env["PYTHONDONTWRITEBYTECODE"], prefix.is_relative_to(scratch),
+                     sorted(path.name.split(".")[0] for path in mirrored.glob("*-pytest-*.pyc"))))
+        return (0, "ok", "")
+
+    stub_passes([green, green])
+    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n",
+                                 "tests/test_other.py": "def test_ok():\n    assert True\n"})
+    assert pr.run_hermetic_pytest(repo, timeout=300) is None
+    assert seen == [("1", True, ["test_other", "test_plain"])] * 2
+    named = next(line.split(" ", 1)[1] for line in capsys.readouterr().err.splitlines() if line.startswith("PREFLIGHT_EVIDENCE "))
+    record = json.loads((pathlib.Path(named) / "result.json").read_text(encoding="utf-8"))
+    (warm,) = [lane for lane in record["lanes"] if lane["lane"] == "warm"]
+    assert warm["returncode"] == 0 and warm["containment_error"] == "" and warm["facts"]["files"] == 2
+    assert warm["facts"]["compile_exit"] == 0 and warm["facts"]["collect_exits"] == [0]
+    assert [lane["lane"] for lane in record["lanes"]].index("warm") < [lane.get("pass") for lane in record["lanes"]].index("parallel")
 
 
 def test_plugins_are_verified_before_the_candidate_tree_exists(tmp_path, two_pass_env, stub_passes, monkeypatch):

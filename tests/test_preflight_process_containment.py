@@ -118,23 +118,24 @@ def test_windows_containment_uses_the_shared_job_seam_and_closes_the_spawn_race(
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX nice; the Windows class is asserted on the creation flags above")
 def test_a_background_spawn_lowers_the_priority_of_the_whole_tree():
-    """The gate's tree runs behind the owner's work: ``background=True`` execs the root under ``nice -n 10``
-    (same pid, so the container's root identity holds) and a grandchild inherits it; a plain spawn keeps
-    the caller's priority."""
+    """The gate's tree runs behind the owner's work: ``background=True`` lowers the root's process group by ten
+    right after it exists (argv untouched, so the container's root identity and every reader of the command hold)
+    and a grandchild inherits it; a plain spawn keeps the caller's priority."""
     from ouroboros.process_containment import ProcessContainer
 
     # `os.getpriority`, not `os.nice(0)`: macOS refuses even a zero increment at the ceiling (EPERM).
     script = ("import os, subprocess, sys; print(os.getpid(), os.getpriority(os.PRIO_PROCESS, 0), subprocess.run("
               "[sys.executable, '-c', 'import os; print(os.getpriority(os.PRIO_PROCESS, 0))'], capture_output=True, "
               "text=True).stdout.strip())")
-    mine, ceiling = os.getpriority(os.PRIO_PROCESS, 0), 20 if sys.platform == "darwin" else 19
-    for background, expected in ((True, min(mine + 10, ceiling)), (False, mine)):
+    mine = os.getpriority(os.PRIO_PROCESS, 0)
+    for background, expected in ((True, min(mine + 10, 19)), (False, mine)):
         container = ProcessContainer()
         proc = container.spawn([sys.executable, "-c", script], background=background, stdout=subprocess.PIPE, text=True)
         out, _ = proc.communicate(timeout=60)
         assert container.reap() == ""
         container.close()
         pid, own, child = out.split()
+        assert proc.args[0] == sys.executable  # the command is the caller's, never a wrapper's
         assert (int(pid), int(own), int(child)) == (proc.pid, expected, expected), (background, out)
 
 def test_a_windows_root_that_cannot_be_job_held_is_killed_and_reported(monkeypatch):

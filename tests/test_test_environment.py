@@ -157,6 +157,34 @@ def test_boundary_is_established_before_runtime_imports_in_nested_collection(tmp
     assert all(Path(path).is_relative_to(root) for path in paths)
 
 
+def test_a_session_under_an_owner_keeps_the_runs_prefix_and_collects_with_gc_paused(tmp_path):
+    """Under an owner root (safe_test, the gate) every session reads and hands on the OWNER's warmed bytecode
+    prefix (a prefix of its own would start cold), while bare pytest keeps one under its own session root; and
+    the conftest collects with the cyclic collector paused, freezing the collected tree afterwards."""
+    owner = tmp_path / "owner"
+    env = isolated_environment(owner, REPO)
+    script = "import json, os, sys, tests.conftest; print(json.dumps([sys.pycache_prefix, os.environ['PYTHONPYCACHEPREFIX']]))"
+    owned = subprocess.run([sys.executable, "-c", script], cwd=REPO, env={**env, "OUROBOROS_TEST_TEMP_ROOT": str(owner)},
+                           text=True, capture_output=True, timeout=120)
+    assert owned.returncode == 0, owned.stderr
+    assert json.loads(owned.stdout.splitlines()[-1]) == [env["PYTHONPYCACHEPREFIX"]] * 2
+    bare = subprocess.run([sys.executable, "-c", script], cwd=REPO, env=env, text=True, capture_output=True, timeout=120)
+    assert bare.returncode == 0, bare.stderr
+    prefix, handed = json.loads(bare.stdout.splitlines()[-1])
+    assert prefix == handed and prefix != env["PYTHONPYCACHEPREFIX"] and prefix.endswith("pycache.noindex")
+    suite, witness = tmp_path / "suite", tmp_path / "gc-at-collection.txt"
+    (suite / "tests").mkdir(parents=True)
+    (suite / "tests" / "test_gc.py").write_text(
+        f"import gc, pathlib\npathlib.Path({str(witness)!r}).write_text(str(gc.isenabled()))\n"
+        "def test_after_collection():\n    assert gc.isenabled() and gc.get_freeze_count() > 0\n", encoding="utf-8")
+    run = subprocess.run([sys.executable, "-m", "pytest", "-p", "tests.conftest", "--rootdir", str(suite), "--confcutdir",
+                          str(suite), "-o", "addopts=", "-q", "-p", "no:cacheprovider", str(suite / "tests")],
+                         cwd=REPO, env={**env, "OUROBOROS_TEST_TEMP_ROOT": str(owner)}, text=True, capture_output=True,
+                         timeout=180)
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert witness.read_text(encoding="utf-8") == "False"
+
+
 def test_safe_test_refuses_a_disposable_root_inside_the_checkout(tmp_path):
     """A nested root is not disposable: git walks up from it into THIS working tree."""
     launcher = [sys.executable, "-I", "-S", str(REPO / "scripts" / "safe_test.py")]

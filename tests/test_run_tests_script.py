@@ -281,12 +281,13 @@ def test_a_deferred_full_escalation_runs_the_floor_and_says_so(run_tests, monkey
     monkeypatch.setattr(run_tests, "_run", lambda label, argv, cwd: ran.append((label, argv)) or 0)
     run_tests.main(["--selected", "--defer-full", "--evidence-dir", str(tmp_path / "evidence")])
     record = json.loads((tmp_path / "evidence" / "selection.json").read_text(encoding="utf-8"))
-    assert ran[0] == "node" and ran[1][0] == "parallel"  # the leg still runs the Node lane and a pytest pass
+    # The leg still runs the Node lane, warms the prefix for the selection, and runs a pytest pass.
+    assert ran[0] == "node" and ran[1][0] == "warm" and "--files-from" in ran[1][1] and ran[2][0] == "parallel"
     if tier == "full":  # the PR minimum runs here; the rest goes to the landed shards
         assert record["deferred_full"] is True and record["files"] == sorted(test_selection.FLOOR_TESTS)
         # The pass is started with exactly the floor in its inventory plugin, not on its command line.
-        assert plugin_scope(ran[1][1], tmp_path / "evidence" / "probe") == sorted(test_selection.FLOOR_TESTS)
-        assert not [arg for arg in ran[1][1] if arg.startswith(SELECT)]
+        assert plugin_scope(ran[2][1], tmp_path / "evidence" / "probe") == sorted(test_selection.FLOOR_TESTS)
+        assert not [arg for arg in ran[2][1] if arg.startswith(SELECT)]
         assert "tests/conftest.py: verification apparatus changed" in summary.read_text(encoding="utf-8")
     else:
         assert "deferred_full" not in record and record["files"] == ["tests/test_floor.py"]
@@ -357,7 +358,7 @@ def test_a_bare_call_never_means_a_subset(run_tests, monkeypatch):
     monkeypatch.setattr(run_tests, "_node_lane", lambda: 0)
     monkeypatch.setattr(run_tests, "_run", lambda label, argv, cwd: calls.append((label, argv)) or 0)
     assert run_tests.main([]) == 0
-    assert [label for label, _ in calls] == ["overlapped"]
+    assert [label for label, _ in calls] == ["warm", "overlapped"]
     calls.clear()
     assert run_tests.main(["tests/test_x.py", "-k", "one"]) == 0
     assert calls == [("focused", [run_tests.sys.executable, "-m", "pytest", "tests/test_x.py", "-k", "one"])]
@@ -367,19 +368,28 @@ def test_a_bare_call_never_means_a_subset(run_tests, monkeypatch):
     assert calls == [("focused", [run_tests.sys.executable, "-m", "pytest", *explicit])]
 
 
-@pytest.mark.parametrize("arguments, phases", [([], ["overlapped"]), (["--sequential"], ["parallel", "serial"]),
+@pytest.mark.parametrize("arguments, phases", [([], ["warm", "overlapped"]), (["--sequential"], ["warm", "parallel", "serial"]),
                                               (["tests/test_x.py", "-k", "one"], ["focused"])])
 def test_evidence_option_keeps_selection_and_gives_each_pytest_phase_its_own_argv(
     run_tests, monkeypatch, tmp_path, arguments, phases,
 ):
+    """A battery warms the run's bytecode prefix once, after the Node lane and before its pytest phases (one owned
+    root with the run's workers as shards); a focused run does not."""
     calls, node = [], []
     monkeypatch.setattr(run_tests, "_node_lane", lambda: node.append(True) or 0)
+    monkeypatch.setattr(run_tests, "_workers", lambda: 3)
     monkeypatch.setattr(run_tests, "_run", lambda label, argv, cwd: calls.append((label, argv)) or 0)
     monkeypatch.chdir(tmp_path)
     assert run_tests.main(["--evidence-dir", "diagnostics", *arguments]) == 0
     assert [label for label, _ in calls] == phases
+    for label, argv in calls:
+        if label == "warm":
+            assert argv[:2] == [run_tests.sys.executable, "-c"] and argv[-2:] == ["--workers", "3"]
+            assert "--ci-evidence-dir" not in argv and "--files-from" not in argv
     assert node == ([] if phases == ["focused"] else [True])
     for label, command in calls:
+        if label == "warm":
+            continue
         offset = command.index("--ci-evidence-dir")
         assert command[offset + 1] == str(tmp_path / "diagnostics" / label)
         selection = command[:offset] + command[offset + 2:]
@@ -400,12 +410,12 @@ def test_a_missing_node_is_a_red_not_run_never_a_silent_skip(run_tests, monkeypa
 
 def test_a_red_lane_stops_the_battery_and_an_empty_battery_is_red(run_tests, monkeypatch):
     monkeypatch.setattr(run_tests, "_node_lane", lambda: 0)
-    codes = iter([1])
+    codes = iter([0, 1])  # the warm, then a red first lane
     seen = []
     monkeypatch.setattr(run_tests, "_run", lambda label, argv, cwd: seen.append(label) or next(codes))
     assert run_tests.main(["--sequential"]) == 1
-    assert seen == ["parallel"]
-    monkeypatch.setattr(run_tests, "_run", lambda label, argv, cwd: 5)
+    assert seen == ["warm", "parallel"]
+    monkeypatch.setattr(run_tests, "_run", lambda label, argv, cwd: 0 if label == "warm" else 5)
     assert run_tests.main(["--sequential"]) == 1
 
 

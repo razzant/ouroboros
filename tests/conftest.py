@@ -5,6 +5,7 @@
 # runtime cleanup) live in ``tests/_shared.py`` instead.
 import asyncio
 import functools
+import gc
 import json
 import os
 import pathlib
@@ -53,6 +54,10 @@ if os.environ.get("OUROBOROS_ALLOW_LIVE_DATA_TESTS") != "1":
         _PYTEST_ROOT, _PYTEST_ROOT / "data" / "repo", source={},
     )
     _environment["declare_scratch"](_PYTEST_ROOT, "pytest-session")
+    if _SAFE_TEMP_ROOT and os.environ.get("PYTHONPYCACHEPREFIX"):
+        # One bytecode prefix per RUN, the owner's, warmed once (ouroboros/test_bytecode.py) and read by
+        # every controller, worker and child of it; a session prefix of its own would start cold again.
+        _PYTEST_DEFAULTS["PYTHONPYCACHEPREFIX"] = os.environ["PYTHONPYCACHEPREFIX"]
     if not _SAFE_TEMP_ROOT:
         for _key in ("TMPDIR", "TEMP", "TMP", "PYTEST_DEBUG_TEMPROOT"):
             _PYTEST_DEFAULTS.pop(_key, None)
@@ -444,6 +449,20 @@ _SERIAL_TEST_FILES = frozenset({
     # observe git calls leaked by co-located modules. Same module-global class -> serial lane.
     "test_update_apply_routing.py",
 })
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_collection(session):  # noqa: ARG001
+    """Collection imports every test module at once: with the cyclic collector paused it costs a fraction
+    (a whole-tree parse runs 2-3.5x faster, opus_rework N3), and nothing it builds is garbage before it ends.
+    The collected tree is then frozen out of every later collection's reach, so the tests' own garbage
+    collections never rescan it."""
+    gc.disable()
+    try:
+        yield
+    finally:
+        gc.enable()
+        gc.freeze()
 
 
 @pytest.hookimpl(tryfirst=True)

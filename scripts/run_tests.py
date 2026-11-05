@@ -208,6 +208,18 @@ def _stop_interrupted(container, proc) -> None:
     container.terminate_tree(_INTERRUPT_TERM_SEC)
 
 
+def _warm_bytecode(files=()) -> int:
+    """Warm the run's bytecode prefix once before a battery (ouroboros/test_bytecode.py): compile the checkout into
+    it and collect the tree (or a selection's modules) in as many shards as the run has workers."""
+    from ouroboros.test_bytecode import command
+
+    files_from = None
+    if files:
+        files_from = pathlib.Path(tempfile.mkdtemp(prefix="ouroboros-warm-")) / "files.txt"
+        files_from.write_text("\n".join(files) + "\n", encoding="utf-8")
+    return _run("warm", command(sys.executable, REPO, workers=_workers(), files_from=files_from), REPO)
+
+
 def _node_lane() -> int:
     from ouroboros.preflight_node import (
         NODE_MIN_VERSION, WEB_DIR, _version_tuple, candidate_node_tests, probe_node_version, resolve_node,
@@ -255,6 +267,8 @@ def _selected(args, evidence) -> int:
         output.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     code = _node_lane()
     record["node"] = "success" if code == 0 else "failure"
+    if code == 0 or args.keep_going:
+        code = _warm_bytecode(selection.files) or code
     red = code  # with --keep-going a later lane runs on, but never hides an earlier red
     previous = os.environ.get("PYTHONPATH")
     completed = False
@@ -378,7 +392,7 @@ def main(argv: list[str] | None = None) -> int:
     started = time.monotonic()
     print(f"=== full: {sum(1 for _ in (REPO / 'tests').rglob('test_*.py'))} Python modules; "
           "full default suite; complete Node lane", flush=True)
-    code = _node_lane()
+    code = _node_lane() or _warm_bytecode()
     ran = 0
     for label, command in battery_commands(args.sequential) if code == 0 else []:
         if evidence is not None:

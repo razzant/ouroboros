@@ -1202,6 +1202,12 @@ def _with_retention_notice(verdict: str, unproven: str, worktree: pathlib.Path, 
     return "\n".join(part for part in (header, notice, rest) if part)[:max_output]
 
 
+def _warm_bytecode(agent_python, worktree, temp_root, evidence, timeout, files=()) -> str:
+    from ouroboros.test_bytecode import warm_lane
+
+    return warm_lane(agent_python, worktree, temp_root, evidence, timeout, files)
+
+
 def _durations_target(ctx) -> Optional[pathlib.Path]:
     """The install's durations table for a caller with a canonical data root (the receipts' root); None otherwise."""
     from ouroboros.preflight_receipts import canonical_data_root
@@ -1460,6 +1466,16 @@ def _run_hermetic_pytest(
             _record_lane(evidence, "node", node_result, returncode=node_result.get("returncode"), containment_error=unproven_teardown)
         if node_error := (node_result or {}).get("error"):
             return _with_retention_notice(node_error, unproven_teardown, worktree, max_output)
+        unproven_teardown = "the bytecode warm did not return, so its teardown is unconfirmed"
+        with launching(evidence):  # the prefix every pass reads; a warm out of budget or red leaves them cold
+            warm_error = _warm_bytecode(agent_python, worktree, temp_root, evidence,
+                                        max(0.0, timeout - (time.monotonic() - started)),
+                                        selection.files if selection is not None else ())
+        unproven_teardown = ""  # it returned: its own reap decided, and a leak is the block below
+        if warm_error:
+            unproven_teardown = next((lane.get("containment_error") for lane in reversed(evidence.get("lanes", []))
+                                      if lane.get("lane") == "warm"), "") or warm_error
+            return _with_retention_notice(warm_error, unproven_teardown, worktree, max_output)
         empty_passes: list[str] = []
         timings: list[tuple[str, float]] = []
         for spec in passes:
