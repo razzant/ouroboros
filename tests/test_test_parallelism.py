@@ -285,13 +285,13 @@ def test_preflight_keeps_the_admission_it_measured_before_the_run(tmp_path, monk
 
     host = budget.HostRuns(slots=4, leases=((100, "run_tests.py overlapped"),), strangers=((700, "python3 -m pytest"),))
     monkeypatch.setattr(preflight_probe, "_preflight_admission", lambda: budget.Admission(2, host))
-    preflight_runner._install_worker_probe(tmp_path)
+    preflight_runner.install_worker_probe(tmp_path)
     monkeypatch.setattr(preflight_probe, "_preflight_admission", lambda: budget.Admission(16, budget.HostRuns()))
     env = preflight_runner._preflight_env(tmp_path, tmp_path / "repo")
     assert env["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "2"
     assert env[budget.NESTED_WORKERS_ENV] == "2"
     # The admission's facts travel with the run's evidence (`result.json` `workers`).
-    assert preflight_runner._recorded_admission(tmp_path) == {
+    assert preflight_runner.recorded_admission(tmp_path) == {
         "workers": 2, "held_by_other_runs": 4, "leases": [[100, "run_tests.py overlapped"]],
         "unleased_roots": [[700, "python3 -m pytest"]], "note": ""}
 

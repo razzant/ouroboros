@@ -12,9 +12,9 @@ import sys
 import time
 from typing import NamedTuple, Optional, Sequence
 
-from ouroboros.preflight_probe import (  # the gate's plugin in the candidate run, and the admission beside it
-    _MIN_PREFLIGHT_WORKERS, _WORKER_PROBE_MODULE, _allocated_worker_count, _install_worker_probe, _observed_worker_ids,
-    _probe_dir, _recorded_admission, _recorded_session,
+from ouroboros.preflight_probe import (  # the gate's plugin in the candidate run and the admission beside it: its public contract
+    MIN_PREFLIGHT_WORKERS, WORKER_PROBE_MODULE, allocated_worker_count, install_worker_probe, observed_worker_ids,
+    probe_dir, recorded_admission, recorded_session,
 )
 
 # Node lane of the gate (`run_hermetic_pytest` calls it once the candidate is
@@ -231,7 +231,7 @@ def _preflight_pass_specs(
     argv at all changes the discovery target and the output flags rather than
     preserving any caller contract.
 
-    ``probe_module`` is the NONCE name ``_install_worker_probe`` actually wrote.
+    ``probe_module`` is the NONCE name ``install_worker_probe`` actually wrote.
     It must be threaded through: ``-p name`` is an ordinary import, so a parallel
     pass built against the bare stem loads a module no file is named after and
     pytest exits ``EXIT_USAGEERROR`` before collecting a single test. The stem is
@@ -258,14 +258,14 @@ def _preflight_pass_specs(
                 # neither — the caller's argv is forwarded verbatim, and the
                 # worker-count check keys on the probe flag being present.
                 *_FORCED_PLUGIN_FLAGS,
-                "-p", probe_module or _WORKER_PROBE_MODULE,
+                "-p", probe_module or WORKER_PROBE_MODULE,
                 *output_flags,
             ],
         ),
         _make_pass(
             "serial",
             [target, "-m", f"{EXCLUSIVE_MARKER} and {LANE_EXCLUSION_EXPR}", *SERIAL_PASS_FLAGS,
-             *_FORCED_SERIAL_PLUGIN_FLAGS, "-p", probe_module or _WORKER_PROBE_MODULE, *output_flags],
+             *_FORCED_SERIAL_PLUGIN_FLAGS, "-p", probe_module or WORKER_PROBE_MODULE, *output_flags],
         ),
     ]
 
@@ -491,11 +491,11 @@ def _preflight_env(temp_root: pathlib.Path, repo_worktree: pathlib.Path, *, crea
     # PREPENDED, so `-p ouroboros_preflight_probe` resolves to the gate's own
     # worker-count plugin and not to anything the candidate tree or the
     # operator's PYTHONPATH happens to shadow it with.
-    env["PYTHONPATH"] = str(_probe_dir(temp_root))
+    env["PYTHONPATH"] = str(probe_dir(temp_root))
     # Re-injected AFTER the scrub, so `-n auto` resolves to a count this process
     # chose rather than one the operator environment happened to carry. Inert for
     # the serial/legacy passes, which pass no `-n` at all.
-    env["PYTEST_XDIST_AUTO_NUM_WORKERS"] = str(_allocated_worker_count(temp_root) if workers is None else workers)
+    env["PYTEST_XDIST_AUTO_NUM_WORKERS"] = str(allocated_worker_count(temp_root) if workers is None else workers)
     env[NESTED_WORKERS_ENV] = env["PYTEST_XDIST_AUTO_NUM_WORKERS"]
     from ouroboros.test_evidence import DURATIONS_POINTER, EVIDENCE_ENV, EVIDENCE_POINTER, TEST_DURATIONS_ENV
     pointer = temp_root / EVIDENCE_POINTER
@@ -558,7 +558,7 @@ print(json.dumps(problems))
 
 def _probe_plugins(
     agent_python: str,
-    probe_dir: pathlib.Path,
+    probe_root: pathlib.Path,
     *,
     isolated: bool,
     spec: Optional[Sequence[tuple]] = None,
@@ -574,7 +574,7 @@ def _probe_plugins(
     argv = [agent_python] + (["-I"] if isolated else []) + ["-c", _PLUGIN_PROBE_SOURCE, payload]
     try:
         proc = subprocess.run(
-            argv, cwd=str(probe_dir), capture_output=True, text=True, timeout=60
+            argv, cwd=str(probe_root), capture_output=True, text=True, timeout=60
         )
     except FileNotFoundError:
         # The caller already renders a precise "no such interpreter" message.
@@ -591,7 +591,7 @@ def _probe_plugins(
     return [str(problem) for problem in problems]
 
 
-def _verify_preflight_plugins(agent_python: str, probe_dir: pathlib.Path) -> list[str]:
+def _verify_preflight_plugins(agent_python: str, probe_root: pathlib.Path) -> list[str]:
     """Prove the SELECTED interpreter really carries the parallel-pass plugins.
 
     Independent of the candidate on purpose. Inferring "the plugins are there"
@@ -602,20 +602,20 @@ def _verify_preflight_plugins(agent_python: str, probe_dir: pathlib.Path) -> lis
     proving nothing.
 
     The candidate-controlled import surface is the working directory, so the
-    probe runs from ``probe_dir`` — the disposable temp root, before the
+    probe runs from ``probe_root`` — the disposable temp root, before the
     worktree even exists — and never from the diff-applied tree. No candidate
     conftest, sitecustomize or plugin can run before the answer is known.
 
     Returns the list of problems; an empty list means verified.
     """
-    problems = _probe_plugins(agent_python, probe_dir, isolated=True)
+    problems = _probe_plugins(agent_python, probe_root, isolated=True)
     if not problems:
         return []
     # `-I` additionally drops PYTHONPATH and the user site directory, which the
     # real pass DOES honour. Neither is candidate-controlled — both come from the
     # operator's own environment — so a strict miss is re-confirmed without them
     # rather than hard-blocking every commit on a legitimate `pip install --user`.
-    return _probe_plugins(agent_python, probe_dir, isolated=False)
+    return _probe_plugins(agent_python, probe_root, isolated=False)
 
 
 def _plugin_missing_remediation(agent_python: str, rejected: str = "") -> str:
@@ -905,7 +905,7 @@ def _crash_remediation(recorded: Optional[dict] = None) -> str:
     """The instruction line for a dead worker — it depends on WHY it died.
 
     The label and the hard block are identical either way; only this line changes.
-    ``recorded`` is this pass's own results.json (``_recorded_session``). The timeout
+    ``recorded`` is this pass's own results.json (``recorded_session``). The timeout
     instruction needs the worker the session recorded dead among its crash rows and
     every crash row naming its worker and a matched timeout; anything less, a missing
     or unreadable record included, is diagnosed before any fix is chosen.
@@ -1300,8 +1300,8 @@ def _run_hermetic_pytest(
         # host ledger until the run ends, whatever the verdict.
         admitted, lease = reserve("hermetic gate")
         # Install before compiling specs: -p must name the actual nonce module.
-        probe_module = _install_worker_probe(temp_root, admitted)
-        evidence["workers"] = _recorded_admission(temp_root)
+        probe_module = install_worker_probe(temp_root, admitted)
+        evidence["workers"] = recorded_admission(temp_root)
         passes = _preflight_pass_specs(pytest_args, probe_module=probe_module)
         # Before ANY candidate code is on disk, let alone imported.
         if any(spec.parallel for spec in passes):
@@ -1447,7 +1447,7 @@ def _run_hermetic_pytest(
                 )
             if inventory_error and returncode in (0, _PYTEST_EXIT_NO_TESTS):
                 return f"⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_INVENTORY: {spec.label}: {inventory_error}"
-            recorded = _recorded_session(temp_root) if probe_module in spec.args else None
+            recorded = recorded_session(temp_root) if probe_module in spec.args else None
             # A candidate's own default-lane plugin (tests/default_lane.py) ends a pass that holds none of the
             # selection's tests with 0 and says so; its record still shows what it collected: nothing.
             if returncode == _PYTEST_EXIT_NO_TESTS or (returncode == 0 and _collected_nothing(recorded)):
@@ -1456,8 +1456,8 @@ def _run_hermetic_pytest(
             if returncode == 0 and spec.parallel and probe_module in spec.args:
                 # Use the actual nonce flag, not the stem or spec.parallel:
                 # custom argv gets no host probe; red/empty lanes need no count.
-                observed = _observed_worker_ids(temp_root)
-                if len(observed) < (required := min(_MIN_PREFLIGHT_WORKERS, _allocated_worker_count(temp_root))):
+                observed = observed_worker_ids(temp_root)
+                if len(observed) < (required := min(MIN_PREFLIGHT_WORKERS, allocated_worker_count(temp_root))):
                     return _diagnosis(
                         "⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_PARALLELISM_LOST (hard block): "
                         f"the {spec.label} pass returned green on {len(observed)} xdist "

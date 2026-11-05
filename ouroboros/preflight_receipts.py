@@ -364,9 +364,9 @@ class GateReceipt:
         if self.path is None:
             return
         try:
-            workers, admitted = len(pr._observed_worker_ids(temp_root)), pr._allocated_worker_count(temp_root)
+            workers, admitted = len(pr.observed_worker_ids(temp_root)), pr.allocated_worker_count(temp_root)
             reason = ("the parallel pass collected no tests" if "parallel" in empty_passes else
-                      f"{workers} observed xdist worker(s)" if workers < min(pr._MIN_PREFLIGHT_WORKERS, admitted) else "")
+                      f"{workers} observed xdist worker(s)" if workers < min(pr.MIN_PREFLIGHT_WORKERS, admitted) else "")
             if not reason:
                 reason = _source_status()[1]
             if not reason:

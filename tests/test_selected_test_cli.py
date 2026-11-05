@@ -15,7 +15,7 @@ from ouroboros.preflight_runner import LANE_EXCLUSION_EXPR
 from tests.test_preflight_runner import _make_repo
 
 WINDOWS_COMMAND_LINE = 32_767  # CreateProcess takes a command line shorter than this, terminator included
-# The fields the two plugins a run writes are filled from (``preflight_probe._WORKER_PROBE_SOURCE``,
+# The fields the two plugins a run writes are filled from (``preflight_probe.WORKER_PROBE_SOURCE``,
 # ``preflight_inventory.SOURCE``). A path or a module name may spell any of them, and that is never a field.
 TEMPLATE_FIELDS = ("__WORKER_LOG__", "__RESULTS_POINTER__", "__SCOPE__", "__RESULT_PATH__")
 
@@ -224,7 +224,7 @@ def test_selected_cli_runs_where_the_evidence_directory_and_a_module_spell_templ
     assert sorted(parallel["executed"]) == sorted(parallel["expected"]) == sorted([
         "tests/test_floor.py::test_floor", f"{named}::test_named"])
     assert row["outcomes"] == {"parallel": "success", "serial": "success"} and row["outcome"] == "success"
-    # The gate's plugin reported where its readers look (_observed_worker_ids, _recorded_session): a file per worker of
+    # The gate's plugin reported where its readers look (observed_worker_ids, recorded_session): a file per worker of
     # the parallel pass, and the pointer each pass's controller leaves at its own results directory (the serial pass last).
     workers = [path.name for path in (evidence / "workers").iterdir()]
     assert workers and all(name.startswith("gw") for name in workers), workers

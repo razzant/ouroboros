@@ -212,7 +212,7 @@ def _node_lane() -> int:
 
 def _selected(args, evidence) -> int:
     from ouroboros.preflight_inventory import inventory_problem, launch_args, read_inventory, selection_passes
-    from ouroboros.preflight_runner import _probe_dir, _install_worker_probe
+    from ouroboros.preflight_probe import install_worker_probe, probe_dir
     from ouroboros.test_selection import select_tests
 
     try:
@@ -243,9 +243,9 @@ def _selected(args, evidence) -> int:
     red = code  # with --keep-going a later lane runs on, but never hides an earlier red
     previous = os.environ.get("PYTHONPATH")
     completed = False
-    os.environ["PYTHONPATH"] = os.pathsep.join(filter(None, (str(_probe_dir(root)), previous)))
+    os.environ["PYTHONPATH"] = os.pathsep.join(filter(None, (str(probe_dir(root)), previous)))
     try:
-        probe = _install_worker_probe(root)
+        probe = install_worker_probe(root)
         for spec in selection_passes(selection, probe_module=probe, temp_root=root) if code == 0 or args.keep_going else []:
             command = [sys.executable, "-m", "pytest", *launch_args(spec.args),
                        "--ci-evidence-dir", str(root / spec.label)]

@@ -108,9 +108,9 @@ def warm_lane(agent_python: str, worktree, temp_root, evidence: dict, timeout, f
     temp_root = Path(temp_root)
     files_from = None
     if files:
-        files_from = pr._probe_dir(temp_root) / "warm-files.txt"
+        files_from = pr.probe_dir(temp_root) / "warm-files.txt"
         files_from.write_text("\n".join(files) + "\n", encoding="utf-8")
-    argv = command(agent_python, worktree, workers=pr._allocated_worker_count(temp_root), files_from=files_from)
+    argv = command(agent_python, worktree, workers=pr.allocated_worker_count(temp_root), files_from=files_from)
     container, output, proc = ProcessContainer(lifeline=True, overload=True), FileOutput(temp_root, "warm"), None
     started = time.monotonic()
     try:

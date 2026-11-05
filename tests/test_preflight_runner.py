@@ -167,7 +167,7 @@ def test_two_pass_specs_mirror_ci(monkeypatch):
     # plugin against a candidate `-p no:timeout`, as the parallel pass does, and loads the gate's own plugin
     # for its reading of `serial("exclusive")`.
     assert serial.args == ["tests/", "-m", f"exclusive and {pr.LANE_EXCLUSION_EXPR}", "--timeout=300",
-                           "-p", "timeout", "-p", pr._WORKER_PROBE_MODULE, "-q", "--tb=line", "--no-header"]
+                           "-p", "timeout", "-p", pr.WORKER_PROBE_MODULE, "-q", "--tb=line", "--no-header"]
 
     # `parallel` is read off the argv, not the label: it gates the xdist-only
     # diagnoses so they cannot fire on a pass that never ran a worker.
@@ -198,12 +198,12 @@ def test_the_parallel_pass_forces_the_plugins_and_the_worker_probe(monkeypatch):
         assert pair[1] and "." not in pair[1], f"{pair[1]!r} is a module path, not an entry-point name"
     joined = " ".join(parallel.args)
     assert " ".join(pr._FORCED_PLUGIN_FLAGS) in joined, "the parallel pass does not force its plugins"
-    assert f"-p {pr._WORKER_PROBE_MODULE}" in joined, "the parallel pass carries no worker probe"
+    assert f"-p {pr.WORKER_PROBE_MODULE}" in joined, "the parallel pass carries no worker probe"
 
     # The serial pass carries the per-test timeout, so it forces the timeout plugin and never xdist; it loads
     # the gate's plugin too, which reads `serial("exclusive")` for both passes (the worker count is the parallel one's).
     assert serial.args.count("-p") == 2 and "timeout" in serial.args
-    assert "xdist" not in serial.args and pr._WORKER_PROBE_MODULE in serial.args
+    assert "xdist" not in serial.args and pr.WORKER_PROBE_MODULE in serial.args
     assert "-p" not in pr._preflight_pass_specs(["tests/", "-n", "2"])[0].args, (
         "an explicit caller argv must be forwarded verbatim"
     )
@@ -494,20 +494,20 @@ def test_the_worker_probe_is_prepended_to_pythonpath(tmp_path, monkeypatch):
     env = pr._preflight_env(root, root / "repo")
 
     entries = env["PYTHONPATH"].split(os.pathsep)
-    assert entries[0] == str(pr._probe_dir(root.resolve(strict=False))), (
+    assert entries[0] == str(pr.probe_dir(root.resolve(strict=False))), (
         "the gate's probe dir is shadowable"
     )
     assert "/inherited/first" not in entries, "an owner import path leaked into the candidate"
 
-    module = pr._install_worker_probe(root)
-    assert module.startswith(pr._WORKER_PROBE_MODULE + "_"), module
-    assert module != pr._WORKER_PROBE_MODULE, "the probe module name carries no nonce"
-    assert (pr._probe_dir(root) / f"{module}.py").exists()
+    module = pr.install_worker_probe(root)
+    assert module.startswith(pr.WORKER_PROBE_MODULE + "_"), module
+    assert module != pr.WORKER_PROBE_MODULE, "the probe module name carries no nonce"
+    assert (pr.probe_dir(root) / f"{module}.py").exists()
     # The RETURNED name is the only one a file is written under, so a caller that
     # discards it and passes the bare stem hands pytest a `-p` import that cannot
     # resolve — a usage error (exit 4) before a single test is collected, on every
     # default two-pass run.
-    assert not (pr._probe_dir(root) / f"{pr._WORKER_PROBE_MODULE}.py").exists()
+    assert not (pr.probe_dir(root) / f"{pr.WORKER_PROBE_MODULE}.py").exists()
     # Written into the gate's disposable temp root, NEVER into the worktree the
     # candidate diff was applied to — the gate must not add a file to the tree it
     # is judging.
@@ -528,12 +528,12 @@ def test_the_parallel_pass_loads_the_probe_module_that_was_actually_written(tmp_
     from ouroboros import preflight_runner as pr
 
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_SERIAL", raising=False)
-    module = pr._install_worker_probe(tmp_path)
+    module = pr.install_worker_probe(tmp_path)
     parallel, serial = pr._preflight_pass_specs(probe_module=module)
 
     assert module in parallel.args, "the parallel pass does not load the generated probe"
     assert parallel.args[parallel.args.index(module) - 1] == "-p", "the probe is not a `-p` operand"
-    assert pr._WORKER_PROBE_MODULE not in parallel.args, (
+    assert pr.WORKER_PROBE_MODULE not in parallel.args, (
         "the parallel pass loads the bare stem, which names no file on the probe path"
     )
     assert module in serial.args, "the serial pass loads the same generated plugin for its `serial(\"exclusive\")` reading"
@@ -710,13 +710,13 @@ def test_a_crash_names_a_timeout_only_from_its_own_recorded_rows(change):
 def test_a_pass_without_its_own_readable_results_has_no_record(tmp_path):
     from ouroboros import preflight_runner as pr
 
-    assert pr._recorded_session(tmp_path) is None  # no controller of this pass located one
+    assert pr.recorded_session(tmp_path) is None  # no controller of this pass located one
     preflight_probe._results_pointer(tmp_path).write_text(str(tmp_path / "evidence"), encoding="utf-8")
-    assert pr._recorded_session(tmp_path) is None  # located, never exported
+    assert pr.recorded_session(tmp_path) is None  # located, never exported
     (tmp_path / "evidence").mkdir()
     for torn in ("{torn", "[]"):
         (tmp_path / "evidence" / "results.json").write_text(torn, encoding="utf-8")
-        assert pr._recorded_session(tmp_path) is None
+        assert pr.recorded_session(tmp_path) is None
 
 
 def test_unrecorded_crash_asks_for_a_diagnosis_before_any_serial_mark():
@@ -922,7 +922,7 @@ def stub_passes(monkeypatch):
     `_verify_preflight_plugins` shells out to the selected interpreter before the
     worktree exists (so with xdist absent from THIS interpreter every stubbed
     test would fail on `PREFLIGHT_PLUGIN_MISSING` instead of on its own subject),
-    and `_observed_worker_ids` reads the worker files a real xdist run writes (a
+    and `observed_worker_ids` reads the worker files a real xdist run writes (a
     recorded pass writes none, so every green two-pass case would fail on
     `PREFLIGHT_PARALLELISM_LOST`). Both behaviours have their own dedicated
     tests, which install their own expectations:
@@ -936,7 +936,7 @@ def stub_passes(monkeypatch):
     events: list[tuple] = []
 
     monkeypatch.setattr(preflight_runner, "_verify_preflight_plugins", lambda *a, **k: [])
-    monkeypatch.setattr(preflight_runner, "_observed_worker_ids", lambda *a, **k: {"gw0", "gw1"})
+    monkeypatch.setattr(preflight_runner, "observed_worker_ids", lambda *a, **k: {"gw0", "gw1"})
 
     def _install(results):
         pending = list(results)
@@ -2074,8 +2074,8 @@ def _gate_pass(tmp_path, monkeypatch, source):
     repo = _make_repo(tmp_path, {
         "pytest.ini": _FIXTURE_PYTEST_INI + "timeout_method = thread\n", "tests/test_case.py": source,
         "conftest.py": f"import sys\nsys.path.insert(0, {str(REPO_ROOT)!r})\npytest_plugins = ['tests.conftest']\n"})
-    read, original = [], pr._recorded_session
-    monkeypatch.setattr(pr, "_recorded_session", lambda root: read.append(original(root)) or read[-1])
+    read, original = [], pr.recorded_session
+    monkeypatch.setattr(pr, "recorded_session", lambda root: read.append(original(root)) or read[-1])
     return pr.run_hermetic_pytest(repo, timeout=120), read
 
 
