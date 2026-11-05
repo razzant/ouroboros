@@ -160,7 +160,7 @@ def test_two_completed_tasks_read_their_card_outcomes_not_a_bare_lifecycle(tmp_p
     observation = _observe(tmp_path)  # chat-announced terminals: the ``_transition_line`` path
     done, stopped = [line for kind, _offset, line in observation.events if kind == "task_terminal"]
     assert done.startswith("- task done1 Done") and " completed" not in done
-    assert stopped.startswith("- task stop1 Failed") and "Ouroboros stopped with unfinished work" in stopped
+    assert stopped.startswith("- task stop1 Stopped") and "Ouroboros stopped with unfinished work" in stopped
     assert "The API stayed down, so nothing could be verified." in stopped and done != stopped
     from ouroboros.task_store import read_document
 
