@@ -18,6 +18,7 @@ from ouroboros import subagent_worktrees as trees
 from ouroboros.maintenance_jobs import record_pass
 from tests._store_shared import seed_result
 from tests.test_claudexor_runtime_retention import cx  # noqa: F401 -- the engine runtime fixture
+from tests.test_session_service_directories import _synthetic_temp_parent  # noqa: F401 -- isolate session scratch parent
 
 WITNESSES: Dict[str, str] = {}  # retirer (dotted) -> the test here that releases one fixture and holds another
 OLD = "2026-10-01T00:00:00+00:00"
