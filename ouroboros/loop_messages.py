@@ -206,10 +206,11 @@ def _record_owner_directive(
         directives = []
         setattr(ctx, "_owner_directives", directives)
     stable_id = str(msg_id or "").strip()
-    message_id = str((origin or {}).get("client_message_id") or "")
-    for known in directives:
+    client, room = (str((origin or {}).get(key) or "") for key in ("client_message_id", "chat_id"))  # unique per room
+    for known in directives:  # a client id is one message unless both rows name different rooms (``dialogue_store``)
         if isinstance(known, dict) and ((stable_id and str(known.get("msg_id") or "") == stable_id) or (
-                message_id and str(known.get("client_message_id") or "") == message_id)):
+                client and str(known.get("client_message_id") or "") == client
+                and room in ("", str(known.get("chat_id") or room)))):
             if not carried:
                 known.pop("carried", None)
             return

@@ -283,3 +283,21 @@ def test_two_replies_to_one_message_keep_one_target_row_beside_the_first():
     second = [ow._row("And this too.", source="owner_mailbox", carrier="ctx", ref="msg m-2"),
               ow._row(TARGET["text"], source=ow.REPLY_TARGET, carrier="ctx", ref=TARGET["address"], author="Ouroboros")]
     assert [row["ref"] for row in ow._deduped(first + second)] == ["msg m-1", TARGET["address"], "msg m-2"]
+
+
+@pytest.mark.parametrize("rooms, kept", [(("100", "200"), ["room one", "room two"]), (("100", "100"), ["room one"]),
+                                         (("100", ""), ["room one"])])
+def test_one_client_id_in_two_rooms_is_two_messages(rooms, kept):
+    """A client id is unique only within its room (a place's message ids repeat across its chats): two rows naming two
+    rooms are two messages; the same room, or a carrier that names none (the mailbox), is one message, kept once."""
+    from types import SimpleNamespace
+
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_continue import owner_corpus_rows
+
+    rows = owner_corpus_rows({"later": [
+        {"source": "owner_mailbox", "content": "room one", "client_message_id": "42", "chat_id": rooms[0]},
+        {"source": "owner_mailbox", "content": "room two", "client_message_id": "42", "chat_id": rooms[1]}]})
+    ctx = SimpleNamespace(task_metadata={"objective_author": {"kind": "continuation"}, "owner_corpus": rows}, task_id="t")
+    _initialize_owner_directives(ctx, [{"role": "user", "content": "work order"}])
+    assert [row["content"] for row in ctx._owner_directives] == kept
