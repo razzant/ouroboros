@@ -146,14 +146,36 @@ def publish_pending_owner_dialogue(ctx: Any, messages: list) -> None:
 
 
 def stamp_lineage(ctx: Any, evt: Dict[str, Any]) -> Dict[str, Any]:
-    """The producing task's lineage (``task_id`` / ``parent_task_id`` / ``root_task_id``) on an owner-directed
-    event, kept where already set: what the supervisor resolves the project binding from. A caller that owes the
-    event durably before delivering it (a relay's answer) stamps it first, so a replay is the same producer's."""
+    """Stamp task lineage and origin before any owner-delivery snapshot is taken.
+
+    The origin is deliberately stamped here, rather than only in
+    ``deliver_owner_event``: relay and Presence Main-contact events register
+    their durable outbox copy before the live/deferred delivery call. Mutate an
+    existing ``progress_meta`` mapping in place so a caller that already owes
+    this event keeps the exact same metadata on replay. Explicit event
+    metadata wins over task-derived metadata; ordinary owner turns remain
+    unlabelled.
+    """
+    from ouroboros.subagent_messages import initiator_meta
+
     meta = getattr(ctx, "task_metadata", {})
     meta = meta if isinstance(meta, dict) else {}
     evt.setdefault("task_id", str(getattr(ctx, "task_id", "") or ""))
     evt.setdefault("parent_task_id", str(meta.get("parent_task_id") or ""))
     evt.setdefault("root_task_id", str(meta.get("root_task_id") or ""))
+
+    progress_meta = evt.get("progress_meta") if isinstance(evt.get("progress_meta"), dict) else {}
+    explicit = str(evt.get("initiator") or progress_meta.get("initiator") or "").strip()
+    derived = initiator_meta(meta).get("initiator", "")
+    value = explicit or derived
+    if value:
+        # Keep an explicit event value authoritative, while making the same
+        # fact available to the send_message consumer and dialogue checkpoint.
+        if not isinstance(evt.get("progress_meta"), dict):
+            progress_meta = {}
+            evt["progress_meta"] = progress_meta
+        evt.setdefault("initiator", value)
+        progress_meta.setdefault("initiator", value)
     return evt
 
 
