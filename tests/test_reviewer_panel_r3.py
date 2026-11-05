@@ -1,5 +1,6 @@
 """Configuration refusals, pending custody and reliable counted-completion notices."""
 from contextlib import contextmanager
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,9 +10,18 @@ from ouroboros.tools import plan_ask
 from tests._skill_review_shared import _build_skill, _make_ctx
 from tests.review_pool_rosters import pool_roster, pool_seat, set_review_pool
 from tests.test_plan_review_event_route import _mailbox_entries
-from tests.test_plan_task_tool import CLEAN, _record, _write, harness as _harness
-from tests._reviewer_panel_plan_r1 import PENDING, _adviser
+from tests.test_plan_task_tool import CLEAN, _record, _slots, _write, harness as _harness
 from tests.test_skill_source_tools import _typed_call
+
+
+PENDING = {"status": "pending", "raw_text": "", "operation_state": "pending_dispatch", "late_result_pending": True}
+
+
+def _adviser(harness):
+    row = SimpleNamespace(subagent_id="critic", slot_id="critic", target_id="m/critic")
+    harness.monkeypatch.setattr("ouroboros.reviewer_slot_config.catalog_review_row", lambda *_: row)
+    harness.monkeypatch.setattr("ouroboros.reviewer_slot_config._delivery_slot", lambda *a, **kw: _slots(("critic", "m/critic"))[0])
+
 
 harness = _harness
 
