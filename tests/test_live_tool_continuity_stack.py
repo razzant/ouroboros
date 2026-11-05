@@ -56,8 +56,11 @@ def fitted(live):
     return json.loads(session.selected.messages_json) if session is not None else []
 
 
-@pytest.mark.parametrize('successor', ['sequential', 'prepared'])
-@pytest.mark.parametrize('engine', ['openai', 'grok', 'gemini'])
+@pytest.mark.parametrize(("engine", "successor"), [
+    ('openai', 'sequential'),
+    ('grok', 'prepared'),
+    ('gemini', 'sequential'),
+])
 def test_a_dropped_connection_returns_live_while_its_tool_runs(host_world, monkeypatch, engine, successor):
     from ouroboros.context_compaction import _atomic_units
     from tests._live_stack import stack

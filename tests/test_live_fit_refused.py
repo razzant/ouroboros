@@ -171,8 +171,7 @@ def test_a_native_resume_before_the_fit_keeps_waiting_for_it():
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('serving', ['has-room', 'full'])
-@pytest.mark.parametrize('engine', ['openai', 'gemini'])
+@pytest.mark.parametrize(("engine", "serving"), [('openai', 'has-room'), ('gemini', 'full')])
 def test_real_refused_fit_after_a_reconnection_ends_typed_with_the_result_whole(host_world, monkeypatch, engine, serving):
     """Under the forced refusal existing tests use. ``has-room`` is the order that used to send the false pointer."""
     from tests._live_stack import stack

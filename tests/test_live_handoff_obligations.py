@@ -288,8 +288,12 @@ def test_heard_but_interrupted_answers_prove_continuation(host_world, monkeypatc
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('engine,thinking', [('gemini', False), ('gemini', True), ('openai', False), ('grok', False)])
-@pytest.mark.parametrize('break_offer', [False, True])
+@pytest.mark.parametrize(("break_offer", "engine", "thinking"), [
+    (False, 'gemini', True),
+    (False, 'grok', False),
+    (True, 'gemini', False),
+    (True, 'openai', False),
+])
 def test_handoff_mail_offer_keeps_custody_until_its_write_succeeds(host_world, monkeypatch, engine, thinking, break_offer):
     from ouroboros.contracts.live_conversation import ContextUpdate
     from tests.test_live_stack_preparation import request

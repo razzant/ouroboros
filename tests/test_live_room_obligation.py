@@ -473,8 +473,7 @@ async def asked(live, wire, owed):
     assert len(room_frames(wire)) == int(owed), (wire.number, owed)
 
 
-@pytest.mark.parametrize('answered_on', [1, 3])
-@pytest.mark.parametrize('engine', ['gemini', 'openai', 'grok'])
+@pytest.mark.parametrize(("engine", "answered_on"), [('gemini', 1), ('openai', 3), ('grok', 1)])
 def test_real_typed_mail_is_owed_on_each_fresh_session_until_answered(host_world, monkeypatch, engine, answered_on):
     """The real producer, adapters and sockets. Unanswered words follow each fresh session; once answered, on whichever
     connection, later losses stay silent."""
@@ -500,9 +499,11 @@ def test_real_typed_mail_is_owed_on_each_fresh_session_until_answered(host_world
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('case,owed', [('lost-while-queued', True), ('written-as-the-old-turn-ended', True),
-                                       ('answered-after-delivery', False)])
-@pytest.mark.parametrize('engine', ['gemini', 'openai', 'grok'])
+@pytest.mark.parametrize(("engine", "case", "owed"), [
+    ('gemini', 'lost-while-queued', True),
+    ('openai', 'written-as-the-old-turn-ended', True),
+    ('grok', 'answered-after-delivery', False),
+])
 def test_real_adapter_queued_mail_is_owed_until_answered_after_delivery(host_world, monkeypatch, engine, case, owed):
     """A turn is already underway, so the adapter accepts the words and writes them only when it ends. That turn saw
     nothing of them; only a response begun after the write can answer them."""

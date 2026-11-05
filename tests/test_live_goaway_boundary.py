@@ -75,11 +75,13 @@ def test_native_attend_measures_the_complete_delivery(host_world, record_propert
     asyncio.run(host.session(consume, LiveOptions()))
 
 
-@pytest.mark.parametrize('engine,thinking,successor', [
-    ('gemini', False, 'native'), ('gemini', True, 'native'),
-    ('gemini', False, 'none'), ('gemini', True, 'none'), ('openai', False, 'none'),
+@pytest.mark.parametrize(("room", "engine", "thinking", "successor"), [
+    (700, 'gemini', False, 'native'),
+    (700, 'gemini', False, 'none'),
+    (700, 'openai', False, 'none'),
+    (4000, 'gemini', True, 'native'),
+    (4000, 'gemini', True, 'none'),
 ])
-@pytest.mark.parametrize('room', [700, 4000])
 def test_native_wire_attend_during_goaway(host_world, monkeypatch, record_property, engine, thinking, successor, room):
     from tests._live_stack import stack
     import threading

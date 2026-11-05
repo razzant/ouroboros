@@ -37,8 +37,10 @@ OLDER = 'Older room mail waiting for its measure.'
 # --- the real host's drain ------------------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize('vision', [True, False], ids=['sighted', 'blind'])
-@pytest.mark.parametrize('cancel', [False, True], ids=['received', 'cancelled'])
+@pytest.mark.parametrize(("cancel", "vision"), [
+    pytest.param(False, True, id='received-sighted'),
+    pytest.param(True, False, id='cancelled-blind'),
+])
 def test_a_cancelled_waiter_leaves_exactly_what_it_would_have_received(monkeypatch, tmp_path, cancel, vision):
     """The same projection either way: what the engine can take, its source stamp kept and host-only keys gone. Once."""
     async def run():

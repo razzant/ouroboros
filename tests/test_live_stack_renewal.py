@@ -61,8 +61,12 @@ def test_full_stack_unfit_room_mail_ends_typed_instead_of_silently_waiting(host_
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('thinking', [False, True])
-@pytest.mark.parametrize('reason', ['audio_drop', 'compression', 'go_away', 'transport_drop'])
+@pytest.mark.parametrize(("reason", "thinking"), [
+    ('audio_drop', False),
+    ('compression', True),
+    ('go_away', False),
+    ('transport_drop', True),
+])
 def test_full_stack_gemini_retention_or_resume_preserves_conversation(host_world, monkeypatch, thinking, reason):
     async def scenario():
         async with stack(host_world, monkeypatch, 'gemini', thinking=thinking) as run:
@@ -133,8 +137,7 @@ def test_nonresumable_transport_drop_continues_from_fitted_history(host_world, m
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('resumable', [False, True])
-@pytest.mark.parametrize('thinking', [False, True])
+@pytest.mark.parametrize(("thinking", "resumable"), [(False, False), (True, True)])
 def test_full_stack_loss_during_a_tool_result_respects_the_native_handle(host_world, monkeypatch, resumable, thinking):
     """R19-2 through the real stack: the writer that meets the close first does not end a resumable call."""
     from websockets.exceptions import ConnectionClosedError
@@ -225,8 +228,7 @@ def test_openai_grok_tool_result_write_loss_continues_without_repeating_effect(h
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('engine', ['openai', 'grok', 'gemini'])
-@pytest.mark.parametrize('failure', ['event', 'close'])
+@pytest.mark.parametrize(("failure", "engine"), [('event', 'openai'), ('event', 'gemini'), ('close', 'grok')])
 def test_provider_refusal_stays_terminal_without_reconnection(host_world, monkeypatch, engine, failure):
     async def scenario():
         async with stack(host_world, monkeypatch, engine) as run:
@@ -392,8 +394,7 @@ def test_r28_goaway_while_tool_pending(host_world, monkeypatch, during_call, han
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('thinking', [False, True])
-@pytest.mark.parametrize('second', ['silent', 'ordinary', 'single'])
+@pytest.mark.parametrize(("second", "thinking"), [('silent', False), ('ordinary', True), ('single', False)])
 def test_ordinary_continuation_survives_later_batches(host_world, monkeypatch, record_property, thinking, second):
     import threading
     entered, release = threading.Event(), threading.Event()

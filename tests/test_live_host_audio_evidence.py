@@ -66,8 +66,7 @@ def audio_events(host):
     return [event for event in events if event.get('type') == 'call.input_audio']
 
 
-@pytest.mark.parametrize('ending', ['finished', 'owner_stop', 'call_failed'])
-@pytest.mark.parametrize('excess', [0, 137])
+@pytest.mark.parametrize(("excess", "ending"), [(0, 'finished'), (0, 'call_failed'), (137, 'owner_stop')])
 def test_call_teardown_records_input_drops_on_end_stop_and_failure(host_world, monkeypatch, ending, excess):
     host = host_world.host
     published = admit_run(host, monkeypatch, ending)

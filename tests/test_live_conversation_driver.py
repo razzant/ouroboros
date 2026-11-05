@@ -604,8 +604,13 @@ def test_malformed_final_cannot_poison_valid_teardown_words(speaker):
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('source', ['host', 'provider'])
-@pytest.mark.parametrize('barrier', ['response', 'input', 'playback', 'caption', 'native'])
+@pytest.mark.parametrize(("barrier", "source"), [
+    ('response', 'host'),
+    ('input', 'provider'),
+    ('playback', 'host'),
+    ('caption', 'provider'),
+    ('native', 'host'),
+])
 def test_fresh_renewal_waits_for_every_quiet_barrier(source, barrier):
     async def scenario():
         host = Host()

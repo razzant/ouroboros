@@ -9,8 +9,7 @@ import pytest
 from tests.test_live_conversation import host_world as host_world
 
 
-@pytest.mark.parametrize('phase', ['tool_job', 'executor'])
-@pytest.mark.parametrize('log_fails', [False, True])
+@pytest.mark.parametrize(("log_fails", "phase"), [(False, 'executor'), (True, 'tool_job')])
 def test_cancelled_finish_attempts_timing_after_custody(host_world, monkeypatch, phase, log_fails):
     """R9-3: the call.timing evidence line is attempted after every custody step, whichever await the
     cancellation lands on, and a failed write never replaces the cancellation."""

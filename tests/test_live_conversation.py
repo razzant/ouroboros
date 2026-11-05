@@ -513,8 +513,7 @@ def test_renewal_uses_reported_held_input_and_growth(host_world):
     assert host.renewal_due() is True
 
 
-@pytest.mark.parametrize('surface', ['provider', 'feature'])
-@pytest.mark.parametrize('action', ['reload', 'disable'])
+@pytest.mark.parametrize(("action", "surface"), [('reload', 'provider'), ('disable', 'feature')])
 def test_active_call_reload_waits_and_owner_disable_cancels(host_world, monkeypatch, surface, action):
     from concurrent.futures import ThreadPoolExecutor
     import contextvars

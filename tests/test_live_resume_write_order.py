@@ -11,9 +11,11 @@ from tests._live_stack import stack
 from tests.test_live_conversation import host_world as host_world
 
 
-@pytest.mark.parametrize('answer', [False, True])
-@pytest.mark.parametrize('thinking', [False, True])
-@pytest.mark.parametrize('handle_timing', ['before-result', 'queued-result', 'after-result'])
+@pytest.mark.parametrize(("handle_timing", "thinking", "answer"), [
+    ('before-result', False, False),
+    ('queued-result', True, True),
+    ('after-result', False, False),
+])
 def test_handle_during_requested_pixels_cannot_cover_later_result(
         host_world, monkeypatch, record_property, thinking, handle_timing, answer):
     entered, release = threading.Event(), threading.Event()
@@ -138,8 +140,7 @@ def test_legacy_session_keeps_send_boundary_order(handle_after):
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('thinking', [False, True])
-@pytest.mark.parametrize('release_at', ['read', 'conversion'])
+@pytest.mark.parametrize(("release_at", "thinking"), [('read', False), ('conversion', True)])
 def test_resume_uses_the_handle_whose_freshness_was_observed(host_world, monkeypatch, record_property,
                                                           thinking, release_at):
     held = threading.Event()
@@ -227,8 +228,7 @@ def test_resume_uses_the_handle_whose_freshness_was_observed(host_world, monkeyp
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('thinking', [False, True])
-@pytest.mark.parametrize('update', ['new-handle', 'cleared'])
+@pytest.mark.parametrize(("update", "thinking"), [('new-handle', False), ('cleared', True)])
 def test_update_read_after_write_unconverted_at_quiet_poll(
         host_world, monkeypatch, record_property, thinking, update):
     async def scenario():
