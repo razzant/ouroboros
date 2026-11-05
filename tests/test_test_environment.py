@@ -2,11 +2,14 @@
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
+import time
 
 import pytest
 
+from ouroboros.platform_layer import kill_process_tree
 from ouroboros.preflight_runner import _preflight_env
 from ouroboros.settings_defaults import settings_env_keys
 from ouroboros.test_environment import isolated_environment, settings_keys
@@ -115,6 +118,24 @@ def test_a_session_under_an_owner_keeps_the_runs_prefix_and_collects_with_gc_pau
                          timeout=180)
     assert run.returncode == 0, run.stdout + run.stderr
     assert witness.read_text(encoding="utf-8") == "False"
+
+
+# The command keeps a child in a session of its own, as tests/group_run.py keeps node's runner.
+# It records the SIGTERM it gets; an "obedient" command then exits, a "stubborn" one keeps running,
+# so only the SIGKILL that follows can stop it.
+_TREE = """\
+import os, pathlib, signal, subprocess, sys, time
+own = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], **own)
+def term(*_):
+    pathlib.Path(sys.argv[1] + ".term").write_text("TERM")
+    if sys.argv[2] == "obedient":
+        os._exit(0)
+if os.name != "nt":
+    signal.signal(signal.SIGTERM, term)
+pathlib.Path(sys.argv[1]).write_text(f"{os.getpid()} {child.pid}")
+time.sleep(600)
+"""
 _LAUNCHER = [sys.executable, "-I", "-S", str(REPO / "scripts" / "safe_test.py")]
 
 
@@ -124,6 +145,58 @@ def _final_root(stderr):
     final = [line for line in lines if line.startswith(("SAFE_TEST_RETAINED ", "SAFE_TEST_RELEASED "))]
     assert len(final) == 1 and lines[-1] == final[0], stderr
     return final[0].split(" ", 1)
+
+
+def _recorded_tree(path, within=30.0):
+    deadline = time.monotonic() + within
+    while not (path.exists() and len(path.read_text(encoding="utf-8").split()) == 2):
+        assert time.monotonic() < deadline, "the command never recorded its tree"
+        time.sleep(0.05)
+    return [int(pid) for pid in path.read_text(encoding="utf-8").split()]
+
+
+def test_safe_test_timeout_stops_the_whole_tree_and_exits_124(tmp_path):
+    """The deadline reaches a child outside the command's group and a command deaf to SIGTERM."""
+    pids = tmp_path / "pids"
+    result = run_in_group(_LAUNCHER + ["--temp-parent", str(tmp_path), "--timeout", "3", "--",
+                                       sys.executable, "-c", _TREE, str(pids), "stubborn"], cwd=REPO, timeout=120)
+    survivors = kill_survivors(_recorded_tree(pids))
+    assert result.returncode == 124, result.stderr
+    assert "SAFE_TEST_TIMEOUT after 3s" in result.stderr
+    # Teardown was confirmed, so the declared scratch went even on this red outcome.
+    assert _final_root(result.stderr)[0] == "SAFE_TEST_RELEASED", result.stderr
+    if sys.platform != "win32":  # the graceful SIGTERM came before the SIGKILL that stopped it
+        assert (tmp_path / "pids.term").read_text(encoding="utf-8") == "TERM"
+    assert not survivors
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+def test_safe_test_forwards_sigterm_then_reaps_the_whole_tree(tmp_path):
+    """TERM requests the tree's stop, the launcher exits 128+15 and a detached child is reaped too.
+
+    Ctrl-C (SIGINT) has its witness in tests/test_test_storage.py; this is the TERM half of the same
+    forwarding (CONSENSUS WP6: signal forwarding 128+N, scratch release)."""
+    stop = signal.SIGTERM
+    pids = tmp_path / "pids"
+    launcher = subprocess.Popen(_LAUNCHER + ["--temp-parent", str(tmp_path), "--timeout", "600", "--",
+                                             sys.executable, "-c", _TREE, str(pids), "obedient"],
+                                cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                start_new_session=True)
+    tree = []
+    try:
+        tree = _recorded_tree(pids)
+        os.kill(launcher.pid, stop)
+        os.kill(launcher.pid, stop)  # a repeated signal cannot cut the teardown short
+        _, stderr = launcher.communicate(timeout=60)
+    finally:
+        if launcher.poll() is None:
+            kill_process_tree(launcher)
+            launcher.wait()
+        survivors = kill_survivors(tree)  # a launcher that failed to stop the tree must not leave it behind
+    assert launcher.returncode == 128 + stop, stderr
+    assert _final_root(stderr)[0] == "SAFE_TEST_RELEASED", stderr
+    assert (tmp_path / "pids.term").read_text(encoding="utf-8") == "TERM"
+    assert not survivors
 
 
 def _live_conftest():
