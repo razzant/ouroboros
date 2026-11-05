@@ -618,7 +618,7 @@ test('the dialog says the whole copy goes with what is not verified saved in it,
 });
 
 const MARKER = 'retention marker or unreadable subtree: /var/tmp/obs-1/held/OUROBOROS_RETAINED.txt';
-const marked = (id, overrides = {}) => entry(id, { group: 'service_folders', kind: 'other', bytes: 5e6, eligible_after: null, reason: 'retained_evidence',
+const marked = (id, overrides = {}) => entry(id, { group: 'service_folders', kind: 'scratch', bytes: 5e6, eligible_after: null, reason: 'retained_evidence',
     cause: 'producer_retained', path: `/data/state/custody_trash/${id}+scratch-1`, availability: 'manual_discard',
     manual: { not_proven_saved_count: 0, not_proven_saved_bytes: 0, not_proven_saved: [], omitted_count: 0, keeps_commits: false,
         producer_retained: true, loss: MARKER, paths: [`/var/tmp/obs-${id}`] }, ...overrides });
@@ -628,6 +628,8 @@ test('marked session scratch reads as scratch its run kept, never as a copy; cop
     const door = trayHtml(free('ready', { pool: scratchPool }), read());
     assert.match(door, /1 session scratch its run marked to keep[\s\S]*5\.0 MB[\s\S]*>Choose scratch…</);
     assert.doesNotMatch(door, /finished cop(?:y|ies)|Choose copies/);
+    const left = trayHtml(free('ready', { pool: scratchPool }), { ...read(), excluded: { ...EMPTY_LIST(), total: 1, complete: true, want: 100, items: [marked('s')] } });
+    assert.match(left, /data-free-excluded="retained_evidence"[\s\S]*Session scratch · its producer marked it to keep · can be discarded by hand/);
     const html = trayHtml(free('ready', { pool: scratchPool }), byHand([marked('s')], { chosen: ['s'] }));
     assert.match(html, /<h3[^>]*>Session scratch marked to keep<\/h3>/);
     assert.doesNotMatch(html, /[Cc]op(?:y|ies)|commits on a branch/, 'nothing on the screen calls it a copy');

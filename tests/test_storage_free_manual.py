@@ -192,6 +192,7 @@ def test_a_producer_retained_handoff_is_manual_loss_acceptance_and_not_the_ordin
     assert plan["pool"]["count"] == 0 and plan["pool"]["manual"]["count"] == 1
     [row] = _page(owner, (data, data.parent))["items"]
     assert row["availability"] == "manual_discard" and row["name"] == "task-1", "named by its task, the marker said once below"
+    assert row["kind"] == "scratch", "it is the session scratch its run kept, never an other item"
     assert row["manual"]["producer_retained"] and marker_words in row["manual"]["loss"]
     assert owner.start(data, data.parent, plan["plan"], None, [row["id"]]) == {"started": False, "reason": "not_offered"}
     assert _discard(owner, (data, data.parent), [row["id"]]) == {"started": True, "reason": ""}

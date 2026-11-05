@@ -90,6 +90,7 @@ const KINDS = {
     work_folder: { label: 'Work folder', unit: ['{n} work folder', '{count} work folders'] },
     working_copy: { label: 'Working copy', unit: ['{n} working copy', '{count} working copies'] },
     environment: { label: 'Temporary environment', unit: ['{n} temporary environment', '{count} temporary environments'] },
+    scratch: { label: 'Session scratch', unit: ['{n} session scratch folder', '{count} session scratch folders'] },
     other: { label: 'Other item', unit: ['{n} other item', '{count} other items'] },
 };
 const kindOf = (item) => KINDS[item?.kind] || KINDS.other;

@@ -866,7 +866,7 @@ class FreeSpace:
                 paths = list(dict.fromkeys(row["path"] for row in held))  # what the entry holds, and what its size is
                 item = _Candidate(GROUP_SERVICE_FOLDERS, f"producer_retained:{entry.name}", entry, "producer_retained",
                                   task=entry.name.split("+", 1)[0], row={"loss": loss, "scratch_paths": paths})
-                item.reason, item.cause = "retained_evidence", PRODUCER_RETAINED
+                item.reason, item.cause, item.kind = "retained_evidence", PRODUCER_RETAINED, "scratch"
                 item.manual = {"signature": None, "unsaved_count": 0, "unsaved_bytes": 0, "unsaved": [],
                                "keep_branch": False, "producer_retained": True, "loss": loss, "paths": paths}
                 group["excluded"].append(item)
