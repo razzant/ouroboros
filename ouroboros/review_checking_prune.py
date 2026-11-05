@@ -259,7 +259,7 @@ def _remove_checkout(entry: pathlib.Path) -> str:
 
 
 def _retire_checkouts(data_root: Any, entries: list, live: Callable[[], Any], cutoff: float, sources: set,
-                      stopped: Callable[[], bool], report: Dict[str, Any]) -> None:
+                      stopped: Callable[[], bool], holds: Any, report: Dict[str, Any]) -> None:
     """Judge and remove the isolated checkouts ENTRIES; ``sources`` are the roots kept seats check from."""
     try:
         rounds = _review_rounds(data_root, repair=True)
@@ -279,14 +279,20 @@ def _retire_checkouts(data_root: Any, entries: list, live: Callable[[], Any], cu
             report["errors"].append(error)
         elif hold:
             report["checkouts_kept"] += 1
-            holds = report.setdefault("checkout_holds", {})
-            holds[hold] = holds.get(hold, 0) + 1
+            if hold != "younger_than_retention":
+                holds.note(hold, entry.name)
         else:
             report["checkouts_removed"] += 1
 
 
+def _seat_hold_cause(home: pathlib.Path, proven: bool) -> str:
+    """The exact fact behind a grouped seat-home hold."""
+    return "seat_checking" if _checking_area_present(unindexed(home, "area")) else "not_proven_over" if not proven else ""
+
+
 def finished_seat_homes(data_root: Any, live: Callable[[str], Any], stopped: Callable[[], bool],
-                        proven: Optional[Dict[str, bool]] = None, only: Optional[Any] = None) -> list:
+                        proven: Optional[Dict[str, bool]] = None, only: Optional[Any] = None,
+                        *, causes: Optional[Dict[pathlib.Path, str]] = None) -> list:
     """For the owner's Storage -> Free and the ``record_compression`` job: ``(home, verdict, task_id)`` per
     seat home (``only``: these home names), ``offer`` when its copy is gone and its task is proven over
     (``proven`` caches that per task), else ``in_use`` or ``unreadable``.
@@ -302,17 +308,22 @@ def finished_seat_homes(data_root: Any, live: Callable[[str], Any], stopped: Cal
         try:
             task_id = str(json.loads((home / "checking.json").read_text(encoding="utf-8")).get("task_id") or "")
         except (OSError, ValueError, AttributeError):
+            if causes is not None:
+                causes[home] = "marker_unreadable"
             found.append((home, "unreadable", ""))
             continue
         if task_id not in proven:
             proven[task_id] = _task_proven_over(task_id, data_root, live)
         bare = proven[task_id] and not _checking_area_present(unindexed(home, "area"))  # its copy is gone
+        if causes is not None and not bare:
+            causes[home] = _seat_hold_cause(home, proven[task_id])
         found.append((home, "offer" if bare else "in_use", task_id))
     return found
 
 
 @contextlib.contextmanager
-def finished_home_held(data_root: Any, home: pathlib.Path, live: Callable[[str], Any], proven: Dict[str, bool]):
+def finished_home_held(data_root: Any, home: pathlib.Path, live: Callable[[str], Any], proven: Dict[str, bool],
+                       *, causes: Optional[Dict[pathlib.Path, str]] = None):
     """HOME under its seat lock (a thread seat's is its thread's; never waits): yields ``""`` while the home
     is still finished (its copy gone, its task proven over), else ``busy`` or ``in_use``; the lock is held
     until the caller's block ends, so no worker prepares, refreshes or captures it meanwhile."""
@@ -322,10 +333,14 @@ def finished_home_held(data_root: Any, home: pathlib.Path, live: Callable[[str],
     task_id, thread = str(marker.get("task_id") or ""), str(marker.get("thread_seat") or "")
     with _seat_locked(seat_dir(data_root, task_id, f"thread:{thread}") if thread else home, wait=False) as held:
         if not held:
+            if causes is not None:
+                causes[home] = "seat_busy"
             yield "busy"
             return
         if task_id not in proven:
             proven[task_id] = _task_proven_over(task_id, data_root, live)
+        if causes is not None and (_checking_area_present(unindexed(home, "area")) or not proven[task_id]):
+            causes[home] = _seat_hold_cause(home, proven[task_id])
         yield "in_use" if _checking_area_present(unindexed(home, "area")) or not proven[task_id] else ""
 
 
@@ -584,7 +599,7 @@ def prune_review_checkouts(data_root: Any, live_task_ids: Any, *, views_since: O
                 unread.append(home.name)
                 report["errors"].append(f"{home.name}: {type(exc).__name__}: {exc}")
         if checkouts and not unread and not busy and not stopped():
-            _retire_checkouts(data_root, checkouts, live, cutoff, sources, stopped, report)
+            _retire_checkouts(data_root, checkouts, live, cutoff, sources, stopped, holds, report)
         if views and not unread and not stopped():
             doomed = []
             with _seat_locked(base, wait=False, name=VIEWS_LOCK_NAME) if view_root.is_dir() else contextlib.nullcontext(

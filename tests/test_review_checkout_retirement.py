@@ -375,7 +375,7 @@ def test_published_rejoin_custody_keeps_the_copy_and_a_retired_rejoin_rebuilds_t
         _attempt(subject, "reviewing")  # published before the retirement judgment
         report = _prune(subject)
         assert report["checkouts_removed"] == 0 and report["checkouts_kept"] == 1, report
-        assert report["checkout_holds"] == {"review_custody_active": 1}
+        assert report["holds"] == [{"class": "review_custody_active", "count": 1, "example": entry.name}]
         causes = {}
         assert dict(rp.orphan_review_checkouts(subject.data, lambda _: False, causes=causes))[entry] == "in_use"
         assert causes == {entry: "review_custody_active"}
@@ -386,7 +386,7 @@ def test_published_rejoin_custody_keeps_the_copy_and_a_retired_rejoin_rebuilds_t
         sm._prune_review_checkouts()
         events = [json.loads(line) for line in (subject.data / "logs/events.jsonl").read_text().splitlines()]
         recorded = [event for event in events if event["type"] == "review_checkout_prune"][-1]["report"]
-        assert recorded["checkout_holds"] == report["checkout_holds"] and recorded["checkouts_removed"] == 0
+        assert recorded["holds"] == report["holds"] and recorded["checkouts_removed"] == 0
         assert pathlib.Path(rejoined.checkout) == entry / "repo.noindex"
         assert (entry / "repo.noindex" / "a.txt").read_text() == "two\n"
         tree = rejoined.tree_sha

@@ -862,6 +862,11 @@ def test_leftover_listing_is_pure_and_a_run_re_checks_each_item(tmp_path, monkey
         before, outside = tree_state(root, mtimes=True), tree_state(wtroot, mtimes=True)
         view = _preview(owner, root, tmp_path)
         assert tree_state(root, mtimes=True) == before and tree_state(wtroot, mtimes=True) == outside
+    from ouroboros import review_checking_prune as rp
+    causes = {}
+    homes = rp.finished_seat_homes(root, owner._probe(), lambda: False, causes=causes)
+    assert causes[seats["copy"]] == "seat_checking" and causes[seats["live"]] == "not_proven_over"
+    assert all(home not in causes for home, verdict, _task in homes if verdict == "offer")
     assert _group(view, "review_evidence")["count"] == 2
     probes["seat-done"] = True  # the task is live again: nothing of it goes
     with rc._seat_locked(second):  # a worker holds the other seat

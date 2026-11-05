@@ -943,8 +943,6 @@ def _prune_review_checkouts(*, stop_event: Any = None) -> None:
             _REVIEW_VIEWS_OWED[0] = False
         from ouroboros import maintenance_jobs
 
-        if report.get("checkouts_kept"):  # the isolated checkouts the pass judged held (their reason is the pass's, #2710)
-            report["holds"] = [*report.get("holds", ()), {"class": "checkout_held", "count": int(report["checkouts_kept"]), "example": ""}]
         released = int(report.get("released") or 0) + int(report.get("removed") or 0) + int(report.get("checkouts_removed") or 0)
         maintenance_jobs.record_pass(DATA_DIR, "review_checkout_prune", {**report, "released": released}, event="review_checkout_prune")
     except Exception:

@@ -788,11 +788,13 @@ class FreeSpace:
         if {GROUP_REVIEW_EVIDENCE, GROUP_REVIEW_CHECKOUTS} & set(self._offered):
             from ouroboros import review_checking_prune as seats
 
-            homes = seats.finished_seat_homes(root, live, self._closed)  # one proof per seat task for both groups
+            seat_causes: dict = {}
+            homes = seats.finished_seat_homes(root, live, self._closed, causes=seat_causes)  # one proof per seat task for both groups
             if GROUP_REVIEW_EVIDENCE in self._offered:
                 group = new_group(GROUP_REVIEW_EVIDENCE)
                 for home, verdict, task_id in homes:
-                    _sorted_into(root, group, verdict, _Candidate(GROUP_REVIEW_EVIDENCE, f"seat:{home.name}", home, "seat", task=task_id))
+                    _sorted_into(root, group, verdict, _Candidate(GROUP_REVIEW_EVIDENCE, f"seat:{home.name}", home, "seat", task=task_id),
+                                 seat_causes.get(home, ""))
                 groups.append(group)
             if GROUP_REVIEW_CHECKOUTS in self._offered:
                 group = new_group(GROUP_REVIEW_CHECKOUTS)
