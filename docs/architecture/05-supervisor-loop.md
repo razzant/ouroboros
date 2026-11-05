@@ -1,6 +1,6 @@
 # 5. Supervisor Loop
 
-`server.py::_run_supervisor()` owns the pooled scheduling tick and lifecycle lock.
+`server.py::_run_supervisor()` owns the pooled scheduling tick and lifecycle lock. Cancellation intent precedes teardown; intent, outcome and money stay separate.
 
 ### Tick and locks
 
@@ -86,7 +86,7 @@ Surplus retirement and cap-full warm Resume share a quiescence token probe: a wo
 
 ### Conversation lane
 
-Startup and auto-resume notices name places still paused, including legacy records, without changing their state. Owner Main/room turns, wakes, Presence bodies and auto-resume run in `WORKERS` slots with `lane="conversation"` (`conversation_lane.py`), admitted by routing with their RUNNING row published first, never PENDING; outside `MAX_WORKERS`, project leases, the crash-storm capture and `disable_exhausted_worker_pool`. The pool's one ready spare is the owner's (a wake waits for its own carrier), replenished at once; a closed repo-writer gate stops spawns, never a dispatch; spawn success is the only bound. `inline_carrier.py` runs the same body on a server thread, disclosed (`inline_executors` in `/api/health` and the vitals): `inline_call` for a live voice call; `inline_degraded`, with an owner notice, only on a physical fact (spawn refused, carrier parked, no started pool, marker window).
+Startup and auto-resume notices name still-paused places (legacy too) without changing them. Owner Main/room turns, wakes, Presence bodies and auto-resume run in `WORKERS` slots with `lane="conversation"` (`conversation_lane.py`), admitted by routing with their RUNNING row published first, never PENDING; outside `MAX_WORKERS`, project leases, the crash-storm capture and `disable_exhausted_worker_pool`. The pool's one ready spare is the owner's (a wake waits for its own carrier), replenished at once; a closed repo-writer gate stops spawns, never a dispatch; spawn success is the only bound. `inline_carrier.py` runs the same body on a server thread, disclosed (`inline_executors` in `/api/health` and the vitals): `inline_call` for a live voice call; `inline_degraded`, with an owner notice, only on a physical fact (spawn refused, carrier parked, no started pool, marker window).
 
 ### Maintenance and custody
 
