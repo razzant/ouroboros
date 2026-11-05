@@ -10,6 +10,9 @@ contained command, then releases declared reproducible test scratch on green
 and red, including a command that could not be launched (exit 2, `launch_error`
 in its result). Unknown command data, debug and unconfirmed teardown stay in place;
 a retention marker keeps only its own test's folder.
+When no evidence destination is selected, a registered private copy's existing
+record sends the run to its owning task's source evidence; an operator checkout
+keeps the checkout-parent `.test-evidence` location.
 The last stderr line names the root once: `SAFE_TEST_RETAINED` or
 `SAFE_TEST_RELEASED` describes that path, not every process anywhere.
 
@@ -116,6 +119,10 @@ def main() -> int:
     # macOS caps an AF_UNIX path at 104 bytes. Born `.noindex`: Spotlight never
     # registers the fixtures below it (fake `Ouroboros.app` bundles among them).
     root = Path(tempfile.mkdtemp(prefix="ob-", suffix=".noindex", dir=parent)).resolve()
+    # The boundary replaces OUROBOROS_DATA_DIR with scratch state. Carry only the
+    # caller's data-root fact to stage two so the existing private-copy record can
+    # select task-owned evidence; no task data or credentials cross the boundary.
+    owner_data_root = os.environ.get("OUROBOROS_DATA_DIR", "")
     try:
         env = boundary(root, repo, keep=(
             "OUROBOROS_RUN_UI_SMOKE", "OUROBOROS_EXPECT_BROWSER_ENGINES",
@@ -145,14 +152,15 @@ def main() -> int:
             "import sys; sys.dont_write_bytecode=True; "
             "sys.path.insert(0, sys.argv[1]); "
             "from ouroboros.safe_test_supervisor import main; "
-            "raise SystemExit(main(sys.argv[2], sys.argv[1], sys.argv[6:], "
+            "raise SystemExit(main(sys.argv[2], sys.argv[1], sys.argv[7:], "
             "evidence_parent=sys.argv[3] or None, keep=sys.argv[4]=='1', "
-            "timeout=float(sys.argv[5]) if sys.argv[5] else None))"
+            "timeout=float(sys.argv[5]) if sys.argv[5] else None, "
+            "owner_data_root=sys.argv[6] or None))"
         )
         return _wait_owning(
             [sys.executable, "-I", "-S", "-c", bootstrap, str(repo), str(root),
              str(args.evidence_dir.resolve()) if args.evidence_dir else "", "1" if args.keep else "0",
-             repr(args.timeout) if args.timeout is not None else "", *command],
+             repr(args.timeout) if args.timeout is not None else "", owner_data_root, *command],
             repo, env,
         )
     finally:

@@ -59,3 +59,5 @@ Only a measured birth/command mismatch retires other owned custody, journalled f
 ### Test runs
 
 `test_environment.py` gives pytest, preflight and server children scrubbed temporary roots before imports. Lanes and `safe_test` commands run in a `ProcessContainer`; past `reap`'s deadline only a visible or unreadable member fails. A passed test's `tmp_path` goes once its processes are gone; a marker keeps its test's folder, the run's own hold its root (PERSISTENCE).
+
+Test evidence follows the same ownership boundary: a registered private-copy run resolves its implicit records to the owning task's `source_handles/test-evidence`, while an operator checkout keeps the checkout-parent `.test-evidence`. Explicit destinations remain authoritative. Finished task records are handed to the existing `record_compression` job for transparent filesystem compression where supported; the retained reader path and bytes stay unchanged.

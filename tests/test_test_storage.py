@@ -28,6 +28,32 @@ def _safe(tmp_path, command, *, keep=False, evidence=None):
     return result, paths[-1] if paths else None
 
 
+def test_safe_test_registered_private_copy_routes_implicit_evidence_to_task_store(tmp_path, monkeypatch):
+    from ouroboros import artifacts, subagent_worktrees
+
+    data = tmp_path / "data"
+    temp_parent = tmp_path / "temp"
+    data.mkdir()
+    temp_parent.mkdir()
+    task_id = "safe-test-copy-task"
+    subagent_worktrees._put_record({"path": str(REPO), "task_id": task_id}, data)
+    env = os.environ.copy()
+    env["OUROBOROS_DATA_DIR"] = str(data)
+    env.pop("OUROBOROS_TEST_EVIDENCE_ROOT", None)
+    monkeypatch.delenv("OUROBOROS_TEST_EVIDENCE_ROOT", raising=False)
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", str(REPO / "scripts" / "safe_test.py"),
+         "--temp-parent", str(temp_parent), "--", sys.executable, "-c", "print('TASK_OWNED_EVIDENCE')"],
+        cwd=REPO, env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    evidence = Path(next(line.split(" ", 1)[1] for line in result.stderr.splitlines()
+                         if line.startswith("SAFE_TEST_EVIDENCE ")))
+    expected = artifacts.task_artifact_dir_path(data, task_id) / "source_handles" / "test-evidence"
+    assert evidence.is_relative_to(expected)
+    assert b"TASK_OWNED_EVIDENCE" in next(evidence.glob("command-*/stdout.bin")).read_bytes()
+
+
 @pytest.mark.parametrize("red,keep", [(False, False), (True, False), (False, True)])
 def test_known_pytest_scratch_released_with_complete_raw_output_and_diagnostics(tmp_path, red, keep):
     probe = tmp_path / "probe"
