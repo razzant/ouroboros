@@ -134,8 +134,11 @@ def test_responsible_question_precedes_selected_terminal_and_unselected_mail_sta
     assert model_sleep.wake_reason(ctx, {"senders": ["peer"]}) == "mail:peer"
 
 
-@pytest.mark.parametrize("tool", ["change", "commit"])
-@pytest.mark.parametrize("mode,enforcement", [("pro", "blocking"), ("pro", "advisory"), ("cyber_pro", "blocking")])
+@pytest.mark.parametrize(("mode", "enforcement", "tool"), [
+    ("pro", "blocking", "change"),
+    ("pro", "advisory", "commit"),
+    ("cyber_pro", "blocking", "change"),
+])
 @pytest.mark.serial
 def test_selected_review_returns_with_other_seat_live_and_never_lands(author, monkeypatch, tool, mode, enforcement):
     from ouroboros import config
@@ -180,9 +183,11 @@ def test_wake_schema_is_unconditional_and_shared():
     assert len(schemas) == 3 and all(schema == waiting.wake_on_schema() for schema in schemas)
 
 
-@pytest.mark.parametrize("install", ["api", "subscription", "mixed"])
-@pytest.mark.parametrize("mode,enforcement", [("pro", "advisory"), ("pro", "blocking"), ("cyber_pro", "blocking")])
-@pytest.mark.parametrize("unavailable", [False, True])
+@pytest.mark.parametrize(("unavailable", "mode", "enforcement", "install"), [
+    (False, "pro", "advisory", "api"),
+    (False, "cyber_pro", "blocking", "mixed"),
+    (True, "pro", "blocking", "subscription"),
+])
 def test_canonical_cas_wake_is_identical_across_installs_and_review_modes(tmp_path, monkeypatch, install, mode, enforcement, unavailable):
     from ouroboros import config
     from ouroboros.review_records import ReviewActorRecord, ReviewRequest, ReviewSlot

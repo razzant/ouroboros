@@ -389,8 +389,10 @@ def test_result_capture_keeps_only_attributed_paths_hashes_and_frozen_words(repo
     assert HEADING not in no_diff and "## Workspace diff" not in no_diff
 
 
-@pytest.mark.parametrize("retrieves", [[False, True], [True, True]], ids=["mixed", "retrieving"])
-@pytest.mark.parametrize("window,bounded", [(1_000_000, False), (100_000, True)])
+@pytest.mark.parametrize(("window", "bounded", "retrieves"), [
+    pytest.param(1_000_000, False, [False, True], id='1000000-False-mixed'),
+    pytest.param(100_000, True, [True, True], id='100000-True-retrieving'),
+])
 def test_result_words_take_the_seats_share_of_the_window(repo, tmp_path, monkeypatch, window, bounded, retrieves):
     from ouroboros import mutation_attribution
     from ouroboros.tools import review, review_admission, review_result

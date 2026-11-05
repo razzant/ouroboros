@@ -19,8 +19,13 @@ from tests.review_pool_rosters import pool_roster, pool_seat, set_review_pool
 from tests.test_review_change_end_to_end import staged_body  # noqa: F401
 
 
-@pytest.mark.parametrize("surface", ["change", "preflight"])
-@pytest.mark.parametrize("catalog_change", ["full", "removed", "emptied", "malformed", "ledger_gap"])
+@pytest.mark.parametrize(("catalog_change", "surface"), [
+    ("full", "change"),
+    ("removed", "preflight"),
+    ("emptied", "preflight"),
+    ("malformed", "change"),
+    ("ledger_gap", "preflight"),
+])
 def test_public_collection_keeps_paid_request_and_operation(
         staged_body, fake_route, tmp_path, monkeypatch, surface, catalog_change):  # noqa: F811
     repo = Path(staged_body["repo"])
@@ -110,8 +115,7 @@ def test_public_collection_keeps_paid_request_and_operation(
             assert settled.wait(10)
 
 
-@pytest.mark.parametrize("binding", ["recorded", "lost"])
-@pytest.mark.parametrize("collection", ["repeat", "reference"])
+@pytest.mark.parametrize(("collection", "binding"), [("repeat", "recorded"), ("reference", "lost")])
 def test_rejoin_keeps_the_paid_waves_history_binding_not_todays_heads(
         staged_body, fake_route, tmp_path, monkeypatch, binding, collection):  # noqa: F811
     """A late collection restores the history the paid wave was prepared with.

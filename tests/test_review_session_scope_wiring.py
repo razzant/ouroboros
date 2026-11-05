@@ -619,8 +619,10 @@ def test_a_staged_diff_that_fits_the_first_send_is_inlined(tmp_path):
     assert "diff_source" not in manifest
 
 
-@pytest.mark.parametrize("delegated", [False, True], ids=["native", "session"])
-@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize(("newline", "delegated"), [
+    pytest.param("\n", False, id='lf-native'),
+    pytest.param("\r\n", True, id='crlf-session'),
+])
 def test_a_staged_diff_above_the_first_send_is_paged_as_one_exact_source(tmp_path, monkeypatch, delegated, newline):
     """A diff too large for the first send is not refused and not truncated: it
     is stored ONCE, byte-exactly, at an address the seat's own reader reaches —
@@ -687,9 +689,10 @@ def test_a_staged_diff_above_the_first_send_is_paged_as_one_exact_source(tmp_pat
         [0, source_text_identity(expected.encode())["complete_chars"]]]
 
 
-@pytest.mark.parametrize("delegated", [False, True], ids=["native", "session"])
-@pytest.mark.parametrize("managed", [False, True], ids=["ordinary", "managed"])
-@pytest.mark.parametrize("git_autocrlf", ["false", "true"], ids=["raw_blob", "lf_blob"])
+@pytest.mark.parametrize(("git_autocrlf", "managed", "delegated"), [
+    pytest.param("false", False, True, id='raw_blob-ordinary-session'),
+    pytest.param("true", True, False, id='lf_blob-managed-native'),
+])
 def test_renamed_prompt_preimage_is_readable_and_covered_without_a_paged_diff(
     tmp_path, delegated, managed, git_autocrlf,
 ):

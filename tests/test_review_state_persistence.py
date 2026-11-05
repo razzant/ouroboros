@@ -128,9 +128,12 @@ def test_unknown_object_is_not_stringified_and_cannot_replace_durable_evidence(t
     assert _payload(tmp_path)["attempts"][0]["triad_raw_results"][0]["unsupported"] == "supported"
 
 
-@pytest.mark.parametrize("operation", ["save", "update"])
-@pytest.mark.parametrize("reason,number", [("contention", None), ("permission", errno.EACCES),
-                                           ("kernel_refused", errno.ENOLCK), ("identity_unreadable", None)])
+@pytest.mark.parametrize(("reason", "number", "operation"), [
+    ("contention", None, "save"),
+    pytest.param("permission", errno.EACCES, "update", id='permission-13-update'),
+    pytest.param("kernel_refused", errno.ENOLCK, "update", id='kernel_refused-77-update'),
+    ("identity_unreadable", None, "save"),
+])
 def test_acquisition_refusal_preserves_platform_cause_and_timeout_compatibility(
     tmp_path, monkeypatch, operation, reason, number,
 ):

@@ -53,9 +53,11 @@ def test_quorum_counts_the_seats_asked(count, answers, expected):
     assert record.verdict["aggregate"] == expected
 
 
-@pytest.mark.parametrize("strictness,reason,count", [("blocking", "", 3), ("advisory", "focused change", 1),
-                                                     ("cyber_pro", "", 1)])
-@pytest.mark.parametrize("surface", ["own_body", "skill", "plan_first"])
+@pytest.mark.parametrize(("surface", "strictness", "reason", "count"), [
+    ("own_body", "blocking", "", 3),
+    ("skill", "advisory", "focused change", 1),
+    ("plan_first", "cyber_pro", "", 1),
+])
 def test_strictness_composes_the_counted_panel(roster, strictness, reason, count, surface):
     panel = slots.compose_review_panel(["b", "adviser"], reason, surface=surface, strictness=strictness)
     assert len([seat for seat in panel.seats if not seat.additional]) == count

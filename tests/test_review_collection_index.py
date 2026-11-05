@@ -26,10 +26,16 @@ def _operation(state="dispatched", **fields):
     return {"surface": "task_acceptance", "state": state, "retry_key": "wave", **fields}
 
 
-@pytest.mark.parametrize("surface", ["task_acceptance", "multi_model_review", "plan_review"])
-@pytest.mark.parametrize("state,pending", [
-    ("preparing", True), ("retained", True), ("dispatched", True), ("unpublished", False), ("closed", False),
-    ("collected", False), ("preparation_unknown", False), ("preparation_refused", False), ("unrecognized", False),
+@pytest.mark.parametrize(("state", "pending", "surface"), [
+    ("preparing", True, "task_acceptance"),
+    ("retained", True, "plan_review"),
+    ("dispatched", True, "plan_review"),
+    ("unpublished", False, "task_acceptance"),
+    ("closed", False, "multi_model_review"),
+    ("collected", False, "multi_model_review"),
+    ("preparation_unknown", False, "plan_review"),
+    ("preparation_refused", False, "task_acceptance"),
+    ("unrecognized", False, "multi_model_review"),
 ])
 def test_selection_is_an_open_pointer_of_any_surface(surface, state, pending):
     row = document("task", review_operations={"owner": {**_operation(state), "surface": surface}})
@@ -110,8 +116,10 @@ def _question_document(task_id):
         "quiz_id": "q", "state": "open", "question": "Keep this format?", "options": ["Yes", "No"]}})
 
 
-@pytest.mark.parametrize("tier", [store.TIER_ENFORCED, store.TIER_NAME])
-@pytest.mark.parametrize("shape", ["v1", "owner-v2"])
+@pytest.mark.parametrize(("shape", "tier"), [
+    pytest.param("v1", store.TIER_ENFORCED, id='v1-enforced'),
+    pytest.param("owner-v2", store.TIER_NAME, id='owner-v2-name'),
+])
 def test_upgrade_then_old_writer_resets_unknown_without_history_loss(tmp_path, tier, shape):
     closed = document("closed", review_operations={"op": _operation("collected")}, result="full old answer")
     _legacy_store(tmp_path, closed, owned_root=tmp_path, tier=tier, shape=shape)

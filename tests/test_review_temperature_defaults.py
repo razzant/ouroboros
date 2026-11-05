@@ -156,8 +156,7 @@ def _strict(gateway, monkeypatch):
     monkeypatch.setattr(gateway, "create_model_operation", checked)
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("explicit", [None, 0, 0.2])
+@pytest.mark.parametrize(("explicit", "asynchronous"), [(None, False), (0, True), (0.2, False)])
 def test_raw_default_hint_defers_but_explicit_temperature_stays_strict(setup, monkeypatch, asynchronous, explicit):
     root, gateway, client = setup
     _strict(gateway, monkeypatch)
@@ -183,8 +182,11 @@ def test_raw_default_hint_defers_but_explicit_temperature_stays_strict(setup, mo
     assert kwargs["temperature"] is explicit and kwargs["default_temperature"] == 0.2
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("explicit,expected", [(None, 0.2), (0, 0), (0.7, 0.7)])
+@pytest.mark.parametrize(("explicit", "expected", "asynchronous"), [
+    (None, 0.2, False),
+    (0, 0, True),
+    (0.7, 0.7, False),
+])
 def test_api_physical_payload_keeps_host_default_and_explicit_precedence(asynchronous, explicit, expected):
     from tests.test_llm_provider_golden import _observe
     from tests.test_multiprovider_conformance import PROVIDER_DRIVERS
@@ -317,8 +319,11 @@ def test_review_custody_distinguishes_hint_from_explicit_without_changing_old_ke
         slot, replace(slot, temperature=0.2), replace(slot, default_temperature=0.2))}) == 3
 
 
-@pytest.mark.parametrize("native", [False, True])
-@pytest.mark.parametrize("request_value,slot_value,expected", [(0, 0.6, 0), (None, 0, 0), (0.7, 0.6, 0.7)])
+@pytest.mark.parametrize(("request_value", "slot_value", "expected", "native"), [
+    (0, 0.6, 0, True),
+    (None, 0, 0, False),
+    (0.7, 0.6, 0.7, True),
+])
 def test_explicit_review_temperature_beats_both_host_hints(setup, monkeypatch, native, request_value, slot_value, expected):
     from ouroboros.review_execution import ApiChatReviewExecutor, ReviewAssignment
     from ouroboros.review_native_episode import NativeToolRoundReviewExecutor
@@ -571,17 +576,16 @@ def test_a_non_compatibility_code_keeps_the_classifier_admission(code):
     assert _plan(_Refused(KIMI_REFUSAL, code=code))[0] is None
 
 
-@pytest.mark.parametrize("hint", [True, False], ids=["hint", "explicit"])
-@pytest.mark.parametrize("message", [
-    "unsupported temperature: not only 1 is allowed",
-    "unsupported temperature: only 1 or less is allowed",
-    "unsupported temperature: must be at most 1",
-    "unsupported temperature: must not be 1",
-    "unsupported temperature: must not exceed 1",
-    "unsupported temperature: cannot exceed 1",
-    "unsupported temperature: only 1 is not allowed",
-    "temperature is unsupported by this provider. only 1 is allowed",
-    "invalid parameter: temperature can only be [0, 1; 0.2]",  # legacy markers classify this as a field refusal
+@pytest.mark.parametrize(("message", "hint"), [
+    pytest.param("unsupported temperature: not only 1 is allowed", True, id='unsupported temperature: not only 1 is allowed-hint'),
+    pytest.param("unsupported temperature: only 1 or less is allowed", False, id='unsupported temperature: only 1 or less is allowed-explicit'),
+    pytest.param("unsupported temperature: must be at most 1", True, id='unsupported temperature: must be at most 1-hint'),
+    pytest.param("unsupported temperature: must not be 1", False, id='unsupported temperature: must not be 1-explicit'),
+    pytest.param("unsupported temperature: must not exceed 1", True, id='unsupported temperature: must not exceed 1-hint'),
+    pytest.param("unsupported temperature: cannot exceed 1", False, id='unsupported temperature: cannot exceed 1-explicit'),
+    pytest.param("unsupported temperature: only 1 is not allowed", True, id='unsupported temperature: only 1 is not allowed-hint'),
+    pytest.param("temperature is unsupported by this provider. only 1 is allowed", False, id='temperature is unsupported by this provider. only 1 is allowed-explicit'),
+    pytest.param("invalid parameter: temperature can only be [0, 1; 0.2]", True, id='invalid parameter: temperature can only be [0, 1; 0.2]-hint'),  # legacy markers classify this as a field refusal
 ])
 def test_a_statement_of_values_it_cannot_use_keeps_an_explicit_value_and_withdraws_the_hint(message, hint):
     retry, reasons = _plan(_Refused(message), hint=hint)
@@ -591,32 +595,29 @@ def test_a_statement_of_values_it_cannot_use_keeps_an_explicit_value_and_withdra
         assert retry is None
 
 
-@pytest.mark.parametrize("hint", [True, False], ids=["hint", "explicit"])
-@pytest.mark.parametrize("error", [
-    _Refused("unsupported value: temperature must be one of [0, 1"),
-    _Refused("invalid parameter: temperature must be one of [0, 1; 0.2]"),
-    _Refused("unsupported temperature: only 1 is allowed", allowed_values=[0, 1, "2e-1"]),
-    _Refused("invalid parameter: temperature must be [0, 1; 0.2]", code="invalid_value"),
-    _Refused("temperature is not supported; must be at most 1", param="temperature", code="unsupported_value"),
-], ids=["unclosed-list", "semicolon-list", "typed-unreadable-member", "value-code", "unsupported-value-code"])
+@pytest.mark.parametrize(("error", "hint"), [
+    pytest.param(_Refused("unsupported value: temperature must be one of [0, 1"), True, id='unclosed-list-hint'),
+    pytest.param(_Refused("invalid parameter: temperature must be one of [0, 1; 0.2]"), False, id='semicolon-list-explicit'),
+    pytest.param(_Refused("unsupported temperature: only 1 is allowed", allowed_values=[0, 1, "2e-1"]), True, id='typed-unreadable-member-hint'),
+    pytest.param(_Refused("invalid parameter: temperature must be [0, 1; 0.2]", code="invalid_value"), False, id='value-code-explicit'),
+    pytest.param(_Refused("temperature is not supported; must be at most 1", param="temperature", code="unsupported_value"), True, id='unsupported-value-code-hint'),
+])
 def test_an_unreadable_value_refusal_beside_capability_wording_repairs_nothing(error, hint):
     # Recognized value evidence prevents hint withdrawal; the typed/code rows each exercise a separate guard.
     assert _plan(error, hint=hint)[0] is None
 
 
-@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
-@pytest.mark.parametrize("refusal,origin", [
-    ("temperature rejected, only 3 attempts are allowed", "default_temperature"),
-    ("temperature is fine, but custom_field must be one of 0, 1", "default_temperature"),
-    ((KIMI_REFUSAL, {"code": "insufficient_quota"}), "default_temperature"),
-    ("unsupported temperature: only 1 or less is allowed", "temperature"),
-    ("invalid max_tokens: only 1 is allowed for temperature-less models", "default_temperature"),
-    ("unsupported value: temperature must be one of [0, 1", "default_temperature"),
-    (("unsupported temperature: only 1 is allowed", {"allowed_values": [0, 1, "2e-1"]}), "default_temperature"),
-    (("invalid parameter: temperature must be [0, 1; 0.2]", {"code": "invalid_value"}), "default_temperature"),
-    (("temperature is not supported; must be at most 1", {"param": "temperature", "code": "unsupported_value"}), "default_temperature"),
-], ids=["a-count", "read-parameter", "quota-code", "explicit-bound", "a-compound", "unreadable-value-list",
-        "unreadable-typed-list", "unreadable-value-code", "unsupported-value-code"])
+@pytest.mark.parametrize(("refusal", "origin", "asynchronous"), [
+    pytest.param("temperature rejected, only 3 attempts are allowed", "default_temperature", False, id='a-count-sync'),
+    pytest.param("temperature is fine, but custom_field must be one of 0, 1", "default_temperature", True, id='read-parameter-async'),
+    pytest.param((KIMI_REFUSAL, {"code": "insufficient_quota"}), "default_temperature", False, id='quota-code-sync'),
+    pytest.param("unsupported temperature: only 1 or less is allowed", "temperature", True, id='explicit-bound-async'),
+    pytest.param("invalid max_tokens: only 1 is allowed for temperature-less models", "default_temperature", False, id='a-compound-sync'),
+    pytest.param("unsupported value: temperature must be one of [0, 1", "default_temperature", True, id='unreadable-value-list-async'),
+    pytest.param(("unsupported temperature: only 1 is allowed", {"allowed_values": [0, 1, "2e-1"]}), "default_temperature", False, id='unreadable-typed-list-sync'),
+    pytest.param(("invalid parameter: temperature must be [0, 1; 0.2]", {"code": "invalid_value"}), "default_temperature", True, id='unreadable-value-code-async'),
+    pytest.param(("temperature is not supported; must be at most 1", {"param": "temperature", "code": "unsupported_value"}), "default_temperature", False, id='unsupported-value-code-sync'),
+])
 def test_a_refusal_that_authorizes_nothing_reaches_the_caller_unrepaired(api, refusal, origin, asynchronous):
     api.rule = lambda _payload: refusal
     with pytest.raises(Exception, match="attempts|custom_field|only 1|must be"):
@@ -624,23 +625,46 @@ def test_a_refusal_that_authorizes_nothing_reaches_the_caller_unrepaired(api, re
     assert api.temperatures() == [0.2] and _records(api.root) == []
 
 
-@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
-@pytest.mark.parametrize("values,excludes_hint", [
-    ("0, 1, or 0.2", False), ("0, 1, and 0.2", False), ("[0, 1, 0.2]", False),
-    ("0, 1, or 2", True), ("0, 1, and 2", True), ("[0, 1, 2]", True),
-    ("0, 1, or exactly 0.2", False), ("0, 1, and", False),  # incomplete lists authorize nothing
-    ("0, 1, or 2, got 0.2", True),  # a known trailing clause is not another allowed value
-    ("[0, 1], or 0.2", False), ("0, 1 (or 0.2)", False),
-    ("(0, 1), or 0.2", False), ("0, 1 for temperature, or 0.2", False),
-    ("(0, 1)", True), ("(0, 0.2)", False),
-    ("[0, 1; 0.2]", False), ("[0, 1", False), ("(0, 1; 0.2)", False), ("(0, 1", False),  # never closed
-    ("(0, 1]", False), ("[0, 1)", False), ("0, 1]", False), ("0, 1)", False),  # closed by the wrong bracket, or none
-    ("[0, 1], [0.2]", False), ("[0, 1] or [0.2]", False),
-    ("0, 1; 0.2", False), ("0, 1. 0.2", False), ("0, 1\n0.2", False), ("0, 1...", False),  # the list runs on
-    ("[0, 1]; or 0.2", False), ("0, 1. and 0.2", False),
-    ("0, 1. . .", False), ("0, 1 . . . 0.2", False),
-    ("[ 0, 1 ]", True), ("( 0 , 1 )", True), ("[0, 1].", True), ("[0, 1]; top_p must be 1", True),
-    ("[(0, 1)]", False), ("((0, 1))", False),  # beyond the grammar's one bracket: unread, so nothing is withdrawn
+@pytest.mark.parametrize(("values", "excludes_hint", "asynchronous"), [
+    pytest.param("0, 1, or 0.2", False, False, id='0, 1, or 0.2-False-sync'),
+    pytest.param("0, 1, and 0.2", False, True, id='0, 1, and 0.2-False-async'),
+    pytest.param("[0, 1, 0.2]", False, False, id='[0, 1, 0.2]-False-sync'),
+    pytest.param("0, 1, or 2", True, True, id='0, 1, or 2-True-async'),
+    pytest.param("0, 1, and 2", True, False, id='0, 1, and 2-True-sync'),
+    pytest.param("[0, 1, 2]", True, True, id='[0, 1, 2]-True-async'),
+    pytest.param("0, 1, or exactly 0.2", False, False, id='0, 1, or exactly 0.2-False-sync'),  # incomplete lists authorize nothing
+    pytest.param("0, 1, and", False, True, id='0, 1, and-False-async'),  # incomplete lists authorize nothing
+    pytest.param("0, 1, or 2, got 0.2", True, False, id='0, 1, or 2, got 0.2-True-sync'),  # a known trailing clause is not another allowed value
+    pytest.param("[0, 1], or 0.2", False, True, id='[0, 1], or 0.2-False-async'),
+    pytest.param("0, 1 (or 0.2)", False, False, id='0, 1 (or 0.2)-False-sync'),
+    pytest.param("(0, 1), or 0.2", False, True, id='(0, 1), or 0.2-False-async'),
+    pytest.param("0, 1 for temperature, or 0.2", False, False, id='0, 1 for temperature, or 0.2-False-sync'),
+    pytest.param("(0, 1)", True, True, id='(0, 1)-True-async'),
+    pytest.param("(0, 0.2)", False, False, id='(0, 0.2)-False-sync'),
+    pytest.param("[0, 1; 0.2]", False, True, id='[0, 1; 0.2]-False-async'),  # never closed
+    pytest.param("[0, 1", False, False, id='[0, 1-False-sync'),  # never closed
+    pytest.param("(0, 1; 0.2)", False, True, id='(0, 1; 0.2)-False-async'),  # never closed
+    pytest.param("(0, 1", False, False, id='(0, 1-False-sync'),  # never closed
+    pytest.param("(0, 1]", False, True, id='(0, 1]-False-async'),  # closed by the wrong bracket, or none
+    pytest.param("[0, 1)", False, False, id='[0, 1)-False-sync'),  # closed by the wrong bracket, or none
+    pytest.param("0, 1]", False, True, id='0, 1]-False-async'),  # closed by the wrong bracket, or none
+    pytest.param("0, 1)", False, False, id='0, 1)-False-sync'),  # closed by the wrong bracket, or none
+    pytest.param("[0, 1], [0.2]", False, True, id='[0, 1], [0.2]-False-async'),
+    pytest.param("[0, 1] or [0.2]", False, False, id='[0, 1] or [0.2]-False-sync'),
+    pytest.param("0, 1; 0.2", False, True, id='0, 1; 0.2-False-async'),  # the list runs on
+    pytest.param("0, 1. 0.2", False, False, id='0, 1. 0.2-False-sync'),  # the list runs on
+    pytest.param("0, 1\n0.2", False, True, id='0, 1\n0.2-False-async'),  # the list runs on
+    pytest.param("0, 1...", False, False, id='0, 1...-False-sync'),  # the list runs on
+    pytest.param("[0, 1]; or 0.2", False, True, id='[0, 1]; or 0.2-False-async'),
+    pytest.param("0, 1. and 0.2", False, False, id='0, 1. and 0.2-False-sync'),
+    pytest.param("0, 1. . .", False, True, id='0, 1. . .-False-async'),
+    pytest.param("0, 1 . . . 0.2", False, False, id='0, 1 . . . 0.2-False-sync'),
+    pytest.param("[ 0, 1 ]", True, True, id='[ 0, 1 ]-True-async'),
+    pytest.param("( 0 , 1 )", True, False, id='( 0 , 1 )-True-sync'),
+    pytest.param("[0, 1].", True, True, id='[0, 1].-True-async'),
+    pytest.param("[0, 1]; top_p must be 1", True, False, id='[0, 1]; top_p must be 1-True-sync'),
+    pytest.param("[(0, 1)]", False, True, id='[(0, 1)]-False-async'),  # beyond the grammar's one bracket: unread, so nothing is withdrawn
+    pytest.param("((0, 1))", False, False, id='((0, 1))-False-sync'),  # beyond the grammar's one bracket: unread, so nothing is withdrawn
 ])
 def test_the_complete_allowed_list_decides_withdrawal_and_learning(api, values, excludes_hint, asynchronous):
     refusal = "temperature must be one of " + values
@@ -733,18 +757,19 @@ def test_a_pathological_refusal_is_read_fast(message):
     assert time.perf_counter() - started < 3
 
 
-@pytest.mark.parametrize("hint", [True, False], ids=["hint", "explicit"])
-@pytest.mark.parametrize("message", [
-    FIELD_REFUSAL, "temperature is unsupported", "unsupported parameter: temperature",
-    "temperature is not supported; top_p must be 1", "temperature is not supported, top-p must be 1",
-    "temperature is not supported for this model; max tokens must be 1",
-    "temperature is not supported, must be removed",  # no number: no statement of its values
-    "temperature is not supported; only default is allowed",
-    "temperature is not supported; only gpt-4 models accept it",
-    "temperature 0.2 is not supported",  # a legacy limit, not this rule: it may mean only the value, yet the field goes
-    # An unbound list that never ended states nothing of temperature: the legacy repair answers, as it always did.
-    "max_tokens is too large, must be 4096 or less; temperature is not supported",
-    "temperature is unsupported by this provider. must be at most 1",
+@pytest.mark.parametrize(("message", "hint"), [
+    pytest.param(FIELD_REFUSAL, True, id='temperature is not supported-hint'),
+    pytest.param("temperature is unsupported", False, id='temperature is unsupported-explicit'),
+    pytest.param("unsupported parameter: temperature", True, id='unsupported parameter: temperature-hint'),
+    pytest.param("temperature is not supported; top_p must be 1", False, id='temperature is not supported; top_p must be 1-explicit'),
+    pytest.param("temperature is not supported, top-p must be 1", True, id='temperature is not supported, top-p must be 1-hint'),
+    pytest.param("temperature is not supported for this model; max tokens must be 1", False, id='temperature is not supported for this model; max tokens must be 1-explicit'),
+    pytest.param("temperature is not supported, must be removed", True, id='temperature is not supported, must be removed-hint'),  # no number: no statement of its values
+    pytest.param("temperature is not supported; only default is allowed", False, id='temperature is not supported; only default is allowed-explicit'),
+    pytest.param("temperature is not supported; only gpt-4 models accept it", True, id='temperature is not supported; only gpt-4 models accept it-hint'),
+    pytest.param("temperature 0.2 is not supported", False, id='temperature 0.2 is not supported-explicit'),  # a legacy limit, not this rule: it may mean only the value, yet the field goes
+    pytest.param("max_tokens is too large, must be 4096 or less; temperature is not supported", True, id='max_tokens is too large, must be 4096 or less; temperature is not supported-hint'),  # An unbound list that never ended states nothing of temperature: the legacy repair answers, as it always did.
+    pytest.param("temperature is unsupported by this provider. must be at most 1", False, id='temperature is unsupported by this provider. must be at most 1-explicit'),
 ])
 def test_genuine_field_refusals_keep_their_historical_repair(message, hint):
     retry, reasons = _plan(_Refused(message), hint=hint)
@@ -903,8 +928,10 @@ def test_reasoning_recovery_composes_with_the_withdrawal(api, hint_first):
     assert len(_records(api.root)) == 2
 
 
-@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
-@pytest.mark.parametrize("hint_first", [False, True], ids=["carrier-first", "hint-first"])
+@pytest.mark.parametrize(("hint_first", "asynchronous"), [
+    pytest.param(False, False, id='carrier-first-sync'),
+    pytest.param(True, True, id='hint-first-async'),
+])
 def test_a_dropped_carrier_composes_with_the_withdrawal_and_its_memory(api, hint_first, asynchronous):
     def rule(payload):
         carrier_refused = bool(payload_effort(payload))

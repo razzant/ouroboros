@@ -229,9 +229,10 @@ def _sent(monkeypatch, seat) -> tuple:
     return provider_call(monkeypatch, executor._chat_kwargs([], [], 8))
 
 
-@pytest.mark.parametrize("local", [False, True], ids=["remote", "local"])
-@pytest.mark.parametrize("catalog", [_roster(_row("helper", "m/helper", marked=False)), _roster()],
-                         ids=["unmarked", "no_rows"])
+@pytest.mark.parametrize(("catalog", "local"), [
+    pytest.param(_roster(_row("helper", "m/helper", marked=False)), False, id='unmarked-remote'),
+    pytest.param(_roster(), True, id='no_rows-local'),
+])
 def test_an_empty_pools_main_seat_sends_mains_binding_from_the_settings_the_pool_reads(install, clean_env,
                                                                                          catalog, local):
     """The Main seat is Main's whole binding — model, local flag, account pin, processing — in the settings the

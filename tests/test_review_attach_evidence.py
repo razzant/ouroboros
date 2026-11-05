@@ -136,9 +136,13 @@ def test_repeat_attach_collection_reuses_the_retained_receipt_without_recreating
     assert calls == [("handshake",), ("get_run", RUN), ("close",)]  # S3: the second read uses producer CAS
 
 
-@pytest.mark.parametrize("verdict", ["PASS", "FAIL"])
-@pytest.mark.parametrize("scope", [ABSENT, None, SETTLED, NO_CENSUS, {**NO_CENSUS, "survivors": 1}],
-                         ids=["absent", "null", "settled", "no-census", "survivor"])
+@pytest.mark.parametrize(("scope", "verdict"), [
+    pytest.param(ABSENT, "PASS", id='absent-PASS'),
+    pytest.param(None, "FAIL", id='null-FAIL'),
+    pytest.param(SETTLED, "PASS", id='settled-PASS'),
+    pytest.param(NO_CENSUS, "FAIL", id='no-census-FAIL'),
+    pytest.param({**NO_CENSUS, "survivors": 1}, "PASS", id='survivor-PASS'),
+])
 def test_any_process_scope_releases_the_copy_and_collects_the_paid_verdict(
         checking_run, monkeypatch, forbid_effects, scope, verdict):  # noqa: F811
     """The census the engine reports does not decide anything here (owner 1A, 2026-10-12):

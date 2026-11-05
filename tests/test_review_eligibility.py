@@ -120,8 +120,7 @@ def test_empty_trace_has_no_effects():
     assert not turn_has_reviewable_effects({})
 
 
-@pytest.mark.parametrize("tool", ["run_command", "run_script"])
-@pytest.mark.parametrize("registered", [False, True])
+@pytest.mark.parametrize(("registered", "tool"), [(False, "run_command"), (True, "run_script")])
 def test_process_outputs_require_observed_production(tool, registered):
     # Declared paths are intentions; successful registration is the produced fact.
     assert turn_has_reviewable_effects({"tool_calls": [

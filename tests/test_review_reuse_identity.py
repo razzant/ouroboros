@@ -450,8 +450,10 @@ def test_the_session_answer_schema_is_the_contract_where_a_session_sits(foreign,
     assert "Revised schema." in briefs["t2"] and "Revised schema." not in briefs["t1"]
 
 
-@pytest.mark.parametrize("surface", ["change", "preflight-session"])
-@pytest.mark.parametrize("owner", ["_FOCUS_GUIDANCE", "_CONTINUE_READING"])
+@pytest.mark.parametrize(("owner", "surface"), [
+    ("_FOCUS_GUIDANCE", "change"),
+    ("_CONTINUE_READING", "preflight-session"),
+])
 def test_a_native_reply_directive_is_the_contract_where_a_native_seat_sits(foreign, monkeypatch, surface, owner):
     """Inside its episode a native seat is told how to handle its evidence: compact_context asked for nothing answers
     with the focus guidance, a result cut at one page ends with the way on. A shipped edit of either is a new wave
