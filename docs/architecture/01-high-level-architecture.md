@@ -242,8 +242,7 @@ ouroboros/ — agent core and shared runtime (§6)
   context_compaction.py, context_source_view.py, context_renewal.py, context_health.py — atomic compaction, source-address recovery, same-task renewal, provenance capsules, transactional apply; health invariants: own delegated obligations full, all foreign work one exact-source pointer (§6 Context fitting)
   context_runtime_facts.py — the runtime section's fact builders
   headless.py, history_retention.py — child-drive isolation, answer/file adoption, workspace patches, memory export; typed `sensitive_blocked` exclusions (§6 Headless finalization; §10)
-  task_custody.py — the one child-drive deletion owner (`settle_child_drive`) and per-task custody lock (§6 Headless finalization)
-  owner_keep.py, review_thread_retention.py — one task's Keep; archived reviewer threads and gated release (§6 Headless finalization)
+  task_custody.py, owner_keep.py, review_thread_retention.py — the one child-drive deletion owner (`settle_child_drive`) and per-task custody lock; one task's Keep; archived reviewer threads and gated release (§6 Headless finalization)
   headless_status.py — lifecycle vocabulary shared by the headless owners
   workspace_patch_rules.py, workspace_patch_capture.py — patch-exclusion rules (env/cache, junk, lockfiles, credential-shaped names); the patch artifact and its manifest
   workspace_copies.py — git-copy source/baseline identity and own-body policy (§6 Delegated subagents)
@@ -271,7 +270,7 @@ ouroboros/ — agent core and shared runtime (§6)
   body_candidate.py, body_adoption.py, body_switch.py — Own-body worktree authoring and restart-bound adoption of an exact reviewed commit before body imports (§6 Own-body candidates; §2)
   artifacts.py, artifact_storage.py, artifact_directories.py — artifact_store/attachments/, records/clones, compression, ZIPs, .scratch_manifest.json hashes, output audit, tool-evidence slices (§6)
   chat_uploads.py, confined_files.py — the owner-attachment store (`data/uploads`) with byte-proven media kind; held-directory walks and regular-file opens (POSIX dirfd, Windows NT handles) for attachments, task files and sources (DESIGN "Chat attachments")
-  retention.py, workspace_preflight.py — GC clamp, cutoff and exact task-drive retention date; workspace facts and delegated scratch/cache preparation/retirement (§6)
+  retention.py, workspace_preflight.py, session_scratch.py — GC clamp and retention date; workspace facts; scratch preparation, holders and release (§6)
   project_sources.py — folder attach validation (realpath, not the home root, no repo/data overlap); opt-in `init_git`; a server-side clone never prompts (typed `auth_required`); attaching is the trust grant (`trusted_at`)
   promotion_source.py — promoted-task source admission after an executor/id reservation
   workspace_admission.py — Task/promotion workspace admission: disjoint roots and Project binding, never a system-repo fallback (§6 Owner routing verbs; CLI / Headless Boundary below)

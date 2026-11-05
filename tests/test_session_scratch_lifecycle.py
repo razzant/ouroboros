@@ -142,11 +142,15 @@ def test_a_scratch_its_producer_retained_is_never_destroyed(world):
     test_environment.retain_tree(scratch, reason)
     assert task_custody.settle_child_drive(data, "held", data / "task_drives" / "held",
                                            live=lambda _t: False)["status"] == "removed"
-    # The custodied drive goes at once (#2586); the retained scratch stays, owned by no one from then on.
-    assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}, "retained": [str(scratch)]}
-    assert task_custody.remove_custody_trash(data) == {"removed": 0, "stuck": {}, "retained": []}
+    # The custodied drive goes at once (#2586); the retained scratch keeps its record as a visible hold (#2708).
+    report = task_custody.remove_custody_trash(data)
+    assert (report["removed"], report["stuck"]) == (1, {})
+    assert [(hold["class"], hold["count"], hold["example"]) for hold in report["holds"]] == [
+        ("producer_retained", 1, f"{scratch}: {reason}")]
+    assert task_custody.remove_custody_trash(data)["holds"] == report["holds"]  # the hold stands, unchanged
     assert (scratch / "only-here.txt").read_text(encoding="utf-8") == "unique input\n"
     assert retire_synthetic_retention(scratch, reason)
+    assert task_custody.remove_custody_trash(data)["removed"] == 1 and not scratch.exists()
 
 
 @pytest.mark.parametrize("access", ACCESSES)

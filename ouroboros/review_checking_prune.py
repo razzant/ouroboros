@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import pathlib
 import threading
 import uuid
@@ -52,7 +53,9 @@ from ouroboros.review_checking import (
     _seat_locked,
     seat_dir,
 )
+from ouroboros.session_scratch import release_seat_scratch
 from ouroboros.unindexed import unindexed
+from ouroboros.workspace_preflight import SESSION_SCRATCH_DIRNAME
 
 _PASS_LOCK = threading.Lock()
 
@@ -411,6 +414,12 @@ def prune_review_checkouts(data_root: Any, live_task_ids: Any, *, views_since: O
             else:
                 report["removed"] += 1
 
+        def scratch(home: pathlib.Path, task_id: str) -> None:
+            """Under the seat lock: the scratch records of a home whose copy is gone go to the custody trash
+            (a capture inside this pass already hands them over with the copy; this covers a copy released
+            earlier whose record stayed)."""
+            report["errors"].extend(release_seat_scratch(data_root, task_id, home)["errors"])
+
         def retire(home: pathlib.Path, area: pathlib.Path) -> bool:
             """Under the seat lock: True keeps the copy (and the views it names)."""
             marker = json.loads((home / "checking.json").read_text(encoding="utf-8"))
@@ -440,6 +449,8 @@ def prune_review_checkouts(data_root: Any, live_task_ids: Any, *, views_since: O
                         holds.note(held, home.name)
                         return True
                     receipt = _release_area(area, receipt, marker.get("git"))
+                    if not receipt.get("cleanup_error"):
+                        scratch(home, task_id)  # the seat's scratch goes with its copy (#2706, #2707)
                 if receipt.get("cleanup_error"):
                     report["errors"].append(receipt["cleanup_error"])
                     holds.note("removal_failed", home.name)
@@ -465,8 +476,8 @@ def prune_review_checkouts(data_root: Any, live_task_ids: Any, *, views_since: O
                 if views:
                     report["errors"].append(f"{home.name}: the seat home is a link")
                 return set()
-            if not views and not _checking_area_present(area):
-                return set()  # a periodic pass reads only seats that still hold a copy
+            if not views and not _checking_area_present(area) and not os.path.lexists(home / SESSION_SCRATCH_DIRNAME):
+                return set()  # a periodic pass reads only seats that still hold a copy or a scratch record
             try:
                 marker = json.loads((home / "checking.json").read_text(encoding="utf-8"))
                 thread, task_id = marker.get("thread_seat"), marker.get("task_id")
@@ -495,6 +506,8 @@ def prune_review_checkouts(data_root: Any, live_task_ids: Any, *, views_since: O
                     for leftover in home.glob(".next-*"):  # an older body's interrupted thread refresh
                         remove(leftover)
                     if not _checking_area_present(area):
+                        if not thread:  # a copy already gone holds no scratch (a handoff a crash interrupted)
+                            scratch(home, str(task_id or ""))
                         return set()
                     kept = retire(home, area)
                 except Exception as exc:  # its views are known and stay; the views pass need not wait for it
