@@ -111,9 +111,13 @@ def test_workload_changes_invalidate_proof(candidate, monkeypatch, change):
         kwargs["pytest_args"] = ["tests/", "-k", "serial"]
     elif change == "python":
         monkeypatch.setenv("OUROBOROS_AGENT_PYTHON", "/missing/python")
+    elif change == "timeout":  # the full suite's budget is its caller's alone: the env lever bounds a bounded run
+        monkeypatch.setenv("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", "950")
+        assert proof.covers(capture_preflight_test_subject(ctx.repo_dir))
+        kwargs["timeout"] = 950
     else:
         key, value = {"env": ("PROOF_INPUT", "different"), "workers": ("OUROBOROS_PREFLIGHT_TEST_WORKERS", "3"),
-                      "serial": ("OUROBOROS_PREFLIGHT_SERIAL", "1"), "timeout": ("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", "950")}[change]
+                      "serial": ("OUROBOROS_PREFLIGHT_SERIAL", "1")}[change]
         monkeypatch.setenv(key, value)
     assert not proof.covers(capture_preflight_test_subject(ctx.repo_dir, **kwargs))
 
