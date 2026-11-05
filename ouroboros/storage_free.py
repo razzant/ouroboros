@@ -30,7 +30,7 @@ storage copy; this module reports ids, counts, sizes and typed reasons.
 The ordinary action works on exact objects: the *pool* (``storage_free_view``) is every offered work folder,
 working copy and declared temporary environment (``copy_environments``), each addressed alone; everything else
 is listed with its reason. Selecting by ``items`` retires those objects, each re-judged under its retirer's own
-lock and the owner's keep (``owner_keep``); ``groups`` stays for the groups below, with their own words.
+lock and the owner's keep (``owner_keep``); the dashboard still exposes saved groups below, with their own words.
 ``manual`` is a third, separate form: exact finished copies whose work no capture holds, each named with what it
 would lose (``view=manual``) and sent with ``accept_loss``; nothing else reaches them (``copy_capture_proof.discard_offer``,
 ``copy_capture_proof.discard_unsaved_copy``).
@@ -585,11 +585,11 @@ class FreeSpace:
 
     # ---- the mind's request (owner Q3 = A, 05.11.2026) --------------------------------------
 
-    def request(self, data_root: Any, repo_dir: Any, *, actor: str, request_id: str, groups: Any = None,
+    def request(self, data_root: Any, repo_dir: Any, *, actor: str, request_id: str,
                 dry_run: bool = False, notify: Optional[Callable[[str], Any]] = None) -> Dict[str, Any]:
         """The same Free the owner presses, asked by the mind (``free_storage``): one preview with the same
         probes, then a run of the ordinary pool (every work folder, working copy and declared temporary
-        environment the retirers' proofs offer) or of the named saved ``groups``; a ``dry_run`` stops after the
+        environment the retirers' proofs offer); a ``dry_run`` stops after the
         preview. The owner's Keep and every retirer proof hold exactly as for the owner. Its receipt is the
         ``storage_free`` job row (``request_id``, ``actor``, the preview's pool and exclusions, the run's
         outcome) and ``notify`` is told one sentence for Main when it ends. Refused while a listing or a run
@@ -603,7 +603,7 @@ class FreeSpace:
                 reason = "busy"
             else:
                 reason = ""
-                self._request = {"request_id": request_id, "actor": actor, "groups": [str(g) for g in (groups or ())],
+                self._request = {"request_id": request_id, "actor": actor,
                                  "dry_run": bool(dry_run), "notify": notify, "requested_at": utc_now_iso()}
         if reason:
             _write_receipt(root, {"request_id": request_id, "actor": actor, "state": "failed", "refusal": reason,
@@ -630,11 +630,8 @@ class FreeSpace:
         if request["dry_run"]:
             self._finish_request(root, {"state": "done", "preview": summary})
             return
-        if request["groups"]:
-            started = self.start(root, repo_dir, plan["id"], request["groups"])
-        else:
-            items = sorted(ordinary_ids(plan))
-            started = self.start(root, repo_dir, plan["id"], None, items=items) if items else {"started": False, "reason": "nothing_selected"}
+        items = sorted(ordinary_ids(plan))
+        started = self.start(root, repo_dir, plan["id"], None, items=items) if items else {"started": False, "reason": "nothing_selected"}
         if not started["started"]:
             self._finish_request(root, {"state": "done", "preview": summary, "refusal": started["reason"]})
         else:

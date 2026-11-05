@@ -19,26 +19,21 @@ import uuid
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 
-SAVED_GROUPS = ("review_evidence", "review_checkouts", "lost_copies", "service_folders", "result_pins")
 RECEIPT_POLL_SEC = 0.5  # how often the receipt row is read while the tool waits (transport pacing, not judgment)
 WAIT_SEC_MAX = 300  # the longest one tool call waits for the receipt; a longer run reports as still running
 
 
-def _free_storage(ctx: ToolContext, groups: list | None = None, dry_run: bool = False, wait_sec: int = 90) -> str:
+def _free_storage(ctx: ToolContext, dry_run: bool = False, wait_sec: int = 90) -> str:
     from ouroboros import maintenance_jobs
     from ouroboros.storage_free import REQUEST_JOB
     from ouroboros.tool_access_paths import canonical_data_root
     from ouroboros.tools.control_events import _emit_control_event
     from ouroboros.utils import utc_now_iso
 
-    chosen = [str(group) for group in (groups or [])]
-    unknown = [group for group in chosen if group not in SAVED_GROUPS]
-    if unknown:
-        return json.dumps({"ok": False, "error": "unknown_group", "unknown": unknown, "groups": list(SAVED_GROUPS)})
     request_id = uuid.uuid4().hex[:16]
     task_id = str(getattr(ctx, "task_id", "") or "")
     transport = _emit_control_event(ctx, {"type": "free_storage", "task_id": task_id, "request_id": request_id,
-                                          "groups": chosen, "dry_run": bool(dry_run), "ts": utc_now_iso()})
+                                          "dry_run": bool(dry_run), "ts": utc_now_iso()})
     root = canonical_data_root(ctx)
     deadline = time.monotonic() + max(0, min(int(wait_sec or 0), WAIT_SEC_MAX))
     receipt: dict = {}
@@ -80,15 +75,12 @@ def storage_tool_entries() -> list[ToolEntry]:
                 "owner's Keep is always respected. Read the Runtime storage fact first (free space, what each retirer "
                 "holds and why, what the last passes released): use this when, in your judgment, the disk needs room now "
                 "and the finished folders are worth less than their space; the owner's retention days are their "
-                "inspection window, so say in Main why you freed early. groups names saved-work groups the owner would "
-                "otherwise tick by hand (review_evidence, review_checkouts, lost_copies, service_folders, result_pins): "
-                "name one only when you judge that saved work disposable. dry_run previews without removing. Every run "
+                "inspection window, so say in Main why you freed early. dry_run previews the ordinary pool and the "
+                "saved-work groups the owner can review and free from the Dashboard, without removing anything. Every run "
                 "is recorded with you as the actor and reported to the owner in Main; the tool waits wait_sec for the "
                 "receipt, else the run goes on and the receipt is on the storage_free job row."
             ),
             "parameters": {"type": "object", "properties": {
-                "groups": {"type": "array", "items": {"type": "string", "enum": list(SAVED_GROUPS)},
-                           "description": "Saved-work groups to free as well; omit for the ordinary pool only."},
                 "dry_run": {"type": "boolean", "default": False, "description": "Preview only: what would go and what stays, with reasons."},
                 "wait_sec": {"type": "integer", "default": 90, "minimum": 0, "maximum": WAIT_SEC_MAX,
                              "description": "How long to wait for the receipt before returning 'running'."},
