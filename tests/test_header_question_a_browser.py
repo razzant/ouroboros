@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
+from tests._shared import answer_projects
 
 subscription_ui = setup_browser.subscription_ui
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
@@ -45,6 +46,7 @@ def _pointer(block):
 
 def _seed(page):
     page.route('**/api/projects', lambda r: r.fulfill(json={'projects': [PROJECT]}))
+    page.route('**/api/projects?id=*', lambda r: answer_projects(r, [PROJECT]))
     page.route('**/api/state', lambda r: r.fulfill(json={
         'sha': 'browser-fixture', 'supervisor_ready': True, 'active_chat_activities': [], 'projects': [PROJECT],
         'project_chat_ids': [42], 'current_questions': [_pointer(BLOCK)], 'current_questions_complete': True,

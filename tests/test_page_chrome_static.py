@@ -253,11 +253,13 @@ def test_sidebar_is_three_zones_with_the_projects_list_as_the_one_scroller():
     assert "pointer-events: none" in touch
     assert ".nav-project-item:has(> .nav-project-kebab:is(:focus, [aria-expanded=\"true\"])) {" in touch
     assert "-webkit-touch-callout: none" in touch and "user-select: none" in touch
-    # The row's ⋯ is the shell's one More glyph.
-    app_js = _read("web/app.js")
-    assert "kebab.innerHTML = SHELL_ICONS.more;" in app_js and "kebab.textContent = '⋯'" not in app_js
+    # The row's ⋯ is the shell's one More glyph; the list's rows live in projects_nav.js and open through app.js's
+    # one ingress, which reads a row older than the feed by its id.
+    rows_js = _read("web/modules/projects_nav.js")
+    assert "kebab.innerHTML = SHELL_ICONS.more;" in rows_js and "kebab.textContent = '⋯'" not in rows_js
     assert "navProjectsToggle?.classList.toggle('active'" not in _read("web/app.js")
-    assert "openProjectPanel(item.project, { openOnly: true," in app_js
+    assert "open(pressed(item.project), { pointer: event.detail > 0 })" in rows_js
+    assert "open: (project, { pointer }) => openProjectPanel(project, { openOnly: true, pointer })" in _read("web/app.js")
 
 
 # ---------------------------------------------------------------------------

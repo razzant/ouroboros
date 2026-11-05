@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
+from tests._shared import answer_projects
 
 subscription_ui = setup_browser.subscription_ui
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
@@ -149,6 +150,7 @@ def seed_page(ui, width, height, telegram=False, touch=None):
         return lambda route: route.fulfill(json=body)
     for path, body in payloads.items():
         page.route('**' + path, response(body))
+    page.route('**/api/projects?id=*', lambda route: answer_projects(route, PROJECTS))  # a reference's own read
     return page
 
 

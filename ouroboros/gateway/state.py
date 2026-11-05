@@ -284,11 +284,14 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
     # isolation SSOT — distinct from the capped/filtered sidebar list, so
     # isolation never lapses for projects beyond the summary limit or hidden rows.
     try:
-        from ouroboros.projects_registry import projects_summary
+        from ouroboros.projects_registry import list_sidebar_projects, projects_summary
 
-        projects = projects_summary(request_drive_root(request), include_pinned=True)
+        root = request_drive_root(request)
+        projects = projects_summary(root, include_pinned=True)
+        project_listable_count = len(list_sidebar_projects(root))
     except Exception:
         projects = []
+        project_listable_count = None
     try:
         from ouroboros.projects_registry import reserved_project_chat_ids
 
@@ -321,6 +324,7 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         "subagents_mode": main_cognition(settings)["subagents_mode"],
         "subagents_availability": subagents_availability(settings),
         "projects": projects,
+        "project_listable_count": project_listable_count,
         "project_chat_ids": project_chat_ids,
         "main_visible_revision": main_visible_revision,
         "task_bindings": task_bindings,

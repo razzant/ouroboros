@@ -911,7 +911,9 @@ under one of the four categories above and fails on a new one;
 
 New messages are crimson, and only where the owner reads. The two sidebar numbers
 count the same thing, the standalone messages not read yet (below): Main's on its
-row, shown while another place is, and the Projects header's, summed over its rows,
+row, shown while another place is, and the Projects header's, summed over its
+Project-room rows shown by this window, including rooms outside the current sidebar feed
+once the complete list has been read,
 each a crimson pill in one column just before the marks (owner 19.10, Q1 = B). A
 Project row's mark takes the crimson tint (its work's shape, or a dot where nothing
 works), and ☰ carries a crimson dot while Main or a Project hidden in the drawer has
@@ -2949,11 +2951,20 @@ neither opens nor reads it. Pinned Projects lead the one list, and one `--space-
 shown row is their only boundary: no caption, glyph, tint, rule or column, so
 nothing reads as one more Project; the row's tooltip and accessible name say
 Pinned. Within each group unread leads, then recency; the column's places follow §5.
-After Unpin, a room outside the recent sidebar slice disappears from that slice,
-not from the registry. The Projects header collapses the whole list or opens it:
-collapsed, only the pinned Projects stay, in their order and with their air; every
-other row hides whatever it is doing, the open one included, and the header keeps
-its mark and unread count for them. The choice is remembered on the device; a row
+The list rests on the pins and the most recent other Projects. Every other one is one step away by the owner's
+choice A1: Find a project under the header and Show more at the end of the list. As built, the field is a
+capsule a row high in the header pills' material, made like the composer's field; it matches every Project's
+name, older and closed ones included, by its letters (any case or accent, each word anywhere in it), and a found
+name may take three lines. Show more ends a list the state knows more rooms for and adds the next fifty by
+recency; a find with no match says no project name contains those words and offers Clear search and Show all
+projects. A list that could not be read again says so, with the time of the one shown and Try again; until a
+read answers, nothing is said to be missing. Neither reads a room's history or marks anything read. Beyond the
+recent rows the order is the one the owner's last action gave, pins still leading: activity changes rows in
+place, and a room that comes or goes never moves the row in view. A Project outside the list opens by its own
+id; a missing or deleting one leaves the room on screen and says so. The Projects header collapses the whole
+list or opens it: collapsed, only the pinned Projects stay, in their order and with their air; every
+other row hides whatever it is doing, the open one included, a find or a browse ends, and the
+header keeps its mark and unread count for them. The choice is remembered on the device; a row
 that hides while it or its menu holds focus closes its menu and hands focus to the
 header. No label is set in capitals. A short window first compacts rows (fine pointer only), then lets the
 whole column scroll with Main pinned at the top and the version and the update on the bottom edge (owner 23.10);

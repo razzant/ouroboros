@@ -127,13 +127,14 @@ def test_page_header_is_shared_foundation_for_top_pages():
 
 def test_project_rows_use_slots_not_generic_spans():
     app_js = _read("web/app.js")
+    rows_js = _read("web/modules/projects_nav.js")  # the Projects list's rows
     css = _read("web/style.css")
-    assert "PROJECTS_VISIBLE_LIMIT" not in app_js
-    assert "className = 'nav-row nav-project-row'" in app_js
+    assert "PROJECTS_VISIBLE_LIMIT" not in app_js + rows_js
+    assert "className = 'nav-row nav-project-row'" in rows_js
     # Project rows are a dotless, compact, indented list (no green status dot).
-    assert "nav-project-dot" not in app_js
+    assert "nav-project-dot" not in app_js + rows_js
     assert "nav-project-dot" not in css
-    assert "className = 'nav-row-label'" in app_js
+    assert "className = 'nav-row-label'" in rows_js
     assert ".nav-project-btn span" not in css
     assert ".nav-projects {" in css and ".nav-projects-list" in css
     assert "['active', 'deleting'].includes" in app_js

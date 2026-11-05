@@ -1382,13 +1382,14 @@ def _with_dialogue_facts(project: Dict[str, Any], room: Optional[dict]) -> Dict[
             "last_active_at": max(str(project.get("last_active_at") or ""), str(facts.get("activity_at") or ""))}
 
 
-def projects_summary(drive_root: Any, *, limit: int = 50, chat_id: Any = None,
-                     include_pinned: bool = False, closed: Optional[bool] = None,
+def projects_summary(drive_root: Any, *, limit: Optional[int] = 50, chat_id: Any = None,
+                     project_id: Any = None, include_pinned: bool = False, closed: Optional[bool] = None,
                      oldest_first: bool = False, start: int = 0) -> List[Dict[str, Any]]:
-    """Sidebar or strict addressed room, with unread/activity from dialogue room facts.
+    """Sidebar, its whole list (``limit=None``) or a strict addressed room, with unread/activity from room facts.
 
-    Registry reads retain lifecycle and binding authority. An unproved inactive room
-    requires complete import; a pending, failed or invalid interval is never inactivity.
+    ``chat_id`` addresses an active room, ``project_id`` an active or deleting one; registry reads retain lifecycle
+    and binding authority. An unproved inactive room requires complete import; a pending, failed or invalid
+    interval is never inactivity.
     """
     from ouroboros import dialogue_store as ds
 
@@ -1396,6 +1397,7 @@ def projects_summary(drive_root: Any, *, limit: int = 50, chat_id: Any = None,
     cognition = main_cognition()
     bound = {str(row.get("project_id") or "") for row in _load_bindings(drive_root)["bindings"].values()
              if isinstance(row, dict)}
+    addressed = chat_id is not None or project_id is not None
     if chat_id is not None:
         address = int(chat_id)
         projects = [row for row in list_reserved_projects(drive_root, strict=True)
@@ -1403,17 +1405,22 @@ def projects_summary(drive_root: Any, *, limit: int = 50, chat_id: Any = None,
         if len(projects) > 1:
             raise ValueError("Project chat identity is ambiguous")
         facts = {address: ds.room(drive_root, address)} if projects else {}
+    elif project_id is not None:
+        # One strict row: another room's malformed routing never hides this one; a tombstone answers none.
+        row = get_reserved_project(drive_root, project_id, strict=True)
+        projects = [row] if row and row.get("lifecycle") in {PROJECT_ACTIVE, PROJECT_DELETING} else []
+        facts = {row["chat_id"]: ds.room(drive_root, row["chat_id"])} if projects else {}
     else:
         projects = [p for p in list_sidebar_projects(drive_root)
                     if closed is None or p.get("lifecycle") == PROJECT_ACTIVE]
         facts = {room["chat_id"]: room for room in ds.rooms(drive_root)} if projects else {}
     projects = [_with_dialogue_facts(project, facts.get(project["chat_id"])) for project in projects]
     projects = select_projects(projects, closed=closed, oldest_first=oldest_first)
-    if chat_id is None and include_pinned:
+    if not addressed and limit is not None and include_pinned:
         # Pins remain reachable without starving the ordinary recent-room slice.
         projects = ([p for p in projects if p.get("pinned") is True]
                     + [p for p in projects if p.get("pinned") is not True][:max(1, int(limit))])
-    elif chat_id is None:
+    elif not addressed and limit is not None:
         start = max(0, int(start))
         projects = projects[start:start + max(1, int(limit))]
     absence_covered = False
@@ -1434,7 +1441,7 @@ def projects_summary(drive_root: Any, *, limit: int = 50, chat_id: Any = None,
                         raise ds.StoreError("dialogue history has gaps; room activity is unknown")
                 absence_covered = True
             except (ds.StoreMigrating, ds.StoreError):
-                if chat_id is not None:
+                if addressed:
                     raise  # the addressed room answers its typed outcome
                 # The sidebar keeps every room while the archive imports: an unproved room reads as
                 # not yet active (as before the import found its rows), never as a missing project.

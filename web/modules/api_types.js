@@ -45,6 +45,7 @@
  * @property {boolean} github_token_configured
  * @property {Object} accounting  // physical-attempt ledger projection
  * @property {Array<ProjectEntry>} projects  // active/deleting sidebar projection
+ * @property {?number} project_listable_count
  * @property {Array<number>} project_chat_ids  // complete (uncapped) project chat_ids — WS fan-out isolation SSOT (v6.32.0)
  * @property {?number=} main_visible_revision  // Main's room revision (its standalone messages, as a Project's visible_revision counts); null while unreadable
  * @property {?Object<string, {project_id: string, chat_id: number, origin_bound?: boolean}>} task_bindings  // null only when task_bindings_unchanged; bound task -> its project: suppress the stray "turn into project" button (v6.33.0 P2) + render a pointer that opens the project panel (v6.33.0 F4). origin_bound marks a task the host included because its OWNER MESSAGE already has a project (#902), so one message cannot keep a second convertible card
@@ -584,7 +585,6 @@
  * @property {string} label
  * @property {string} url
  */
-
 /** @typedef {Object} LinksOutbound
  * @property {"links"} type
  * @property {"assistant"} role

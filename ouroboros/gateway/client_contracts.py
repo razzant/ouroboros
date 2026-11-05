@@ -522,7 +522,9 @@ class ChatUploadDeleteResponse(TypedDict):
 
 
 class ProjectListResponse(TypedDict):
-    """``GET /api/projects``: active and deleting projects, at most 200, most recently active first.
+    """``GET /api/projects``: active and deleting projects, at most 200, most recently active first; ``?all=1``
+    lists every one of them. ``?id=<project_id>`` answers that project while active or deleting, ``?chat_id=<n>``
+    the active project of that room; either answers none otherwise.
     Rows are the compact projection ``GET /api/state`` also carries: id, name, pinned, chat_id, working_dir,
     provenance, last_active_at, lifecycle, optional closed, routing_generation, visible_revision, delete_error and
     has_thread_activity."""

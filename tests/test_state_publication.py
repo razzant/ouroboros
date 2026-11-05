@@ -24,7 +24,7 @@ STATE_FIELDS = {
     "evolution_cycle", "evolution_state", "bg_consciousness_state", "spent_calls", "supervisor_ready",
     "supervisor_error", "boot", "runtime_mode", "context_mode", "subagents_mode", "subagents_availability",
     "context_mode_auto_low", "effort_range", "safety_mode", "skills_repo_configured", "github_token_configured",
-    "accounting", "projects", "project_chat_ids", "main_visible_revision", "task_bindings",
+    "accounting", "projects", "project_listable_count", "project_chat_ids", "main_visible_revision", "task_bindings",
     "task_bindings_revision", "task_bindings_unchanged", "active_direct_turns", "active_chat_activities",
     "active_chat_activities_complete", "current_questions", "current_questions_complete", "current_questions_gaps",
     "main_attention", "main_attention_complete", "main_attention_gaps", "works", "rooms", "work_summary",
@@ -104,6 +104,16 @@ def test_the_answer_keeps_the_client_shape_and_names_its_generation(serving):
     assert float(response.headers[publication.AGE_HEADER]) >= 0.0
     assert isinstance(payload["task_bindings"], dict) and payload["task_bindings_unchanged"] is False
     assert payload["boot"]["phase"] in {"starting", "serving", "ready", "failed"}
+
+
+def test_state_keeps_the_sidebar_feed_capped_and_reports_the_full_listable_count(serving):
+    from ouroboros import projects_registry as registry
+
+    for index in range(60):
+        registry.create_project(serving.root, f"project-{index:03d}", name=f"Project {index:03d}", origin="owner_ui")
+    payload = _payload(_get(serving.app))
+    assert len(payload["projects"]) == 50
+    assert payload["project_listable_count"] == 60
 
 
 def test_concurrent_readers_share_one_production_even_when_nothing_could_be_reused(serving, monkeypatch):
