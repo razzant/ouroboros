@@ -64,6 +64,31 @@ def test_scrubbed_child_reinjects_roots_but_preserves_explicit_synthetic_home(tm
     assert env["OUROBOROS_DELIVERABLES_ROOT"] == str(tmp_path / "explicit")
 
 
+def test_git_discovery_cannot_escape_to_an_ancestor_checkout(tmp_path, monkeypatch):
+    from ouroboros.workspace_admission import validate_workspace_root, WorkspaceRootError
+
+    ancestor = tmp_path / "ancestor"
+    ancestor.mkdir()
+    subprocess.run(["git", "init", str(ancestor)], check=True, capture_output=True)
+    root = ancestor / "test-boundary"
+    env = isolated_environment(root, REPO)
+    result = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                            cwd=root / "tmp", env=env, capture_output=True)
+    assert result.returncode != 0
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(root))
+    assert validate_workspace_root(root / "tmp", system_repo_dir=REPO,
+                                   drive_root=root / "data") == root / "tmp"
+    (root / "tmp" / ".git").write_text("invalid git metadata", encoding="utf-8")
+    with pytest.raises(WorkspaceRootError, match="could not be resolved"):
+        validate_workspace_root(root / "tmp", system_repo_dir=REPO, drive_root=root / "data")
+    (root / "tmp" / ".git").unlink()
+    own = root / "tmp" / "own"
+    subprocess.run(["git", "init", str(own)], env=env, check=True, capture_output=True)
+    result = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                            cwd=own, env=env, check=True, capture_output=True, text=True)
+    assert Path(result.stdout.strip()).resolve() == own.resolve()
+
+
 def test_a_session_under_an_owner_keeps_the_runs_prefix_and_collects_with_gc_paused(tmp_path):
     """Under an owner root (safe_test, the gate) every session reads and hands on the OWNER's warmed bytecode
     prefix (a prefix of its own would start cold), while bare pytest keeps one under its own session root; and
