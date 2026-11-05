@@ -1065,10 +1065,13 @@ def test_the_full_suite_has_no_total_budget_and_a_warm_takes_none_of_a_callers(t
     assert all(0 < event[2] <= 60 for event in events[2:]), events[2:]
     assert record()["budget_seconds"] == 60
 
-    monkeypatch.setenv("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", "45")  # the owner's lever bounds the full suite too
+    monkeypatch.setenv("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", "45")  # the override bounds a bounded run, never the full suite (8760b0d69)
     stub_passes([(0, ""), (0, "")])
-    assert pr.run_hermetic_pytest(repo) is None
-    assert all(0 < event[2] <= 45 for event in events[4:]) and record()["budget_seconds"] == 45
+    assert pr.run_hermetic_pytest(repo) is None, "the override must not put a deadline on the full suite"
+    assert all(event[2] is None for event in events[4:]) and record()["budget_seconds"] is None
+    stub_passes([(0, ""), (0, "")])
+    assert pr.run_hermetic_pytest(repo, pytest_args=["tests/"]) is None  # an explicit argv is a bounded run: the override wins
+    assert all(0 < event[2] <= 45 for event in events[6:]) and record()["budget_seconds"] == 45
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_TIMEOUT_SEC")
 
     workload = commit_admission.preflight_test_workload
