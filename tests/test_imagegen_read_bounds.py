@@ -104,7 +104,9 @@ class _Handler(BaseHTTPRequestHandler):
             peer.release.wait(120)
         shape = peer.shape(request)
         if shape == "late":
-            time.sleep(_LATE_HEADERS_SEC)
+            # Keep the physical late-header bound, but let teardown release an
+            # already-finished peer instead of sleeping blind.
+            peer.release.wait(_LATE_HEADERS_SEC)
         try:
             response = peer.app(request)
         except httpx.TransportError:
