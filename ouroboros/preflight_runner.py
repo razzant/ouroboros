@@ -651,7 +651,8 @@ def _resolve_preflight_timeout(timeout: Optional[int] = None, *, full: bool = Fa
     caller's own, then `_DEFAULT_PREFLIGHT_TIMEOUT_SEC`. The full suite takes only a caller's own: how long the
     whole suite honestly takes is this install's to find, and a constant below it makes every full proof red, so
     a full run ends by its tests' own 300 s bound, the containment proof and the owner's Stop, and records how
-    long it took."""
+    long it took. The residual of that choice (owner 5A): nothing bounds a full run's collection or its bytecode
+    warm, so a candidate whose test import blocks holds a full gate until Stop."""
     raw = None if full else os.environ.get("OUROBOROS_PREFLIGHT_TIMEOUT_SEC")
     if raw:
         try:
