@@ -58,4 +58,4 @@ Only a measured birth/command mismatch retires other owned custody, journalled f
 
 ### Test runs
 
-`test_environment.py` gives pytest, preflight and server children scrubbed temporary roots before imports. Lanes and `safe_test` commands run in a `ProcessContainer`; past `reap`'s deadline only a visible or unreadable member fails. A passed test's `tmp_path` goes once its processes are gone; a marker keeps its test's folder, the run's own hold its root (PERSISTENCE).
+`test_environment.py` gives pytest, preflight and server children scrubbed temporary roots before imports. Lanes and `safe_test` commands run in a `ProcessContainer`; past `reap`'s deadline only a visible or unreadable member fails. A passed test's `tmp_path` goes when its processes are gone; a marker keeps a test's folder or the run's root (PERSISTENCE).
