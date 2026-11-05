@@ -263,18 +263,14 @@ def collect_durations(root: Path, *, run_id: str, sha: str) -> dict:
     """One run's weight table for the shards of later runs (tests/default_lane.py, tests/browser_lane.py).
 
     Integer milliseconds, keys sorted: per test FILE and system, the setup, call and
-    teardown time of every report of the default lanes' passes (`platforms`) and the part
-    of it the tests of a named resource took (`serial`: what the resource groups hold,
-    for whoever decides their membership); per node, the same for the UI lane
-    (`ui_nodes`). A pass is a projection carrying a `default_parallel`, `default_serial`
-    or `ui_browser` block, or an unsharded `parallel` or `serial` pass directory without
-    one (run_tests.py's battery): the caller decides which artifacts lie under root.
-    Retry rounds, collections without reports, projections of an unknown system and
-    subtest reports (their time lies within
-    their test's call) are left out. Of one pass (system, lane, shard) the highest run
-    attempt counts, then the larger projection, then the first path, so a projection
-    downloaded twice counts once. A test's time is serial when it ran in a `serial:<resource>`
-    xdist group; the one-process pass of `serial("exclusive")` tests has no group.
+    teardown time of every report of the default lanes' passes (`platforms`); per node,
+    the same for the UI lane (`ui_nodes`). A pass is a projection carrying a
+    `default_parallel`, `default_serial` or `ui_browser` block, or an unsharded `parallel`
+    or `serial` pass directory without one (run_tests.py's battery): the caller decides
+    which artifacts lie under root. Retry rounds, collections without reports, projections
+    of an unknown system and subtest reports (their time lies within their test's call) are
+    left out. Of one pass (system, lane, shard) the highest run attempt counts, then the
+    larger projection, then the first path, so a projection downloaded twice counts once.
     """
     chosen = {}
     for directory, dirs, files in os.walk(root):

@@ -3988,8 +3988,9 @@ def test_hermetic_pytest_timeout_reaps_detached_session_child(tmp_path, two_pass
     ),
 )
 def test_untracked_listing_is_decoded_with_the_filesystem_codec(tmp_path, monkeypatch):
-    """Filesystem-independent pin for the same defect (the test above can only run
-    where non-UTF-8 names are creatable): the listing is read as BYTES and each
+    """Filesystem-independent pin for the defect behind the "non-UTF-8 name" subtest of
+    test_the_candidate_is_the_live_worktree_byte_for_byte, which can only run where
+    non-UTF-8 names are creatable: the listing is read as BYTES and each
     name goes through `os.fsdecode`, so the original bytes reach the copy instead
     of a U+FFFD name that matches no file on disk. POSIX-only: os.fsdecode is only
     byte-transparent under surrogateescape (POSIX); see the skip marker."""
