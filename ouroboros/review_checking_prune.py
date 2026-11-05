@@ -315,8 +315,6 @@ def finished_seat_homes(data_root: Any, live: Callable[[str], Any], stopped: Cal
     seat home (``only``: these home names), ``offer`` when its copy is gone and its task is proven over
     (``proven`` caches that per task), else ``in_use`` or ``unreadable``.
     Pure: markers and task rows are read, no seat lock is taken (a lock writes a file)."""
-    from ouroboros.subagent_worktrees import _task_proven_over
-
     seats, proven, found = pathlib.Path(data_root) / "state" / "review_checkouts" / "seats", {} if proven is None else proven, []
     for home in sorted(seats.iterdir()) if seats.is_dir() else ():
         if stopped():
