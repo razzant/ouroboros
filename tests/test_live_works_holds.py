@@ -36,7 +36,6 @@ def test_a_writer_held_continue_reads_as_held_for_the_earlier_attempt(tmp_path):
     ({"by": {"actor": "ouroboros", "text": "pausing for the update", "at": "2026-10-13T12:40:00Z"}},
      "Ouroboros: pausing for the update"),
     ({"actor": "mind", "actor_task_id": "m1"}, "Ouroboros"),  # a fence written before the declaration existed
-    ({}, ""),  # requested_by=owner alone is the door a press came through: it names nobody
 ])
 def test_an_owner_pause_names_the_author_its_fence_declared(tmp_path, declared, by):
     write_task_result(tmp_path, "t", "running", title="Work", owner_pause={

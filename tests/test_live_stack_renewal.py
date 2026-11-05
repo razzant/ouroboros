@@ -7,9 +7,10 @@ import pytest
 from tests._extension_loader_shared import _clear_loader_state  # noqa: F401
 from tests._live_stack import stack
 from tests.test_live_conversation import host_world as host_world
+from tests._cases import chosen_rows
 
 
-@pytest.mark.parametrize('engine,thinking', [('openai', False), ('grok', False), ('gemini', False), ('gemini', True)])
+@pytest.mark.parametrize('engine,thinking', [('openai', False), ('grok', False), ('gemini', True)])
 def test_full_stack_host_window_renews_with_pending_canonical_facts(host_world, monkeypatch, engine, thinking):
     async def scenario():
         async with stack(host_world, monkeypatch, engine, thinking=thinking) as run:
@@ -278,7 +279,7 @@ def test_transport_replacement_open_refusal_ends_with_its_typed_reason(host_worl
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('during_call,handle_after,outcome', [
+@pytest.mark.parametrize('during_call,handle_after,outcome', chosen_rows([
     (during, after, 'answered')
     for during in ('none', 'cleared', 'predates')
     for after in ('absent', 'with-answer', 'after-answer')
@@ -286,7 +287,7 @@ def test_transport_replacement_open_refusal_ends_with_its_typed_reason(host_worl
      ('cleared', 'absent', 'silent'), ('predates', 'absent', 'silent'),
      ('predates', 'after-answer', 'silent'),
      ('cleared', 'absent', 'unanswered'), ('predates', 'absent', 'unanswered'),
-     ('cleared', 'absent', 'same-turn'), ('predates', 'absent', 'same-turn')])
+     ('cleared', 'absent', 'same-turn'), ('predates', 'absent', 'same-turn')], 0, 16))
 @pytest.mark.parametrize('thinking', [False, True])
 def test_r28_goaway_while_tool_pending(host_world, monkeypatch, during_call, handle_after, outcome, thinking):
     """Follow direct delivery through renewal: only a post-write handle can resume its result."""

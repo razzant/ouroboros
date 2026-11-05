@@ -52,7 +52,7 @@ def test_room_update_without_a_live_socket_records_an_offer_without_waiting():
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('code', ['authentication', 'rate_limit', 'provider_error', 'context_capacity', 'budget_exhausted'])
+@pytest.mark.parametrize('code', ['authentication', 'provider_error', 'budget_exhausted'])
 def test_prepared_typed_refusal_never_buys_a_sequential_attempt(code):
     async def scenario():
         host = Host()

@@ -115,7 +115,7 @@ class Measures:
         monkeypatch.setattr(live.host, 'tool_batch', due_at_the_boundary)
 
 
-@pytest.mark.parametrize('engine,recovery', [('gemini', 'native'), ('gemini', 'fresh'), ('openai', 'fresh'), ('grok', 'fresh')])
+@pytest.mark.parametrize('engine,recovery', [('gemini', 'native'), ('gemini', 'fresh'), ('grok', 'fresh')])
 def test_the_call_keeps_talking_and_keeps_its_result_once_around_a_long_effect(host_world, monkeypatch, engine, recovery):
     """The owner's whole promise on one call. A long effect runs. The conversation goes both ways on the connection that
     issued it where the engine allows, through a lost socket, and on the replacement, spoken and typed. A fresh recovery

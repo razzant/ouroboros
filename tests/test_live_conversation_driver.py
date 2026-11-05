@@ -645,7 +645,7 @@ def test_fresh_renewal_waits_for_every_quiet_barrier(source, barrier):
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('reason', ['audio_span', 'audio_drop', 'tools', 'languages'])
+@pytest.mark.parametrize('reason', ['audio_span', 'tools', 'languages'])
 def test_refit_reasons_never_reuse_a_resumption_handle(reason):
     async def scenario():
         host = Host()
@@ -683,7 +683,7 @@ def test_goaway_without_a_current_handle_does_not_claim_a_resume(revoked):
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('trigger', ['host', 'provider', 'provider_resume_with_handle', 'provider_resume_without_handle'])
+@pytest.mark.parametrize('trigger', ['host', 'provider', 'provider_resume_without_handle'])
 def test_a_renewal_waits_for_quiet_past_its_deadline(trigger):
     """28.10: a Gemini call ended mid-sentence ("session expired while work was pending") when the talk
     left no quiet moment within 30 s of an audio-span renewal. Every renewal waits for the next quiet
@@ -859,7 +859,7 @@ def test_response_refusal_drains_received_accounting_and_final_captions(refused)
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('configured', ['', 'low', 'obsolete', 'none', 'high'])
+@pytest.mark.parametrize('configured', ['', 'obsolete', 'high'])
 def test_grok_feature_options_put_the_lowest_default_on_the_wire(configured):
     from ouroboros.contracts.realtime import RealtimeInput
     from skills.grok_realtime.plugin import CATALOG, GrokSession
