@@ -234,8 +234,9 @@ def pids_with_env_marker(marker: str, pgid: int = 0, since_ticks: int = 0) -> "O
 
 
 # A member can fork between scans and its child inherits the token, so one quiet scan proves little:
-# `reap` needs `_REAP_QUIET_SCANS` scans in a row with nothing live and nothing undeterminable, and
-# FAILS if that has not happened by `_REAP_DEADLINE_SEC`.
+# `reap` needs `_REAP_QUIET_SCANS` scans in a row with nothing live and nothing undeterminable. A
+# scan past `_REAP_DEADLINE_SEC` that still shows a member FAILS; the clock never fails a quiet tree,
+# whose scans may simply be slow: a quiet scan gets its confirming one however late it ran.
 _REAP_QUIET_SCANS = 2
 _REAP_DEADLINE_SEC = 10.0
 _REAP_SETTLE_SEC = 0.05
@@ -250,10 +251,7 @@ def _containment_leak_reason(alive: List[int], undetermined: List[int]) -> str:
     if undetermined:
         parts.append("liveness could not be determined (the attributed process environment could not be "
                      "read): " + ", ".join(str(pid) for pid in undetermined))
-    detail = "; ".join(parts) or ("no member was visible in the last scan, but two consecutive "
-                                  "quiet scans were never reached, so nothing is proven gone")
-    return (f"the contained tree could not be proven gone within {_REAP_DEADLINE_SEC:.0f}s — "
-            f"{detail}")
+    return f"the contained tree could not be proven gone within {_REAP_DEADLINE_SEC:.0f}s — {'; '.join(parts)}"
 
 
 class ProcessContainer:
@@ -540,18 +538,13 @@ class ProcessContainer:
         known: "set[int]" = {root} if root > 0 else set()
         deadline = time.monotonic() + _REAP_DEADLINE_SEC
         alive, undetermined, error = self._scan(token, pgid, known, True, since)  # the ONE sweep
-        last, quiet = (alive, undetermined), 0
+        quiet = 0
         while not error:
-            if alive or undetermined:
-                quiet, last = 0, (alive, undetermined)
-            else:
-                quiet += 1
+            quiet = 0 if alive or undetermined else quiet + 1
             if quiet >= _REAP_QUIET_SCANS:
                 return ""
-            if time.monotonic() >= deadline:
-                # The last NON-EMPTY scan, not the current one: a scan coming back empty just as the
-                # deadline passes would name no pid, under a remediation that says to kill them.
-                return _containment_leak_reason(*last)
+            if not quiet and time.monotonic() >= deadline:
+                return _containment_leak_reason(alive, undetermined)
             time.sleep(_REAP_SETTLE_SEC)
             alive, undetermined, error = self._scan(token, pgid, known, False, since)
         return error
