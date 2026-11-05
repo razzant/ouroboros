@@ -281,13 +281,25 @@ def test_a_task_not_proven_over_keeps_its_scratch_for_its_next_start(tmp_path, s
     assert _prepare(tmp_path, _Catalog(GRANTED)).scratch == str(scratch)  # the same task and key reuse it
 
 
-def test_the_owner_keep_holds_a_finished_tasks_scratch_until_released(tmp_path):
+def test_the_owner_keep_holds_a_finished_tasks_scratch_until_released(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
     data, scratch = _started(tmp_path)
     assert owner_keep.set_owner_keep(data, "task-1", keep=True, source={"basis": "test"})["keep"] is True
     assert release_finished_scratch(data, OVER) == {"released": [], "holds": [_hold(data, "owner_keep")], "errors": []}
     assert _notes(data) == ["task-1/snap-1.json"] and scratch.is_dir()
     assert owner_keep.set_owner_keep(data, "task-1", keep=False, source={"basis": "test"})["keep"] is False
-    assert release_finished_scratch(data, OVER)["released"]
+
+    @contextmanager
+    def busy(*args, **kwargs):
+        yield False
+
+    with monkeypatch.context() as patch:
+        patch.setattr(task_custody, "task_custody_lock", busy)
+        assert release_finished_scratch(data, OVER) == {"released": [], "holds": [_hold(data, "busy")], "errors": []}
+        assert _notes(data) == ["task-1/snap-1.json"] and scratch.is_dir()
+    report = release_finished_scratch(data, OVER)
+    assert report["released"] and report["holds"] == []
     task_custody.remove_custody_trash(data)
     assert not scratch.exists()
 

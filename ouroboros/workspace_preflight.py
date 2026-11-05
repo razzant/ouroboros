@@ -477,10 +477,10 @@ def release_finished_scratch(data_root: Any, live: Any, *, stop: Any = None) -> 
     process (``session_scratch.release_session_scratch``). A note whose record already retired with its
     drive, or that names no record of its task, is dropped; every record kept is reported as a typed
     hold with its reason and since when (``holds``: ``session_scratch.task_hold`` words, ``seat_open``,
-    ``owner_keep``, ``task_not_terminal``); a busy custody lock or a failed step keeps it for the next
+    ``owner_keep``, ``busy``, ``task_not_terminal``); a busy custody lock or a failed step keeps it for the next
     pass. Links and junctions are never followed."""
     from ouroboros.body_candidate import _recorded_terminal
-    from ouroboros.owner_keep import OWNER_KEEP, gate
+    from ouroboros.owner_keep import gate
     from ouroboros.session_scratch import aggregate_holds, seat_hold, task_hold
     from ouroboros.task_custody import _STAGING_DIR
     from ouroboros.task_results import validate_task_id
@@ -533,7 +533,7 @@ def release_finished_scratch(data_root: Any, live: Any, *, stop: Any = None) -> 
                     continue
                 why = seat_hold(root, note.stem) if note in seats else hold
                 if not why and kept:
-                    why = OWNER_KEEP
+                    why = kept
                 if not why and note not in seats and not _recorded_terminal(task_id, root):
                     why = "task_not_terminal"  # continued since it was proven over, read again under the lock
                 if why:
