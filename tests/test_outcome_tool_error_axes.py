@@ -5,6 +5,7 @@ import copy
 import pytest
 
 from ouroboros.outcomes import derive_loop_outcome
+from tests._cases import plain_rows
 
 
 TOOL_ERRORS = [
@@ -18,53 +19,39 @@ TOOL_ERRORS = [
 ]
 
 
-@pytest.mark.parametrize("tool_error", TOOL_ERRORS)
-@pytest.mark.parametrize("review", [None, "PASS", "FAIL", "DEGRADED"])
-@pytest.mark.parametrize("text,usage,extra,execution,reason", [
-    pytest.param("Delivered answer.", {}, {}, "ok", "final_message", id="delivered"),
-    pytest.param("", {}, {}, "failed", "empty_final_text", id="empty"),
-    pytest.param("Retained answer", {"execution_status": "infra_failed", "reason_code": "provider_unavailable"},
-                 {}, "infra_failed", "provider_unavailable", id="provider-failure"),
-    pytest.param("Retained answer", {"execution_status": "failed", "reason_code": "task_exception"},
-                 {}, "failed", "task_exception", id="task-failure"),
-    pytest.param("Retained answer", {"execution_status": "failed", "reason_code": "deadline_local",
-                                    "_best_effort_extracted": True},
-                 {}, "best_effort", "deadline_local", id="deadline"),
-    pytest.param("Retained answer", {}, {"delivery_candidate": {
-        "degraded": True, "degraded_reason": "invalid_delivery_control_after_repair"}},
-        "degraded", "invalid_delivery_control_after_repair", id="incomplete-delivery"),
-    pytest.param("Retained answer", {}, {"child_result_dispositions": {"deferred_count": 1}},
-                 "degraded", "child_results_deferred", id="deferred-child"),
-    pytest.param("Retained answer", {}, {"verification_events": [{"services": [
-        {"name": "result", "artifact_output_failed": True}]}]},
-        "degraded", "tool_failure", id="artifact-failure"),
-])
-def test_tool_errors_do_not_decide_delivery_or_acceptance(tool_error, review, text, usage, extra, execution, reason):
-    trace = {"tool_calls": [copy.deepcopy(tool_error)], **copy.deepcopy(extra)}
-    if review:
-        trace.update(review_runs=[{"authority": "host_root", "aggregate_signal": review}],
-                     review_decision={"eligibility": "eligible", "trigger": "host_root_effects"})
-    outcome = derive_loop_outcome(text, usage, trace)
-    axes = outcome["outcome_axes"]
-    assert axes["execution"]["status"] == execution
-    assert axes["execution"]["reason_code"] == reason
-    judged = {None: "not_evaluated", "PASS": "pass", "FAIL": "fail", "DEGRADED": "degraded"}[review]
-    if "child_result_dispositions" in extra and review != "FAIL":
-        judged = "best_effort"
-    elif "delivery_candidate" in extra and review is None:
-        judged = "degraded"
-    assert axes["objective"]["status"] == judged
-    assert bool(axes["objective"].get("warning")) == (judged == "not_evaluated")
-    errors = axes["execution"]["unresolved_tool_errors"] or axes["execution"]["cosmetic_tool_errors"]
-    assert errors[0]["status"] == tool_error["status"]
-    if tool_error.get("signal"):
-        assert errors[0]["signal"] == "SIGKILL"
-        assert errors[0]["exit_code"] == -9
-        assert not axes["execution"]["cosmetic_tool_errors"]
-    if execution == "ok":
-        assert outcome["failure"] is None
-    if review and judged == review.lower():
-        assert axes["objective"]["source"] == "task_acceptance_review"
+def test_tool_errors_do_not_decide_delivery_or_acceptance(subtests):
+    for tool_error in plain_rows(TOOL_ERRORS):
+        for review in [None, "PASS", "FAIL", "DEGRADED"]:
+            for text, usage, extra, execution, reason in [("Delivered answer.", {}, {}, "ok", "final_message"), ("", {}, {}, "failed", "empty_final_text"), ("Retained answer", {"execution_status": "infra_failed", "reason_code": "provider_unavailable"}, {}, "infra_failed", "provider_unavailable"), ("Retained answer", {"execution_status": "failed", "reason_code": "task_exception"}, {}, "failed", "task_exception"), ("Retained answer", {"execution_status": "failed", "reason_code": "deadline_local",
+                               "_best_effort_extracted": True}, {}, "best_effort", "deadline_local"), ("Retained answer", {}, {"delivery_candidate": {
+   "degraded": True, "degraded_reason": "invalid_delivery_control_after_repair"}}, "degraded", "invalid_delivery_control_after_repair"), ("Retained answer", {}, {"child_result_dispositions": {"deferred_count": 1}}, "degraded", "child_results_deferred"), ("Retained answer", {}, {"verification_events": [{"services": [
+   {"name": "result", "artifact_output_failed": True}]}]}, "degraded", "tool_failure")]:
+                with subtests.test(tool_error=tool_error, review=review, text=text, usage=usage, extra=extra, execution=execution, reason=reason):
+                    trace = {"tool_calls": [copy.deepcopy(tool_error)], **copy.deepcopy(extra)}
+                    if review:
+                        trace.update(review_runs=[{"authority": "host_root", "aggregate_signal": review}],
+                                     review_decision={"eligibility": "eligible", "trigger": "host_root_effects"})
+                    outcome = derive_loop_outcome(text, usage, trace)
+                    axes = outcome["outcome_axes"]
+                    assert axes["execution"]["status"] == execution
+                    assert axes["execution"]["reason_code"] == reason
+                    judged = {None: "not_evaluated", "PASS": "pass", "FAIL": "fail", "DEGRADED": "degraded"}[review]
+                    if "child_result_dispositions" in extra and review != "FAIL":
+                        judged = "best_effort"
+                    elif "delivery_candidate" in extra and review is None:
+                        judged = "degraded"
+                    assert axes["objective"]["status"] == judged
+                    assert bool(axes["objective"].get("warning")) == (judged == "not_evaluated")
+                    errors = axes["execution"]["unresolved_tool_errors"] or axes["execution"]["cosmetic_tool_errors"]
+                    assert errors[0]["status"] == tool_error["status"]
+                    if tool_error.get("signal"):
+                        assert errors[0]["signal"] == "SIGKILL"
+                        assert errors[0]["exit_code"] == -9
+                        assert not axes["execution"]["cosmetic_tool_errors"]
+                    if execution == "ok":
+                        assert outcome["failure"] is None
+                    if review and judged == review.lower():
+                        assert axes["objective"]["source"] == "task_acceptance_review"
 
 
 def test_advisory_review_cannot_clear_unreviewed_tool_error_warning():

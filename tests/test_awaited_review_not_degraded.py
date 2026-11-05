@@ -173,25 +173,27 @@ REAL_RUNS = {
 }
 
 
-@pytest.mark.parametrize("name", sorted(AWAITED_RUNS))
-def test_a_review_run_that_was_only_awaited_is_awaiting_not_degraded(name):
-    axis = _review_axis({"review_runs": [AWAITED_RUNS[name]]})
-    assert axis["status"] == "awaiting" and axis["aggregate_signals"] == ["DEGRADED"]
-    assert "outcome_tier" not in axis  # a minority answer is not the panel's tier
-    assert _objective_axis(axis) == {"status": "not_evaluated", "source": "none", "review_status": "awaiting"}
-    record = {"status": "completed", "reason_code": "final_message",
-              "outcome_axes": {"execution": {"status": "ok"}, "review": axis, "objective": _objective_axis(axis)}}
-    assert completion_status_label(record, {}) == "Done"
+def test_a_review_run_that_was_only_awaited_is_awaiting_not_degraded(subtests):
+    for name in sorted(AWAITED_RUNS):
+        with subtests.test(name=name):
+            axis = _review_axis({"review_runs": [AWAITED_RUNS[name]]})
+            assert axis["status"] == "awaiting" and axis["aggregate_signals"] == ["DEGRADED"]
+            assert "outcome_tier" not in axis  # a minority answer is not the panel's tier
+            assert _objective_axis(axis) == {"status": "not_evaluated", "source": "none", "review_status": "awaiting"}
+            record = {"status": "completed", "reason_code": "final_message",
+                      "outcome_axes": {"execution": {"status": "ok"}, "review": axis, "objective": _objective_axis(axis)}}
+            assert completion_status_label(record, {}) == "Done"
 
 
-@pytest.mark.parametrize("name", sorted(REAL_RUNS))
-def test_every_real_review_degradation_keeps_the_degraded_axis(name):
-    axis = _review_axis({"review_runs": [REAL_RUNS[name]]})
-    assert axis["status"] == "degraded"
-    assert _objective_axis(axis)["status"] == "degraded"
-    record = {"status": "completed", "reason_code": "final_message",
-              "outcome_axes": {"execution": {"status": "ok"}, "review": axis, "objective": _objective_axis(axis)}}
-    assert completion_status_label(record, {}) == "Done with warnings"
+def test_every_real_review_degradation_keeps_the_degraded_axis(subtests):
+    for name in sorted(REAL_RUNS):
+        with subtests.test(name=name):
+            axis = _review_axis({"review_runs": [REAL_RUNS[name]]})
+            assert axis["status"] == "degraded"
+            assert _objective_axis(axis)["status"] == "degraded"
+            record = {"status": "completed", "reason_code": "final_message",
+                      "outcome_axes": {"execution": {"status": "ok"}, "review": axis, "objective": _objective_axis(axis)}}
+            assert completion_status_label(record, {}) == "Done with warnings"
 
 
 def test_a_fail_and_a_pass_keep_their_words_beside_a_wait():

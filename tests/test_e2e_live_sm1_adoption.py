@@ -26,6 +26,7 @@ from ouroboros import review_ledger as ledger
 from tests.body_candidate_support import candidate_commit, git, isolate, make_ctx, make_serving
 from tests.system_e2e.harness import ArtifactOracle, wait_until
 from tests.test_review_ledger import _facts, _panel
+from tests._cases import case_folders
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 REAL_EVIDENCE = preflight_qualification.adoption_test_evidence  # ``isolate`` stubs it for switching tests
@@ -520,8 +521,7 @@ REQUESTS = {
 }
 
 
-@pytest.mark.parametrize("calls,adopts", REQUESTS.values(), ids=REQUESTS.keys())
-def test_the_request_is_the_one_the_host_holds_from_the_rows_the_real_loop_wrote(tmp_path, monkeypatch, calls, adopts):
+def test_the_request_is_the_one_the_host_holds_from_the_rows_the_real_loop_wrote(subtests, tmp_path, monkeypatch):
     """``request_restart`` through the real loop: the stand reads the rows the product wrote. In one task attempt the
     first call the host answers sends the request and every later call only reads its receipt, an acceptance or a
     ``RESTART_<STATUS>: request <id>`` (``control_runtime._request_restart``; a refusal before anything was sent leaves
@@ -530,54 +530,58 @@ def test_the_request_is_the_one_the_host_holds_from_the_rows_the_real_loop_wrote
     the newest call's arguments turned an exact adoption followed by a reason-only retry into
     ``restart_without_adoption``, and an ordinary restart followed by an ignored ``adopt_commit`` into a wait for an
     adoption that never comes."""
-    from ouroboros import loop_tool_execution
-    from ouroboros.tools import control_events
-    from ouroboros.tools.registry import ToolRegistry
-    from tests._shared import write_queue_document
-    from tests.body_candidate_support import host_restart_ack
+    case_paths = case_folders(tmp_path)
+    for calls, adopts in REQUESTS.values():
+        tmp_path = next(case_paths)
+        with subtests.test(calls=calls, adopts=adopts), monkeypatch.context() as monkeypatch:
+            from ouroboros import loop_tool_execution
+            from ouroboros.tools import control_events
+            from ouroboros.tools.registry import ToolRegistry
+            from tests._shared import write_queue_document
+            from tests.body_candidate_support import host_restart_ack
 
-    serving = make_serving(tmp_path)
-    data = isolate(monkeypatch, tmp_path)
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
-    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
-    monkeypatch.setattr(control_events, "_PROMOTE_CONFIRM_TIMEOUT_SEC", 0)   # a silent host is a lost ACK at once
-    ctx = make_ctx(serving, data, "root-sm1")
-    body_candidate.prepare(ctx)
-    sha = candidate_commit(pathlib.Path(ctx.repo_dir), files={"ouroboros/mod_a.py": "GEN = 'GEN_CAND'\n"})
-    body_candidate.record_reviewed_commit(ctx, sha)
-    old = git(serving, "rev-parse", "HEAD")
-    sent = host_restart_ack(ctx, data, status=None if LATE_ACK in calls else "accepted")
-    registry = ToolRegistry(repo_dir=serving, drive_root=data)
-    registry.set_context(ctx)
-    requests = [step for step in calls if step != LATE_ACK]
-    for index, step in enumerate(calls):
-        if step == LATE_ACK:   # what ``host_restart_ack`` publishes, for the one request already held
-            held = {key: ctx.pending_restart_request[key] for key in ("request_id", "task_id", "task_attempt", "reason")}
-            write_queue_document(data / "state" / "queue_snapshot.json", {"restart_intent": {**held, "status": "accepted"}})
-            continue
-        attempt, arguments = step
-        ctx.task_attempt = attempt
-        arguments = {key: sha if value == EXACT else value for key, value in arguments.items()}
-        loop_tool_execution._execute_single_tool(registry, {"id": f"restart-{index}", "function": {
-            "name": "request_restart", "arguments": json.dumps(arguments)}}, data / "logs", "root-sm1")
-    rows = scenarios.tool_result_rows([json.loads(line) for line in (data / "logs" / "tools.jsonl").read_text(encoding="utf-8").splitlines()])
-    assert [row["tool"] for row in rows] == ["request_restart"] * len(requests), rows
-    assert len([event for event in sent if event.get("type") == "restart_request"]) == len({a for a, _ in requests}), "one request per attempt"
-    if LATE_ACK in calls:   # the receipt branch, as the loop wrote it: the request's own row, then a replay's
-        assert "RESTART_UNCONFIRMED: request " in rows[0]["result_preview"], rows[0]
-        assert rows[-1]["result_preview"].startswith("Restart requested. The previously acknowledged request is unchanged."), rows[-1]
+            serving = make_serving(tmp_path)
+            data = isolate(monkeypatch, tmp_path)
+            monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
+            monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+            monkeypatch.setattr(control_events, "_PROMOTE_CONFIRM_TIMEOUT_SEC", 0)   # a silent host is a lost ACK at once
+            ctx = make_ctx(serving, data, "root-sm1")
+            body_candidate.prepare(ctx)
+            sha = candidate_commit(pathlib.Path(ctx.repo_dir), files={"ouroboros/mod_a.py": "GEN = 'GEN_CAND'\n"})
+            body_candidate.record_reviewed_commit(ctx, sha)
+            old = git(serving, "rev-parse", "HEAD")
+            sent = host_restart_ack(ctx, data, status=None if LATE_ACK in calls else "accepted")
+            registry = ToolRegistry(repo_dir=serving, drive_root=data)
+            registry.set_context(ctx)
+            requests = [step for step in calls if step != LATE_ACK]
+            for index, step in enumerate(calls):
+                if step == LATE_ACK:   # what ``host_restart_ack`` publishes, for the one request already held
+                    held = {key: ctx.pending_restart_request[key] for key in ("request_id", "task_id", "task_attempt", "reason")}
+                    write_queue_document(data / "state" / "queue_snapshot.json", {"restart_intent": {**held, "status": "accepted"}})
+                    continue
+                attempt, arguments = step
+                ctx.task_attempt = attempt
+                arguments = {key: sha if value == EXACT else value for key, value in arguments.items()}
+                loop_tool_execution._execute_single_tool(registry, {"id": f"restart-{index}", "function": {
+                    "name": "request_restart", "arguments": json.dumps(arguments)}}, data / "logs", "root-sm1")
+            rows = scenarios.tool_result_rows([json.loads(line) for line in (data / "logs" / "tools.jsonl").read_text(encoding="utf-8").splitlines()])
+            assert [row["tool"] for row in rows] == ["request_restart"] * len(requests), rows
+            assert len([event for event in sent if event.get("type") == "restart_request"]) == len({a for a, _ in requests}), "one request per attempt"
+            if LATE_ACK in calls:   # the receipt branch, as the loop wrote it: the request's own row, then a replay's
+                assert "RESTART_UNCONFIRMED: request " in rows[0]["result_preview"], rows[0]
+                assert rows[-1]["result_preview"].startswith("Restart requested. The previously acknowledged request is unchanged."), rows[-1]
 
-    body_adoption.bind_restart(lambda **_kw: (True, "ok"), data, ctx.pending_restart_reason)(
-        reason="agent_restart_request", unsynced_policy="rescue_and_block")
-    handoff = body_adoption.read(data)
-    assert (handoff.get("cand") == sha and handoff.get("restart_bound") is True) is adopts, handoff
+            body_adoption.bind_restart(lambda **_kw: (True, "ok"), data, ctx.pending_restart_reason)(
+                reason="agent_restart_request", unsynced_policy="rescue_and_block")
+            handoff = body_adoption.read(data)
+            assert (handoff.get("cand") == sha and handoff.get("restart_bound") is True) is adopts, handoff
 
-    fact = adoption.restart_request_fact(rows)
-    lane_view = types.SimpleNamespace(data_root=data, clone=serving, oracle=ArtifactOracle(data), server=None)
-    facts = adoption.observe_direct_adoption(lane_view, "root-sm1", rows, {"commit_sha": sha}, timeout=0, stylesheet="VERSION",
-                                             routes=(), poll=0)
-    assert facts["reason"] == ("timeout:settlement" if adopts else "restart_without_adoption"), facts
-    assert adoption.adoption_checks(facts)["adoption_requested_for_reviewed_commit"] is adopts
-    assert fact["accepted"] is True and adoption.names_commit(fact["adopt_commit"], sha) is adopts, fact
-    assert fact["adopt_commit"] in {"", sha} and fact["task_attempt"] == requests[-1][0], fact
-    assert git(serving, "rev-parse", "HEAD") == old, "nothing here restarts or adopts"
+            fact = adoption.restart_request_fact(rows)
+            lane_view = types.SimpleNamespace(data_root=data, clone=serving, oracle=ArtifactOracle(data), server=None)
+            facts = adoption.observe_direct_adoption(lane_view, "root-sm1", rows, {"commit_sha": sha}, timeout=0, stylesheet="VERSION",
+                                                     routes=(), poll=0)
+            assert facts["reason"] == ("timeout:settlement" if adopts else "restart_without_adoption"), facts
+            assert adoption.adoption_checks(facts)["adoption_requested_for_reviewed_commit"] is adopts
+            assert fact["accepted"] is True and adoption.names_commit(fact["adopt_commit"], sha) is adopts, fact
+            assert fact["adopt_commit"] in {"", sha} and fact["task_attempt"] == requests[-1][0], fact
+            assert git(serving, "rev-parse", "HEAD") == old, "nothing here restarts or adopts"

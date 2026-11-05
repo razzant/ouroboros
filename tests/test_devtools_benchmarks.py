@@ -4655,9 +4655,7 @@ _SEAM_WRITE_FORMS = (
 )
 
 
-@pytest.mark.parametrize("label, statement, callee", _SEAM_WRITE_FORMS,
-                         ids=[form[2] + "/" + form[0][:28] for form in _SEAM_WRITE_FORMS])
-def test_invariant_c_places_the_destination_of_every_write_form(label, statement, callee):
+def test_invariant_c_places_the_destination_of_every_write_form(subtests):
     """Every call form a write primitive wears is caught, and the coverage is PROVEN per form.
 
     The first cut of Invariant C carried a hand-enumerated position table, and it was wrong in
@@ -4668,25 +4666,27 @@ def test_invariant_c_places_the_destination_of_every_write_form(label, statement
     one. Destinations now come from each primitive's REAL signature, and this matrix is the proof
     that the derivation covers the forms rather than an assertion that it does.
     """
-    from devtools.benchmarks.common import launcher_audit
+    for label, statement, callee in _SEAM_WRITE_FORMS:
+        with subtests.test(label=label, statement=statement, callee=callee):
+            from devtools.benchmarks.common import launcher_audit
 
-    source = _SEAM_FORM_TEMPLATE.format(statement=statement)
-    violations = launcher_audit.audit_source(source, name="form.py")
-    assert len(violations) == 1, (label, violations)
-    assert "publishes a manifest from INSIDE an active finalize_run_manifest" in violations[0]
-    assert callee in violations[0], (label, violations[0])
-    assert launcher_audit.UNRESOLVED_WRITE not in violations[0]
+            source = _SEAM_FORM_TEMPLATE.format(statement=statement)
+            violations = launcher_audit.audit_source(source, name="form.py")
+            assert len(violations) == 1, (label, violations)
+            assert "publishes a manifest from INSIDE an active finalize_run_manifest" in violations[0]
+            assert callee in violations[0], (label, violations[0])
+            assert launcher_audit.UNRESOLVED_WRITE not in violations[0]
 
-    # The same form writing a NON-manifest artefact is not a publication -- per form, so the
-    # matrix cannot pass by being uniformly red.
-    benign = launcher_audit.audit_source(
-        source.replace("run_manifest.json", "task_outcome.json").replace(
-            'admit_benchmark_run(out / "task_outcome.json"',
-            'admit_benchmark_run(out / "run_manifest.json"').replace(
-            'finalize_run_manifest(out / "task_outcome.json"',
-            'finalize_run_manifest(out / "run_manifest.json"'),
-        name="form.py")
-    assert benign == [], (label, benign)
+            # The same form writing a NON-manifest artefact is not a publication -- per form, so the
+            # matrix cannot pass by being uniformly red.
+            benign = launcher_audit.audit_source(
+                source.replace("run_manifest.json", "task_outcome.json").replace(
+                    'admit_benchmark_run(out / "task_outcome.json"',
+                    'admit_benchmark_run(out / "run_manifest.json"').replace(
+                    'finalize_run_manifest(out / "task_outcome.json"',
+                    'finalize_run_manifest(out / "run_manifest.json"'),
+                name="form.py")
+            assert benign == [], (label, benign)
 
 
 def test_invariant_c_derives_destinations_from_real_signatures_not_a_hand_written_table():

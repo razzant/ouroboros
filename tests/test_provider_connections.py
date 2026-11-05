@@ -263,24 +263,25 @@ _FP_GOLDEN = {
 }
 
 
-@pytest.mark.parametrize("model", sorted(_FP_GOLDEN))
-def test_built_in_route_fingerprints_are_byte_identical(model, monkeypatch):
-    from ouroboros.capability_evidence import route_fingerprint
-    from ouroboros.context_window import route_observation_scope
-    from ouroboros.gateway.settings import _active_main_route
-    from ouroboros.response_limits import _response_fingerprint, dispatch_target
-    from ouroboros.reviewer_window import reviewer_route
-    from ouroboros.vision_routing import image_route_scope
+def test_built_in_route_fingerprints_are_byte_identical(subtests, monkeypatch):
+    for model in sorted(_FP_GOLDEN):
+        with subtests.test(model=model), monkeypatch.context() as monkeypatch:
+            from ouroboros.capability_evidence import route_fingerprint
+            from ouroboros.context_window import route_observation_scope
+            from ouroboros.gateway.settings import _active_main_route
+            from ouroboros.response_limits import _response_fingerprint, dispatch_target
+            from ouroboros.reviewer_window import reviewer_route
+            from ouroboros.vision_routing import image_route_scope
 
-    monkeypatch.setattr("ouroboros.config.runtime_settings", lambda: dict(_FP_SETTINGS))
-    route = _active_main_route(_FP_SETTINGS, model_override=model)
-    provider, base_url = route["provider"], route["base_url"]
-    observed = (provider, base_url, route_fingerprint(provider=provider, base_url=base_url, model=model),
-                _response_fingerprint(provider=provider, model=model, base_url=base_url),
-                route_observation_scope(dict(route, options={}), _FP_SETTINGS),
-                image_route_scope(dispatch_target(model, _FP_SETTINGS)))
-    assert observed == _FP_GOLDEN[model]
-    assert reviewer_route(model) == (provider, base_url)
+            monkeypatch.setattr("ouroboros.config.runtime_settings", lambda: dict(_FP_SETTINGS))
+            route = _active_main_route(_FP_SETTINGS, model_override=model)
+            provider, base_url = route["provider"], route["base_url"]
+            observed = (provider, base_url, route_fingerprint(provider=provider, base_url=base_url, model=model),
+                        _response_fingerprint(provider=provider, model=model, base_url=base_url),
+                        route_observation_scope(dict(route, options={}), _FP_SETTINGS),
+                        image_route_scope(dispatch_target(model, _FP_SETTINGS)))
+            assert observed == _FP_GOLDEN[model]
+            assert reviewer_route(model) == (provider, base_url)
 
 
 def test_a_named_connection_fingerprints_its_own_endpoint_and_shares_a_fixed_one():

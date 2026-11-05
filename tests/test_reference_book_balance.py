@@ -26,6 +26,7 @@ from ouroboros.reference_books import (
     ruled_text_paths,
     ruled_text_sizes,
 )
+from tests._cases import case_folders
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 CHAPTER = "docs/architecture/01-one.md"
@@ -292,30 +293,36 @@ GROW = {
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("tool", sorted(GROW))
-def test_a_body_book_edit_carries_the_balance(tmp_path, monkeypatch, tool):
-    import ouroboros.safety as safety
+def test_a_body_book_edit_carries_the_balance(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for tool in sorted(GROW):
+        tmp_path = next(case_paths)
+        with subtests.test(tool=tool), monkeypatch.context() as monkeypatch:
+            import ouroboros.safety as safety
 
-    monkeypatch.setattr(safety, "check_safety", lambda *args, **kwargs: (True, ""))
-    result = str(_registry(tmp_path, external=False).execute(tool, GROW[tool]))
-    assert result.startswith("✅"), result[:300]
-    assert "ℹ️ Text growth:\n" in result and BOOK_GROWTH_RULE in result
+            monkeypatch.setattr(safety, "check_safety", lambda *args, **kwargs: (True, ""))
+            result = str(_registry(tmp_path, external=False).execute(tool, GROW[tool]))
+            assert result.startswith("✅"), result[:300]
+            assert "ℹ️ Text growth:\n" in result and BOOK_GROWTH_RULE in result
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("tool", sorted(GROW))
-def test_a_foreign_project_or_a_non_book_path_gets_no_balance(tmp_path, monkeypatch, tool):
-    import ouroboros.safety as safety
+def test_a_foreign_project_or_a_non_book_path_gets_no_balance(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for tool in sorted(GROW):
+        tmp_path = next(case_paths)
+        with subtests.test(tool=tool), monkeypatch.context() as monkeypatch:
+            import ouroboros.safety as safety
 
-    monkeypatch.setattr(safety, "check_safety", lambda *args, **kwargs: (True, ""))
-    foreign = str(_registry(tmp_path / "a", external=True).execute(tool, GROW[tool]))
-    assert foreign.startswith("✅") and "Text growth" not in foreign, foreign[:300]
-    plain = {"write_file": {"path": "notes.md", "content": "notes, more\n"},
-             "edit_text": {"path": "notes.md", "old_str": "notes", "new_str": "notes, more"},
-             "apply_patch": {"patch": "*** Update File: notes.md\n-notes\n+notes, more\n"},
-             "edit_batch": {"edits": [{"path": "notes.md", "old_str": "notes", "new_str": "notes, more"}]}}[tool]
-    body = str(_registry(tmp_path / "b", external=False).execute(tool, plain))
-    assert body.startswith("✅") and "Text growth" not in body, body[:300]
+            monkeypatch.setattr(safety, "check_safety", lambda *args, **kwargs: (True, ""))
+            foreign = str(_registry(tmp_path / "a", external=True).execute(tool, GROW[tool]))
+            assert foreign.startswith("✅") and "Text growth" not in foreign, foreign[:300]
+            plain = {"write_file": {"path": "notes.md", "content": "notes, more\n"},
+                     "edit_text": {"path": "notes.md", "old_str": "notes", "new_str": "notes, more"},
+                     "apply_patch": {"patch": "*** Update File: notes.md\n-notes\n+notes, more\n"},
+                     "edit_batch": {"edits": [{"path": "notes.md", "old_str": "notes", "new_str": "notes, more"}]}}[tool]
+            body = str(_registry(tmp_path / "b", external=False).execute(tool, plain))
+            assert body.startswith("✅") and "Text growth" not in body, body[:300]
 
 
 @pytest.mark.serial

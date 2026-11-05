@@ -31,14 +31,15 @@ def _verdict(case: dict) -> dict:
                               request_kind=case["request_kind"], now=_now(case))
 
 
-@pytest.mark.parametrize("name", list(CASES))
-def test_shared_matrix(name):
-    case = CASES[name]
-    verdict = _verdict(case)
-    assert {key: verdict.get(key) for key in case["expect"]} == case["expect"]
-    assert verdict.get("execution_guaranteed") is not True
-    if verdict["state"] == "unknown":
-        assert verdict["resets_at"] is None
+def test_shared_matrix(subtests):
+    for name in list(CASES):
+        with subtests.test(name=name):
+            case = CASES[name]
+            verdict = _verdict(case)
+            assert {key: verdict.get(key) for key in case["expect"]} == case["expect"]
+            assert verdict.get("execution_guaranteed") is not True
+            if verdict["state"] == "unknown":
+                assert verdict["resets_at"] is None
 
 
 def _flat_or(case: dict) -> str:

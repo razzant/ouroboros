@@ -22,6 +22,7 @@ import pytest
 from ouroboros import consciousness_authority as ca
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from tests._store_shared import seed_result
+from tests._cases import case_folders
 
 WAKE_META = {
     "initiator": "consciousness", "usage_category": "consciousness",
@@ -206,17 +207,20 @@ _BLOCKED_CALLS = (
 )
 
 
-@pytest.mark.parametrize("mode", ["light", "advanced", "pro", "cyber_pro"])
-@pytest.mark.parametrize("level", ["act", "observe"])
-@pytest.mark.parametrize(("tool_name", "args"), _BLOCKED_CALLS)
-def test_act_and_observe_cannot_touch_the_repo_in_any_install_mode(tmp_path, monkeypatch, mode, level, tool_name, args):
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
-    reg = _registry(tmp_path, _wake_task(level)["metadata"])
-    result = reg.execute(tool_name, dict(args))
-    expected = "RESOURCE_CONSTRAINT_BLOCKED" if level == "observe" and tool_name != "commit_reviewed" else "LIGHT_MODE_BLOCKED"
-    assert expected in result, (mode, level, tool_name, result[:300])
-    assert not (tmp_path / "repo" / "x.py").exists()
-    assert (tmp_path / "repo" / "README.md").read_text(encoding="utf-8") == "ok\n"
+def test_act_and_observe_cannot_touch_the_repo_in_any_install_mode(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for mode in ["light", "advanced", "pro", "cyber_pro"]:
+        for level in ["act", "observe"]:
+            for tool_name, args in _BLOCKED_CALLS:
+                tmp_path = next(case_paths)
+                with subtests.test(mode=mode, level=level, tool_name=tool_name, args=args), monkeypatch.context() as monkeypatch:
+                    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
+                    reg = _registry(tmp_path, _wake_task(level)["metadata"])
+                    result = reg.execute(tool_name, dict(args))
+                    expected = "RESOURCE_CONSTRAINT_BLOCKED" if level == "observe" and tool_name != "commit_reviewed" else "LIGHT_MODE_BLOCKED"
+                    assert expected in result, (mode, level, tool_name, result[:300])
+                    assert not (tmp_path / "repo" / "x.py").exists()
+                    assert (tmp_path / "repo" / "README.md").read_text(encoding="utf-8") == "ok\n"
 
 
 @pytest.mark.parametrize("mode", ["advanced", "pro", "cyber_pro"])

@@ -165,24 +165,25 @@ def test_origin_addressed_notice_types_cover_admission_and_steering():
     })
 
 
-@pytest.mark.parametrize("notice_type", sorted(ORIGIN_ADDRESSED_NOTICE_TYPES))
-def test_origin_addressed_notice_rows_stay_in_the_owners_chat(notice_type):
+def test_origin_addressed_notice_rows_stay_in_the_owners_chat(subtests):
     """R12: the refused task id is bound to the project it never started in, so
     binding lineage would move the notice out of Main into that project on
     reload. The notice is addressed to the chat the OWNER wrote in. A relay's answer
     is its work's speech too: it stays in that chat and also joins its work's Project."""
-    rooms = lambda task_id, parent="", root="": 77 if "refused-task" in (task_id, parent, root) else 0  # noqa: E731
-    main = room_membership(1, {77}, [], rooms)
-    project = room_membership(77, {77}, [], rooms)
-    notice = {"direction": "system", "type": notice_type, "task_id": "refused-task", "chat_id": 1}
+    for notice_type in sorted(ORIGIN_ADDRESSED_NOTICE_TYPES):
+        with subtests.test(notice_type=notice_type):
+            rooms = lambda task_id, parent="", root="": 77 if "refused-task" in (task_id, parent, root) else 0  # noqa: E731
+            main = room_membership(1, {77}, [], rooms)
+            project = room_membership(77, {77}, [], rooms)
+            notice = {"direction": "system", "type": notice_type, "task_id": "refused-task", "chat_id": 1}
 
-    assert main(1, notice) is True
-    assert project(1, notice) is (notice_type in WORK_SPEECH_ELSEWHERE_TYPES)
-    assert project(77, {**notice, "chat_id": 77}) is True
-    # An ordinary bound row keeps today's behaviour: lineage moves it to its room.
-    ordinary = {"direction": "out", "type": "chat", "task_id": "refused-task", "chat_id": 1}
-    assert main(1, ordinary) is False
-    assert project(1, ordinary) is True
+            assert main(1, notice) is True
+            assert project(1, notice) is (notice_type in WORK_SPEECH_ELSEWHERE_TYPES)
+            assert project(77, {**notice, "chat_id": 77}) is True
+            # An ordinary bound row keeps today's behaviour: lineage moves it to its room.
+            ordinary = {"direction": "out", "type": "chat", "task_id": "refused-task", "chat_id": 1}
+            assert main(1, ordinary) is False
+            assert project(1, ordinary) is True
 
 
 @pytest.mark.parametrize(("after_lock", "labelled", "chat_id"), [

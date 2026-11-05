@@ -120,10 +120,11 @@ def test_a_peers_control_stays_bounded_in_utf8_bytes_at_the_socket_door(over):
         assert events[1].message["text"] == words
 
 
-@pytest.mark.parametrize("kind", cp.SERVER_MESSAGE_TYPES)
-def test_bounded_codec_keeps_reading_server_controls(kind):
-    message = {"type": kind}
-    assert cp.decode_control(cp.encode_control(message)) == message
+def test_bounded_codec_keeps_reading_server_controls(subtests):
+    for kind in cp.SERVER_MESSAGE_TYPES:
+        with subtests.test(kind=kind):
+            message = {"type": kind}
+            assert cp.decode_control(cp.encode_control(message)) == message
 
 
 def test_a_long_server_caption_is_whole_json_beyond_the_bounded_peer_reader():

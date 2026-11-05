@@ -187,13 +187,14 @@ def test_v2_declares_each_token_counter_nullable_and_legacy_zeros_ambiguous():
     assert "lower bound" in rc.LEGACY_RULE
 
 
-@pytest.mark.parametrize("row", [row for row in rc.ANCHOR_ROWS if row.type not in _TOOL_ROWS], ids=lambda r: r.type)
-def test_every_writer_literal_carries_the_guaranteed_fields(row):
-    literals = [keys for writer in WRITERS[row.type]
-                for keys in _literal_keys((REPO / writer).read_text(encoding="utf-8"), row.type)]
-    assert literals, f"no {row.type!r} row literal in {WRITERS[row.type]}: renamed or moved writer"
-    for keys in literals:
-        assert row.guaranteed <= keys, f"{row.type}: writer lacks {sorted(row.guaranteed - keys)}"
+def test_every_writer_literal_carries_the_guaranteed_fields(subtests):
+    for row in [row for row in rc.ANCHOR_ROWS if row.type not in _TOOL_ROWS]:
+        with subtests.test(row=row):
+            literals = [keys for writer in WRITERS[row.type]
+                        for keys in _literal_keys((REPO / writer).read_text(encoding="utf-8"), row.type)]
+            assert literals, f"no {row.type!r} row literal in {WRITERS[row.type]}: renamed or moved writer"
+            for keys in literals:
+                assert row.guaranteed <= keys, f"{row.type}: writer lacks {sorted(row.guaranteed - keys)}"
 
 
 def test_the_literal_check_sees_a_missing_field_and_a_resolved_spread():

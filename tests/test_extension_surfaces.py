@@ -22,7 +22,7 @@ from tests.test_extension_loader import (
     _prepare_extension,
     _write_ext_skill,
 )
-from tests._cases import chosen_rows
+from tests._cases import case_folders, chosen_rows
 
 
 @pytest.fixture(autouse=True)
@@ -74,17 +74,16 @@ _ROUTE_REJECTION_CASES = [
 ]
 
 
-@pytest.mark.parametrize(
-    "case_id,name,plugin,expected_substr",
-    _ROUTE_REJECTION_CASES,
-    ids=[c[0] for c in _ROUTE_REJECTION_CASES],
-)
-def test_load_extension_rejects_route(tmp_path, case_id, name, plugin, expected_substr):
-    loaded, _, drive_root = _prepare_extension(tmp_path, name, plugin, permissions=["route"])
-    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
-    assert err is not None
-    if expected_substr is not None:
-        assert expected_substr in err.lower()
+def test_load_extension_rejects_route(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for case_id, name, plugin, expected_substr in _ROUTE_REJECTION_CASES:
+        tmp_path = next(case_paths)
+        with subtests.test(case_id=case_id, name=name, plugin=plugin, expected_substr=expected_substr):
+            loaded, _, drive_root = _prepare_extension(tmp_path, name, plugin, permissions=["route"])
+            err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+            assert err is not None
+            if expected_substr is not None:
+                assert expected_substr in err.lower()
 
 
 def test_load_extension_accepts_string_route_method(tmp_path):
@@ -632,16 +631,15 @@ _UI_TAB_REJECTION_CASES.extend([
 ])
 
 
-@pytest.mark.parametrize(
-    "case_id,name,plugin,expected_substr",
-    _UI_TAB_REJECTION_CASES,
-    ids=[c[0] for c in _UI_TAB_REJECTION_CASES],
-)
-def test_register_ui_tab_rejects(tmp_path, case_id, name, plugin, expected_substr):
-    loaded, _, drive_root = _prepare_extension(tmp_path, name, plugin, permissions=["widget"])
-    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
-    assert err is not None
-    assert expected_substr in err
+def test_register_ui_tab_rejects(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for case_id, name, plugin, expected_substr in _UI_TAB_REJECTION_CASES:
+        tmp_path = next(case_paths)
+        with subtests.test(case_id=case_id, name=name, plugin=plugin, expected_substr=expected_substr):
+            loaded, _, drive_root = _prepare_extension(tmp_path, name, plugin, permissions=["widget"])
+            err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+            assert err is not None
+            assert expected_substr in err
 
 
 # --- render.start launch policy (widgets-lifecycle W1b) -----------------------------

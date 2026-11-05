@@ -271,16 +271,14 @@ def test_a_restart_with_a_failed_dependency_install_pauses_and_discloses(
 # F2: no unverified download may become the packaged runtime.
 # --------------------------------------------------------------------------
 
-@pytest.mark.parametrize(
-    "script",
-    sorted(p.name for p in (REPO_ROOT / "scripts").glob("download_*_standalone.*")),
-)
-def test_every_standalone_download_verifies_a_checksum(script):
-    text = (REPO_ROOT / "scripts" / script).read_text(encoding="utf-8").lower()
-    assert "sha256" in text, f"{script} downloads a runtime without verifying it"
-    assert any(token in text for token in ("mismatch", "verified")), (
-        f"{script} computes a hash but never refuses on mismatch"
-    )
+def test_every_standalone_download_verifies_a_checksum(subtests):
+    for script in sorted(p.name for p in (REPO_ROOT / "scripts").glob("download_*_standalone.*")):
+        with subtests.test(script=script):
+            text = (REPO_ROOT / "scripts" / script).read_text(encoding="utf-8").lower()
+            assert "sha256" in text, f"{script} downloads a runtime without verifying it"
+            assert any(token in text for token in ("mismatch", "verified")), (
+                f"{script} computes a hash but never refuses on mismatch"
+            )
 
 
 def test_windows_python_download_pins_the_release_checksum():

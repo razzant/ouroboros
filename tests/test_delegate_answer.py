@@ -17,6 +17,7 @@ import queue as stdqueue
 from pathlib import Path
 
 import pytest
+from tests._cases import case_folders
 
 
 @pytest.fixture(autouse=True)
@@ -434,45 +435,50 @@ def _answer_over_wire(tmp_path, monkeypatch, response):
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("response", _RECORDED_ANSWERS, ids=lambda row: row["case"])
-def test_recorded_engine_answers_reach_the_nanny_classified(tmp_path, monkeypatch, response):
+def test_recorded_engine_answers_reach_the_nanny_classified(subtests, tmp_path, monkeypatch):
     """The published class of each engine outcome: delivered and already_resolved are
     observations, an absent interaction or run a recorded substrate refusal, rejected
     rows an agent fault; an engine without the answer service is a typed refusal."""
-    status, tool_code, detail = {
-        "delivered": ("delivered", "OK", "delivered to the live session"),
-        "already_resolved": ("already_resolved", "OK", "interaction was already resolved"),
-        "already_resolved_without_message": ("already_resolved", "OK", "request failed with status 409"),
-        "not_found": ("not_found", "TOOL_REPORTED_FAILURE", "no pending interaction"),
-        "rejected": ("rejected", "TOOL_ARG_ERROR", "answer does not match the question set"),
-        "unknown_run": ("not_found", "TOOL_REPORTED_FAILURE", "no such run"),
-        "no_answer_service": ("refused", "TOOL_REPORTED_FAILURE", None),
-    }[response["case"]]
-    result, out = _answer_over_wire(tmp_path, monkeypatch, response)
-    assert (out["status"], result.code) == (status, tool_code)
-    assert (result.status == "ok") is (tool_code == "OK")
-    if status == "refused":
-        assert out["reason"] == "interaction_answers_unsupported"
-        return
-    assert out["accepted"] is (status == "delivered") and out["detail"] == detail
-    assert ("do NOT re-post" in out["note"]) is (status == "already_resolved")
-    assert ("Fix the answer rows" in out["note"]) is (status == "rejected")
+    case_paths = case_folders(tmp_path)
+    for response in _RECORDED_ANSWERS:
+        tmp_path = next(case_paths)
+        with subtests.test(response=response), monkeypatch.context() as monkeypatch:
+            status, tool_code, detail = {
+                "delivered": ("delivered", "OK", "delivered to the live session"),
+                "already_resolved": ("already_resolved", "OK", "interaction was already resolved"),
+                "already_resolved_without_message": ("already_resolved", "OK", "request failed with status 409"),
+                "not_found": ("not_found", "TOOL_REPORTED_FAILURE", "no pending interaction"),
+                "rejected": ("rejected", "TOOL_ARG_ERROR", "answer does not match the question set"),
+                "unknown_run": ("not_found", "TOOL_REPORTED_FAILURE", "no such run"),
+                "no_answer_service": ("refused", "TOOL_REPORTED_FAILURE", None),
+            }[response["case"]]
+            result, out = _answer_over_wire(tmp_path, monkeypatch, response)
+            assert (out["status"], result.code) == (status, tool_code)
+            assert (result.status == "ok") is (tool_code == "OK")
+            if status == "refused":
+                assert out["reason"] == "interaction_answers_unsupported"
+                continue
+            assert out["accepted"] is (status == "delivered") and out["detail"] == detail
+            assert ("do NOT re-post" in out["note"]) is (status == "already_resolved")
+            assert ("Fix the answer rows" in out["note"]) is (status == "rejected")
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("response", [row for row in _RECORDED_ANSWERS
-                                      if (row["service_outcome"] or {}).get("status") in
-                                      ("already_resolved", "not_found", "rejected")],
-                         ids=lambda row: row["case"])
-def test_direct_and_wrapped_answer_refusals_publish_identically(tmp_path, monkeypatch, response):
-    context = json.loads(response["body"])["context"]
-    direct = {**response, "content_type": "application/json", "body": json.dumps(
-        {**context, "message": json.loads(response["body"])["message"]})}
-    with monkeypatch.context() as patch:
-        legacy = _answer_over_wire(tmp_path, patch, direct)
-    with monkeypatch.context() as patch:
-        wrapped = _answer_over_wire(tmp_path, patch, response)
-    assert (wrapped[0].status, wrapped[0].code, wrapped[1]) == (legacy[0].status, legacy[0].code, legacy[1])
+def test_direct_and_wrapped_answer_refusals_publish_identically(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for response in [row for row in _RECORDED_ANSWERS
+                     if (row["service_outcome"] or {}).get("status") in
+                     ("already_resolved", "not_found", "rejected")]:
+        tmp_path = next(case_paths)
+        with subtests.test(response=response), monkeypatch.context() as monkeypatch:
+            context = json.loads(response["body"])["context"]
+            direct = {**response, "content_type": "application/json", "body": json.dumps(
+                {**context, "message": json.loads(response["body"])["message"]})}
+            with monkeypatch.context() as patch:
+                legacy = _answer_over_wire(tmp_path, patch, direct)
+            with monkeypatch.context() as patch:
+                wrapped = _answer_over_wire(tmp_path, patch, response)
+            assert (wrapped[0].status, wrapped[0].code, wrapped[1]) == (legacy[0].status, legacy[0].code, legacy[1])
 
 
 @pytest.mark.serial

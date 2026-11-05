@@ -11,6 +11,7 @@ import importlib
 import pathlib
 
 import pytest
+from tests._cases import plain_rows
 
 policy = importlib.import_module("ouroboros.git_shell_policy")
 
@@ -69,9 +70,10 @@ BLOCKED_CASES = [
 ]
 
 
-@pytest.mark.parametrize("cmd", BLOCKED_CASES)
-def test_runtime_targeting_git_is_blocked(cmd):
-    assert _violation(cmd), f"expected BLOCK for: {cmd!r}"
+def test_runtime_targeting_git_is_blocked(subtests):
+    for cmd in plain_rows(BLOCKED_CASES):
+        with subtests.test(cmd=cmd):
+            assert _violation(cmd), f"expected BLOCK for: {cmd!r}"
 
 
 def test_network_subcommand_blocked_when_network_disabled():
@@ -180,9 +182,10 @@ def test_commit_minusC_message_reuse_is_not_a_path():
     assert _violation("git commit -C HEAD", cwd="/tmp/ws") == ""
 
 
-@pytest.mark.parametrize("cmd", ALLOWED_CASES)
-def test_legitimate_workspace_git_is_allowed(cmd):
-    assert not _violation(cmd), f"expected ALLOW for: {cmd!r}"
+def test_legitimate_workspace_git_is_allowed(subtests):
+    for cmd in plain_rows(ALLOWED_CASES):
+        with subtests.test(cmd=cmd):
+            assert not _violation(cmd), f"expected ALLOW for: {cmd!r}"
 
 
 def test_clone_allowed_when_network_enabled():

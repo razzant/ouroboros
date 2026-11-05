@@ -221,23 +221,24 @@ def test_the_typed_state_outranks_words_stored_by_an_earlier_projection():
 
 # ── arithmetic: identical to the base for every input ────────────────────────
 
-@pytest.mark.parametrize("policy", list(POLICIES))
-@pytest.mark.parametrize("shapes", list(BASE_AGGREGATE), ids=lambda shapes: "+".join(shapes) or "empty")
-def test_aggregate_quorum_and_gate_fields_equal_the_base(shapes, policy):
-    before = [dataclasses.asdict(row(shape, f"s{index + 1}")) for index, shape in enumerate(shapes)]
-    result, actors = aggregate(shapes, policy)
-    expected = BASE_AGGREGATE[shapes][list(POLICIES).index(policy)]
-    assert result["aggregate_signal"] == expected
-    assert result["degraded"] is (expected == "DEGRADED")
-    for shape, actor, stored in zip(shapes, actors, before):
-        assert (actor.signal, actor.semantic_verdict, actor.enforcement_impact,
-                actor.quorum_contribution) == BASE_ROW[shape], shape
-        assert {key: getattr(actor, key) for key in INPUT_FIELDS} == {key: stored[key] for key in INPUT_FIELDS}
-    panel = panel_of(shapes, policy)
-    assert panel["aggregate_signal"] == expected
-    assert panel["quorum"] == {
-        "required": max(1, int(POLICIES[policy][1]["min_successful_slots"] or 1)),
-        "contributed": sum(BASE_ROW[shape][3] for shape in shapes), "configured": len(shapes)}
+def test_aggregate_quorum_and_gate_fields_equal_the_base(subtests):
+    for policy in list(POLICIES):
+        for shapes in list(BASE_AGGREGATE):
+            with subtests.test(policy=policy, shapes=shapes):
+                before = [dataclasses.asdict(row(shape, f"s{index + 1}")) for index, shape in enumerate(shapes)]
+                result, actors = aggregate(shapes, policy)
+                expected = BASE_AGGREGATE[shapes][list(POLICIES).index(policy)]
+                assert result["aggregate_signal"] == expected
+                assert result["degraded"] is (expected == "DEGRADED")
+                for shape, actor, stored in zip(shapes, actors, before):
+                    assert (actor.signal, actor.semantic_verdict, actor.enforcement_impact,
+                            actor.quorum_contribution) == BASE_ROW[shape], shape
+                    assert {key: getattr(actor, key) for key in INPUT_FIELDS} == {key: stored[key] for key in INPUT_FIELDS}
+                panel = panel_of(shapes, policy)
+                assert panel["aggregate_signal"] == expected
+                assert panel["quorum"] == {
+                    "required": max(1, int(POLICIES[policy][1]["min_successful_slots"] or 1)),
+                    "contributed": sum(BASE_ROW[shape][3] for shape in shapes), "configured": len(shapes)}
 
 
 def test_an_awaited_slot_holds_the_fail_closed_place_without_becoming_a_pass():

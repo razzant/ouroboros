@@ -270,24 +270,21 @@ def test_poll_does_not_retry_an_unrelated_enoent(monkeypatch):
         smoke.poll_to_terminal(Gateway(), "run-1", 30)
 
 
-@pytest.mark.parametrize(
-    ("lane", "attempt", "mutated", "seed_unchanged"),
-    [
-        (lane, attempt, mutated, seed_unchanged)
-        for lane in ("fixture", "live")
-        for attempt in (1, 2)
-        for mutated in (False, True)
-        for seed_unchanged in (False, True)
-    ],
-)
-def test_live_no_mutation_retry_truth_table(
-        lane, attempt, mutated, seed_unchanged):
-    expected = (
-        lane == "live" and attempt == 1 and not mutated and seed_unchanged
-    )
-    assert smoke.should_retry_live_no_mutation(
-        lane, attempt, mutated, seed_unchanged
-    ) is expected
+def test_live_no_mutation_retry_truth_table(subtests):
+    for lane, attempt, mutated, seed_unchanged in [
+                                                      (lane, attempt, mutated, seed_unchanged)
+                                                      for lane in ("fixture", "live")
+                                                      for attempt in (1, 2)
+                                                      for mutated in (False, True)
+                                                      for seed_unchanged in (False, True)
+                                                  ]:
+        with subtests.test(lane=lane, attempt=attempt, mutated=mutated, seed_unchanged=seed_unchanged):
+            expected = (
+                lane == "live" and attempt == 1 and not mutated and seed_unchanged
+            )
+            assert smoke.should_retry_live_no_mutation(
+                lane, attempt, mutated, seed_unchanged
+            ) is expected
 
 
 @pytest.mark.parametrize(("lane", "expected_attempts"), [("fixture", 1), ("live", 2)])

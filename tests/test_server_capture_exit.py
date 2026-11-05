@@ -336,43 +336,44 @@ def test_executable_does_not_turn_early_failures_into_success(tmp_path, entrypoi
         assert not error, error
 
 
-@pytest.mark.parametrize("signum", [None, signal.SIGINT, signal.SIGTERM] +
-                         ([signal.SIGBREAK] if hasattr(signal, "SIGBREAK") else []))
-@pytest.mark.parametrize("panic", [False, True])
-@pytest.mark.parametrize("flush_error", [None, BrokenPipeError(), ValueError("closed stream")])
-def test_command_boundary_unwinds_before_exit_and_defers_to_panic(monkeypatch, signum, panic, flush_error):
-    import server
-    from ouroboros import server_control
+def test_command_boundary_unwinds_before_exit_and_defers_to_panic(subtests, monkeypatch):
+    for signum in ([None, signal.SIGINT, signal.SIGTERM] +
+        ([signal.SIGBREAK] if hasattr(signal, "SIGBREAK") else [])):
+        for panic in [False, True]:
+            for flush_error in [None, BrokenPipeError(), ValueError("closed stream")]:
+                with subtests.test(signum=signum, panic=panic, flush_error=flush_error), monkeypatch.context() as monkeypatch:
+                    import server
+                    from ouroboros import server_control
 
-    calls = []
-    signals = [signal.SIGINT, signal.SIGTERM] + ([signal.SIGBREAK] if hasattr(signal, "SIGBREAK") else [])
-    before = {sig: signal.getsignal(sig) for sig in signals}
-    import threading
-    monkeypatch.setattr(server, "_exit_signalled", threading.Event())
-    monkeypatch.setattr(server, "_supervisor_stop", threading.Event())
+                    calls = []
+                    signals = [signal.SIGINT, signal.SIGTERM] + ([signal.SIGBREAK] if hasattr(signal, "SIGBREAK") else [])
+                    before = {sig: signal.getsignal(sig) for sig in signals}
+                    import threading
+                    monkeypatch.setattr(server, "_exit_signalled", threading.Event())
+                    monkeypatch.setattr(server, "_supervisor_stop", threading.Event())
 
-    def main():
-        try:
-            if signum is not None:
-                signal.getsignal(signum)(signum, None)  # Invoke only this boundary's handler.
-                assert server._exit_signalled.is_set() and server._supervisor_stop.is_set()
-                calls.append("signal-returned")
-            return 2  # A refusal must retain its nonzero status.
-        finally:
-            calls.append("unwound")
+                    def main():
+                        try:
+                            if signum is not None:
+                                signal.getsignal(signum)(signum, None)  # Invoke only this boundary's handler.
+                                assert server._exit_signalled.is_set() and server._supervisor_stop.is_set()
+                                calls.append("signal-returned")
+                            return 2  # A refusal must retain its nonzero status.
+                        finally:
+                            calls.append("unwound")
 
-    if flush_error is not None:
-        def flush():
-            raise flush_error
-        monkeypatch.setattr(server.sys, "stdout", SimpleNamespace(flush=flush))
-    monkeypatch.setattr(server, "main", main)
-    monkeypatch.setattr(server_control, "_restart_stop_requested", panic)
-    monkeypatch.setattr(server_control.os, "_exit", lambda code: calls.append(("exit", code)))
-    monkeypatch.setattr(server.threading, "Event", lambda: SimpleNamespace(wait=lambda: calls.append("panic-parked")))
-    server.executable_main()
-    assert calls == (["signal-returned"] if signum is not None else []) + [
-        "unwound", "panic-parked" if panic else ("exit", 128 + signum if signum else 2)]
-    assert {sig: signal.getsignal(sig) for sig in signals} == before
+                    if flush_error is not None:
+                        def flush():
+                            raise flush_error
+                        monkeypatch.setattr(server.sys, "stdout", SimpleNamespace(flush=flush))
+                    monkeypatch.setattr(server, "main", main)
+                    monkeypatch.setattr(server_control, "_restart_stop_requested", panic)
+                    monkeypatch.setattr(server_control.os, "_exit", lambda code: calls.append(("exit", code)))
+                    monkeypatch.setattr(server.threading, "Event", lambda: SimpleNamespace(wait=lambda: calls.append("panic-parked")))
+                    server.executable_main()
+                    assert calls == (["signal-returned"] if signum is not None else []) + [
+                        "unwound", "panic-parked" if panic else ("exit", 128 + signum if signum else 2)]
+                    assert {sig: signal.getsignal(sig) for sig in signals} == before
 
 
 @pytest.mark.parametrize("error", [RuntimeError("startup probe"), SystemExit(7), KeyboardInterrupt()])

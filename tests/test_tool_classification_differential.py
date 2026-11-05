@@ -642,14 +642,15 @@ def _published_answer(tool: str, result) -> tuple[bool, str]:
     return is_error, _typed_result_metadata(tool, result.text, is_error, result)["status"]
 
 
-@pytest.mark.parametrize("subject", tuple(CURRENT_PRODUCER_CONTRACTS))
-@pytest.mark.parametrize("detail", [": detail line\nbody line", " (fixture_tool): detail line\nbody line"])
-def test_current_producer_contracts_have_explicit_live_answers(subject, detail):
+def test_current_producer_contracts_have_explicit_live_answers(subtests):
     """New producers need present contracts, never fabricated old answers."""
-    code = subject.split(":", 2)[1] if subject.startswith("native:") else ""
-    identifier = subject.rsplit(":", 1)[-1]
-    case = Case("current:" + subject, subject, "read_file", "⚠️ " + identifier + detail, code)
-    assert _live_answer(case) == CURRENT_PRODUCER_CONTRACTS[subject]
+    for subject in tuple(CURRENT_PRODUCER_CONTRACTS):
+        for detail in [": detail line\nbody line", " (fixture_tool): detail line\nbody line"]:
+            with subtests.test(subject=subject, detail=detail):
+                code = subject.split(":", 2)[1] if subject.startswith("native:") else ""
+                identifier = subject.rsplit(":", 1)[-1]
+                case = Case("current:" + subject, subject, "read_file", "⚠️ " + identifier + detail, code)
+                assert _live_answer(case) == CURRENT_PRODUCER_CONTRACTS[subject]
 
 
 @pytest.mark.parametrize(("failure", "tool"), [

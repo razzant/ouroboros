@@ -26,6 +26,7 @@ from ouroboros.secret_masking import (
     looks_masked_secret,
     looks_masked_settings_secret,
 )
+from tests._cases import case_folders
 
 REAL_KEY = "sk-original-secret"
 TOKEN_MASKS = ("***", "***set***", "sk-origi...")
@@ -210,28 +211,31 @@ def test_every_provider_secret_round_trips(settings_client, key):
     assert saved[key] == "brand-new-value-123"
 
 
-@pytest.mark.parametrize("mask", TOKEN_MASKS)
-def test_a_stored_mask_reads_back_as_unset(tmp_path, monkeypatch, mask):
+def test_a_stored_mask_reads_back_as_unset(subtests, tmp_path, monkeypatch):
     """Repair for an install an older round-trip already poisoned."""
-    from ouroboros import config as cfg
+    case_paths = case_folders(tmp_path)
+    for mask in TOKEN_MASKS:
+        tmp_path = next(case_paths)
+        with subtests.test(mask=mask), monkeypatch.context() as monkeypatch:
+            from ouroboros import config as cfg
 
-    settings_path = tmp_path / "settings.json"
-    settings_path.write_text(
-        json.dumps(
-            {
-                "OPENAI_COMPATIBLE_API_KEY": mask,
-                "OPENAI_COMPATIBLE_BASE_URL": "http://127.0.0.1:4000/v1",
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(cfg, "SETTINGS_PATH", settings_path)
-    monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
+            settings_path = tmp_path / "settings.json"
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "OPENAI_COMPATIBLE_API_KEY": mask,
+                        "OPENAI_COMPATIBLE_BASE_URL": "http://127.0.0.1:4000/v1",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            monkeypatch.setattr(cfg, "SETTINGS_PATH", settings_path)
+            monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
 
-    loaded = cfg.load_settings()
+            loaded = cfg.load_settings()
 
-    assert loaded["OPENAI_COMPATIBLE_API_KEY"] == ""
-    assert loaded["OPENAI_COMPATIBLE_BASE_URL"] == "http://127.0.0.1:4000/v1"
+            assert loaded["OPENAI_COMPATIBLE_API_KEY"] == ""
+            assert loaded["OPENAI_COMPATIBLE_BASE_URL"] == "http://127.0.0.1:4000/v1"
 
 
 def test_a_stored_password_mask_reads_back_as_unset(tmp_path, monkeypatch):

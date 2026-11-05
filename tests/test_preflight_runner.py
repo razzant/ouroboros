@@ -15,6 +15,7 @@ import pytest
 from ouroboros.platform_layer import force_kill_pid, pid_is_alive
 from ouroboros.test_parallelism import WORKERS_ENV
 from ouroboros.settings_defaults import settings_env_keys
+from tests._cases import case_folders
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -450,8 +451,7 @@ def test_external_pytest_controls_never_reach_the_candidate_suite(tmp_path, monk
         assert key not in env, f"{key} leaked into the candidate suite"
 
 
-@pytest.mark.parametrize("key", settings_env_keys())
-def test_projected_settings_keys_never_reach_the_candidate_suite(tmp_path, monkeypatch, key):
+def test_projected_settings_keys_never_reach_the_candidate_suite(subtests, tmp_path, monkeypatch):
     """`config.apply_settings_to_env` exports every one of these from the owner's
     settings.json into the server process, and most carry neither the OUROBOROS_
     prefix nor a secret suffix (OPENAI_COMPATIBLE_BASE_URL, USE_LOCAL_*,
@@ -461,11 +461,15 @@ def test_projected_settings_keys_never_reach_the_candidate_suite(tmp_path, monke
     it and lost four tests; USE_LOCAL_MAIN lost a different four. The scrub is
     DERIVED from `settings_env_keys()`, so tomorrow's settings key is covered
     without anyone extending a hand-kept list."""
-    from ouroboros.preflight_runner import _preflight_env
+    case_paths = case_folders(tmp_path)
+    for key in settings_env_keys():
+        tmp_path = next(case_paths)
+        with subtests.test(key=key), monkeypatch.context() as monkeypatch:
+            from ouroboros.preflight_runner import _preflight_env
 
-    monkeypatch.setenv(key, "owner-runtime-state")
-    env = _preflight_env(tmp_path / "root", tmp_path / "root" / "repo")
-    assert env.get(key) != "owner-runtime-state", f"{key} leaked into the candidate suite"
+            monkeypatch.setenv(key, "owner-runtime-state")
+            env = _preflight_env(tmp_path / "root", tmp_path / "root" / "repo")
+            assert env.get(key) != "owner-runtime-state", f"{key} leaked into the candidate suite"
 
 
 def test_the_worker_probe_is_prepended_to_pythonpath(tmp_path, monkeypatch):

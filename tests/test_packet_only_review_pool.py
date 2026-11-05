@@ -143,14 +143,15 @@ def test_the_save_warning_judges_the_enforcement_the_real_loader_makes_effective
     assert (WARNING in answer.get("warnings", [])) is warned
 
 
-@pytest.mark.parametrize("catalog", list(PACKET_ONLY.values()), ids=list(PACKET_ONLY))
-def test_a_blocking_save_of_a_pool_with_no_reading_row_warns_and_still_saves(monkeypatch, catalog):
-    status, body, saved = _post(monkeypatch, {SUBAGENTS_SETTING: catalog, "OUROBOROS_REVIEW_ENFORCEMENT": "blocking"})
+def test_a_blocking_save_of_a_pool_with_no_reading_row_warns_and_still_saves(subtests, monkeypatch):
+    for catalog in list(PACKET_ONLY.values()):
+        with subtests.test(catalog=catalog), monkeypatch.context() as monkeypatch:
+            status, body, saved = _post(monkeypatch, {SUBAGENTS_SETTING: catalog, "OUROBOROS_REVIEW_ENFORCEMENT": "blocking"})
 
-    assert status == 200 and body["status"] == "saved", body
-    assert json.loads(saved[SUBAGENTS_SETTING])["items"] == catalog["items"], "a warning never refuses the save"
-    assert saved["OUROBOROS_REVIEW_ENFORCEMENT"] == "blocking"
-    assert WARNING in body.get("warnings", [])
+            assert status == 200 and body["status"] == "saved", body
+            assert json.loads(saved[SUBAGENTS_SETTING])["items"] == catalog["items"], "a warning never refuses the save"
+            assert saved["OUROBOROS_REVIEW_ENFORCEMENT"] == "blocking"
+            assert WARNING in body.get("warnings", [])
 
 
 @pytest.mark.parametrize("catalog, enforcement, mode", chosen_rows([

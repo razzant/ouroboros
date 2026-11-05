@@ -13,7 +13,7 @@ import pytest
 
 
 from tests._review_session_route_shared import _owned_gateway_uses_each_test_transport as __owned_gateway_uses_each_test_transport
-from tests._cases import chosen_rows
+from tests._cases import case_folders, chosen_rows
 
 # The autouse transport fixture is requested by pytest, not by name, so it is re-bound
 # through a module attribute exactly as in the sibling suites: leaving it behind would
@@ -250,28 +250,30 @@ _CANCEL_OUTCOME_CASES = [
 ]
 
 
-@pytest.mark.parametrize("outcome,expected", _CANCEL_OUTCOME_CASES)
-def test_waiting_on_user_raise_carries_the_honest_cancel_outcome(
-        tmp_path, outcome, expected):
+def test_waiting_on_user_raise_carries_the_honest_cancel_outcome(subtests, tmp_path):
     """BR1-1(b): "host-cancelled" is claimed ONLY for a `confirmed` verified
     receipt; requested/failed/containment-fault raises say the cancel was
     requested-but-unverified and the run MAY STILL BE LIVE — same typed
     exception class, distinct reason text."""
-    from ouroboros.review_execution import (
-        ReviewSessionWaitingOnUser,
-        _poll_session_terminal,
-    )
+    case_paths = case_folders(tmp_path)
+    for outcome, expected in _CANCEL_OUTCOME_CASES:
+        tmp_path = next(case_paths)
+        with subtests.test(outcome=outcome, expected=expected):
+            from ouroboros.review_execution import (
+                ReviewSessionWaitingOnUser,
+                _poll_session_terminal,
+            )
 
-    stub = _OutcomeCustodyStub(outcome)
-    with pytest.raises(ReviewSessionWaitingOnUser) as excinfo:
-        _poll_session_terminal(_RunningGateway(waiting=True), stub, tmp_path,
-                               SimpleNamespace(run_id="run-h"), "run-h", 600.0)
-    text = str(excinfo.value)
-    assert expected in text
-    if outcome != "confirmed":
-        assert "host-cancelled" not in text
-        assert outcome in text
-    assert stub.cancels == ["review_session_waiting_on_user"]
+            stub = _OutcomeCustodyStub(outcome)
+            with pytest.raises(ReviewSessionWaitingOnUser) as excinfo:
+                _poll_session_terminal(_RunningGateway(waiting=True), stub, tmp_path,
+                                       SimpleNamespace(run_id="run-h"), "run-h", 600.0)
+            text = str(excinfo.value)
+            assert expected in text
+            if outcome != "confirmed":
+                assert "host-cancelled" not in text
+                assert outcome in text
+            assert stub.cancels == ["review_session_waiting_on_user"]
 
 
 @pytest.mark.parametrize("outcome,expected", chosen_rows(_CANCEL_OUTCOME_CASES, 0, 1, 3))

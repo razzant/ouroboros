@@ -9,6 +9,7 @@ import pytest
 
 from ouroboros.test_environment import DIAGNOSTIC_OUTPUT_KEYS
 from tests._shared import producer_evidence_dir
+from tests._cases import case_folders
 
 
 @pytest.mark.serial
@@ -39,17 +40,20 @@ def test_managed_launchers_preserve_explicit_producer_destinations(tmp_path, mon
     assert json.loads(raw) == selected
 
 
-@pytest.mark.parametrize("key", DIAGNOSTIC_OUTPUT_KEYS)
-def test_native_explicit_output_in_scratch_retains_it(tmp_path, monkeypatch, key):
-    from ouroboros.preflight_runner import _preflight_env
-    from ouroboros.test_environment import RETENTION_MARKER
-    root = tmp_path / "native"
-    monkeypatch.setenv(key, str(root / "chosen"))
-    _preflight_env(root, tmp_path)
-    marker = root / RETENTION_MARKER
-    assert key in marker.read_text(encoding="utf-8")
-    # This test spawned no process and wrote no diagnostic; retire its synthetic marker.
-    marker.unlink()
+def test_native_explicit_output_in_scratch_retains_it(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for key in DIAGNOSTIC_OUTPUT_KEYS:
+        tmp_path = next(case_paths)
+        with subtests.test(key=key), monkeypatch.context() as monkeypatch:
+            from ouroboros.preflight_runner import _preflight_env
+            from ouroboros.test_environment import RETENTION_MARKER
+            root = tmp_path / "native"
+            monkeypatch.setenv(key, str(root / "chosen"))
+            _preflight_env(root, tmp_path)
+            marker = root / RETENTION_MARKER
+            assert key in marker.read_text(encoding="utf-8")
+            # This test spawned no process and wrote no diagnostic; retire its synthetic marker.
+            marker.unlink()
 
 
 @pytest.mark.parametrize("fault", ["injected", "real"])

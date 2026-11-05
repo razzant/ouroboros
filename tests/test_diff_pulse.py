@@ -16,6 +16,7 @@ from ouroboros.review import DIFF_PULSE_QUESTION, diff_pulse
 from ouroboros.tools.registry import ToolContext
 from tests.test_reference_book_balance import _registry
 from tests.test_review_change_end_to_end import GOAL, SCOPE, _brief_text, staged_body  # noqa: F401 -- the fixture
+from tests._cases import case_folders
 
 pytestmark = pytest.mark.serial  # real git subprocesses
 
@@ -220,18 +221,21 @@ CODE = {
 }
 
 
-@pytest.mark.parametrize("tool", sorted(CODE))
-def test_a_body_edit_carries_the_pulse_and_a_foreign_project_edit_does_not(tmp_path, monkeypatch, tool):
-    import ouroboros.safety as safety
+def test_a_body_edit_carries_the_pulse_and_a_foreign_project_edit_does_not(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for tool in sorted(CODE):
+        tmp_path = next(case_paths)
+        with subtests.test(tool=tool), monkeypatch.context() as monkeypatch:
+            import ouroboros.safety as safety
 
-    monkeypatch.setattr(safety, "check_safety", lambda *args, **kwargs: (True, ""))
-    body = str(_registry(tmp_path / "a", external=False).execute(tool, CODE[tool]))
-    assert body.startswith("✅"), body[:300]
-    assert "Diff pulse since canonical/ouroboros merge-base" in body and "ouroboros/loop.py 2 (+1/-0)" in body
-    assert DIFF_PULSE_QUESTION in body and "Text growth" not in body  # no book or ruled text was touched
-    # A user's project with the same layout and the official remote is not the body.
-    foreign = str(_registry(tmp_path / "b", external=True).execute(tool, CODE[tool]))
-    assert foreign.startswith("✅") and "Diff pulse" not in foreign, foreign[:300]
+            monkeypatch.setattr(safety, "check_safety", lambda *args, **kwargs: (True, ""))
+            body = str(_registry(tmp_path / "a", external=False).execute(tool, CODE[tool]))
+            assert body.startswith("✅"), body[:300]
+            assert "Diff pulse since canonical/ouroboros merge-base" in body and "ouroboros/loop.py 2 (+1/-0)" in body
+            assert DIFF_PULSE_QUESTION in body and "Text growth" not in body  # no book or ruled text was touched
+            # A user's project with the same layout and the official remote is not the body.
+            foreign = str(_registry(tmp_path / "b", external=True).execute(tool, CODE[tool]))
+            assert foreign.startswith("✅") and "Diff pulse" not in foreign, foreign[:300]
 
 
 def test_the_commit_gate_shows_the_pulse_and_no_size_changes_what_it_decides(tmp_path):

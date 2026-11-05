@@ -18,6 +18,7 @@ from ouroboros.tools.shell_guards import (
     light_shell_repo_mutation,
     shell_writer_targets_protected,
 )
+from tests._cases import case_folders
 
 
 # ---- the classifier itself: one structural owner ---------------------------
@@ -754,9 +755,7 @@ _ORDINARY_STDLIB_WRITES = [
 ]
 
 
-@pytest.mark.parametrize("label, template", _ORDINARY_STDLIB_WRITES,
-                         ids=[label for label, _ in _ORDINARY_STDLIB_WRITES])
-def test_an_ordinary_stdlib_write_is_never_read_as_a_proven_read(tmp_path, label, template):
+def test_an_ordinary_stdlib_write_is_never_read_as_a_proven_read(subtests, tmp_path):
     """Nine ordinary stdlib write APIs parsed to a fully-resolved AST with ZERO write
     targets, so `targets == [] and not unknown` — the callers' PROOF of read-only —
     was handed out for a payload that writes. `_INTERPRETER_ANY_WRITE_RE`, in the
@@ -764,20 +763,24 @@ def test_an_ordinary_stdlib_write_is_never_read_as_a_proven_read(tmp_path, label
     signed the proof. The fence's claim marked this failure class closed, so the
     next reviewer would not have come back to it (BIBLE P2).
     """
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    code = template.format(t=repr(str(repo / "victim.txt")))
+    case_paths = case_folders(tmp_path)
+    for label, template in _ORDINARY_STDLIB_WRITES:
+        tmp_path = next(case_paths)
+        with subtests.test(label=label, template=template):
+            repo = tmp_path / "repo"
+            repo.mkdir()
+            code = template.format(t=repr(str(repo / "victim.txt")))
 
-    # The regex half of the vocabulary has always seen these as writes...
-    assert _INTERPRETER_ANY_WRITE_RE.search(code), label
-    # ...and now the AST half agrees: it either resolves the target or says UNKNOWN.
-    targets, unknown = _python_write_targets_and_unknown(code)
-    assert targets or unknown, f"{label} parsed as a proven read"
-    # End to end, with the cwd OUTSIDE the repo so only the target can block it.
-    assert light_shell_repo_mutation(
-        ["python3.11", "-c", code],
-        repo_dir=repo, cwd=str(tmp_path), work_dir=tmp_path,
-    ) is True, label
+            # The regex half of the vocabulary has always seen these as writes...
+            assert _INTERPRETER_ANY_WRITE_RE.search(code), label
+            # ...and now the AST half agrees: it either resolves the target or says UNKNOWN.
+            targets, unknown = _python_write_targets_and_unknown(code)
+            assert targets or unknown, f"{label} parsed as a proven read"
+            # End to end, with the cwd OUTSIDE the repo so only the target can block it.
+            assert light_shell_repo_mutation(
+                ["python3.11", "-c", code],
+                repo_dir=repo, cwd=str(tmp_path), work_dir=tmp_path,
+            ) is True, label
 
 
 def test_the_same_stdlib_writes_still_run_when_they_target_elsewhere(tmp_path):

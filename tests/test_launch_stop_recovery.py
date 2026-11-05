@@ -52,6 +52,7 @@ from tests._launch_stop_shared import (
     _view,
     write_scripts,
 )
+from tests._cases import case_folders
 
 pytestmark = [pytest.mark.serial,
               pytest.mark.skipif(os.name == "nt", reason="the measured stop is POSIX; Windows keeps its native kill")]
@@ -849,38 +850,40 @@ _READER_CASES = {  # rows alive, A's and its sibling's owed children, unreadable
 }
 
 
-@pytest.mark.parametrize("case", list(_READER_CASES))
-@pytest.mark.parametrize("reader", ["presence", "cold sleep", "continuation", "body candidate"])
-def test_a_reader_holds_a_launch_by_what_it_still_owes_never_by_the_process_on_its_leaders_pid(
-        tmp_path, monkeypatch, reader, case):
+def test_a_reader_holds_a_launch_by_what_it_still_owes_never_by_the_process_on_its_leaders_pid(subtests, tmp_path, monkeypatch):
     """The four readers that release custody (Presence's lend, a cold sleep, a Continue's writers, a body
     candidate's transfer and GC) over launch A and a sibling launch of the same owner. A leader measured alive with
     its recorded birth holds its launch with no process table; a gone leader's launch is held by a live owed child
     or a process that kept its marker, read in ONE table for every such launch; an unreadable table or leader
     identity holds it as unknown (never as a running writer); a stranger that reused its leader pid is not it.
     Controlled identities, no OS process signalled."""
-    from ouroboros import owned_shutdown, process_census
+    case_paths = case_folders(tmp_path)
+    for case in list(_READER_CASES):
+        for reader in ["presence", "cold sleep", "continuation", "body candidate"]:
+            tmp_path = next(case_paths)
+            with subtests.test(case=case, reader=reader), monkeypatch.context() as monkeypatch:
+                from ouroboros import owned_shutdown, process_census
 
-    alive, a_owed, sibling_owed, unreadable, expect_a, expect_sibling, censuses = _READER_CASES[case]
-    row = {_PID: (2, _NEW_BIRTH if case == "reused pid" else _OLD_BIRTH, set()), _OTHER: (2, _OLD_BIRTH, {_MARK_B}),
-           _CHILD: (1, _OLD_BIRTH, set()), _CARRIER: (1, _OLD_BIRTH, {_MARK_A})}
-    rows = {pid: process_census._Row(pid, row[pid][0], pid, row[pid][1], 123.0, "alive", row[pid][2]) for pid in alive}
-    read, owner = _reader(tmp_path, monkeypatch, reader)
-    world = _controlled(tmp_path, monkeypatch, rows)
-    world.unknown, world.unreadable = case in ("unknown", "unreadable leader"), unreadable
-    owed = [{"pid": pid, "birth": _OLD_BIRTH} for pid in a_owed]
-    world.spawned({**_launch_row(owner), "known_members": owed})
-    world.spawned({**_launch_row(owner, marker=_MARK_B, purpose="service:sibling", pid=_OTHER),
-                   "known_members": [{"pid": pid, "birth": _OLD_BIRTH} for pid in sibling_owed]})
-    assert len(owned_shutdown.owned_records(tmp_path)) == 2
+                alive, a_owed, sibling_owed, unreadable, expect_a, expect_sibling, censuses = _READER_CASES[case]
+                row = {_PID: (2, _NEW_BIRTH if case == "reused pid" else _OLD_BIRTH, set()), _OTHER: (2, _OLD_BIRTH, {_MARK_B}),
+                       _CHILD: (1, _OLD_BIRTH, set()), _CARRIER: (1, _OLD_BIRTH, {_MARK_A})}
+                rows = {pid: process_census._Row(pid, row[pid][0], pid, row[pid][1], 123.0, "alive", row[pid][2]) for pid in alive}
+                read, owner = _reader(tmp_path, monkeypatch, reader)
+                world = _controlled(tmp_path, monkeypatch, rows)
+                world.unknown, world.unreadable = case in ("unknown", "unreadable leader"), unreadable
+                owed = [{"pid": pid, "birth": _OLD_BIRTH} for pid in a_owed]
+                world.spawned({**_launch_row(owner), "known_members": owed})
+                world.spawned({**_launch_row(owner, marker=_MARK_B, purpose="service:sibling", pid=_OTHER),
+                               "known_members": [{"pid": pid, "birth": _OLD_BIRTH} for pid in sibling_owed]})
+                assert len(owned_shutdown.owned_records(tmp_path)) == 2
 
-    found = read()
+                found = read()
 
-    assert _held(found, _PID) == expect_a, found
-    if reader != "body candidate" or "unknown" not in (expect_a, expect_sibling):  # a body's -1 names no record
-        assert _held(found, _OTHER) == expect_sibling, found
-    assert len(world.censuses) == censuses, "a measured live leader needs no table; the others share ONE"
-    assert world.signals == [] and world.kills == []
+                assert _held(found, _PID) == expect_a, found
+                if reader != "body candidate" or "unknown" not in (expect_a, expect_sibling):  # a body's -1 names no record
+                    assert _held(found, _OTHER) == expect_sibling, found
+                assert len(world.censuses) == censuses, "a measured live leader needs no table; the others share ONE"
+                assert world.signals == [] and world.kills == []
 
 
 @pytest.mark.parametrize("case", ["owed child", "reused pid"])

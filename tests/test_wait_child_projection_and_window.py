@@ -27,6 +27,7 @@ import ouroboros.task_pacing as pacing
 from ouroboros.deadline_utils import utc_now
 from ouroboros.task_results import STATUS_COMPLETED, STATUS_RUNNING, write_task_result
 from ouroboros.tools import control_task_results as mod
+from tests._cases import case_folders
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 CHILD = "nannychild"
@@ -295,19 +296,21 @@ def _executor_margins(tmp_path, monkeypatch, name, get_timeout, settings_timeout
     return margins, margin
 
 
-@pytest.mark.parametrize("name", sorted(_WINDOWED))
-@pytest.mark.parametrize("settings_timeout", [0, 60, 99_999])
-@pytest.mark.parametrize("bound", ["deadline", "execution budget"])
-def test_the_executor_kill_timer_outlives_every_window_by_the_margin(tmp_path, monkeypatch, name,
-                                                                     settings_timeout, bound):
+def test_the_executor_kill_timer_outlives_every_window_by_the_margin(subtests, tmp_path, monkeypatch):
     """Exactly one reserve subtraction on both sides of the executor seam: without a bound, under a
     deadline or an explicit execution budget, and whatever OUROBOROS_TOOL_TIMEOUT_SEC says."""
-    from ouroboros.tools.registry import ToolRegistry
+    case_paths = case_folders(tmp_path)
+    for name in sorted(_WINDOWED):
+        for settings_timeout in [0, 60, 99_999]:
+            for bound in ["deadline", "execution budget"]:
+                tmp_path = next(case_paths)
+                with subtests.test(name=name, settings_timeout=settings_timeout, bound=bound), monkeypatch.context() as monkeypatch:
+                    from ouroboros.tools.registry import ToolRegistry
 
-    registry = ToolRegistry(repo_dir=REPO, drive_root=tmp_path)
-    margins, margin = _executor_margins(tmp_path, monkeypatch, name, registry.get_timeout, settings_timeout, bound)
+                    registry = ToolRegistry(repo_dir=REPO, drive_root=tmp_path)
+                    margins, margin = _executor_margins(tmp_path, monkeypatch, name, registry.get_timeout, settings_timeout, bound)
 
-    assert margins and min(margins) >= margin, margins
+                    assert margins and min(margins) >= margin, margins
 
 
 def test_the_old_equal_window_and_kill_timeout_fails_the_ordering(tmp_path, monkeypatch):

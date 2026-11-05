@@ -37,25 +37,27 @@ def test_legacy_selections_do_not_constrain_new_focus_admission(tmp_path):
     assert admission.capability_ceiling is None
 
 
-@pytest.mark.parametrize("old,new", PAIRS)
-def test_a_frozen_ceiling_with_the_old_spelling_allows_the_successor_only(old, new):
-    from ouroboros.presence_authority import PresenceToolGrant, presence_ceiling_allows_tool
+def test_a_frozen_ceiling_with_the_old_spelling_allows_the_successor_only(subtests):
+    for old, new in PAIRS:
+        with subtests.test(old=old, new=new):
+            from ouroboros.presence_authority import PresenceToolGrant, presence_ceiling_allows_tool
 
-    ceiling = type("Ceiling", (), {"tool_grants": (PresenceToolGrant(old),)})()
-    assert presence_ceiling_allows_tool(ceiling, new)
-    assert not presence_ceiling_allows_tool(ceiling, "write_file")  # quiet: nothing else widens
+            ceiling = type("Ceiling", (), {"tool_grants": (PresenceToolGrant(old),)})()
+            assert presence_ceiling_allows_tool(ceiling, new)
+            assert not presence_ceiling_allows_tool(ceiling, "write_file")  # quiet: nothing else widens
 
 
-@pytest.mark.parametrize("old,new", PAIRS)
-def test_an_unknown_old_name_names_its_successor(old, new):
-    from ouroboros.tool_policy import name_miss_guidance
+def test_an_unknown_old_name_names_its_successor(subtests):
+    for old, new in PAIRS:
+        with subtests.test(old=old, new=new):
+            from ouroboros.tool_policy import name_miss_guidance
 
-    lines = name_miss_guidance(old, "builtin", [{"name": new, "description": "x"}], discovery=True)
-    assert lines[0] == f"{old!r} was renamed {new!r} (not called)."
-    quiet = name_miss_guidance("no_such_tool", "builtin", [{"name": new, "description": "x"}], discovery=True)
-    assert not any("renamed" in line for line in quiet)
-    elsewhere = name_miss_guidance(old, "mcp_srv", [], discovery=True)  # an MCP tool may own that name
-    assert not any("renamed" in line for line in elsewhere)
+            lines = name_miss_guidance(old, "builtin", [{"name": new, "description": "x"}], discovery=True)
+            assert lines[0] == f"{old!r} was renamed {new!r} (not called)."
+            quiet = name_miss_guidance("no_such_tool", "builtin", [{"name": new, "description": "x"}], discovery=True)
+            assert not any("renamed" in line for line in quiet)
+            elsewhere = name_miss_guidance(old, "mcp_srv", [], discovery=True)  # an MCP tool may own that name
+            assert not any("renamed" in line for line in elsewhere)
 
 
 def _bound_ceiling_ctx(grant_name):
@@ -72,19 +74,20 @@ def _bound_ceiling_ctx(grant_name):
     return SimpleNamespace(task_contract={"capability_ceiling": presence_ceiling_payload(ceiling)}, task_metadata={})
 
 
-@pytest.mark.parametrize("old,new", PAIRS)
-def test_a_frozen_old_spelling_grant_binds_the_successors_arguments(old, new):
+def test_a_frozen_old_spelling_grant_binds_the_successors_arguments(subtests):
     """The host binding follows the grant to the successor; the model's value never wins."""
-    from ouroboros.presence_authority import apply_presence_argument_bindings
-    from ouroboros.tools.registry_core import _presence_bound_args, _presence_tool_allowed
+    for old, new in PAIRS:
+        with subtests.test(old=old, new=new):
+            from ouroboros.presence_authority import apply_presence_argument_bindings
+            from ouroboros.tools.registry_core import _presence_bound_args, _presence_tool_allowed
 
-    ctx = _bound_ceiling_ctx(old)
-    assert _presence_tool_allowed(ctx, new) and not _presence_tool_allowed(ctx, old)
-    assert apply_presence_argument_bindings(ctx, new, {"project_id": "model-chosen"})["project_id"] == "host-bound"
-    bound, refusal = _presence_bound_args(ctx, new, {"project_id": "model-chosen"})
-    assert refusal == "" and bound["project_id"] == "host-bound"
-    unrelated = apply_presence_argument_bindings(ctx, "write_file", {"project_id": "model-chosen"})
-    assert unrelated["project_id"] == "model-chosen"  # quiet: the binding belongs to that grant only
+            ctx = _bound_ceiling_ctx(old)
+            assert _presence_tool_allowed(ctx, new) and not _presence_tool_allowed(ctx, old)
+            assert apply_presence_argument_bindings(ctx, new, {"project_id": "model-chosen"})["project_id"] == "host-bound"
+            bound, refusal = _presence_bound_args(ctx, new, {"project_id": "model-chosen"})
+            assert refusal == "" and bound["project_id"] == "host-bound"
+            unrelated = apply_presence_argument_bindings(ctx, "write_file", {"project_id": "model-chosen"})
+            assert unrelated["project_id"] == "model-chosen"  # quiet: the binding belongs to that grant only
 
 
 def test_a_saved_builtin_name_resolves_and_a_corrupt_one_fails_typed():

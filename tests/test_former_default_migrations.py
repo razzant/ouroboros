@@ -36,28 +36,29 @@ def test_formerly_remapped_review_ids_are_no_longer_rewritten():
     assert normalized == document
 
 
-@pytest.mark.parametrize("model", _FORMERLY_REMAPPED_IDS)
-def test_a_saved_model_is_not_rewritten_as_retired_on_an_aggregator_install(model):
-    from ouroboros.reviewer_slot_config import review_pool_rows
+def test_a_saved_model_is_not_rewritten_as_retired_on_an_aggregator_install(subtests):
+    for model in _FORMERLY_REMAPPED_IDS:
+        with subtests.test(model=model):
+            from ouroboros.reviewer_slot_config import review_pool_rows
 
-    catalog = json.dumps({"enabled": True, "items": [
-        {"subagent_id": "t1", "recommended_use": "Reviews.", "review_eligible": True,
-         "route": {"kind": "api_model", "target_id": model}},
-        {"subagent_id": "s1", "recommended_use": "Reviews natively.", "review_eligible": True,
-         "route": {"kind": "api_model", "target_id": model}, "delivery": "native"},
-    ]})
-    document = {
-        "OPENROUTER_API_KEY": "sk-or",
-        "OUROBOROS_MODEL": model,
-        "OUROBOROS_MODEL_LIGHT": model,
-        "OUROBOROS_MODEL_FALLBACKS": model,
-        "OUROBOROS_SUBAGENTS": catalog,
-    }
-    normalized, changed, changed_keys = apply_runtime_provider_defaults(dict(document))
+            catalog = json.dumps({"enabled": True, "items": [
+                {"subagent_id": "t1", "recommended_use": "Reviews.", "review_eligible": True,
+                 "route": {"kind": "api_model", "target_id": model}},
+                {"subagent_id": "s1", "recommended_use": "Reviews natively.", "review_eligible": True,
+                 "route": {"kind": "api_model", "target_id": model}, "delivery": "native"},
+            ]})
+            document = {
+                "OPENROUTER_API_KEY": "sk-or",
+                "OUROBOROS_MODEL": model,
+                "OUROBOROS_MODEL_LIGHT": model,
+                "OUROBOROS_MODEL_FALLBACKS": model,
+                "OUROBOROS_SUBAGENTS": catalog,
+            }
+            normalized, changed, changed_keys = apply_runtime_provider_defaults(dict(document))
 
-    assert (changed, changed_keys) == (False, [])
-    assert normalized == document
-    assert [row.target_id for row in review_pool_rows(normalized)] == [model, model]
+            assert (changed, changed_keys) == (False, [])
+            assert normalized == document
+            assert [row.target_id for row in review_pool_rows(normalized)] == [model, model]
 
 
 def test_direct_openai_keeps_a_saved_id_that_was_never_our_default_for_its_slot():
@@ -142,24 +143,25 @@ _LOCAL_ONLY = {"LOCAL_MODEL_SOURCE": "repo/model.gguf", "USE_LOCAL_MAIN": True}
 _OUR_FORMER_GEMINI_DEFAULT = "google/gemini-3.1-flash-lite"
 
 
-@pytest.mark.parametrize("provider", sorted(_DIRECT_PROVIDER_CREDENTIALS))
-def test_our_former_gemini_default_stays_in_active_slots_on_every_direct_provider(provider):
+def test_our_former_gemini_default_stays_in_active_slots_on_every_direct_provider(subtests):
     """A stored copy of our former Main/Code/Light default on a direct-only install is a saved
     value: it stays (unreachable, so honestly unavailable) in every active slot, while the
     retired Heavy key still drops it rather than seeding an actor."""
-    former = _OUR_FORMER_GEMINI_DEFAULT
-    normalized, _changed, changed_keys = apply_runtime_provider_defaults({
-        **_DIRECT_PROVIDER_CREDENTIALS[provider],
-        "OUROBOROS_MODEL": former,
-        "OUROBOROS_MODEL_HEAVY": former,
-        "OUROBOROS_MODEL_LIGHT": former,
-        "OUROBOROS_MODEL_FALLBACKS": former,
-    })
+    for provider in sorted(_DIRECT_PROVIDER_CREDENTIALS):
+        with subtests.test(provider=provider):
+            former = _OUR_FORMER_GEMINI_DEFAULT
+            normalized, _changed, changed_keys = apply_runtime_provider_defaults({
+                **_DIRECT_PROVIDER_CREDENTIALS[provider],
+                "OUROBOROS_MODEL": former,
+                "OUROBOROS_MODEL_HEAVY": former,
+                "OUROBOROS_MODEL_LIGHT": former,
+                "OUROBOROS_MODEL_FALLBACKS": former,
+            })
 
-    assert [normalized[key] for key in ("OUROBOROS_MODEL", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_FALLBACKS")] == [
-        former] * 3
-    assert normalized["OUROBOROS_MODEL_HEAVY"] == ""
-    assert changed_keys == ["OUROBOROS_MODEL_HEAVY"]
+            assert [normalized[key] for key in ("OUROBOROS_MODEL", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_FALLBACKS")] == [
+                former] * 3
+            assert normalized["OUROBOROS_MODEL_HEAVY"] == ""
+            assert changed_keys == ["OUROBOROS_MODEL_HEAVY"]
 
 
 def test_a_local_only_install_keeps_a_saved_former_gemini_light():

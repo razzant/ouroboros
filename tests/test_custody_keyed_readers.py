@@ -41,6 +41,7 @@ from tests.test_delegated_skill_payload import (  # noqa: F401  (autouse fixture
     _seed_skill,
     _StartStub,
 )
+from tests._cases import case_folders
 
 NAN, INF = float("nan"), float("inf")
 _ABSENT = object()
@@ -330,17 +331,20 @@ _HOLDERS = {
 }
 
 
-@pytest.mark.parametrize("case", sorted(_HOLDERS))
-def test_foreign_payload_holders_are_inventory_not_an_admission_limit(tmp_path, monkeypatch, case):
-    setup, _holder = _HOLDERS[case]
-    caller = _caller(tmp_path, monkeypatch)
-    drive = custody.custody_root(caller)
-    skill = _seed_skill(tmp_path / "data")
-    _start_holder(drive, skill, **setup)
-    _stub_gateway(monkeypatch)
-    assert _start(caller)["status"] == "started"
-    assert "run-holder" in current.runs(drive)
-    custody._CUSTODY.clear()
+def test_foreign_payload_holders_are_inventory_not_an_admission_limit(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for case in sorted(_HOLDERS):
+        tmp_path = next(case_paths)
+        with subtests.test(case=case), monkeypatch.context() as monkeypatch:
+            setup, _holder = _HOLDERS[case]
+            caller = _caller(tmp_path, monkeypatch)
+            drive = custody.custody_root(caller)
+            skill = _seed_skill(tmp_path / "data")
+            _start_holder(drive, skill, **setup)
+            _stub_gateway(monkeypatch)
+            assert _start(caller)["status"] == "started"
+            assert "run-holder" in current.runs(drive)
+            custody._CUSTODY.clear()
 
 
 def test_foreign_pending_payload_invocation_is_preserved_beside_new_start(tmp_path, monkeypatch):

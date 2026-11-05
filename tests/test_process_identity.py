@@ -61,13 +61,14 @@ def test_only_unequal_validated_tokens_of_one_kind_are_a_different_birth(live, r
     assert different_birth(recorded, live) is different
 
 
-@pytest.mark.parametrize("first", sorted(_KINDS))
-@pytest.mark.parametrize("second", sorted(_KINDS))
-def test_two_kinds_never_prove_a_different_birth(first, second):
-    live, recorded = _KINDS[first][0], _KINDS[second][1]
-    assert different_birth(live, recorded) is (first == second)
-    assert different_birth(recorded, live) is (first == second)
-    assert same_birth(live, recorded) is same_birth(recorded, live) is (False if first == second else None)
+def test_two_kinds_never_prove_a_different_birth(subtests):
+    for first in sorted(_KINDS):
+        for second in sorted(_KINDS):
+            with subtests.test(first=first, second=second):
+                live, recorded = _KINDS[first][0], _KINDS[second][1]
+                assert different_birth(live, recorded) is (first == second)
+                assert different_birth(recorded, live) is (first == second)
+                assert same_birth(live, recorded) is same_birth(recorded, live) is (False if first == second else None)
 
 
 @pytest.mark.parametrize("first,second,same", [

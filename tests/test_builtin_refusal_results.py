@@ -13,6 +13,7 @@ from ouroboros.tools.tool_result import (
     _published_tool_result,
     _restore_tool_result_sidecar,
 )
+from tests._cases import case_folders
 
 
 def _call(ctx, function, *args, **kwargs):
@@ -197,24 +198,25 @@ _PRE_DAEMON_REFUSALS = [
 ]
 
 
-@pytest.mark.parametrize("tool,args,reason,code", _PRE_DAEMON_REFUSALS)
-def test_every_delegate_verb_publishes_one_native_refusal_through_the_registry(
-    tmp_path, monkeypatch, tool, args, reason, code,
-):
-    import json
+def test_every_delegate_verb_publishes_one_native_refusal_through_the_registry(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for tool, args, reason, code in _PRE_DAEMON_REFUSALS:
+        tmp_path = next(case_paths)
+        with subtests.test(tool=tool, args=args, reason=reason, code=code), monkeypatch.context() as monkeypatch:
+            import json
 
-    registry = _delegate_registry(tmp_path, monkeypatch)
-    result = registry.execute_result(tool, dict(args))
-    assert (result.status, result.code) == (TOOL_CODE_SPECS[code].status, code)
-    # The handler ABI is unchanged: the published text IS the string the entry returned.
-    assert registry.execute(tool, dict(args)) == result.text
-    payload = json.loads(result.text)
-    # The envelope is ADDITIVE: the domain reason keeps its own name and vocabulary.
-    assert payload["status"] == "refused"
-    assert payload["reason"] == reason
-    assert payload["ok"] is False
-    assert payload["host_code"] == code
-    assert payload["tool"] == tool
+            registry = _delegate_registry(tmp_path, monkeypatch)
+            result = registry.execute_result(tool, dict(args))
+            assert (result.status, result.code) == (TOOL_CODE_SPECS[code].status, code)
+            # The handler ABI is unchanged: the published text IS the string the entry returned.
+            assert registry.execute(tool, dict(args)) == result.text
+            payload = json.loads(result.text)
+            # The envelope is ADDITIVE: the domain reason keeps its own name and vocabulary.
+            assert payload["status"] == "refused"
+            assert payload["reason"] == reason
+            assert payload["ok"] is False
+            assert payload["host_code"] == code
+            assert payload["tool"] == tool
 
 
 def test_a_refused_delegate_call_is_no_longer_recorded_as_a_successful_call(tmp_path, monkeypatch):

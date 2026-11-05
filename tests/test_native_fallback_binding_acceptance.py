@@ -25,7 +25,7 @@ from tests.test_llm_claudexor import setup as gateway_fixture
 from tests.test_model_wait import live_wait as wait_fixture
 from tests.test_model_wait_controls import _loop_tools
 from tests.test_subscription_main_wait import main_call as main_call_fixture
-from tests._cases import chosen_rows
+from tests._cases import case_folders, chosen_rows
 
 setup = gateway_fixture
 live_wait = wait_fixture
@@ -447,82 +447,85 @@ def _wire_refusal(wire, status):
         request=httpx.Request("POST", "https://fixture.invalid"), response=httpx.Response(status))
 
 
-@pytest.mark.parametrize("wire,status,ending", _REFUSAL_CASES)
-def test_primary_refusal_policy_preserves_every_wire_status_and_ending(tmp_path, monkeypatch, wire, status, ending):
-    from datetime import datetime, timezone
-    from ouroboros.loop_llm_call import classify_llm_exception
-    from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
-    from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN
+def test_primary_refusal_policy_preserves_every_wire_status_and_ending(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for wire, status, ending in _REFUSAL_CASES:
+        tmp_path = next(case_paths)
+        with subtests.test(wire=wire, status=status, ending=ending), monkeypatch.context() as monkeypatch:
+            from datetime import datetime, timezone
+            from ouroboros.loop_llm_call import classify_llm_exception
+            from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
+            from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN
 
-    refusal = classify_llm_exception(_wire_refusal(wire, status))
-    assert (refusal.kind, refusal.retry_same_request, refusal.status_code) == ("provider_transient", True, status)
-    if wire == "managed":
-        payload = llm_claudexor._request({"source": ROUTE["source"], "resolved_model": ROUTE["model"]},
-            [{"role": "user", "content": "Keep waiting on the primary."}], None,
-            {"model_role": "main", "model_account_override": "account-a", "prospective": True})
-        assert json.loads(json.dumps(payload))["account"] == {"mode": "pin", "profileId": "account-a"}
-    ctx = SimpleNamespace(route_wait_on_primary=True, is_direct_chat=ending != "wrap", task_metadata={})
-    assert not loop_transport.fallback_chain_allowed(ctx, refusal.kind, None)
-    ctx.route_wait_on_primary = False
-    assert loop_transport.fallback_chain_allowed(ctx, refusal.kind, None)
-    ctx.route_wait_on_primary = True
-    now, waits, notes = [1000.0], [], []
-    monkeypatch.setattr(loop_transport, "time", SimpleNamespace(monotonic=lambda: now[0], time=lambda: now[0]))
+            refusal = classify_llm_exception(_wire_refusal(wire, status))
+            assert (refusal.kind, refusal.retry_same_request, refusal.status_code) == ("provider_transient", True, status)
+            if wire == "managed":
+                payload = llm_claudexor._request({"source": ROUTE["source"], "resolved_model": ROUTE["model"]},
+                    [{"role": "user", "content": "Keep waiting on the primary."}], None,
+                    {"model_role": "main", "model_account_override": "account-a", "prospective": True})
+                assert json.loads(json.dumps(payload))["account"] == {"mode": "pin", "profileId": "account-a"}
+            ctx = SimpleNamespace(route_wait_on_primary=True, is_direct_chat=ending != "wrap", task_metadata={})
+            assert not loop_transport.fallback_chain_allowed(ctx, refusal.kind, None)
+            ctx.route_wait_on_primary = False
+            assert loop_transport.fallback_chain_allowed(ctx, refusal.kind, None)
+            ctx.route_wait_on_primary = True
+            now, waits, notes = [1000.0], [], []
+            monkeypatch.setattr(loop_transport, "time", SimpleNamespace(monotonic=lambda: now[0], time=lambda: now[0]))
 
-    def sleep(seconds, _wake):
-        waits.append(seconds)
-        now[0] += seconds
-        return False
+            def sleep(seconds, _wake):
+                waits.append(seconds)
+                now[0] += seconds
+                return False
 
-    monkeypatch.setattr(loop_transport, "interruptible_wait_sleep", sleep)
-    common = {"drive_logs": tmp_path, "task_id": "task-one", "model": MODEL,
-              "emit_progress": lambda text, **_kw: notes.append(text)}
-    episode = loop_transport.reconcile_transport_wait(None, ctx, msg_present=False, error_kind=refusal.kind, **common)
-    assert episode.wait_cause == refusal.kind and episode.interactive is (ending != "wrap")
-    step = {**common, "tools": SimpleNamespace(_ctx=ctx), "drive_root": None,
-            "incoming_messages": None, "owner_msg_seen": set()}
-    assert loop_transport.transport_wait_step(episode, error_kind=refusal.kind, **step)
-    assert waits == [4.0]
-    if ending == "answer":
-        # Another real refusal preserves this episode: it cannot reset its
-        # pacing or claim that an available catalog was a recovered generation.
-        assert loop_transport.reconcile_transport_wait(episode, ctx, msg_present=False,
-                                                       error_kind=refusal.kind, **common) is episode
-        assert loop_transport.transport_wait_step(episode, error_kind=refusal.kind, **step)
-        assert waits == [4.0, 8.0] and episode.redials == 2
-        assert loop_transport.reconcile_transport_wait(episode, ctx, msg_present=True,
-                                                       error_kind="", **common) is None
-    else:
-        control = {"stop": REASON_OWNER_STOPPED_DIRECT_TURN, "wrap": REASON_OWNER_REQUESTED_FINALIZATION}.get(ending, "")
+            monkeypatch.setattr(loop_transport, "interruptible_wait_sleep", sleep)
+            common = {"drive_logs": tmp_path, "task_id": "task-one", "model": MODEL,
+                      "emit_progress": lambda text, **_kw: notes.append(text)}
+            episode = loop_transport.reconcile_transport_wait(None, ctx, msg_present=False, error_kind=refusal.kind, **common)
+            assert episode.wait_cause == refusal.kind and episode.interactive is (ending != "wrap")
+            step = {**common, "tools": SimpleNamespace(_ctx=ctx), "drive_root": None,
+                    "incoming_messages": None, "owner_msg_seen": set()}
+            assert loop_transport.transport_wait_step(episode, error_kind=refusal.kind, **step)
+            assert waits == [4.0]
+            if ending == "answer":
+                # Another real refusal preserves this episode: it cannot reset its
+                # pacing or claim that an available catalog was a recovered generation.
+                assert loop_transport.reconcile_transport_wait(episode, ctx, msg_present=False,
+                                                               error_kind=refusal.kind, **common) is episode
+                assert loop_transport.transport_wait_step(episode, error_kind=refusal.kind, **step)
+                assert waits == [4.0, 8.0] and episode.redials == 2
+                assert loop_transport.reconcile_transport_wait(episode, ctx, msg_present=True,
+                                                               error_kind="", **common) is None
+            else:
+                control = {"stop": REASON_OWNER_STOPPED_DIRECT_TURN, "wrap": REASON_OWNER_REQUESTED_FINALIZATION}.get(ending, "")
 
-        def terminal(**facts):
-            assert facts["error_kind"] == facts["wait_cause"] == refusal.kind
-            assert facts["control_reason"] == control
-            return loop_transport.provider_terminal_fallback_text(
-                {"_last_llm_error_kind": refusal.kind, "_last_llm_status_code": status},
-                is_context_overflow=False, is_transport_wait=True, is_deadline_exhausted=ending == "deadline",
-                waited_sec=facts["waited_sec"], interactive=facts["interactive"],
-                control_reason=facts["control_reason"], wait_cause=facts["wait_cause"])
+                def terminal(**facts):
+                    assert facts["error_kind"] == facts["wait_cause"] == refusal.kind
+                    assert facts["control_reason"] == control
+                    return loop_transport.provider_terminal_fallback_text(
+                        {"_last_llm_error_kind": refusal.kind, "_last_llm_status_code": status},
+                        is_context_overflow=False, is_transport_wait=True, is_deadline_exhausted=ending == "deadline",
+                        waited_sec=facts["waited_sec"], interactive=facts["interactive"],
+                        control_reason=facts["control_reason"], wait_cause=facts["wait_cause"])
 
-        if ending == "deadline":
-            ctx.task_metadata["deadline_at"] = datetime.fromtimestamp(now[0] - 1, timezone.utc).isoformat()
-            assert not loop_transport.transport_wait_step(episode, error_kind="deadline_exhausted", **step)
-            notice = terminal(error_kind=refusal.kind, wait_cause=episode.wait_cause,
-                              waited_sec=episode.waited_sec, interactive=episode.interactive, control_reason="")
-        else:
-            notice = loop_transport.finalize_now_transport_terminal(episode, drive_logs=tmp_path,
-                task_id="task-one", model=MODEL, handle_provider_unavailable=terminal, control_reason=control)
-        assert "No new summary request was sent" in notice
-        assert "provider connection was unavailable" not in notice and "$0" not in notice
-        assert "refusing requests" in notice
-        assert waits == [4.0] and episode.redials == 1
-    assert any("primary provider temporarily refused" in note for note in notes)
-    assert not any("$0" in note or "connection restored" in note.lower() for note in notes)
-    if ending == "wrap":
-        assert any(note.endswith("Stop cancels.") for note in notes)
-    events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()]
-    assert events[0]["detail"] == refusal.kind
-    assert events[-1]["phase"] == ("recovered" if ending == "answer" else "ended")
+                if ending == "deadline":
+                    ctx.task_metadata["deadline_at"] = datetime.fromtimestamp(now[0] - 1, timezone.utc).isoformat()
+                    assert not loop_transport.transport_wait_step(episode, error_kind="deadline_exhausted", **step)
+                    notice = terminal(error_kind=refusal.kind, wait_cause=episode.wait_cause,
+                                      waited_sec=episode.waited_sec, interactive=episode.interactive, control_reason="")
+                else:
+                    notice = loop_transport.finalize_now_transport_terminal(episode, drive_logs=tmp_path,
+                        task_id="task-one", model=MODEL, handle_provider_unavailable=terminal, control_reason=control)
+                assert "No new summary request was sent" in notice
+                assert "provider connection was unavailable" not in notice and "$0" not in notice
+                assert "refusing requests" in notice
+                assert waits == [4.0] and episode.redials == 1
+            assert any("primary provider temporarily refused" in note for note in notes)
+            assert not any("$0" in note or "connection restored" in note.lower() for note in notes)
+            if ending == "wrap":
+                assert any(note.endswith("Stop cancels.") for note in notes)
+            events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+            assert events[0]["detail"] == refusal.kind
+            assert events[-1]["phase"] == ("recovered" if ending == "answer" else "ended")
 
 
 @pytest.mark.parametrize("wire,status,ending", chosen_rows(_REFUSAL_LOOP_CASES, 0, 4, 9))

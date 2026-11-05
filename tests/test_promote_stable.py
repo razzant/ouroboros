@@ -153,10 +153,11 @@ REFUSALS = {
 }
 
 
-@pytest.mark.parametrize("change,problem", REFUSALS.values(), ids=REFUSALS)
-def test_facts_refuse_an_unproven_release(change, problem):
-    with pytest.raises(ValueError, match=problem):
-        promotion.release_facts("v7.8.0", COMMIT, get=_world(**change))
+def test_facts_refuse_an_unproven_release(subtests):
+    for change, problem in REFUSALS.values():
+        with subtests.test(change=change, problem=problem):
+            with pytest.raises(ValueError, match=problem):
+                promotion.release_facts("v7.8.0", COMMIT, get=_world(**change))
 
 
 def test_facts_refuse_bytes_the_url_does_not_serve():
