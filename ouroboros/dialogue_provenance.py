@@ -729,7 +729,8 @@ def _pre_epoch_author(row: Mapping[str, Any], lineage_lookup: Any) -> dict[str, 
 
 def _place_speaker(row: Mapping[str, Any], owner_accounts: Mapping[str, Any] | None) -> str:
     """The host fact a place row's author label leads with: ``my human`` (``places.owner_confirmed_row`` over the
-    current snapshot), else ``the account I send as`` (a bot or service account of mine wrote it), else none."""
+    current snapshot), else ``the account I send as`` (a bot or service account of mine wrote it), else ``a bot``
+    when the connector marked its actor one (owner 4 Nov, Q2=A: bots come whole with an author fact), else none."""
     if owner_accounts is not None:
         from ouroboros.places import owner_confirmed_row  # D15->D20 is lazy-only
 
@@ -739,7 +740,9 @@ def _place_speaker(row: Mapping[str, Any], owner_accounts: Mapping[str, Any] | N
     actor = _mapping(transport.get("actor"))
     actor_id = _text(actor.get("platform_actor_id") or actor.get("id"))
     sends_as = _text(_mapping(_mapping(transport.get("identity")).get("sends_as")).get("id"))
-    return "the account I send as" if actor_id and actor_id == sends_as else ""
+    if actor_id and actor_id == sends_as:
+        return "the account I send as"
+    return "a bot" if actor.get("is_bot") is True else ""
 
 
 def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch: Mapping[str, Any] | None = None,
