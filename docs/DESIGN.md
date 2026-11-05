@@ -2260,7 +2260,8 @@ there is ONE line whose wording carries its openness and never renders an
 unknown as a number: `$0.00` only where priced rows evidenced that zero,
 `up to $1.20` while the tracked subtotal is inexact, `Tracked: $1.20` when part
 of the same scope has no price (`Tracked: up to $1.20` when that subtotal is
-inexact too), and `Cost unknown` for unpriced rows with no tracked amount. An
+inexact too), `Cost pending` while accounting is open without a tracked amount,
+and `Cost not priced` once settled usage has no tracked price. An
 empty, intact ledger has no money line; an empty view with an integrity gap
 stays unknown; neither proves a free result. The chip's short word (`Sending`,
 `Queued`) and `Tracked:` are explained in the card's details (exact phase;
