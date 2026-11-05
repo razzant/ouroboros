@@ -166,7 +166,7 @@ def test_node_lane_uses_the_shared_worker_budget(run_tests, monkeypatch):
     monkeypatch.setattr(run_tests, "_workers", lambda: 3)
     monkeypatch.setattr(run_tests, "_run", lambda label, argv, cwd: seen.append(argv) or 0)
     assert run_tests._node_lane() == 0
-    assert seen == [["node", "--test", "--test-concurrency=3", "tests/one.test.js"]]
+    assert seen == [["node", "--test", "--test-timeout=300000", "--test-concurrency=3", "tests/one.test.js"]]
 
 
 def test_empty_lane_with_cleanup_error_makes_the_battery_red(run_tests, monkeypatch, capsys):

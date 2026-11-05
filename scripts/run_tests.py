@@ -186,7 +186,9 @@ def _node_lane() -> int:
         print(f"\n=== node: NOT_RUN — {found}; the web lane needs node >= {floor}, so this is not the full "
               "battery: install node or pass focused targets", flush=True)
         return 1
-    return _run("node", [node, "--test", f"--test-concurrency={_workers()}", *files], REPO / WEB_DIR)
+    from ouroboros.preflight_node import NODE_TEST_TIMEOUT_FLAG
+
+    return _run("node", [node, "--test", NODE_TEST_TIMEOUT_FLAG, f"--test-concurrency={_workers()}", *files], REPO / WEB_DIR)
 
 
 def _selected(args, evidence) -> int:

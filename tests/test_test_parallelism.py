@@ -196,7 +196,8 @@ def test_local_node_lane_uses_the_same_cpu_and_memory_budget(tmp_path, monkeypat
     calls = []
     monkeypatch.setattr(runner, "_run", lambda label, argv, cwd: calls.append((argv, cwd)) or 0)
     assert runner._node_lane() == 0
-    assert calls == [(["/fake/node", "--test", "--test-concurrency=3", "tests/a.test.js", "tests/b.test.js"],
+    assert calls == [(["/fake/node", "--test", "--test-timeout=300000", "--test-concurrency=3", "tests/a.test.js",
+                       "tests/b.test.js"],
                       runner.REPO / "web")]
 
 
