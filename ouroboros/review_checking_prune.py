@@ -61,6 +61,7 @@ from ouroboros.unindexed import unindexed
 from ouroboros.workspace_preflight import SESSION_SCRATCH_DIRNAME
 
 _PASS_LOCK = threading.Lock()
+_PSEUDO_SEAT_OWNERS = frozenset({"api_skill_review", "marketplace_install"})
 
 
 def seat_scratch_released(data_root: Any, key: str) -> bool:
@@ -119,6 +120,23 @@ def _copy_run_state(data_root: Any, task_id: str, area: pathlib.Path, created_at
         if start is not None and cap > 0:
             ends.append(start + timedelta(seconds=cap))
     return (True if own else None), (not ends or min(ends) > utc_now())
+
+
+def _seat_proven_over(data_root: Any, task_id: str, home: pathlib.Path, live: Any) -> bool:
+    """Use a pseudo owner's seat proof when no task row can prove it over."""
+    if task_id not in _PSEUDO_SEAT_OWNERS:
+        from ouroboros.subagent_worktrees import _task_proven_over
+
+        return _task_proven_over(task_id, data_root, live)
+    try:
+        marker = json.loads((home / "checking.json").read_text(encoding="utf-8"))
+        for area in (home / "area", home / "area.noindex"):
+            over, _window = _copy_run_state(data_root, task_id, area, marker.get("created_at"))
+            if over is True:
+                return True
+        return False
+    except Exception:
+        return False
 
 
 def _checkout_entries(base: pathlib.Path) -> list:
@@ -313,7 +331,7 @@ def finished_seat_homes(data_root: Any, live: Callable[[str], Any], stopped: Cal
             found.append((home, "unreadable", ""))
             continue
         if task_id not in proven:
-            proven[task_id] = _task_proven_over(task_id, data_root, live)
+            proven[task_id] = _seat_proven_over(data_root, task_id, home, live)
         bare = proven[task_id] and not _checking_area_present(unindexed(home, "area"))  # its copy is gone
         if causes is not None and not bare:
             causes[home] = _seat_hold_cause(home, proven[task_id])
@@ -327,8 +345,6 @@ def finished_home_held(data_root: Any, home: pathlib.Path, live: Callable[[str],
     """HOME under its seat lock (a thread seat's is its thread's; never waits): yields ``""`` while the home
     is still finished (its copy gone, its task proven over), else ``busy`` or ``in_use``; the lock is held
     until the caller's block ends, so no worker prepares, refreshes or captures it meanwhile."""
-    from ouroboros.subagent_worktrees import _task_proven_over
-
     marker = json.loads((home / "checking.json").read_text(encoding="utf-8"))
     task_id, thread = str(marker.get("task_id") or ""), str(marker.get("thread_seat") or "")
     with _seat_locked(seat_dir(data_root, task_id, f"thread:{thread}") if thread else home, wait=False) as held:
@@ -338,7 +354,7 @@ def finished_home_held(data_root: Any, home: pathlib.Path, live: Callable[[str],
             yield "busy"
             return
         if task_id not in proven:
-            proven[task_id] = _task_proven_over(task_id, data_root, live)
+            proven[task_id] = _seat_proven_over(data_root, task_id, home, live)
         if causes is not None and (_checking_area_present(unindexed(home, "area")) or not proven[task_id]):
             causes[home] = _seat_hold_cause(home, proven[task_id])
         yield "in_use" if _checking_area_present(unindexed(home, "area")) or not proven[task_id] else ""
@@ -350,16 +366,14 @@ def retire_seat_home(data_root: Any, home: pathlib.Path, live: Callable[[str], A
     over before the owner's keep gate (the probe takes the supervisor's queue lock, which drive settlement
     holds while it waits for custody); inside, only the recorded terminal status is read again."""
     from ouroboros.body_candidate import _recorded_terminal
-    from ouroboros.subagent_worktrees import _task_proven_over
-
     marker = json.loads((home / "checking.json").read_text(encoding="utf-8"))
     task_id = str(marker.get("task_id") or "")
     if task_id not in proven:
-        proven[task_id] = _task_proven_over(task_id, data_root, live)
+        proven[task_id] = _seat_proven_over(data_root, task_id, home, live)
     with gate(data_root, task_id, timeout_sec=0) as kept:  # outside the seat lock's file: it covers the move too
         if kept:
             return kept
-        if proven[task_id] and not _recorded_terminal(task_id, data_root):
+        if proven[task_id] and task_id not in _PSEUDO_SEAT_OWNERS and not _recorded_terminal(task_id, data_root):
             return "in_use"  # continued since it was proven over: no stale proof deletes it
         with finished_home_held(data_root, home, live, proven) as why:
             if why:
@@ -546,13 +560,14 @@ def prune_review_checkouts(data_root: Any, live_task_ids: Any, *, views_since: O
                 if views:
                     report["errors"].append(f"{home.name}: the seat home is a link")
                 return set()
-            if not views and not _checking_area_present(area) and not os.path.lexists(home / SESSION_SCRATCH_DIRNAME):
-                return set()  # a periodic pass reads only seats that still hold a copy or a scratch record
             try:
                 marker = json.loads((home / "checking.json").read_text(encoding="utf-8"))
                 thread, task_id = marker.get("thread_seat"), marker.get("task_id")
             except (OSError, ValueError, AttributeError):
                 thread, task_id = "", ""
+            if not views and not _checking_area_present(area) and not os.path.lexists(home / SESSION_SCRATCH_DIRNAME) \
+                    and task_id not in _PSEUDO_SEAT_OWNERS:
+                return set()  # a periodic pass reads only seats that still hold a copy or a scratch record
             lock_home = seat_dir(data_root, task_id, f"thread:{thread}") if thread else home
             with _seat_locked(lock_home, wait=False) as held:  # same owner for active and relocated thread turns
                 if not held:  # a worker is changing it; the views it needs are read in a later pass

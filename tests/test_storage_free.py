@@ -875,6 +875,40 @@ def test_leftover_listing_is_pure_and_a_run_re_checks_each_item(tmp_path, monkey
     assert seats["done"].is_dir() and second.is_dir()
 
 
+@pytest.mark.parametrize("state", ["done", "live", "unknown"])
+def test_pseudo_owner_seat_homes_use_their_own_proof_in_free(tmp_path, monkeypatch, state):
+    """Pseudo owners have no task row: a settled seat run is offered and retired, while a live or unknown
+    seat proof remains held even after its copy is gone."""
+    from ouroboros import delegate_custody_current as current
+
+    root = tmp_path / state / "data"
+    root.mkdir(parents=True)
+    task_id = "api_skill_review" if state != "unknown" else "marketplace_install"
+    home = _seat(root, task_id, f"op-{state}", area=True)
+    area = home / "area"
+    marker = json.loads((home / "checking.json").read_text(encoding="utf-8"))
+    marker["created_at"] = "2020-01-01T00:00:00+00:00"
+    (home / "checking.json").write_text(json.dumps(marker), encoding="utf-8")
+    area.rmdir()
+    if state == "unknown":
+        snapshot = {"runs": {}, "pending": []}
+    else:
+        snapshot = {"runs": {"run": SimpleNamespace(
+            execution_root=str(area), terminal_state="succeeded" if state == "done" else "",
+            started_ts=marker["created_at"], max_seconds=0)}, "pending": []}
+    monkeypatch.setattr(current, "task_snapshot", lambda _root, _task_id: snapshot)
+    _fake_sizer(monkeypatch)
+    owner = _owner({}, offered=("review_evidence",))
+    view = _preview(owner, root, tmp_path)
+    evidence = _group(view, "review_evidence")
+    if state == "done":
+        assert [item["id"] for item in evidence["items"]] == [f"seat:{home.name}"] and evidence["in_use"] == 0
+        run = _run(owner, root, tmp_path, groups=("review_evidence",))["run"]
+        assert run["removed"] + run["deleting"] == 1 and not home.exists()
+    else:
+        assert evidence["items"] == [] and evidence["in_use"] == 1 and home.is_dir()
+
+
 @pytest.mark.parametrize("state", ["readable", "unreadable"])
 def test_the_checkout_run_reads_the_review_state_once_and_unknown_custody_keeps_every_checkout(tmp_path, monkeypatch, state):
     """The run's own listing reads the review state, and the markerless fallback one more time, not once per

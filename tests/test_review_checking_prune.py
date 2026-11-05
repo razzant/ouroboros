@@ -50,10 +50,11 @@ def test_only_positive_evidence_releases_a_copy(tmp_path, monkeypatch):
     running, pending, done, unknown = (_seat(root, source, f"op-{name}")
                                        for name in ("running", "pending", "done", "unknown"))
     skill = _seat(root, source, "op-skill", task="api_skill_review")  # an owner that is never a live task
-    _custody(monkeypatch, running=[running, skill], pending=[pending], settled=[done])
+    skill_done = _seat(root, source, "op-skill-done", task="api_skill_review")
+    _custody(monkeypatch, running=[running, skill], pending=[pending], settled=[done, skill_done])
     report = rp.prune_review_checkouts(root, set())
-    assert running.is_dir() and pending.is_dir() and skill.is_dir() and unknown.is_dir() and not done.exists()
-    assert (report["released"], report["errors"]) == (1, [])
+    assert running.is_dir() and pending.is_dir() and skill.is_dir() and unknown.is_dir() and not done.exists() and not skill_done.exists()
+    assert (report["released"], report["errors"]) == (2, [])
     receipt = rc._receipt(root, TASK, "op-done")
     assert receipt["status"] == "retained"
     assert (Path(receipt["evidence_dir"]) / "files" / "check.py").read_bytes() == EDIT
