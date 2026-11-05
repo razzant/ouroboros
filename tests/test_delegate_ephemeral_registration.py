@@ -278,7 +278,7 @@ def test_a_delegated_plan_thread_on_a_minted_root_is_ephemeral_from_the_thread_f
 
     request = {"scope": {"kind": "project", "root": "/w/copy", **scope}, "mode": "plan", "access": "readonly"}
     engine = Engine()
-    for version, allowed in [("5.0.1", False), ("5.1.0", False), (config.CLAUDEXOR_EPHEMERAL_THREAD_MIN_VERSION, True)]:
+    for version, allowed in [("5.0.1", False), ("5.0.2", False), (config.CLAUDEXOR_EPHEMERAL_THREAD_MIN_VERSION, True)]:
         engine.engine_version = version
         assert bind_thread(engine, request, SimpleNamespace(route_id="r", profile_id=""), "inv-1") == {
             "thread_id": "thread-1"}
