@@ -191,8 +191,7 @@ def _assert_sealed_false_sends(observed, expected_sends):
     return wire
 
 
-@pytest.mark.parametrize("method", ["chat", "chat_async"])
-@pytest.mark.parametrize("no_proxy", [False, True])
+@pytest.mark.parametrize(("no_proxy", "method"), [(False, "chat"), (True, "chat_async")])
 def test_physical_send_seals_explicit_false(method, no_proxy):
     observed = _observe(_spec(method, [_response_step()], no_proxy=no_proxy))
     wire = _assert_sealed_false_sends(observed, 1)

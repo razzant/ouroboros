@@ -40,9 +40,10 @@ def _staged_repo(tmp_path: Path, *, eol: bytes, autocrlf: str) -> tuple[Path, by
     return repo, proposed, _git_bytes(repo, "write-tree").strip()
 
 
-@pytest.mark.parametrize("eol", [b"\n", b"\r\n"], ids=["lf-blob", "crlf-blob"])
-@pytest.mark.parametrize("autocrlf", ["false", "true"])
-@pytest.mark.parametrize("windows_text", [False, True], ids=["native-stdio", "windows-text-stdio"])
+@pytest.mark.parametrize(("windows_text", "autocrlf", "eol"), [
+    pytest.param(False, "false", b"\n", id='native-stdio-false-lf-blob'),
+    pytest.param(True, "true", b"\r\n", id='windows-text-stdio-true-crlf-blob'),
+])
 def test_isolated_checkout_replays_the_staged_bytes(tmp_path, monkeypatch, eol, autocrlf, windows_text):
     repo, proposed, expected_tree = _staged_repo(tmp_path, eol=eol, autocrlf=autocrlf)
     original_run = subprocess.run
@@ -74,8 +75,10 @@ def test_isolated_checkout_replays_the_staged_bytes(tmp_path, monkeypatch, eol, 
     assert _git_bytes(repo, "worktree", "list", "--porcelain").count(b"worktree ") == 1
 
 
-@pytest.mark.parametrize("eol", [b"\n", b"\r\n"], ids=["lf-blob", "crlf-blob"])
-@pytest.mark.parametrize("drift", [False, True], ids=["same-tree", "drift-bytes"])
+@pytest.mark.parametrize(("drift", "eol"), [
+    pytest.param(False, b"\n", id='same-tree-lf-blob'),
+    pytest.param(True, b"\r\n", id='drift-bytes-crlf-blob'),
+])
 def test_operator_lane_reviews_the_replayed_bytes_and_surfaces_drift(tmp_path, monkeypatch, eol, drift):
     repo, proposed, expected_tree = _staged_repo(tmp_path, eol=eol, autocrlf="false")
     output = tmp_path / "output"

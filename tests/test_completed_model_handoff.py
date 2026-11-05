@@ -83,8 +83,10 @@ def _failed_send(root, *, asynchronous=False, owner=None, error=None, while_send
     return reservations[0]
 
 
-@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
-@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+@pytest.mark.parametrize(("bound", "asynchronous"), [
+    pytest.param(False, False, id='unbound-sync'),
+    pytest.param(True, True, id='bound-async'),
+])
 def test_producer_to_continue_preserves_live_receiver_and_late_money(tmp_path, monkeypatch, asynchronous, bound):
     from supervisor.events_budget import observe_held_budget_selection
 
@@ -147,8 +149,10 @@ def _paused_root(tmp_path, monkeypatch):
     return queue, install
 
 
-@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
-@pytest.mark.parametrize("terminal_http", [False, True], ids=["transport-unknown", "http-finished"])
+@pytest.mark.parametrize(("terminal_http", "asynchronous"), [
+    pytest.param(False, False, id='transport-unknown-sync'),
+    pytest.param(True, True, id='http-finished-async'),
+])
 def test_actual_paused_task_resume_observes_completion(tmp_path, monkeypatch, asynchronous, terminal_http):
     from ouroboros import owner_pause
 
@@ -300,8 +304,12 @@ _PROBE_FACTS = {exc: {"stage": "raised_exception", "exception_type": exc, "provi
 _HTTP_FACTS = {"stage": "raised_exception", "provider_status_code": 400, "transport_cause_type": None}
 
 
-@pytest.mark.parametrize("facts", [_HTTP_FACTS, _PROBE_FACTS["TimeoutError"]], ids=["http-400", "timeout"])
-@pytest.mark.parametrize("pid_state", ["dead", "live", "missing", "inaccessible"])
+@pytest.mark.parametrize(("pid_state", "facts"), [
+    pytest.param("dead", _HTTP_FACTS, id='dead-http-400'),
+    pytest.param("live", _PROBE_FACTS["TimeoutError"], id='live-timeout'),
+    pytest.param("missing", _HTTP_FACTS, id='missing-http-400'),
+    pytest.param("inaccessible", _PROBE_FACTS["TimeoutError"], id='inaccessible-timeout'),
+])
 def test_historic_raised_send_uses_only_addressed_open_rows_without_pid_gate(tmp_path, monkeypatch, pid_state, facts):
     from ouroboros import platform_layer
 

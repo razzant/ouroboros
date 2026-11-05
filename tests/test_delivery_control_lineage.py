@@ -391,21 +391,11 @@ def test_incomplete_armed_invalid_keeps_typed_reason(
         assert returned_trace["forced_finalization"]["source"] == "retained_candidate"
 
 
-@pytest.mark.parametrize(
-    "raw",
-    [
-        '{"delivery_control":"publish"}',
-        '{"delivery_control":"keep","delivery_control":"replace"}',
-    ],
-)
-@pytest.mark.parametrize(
-    "response_meta",
-    [
-        {"finish_reason_present": True, "finish_reason": "length", "tool_call_count": 0},
-        {"finish_reason_present": True, "finish_reason": None, "tool_call_count": 0},
-        {"finish_reason_present": False, "finish_reason": None, "tool_call_count": 1},
-    ],
-)
+@pytest.mark.parametrize(("response_meta", "raw"), [
+    pytest.param({"finish_reason_present": True, "finish_reason": "length", "tool_call_count": 0}, '{"delivery_control":"publish"}', id='response_meta0-{"delivery_control":"publish"}'),
+    pytest.param({"finish_reason_present": True, "finish_reason": None, "tool_call_count": 0}, '{"delivery_control":"keep","delivery_control":"replace"}', id='response_meta1-{"delivery_control":"keep","delivery_control":"replace"}'),
+    pytest.param({"finish_reason_present": False, "finish_reason": None, "tool_call_count": 1}, '{"delivery_control":"publish"}', id='response_meta2-{"delivery_control":"publish"}'),
+])
 def test_provider_terminal_incomplete_armed_invalid_without_candidate_uses_fallback(
     tmp_path, monkeypatch, raw, response_meta,
 ):

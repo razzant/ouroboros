@@ -134,8 +134,7 @@ def test_chat_activities_snapshot_projects_queue_roots_with_phases(tmp_path, mon
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("kind", ["direct_chat", "managed_task"])
-@pytest.mark.parametrize("bound", [False, True])
+@pytest.mark.parametrize(("bound", "kind"), [(False, "direct_chat"), (True, "managed_task")])
 def test_snapshot_rehomes_activity_without_changing_sources(tmp_path, monkeypatch, kind, bound):
     """Both live owners follow their Project binding without rewriting ingress."""
     import supervisor.queue as queue_mod

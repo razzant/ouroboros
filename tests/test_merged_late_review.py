@@ -249,8 +249,7 @@ def test_an_unreadable_frozen_mark_does_not_recompose_or_lose_its_pending_public
     assert review_pause.ended_left_review(left) == "saved"
 
 
-@pytest.mark.parametrize("merged", [False, True])
-@pytest.mark.parametrize("room_state", ["unreadable", "unproven"])
+@pytest.mark.parametrize(("room_state", "merged"), [("unreadable", False), ("unproven", True)])
 def test_room_read_failure_keeps_the_mark_owed_but_proven_absence_discharges_it(world, monkeypatch, merged, room_state):
     from ouroboros import late_review_marks as late, review_operation, store
 

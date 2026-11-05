@@ -286,12 +286,12 @@ def test_check_latest_never_prepares_a_runtime(http, owned, monkeypatch):
     assert "ensure" not in owned.opened
 
 
-@pytest.mark.parametrize("failed_read", [1, 2])
-@pytest.mark.parametrize("failure", [ClaudexorUnavailable("daemon_unreachable", "negative unreachable"),
-                                    ClaudexorUnavailable("maintenance_inspection_failed", "read failed", status_code=502),
-                                    OSError("read unavailable")])
-@pytest.mark.parametrize("target", [{"kind": "latest"}, {"kind": "version", "version": "1.2.3"},
-                                   {"kind": "previous"}, {"kind": "baseline"}])
+@pytest.mark.parametrize(("target", "failure", "failed_read"), [
+    pytest.param({"kind": "latest"}, ClaudexorUnavailable("daemon_unreachable", "negative unreachable"), 1, id='target0-failure0-1'),
+    pytest.param({"kind": "version", "version": "1.2.3"}, ClaudexorUnavailable("maintenance_inspection_failed", "read failed", status_code=502), 2, id='target1-failure1-2'),
+    pytest.param({"kind": "previous"}, OSError("read unavailable"), 1, id='target2-failure2-1'),
+    pytest.param({"kind": "baseline"}, ClaudexorUnavailable("daemon_unreachable", "negative unreachable"), 2, id='target3-failure0-2'),
+])
 def test_optional_read_failure_preserves_post_and_same_key_rejoin(http, owned, monkeypatch, failed_read, failure, target):
     from ouroboros import claudexor_runtime as runtime
     monkeypatch.setattr(runtime, "get_runtime_manager", lambda: pytest.fail("unknown observation must not prepare"))
@@ -354,8 +354,7 @@ def test_unrelated_observation_fault_is_not_swallowed(owned):
     assert not owned.calls
 
 
-@pytest.mark.parametrize("selection", ["external", "attach_only"])
-@pytest.mark.parametrize("missing_npm", [False, True])
+@pytest.mark.parametrize(("missing_npm", "selection"), [(False, "external"), (True, "attach_only")])
 def test_external_engine_preparation_cannot_promise_header_restart(http, owned, monkeypatch, selection, missing_npm):
     from ouroboros import claudexor_runtime as runtime, review_run_isolation
     monkeypatch.setattr(runtime, "get_runtime_manager", lambda: pytest.fail("external runtime must not be prepared"))

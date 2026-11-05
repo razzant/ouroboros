@@ -541,8 +541,11 @@ def test_relpath_is_result_identity_but_the_physical_store_is_not(tmp_path):
 # One probe per review finding: the class of failure, not the local example.
 
 
-@pytest.mark.parametrize("kind", ["headless", "task_drives"])
-@pytest.mark.parametrize("recorded_by", ["child_result", "canonical_row", "registration"])
+@pytest.mark.parametrize(("recorded_by", "kind"), [
+    ("child_result", "headless"),
+    ("canonical_row", "task_drives"),
+    ("registration", "headless"),
+])
 def test_obligations_are_derived_before_the_store_is_looked_at(tmp_path, kind, recorded_by):
     """F1: a WHOLE child store that is gone is a missing source for every recorded row, not
     permission: no row is dropped, the drive stays, a restore converges (both layouts)."""

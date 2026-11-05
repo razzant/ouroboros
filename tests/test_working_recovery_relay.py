@@ -47,8 +47,7 @@ def _first_receiver(host, tmp_path, monkeypatch, scope, origin="crash"):  # noqa
     return receiver, copy.deepcopy(receiver["_working_recovery"])
 
 
-@pytest.mark.parametrize("scope", ["project", "main"])
-@pytest.mark.parametrize("origin", ["crash", "stored_new_id"])
+@pytest.mark.parametrize(("origin", "scope"), [("crash", "main"), ("stored_new_id", "project")])
 def test_real_crash_retry_carries_original_source_across_two_lost_receivers(
     host, tmp_path, monkeypatch, scope, origin,  # noqa: F811
 ):

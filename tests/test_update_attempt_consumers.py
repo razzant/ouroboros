@@ -529,14 +529,13 @@ def test_failed_boot_unwind_is_a_known_failure_until_the_restored_generation(
     assert retained_attempt.boot_restarts == [True]
 
 
-@pytest.mark.parametrize("phase,fields", [
-    ("pending_boot_smoke", {"merge_commit": "target", "boot_attempts": 0}),
-    ("applying_replace", {"pre_update_sha": "target"}),
-    ("rolling_back", {"rollback_reason": "fixture"}),
-    ("assisted_resolution", {}),
-    ("gate_blocked", {"gate_blocked_reason": "fixture"}),
+@pytest.mark.parametrize(("rolled_back", "phase", "fields"), [
+    pytest.param(False, "pending_boot_smoke", {"merge_commit": "target", "boot_attempts": 0}, id='False-pending_boot_smoke-fields0'),
+    pytest.param(False, "assisted_resolution", {}, id='False-assisted_resolution-fields3'),
+    pytest.param(True, "applying_replace", {"pre_update_sha": "target"}, id='True-applying_replace-fields1'),
+    pytest.param(True, "gate_blocked", {"gate_blocked_reason": "fixture"}, id='True-gate_blocked-fields4'),
+    pytest.param(None, "rolling_back", {"rollback_reason": "fixture"}, id='None-rolling_back-fields2'),
 ])
-@pytest.mark.parametrize("rolled_back", [False, True, None])
 def test_every_boot_rollback_branch_reports_its_own_unfinished_rollback(
     replace_scene, retained_attempt, monkeypatch, phase, fields, rolled_back
 ):

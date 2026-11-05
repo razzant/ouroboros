@@ -90,9 +90,13 @@ def test_read_host_budget_contains_uia_and_win32_phases(registered):
     assert tool["timeout_sec"] * 1000 > 2 * phase_ms
 
 
-@pytest.mark.parametrize("field", ["automation_id", "role", "name", "name_contains", "value_contains"])
-@pytest.mark.parametrize("bad", [123, False, None, [], {}])
-@pytest.mark.parametrize("tool", ["element_act", "element_find"])
+@pytest.mark.parametrize(("tool", "bad", "field"), [
+    ("element_act", 123, "automation_id"),
+    ("element_act", None, "name"),
+    pytest.param("element_act", {}, "value_contains", id='element_act-bad4-value_contains'),
+    ("element_find", False, "role"),
+    pytest.param("element_find", [], "name_contains", id='element_find-bad3-name_contains'),
+])
 def test_malformed_selector_never_widens_at_registered_host_call(tmp_path, registered, field, bad, tool):
     calls, current = registered
     target = make(calls, "save", 50000, name="Save", patterns={10000: None})

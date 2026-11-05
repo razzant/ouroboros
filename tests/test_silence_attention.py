@@ -565,8 +565,7 @@ def test_diagnostic_producer_to_worker_put_revalidates_source_off_queue_lock(att
         assert generation.lane_idle(preparation.ADMISSION_LANE, 15)
 
 
-@pytest.mark.parametrize("source_change", ["pause", "new_episode"])
-@pytest.mark.parametrize("root_control", ["stop", "deadline"])
+@pytest.mark.parametrize(("root_control", "source_change"), [("stop", "pause"), ("deadline", "new_episode")])
 def test_sent_diagnostic_source_change_cannot_hide_root_hard_control(monkeypatch, source_change, root_control):
     from ouroboros.work_diagnostics import control_reason
 

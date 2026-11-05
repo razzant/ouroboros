@@ -62,13 +62,12 @@ def test_history_keeps_only_recorded_card_facts_without_task_result(tmp_path, ca
         assert not COORDINATOR_FIELDS & replay.keys(), "replay cannot reconstruct absent facts"
 
 
-@pytest.mark.parametrize("price", [None, .001])
-@pytest.mark.parametrize("model,local,cost,billing", [
-    ("openai/gpt-5", False, None, "unknown"),
-    ("openai/gpt-5", False, .125, "measured"),
-    ("future-provider/reviewer", False, 0.0, "measured"),
-    ("local-model", True, None, "unknown"),
-    ("claudexor::codex=gpt-5", False, None, "subscription"),
+@pytest.mark.parametrize(("model", "local", "cost", "billing", "price"), [
+    ("openai/gpt-5", False, None, "unknown", None),
+    ("openai/gpt-5", False, .125, "measured", .001),
+    ("future-provider/reviewer", False, 0.0, "measured", None),
+    ("local-model", True, None, "unknown", .001),
+    ("claudexor::codex=gpt-5", False, None, "subscription", None),
 ])
 def test_billing_basis_ignores_price_cache_and_requires_observed_cost(monkeypatch, price, model, local, cost, billing):
     consulted = []

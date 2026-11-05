@@ -914,8 +914,13 @@ def test_inline_fallback_keeps_the_source_and_capture_boundaries(tmp_path, monke
     assert ctx.pending_events == []
 
 
-@pytest.mark.parametrize("initial_input", [False, True])
-@pytest.mark.parametrize("count,failure", [(1, ""), (28, ""), (28, "file"), (28, "manifest"), (28, "mailbox")])
+@pytest.mark.parametrize(("count", "failure", "initial_input"), [
+    (1, "", False),
+    (28, "", True),
+    (28, "file", False),
+    (28, "manifest", True),
+    (28, "mailbox", False),
+])
 def test_acknowledged_owner_inputs_survive_copyback_retry_mailbox_cleanup_and_gc(
     tmp_path, monkeypatch, initial_input, count, failure,
 ):

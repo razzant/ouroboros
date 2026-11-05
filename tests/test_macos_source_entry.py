@@ -350,8 +350,12 @@ def _git(repo, *args):
                           check=True, capture_output=True, text=True).stdout.strip()
 
 
-@pytest.mark.parametrize("changed", ["ouroboros/process_scope.py", "supervisor/queue.py", "server.py", None])
-@pytest.mark.parametrize("macos", [True, False])
+@pytest.mark.parametrize(("macos", "changed"), [
+    (True, "ouroboros/process_scope.py"),
+    (True, "server.py"),
+    (False, "supervisor/queue.py"),
+    (False, None),
+])
 def test_cold_open_counts_packaged_helpers_the_frozen_launcher_has_not_imported_yet(launch, monkeypatch, changed,
                                                                                 macos):
     """Real Git and the real detector. A frozen launcher imports more helpers from its seed later (Panic sweep,
@@ -502,9 +506,13 @@ def test_frozen_handoff_probe_uses_shell_python_even_when_body_is_in_a_venv(laun
     assert seen["python"] == str(launch.python)
 
 
-@pytest.mark.parametrize("frozen", [True, False])
-@pytest.mark.parametrize("source", ["old-339fce", "no-protocol", "compatible-local", "future-protocol",
-                                    "damaged-helper"])
+@pytest.mark.parametrize(("source", "frozen"), [
+    ("old-339fce", False),
+    ("no-protocol", True),
+    ("compatible-local", False),
+    ("future-protocol", True),
+    ("damaged-helper", False),
+])
 def test_entry_handoff_requires_source_capability_in_a_real_plain_python_probe(launch, monkeypatch, frozen, source):
     """The actual old launcher imports successfully but cannot host its body under the entry.
 

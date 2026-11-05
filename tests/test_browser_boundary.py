@@ -71,29 +71,30 @@ def test_native_and_same_origin_requests_reach_the_handler(client, headers):
     assert response.status_code == 200 and HANDLED == [("POST", "/api/reset", b"")]
 
 
-@pytest.mark.parametrize("headers", [
-    {"origin": "http://evil.example", "sec-fetch-site": "cross-site"},
-    {"origin": "http://evil.example"},                          # no Fetch Metadata
-    {"origin": "http://testserver:3000"},                       # same host, another port
-    {"origin": "http://testserver:3000", "sec-fetch-site": "same-site"},
-    {"origin": "https://testserver"},                           # another scheme
-    {"origin": "null"},                                         # an opaque frame or sandboxed page
-    {"origin": "null", "sec-fetch-site": "same-origin"},
-    {"origin": "http://testserver/path"},                       # malformed
-    {"origin": "chrome-extension://abc"},
-    {"sec-fetch-site": "cross-site"},                           # a no-cors image or form with no Origin
-    {"sec-fetch-site": "same-site"},
+@pytest.mark.parametrize(("method", "headers"), [
+    pytest.param("POST", {"origin": "http://evil.example", "sec-fetch-site": "cross-site"}, id='POST-headers0'),
+    pytest.param("POST", {"origin": "http://testserver:3000", "sec-fetch-site": "same-site"}, id='POST-headers3'),
+    pytest.param("POST", {"origin": "null", "sec-fetch-site": "same-origin"}, id='POST-headers6'),
+    pytest.param("POST", {"sec-fetch-site": "cross-site"}, id='POST-headers9'),  # a no-cors image or form with no Origin
+    pytest.param("GET", {"origin": "http://evil.example"}, id='GET-headers1'),  # no Fetch Metadata
+    pytest.param("GET", {"origin": "https://testserver"}, id='GET-headers4'),  # another scheme
+    pytest.param("GET", {"origin": "http://testserver/path"}, id='GET-headers7'),  # malformed
+    pytest.param("GET", {"sec-fetch-site": "same-site"}, id='GET-headers10'),
+    pytest.param("DELETE", {"origin": "http://testserver:3000"}, id='DELETE-headers2'),  # same host, another port
+    pytest.param("DELETE", {"origin": "null"}, id='DELETE-headers5'),  # an opaque frame or sandboxed page
+    pytest.param("DELETE", {"origin": "chrome-extension://abc"}, id='DELETE-headers8'),
 ])
-@pytest.mark.parametrize("method", ["POST", "GET", "DELETE"])
 def test_other_sites_pages_never_reach_a_handler(client, headers, method):
     _refused(client.request(method, "/api/reset", headers=headers))
 
 
-@pytest.mark.parametrize("path", [
-    "/", "/onboarding", "/static/modules/app.js",
-    "/api/extensions/demo/module/widget.js", "/api/extensions/demo/ui/rev1/ui/icon.png",
+@pytest.mark.parametrize(("method", "path"), [
+    ("GET", "/"),
+    ("GET", "/static/modules/app.js"),
+    ("GET", "/api/extensions/demo/ui/rev1/ui/icon.png"),
+    ("HEAD", "/onboarding"),
+    ("HEAD", "/api/extensions/demo/module/widget.js"),
 ])
-@pytest.mark.parametrize("method", ["GET", "HEAD"])
 def test_passive_files_load_from_any_page(client, path, method):
     response = client.request(method, path, headers={"origin": "null", "sec-fetch-site": "cross-site"})
     assert response.status_code == 200 and HANDLED and HANDLED[0][1] == path

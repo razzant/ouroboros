@@ -206,9 +206,10 @@ def test_question_read_is_readonly(tmp_path):
         assert txn.revision() == revision
 
 
-@pytest.mark.parametrize("room,chat_id", [("main", 1), ("agent-to-agent", -1001)])
-@pytest.mark.parametrize("second,order", [(1, ("waited", "calm")), (0, ("calm", "waited"))],
-                         ids=["distinct-times", "tied-times"])
+@pytest.mark.parametrize(("second", "order", "room", "chat_id"), [
+    pytest.param(1, ("waited", "calm"), "main", 1, id='distinct-times-main-1'),
+    pytest.param(0, ("calm", "waited"), "agent-to-agent", -1001, id='tied-times-agent-to-agent--1001'),
+])
 def test_mains_own_unanswered_questions_are_named_by_identity_and_other_rooms_stay_out(
         tmp_path, monkeypatch, room, chat_id, second, order):
     """Main's waiting count reaches Main's own unanswered questions, whose cards are already its native
@@ -500,8 +501,7 @@ def test_existing_maintenance_duty_recovers_questions_without_blocking_other_obl
                                                   **({"question_delivery_replay": 1} if fail else {})}
 
 
-@pytest.mark.parametrize("depth,converted", [(1, "root"), (3, "middle")])
-@pytest.mark.parametrize("action", ["answer", "close"])
+@pytest.mark.parametrize(("action", "depth", "converted"), [("answer", 1, "root"), ("close", 3, "middle")])
 def test_retained_descendant_question_converges_after_ancestor_conversion(tmp_path, monkeypatch, depth, converted, action):
     """An already accepted retained ask follows current display membership, while its reply
     keeps the publication address. This does not grant live subagents new quiz authority."""

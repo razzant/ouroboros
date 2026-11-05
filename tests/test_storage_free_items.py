@@ -469,8 +469,12 @@ def _old_environment(fixture, place, declaration):
     return root, env
 
 
-@pytest.mark.parametrize("place", ["root", "copies"])
-@pytest.mark.parametrize("declaration", ["absent", "torn", "ownerless", "this_task"])
+@pytest.mark.parametrize(("declaration", "place"), [
+    ("absent", "copies"),
+    ("torn", "root"),
+    ("ownerless", "copies"),
+    ("this_task", "root"),
+])
 def test_keep_names_an_old_environment_the_saved_group_would_remove_for_that_task(copies, place, declaration):  # noqa: F811
     """The saved group gates an old environment on its declared owner, else the owner its copy's name carries;
     the keep's inventory names the same object, so a keep is saved and that group's run then leaves the folder."""

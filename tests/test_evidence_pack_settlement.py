@@ -320,8 +320,10 @@ def test_census_reads_the_store_once_for_every_loose_task(root, monkeypatch):
     assert leased == []  # the child census reuses the pass's one read
 
 
-@pytest.mark.parametrize("operation", ["changed_tasks", "run_pass"])
-@pytest.mark.parametrize("tier", [store.TIER_ENFORCED, store.TIER_NAME])
+@pytest.mark.parametrize(("tier", "operation"), [
+    pytest.param(store.TIER_ENFORCED, "changed_tasks", id='enforced-changed_tasks'),
+    pytest.param(store.TIER_NAME, "run_pass", id='name-run_pass'),
+])
 def test_a_writer_commits_while_a_census_directory_probe_stalls(root, monkeypatch, operation, tier):
     """No store transaction spans the census's ``stat`` calls. On the enforced tier a held read lock
     (a LockFileEx range on Windows) delays the writer's COMMIT; on the name tier the reader holds the

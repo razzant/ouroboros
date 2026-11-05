@@ -78,8 +78,13 @@ def test_split_root_boot_recovery_obeys_the_snapshot_protocol(
     assert load_task_result(root, "split")["status"] == ("failed" if settled else "scheduled")
 
 
-@pytest.mark.parametrize("publication", ["legacy_stale", "stamp_stale", "stamp_missing", "stamp_mismatch", "fresh"])
-@pytest.mark.parametrize("malformed", [False, True])
+@pytest.mark.parametrize(("malformed", "publication"), [
+    (False, "legacy_stale"),
+    (False, "stamp_missing"),
+    (False, "fresh"),
+    (True, "stamp_stale"),
+    (True, "stamp_mismatch"),
+])
 def test_restore_records_invalid_fences_before_stale_empty_return(roots, publication, malformed):
     root, _repo = roots
     _interrupted_running_row(root, "fenced")

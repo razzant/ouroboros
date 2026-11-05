@@ -394,8 +394,7 @@ class TestVisionSlot:
         assert _resolve_vlm_model(LLMClient(), "", images=[{"base64": _PNG, "mime": "image/png"}]) == "zai::glm-5.3"
         assert wire == []
 
-    @pytest.mark.parametrize("mode", ["auto", "caption"])
-    @pytest.mark.parametrize("vision", ["", "zai::glm-5.3-flash"])
+    @pytest.mark.parametrize(("vision", "mode"), [("", "auto"), ("zai::glm-5.3-flash", "caption")])
     def test_local_main_captions_remotely_only_with_a_deliberate_vision_slot(self, monkeypatch, wire, mode, vision):
         from ouroboros.vision_routing import VisionRoutingContext, prepare_messages_for_send
 

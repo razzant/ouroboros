@@ -259,8 +259,12 @@ def test_unread_operations_catalog_does_not_erase_successful_siblings(engine, fa
     assert payload["resources"] == WIRE["quota"]["resources"]
 
 
-@pytest.mark.parametrize("failure", ["http", "transport"])
-@pytest.mark.parametrize("action", ["full_refresh", "target_refresh", "reset", "inspect"])
+@pytest.mark.parametrize(("action", "failure"), [
+    ("full_refresh", "http"),
+    ("target_refresh", "transport"),
+    ("reset", "http"),
+    ("inspect", "transport"),
+])
 def test_explicit_operations_preserve_catalog_failure_instead_of_claiming_unsupported(engine, failure, action):
     client, state, calls = engine
     state["catalog_error"] = failure

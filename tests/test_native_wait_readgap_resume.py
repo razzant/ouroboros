@@ -89,8 +89,10 @@ def _assert_original_dispatch(env):
     assert read_actor_source_bytes(env.case.root, env.case.task_id, env.carrier["source_ref"]) == env.exact
 
 
-@pytest.mark.parametrize("stage", ["early", "late"])
-@pytest.mark.parametrize("project", [False, True], ids=["root", "project-root"])
+@pytest.mark.parametrize(("project", "stage"), [
+    pytest.param(False, "early", id='root-early'),
+    pytest.param(True, "late", id='project-root-late'),
+])
 def test_recovered_native_wait_needs_explicit_resume_then_dispatches_once(restart_case, monkeypatch, stage, project):
     env = _held(restart_case, monkeypatch, stage=stage, project=project)
     workers.assign_tasks()

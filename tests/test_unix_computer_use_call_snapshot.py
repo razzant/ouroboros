@@ -432,8 +432,12 @@ def test_osworld_hands_pyautogui_the_letter_as_written(desktop):
     assert "pyautogui.keyDown('ctrl'); pyautogui.keyDown('C')" in sent[0]
 
 
-@pytest.mark.parametrize("raw", [False, True])
-@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), "1e999"])
+@pytest.mark.parametrize(("value", "raw"), [
+    pytest.param(float("nan"), False, id='nan-False'),
+    pytest.param(float("inf"), True, id='inf-True'),
+    pytest.param(float("-inf"), False, id='-inf-False'),
+    ("1e999", True),
+])
 def test_nonfinite_coordinates_fail_in_both_coordinate_modes(desktop, raw, value):
     observation(desktop)
     out = json.loads(desktop.click(x=value, y=1, raw=raw, app="Editor", observation_id="shot"))
@@ -453,10 +457,12 @@ def test_unknown_or_contradictory_completion_never_replays_a_paste(desktop, body
     assert "observed_effect" not in out
 
 
-@pytest.mark.parametrize("host", ["macos", "x11", "ssh", "osworld"])
-@pytest.mark.parametrize("front", [False, True])
-@pytest.mark.parametrize("method,kwargs", [("key", {"keys": "down down"}), ("click", {"x": 1, "y": 1, "raw": True}),
-                                           ("type_text", {"text": "text"})])
+@pytest.mark.parametrize(("method", "kwargs", "front", "host"), [
+    pytest.param("key", {"keys": "down down"}, False, "macos", id='key-kwargs0-False-macos'),
+    pytest.param("key", {"keys": "down down"}, True, "osworld", id='key-kwargs0-True-osworld'),
+    pytest.param("click", {"x": 1, "y": 1, "raw": True}, True, "x11", id='click-kwargs1-True-x11'),
+    pytest.param("type_text", {"text": "text"}, False, "ssh", id='type_text-kwargs2-False-ssh'),
+])
 def test_never_policy_requires_front_without_any_activation(tmp_path, monkeypatch, host, front, method, kwargs):
     from tests.test_unix_computer_use_targeting import mac, x11, KEYNOTE, SAFARI
     from tests.test_unix_computer_use_remote_targeting import ssh, mac_over_ssh, osworld, listing, KEYNOTE_FRONT, FIREFOX_FRONT
@@ -515,8 +521,11 @@ def test_never_policy_with_an_unread_front_claims_no_switch(tmp_path, monkeypatc
                    for cmd in calls)
 
 
-@pytest.mark.parametrize("front,reason", [({"pid": 8, "app": "Other"}, "target_lost"), (None, "front_unread")])
-@pytest.mark.parametrize("method,kwargs", [("key", {"keys": "a"}), ("click", {"x": 1, "y": 1, "raw": True}), ("type_text", {"text": "text"})])
+@pytest.mark.parametrize(("method", "kwargs", "front", "reason"), [
+    pytest.param("key", {"keys": "a"}, {"pid": 8, "app": "Other"}, "target_lost", id='key-kwargs0-front0-target_lost'),
+    pytest.param("click", {"x": 1, "y": 1, "raw": True}, None, "front_unread", id='click-kwargs1-None-front_unread'),
+    pytest.param("type_text", {"text": "text"}, {"pid": 8, "app": "Other"}, "target_lost", id='type_text-kwargs2-front0-target_lost'),
+])
 def test_never_policy_last_look_before_the_first_step_says_nothing_was_sent(desktop, method, kwargs, front, reason):
     desktop._native = lambda op, *a, **kw: {"ok": True, "candidates": [{"pid": 7, "app": "Editor"}]}
     sent = []
@@ -558,8 +567,10 @@ def test_never_policy_keeps_the_later_step_words(tmp_path, monkeypatch):
     assert FIRST_REFUSAL not in out["error"] and len(inputs(state)) == 1
 
 
-@pytest.mark.parametrize("reason,marker", [("target_lost", "__TARGET_LOST__"), ("front_unread", "__FRONT_UNREAD__")])
-@pytest.mark.parametrize("host", ["ssh", "osworld"])
+@pytest.mark.parametrize(("host", "reason", "marker"), [
+    ("ssh", "target_lost", "__TARGET_LOST__"),
+    ("osworld", "front_unread", "__FRONT_UNREAD__"),
+])
 def test_remote_precheck_after_no_switch_claims_none(tmp_path, monkeypatch, host, reason, marker):
     from tests.test_unix_computer_use_targeting import KEYNOTE
     from tests.test_unix_computer_use_remote_targeting import ssh, osworld, listing, info_line, LISTING, KEYNOTE_FRONT

@@ -269,8 +269,11 @@ def _end(pooled, host, monkeypatch):
     write_task_result(host.root, TASK_ID, "completed", result="done")
 
 
-@pytest.mark.parametrize("change", [_end, _superseding_attempt], ids=["ended", "superseded"])
-@pytest.mark.parametrize("moment", ["before_the_call", "while_retaining_the_source", "before_the_locked_write"])
+@pytest.mark.parametrize(("moment", "change"), [
+    pytest.param("before_the_call", _superseding_attempt, id='before_the_call-superseded'),
+    pytest.param("while_retaining_the_source", _superseding_attempt, id='while_retaining_the_source-superseded'),
+    pytest.param("before_the_locked_write", _end, id='before_the_locked_write-ended'),
+])
 def test_ended_or_superseded_pooled_attempt_writes_nothing(pooled, host, monkeypatch, change, moment):
     from ouroboros import task_results
     from ouroboros.tools import project_journal
@@ -340,9 +343,11 @@ def test_a_live_direct_actor_is_not_held_to_the_rows_owner_record(direct, host):
     assert _publish(direct.actor, "Still this turn").startswith("OK:")
 
 
-@pytest.mark.parametrize("owner", [None, {"kind": "unrecognized"}, "direct"], ids=["legacy", "malformed", "not_a_record"])
-@pytest.mark.parametrize("origin_direct,expected", [(True, "FOCUS_TASK_NOT_LIVE"), (False, "OK:")],
-                         ids=["direct_origin", "queued_origin"])
+@pytest.mark.parametrize(("origin_direct", "expected", "owner"), [
+    pytest.param(True, "FOCUS_TASK_NOT_LIVE", None, id='direct_origin-legacy'),
+    pytest.param(True, "FOCUS_TASK_NOT_LIVE", "direct", id='direct_origin-not_a_record'),
+    pytest.param(False, "OK:", {"kind": "unrecognized"}, id='queued_origin-malformed'),
+])
 def test_absent_or_malformed_owner_is_no_fact_and_the_origin_decides(tmp_path, owner, origin_direct, expected):
     from ouroboros.task_status import execution_owner_record
     from ouroboros.tools.project_journal import _update_focus

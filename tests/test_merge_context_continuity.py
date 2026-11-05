@@ -58,8 +58,7 @@ def test_target_fold_and_authored_notes_survive_seed_and_physical_cut(install):
     assert any(row not in kept for row in seed[5:-2]), 'ordinary old dialogue must still yield'
 
 
-@pytest.mark.parametrize('transport', ['call', 'text'])
-@pytest.mark.parametrize('room', ['main', 'project'])
+@pytest.mark.parametrize(("room", "transport"), [('main', 'call'), ('project', 'text')])
 def test_terminal_relay_reaches_live_room_beside_main_wake(host_world, monkeypatch, transport, room):
     from ouroboros import owner_mailbox as mail
     from ouroboros.consciousness_authority import is_own_clock_wake

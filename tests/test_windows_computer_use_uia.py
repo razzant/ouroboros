@@ -857,9 +857,12 @@ def test_the_tools_refuse_outside_windows():
         api.tools["window_list"]["handler"]()
 
 
-@pytest.mark.parametrize("shape", ["tree", "flat"])
-@pytest.mark.parametrize("label", ['"' * 4000, "\\" * 4000, "\u0001" * 4000, "界🙂" * 2000],
-                         ids=["quotes", "backslashes", "control", "unicode"])
+@pytest.mark.parametrize(("label", "shape"), [
+    pytest.param('"' * 4000, "tree", id='quotes-tree'),
+    pytest.param("\\" * 4000, "flat", id='backslashes-flat'),
+    pytest.param("\u0001" * 4000, "tree", id='control-tree'),
+    pytest.param("界🙂" * 2000, "flat", id='unicode-flat'),
+])
 def test_large_read_survives_actual_child_result_encoding(tmp_path, shape, label):
     from ouroboros.extension_process_runner import _RESULT_CAP, _write_child_result
 

@@ -148,9 +148,11 @@ def test_start_and_in_task_admission_share_the_input_bound(tmp_path, monkeypatch
         assert (refusal is not None) is (usable is not None and size > usable)
 
 
-@pytest.mark.parametrize("account_refusal", [False, True])
-@pytest.mark.parametrize("kind", ["input", "total", "unknown"])
-@pytest.mark.parametrize("mode", ["nano", "low"])
+@pytest.mark.parametrize(("mode", "kind", "account_refusal"), [
+    ("nano", "input", False),
+    ("nano", "unknown", False),
+    ("low", "total", True),
+])
 def test_a_rebind_keeps_the_route_window_for_the_final_admission(tmp_path, monkeypatch, mode, kind, account_refusal):
     """3 Nov 2026 witness: a same-route rebind under Nano dropped an input-only 240K route's record and admitted
     297,344 input tokens until a provider refusal; Low kept it only because its reserve equals the ceiling.

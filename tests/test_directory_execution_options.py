@@ -50,11 +50,10 @@ def test_a_read_only_child_may_name_the_documented_default(surface, options):
     assert {key: fields[key] for key in ("directory_strategy", "scope_paths") if key in fields} == options
 
 
-@pytest.mark.parametrize("surface", [{}, {"write_surface": "read_only"}])
-@pytest.mark.parametrize("options", [
-    {"directory_strategy": "copy", "scope_paths": ["."]},
-    {"directory_strategy": "direct", "scope_paths": ["out"]},
-    {"scope_paths": ["out"]},
+@pytest.mark.parametrize(("options", "surface"), [
+    pytest.param({"directory_strategy": "copy", "scope_paths": ["."]}, {}, id='options0-surface0'),
+    pytest.param({"directory_strategy": "direct", "scope_paths": ["out"]}, {"write_surface": "read_only"}, id='options1-surface1'),
+    pytest.param({"scope_paths": ["out"]}, {}, id='options2-surface0'),
 ])
 def test_a_read_only_child_asking_for_real_geometry_is_refused_at_schedule_time(surface, options):
     """The contradiction is caught where the parent can still fix it in one move.

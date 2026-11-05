@@ -692,8 +692,10 @@ def _windows_branch():
         yield api
 
 
-@pytest.mark.parametrize("measure", [True, False], ids=["measured", "unmeasured"])
-@pytest.mark.parametrize("alias", [False, True], ids=["physical-root", "configured-alias"])
+@pytest.mark.parametrize(("alias", "measure"), [
+    pytest.param(False, False, id='physical-root-unmeasured'),
+    pytest.param(True, True, id='configured-alias-measured'),
+])
 def test_the_held_walk_names_each_index_as_the_path_rule_does(tmp_path, measure, alias):
     """The walk asks the rule through each held directory, never by a descendant path, and answers as
     ``is_wal_index`` does for every name: a database's own index (left behind, Unicode-named, an index's

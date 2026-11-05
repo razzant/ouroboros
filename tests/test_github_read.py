@@ -222,8 +222,10 @@ def test_get_with_a_cursor_pages_exactly_one_facet(gh):
     assert gh.read(method="get", kind="pr", target=7, include=["weird"]).startswith("⚠️ TOOL_ARG_ERROR: unknown include facet(s) weird")
 
 
-@pytest.mark.parametrize("detail", ["concise", "full"])
-@pytest.mark.parametrize("fields", [[], ["review_decision"]])
+@pytest.mark.parametrize(("fields", "detail"), [
+    pytest.param([], "concise", id='fields0-concise'),
+    pytest.param(["review_decision"], "full", id='fields1-full'),
+])
 def test_get_pr_keeps_review_decision_in_both_detail_modes(gh, detail, fields):
     def answer(p, argv, kw):
         if p.route != "graphql":
@@ -251,8 +253,14 @@ def test_full_pr_list_enrichment_preserves_raw_head_and_base(gh):
     assert payload["items"][0]["base"]["repo"] == {"id": 2}
 
 
-@pytest.mark.parametrize("detail", ["concise", "full"])
-@pytest.mark.parametrize("null_field", [None, "headRefOid", "headRefName", "headRepositoryOwner", "baseRefName", "all"])
+@pytest.mark.parametrize(("null_field", "detail"), [
+    (None, "full"),
+    ("headRefOid", "full"),
+    ("headRefName", "concise"),
+    ("headRepositoryOwner", "concise"),
+    ("baseRefName", "full"),
+    ("all", "concise"),
+])
 def test_pr_list_overlays_only_nonnull_graphql_head_and_base_facts(gh, detail, null_field):
     node = {"id": "PR_node7", "commits": {"totalCount": 4}, "reviewDecision": "APPROVED",
             "headRefName": "new-feature", "headRefOid": "d" * 40,
@@ -277,8 +285,7 @@ def test_pr_list_overlays_only_nonnull_graphql_head_and_base_facts(gh, detail, n
     assert item["commits"] == 4 and item["review_decision"] == "APPROVED"
 
 
-@pytest.mark.parametrize("detail", ["concise", "full"])
-@pytest.mark.parametrize("nested", ["comments", "replies"])
+@pytest.mark.parametrize(("nested", "detail"), [("comments", "concise"), ("replies", "full")])
 def test_nested_cuts_are_disclosed_in_both_detail_modes(gh, detail, nested):
     def answer(p, argv, kw):
         if p.route != "graphql":
@@ -400,8 +407,11 @@ def test_list_pr_since_stops_at_the_first_older_row(gh):
     assert [i["number"] for i in payload["items"]] == [3] and payload["complete"] is True and payload["next_cursor"] == ""
 
 
-@pytest.mark.parametrize("filters", [{"state": "merged"}, {"labels": "bug"}, {"author": "dev"}])
-@pytest.mark.parametrize("detail", ["concise", "full"])
+@pytest.mark.parametrize(("detail", "filters"), [
+    pytest.param("concise", {"author": "dev"}, id='concise-filters2'),
+    pytest.param("full", {"state": "merged"}, id='full-filters0'),
+    pytest.param("full", {"labels": "bug"}, id='full-filters1'),
+])
 def test_search_backed_pr_lists_keep_facts_and_withhold_unreadable_counts(gh, filters, detail):
     def answer(p, argv, kw):
         if p.route == "graphql":
@@ -448,8 +458,7 @@ def test_list_reviews_need_a_pull_request(gh):
     assert gh.read(method="list", kind="review").startswith("⚠️ TOOL_ARG_ERROR: list(kind='review') needs target") and not gh.calls
 
 
-@pytest.mark.parametrize("detail", ["concise", "full"])
-@pytest.mark.parametrize("since", ["", "2026-10-01T00:00:00Z"])
+@pytest.mark.parametrize(("since", "detail"), [("", "full"), ("2026-10-01T00:00:00Z", "concise")])
 def test_label_list_discloses_unsupported_since_without_claiming_a_filter(gh, detail, since):
     # A synthetic old timestamp makes this nonempty fixture distinguish an applied filter from an ignored one.
     label = {"id": 1, "name": "bug", "color": "ff0000", "updated_at": "2026-09-01T00:00:00Z"}

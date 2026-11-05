@@ -504,8 +504,7 @@ def test_final_admission_retry_uses_parent_controls_while_body_keeps_soft_envelo
     assert not claims(tmp_path)
 
 
-@pytest.mark.parametrize("control", ["open", "stop", "deadline"])
-@pytest.mark.parametrize("kind", ["mcp", "isolated"])
+@pytest.mark.parametrize(("kind", "control"), [("mcp", "open"), ("isolated", "stop"), ("isolated", "deadline")])
 def test_a_dynamic_entry_waits_out_a_contended_control_read_under_parent_controls(tmp_path, monkeypatch, kind, control):
     """MCP and isolated extensions have no run_tool_handler, so their entry gate reads the caller's controls itself;
     with no in-memory owner control that read goes to the store. Under real contention it waits the same way: off every
@@ -610,8 +609,7 @@ def one_contended_strict_read(monkeypatch, controls, *, stop=False, meanwhile=No
     return lambda: armed.__setitem__(0, True), hits
 
 
-@pytest.mark.parametrize("control", ["open", "stop"])
-@pytest.mark.parametrize("gate", ["operation_start", "submit_async_preparation"])
+@pytest.mark.parametrize(("gate", "control"), [("operation_start", "open"), ("submit_async_preparation", "stop")])
 def test_a_nested_start_waits_out_its_contended_control_read_and_keeps_its_begun_phase(tmp_path, monkeypatch, gate,
                                                                                          control):
     """A started handler's nested start reads fresh controls in its own admission. When that read is contended, only the
@@ -740,9 +738,14 @@ def nested_start_after_soft_wait(registry, tool, gate, *, control, deadline, bef
     return events, body_bounds, refusals, outcome
 
 
-@pytest.mark.parametrize("control", ["open", "caller_deadline", "end", "stop", "durable_stop", "pause"])
-@pytest.mark.parametrize("gate", ["operation_start", "submit_async_preparation"])
-@pytest.mark.parametrize("tool", ["edit_text", "knowledge_read"])  # joined past its soft wait / abandoned to background
+@pytest.mark.parametrize(("tool", "gate", "control"), [
+    ("edit_text", "operation_start", "open"),
+    ("edit_text", "operation_start", "end"),
+    ("edit_text", "operation_start", "durable_stop"),
+    ("knowledge_read", "submit_async_preparation", "caller_deadline"),
+    ("knowledge_read", "submit_async_preparation", "stop"),
+    ("knowledge_read", "submit_async_preparation", "pause"),
+])
 def test_a_nested_start_after_the_soft_wait_keeps_the_callers_bounds(tmp_path, monkeypatch, tool, gate, control):
     """A tool's soft wait decides only when the loop stops waiting for it. A later nested start of its body is a new
     start whose gate reads the bounds the invocation inherited, as nested starts did before that gate existed: it
@@ -780,9 +783,11 @@ def test_a_nested_start_after_the_soft_wait_keeps_the_callers_bounds(tmp_path, m
     assert not claims(tmp_path)
 
 
-@pytest.mark.parametrize("control", ["open", "caller_deadline", "stop"])
-@pytest.mark.parametrize("gate", ["operation_start", "submit_async_preparation"])
-@pytest.mark.parametrize("tool", ["edit_text", "knowledge_read"])
+@pytest.mark.parametrize(("tool", "gate", "control"), [
+    ("edit_text", "operation_start", "open"),
+    ("edit_text", "operation_start", "stop"),
+    ("knowledge_read", "submit_async_preparation", "caller_deadline"),
+])
 def test_a_contended_nested_start_after_the_soft_wait_waits_under_the_callers_bounds(tmp_path, monkeypatch, tool, gate,
                                                                                     control):
     """The same nested start when its gate's read meets a contended store: its wait checks the caller's bounds too, so

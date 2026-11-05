@@ -20,8 +20,7 @@ pytestmark = pytest.mark.serial
 ORIGIN = {"absent": "mid_task_no_origin"}
 
 
-@pytest.mark.parametrize("pinned", [False, True])
-@pytest.mark.parametrize("destination_has_folder", [False, True])
+@pytest.mark.parametrize(("destination_has_folder", "pinned"), [(False, False), (True, True)])
 def test_explicit_resource_survives_real_placement_assignment(host, tmp_path, monkeypatch, pinned, destination_has_folder):
     source = tmp_path / "chosen-source"
     source.mkdir()

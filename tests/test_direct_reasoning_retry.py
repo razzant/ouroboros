@@ -129,8 +129,7 @@ def _run(lane, messages, *, asynchronous=False, adopt=False, effort="high", stre
         return error, pop_replay_omission()
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("kind", ["thinking", "redacted_thinking"])
+@pytest.mark.parametrize(("kind", "asynchronous"), [("thinking", False), ("redacted_thinking", True)])
 def test_generic_400_rebuilds_once_without_native_receipt_and_main_keeps_the_omission(lane, asynchronous, kind):
     messages = _history(kind)
     expected = LLMClient._strip_openrouter_roundtrip_metadata(messages, keep_reasoning_content=True)

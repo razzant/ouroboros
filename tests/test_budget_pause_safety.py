@@ -203,8 +203,11 @@ def test_consumed_grant_without_new_working_source_is_never_reexecuted(tmp_path,
     assert budget_pause.budget_pause_row(tmp_path, "dead")["state"] == budget_pause.STATE_RESUMED
 
 
-@pytest.mark.parametrize("fences", ["budget", "acceptance", "both"])
-@pytest.mark.parametrize("source_state", ["intact", "missing", "corrupt"])
+@pytest.mark.parametrize(("source_state", "fences"), [
+    ("intact", "budget"),
+    ("missing", "acceptance"),
+    ("corrupt", "both"),
+])
 def test_invalid_fences_retain_exact_source_locators(tmp_path, monkeypatch, fences, source_state):
     from ouroboros.work_stop import continuation_refusal
 

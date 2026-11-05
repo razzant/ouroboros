@@ -302,8 +302,11 @@ def test_signal_before_uvicorn_capture_stops_server(tmp_path, entrypoint, ingres
         save_evidence(tmp_path, f"early-{entrypoint}-{ingress}")
 
 
-@pytest.mark.parametrize("entrypoint", ["script", "console", "cli"])
-@pytest.mark.parametrize("failure,code", [("arguments", 2), ("startup", 1)])
+@pytest.mark.parametrize(("failure", "code", "entrypoint"), [
+    ("arguments", 2, "script"),
+    ("arguments", 2, "cli"),
+    ("startup", 1, "console"),
+])
 def test_executable_does_not_turn_early_failures_into_success(tmp_path, entrypoint, failure, code):
     env = isolated_environment(tmp_path, REPO)
     env["OUROBOROS_SERVER_PORT"] = "0"

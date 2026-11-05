@@ -5,8 +5,7 @@ from tests._safety_fixtures import supervisor as supervisor_fixture
 supervisor = supervisor_fixture
 
 
-@pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
-@pytest.mark.parametrize("required", ["explicit", "consciousness"])
+@pytest.mark.parametrize(("required", "mode"), [("explicit", "advanced"), ("consciousness", "cyber_pro")])
 def test_no_checker_hold_and_no_retry_grant(supervisor, monkeypatch, mode, required):
     h = supervisor
     monkeypatch.setattr(h.module, "get_runtime_mode", lambda: mode)

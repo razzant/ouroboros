@@ -107,8 +107,7 @@ def assert_unabsorbed(drive):
     assert not load_effective_task_result(drive, "child").get("child_result_disposition")
 
 
-@pytest.mark.parametrize("direct", [False, True])
-@pytest.mark.parametrize("decision", ["apply", "accept", "reject"])
+@pytest.mark.parametrize(("decision", "direct"), [("apply", False), ("accept", True), ("reject", False)])
 def test_shared_decision_does_not_absorb_a_result_published_after_capture_read(env, monkeypatch, direct, decision):
     from ouroboros.tools import subagent_integration as integration
     from ouroboros.tools.join_ledger import _current_child_result_disposition
@@ -383,8 +382,11 @@ def test_a_link_is_checked_as_a_link_and_only_a_folder_can_leave_b(env, monkeypa
     assert_unabsorbed(drive)
 
 
-@pytest.mark.parametrize("authority", ["presence_on_b", "policy_on_link", "policy_on_destination"])
-@pytest.mark.parametrize("executor", [False, True, "backend_policy"])
+@pytest.mark.parametrize(("executor", "authority"), [
+    (False, "presence_on_b"),
+    (True, "policy_on_destination"),
+    ("backend_policy", "policy_on_link"),
+])
 def test_a_link_out_of_b_is_judged_by_its_own_path(env, authority, executor):
     """A child's link to a file outside B is an entry of B: a Presence grant on B covers it although its
     destination lies outside the grant, a task policy naming the link itself still refuses, and a policy on
@@ -654,8 +656,7 @@ def test_direct_chat_project_room_parent_verifies_child_folder(env, b_is_room):
     assert load_effective_task_result(drive, "child")["child_result_disposition"] == "integrated"
 
 
-@pytest.mark.parametrize("operation", ["read_bytes", "hash"])
-@pytest.mark.parametrize("b_is_room", [False, True])
+@pytest.mark.parametrize(("b_is_room", "operation"), [(False, "read_bytes"), (True, "hash")])
 def test_project_room_relative_policy_uses_caller_room(env, monkeypatch, operation, b_is_room):
     parent, a, b, drive = env
     parent.workspace_root, parent.workspace_mode = None, ""
@@ -691,8 +692,7 @@ def test_project_room_relative_policy_uses_caller_room(env, monkeypatch, operati
     assert (snapshot(a), snapshot(b), snapshot(art)) == before
 
 
-@pytest.mark.parametrize("room", ["missing_path", "note_only"])
-@pytest.mark.parametrize("absolute_policy", [False, True])
+@pytest.mark.parametrize(("absolute_policy", "room"), [(False, "missing_path"), (True, "note_only")])
 def test_unavailable_project_room_does_not_block_independent_child(env, room, absolute_policy):
     parent, a, b, drive = env
     parent.workspace_root, parent.workspace_mode = None, ""

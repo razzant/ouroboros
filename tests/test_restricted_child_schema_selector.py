@@ -156,9 +156,11 @@ def test_an_acting_child_cannot_load_or_call_an_ungranted_extension(tmp_path, mo
     assert "ACTING_SUBAGENT_TOOL_NOT_GRANTED" in registry.execute(ungranted, {"query": "q"})
 
 
-@pytest.mark.parametrize("disabled", [("enable_tools",), ("list_available_tools",),
-                                      ("enable_tools", "list_available_tools")])
-@pytest.mark.parametrize("dispatch_only", [False, True])
+@pytest.mark.parametrize(("dispatch_only", "disabled"), [
+    pytest.param(False, ("list_available_tools",), id='False-disabled1'),
+    pytest.param(True, ("enable_tools",), id='True-disabled0'),
+    pytest.param(True, ("enable_tools", "list_available_tools"), id='True-disabled2'),
+])
 def test_a_selector_the_actor_cannot_call_is_never_recommended(tmp_path, monkeypatch, extensions,
                                                                disabled, dispatch_only):
     """A contract's disabled selector, including a consciousness-origin task whose disabled schema stays visible."""

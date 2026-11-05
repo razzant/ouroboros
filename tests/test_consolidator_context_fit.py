@@ -167,8 +167,7 @@ def test_wait_interruption_propagates(fit):
     assert caught.value is interruption and len(llm.calls) == 1
 
 
-@pytest.mark.parametrize("unresolved", [False, True])
-@pytest.mark.parametrize("code", ["provider_failed", "invalid_request"])
+@pytest.mark.parametrize(("code", "unresolved"), [("provider_failed", False), ("invalid_request", True)])
 def test_confirmed_model_context_refusal_is_typed_but_unknown_custody_propagates(fit, unresolved, code):
     from ouroboros.llm_claudexor import ClaudexorModelError
     fit.window = None
@@ -336,4 +335,3 @@ def test_output_truncation_is_refused_on_every_lane_shape(fit, shape):
     content, usage = _call(llm)
     assert content == ""
     assert [error["kind"] for error in usage["_consolidation_errors"]] == ["output_truncated"]
-

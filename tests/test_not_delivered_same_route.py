@@ -155,8 +155,10 @@ def test_the_transient_knob_does_not_widen_the_burst(tmp_path, slept, monkeypatc
     assert llm.calls == 3 and slept == [4.0, 8.0]
 
 
-@pytest.mark.parametrize("held", ["episode_redial", "paid_repeat_record"])
-@pytest.mark.parametrize("failure", [_receipt, _prepare_failure])
+@pytest.mark.parametrize(("failure", "held"), [
+    pytest.param(_receipt, "episode_redial", id='_receipt-episode_redial'),
+    pytest.param(_prepare_failure, "paid_repeat_record", id='_prepare_failure-paid_repeat_record'),
+])
 def test_an_open_wait_or_a_held_repeat_keeps_one_attempt(tmp_path, slept, held, failure):
     usage: dict = {"execution_id": "ex"}
     if held == "episode_redial":

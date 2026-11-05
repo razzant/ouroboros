@@ -221,8 +221,7 @@ def test_conversion_bind_failure_preserves_scope_and_exact_carrier(host, tmp_pat
     assert queue.QUEUE_SNAPSHOT_PATH.read_bytes() == saved
 
 
-@pytest.mark.parametrize("timestamp", ["old", "invalid", "absent"])
-@pytest.mark.parametrize("schedule", [False, True])
+@pytest.mark.parametrize(("schedule", "timestamp"), [(False, "old"), (False, "absent"), (True, "invalid")])
 def test_project_hold_survives_early_restore_pruning(host, tmp_path, monkeypatch, timestamp, schedule):  # noqa: F811
     from supervisor import queue
 

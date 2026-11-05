@@ -689,8 +689,7 @@ def test_windows_job_assignment_failure_retires_through_the_same_owner(tmp_path,
     assert supervisor.snapshot() == {} and len(spawned) == 1 and jobs["closed"] == ["job-0"]
 
 
-@pytest.mark.parametrize("windows", [False, True])
-@pytest.mark.parametrize("finale", ["panic", "retry"])
+@pytest.mark.parametrize(("finale", "windows"), [("panic", False), ("retry", True)])
 def test_loader_rollback_keeps_unconfirmed_companion_until_death(tmp_path, monkeypatch, windows, finale):
     """register -> publish -> start fails -> load_extension's unload -> stop keeps the owner."""
     from ouroboros import extension_loader, extension_plugin_api

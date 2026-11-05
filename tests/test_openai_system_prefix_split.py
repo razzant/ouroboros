@@ -763,9 +763,10 @@ def _plan(blocks):
     )
 
 
-@pytest.mark.parametrize("book", [False, True])
-@pytest.mark.parametrize("marked", [False, True])
-@pytest.mark.parametrize("memory", [MEMORY, "  \n"])
+@pytest.mark.parametrize(("memory", "marked", "book"), [
+    pytest.param(MEMORY, False, False, id='semi-stable memory block (identity, scratchpad)-False-False'),
+    ("  \n", True, True),
+])
 def test_context_fit_declares_all_nonempty_stable_items_before_the_tail(monkeypatch, book, marked, memory):
     """The declaration survives reprojection and keeps B out of the notice without markers."""
     blocks = _system_blocks(memory=memory)

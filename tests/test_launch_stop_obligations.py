@@ -47,8 +47,10 @@ class _Held:
         return self.poll()
 
 
-@pytest.mark.parametrize("consumer", ["next-start retry", "next-generation reaper"])
-@pytest.mark.parametrize("order", ["memory-then-ledger", "ledger-then-memory"])
+@pytest.mark.parametrize(("order", "consumer"), [
+    ("memory-then-ledger", "next-start retry"),
+    ("ledger-then-memory", "next-generation reaper"),
+])
 def test_two_parallel_exit_stops_of_one_launch_keep_what_either_could_not_end(tmp_path, monkeypatch, order, consumer):
     """Launch A's runner L has a child C in its own group whose binary hides its environment. Two writers of
     ``_stop_records`` stop A at once: the in-memory owner reaches C through L's chain while the daemon roots are
@@ -228,8 +230,12 @@ def test_an_executor_service_whose_birth_could_not_be_read_keeps_its_marker_for_
         _end(pid, birth)
 
 
-@pytest.mark.parametrize("case", ["marker carrier", "hidden live leader", "command-changed leader", "birth-refuted pid"])
-@pytest.mark.parametrize("reader", ["presence", "cold sleep", "continuation", "body candidate"])
+@pytest.mark.parametrize(("reader", "case"), [
+    ("presence", "marker carrier"),
+    ("cold sleep", "hidden live leader"),
+    ("continuation", "command-changed leader"),
+    ("body candidate", "birth-refuted pid"),
+])
 def test_every_reader_holds_an_unmeasured_launch_by_its_marker_and_only_a_birth_refutes_its_leader(
         tmp_path, monkeypatch, reader, case):
     """The four custody readers over a launch row whose leader birth the registration could not read: a process

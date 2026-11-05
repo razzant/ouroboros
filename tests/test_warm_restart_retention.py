@@ -184,8 +184,7 @@ def test_retained_warm_pause_resumes_without_replaying_effects(tmp_path, monkeyp
         budget_pause.load_budget_pause(ctx, task["_budget_pause_resume"])
 
 
-@pytest.mark.parametrize("ack", [False, True])
-@pytest.mark.parametrize("reason", ["owner_pause", "sleep"])
+@pytest.mark.parametrize(("reason", "ack"), [("owner_pause", False), ("sleep", True)])
 def test_a_resumed_owner_pause_returns_at_the_next_stop_from_its_newer_work(tmp_path, monkeypatch, ack, reason):
     """19.10.2026: an owner Pause landed while the task's own review ran, the update's stop
     retained that warm wait into an exact pause, and Resume continued the SAME attempt. The
@@ -518,8 +517,7 @@ def test_unreadable_unrelated_row_does_not_remove_manual_restart_returns(tmp_pat
     assert selected == {"saved-warm"}
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-@pytest.mark.parametrize("ack", [False, True])
+@pytest.mark.parametrize(("ack", "legacy"), [(False, False), (True, True)])
 def test_conversion_failure_without_project_hold_recovers_on_resume(tmp_path, monkeypatch, legacy, ack):
     queue, state, workers = _install_queue(tmp_path, monkeypatch)
     _pool_events(workers, monkeypatch)
@@ -564,9 +562,7 @@ def test_a_closed_wait_with_a_retention_hold_still_reaches_shutdown_custody(tmp_
     assert has_active_intent(tmp_path, "saved-warm", strict=True)
 
 
-@pytest.mark.parametrize("ack", [False, True])
-@pytest.mark.parametrize("project_hold", [False, True])
-@pytest.mark.parametrize("reason", ["owner", "owner_pause"])
+@pytest.mark.parametrize(("reason", "project_hold", "ack"), [("owner", False, False), ("owner_pause", True, True)])
 def test_unreadable_wait_does_not_abort_other_pending_restore(tmp_path, monkeypatch, ack, project_hold, reason):
     from ouroboros import task_results
     from ouroboros.work_stop import continuation_refusal

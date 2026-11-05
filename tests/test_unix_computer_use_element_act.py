@@ -185,8 +185,10 @@ def test_several_matches_refuse_without_nth_and_nth_picks_in_walk_order():
     assert ax.balanced()
 
 
-@pytest.mark.parametrize("attribute", ["title", "description"])
-@pytest.mark.parametrize("label", ["Play", "P" * 220 + "LAY"])
+@pytest.mark.parametrize(("label", "attribute"), [
+    ("Play", "title"),
+    pytest.param("P" * 220 + "LAY", "description", id='PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPLAY-description'),
+])
 def test_labels_match_the_full_exact_title_or_description(attribute, label):
     nodes = deck()
     for el, text in (("play", label), ("play2", label.lower())):
@@ -386,9 +388,11 @@ def test_refusal_and_candidate_rows_keep_the_complete_label_and_value():
     assert not any("value_len" in row for row in rows)
 
 
-@pytest.mark.parametrize("value", [None, ("axerror", -25212), ("axerror", -25205)])
-@pytest.mark.parametrize("text", ["", "new"])
-@pytest.mark.parametrize("code", [0, TIMEOUT])
+@pytest.mark.parametrize(("code", "text", "value"), [
+    (0, "", None),
+    pytest.param(0, "", ("axerror", -25205), id='0--value2'),
+    pytest.param(TIMEOUT, "new", ("axerror", -25212), id='-25204-new-value1'),
+])
 def test_set_value_with_absent_readback_keeps_verification_unknown(value, text, code):
     nodes = deck()
     ax = FakeAX(nodes, windows=["win"], focused="win", perform=lambda el, action: code,

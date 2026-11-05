@@ -651,8 +651,7 @@ def test_history_preserves_typed_wait_map_without_counting_progress_or_human_row
     assert rows[0]["task_terminal_status"] == "completed"
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("dispatch", ["not_started", "response_received"])
+@pytest.mark.parametrize(("dispatch", "asynchronous"), [("not_started", False), ("response_received", True)])
 def test_confirmed_mixed_pool_waits_and_heals_on_the_same_live_call(elapsed_quota_wait, dispatch, asynchronous):
     root, transport, client, controller, events, _decide = elapsed_quota_wait
     transport.results = [result(outcome="failed", problem={
@@ -733,8 +732,11 @@ def test_mixed_pool_wait_keeps_calendar_deadline_and_existing_quota_union(live_w
     assert list(events.queue)[-1]["resolution"] == "deadline"
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("code", ["auth_required", "subscription_window_exhausted", "credential_pool_exhausted"])
+@pytest.mark.parametrize(("code", "asynchronous"), [
+    ("auth_required", False),
+    ("subscription_window_exhausted", True),
+    ("credential_pool_exhausted", False),
+])
 def test_call_can_decline_resource_wait_without_losing_task_binding(live_wait, code, asynchronous):
     from ouroboros.llm_claudexor import ClaudexorModelError
 

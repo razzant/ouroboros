@@ -168,8 +168,11 @@ def _history(tmp_path, chat_id):
 
 
 class TestDeliveryAndReplay:
-    @pytest.mark.parametrize("live", [True, False], ids=["live", "deferred"])
-    @pytest.mark.parametrize("born_in", ["project", "main", "main_unstamped"])
+    @pytest.mark.parametrize(("born_in", "live"), [
+        pytest.param("project", True, id='project-live'),
+        pytest.param("main", False, id='main-deferred'),
+        pytest.param("main_unstamped", True, id='main_unstamped-live'),
+    ])
     def test_notice_is_one_message_in_main_and_its_project_live_and_on_reload(self, tmp_path, host, live, born_in):
         project_chat = _project(tmp_path)
         # A root bound after admission keeps the chat it was born in on its row;

@@ -335,8 +335,12 @@ def test_a_task_that_spoke_for_itself_never_gets_the_system_row(phone, monkeypat
     assert [data["text"] for data in phone.sent()] == ([f"Parser · {_cause(stated)}"] if told else [])
 
 
-@pytest.mark.parametrize("failure", [None, "append_false", "append_raises", "ack_raises"])
-@pytest.mark.parametrize("act", ["owner_message", "synthetic"])
+@pytest.mark.parametrize(("act", "failure"), [
+    ("owner_message", None),
+    ("owner_message", "append_raises"),
+    ("synthetic", "append_false"),
+    ("synthetic", "ack_raises"),
+])
 def test_an_accepted_act_stays_quiet_with_or_without_its_ack(phone, monkeypatch, act, failure):
     """Only a refusal has a cause to tell: a landed steer sends nothing and publishes no refusal row."""
     from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX

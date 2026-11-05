@@ -78,14 +78,10 @@ def test_advisory_review_cannot_clear_unreviewed_tool_error_warning():
     assert axes["objective"]["warning"] == "residual_tool_errors_without_review"
 
 
-@pytest.mark.parametrize("exit_code,signal,bucket", [
-    (-9, "SIGKILL", "unresolved_tool_errors"), (1, "", "cosmetic_tool_errors"),
-])
-@pytest.mark.parametrize("extra,execution,reason", [
-    ({}, "ok", "final_message"),
-    ({"delivery_candidate": {"degraded": True, "degraded_reason": "invalid_delivery_control_after_repair"}},
-     "degraded", "invalid_delivery_control_after_repair"),
-    ({"child_result_dispositions": {"deferred_count": 1}}, "degraded", "child_results_deferred"),
+@pytest.mark.parametrize(("extra", "execution", "reason", "exit_code", "signal", "bucket"), [
+    pytest.param({}, "ok", "final_message", -9, "SIGKILL", "unresolved_tool_errors", id='extra0-ok-final_message--9-SIGKILL-unresolved_tool_errors'),
+    pytest.param({"delivery_candidate": {"degraded": True, "degraded_reason": "invalid_delivery_control_after_repair"}}, "degraded", "invalid_delivery_control_after_repair", 1, "", "cosmetic_tool_errors", id='extra1-degraded-invalid_delivery_control_after_repair-1--cosmetic_tool_errors'),
+    pytest.param({"child_result_dispositions": {"deferred_count": 1}}, "degraded", "child_results_deferred", -9, "SIGKILL", "unresolved_tool_errors", id='extra2-degraded-child_results_deferred--9-SIGKILL-unresolved_tool_errors'),
 ])
 def test_persisted_unjudged_objective_keeps_warning_after_normalization(
     tmp_path, exit_code, signal, bucket, extra, execution, reason,

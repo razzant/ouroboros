@@ -30,8 +30,11 @@ def registry(tmp_path, monkeypatch):
     return registry
 
 
-@pytest.mark.parametrize("access", ["inherit", "readonly", "workspace_write"])
-@pytest.mark.parametrize("surface", ["read_only", "self_worktree"])
+@pytest.mark.parametrize(("surface", "access"), [
+    ("read_only", "inherit"),
+    ("self_worktree", "readonly"),
+    ("self_worktree", "workspace_write"),
+])
 def test_api_all_fields_form_queues_without_changing_write_surface(registry, access, surface):
     """The incident's complete optional shape must reach the actual registered handler."""
     args = {

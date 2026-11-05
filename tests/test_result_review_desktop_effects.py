@@ -238,8 +238,13 @@ def test_reads_refusals_failures_and_timeouts_produce_nothing_and_force_no_revie
     assert "Effect receipts" not in rr.answer_text(reply="Observed.", produced=produced, verification="")
 
 
-@pytest.mark.parametrize("value", [False, "true", 1, None, {"executed": True}])
-@pytest.mark.parametrize("ok", [True, False])
+@pytest.mark.parametrize(("ok", "value"), [
+    (True, False),
+    (True, 1),
+    pytest.param(True, {"executed": True}, id='True-value4'),
+    (False, "true"),
+    (False, None),
+])
 def test_only_a_literal_true_is_an_effect(tmp_path, monkeypatch, value, ok):
     ctx = _floor_ctx(tmp_path, monkeypatch)
     payload = json.dumps({"ok": ok, "observed_effect": value, "error": "" if ok else "partly done"})

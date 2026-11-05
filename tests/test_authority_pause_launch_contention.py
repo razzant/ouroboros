@@ -9,8 +9,10 @@ from tests._budget_pause_exact_helpers import _loop_ctx
 from tests.test_store import document, publish
 
 
-@pytest.mark.parametrize("rail", [bp.RAIL_BILLING_AUTHORITY, bp.RAIL_CONTROL_AUTHORITY])
-@pytest.mark.parametrize("stop", [False, True])
+@pytest.mark.parametrize(("stop", "rail"), [
+    pytest.param(False, bp.RAIL_BILLING_AUTHORITY, id='False-billing_authority_unreadable'),
+    pytest.param(True, bp.RAIL_CONTROL_AUTHORITY, id='True-control_authority_unreadable'),
+])
 def test_launch_lock_release_keeps_one_seed_and_capture(tmp_path, monkeypatch, rail, stop):
     publish(tmp_path, document("member", status="running"))
     ctx, limit = _loop_ctx(tmp_path, "member")

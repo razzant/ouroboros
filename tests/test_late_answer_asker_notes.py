@@ -223,8 +223,7 @@ def _continue_of_asker():
     return {"id": "next", "text": "continue", "predecessor_authority": {"task_id": ASKER, "source": _pull_source(ASKER)}}
 
 
-@pytest.mark.parametrize("forked", [False, True])
-@pytest.mark.parametrize("kind", ["late_answer", "continue"])
+@pytest.mark.parametrize(("kind", "forked"), [("late_answer", False), ("continue", True)])
 def test_the_displayed_notes_reader_resolves_for_the_receiving_task(tmp_path, monkeypatch, forked, kind):
     """Execute the emitted reader, not the asker's unqualified artifact_store recipe."""
     from ouroboros.main_context_authority import late_answer_notes_message, predecessor_notes_message, WORKING_NOTES_FIELD

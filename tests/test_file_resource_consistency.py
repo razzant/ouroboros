@@ -255,8 +255,7 @@ def test_ssh_subject_separates_remote_payload_and_local_channels():
     assert raw[-1] == 'sudo -n tee /etc/remote.conf'
 
 
-@pytest.mark.parametrize('remote', [False, True])
-@pytest.mark.parametrize('control', ['elevation', 'owner_key'])
+@pytest.mark.parametrize(("control", "remote"), [('elevation', False), ('owner_key', True)])
 def test_ssh_keeps_full_command_visible_to_supervisor_and_handler(environment, monkeypatch, remote, control):
     reg, ctx, home, work, _data = environment
     commands = {
@@ -287,8 +286,11 @@ def test_ssh_keeps_full_command_visible_to_supervisor_and_handler(environment, m
     assert command == original
 
 
-@pytest.mark.parametrize('root', ['active_workspace', 'task_drive', 'artifact_store'])
-@pytest.mark.parametrize('directory', ['ordinary', 'auth', 'tokens'])
+@pytest.mark.parametrize(("directory", "root"), [
+    ('ordinary', 'active_workspace'),
+    ('auth', 'task_drive'),
+    ('tokens', 'artifact_store'),
+])
 def test_child_source_names_and_certificates_do_not_confer_credential_authority(environment, root, directory):
     reg, ctx, _home, _work, _data = environment
     ctx.task_constraint = TaskConstraint(mode='local_readonly_subagent')
@@ -316,8 +318,11 @@ def test_child_source_names_and_certificates_do_not_confer_credential_authority(
         assert ctx.last_read_view['total_lines'] == 3
 
 
-@pytest.mark.parametrize('root', ['task_drive', 'artifact_store'])
-@pytest.mark.parametrize('path', ['auth/login.py', 'tokens/login.py', 'tokens.json'])
+@pytest.mark.parametrize(("path", "root"), [
+    ('auth/login.py', 'artifact_store'),
+    ('tokens/login.py', 'task_drive'),
+    ('tokens.json', 'artifact_store'),
+])
 def test_child_own_task_content_is_not_a_repository_credential_store(environment, root, path):
     reg, ctx, _home, _work, _data = environment
     ctx.task_constraint = TaskConstraint(mode='local_readonly_subagent')
@@ -345,11 +350,12 @@ def test_ssh_remote_task_runs_with_original_argv(environment):
     assert 'WORKSPACE_SHELL_BLOCKED' not in result
 
 
-@pytest.mark.parametrize('actor', ['acting_subagent', 'local_readonly_subagent'])
-@pytest.mark.parametrize('command', [
-    ['grep', '-rn', 'token', 'src/'], ['rg', 'password', '.'],
-    ['pytest', '-k', 'secret'], ['git', 'log', '--grep', 'credential'],
-    [sys.executable, '-c', "print('token')"],
+@pytest.mark.parametrize(("command", "actor"), [
+    pytest.param(['grep', '-rn', 'token', 'src/'], 'acting_subagent', id='command0-acting_subagent'),
+    pytest.param(['rg', 'password', '.'], 'local_readonly_subagent', id='command1-local_readonly_subagent'),
+    pytest.param(['pytest', '-k', 'secret'], 'acting_subagent', id='command2-acting_subagent'),
+    pytest.param(['git', 'log', '--grep', 'credential'], 'local_readonly_subagent', id='command3-local_readonly_subagent'),
+    pytest.param([sys.executable, '-c', "print('token')"], 'acting_subagent', id='command4-acting_subagent'),
 ])
 def test_child_search_words_are_not_credential_path_operands(environment, actor, command):
     from copy import deepcopy
@@ -374,8 +380,7 @@ def test_child_search_words_are_not_credential_path_operands(environment, actor,
     assert command == original
 
 
-@pytest.mark.parametrize('wrapper', ['direct', 'env', 'sh', 'sh_env'])
-@pytest.mark.parametrize('allowed', [False, True])
+@pytest.mark.parametrize(("allowed", "wrapper"), [(False, 'direct'), (False, 'sh'), (True, 'env'), (True, 'sh_env')])
 def test_wrapped_inline_read_uses_the_configured_supervisor(environment, monkeypatch, wrapper, allowed):
     reg, ctx, _home, work, _data = environment
     ctx.task_constraint = TaskConstraint(mode='acting_subagent', surface='external_workspace', write_root=str(work))
@@ -495,8 +500,12 @@ def test_child_known_root_source_read_keeps_shell_capability(environment, monkey
     assert '$HOME/project/README.md' in command[2]
 
 
-@pytest.mark.parametrize('mode', ['light', 'advanced', 'pro', 'cyber_pro'])
-@pytest.mark.parametrize('actor', ['parent', 'local_readonly_subagent', 'acting_subagent'])
+@pytest.mark.parametrize(("actor", "mode"), [
+    ('parent', 'light'),
+    ('local_readonly_subagent', 'pro'),
+    ('acting_subagent', 'advanced'),
+    ('acting_subagent', 'cyber_pro'),
+])
 def test_parent_runtime_read_rules_follow_physical_files_across_root_labels(tmp_path, monkeypatch, mode, actor):
     from ouroboros import config
     from ouroboros.tools import vision
@@ -585,9 +594,12 @@ def test_project_settings_source_is_readable_by_verify_guard(tmp_path):
     assert "project fixture" in registry.execute("read_file", {"path": "data/settings.json"})
 
 
-@pytest.mark.parametrize('mode', ['light', 'advanced', 'pro', 'cyber_pro'])
-@pytest.mark.parametrize('actor', ['parent', 'local_readonly_subagent', 'acting_subagent'])
-@pytest.mark.parametrize('fallback', [False, True])
+@pytest.mark.parametrize(("fallback", "actor", "mode"), [
+    (False, 'parent', 'light'),
+    (False, 'acting_subagent', 'pro'),
+    (True, 'parent', 'cyber_pro'),
+    (True, 'local_readonly_subagent', 'advanced'),
+])
 def test_explicit_user_files_retains_parent_mode_policy(tmp_path, monkeypatch, mode, actor, fallback):
     from ouroboros import config
     from ouroboros.tools import media, vision

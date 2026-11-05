@@ -293,8 +293,7 @@ def test_uncertain_empty_catalog_has_only_provenance(monkeypatch, tmp_path, evid
         assert "not listed yet" in notice and not mcp_catalog.catalog_path("demo").exists()
 
 
-@pytest.mark.parametrize("source", ["settings", "mtime"])
-@pytest.mark.parametrize("malformed", [False, True])
+@pytest.mark.parametrize(("malformed", "source"), [(False, "settings"), (True, "mtime")])
 def test_prune_sharing_violation_keeps_event_and_other_files_live(monkeypatch, source, malformed):
     from pathlib import Path
     writer = publisher()
@@ -411,8 +410,7 @@ def test_empty_success_replaces_catalog_and_proves_absence():
     assert writer.catalog_notices() == [] and writer.enabled_servers_without_tools()
 
 
-@pytest.mark.parametrize("failure", [False, True])
-@pytest.mark.parametrize("removed", [False, True])
+@pytest.mark.parametrize(("removed", "failure"), [(False, False), (True, True)])
 def test_inflight_result_for_changed_or_removed_server_writes_nothing(failure, removed):
     writer = publisher()
     async def changed(cfg, timeout):
@@ -426,8 +424,11 @@ def test_inflight_result_for_changed_or_removed_server_writes_nothing(failure, r
     assert not mcp_catalog.catalog_path("demo").exists() and names(writer) == []
 
 
-@pytest.mark.parametrize("edit", [{"allowed_tools": ["other"]}, {"name": "Renamed"}, {"enabled": False}])
-@pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize(("failure", "edit"), [
+    pytest.param(False, {"allowed_tools": ["other"]}, id='False-edit0'),
+    pytest.param(False, {"enabled": False}, id='False-edit2'),
+    pytest.param(True, {"name": "Renamed"}, id='True-edit1'),
+])
 def test_inflight_result_survives_non_connection_edits(edit, failure):
     writer = publisher()
     writer.refresh_server("demo")

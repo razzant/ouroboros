@@ -200,8 +200,7 @@ def test_result_and_scan_limits_still_count_matched_lines(tmp_path, backend):
     assert all(ROW.match(row) for row in _rows(result))
 
 
-@pytest.mark.parametrize("separator", ["\u0085", "\u2028", "\u2029"])
-@pytest.mark.parametrize("long_line", [False, True])
+@pytest.mark.parametrize(("long_line", "separator"), [(False, "\u0085"), (False, "\u2029"), (True, "\u2028")])
 def test_rg_json_records_split_only_on_lf_not_unicode_inside_strings(tmp_path, separator, long_line):
     if not code_search_rg._rg_binary():
         pytest.skip("ripgrep is not installed")

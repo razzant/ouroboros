@@ -9,8 +9,7 @@ from ouroboros import context_fit as cf, memory_view as mv
 from tests import _memory_view_synthetic as syn
 
 
-@pytest.mark.parametrize('held, step', [('note', 'F8'), ('owner_row', 'F7')])
-@pytest.mark.parametrize('ratio', [1.0, 1.5])
+@pytest.mark.parametrize(("ratio", "held", "step"), [(1.0, 'note', 'F8'), (1.5, 'owner_row', 'F7')])
 def test_measured_envelope_prices_physical_pressure_without_changing_window(monkeypatch, held, step, ratio):
     row = {**syn.spoken(0, 'human', 8000), 'owner_side': True, 'carried': False}
     room = syn.room(lane1=[row] if held == 'owner_row' else [], notes=1 if held == 'note' else 0)

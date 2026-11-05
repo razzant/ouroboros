@@ -720,16 +720,11 @@ def test_settings_keep_a_blank_search_model_blank_and_a_saved_one_saved(tmp_path
 # Credential plans (benchmark isolation, the manifest disclosure) read the search slot as the legs this
 # resolver sends for the target's own Source and Model, never as a chat route and never by Main's provider.
 
-@pytest.mark.parametrize("main", ["openrouter/model", "anthropic::owner-main"])
-@pytest.mark.parametrize("search,search_keys", [
-    # Blank: the recommended model of every source Auto tries, whatever Main is (owner decision, 1 Nov 2026).
-    ("", {"OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"}),
-    # A bare native id is OpenAI's in search grammar: its OpenAI leg first, then the same model on OpenRouter.
-    ("gpt-5.2", {"OPENAI_API_KEY", "OPENROUTER_API_KEY"}),
-    # An OpenRouter catalog id (a single-model pin) plans that leg only, never Auto's other-model fallback.
-    ("google/gemini-2.5-pro", {"OPENROUTER_API_KEY"}),
-    # A named connection travels as its row; the saved route's same-model OpenRouter leg is kept too.
-    ("openai@work::gpt-5.5", {"OPENAI_API_KEY", "OPENROUTER_API_KEY", "OUROBOROS_CONNECTIONS"}),
+@pytest.mark.parametrize(("search", "search_keys", "main"), [
+    pytest.param("", {"OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"}, "openrouter/model", id='-search_keys0-openrouter/model'),  # Blank: the recommended model of every source Auto tries, whatever Main is (owner decision, 1 Nov 2026).
+    pytest.param("gpt-5.2", {"OPENAI_API_KEY", "OPENROUTER_API_KEY"}, "anthropic::owner-main", id='gpt-5.2-search_keys1-anthropic::owner-main'),  # A bare native id is OpenAI's in search grammar: its OpenAI leg first, then the same model on OpenRouter.
+    pytest.param("google/gemini-2.5-pro", {"OPENROUTER_API_KEY"}, "openrouter/model", id='google/gemini-2.5-pro-search_keys2-openrouter/model'),  # An OpenRouter catalog id (a single-model pin) plans that leg only, never Auto's other-model fallback.
+    pytest.param("openai@work::gpt-5.5", {"OPENAI_API_KEY", "OPENROUTER_API_KEY", "OUROBOROS_CONNECTIONS"}, "anthropic::owner-main", id='openai@work::gpt-5.5-search_keys3-anthropic::owner-main'),  # A named connection travels as its row; the saved route's same-model OpenRouter leg is kept too.
 ])
 def test_the_web_search_slot_plans_the_legs_its_configured_search_sends(main, search, search_keys):
     """The search Model is no chat route: the plan takes the legs ``search_routes`` resolves for the
@@ -760,21 +755,15 @@ _NOT_SEARCH_KEYS = ("OUROBOROS_MODEL", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL
 _SEARCH_CHOICE = ("OUROBOROS_WEBSEARCH_BACKEND", "OUROBOROS_WEBSEARCH_MODEL")
 
 
-@pytest.mark.parametrize("saved,override,search_keys", [
-    ({}, {}, {"OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"}),  # nothing saved: Auto, not this process's Source
-    ({"OUROBOROS_WEBSEARCH_BACKEND": "openai"}, {}, {"OPENAI_API_KEY"}),
-    # The saved Source travels with its Model: a ddgs pin's stale model never becomes paid Auto search,
-    ({"OUROBOROS_WEBSEARCH_BACKEND": "ddgs", "OUROBOROS_WEBSEARCH_MODEL": "gpt-5.2"}, {}, set()),
-    # nor does a legacy bare id under the Anthropic pin change meaning (the recommended model is still the one sent).
-    ({"OUROBOROS_WEBSEARCH_BACKEND": "anthropic", "OUROBOROS_WEBSEARCH_MODEL": "claude-opus-4-6"}, {}, {"ANTHROPIC_API_KEY"}),
-    # A benchmark's explicit Source wins over the saved one.
-    ({"OUROBOROS_WEBSEARCH_BACKEND": "ddgs", "OUROBOROS_WEBSEARCH_MODEL": "gpt-5.2"}, {"OUROBOROS_WEBSEARCH_BACKEND": "openai"},
-     {"OPENAI_API_KEY"}),
-    # An unusable saved Model leaves the Source's recommended leg planned: a call naming its own model meets it.
-    ({"OUROBOROS_WEBSEARCH_BACKEND": "openai", "OUROBOROS_WEBSEARCH_MODEL": "openai/gpt-5.2"}, {}, {"OPENAI_API_KEY"}),
-    ({"OUROBOROS_WEBSEARCH_MODEL": "vendor/future"}, {}, {"OPENROUTER_API_KEY"}),  # never Auto's other-model fallback
+@pytest.mark.parametrize(("main", "saved", "override", "search_keys"), [
+    pytest.param("deepseek::chat", {}, {}, {"OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"}, id='deepseek::chat-saved0-override0-search_keys0'),  # nothing saved: Auto, not this process's Source
+    pytest.param("deepseek::chat", {"OUROBOROS_WEBSEARCH_BACKEND": "ddgs", "OUROBOROS_WEBSEARCH_MODEL": "gpt-5.2"}, {}, set(), id='deepseek::chat-saved2-override2-search_keys2'),  # The saved Source travels with its Model: a ddgs pin's stale model never becomes paid Auto search,
+    pytest.param("deepseek::chat", {"OUROBOROS_WEBSEARCH_BACKEND": "ddgs", "OUROBOROS_WEBSEARCH_MODEL": "gpt-5.2"}, {"OUROBOROS_WEBSEARCH_BACKEND": "openai"}, {"OPENAI_API_KEY"}, id='deepseek::chat-saved4-override4-search_keys4'),  # A benchmark's explicit Source wins over the saved one.
+    pytest.param("deepseek::chat", {"OUROBOROS_WEBSEARCH_MODEL": "vendor/future"}, {}, {"OPENROUTER_API_KEY"}, id='deepseek::chat-saved6-override6-search_keys6'),  # never Auto's other-model fallback
+    pytest.param("minimax::chat", {"OUROBOROS_WEBSEARCH_BACKEND": "openai"}, {}, {"OPENAI_API_KEY"}, id='minimax::chat-saved1-override1-search_keys1'),
+    pytest.param("minimax::chat", {"OUROBOROS_WEBSEARCH_BACKEND": "anthropic", "OUROBOROS_WEBSEARCH_MODEL": "claude-opus-4-6"}, {}, {"ANTHROPIC_API_KEY"}, id='minimax::chat-saved3-override3-search_keys3'),  # nor does a legacy bare id under the Anthropic pin change meaning (the recommended model is still the one sent).
+    pytest.param("minimax::chat", {"OUROBOROS_WEBSEARCH_BACKEND": "openai", "OUROBOROS_WEBSEARCH_MODEL": "openai/gpt-5.2"}, {}, {"OPENAI_API_KEY"}, id='minimax::chat-saved5-override5-search_keys5'),  # An unusable saved Model leaves the Source's recommended leg planned: a call naming its own model meets it.
 ])
-@pytest.mark.parametrize("main", ["deepseek::chat", "minimax::chat"])
 def test_an_isolated_document_searches_as_the_saved_one_whatever_main_or_the_host(monkeypatch, saved, override, search_keys, main):
     """The real isolated document keeps the saved Source with its Model (an explicit override wins), and its grant
     is planned from that pair, whatever Main is and whatever this process's own Source and Model are; the run's

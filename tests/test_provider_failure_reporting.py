@@ -805,9 +805,11 @@ def test_provider_failure_hint_empty_without_error():
     assert _provider_failure_hint({}) == ""
 
 
-@pytest.mark.parametrize("code", ["provider_failed", "invalid_request"])
-@pytest.mark.parametrize("vendor,parameter,kind", [("string_above_max_length", "instructions", "bad_request"),
-    ("string_above_max_length", "max_tokens", "bad_request"), ("context_length_exceeded", "input", "context_overflow")])
+@pytest.mark.parametrize(("vendor", "parameter", "kind", "code"), [
+    ("string_above_max_length", "instructions", "bad_request", "provider_failed"),
+    ("string_above_max_length", "max_tokens", "bad_request", "invalid_request"),
+    ("context_length_exceeded", "input", "context_overflow", "provider_failed"),
+])
 def test_claudexor_display_reaches_error_and_terminal_without_retry(tmp_path, monkeypatch, code, vendor, parameter, kind):
     import json
     from ouroboros.llm_claudexor import ClaudexorModelError

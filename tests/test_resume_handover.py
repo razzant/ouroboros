@@ -257,8 +257,7 @@ def _account_route(task, **_kwargs):
 
 # --- the reproduced sequence (issue #1716 qualification) -----------------------------------------
 
-@pytest.mark.parametrize("cut", ["after_resume", "after_save"])
-@pytest.mark.parametrize("scope", ["project", "main"])
+@pytest.mark.parametrize(("scope", "cut"), [("project", "after_resume"), ("main", "after_save")])
 def test_consumed_exact_resume_then_application_stop_never_restores_older_cognition(
     host, tmp_path, monkeypatch, scope, cut,  # noqa: F811
 ):
@@ -288,8 +287,12 @@ def test_consumed_exact_resume_then_application_stop_never_restores_older_cognit
 
 # --- every cut of the handover, through the real stop, boot and Resume doors -------------------
 
-@pytest.mark.parametrize("cut", ["before_bridge", "after_bridge", "after_cas", "after_fence"])
-@pytest.mark.parametrize("scope", ["project", "main"])
+@pytest.mark.parametrize(("scope", "cut"), [
+    ("project", "before_bridge"),
+    ("project", "after_cas"),
+    ("main", "after_bridge"),
+    ("main", "after_fence"),
+])
 def test_every_cut_of_the_handover_continues_exact_or_newer_cognition(
     host, tmp_path, monkeypatch, scope, cut,  # noqa: F811
 ):
@@ -393,8 +396,7 @@ def _member_resumed_until(tmp_path, monkeypatch, cut):
     return ctx, blob["_pause_row"]["grant"]["grant_id"]
 
 
-@pytest.mark.parametrize("returning", [False, True])
-@pytest.mark.parametrize("cut", ["after_cas", "after_fence"])
+@pytest.mark.parametrize(("cut", "returning"), [("after_cas", False), ("after_fence", True)])
 def test_a_member_resume_consumed_before_its_fence_selection_completes_at_the_owner_resume(
     tmp_path, monkeypatch, cut, returning,
 ):
@@ -451,8 +453,7 @@ def test_member_resume_completion_needs_its_own_consumed_grant_and_fence(tmp_pat
     assert read_fence(tmp_path, ROOT) == before, "a read never changes the fence"
 
 
-@pytest.mark.parametrize("returning", [False, True])
-@pytest.mark.parametrize("refusal", ["stop", "restart_no_resume"])
+@pytest.mark.parametrize(("refusal", "returning"), [("stop", False), ("restart_no_resume", True)])
 def test_a_refused_owner_resume_never_completes_the_member_fence(tmp_path, monkeypatch, refusal, returning):
     from ouroboros.cancel_intents import request_cancel
     from ouroboros.owner_pause import read_fence

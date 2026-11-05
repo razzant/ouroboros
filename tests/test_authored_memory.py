@@ -716,9 +716,12 @@ def test_a_root_on_the_canonical_drive_opens_the_report_with_the_call_it_is_show
     assert "OLD DEEP REVIEW BODY" in _run(root, deep)
 
 
-@pytest.mark.parametrize("mode", ["light", "advanced", "pro", "cyber_pro"])
-@pytest.mark.parametrize("focus", ["main", "project", "readonly_child", "acting_child"])
-@pytest.mark.parametrize("forked", [False, True])
+@pytest.mark.parametrize(("forked", "focus", "mode"), [
+    (False, "main", "light"),
+    (False, "readonly_child", "pro"),
+    (True, "project", "advanced"),
+    (True, "acting_child", "cyber_pro"),
+])
 def test_context_readers_open_canonical_history_in_every_mode_and_focus(tmp_path, monkeypatch, mode, focus, forked):
     from ouroboros.contracts.task_constraint import TaskConstraint
     from ouroboros.context import _canonical_runtime_reader

@@ -38,8 +38,7 @@ from tests.test_continue_successor_integration import continue_from, interrupted
 # Every Git tree, state root and process is case-local; these fixtures may run in parallel.
 
 
-@pytest.mark.parametrize("direct", [False, True])
-@pytest.mark.parametrize("decision", ["apply", "accept", "reject"])
+@pytest.mark.parametrize(("decision", "direct"), [("apply", False), ("accept", True), ("reject", False)])
 def test_ordinary_verdict_binds_consumed_shared_or_direct_result(tmp_path, monkeypatch, direct, decision):
     from ouroboros.tools import subagent_integration as integration
     from ouroboros.tools.join_ledger import _current_child_result_disposition

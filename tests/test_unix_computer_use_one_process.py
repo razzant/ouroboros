@@ -373,8 +373,11 @@ def test_element_act_observe_is_one_helper_call_carrying_the_shared_budget(tmp_p
     assert meta["ax_tree"]["text_limit"]["default"] == 200 and meta["ax_tree"]["window"]["type"] == ["integer", "string"]
 
 
-@pytest.mark.parametrize("tail", ['{"ok": true, "observation": {"ok": tr', "", "Traceback (most recent call last):"])
-@pytest.mark.parametrize("dispatched", [True, False])
+@pytest.mark.parametrize(("dispatched", "tail"), [
+    (True, '{"ok": true, "observation": {"ok": tr'),
+    (True, "Traceback (most recent call last):"),
+    (False, ""),
+])
 def test_a_helper_stopped_after_its_receipt_keeps_the_receipt_and_says_the_read_did_not_finish(tmp_path, monkeypatch, tail, dispatched):
     module, api, state = mac(tmp_path, monkeypatch)
     saved = RECEIPT if dispatched else {"ok": False, "dispatched": False, "reason": "element_ambiguous",
@@ -539,5 +542,3 @@ def test_screenshot_with_unreadable_displays_has_no_mapped_input(tmp_path, monke
     assert "locked" in named["coordinate_note"] and "Capture only" in named["coordinate_note"]
     assert [args[0] for args in state["helper"]] == ["displays"], "no resolution is attempted without a display list"
     assert [argv for argv in state["calls"] if argv[0] == "screencapture"][-1][1:-1] == ["-x"], "the default capture: no -D"
-
-

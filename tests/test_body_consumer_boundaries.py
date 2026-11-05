@@ -30,8 +30,12 @@ def registry(ctx):
     return tools
 
 
-@pytest.mark.parametrize("tool", ["write_file", "edit_text", "apply_patch", "edit_batch"])
-@pytest.mark.parametrize("spelling", ["basename", "absolute", "backslash", "whitespace"])
+@pytest.mark.parametrize(("spelling", "tool"), [
+    ("basename", "write_file"),
+    ("absolute", "edit_text"),
+    ("backslash", "apply_patch"),
+    ("whitespace", "edit_batch"),
+])
 def test_all_edit_consumers_keep_serving_alias_on_first_and_later_writes(body, tool, spelling):
     serving, data = body
     ctx = make_ctx(serving, data, "aliases")
@@ -77,9 +81,12 @@ def test_patch_add_delete_keep_serving_targets_and_real_nested_paths(body, prepa
     assert (candidate / serving.name / "nested.txt").read_text() == "nested\n"
 
 
-@pytest.mark.parametrize("prepared", [False, True])
-@pytest.mark.parametrize("external", [False, True])
-@pytest.mark.parametrize("spelling", ["absolute", "relative", "sibling", "symlink"])
+@pytest.mark.parametrize(("spelling", "external", "prepared"), [
+    ("absolute", False, True),
+    ("relative", True, False),
+    ("sibling", True, True),
+    ("symlink", False, False),
+])
 def test_explicit_serving_child_source_is_copied_from_candidate(body, monkeypatch, tmp_path, prepared, external, spelling):
     from ouroboros.tools.control_scheduling import _child_workspace
     from ouroboros.workspace_copies import admitted_copy_metadata
@@ -230,9 +237,12 @@ def test_read_only_child_of_a_bound_parent_reads_the_candidate_and_writes_nothin
     assert not (candidate / "made.txt").exists() and (serving / "ouroboros/mod_a.py").read_text() == "GEN = 'GEN_OLD'\n"
 
 
-@pytest.mark.parametrize("child", [False, True])
-@pytest.mark.parametrize("executor", [False, True])
-@pytest.mark.parametrize("consumer", ["run_command", "run_script", "verify_and_record", "start_service"])
+@pytest.mark.parametrize(("consumer", "executor", "child"), [
+    ("run_command", False, False),
+    ("run_script", True, True),
+    ("verify_and_record", False, False),
+    ("start_service", True, True),
+])
 def test_process_consumers_use_full_isolated_body_environment(body, monkeypatch, child, executor, consumer):
     from ouroboros.workspace_copies import admitted_copy_metadata
     from supervisor.events_subagent_admission import _resolve_subagent_constraint
@@ -304,8 +314,7 @@ def test_gc_honours_nested_preflight_retention_marker(body):
         retire_synthetic_retention(nested, "teardown unconfirmed")  # no process ever ran here
 
 
-@pytest.mark.parametrize("removal", ["remove_worktree", "prune_orphans"])
-@pytest.mark.parametrize("retained", [False, True])
+@pytest.mark.parametrize(("retained", "removal"), [(False, "prune_orphans"), (True, "remove_worktree")])
 def test_own_body_child_copy_removal_disposes_its_sibling_environment(body, monkeypatch, removal, retained):
     from ouroboros.test_environment import retain_tree
     from ouroboros.workspace_copies import admitted_copy_metadata

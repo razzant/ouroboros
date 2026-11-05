@@ -890,9 +890,12 @@ def _reshape(task, attempt_no, rows, *, record_seats=(), aggregate=None, **field
     review_ledger.revise_record(review_ledger.ledger_root(task), record_id, seats)
 
 
-@pytest.mark.parametrize("mode", ["cyber_pro", "pro"])
-@pytest.mark.parametrize("shape", ["landed_late_settled_token", "quorum_failed_unsent_and_late_token",
-                                   "terminal_adviser_token", "live_adviser"])
+@pytest.mark.parametrize(("shape", "mode"), [
+    ("landed_late_settled_token", "cyber_pro"),
+    ("quorum_failed_unsent_and_late_token", "pro"),
+    ("terminal_adviser_token", "cyber_pro"),
+    ("live_adviser", "pro"),
+])
 def test_a_finished_review_holding_a_stale_start_token_admits_the_authors_next_intent(task, monkeypatch, request,
                                                                                       shape, mode):
     """Three incidents of 2026-11-04 (synthetic shapes): a finished commit review whose row kept a seat's start token

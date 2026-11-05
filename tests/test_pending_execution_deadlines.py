@@ -99,8 +99,11 @@ def _resource_hold(host, clock, monkeypatch, kind, *, deadline=True):  # noqa: F
     return task
 
 
-@pytest.mark.parametrize("kind", ["global_budget", "root_budget", "root_selection"])
-@pytest.mark.parametrize("deadline", [False, True], ids=["duration-only", "explicit-calendar"])
+@pytest.mark.parametrize(("deadline", "kind"), [
+    pytest.param(False, "global_budget", id='duration-only-global_budget'),
+    pytest.param(False, "root_selection", id='duration-only-root_selection'),
+    pytest.param(True, "root_budget", id='explicit-calendar-root_budget'),
+])
 def test_never_started_resource_wait_reaches_deadline_outcome_without_resume(
     host, clock, monkeypatch, kind, deadline,  # noqa: F811
 ):

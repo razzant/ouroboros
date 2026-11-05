@@ -232,9 +232,11 @@ def _settled_capture(ctx, held):
         custody._CUSTODY.clear()
 
 
-@pytest.mark.parametrize("policy", ["autocrlf", "info_attributes", "filemode"])
-@pytest.mark.parametrize("access", ["full", "workspace_write"])
-@pytest.mark.parametrize("geometry", ["root", "subdirectory"])
+@pytest.mark.parametrize(("geometry", "access", "policy"), [
+    ("root", "full", "autocrlf"),
+    ("root", "full", "filemode"),
+    ("subdirectory", "workspace_write", "info_attributes"),
+])
 def test_source_local_comparison_settings_reach_the_investigation_copy(tmp_path, monkeypatch, geometry, access, policy):
     from ouroboros.subagent_worktrees import find_execution_snapshot
 

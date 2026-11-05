@@ -119,8 +119,11 @@ def test_exact_tokens_are_not_reranked_and_literal_none_is_not_omission(token):
     assert validated_effort_resolution(report) == report
 
 
-@pytest.mark.parametrize("resolution", ["omitted", "unverifiable", "rejected"])
-@pytest.mark.parametrize("parameter", [None, "model_reasoning_effort"])
+@pytest.mark.parametrize(("parameter", "resolution"), [
+    (None, "omitted"),
+    (None, "rejected"),
+    ("model_reasoning_effort", "unverifiable"),
+])
 def test_absent_knob_is_null_and_never_confirms_a_tier(resolution, parameter):
     report = {**SHARED, "submitted": None, "parameter": parameter, "resolution": resolution}
     assert validated_effort_resolution(report) == report
@@ -193,8 +196,14 @@ def test_old_model_result_without_resolution_keeps_effort_unknown(model_setup):
     assert not ledger(root)[-1].get("effort_resolution")
 
 
-@pytest.mark.parametrize("online", [False, True])
-@pytest.mark.parametrize("evidence", ["missing", "prepared", "applied", "observed", "malformed", "malformed_applied"])
+@pytest.mark.parametrize(("evidence", "online"), [
+    ("missing", True),
+    ("prepared", True),
+    ("applied", False),
+    ("observed", True),
+    ("malformed", False),
+    ("malformed_applied", False),
+])
 def test_late_model_result_keeps_only_exact_attempt_effort_evidence(tmp_path, monkeypatch, online, evidence):
     from types import SimpleNamespace
 

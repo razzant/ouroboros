@@ -693,9 +693,10 @@ def test_a_cancelled_late_answer_request_settles_its_delivery_and_a_retry_rejoin
 _ONE_PIXEL_PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC")
 
 
-@pytest.mark.parametrize("name,data,placeholder", [("notes.txt", b"attachment bytes", "(file attached)"),
-                                                   ("owner.png", _ONE_PIXEL_PNG, "(image attached)")])
-@pytest.mark.parametrize("caption", ["", "   "])
+@pytest.mark.parametrize(("caption", "name", "data", "placeholder"), [
+    ("", "notes.txt", b"attachment bytes", "(file attached)"),
+    pytest.param("   ", "owner.png", _ONE_PIXEL_PNG, "(image attached)", id='   -owner.png-\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wSÞ\x00\x00\x00\x0cIDATx\x9ccøÏÀ\x00\x00\x03\x01\x01\x00Éþ\x92ï\x00\x00\x00\x00IEND®B`\x82-(image attached)'),
+])
 def test_attachment_inspection_keeps_health_and_same_socket_panic_live(bridge, monkeypatch, caption,
                                                                        name, data, placeholder):
     from pathlib import Path

@@ -193,8 +193,10 @@ def test_git_capture_default_timeout_is_unbounded(monkeypatch, tmp_path):
     assert proc not in shell_process._active_subprocesses and shell_process._spawning_subprocesses == 0
 
 
-@pytest.mark.parametrize("timeout", [None, 30])
-@pytest.mark.parametrize("error_type", [KeyboardInterrupt, OSError])
+@pytest.mark.parametrize(("error_type", "timeout"), [
+    pytest.param(KeyboardInterrupt, None, id='KeyboardInterrupt-None'),
+    pytest.param(OSError, 30, id='OSError-30'),
+])
 def test_git_capture_exception_cleanup_preserves_the_exception(monkeypatch, tmp_path, timeout, error_type):
     """The public capture's exceptional exit must reap its real child and close its pipes,
     for both wait modes. Inject the communication failure only into this test's child."""

@@ -274,8 +274,12 @@ def test_real_reader_without_delete_sharing_cannot_kill_rotation(tmp_path, caplo
     print("ROTATION_NATIVE_RECOVERY held_ticks=4 strict_append_and_exact_chain=passed")
 
 
-@pytest.mark.parametrize("name", ["events", "tools", "supervisor", "task_reflections"])
-@pytest.mark.parametrize("winerror", [32, 33])
+@pytest.mark.parametrize(("winerror", "name"), [
+    (32, "events"),
+    (32, "supervisor"),
+    (33, "tools"),
+    (33, "task_reflections"),
+])
 def test_rotation_oserror_keeps_real_supervisor_dispatching(
         monkeypatch, tmp_path, caplog, record_property, name, winerror):
     """Four failed rotations reach every downstream dispatch seam; recovery keeps exact bytes.

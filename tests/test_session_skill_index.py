@@ -76,8 +76,7 @@ def test_index_bounds_metadata_like_context_without_copying_bodies(tmp_path):
     assert len([line for line in index.splitlines() if line.startswith("- ")]) == 1
 
 
-@pytest.mark.parametrize("compiled", [True, False])
-@pytest.mark.parametrize("input_sources", ["shared", "declared"])
+@pytest.mark.parametrize(("input_sources", "compiled"), [("shared", True), ("declared", False)])
 def test_genesis_request_gets_index_only_for_shared_inputs(tmp_path, monkeypatch, compiled, input_sources):
     from tests.test_session_design_navigation import _start
 

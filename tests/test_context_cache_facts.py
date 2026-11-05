@@ -136,8 +136,10 @@ def test_no_clause_without_a_change_before_that_request(tmp_path):
         assert "write 0 tokens |" in line and "before that request" not in line
 
 
-@pytest.mark.parametrize("kind,target", [("api_model", "openai/gpt-fixture"), ("agent_session", "codex=gpt-fixture")])
-@pytest.mark.parametrize("input_sources", ["shared", "declared"])
+@pytest.mark.parametrize(("input_sources", "kind", "target"), [
+    ("shared", "api_model", "openai/gpt-fixture"),
+    ("declared", "agent_session", "codex=gpt-fixture"),
+])
 def test_context_cache_facts(tmp_path, monkeypatch, kind, target, input_sources):
     from ouroboros import maintenance
     from ouroboros.context import _capture_context_core

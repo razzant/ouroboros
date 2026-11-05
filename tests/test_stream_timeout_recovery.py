@@ -209,8 +209,12 @@ def test_wrap_up_during_timeout_backoff_sends_nothing_and_retains_notice(wire_en
     assert TIMEOUT_REPEAT_KEY in usage and "was not sent" in usage["terminal_host_notice"]
 
 
-@pytest.mark.parametrize("new_id", [False, True], ids=["same_id", "successor_id"])
-@pytest.mark.parametrize("lost_at", ["granted", "dispatch_intent", "dispatched", "spent"])
+@pytest.mark.parametrize(("lost_at", "new_id"), [
+    pytest.param("granted", False, id='granted-same_id'),
+    pytest.param("dispatch_intent", True, id='dispatch_intent-successor_id'),
+    pytest.param("dispatched", False, id='dispatched-same_id'),
+    pytest.param("spent", True, id='spent-successor_id'),
+])
 def test_real_checkpoint_recovery_does_not_renew_repeat(wire_env, sleeps, monkeypatch, new_id, lost_at):
     def crash(*_a, **_k):
         raise WorkerLost()

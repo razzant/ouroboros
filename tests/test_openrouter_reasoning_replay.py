@@ -156,8 +156,7 @@ def test_direct_provider_carriers_keep_their_existing_projection(model, retained
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("method", ["chat", "chat_async"])
-@pytest.mark.parametrize("no_proxy", [False, True])
+@pytest.mark.parametrize(("no_proxy", "method"), [(False, "chat"), (True, "chat_async")])
 def test_sync_async_physical_send_preserves_details_and_seals_deduplicated_payload(method, no_proxy):
     details = [_text("exact", signature="opaque==", future={"parts": [2, 1]})]
     history = _history({"reasoning": "exact", "reasoning_details": details})

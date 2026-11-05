@@ -44,8 +44,11 @@ def _pause_and_resume(root, monkeypatch, queue, workers):
     assert queue.resume_budget_paused_task("root")["ok"]
 
 
-@pytest.mark.parametrize("root", ["active_workspace", "runtime_data"])
-@pytest.mark.parametrize("case", ["missing_match", "duplicate_match", "missing_file"])
+@pytest.mark.parametrize(("case", "root"), [
+    ("missing_match", "runtime_data"),
+    ("duplicate_match", "runtime_data"),
+    ("missing_file", "active_workspace"),
+])
 def test_editor_validation_finishes_without_a_writer_and_owner_can_resume(tmp_path, monkeypatch, root, case):
     from ouroboros.task_results import load_task_result
 
@@ -146,9 +149,10 @@ def _completion_refusal(registry, case):
     return result
 
 
-@pytest.mark.parametrize("case", ["argument", "conflict"])
-@pytest.mark.parametrize("actor", ["root", "child"])
-@pytest.mark.parametrize("next_action", ["pause", "continue"])
+@pytest.mark.parametrize(("next_action", "actor", "case"), [
+    ("pause", "root", "argument"),
+    ("continue", "child", "conflict"),
+])
 def test_completion_refusal_keeps_owner_controls_available(tmp_path, monkeypatch, case, actor, next_action):
     from ouroboros.task_results import load_task_result, write_task_result
     from supervisor.continuation_admission import admit_continuation

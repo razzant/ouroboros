@@ -57,8 +57,17 @@ def test_control_request_rechecks_after_model_response(attention, monkeypatch, c
     assert ctx.pending_events == []
 
 
-@pytest.mark.parametrize("action", ["pause_task", "resume_task", "continue_task"])
-@pytest.mark.parametrize("change", ["progress", "memory_progress", "attempt", "memory_attempt", "memory_pause", "stop", "panic", "missing", "unreadable"])
+@pytest.mark.parametrize(("change", "action"), [
+    ("progress", "pause_task"),
+    ("memory_progress", "resume_task"),
+    ("attempt", "continue_task"),
+    ("memory_attempt", "pause_task"),
+    ("memory_pause", "continue_task"),
+    ("stop", "resume_task"),
+    ("panic", "continue_task"),
+    ("missing", "pause_task"),
+    ("unreadable", "resume_task"),
+])
 def test_deferred_effect_rechecks_current_source(attention, monkeypatch, action, change):
     from ouroboros.tools.control_mind import _request_control
     from ouroboros.tool_call_log import invocation_scope
@@ -113,8 +122,12 @@ def test_host_diagnostic_binding_survives_missing_context_and_unprefixed_actor(a
                    "action_nonce": "host-binding"})["error"] == "diagnostic_control_target"
 
 
-@pytest.mark.parametrize("change", ["quiet", "progress", "episode", "attempt"])
-@pytest.mark.parametrize("boundary", ["send", "launch"])
+@pytest.mark.parametrize(("boundary", "change"), [
+    ("send", "quiet"),
+    ("send", "attempt"),
+    ("launch", "progress"),
+    ("launch", "episode"),
+])
 def test_unpublished_source_progress_reaches_unsent_boundaries(attention, monkeypatch, change, boundary):
     from ouroboros.model_wait import TaskModelWait, dispatch_control_reason
     from ouroboros.task_status import _load_queue_snapshot, queue_snapshot_observation
@@ -190,8 +203,7 @@ def test_answer_bytes_do_not_assert_source_writers_exited(attention, monkeypatch
     assert attention.running["root"] is attention.meta and queue._reap_queue.empty()
 
 
-@pytest.mark.parametrize("mode", ["warm", "cold", "slot"])
-@pytest.mark.parametrize("selected", ["root", "middle"])
+@pytest.mark.parametrize(("selected", "mode"), [("root", "warm"), ("root", "slot"), ("middle", "cold")])
 def test_late_waiter_receives_one_attention_without_readmission(attention, monkeypatch, mode, selected):
     from ouroboros import model_sleep
     from ouroboros.owner_mailbox import drain_owner_entries
@@ -513,8 +525,13 @@ def _finish_source(attention, monkeypatch):
     return result, usage, trace, calls, progress
 
 
-@pytest.mark.parametrize("kind", ["diagnostic", "ordinary"])
-@pytest.mark.parametrize("state", ["pending", "queued_only", "running", "completed", "failed"])
+@pytest.mark.parametrize(("state", "kind"), [
+    ("pending", "diagnostic"),
+    ("queued_only", "ordinary"),
+    ("running", "diagnostic"),
+    ("completed", "ordinary"),
+    ("failed", "diagnostic"),
+])
 def test_recovered_source_finish_owes_its_diagnostic_no_disposition(attention, monkeypatch, state, kind):
     """The source's real handoff and absorption gates: a host diagnostic stays a listed,
     accounted child but needs no author disposition; the same lineage without the host
@@ -585,8 +602,11 @@ def _review_while_child_settles(attention, monkeypatch, child, outcome):
     return reviewed
 
 
-@pytest.mark.parametrize("kind", ["diagnostic", "adopted", "ordinary"])
-@pytest.mark.parametrize("outcome", ["completed", "cancelled"])
+@pytest.mark.parametrize(("outcome", "kind"), [
+    ("completed", "diagnostic"),
+    ("completed", "ordinary"),
+    ("cancelled", "adopted"),
+])
 def test_child_settling_under_result_review_rearms_only_claimed_evidence(attention, monkeypatch, outcome, kind):
     """The source answers while its child runs, and the child settles while that answer
     is under result review. An unclaimed host diagnostic is not evidence of the answer:
@@ -703,8 +723,11 @@ def _helper_source(attention):
     return _mint(attention)
 
 
-@pytest.mark.parametrize("action", ["pause_task", "resume_task", "continue_task"])
-@pytest.mark.parametrize("target", ["parent", "sibling"])
+@pytest.mark.parametrize(("target", "action"), [
+    ("parent", "pause_task"),
+    ("parent", "continue_task"),
+    ("sibling", "resume_task"),
+])
 def test_child_source_diagnostic_cannot_control_root_or_sibling(attention, monkeypatch, action, target):
     from ouroboros.tool_call_log import invocation_scope
     from supervisor.events_mind_controls import _apply

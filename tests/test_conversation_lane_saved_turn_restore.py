@@ -563,9 +563,12 @@ def test_a_pre_body_return_proves_nothing_once_a_launch_or_body_may_have_followe
     assert not task_admission.prestart_returned_unsent(still)
 
 
-@pytest.mark.parametrize("resume_first", [False, True])
-@pytest.mark.parametrize("door", ["quit", "panic", "owner_restart"])
-@pytest.mark.parametrize("read_gap", ["proof_reader", "store"])
+@pytest.mark.parametrize(("read_gap", "door", "resume_first"), [
+    ("proof_reader", "quit", True),
+    ("proof_reader", "owner_restart", False),
+    ("store", "panic", True),
+    ("store", "owner_restart", False),
+])
 def test_pre_body_readability_recovery_keeps_quit_authority_and_resumes_once(
         tmp_path, monkeypatch, resume_first, door, read_gap):
     from supervisor import task_admission

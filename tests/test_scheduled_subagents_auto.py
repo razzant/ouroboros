@@ -64,8 +64,11 @@ def _actor(task, root, settings=None):
     return actor_settings_snapshot(task_settings_snapshot(dict(settings or {}), dict(settings or {})), task, root)
 
 
-@pytest.mark.parametrize("room", ["main", "project"])
-@pytest.mark.parametrize("mode,mode_seen,fact", [("swarm", "auto", FACT_AUTO), ("auto", "auto", FACT_AUTO), ("off", "off", FACT_OFF)])
+@pytest.mark.parametrize(("mode", "mode_seen", "fact", "room"), [
+    pytest.param("swarm", "auto", FACT_AUTO, "main", id='swarm-auto-Subagents: Auto — scheduled work-main'),
+    pytest.param("auto", "auto", FACT_AUTO, "project", id='auto-auto-Subagents: Auto — scheduled work-project'),
+    pytest.param("off", "off", FACT_OFF, "main", id='off-off-Subagents: Off — set by my human for this chat-main'),
+])
 def test_a_due_schedule_admits_on_auto_and_keeps_the_rooms_off(q, monkeypatch, room, mode, mode_seen, fact):
     _settings(monkeypatch, "auto" if room == "project" else mode)
     project_id = ""
@@ -271,8 +274,11 @@ def _catalog_settings(monkeypatch, mode):
     return values
 
 
-@pytest.mark.parametrize("door", ["followup", "writer"])
-@pytest.mark.parametrize("mode,mode_seen,fact", [("swarm", "auto", FACT_AUTO), ("auto", "auto", FACT_AUTO), ("off", "off", FACT_OFF)])
+@pytest.mark.parametrize(("mode", "mode_seen", "fact", "door"), [
+    pytest.param("swarm", "auto", FACT_AUTO, "followup", id='swarm-auto-Subagents: Auto — scheduled work-followup'),
+    pytest.param("auto", "auto", FACT_AUTO, "writer", id='auto-auto-Subagents: Auto — scheduled work-writer'),
+    pytest.param("off", "off", FACT_OFF, "followup", id='off-off-Subagents: Off — set by my human for this chat-followup'),
+])
 def test_a_schedule_consciousness_wrote_follows_its_room_like_any_scheduled_work(q, monkeypatch, door, mode, mode_seen, fact):
     """At every consumption point: the queue's admission fact, the live mode, the round's fact, the catalog the model
     sees and the tool's refusal."""

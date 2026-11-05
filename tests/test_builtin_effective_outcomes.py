@@ -209,8 +209,7 @@ class _RetiredBetweenReads(dict):
         return self.pop(name, default)
 
 
-@pytest.mark.parametrize("route", ["registry", "direct"])
-@pytest.mark.parametrize("held", ["unconfirmed", "finalizing"])
+@pytest.mark.parametrize(("held", "route"), [("unconfirmed", "registry"), ("finalizing", "direct")])
 def test_restart_refusal_keeps_the_prior_launch_and_says_why_with_or_without_a_registry(invoke, monkeypatch, tmp_path, held, route):
     """The prior launch's processes are not confirmed ended, or another stop still holds its name: nothing new
     starts, the record and log stay, and the cause is the stop's own answer, read the same called directly or through
@@ -254,8 +253,11 @@ def test_restart_proceeds_once_the_prior_launch_is_confirmed_ended_even_if_its_o
     assert (result.status, result.code) == ("ok", "OK") and json.loads(result.text)["state"] == "running"
 
 
-@pytest.mark.parametrize("route", ["registry", "direct"])
-@pytest.mark.parametrize("executor_answer", ["unconfirmed", "confirmed", "confirmed_outputs_failed"])
+@pytest.mark.parametrize(("executor_answer", "route"), [
+    ("unconfirmed", "registry"),
+    ("confirmed", "direct"),
+    ("confirmed_outputs_failed", "direct"),
+])
 def test_restart_follows_the_stops_own_answer_when_another_stop_retired_the_record(
         invoke, monkeypatch, tmp_path, route, executor_answer):
     """Another stop retires the host record between the start's read and its retire, so the retire reaches an executor

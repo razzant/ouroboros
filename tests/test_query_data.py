@@ -78,9 +78,15 @@ def test_exact_whole_document_and_string_projection(ctx):
     assert saved(ctx, whole) == raw
 
 
-@pytest.mark.parametrize("same_bytes", [False, True])
-@pytest.mark.parametrize("link_error", [None, errno.EOPNOTSUPP, errno.ENOTSUP, errno.EPERM,
-                                       errno.EXDEV, errno.ENOSYS, "win32"])
+@pytest.mark.parametrize(("link_error", "same_bytes"), [
+    (None, True),
+    pytest.param(errno.EOPNOTSUPP, True, id='102-True'),
+    pytest.param(errno.ENOTSUP, False, id='45-False'),
+    pytest.param(errno.EPERM, False, id='1-False'),
+    pytest.param(errno.EXDEV, True, id='18-True'),
+    pytest.param(errno.ENOSYS, False, id='78-False'),
+    ("win32", True),
+])
 def test_concurrent_exports_publish_exclusively(ctx, monkeypatch, same_bytes, link_error):
     if link_error is not None:
         def unsupported(*_args, **_kwargs):

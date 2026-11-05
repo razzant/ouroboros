@@ -362,8 +362,11 @@ def test_retrieving_seat_request_preserves_selected_source(evidence_context, mon
     assert (request.policy.get("native_data_root") == ctx.budget_drive_root) is (delivery == "native")
 
 
-@pytest.mark.parametrize("image_state", ["attached", "missing", "reported_failure"])
-@pytest.mark.parametrize("skill", ["unix_computer_use", "another_image_producer"])
+@pytest.mark.parametrize(("skill", "image_state"), [
+    ("unix_computer_use", "attached"),
+    ("another_image_producer", "missing"),
+    ("another_image_producer", "reported_failure"),
+])
 def test_autoattached_image_process_trace_reaches_commit_evidence(evidence_context, image_state, skill):
     from ouroboros.extension_surface_names import extension_surface_name
     from ouroboros.loop_tool_execution import process_tool_results

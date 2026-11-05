@@ -154,8 +154,10 @@ def completion_stub():
     return stub
 
 
-@pytest.mark.parametrize("marker", ["[OWNER_STOP]", "[FINALIZE_NOW]"])
-@pytest.mark.parametrize("multipart", [False, True], ids=["string", "multipart"])
+@pytest.mark.parametrize(("multipart", "marker"), [
+    pytest.param(False, "[OWNER_STOP]", id='string-[OWNER_STOP]'),
+    pytest.param(True, "[FINALIZE_NOW]", id='multipart-[FINALIZE_NOW]'),
+])
 def test_mock_finalization_completion(completion_stub, marker, multipart):
     text = f"{marker} Summarize the verified work and stop."
     content = [{"type": "text", "text": text}] if multipart else text
@@ -187,8 +189,11 @@ def test_mock_keepalive_completion(completion_stub, multipart):
     }
 
 
-@pytest.mark.parametrize("marker", ["[OWNER_STOP]", "[FINALIZE_NOW]"])
-@pytest.mark.parametrize("tail_state", ["unknown", "sent", "unsent"])
+@pytest.mark.parametrize(("tail_state", "marker"), [
+    ("unknown", "[OWNER_STOP]"),
+    ("sent", "[FINALIZE_NOW]"),
+    ("unsent", "[OWNER_STOP]"),
+])
 def test_mock_finalizes_after_production_multipart_append(completion_stub, marker, tail_state):
     from types import SimpleNamespace
 

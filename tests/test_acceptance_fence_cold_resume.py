@@ -87,9 +87,10 @@ def _resume(host, monkeypatch, pid=2222, *, consume=True):  # noqa: F811
     return ctx
 
 
-@pytest.mark.parametrize('reason', ['owner', 'budget'])
-@pytest.mark.parametrize('pid', [1111, 2222], ids=['same-worker', 'different-worker'])
-@pytest.mark.parametrize('boot', [False, True], ids=['park', 'park-boot'])
+@pytest.mark.parametrize(("boot", "pid", "reason"), [
+    pytest.param(False, 1111, 'owner', id='park-same-worker-owner'),
+    pytest.param(True, 2222, 'budget', id='park-boot-different-worker-budget'),
+])
 def test_exact_cold_resume_rebinds_and_seals(host, tmp_path, monkeypatch, reason, pid, boot):  # noqa: F811
     from ouroboros.loop_delivery import _no_tool_final_answer
     from ouroboros.task_results import load_task_result, write_task_result

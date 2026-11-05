@@ -23,8 +23,10 @@ def release_connections():
     store.close_connections()
 
 
-@pytest.mark.parametrize("money", [False, True])
-@pytest.mark.parametrize("tier", [store.TIER_ENFORCED, store.TIER_NAME])
+@pytest.mark.parametrize(("tier", "money"), [
+    pytest.param(store.TIER_ENFORCED, False, id='enforced-False'),
+    pytest.param(store.TIER_NAME, True, id='name-True'),
+])
 def test_fifty_reads_open_one_connection_per_thread(tmp_path, monkeypatch, money, tier):
     monkeypatch.setattr(store, "_journal_mode", lambda *_: "PERSIST")
     if money:

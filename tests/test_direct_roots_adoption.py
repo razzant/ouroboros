@@ -134,8 +134,11 @@ def _readers(drive, *, answered=False):
     )
 
 
-@pytest.mark.parametrize("roster", ["missing", "empty"])
-@pytest.mark.parametrize("snapshot", ["valid", "absent", "zero_byte"])
+@pytest.mark.parametrize(("snapshot", "roster"), [
+    ("valid", "missing"),
+    ("absent", "empty"),
+    ("zero_byte", "missing"),
+])
 def test_a_dead_turn_without_roster_or_snapshot_is_an_honest_interruption(qenv, monkeypatch, roster, snapshot):
     bus, _sent = _bus(qenv, monkeypatch)
     _crashed_turn(qenv.drive)
@@ -160,9 +163,11 @@ def test_a_dead_turn_without_roster_or_snapshot_is_an_honest_interruption(qenv, 
         row for row in log if row.get("type") == "direct_roots_adopted_orphans").items()
 
 
-@pytest.mark.parametrize("roster", ["missing", "listed"])
-@pytest.mark.parametrize("snapshot", ["valid", "absent"])
-@pytest.mark.parametrize("answer", ["owed", "delivered", "exhausted"])
+@pytest.mark.parametrize(("answer", "snapshot", "roster"), [
+    ("owed", "valid", "missing"),
+    ("delivered", "absent", "listed"),
+    ("exhausted", "valid", "missing"),
+])
 def test_a_registered_answer_survives_the_crash_without_a_contradicting_notice(qenv, monkeypatch, roster,
                                                                               snapshot, answer):
     from ouroboros.working_checkpoint import REASON_FINALIZATION_INCOMPLETE

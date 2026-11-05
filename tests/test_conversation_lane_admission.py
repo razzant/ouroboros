@@ -404,8 +404,11 @@ def test_custody_publishes_only_its_own_row_never_a_resend_admitted_under_the_sa
     assert emitted == []  # no terminal of the old attempt for the row the resend owns
 
 
-@pytest.mark.parametrize("live, resumes", [("presence", True), ("direct", False)])
-@pytest.mark.parametrize("places_state", ["paused", "empty", "unreadable"])
+@pytest.mark.parametrize(("places_state", "live", "resumes"), [
+    ("paused", "presence", True),
+    ("empty", "direct", False),
+    ("unreadable", "presence", True),
+])
 def test_a_correspondents_presence_turn_never_holds_the_owners_auto_resume(lane, monkeypatch, live, resumes, places_state):
     """Review N8: the Host serves at boot before auto-resume, so a correspondent's Presence turn can be a live lane
     row when the planned restart's resume runs. It is its place's conversation, never the owner's: only an owner

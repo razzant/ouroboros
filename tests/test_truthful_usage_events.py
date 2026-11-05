@@ -83,11 +83,10 @@ def test_explicit_null_counter_outranks_legacy_fallback():
     assert event_token_counts({"prompt_tokens": None}, {"prompt_tokens": 0})["prompt_tokens"] is None
 
 
-@pytest.mark.parametrize("emitter", ["vision", "web_search"])
-@pytest.mark.parametrize("tokens,expected", [
-    ({}, [None] * 4),
-    (dict.fromkeys(COUNTERS, 0), [0] * 4),
-    ({"prompt_tokens": 17, "cache_write_tokens": 0}, [17, None, None, 0]),
+@pytest.mark.parametrize(("tokens", "expected", "emitter"), [
+    pytest.param({}, [None] * 4, "vision", id='tokens0-expected0-vision'),
+    pytest.param(dict.fromkeys(COUNTERS, 0), [0] * 4, "web_search", id='tokens1-expected1-web_search'),
+    pytest.param({"prompt_tokens": 17, "cache_write_tokens": 0}, [17, None, None, 0], "web_search", id='tokens2-expected2-web_search'),
 ])
 def test_tool_producers_keep_unknown_and_partial_usage(emitter, tokens, expected):
     usage = {**tokens, "cost": 0.0, "provider": "openai"}

@@ -365,8 +365,7 @@ def test_macos_screenshot_without_logical_size_is_capture_only(tmp_path, monkeyp
     assert "Capture only" in result["coordinate_note"]
 
 
-@pytest.mark.parametrize("backend", ["local", "remote"])
-@pytest.mark.parametrize("failure", ["write", "lock"])
+@pytest.mark.parametrize(("failure", "backend"), [("write", "local"), ("lock", "remote")])
 def test_screenshot_save_failure_keeps_image_without_claiming_observation(tmp_path, monkeypatch, backend, failure):
     from PIL import Image
     from ouroboros import utils

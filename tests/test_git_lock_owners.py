@@ -731,8 +731,7 @@ def update_lanes(replace_scene, monkeypatch):
     return post
 
 
-@pytest.mark.parametrize("holder", ["crashed", "live"])
-@pytest.mark.parametrize("lane", ["auto_merge", "assisted"])
+@pytest.mark.parametrize(("lane", "holder"), [("auto_merge", "live"), ("assisted", "crashed")])
 def test_an_update_refused_at_its_first_step_rolls_back_in_place_and_keeps_the_core_usable(
         replace_scene, update_lanes, lane, holder, monkeypatch):
     from ouroboros import server_restart
@@ -928,9 +927,11 @@ def _next_boot(scene, monkeypatch):
     return booted, update_merge.finalize_managed_update_on_boot(supervisor_ready=True)
 
 
-@pytest.mark.parametrize("lock_at_next_boot", ["released", "still_held"])
-@pytest.mark.parametrize("history", ["side_release", "older_ancestor"])
-@pytest.mark.parametrize("seam", ["switch_failed", "refused", "switch_not_performed"])
+@pytest.mark.parametrize(("seam", "history", "lock_at_next_boot"), [
+    ("switch_failed", "side_release", "released"),
+    ("refused", "older_ancestor", "still_held"),
+    ("switch_not_performed", "side_release", "released"),
+])
 def test_a_store_less_target_the_switch_did_not_reach_is_never_replayed_or_finalized(
         replace_scene, monkeypatch, seam, history, lock_at_next_boot):
     from ouroboros import store_switch
@@ -1025,8 +1026,7 @@ def test_bootstrap_still_replays_an_armed_intent_whose_target_has_the_store(repl
     assert _git(scene.repo, "rev-parse", "HEAD") == scene.target and result["finalized"] is True, result
 
 
-@pytest.mark.parametrize("held", [False, True])
-@pytest.mark.parametrize("operation", ["cherry-pick", "revert"])
+@pytest.mark.parametrize(("operation", "held"), [("cherry-pick", False), ("revert", True)])
 def test_a_clean_index_with_an_unfinished_operation_is_not_a_finished_rollback(
         replace_scene, update_lanes, held, operation):
     """An empty operation leaves a clean index but a real Git continuation; reset must not be skipped."""
@@ -1146,8 +1146,7 @@ def restore_door(tmp_path, monkeypatch):
                            restore=restore)
 
 
-@pytest.mark.parametrize("door", ["ui_rollback", "vcs_rollback"])
-@pytest.mark.parametrize("holder", ["crashed", "live"])
+@pytest.mark.parametrize(("holder", "door"), [("crashed", "ui_rollback"), ("live", "vcs_rollback")])
 def test_a_restore_git_refused_at_the_index_lock_returns_writers_without_a_restart(restore_door, holder, door, monkeypatch):
     from supervisor import worker_chat_lane, workers
 

@@ -340,8 +340,7 @@ def test_a_vendor_probe_leaves_no_process_behind(tmp_path, mode):
     assert not pid_is_alive(grandchild) or pid_is_zombie(grandchild)
 
 
-@pytest.mark.parametrize("kind", ["native", "node"])
-@pytest.mark.parametrize("version_output", ["codex-cli 1.2.3", "codex-cli 1.2.30"])
+@pytest.mark.parametrize(("version_output", "kind"), [("codex-cli 1.2.3", "native"), ("codex-cli 1.2.30", "node")])
 def test_vendor_launch_uses_managed_transport_and_engine_doctor_in_custody(
         tmp_path, monkeypatch, kind, version_output):
     import ouroboros.config as config

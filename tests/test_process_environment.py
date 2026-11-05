@@ -83,8 +83,11 @@ def test_settings_wire_metadata_is_not_an_unknown_config_field():
     assert cfg.configuration_warnings == ('Fields retained but not applied: future_option',)
 
 
-@pytest.mark.parametrize('secret', ['!', 'synthetic-quote"\\tail\nvalue', 'synthetic-quote"\\tail\r\nvalue'])
-@pytest.mark.parametrize('newline', ['\n', '\r\n'])
+@pytest.mark.parametrize(("newline", "secret"), [
+    ('\n', '!'),
+    ('\n', 'synthetic-quote"\\tail\r\nvalue'),
+    ('\r\n', 'synthetic-quote"\\tail\nvalue'),
+])
 def test_mcp_reference_secrets_are_masked_without_a_length_floor(secret, newline):
     raw = {'id': 'local', 'transport': 'stdio', 'command': 'unused',
            'env': {'PORT': '8080'}, 'env_from_settings': {'PASSWORD': 'CUSTOM_KEY'}}

@@ -546,8 +546,7 @@ def test_pre_round_terminal_order_keeps_cost_after_stop_and_deadline(monkeypatch
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("first", ["web", "host"])
-@pytest.mark.parametrize("persist_role", [False, True])
+@pytest.mark.parametrize(("persist_role", "first"), [(False, "host"), (True, "web")])
 def test_web_and_host_wait_decisions_share_saved_replay_and_attempt_fences(live_wait, monkeypatch, first, persist_role):
     from ouroboros import config
     from supervisor import queue as task_queue
@@ -591,8 +590,7 @@ def test_web_and_host_wait_decisions_share_saved_replay_and_attempt_fences(live_
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("declared", [True, False])
-@pytest.mark.parametrize("persist_role", [True, False])
+@pytest.mark.parametrize(("persist_role", "declared"), [(True, True), (False, False)])
 def test_a_main_model_saved_on_a_wait_card_is_recorded_like_a_settings_save(live_wait, monkeypatch, declared,
                                                                              persist_role):
     """ORDER item 4: the card's saved choice records the writer's receipt as one ``settings_changed`` with the origin

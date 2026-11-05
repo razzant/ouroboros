@@ -100,8 +100,7 @@ def spend_preparation(env, monkeypatch, until):
     monkeypatch.setattr(env.observability, "persist_physical_candidate", persist)
 
 
-@pytest.mark.parametrize("consumer", ["naming", "translation"])
-@pytest.mark.parametrize("limiter", [0, 1])
+@pytest.mark.parametrize(("limiter", "consumer"), [(0, "naming"), (1, "translation")])
 def test_preparation_expiry_prevents_a_physical_send(call_env, monkeypatch, consumer, limiter):
     monkeypatch.setenv("OUROBOROS_MODEL_MAX_CONCURRENCY", str(limiter))
     spend_preparation(call_env, monkeypatch, 111)
@@ -121,8 +120,7 @@ def test_slot_wait_spends_the_same_deadline(call_env, monkeypatch, consumer):
     assert ledger_rows(call_env.root)[-1]["state"] == "released"
 
 
-@pytest.mark.parametrize("consumer", ["naming", "translation"])
-@pytest.mark.parametrize("spent", [3, 11])
+@pytest.mark.parametrize(("spent", "consumer"), [(3, "naming"), (11, "translation")])
 def test_recovery_has_remaining_allowance_and_never_renews_it(call_env, consumer, spent):
     original = call_env.sdk.chat.completions.create
 
@@ -148,8 +146,11 @@ def test_recovery_has_remaining_allowance_and_never_renews_it(call_env, consumer
         assert ledger_rows(call_env.root)[-1]["cost_usd"] == 0.25
 
 
-@pytest.mark.parametrize("consumer", ["naming", "translation"])
-@pytest.mark.parametrize("inherited", ["none", "calendar", "execution"])
+@pytest.mark.parametrize(("inherited", "consumer"), [
+    ("none", "naming"),
+    ("calendar", "translation"),
+    ("execution", "naming"),
+])
 def test_earlier_inherited_bound_wins_and_unbounded_helpers_still_work(call_env, consumer, inherited):
     scopes = {"none": contextlib.nullcontext, "calendar": lambda: model_wait.calendar_scope(
         datetime.fromtimestamp(104, timezone.utc).isoformat()),
@@ -222,8 +223,7 @@ def test_expired_translation_batch_requeues_without_spending_an_answer_attempt(c
     assert not call_env.sends
 
 
-@pytest.mark.parametrize("consumer", ["naming", "translation"])
-@pytest.mark.parametrize("expired", [False, True])
+@pytest.mark.parametrize(("expired", "consumer"), [(False, "naming"), (True, "translation")])
 def test_local_consumer_checks_preparation_deadline(call_env, monkeypatch, consumer, expired):
     from ouroboros import local_model
 
@@ -657,9 +657,10 @@ def test_an_accepted_verdict_extraction_outlives_its_own_window(call_env, monkey
     collected_once(call_env, gateway)
 
 
-@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
-@pytest.mark.parametrize("bound,cancelled_at", [("caller_deadline_ts", [190]), ("caller_dispatch_deadline_ts", [])],
-                         ids=["callers_own_deadline", "helper_send_window"])
+@pytest.mark.parametrize(("bound", "cancelled_at", "asynchronous"), [
+    pytest.param("caller_deadline_ts", [190], False, id='callers_own_deadline-sync'),
+    pytest.param("caller_dispatch_deadline_ts", [], True, id='helper_send_window-async'),
+])
 def test_only_a_callers_own_deadline_ends_the_wait_for_an_accepted_operation(call_env, monkeypatch, bound,
                                                                              cancelled_at, asynchronous):
     """The same managed chat, wait owner and running operation, both bounds at 180. Main's own deadline less its

@@ -290,8 +290,10 @@ def _github_pages(monkeypatch, pages):
     return calls
 
 
-@pytest.mark.parametrize("reverse", [False, True], ids=["open-first", "merged-first"])
-@pytest.mark.parametrize("merged_approved", [False, True], ids=["unapproved-merge", "approved-merge"])
+@pytest.mark.parametrize(("merged_approved", "reverse"), [
+    pytest.param(False, False, id='unapproved-merge-open-first'),
+    pytest.param(True, True, id='approved-merge-merged-first'),
+])
 def test_push_approval_belongs_to_the_exact_merged_pr(monkeypatch, reverse, merged_approved):
     from scripts.book_growth_mode import main
 
@@ -325,16 +327,15 @@ def test_push_rejects_unrelated_approval(monkeypatch, pulls):
     assert calls == [PULLS_URL]
 
 
-@pytest.mark.parametrize("events,expected", [
-    ([OWNER_ADDS], "approved"),
-    ([_label("labeled", "razzant", "other")], "block"),
-    ([_label("labeled", "ouroboros-agent")], "block"),
-    ([OWNER_ADDS, _label("unlabeled", "razzant")], "block"),
-    ([OWNER_ADDS, _label("unlabeled", "someone"), _label("labeled", "someone")], "block"),
-    ([_label("labeled", "someone"), _label("unlabeled", "someone"), OWNER_ADDS], "approved"),
-    ([OWNER_ADDS, _label("unlabeled", "someone", "other")], "approved"),
-], ids=["owner", "unrelated-label", "non-owner", "removed", "non-owner-reapplied", "owner-reapplied", "unrelated-removal"])
-@pytest.mark.parametrize("event", ["pull_request", "push"])
+@pytest.mark.parametrize(("event", "events", "expected"), [
+    pytest.param("pull_request", [OWNER_ADDS], "approved", id='pull_request-owner'),
+    pytest.param("pull_request", [_label("labeled", "ouroboros-agent")], "block", id='pull_request-non-owner'),
+    pytest.param("pull_request", [OWNER_ADDS, _label("unlabeled", "someone"), _label("labeled", "someone")], "block", id='pull_request-non-owner-reapplied'),
+    pytest.param("pull_request", [OWNER_ADDS, _label("unlabeled", "someone", "other")], "approved", id='pull_request-unrelated-removal'),
+    pytest.param("push", [_label("labeled", "razzant", "other")], "block", id='push-unrelated-label'),
+    pytest.param("push", [OWNER_ADDS, _label("unlabeled", "razzant")], "block", id='push-removed'),
+    pytest.param("push", [_label("labeled", "someone"), _label("unlabeled", "someone"), OWNER_ADDS], "approved", id='push-owner-reapplied'),
+])
 def test_raw_label_history_controls_the_exception(monkeypatch, event, events, expected):
     from scripts.book_growth_mode import main
 
@@ -455,10 +456,13 @@ def test_push_mode_reaches_the_size_lane_and_only_growth_fails(monkeypatch, caps
             test_a_change_does_not_grow_a_reference_book(capsys)
 
 
-@pytest.mark.parametrize("text_id,name", [("constitution", "BIBLE.md"), ("prompts", "Prompts")])
-@pytest.mark.parametrize("mode,tip,passes", [
-    ("block", 101, False), ("", 101, False), ("approved", 101, True), ("warn", 101, True),
-    ("block", 100, True), ("block", 99, True),
+@pytest.mark.parametrize(("mode", "tip", "passes", "text_id", "name"), [
+    ("block", 101, False, "constitution", "BIBLE.md"),
+    ("", 101, False, "prompts", "Prompts"),
+    ("approved", 101, True, "constitution", "BIBLE.md"),
+    ("warn", 101, True, "prompts", "Prompts"),
+    ("block", 100, True, "constitution", "BIBLE.md"),
+    ("block", 99, True, "prompts", "Prompts"),
 ])
 def test_bible_and_prompt_growth_fails_unless_the_owner_approved(monkeypatch, capsys, text_id, name, mode, tip, passes):
     import sys

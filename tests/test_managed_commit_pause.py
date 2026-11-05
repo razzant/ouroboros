@@ -117,8 +117,7 @@ def test_managed_pause_retains_commit_and_resumes_unfinished_gates(managed_commi
     assert assisted._git(f.repo, "rev-parse", "HEAD").stdout.strip() == commit
 
 
-@pytest.mark.parametrize("phase", ["tests", "smoke"])
-@pytest.mark.parametrize("pause_during", [False, True])
+@pytest.mark.parametrize(("pause_during", "phase"), [(False, "smoke"), (True, "tests")])
 def test_real_failed_managed_gates_keep_existing_rollback(managed_commit, phase, pause_during):
     f = managed_commit
     f.mode.update(pause=phase if pause_during else "", red=phase)

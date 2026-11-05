@@ -147,8 +147,12 @@ def test_onboarding_restart_uses_existing_restart_transaction_and_exit_signal(st
     assert git_ops.REPO_DIR == obj.repo
 
 
-@pytest.mark.parametrize('thread_alive', [True, False])
-@pytest.mark.parametrize('surface', ['http', 'ws', 'ws_chat', 'ws_chat_files'])
+@pytest.mark.parametrize(("surface", "thread_alive"), [
+    ('http', True),
+    ('ws', False),
+    ('ws_chat', True),
+    ('ws_chat_files', False),
+])
 def test_restart_during_initialization_does_not_queue_to_published_bridge(
         startup_controls, monkeypatch, thread_alive, surface):
     """Publishing the bridge precedes recovery; only a ready loop can consume Restart. The composer

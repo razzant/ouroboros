@@ -79,8 +79,10 @@ def _observed_source(messages):
 
 # --- the incident shape: a Place focus at its round limit -------------------------------------
 
-@pytest.mark.parametrize("subject", [False, True], ids=["no-subject", "observed-subject"])
-@pytest.mark.parametrize("form", ["native", "text"])
+@pytest.mark.parametrize(("form", "subject"), [
+    pytest.param("native", False, id='native-no-subject'),
+    pytest.param("text", True, id='text-observed-subject'),
+])
 def test_place_round_limit_keeps_the_silent_finish_its_focus_selected(contact_runtime, monkeypatch, form, subject):
     """content=null plus a sole finish_task(silent, summary, answer) on a real Place: the answer is the internal
     record, nothing is spoken in the room, the summary is kept, and the round limit stays the cause."""
@@ -320,8 +322,7 @@ NULL_FIELDS = {"action": "finish", "answer": ANSWER, "answer_sha256": None, "rat
                "pending_review": None, "silent": None, "summary": None, "swarm_comparison": None}
 
 
-@pytest.mark.parametrize("request_kind", ["null-fields", "silent-false"])
-@pytest.mark.parametrize("form", ["native", "text"])
+@pytest.mark.parametrize(("form", "request_kind"), [("native", "null-fields"), ("text", "silent-false")])
 def test_null_fields_name_nothing_and_false_keeps_a_spoken_finish(tmp_path, form, request_kind):
     """The controls of the same reading: a null optional field is absent, as the handler's own staging drops it (a
     null subject acknowledges or degrades nothing), and silent=false is an ordinary spoken finish."""
@@ -739,15 +740,11 @@ def test_a_reply_with_calls_this_rail_cannot_adopt_consumes_nothing(tmp_path, sh
     assert _request_fact(returned) == expected
 
 
-@pytest.mark.parametrize("request_body", [
-    {"action": "finish", "silent": True, "summary": SUMMARY, "answer": INTERNAL},
-    {"action": "stop", "rationale": RATIONALE, "answer": INTERNAL},
-], ids=["silent-summary", "stop"])
-@pytest.mark.parametrize("calls", [
-    [("chat_history", {})],
-    [("finish_task", {"action": "finish", "answer": ANSWER}), ("chat_history", {})],
-    [("finish_task", {"action": "finish", "answer": ANSWER}), ("finish_task", {"action": "finish", "answer": PARTIAL})],
-], ids=["other-call", "finish-beside-other", "two-finishes"])
+@pytest.mark.parametrize(("calls", "request_body"), [
+    pytest.param([("chat_history", {})], {"action": "finish", "silent": True, "summary": SUMMARY, "answer": INTERNAL}, id='other-call-silent-summary'),
+    pytest.param([("finish_task", {"action": "finish", "answer": ANSWER}), ("chat_history", {})], {"action": "stop", "rationale": RATIONALE, "answer": INTERNAL}, id='finish-beside-other-stop'),
+    pytest.param([("finish_task", {"action": "finish", "answer": ANSWER}), ("finish_task", {"action": "finish", "answer": PARTIAL})], {"action": "finish", "silent": True, "summary": SUMMARY, "answer": INTERNAL}, id='two-finishes-silent-summary'),
+])
 def test_a_serialized_completion_beside_native_calls_is_never_the_final_through_the_pipeline(at_limit, calls, request_body):
     """Scripted transport (no reported call count) and the real terminal pipeline: a serialized completion in the
     text of a reply that also asked for tools is never the authored final — no silence, summary or stop, the

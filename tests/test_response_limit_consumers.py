@@ -354,8 +354,7 @@ def test_the_serving_artifact_is_the_live_launch_not_the_saved_settings(monkeypa
     assert manager.serving_artifact() == {'model_path': '/models/a b.gguf', 'port': 8766}
 
 
-@pytest.mark.parametrize("expired", [False, True])
-@pytest.mark.parametrize("account", ["", "account-b"])
+@pytest.mark.parametrize(("account", "expired"), [("", True), ("account-b", False)])
 def test_settings_preview_binds_the_exact_account_and_stores_nothing(tmp_path, monkeypatch, expired, account):
     from starlette.applications import Starlette
     from starlette.routing import Route

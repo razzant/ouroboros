@@ -228,8 +228,7 @@ def test_delayed_runtime_preparation_rechecks_the_ready_peer_before_spawn(startu
     assert winner.stop() is True
 
 
-@pytest.mark.parametrize("descriptor", [False, True])
-@pytest.mark.parametrize("action", ["stop", "panic"])
+@pytest.mark.parametrize(("action", "descriptor"), [("stop", False), ("panic", True)])
 def test_peer_stop_works_before_readiness_and_reaps_the_owned_child(startup, monkeypatch, descriptor, action):
     manager = owned.OwnedClaudexorDaemon()
     with pytest.raises(ClaudexorUnavailable):

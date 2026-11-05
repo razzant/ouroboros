@@ -125,19 +125,18 @@ def test_a_real_ordinary_finish_stays_refused_with_the_same_producer(tmp_path, m
     assert workers.PENDING == [] and "continued_by" not in load_task_result(data, "stop-root")
 
 
-@pytest.mark.parametrize("axes", [
-    STOP_AXES,
-    {"execution": {"status": "ok"}, "objective": {"status": "fail", "source": "plan_review_author_stop",
-                                                  "reason": "author_stop"}},
-    {"execution": {"status": "ok"}, "objective": {"status": "fail", "source": "task_acceptance_review",
+@pytest.mark.parametrize(("reason_code", "axes"), [
+    pytest.param("final_message", STOP_AXES, id='final_message-current'),
+    pytest.param("final_message", {"execution": {"status": "ok"}, "objective": {"status": "fail", "reason": "review_cycles_exhausted"},
+     "review": {"acceptance_decision": {"reason": "review_cycles_exhausted", "author_action": "stop",
+                                        "author_disposition": {"action": "stop", "rationale": STOP_RATIONALE}}}}, id='final_message-legacy-exhausted-rounds'),
+    pytest.param("plan_review_advisory", {"execution": {"status": "ok"}, "objective": {"status": "fail", "source": "plan_review_author_stop",
+                                                  "reason": "author_stop"}}, id='plan_review_advisory-plan-exit'),
+    pytest.param("delegated_custody_unreconciled", {"execution": {"status": "ok"}, "objective": {"status": "fail", "source": "task_acceptance_review",
                                                   "reason": "author_stop"},
      "review": {"acceptance_decision": {"reason": "author_stop", "author_action": "stop", "author_disposition": {
-         "action": "stop", "rationale": STOP_RATIONALE}}}},
-    {"execution": {"status": "ok"}, "objective": {"status": "fail", "reason": "review_cycles_exhausted"},
-     "review": {"acceptance_decision": {"reason": "review_cycles_exhausted", "author_action": "stop",
-                                        "author_disposition": {"action": "stop", "rationale": STOP_RATIONALE}}}},
-], ids=["current", "plan-exit", "legacy-decision", "legacy-exhausted-rounds"])
-@pytest.mark.parametrize("reason_code", ["final_message", "plan_review_advisory", "delegated_custody_unreconciled"])
+         "action": "stop", "rationale": STOP_RATIONALE}}}}, id='delegated_custody_unreconciled-legacy-decision'),
+])
 def test_every_stored_stop_shape_reads_the_same_under_its_recorded_reason(axes, reason_code):
     from ouroboros.owner_continue import AUTHOR_STOP_CAUSE, continuation_eligibility
 

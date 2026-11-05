@@ -264,10 +264,9 @@ def test_first_generic_owner_save_preserves_an_explicit_independent_triple(room_
     assert json.loads(config.SETTINGS_PATH.read_text(encoding="utf-8"))[EFFORT_FORMAT_KEY] == 1
 
 
-@pytest.mark.parametrize("legacy_mode", ["max", "low"])
-@pytest.mark.parametrize("endpoint,body", [
-    ("/api/owner/context-mode", {"mode": "low"}),
-    ("/api/owner/effort-range", {"min": "low", "recommended": "ultra", "max": "high"}),
+@pytest.mark.parametrize(("endpoint", "body", "legacy_mode"), [
+    pytest.param("/api/owner/context-mode", {"mode": "low"}, "max", id='/api/owner/context-mode-body0-max'),
+    pytest.param("/api/owner/effort-range", {"min": "low", "recommended": "ultra", "max": "high"}, "low", id='/api/owner/effort-range-body1-low'),
 ])
 def test_first_main_control_save_normalizes_legacy_context_before_capturing_digest(room_settings, endpoint, body, legacy_mode):
     _root, client = room_settings

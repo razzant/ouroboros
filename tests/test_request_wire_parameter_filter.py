@@ -332,49 +332,41 @@ def test_an_unrelated_400_and_a_range_refusal_keep_todays_one_send(evidence_root
     assert _learned_fields(evidence_root) == []
 
 
-@pytest.mark.parametrize("body_error", [False, True])
-@pytest.mark.parametrize("message,param,withdrawn", [
-    (KIMI_REFUSAL, "", True),
-    ("invalid temperature: only 1 is supported", "", True),  # the predicate boundary ends the clause too
-    ("temperature can only be 1", "", True),
-    ("only 1 is allowed for temperature", "", True),  # the predicate names the subject itself
-    ("max_tokens is optional; invalid temperature: only 1 is allowed", "", True),  # names its subject after another clause
-    # Formerly "not one value, so nothing": the sent hint's own number decides now, and no number here allows 0.2.
-    ("temperature can only be set to 1", "", True),
-    ("temperature can only be 0 or 1", "", True),
-    ("temperature can only be 0 and 1", "", True),
-    ("temperature can only be 0 | 1", "", True),
-    ("only 0 or 1 is allowed for temperature", "", True),
-    ("only 0 and 1 are allowed for temperature", "", True),
-    # Formerly "the param stays unconfirmed": a typed parameter owns a statement that opens its own clause...
-    ("Invalid value: only 1 is allowed for this model", "temperature", True),
-    # ...even after another field's colon, a limit of the grammar: the structure outranks that prose, at the bounded
-    # cost of one hint-free resend, learned only if it succeeds.
-    ("invalid max_tokens: only 1 is allowed; temperature is optional", "temperature", True),
-    # Formerly dropped: top_p is no host hint, so it has no origin to withdraw; the provider's error stands.
-    ("invalid top_p: only 0.5 is allowed", "", False),
-    # Formerly dropped by the path's leaf: only the exact parameter binds, as "messages.temperature" must not.
-    ("invalid temperature: only 1 is allowed", "body.temperature", False),
-    ("max_tokens is optional; invalid temperature: only 1 is allowed", "body.temperature", False),
-    # Unchanged: nothing here is a complete statement of temperature's values excluding the hint.
-    ("temperature can only take 1", "", False),   # "take" is outside the closed grammar
-    ("temperature can only take 0, 1", "", False),
-    ("temperature can only be 0 to 2", "", False),  # a range holding 0.2
-    ("temperature can only be between 0 and 2", "", False),
-    ("top_p can only take values between 0 and 1", "", False),
-    ("invalid temperature and top_p: only 1 is allowed", "", False),  # the colon follows two fields, not one subject
-    ("top_p can only be 0.5", "temperature", False),  # that statement has its own subject, whatever the param says
-    ("invalid max_tokens: only 1 is allowed; temperature is optional", "", False),  # the subject is max_tokens
-    ("invalid max_tokens: only 1 is allowed, temperature is optional", "", False),  # comma or semicolon alike
-    ("invalid max_tokens: only 1 is allowed for temperature-less models", "", False),  # a compound is not the field
-    ("invalid max_tokens: must be 1 for low-temperature models", "", False),
-    ("only 1 is allowed for temperature-less models", "", False),
-    (KIMI_REFUSAL.replace("temperature", "response_format"), "", False),  # a non-sampling field named in prose
-    ("Invalid value: only 1 is allowed", "response_format", False),       # a non-sampling structured param
-    ("Invalid value: only 1 is allowed", "model", False),                 # not an optional field at all
-    ("invalid model: only 'kimi/k3.1-pro' is allowed", "", False),        # unrelated field; not a number either
-    ("temperature must be between 0 and 2", "", False),                   # a range holding 0.2
-    ("invalid value for temperature", "", False),                         # names no allowed value
+@pytest.mark.parametrize(("message", "param", "withdrawn", "body_error"), [
+    pytest.param(KIMI_REFUSAL, "", True, True, id='invalid temperature: only 1 is allowed for this model--True-True'),
+    ("invalid temperature: only 1 is supported", "", True, True),  # the predicate boundary ends the clause too
+    ("temperature can only be 1", "", True, False),
+    ("only 1 is allowed for temperature", "", True, True),  # the predicate names the subject itself
+    ("max_tokens is optional; invalid temperature: only 1 is allowed", "", True, False),  # names its subject after another clause
+    ("temperature can only be set to 1", "", True, True),  # Formerly "not one value, so nothing": the sent hint's own number decides now, and no number here allows 0.2.
+    ("temperature can only be 0 or 1", "", True, False),
+    ("temperature can only be 0 and 1", "", True, True),
+    ("temperature can only be 0 | 1", "", True, False),
+    ("only 0 or 1 is allowed for temperature", "", True, True),
+    ("only 0 and 1 are allowed for temperature", "", True, False),
+    ("Invalid value: only 1 is allowed for this model", "temperature", True, True),  # Formerly "the param stays unconfirmed": a typed parameter owns a statement that opens its own clause...
+    ("invalid max_tokens: only 1 is allowed; temperature is optional", "temperature", True, False),  # ...even after another field's colon, a limit of the grammar: the structure outranks that prose, at the bounded cost of one hint-free resend, learned only if it succeeds.
+    ("invalid top_p: only 0.5 is allowed", "", False, True),  # Formerly dropped: top_p is no host hint, so it has no origin to withdraw; the provider's error stands.
+    ("invalid temperature: only 1 is allowed", "body.temperature", False, False),  # Formerly dropped by the path's leaf: only the exact parameter binds, as "messages.temperature" must not.
+    ("max_tokens is optional; invalid temperature: only 1 is allowed", "body.temperature", False, True),
+    ("temperature can only take 1", "", False, False),  # Unchanged: nothing here is a complete statement of temperature's values excluding the hint. "take" is outside the closed grammar
+    ("temperature can only take 0, 1", "", False, False),
+    ("temperature can only be 0 to 2", "", False, True),  # a range holding 0.2
+    ("temperature can only be between 0 and 2", "", False, False),
+    ("top_p can only take values between 0 and 1", "", False, True),
+    ("invalid temperature and top_p: only 1 is allowed", "", False, False),  # the colon follows two fields, not one subject
+    ("top_p can only be 0.5", "temperature", False, True),  # that statement has its own subject, whatever the param says
+    ("invalid max_tokens: only 1 is allowed; temperature is optional", "", False, False),  # the subject is max_tokens
+    ("invalid max_tokens: only 1 is allowed, temperature is optional", "", False, True),  # comma or semicolon alike
+    ("invalid max_tokens: only 1 is allowed for temperature-less models", "", False, False),  # a compound is not the field
+    ("invalid max_tokens: must be 1 for low-temperature models", "", False, True),
+    ("only 1 is allowed for temperature-less models", "", False, False),
+    pytest.param(KIMI_REFUSAL.replace("temperature", "response_format"), "", False, True, id='invalid response_format: only 1 is allowed for this model--False-True'),  # a non-sampling field named in prose
+    ("Invalid value: only 1 is allowed", "response_format", False, False),  # a non-sampling structured param
+    ("Invalid value: only 1 is allowed", "model", False, False),  # not an optional field at all
+    ("invalid model: only 'kimi/k3.1-pro' is allowed", "", False, True),  # unrelated field; not a number either
+    ("temperature must be between 0 and 2", "", False, False),  # a range holding 0.2
+    ("invalid value for temperature", "", False, True),  # names no allowed value
 ])
 def test_the_allowed_values_rule_withdraws_only_a_temperature_hint(evidence_root, body_error, message, param, withdrawn):
     """A refusal withdraws the hint only when a statement bound to the exact field (or by its

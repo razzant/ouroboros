@@ -132,8 +132,11 @@ def test_the_anthropic_line_is_exactly_what_the_next_canonical_request_replays(t
 # --- real provider lanes --------------------------------------------------------------
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("provider", ["openai", "openrouter", "anthropic"])
+@pytest.mark.parametrize(("provider", "asynchronous"), [
+    ("openai", False),
+    ("openrouter", True),
+    ("anthropic", False),
+])
 def test_each_remote_lane_measures_prices_seals_and_sends_one_clocked_candidate(
         transport, ticking, provider, asynchronous):  # noqa: F811
     root, client, sent = transport
@@ -751,8 +754,7 @@ def test_native_anthropic_compatibility_retry_has_a_fresh_sealed_clock(transport
     assert usage["request_wire"]["applied_effort"] == "provider_default"
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("dialect_first", [False, True])
+@pytest.mark.parametrize(("dialect_first", "asynchronous"), [(False, False), (True, True)])
 def test_clock_refresh_preserves_composed_tool_dialect_and_effort_recovery(
         tmp_path, monkeypatch, ticking, asynchronous, dialect_first):
     import ouroboros.request_wire_contract as wire

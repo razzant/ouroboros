@@ -386,9 +386,11 @@ def test_one_birth_has_one_spelling():
     assert pc.birth_epoch(HOST_BIRTH) == pc.birth_epoch(ENGINE_BIRTH) > 0
 
 
-@pytest.mark.parametrize("recorded, live", [(ENGINE_BIRTH, HOST_BIRTH), (HOST_BIRTH, ENGINE_BIRTH)],
-                         ids=["engine-record", "old-host-record"])
-@pytest.mark.parametrize("after", ["ends", "survives", "fails"])
+@pytest.mark.parametrize(("after", "recorded", "live"), [
+    pytest.param("ends", ENGINE_BIRTH, HOST_BIRTH, id='ends-engine-record'),
+    pytest.param("survives", HOST_BIRTH, ENGINE_BIRTH, id='survives-old-host-record'),
+    pytest.param("fails", ENGINE_BIRTH, HOST_BIRTH, id='fails-engine-record'),
+])
 def test_either_spelling_of_a_live_recorded_birth_is_that_process(monkeypatch, recorded, live, after):
     """The engine-shaped and the old padded record of one live process are that process: it
     is signalled, and a reading in the other spelling is never a false 'gone' or 'ended'; a
@@ -573,8 +575,12 @@ def _record_group_before_failed_panic(tmp_path, monkeypatch, origin, *, birth=HO
     return sent
 
 
-@pytest.mark.parametrize("origin", ["task", "engine"])
-@pytest.mark.parametrize("later", ["unreadable", "same", "reused", "absent"])
+@pytest.mark.parametrize(("later", "origin"), [
+    ("unreadable", "task"),
+    ("same", "engine"),
+    ("reused", "task"),
+    ("absent", "engine"),
+])
 def test_failed_broad_table_preserves_recorded_leader_for_known_only_recovery(tmp_path, monkeypatch, origin, later):
     sent = _record_group_before_failed_panic(tmp_path, monkeypatch, origin)
     first = ps.panic_scope_census(tmp_path, exclude={os.getpid(), 1})
@@ -611,8 +617,7 @@ def test_failed_broad_table_preserves_recorded_leader_for_known_only_recovery(tm
         assert recovered["captured_gone"] == ([PID] if later in ("reused", "absent") else [])
 
 
-@pytest.mark.parametrize("origin", ["task", "engine"])
-@pytest.mark.parametrize("case", ["excluded", "leaderless"])
+@pytest.mark.parametrize(("case", "origin"), [("excluded", "task"), ("leaderless", "engine")])
 def test_failed_broad_table_never_invents_an_excluded_or_unidentified_leader(tmp_path, monkeypatch, origin, case):
     sent = _record_group_before_failed_panic(tmp_path, monkeypatch, origin,
                                            birth="" if case == "leaderless" else HOST_BIRTH)

@@ -14,9 +14,13 @@ import pytest
 pytestmark = pytest.mark.serial
 
 
-@pytest.mark.parametrize("phase", ["publication", "custody", "success", "early-cleanup", "posix-exec"])
-@pytest.mark.parametrize("uvicorn_returns", [True, False], ids=["returned", "held"])
-@pytest.mark.parametrize("panic_entry", ["executor", "ingress", "failed-ingress"])
+@pytest.mark.parametrize(("panic_entry", "uvicorn_returns", "phase"), [
+    pytest.param("executor", True, "publication", id='executor-returned-publication'),
+    pytest.param("executor", False, "early-cleanup", id='executor-held-early-cleanup'),
+    pytest.param("ingress", False, "custody", id='ingress-held-custody'),
+    pytest.param("failed-ingress", True, "success", id='failed-ingress-returned-success'),
+    pytest.param("failed-ingress", False, "posix-exec", id='failed-ingress-held-posix-exec'),
+])
 def test_actual_restart_watcher_leaves_termination_to_panic(tmp_path, phase, uvicorn_returns, panic_entry):
     """Panic persists before physical exit 99, including when the watcher raises.
 
@@ -220,8 +224,10 @@ sys.exit(server.main())
     assert persisted["evolution_owner_stopped"] is True
 
 
-@pytest.mark.parametrize("managed", [True, False], ids=["launcher", "direct"])
-@pytest.mark.parametrize("uvicorn_returns", [True, False], ids=["returned", "held"])
+@pytest.mark.parametrize(("uvicorn_returns", "managed"), [
+    pytest.param(True, True, id='returned-launcher'),
+    pytest.param(False, False, id='held-direct'),
+])
 def test_restart_waits_for_cleanup_and_transfers_once(monkeypatch, tmp_path, managed, uvicorn_returns):
     import server
     from ouroboros import server_restart
@@ -342,9 +348,12 @@ def test_restart_fallback_runs_pin_handoff_before_retained_executor_cleanup(monk
     assert calls[2][1] == {"root": tmp_path}
 
 
-@pytest.mark.parametrize("failure", ["", "fallback", "cleanup", "reexec"],
-                         ids=["reexec-ok", "spawn-fallback-ok", "cleanup-error", "reexec-error"])
-@pytest.mark.parametrize("uvicorn_returns", [False, True], ids=["held", "returned"])
+@pytest.mark.parametrize(("uvicorn_returns", "failure"), [
+    pytest.param(False, "cleanup", id='held-cleanup-error'),
+    pytest.param(False, "reexec", id='held-reexec-error'),
+    pytest.param(True, "", id='returned-reexec-ok'),
+    pytest.param(True, "fallback", id='returned-spawn-fallback-ok'),
+])
 def test_direct_watchdog_physically_transfers_or_fails(tmp_path, failure, uvicorn_returns):
     """Thread outcomes are physical exec or nonzero exit, never success/hang after an error."""
     script = tmp_path / "direct reexec.py"

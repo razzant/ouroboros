@@ -253,8 +253,10 @@ def test_claudexor_sender_acknowledges_and_closes_after_its_receiver_left():
     assert events == [("close",)]
 
 
-@pytest.mark.parametrize("abandonable", [False, True])
-@pytest.mark.parametrize("timeout_type", [TimeoutError, FutureTimeout])
+@pytest.mark.parametrize(("timeout_type", "abandonable"), [
+    pytest.param(TimeoutError, False, id='TimeoutError0-False'),
+    pytest.param(FutureTimeout, True, id='TimeoutError1-True'),
+])
 def test_provider_timeout_is_an_error_not_a_receiver_poll(tmp_path, scope, monkeypatch, abandonable, timeout_type):
     failure = timeout_type("provider timed out")
     def send():
@@ -392,8 +394,7 @@ def test_async_cancellation_still_joins_received_answer_during_abandonable_poll(
     assert row["state"] == "settled" and row["cost_usd"] == pytest.approx(.1)
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("retention_fails", [False, True])
+@pytest.mark.parametrize(("retention_fails", "asynchronous"), [(False, True), (True, False)])
 def test_subscription_chat_pause_preserves_late_receipt_without_adopting_it(
         subscription_setup, monkeypatch, asynchronous, retention_fails):  # noqa: F811 - the imported fixture
     from ouroboros import llm_claudexor

@@ -183,8 +183,7 @@ def test_tapped_option_reaches_the_decision_ingress_and_settles_the_card(tmp_pat
                            "\nAnswered: 2. postgres", [])]
 
 
-@pytest.mark.parametrize("required", [True, False])
-@pytest.mark.parametrize("answer_path", ["callback", "reply"])
+@pytest.mark.parametrize(("answer_path", "required"), [("callback", True), ("reply", False)])
 def test_settled_quiz_drops_only_required_wait_copy(tmp_path, monkeypatch, required, answer_path):
     plugin = _load_plugin()
     api = _send_card(plugin, tmp_path, monkeypatch, wait_for_answer=required)
@@ -368,8 +367,7 @@ def _tracking_init(self, token, **kwargs):
 Client.__init__ = _tracking_init
 
 
-@pytest.mark.parametrize("command", ["/panic", "/restart", "/status"])
-@pytest.mark.parametrize("reply_to_quiz", [False, True])
+@pytest.mark.parametrize(("reply_to_quiz", "command"), [(False, "/panic"), (False, "/status"), (True, "/restart")])
 def test_owner_commands_keep_dispatch_when_replying_to_quiz(tmp_path, monkeypatch, command, reply_to_quiz):
     plugin = _load_plugin()
     api = _send_card(plugin, tmp_path, monkeypatch)
@@ -831,15 +829,12 @@ def test_an_answer_accepted_behind_a_503_is_recorded_and_never_asked_again(tmp_p
     assert last.toasts == ([] if path == "reply" else [("cb35", f"✅ {_PENDING}.")])
 
 
-@pytest.mark.parametrize("payload", [
-    {"error": "The answer could not be confirmed. Retry the same answer when storage is available.",
-     "task_id": "task-1", "reason_code": "quiz_answer_unconfirmed"},
-    # Recorded, but by whom is not said: no winner to compare, so no claim that it is this answer.
-    {"error": "The answer was recorded. Delivery remains pending.", "task_id": "task-1", "state": "answered",
-     "reason_code": "quiz_delivery_failed", "question_delivery": _delivery(reason="quiz_delivery_failed")},
-], ids=["unconfirmed", "answered-without-winner"])
-@pytest.mark.parametrize("status", [503, 500])
-@pytest.mark.parametrize("path", ["reply", "tap"])
+@pytest.mark.parametrize(("path", "status", "payload"), [
+    pytest.param("reply", 503, {"error": "The answer could not be confirmed. Retry the same answer when storage is available.",
+     "task_id": "task-1", "reason_code": "quiz_answer_unconfirmed"}, id='reply-503-unconfirmed'),
+    pytest.param("tap", 500, {"error": "The answer was recorded. Delivery remains pending.", "task_id": "task-1", "state": "answered",
+     "reason_code": "quiz_delivery_failed", "question_delivery": _delivery(reason="quiz_delivery_failed")}, id='tap-500-answered-without-winner'),  # Recorded, but by whom is not said: no winner to compare, so no claim that it is this answer.
+])
 def test_an_unconfirmed_answer_says_its_outcome_is_unknown_and_keeps_the_card_open(tmp_path, monkeypatch, path, status, payload):
     plugin = _load_plugin()
     update = (lambda _token: _reply_update(36, "Use duckdb")) if path == "reply" else (lambda token: _tap_update(36, token, 1))

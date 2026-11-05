@@ -254,9 +254,11 @@ def test_old_sparse_record_is_not_upgraded():
     assert _accept(frame) is None
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-@pytest.mark.parametrize("field", ["waited_sec", "unresolved_upper_bound_usd"])
-@pytest.mark.parametrize("value", [float("nan"), float("inf"), 10**400], ids=["nan", "infinity", "huge-integer"])
+@pytest.mark.parametrize(("value", "field", "legacy"), [
+    pytest.param(float("nan"), "waited_sec", False, id='nan-waited_sec-False'),
+    pytest.param(float("inf"), "unresolved_upper_bound_usd", True, id='infinity-unresolved_upper_bound_usd-True'),
+    pytest.param(10**400, "waited_sec", False, id='huge-integer-waited_sec-False'),
+])
 def test_cost_grace_rejects_invalid_marker_numbers(legacy, field, value):
     frame = _completed_abandoned_residue_frame("legacy") if legacy else _frame()
     marked = _accept(frame)

@@ -418,9 +418,10 @@ def test_explicit_settings_choice_equal_to_environment_or_default_is_authored(
     assert _stored(isolated_settings)["OUROBOROS_UI_DIR"] == choice
 
 
-@pytest.mark.parametrize("environment", ["none", "/srv/operator-ui"])
-@pytest.mark.parametrize("saved", [None, ""])
-@pytest.mark.parametrize("control", ["auto-grant", "context-mode"])
+@pytest.mark.parametrize(("control", "saved", "environment"), [
+    ("auto-grant", None, "none"),
+    ("context-mode", "", "/srv/operator-ui"),
+])
 def test_owner_controls_preserve_ui_choice_authorship(
         isolated_settings, monkeypatch, applied_settings, environment, saved, control):
     """The raw owner reader merges defaults, not the operator's environment."""

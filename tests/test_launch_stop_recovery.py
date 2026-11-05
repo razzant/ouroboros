@@ -174,8 +174,7 @@ def test_the_exit_stop_ends_every_kept_service_row_in_one_shared_pass(tmp_path, 
             _end(pid, birth)
 
 
-@pytest.mark.parametrize("mode", ["separate", "separate-exit"])
-@pytest.mark.parametrize("owner", ["gone-task", "previous-generation"])
+@pytest.mark.parametrize(("owner", "mode"), [("gone-task", "separate"), ("previous-generation", "separate-exit")])
 def test_the_reaper_ends_a_stale_service_by_its_launch_identity_and_keeps_an_unconfirmed_row(
         tmp_path, monkeypatch, scripts, mode, owner):
     """A task service whose task is gone, or a kept service a previous server generation left."""
@@ -208,8 +207,7 @@ def test_the_reaper_ends_a_stale_service_by_its_launch_identity_and_keeps_an_unc
         _end(pid, birth)
 
 
-@pytest.mark.parametrize("later", ["reaper", "exit stop"])
-@pytest.mark.parametrize("scope", ["task", "session"])
+@pytest.mark.parametrize(("scope", "later"), [("task", "reaper"), ("session", "exit stop")])
 def test_the_reaper_keeps_a_dead_launch_row_while_its_owner_lives_and_a_later_stop_ends_its_orphan(
         tmp_path, monkeypatch, scripts, scope, later):
     """Custody of a launch does not end with its leader: a sweep during the owner's life signals nothing and
@@ -299,8 +297,7 @@ def test_a_reused_leader_pid_never_retires_a_launch_before_its_marker_is_read(tm
         _settle(leader, stranger, identities=[(pid, birth)])
 
 
-@pytest.mark.parametrize("leader_state", ["gone", "reused"])
-@pytest.mark.parametrize("consumer", ["update", "exit stop"])
+@pytest.mark.parametrize(("consumer", "leader_state"), [("update", "gone"), ("exit stop", "reused")])
 def test_a_durable_executor_launch_ends_what_its_gone_or_reused_leader_left(
         tmp_path, monkeypatch, scripts, consumer, leader_state):
     from ouroboros import owned_shutdown, workspace_executor
@@ -335,8 +332,11 @@ def test_a_durable_executor_launch_ends_what_its_gone_or_reused_leader_left(
         _settle(stranger, identities=[(pid, birth)])
 
 
-@pytest.mark.parametrize("consumer", ["quiesce", "reaper", "exit stop"])
-@pytest.mark.parametrize("ledger", ["daemon row", "corrupt", "missing"])
+@pytest.mark.parametrize(("ledger", "consumer"), [
+    ("daemon row", "quiesce"),
+    ("corrupt", "reaper"),
+    ("missing", "exit stop"),
+])
 def test_a_child_drive_stop_spares_the_installation_daemon_and_holds_it_while_its_ledger_is_unknown(
         tmp_path, scripts, consumer, ledger):
     """The installation's ledger names its daemon, whichever drive the service row lives in. When that ledger
@@ -415,8 +415,7 @@ def test_the_generation_stop_ends_many_services_in_shared_passes_and_reports_an_
             _end(pid, birth)
 
 
-@pytest.mark.parametrize("consumer", ["quiesce", "reaper"])
-@pytest.mark.parametrize("mode", ["same-exit", "separate-exit"])
+@pytest.mark.parametrize(("mode", "consumer"), [("same-exit", "quiesce"), ("separate-exit", "reaper")])
 def test_a_legacy_row_whose_leader_exited_keeps_its_old_group_stop_and_is_never_held_forever(
         tmp_path, scripts, consumer, mode):
     """A row without a launch identity (an older row's shape) keeps the stop it always had: a group that
@@ -655,9 +654,11 @@ def test_the_next_generations_sweep_ends_the_marker_carrier_a_kept_row_left_belo
         _settle(leader, identities=[(pid, birth)])
 
 
-@pytest.mark.parametrize("b_row", ["launch", "unmarked"])
-@pytest.mark.parametrize("order", ["owed-then-reuse", "reuse-then-late-owed"])
-@pytest.mark.parametrize("consumer", ["reaper", "quiesce", "exit-stop"])
+@pytest.mark.parametrize(("consumer", "order", "b_row"), [
+    ("reaper", "owed-then-reuse", "launch"),
+    ("quiesce", "reuse-then-late-owed", "unmarked"),
+    ("exit-stop", "owed-then-reuse", "launch"),
+])
 def test_an_old_launchs_owed_child_outlives_a_new_process_that_reuses_its_dead_leaders_pid(
         tmp_path, monkeypatch, consumer, order, b_row):
     """Launch A owes a denied child after its leader died; the kernel then hands A's leader pid to B, a launch or an

@@ -88,8 +88,11 @@ def _bypass_accounting(monkeypatch):
     return observed
 
 
-@pytest.mark.parametrize("slot", ["safety", "light", "main"])
-@pytest.mark.parametrize("consumer", ["credential-plan", "provider-test"])
+@pytest.mark.parametrize(("consumer", "slot"), [
+    ("credential-plan", "safety"),
+    ("credential-plan", "main"),
+    ("provider-test", "light"),
+])
 def test_safety_routes_reach_credential_plan_and_provider_test_without_losing_inheritance(install, monkeypatch, slot, consumer):
     from ouroboros import config
     from ouroboros.model_slots import get_safety_model

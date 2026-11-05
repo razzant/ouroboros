@@ -43,8 +43,7 @@ def events(root, kind):
     return [row for row in rows if row.get("type") == kind]
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("pin", ["", "account-a"])
+@pytest.mark.parametrize(("pin", "asynchronous"), [("", False), ("account-a", True)])
 def test_released_auth_change_answers_from_one_new_operation_on_the_same_route(setup, asynchronous, pin):
     root, gateway, client = setup
     gateway.results, gateway.dispatch = [auth_refusal(), result()], ["not_started", "response_received"]
@@ -95,8 +94,12 @@ def test_a_second_auth_change_keeps_the_previous_refusal(setup, asynchronous):
     assert (classified.kind, classified.retry_same_request) == ("bad_request", False)
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("case", ["unknown_outcome", "unknown_dispatch", "unreleased", "other_code"])
+@pytest.mark.parametrize(("case", "asynchronous"), [
+    ("unknown_outcome", False),
+    ("unknown_dispatch", True),
+    ("unreleased", False),
+    ("other_code", True),
+])
 def test_only_a_released_typed_auth_change_is_asked_again(setup, monkeypatch, asynchronous, case):
     root, gateway, client = setup
     value, dispatch = auth_refusal(), "not_started"

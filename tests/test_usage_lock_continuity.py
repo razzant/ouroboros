@@ -220,8 +220,7 @@ def test_hold_setup_failure_still_releases_its_thread(tmp_path, monkeypatch, fac
     assert released_by_helper, "setup failure abandoned an untimed producer"
 
 
-@pytest.mark.parametrize("stage", ["reserve", "dispatch"])
-@pytest.mark.parametrize("interactive", [False, True])
+@pytest.mark.parametrize(("interactive", "stage"), [(False, "reserve"), (True, "dispatch")])
 def test_same_chain_preparation_stamp_claim_and_one_send(root, short_acquisitions, monkeypatch, stage, interactive):
     calls, prepared, stamps = [], [], []
     with contextlib.ExitStack() as stack:

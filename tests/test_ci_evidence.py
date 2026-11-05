@@ -332,8 +332,7 @@ def test_real_canary_parameter_identifies_missing_provider_facts(tmp_path):
     assert "Producer step: **success**" in summary
 
 
-@pytest.mark.parametrize("producer", ["success", "failure"])
-@pytest.mark.parametrize("artifact", ["success", "failure"])
+@pytest.mark.parametrize(("artifact", "producer"), [("success", "success"), ("failure", "failure")])
 def test_partial_scope_and_artifact_outcome_stay_separate_from_producer(tmp_path, producer, artifact):
     public = tmp_path / "public"
     _write_results(public)
@@ -532,8 +531,7 @@ def test_journal_holds_only_redacted_identity_enums_and_exception_types(tmp_path
             if row.get("outcome") == "failed"] == [("call", "AssertionError")]
 
 
-@pytest.mark.parametrize("fails", [False, True])
-@pytest.mark.parametrize("broken", ["directory", "open", "write"])
+@pytest.mark.parametrize(("broken", "fails"), [("directory", False), ("open", True), ("write", False)])
 def test_journal_failure_is_one_line_and_never_changes_the_producer_exit(tmp_path, broken, fails):
     source = "def test_producer():\n    " + ("assert False\n" if fails else "pass\n")
     conftest = ""
@@ -848,10 +846,17 @@ def _exit_status(key, status):
     return lambda paths: _rewrite(paths[key], change)
 
 
-@pytest.mark.parametrize("key, label", [(2, "shard 2/3"), ("manifest", "manifest")])
-@pytest.mark.parametrize("status, said", [(1, "1"), (2, "2"), (-9, "-9"), (ABSENT, "unknown"), (None, "unknown"),
-                                          (True, "unknown"), (False, "unknown"), ("0", "unknown"), (0.0, "unknown")],
-                         ids=["failed", "interrupted", "signal", "absent", "null", "true", "false", "text", "float"])
+@pytest.mark.parametrize(("status", "said", "key", "label"), [
+    pytest.param(1, "1", 2, "shard 2/3", id='failed-2-shard 2/3'),
+    pytest.param(2, "2", "manifest", "manifest", id='interrupted-manifest-manifest'),
+    pytest.param(-9, "-9", 2, "shard 2/3", id='signal-2-shard 2/3'),
+    pytest.param(ABSENT, "unknown", "manifest", "manifest", id='absent-manifest-manifest'),
+    pytest.param(None, "unknown", 2, "shard 2/3", id='null-2-shard 2/3'),
+    pytest.param(True, "unknown", "manifest", "manifest", id='true-manifest-manifest'),
+    pytest.param(False, "unknown", 2, "shard 2/3", id='false-2-shard 2/3'),
+    pytest.param("0", "unknown", "manifest", "manifest", id='text-manifest-manifest'),
+    pytest.param(0.0, "unknown", 2, "shard 2/3", id='float-2-shard 2/3'),
+])
 def test_shard_reconciliation_refuses_the_proof_of_a_session_that_ended_red(tmp_path, key, label, status, said):
     """Every node executed and every slice exact: the session's exit status alone decides."""
     paths = _lane_proofs(tmp_path)

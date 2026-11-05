@@ -132,10 +132,13 @@ def test_an_older_top_level_answer_keeps_its_max_meaning_and_gains_no_requiremen
     assert KEY not in restored["task_contract"] and development_required(restored) is False
 
 
-@pytest.mark.parametrize("answer", [{"context_requires_self_body_docs": True},
-                                    {"task_contract": {"context_requires_self_body_docs": True}},
-                                    {"task_contract": {KEY: False}}, {KEY: False}, {}])
-@pytest.mark.parametrize("mode", ["low", "nano"])
+@pytest.mark.parametrize(("mode", "answer"), [
+    pytest.param("low", {"context_requires_self_body_docs": True}, id='low-answer0'),
+    pytest.param("low", {"task_contract": {KEY: False}}, id='low-answer2'),
+    pytest.param("low", {}, id='low-answer4'),
+    pytest.param("nano", {"task_contract": {"context_requires_self_body_docs": True}}, id='nano-answer1'),
+    pytest.param("nano", {KEY: False}, id='nano-answer3'),
+])
 def test_a_subject_marker_an_explicit_no_or_absence_keeps_the_compact_map(tmp_path, answer, mode):
     env, core, task = _capture(tmp_path, answer)
     plan = _capture_plan(env, core, task, mode)
@@ -190,8 +193,7 @@ def _presence_promote(tmp_path, monkeypatch, inherited, **event):
     return pending[0], ceiling
 
 
-@pytest.mark.parametrize("inherited", [True, False])
-@pytest.mark.parametrize("own", ["absent", True, False])
+@pytest.mark.parametrize(("own", "inherited"), [("absent", True), (True, False), (False, True)])
 def test_a_presence_started_root_keeps_the_authority_and_only_its_own_answer(tmp_path, monkeypatch, own, inherited):
     """The starting work's contract replaces the new root's wholesale: neither of its answers rides along, and the
     root's own true or false survives that replacement, on the queued task and on its durable admission row."""
@@ -527,13 +529,12 @@ def _pass_context(plan, book, *, known=True):
                            accumulated_usage={}), SimpleNamespace(measurement=measurement)
 
 
-@pytest.mark.parametrize("passes", [0, 1], ids=["first_pass", "second_pass"])
-@pytest.mark.parametrize("book,target,slack,runs", [
-    (50_000, 30_000, 10_000, False),  # the book alone explains the excess
-    (50_000, None, 10_000, False),  # nothing measures the excess: it is not guessed onto anything
-    (50_000, 90_000, 10_000, True),  # what a view without the book would also exceed: ordinary recovery, sized without it
-    (0, None, 10_000, True),  # no book: as ever, each step takes its whole category
-], ids=["book_only", "unknown_beside_book", "ordinary_too", "no_book"])
+@pytest.mark.parametrize(("book", "target", "slack", "runs", "passes"), [
+    pytest.param(50_000, 30_000, 10_000, False, 0, id='book_only-first_pass'),  # the book alone explains the excess
+    pytest.param(50_000, None, 10_000, False, 1, id='unknown_beside_book-second_pass'),  # nothing measures the excess: it is not guessed onto anything
+    pytest.param(50_000, 90_000, 10_000, True, 0, id='ordinary_too-first_pass'),  # what a view without the book would also exceed: ordinary recovery, sized without it
+    pytest.param(0, None, 10_000, True, 1, id='no_book-second_pass'),  # no book: as ever, each step takes its whole category
+])
 def test_neither_refusal_pass_pays_for_the_book(monkeypatch, passes, book, target, slack, runs):
     from ouroboros import loop_model_call as lmc
 

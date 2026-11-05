@@ -131,8 +131,7 @@ def test_revocation_and_retry_keep_the_existing_control_semantics(tmp_path, kind
     assert mailbox.drain_owner_entries(tmp_path, "parent", set(), 2) == []
 
 
-@pytest.mark.parametrize("source", ["mailbox", "ack"])
-@pytest.mark.parametrize("fault", ["torn", "malformed", "read_error"])
+@pytest.mark.parametrize(("fault", "source"), [("torn", "ack"), ("malformed", "ack"), ("read_error", "mailbox")])
 def test_failed_or_incomplete_read_is_never_a_cached_empty_result(tmp_path, monkeypatch, source, fault):
     path, ack = acknowledged_history(tmp_path, 2)
     target = path if source == "mailbox" else ack

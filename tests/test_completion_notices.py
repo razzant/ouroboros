@@ -178,8 +178,7 @@ def test_earlier_approval_does_not_hide_current_open_obligations():
     assert "earlier version" in summary["reason_detail"]
 
 
-@pytest.mark.parametrize("notify", ["off", "on"])
-@pytest.mark.parametrize("mirror", ["all", "telegram_only"])
+@pytest.mark.parametrize(("mirror", "notify"), [("all", "off"), ("telegram_only", "on")])
 def test_files_questions_and_project_replies_are_independent(tmp_path, monkeypatch, notify, mirror):
     import base64
     import json

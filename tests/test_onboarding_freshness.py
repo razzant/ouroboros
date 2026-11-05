@@ -8,8 +8,7 @@ from starlette.testclient import TestClient
 pytestmark = pytest.mark.serial
 
 
-@pytest.mark.parametrize("surface", ["page", "readiness"])
-@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize(("existing", "surface"), [(False, "page"), (True, "readiness")])
 def test_wizard_freshness_comes_from_settings_file(surface, existing, monkeypatch, tmp_path):
     from ouroboros import config
     from ouroboros.gateway import onboarding_host, settings

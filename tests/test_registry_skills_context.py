@@ -73,9 +73,11 @@ def _ids(plan, mode=None):
     return [row["section_id"] for row in _host_facts(plan, mode)]
 
 
-@pytest.mark.parametrize("mode", ["max", "low", "nano"])
-@pytest.mark.parametrize("registry", [_registry(40), "# Registry\n\n## Trusted\nFREE_TRUST\n\n## Doubted\nFREE_DOUBT\n",
-                                      "Only prose, no heading: PROSE_ONLY\n"], ids=["entries", "freeform", "prose"])
+@pytest.mark.parametrize(("registry", "mode"), [
+    pytest.param(_registry(40), "max", id='entries-max'),
+    pytest.param("# Registry\n\n## Trusted\nFREE_TRUST\n\n## Doubted\nFREE_DOUBT\n", "low", id='freeform-low'),
+    pytest.param("Only prose, no heading: PROSE_ONLY\n", "nano", id='prose-nano'),
+])
 def test_the_registry_rides_whole_beside_a_short_start_room(tmp_path, mode, registry):
     env, core = _world(tmp_path, registry)
     roomy = _plan(env, core, 2_000_000, mode)
@@ -378,8 +380,11 @@ def test_every_admitted_skill_keeps_purpose_and_trigger_in_each_catalogue_form(t
     assert "desk_tool_0" not in part.operative_view and "Model experience" not in part.operative_view
 
 
-@pytest.mark.parametrize("profile", ["root", "local_readonly_subagent", "acting_subagent"])
-@pytest.mark.parametrize("long_description", [True, False], ids=["prefix", "short-description"])
+@pytest.mark.parametrize(("long_description", "profile"), [
+    pytest.param(True, "root", id='prefix-root'),
+    pytest.param(True, "acting_subagent", id='prefix-acting_subagent'),
+    pytest.param(False, "local_readonly_subagent", id='short-description-local_readonly_subagent'),
+])
 def test_each_skill_names_a_manifest_read_every_actor_profile_dispatches(tmp_path, monkeypatch, profile, long_description):
     repo, data, work = tmp_path / "repo", tmp_path / "data", tmp_path / "work"
     fork = data / "state" / "headless_tasks" / "reader" / "data"

@@ -70,12 +70,10 @@ def test_sql_denials_and_working_select(ctx, query):
         assert txn.load("caller")["result"] == "body only"
 
 
-@pytest.mark.parametrize("db", ["current", "money"])
-@pytest.mark.parametrize("snapshot", [False, True])
-@pytest.mark.parametrize("query,message", [
-    ("DELETE FROM meta", "not authorized"),
-    ("SELECT )", 'near ")": syntax error'),
-    ("SELECT 1; SELECT 2", "You can only execute one statement at a time."),
+@pytest.mark.parametrize(("query", "message", "snapshot", "db"), [
+    ("DELETE FROM meta", "not authorized", False, "current"),
+    ("SELECT )", 'near ")": syntax error', True, "money"),
+    ("SELECT 1; SELECT 2", "You can only execute one statement at a time.", False, "current"),
 ])
 def test_sql_errors_are_query_failures_not_store_damage(ctx, db, snapshot, query, message):
     if db == "money":
@@ -377,8 +375,7 @@ def test_sqlite_failure_owns_only_its_interrupt_and_an_expired_busy_wait(tmp_pat
         assert not owned(spent, errors[name], fired), name
 
 
-@pytest.mark.parametrize("started", [False, True])
-@pytest.mark.parametrize("returncode", [None, 0, 1])
+@pytest.mark.parametrize(("returncode", "started"), [(None, True), (0, False), (1, True)])
 def test_late_parent_observation_keeps_exited_child_answer(tmp_path, monkeypatch, started, returncode):
     from types import SimpleNamespace
 

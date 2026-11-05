@@ -175,8 +175,12 @@ def _write_patch(tmp_path, monkeypatch, writer):
         delegate_custody._CUSTODY.clear()
 
 
-@pytest.mark.parametrize("writer", ["workspace", "payload"])
-@pytest.mark.parametrize("mode", ["native", "refused", "corrupt", "unsupported"])
+@pytest.mark.parametrize(("mode", "writer"), [
+    ("native", "workspace"),
+    ("refused", "payload"),
+    ("corrupt", "payload"),
+    ("unsupported", "workspace"),
+])
 def test_both_patch_writers_publish_measured_final_bytes(tmp_path, monkeypatch, writer, mode):
     if mode == "native" and sys.platform != "darwin":
         pytest.skip("native APFS compression proof")

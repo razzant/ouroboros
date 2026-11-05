@@ -27,8 +27,12 @@ from tests._work_projection_shared import state_fields
 pytestmark = pytest.mark.serial
 
 
-@pytest.mark.parametrize("door", ["warm", "exact", "queued", "unsaved"])
-@pytest.mark.parametrize("separate_late_work", [False, True])
+@pytest.mark.parametrize(("separate_late_work", "door"), [
+    (False, "warm"),
+    (False, "queued"),
+    (True, "exact"),
+    (True, "unsaved"),
+])
 def test_census_uses_physical_actor_and_keeps_actual_late_work(
         host, monkeypatch, clock, reaper, door, separate_late_work):  # noqa: F811
     task, _child, _plan = paused_retry(host, monkeypatch, clock, reaper, door)

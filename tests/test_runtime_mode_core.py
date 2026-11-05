@@ -1408,16 +1408,11 @@ def test_light_missing_native_payload_creation_rejected_at_gate(tmp_path, monkey
     assert "root=system_repo" in result
 
 
-@pytest.mark.parametrize("tool_name,base_args", [
-    ("write_file", {"path": "plugin.py", "content": "x"}),
-    ("edit_text", {"path": "plugin.py", "old_str": "a", "new_str": "b"}),
-    ("write_file", {"root": "skill_payload", "path": "plugin.py", "content": "x"}),
-])
-@pytest.mark.parametrize("partial", [
-    {"bucket": "external"},
-    {"skill_name": "alpha"},
-    {"bucket": "native", "skill_name": "alpha"},
-    {"bucket": "external", "skill_name": "...."},  # sanitizes to empty
+@pytest.mark.parametrize(("partial", "tool_name", "base_args"), [
+    pytest.param({"bucket": "external"}, "write_file", {"path": "plugin.py", "content": "x"}, id='partial0-write_file-base_args0'),
+    pytest.param({"skill_name": "alpha"}, "edit_text", {"path": "plugin.py", "old_str": "a", "new_str": "b"}, id='partial1-edit_text-base_args1'),
+    pytest.param({"bucket": "native", "skill_name": "alpha"}, "write_file", {"root": "skill_payload", "path": "plugin.py", "content": "x"}, id='partial2-write_file-base_args2'),
+    pytest.param({"bucket": "external", "skill_name": "...."}, "write_file", {"path": "plugin.py", "content": "x"}, id='partial3-write_file-base_args0'),  # sanitizes to empty
 ])
 def test_light_partial_args_surface_specific_error_not_generic_light_block(
     tool_name, base_args, partial, tmp_path, monkeypatch

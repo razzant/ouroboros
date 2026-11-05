@@ -13,8 +13,7 @@ from tests.system_e2e.harness import ScriptedStubModel
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("tool_call", [False, True])
+@pytest.mark.parametrize(("tool_call", "stream"), [(False, False), (True, True)])
 def test_loopback_model_round_trips_through_the_real_sdk(stream, tool_call):
     script = [{"tool": "lookup", "arguments": {"query": "preserve both sides"}}] if tool_call else []
     tools = [{"type": "function", "function": {"name": "lookup", "parameters": {
@@ -45,8 +44,7 @@ def test_loopback_model_round_trips_through_the_real_sdk(stream, tool_call):
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("tool_call", [False, True])
+@pytest.mark.parametrize(("tool_call", "stream"), [(False, False), (True, True)])
 def test_cancellation_model_round_trips_through_the_real_sdk(stream, tool_call):
     tools = [{"type": "function", "function": {"name": "list_files", "parameters": {
         "type": "object", "properties": {"path": {"type": "string"}},

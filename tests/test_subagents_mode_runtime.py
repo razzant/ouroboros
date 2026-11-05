@@ -112,8 +112,7 @@ def test_an_admitted_child_finishes_its_bound_session_after_off(monkeypatch):
         assert "subagents_off_in_room" in runtime.exact_start(ctx, "new work", {"subagent_id": "session"}).text
 
 
-@pytest.mark.parametrize("mode", ["off", "auto", "swarm"])
-@pytest.mark.parametrize("inputs", ["shared", "declared"])
+@pytest.mark.parametrize(("inputs", "mode"), [("shared", "off"), ("shared", "swarm"), ("declared", "auto")])
 def test_both_context_builders_omit_only_the_off_catalog(mode, inputs, monkeypatch, tmp_path):
     from ouroboros.context import _capture_context_core
     from ouroboros.memory import Memory

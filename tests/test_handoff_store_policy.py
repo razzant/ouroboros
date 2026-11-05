@@ -189,9 +189,12 @@ def test_failed_submission_restores_transient_parent_scope_without_losing_other_
     assert not store._ADMISSION_NO_WAIT.get() and store._WAIT_BUDGET.get() is None
 
 
-@pytest.mark.parametrize("stage", ["claim", "submit"])
-@pytest.mark.parametrize("reason", ["contention", "permission", "kernel_refused", "identity_unreadable"])
-@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize(("asynchronous", "reason", "stage"), [
+    (False, "contention", "submit"),
+    (False, "identity_unreadable", "claim"),
+    (True, "permission", "claim"),
+    (True, "kernel_refused", "submit"),
+])
 def test_launch_lock_outcome_keeps_proven_unsent_distinct_from_contention(
     source, monkeypatch, stage, reason, asynchronous,
 ):

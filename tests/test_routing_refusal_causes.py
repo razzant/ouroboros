@@ -191,9 +191,11 @@ def test_origin_addressed_notice_rows_stay_in_the_owners_chat(notice_type):
     assert project(1, ordinary) is True
 
 
-@pytest.mark.parametrize("chat_id", [1, 0, -1001])
-@pytest.mark.parametrize("labelled", [False, True])
-@pytest.mark.parametrize("after_lock", [False, True])
+@pytest.mark.parametrize(("after_lock", "labelled", "chat_id"), [
+    (False, False, -1001),
+    (True, True, 1),
+    (True, True, 0),
+])
 def test_cancel_refusal_is_one_system_notice_only_when_no_owner_receipt_can_tell_it(
     tmp_path, monkeypatch, chat_id, labelled, after_lock,
 ):

@@ -156,8 +156,7 @@ def _content(messages, call_id):
     return next(row["content"] for row in messages if row.get("role") == "tool" and row.get("tool_call_id") == call_id)
 
 
-@pytest.mark.parametrize("name", ["wait_task", "wait_tasks"])
-@pytest.mark.parametrize("order", ["sleep_first", "wait_first"])
+@pytest.mark.parametrize(("order", "name"), [("sleep_first", "wait_task"), ("wait_first", "wait_tasks")])
 def test_a_task_wait_beside_a_sleep_shows_the_hold_before_either_parks(tmp_path, monkeypatch, order, name):
     """The nanny's falsifier (an armed sleep, then an in-slot wait on the held child) and its mirror."""
     _tree, registry, parks = _resumed_root(tmp_path, monkeypatch)

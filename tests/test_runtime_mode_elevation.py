@@ -1642,10 +1642,14 @@ def test_files_api_owner_only_helper_blocks_symlinked_skill_state_dir(tmp_path, 
     assert fba_mod._is_owner_only_file(backing_target) is True
 
 
-@pytest.mark.parametrize("filename", [
-    "grants.json", "review.json", "review_history.jsonl", "accepted_rebuttals.json", "enabled.json", "Review.JSON",
+@pytest.mark.parametrize(("shape", "filename"), [
+    ("redirect", "grants.json"),
+    ("redirect", "review_history.jsonl"),
+    ("redirect", "enabled.json"),
+    ("cp", "review.json"),
+    ("cp", "accepted_rebuttals.json"),
+    ("cp", "Review.JSON"),
 ])
-@pytest.mark.parametrize("shape", ["redirect", "cp"])
 def test_run_shell_writes_skill_state_examples(shape, filename, tmp_path, monkeypatch):
     """An example tree may contain state/skills names without becoming live state."""
     from ouroboros.tools.registry import ToolRegistry

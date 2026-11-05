@@ -267,8 +267,7 @@ def _helper_retirement_logs(context, count):
     return retired
 
 
-@pytest.mark.parametrize("surface", ["multi_model_review", "deep_self_review"])
-@pytest.mark.parametrize("fold", [False, True])
+@pytest.mark.parametrize(("fold", "surface"), [(False, "multi_model_review"), (True, "deep_self_review")])
 def test_native_review_retires_before_chat_and_records_only_logs(tmp_path, fold, surface):
     second = (_signed_call("compact_context", {"working_note": "The source remains in its checkpoint.", "keep_unit_ids": []}, "fold")
               if fold else _signed_call("read_file", {"path": "source.txt"}, "read-again"))

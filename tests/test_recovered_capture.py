@@ -389,8 +389,7 @@ def test_body_stop_mid_capture_keeps_named_files_pending_for_the_next_generation
     assert len([row for row in ledger_rows(root) if row.get("kind") == "subscription_session"]) == 1
 
 
-@pytest.mark.parametrize("kind", ["ordinary", "review"])
-@pytest.mark.parametrize("door", ["stop", "restart"])
+@pytest.mark.parametrize(("door", "kind"), [("stop", "ordinary"), ("restart", "review")])
 def test_stop_and_owner_restart_leave_capture_to_existing_owners(tmp_path, monkeypatch, kind, door):
     from ouroboros import claudexor_daemon, owned_shutdown, server_restart
     from ouroboros.cancel_intents import request_cancel

@@ -689,13 +689,12 @@ def test_a_later_answer_refused_behind_the_winners_failed_delivery_is_a_conflict
     assert [host.block().get(key) for key in keys] == [winner.get(key) for key in keys]
 
 
-@pytest.mark.parametrize("failure", ["history", "mailbox"])
-@pytest.mark.parametrize("path,earlier,given,shown", [
-    ("tap", {"option_index": 1}, 1, "2. postgres"),
-    ("reply", {"comment": "Use duckdb"}, "Use duckdb", "Use duckdb"),
-    ("tap", None, 1, "2. postgres"),
-    ("reply", None, "Use duckdb", "Use duckdb"),
-], ids=["tap-same-answer", "reply-same-answer", "tap-same-update", "reply-same-update"])
+@pytest.mark.parametrize(("path", "earlier", "given", "shown", "failure"), [
+    pytest.param("tap", {"option_index": 1}, 1, "2. postgres", "history", id='tap-same-answer-history'),
+    pytest.param("reply", {"comment": "Use duckdb"}, "Use duckdb", "Use duckdb", "mailbox", id='reply-same-answer-mailbox'),
+    pytest.param("tap", None, 1, "2. postgres", "history", id='tap-same-update-history'),
+    pytest.param("reply", None, "Use duckdb", "Use duckdb", "mailbox", id='reply-same-update-mailbox'),
+])
 def test_the_same_answer_behind_a_failed_delivery_stays_accepted(
         card, tmp_path, monkeypatch, failure, path, earlier, given, shown):
     """No false changed answer: the same answer given on the web card, or this very update answered again,

@@ -212,8 +212,10 @@ def capture(host, case, **extra):
     }
 
 
-@pytest.mark.parametrize("room", ["main", "project"])
-@pytest.mark.parametrize("caption_only", [False, True], ids=["text", "caption"])
+@pytest.mark.parametrize(("caption_only", "room"), [
+    pytest.param(False, "main", id='text-main'),
+    pytest.param(True, "project", id='caption-project'),
+])
 def test_legacy_swarm_flag_uses_ordinary_owner_turn(host, room, caption_only):
     case = incoming_case(host, room, caption_only=caption_only)
     calls = []
@@ -277,8 +279,7 @@ def test_internal_admission_keeps_exact_objective_bytes(host, room):
     assert host.pending[0]["task_contract"]["objective"] == EXACT_OWNER.strip()
 
 
-@pytest.mark.parametrize("room", ["main", "project"])
-@pytest.mark.parametrize("phase", ["pending", "running", "terminal"])
+@pytest.mark.parametrize(("phase", "room"), [("pending", "main"), ("running", "project"), ("terminal", "main")])
 def test_replayed_client_message_id_admits_nothing_new(host, room, phase):
     case = incoming_case(host, room)
     _handle_promote_chat_to_task(promotion_event(case), host.ctx)

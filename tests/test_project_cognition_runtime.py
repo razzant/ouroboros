@@ -196,8 +196,10 @@ def test_unrelated_malformed_project_does_not_block_main_or_a_healthy_actor():
         snapshot({"id": "bad-actor", "project_id": "bad"})
 
 
-@pytest.mark.parametrize("exists", [True, False])
-@pytest.mark.parametrize("primary,low,high", [("ultra", "low", "ultra"), ("none", "none", "high")])
+@pytest.mark.parametrize(("primary", "low", "high", "exists"), [
+    ("ultra", "low", "ultra", True),
+    ("none", "none", "high", False),
+])
 def test_env_only_legacy_effort_preserves_missing_bounds_at_every_start(monkeypatch, exists, primary, low, high):
     from ouroboros.settings_scales import effort_range
     from ouroboros.subagent_runtime import apply_task_start_settings

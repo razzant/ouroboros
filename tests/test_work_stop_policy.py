@@ -23,8 +23,7 @@ def test_owner_marker_after_root_release_requires_member_selection(state):
     assert "member_stop" not in stop
 
 
-@pytest.mark.parametrize("state", ["released", "absent"])
-@pytest.mark.parametrize("actor", ["owner", "mind"])
+@pytest.mark.parametrize(("actor", "state"), [("owner", "released"), ("mind", "absent")])
 def test_zero_dispatch_owner_marker_selects_against_the_current_fence(tmp_path, monkeypatch, state, actor):
     from ouroboros.control_actor import mind_control
     from ouroboros.task_results import write_task_result

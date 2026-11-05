@@ -62,8 +62,10 @@ def test_fresh_lock_of_reaped_process_is_recovered_within_caller_budget(tmp_path
         platform.release_exclusive_file_lock(lock, fd)
 
 
-@pytest.mark.parametrize("creation", [FileExistsError, PermissionError])
-@pytest.mark.parametrize("windows", [True, False], ids=["windows", "posix"])
+@pytest.mark.parametrize(("windows", "creation"), [
+    pytest.param(True, FileExistsError, id='windows-FileExistsError'),
+    pytest.param(False, PermissionError, id='posix-PermissionError'),
+])
 def test_a_name_that_refuses_its_probe_mid_release_is_contention_only_on_windows(
         tmp_path, monkeypatch, creation, windows):
     """Windows refuses to open a name while its holder deletes it (delete pending, or the

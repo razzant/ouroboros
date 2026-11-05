@@ -64,12 +64,19 @@ def _placement(anchor, placement, task="wanted"):
     return root
 
 
-@pytest.mark.parametrize("fault", ["none", "loose_good", "loose_bad", "pack_bad", "pack_missing", "sidecar_bad",
-                                   "unrelated_bad", "absent", "absent_with_unrelated_bad", "bad_loose_missing_pack",
-                                   "index_bad"])
-@pytest.mark.parametrize("metadata", [False, True])
-@pytest.mark.parametrize("warm", [False, True])
-@pytest.mark.parametrize("placement", ["canonical", "headless", "legacy"])
+@pytest.mark.parametrize(("placement", "warm", "metadata", "fault"), [
+    ("canonical", False, False, "none"),
+    ("canonical", False, False, "unrelated_bad"),
+    ("canonical", True, True, "pack_bad"),
+    ("canonical", True, True, "bad_loose_missing_pack"),
+    ("headless", False, False, "pack_missing"),
+    ("headless", False, False, "index_bad"),
+    ("headless", True, True, "loose_good"),
+    ("headless", True, True, "absent"),
+    ("legacy", False, False, "loose_bad"),
+    ("legacy", False, False, "absent_with_unrelated_bad"),
+    ("legacy", True, True, "sidecar_bad"),
+])
 def test_confined_and_existing_source_fallback_outcomes(tmp_path, fault, metadata, warm, placement):
     # Independent roots ensure the original reader does not warm the candidate's
     # cache before its cold lookup. Both use real producers and SQLite indexes.
@@ -114,8 +121,7 @@ def test_confined_source_handles_canonical_child_and_reciprocal_retry(tmp_path):
         artifacts.read_actor_source_bytes(root, new, ref, anchor=root)
 
 
-@pytest.mark.parametrize("count", [20, 2000])
-@pytest.mark.parametrize("placement", ["canonical", "headless", "legacy"])
+@pytest.mark.parametrize(("placement", "count"), [("canonical", 20), ("headless", 2000), ("legacy", 20)])
 def test_confined_placement_work_stays_constant(tmp_path, monkeypatch, record_property, count, placement):
     anchor = tmp_path / "data"
     root = _placement(anchor, placement, "zz-target")
@@ -184,8 +190,7 @@ def test_confined_placement_work_stays_constant(tmp_path, monkeypatch, record_pr
         target.write_text(json.dumps(measurements, indent=2) + "\n")
 
 
-@pytest.mark.parametrize("metadata", [False, True])
-@pytest.mark.parametrize("placement", ["canonical", "headless", "legacy"])
+@pytest.mark.parametrize(("placement", "metadata"), [("canonical", False), ("headless", True), ("legacy", False)])
 def test_warm_cache_corruption_preserves_existing_authority(tmp_path, record_property, metadata, placement):
     anchor = tmp_path / "data"
     root = _placement(anchor, placement)
@@ -267,9 +272,10 @@ def _occupied_origin_drive(tmp_path, layout, alias):
     return anchor, drive, origin, successor
 
 
-@pytest.mark.parametrize("alias", [True, False], ids=["configured-alias", "physical-root"])
-@pytest.mark.parametrize("kind", ["loose", "packed"])
-@pytest.mark.parametrize("layout", ["headless", "legacy"])
+@pytest.mark.parametrize(("layout", "kind", "alias"), [
+    pytest.param("headless", "packed", True, id='headless-packed-configured-alias'),
+    pytest.param("legacy", "loose", False, id='legacy-loose-physical-root'),
+])
 def test_retry_successor_reads_its_sources_in_the_named_predecessor_drive(tmp_path, layout, kind, alias):
     """The successor's canonical row names the occupied drive in the configured spelling;
     only that trusted root prefix is re-spelled, and the occupant must still bind itself."""

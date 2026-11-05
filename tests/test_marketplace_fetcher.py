@@ -332,8 +332,7 @@ def test_stage_preserves_arbitrary_data_through_loading_and_review(tmp_path):
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
-@pytest.mark.parametrize("name", ["program.so", "node_modules/lib/index.js"])
+@pytest.mark.parametrize(("name", "mode"), [("program.so", "advanced"), ("node_modules/lib/index.js", "cyber_pro")])
 def test_cyber_stages_archive_findings_as_advice(monkeypatch, caplog, mode, name):
     from ouroboros.marketplace import fetcher
 

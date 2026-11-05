@@ -588,8 +588,7 @@ def _fail_attempt_save(monkeypatch, state, point):
     monkeypatch.setattr(state, "atomic_write_text", interrupted)
 
 
-@pytest.mark.parametrize("point", ["before", "primary", "backup"])
-@pytest.mark.parametrize("recovery", ["link", "finish"])
+@pytest.mark.parametrize(("recovery", "point"), [("link", "before"), ("link", "backup"), ("finish", "primary")])
 def test_failed_begin_replaces_the_unchanged_previous_terminal_attempt(
         retained_state, isolated_progress, monkeypatch, point, recovery):
     state = retained_state

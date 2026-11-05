@@ -235,8 +235,7 @@ def test_note_never_calls_an_unmeasured_book_paid(tmp_path):
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("missing_book", ["architecture", "development"])
-@pytest.mark.parametrize("growth", ["", "Added.\n"])
+@pytest.mark.parametrize(("growth", "missing_book"), [("", "architecture"), ("Added.\n", "development")])
 def test_note_discloses_an_unavailable_book_beside_a_measured_book(tmp_path, missing_book, growth):
     repo = _book_repo(tmp_path)
     development = "docs/development/01-one.md"

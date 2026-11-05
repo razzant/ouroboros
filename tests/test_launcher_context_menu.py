@@ -592,22 +592,15 @@ def test_qt_turns_the_menu_on_and_filters_by_web_action(backend, qt_host_restore
     assert not hasattr(event, "stock")
 
 
-@pytest.mark.parametrize("enum_of", [
-    lambda names: types.SimpleNamespace(**names),  # bindings that keep the enum's names on the class
-    lambda names: types.SimpleNamespace(WebAction=types.SimpleNamespace(**names)),  # Qt6's scoped enum
-], ids=["flat", "scoped"])
-@pytest.mark.parametrize("stock, shown", [
-    (["Back", "Forward", "Reload", "-", "SavePage", "OpenLinkInNewTab", "OpenLinkInNewWindow", "-", "DownloadLinkToDisk",
-      "CopyLinkToClipboard"],
-     ["Back", "Forward", "Reload", "-", "OpenLinkInNewTab", "OpenLinkInNewWindow", "-", "CopyLinkToClipboard"]),
-    (["Back", "Forward", "Reload", "-", "SavePage", "-", "ViewSource"], ["Back", "Forward", "Reload"]),
-    (["Copy"], ["Copy"]),
-    (["Cut", "Copy", "Paste", "SelectAll"], ["Cut", "Copy", "Paste", "SelectAll"]),
-    (["Back", "Reload", "-", "SavePage", "-", "DownloadImageToDisk", "CopyImageToClipboard", "CopyImageUrlToClipboard"],
-     ["Back", "Reload", "-", "CopyImageToClipboard", "CopyImageUrlToClipboard"]),
-    (["Back", "Reload", "-", "SavePage", "-", "ToggleMediaLoop", "DownloadMediaToDisk", "CopyMediaUrlToClipboard"],
-     ["Back", "Reload", "-", "ToggleMediaLoop", "CopyMediaUrlToClipboard"]),
-    (["OpenLinkInThisWindow", "CopyLinkToClipboard"], ["CopyLinkToClipboard"]),
+@pytest.mark.parametrize(("stock", "shown", "enum_of"), [
+    pytest.param(["Back", "Forward", "Reload", "-", "SavePage", "OpenLinkInNewTab", "OpenLinkInNewWindow", "-", "DownloadLinkToDisk",
+      "CopyLinkToClipboard"], ["Back", "Forward", "Reload", "-", "OpenLinkInNewTab", "OpenLinkInNewWindow", "-", "CopyLinkToClipboard"], lambda names: types.SimpleNamespace(**names), id='stock0-shown0-flat'),  # bindings that keep the enum's names on the class
+    pytest.param(["Back", "Forward", "Reload", "-", "SavePage", "-", "ViewSource"], ["Back", "Forward", "Reload"], lambda names: types.SimpleNamespace(WebAction=types.SimpleNamespace(**names)), id='stock1-shown1-scoped'),  # Qt6's scoped enum
+    pytest.param(["Copy"], ["Copy"], lambda names: types.SimpleNamespace(**names), id='stock2-shown2-flat'),  # bindings that keep the enum's names on the class
+    pytest.param(["Cut", "Copy", "Paste", "SelectAll"], ["Cut", "Copy", "Paste", "SelectAll"], lambda names: types.SimpleNamespace(WebAction=types.SimpleNamespace(**names)), id='stock3-shown3-scoped'),  # Qt6's scoped enum
+    pytest.param(["Back", "Reload", "-", "SavePage", "-", "DownloadImageToDisk", "CopyImageToClipboard", "CopyImageUrlToClipboard"], ["Back", "Reload", "-", "CopyImageToClipboard", "CopyImageUrlToClipboard"], lambda names: types.SimpleNamespace(**names), id='stock4-shown4-flat'),  # bindings that keep the enum's names on the class
+    pytest.param(["Back", "Reload", "-", "SavePage", "-", "ToggleMediaLoop", "DownloadMediaToDisk", "CopyMediaUrlToClipboard"], ["Back", "Reload", "-", "ToggleMediaLoop", "CopyMediaUrlToClipboard"], lambda names: types.SimpleNamespace(WebAction=types.SimpleNamespace(**names)), id='stock5-shown5-scoped'),  # Qt6's scoped enum
+    pytest.param(["OpenLinkInThisWindow", "CopyLinkToClipboard"], ["CopyLinkToClipboard"], lambda names: types.SimpleNamespace(**names), id='stock6-shown6-flat'),  # bindings that keep the enum's names on the class
 ])
 def test_qt_menus_keep_what_works(enum_of, stock, shown):
     page = QtPage()

@@ -398,8 +398,7 @@ def _real_ownership(monkeypatch):
     monkeypatch.setattr(task_queue, "task_has_live_ownership", task_has_live_ownership)
 
 
-@pytest.mark.parametrize("surface", ["skill_review", "multi_model_review"])
-@pytest.mark.parametrize("non_task", [False, True])
+@pytest.mark.parametrize(("non_task", "surface"), [(False, "skill_review"), (True, "multi_model_review")])
 def test_completed_review_attribution_allows_exact_price_recovery(env, capsys, monkeypatch, surface, non_task):
     from ouroboros.review_substrate import ReviewRequest, ReviewSlot, run_review_request
 

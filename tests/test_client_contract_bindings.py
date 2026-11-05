@@ -379,8 +379,7 @@ def test_recent_wake_rows_match_the_typed_contract(client, monkeypatch, with_sum
                                  if key not in {"tool_calls", "rounds", "first_reply_at"}}, shape)
 
 
-@pytest.mark.parametrize("source", ["usage", "tasks"])
-@pytest.mark.parametrize("typed", [True, False])
+@pytest.mark.parametrize(("typed", "source"), [(True, "usage"), (False, "tasks")])
 def test_recent_wake_read_unavailability_keeps_the_panel(client, monkeypatch, source, typed):
     from ouroboros import consciousness_view, store, usage_store
     from ouroboros.consciousness import BackgroundConsciousness

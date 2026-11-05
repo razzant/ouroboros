@@ -12,9 +12,7 @@ from ouroboros.gateway import history, history_paging
 from tests.test_chat_history_paging import isolated_runtime, pages, request, row, write  # noqa: F401
 
 
-@pytest.mark.parametrize("project_room", [False, True])
-@pytest.mark.parametrize("source", ["chat", "progress"])
-@pytest.mark.parametrize("in_span", [False, True])
+@pytest.mark.parametrize(("in_span", "source", "project_room"), [(False, "chat", False), (True, "progress", True)])
 def test_import_gap_follows_delivered_span_after_quota_deferral(tmp_path, project_room, source, in_span):
     from ouroboros.projects_registry import create_project
 

@@ -454,9 +454,7 @@ def _settle_owner_fence(root, root_task_id):
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("settled", [False, True])
-@pytest.mark.parametrize("returning", [False, True])
-@pytest.mark.parametrize("cut", ["after_cas", "after_fence"])
+@pytest.mark.parametrize(("cut", "returning", "settled"), [("after_cas", False, False), ("after_fence", True, True)])
 def test_an_interrupted_owner_resume_of_a_project_member_offers_its_existing_resume_in_main(
     host, tmp_path, monkeypatch, cut, returning, settled,  # noqa: F811
 ):

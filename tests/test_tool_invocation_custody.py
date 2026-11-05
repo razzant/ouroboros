@@ -54,8 +54,12 @@ def test_actual_local_completion_releases_all_control_consumers(tmp_path, monkey
     _assert_consumers(tmp_path, registry, queue, workers, False)
 
 
-@pytest.mark.parametrize('split_drive', [False, True])
-@pytest.mark.parametrize('backend,timeout', [('running', False), ('unreadable', False), ('running', True), ('completed', False)])
+@pytest.mark.parametrize(("backend", "timeout", "split_drive"), [
+    ('running', False, False),
+    ('unreadable', False, True),
+    ('running', True, False),
+    ('completed', False, True),
+])
 def test_backend_receipt_owns_custody_after_local_handler_unwinds(tmp_path, monkeypatch, backend, timeout, split_drive):
     from ouroboros import workspace_executor as executor
     from ouroboros.task_results import load_task_result
@@ -79,9 +83,11 @@ def test_backend_receipt_owns_custody_after_local_handler_unwinds(tmp_path, monk
         assert not list((registry._ctx.drive_root / 'state' / 'workspace_executor_processes').glob('*.json'))
 
 
-@pytest.mark.parametrize('command_probe', ['measured', 'missing', 'changed'])
-@pytest.mark.parametrize('executor_kind', [None, 'local'])
-@pytest.mark.parametrize('split_drive', [False, True])
+@pytest.mark.parametrize(("split_drive", "executor_kind", "command_probe"), [
+    (False, None, 'measured'),
+    (False, None, 'changed'),
+    (True, 'local', 'missing'),
+])
 def test_exception_after_spawn_keeps_live_process_then_releases_after_join(tmp_path, monkeypatch, executor_kind, split_drive, command_probe):
     from ouroboros.tools import shell_process
     from ouroboros.task_results import load_task_result

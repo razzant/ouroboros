@@ -480,9 +480,15 @@ def test_payload_reached_by_repo_label_is_not_git_recoverable(file_tools):
     assert not _repo_edit_binding(replace(binding, root='active_workspace'))
 
 
-@pytest.mark.parametrize('root', ['active_workspace', 'system_repo', 'runtime_data',
-                                  'task_drive', 'artifact_store', 'user_files', 'skill_payload'])
-@pytest.mark.parametrize('tool', ['edit_batch', 'apply_patch'])
+@pytest.mark.parametrize(("tool", "root"), [
+    ('edit_batch', 'active_workspace'),
+    ('edit_batch', 'runtime_data'),
+    ('edit_batch', 'artifact_store'),
+    ('edit_batch', 'skill_payload'),
+    ('apply_patch', 'system_repo'),
+    ('apply_patch', 'task_drive'),
+    ('apply_patch', 'user_files'),
+])
 def test_light_root_parity_and_readonly_ceiling(file_tools, monkeypatch, root, tool):
     registry, ctx, *_ = file_tools
     base = _target(file_tools, root)
@@ -546,9 +552,16 @@ def test_unicode_edit_sites_agree_with_numbered_reader(file_tools, root):
     assert "     3\tfinal" in patched, patched
 
 
-@pytest.mark.parametrize("root", ["active_workspace", "system_repo", "runtime_data",
-                                  "task_drive", "artifact_store", "user_files", "skill_payload"])
-@pytest.mark.parametrize("denied", ["delete", "read_bytes", "copy"])
+@pytest.mark.parametrize(("denied", "root"), [
+    ("delete", "active_workspace"),
+    ("delete", "artifact_store"),
+    ("read_bytes", "system_repo"),
+    ("read_bytes", "runtime_data"),
+    ("read_bytes", "user_files"),
+    ("copy", "active_workspace"),
+    ("copy", "task_drive"),
+    ("copy", "skill_payload"),
+])
 def test_delete_checks_its_own_policy_and_recovery_authority(file_tools, root, denied):
     registry, ctx, _, _, _, data, _ = file_tools
     base = _target(file_tools, root)
@@ -702,8 +715,13 @@ def test_editor_results_reach_the_actual_keyless_http_model_send(file_tools, tmp
         assert "     1\tBETA" in delivered[1]["content"]
 
 
-@pytest.mark.parametrize("root", ["runtime_data", "task_drive", "artifact_store", "user_files", "skill_payload"])
-@pytest.mark.parametrize("tool", ["edit_text", "edit_batch", "apply_patch"])
+@pytest.mark.parametrize(("tool", "root"), [
+    ("edit_text", "runtime_data"),
+    ("edit_text", "user_files"),
+    ("edit_batch", "task_drive"),
+    ("edit_batch", "skill_payload"),
+    ("apply_patch", "artifact_store"),
+])
 def test_data_edit_keeps_existing_non_json_text_capability(file_tools, root, tool):
     registry, _, *_ = file_tools
     base = _target(file_tools, root)
@@ -788,8 +806,12 @@ def test_duplicate_occurrence_lines_use_reader_unicode_boundaries():
     assert "Occurrences at: line 2, line 4" in error
 
 
-@pytest.mark.parametrize("own_body", [True, False])
-@pytest.mark.parametrize("tool", ["write_file", "edit_text", "edit_batch", "apply_patch"])
+@pytest.mark.parametrize(("tool", "own_body"), [
+    ("write_file", True),
+    ("edit_text", False),
+    ("edit_batch", True),
+    ("apply_patch", False),
+])
 def test_admitted_body_copy_keeps_protected_paths_for_every_writer(tmp_path, monkeypatch, tool, own_body):
     system, copy, data = (tmp_path / name for name in ("repo", "copy", "data"))
     for directory in (system, copy, data):

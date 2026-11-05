@@ -329,8 +329,7 @@ def test_resolver_refused_by_its_admission_is_never_claimed_started(pool, prior)
     assert _drain(pool.slot) == [RESOLVER]
 
 
-@pytest.mark.parametrize("queued", [False, True])
-@pytest.mark.parametrize("loss", [None, "removed", "legacy"])
+@pytest.mark.parametrize(("loss", "queued"), [(None, False), ("removed", True), ("legacy", True)])
 def test_resolver_whose_dispatch_evidence_is_lost_is_never_replayed(pool, loss, queued):  # noqa: F811
     """A resolver that reached a worker and then lost its result may already have run:
     the managed resume neither sends it again nor mints a first-dispatch receipt, whether

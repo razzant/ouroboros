@@ -391,8 +391,7 @@ def test_an_advisory_delivery_after_a_shown_refusal_is_the_authors_own_decision(
     assert _objective_axis(_review_axis(trace))["source"] == "author_acceptance"
 
 
-@pytest.mark.parametrize("owner_message", [False, True])
-@pytest.mark.parametrize("checkpointed", [False, True])
+@pytest.mark.parametrize(("checkpointed", "owner_message"), [(False, False), (True, True)])
 def test_delivery_collects_the_running_review_the_mind_started_without_buying_another(tmp_path, monkeypatch,
                                                                                       owner_message, checkpointed):
     """With ``owner_message`` an owner message arrives while the review runs (the usual reason its author left

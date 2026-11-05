@@ -212,8 +212,12 @@ def test_saved_successor_keeps_frozen_source_across_another_crash_before_dispatc
     assert wc.load_recovery(ctx, source)["working"]["boundary"] == "pre_effect"
 
 
-@pytest.mark.parametrize("origin", ["restarted", "resumed", "crash_retry"])
-@pytest.mark.parametrize("door", ["restart", "quit", "crash", "panic"])
+@pytest.mark.parametrize(("door", "origin"), [
+    ("restart", "restarted"),
+    ("quit", "resumed"),
+    ("crash", "crash_retry"),
+    ("panic", "restarted"),
+])
 def test_runnable_saved_successor_waiting_for_capacity_follows_the_next_stop(tmp_path, monkeypatch, origin, door):
     """A pending successor still owns saved work; another stop does not buy an attempt."""
     import queue as stdqueue

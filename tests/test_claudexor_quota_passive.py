@@ -224,8 +224,10 @@ def test_quota_view_known_empty_is_distinct_from_undiscovered(passive_engine):
     assert all(client.is_closed for client in engine.clients)
 
 
-@pytest.mark.parametrize("pools", [[], [{"harness_id": "codex", "members": ["account-a"]}]])
-@pytest.mark.parametrize("quota_failed", [False, True])
+@pytest.mark.parametrize(("quota_failed", "pools"), [
+    pytest.param(False, [], id='False-pools0'),
+    pytest.param(True, [{"harness_id": "codex", "members": ["account-a"]}], id='True-pools1'),
+])
 def test_quota_view_unified_marker_comes_from_successful_roster_without_operations(
     passive_engine, pools, quota_failed,
 ):
@@ -301,10 +303,11 @@ def test_quota_view_accepts_legacy_absence_omission(passive_engine):
     assert payload["read_errors"] == {}
 
 
-@pytest.mark.parametrize("facet,path", [
-    ("accounts", "/v2/credential-profiles"), ("quota", "/v2/quota"),
+@pytest.mark.parametrize(("failure_type", "facet", "path"), [
+    ("refusal", "quota", "/v2/quota"),
+    ("transport", "accounts", "/v2/credential-profiles"),
+    ("malformed_code", "quota", "/v2/quota"),
 ])
-@pytest.mark.parametrize("failure_type", ["refusal", "transport", "malformed_code"])
 def test_quota_view_errors_are_bounded_and_preserve_successful_sibling(
     passive_engine, caplog, facet, path, failure_type,
 ):

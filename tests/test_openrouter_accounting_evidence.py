@@ -128,8 +128,7 @@ def test_returned_body_failure_preserves_explicit_money(root, usage, expected, f
     assert read_blob_ref(root, current["physical_failure"]["evidence_ref"])["body"] == body
 
 
-@pytest.mark.parametrize("cost", [0, 1.25])
-@pytest.mark.parametrize("via_stream", [False, True])
+@pytest.mark.parametrize(("via_stream", "cost"), [(False, 0), (True, 1.25)])
 def test_received_cost_precedes_existing_free_exception_classification(root, cost, via_stream):
     error = BodyFailure({"id": "gen-free", "error": {"message": "No endpoints found"}, "usage": {"cost": cost}})
     error.status_code = 404

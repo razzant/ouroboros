@@ -13,8 +13,7 @@ from tests.test_invocation_ownership import owner, run
 pytestmark = pytest.mark.serial
 
 
-@pytest.mark.parametrize("family", ["builtin", "extension"])
-@pytest.mark.parametrize("control", ["open", "stop", "deadline"])
+@pytest.mark.parametrize(("control", "family"), [("open", "builtin"), ("stop", "extension"), ("deadline", "builtin")])
 def test_final_control_keeps_builtin_and_extension_meaning(tmp_path, monkeypatch, family, control):
     controls, effects, owners = [None], [], []
     actual = owner_pause.run_tool_handler

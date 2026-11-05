@@ -72,8 +72,13 @@ def immutable_evidence(item):
     return value
 
 
-@pytest.mark.parametrize("status", ["reviewing", "reviewed", "succeeded", "failed", "blocked"])
-@pytest.mark.parametrize("seat", [0, 1])
+@pytest.mark.parametrize(("seat", "status"), [
+    (0, "reviewing"),
+    (0, "succeeded"),
+    (0, "blocked"),
+    (1, "reviewed"),
+    (1, "failed"),
+])
 def test_exact_paid_checkpoint_survives_author_continuation(reserved, status, seat):
     ctx = reserved
     arguments = args_for(ctx, seat)

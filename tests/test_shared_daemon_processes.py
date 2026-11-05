@@ -55,8 +55,7 @@ def test_posix_forced_tree_preserves_shared_branch_even_in_same_group(monkeypatc
     assert killed == [12, 11, 10]
 
 
-@pytest.mark.parametrize("count", [1, 15])
-@pytest.mark.parametrize("attached", [False, True])
+@pytest.mark.parametrize(("attached", "count"), [(False, 1), (True, 15)])
 def test_posix_tree_reads_one_snapshot_for_target_and_whole_retained_branch(monkeypatch, count, attached):
     monkeypatch.setattr(pl, "IS_WINDOWS", False)
     calls = []

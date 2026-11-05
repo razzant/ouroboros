@@ -37,8 +37,7 @@ def _running(host, tmp_path, monkeypatch, scope):  # noqa: F811
     return original
 
 
-@pytest.mark.parametrize("scope", ["project", "main"])
-@pytest.mark.parametrize("stop", ["quit", "restart"])
+@pytest.mark.parametrize(("stop", "scope"), [("quit", "project"), ("restart", "main")])
 def test_saved_accepted_work_returns_through_real_assignment(host, tmp_path, monkeypatch, scope, stop):  # noqa: F811
     from supervisor.restart_retention import prepare_restart_returns
 

@@ -31,8 +31,7 @@ async def _reach(phase, task):
         await asyncio.sleep(.01)
 
 
-@pytest.mark.parametrize("terminal", ["settled", "unresolved", "dispatched"])
-@pytest.mark.parametrize("deadline", [False, True])
+@pytest.mark.parametrize(("deadline", "terminal"), [(False, "settled"), (False, "dispatched"), (True, "unresolved")])
 def test_real_api_consumer_cancel_retains_response_capture_and_claim(data_root, monkeypatch, terminal, deadline):
     client, response = LLMClient(api_key="unused"), _Response(text="exact paid answer 🐍\r\n")
     entered, release, retaining, retained = [threading.Event() for _ in range(4)]

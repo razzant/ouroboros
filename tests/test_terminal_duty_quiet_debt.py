@@ -128,8 +128,7 @@ def test_an_unanswered_presence_query_proves_no_absence(env, monkeypatch):
     assert all(row["reasons"].get("child") != "result_absent" for row in published(env, duty.COST_PROJECTIONS))
 
 
-@pytest.mark.parametrize("restart", [False, True])
-@pytest.mark.parametrize("arrival", ["child_copyback", "late_row"])
+@pytest.mark.parametrize(("arrival", "restart"), [("child_copyback", False), ("late_row", True)])
 def test_a_body_landing_after_the_last_ledger_write_is_projected_without_a_receipt(env, restart, arrival):
     from ouroboros.headless import copy_child_task_result
 

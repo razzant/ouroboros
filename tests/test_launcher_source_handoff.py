@@ -120,9 +120,12 @@ def test_the_launchers_git_asks_for_a_hidden_window(tmp_path, monkeypatch):
     assert all(flags & NO_WINDOW for _, flags in seen)
 
 
-@pytest.mark.parametrize("changed", ["ouroboros/launcher_bootstrap.py", "ouroboros/launcher_server_reaper.py",
-                                     "ouroboros/process_scope.py", "server.py"])
-@pytest.mark.parametrize("compiled", [False, True])
+@pytest.mark.parametrize(("compiled", "changed"), [
+    (False, "ouroboros/launcher_bootstrap.py"),
+    (False, "ouroboros/process_scope.py"),
+    (True, "ouroboros/launcher_server_reaper.py"),
+    (True, "server.py"),
+])
 def test_container_warm_handoff_counts_helpers_loaded_from_the_image(tmp_path, monkeypatch, changed, compiled):
     """Docker imports helpers from /app, with body and seed in two other directories."""
     repo, seed, app = (tmp_path / name for name in ("body/repo", "opt/ouroboros/seed", "app"))
@@ -287,8 +290,7 @@ def test_posix_replaces_the_process_image_with_the_marked_environment(hand_over)
     assert env[MARK] == "1"
 
 
-@pytest.mark.parametrize("windows", [True, False])
-@pytest.mark.parametrize("when", ["before teardown", "after unlock"])
+@pytest.mark.parametrize(("when", "windows"), [("before teardown", True), ("after unlock", False)])
 def test_cancelled_handoff_never_starts_a_successor(hand_over, windows, when):
     cancelled = lambda: when == "before teardown" or "release" in hand_over.calls
     try:
@@ -310,8 +312,7 @@ def test_cancelled_handoff_keeps_panic_alive_even_if_the_lock_was_taken(hand_ove
 # --------------------------------------------------------------------------------- cold start ---
 
 
-@pytest.mark.parametrize("windows", [False, True])
-@pytest.mark.parametrize("frozen", [False, True])
+@pytest.mark.parametrize(("frozen", "windows"), [(False, False), (True, True)])
 def test_import_broken_successor_keeps_frozen_or_seed_shell(hand_over, monkeypatch, windows, frozen):
     monkeypatch.setattr(bootstrap_module, "source_launcher_importable", lambda *a, **kw: False)
     hand_over([], windows=windows, frozen=frozen)

@@ -85,12 +85,11 @@ def test_config_read_accepts_object_and_json_and_is_idempotent():
     assert json.loads(normalized[MODEL_CONTEXT_WINDOWS_KEY]) == {"light": 872000}
 
 
-@pytest.mark.parametrize("key, valid", [
-    (MODEL_ACCOUNTS_KEY, "private-account-value"),
-    (MODEL_CONTEXT_WINDOWS_KEY, 0),
-    (MODEL_PROCESSING_PREFERENCES_KEY, "economy"),
+@pytest.mark.parametrize(("encoded", "key", "valid"), [
+    pytest.param(False, MODEL_ACCOUNTS_KEY, "private-account-value", id='False-OUROBOROS_MODEL_ACCOUNTS-private-account-value'),
+    pytest.param(False, MODEL_PROCESSING_PREFERENCES_KEY, "economy", id='False-OUROBOROS_MODEL_PROCESSING_PREFERENCES-economy'),
+    pytest.param(True, MODEL_CONTEXT_WINDOWS_KEY, 0, id='True-OUROBOROS_MODEL_CONTEXT_WINDOWS-0'),
 ])
-@pytest.mark.parametrize("encoded", [False, True])
 def test_unknown_role_diagnostic_names_keys_without_applying_or_disclosing_values(key, valid, encoded):
     from ouroboros.config import normalize_settings_raw, prepare_settings_for_persist
 

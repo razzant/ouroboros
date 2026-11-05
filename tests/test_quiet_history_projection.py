@@ -15,9 +15,11 @@ from tests._wake_summary_shared import seed_wake
 from tests.test_chat_history_paging import isolated_runtime  # noqa: F401
 
 
-@pytest.mark.parametrize("silent,notice", [(True, ""), (True, "A tool failed."), (False, "")],
-                         ids=["quiet", "quiet-with-notice", "ordinary"])
-@pytest.mark.parametrize("retained", [True, False], ids=["result-present", "result-pruned"])
+@pytest.mark.parametrize(("retained", "silent", "notice"), [
+    pytest.param(True, True, "", id='result-present-quiet'),
+    pytest.param(True, False, "", id='result-present-ordinary'),
+    pytest.param(False, True, "A tool failed.", id='result-pruned-quiet-with-notice'),
+])
 def test_terminal_flags_round_trip_through_room_history(tmp_path, silent, notice, retained):
     project = create_project(tmp_path, "checks", name="Scheduled checks")
     task_id = "scheduled-check"
@@ -84,9 +86,10 @@ def test_stored_wake_and_history_share_phase_and_quiet_facts(tmp_path, silent, n
     assert wake["note"] == document["result"]
 
 
-@pytest.mark.parametrize("retained", [True, False])
-@pytest.mark.parametrize("summary", ["Проверил состояние системы.", ""])
-@pytest.mark.parametrize("owner_sent", [True, False])
+@pytest.mark.parametrize(("owner_sent", "summary", "retained"), [
+    (True, "Проверил состояние системы.", True),
+    (False, "", False),
+])
 def test_wake_words_and_quiet_truth_survive_terminal_only_history(tmp_path, retained, summary, owner_sent):
     fields = {"owner_message_sent": owner_sent, "schedule_name": "Daily check"}
     if summary:

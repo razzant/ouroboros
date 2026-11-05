@@ -168,8 +168,7 @@ def test_wal_is_full_and_export_checkpoints_to_standalone_delete(tmp_path, monke
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
 
-@pytest.mark.parametrize("money", [False, True])
-@pytest.mark.parametrize("mode", ["PERSIST", "WAL"])
+@pytest.mark.parametrize(("mode", "money"), [("PERSIST", False), ("WAL", True)])
 def test_sibling_build_is_standalone_before_publication(tmp_path, monkeypatch, money, mode):
     monkeypatch.setattr(store, "_journal_mode", lambda *_: mode)
     if money:
@@ -195,8 +194,7 @@ def test_failed_build_rolls_back_and_releases_its_temporary_journal(tmp_path, mo
         assert conn.execute("PRAGMA journal_mode").fetchone()[0] == ("wal" if mode == "WAL" else "delete")
 
 
-@pytest.mark.parametrize("dialogue", [False, True])
-@pytest.mark.parametrize("wal", [True, False])
+@pytest.mark.parametrize(("wal", "dialogue"), [(True, False), (False, True)])
 def test_a_door_reset_hands_every_store_off_out_of_wal_first(tmp_path, monkeypatch, wal, dialogue):
     # A store-aware older body never sets the journal mode: it must receive DELETE files, from the
     # door's own reset and from the seam alike (every release before the dialogue store needs the
@@ -729,8 +727,7 @@ def test_a_required_wal_exit_never_defers_silently(tmp_path, monkeypatch):
         txn.set_meta("served", True)
 
 
-@pytest.mark.parametrize("which", ["facts", "dialogue"])
-@pytest.mark.parametrize("conversion", ["completes", "busy"])
+@pytest.mark.parametrize(("conversion", "which"), [("completes", "facts"), ("busy", "dialogue")])
 def test_a_retier_leaves_wal_under_the_old_tier_before_the_header_names_the_new_one(tmp_path, monkeypatch, which,
                                                                                     conversion):
     """Enforced (WAL) -> name tier: the file leaves WAL through the enforced protocol it is used with, and

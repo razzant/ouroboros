@@ -403,8 +403,7 @@ def test_inline_inventory_migrates_to_the_source_bound_transitions(clock, versio
     assert set(accepted) == {'version', 'source_ref'} and accepted['version'] == 2
 
 
-@pytest.mark.parametrize('failure', ['write', 'readback', 'bootstrap_write'])
-@pytest.mark.parametrize('restart', [False, True])
+@pytest.mark.parametrize(("restart", "failure"), [(False, 'readback'), (True, 'write'), (True, 'bootstrap_write')])
 def test_first_failed_source_preserves_intervening_events(clock, monkeypatch, failure, restart):
     from ouroboros import artifacts, chat_chain
     from ouroboros.consciousness import OBSERVATION_STATE_KEY

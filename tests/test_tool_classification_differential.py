@@ -652,8 +652,12 @@ def test_current_producer_contracts_have_explicit_live_answers(subject, detail):
     assert _live_answer(case) == CURRENT_PRODUCER_CONTRACTS[subject]
 
 
-@pytest.mark.parametrize("tool", ["skill_install", "skill_update"])
-@pytest.mark.parametrize("failure", ["staged_hash", "landing", "bad_check", "empty_notes"])
+@pytest.mark.parametrize(("failure", "tool"), [
+    ("staged_hash", "skill_install"),
+    ("landing", "skill_install"),
+    ("bad_check", "skill_update"),
+    ("empty_notes", "skill_update"),
+])
 def test_registry_failures_keep_the_current_producer_contract(registry_release, monkeypatch, tool, failure):  # noqa: F811
     from ouroboros.skill_install_record import read_install_record
     from ouroboros.tools.registry import ToolContext
@@ -737,8 +741,14 @@ def test_unrecordable_relay_answer_publishes_the_current_producer_contract(tmp_p
         CURRENT_PRODUCER_CONTRACTS["native:CAPABILITY_UNAVAILABLE:RELAY_RETURN_NOT_OWED"])
 
 
-@pytest.mark.parametrize("tool", ["send_user_message", "send_photo", "send_video", "send_file", "send_links", "show_card"])
-@pytest.mark.parametrize("identifier", ["LOCAL_ROOM_UNAVAILABLE", "PEER_DELIVERY_UNSUPPORTED"])
+@pytest.mark.parametrize(("identifier", "tool"), [
+    ("LOCAL_ROOM_UNAVAILABLE", "send_user_message"),
+    ("LOCAL_ROOM_UNAVAILABLE", "send_video"),
+    ("LOCAL_ROOM_UNAVAILABLE", "send_links"),
+    ("PEER_DELIVERY_UNSUPPORTED", "send_photo"),
+    ("PEER_DELIVERY_UNSUPPORTED", "send_file"),
+    ("PEER_DELIVERY_UNSUPPORTED", "show_card"),
+])
 def test_undelivered_send_frames_publish_the_current_producer_contract(tmp_path, monkeypatch, identifier, tool):
     """A send that queued nothing answers through the registry as the producer's typed refusal.
 

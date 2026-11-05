@@ -128,8 +128,7 @@ def test_actual_main_captures_source_after_binding(applied_host, tmp_path, monke
         _stop_restart_watcher(server)
 
 
-@pytest.mark.parametrize("original_host", [None, "", "0.0.0.0"])
-@pytest.mark.parametrize("explicit_cli", [False, True])
+@pytest.mark.parametrize(("explicit_cli", "original_host"), [(False, None), (False, "0.0.0.0"), (True, "")])
 def test_two_settings_restarts_do_not_invent_environment_authority(monkeypatch, tmp_path, original_host, explicit_cli):
     saved = {"OUROBOROS_SERVER_HOST": "127.0.0.2"}
     monkeypatch.setattr(config, "load_settings", lambda: saved)

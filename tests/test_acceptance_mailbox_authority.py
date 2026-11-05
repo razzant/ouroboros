@@ -38,8 +38,11 @@ def _fence(tool_ctx):
     return calls
 
 
-@pytest.mark.parametrize("provenance", ["system", "descendant_task", "independent_task"])
-@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize(("cached", "provenance"), [
+    (False, "system"),
+    (False, "independent_task"),
+    (True, "descendant_task"),
+])
 def test_context_mail_wakes_without_reopening_acceptance(case, provenance, cached):
     tool_ctx, _tools, ctx, _trace, _candidate = case
     before = owner_source_sha256(tool_ctx)

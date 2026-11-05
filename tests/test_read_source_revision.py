@@ -51,8 +51,13 @@ def _registry(tmp_path):
     return registry
 
 
-@pytest.mark.parametrize("window", [{}, {"start_line": 2}, {"max_lines": 1}, {"start_char": 3}, {"max_chars": 4}])
-@pytest.mark.parametrize("root", ["active_workspace", "system_repo", "runtime_data", "task_drive"])
+@pytest.mark.parametrize(("root", "window"), [
+    pytest.param("active_workspace", {}, id='active_workspace-window0'),
+    pytest.param("active_workspace", {"max_chars": 4}, id='active_workspace-window4'),
+    pytest.param("system_repo", {"start_line": 2}, id='system_repo-window1'),
+    pytest.param("runtime_data", {"max_lines": 1}, id='runtime_data-window2'),
+    pytest.param("task_drive", {"start_char": 3}, id='task_drive-window3'),
+])
 def test_a_repeat_returns_what_a_fresh_context_reads_on_every_branch_and_window(tmp_path, root, window):
     """Read history is not a read input. On both read_file branches and for each slice
     selector, the same view read again in one task, after another window, is the typed

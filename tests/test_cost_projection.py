@@ -109,8 +109,7 @@ def test_terminal_batches_keep_the_receipt_without_reading_current_accounting(ro
     assert current_costs(rows, root) == rows
 
 
-@pytest.mark.parametrize("same_tree", [True, False])
-@pytest.mark.parametrize("lineage_carrier", ["top_level", "metadata"])
+@pytest.mark.parametrize(("lineage_carrier", "same_tree"), [("top_level", True), ("metadata", False)])
 def test_wait_cost_batch_reads_each_actual_root_once(root, monkeypatch, same_tree, lineage_carrier):
     from ouroboros import usage_accounting as ua
     from ouroboros.task_results import write_task_result

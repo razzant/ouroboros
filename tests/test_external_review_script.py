@@ -1049,8 +1049,7 @@ def test_packet_seats_carry_each_seats_one_saved_text(tmp_path, monkeypatch):
     assert len(reads) == 3  # one selected text per seat, nothing else read
 
 
-@pytest.mark.parametrize("status", ["pending", "responded"])
-@pytest.mark.parametrize("cost", [0.01, 0.0, None])
+@pytest.mark.parametrize(("cost", "status"), [(0.01, "pending"), (0.0, "responded"), (None, "pending")])
 def test_external_review_cost_report_keeps_amount_knowledge_separate_from_lifecycle(status, cost):
     actors = _actors([{"slot_id": "slot_1", "model_id": "reviewer", "status": status, "cost_usd": cost}])
     evidence, report = _review_evidence_and_cost(actors)

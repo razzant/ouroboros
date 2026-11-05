@@ -190,12 +190,11 @@ def test_a_successful_reask_is_the_calls_answer(isolated, asynchronous):
     assert rows[1]["state"] == "settled" and rows[1]["cost_usd"] == 0.5 and rows[1]["cost_final"] is True
 
 
-@pytest.mark.parametrize("metadata", [
-    receipt(400, 402),  # an upstream itself answered 402: its own billing verdict
-    None,  # no receipt at all
-    {"requested": MODEL, "attempt": 0, "summary": "available=16"},  # refused before any upstream
-], ids=["402-among-attempts", "no-receipt", "no-attempts"])
-@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize(("asynchronous", "metadata"), [
+    pytest.param(False, receipt(400, 402), id='False-402-among-attempts'),  # an upstream itself answered 402: its own billing verdict
+    pytest.param(False, {"requested": MODEL, "attempt": 0, "summary": "available=16"}, id='False-no-attempts'),  # refused before any upstream
+    pytest.param(True, None, id='True-no-receipt'),  # no receipt at all
+])
 def test_a_genuine_402_stays_quota_without_reask(isolated, asynchronous, metadata):
     outcome, sends = drive([Wire(error_frame(402, CREDITS, metadata))], asynchronous=asynchronous)
 

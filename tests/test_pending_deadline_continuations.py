@@ -95,8 +95,10 @@ def _exact(host, monkeypatch, *, recovered=False):  # noqa: F811
     return task
 
 
-@pytest.mark.parametrize("entry", ["tick", "assignment"])
-@pytest.mark.parametrize("recovered", [False, True], ids=["first-run", "working-recovery"])
+@pytest.mark.parametrize(("recovered", "entry"), [
+    pytest.param(False, "tick", id='first-run-tick'),
+    pytest.param(True, "assignment", id='working-recovery-assignment'),
+])
 def test_exact_resume_wait_expires_without_worker_dispatch(host, expiry, monkeypatch, entry, recovered):  # noqa: F811
     task = _exact(host, monkeypatch, recovered=recovered)
     sent = []
@@ -111,9 +113,17 @@ def test_exact_resume_wait_expires_without_worker_dispatch(host, expiry, monkeyp
     assert [e["status"] for e in expiry.frames if e.get("type") == "task_done"] == ["failed"]
 
 
-@pytest.mark.parametrize("change", ["pause", "stop", "live", "completed", "revoked", "unreadable",
-                                    "selected_grant", "selected_source", "selected_attempt"])
-@pytest.mark.parametrize("during", [False, True], ids=["before-reap", "during-custody"])
+@pytest.mark.parametrize(("during", "change"), [
+    pytest.param(False, "pause", id='before-reap-pause'),
+    pytest.param(False, "completed", id='before-reap-completed'),
+    pytest.param(False, "unreadable", id='before-reap-unreadable'),
+    pytest.param(False, "selected_source", id='before-reap-selected_source'),
+    pytest.param(True, "stop", id='during-custody-stop'),
+    pytest.param(True, "live", id='during-custody-live'),
+    pytest.param(True, "revoked", id='during-custody-revoked'),
+    pytest.param(True, "selected_grant", id='during-custody-selected_grant'),
+    pytest.param(True, "selected_attempt", id='during-custody-selected_attempt'),
+])
 def test_exact_grant_authority_is_rechecked_after_mark(host, expiry, monkeypatch, change, during):  # noqa: F811
     from supervisor.owner_pause_control import request_owner_pause
     from supervisor.queue_transitions import revoke_exact_budget_resume

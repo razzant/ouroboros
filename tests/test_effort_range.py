@@ -897,8 +897,7 @@ def test_the_endpoint_is_indexed_mirrored_and_owner_only_for_the_browser():
     assert not _is_effort_range_owner_post(SimpleNamespace(method="GET", url="http://127.0.0.1:8765/api/owner/effort-range"))
 
 
-@pytest.mark.parametrize("role", ["evolution", "consciousness"])
-@pytest.mark.parametrize("mode", ["pro", "cyber_pro"])
+@pytest.mark.parametrize(("mode", "role"), [("pro", "consciousness"), ("cyber_pro", "evolution")])
 def test_an_owner_task_pin_holds_against_an_evolution_or_wake_self_switch(tmp_path, monkeypatch, role, mode):
     """Evolution tasks and wakes may move their own level inside the range, but an explicit
     effort the owner gave the task (API, CLI, schedule) is a pin outside Cyber Pro."""

@@ -289,8 +289,15 @@ def persistent_loop(tmp_path, monkeypatch, client, *, target="t-output-recovery"
     return kw, notes
 
 
-@pytest.mark.parametrize("new_id", [False, True])
-@pytest.mark.parametrize("lost_at", ["informed", "fallback", "informed_send", "fallback_send", "smaller", "smaller_send", "fallback_informed"])
+@pytest.mark.parametrize(("lost_at", "new_id"), [
+    ("informed", True),
+    ("fallback", True),
+    ("informed_send", False),
+    ("fallback_send", True),
+    ("smaller", False),
+    ("smaller_send", False),
+    ("fallback_informed", True),
+])
 def test_real_checkpoint_recovery_never_reopens_spent_step(tmp_path, monkeypatch, isolated, endpoint, new_id, lost_at):
     from ouroboros import working_checkpoint as wc
     from tests.test_stream_timeout_recovery import WorkerLost

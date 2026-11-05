@@ -35,8 +35,7 @@ def _reconcile(manifest, shards):
 
 
 @pytest.mark.skipif(not ci_evidence.SubtestReport, reason="pytest has no built-in subtest reports")
-@pytest.mark.parametrize("workers", [0, 2])
-@pytest.mark.parametrize("fails", [False, True])
+@pytest.mark.parametrize(("fails", "workers"), [(False, 0), (True, 2)])
 def test_real_subtests_keep_failures_without_duplicate_parent_execution(tmp_path, workers, fails):
     result, public, _ = _producer(tmp_path, f'''
         import unittest

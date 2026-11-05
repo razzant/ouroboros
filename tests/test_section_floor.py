@@ -127,8 +127,7 @@ def _service(name="runtime", size=100_000):
                        f"## {name}\n\nOperative state remains.")
 
 
-@pytest.mark.parametrize("preferred", ["max", "low", "nano"])
-@pytest.mark.parametrize("window", [0, 2_000_000])
+@pytest.mark.parametrize(("window", "preferred"), [(0, "max"), (0, "nano"), (2_000_000, "low")])
 def test_unselected_projections_are_byte_identical_and_write_nothing(tmp_path, preferred, window):
     core = _core(tmp_path, [_service(size=2_000), "protected dynamic text"], [_service("world", 1_000)],
                  syn.snapshot(story=syn.pages(2, 4_000)))

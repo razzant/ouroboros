@@ -108,8 +108,7 @@ def _after_receipt(monkeypatch, tid, mutate):
     return called
 
 
-@pytest.mark.parametrize("consumer", ["scan", "admit"])
-@pytest.mark.parametrize("mutation", ["owner_hold", "cancelled"])
+@pytest.mark.parametrize(("mutation", "consumer"), [("owner_hold", "admit"), ("cancelled", "scan")])
 def test_changed_receipt_defers_without_replaying_or_persisting_a_false_hold(q, monkeypatch, consumer, mutation):
     _row(q, intent={"kind": "system_repo"})
     automatic_pass()

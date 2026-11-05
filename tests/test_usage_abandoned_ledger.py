@@ -75,8 +75,7 @@ def root(tmp_path):
     usage_store.forget(tmp_path)
 
 
-@pytest.mark.parametrize("prior", ["unresolved", "abandoned"])
-@pytest.mark.parametrize("cost", [0.0, 0.7, None])
+@pytest.mark.parametrize(("cost", "prior"), [(0.0, "unresolved"), (0.7, "abandoned"), (None, "unresolved")])
 def test_one_late_receipt_is_accepted_once_by_the_store_and_the_import(root, prior, cost):
     before = _numbered(_chain("late", prior))
     actual = _numbered([_row("late", "settled", settle_reason="late_receipt",

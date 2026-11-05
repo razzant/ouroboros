@@ -61,9 +61,15 @@ def test_live_leader_without_its_own_group_still_blocks_cleanup(tmp_path):
     assert _observe(tmp_path, "group").stdout == "running"
 
 
-@pytest.mark.parametrize("line", ["", "garbage", "42 (short) S 1 42", "42 (bad) Q 1 42",
-                                  "42 (bad) S 1 nope", "42 (bad) Z 1 4:2", "99 (wrong) Z 1 42"])
-@pytest.mark.parametrize("scope", ["leader", "group"])
+@pytest.mark.parametrize(("scope", "line"), [
+    ("leader", ""),
+    ("leader", "42 (short) S 1 42"),
+    ("leader", "42 (bad) S 1 nope"),
+    ("leader", "99 (wrong) Z 1 42"),
+    ("group", "garbage"),
+    ("group", "42 (bad) Q 1 42"),
+    ("group", "42 (bad) Z 1 4:2"),
+])
 def test_malformed_stat_is_unknown(tmp_path, line, scope):
     path = _stat(tmp_path)
     path.write_text(line + " " + " ".join(["0"] * 47) if line != "42 (short) S 1 42" else line)

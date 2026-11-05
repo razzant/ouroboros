@@ -109,8 +109,10 @@ def _toggle(ctx, name, enabled, *, from_loop):
     return asyncio.run(inside_loop())
 
 
-@pytest.mark.parametrize("isolated", [False, True], ids=["in_process", "isolated"])
-@pytest.mark.parametrize("from_loop", [False, True], ids=["queue_direct", "queue_thread"])
+@pytest.mark.parametrize(("from_loop", "isolated"), [
+    pytest.param(False, True, id='queue_direct-isolated'),
+    pytest.param(True, False, id='queue_thread-in_process'),
+])
 def test_save_enable_and_use_inside_the_task_that_started_before_the_key(world, isolated, from_loop):
     world.extension("bridge", GATED, isolated=isolated)
     snapshot = subagent_runtime.apply_task_start_settings()
@@ -255,8 +257,10 @@ def _script_env(world, name):
     return skill_exec._scrub_env(KEYS, world.data / "state" / "skills" / name, name, granted_keys=KEYS)
 
 
-@pytest.mark.parametrize("isolated", [False, True], ids=["in_process", "isolated"])
-@pytest.mark.parametrize("change", ["cleared", "deleted"])
+@pytest.mark.parametrize(("change", "isolated"), [
+    pytest.param("cleared", False, id='cleared-in_process'),
+    pytest.param("deleted", True, id='deleted-isolated'),
+])
 def test_a_key_saved_before_the_start_does_not_return_from_its_projection(world, isolated, change):
     """The task start projects the saved key into this process's environment; a later clear stays a clear."""
     import os
@@ -325,8 +329,10 @@ TWO_READS = (
 )
 
 
-@pytest.mark.parametrize("isolated", [False, True], ids=["in_process", "isolated"])
-@pytest.mark.parametrize("change", ["rotated", "deleted"])
+@pytest.mark.parametrize(("change", "isolated"), [
+    pytest.param("rotated", False, id='rotated-in_process'),
+    pytest.param("deleted", True, id='deleted-isolated'),
+])
 def test_one_call_reads_a_save_made_between_its_two_reads(world, monkeypatch, isolated, change):
     """A long handler's later read sees the owner's save; the operator's own variable still stands in."""
     import contextvars

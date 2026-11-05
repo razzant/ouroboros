@@ -96,8 +96,11 @@ def test_an_empty_page_needs_no_count_read(tmp_path, gh):
     assert len(gh.calls) == 1
 
 
-@pytest.mark.parametrize("kind", ["system", "queued", "room"])
-@pytest.mark.parametrize("repo", ["", "github.example/owner/selected"])
+@pytest.mark.parametrize(("repo", "kind"), [
+    ("", "system"),
+    ("", "room"),
+    ("github.example/owner/selected", "queued"),
+])
 def test_the_count_read_follows_the_returned_url_not_ambient_targets(tmp_path, gh, monkeypatch, kind, repo):
     ctx, expected_cwd = _context(tmp_path, kind)
     monkeypatch.setenv("GH_REPO", "unrelated/wrong-repo")

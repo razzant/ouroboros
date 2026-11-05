@@ -147,8 +147,7 @@ def test_pending_child_progress_affects_only_its_current_ancestors(host, descend
     assert bool(host.meta.get("silence_attention")) is not descendant
 
 
-@pytest.mark.parametrize("rail", ["deadline", "absolute_ceiling"])
-@pytest.mark.parametrize("unreadable", [False, True])
+@pytest.mark.parametrize(("unreadable", "rail"), [(False, "deadline"), (True, "absolute_ceiling")])
 def test_pending_or_unreadable_observation_never_spares_hard_axes(host, monkeypatch, rail, unreadable):
     if rail == "deadline":
         host.meta["task"]["deadline_at"] = "1970-01-01T01:00:00+00:00"

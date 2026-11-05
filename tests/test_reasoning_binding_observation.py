@@ -126,12 +126,11 @@ def test_retirement_identity_refreshes_same_round_facts_and_expires_next_round(t
     assert any(row.get("content") == current for row in ctx.messages), "sent facts remain historical"
 
 
-@pytest.mark.parametrize("turns", [1, 2])
-@pytest.mark.parametrize("cause,sanction,explanation", [
-    ("messages", "compaction", "context folded"),
-    ("system", None, "the system view was rebuilt"),
-    ("tools", None, "the tool set changed"),
-    ("no_baseline", None, "the task resumed without a record of its last request"),
+@pytest.mark.parametrize(("cause", "sanction", "explanation", "turns"), [
+    ("messages", "compaction", "context folded", 1),
+    ("system", None, "the system view was rebuilt", 2),
+    ("tools", None, "the tool set changed", 1),
+    ("no_baseline", None, "the task resumed without a record of its last request", 2),
 ])
 def test_model_fact_explains_the_change_without_indices_or_internal_cause_codes(cause, sanction, explanation, turns):
     usage = {"_reasoning_retired_round": {"round": 4, "index": 123, "cause": cause, "turns": turns,

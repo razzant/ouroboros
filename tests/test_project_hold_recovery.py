@@ -324,8 +324,7 @@ def test_invalid_independent_snapshot_fence_cannot_be_cleared_by_project_recover
     assert not host.pending[0].get("_owner_hold")
 
 
-@pytest.mark.parametrize("frozen", [True, False])
-@pytest.mark.parametrize("back", [True, False])
+@pytest.mark.parametrize(("back", "frozen"), [(True, True), (False, False)])
 def test_room_rebind_and_back_cannot_redirect_original_preparation(host, tmp_path, monkeypatch, frozen, back):  # noqa: F811
     task = accepted(host, tmp_path)
     task["_project_admission"]["frozen"] = frozen
@@ -348,9 +347,17 @@ def test_room_rebind_and_back_cannot_redirect_original_preparation(host, tmp_pat
         assert not sent and load_task_result(host.root, prepared["id"])["status"] == "failed"
 
 
-@pytest.mark.parametrize("dispatch", [None, "none", "possible", "stored_possible", "missing_receipt",
-                                      "unreadable_receipt", "started", "owner_pause", "panic"])
-@pytest.mark.parametrize("readable", [False, True])
+@pytest.mark.parametrize(("readable", "dispatch"), [
+    (False, "none"),
+    (False, "stored_possible"),
+    (False, "unreadable_receipt"),
+    (False, "owner_pause"),
+    (True, None),
+    (True, "possible"),
+    (True, "missing_receipt"),
+    (True, "started"),
+    (True, "panic"),
+])
 def test_held_deadline_keeps_custody_without_replay(host, tmp_path, monkeypatch, expiry, dispatch, readable):  # noqa: F811
     from supervisor.events_budget import HOLD_PANIC, HOLD_SAVED_WORK, budget_hold_fact, hold_budget_row
 

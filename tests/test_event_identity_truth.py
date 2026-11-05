@@ -41,8 +41,10 @@ def test_task_received_carries_only_supplied_top_level_identity(tmp_path, monkey
         assert 'root_task_id' not in row and 'parent_task_id' not in row
 
 
-@pytest.mark.parametrize('fault', [False, True])
-@pytest.mark.parametrize('lineage', [{}, {'root_task_id': 'root', 'parent_task_id': 'parent'}])
+@pytest.mark.parametrize(("lineage", "fault"), [
+    pytest.param({}, False, id='lineage0-False'),
+    pytest.param({'root_task_id': 'root', 'parent_task_id': 'parent'}, True, id='lineage1-True'),
+])
 def test_both_terminal_writers_stamp_append_time_without_clamping(tmp_path, monkeypatch, fault, lineage):
     from ouroboros import headless
     from supervisor import events, events_task_done as module

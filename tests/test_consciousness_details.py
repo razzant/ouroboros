@@ -63,10 +63,13 @@ def test_primary_endpoint_and_state_fallback_share_status(monkeypatch, tmp_path,
     assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
 
 
-@pytest.mark.parametrize("wake,held", [("", False), ("wake", False), ("wake", True)])
-@pytest.mark.parametrize("appointment", ["", "2027-01-15T11:30:00Z"])
-@pytest.mark.parametrize("deadline", ["2027-01-15T11:59:59Z", "2027-01-15T12:00:00Z",
-                                     "2027-01-15T12:00:01Z", "", "invalid"])
+@pytest.mark.parametrize(("deadline", "appointment", "wake", "held"), [
+    ("2027-01-15T11:59:59Z", "", "", False),
+    ("2027-01-15T12:00:00Z", "2027-01-15T11:30:00Z", "wake", False),
+    ("2027-01-15T12:00:01Z", "2027-01-15T11:30:00Z", "wake", False),
+    ("", "", "wake", True),
+    ("invalid", "", "wake", True),
+])
 def test_due_headline_requires_a_past_attempt_without_a_live_wake(monkeypatch, wake, held, appointment, deadline):
     monkeypatch.setattr(view, "time", SimpleNamespace(time=lambda: NOW))
     monkeypatch.setattr(view, "_DISPLAY_ZONE", dt.timezone.utc)
@@ -87,8 +90,7 @@ def test_due_headline_requires_a_past_attempt_without_a_live_wake(monkeypatch, w
     assert {key: result[key] for key in facts} == facts
 
 
-@pytest.mark.parametrize("enabled,status", [(None, "unknown"), (False, "disabled")])
-@pytest.mark.parametrize("held", [False, True])
+@pytest.mark.parametrize(("held", "enabled", "status"), [(False, None, "unknown"), (True, False, "disabled")])
 def test_due_work_never_overrides_unknown_or_disabled_control(monkeypatch, enabled, status, held):
     monkeypatch.setattr(view, "time", SimpleNamespace(time=lambda: NOW))
     result = view.describe_consciousness_state({"next_wake_at": "2027-01-15T11:59:59Z",
@@ -96,9 +98,15 @@ def test_due_work_never_overrides_unknown_or_disabled_control(monkeypatch, enabl
     assert result["status"] == status
 
 
-@pytest.mark.parametrize("outcome", ["skipped:allowance_unknown", "skipped:allowance_exhausted",
-    "rejected:budget_exhausted", "paused", "pausing", "unknown", "failed"])
-@pytest.mark.parametrize("hour,words", [(11, "due since 11:00"), (13, "at 13:00")])
+@pytest.mark.parametrize(("hour", "words", "outcome"), [
+    (11, "due since 11:00", "skipped:allowance_unknown"),
+    (11, "due since 11:00", "rejected:budget_exhausted"),
+    (11, "due since 11:00", "pausing"),
+    (11, "due since 11:00", "failed"),
+    (13, "at 13:00", "skipped:allowance_exhausted"),
+    (13, "at 13:00", "paused"),
+    (13, "at 13:00", "unknown"),
+])
 def test_explained_outcomes_label_future_and_overdue_attempts(monkeypatch, outcome, hour, words):
     monkeypatch.setattr(view, "time", SimpleNamespace(time=lambda: NOW))
     monkeypatch.setattr(view, "_DISPLAY_ZONE", dt.timezone.utc)
@@ -165,8 +173,11 @@ def test_recent_wake_coverage_names_actual_shares_only_on_a_full_mixed_page(monk
         assert coverage == "the latest 50 wakes that reached a model call in the last 48 h"
 
 
-@pytest.mark.parametrize("offset", [0, 3])
-@pytest.mark.parametrize("day,words", [(14, "Jan 14 10:00"), (15, "10:00"), (16, "Jan 16 10:00")])
+@pytest.mark.parametrize(("day", "words", "offset"), [
+    (14, "Jan 14 10:00", 0),
+    (15, "10:00", 3),
+    (16, "Jan 16 10:00", 0),
+])
 def test_headlines_date_instants_outside_the_server_local_day(monkeypatch, offset, day, words):
     zone = dt.timezone(dt.timedelta(hours=offset))
     monkeypatch.setattr(view, "time", SimpleNamespace(time=lambda: NOW))

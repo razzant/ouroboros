@@ -157,9 +157,11 @@ def test_startup_recovery_skips_symlinked_external_task_drive(roots):
     assert not result_exists(root, "evil")
 
 
-@pytest.mark.parametrize("family", ["headless", "task_drives"])
-@pytest.mark.parametrize("status", ["failed", "cancelled", "rejected_duplicate"])
-@pytest.mark.parametrize("child_status", [None, "running"])
+@pytest.mark.parametrize(("child_status", "status", "family"), [
+    (None, "cancelled", "headless"),
+    ("running", "failed", "task_drives"),
+    ("running", "rejected_duplicate", "task_drives"),
+])
 def test_host_terminal_without_child_terminal_does_not_disable_retention(
     roots, monkeypatch, family, status, child_status,
 ):

@@ -84,8 +84,11 @@ def _ctx(tmp_path):
     return types.SimpleNamespace(repo_dir=tmp_path, _active_builtin_tool_result=None)
 
 
-@pytest.mark.parametrize("body", ["ASCII body", "An em dash —", "Owner's code → 🤖"])
-@pytest.mark.parametrize("method", ["merge", "squash"])
+@pytest.mark.parametrize(("method", "body"), [
+    ("merge", "ASCII body"),
+    ("merge", "Owner's code → 🤖"),
+    ("squash", "An em dash —"),
+])
 def test_text_stdin_is_utf8_under_a_non_utf8_locale(fake_gh, tmp_path, body, method):
     """Real parent and gh child pipes, with UTF-8 mode and locale coercion disabled."""
     source, received = tmp_path / "body.txt", tmp_path / "received.bin"

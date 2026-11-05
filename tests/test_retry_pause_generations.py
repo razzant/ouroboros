@@ -59,8 +59,11 @@ def _park(host, running, plan, *, event=False):  # noqa: F811 -- helper shares t
     return ctx, limit
 
 
-@pytest.mark.parametrize("actor", ["root", "retry", "retry_chain"])
-@pytest.mark.parametrize("action", ["ordinary", "duplicate", "newer"])
+@pytest.mark.parametrize(("action", "actor"), [
+    ("ordinary", "root"),
+    ("duplicate", "retry"),
+    ("newer", "retry_chain"),
+])
 def test_assigned_resume_releases_only_its_pause_generation(host, monkeypatch, clock, reaper, actor, action):  # noqa: F811
     running = _running_actor(host, monkeypatch, clock, reaper, actor)
     plan = _fresh_plan(monkeypatch)

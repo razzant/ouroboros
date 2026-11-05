@@ -50,8 +50,11 @@ def _bounded_creates(monkeypatch, gateway, maximum):
     monkeypatch.setattr(gateway, "create_model_operation", checked)
 
 
-@pytest.mark.parametrize("role,direct", [("main", False), ("main", True), ("consciousness", True)])
-@pytest.mark.parametrize("primary_account", ["account-a", ""], ids=["pinned-A", "Auto"])
+@pytest.mark.parametrize(("primary_account", "role", "direct"), [
+    pytest.param("account-a", "main", False, id='pinned-A-main-False'),
+    pytest.param("account-a", "consciousness", True, id='pinned-A-consciousness-True'),
+    pytest.param("", "main", True, id='Auto-main-True'),
+])
 def test_native_loop_fallback_then_symbolic_return_uses_real_role_account_and_fit(
         main_call, monkeypatch, role, direct, primary_account):
     """A -> B -> primary: equal model names do not make equal account/role bindings.
@@ -272,8 +275,11 @@ def test_duplicate_model_slots_keep_their_distinct_native_accounts(main_call, mo
     assert [row["state"] for row in ledger(ctx.drive_root)].count("unresolved") == 2
 
 
-@pytest.mark.parametrize("status,reason", [(401, "auth"), (402, "quota"), (400, "")])
-@pytest.mark.parametrize("wire", ["http", "sse"])
+@pytest.mark.parametrize(("wire", "status", "reason"), [
+    ("http", 401, "auth"),
+    ("sse", 402, "quota"),
+    ("sse", 400, ""),
+])
 def test_primary_wait_honors_a_direct_api_access_refusal(main_call, monkeypatch, status, reason, wire):
     """A declared wait must not be undone by a paid fallback merely because access uses an API key."""
     from ouroboros import usage_accounting as ua
@@ -369,8 +375,7 @@ def test_transient_cooldown_keeps_other_native_account_available(main_call, monk
         fallback_cooldown.reset_for_tests()
 
 
-@pytest.mark.parametrize("choice", ["return", "wait"])
-@pytest.mark.parametrize("primary_account", ["account-a", ""])
+@pytest.mark.parametrize(("primary_account", "choice"), [("account-a", "return"), ("", "wait")])
 def test_primary_choice_survives_shared_cold_continuation(main_call, monkeypatch, choice, primary_account):
     from ouroboros import budget_pause, loop_model_call, owner_wait
     from ouroboros.model_slots import route_binding

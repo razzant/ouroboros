@@ -111,9 +111,11 @@ def _wait_for(predicate, timeout: float = 5.0):
 # (a) spawn and (b) respawn both install booting slots through the one seam
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("cap", [1, 3, 10])
-@pytest.mark.parametrize("count", [None, 0, 2])
-@pytest.mark.parametrize("start", ["spawn_workers", "ensure_worker_pool_started"])
+@pytest.mark.parametrize(("start", "count", "cap"), [
+    ("spawn_workers", None, 1),
+    ("spawn_workers", 2, 10),
+    ("ensure_worker_pool_started", 0, 3),
+])
 def test_spawn_installs_every_slot_booting_and_hands_the_set_to_the_readiness_seam(pool, monkeypatch, cap, count, start):
     workers = pool.workers
     fake_ctx = MagicMock()

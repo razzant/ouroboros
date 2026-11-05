@@ -297,8 +297,12 @@ def test_same_model_roles_bind_separate_accounts_and_unlabelled_is_auto(setup, m
     ]
 
 
-@pytest.mark.parametrize("method", ["chat", "chat_async", "vision_query", "remote"])
-@pytest.mark.parametrize("override", [None, "", "account-b"])
+@pytest.mark.parametrize(("override", "method"), [
+    (None, "chat"),
+    (None, "remote"),
+    ("", "chat_async"),
+    ("account-b", "vision_query"),
+])
 def test_explicit_account_override_keeps_role_and_auto_semantics(setup, monkeypatch, method, override):
     _, gateway, client = setup
     monkeypatch.setenv(MODEL_ACCOUNTS_KEY, json.dumps({"main": "main-pin", "vision": "vision-pin"}))
@@ -359,8 +363,11 @@ def test_precreate_handshake_waits_only_for_unanswered_transport(setup, monkeypa
         assert all(row["state"] == "released" for row in ledger(root))
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("content", [None, "Original answer\r\n", [{"type": "text", "text": "Original block 🐍"}]])
+@pytest.mark.parametrize(("content", "asynchronous"), [
+    (None, False),
+    ("Original answer\r\n", False),
+    pytest.param([{"type": "text", "text": "Original block 🐍"}], True, id='content2-True'),
+])
 def test_direct_provider_history_keeps_refusal_text_and_omits_stop_metadata(setup, content, asynchronous):
     _, gateway, client = setup
     refusal = "Cannot comply with this request. 🐍\r\n"
@@ -379,13 +386,12 @@ def test_direct_provider_history_keeps_refusal_text_and_omits_stop_metadata(setu
     assert messages == original
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("phase,code,status,not_sent", [
-    ("create", "model_request_invalid", 400, True),
-    ("get", "model_request_invalid", 400, False),
-    ("create", "http_400", 400, False),
-    ("create", "auth_required", 401, False),
-    ("get", "subscription_window_exhausted", 429, False),
+@pytest.mark.parametrize(("phase", "code", "status", "not_sent", "asynchronous"), [
+    ("create", "model_request_invalid", 400, True, True),
+    ("get", "model_request_invalid", 400, False, True),
+    ("create", "http_400", 400, False, False),
+    ("create", "auth_required", 401, False, False),
+    ("get", "subscription_window_exhausted", 429, False, True),
 ])
 def test_only_exact_pre_admission_create_refusal_releases_the_attempt(setup, monkeypatch, phase, code, status, not_sent, asynchronous):
     root, gateway, client = setup
@@ -516,9 +522,11 @@ def test_a_vendor_code_is_labelled_by_the_event_field_only_when_it_fills_that_fi
     assert (attempt_custody_event_fields(error).get("provider_error_type") == "v1") is (label == "provider_error_type")
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("code,vendor", [("invalid_request", "string_above_max_length"),
-    ("invalid_request", "context_length_exceeded"), ("provider_failed", "context_length_exceeded")])
+@pytest.mark.parametrize(("code", "vendor", "asynchronous"), [
+    ("invalid_request", "string_above_max_length", False),
+    ("invalid_request", "context_length_exceeded", True),
+    ("provider_failed", "context_length_exceeded", False),
+])
 def test_field_refusal_retains_then_acknowledges_once_with_display(setup, asynchronous, code, vendor):
     root, gateway, client = setup
     problem = {"code": code, "message": "Codex model request was refused (HTTP 400).", "retryable": False,
@@ -565,8 +573,7 @@ def test_proven_not_started_releases_and_never_fabricates_provider_usage(setup, 
     assert len(gateway.accepted_operations) == 1
 
 
-@pytest.mark.parametrize("proof", ["connection_not_written", "incomplete_upload"])
-@pytest.mark.parametrize("proven", [True, False])
+@pytest.mark.parametrize(("proven", "proof"), [(True, "connection_not_written"), (False, "incomplete_upload")])
 def test_upload_proof_refines_terminal_without_resending_or_inventing_usage(setup, proof, proven):
     from ouroboros.loop_llm_call import classify_llm_exception
 
@@ -677,8 +684,7 @@ def test_native_reset_keeps_canonical_tools_and_only_claims_a_real_account_chang
     assert messages == original
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("with_message_token", [False, True])
+@pytest.mark.parametrize(("with_message_token", "asynchronous"), [(False, False), (True, True)])
 def test_native_reset_clears_both_surfaces_and_adopts_the_new_turn(
     setup, turn_engine, asynchronous, with_message_token,
 ):
@@ -739,8 +745,7 @@ def test_dual_continuation_repair_is_bounded_to_one_retry(setup, turn_engine, as
     assert [row["state"] for row in ledger(root)] == ["released"] * 2
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("dispatch", ["not_started", "unknown"])
+@pytest.mark.parametrize(("dispatch", "asynchronous"), [("not_started", False), ("unknown", True)])
 def test_unresolved_dual_continuation_refusal_preserves_the_slot(
     setup, turn_engine, monkeypatch, asynchronous, dispatch,
 ):

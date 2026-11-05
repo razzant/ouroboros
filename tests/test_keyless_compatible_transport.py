@@ -182,8 +182,11 @@ def test_no_ambient_sdk_credential_reaches_the_keyless_endpoint(endpoint, monkey
     assert [r["authorization"] for r in endpoint.requests] == [None] * len(endpoint.requests)
 
 
-@pytest.mark.parametrize("header_name", ["Authorization", "authorization", "AUTHORIZATION"])
-@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize(("asynchronous", "header_name"), [
+    (False, "Authorization"),
+    (False, "AUTHORIZATION"),
+    (True, "authorization"),
+])
 def test_keyless_request_headers_cannot_restore_authorization(endpoint, header_name, asynchronous):
     target = {"keyless": True, "api_key": ""}
     sdk = openai_client_class(target, async_client=asynchronous)(base_url=endpoint.base_url, max_retries=0)

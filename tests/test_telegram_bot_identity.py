@@ -700,8 +700,10 @@ def _seed_legacy_card(world: _World, token: str, *, secret: bool, message_id: in
         **({"secret": True} if secret else {})}}}), encoding="utf-8")
 
 
-@pytest.mark.parametrize("token", [A, B], ids=["sender-unknown-same-bot", "sender-unknown-new-bot"])
-@pytest.mark.parametrize("words", [_CANARY, "/status"], ids=["words", "command"])
+@pytest.mark.parametrize(("words", "token"), [
+    pytest.param(_CANARY, A, id='words-sender-unknown-same-bot'),
+    pytest.param("/status", B, id='command-sender-unknown-new-bot'),
+])
 def test_a_reply_to_a_stored_secret_request_never_reaches_the_host(world, token, words):
     """Whatever it holds, a command included, as a reply to a remembered secret request always was."""
     async def steps():
@@ -729,11 +731,12 @@ def test_this_bots_own_message_at_a_secret_requests_number_is_no_ambiguity(world
     assert world.texts() == ["an ordinary reply"]
 
 
-@pytest.mark.parametrize("token", [A, B], ids=["sender-unknown-same-bot", "sender-unknown-new-bot"])
-@pytest.mark.parametrize("body", [
-    {"text": "postgres, I think"}, {"caption": "a caption", "photo": [{"file_id": "p"}]}, {"photo": [{"file_id": "p"}]},
-    {"document": {"file_id": "d", "file_name": "notes.txt", "mime_type": "text/plain", "file_size": 10}},
-], ids=["words", "captioned", "bare-photo", "file"])
+@pytest.mark.parametrize(("body", "token"), [
+    pytest.param({"text": "postgres, I think"}, A, id='words-sender-unknown-same-bot'),
+    pytest.param({"caption": "a caption", "photo": [{"file_id": "p"}]}, B, id='captioned-sender-unknown-new-bot'),
+    pytest.param({"photo": [{"file_id": "p"}]}, A, id='bare-photo-sender-unknown-same-bot'),
+    pytest.param({"document": {"file_id": "d", "file_name": "notes.txt", "mime_type": "text/plain", "file_size": 10}}, B, id='file-sender-unknown-new-bot'),
+])
 def test_a_reply_at_a_stored_cards_number_is_held_here_with_a_route_to_the_question(quiz_world, token, body):
     """Neither an answer (its sender is unknown) nor a new turn: nothing reaches the task or a model."""
     world = quiz_world

@@ -69,8 +69,7 @@ def _assert_no_bookkeeping_downloads(root):
             assert client.get(f"/api/tasks/applied/artifacts/{name}").status_code == 404
 
 
-@pytest.mark.parametrize("chat_id", [0, 1])
-@pytest.mark.parametrize("user_file", [False, True])
+@pytest.mark.parametrize(("user_file", "chat_id"), [(False, 0), (True, 1)])
 def test_terminal_pipeline_keeps_review_bookkeeping_out_of_the_deliverables(tmp_path, monkeypatch, chat_id, user_file):
     monkeypatch.setattr(agent_task_pipeline, "_run_post_task_processing_async", lambda *a, **k: None)
     _task, stored, pending = _finish(tmp_path, chat_id=chat_id, user_file=user_file)

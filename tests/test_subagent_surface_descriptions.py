@@ -30,8 +30,10 @@ def test_schedule_and_integration_describe_the_three_write_surfaces():
     assert "shared external_workspace files are verified without reapplying" in prompt
 
 
-@pytest.mark.parametrize("expected", ["Write the letter itself.", "JSON with summary and findings."])
-@pytest.mark.parametrize("acting", [False, True])
+@pytest.mark.parametrize(("acting", "expected"), [
+    (False, "Write the letter itself."),
+    (True, "JSON with summary and findings."),
+])
 def test_handoff_keeps_the_parents_form_and_child_boundaries(expected, acting):
     prompt = _compose_subagent_text("Explain the result", role="", expected_output=expected,
         constraints="", context="Evidence only", task_constraint={"mode": "acting_subagent",

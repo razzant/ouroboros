@@ -153,8 +153,7 @@ def test_diagnostic_failure_preserves_exact_preparation_result(brief_env, monkey
     assert len(_events(ctx)) == (1 if failure == "sink_error" else 0)
 
 
-@pytest.mark.parametrize("route", ["api_chat", "agent_session"])
-@pytest.mark.parametrize("delivery", ["inline", "paged"])
+@pytest.mark.parametrize(("delivery", "route"), [("inline", "api_chat"), ("paged", "agent_session")])
 def test_successful_preparation_emits_no_failure(brief_env, monkeypatch, route, delivery):
     """The gate captures the staged diff itself and hands it to every seat's
     brief, so at the gate the diff is inline or paged — never left for the

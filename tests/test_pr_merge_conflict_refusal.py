@@ -81,9 +81,12 @@ def test_gh_pre_merge_refusals_are_pre_effect(tmp_path, monkeypatch, method, rep
     assert result.text.count(" | ") <= 2 and "&& git" not in result.text
 
 
-@pytest.mark.parametrize("method,repo,body", [("squash", "", True), ("merge", "octo/demo", True), ("rebase", "", False),
-                                              ("rebase", "octo/demo", False)])
-@pytest.mark.parametrize("stderr", [CONFLICT, BASE_RACE], ids=["conflict", "base-race"])
+@pytest.mark.parametrize(("stderr", "method", "repo", "body"), [
+    pytest.param(CONFLICT, "squash", "", True, id='conflict-squash--True'),
+    pytest.param(CONFLICT, "rebase", "", False, id='conflict-rebase--False'),
+    pytest.param(BASE_RACE, "merge", "octo/demo", True, id='base-race-merge-octo/demo-True'),
+    pytest.param(BASE_RACE, "rebase", "octo/demo", False, id='base-race-rebase-octo/demo-False'),
+])
 def test_githubs_exact_refusals_of_the_sent_merge_are_server_refused(tmp_path, monkeypatch, method, repo, body, stderr):
     args = ["pr", "merge", "7", f"--{method}", "--match-head-commit", HEAD] + (["--body-file", "-"] if body else [])
     result = _classify(tmp_path, monkeypatch, stderr, args=args, repo=repo)

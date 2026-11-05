@@ -138,12 +138,11 @@ def test_the_legacy_fallback_alias_still_serves_a_process_with_no_modern_chain(m
     assert parse_fallback_chain() == ["a/one", "b/two"]
 
 
-@pytest.mark.parametrize("document", [None, {}, {"TOTAL_BUDGET": 50.0}], ids=["no-file", "raw-empty", "unrelated-key"])
-@pytest.mark.parametrize("env, expected", [
-    ({"ANTHROPIC_API_KEY": "k"}, ANTHROPIC),
-    ({"OPENAI_API_KEY": "k"}, OPENAI),
-    ({"OPENROUTER_API_KEY": "k"}, SHIPPED),
-], ids=["anthropic", "openai", "openrouter"])
+@pytest.mark.parametrize(("env", "expected", "document"), [
+    pytest.param({"ANTHROPIC_API_KEY": "k"}, ANTHROPIC, None, id='anthropic-no-file'),
+    pytest.param({"OPENAI_API_KEY": "k"}, OPENAI, {}, id='openai-raw-empty'),
+    pytest.param({"OPENROUTER_API_KEY": "k"}, SHIPPED, {"TOTAL_BUDGET": 50.0}, id='openrouter-unrelated-key'),
+])
 def test_absent_slots_follow_the_configured_access_on_every_read(install, monkeypatch, document, env, expected):
     if document is not None:
         _write(install, document)

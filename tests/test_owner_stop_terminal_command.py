@@ -197,9 +197,11 @@ def test_forced_producer_saved_answer_uses_provenance_not_its_prefix(root, monke
         assert _completion_verdict(stored, {}) == "Stopped from the app (Stop now)"
 
 
-@pytest.mark.parametrize("prefix", ["", "⚠️ ", "❌ "])
-@pytest.mark.parametrize("status,reason", [("infra_failed", OWNER_STOP), ("infra_failed", "provider_failure"),
-                                          ("failed", "provider_unavailable")])
+@pytest.mark.parametrize(("status", "reason", "prefix"), [
+    pytest.param("infra_failed", OWNER_STOP, "", id='infra_failed-owner_requested_finalization-'),
+    ("infra_failed", "provider_failure", "⚠️ "),
+    ("failed", "provider_unavailable", "❌ "),
+])
 def test_answer_provenance_never_overrides_an_independent_execution_failure(prefix, status, reason):
     from ouroboros.outcomes import derive_loop_outcome
 

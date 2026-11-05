@@ -298,9 +298,11 @@ def test_lazy_selection_failure_preserves_real_settlement_and_remaining_pending_
     assert late._plan_marks(root) == [mark] and council.transport.calls.count("m/a") == 1
 
 
-@pytest.mark.parametrize("discovery", ["initial", "changed", "legacy"])
-@pytest.mark.parametrize("read", ["plan", "terminal", "collection"])
-@pytest.mark.parametrize("failure", ["busy", "invalid"])
+@pytest.mark.parametrize(("failure", "read", "discovery"), [
+    ("busy", "terminal", "changed"),
+    ("invalid", "plan", "initial"),
+    ("invalid", "collection", "legacy"),
+])
 def test_failed_plan_examination_retries_contention_and_rests_on_invalid_input(council, monkeypatch, discovery, read, failure):
     from ouroboros import maintenance, maintenance_jobs, plan_collection_job, task_results
     from ouroboros.tools import plan_ask

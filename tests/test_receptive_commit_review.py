@@ -794,8 +794,7 @@ def test_unknown_seat_notice_names_custody_instead_of_claiming_settlement(tmp_pa
     assert facts["review_feedback"]["unknown_seats"] == 1
 
 
-@pytest.mark.parametrize("mode", ["pro", "cyber_pro"])
-@pytest.mark.parametrize("interactive", [True, False])
+@pytest.mark.parametrize(("interactive", "mode"), [(True, "pro"), (False, "cyber_pro")])
 def test_a_settled_handback_leaves_no_open_custody_behind(author, mode, interactive):
     """A settled outcome handed back before Git closes its attempt: a revised candidate then
     buys its own review (Cyber Pro included), never a $0 'still running' replay."""

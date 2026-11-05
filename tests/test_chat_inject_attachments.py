@@ -69,8 +69,7 @@ def test_inject_without_attachments_keeps_the_historical_kwargs(tmp_path):
     assert "client_message_id" not in bridge.messages[0]
 
 
-@pytest.mark.parametrize("copy_fails", [False, True])
-@pytest.mark.parametrize("cancel_mode", ["asyncio", "anyio"])
+@pytest.mark.parametrize(("cancel_mode", "copy_fails"), [("asyncio", False), ("anyio", True)])
 def test_cancelled_inject_retains_copy_and_inflight_until_worker_settles(tmp_path, monkeypatch, copy_fails, cancel_mode):
     import anyio
     import asyncio

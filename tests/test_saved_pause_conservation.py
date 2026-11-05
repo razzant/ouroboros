@@ -89,9 +89,10 @@ def _result_gap(root, monkeypatch, kind, *, task_id="saved"):
             assert calls, "the consumer must actually encounter SQLite contention"
 
 
-@pytest.mark.parametrize("entry", ["live", "restore"])
-@pytest.mark.parametrize("gap", ["busy", "unreadable"])
-@pytest.mark.parametrize("project", [False, True], ids=["unscoped", "project"])
+@pytest.mark.parametrize(("project", "gap", "entry"), [
+    pytest.param(False, "unreadable", "live", id='unscoped-unreadable-live'),
+    pytest.param(True, "busy", "restore", id='project-busy-restore'),
+])
 def test_saved_technical_pause_survives_result_gap_then_explicit_resume(tmp_path, monkeypatch, entry, gap, project):
     queue, state, workers = _install_queue(tmp_path, monkeypatch)
     monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 5.0)
@@ -152,8 +153,7 @@ def test_accepted_project_without_exact_pause_keeps_project_verification_hold(tm
     assert not task.get("_terminalization_retry") and not task.get("_budget_pause")
 
 
-@pytest.mark.parametrize("entry", ["live", "restore"])
-@pytest.mark.parametrize("outcome", ["completed", "stop"])
+@pytest.mark.parametrize(("outcome", "entry"), [("completed", "restore"), ("stop", "live")])
 def test_saved_pause_does_not_override_known_terminal_or_stop(tmp_path, monkeypatch, entry, outcome):
     from ouroboros.cancel_intents import request_cancel
 

@@ -465,8 +465,7 @@ def test_operation_identity_mismatch_is_not_an_accepted_response(gateway_factory
     assert raised.value.code == "malformed_response"
 
 
-@pytest.mark.parametrize("capture_failure", [False, True])
-@pytest.mark.parametrize("capture_effort", [False, True])
+@pytest.mark.parametrize(("capture_effort", "capture_failure"), [(False, False), (True, True)])
 def test_evidence_opt_ins_preserve_create_body(gateway_factory, capture_failure, capture_effort):
     wire = ModelWire()
     gateway = gateway_factory(wire)

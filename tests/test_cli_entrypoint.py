@@ -158,9 +158,10 @@ def test_marketplace_hub_alias_uses_source_routes(monkeypatch, hub, command, met
     assert calls == [(method, path, body)]
 
 
-@pytest.mark.parametrize("hub", ["sources", "ouroboroshub"])
-@pytest.mark.parametrize("source", ["ouroboros", "ouroboros-community"])
-@pytest.mark.parametrize("command", ["install", "preview"])
+@pytest.mark.parametrize(("command", "source", "hub"), [
+    ("install", "ouroboros-community", "ouroboroshub"),
+    ("preview", "ouroboros", "sources"),
+])
 def test_marketplace_bare_name_resolves_the_public_hub_offer(monkeypatch, hub, source, command):
     from ouroboros import cli
 

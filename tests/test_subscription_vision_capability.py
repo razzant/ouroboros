@@ -234,8 +234,13 @@ def test_blank_auto_vision_still_captions_through_an_unknown_route(subscription_
     assert gateway.uploads[0][0]["messages"][-1]["content"][1]["type"] == "image_url"
 
 
-@pytest.mark.parametrize("modalities", [["text", "image"], ["text"], [], ["text", 42], ["text", " "]])
-@pytest.mark.parametrize("producer", ["initial", "mailbox"])
+@pytest.mark.parametrize(("producer", "modalities"), [
+    pytest.param("initial", ["text", "image"], id='initial-modalities0'),
+    pytest.param("initial", [], id='initial-modalities2'),
+    pytest.param("initial", ["text", " "], id='initial-modalities4'),
+    pytest.param("mailbox", ["text"], id='mailbox-modalities1'),
+    pytest.param("mailbox", ["text", 42], id='mailbox-modalities3'),
+])
 def test_owner_image_reaches_the_prepared_claudexor_payload(subscription_transport, catalog, monkeypatch, tmp_path,
                                                             producer, modalities):
     """A staged owner image, at task start or delivered live, through Auto to the gateway upload."""

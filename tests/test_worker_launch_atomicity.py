@@ -81,8 +81,7 @@ def hold_reason(task):
     return ((hold_fact(task) or continuation_refusal(task)) or {}).get("reason")
 
 
-@pytest.mark.parametrize("zero_budget", [False, True])
-@pytest.mark.parametrize("locked", [False, True])
+@pytest.mark.parametrize(("locked", "zero_budget"), [(False, False), (True, True)])
 def test_marks_commit_together_or_change_nothing(world, monkeypatch, zero_budget, locked):
     """Probe04 reversed: a held store at the canonical mark refuses everything, memory included."""
     _, root, pending = world

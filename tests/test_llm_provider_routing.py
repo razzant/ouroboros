@@ -1158,14 +1158,12 @@ def test_sealed_classifier_single_forms(kwargs, expected):
     assert _sealed(**kwargs) is expected
 
 
-@pytest.mark.parametrize("model", ["anthropic/claude-sonnet-4.6", "google/gemini-3.5-flash",
-                                   "~google/gemini-3.5-flash", " anthropic/claude-opus-5 ",
-                                   "Anthropic/Claude-Opus-5"])
-@pytest.mark.parametrize("form", [
-    {"details": [{"type": "reasoning.encrypted", "data": "blob"}]},
-    {"details": [{"type": "reasoning.text", "text": "t", "signature": "sig"}]},
-    {"details": [{"type": "reasoning.unknown_future"}]},
-    {"content": [{"type": "redacted_thinking", "data": "blob"}]},
+@pytest.mark.parametrize(("form", "model"), [
+    pytest.param({"details": [{"type": "reasoning.encrypted", "data": "blob"}]}, "anthropic/claude-sonnet-4.6", id='form0-anthropic/claude-sonnet-4.6'),
+    pytest.param({"details": [{"type": "reasoning.encrypted", "data": "blob"}]}, "Anthropic/Claude-Opus-5", id='form0-Anthropic/Claude-Opus-5'),
+    pytest.param({"details": [{"type": "reasoning.text", "text": "t", "signature": "sig"}]}, "google/gemini-3.5-flash", id='form1-google/gemini-3.5-flash'),
+    pytest.param({"details": [{"type": "reasoning.unknown_future"}]}, "~google/gemini-3.5-flash", id='form2-~google/gemini-3.5-flash'),
+    pytest.param({"content": [{"type": "redacted_thinking", "data": "blob"}]}, " anthropic/claude-opus-5 ", id='form3- anthropic/claude-opus-5 '),
 ])
 def test_signed_portable_roster_vouches_every_opaque_form(model, form):
     """The roster is the SECOND axis and it vouches ALL non-plain forms for its

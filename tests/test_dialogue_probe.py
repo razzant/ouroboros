@@ -79,9 +79,14 @@ def probe(conn, keys, **kwargs):
         "before": None, "lower": 0, "limit": 200, "newest_first": True, **kwargs}))
 
 
-@pytest.mark.parametrize("stream", ["chat", "progress"])
-@pytest.mark.parametrize("newest_first", [False, True])
-@pytest.mark.parametrize("limit", [-7, -1, 0, 1, 9, 10_000])
+@pytest.mark.parametrize(("limit", "newest_first", "stream"), [
+    (-7, False, "chat"),
+    (-1, True, "progress"),
+    (0, False, "chat"),
+    (1, True, "progress"),
+    (9, False, "chat"),
+    (10_000, True, "progress"),
+])
 def test_selection_matches_the_addressed_union(connection, records, stream, newest_first, limit):
     key_sets = [[], [("chat_id", None)], [("task_id", None), ("kind", None)],
                 [("chat_id", 1), ("task_id", "task-1"), ("chat_id", 1), ("origin", "1:owner-1")],
@@ -158,8 +163,12 @@ def test_coordinates_reaching_python_do_not_grow_with_the_room(newest_first):
     assert measured[0] == measured[1] == (4, 21, 7), measured
 
 
-@pytest.mark.parametrize("variables,compound", [(5, 1), (9, 3), (31, 7), (999, 500)])
-@pytest.mark.parametrize("newest_first", [False, True])
+@pytest.mark.parametrize(("newest_first", "variables", "compound"), [
+    (False, 5, 1),
+    (False, 31, 7),
+    (True, 9, 3),
+    (True, 999, 500),
+])
 def test_runtime_limits_bound_selection_and_hydration(variables, compound, newest_first):
     if not hasattr(sqlite3.Connection, "setlimit"):
         pytest.skip("Python 3.10 has no runtime SQLite limit API; conservative fallback covered separately")

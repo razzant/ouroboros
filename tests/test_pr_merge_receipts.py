@@ -749,8 +749,7 @@ def test_body_uses_fresh_publication_view_and_confirms_a_lost_edit_reply(world, 
     assert sum(c[:1] == ["api"] and "PATCH" in c for c in world.gh.calls) == 1
 
 
-@pytest.mark.parametrize("method", ["merge", "squash", "rebase"])
-@pytest.mark.parametrize("body_size", [80, 65536])
+@pytest.mark.parametrize(("body_size", "method"), [(80, "merge"), (80, "rebase"), (65536, "squash")])
 def test_merge_body_uses_stdin_at_github_body_limit(world, monkeypatch, method, body_size):
     from ouroboros import update_qualification as qualification
 

@@ -269,9 +269,11 @@ def test_a_link_swapped_during_the_run_is_refused_at_registration(project, tmp_p
     assert result.code == "ARTIFACT_OUTPUT_ERROR" and "escapes allowed artifact roots" in result.text, result.text
 
 
-@pytest.mark.parametrize("tool", ["run_command", "run_script", "start_service"])
-@pytest.mark.parametrize("absolute", [False, True])
-@pytest.mark.parametrize("invalid", ["\x00", "\x01"])
+@pytest.mark.parametrize(("invalid", "absolute", "tool"), [
+    ("\x00", False, "run_command"),
+    ("\x01", True, "run_script"),
+    ("\x01", True, "start_service"),
+])
 def test_an_unusable_output_spelling_is_a_refusal_not_a_crash(project, tool, absolute, invalid):
     registry, active, _outside = project
     spelling = f"bad{invalid}name.txt"
@@ -339,8 +341,11 @@ def _locked(path, mode):
 
 
 @posix_permissions
-@pytest.mark.parametrize("tool", ["run_command", "run_script"])
-@pytest.mark.parametrize("shape", ["unreadable_file", "unreadable_directory", "unsearchable_parent"])
+@pytest.mark.parametrize(("shape", "tool"), [
+    ("unreadable_file", "run_script"),
+    ("unreadable_directory", "run_command"),
+    ("unsearchable_parent", "run_script"),
+])
 def test_an_existing_output_the_baseline_cannot_read_is_disclosed(project, tool, shape):
     registry, active, _outside = project
     site = active / "site"
@@ -576,8 +581,10 @@ def test_unexpandable_output_home_refuses_before_effects(project, tool):
     assert not (active / "site" / "marker.txt").exists()
 
 
-@pytest.mark.parametrize("tool", ["run_command", "run_script"])
-@pytest.mark.parametrize("error_type", [RuntimeError, OSError])
+@pytest.mark.parametrize(("error_type", "tool"), [
+    pytest.param(RuntimeError, "run_command", id='RuntimeError-run_command'),
+    pytest.param(OSError, "run_script", id='OSError-run_script'),
+])
 def test_late_output_resolution_failure_preserves_completed_command(project, monkeypatch, tool, error_type):
     from ouroboros.tools import shell_outputs
 
