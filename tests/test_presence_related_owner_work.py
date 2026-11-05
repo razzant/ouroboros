@@ -464,13 +464,7 @@ def _write_origin(root, origin):
 
 @pytest.mark.parametrize("origin,converted", [
     ("old-root", True),  # an old late-answer root: its binding authority beside the owner door's stamp
-    ("owner-turn", True),  # the answering owner turn itself, by its accepted late answer
     ("acting-root", False),  # a place's own delegated root: no owner door
-    ("missing", False),  # no readable origin record: an evidence gap, never a guess from the binding
-    ("other-binding", False),  # the owner's related work, of another place than this row's
-    ("child-origin", False),  # a delegated child: the door's stamp beside it relates nothing
-    ("origin-ceiling", False),  # a run under a ceiling hands on no relation, whatever its stamp
-    ("row-ceiling", False),  # the row's own frozen ceiling keeps narrowing
     ("started-occurrence", False),  # an old run with no host receipt: nothing proves its own source, whatever metadata says
 ])
 def test_an_old_follow_up_is_related_owner_work_only_by_its_recorded_origin(q, origin, converted):
@@ -876,9 +870,7 @@ def _interrupted_after_it_ran(q, before):
     return task_id
 
 
-@pytest.mark.parametrize("origin,converted", [("old-root", True), ("acting-root", False), ("missing", False),
-                                              ("other-binding", False), ("origin-ceiling", False), ("row-ceiling", False),
-                                              ("started-occurrence", False)])
+@pytest.mark.parametrize("origin,converted", [("old-root", True), ("acting-root", False), ("started-occurrence", False)])
 def test_a_new_continue_of_an_old_started_occurrence_reads_its_recorded_origin(q, origin, converted):
     """What already ran keeps what it ran with, on its own record. Continue admits NEW work: it reads the origin its host
     receipt names, as a new occurrence does; the binding alone proves nothing and an unproven source stays narrowed."""

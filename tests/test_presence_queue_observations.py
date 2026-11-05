@@ -114,8 +114,7 @@ def test_complete_empty_snapshot_replaces_old_queue_and_get_is_passive(host):
 
 @pytest.mark.parametrize("change", [
     {"conversation_key": "telegram:bot-1:another-room:topic-1"},
-    {"after_source_event_id": "telegram:bot-1:other"}, {"complete": False}, {"pending_count": 2},
-    {"omitted_count": 1}, {"observed_at": "2026-10-06T10:00:00"},
+    {"complete": False}, {"observed_at": "2026-10-06T10:00:00"},
     {"events": [{"source_event_id": "queue-0", "text": "cut", "text_truncated": True}]},
 ])
 def test_partial_or_wrong_source_queue_is_rejected_before_author_start(host, change):

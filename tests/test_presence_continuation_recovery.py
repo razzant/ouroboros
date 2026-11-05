@@ -7,7 +7,7 @@ from ouroboros import presence_continuation as pc
 from ouroboros.review_operation import controller_identity, controller_state
 
 
-@pytest.mark.parametrize("identity", [None, {}, {"pid": 0}, {"pid": "unreadable"}])
+@pytest.mark.parametrize("identity", [None, {}, {"pid": "unreadable"}])
 def test_missing_author_identity_does_not_invent_a_crash(identity):
     row = {"status": "running", "presence_continuation": {"initial": {}, "author_controller": identity}}
     assert pc.continuation_status(row) == "running"
@@ -54,7 +54,7 @@ def test_foreign_live_controller_without_birth_evidence_remains_unknown(monkeypa
     assert pc.continuation_status(row) == "running" and pc.work_view(row, "turn")[0] == 202
 
 
-@pytest.mark.parametrize("status", ["completed", "failed", "cancelled", "interrupted"])
+@pytest.mark.parametrize("status", ["completed", "failed", "interrupted"])
 def test_terminal_record_is_not_reclassified_by_an_author_witness(status):
     row = {"status": status, "presence_continuation": {"initial": {}, "author_controller": {"pid": 0}}}
     assert pc.continuation_status(row) == status

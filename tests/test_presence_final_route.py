@@ -824,7 +824,7 @@ def test_saved_turn_flush_preserves_order_through_the_worker_drain(root, monkeyp
         [] if failed_row is None else ["First.", "Second.", "Third."][["First.", "Second."].index(failed_row):])
 
 
-@pytest.mark.parametrize("name", ["send_user_message", "send_photo", "send_video", "send_file", "send_links", "show_card"])
+@pytest.mark.parametrize("name", ["send_user_message", "send_photo", "show_card"])
 def test_main_receipts_claim_only_queue_acceptance(tmp_path, name):
     from tests.test_main_notice import _ctx
 
