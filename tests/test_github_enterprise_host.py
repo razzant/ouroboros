@@ -445,10 +445,14 @@ class _Handler(BaseHTTPRequestHandler):
         pass
 
 
-class _Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
-    def get_request(self):
-        connection, _address = super().get_request()
-        return connection, ("fixture", 0)
+def _serve_unix(address):
+    # Built only past the fixture's skip: socketserver has no UnixStreamServer without AF_UNIX (Windows CPython).
+    class _Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+        def get_request(self):
+            connection, _address = super().get_request()
+            return connection, ("fixture", 0)
+
+    return _Server(address, _Handler)
 
 
 def _git(cwd, *args):
@@ -472,7 +476,7 @@ def two_hosts(tmp_path, monkeypatch):
         pytest.skip("the installed GitHub CLI is the evidence")
     base = pathlib.Path(tempfile.mkdtemp(prefix="gh", dir="/tmp"))  # Short: an AF_UNIX path has at most 104 bytes on macOS.
     world, address = _World(), base / "s"
-    server = _Server(str(address), _Handler)
+    server = _serve_unix(str(address))
     server.world, world.tmp_path = world, tmp_path
     serving = threading.Thread(target=server.serve_forever, daemon=True)
     serving.start()
