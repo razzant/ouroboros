@@ -31,9 +31,9 @@ def projection_fields(row: dict) -> dict:
 
 
 def _snippet(text) -> str:
-    """A Reply's one-line preview: the first 160 characters, a longer text visibly cut; the address reads it all."""
+    """A Reply's one-line preview: at most 160 characters, a longer text visibly cut; the address reads it all."""
     words = " ".join(str(text or "").split())
-    return words if len(words) <= 160 else words[:160].rstrip() + "…"
+    return words if len(words) <= 160 else words[:159].rstrip() + "…"
 
 
 def _preview(text) -> dict:

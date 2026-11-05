@@ -18,7 +18,7 @@ def test_a_reply_preview_marks_its_cut_and_leaves_a_short_text_alone():
     from ouroboros.dialogue_provenance import relation_text
 
     long = reference_from_row({"direction": "in", "chat_id": 1, "ts": "2026-11-04T10:00:00Z", "text": LONG})
-    assert long["snippet"] == LONG[:160].rstrip() + "…" and len(long["snippet"]) <= 161, "the contract's preview"
+    assert long["snippet"] == LONG[:159].rstrip() + "…" and len(long["snippet"]) <= 160, "the contract's preview"
     assert long["chars"] == len(LONG) and relation_text({"reply_to": long}).endswith(
         f": {long['snippet']} [{len(LONG)} chars in full]]"), "only the model's reading states the whole size"
     short = reference_from_row({"direction": "in", "chat_id": 1, "ts": "2026-11-04T10:00:00Z", "text": "  yes \n "})
