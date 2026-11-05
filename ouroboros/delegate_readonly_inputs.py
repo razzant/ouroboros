@@ -166,7 +166,7 @@ def resolve_selection(ctx: Any, entries: List[Dict[str, str]], receiving: Any = 
             continue
         if not stat.S_ISREG(mode):
             results.append({**row, "status": "not_a_file", "source": str(target),
-                            "detail": "only regular files are copied; select each file"})
+                            "detail": "only regular files are copied; select each file, or bind one directory with workspace_root"})
             continue
         resolved.append({**row, "source": str(target)})
         results.append({**row, "status": "checked", "source": str(target)})

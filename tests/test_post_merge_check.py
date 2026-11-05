@@ -163,7 +163,7 @@ def test_outcomes_name_each_id_and_a_module_stands_for_its_tests(tmp_path):
                                   "tests/u.py::test_late", "tests/t.py::test_gone", "tests/w.py::test_any",
                                   "tests/v.py", "tests/u.py", "tests/w.py"]) == {
         "tests/t.py::test_ok": "passed", "tests/t.py::test_red": "failed", "tests/t.py::test_skip": "skipped",
-        "tests/u.py::test_late": "failed", "tests/t.py::test_gone": "absent", "tests/w.py::test_any": "failed",
+        "tests/u.py::test_late": "failed", "tests/t.py::test_gone": "unknown", "tests/w.py::test_any": "failed",
         "tests/v.py": "passed", "tests/u.py": "failed", "tests/w.py": "failed"}
 
 
@@ -460,6 +460,125 @@ def test_a_check_that_could_not_see_its_failures_says_so(tmp_path):
         ("tests/s.py::test_slow", "was running when the session ended")]
 
 
+def test_a_successful_retry_cannot_hide_an_unrun_selected_test(tmp_path, monkeypatch, capsys):
+    red, missing = "tests/t.py::test_retry", "tests/t.py::test_unrun"
+    _selection(tmp_path, parallel="failure", inventory={
+        "parallel": {"expected": [red, missing], "executed": [red]}})
+    _results(tmp_path / "parallel", [_row(red, "failed")], exit_code=2)
+    _results(tmp_path / "serial", [])
+    retried = []
+
+    def retry(ids, directory):
+        retried.extend(ids)
+        _results(directory, [_row(red)])
+
+    record = pmc.classify(tmp_path, run=retry, node=lambda: 0)
+    assert retried == [red] and not record["failed"]
+    assert record["not_run"] == {"parallel": [missing]}
+    (tmp_path / "classification.json").write_text(json.dumps(record), encoding="utf-8")
+    text, is_red = pmc.render_summary(tmp_path)
+    assert is_red and "— RED" in text and missing in text
+    assert "passed on their one retry" in text  # the good observation is not discarded
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    assert pmc.main(["summary", "--evidence-dir", str(tmp_path), "--os", "windows"]) == 1
+    assert missing in capsys.readouterr().out
+    # Already retained classification records have the same meaning without reclassification.
+    record["problems"] = []
+    (tmp_path / "classification.json").write_text(json.dumps(record), encoding="utf-8")
+    assert pmc.render_summary(tmp_path)[1]
+
+
+@pytest.mark.parametrize("cost_outcome,session,expected_red", [
+    ("failure", "failed", True), ("failure", "passed", True),
+    ("failure", "unfinished", True), ("skipped", "missing", True),
+    ("success", "missing", True), ("success", "failed", True),
+    ("success", "skipped", True), ("success", "passed", False),
+    ("", "missing", True),
+])
+def test_cost_outcome_reaches_the_real_summary_command(tmp_path, monkeypatch, capsys,
+                                                      cost_outcome, session, expected_red):
+    (tmp_path / "classification.json").write_text(json.dumps({
+        "complete": True, "failed": [], "flaky": [], "problems": [], "not_run": {}}), encoding="utf-8")
+    nodeid = "tests/test_cost_contract.py::test_rest_law"
+    if session not in ("missing", "unfinished"):
+        _results(tmp_path / "cost-contract", [_row(nodeid, session,
+                 "setup" if session == "skipped" else "call")])
+    elif session == "unfinished":
+        directory = tmp_path / "cost-contract"
+        directory.mkdir()
+        (directory / "events.jsonl").write_text(json.dumps({"event": "start", "nodeid": nodeid}), encoding="utf-8")
+    monkeypatch.setenv("COST_CONTRACT_OUTCOME", cost_outcome)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    code = pmc.main(["summary", "--evidence-dir", str(tmp_path), "--os", "linux"])
+    text = capsys.readouterr().out
+    assert code == int(expected_red) and "Cost contract" in text
+    assert ("— RED" in text) is expected_red
+    if session == "failed":
+        assert nodeid in text
+    # Windows deliberately does not run the cost contract, even if another leg failed it.
+    assert pmc.main(["summary", "--evidence-dir", str(tmp_path), "--os", "windows"]) == 0
+    assert "Cost contract: not selected on Windows" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("stage", ["classify", "attribute", "route"])
+@pytest.mark.parametrize("outcome", ["failure", "skipped", "", "success"])
+def test_workflow_stage_outcome_reaches_summary_without_a_new_retry(tmp_path, monkeypatch, capsys, stage, outcome):
+    (tmp_path / "classification.json").write_text(json.dumps({
+        "complete": True, "failed": [], "flaky": [], "problems": []}), encoding="utf-8")
+    monkeypatch.setenv(f"POST_MERGE_{stage.upper()}_OUTCOME", outcome)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    code = pmc.main(["summary", "--evidence-dir", str(tmp_path), "--os", "windows"])
+    assert code == (0 if outcome == "success" else 1)
+    text = capsys.readouterr().out
+    if outcome != "success":
+        assert f"the {stage} step is {outcome or 'unknown'}" in text
+
+
+def test_a_missing_report_does_not_establish_removal_and_a_skip_does_not_establish_a_pass(tmp_path):
+    ids = ["tests/t.py", "tests/t.py::test_deselected", "tests/gone.py::test_removed"]
+    def run(args, directory):
+        assert args == ["tests/t.py"]
+        _results(directory, [_row("tests/t.py::test_ok"), _row("tests/t.py::test_skip", "skipped", "setup")])
+    found = pmc.check_ids(ids, tmp_path, read_source={"tests/t.py": "def test_deselected(): pass\n"}.get, run=run)
+    assert found == dict(zip(ids, ["skipped", "unknown", "absent"]))
+
+
+def test_source_read_failure_is_not_module_removal(tmp_path, monkeypatch):
+    def unavailable(*args, **kwargs):
+        raise subprocess.CalledProcessError(128, args)
+    monkeypatch.setattr(pmc, "_git", unavailable)
+    with pytest.raises(subprocess.CalledProcessError):
+        pmc.tree_source("bad-revision")("tests/t.py")
+    monkeypatch.setattr(pmc, "REPO_ROOT", tmp_path)
+    assert pmc.working_source("tests/missing.py") is None
+    (tmp_path / "bad.py").write_bytes(b"\xff")
+    with pytest.raises(UnicodeError):
+        pmc.working_source("bad.py")
+
+
+def test_the_runner_final_inventory_failure_is_not_a_green_selected_run(tmp_path):
+    _selection(tmp_path)
+    selection = json.loads((tmp_path / "selection.json").read_text(encoding="utf-8"))
+    selection["outcome"] = "failure"  # the final floor check failed after both passes succeeded
+    (tmp_path / "selection.json").write_text(json.dumps(selection), encoding="utf-8")
+    for label in ("parallel", "serial"):
+        _results(tmp_path / label, [_row(f"tests/{label}.py::test_ok")])
+    result = pmc.classify(tmp_path, run=lambda *a: pytest.fail("no retry of the whole selection"), node=lambda: 0)
+    assert not result["failed"] and "inventory/floor" in result["problems"][0]
+    (tmp_path / "classification.json").write_text(json.dumps(result), encoding="utf-8")
+    assert pmc.render_summary(tmp_path)[1]
+
+
+def test_skipped_base_probe_is_not_a_good_revision(tmp_path, monkeypatch):
+    monkeypatch.setattr(pmc, "_git", lambda *args, **kwargs: "")
+    monkeypatch.setattr(pmc, "remove_worktree", lambda tree: None)
+    nodeid = "tests/t.py::test_case"
+    monkeypatch.setattr(pmc, "check_ids", lambda *a, **k: {nodeid: "skipped"})
+    prober = pmc.Prober(tmp_path / "evidence", tmp_path / "work", HEAD)
+    assert prober("a" * 40, [nodeid]) == {nodeid: "error"}
+    assert pmc.bisect(["base", "head"], [nodeid], prober)[0]["verdict"] == "unattributed"
+
+
 # --- attribute -------------------------------------------------------------------------------
 
 CHAIN = ["base"] + [f"m{index}" for index in range(1, 9)]  # base, then eight merges; m8 is the head
@@ -579,7 +698,7 @@ def test_a_probe_answers_a_size_test_from_the_size_check_of_its_tree(tmp_path, m
     prober = pmc.Prober(tmp_path / "evidence", tmp_path / "work", HEAD, size=size,
                         run=lambda *a, **k: pytest.fail("a size test is not rerun as a plain test"))
     assert prober("a" * 40, ids) == {"size tests/s.py::test_red": "fail", "size tests/s.py::test_green": "pass",
-                                     "size tests/s.py::test_new": "pass",  # not defined at that commit
+                                     "size tests/s.py::test_new": "error",  # no report is not proof of removal
                                      "size tests/s.py::test_skip": "error"}  # it measured nothing there
     for unfinished in (lambda tree, directory: None, None):  # no size session there; a Prober without one
         prober = pmc.Prober(tmp_path / "evidence", tmp_path / "work", HEAD, size=unfinished)
@@ -587,6 +706,20 @@ def test_a_probe_answers_a_size_test_from_the_size_check_of_its_tree(tmp_path, m
 
 
 # --- summary ---------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("verdict", ["culprit", "pre-existing", "unattributed"])
+def test_attribution_explains_a_failed_check_without_changing_red(tmp_path, verdict):
+    nodeid = "tests/t.py::test_red"
+    (tmp_path / "classification.json").write_text(json.dumps({"complete": True,
+        "failed": [{"id": nodeid, "why": "failed in call", "pass": "serial", "retry": "skipped"}],
+        "flaky": [], "problems": []}), encoding="utf-8")
+    (tmp_path / "attribution.json").write_text(json.dumps({"verdicts": [
+        {"id": nodeid, "verdict": verdict}]}), encoding="utf-8")
+    text, red = pmc.render_summary(tmp_path)
+    assert red and "— RED" in text and verdict in text
+    assert "does not establish the same cause" in text
+    assert "red again on retry" not in text
+
 
 def test_the_summary_is_red_only_for_failures_left_after_their_retry(tmp_path):
     text, red = pmc.render_summary(tmp_path)

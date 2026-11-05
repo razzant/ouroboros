@@ -230,7 +230,8 @@ def test_merge_commit_carries_checks_and_missing_evidence_without_blocking(world
     assert receipt["checks"][1]["name"] == "cost_contract"
     assert receipt["checks"][1]["status"] == "unknown"
     assert "No execution evidence" in body and "Post-merge check: not run yet" in body
-    assert receipt["review"] == {"observed": "unknown", "declared": "AUTHOR ACCEPTED"}
+    assert receipt["review"] == {"observed": "unknown", "state": "no_record", "relation": "unknown",
+                                 "declared": "AUTHOR ACCEPTED"}
     assert "Summary of the change" in body
 
 
@@ -254,6 +255,56 @@ def test_malformed_trailer_is_unknown_and_valid_one_is_read():
         body = qualification.TRAILER + json.dumps({**receipt, **changes})
         assert qualification.commit_qualification(body) is None
     assert qualification.commit_qualification(qualification.commit_summary(receipt)) == receipt
+
+
+def test_the_trailer_keeps_record_state_and_request_relation_and_legacy_says_not_recorded():
+    record = {"record": {"state": "pending", "verdict": {"aggregate": "PASS"}}}
+    new = qualification.merge_qualification(record, relation="covers_head")
+    assert new["review"] == {"observed": "PASS", "state": "pending", "relation": "covers_head", "declared": "unknown"}
+    assert qualification.merge_qualification({}, relation="not_declared")["review"] == {
+        "observed": "unknown", "state": "no_record", "relation": "not_declared", "declared": "unknown"}
+    assert ("- Review: observed PASS (record pending, subject relation at the merge request covers_head); "
+            "author declared unknown") in qualification.commit_summary(new)
+    assert qualification.commit_qualification(qualification.commit_summary(new)) == new
+    legacy = qualification.merge_qualification(record)  # a receipt from before the relation: nothing invented
+    assert legacy["review"] == {"observed": "PASS", "declared": "unknown"}
+    assert ("- Review: observed PASS (record state and subject relation at the merge request not recorded); "
+            "author declared unknown") in qualification.commit_summary(legacy)
+    assert "settled" not in qualification.commit_summary(legacy)
+
+
+def _receipt_commit(n, review):
+    return {"sha": f"{n:040x}", "subject": f"change {n}", "date": "2026-11-04T10:00:00+00:00", "body_read": True,
+            "receipt": {"schema": 1, "checks": [], "review": review, "post_merge": {"status": "not_run"}}}
+
+
+def test_review_combinations_stay_bound_to_their_commit_in_every_summary():
+    pass_different = {"observed": "PASS", "state": "settled", "relation": "changes_after_review", "declared": "PASS"}
+    fail_same = {"observed": "FAIL", "state": "settled", "relation": "covers_head", "declared": "PASS"}
+    legacy = {"observed": "PASS", "declared": "PASS"}
+    future = {**fail_same, "observed": "PASS", "landing": "same"}
+    guessed = {**pass_different, "relation": "approved"}
+    value = {"base_sha": "a" * 40, "target_sha": "b" * 40, "commits": [
+        _receipt_commit(n, review) for n, review in enumerate((pass_different, fail_same, legacy, future, guessed))]}
+    compact = qualification.compact_qualification(value)["commits"]
+    assert compact["reviews"] == [
+        {"observed": "FAIL", "state": "settled", "relation": "covers_head", "declared": "PASS", "count": 1},
+        {"observed": "PASS", "state": "not_recorded", "relation": "not_recorded", "declared": "PASS", "count": 1},
+        {"observed": "PASS", "state": "settled", "relation": "changes_after_review", "declared": "PASS", "count": 1}]
+    assert compact["unabridged"] == [{"sha": f"{3:040x}", "receipt": {"review": future}},
+                                     {"sha": f"{4:040x}", "receipt": {"review": guessed}}]
+    assert qualification.qualification_summary(value)["reviews"] == [{**review, "count": 1} for review in (
+        pass_different, fail_same,
+        {"observed": "PASS", "state": "not_recorded", "relation": "not_recorded", "declared": "PASS"}, future, guessed)]
+
+
+def test_qualification_summary_preserves_unknown_review_count_field():
+    review = {"observed": "PASS", "state": "settled", "relation": "covers_head", "declared": "PASS",
+              "count": "source-count"}
+    value = {"base_sha": "a" * 40, "target_sha": "b" * 40, "commits": [_receipt_commit(0, review)]}
+    row = qualification.qualification_summary(value)["reviews"][0]
+    assert row["count"] == "source-count"
+    assert row["_count"] == 1
 
 
 def test_github_checks_include_red_intermediate_sha_but_exclude_other_ranges():

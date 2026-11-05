@@ -570,12 +570,31 @@ class LedgerRecord:
     panel: dict
 
 
-def ledger_record(kind="base..head", *, head=HEAD, base=BASE, tree=TREE, aggregate="PASS", state="settled"):
+def ledger_record(kind="base..head", *, head=HEAD, base=BASE, tree=TREE, aggregate="PASS", state="settled",
+                  landings=None):
     return {"record_id": RECORD_ID, "revision": 1, "state": state,
             "subject": {"root_kind": "active_workspace", "root": PRIVATE_ROOT, "kind": kind,
                         "base": base, "head": head, "tree_sha": tree},
             "verdict": {"aggregate": aggregate, "per_question": {"change": aggregate, "coupling": "PASS"}},
-            "panel": {"seats": 3, "distinct_models": 2}}
+            "panel": {"seats": 3, "distinct_models": 2},
+            **({"commit_landings": landings} if landings is not None else {})}
+
+
+PRIVATE_REASON = "PRIVATE REASON: why the author went ahead"
+
+
+def landed(relation="same", *, sha=HEAD, parent=BASE, tree=TREE):
+    """A ``commit_landings`` row as the review ledger writes it, private author facts included."""
+    return {"commit_sha": sha, "tree_sha": tree, "parent_sha": parent, "reviewed_subject": relation,
+            "author_subject": "s" * 64, "author_disposition": "rejected", "author_reason": PRIVATE_REASON,
+            "recorded_at": "2026-11-04T10:00:00Z"}
+
+
+def _trailer(world):
+    from ouroboros.update_qualification import commit_qualification
+
+    (body,) = world.gh.merge_inputs
+    return commit_qualification(body)
 
 
 def install_ledger(monkeypatch, records=(), *, error=None, answer=None):
@@ -763,6 +782,78 @@ def test_a_record_reads_green_only_when_settled_with_pass(world, monkeypatch, st
     assert "\n" not in merge_receipts.card_row_text(receipt)  # the label says it all: no second line repeats it
     assert (f"({state})" in out) is (state != "settled")
     assert f"verdict **{aggregate}**" in world.gh.pr["body"]
+
+
+# --- an index/worktree record reaches the merged head only through its exact landing ------
+
+
+@pytest.mark.parametrize("kind", ["index", "worktree"])
+@pytest.mark.parametrize(("row", "status", "gaps"), [
+    (landed("same"), "covers_head", []),
+    (landed("different", tree="9" * 40), "changes_after_review", []),
+    (landed("unknown", tree=""), "unknown", ["subject_kind_not_committed", "landing_relation_unknown"]),
+    (landed("same", sha="e" * 40), "unknown", ["subject_kind_not_committed"]),
+    (landed("same", parent="e" * 40), "unknown", ["subject_kind_not_committed", "landing_parent_not_reviewed_base"]),
+], ids=["same", "different", "unknown", "unmatched", "amended"])
+def test_an_uncommitted_record_links_to_the_merged_head_only_through_its_exact_landing(
+        world, monkeypatch, kind, row, status, gaps):
+    # ``subject.head`` equals the PR head throughout: that incidental match never stands in for a landing.
+    install_ledger(monkeypatch, {RECORD_ID: ledger_record(kind, landings=[row])})
+    out = record_merge(world, review_record_id=RECORD_ID)
+    (receipt,) = _receipts(world)
+    assert receipt["outcome"]["status"] == "merged"  # loud, never a lock
+    assert (receipt["coverage"]["status"], receipt["coverage"]["gaps"]) == (status, gaps)
+    assert receipt["coverage"].get("landing") == {"covers_head": "same", "changes_after_review": "different"}.get(status)
+    assert out.startswith("✅ PR #7 merge: merged" if status == "covers_head" else "⚠️ PR #7 merge: merged")
+    assert [set(r) for r in receipt["review"]["record"]["commit_landings"]] == [
+        {"commit_sha", "tree_sha", "parent_sha", "reviewed_subject"}]
+    assert _trailer(world) == receipt["qualification"]
+    assert receipt["qualification"]["review"] == {"observed": "PASS", "state": "settled", "relation": status,
+                                                  "declared": "unknown"}
+    for text in (json.dumps(_receipts(world)), world.gh.pr["body"], world.gh.merge_inputs[0]):
+        assert PRIVATE_REASON not in text and "s" * 64 not in text
+
+
+@pytest.mark.parametrize(("state", "aggregate"), [("settled", "FAIL"), ("pending", "PASS"), ("settled", "QUORUM_FAILED")])
+def test_an_exact_landing_links_the_subject_and_never_turns_its_verdict_green(world, monkeypatch, state, aggregate):
+    """An author who went ahead on the reviewed bytes links the review to the commit; the verdict stays the critic's."""
+    install_ledger(monkeypatch, {RECORD_ID: ledger_record("index", head="", aggregate=aggregate, state=state,
+                                                          landings=[landed("same")])})
+    out = record_merge(world, review_record_id=RECORD_ID)
+    (receipt,) = _receipts(world)
+    assert (receipt["coverage"]["status"], receipt["coverage"]["gaps"]) == ("covers_head", [])
+    assert out.startswith("⚠️ PR #7 merge: merged") and f"review source: record, verdict {aggregate}" in out
+    assert _trailer(world)["review"] == {"observed": aggregate, "state": state, "relation": "covers_head",
+                                         "declared": "unknown"}
+    assert f"verdict **{aggregate}**" in world.gh.pr["body"]
+    assert (f"- Review: observed {aggregate} (record {state}, subject relation at the merge request covers_head)"
+            in world.gh.merge_inputs[0])
+
+
+@pytest.mark.parametrize("moved", ["base_before_request", "tree_at_merge"])
+def test_the_trailer_keeps_the_request_relation_while_the_receipt_follows_later_facts(world, monkeypatch, moved):
+    install_ledger(monkeypatch, {RECORD_ID: ledger_record("index", head="", landings=[landed("same")])})
+    base, tree = ("e" * 40, TREE) if moved == "base_before_request" else (BASE, "9" * 40)
+    world.gh.pr["baseRefOid"] = base
+    original = world.gh
+
+    def gh(args, *a, **kw):
+        if args[:1] == ["api"] and args[1].endswith(f"/commits/{MERGE}"):
+            return github.GhResult(True, json.dumps({"commit": {"tree": {"sha": tree}},
+                                                      "parents": [{"sha": base}, {"sha": HEAD}]}), 0, None, "")
+        return original(args, *a, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", gh)
+    out = record_merge(world, review_record_id=RECORD_ID)
+    (receipt,) = _receipts(world)
+    gap = "reviewed_base_differs" if moved == "base_before_request" else "merged_tree_differs_from_reviewed_head"
+    assert receipt["outcome"]["status"] == "merged" and out.startswith("⚠️ PR #7 merge: merged")
+    assert (receipt["coverage"]["status"], receipt["coverage"]["gaps"]) == ("unknown", [gap])
+    # Written before the merge: the request already saw the moved base; the later merge tree did not exist yet.
+    relation = "unknown" if moved == "base_before_request" else "covers_head"
+    assert _trailer(world) == receipt["qualification"] and receipt["qualification"]["review"]["relation"] == relation
+    body = world.gh.pr["body"]
+    assert f"subject relation at the merge request {relation}" in body and f"gaps: {gap}" in body
 
 
 @pytest.mark.parametrize("bind_record", [True, False])
