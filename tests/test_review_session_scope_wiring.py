@@ -24,6 +24,7 @@ from ouroboros.triad_review import parse_seat_answers
 
 from tests._review_session_route_shared import _owned_gateway_uses_each_test_transport as __owned_gateway_uses_each_test_transport
 from tests._review_session_route_shared import fake_route as __fake_route
+from tests._worlds import clone_repository, world
 
 # Fixtures are requested by name as test parameters, so they are re-bound through a
 # module attribute: a direct import of a name that reappears as a parameter is an F811
@@ -32,7 +33,6 @@ _owned_gateway_uses_each_test_transport = __owned_gateway_uses_each_test_transpo
 fake_route = __fake_route
 
 from tests._review_session_route_shared import FakeGateway, _terminal_detail
-from tests._worlds import clone_repository, world
 
 # ---------------------------------------------------------------------------
 # 5.2/5.6/5.7 — surface wiring: the wave delivers sessions without packs
