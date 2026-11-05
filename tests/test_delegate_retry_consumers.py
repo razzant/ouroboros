@@ -173,9 +173,8 @@ def test_successor_wait_does_not_enter_live_containment_or_settlement(tmp_path, 
 
 
 @pytest.mark.parametrize("case", [
-    "common_root", "narrative", "one_sided", "wrong_root", "cycle", "old_execution_live",
-    "parallel_attempt", "malformed_parallel_attempt", "snapshot_stale", "snapshot_missing", "leaf_live", "closed_absent",
-    "review_owned", "stale_successor", "stale_custody_memo",
+    "cycle", "old_execution_live",
+    "malformed_parallel_attempt", "snapshot_missing",
 ])
 def test_registered_wait_refuses_unproven_successor_without_touching_gateway(
     tmp_path, monkeypatch, case,

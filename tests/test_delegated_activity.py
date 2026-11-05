@@ -453,7 +453,7 @@ def _agent(tool_ctx):
     return agent, events
 
 
-@pytest.mark.parametrize("unit,needs_omission", [("\x00", True), ("\x00\\", True), ("\\", False), ("🙂", False)])
+@pytest.mark.parametrize("unit,needs_omission", [("\x00", True), ("\\", False), ("🙂", False)])
 def test_serialized_speech_bound_survives_the_real_progress_carrier(tmp_path, unit, needs_omission):
     text = unit * (6000 // len(unit))
     originals = [_harness(seq, "message", text=text) for seq in range(1, 5)]

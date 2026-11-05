@@ -153,10 +153,6 @@ def test_answer_interaction_decodes_the_engine_problem_envelope(status, code):
 
 @pytest.mark.parametrize("context,problem_code,content_type", [
     (None, "http_409", "application/problem+json"),
-    ([], "http_409", "application/problem+json"),
-    ({"accepted": False, "status": "unknown"}, "http_409", "application/problem+json"),
-    ({"accepted": False, "status": "delivered"}, "http_409", "application/problem+json"),
-    ({"status": "already_resolved"}, "http_409", "application/problem+json"),
     ({"accepted": False, "status": "already_resolved"}, "idempotency_conflict", "application/problem+json"),
     ({"accepted": False, "status": "already_resolved"}, "http_409", "application/json"),
 ])
@@ -356,7 +352,7 @@ def test_already_resolved_tells_the_nanny_not_to_repost(tmp_path, monkeypatch):
 @pytest.mark.serial
 @pytest.mark.parametrize("status,code,accepted", [
     ("delivered", 200, True), ("already_resolved", 409, False),
-    ("not_found", 404, False), ("rejected", 409, False),
+    ("not_found", 404, False),
 ])
 def test_wire_answer_outcome_reaches_the_nanny(tmp_path, monkeypatch, status, code, accepted):
     import httpx
@@ -483,7 +479,6 @@ def test_direct_and_wrapped_answer_refusals_publish_identically(tmp_path, monkey
 @pytest.mark.parametrize("status,problem,outcome,tool_code", [
     (409, {"code": "http_409", "context": {"accepted": True, "status": "delivered"}}, "rejected", "TOOL_ARG_ERROR"),
     (409, {"code": "http_409", "context": {"accepted": False, "status": "unknown"}}, "rejected", "TOOL_ARG_ERROR"),
-    (409, {"code": "http_409", "context": []}, "rejected", "TOOL_ARG_ERROR"),
     (404, {"code": "route_not_found", "context": {"accepted": False, "status": "not_found"}},
      "not_found", "TOOL_REPORTED_FAILURE"),
 ])

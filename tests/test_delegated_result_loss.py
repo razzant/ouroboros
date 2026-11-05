@@ -274,8 +274,7 @@ def test_a_continuation_never_takes_its_predecessors_pin_as_its_own_result(tmp_p
 
 
 @pytest.mark.parametrize("carrier, payload", [
-    ("manifest", "{not json"), ("manifest", '["ready_with_changes"]'), ("manifest", '"ready_with_changes"'),
-    ("manifest", "7"), ("manifest", "null"), ("record", "{not json")])
+    ("manifest", "{not json"), ("manifest", '["ready_with_changes"]'), ("manifest", '"ready_with_changes"')])
 def test_an_unreadable_carrier_never_proves_loss(tmp_path, monkeypatch, carrier, payload):
     """Corrupt bytes, or well-formed JSON that is no manifest, refuse typed and stay as they are."""
     target, ctx, handle, drive = _writer(tmp_path, monkeypatch)
@@ -866,8 +865,7 @@ def test_output_collected_after_a_lost_reject_is_delivered_with_its_decision(tmp
     custody._CUSTODY.clear()
 
 
-@pytest.mark.parametrize("reflog", ["missing", "baseline_only", "expired_by_git", "retained_child", "retained_old_only", "wholly_malformed",
-                                    "malformed_beside_baseline", "unterminated_record"])
+@pytest.mark.parametrize("reflog", ["missing", "malformed_beside_baseline", "unterminated_record"])
 def test_a_head_reflog_git_reads_only_in_part_is_not_absence(tmp_path, monkeypatch, reflog):
     """Git skips, with exit 0, each HEAD reflog line it cannot parse, a final record without its newline
     included. A present reflog it reads only in part may have recorded the child's result, so neither

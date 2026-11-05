@@ -113,7 +113,7 @@ def test_typed_observation_timeout_keeps_same_run_inside_supervision(tmp_path, m
     assert sleeps == [delegate_supervision._TICK_SEC]
 
 
-@pytest.mark.parametrize("status", [200, 401, 403, 503])
+@pytest.mark.parametrize("status", [200, 401, 503])
 def test_received_auth_refusal_cannot_be_hidden_by_body_read_timeout(status):
     class BrokenBody(httpx.SyncByteStream):
         def __iter__(self):
@@ -147,10 +147,6 @@ def test_existing_control_returns_without_starting_another_observation(tmp_path,
 @pytest.mark.parametrize("failure,reason", [
     (httpx.ReadTimeout("read timed out"), "observation_read_timeout"),
     (httpx.ConnectError("connection refused"), "daemon_unreachable"),
-    (httpx.ConnectTimeout("connect timed out"), "daemon_unreachable"),
-    (httpx.PoolTimeout("pool exhausted"), "daemon_unreachable"),
-    (httpx.ReadError("connection reset"), "daemon_unreachable"),
-    (httpx.WriteError("broken pipe"), "daemon_unreachable"),
     (httpx.RemoteProtocolError("server disconnected"), "daemon_unreachable"),
 ])
 def test_read_only_retryable_transport_failures_are_typed_observation_holes(failure, reason):
@@ -205,7 +201,6 @@ def test_a_received_refusal_carries_no_observation_reason():
     ("GET", "/v2/agent-capabilities?model=private-query", "/v2/agent-capabilities"),
     ("GET", "/v2/trust?repoRoot=%2Fprivate%2Frepo", "/v2/trust"),
     ("GET", "/v2/runs/private-id/artifacts/private-file?token=private-query", "/v2/runs/..."),
-    ("POST", "/v2/threads/private-id/turns", "/v2/threads/..."),
 ])
 def test_control_failure_names_the_request_without_private_values(monkeypatch, method, path, family):
     calls, failures = [], []

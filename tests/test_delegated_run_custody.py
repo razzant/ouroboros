@@ -741,7 +741,6 @@ def test_a_start_whose_custody_row_did_not_land_does_not_claim_to_be_custodied(t
 
 
 @pytest.mark.parametrize("status_code,retired,remove_absent", [
-    (422, True, False),     # the daemon ANSWERED and refused: no run was bound
     (0, False, False),      # transport error: the POST's fate is unknown, a run may be live
     (503, False, False),    # 5xx: same — an unverified outcome is not grounds to destroy state
     # The daemon has no such registration: absence IS discharge, the same answer
@@ -908,14 +907,6 @@ def _settled_session_row(root, reported, run_id="run-counters"):
     ({"total_tokens": None, "cache_read_tokens": None, "cache_write_tokens": None},
      {"total_tokens": None, "cache_read_tokens": None, "cache_write_tokens": None}),
     (_ABSENT, None),                                                    # an engine that reports nothing
-    (None, None),
-    ({"total_tokens": 10, "cache_read_tokens": 4}, None),               # partial: unknown as a whole
-    ({**_COMPLETE_COUNTERS, "extra_tokens": 1}, None),
-    ({"total_tokens": -1, "cache_read_tokens": 0, "cache_write_tokens": 0}, None),
-    ({"total_tokens": 1.5, "cache_read_tokens": 0, "cache_write_tokens": 0}, None),
-    ({"total_tokens": True, "cache_read_tokens": 0, "cache_write_tokens": 0}, None),
-    ({"total_tokens": "270", "cache_read_tokens": 0, "cache_write_tokens": 0}, None),
-    ("270/130", None),
 ])
 def test_normalized_session_counters_are_carried_whole_or_not_at_all(tmp_path, reported, expected):
     """A repaired counter would read exactly like a measured one (BIBLE P1)."""

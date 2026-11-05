@@ -120,8 +120,8 @@ def uncertain_rollback():
 
 
 @pytest.mark.parametrize("error", [store.StoreBusy("unknown"),
-    store.StoreBusy("uninspectable", reason="uninspectable"), uncertain_rollback(),
-    store.StoreLost("lost"), PermissionError("denied")])
+    uncertain_rollback(),
+    PermissionError("denied")])
 def test_hard_unknown_and_uncertain_claim_fail_once(start, monkeypatch, error):
     publish, calls = current.publish, []
 

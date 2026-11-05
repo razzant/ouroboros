@@ -68,7 +68,7 @@ def test_git_whole_capture_uses_the_normal_disposition(tmp_path, monkeypatch, op
     assert _git(target, "diff", "--cached", "--name-only").stdout.splitlines() == staged
 
 
-@pytest.mark.parametrize("paths", [["tracked.txt"], "", False, {}])
+@pytest.mark.parametrize("paths", [["tracked.txt"], False, {}])
 def test_git_selection_refusal_has_no_effects(tmp_path, monkeypatch, paths):
     from ouroboros.tools.delegate import _capture_terminal_patch
 

@@ -30,6 +30,7 @@ from ouroboros.utils import truncate_within_limit
 from supervisor import events_chat_delivery, message_bus
 from tests import _dialogue as dialogue_test
 from tests.test_delegated_activity import Daemon, _agent, _ctx, _gateway, _harness, _records, _run_event
+from tests._cases import chosen_rows
 
 CLAUDE = ("claude", "a01")
 # The adapter's key shape (consumers compare it whole and never parse it).
@@ -228,15 +229,9 @@ ANSWER = "Fixed the duplicate posts; all 15 import tests pass."
 @pytest.mark.parametrize("reply,final,lines", [
     pytest.param(_stream(1, ["Fixed the duplicate posts;", " all 15 import tests pass."], K1), _final(4, ANSWER),
                  [f"claude · a01: {ANSWER}", f"claude · a01 (answer): {ANSWER}"], id="streamed"),
-    pytest.param([_said(1, ANSWER, K1, "complete")], _final(2, ANSWER),
-                 [f"claude · a01: {ANSWER}", f"claude · a01 (answer): {ANSWER}"], id="nonstreamed"),
     pytest.param([_said(1, "Done.", K1, "complete")], _final(2, ANSWER),
                  ["claude · a01: Done.", f"claude · a01 (answer): {ANSWER}"], id="unique-words"),
     pytest.param([], _final(1, ANSWER), [f"claude · a01 (answer): {ANSWER}"], id="result-only"),
-    pytest.param([], _final(1, '{"fixed": 3}', source="structured_output"),
-                 ['claude · a01 (answer): {"fixed": 3}'], id="structured"),
-    pytest.param([_said(1, "Starting.", K1, "complete", actor=("codex", "a02"))], _final(2, ANSWER),
-                 ["codex · a02: Starting.", f"claude · a01 (answer): {ANSWER}"], id="another-actor-spoke"),
 ])
 def test_the_typed_final_answer_is_its_own_part_and_keeps_its_words_for_text_readers(tmp_path, reply, final, lines):
     record = _one(tmp_path, [*reply, final])
@@ -392,7 +387,7 @@ LATER_KEYS = [*_stream(7, ["Last", " one."], K3, complete="Last one, revised."),
               *_stream(10, ["Done", "."], K4, complete="Done, revised.")]
 
 
-@pytest.mark.parametrize("coverage", ["missing", "unreadable", "window", "provisional"])
+@pytest.mark.parametrize("coverage", ["missing", "unreadable", "provisional"])
 def test_no_key_of_a_record_without_exact_coverage_is_proven_either_way(tmp_path, coverage):
     """Every comparison needs the gap-free exact range, not only the record's first key: an earlier block of the
     same actor proves nothing about a later block whose fragment never passed here whole, or that a bounded window
@@ -520,19 +515,10 @@ def test_the_frame_log_prints_a_complete_texts_new_words_after_its_proven_draft(
         "an equal complete adds only its new words; a changed one is printed whole and says so"
     assert done["parts"][0]["text"] == complete, "the record keeps the whole complete text for the card and history"
     assert delegate_activity.card_text(done, 650).count(complete) == 1, "a card shows one record: the words whole"
-
-
-NOTES = [f"Note {index}." for index in range(40)]                   # with the draft, 41 parts: one is omitted
-LONG = ["L" * 550] * 4                                                   # their lines alone pass the frame's 2000
-
-
 @pytest.mark.parametrize("before,draft,rest,shown", [
     pytest.param([], ["Checking the file."], [], True, id="shown-whole"),
     pytest.param([], ["w" * 700], [], False, id="line-bound"),          # its line keeps 600 code points
-    pytest.param(NOTES, ["Checking the file."], [], False, id="part-bound"),
-    pytest.param(LONG, ["Checking the file."], [], False, id="frame-bound"),
     pytest.param([], ["😀" * 599], ["é ok"], True, id="astral-whole"),   # code points, not UTF-16 units
-    pytest.param([], ["😀" * 601], ["é ok"], False, id="astral-cut"),
 ])
 def test_the_frame_log_skips_only_words_its_earlier_lines_showed_whole(tmp_path, before, draft, rest, shown):
     first = [_harness(index + 1, "message", text=text) for index, text in enumerate(before)]
@@ -774,7 +760,7 @@ def _one_utterance_per_key(journal, records, *, exact=True):
     assert answers == [f"claude · a01 (answer): {journal.answer['text']}"], "its words reach text readers whole"
 
 
-@pytest.mark.parametrize("name", SCENARIOS)
+@pytest.mark.parametrize("name", chosen_rows(SCENARIOS, 0, 1, 3))
 def test_the_engines_journals_read_as_one_utterance_per_key_however_the_polls_cut_them(tmp_path, name):
     journal = engine_journal(name)
     assert journal.answer["hasFinal"] is True

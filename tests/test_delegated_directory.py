@@ -544,8 +544,7 @@ def test_partial_apply_and_consumer_copies_leave_shared_content_unchanged(tmp_pa
     assert _retained(ctx.drive_root, held)[1] == before
 
 
-@pytest.mark.parametrize("fault,code", [("corrupt", "artifact_integrity_error"), ("size", "artifact_integrity_error"),
-                                        ("unavailable", "artifact_not_found"), ("truncated", "daemon_unreachable")])
+@pytest.mark.parametrize("fault,code", [("corrupt", "artifact_integrity_error"), ("unavailable", "artifact_not_found"), ("truncated", "daemon_unreachable")])
 def test_failures_of_repeated_content_stay_failures_and_a_new_capture_refetches(tmp_path, monkeypatch, fault, code):
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
 

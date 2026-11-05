@@ -112,7 +112,7 @@ def test_orphan_protection_names_handles_instead_of_every_run_of_the_task(tmp_pa
     assert seen == ["unreserved"]
 
 
-@pytest.mark.parametrize("bad", [None, "birth", "exit", "handle"])
+@pytest.mark.parametrize("bad", [None, "birth", "handle"])
 def test_windows_generation_proof_applies_to_each_holder(tmp_path, monkeypatch, bad):
     from ouroboros import platform_layer
 

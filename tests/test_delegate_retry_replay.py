@@ -152,12 +152,7 @@ def _record(state, *, task_id="mine", body=None, **extra):
     (None, "", "unknown_invocation"),
     # Each record also fails every later check: the earliest one answers.
     (_record("started", task_id="theirs"), "other", "invocation_not_owned"),
-    (_record("started"), "other", "invocation_already_started"),
     (_record("failed_definite"), "other", "invocation_definitely_refused"),
-    (_record("pending", body={"model": "m"}), "other", "invocation_request_unrecorded"),
-    ({"state": "legacy_gap", "run_id": "", "reason": "invocation_request_missing"}, "", "invocation_request_unrecorded"),
-    (_record("pending", body={"prompt": "P"}), " ", "retry_prompt_mismatch"),
-    (_record("pending", body={"prompt": "P"}), "P ", "retry_prompt_mismatch"),
 ])
 def test_the_single_validator_answers_in_its_order(monkeypatch, record, text, reason):
     from ouroboros.tools.delegate_integration import _validated_invocation

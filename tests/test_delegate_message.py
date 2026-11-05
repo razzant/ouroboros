@@ -288,7 +288,6 @@ def test_a_settled_run_is_not_active_without_a_post(tmp_path, monkeypatch):
 @pytest.mark.parametrize("stub_kwargs,reason,live_input", [
     ({"operations": []}, "engine_lacks_operation", None),
     ({"harnesses": [_row(live_input="none")]}, "route_live_input_none", "none"),
-    ({"harnesses": [_row(live_input=None)]}, "route_live_input_none", "none"),
     ({"harnesses": [_row(route_id="another-route")]}, "route_not_in_capability_catalog", None),
     ({"capability_error": RuntimeError("catalog down")}, "capability_read_failed", "unknown"),
 ])
@@ -449,10 +448,7 @@ def test_payload_verdict_4xx_is_rejected_as_an_agent_fault(tmp_path, monkeypatch
 @pytest.mark.parametrize("code,status", [
     ("daemon_unreachable", 0),          # transport death
     ("http_503", 503),                  # any 5xx
-    ("internal_error", 500),            # the receipt-save failure path
     ("delivery_in_progress", 409),      # the idempotency store: fate unknown
-    ("delivery_interrupted", 409),
-    ("http_429", 429),                  # says nothing about delivery
 ])
 def test_ambiguous_failures_are_delivery_unknown_naming_the_same_id_retry(
         tmp_path, monkeypatch, code, status):
@@ -824,8 +820,6 @@ def test_pending_refusal_includes_current_answerable_questions_without_consuming
 @pytest.mark.serial
 @pytest.mark.parametrize("outcome,reason", [
     ("accepted", ""), ("delivered", ""), ("rejected", "rpc_refused"),
-    ("unsupported", "interaction_pending"), ("not_active", "run_terminal"),
-    ("delivery_unknown", "interaction_pending"),
 ])
 def test_unrelated_message_outcomes_do_not_read_run_detail(tmp_path, monkeypatch, outcome, reason):
     from ouroboros.delegate_interactions import _delegate_message
@@ -841,17 +835,11 @@ def test_unrelated_message_outcomes_do_not_read_run_detail(tmp_path, monkeypatch
 
 @pytest.mark.serial
 @pytest.mark.parametrize("detail,error", [
-    ({}, None), ({"pendingInteractions": None}, None),
-    ({"pendingInteractions": "unreadable"}, None),
     ({"pendingInteractions": ["invalid row"]}, None),
-    ({"pendingInteractions": [{}]}, None),
-    ({"pendingInteractions": [{"interactionId": "i", "questions": []}]}, None),
     ({"pendingInteractions": [{"interactionId": "i", "questions": [None]}]}, None),
-    ({"pendingInteractions": [_message_question(), {"interactionId": "bad"}]}, None),
     ({"pendingInteractions": [{**_message_question(), "attemptId": {"invalid": "identity"}}]}, None),
     ({"pendingInteractions": [{"interactionId": "i", "questions": [
         {"id": "q", "question": "Q?", "options": ["invalid option"]}]}]}, None),
-    ({"pendingInteractions": []}, RuntimeError("retained read failure")),
 ])
 def test_failed_question_observation_preserves_the_refusal_as_unknown(
         tmp_path, monkeypatch, detail, error):

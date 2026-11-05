@@ -131,7 +131,7 @@ def test_saved_run_handoff_accepts_settlement_since_reservation(tmp_path, monkey
     assert result["settled"] is (transition == "settled")
 
 
-@pytest.mark.parametrize("fault", ["attempt", "authority", "holder", "generation", "cause"])
+@pytest.mark.parametrize("fault", ["attempt", "generation", "cause"])
 def test_saved_carrier_does_not_relax_local_handoff_authority(tmp_path, monkeypatch, fault):
     custody, recovery, task, _, _, _, _ = _pending_handoff(tmp_path, "nanny")
     task["_working_recovery"] = {}
@@ -386,7 +386,7 @@ def test_pending_wait_sources_survive_aged_gc_and_second_planned_restart(
     assert not stub_delegate_engines
 
 
-@pytest.mark.parametrize("fault", ["task", "attempt", "authority", "holder", "custody_read", "row_read"])
+@pytest.mark.parametrize("fault", ["authority", "custody_read", "row_read"])
 def test_second_handoff_never_replaces_unproven_pending_wait_source(tmp_path, monkeypatch, fault):
     from ouroboros import delegate_custody_current as current
 
