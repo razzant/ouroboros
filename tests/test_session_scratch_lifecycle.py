@@ -80,7 +80,7 @@ def _seed_installed(scratch: Path) -> Path:
     and retirement, so their tiny environment is built through Python's in-process
     venv API and the package is written into its site-packages directory.
     """
-    venv.EnvBuilder(with_pip=False).create(scratch / "env")
+    venv.EnvBuilder(with_pip=False, symlinks=os.name != "nt").create(scratch / "env")  # as `python -m venv` does
     site = next((scratch / "env").rglob("site-packages"))
     package = site / "tinypkg"
     package.mkdir()
