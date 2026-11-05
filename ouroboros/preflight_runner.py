@@ -739,48 +739,37 @@ def _controller_diagnostics(output_root) -> str:
     return "\n".join(found.values()) + ("\n" if found else "")
 
 
-def _execute_pytest_pass(
-    agent_python: str,
-    worktree: pathlib.Path,
-    temp_root: pathlib.Path,
-    args: Sequence[str],
-    timeout: Optional[float],
-) -> tuple[Optional[int], str, str]:
-    """Run ONE pytest invocation in the prepared worktree.
+def _execute_lane(argv: Sequence[str], worktree: pathlib.Path, temp_root: pathlib.Path,
+                  timeout: Optional[float], lane: str):
+    """Run ONE contained lane of the gate (a pytest pass, the bytecode warm) in the prepared worktree.
 
-    ``timeout`` is the caller's exact remaining share of the TOTAL budget and
-    stays a float — rounding it up would let the last pass outlive the total;
-    None when the run has no total budget (the full suite).
+    ``timeout`` is the caller's exact remaining share of the TOTAL budget and stays a float — rounding it up
+    would let the last lane outlive the total; None when the run has no total budget (the full suite).
 
-    Returns ``(returncode, combined_output, containment_error)``.
-    ``returncode is None`` means the pass exhausted its slice of the budget and
-    its whole process tree was reaped. The output of a timed-out pass is whatever
-    the child had flushed before the kill. Both passes carry the same 300 s
-    per-test timeout; a kill of the whole pass budget leaves that flushed output
-    as the only evidence of WHICH test was running.
+    Returns a ``CapturedPass``: ``(returncode, combined_output, containment_error)`` plus the lane's own
+    diagnostic errors and container token. ``returncode is None`` means the lane exhausted its slice of the
+    budget and its whole process tree was reaped; its output is whatever the child had flushed before the
+    kill, the only evidence of WHICH test was running.
 
-    A NON-EMPTY ``containment_error`` is a hard block the caller must not accept
-    as green, whatever the return code says: the container's post-pass SCAN found
-    a process the pass spawned still alive, or could not determine whether one is
-    (which counts the same), so a green pass may be sitting on top of a live tree
-    that survives into pass 2 and past teardown. The reap therefore happens before
-    the return rather than in the `finally` below, which cannot alter an
-    already-computed tuple; only the handle release stays unconditional.
+    A NON-EMPTY ``containment_error`` is a hard block the caller must not accept as green, whatever the return
+    code says: the container's post-lane SCAN found a process the lane spawned still alive, or could not
+    determine whether one is (which counts the same), so a green lane may be sitting on top of a live tree
+    that survives into the next lane and past teardown. The reap therefore happens before the return rather
+    than in the `finally` below, which cannot alter an already-computed tuple; only the handle release stays
+    unconditional. The lane's tree runs behind the owner's work (``background=True``).
     """
     from ouroboros.process_containment import ProcessContainer
 
-    from ouroboros.preflight_inventory import launch_args, note_lane_process
+    from ouroboros.preflight_inventory import note_lane_process
     from ouroboros.test_evidence import CapturedPass, FileOutput
 
-    args = launch_args(args)  # a selected scope is carried by its inventory plugin, not by the command line
+    argv = list(argv)
     container = ProcessContainer(lifeline=True, overload=True)
-    output = FileOutput(temp_root, "pytest")
+    output = FileOutput(temp_root, lane)
     proc = None
     try:
-        proc = container.spawn(  # the owner's work keeps the foreground: the gate's tree runs behind it
-            [agent_python, "-m", "pytest", *args], background=True, cwd=str(worktree),
-            env=_preflight_env(temp_root, worktree), stdout=output.stdout, stderr=output.stderr,
-        )
+        proc = container.spawn(argv, background=True, cwd=str(worktree), env=_preflight_env(temp_root, worktree),
+                               stdout=output.stdout, stderr=output.stderr)
         try:
             returncode: Optional[int] = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -793,13 +782,13 @@ def _execute_pytest_pass(
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                reap_error = reap_error or "direct pytest process did not exit after reap"
-        preview = output.finish(returncode=returncode, containment_error=reap_error,
-                                argv=[agent_python, "-m", "pytest", *args])
-        try:
-            preview = _controller_diagnostics(output.root) + preview
-        except OSError as exc:
-            output.failed("controller diagnostics", exc)
+                reap_error = reap_error or f"direct {lane} process did not exit after reap"
+        preview = output.finish(returncode=returncode, containment_error=reap_error, argv=argv)
+        if lane == "pytest":
+            try:
+                preview = _controller_diagnostics(output.root) + preview
+            except OSError as exc:
+                output.failed("controller diagnostics", exc)
         return CapturedPass(returncode, preview, reap_error, output.errors, container.token)
     except BaseException as exc:
         if proc is not None and proc.poll() is None:
@@ -813,6 +802,21 @@ def _execute_pytest_pass(
         container.close()
         output.close()
 
+
+def _execute_pytest_pass(
+    agent_python: str,
+    worktree: pathlib.Path,
+    temp_root: pathlib.Path,
+    args: Sequence[str],
+    timeout: Optional[float],
+) -> tuple[Optional[int], str, str]:
+    """Run ONE pytest invocation in the prepared worktree: ``_execute_lane`` with pytest's argv (a selected scope
+    travels in its inventory plugin, not on the command line) and the controller's diagnostics ahead of the
+    output. Both passes carry the same 300 s per-test timeout; a kill of the whole pass budget leaves the
+    flushed output as the only evidence of which test was running."""
+    from ouroboros.preflight_inventory import launch_args
+
+    return _execute_lane([agent_python, "-m", "pytest", *launch_args(args)], worktree, temp_root, timeout, "pytest")
 
 _TRUNCATION_MARKER = "\n...(truncated)..."
 
@@ -1089,9 +1093,33 @@ def _with_retention_notice(verdict: str, unproven: str, worktree: pathlib.Path, 
 
 
 def _warm_bytecode(agent_python, worktree, temp_root, evidence, timeout, files=()) -> str:
-    from ouroboros.test_bytecode import warm_lane
+    """The gate's warm before its passes (ouroboros/test_bytecode.py): one contained root compiles the candidate
+    and collects its tests, or a selection's modules, in as many shards as the gate admitted workers; its facts
+    join the run's lanes. Returns a hard-block diagnosis only when the warm's tree outlived it (containment),
+    never for a warm that failed or ran out of ``timeout`` (what the run's budget still held, None for none;
+    the passes are charged nothing for it): those leave the passes cold, recorded as such."""
+    from ouroboros.test_bytecode import command
 
-    return warm_lane(agent_python, worktree, temp_root, evidence, timeout, files)
+    files_from = None
+    if files:
+        files_from = probe_dir(temp_root) / "warm-files.txt"
+        files_from.write_text("\n".join(files) + "\n", encoding="utf-8")
+    argv = command(agent_python, worktree, workers=allocated_worker_count(temp_root), files_from=files_from)
+    started = time.monotonic()
+    returncode, preview, reap_error = result = _execute_lane(argv, worktree, temp_root, timeout, "warm")
+    facts = next((line.removeprefix("WARM_BYTECODE ").strip() for line in preview.splitlines()
+                  if line.startswith("WARM_BYTECODE ")), "")
+    _record_lane(evidence, "warm", {"evidence_errors": result.evidence_errors}, returncode=returncode,
+                 containment_error=reap_error, seconds=round(time.monotonic() - started, 1),
+                 facts=json.loads(facts) if facts else None)
+    if reap_error:
+        return _diagnosis(
+            "⚠️ PRE_PUSH_TEST_ERROR: PREFLIGHT_CONTAINMENT_FAILED (hard block): the warm ran, but processes it "
+            "spawned were still alive afterwards (or could not be determined to be gone)",
+            "The bytecode warm collects the candidate's test tree once; a tree it leaves alive survives into the "
+            "passes and past teardown, so its verdict is not accepted. Find what the candidate's collection starts "
+            "and does not wait for.", reap_error, 8000)
+    return ""
 
 
 def _durations_target(ctx) -> Optional[pathlib.Path]:

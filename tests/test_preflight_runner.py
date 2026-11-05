@@ -139,9 +139,11 @@ def two_pass_env(monkeypatch, preflight_timeout_diagnostics):
     monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
     monkeypatch.delenv("PYTEST_XDIST_TESTRUNUID", raising=False)
     # The bytecode warm is a real contained root over the candidate; these scenarios are about the passes.
-    # `test_the_gate_warms_its_prefix_once_before_the_passes` runs it for real.
+    # `test_the_gate_warms_its_prefix_once_before_the_passes` runs the real one, returned here.
     from ouroboros import preflight_runner
+    real_warm = preflight_runner._warm_bytecode
     monkeypatch.setattr(preflight_runner, "_warm_bytecode", lambda *args, **kwargs: "")
+    return real_warm
 
 
 # ── Pass-spec contract (unit) ─────────────────────────────────────────
@@ -1087,9 +1089,8 @@ def test_the_gate_warms_its_prefix_once_before_the_passes(tmp_path, two_pass_env
     modules and pytest's rewritten test modules into the run's prefix before the first pass; its facts are a lane of
     the run's evidence, and the passes read the prefix with the write ban kept."""
     from ouroboros import preflight_runner as pr
-    from ouroboros.test_bytecode import warm_lane
 
-    monkeypatch.setattr(pr, "_warm_bytecode", lambda *args, **kwargs: warm_lane(*args, **kwargs))
+    monkeypatch.setattr(pr, "_warm_bytecode", two_pass_env)  # the fixture stubs the warm; this test runs the real one
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     _pin_preflight_root(monkeypatch, scratch)
@@ -2190,12 +2191,15 @@ def test_pass2_timeout_names_serial_pass(tmp_path, two_pass_env):
 
 def test_hermetic_pytest_timeout_invokes_full_tree_reaper():
     """The timeout path must delegate to the full-tree reaper (not a bare killpg),
-    and the pass-owned container must reap detached/reparented descendants.
+    and the lane-owned container must reap detached/reparented descendants.
     The timeout helper retains its captured PID-tree and process-group cleanup.
+    The pytest pass runs through the one lane executor the warm shares (`_execute_lane`), so that is the
+    source pinned here; the pass itself only builds pytest's argv.
     """
     from ouroboros import preflight_runner
 
-    pass_src = inspect.getsource(preflight_runner._execute_pytest_pass)
+    assert "_execute_lane(" in inspect.getsource(preflight_runner._execute_pytest_pass)
+    pass_src = inspect.getsource(preflight_runner._execute_lane)
     assert "_terminate_preflight_tree" in pass_src
 
     # The process is spawned INSIDE the container, never `Popen`'d and adopted
