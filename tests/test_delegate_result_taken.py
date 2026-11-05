@@ -183,7 +183,7 @@ def test_an_interrupted_delivery_resends_once_under_the_same_derived_key(world):
 
 @pytest.mark.parametrize("status,code,state", [
     (409, "run_taken_continuable", "refused"), (409, "run_taken_not_patch", "refused"),
-    (400, "invalid_request", "refused"), (404, "not_found", "absent")])
+    (400, "invalid_request", "refused"), (404, "not_found", "absent"), (404, "project_not_registered", "absent")])
 def test_a_typed_answer_is_recorded_once_and_never_repeated(world, status, code, state):
     world.engine.fail.append(ClaudexorUnavailable(code, code, status_code=status))
     assert world.tell() == rt.DONE
