@@ -1196,23 +1196,22 @@ def _live_retry_target_locked(q: Any, task_id: str, *, results) -> Tuple[str, st
 
 
 def task_has_live_ownership(task_id: str, *, ignore_review_operation: str = '', ownership=None) -> bool:
-    """Whether executable or paused custody remains for this task: a RUNNING row, busy worker, direct
-    turn, still-billing synthesis, a retained late review, or an unsettled inline Presence turn whose
-    runner the author census witnesses or cannot rule out (``presence_turn_owned``). The pipeline
-    persists the durable terminal result BEFORE post-task cognition ends, so "the status is settled"
-    and "the worker is dead" are two different facts — ``already_settled`` is a terminal answer ONLY
-    when this predicate is False. Cancel INGRESSES consult it and pass ``allow_settled_target=True``
-    to ``request_cancel`` while ownership is live, so custody kills the still-spending worker instead
-    of no-oping; completion-wins keeps the stored result either way. (The worker-process twin — the
-    agent tool cannot see the live maps — is ``ouroboros.task_status.task_has_live_queue_ownership``.)
-    """
+    """Executable/paused custody, including uncertainty. Durable terminality precedes post-task work,
+    so only False proves no owner. Cancel uses allow_settled_target=True to stop surviving spend
+    without replacing the result. Worker twin: task_status.task_has_live_queue_ownership."""
+    return bool(_task_ownership_reason(task_id, ignore_review_operation=ignore_review_operation, ownership=ownership))
+
+
+def _task_ownership_reason(task_id: str, *, ignore_review_operation: str = '', ownership=None) -> str:
+    """Ownership's existing conservative check, preserving its uncertainty for settlement."""
     q = _queue_module()
     from supervisor import workers
 
     task_id = str(task_id or "").strip()
     if not task_id:
-        return False
-    from supervisor.task_ownership import TaskOwnershipRead, prepare_retry_chain
+        return ""
+    from supervisor.task_ownership import BUSY, UNCHANGED, TaskOwnershipRead, prepare_retry_chain
+    from ouroboros.store import StoreBusy
     from ouroboros.presence_runner import presence_turn_owned
     from ouroboros.review_operation import task_has_live_review_operation
     from ouroboros.owner_pause import FENCE_REQUESTED, FENCE_PAUSED, FENCE_RELEASED
@@ -1227,50 +1226,40 @@ def task_has_live_ownership(task_id: str, *, ignore_review_operation: str = '', 
         current = read(task_id)
         if task_has_live_review_operation(q.DRIVE_ROOT, task_id, exclude_owner_id=ignore_review_operation,
                                           result_loader=read):
-            return True
+            return "task_live"
         if presence_turn_owned(current, task_id, drive_root=q.DRIVE_ROOT):
-            return True  # no queue map holds it; its runner reads the intent (#2012)
+            return "task_live"  # no queue map holds it; its runner reads the intent (#2012)
         fence = current.get("owner_pause") or {}
         if not isinstance(fence, dict) or (fence and fence.get("state") not in
                                            {FENCE_REQUESTED, FENCE_PAUSED, FENCE_RELEASED}):
-            return True
+            return "liveness_unknown"
         prepare_retry_chain(q, task_id, read)
-    except (OSError, ValueError, TypeError, RuntimeError):
-        return True  # Unknown durable ownership cannot authorize a mutation.
+    except (OSError, ValueError, TypeError, RuntimeError) as exc:
+        return "store_busy" if isinstance(exc, StoreBusy) or isinstance(exc.__cause__, StoreBusy) else "liveness_unknown"
     with q._queue_lock:
-        if not ownership.unchanged(accessed):
-            return True
+        checked = ownership.recheck(accessed)
+        if checked != UNCHANGED:
+            return "store_busy" if checked == BUSY else "liveness_unknown"
         if task_id in q.RUNNING:
-            return True
+            return "task_live"
         if any(
             worker.busy_task_id == task_id for worker in workers.WORKERS.values()
         ):
-            return True
-        # The in-process direct-chat turn is live PHYSICAL ownership too: it
-        # spends on the owner's behalf from inside the supervisor process and
-        # writes an ordinary durable running row, so it must be as
-        # addressable as a pooled worker (custody stops it cooperatively).
+            return "task_live"
+        # Direct turns and post-task synthesis still spend after a durable terminal row.
         if workers.direct_chat_turn(task_id) is not None:
-            return True
-        # The turn's paid post-task synthesis OUTLIVES the turn: the loop
-        # returns and ``_busy`` drops while the in-process worker thread still
-        # bills, so the pipeline's in-flight key is live physical ownership
-        # too — the stop ingress must not answer 404 while the spend
-        # continues, and custody keeps the intent open for the stage gate.
+            return "task_live"
         if post_task_synthesis_in_flight(q.DRIVE_ROOT, task_id):
-            return True
+            return "task_live"
         # A dead attempt whose reap the reaper retains (slot reserved, terminal owed) is custody Stop must reach.
         from supervisor.task_reaper import _deferred_reap_jobs
         if any(str(job.get("task_id") or "") == task_id for job in _deferred_reap_jobs):
-            return True
+            return "task_live"
         try:
             retry_target, _retry_settled_status = _live_retry_target_locked(q, task_id, results=ownership)
-        except Exception:
-            # An indeterminate chain cannot prove that physical ownership is
-            # absent.  Fail open toward liveness so intent minting, which does
-            # the authoritative locked validation, decides the request.
-            return True
-        return bool(
+        except Exception as exc:
+            return "store_busy" if isinstance(exc, StoreBusy) or isinstance(exc.__cause__, StoreBusy) else "liveness_unknown"
+        return "task_live" if (
             retry_target != task_id
             and (
                 retry_target in q.RUNNING
@@ -1279,15 +1268,15 @@ def task_has_live_ownership(task_id: str, *, ignore_review_operation: str = '', 
                     for worker in workers.WORKERS.values()
                 )
             )
-        )
+        ) else ""
 
 
 def task_settlement_liveness(task_id: str) -> Optional[bool]:
     """The probe a destructive custody settlement asks (``task_custody.settle_child_drive``):
     True while ``task_has_live_ownership`` holds or the id waits in PENDING, None while a
     reap of this task (its slot or a queued/deferred reap job) makes absence inconclusive
-    or the queue cannot be read, False only for proven absence. Callers without the
-    supervisor's live maps have no such probe, so they never delete."""
+    or the queue cannot be read, False only for proven absence. StoreBusy retains the
+    distinct busy cause. Callers without live maps cannot prove absence."""
     q = _queue_module()
     from supervisor import task_reaper, workers
 
@@ -1296,15 +1285,21 @@ def task_settlement_liveness(task_id: str) -> Optional[bool]:
         return None  # empty maps outside the supervisor process prove no absence
     try:
         from supervisor.task_ownership import settlement_reads
+        from ouroboros.store import StoreBusy
 
         locked = q._queue_lock._is_owned()
         reads = settlement_reads(q.DRIVE_ROOT, task_id, locked=locked)
         if reads is None:
             return None
         if not locked:
-            task_has_live_ownership(task_id, ownership=reads)  # Prepare before the mutation lock.
+            _task_ownership_reason(task_id, ownership=reads)  # Prepare before the mutation lock.
         with q._queue_lock:
-            if task_has_live_ownership(task_id, ownership=reads) or any(str(row.get("id") or "") == task_id for row in q.PENDING):
+            reason = _task_ownership_reason(task_id, ownership=reads)
+            if reason == "store_busy":
+                raise StoreBusy("ownership re-check found the store busy", reason="contention")
+            if reason == "liveness_unknown":
+                return None
+            if reason or any(str(row.get("id") or "") == task_id for row in q.PENDING):
                 return True
             with q._reap_queue.mutex:
                 jobs = [*q._reap_queue.queue, *task_reaper._deferred_reap_jobs]
@@ -1314,6 +1309,8 @@ def task_settlement_liveness(task_id: str) -> Optional[bool]:
         if not locked:
             settlement_reads(q.DRIVE_ROOT, task_id, locked=False, prepared=reads)
         return False
+    except StoreBusy:
+        raise  # The destructive caller reports contention, never a live owner.
     except Exception:
         log.warning("Settlement liveness of %s is unknown", task_id, exc_info=True)
         return None

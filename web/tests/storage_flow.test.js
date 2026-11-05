@@ -91,8 +91,8 @@ test('Storage flow previews on its door, polls while listing, reads the whole po
     await settle();
     const door = mount.querySelector('[data-storage-door]');
     assert.equal(door.hidden, false);
-    assert.equal(door.textContent, 'Free temporary space…');
-    assert.equal(storageTray(mount).textContent, '', 'at rest the flow is empty');
+    assert.equal(door.textContent, 'Check for files to remove');
+    assert.match(storageTray(mount).textContent, /Not checked/);
     routes.set(previewUrl, (_url, init) => {
         assert.equal(init.method, 'POST');
         return response(freeBody('listing', { total: 2, pool: poolFacts(1, { bytes: null }), started: true }), 202);
@@ -101,9 +101,9 @@ test('Storage flow previews on its door, polls while listing, reads the whole po
     await door.fire('click', { target: door });
     await settle();
     assert.deepEqual(calls, [storageUrl, previewUrl]);
-    assert.match(storageTray(mount).textContent, /Checking what can go · 0 of 2 folders/);
+    assert.match(storageTray(mount).textContent, /Checking for files to remove · 0 of 2 folders/);
     assert.equal(door.hidden, true, 'no second start while it lists');
-    assert.equal(mount.querySelector('[data-storage-action="measure"]').textContent, 'Measure now', 'a preview POST never reads as a count');
+    assert.equal(mount.querySelector('[data-storage-action="measure"]').textContent, 'Measure sizes', 'a preview POST never reads as a count');
     assert.equal(document.activeElement?.getAttribute('data-key'), 'data-free-stop', 'focus follows the door into the listing');
     assert.equal(timers.polls(), 1, 'a listing is polled');
 
@@ -114,7 +114,7 @@ test('Storage flow previews on its door, polls while listing, reads the whole po
     routes.set(itemsUrl('pool', { cursor: 2, version: 'p1' }), () => held.promise);
     await timers.fire();
     await settle();
-    assert.match(storageTray(mount).textContent, /3 items · 3\.0 GB counted[\s\S]*Reading the list · 2 of 3/);
+    assert.match(storageTray(mount).textContent, /Can be removed3\.0 GB[\s\S]*3 items[\s\S]*Reading the list · 2 of 3/);
     const waiting = trayButton(mount, 'data-free-go');
     assert.equal(waiting.getAttribute('aria-disabled'), 'true');
     assert.equal(document.activeElement?.getAttribute('data-key'), 'data-free-go', 'focus follows Stop to the action it waits for');
@@ -123,10 +123,10 @@ test('Storage flow previews on its door, polls while listing, reads the whole po
     await storageTray(mount).fire('click', { target: waiting });
     await settle();
     assert.equal(posted, 0, 'a partial list sends nothing');
-    assert.doesNotMatch(storageTray(mount).textContent, /Remove 3 items|Show all/);
+    assert.doesNotMatch(storageTray(mount).textContent, /Remove 3 selected items|Review the/);
     held.resolve(page('pool', [poolEntry('c')], { total: 3 }));
     await settle();
-    assert.match(storageTray(mount).textContent, /Show all 3 and choose[\s\S]*Remove 3 items/);
+    assert.match(storageTray(mount).textContent, /Remove 3 selected items[\s\S]*Review the 3 items/);
     assert.equal(trayButton(mount, 'data-free-go').getAttribute('aria-disabled'), null);
     assert.equal(timers.polls(), 0, 'a ready list is not polled');
     assert.deepEqual(calls.slice(2), [storageUrl, itemsUrl('pool'), itemsUrl('pool', { cursor: 2, version: 'p1' })], 'each page once, the version on the next');
@@ -135,7 +135,7 @@ test('Storage flow previews on its door, polls while listing, reads the whole po
     const before = calls.length;
     trayButton(mount, 'data-free-cancel').focus();
     await pressTray(mount, 'data-free-cancel');
-    assert.equal(storageTray(mount).textContent, '');
+    assert.match(storageTray(mount).textContent, /Not checked/);
     assert.equal(door.hidden, false);
     assert.equal(document.activeElement, door, 'focus lands on the door');
     assert.equal(calls.length, before);
@@ -151,18 +151,18 @@ test('Storage flow sends the real ids of exactly what is chosen, across every pa
     const first = rows()[0];
     first.checked = false;
     await storageTray(mount).fire('change', { target: first });
-    assert.match(storageTray(mount).textContent, /149 of 150 chosen[\s\S]*Remove 149 items/);
+    assert.match(storageTray(mount).textContent, /Remove 149 selected items[\s\S]*149 of 150 chosen/);
     await pressTray(mount, 'data-free-none');
-    assert.match(storageTray(mount).textContent, /0 of 150 chosen[\s\S]*Nothing selected/);
+    assert.match(storageTray(mount).textContent, /Nothing selected[\s\S]*0 of 150 chosen/);
     assert.equal(trayButton(mount, 'data-free-go'), null);
     await pressTray(mount, 'data-free-all');
-    assert.match(storageTray(mount).textContent, /150 of 150 chosen[\s\S]*Remove 150 items/);
+    assert.match(storageTray(mount).textContent, /Remove 150 selected items[\s\S]*150 of 150 chosen/);
     await pressTray(mount, 'data-free-more-picks');
     assert.equal(rows().length, 150);
     const last = rows()[149];
     last.checked = false;
     await storageTray(mount).fire('change', { target: last });
-    assert.match(storageTray(mount).textContent, /Remove 149 items/);
+    assert.match(storageTray(mount).textContent, /Remove 149 selected items/);
 
     let posted = null;
     routes.set(freeUrl, async (_url, init) => {
@@ -206,7 +206,7 @@ test('Storage flow sends the real ids of exactly what is chosen, across every pa
     assert.deepEqual(reads, [itemsUrl('pool')], 'one read of the pool, no outcome read until asked for');
 
     await pressTray(mount, 'data-free-done');
-    assert.equal(storageTray(mount).textContent, '');
+    assert.match(storageTray(mount).textContent, /Not checked/);
     assert.equal(mount.querySelector('[data-storage-door]').hidden, false, 'Done gives the door back');
     assert.equal(calls.filter((url) => url === freeUrl).length, 1, 'one POST');
 });
@@ -228,7 +228,7 @@ test('Storage flow says why a run did not start, stops offering a stale list, an
     routes.set(itemsUrl('pool', { plan: 'p2' }), response({ plan: 'p2', view: 'pool', version: 'p2', total: 1, counts: {}, next_cursor: null, items: [poolEntry('z')] }));
     await pressTray(mount, 'data-free-preview');
     await settle();
-    assert.match(storageTray(mount).textContent, /Remove 1 item/);
+    assert.match(storageTray(mount).textContent, /Remove 1 selected item/);
     assert.doesNotMatch(storageTray(mount).textContent, /The list changed|the list you reviewed/i, 'the owner\'s own new start has read the refusal');
     assert.ok(calls.includes(itemsUrl('pool', { plan: 'p2' })));
 });
@@ -373,7 +373,7 @@ test('Storage flow refuses a pool page it cannot trust, offers Try again, and ne
     const retry = trayButton(mount, 'data-free-retry-pool');
     await storageTray(mount).fire('click', { target: retry });
     await settle();
-    assert.match(storageTray(mount).textContent, /Remove 3 items/);
+    assert.match(storageTray(mount).textContent, /Remove 3 selected items/);
 });
 
 test('Storage flow names a pool read that failed, with no loop, and an outdated plan by what to do next', async (t) => {
@@ -452,7 +452,7 @@ test('Storage flow lists what stays only when opened, page by page', async (t) =
     routes.set(itemsUrl('excluded'), page('excluded', stays, { total: 102, next_cursor: 100 }));
     await toggleOpen(mount, 'left');
     await settle();
-    assert.match(storageTray(mount).textContent, /1: unique work not verified saved · 101: still in use[\s\S]*Task x0[\s\S]*Task x99[\s\S]*Show 2 more/);
+    assert.match(storageTray(mount).textContent, /1 unique work not verified saved · 101 still in use[\s\S]*Task x0[\s\S]*Task x99[\s\S]*Show 2 more/);
     // A repaint re-opens the disclosure and its toggle reads nothing more.
     await toggleOpen(mount, 'left');
     await settle();
@@ -467,7 +467,7 @@ test('Storage flow lists what stays only when opened, page by page', async (t) =
 test('Storage flow reaches the saved groups on purpose: nothing checked, the shared confirm, one POST of whole groups', async (t) => {
     const groups = [freeGroup('work_folders', 6.8e9), freeGroup('review_evidence', 43e9), freeGroup('result_pins', 2e5)];
     const { mount, routes, calls, document } = await openReady(t, [poolEntry('a')], { groups });
-    assert.match(storageTray(mount).textContent, /Saved, unknown or undecided: this button never removes them/);
+    assert.match(storageTray(mount).textContent, /Saved work in/);
     assert.equal(storageTray(mount).querySelector('[data-free-group]'), null, 'read-only until asked for');
     await pressTray(mount, 'data-free-saved');
     assert.equal(document.activeElement?.getAttribute('data-key'), 'data-free-saved-back', 'focus moves into the checklist');
@@ -548,7 +548,7 @@ test('Storage flow sends no row hidden below the shown hundred that the owner le
     const first = storageTray(mount).querySelectorAll('[data-free-pick]')[0];
     first.checked = true;
     await storageTray(mount).fire('change', { target: first });
-    assert.match(storageTray(mount).textContent, /1 of 150 chosen[\s\S]*The 50 not shown keep their choice: none chosen\.[\s\S]*Remove 1 item/);
+    assert.match(storageTray(mount).textContent, /Remove 1 selected item[\s\S]*1 of 150 chosen[\s\S]*The 50 not shown keep their choice: none chosen\./);
     let posted = null;
     routes.set(freeUrl, async (_url, init) => {
         posted = JSON.parse(init.body);
@@ -589,12 +589,12 @@ test('Storage flow stops reading when its tab is left, resumes the same read on 
     assert.equal(signal.aborted, true, 'leaving the tab aborts its read');
     held.resolve(page('pool', [poolEntry('c')], { total: 3 }));  // a server that answered anyway
     await settle();
-    assert.doesNotMatch(storageTray(mount).textContent, /Remove 3 items/, 'a late page counts for nothing');
+    assert.doesNotMatch(storageTray(mount).textContent, /Remove 3 selected items/, 'a late page counts for nothing');
 
     routes.set(itemsUrl('pool', { cursor: 2, version: 'p1' }), page('pool', [poolEntry('c')], { total: 3 }));
     show('storage');
     await settle();
-    assert.match(storageTray(mount).textContent, /Remove 3 items/);
+    assert.match(storageTray(mount).textContent, /Remove 3 selected items/);
     assert.equal(calls.filter((url) => url === itemsUrl('pool')).length, 1, 'the page already read is not read again');
 
     // Another tab previewed: this flow's choices and rows mean nothing under the new plan.
@@ -604,7 +604,7 @@ test('Storage flow stops reading when its tab is left, resumes the same read on 
     show('logs');
     show('storage');
     await settle();
-    assert.match(storageTray(mount).textContent, /1 of 1 chosen[\s\S]*Remove 1 item/);
+    assert.match(storageTray(mount).textContent, /Remove 1 selected item[\s\S]*1 of 1 chosen/);
     const box = storageTray(mount).querySelector('[data-free-pick]');
     assert.equal(box.hasAttribute('checked'), true, 'nothing carried over');
 });
@@ -621,7 +621,7 @@ test('Storage destroy aborts a pool read and ignores its late page and every lat
     assert.equal(signal.aborted, true);
     held.resolve(page('pool', [poolEntry('a'), poolEntry('b')]));
     await settle();
-    assert.doesNotMatch(storageTray(mount).textContent, /Remove 2 items/);
+    assert.doesNotMatch(storageTray(mount).textContent, /Remove 2 selected items/);
     const before = calls.length;
     await storageTray(mount).fire('click', { target: trayButton(mount, 'data-free-cancel') });
     await settle();
@@ -654,8 +654,8 @@ test('Storage flow names saved-group items it leaves out by their own words, nev
     await settle();
     const tray = storageTray(mount).textContent;
     assert.doesNotMatch(tray, /another reason/);
-    assert.match(tray, /Can’t go right now[\s\S]*1: still in use/);
-    assert.doesNotMatch(tray, /Can’t go right now[^]*?2: /, 'the saved groups say their own count');
+    assert.match(tray, /Kept ·[\s\S]*1 still in use/);
+    assert.doesNotMatch(tray, /Kept ·[^]*?2: /, 'the saved groups say their own count');
     const rows = storageTray(mount).querySelectorAll('[data-free-excluded]');
     assert.equal(rows.length, 3);
     assert.match(rows[0].textContent, /only its saved group can remove it/);
@@ -671,7 +671,7 @@ for (const [name, now, expectRest] of [['no plan after a restart', idleFree, tru
         assert.match(storageTray(mount).textContent, /Nothing was removed: the list you reviewed had changed\./, 'the attempt is still said in place');
         assert.equal(trayButton(mount, 'data-free-go'), null);
         if (expectRest) assert.equal(mount.querySelector('[data-storage-door]').hidden, false, 'the server holds no plan: the door is the next step');
-        else assert.match(storageTray(mount).textContent, /Checking what can go/, 'the server\'s own phase stands beside it');
+        else assert.match(storageTray(mount).textContent, /Checking for files to remove/, 'the server\'s own phase stands beside it');
         assert.equal(calls.filter((url) => url === freeUrl).length, 1);
         if (!expectRest) return;
         // The owner's next press starts over and the old sentence goes.
@@ -795,7 +795,7 @@ test('Storage flow after a lost Remove answer and a replaced plan says the outco
     await settle();
     const tray = storageTray(mount).textContent;
     assert.match(tray, /The answer to Remove was lost and the list has changed since; whether it removed anything is not known here\. Nothing is sent again\./);
-    assert.match(tray, /Remove 1 item/, 'the new plan is the owner\'s: the lost request can no longer start under it');
+    assert.match(tray, /Remove 1 selected item/, 'the new plan is the owner\'s: the lost request can no longer start under it');
     assert.equal(calls.filter((url) => url === freeUrl).length, 1);
     // The owner's next Remove is a new attempt: the old sentence goes with it.
     routes.set(freeUrl, response({ ...freeBody('running', { plan: 'p2', total: 1, pool: poolFacts(1), run: freeRun({ selected: 1, done: 0, removed: 0, removed_bytes: 0 }) }), started: true }, 202));
@@ -846,8 +846,8 @@ test('Storage flow resumes an interrupted pool read on tab return even when the 
     show('storage');
     await settle();
     await settle();
-    assert.match(storageTray(mount).textContent, /Storage status could not be read|Remove 3 items/);
-    assert.match(storageTray(mount).textContent, /Remove 3 items/, 'the held plan\'s list is read on, not left at "Reading the list…"');
+    assert.match(storageTray(mount).textContent, /Storage status could not be read|Remove 3 selected items/);
+    assert.match(storageTray(mount).textContent, /Remove 3 selected items/, 'the held plan\'s list is read on, not left at "Reading the list…"');
     assert.equal(calls.filter((url) => url === itemsUrl('pool', { cursor: 2, version: 'p1' })).length, 2);
 });
 
@@ -920,9 +920,9 @@ async function openCopies(t, n = 3, { items = copiesOf(n), body = {} } = {}) {
 
 test('Storage flow opens copies by hand on purpose, reads their list whole and starts with nothing chosen', async (t) => {
     const { mount, routes, calls, document } = await openReady(t, [poolEntry('a'), poolEntry('b')], manualFree(3));
-    assert.match(storageTray(mount).textContent, /Finished copies not verified saved/);
+    assert.match(storageTray(mount).textContent, /finished cop(?:y|ies) not verified saved/);
     assert.equal(calls.filter((url) => url.includes('view=manual')).length, 0, 'closed: nothing read');
-    assert.match(storageTray(mount).textContent, /Remove 2 items/, 'the ordinary pool never counts them');
+    assert.match(storageTray(mount).textContent, /Remove 2 selected items/, 'the ordinary pool never counts them');
     routes.set(manualUrl(), manualPage(copiesOf(3)));
     await pressTray(mount, 'data-free-manual-open');
     await settle();
@@ -939,7 +939,7 @@ test('Storage flow opens copies by hand on purpose, reads their list whole and s
     assert.equal(calls.filter((url) => url === freeUrl).length, 0);
     // Back returns to the review, the pool untouched; opening again keeps no choice that was not made.
     await pressTray(mount, 'data-free-manual-back');
-    assert.match(storageTray(mount).textContent, /Remove 2 items/);
+    assert.match(storageTray(mount).textContent, /Remove 2 selected items/);
 });
 
 test('Storage flow sends one POST of exactly the chosen copy ids with the acknowledgement, only after the dialog is confirmed', async (t) => {
@@ -1166,7 +1166,7 @@ test('Storage flow forgets the copies screen and its choices with the plan, and 
     await pressTray(mount, 'data-free-preview').catch(() => {});
     await settle();
     const review = storageTray(mount).textContent;
-    assert.match(review, /Remove 2 items/);
+    assert.match(review, /Remove 2 selected items/);
     assert.equal(storageTray(mount).querySelectorAll('[data-free-manual-pick]').length, 0, 'the screen is closed on a new plan');
     assert.ok(trayButton(mount, 'data-free-manual-open'), 'the door is there again, nothing chosen');
     routes.set(manualUrl({ plan: 'p2' }), response({ plan: 'p2', view: 'manual', version: 'p2', total: 2, counts: {}, next_cursor: null, items: copiesOf(2) }));
@@ -1175,7 +1175,7 @@ test('Storage flow forgets the copies screen and its choices with the plan, and 
     assert.match(storageTray(mount).textContent, /0 of 2 chosen/, 'nothing carried over');
     await pressTray(mount, 'data-free-manual-back');
     await pressTray(mount, 'data-free-cancel');
-    assert.equal(storageTray(mount).textContent, '');
+    assert.match(storageTray(mount).textContent, /Not checked/);
     assert.equal(mount.querySelector('[data-storage-door]').hidden, false);
 });
 

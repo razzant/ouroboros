@@ -2454,20 +2454,19 @@ fade dims a card where the list cuts it.
 
 ### Storage
 
-Storage leads with free space, when it was read and one `Free temporary space…`,
-replaced by the flow until `Done`; `Where it is` folds its groups (owner decisions
-2026-10-30T11:38Z and 14:09Z). The review is the one confirmation: `Remove N items`
-waits for the whole list, hidden rows keep their choice, counted; a refused plan
-offers only Check again. Details open on request; `Not included, and why` names
-each reason and item, then the saved groups (loss sentences, danger capsule). An
-unanswered Remove or Free holds the flow (no new choice, no hiding); a lost answer
-never reads as nothing removed or offers its list again. A result puts what went
-wrong first; counted size and free space are two facts. An `environment` goes
-whole, with whatever was installed in it. Finished copies with unproven saved
-contents have a separate, initially unchecked choice in the details (owner choice
-2026-10-30T16:48Z). Show the exact copies, the whole-copy loss warning and omitted
-path counts before confirmation; saved results and held commits remain. These
-copies are neither automatic candidates nor falsely labelled unable to go.
+Storage leads with **Space used by Ouroboros**, its measurement date, growth,
+unreadable count, **Refresh sizes**, the coloured bar and five-group legend (owner
+choice 2026-11-04). **Cleanup** follows: **Can be removed** is unknown until a
+check, never the selection; **Selected** is a separate quieter figure. One
+**Remove N selected items** waits for the whole list and sends exactly those ids;
+hidden rows keep their choice. Copies not verified saved and saved groups have
+one compact row each, deliberately opened, unchecked, with their whole-loss
+confirmation. **Kept** names concrete causes, each item accessible on request.
+An unanswered Remove/Free holds its flow; a lost POST never replays. A refused
+plan offers Check again. Results put problems first and keep every item reachable.
+**Folders** lists every measured place in two columns (one on phones), each opening
+to its reason, removers and parts. Free disk space is secondary, with its own
+reading date: counted size never promises free space. An environment goes whole.
 `Folders of deleted projects` is one read-only fold under the groups (owner choices
 2026-11-01T17:46Z and 22:27Z): no key, share, headline or action. A folder lists
 under the place already holding its bytes, or as outside the total; a shared one

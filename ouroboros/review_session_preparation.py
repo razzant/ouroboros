@@ -72,9 +72,10 @@ def seat_service_directories(gateway: Any, route_id: str, shape: Any, data_root:
     if thread_seat:
         return ServiceDirectories(limitation="thread_turns_carry_no_grant: a review thread's turns carry "
                                              "no execution grant" if shape.access == "workspace_write" else "")
+    seat_home = seat_dir(data_root, task_id, operation_id)
     return session_service_directories(
         gateway, route_id, access=shape.access, mode=shape.mode, data_root=data_root, drive_root=data_root,
-        task_id=task_id, key=f"seat-{seat_dir(data_root, task_id, operation_id).name}", execution_root=area)
+        task_id=task_id, key=f"seat-{seat_home.name}", execution_root=area)
 
 
 # A writable seat's own note inside the environment facts every delegated run is given.

@@ -25,6 +25,17 @@ from tests.test_store import document, publish
 OLD = "2026-10-01T00:00:00+00:00"
 
 
+@pytest.mark.parametrize("generic_cause", ["in_use", None])
+def test_exact_cause_breakdown_keeps_the_generic_remainder(generic_cause):
+    run = {"items": [SimpleNamespace(key="a", cause="task_live"),
+                     SimpleNamespace(key="b", cause=generic_cause)],
+           "kept_items": {"a": "in_use", "b": "in_use"}, "kept": {"in_use": 2}}
+    assert FreeSpace._kept_view(run) == [{"reason": "in_use", "count": 2, "causes": [
+        {"cause": "in_use", "count": 1}, {"cause": "task_live", "count": 1}]}]
+    run["items"][0].cause = "in_use"
+    assert FreeSpace._kept_view(run) == [{"reason": "in_use", "count": 2}]
+
+
 def _recent() -> str:
     return datetime.fromtimestamp(time.time() - 3600, tz=timezone.utc).isoformat()
 
@@ -296,7 +307,9 @@ def test_the_run_names_the_folders_it_freed_in_its_event(tmp_path, monkeypatch):
     rows = [json.loads(line) for line in (root / "logs" / "events.jsonl").read_text().splitlines()]
     report, = [row["report"] for row in rows if row["type"] == "storage_free"]
     assert report["removed_ids"] + report["deleting_ids"] == ["direct:gone"] and report["stuck_ids"] == []
-    assert report["removed"] + report["deleting"] == 1 and report["kept"] == [{"reason": "in_use", "count": 1}]
+    assert report["kept_ids"] == {"direct:busy": "in_use"}
+    assert report["kept_causes"] == {"direct:busy": "task_live"}
+    assert report["removed"] + report["deleting"] == 1 and report["kept"] == [{"reason": "in_use", "count": 1, "causes": [{"cause": "task_live", "count": 1}]}]
 
 
 def test_a_folder_not_previewed_is_untouched_and_a_task_live_again_is_kept(tmp_path, monkeypatch):
@@ -312,7 +325,7 @@ def test_a_folder_not_previewed_is_untouched_and_a_task_live_again_is_kept(tmp_p
     run = view["run"]
     assert not (root / "task_drives" / "first").exists()
     assert (root / "task_drives" / "late").is_dir() and (root / "task_drives" / "second").is_dir()
-    assert run["kept"] == [{"reason": "in_use", "count": 1}]
+    assert run["kept"] == [{"reason": "in_use", "count": 1, "causes": [{"cause": "task_live", "count": 1}]}]
     assert run["removed"] + run["deleting"] == 1 and run["selected"] == 2
 
 
@@ -357,7 +370,7 @@ def test_a_kept_folder_names_its_reason_and_the_next_run_frees_it(tmp_path, monk
     owner = _owner(probes)
     _preview(owner, root, tmp_path)
     view = _run(owner, root, tmp_path)
-    assert view["run"]["kept"] == [{"reason": "results_pending", "count": 1}]
+    assert view["run"]["kept"] == [{"reason": "results_pending", "count": 1, "causes": [{"cause": "child_refs_pending", "count": 1}]}]
     assert (root / "task_drives" / "pending").is_dir()
 
     _preview(owner, root, tmp_path)
@@ -372,6 +385,9 @@ def test_a_kept_folder_names_its_reason_and_the_next_run_frees_it(tmp_path, monk
     ("unread_mailbox_unreadable", "unreadable_record"),  # a torn mailbox is a read failure, not pending work
     ("task_result_unreadable", "unreadable_record"),
     ("custody_error: ValueError('torn')", "unreadable_record"),
+    ("raw_evidence_uncustodied", "results_pending"),
+    ("artifact_source_missing", "results_pending"),
+    ("undeclared_environment", "retained_evidence"),
     ("generation_closed", "restart"),
     ("store_busy", "busy"),  # a store still leased inside the drive: busy right now, tried next pass
     ("not_own_drive", "other"),  # a code with no owner-facing group stays "for another reason"
@@ -881,7 +897,9 @@ def test_the_checkout_run_reads_the_review_state_once_and_unknown_custody_keeps_
     if state == "readable":
         assert len(calls) == 2 and view["run"]["removed"] == 3 and not any(entry.exists() for entry in entries)
     else:
-        assert view["run"]["kept"] == [{"reason": "unreadable_record", "count": 3}] and all(entry.is_dir() for entry in entries)
+        assert view["run"]["kept"] == [{"reason": "unreadable_record", "count": 3,
+                                       "causes": [{"cause": "review_state_unreadable", "count": 3}]}]
+        assert all(entry.is_dir() for entry in entries) and view["run"]["failed"] == 0
 
 
 def test_result_pins_of_a_finished_writer_without_a_disposition_are_offered_and_dropped(tmp_path, monkeypatch):

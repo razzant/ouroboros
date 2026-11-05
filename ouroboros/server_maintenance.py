@@ -915,7 +915,7 @@ def _prune_review_checkouts(*, stop_event: Any = None) -> None:
             stop=lambda: _stop_requested(stop_event))
         if report.get("views_done"):
             _REVIEW_VIEWS_OWED[0] = False
-        _prune_event("review_checkout_prune", ("released", "removed", "checkouts_removed", "errors", "skipped"),
+        _prune_event("review_checkout_prune", ("released", "removed", "checkouts_removed", "checkout_holds", "errors", "skipped"),
                      report=report)
     except Exception:
         log.debug("Review checkout prune failed", exc_info=True)

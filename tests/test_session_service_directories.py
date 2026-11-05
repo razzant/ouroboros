@@ -363,6 +363,10 @@ def test_real_bus_through_safe_test_uses_the_actual_short_grant(tmp_path, monkey
         assert record["returncode"] == 0 and pathlib.Path(record["scratch"]).parent == scratch
     finally:
         custody._CUSTODY.clear()
+        if consumer == 'reviewer':
+            with pytest.raises(OSError, match='copy still holds scratch'):
+                workspace_preflight.release_session_scratch(drive, data_root=data)
+            assert rc.capture_seat_evidence(data, 'task-1', 'socket')['status'] == 'retained'
         workspace_preflight.release_session_scratch(drive)
 
 

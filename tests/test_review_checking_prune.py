@@ -427,3 +427,25 @@ def test_unreadable_live_ownership_prunes_nothing(monkeypatch, tmp_path):
     monkeypatch.setattr(sm, "_startup_live_task_ids", unreadable)
     monkeypatch.setattr(rp, "prune_review_checkouts", lambda *_args, **_kwargs: pytest.fail("pruned blind"))
     sm._prune_review_checkouts()
+
+
+@pytest.mark.parametrize('door', ['live_task', 'ended_task', 'skills_api'])
+@pytest.mark.parametrize('window', ['unbounded', 'open', 'spent'])
+def test_continuation_copy_follows_an_available_continuation_door(tmp_path, monkeypatch, door, window):
+    from tests.test_review_checkout_lifecycle import _seat as make_seat
+    root, source = _frozen(tmp_path)
+    task = 'api_skill_review' if door == 'skills_api' else TASK
+    area = make_seat(root, source, 'stopped', task=task)
+    rc.terminal_seat_evidence(root, task, 'stopped', {'summary': {'id':'run', 'state':'failed'}}, hold=True)
+    marker_path = area.parent / 'checking.json'
+    marker = json.loads(marker_path.read_text())
+    marker_path.write_text(json.dumps({**marker, 'created_at': '2000-01-01T00:00:00+00:00'}))
+    from datetime import datetime, timedelta, timezone
+    start = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+    _custody(monkeypatch, settled=[area], started=start)
+    for entry in current.task_snapshot(root, task)['runs'].values():
+        entry.max_seconds = {'unbounded': 0, 'open': 3600, 'spent': 60}[window]
+    result = rp.prune_review_checkouts(root, {task} if door == 'live_task' else set())
+    retained = door != 'ended_task' and window != 'spent'
+    assert result['released'] == (0 if retained else 1)
+    assert area.exists() is retained
