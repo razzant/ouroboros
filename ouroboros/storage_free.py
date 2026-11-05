@@ -438,13 +438,14 @@ class FreeSpace:
 
     def _settled(self, root: pathlib.Path, run: Dict[str, Any]) -> Tuple[List[str], List[str], List[str]]:
         """The run's folders as they stand now, by id: a moved folder is removed once its trash entry is gone,
-        stuck once the ``custody_trash`` job recorded that this very entry survived its removal (a moved drive or
-        seat home is named by its task, a discarded scratch handoff by its own entry)."""
+        stuck once the ``custody_trash`` job recorded that this very entry survived its removal, or stayed held
+        because its producer marked it again (a moved drive or seat home is named by its task, a discarded scratch
+        handoff by its own entry)."""
         from ouroboros.task_custody import custody_trash_entries
         from ouroboros.workspace_preflight import _RELEASE_MARK
 
         entries = custody_trash_entries(root) if run["moved"] else []
-        survived = self._stuck_trash(root) if entries else {}
+        survived = self._survived_trash(root) if entries else {}
         named = {name: name if _RELEASE_MARK in name else name.rsplit("-", 1)[0] for name, _identity in entries}
         waiting = {named[name] for name, identity in entries if survived.get(name) != identity}
         blocked = {named[name] for name, identity in entries if survived.get(name) == identity}
@@ -487,15 +488,15 @@ class FreeSpace:
             for reason, count in sorted(run["kept"].items()) if count]
 
     @staticmethod
-    def _stuck_trash(root: pathlib.Path) -> Dict[str, Any]:
-        """The ``custody_trash`` job's record of entries that survived its removal (name -> the
-        identity it saw); nothing when the row is absent or the store cannot be read now."""
+    def _survived_trash(root: pathlib.Path) -> Dict[str, Any]:
+        """The ``custody_trash`` job's record of entries that survived its removal, stuck or held (name ->
+        the identity it saw); nothing when the row is absent or the store cannot be read now."""
         try:
             from ouroboros import maintenance_jobs
 
             row = maintenance_jobs.job(root, "custody_trash") or {}
-            stuck = row.get("stuck")
-            return stuck if isinstance(stuck, dict) else {}
+            return {name: identity for key in ("held", "stuck") if isinstance(row.get(key), dict)
+                    for name, identity in row[key].items()}
         except Exception:
             return {}
 

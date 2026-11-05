@@ -163,7 +163,7 @@ def test_a_producer_retained_handoff_is_manual_loss_acceptance_and_not_the_ordin
     """A marked handoff is named with the producer's words; the owner's explicit discard removes its marker
     and hands exactly that entry to the maintenance child (its identity touched, the child asked), deleting
     nothing on Free's thread, so another settled entry waits for the child too; an ordinary item press
-    cannot reach it."""
+    cannot reach it, and a handoff its producer marks again before the child runs reads as kept."""
     from tests.test_session_scratch_release import _started
     from ouroboros import maintenance
     from ouroboros.workspace_preflight import release_finished_scratch
@@ -200,7 +200,12 @@ def test_a_producer_retained_handoff_is_manual_loss_acceptance_and_not_the_ordin
     assert [entry.stat().st_ino, entry.stat().st_mtime_ns] != held_identity, "a touched entry makes the job due"
     run = owner.projection(data)["run"]
     assert (run["deleting"], run["removed"], run["failed"]) == (1, 0, 0)
-    assert maintenance.run_job(data, "custody_trash") == {"state": "done", "items": 2}
+    assert environment.retain_tree(nested, marker_words)  # its producer marks it again before the child runs
+    assert maintenance.run_job(data, "custody_trash") == {"state": "done", "items": 1} and not other.exists()
+    run = owner.projection(data)["run"]
+    assert (run["deleting"], run["stuck"]) == (0, 1), "a handoff marked again is kept, not still being deleted"
+    assert retire_synthetic_retention(nested, marker_words)
+    assert maintenance.run_job(data, "custody_trash") == {"state": "done", "items": 1}
     assert not scratch.exists() and not any((data / "state" / "custody_trash").iterdir())
     run = owner.projection(data)["run"]
     assert (run["deleting"], run["removed"], run["stuck"]) == (0, 1, 0)
