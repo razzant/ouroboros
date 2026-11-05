@@ -54,11 +54,13 @@ def test_the_warm_root_compiles_the_checkout_and_collects_the_walked_modules_int
     assert (prefix / "OUROBOROS_TEST_SCRATCH.txt").read_text(encoding="utf-8").startswith("bytecode-prefix\n")
     tag, below = sys.implementation.cache_tag, Path(*repo.resolve().parts[1:]).as_posix()
     cached = sorted(path.relative_to(prefix).as_posix() for path in prefix.rglob("*.pyc"))
-    assert f"{below}/ouroboros/thing.{tag}.pyc" in cached, cached  # compileall: the whole checkout
+    compiled = f"{below}/ouroboros/thing.{tag}.pyc"
+    assert compiled in cached, cached  # compileall: the whole checkout
     rewritten = [name for name in cached if name.startswith(f"{below}/tests/") and "-pytest-" in name]
     assert [name.rsplit("/", 1)[1].split(".")[0] for name in rewritten] == ["test_a", "test_b"], rewritten  # the walk
     before = len(cached)
     probe = subprocess.run([sys.executable, "-v", "-c", "import ouroboros.thing"], cwd=repo, env=env,
                            capture_output=True, text=True, timeout=120)
-    assert probe.returncode == 0 and f"code object from '{prefix}" in probe.stderr, probe.stderr[-800:]
+    # `python -v` names the pyc it read with repr(): the exact file, as that form spells it on every OS.
+    assert probe.returncode == 0 and f"code object from {str(prefix / compiled)!r}" in probe.stderr, probe.stderr[-800:]
     assert len(list(prefix.rglob("*.pyc"))) == before, "the run's processes keep the write ban"
