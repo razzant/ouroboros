@@ -29,8 +29,8 @@ def _safe(tmp_path, command, *, keep=False, evidence=None):
     return result, paths[-1] if paths else None
 
 
-@pytest.mark.parametrize("red", [False, True])
-def test_known_pytest_scratch_released_with_complete_raw_output_and_diagnostics(tmp_path, red):
+@pytest.mark.parametrize("red,keep", [(False, False), (True, False), (False, True)])
+def test_known_pytest_scratch_released_with_complete_raw_output_and_diagnostics(tmp_path, red, keep):
     probe = tmp_path / "probe"
     probe.mkdir()
     (probe / "test_probe.py").write_text('''import os, pathlib, sys
@@ -46,11 +46,16 @@ def test_probe(tmp_path):
     assert ''' + str(not red) + "\n", encoding="utf-8")
     args = [sys.executable, "-m", "pytest", "-p", "tests.conftest", "--rootdir", str(probe),
             "--confcutdir", str(probe), "-o", "addopts=", "-q", "-s", str(probe)]
-    result, evidence = _safe(tmp_path, args)
+    result, evidence = _safe(tmp_path, args, keep=keep)
     assert result.returncode == int(red), result.stderr
     record = json.loads((evidence / "result.json").read_text())
-    assert not Path(record["scratch"]).exists(), record
-    assert record["cleanup"]["released"] and record["containment_error"] == ""
+    root = Path(record["scratch"])
+    if keep:  # debug retention holds even a passed test's folder, from the command's start
+        assert next(root.glob("b*/t/test_probe*/reproducible.bin")).stat().st_size == 3_000_000
+        import shutil
+        shutil.rmtree(root)  # this test's own new ended root
+    assert not root.exists(), record
+    assert bool(record["cleanup"]["released"]) is not keep and record["containment_error"] == ""
     raw = next(evidence.glob("command-*/stdout.bin")).read_bytes()
     err = next(evidence.glob("command-*/stderr.bin")).read_bytes()
     assert b"STDOUT_HEAD" + b"o" * 100_000 + b"STDOUT_TAIL" in raw
@@ -184,6 +189,21 @@ def test_native_ctxless_green_red_keep_full_source_and_logs(tmp_path, capsys, re
     assert b"NATIVE_HEAD" + b"x" * 100_000 + b"NATIVE_TAIL" in next(evidence.glob("pytest-*/stdout.bin")).read_bytes()
     assert (evidence / "source/untracked/admitted-input.bin").read_bytes() == b'untracked\x00exact'
     assert b"dirty input" in (evidence / "source/candidate.diff").read_bytes()
+
+
+def test_native_debug_keep_holds_the_root_before_any_test_runs(tmp_path, monkeypatch, capsys):
+    from ouroboros.preflight_runner import run_hermetic_pytest
+    from tests._shared import retire_synthetic_gate_hold
+    repo = _repo(tmp_path / "repo", "import os, pathlib\ndef test_probe():\n    assert (pathlib.Path("
+                 "os.environ['OUROBOROS_TEST_TEMP_ROOT']) / 'OUROBOROS_RETAINED.txt').is_file()\n")
+    monkeypatch.setenv("OUROBOROS_PREFLIGHT_KEEP", "1")
+    assert run_hermetic_pytest(repo, pytest_args=["tests", "-q"], timeout=60) is None
+    evidence = Path(next(line.split(" ", 1)[1] for line in capsys.readouterr().err.splitlines()
+                         if line.startswith("PREFLIGHT_EVIDENCE ")))
+    root = Path(json.loads((evidence / "result.json").read_text())["scratch"])
+    assert retire_synthetic_gate_hold(repo, root, "explicit preflight debug retention")
+    import shutil
+    shutil.rmtree(root)  # this test's own new ended root
 
 
 def test_native_timeout_preserves_obtained_output(tmp_path, capsys):

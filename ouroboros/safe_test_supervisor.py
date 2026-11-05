@@ -152,6 +152,8 @@ def main(root, repo, command, evidence_parent=None, keep=False, timeout=None) ->
         if signum is not None:
             previous[signum] = signal.signal(signum, request_stop)
     try:
+        if keep:  # before the command: a test's folder goes at its end unless its root is held
+            retain_tree(root, "debug retention")
         evidence, fallback = _evidence_directory(repo, root, evidence_parent)
         if fallback:
             report_diagnostic(f"SAFE_TEST_EVIDENCE_FALLBACK {fallback}: {evidence}")

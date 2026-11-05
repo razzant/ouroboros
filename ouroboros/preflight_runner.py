@@ -1334,7 +1334,10 @@ def _run_hermetic_pytest(
     unproven_teardown = ""
     selection, subject, inventory = None, None, {}
     try:
+        from ouroboros.test_environment import retain_tree
         from ouroboros.test_evidence import EVIDENCE_POINTER
+        if os.environ.get("OUROBOROS_PREFLIGHT_KEEP") == "1":  # a test's folder goes at its end unless its root is held
+            retain_tree(temp_root, "explicit preflight debug retention")
         (temp_root / EVIDENCE_POINTER).write_text(str(evidence["path"]), encoding="utf-8")
         # Install before compiling specs: -p must name the actual nonce module.
         probe_module = _install_worker_probe(temp_root)
