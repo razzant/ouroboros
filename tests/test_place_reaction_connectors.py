@@ -165,8 +165,7 @@ def test_a_tool_wait_runs_to_its_bound_over_a_real_reaction(chain, provider, wai
 
     world.h.script = [start, after]
     post(world, world.spec.first)
-    until(lambda: world.h.calls == 1, "the wait")
-    time.sleep(0.2)
+    until(lambda: world.h.agents and getattr(world.author(), "_in_slot_waits", {}), "the tool's in-slot wait")
     assert post(world, world.spec.heard)["outcome"] == "silent"
     assert attention(world)[world.spec.heard] == "current_author" and world.h.calls == 1
     assert settled(world)["text"] == FINAL
@@ -185,8 +184,7 @@ def test_control_a_real_message_ends_that_wait(chain, provider):
 
     world.h.script = [call(("await_messages", {"timeout_sec": 30})), after]
     post(world, world.spec.first)
-    until(lambda: world.h.calls == 1, "the wait")
-    time.sleep(0.2)
+    until(lambda: world.h.agents and getattr(world.author(), "_in_slot_waits", {}), "the tool's in-slot wait")
     post(world, world.spec.later)
     settled(world)
     assert '"reason": "owner_mailbox_pending"' in seen["result"]
