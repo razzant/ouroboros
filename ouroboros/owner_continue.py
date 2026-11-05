@@ -1,26 +1,20 @@
 """The owner's Continue of interrupted or explicitly unfinished work: identity, eligibility, sources.
 
-Owner Batch4 (1A/4A/8A): Continue is a NEW root in the same room and folder
-that reads the earlier work; it is never a resurrection of the old task,
-never offered after the owner's own Stop, a Panic or a finished answer, and it
-adopts no old children: it may only decide a direct child's finished native
-result (apply or verify it, accept a shared one as it stands, or reject it)
-through ``integrate_subagent_patch`` under the recorded relation.
-The successor model decides whether and how to go on
-(LLM-first) and asks in the existing conversation when unsure — the host
-carries facts, not a policy. This module is the protocol's data half; the
-queue admission is ``supervisor/continuation_admission.py``.
+Owner Batch4 (1A/4A/8A): Continue is a NEW root in the same room and folder that reads the earlier work; it is
+never a resurrection of the old task, never offered after the owner's own Stop, a Panic or a finished answer, and it
+adopts no old children: it may only decide a direct child's finished native result (apply or verify it, accept a
+shared one as it stands, or reject it) through ``integrate_subagent_patch`` under the recorded relation. The
+successor model decides whether and how to go on (LLM-first) and asks in the existing conversation when unsure — the
+host carries facts, not a policy. This module is the protocol's data half; the queue admission is
+``supervisor/continuation_admission.py``.
 
-- IDENTITY: the successor id is derived from ``(verb, predecessor, action
-  nonce)``; the nonce is the client's, kept across retry and reload. The id is
-  a name, not the proof: the full binding (predecessor, nonce, successor,
+- IDENTITY: the successor id is derived from ``(verb, predecessor, action nonce)``; the nonce is the client's, kept
+  across retry and reload. The id is a name, not the proof: the full binding (predecessor, nonce, successor,
   destination, group, token) is recorded and compared on every replay.
-- CLAIM before any effect: the binding is written on the predecessor's result
-  (``continued_by``, under its own lock) before the successor row, the queue or
-  any workspace effect; a write that fails refuses with nothing done. One
-  predecessor has one Continue successor: a later press with another nonce is
-  answered with the accepted successor (a stale card points to it); new
-  intentional work goes through the ordinary conversation.
+- CLAIM before any effect: the binding is written on the predecessor's result (``continued_by``, under its own lock)
+  before the successor row, the queue or any workspace effect; a write that fails refuses with nothing done. One
+  predecessor has one Continue successor: a later press with another nonce is answered with the accepted successor (a
+  stale card points to it); new intentional work goes through the ordinary conversation.
 - ELIGIBILITY from typed facts only (``continuation_eligibility``): a settled
   ROOT whose recorded cause is a technical interruption — the owner Restart's
   or a graceful shutdown's cancel origin (the stop door records it,
@@ -35,12 +29,10 @@ queue admission is ``supervisor/continuation_admission.py``.
   keeps its total and starts from the execution its predecessor closed
   (``execution_carry``); a spent budget refuses like a deadline, an unrecorded
   total refuses as unknown, never as a new quota.
-- SOURCES kept apart: the exact original owner message and every later
-  owner-authored mailbox row (read or unread) are the owner's; the
-  predecessor's own result is its authored note; unread mail from tasks is
-  peer context. A required owner source that cannot be read refuses (a gap is
-  named, never reconstructed as owner text). A root no owner message opened is continued
-  from the opening its producer recorded, never as owner words (``owner_sources``).
+- SOURCES kept apart: the exact original owner message and every later owner-authored mailbox row (read or unread) are
+  the owner's; the predecessor's own result is its authored note; unread mail from tasks is peer context. A required
+  owner source that cannot be read refuses (a gap is named, never reconstructed as owner text). A root no owner
+  message opened is continued from the opening its producer recorded, never as owner words (``owner_sources``).
 """
 
 from __future__ import annotations
@@ -115,6 +107,14 @@ CORPUS_TASK_SOURCES = frozenset({"principal_task_message", "relayed_peer_message
 # The typed ids an owner-source row may carry, each a string when present: its message, a task message's sender and
 # relaying sibling, an owner answer's card, the chat row it is and that id's room; its ``reply_to`` rides beside them.
 ROW_IDS = ("msg_id", "source_task_id", "relayed_from_task_id", "quiz_id", "client_message_id", "chat_id")
+
+
+def row_identity(row: Dict[str, Any]) -> str:
+    """One message's identity in a Continue's sources: its ``msg_id``, else its room and client id ('' with neither)."""
+    client = str(row.get("client_message_id") or "")
+    return str(row.get("msg_id") or "") or (f"client {row.get('chat_id') or ''} / {client}" if client else "")
+
+
 # What a successor reads of an answered card beside the owner's words (``answered_card``).
 CARD_FIELDS = ("quiz_id", "question", "options", "answered_index", "comment", "asked_at", "answered_at")
 # The binding's copy of the work's explicit execution budget (``execution_carry``).
@@ -505,13 +505,13 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
             if sources is not None and row.get(source_key, "") not in sources:
                 gaps.append("owner_source_provenance_unknown")
                 continue
-            msg_id, text = row.get("msg_id", ""), row[text_key]
-            if msg_id and msg_id in seen:
-                if seen[msg_id] != (text, target is later):
+            identity, text = row_identity(row), row[text_key]
+            if identity and identity in seen:
+                if seen[identity] != (text, target is later):
                     gaps.append("owner_message_identity_conflict")
                 continue
-            if msg_id:
-                seen[msg_id] = (text, target is later)
+            if identity:
+                seen[identity] = (text, target is later)
             target.append(dict(row))
     late_framed: set = set()  # ids whose exact row carries typed late-answer provenance
     quizzes = result.get("owner_quiz") if isinstance(result.get("owner_quiz"), dict) else {}
@@ -531,8 +531,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
                 gaps.append(malformed)
                 continue
             msg_id, source, text = str(row.get("msg_id") or ""), str(row.get("source") or ""), row["content"]
-            client = str(row.get("client_message_id") or "")
-            identity = msg_id or (f"client {row.get('chat_id') or ''} / {client}" if client else "")
+            client, identity = str(row.get("client_message_id") or ""), row_identity(row)
             if source not in CORPUS_INITIAL_SOURCES | CORPUS_OWNER_SOURCES | CORPUS_TASK_SOURCES:
                 gaps.append("owner_source_provenance_unknown")
                 continue
