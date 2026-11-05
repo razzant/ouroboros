@@ -287,7 +287,7 @@ def _get_tool_timeout(
                     settings_val = parsed
             except ValueError:
                 pass
-    per_tool = tools.get_timeout(tool_name)
+    per_tool = tools.get_timeout(str((tool_args or {}).get("name") or "") if tool_name == "call_mcp_tool" else tool_name)
     base = max(settings_val, per_tool) if settings_val > 0 and per_tool is not None else per_tool
     if tool_name in {"analyze_screenshot", "vlm_query"}:
         from ouroboros.tools.vision import _vision_tool_timeout
