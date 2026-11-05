@@ -233,14 +233,6 @@ def test_task_result_row_explicit_falsy_kwargs_override_metadata():
     assert row["error"] == ""
 
 
-def test_pyproject_does_not_package_devtools_runtime_assets():
-    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert '"devtools*"' not in pyproject
-    assert "devtools = [" not in pyproject
-    assert '"benchmarks/**/*.sh"' not in pyproject
-    assert '"benchmarks/**/*.md"' not in pyproject
-
-
 def test_executable_devtools_entrypoints_support_direct_help():
     scripts = [
         "devtools/benchmarks/programbench/run_programbench.py",

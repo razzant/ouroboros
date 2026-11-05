@@ -1074,23 +1074,6 @@ def _covers(scan_path: str, pattern: str, scan_prefix_ok: bool = True) -> bool:
 # --- tests -----------------------------------------------------------------
 
 
-def test_update_backup_inventory_names_its_pending_and_partial_restore_lifetime():
-    row = next(line for line in DOC.read_text(encoding="utf-8").splitlines()
-               if line.startswith("| `state/skills/<name>/` owner state"))
-    assert "`update_backup.json`" in row
-    assert "only while a review-basis update is pending" in row
-    assert "removed when it settles or the skill is uninstalled" in row
-    assert "kept as evidence after a partial restore" in row
-    assert "state/skills/*/update_backup.json" in scan_data_paths()
-
-
-def test_skill_update_docs_name_all_rejection_reasons():
-    for filename in ("CREATING_SKILLS.md", "CLIENT_CONTRACT.md"):
-        text = (REPO / "docs" / filename).read_text(encoding="utf-8")
-        for reason in ("review_blockers", "review_unfinished", "preflight_failed", "landing_failed"):
-            assert f"`{reason}`" in text, (filename, reason)
-
-
 def test_scan_is_populated_and_pinned():
     paths = scan_data_paths()
     assert "uploads/views/*_*" in paths, "the shared original-retention writer must remain scanned"

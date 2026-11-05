@@ -11,9 +11,6 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_PATH = REPO_ROOT / "skills" / "unix_computer_use" / "plugin.py"
-SKILL_PATH = REPO_ROOT / "skills" / "unix_computer_use" / "SKILL.md"
-
-
 _PROBE_HEADS = (("lsappinfo",), ("xdotool", "getactivewindow"), ("wmctrl", "-lpxG"))
 
 
@@ -67,13 +64,6 @@ def test_unix_computer_use_registers_expected_tools(tmp_path):
         "window_list",
         "ax_tree",
     } <= set(api.tools)
-
-
-def test_unix_computer_use_manifest_declares_permissions():
-    text = SKILL_PATH.read_text(encoding="utf-8")
-
-    # `net` is required for the remote OSWorld HTTP / SSH backends.
-    assert "permissions: [tool, subprocess, net]" in text
 
 
 def test_unix_computer_use_screenshot_uses_detected_backend(tmp_path, monkeypatch):

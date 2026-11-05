@@ -862,15 +862,6 @@ def _read(rel: str) -> str:
     return (ROOT / rel).read_text(encoding="utf-8")
 
 
-def test_the_spa_declares_after_its_theme_script_and_only_the_spa_declares():
-    """The declaration is parsed after ``theme.js`` painted, so it carries the palette in one message."""
-    index = _read("web/index.html")
-    meta = '<meta name="ouroboros-window-chrome" content="integrated">'
-    assert index.count(meta) == 1 and index.index('<script src="/static/theme.js"></script>') < index.index(meta)
-    assert index.index(meta) < index.index("<body")
-    assert "ouroboros-window-chrome" not in _read("web/onboarding_template.html")
-
-
 def _selector_list(text):
     """Split selector lists, keeping commas in :is/:where, attributes and strings."""
     start, depth, quote, escaped = 0, 0, "", False

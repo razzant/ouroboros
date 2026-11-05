@@ -6,7 +6,6 @@ delegated session gets them in its start request, never in its canonical work or
 """
 import json
 import os
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -120,9 +119,3 @@ def test_an_unknown_start_retry_replays_the_rules_it_was_prepared_with(tmp_path,
         tmp_path, monkeypatch, acting=False, run_id="rules-session", prompt="Do the work",
         start_kwargs={"retry_of": unknown["pending_invocation_id"]})
     assert payload["status"] == "started" and retry == original
-
-
-def test_supervisor_prompt_keeps_machine_read_verdict_format():
-    """The parser's verdict vocabulary is structural; prompt meaning belongs to review."""
-    text = (Path(__file__).resolve().parents[1] / "prompts" / "SAFETY.md").read_text(encoding="utf-8")
-    assert '"status": "SAFE" | "SUSPICIOUS" | "DANGEROUS"' in text

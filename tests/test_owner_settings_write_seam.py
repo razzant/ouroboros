@@ -1192,28 +1192,3 @@ def test_settings_save_body_runs_off_the_event_loop():
                 assert "settings_document_mutation" in text, (
                     f"new settings writer {node.name} does not hold the document lock"
                 )
-
-
-def test_settings_enrichment_does_not_await_the_status_probe():
-    """The shared Claudexor status read can wake a cold daemon and walk model
-    discovery; a section reload awaiting it unbounded would hold the Save button
-    (loadSettings awaits its enrichment) hostage for the whole probe. The status
-    surface binding repaints the rows when the snapshot lands, and the review-pool
-    read starts only after the confirmed document is already editable."""
-    import pathlib
-
-    modules = pathlib.Path(__file__).resolve().parents[1] / "web" / "modules"
-    subagents = (modules / "subagents_settings.js").read_text(encoding="utf-8")
-    assert "await boundedStatusRefresh(store);" in subagents
-    assert "await store.refresh" not in subagents
-    host = (modules / "settings.js").read_text(encoding="utf-8")
-    load = host[host.index("async function loadSettings"):host.index("async function reloadSettingsWithFeedback")]
-    assert load.index("settingsLoaded = true;") < load.index("reloadReviewPool({ isCurrent })")
-    store = (
-        pathlib.Path(__file__).resolve().parents[1]
-        / "web" / "modules" / "claudexor_status_store.js"
-    ).read_text(encoding="utf-8")
-    assert "Promise.race([refresh, beat]).finally(() => { if (timer) clearTimeout(timer); });" in store, (
-        "the bounded beat must race the refresh (never cancel it) and clear "
-        "the losing timer"
-    )

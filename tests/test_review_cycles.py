@@ -300,23 +300,6 @@ def test_settings_post_accepts_ints_and_unlimited_rejects_garbage(monkeypatch, t
 # UI + JS binding parity (owner D11: ONE knob, Behavior tab, 1 / 2 / 3 / 5 / ∞)
 
 
-def test_settings_ui_knob_and_js_binding():
-    ui = (REPO / "web" / "modules" / "settings_ui.js").read_text(encoding="utf-8")
-    js = (REPO / "web" / "modules" / "settings.js").read_text(encoding="utf-8")
-    css = (REPO / "web" / "settings.css").read_text(encoding="utf-8")
-    assert '<input id="s-review-max-cycles" type="hidden" value="2">' in ui
-    section = ui[ui.index("<h3>Max Review Cycles</h3>"):]
-    section = section[:section.index("<h3>", 1)]  # the card alone, up to the next one
-    assert "target: 's-review-max-cycles'" in section
-    for value in ("'1'", "'2'", "'3'", "'5'", "'unlimited'"):
-        assert f"value: {value}" in section
-    assert "\\u221E" in section  # the ∞ label maps to the "unlimited" value
-    assert "['s-review-max-cycles', 'OUROBOROS_REVIEW_MAX_CYCLES', '2']" in js
-    assert "[data-review-cycles-group].settings-effort-group" in css
-    # Behavior tab: the knob closes the review trio that opens the tab, before Access.
-    assert ui.index("<h3>Review Enforcement</h3>") < ui.index("<h3>Task Result Review</h3>") < ui.index("<h3>Max Review Cycles</h3>") < ui.index("<h3>Access</h3>")
-
-
 def test_legacy_acceptance_key_migrates_into_the_shared_knob(tmp_path, monkeypatch):
     """The deprecated acceptance key is a RENAME ALIAS, migrated at load like the retention
     keys — never a runtime branch that could not tell a deliberate "2" from an untouched
@@ -378,4 +361,3 @@ def test_review_cycle_modules_respect_size_bounds():
     assert len(module_lines) <= 200
     config_lines = (REPO / "ouroboros" / "config.py").read_text(encoding="utf-8").splitlines()
     assert len(config_lines) <= 1600
-

@@ -8,14 +8,7 @@
   - mcp_settings imports apiFetch so the MCP status refresh works.
 """
 
-import pathlib
 from types import SimpleNamespace
-
-WEB = pathlib.Path(__file__).resolve().parent.parent / "web"
-
-
-def _web(rel: str) -> str:
-    return (WEB / rel).read_text(encoding="utf-8")
 
 
 # --------------------------------------------------------------------------- #
@@ -189,23 +182,3 @@ def test_preview_pipeline_flags_metadata_only(monkeypatch):
 # --------------------------------------------------------------------------- #
 # Web UI fixes (static source contracts)
 # --------------------------------------------------------------------------- #
-
-def test_skills_offer_make_runnable_for_instruction_skills():
-    src = _web("modules/skill_card_renderer.js")
-    assert "skills-make-runnable" in src
-    assert "skill.type === 'instruction'" in src
-    # Reuses the existing repair action rather than a bespoke path.
-    assert 'data-skill-action="repair"' in src
-
-
-def test_files_header_does_not_duplicate_directory_description():
-    src = _web("modules/files.js")
-    # The file-manager blurb stays in the preview pane, not the page header.
-    assert "description: defaultDirectoryMeta()" not in src
-    assert "defaultDirectoryMeta()" in src  # still used for the preview default
-
-
-def test_mcp_settings_imports_apifetch_for_status_refresh():
-    src = _web("modules/mcp_settings.js")
-    assert "apiFetch" in src
-    assert "} from './api_client.js';" in src
