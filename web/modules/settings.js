@@ -763,6 +763,15 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             input.step = field.step || 'any';
             input.value = s[field.settingKey] ?? field.default ?? '';
         });
+        const budgetHelp = byId('s-budget-help');
+        if (budgetHelp) {
+            const note = (Array.isArray(setupContract.budgetFields) ? setupContract.budgetFields : [])
+                .map((field) => String(field.note || '').trim()).find(Boolean) || '';
+            if (note) {
+                budgetHelp.textContent = note;
+                budgetHelp.hidden = false;
+            }
+        }
         applyMcpSettings(s);
         resetSecretClearFlags(page);
         // After the flat inputs and transient flags: snapshot only the applied document.

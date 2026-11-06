@@ -599,9 +599,9 @@ def cost_ceiling_disclosure(ceiling: CostCeiling) -> Dict[str, Any]:
         "basis": ceiling.basis,
         "allocation": "unreserved_shared_pool",
         "rule": (
-            "The early in-task cost stop of THIS task's whole tree, if any. Ordinary tasks have none: new paid calls "
+            "The early in-task cost stop of THIS task's whole tree, if any. Ordinary tasks have none: new model calls "
             "are refused only when known spend (confirmed and estimated, subagents included) reaches the hard tree "
-            "cap, the whole-work group cap or the shared Total budget. An active stop is an explicit "
+            "cap or the whole-work group cap, and new paid calls when it reaches the shared Total budget. An active stop is an explicit "
             "cost_hard_stop_pct profile's point (resolved once at task start, retained by descendants; spend over it "
             "stops) or a producer's allowance such as a wake's daily remainder (known spend reaching it stops). At "
             "any of these a task with an exact continuation pauses with its work saved; an actor without one ends "
