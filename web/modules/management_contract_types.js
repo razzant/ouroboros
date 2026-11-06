@@ -402,7 +402,7 @@
 
 /**
  * Engine or host preparation problem. POST may prepare Node/npm:
- * 409 maintenance_restart_required asks for chat-header Restart;
+ * 409 maintenance_restart_required asks for Restart Claudexor in Accounts;
  * 409/503 maintenance_preparation_failed reports failure. Both carry
  * context.acceptance=not_submitted, scope=this_attempt. Optional inspection failure still
  * permits POST. After 503 acceptance=unknown, keep the same body and Idempotency-Key,

@@ -257,7 +257,11 @@ def test_update_preparation_is_not_an_engine_operation(http, owned, monkeypatch,
     assert prepares == [True]
     assert checks == [{"fresh": True}, {"fresh": True, "check_latest": True}]
     if not failure:
-        assert "Use Restart in the chat header, then repeat Update." in problem["message"]
+        assert "Use Restart Claudexor in Accounts, then repeat Update." in problem["message"]
+        assert "chat header" not in problem["message"], "the header Restart keeps the engine"
+        assert problem["requiredActions"] == ["restart_claudexor"]
+    else:
+        assert problem["requiredActions"] == [] and "Restart" not in problem["message"]
 
 
 @pytest.mark.parametrize("problem", [None, {"code": "latest_unavailable"}])
@@ -392,7 +396,7 @@ def test_malformed_update_never_downloads_before_engine_validation(http, owned, 
 
 # ---- A current inspection whose reported executable is gone (#2461) ----
 PINNED_SPAWN_FAILURE = json.loads((Path(__file__).parent / "fixtures/claudexor_maintenance_spawn_enoent.json").read_text(encoding="utf-8"))
-RESTART_ADVICE = "Restart in the chat header"
+RESTART_ADVICE = "Restart Claudexor in Accounts"
 
 
 def spawn_failure_body(path):
@@ -441,7 +445,7 @@ def test_pinned_wire_reports_the_missing_executable_over_http_and_tool(http, rea
     assert facts["engineBuildSha"] == PINNED_SPAWN_FAILURE["provenance"]["engine_build_sha"]
     assert facts["observedAt"]
     assert facts["remedy"].startswith("The executable reported by this inspection is no longer present.")
-    assert RESTART_ADVICE in facts["remedy"] and "interrupts engine sessions" in facts["remedy"]
+    assert RESTART_ADVICE in facts["remedy"] and "ends every run on the engine" in facts["remedy"]
     assert "not guaranteed" in facts["remedy"]
     assert [request.method for request in seen if request.url.path != "/v2/operations"] == ["GET"]
     answer = json.loads(tools._inspect_harness(context(tmp_path), harnesses=["cursor"], fresh=True))

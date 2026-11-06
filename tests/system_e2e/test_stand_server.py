@@ -67,7 +67,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.timeout(3600, method=_TIMEOUT
 
 LANE_FULL = "stand_full"  # the full shape's own lane: 50 real workers
 HOOK = pathlib.Path(__file__).resolve().parents[1] / "_stand_hook.py"
-STORM_WORKERS = 3  # supervisor.workers._worker_crash_storm_detected: three busy crashes inside its window
+STORM_WORKERS = 3  # three busy project workers killed at once: each task gets its one retry, no fence (ARCHITECTURE §5)
 RESTORED_MARKER = "live work "  # the input of every row the root's queue restores at boot (tests/_live_set.py ``_task``)
 TURN_MARKER = "[STAND-TURN]"
 READ_WINDOW_SEC = 60.0  # a transport bound for one answer under load
@@ -335,15 +335,18 @@ class _Run:
 
     # ---- recovery: the conversation with no pool ------------------------------------------------------------------------------
     def storm(self) -> None:
-        """E7: three project workers at work, kill -9 at once (the pool's own definition of a storm), then the owner says hello."""
+        """E7: three project workers at work, kill -9 at once, then the owner says hello: the lane answers while each
+        killed task takes its one retry; no crash-storm fence freezes the pool (ARCHITECTURE §5)."""
         pids = [_carrier_pid(self.oracle, self.data_root, task_id) for task_id in self.at_work(STORM_WORKERS)]
         self.facts["storm_workers"] = sum(bool(pid) for pid in pids)
         for pid in pids:
             if pid:
                 os.kill(pid, signal.SIGKILL)
-        storm_row = wait_until(lambda: self.oracle.supervisor_rows("crash_storm_detected"), SETTLE_SEC)
+        dead_rows = wait_until(lambda: len(self.oracle.supervisor_rows("worker_dead_detected")) >= STORM_WORKERS
+                               and self.oracle.supervisor_rows("worker_dead_detected"), SETTLE_SEC)
         hello = self.finished_turn("Hello after the storm: answer in one line.")
-        self.facts["storm"] = {**hello, "storm_row": bool(storm_row),
+        self.facts["storm"] = {**hello, "dead_rows": len(dead_rows or []),
+                               "fence": self.oracle.queue_snapshot().get("worker_pool_disabled_reason") or "",
                                "pending_ids": [row.get("id") for row in self.oracle.queue_snapshot().get("pending") or []]}
 
     def no_worker_left(self) -> None:
@@ -545,7 +548,8 @@ def test_s43_e6_a_receipt_names_what_the_owner_waited(scenario, turn):
 def test_s43_e7_after_a_worker_storm_the_next_hello_is_answered_and_never_waits_in_pending(scenario):
     recovery = scenario["recovery"]
     storm = recovery["storm"]
-    assert recovery["storm_workers"] == STORM_WORKERS and storm["storm_row"], (recovery["storm_workers"], storm)
+    assert recovery["storm_workers"] == STORM_WORKERS and storm["dead_rows"] >= STORM_WORKERS, (recovery["storm_workers"], storm)
+    assert storm["fence"] == "", storm  # three deaths fence nothing: the pool recovers each task once
     assert storm["status"] == "completed", storm
     assert storm["task_id"] not in storm["pending_ids"], storm
 

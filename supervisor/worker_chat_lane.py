@@ -108,16 +108,16 @@ def wake_gate_refusal() -> str:
     return "" if not reason or conversation_admitted_during_update(reason) else "repo_writer_gate_closed"
 
 
-def owner_conversation_admitted(chat_id: int, client_message_id: str = "") -> bool:
-    """Admit one owner chat turn: open gate, or a resolver-held update.
-
-    A refused turn gets the pool's existing lock notice (``_repo_writer_turn_allowed``),
-    naming the submission it answers.
-    """
+def owner_conversation_gate_open() -> bool:
+    """The repository-writer gate admits an owner chat turn: open, or a resolver-held update. Quiet."""
     reason = _pool().repo_writer_admission_closed()
-    if not reason or conversation_admitted_during_update(reason):
-        return True
-    return bool(_pool()._repo_writer_turn_allowed(chat_id, client_message_id))
+    return not reason or conversation_admitted_during_update(reason)
+
+
+def owner_conversation_admitted(chat_id: int, client_message_id: str = "") -> bool:
+    """Admit one owner chat turn (``owner_conversation_gate_open``); a refused turn gets the pool's
+    existing lock notice (``_repo_writer_turn_allowed``), naming the submission it answers."""
+    return owner_conversation_gate_open() or bool(_pool()._repo_writer_turn_allowed(chat_id, client_message_id))
 
 
 def marker_window_closed() -> bool:
@@ -229,12 +229,13 @@ def handle_chat_direct(
     task_constraint: Optional[dict] = None,
     task_metadata: Optional[dict] = None,
     realtime_turn: Any = None,
-) -> None:
+) -> Optional[Dict[str, Any]]:
     """Admit one owner turn: to the conversation lane, or inline for a live call.
 
     Returns once the turn is admitted (its RUNNING row published, its start
     receipt sent) or refused; the body runs in the carrier. A live call keeps
     this thread (``executor=inline_call``): its host port is process-local.
+    The lane's admitted RUNNING meta (its ``task.id``), None when refused, deferred or inline.
     """
     # The admission is a short execution of its own: a door that stalls before
     # deciding still says where it stands (server_liveness reads the registry's
@@ -253,7 +254,7 @@ def handle_chat_direct(
             run_inline_turn(chat_id, text, image_data, task_constraint, task_metadata,
                             realtime_turn=realtime_turn, executor=EXECUTOR_INLINE_CALL, execution=execution)
             return
-        admit_owner_turn(chat_id, text, image_data, task_constraint=task_constraint, task_metadata=task_metadata)
+        return admit_owner_turn(chat_id, text, image_data, task_constraint=task_constraint, task_metadata=task_metadata)
     finally:
         registry.end_execution(execution)
 
@@ -984,6 +985,11 @@ def auto_resume_after_restart() -> None:
         chat_known, chat_id = control_value(_pool().load_state(), "owner_chat_id")
         if not chat_known or chat_id in (None, "", 0):
             return  # an autonomous resume turn needs a KNOWN owner chat (#1307)
+        from ouroboros.server_process import core_loss_recovery_turn
+
+        if core_loss_recovery_turn(root, int(chat_id), _pool().PENDING, admit=handle_chat_direct,
+                                   live=conversation_turn_live, gate=owner_conversation_gate_open):
+            return  # a Fault boot: its one recovery turn, or the previous one still open, is the resume (owner 2A)
 
         # The one real trigger: a planned restart's verify record. A launcher
         # line in the log tail is not evidence of unfinished work (owner Batch4).
@@ -995,7 +1001,7 @@ def auto_resume_after_restart() -> None:
             from ouroboros.places import paused_places_sentence
 
             # The admission is short (the body runs in a carrier): no thread of its own.
-            handle_chat_direct(
+            meta = handle_chat_direct(
                 int(chat_id),
                 "\n".join(filter(None, (
                     "[auto-resume after restart] Continue your work. Read scratchpad and identity — they contain context of what you were doing.",
@@ -1007,6 +1013,8 @@ def auto_resume_after_restart() -> None:
                 {
                     "ts": utc_now_iso(),
                     "type": "auto_resume_triggered",
+                    "trigger": "planned_restart",
+                    "task_id": str(((meta or {}).get("task") or {}).get("id") or ""),
                 },
             )
     except Exception as e:

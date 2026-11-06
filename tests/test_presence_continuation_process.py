@@ -243,7 +243,11 @@ def test_host_close_rejects_a_live_descendant_after_the_parent_exits(tmp_path):
 
 @pytest.mark.parametrize("method", ["spawn", "forkserver"])
 def test_fixture_joins_owned_multiprocessing_support_before_exit(tmp_path, method):
-    """Force the bus to exist; test cleanup independently of late-notice timing."""
+    """Force the bus to exist; test cleanup independently of late-notice timing.
+
+    The bus process is spawn-started whatever the worker start method is (ARCHITECTURE §5: it inherits no
+    forkserver), so under ``forkserver`` the script starts the forkserver the first worker start would, and the
+    fixture must join it too."""
     script = r'''
 import json, os, sys
 from pathlib import Path
@@ -257,6 +261,8 @@ try:
     bus = get_event_q()
     bus.put({"fixture": True})
     assert bus.get(timeout=5) == {"fixture": True}
+    if sys.argv[2] == "forkserver":
+        forkserver.ensure_running()  # what a worker start under forkserver brings; the bus itself is spawn-started
     shutdown_fixture_processes(root, 1)
     assert forkserver._forkserver._forkserver_pid is None
     record = json.loads((root / "process-cleanup-1.json").read_text())

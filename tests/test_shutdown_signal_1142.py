@@ -175,6 +175,13 @@ def _check_real_shutdown(tmp_path, *, launcher_pipe):
     assert (entry["cause"], entry["restart_exit"]) == (cause, False), entry
     assert datetime.fromisoformat(entry["entered_at"]) <= datetime.fromisoformat(shutdown_rows[-1]["ts"])
     assert elapsed < LAUNCHER_STOP_GRACE_SEC, elapsed
+    # The event-bus manager ignores the group's SIGTERM (ARCHITECTURE §5): it was ALIVE when the teardown
+    # reached it, after the terminal custody that emits on it, and the RPC ended it (no kill needed). A manager
+    # the signal had killed would leave its exit code here and the bus_lost door would have taken the stop.
+    stopped = [row for row in _read_rows(data_dir / "logs" / "supervisor.jsonl")
+               if row.get("type") == "event_queue_generation_stopped"]
+    assert stopped and stopped[-1]["exitcode_before_shutdown"] is None and stopped[-1]["killed"] is False, stopped
+    assert not any(row.get("type") == "supervisor_generation_fault" for row in _read_rows(data_dir / "logs" / "supervisor.jsonl"))
 
 
 _PIPE_OWNER_PROBE = r'''

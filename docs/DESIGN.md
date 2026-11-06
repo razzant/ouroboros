@@ -625,8 +625,10 @@ observation confirms the supervisor can assign work; a live socket alone means
 only that the UI transport is open. The host's boot phases refine the word
 without changing the fact: `Chat ready, restoring background tasks` once the
 dialogue accepts messages durably while pooled work is still not admitted, and
-`Start failed` (its cause in the badge title) when the generation cannot become
-ready. `Online` is reserved for a ready, idle
+`Start failed` (its cause beside it where it fits, always the badge title) when
+the generation cannot become ready: a start that failed in its init. A ready generation
+that loses its task core does not fail this way: it ends and restarts (ARCHITECTURE §9,
+the Fault door), with one `supervisor_failure` Main row before and the startup notice after. `Online` is reserved for a ready, idle
 runtime; known queued, active or finalizing work keeps its own factual label. A
 durably accepted incoming message likewise proves acceptance, not that its task
 has begun or a model has read it.
@@ -2558,6 +2560,13 @@ rotates compatible accounts and an explicit pin stays pinned. A model inherited
 from Main remains visibly inherited while its account can be pinned
 independently. Fallbacks use the same row in their saved order, with adjacent
 move/remove controls and the group's Add action.
+
+Restart Claudexor (Accounts toolbar, after Refresh) asks first in the shared confirm
+dialog: its body is one sentence of fact, `Restarting Claudexor ends N runs: X of
+Ouroboros, Y of other programs.`, plus any pin warning; the serving and pinned engines,
+model calls in flight and the runs open under "Engine and runs". A count that could not
+be read is said as unknown, never zero; a preview that changed while the dialog was open
+asks again with the new facts. The outcome note says the stop and the start apart.
 
 Context details show the server-built sourced window line: "set in Settings"
 labels a manual value; the Clear confirmation button removes the route acknowledgement.

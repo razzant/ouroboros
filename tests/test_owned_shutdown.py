@@ -797,7 +797,8 @@ def test_every_door_joins_the_one_stop_and_the_boot_retry_precedes_launches():
     emergency = inspect.getsource(server._emergency_process_cleanup)
     assert emergency.index("kill_workers(") < emergency.index("stop_owned_work(DATA_DIR)")
     owner = inspect.getsource(server_restart._stop_owned_work)
-    assert owner.index('_stop_owned_daemon("Owner restart")') < owner.index("stop_owned_work(DATA_DIR)")
+    assert "_stop_owned_daemon(" not in owner, "Restart keeps the shared engine (owner 3A)"
+    assert owner.index("reconcile_orphaned_runs(") < owner.index("stop_owned_work(DATA_DIR)")
     assert "_stop_owned_local_processes" not in inspect.getsource(server)
     assert not hasattr(__import__("ouroboros.workspace_executor").workspace_executor, "_iter_process_records")
 

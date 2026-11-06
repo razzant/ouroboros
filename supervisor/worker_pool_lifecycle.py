@@ -48,7 +48,7 @@ def is_project_slot(slot: Any) -> bool:
 
 
 def is_lane_slot(slot: Any) -> bool:
-    """A conversation-lane carrier: outside MAX_WORKERS, the storm capture and the exhaustion fence."""
+    """A conversation-lane carrier: outside MAX_WORKERS and the exhaustion fence."""
     return getattr(slot, "lane", LANE_PROJECT) == LANE_CONVERSATION
 
 
@@ -208,7 +208,7 @@ def _recorded_cancel_fields(task_id: str, *, stop_source: str = "", reason: str 
 
 def _write_failure_result(
     task_id: str,
-    reason: str = "Worker process crashed (crash storm). Task was not completed.",
+    reason: str = "Worker process was stopped before this task finished. Task was not completed.",
     status: str = "",
     stop_source: str = "",
 ) -> str:
@@ -419,7 +419,7 @@ def _verify_worker_sha_after_spawn(
     ``WORKER_READY_CEILING_SEC`` from birth. Replacement still runs through ``respawn_worker`` — at
     most ``WORKER_READY_MAX_ATTEMPTS`` consecutive times for one slot, then the slot is parked and
     reported. A child that DIED during boot is released to the crash detector, which already owns
-    process death (``worker_dead_detected``, retry, the crash-storm fence). This is a contract
+    process death (``worker_dead_detected``, the one retry). This is a contract
     distinct from process liveness and from the task idle rail: a deadlocked child is alive and
     holds no task. ``spawned_at`` is the instant before ``proc.start()``: the window and the
     reported wait count from the child's birth, not from this thread's start.
@@ -897,8 +897,8 @@ def respawn_worker(wid: int, *, ready_attempt: int = 1) -> bool:
     prevents a replacement from being installed if the slot was removed while
     the queue lock was released.  The fresh slot is installed unassignable and
     handed to the readiness seam; ``ready_attempt`` is that seam's own
-    consecutive-failure count for this slot. A current pool stop fence (crash
-    storm, exhaustion, Stop, update) starts no child and forgets no slot: a
+    consecutive-failure count for this slot. A current pool stop fence
+    (exhaustion, Stop, update) starts no child and forgets no slot: a
     death or timeout captured earlier, a lent slot's included, leaves its dead
     slot to that fence's owner, whose stop needs the membership it captured.
     """
@@ -1018,7 +1018,7 @@ def _idle_retirement_current(job: dict, slot: Any) -> bool:
         return (str(_pool().DRIVE_ROOT) == job["drive_root"]
                 and _pool().WORKERS.get(slot.wid) is slot and slot.retiring
                 and slot.busy_task_id is None and job["token"] == slot.quiescence_token
-                # A captured storm stop keeps membership stable; its owner tears down.
+                # A captured fence stop keeps membership stable; its owner tears down.
                 and not project_fenced(slot))
 
 
@@ -1104,8 +1104,8 @@ def reconcile_worker_capacity(residual_demand) -> None:
                 retire_quiescent_worker(slot)
         next_id = max(_pool().WORKERS, default=-1) + 1
     for wid in range(next_id, next_id + missing):
-        # Starts run without Q. The serializer excludes Stop/update/storm teardown;
-        # the health owner can still fence a storm while this start is in flight.
+        # Starts run without Q. The serializer excludes Stop/update/exhaustion teardown;
+        # the readiness owner can still fence the pool while this start is in flight.
         from supervisor.worker_chat_lane import marker_window_closed
 
         with _queue_lock:
@@ -1183,7 +1183,7 @@ def _spawn_worker_slot(wid: int, old: Any = None, *, ready_attempt: int = 1, lan
         target=_pool()._verify_worker_sha_after_spawn,
         args=({wid: fresh}, events_cursor, int(ready_attempt), spawned_at), daemon=True,
     ).start()
-    # Do not reset _LAST_SPAWN_TIME here; respawn grace would hide crash storms.
+    # Do not reset _LAST_SPAWN_TIME here; respawn grace would hide a dying pool's deaths.
     return True
 
 
