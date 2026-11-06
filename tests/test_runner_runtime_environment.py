@@ -81,6 +81,52 @@ def test_temp_parent_is_short_on_macos_and_linux_and_the_platform_default_elsewh
     monkeypatch.setattr(test_environment.sys, "platform", platform)
     monkeypatch.setattr(test_environment.tempfile, "gettempdir", lambda: str(tmp_path))
     assert test_environment.default_temp_parent() == (tmp_path if platform == "win32" else Path("/tmp"))
+    # Session scratch alone moves out of the OS cleaners' /tmp (O3, owner Q1=A narrowed by A-1):
+    # the preflight, commit-admission and safe_test parent above is unchanged.
+    assert test_environment.session_scratch_parent() == (tmp_path if platform == "win32" else Path("/var/tmp"))
+
+
+@SHORT_TEMP
+def test_session_scratch_parent_keeps_the_deepest_nested_manager_socket_inside_the_bound(tmp_path):
+    """The real witness of the four extra bytes: safe_test rooted in a session scratch under
+    ``session_scratch_parent()`` (as a delegated session's instructions ask), then a real manager
+    socket in both nested layouts a run makes there: an owned process temp (``c<8>``) and the pytest
+    session root with its ``tmp`` (``p<8>/tmp``, the deepest: 95 of 104 bytes under ``/private/var/tmp``)."""
+    parent = test_environment.session_scratch_parent().resolve()
+    scratch = Path(tempfile.mkdtemp(prefix="obs-", dir=parent))
+    probe = tmp_path / "probe.py"
+    probe.write_text(f'''
+import json, multiprocessing, os, pathlib, sys, tempfile
+sys.path.insert(0, {str(REPO)!r})
+from ouroboros.test_environment import declare_scratch, owned_process_temp
+if __name__ == "__main__":  # a spawned manager child re-imports this file
+    root = pathlib.Path(os.environ["OUROBOROS_TEST_TEMP_ROOT"])
+    session = pathlib.Path(tempfile.mkdtemp(prefix="p", dir=root))  # tests/conftest.py's pytest root
+    declare_scratch(session, "pytest-session")
+    found = {{}}
+    for layout, temp in (("process", owned_process_temp()), ("pytest", session / "tmp")):
+        temp.mkdir(exist_ok=True)
+        os.environ["TMPDIR"] = tempfile.tempdir = str(temp)
+        with multiprocessing.Manager() as manager:
+            queue = manager.Queue()
+            queue.put("owned")
+            assert queue.get(timeout=5) == "owned"
+            found[layout] = {{"address": manager.address, "tmpdir": str(temp)}}
+    print(json.dumps(found))
+''', encoding="utf-8")
+    try:
+        result = subprocess.run([sys.executable, "-I", "-S", str(REPO / "scripts/safe_test.py"), "--temp-parent",
+                                 str(scratch), "--timeout", "180", "--", sys.executable, str(probe)],
+                                cwd=REPO, text=True, capture_output=True)
+        assert result.returncode == 0, result.stdout + result.stderr
+        found = json.loads(result.stdout.splitlines()[-1])
+        for layout in ("process", "pytest"):
+            address = Path(found[layout]["address"])
+            assert address.is_relative_to(scratch) and Path(found[layout]["tmpdir"]).is_relative_to(scratch), found
+            assert len(os.fsencode(address)) < 104, (layout, len(os.fsencode(address)), address)
+        assert "SAFE_TEST_RELEASED" in result.stderr and not any(scratch.iterdir())
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def test_a_nested_gate_lives_under_its_owner_and_a_top_level_gate_keeps_the_default_parent(tmp_path, monkeypatch):

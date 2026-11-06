@@ -18,7 +18,7 @@ The page's stored choice is the one appearance authority. Before CSS, `web/theme
 
 Iframes inherit no host tokens or choice; `render.appearance` declares their policy (CREATING_SKILLS). `webview.start(private_mode=False)` keeps what pywebview otherwise erases each opening; macOS also needs stable identity across source handoff (§2), never merging ordinary-app and legacy Python profiles. Windows persistence stays unqualified.
 
-`pages.js` lists Main, Files, Skills, Widgets, Dashboard, Settings/About. `syncNavigationState()` owns page/Project/expansion/drawer; widths are owner-local. `#<page>` is read once, never written (no desktop address bar; Telegram loads `/`). Projects are panels, not routes, in the sole `<nav>`: keyed pointer/keyboard rows open/pin/rename/delete; `PROJECT_NAME_MAX` and lifecycle govern names; pins survive `/api/state` caps; deleting rooms cannot open until registry publication. `style.css` gives Main track 2 of 2, hiding retained `#divider`, unboxing `.sidebar-scroll`; panels overlay. Below `layout.js`'s switch, Main takes track 1, sidebar becomes a drawer, Project fills content. `layers.js` owns dismissal; `host_telegram.js` binds Telegram Back; `drawer_drag.js` speeds visible controls; `shell_motion.js`/`room_retire.js`/`motion.js` move between places (DESIGN §10).
+`pages.js` lists the places. `syncNavigationState()` owns page/Project/expansion/drawer; widths are owner-local. `#<page>` is read once, never written (no desktop address bar; Telegram loads `/`). Projects are panels, not routes, in the sole `<nav>`: `projects_nav.js` keys rows (open/pin/rename/delete); pins survive the `/api/state` cap, older rooms load by `?all=1` on demand; `PROJECT_NAME_MAX` and lifecycle govern names; deleting rooms cannot open until registry publication. `style.css` gives Main track 2 of 2, hiding retained `#divider`, unboxing `.sidebar-scroll`; panels overlay. Below `layout.js`'s switch, Main takes track 1, sidebar becomes a drawer, Project fills content. `layers.js` owns dismissal; `host_telegram.js` binds Telegram Back; `drawer_drag.js` speeds visible controls; `shell_motion.js`/`room_retire.js`/`motion.js` move between places (DESIGN §10).
 
 - `web/ui.css` ← shared tokens and controls; `settings.css` owns the wrapping `.settings-action-row`; `style.css` owns shell/card geometry and System's edge-free shadow (DESIGN §8).
 - `theme_palette.js` ← `--chart-*` tokens into mounted Chart options, a host chart's series too; updates keep data and caller-authored option groups.
@@ -35,7 +35,10 @@ Iframes inherit no host tokens or choice; `render.appearance` declares their pol
 - `skill_card_renderer.js`, `skill_presentation.js` ← skill cards and the words every Skills surface shares.
 - `client_surface.js` ← send-time raw observables in each chat frame, no device taxonomy.
 - `chat_markdown.js` ← marked+DOMPurify, chat URLs, KaTeX, lazy Mermaid, bounded charts, unloaded images (DESIGN §5; vendors: `web/vendor/VENDOR-MANIFEST.md`).
-- `document_reader.js` ← chat text (`DOCUMENT_READER_MAX_BYTES`) and chat images; reads/loads use `DOCUMENT_READER_TIMEOUT_MS` (DESIGN "Document reading").
+- `document_reader.js` ← chat text (`DOCUMENT_READER_MAX_BYTES`) and chat images;
+  reads/loads use `DOCUMENT_READER_TIMEOUT_MS`, while image-only scenes own
+  bounded focal zoom/pinch/pan and keyboard/visible reset controls (DESIGN
+  "Document reading").
 - `log_events.js` ← event classification and the one factual task-presentation projection for Chat and Logs: task truth maps only to `Working` / `Done` / `Done with warnings` / `Failed` / `Stopped`; it owns no actions, incidents or notifications, and compact headlines never expose raw reason codes. Task-to-task delivery appears in the receiving timeline (`task_message_injected`), delivery or refusal in the sending one (`task_message_routed`).
 - `effort_evidence.js` ← Logs: requested effort, host carrier, engine preparation, sourced provider observation; missing echoes stay unknown.
 - `toast.js`, `masonry.js`, `widget_frame.js`, `widget_job.js` ← toasts, layout, framed-widget bootstrap/lifecycle, bounded widget request/job policy.
@@ -143,7 +146,7 @@ Cancel appears only on unfinished root cards (moved works' portals too) whose ho
 
 One click and `move_to_project` share one placement operation per task id. Its durable binding wins; a name requested for an already-bound task renames that room. Only this work moves. `project_started`, `project_handoff` and `/api/state.task_bindings` carry the task/project identity and name for the existing Main card. Origin siblings are independent. RUNNING resources stay unchanged until leased readmission (§6 Project placement).
 
-Main-root `project_reference.js` opens, never closes, the panel; names stay server-owned (DESIGN "References and actions"). Project-scoped is not project-bound: a headless/CLI `project_id` grants lease/memory scope without durable binding, routes to that thread at admission (§5), and creates neither Main card nor conversion button.
+Main-root `project_reference.js` opens (by `?id=`), never closes, the panel; names stay server-owned (DESIGN "References and actions"). Project-scoped is not project-bound: a headless/CLI `project_id` grants lease/memory scope without durable binding, routes to that thread at admission (§5), and creates neither Main card nor conversion button.
 
 #### Project rooms
 
@@ -207,7 +210,7 @@ Activity joins queue with the same refresh's `/api/state` census: each row's own
 
 Costs reads the physical-attempt ledger: confirmed/estimated spend separately, reserved/unresolved holds (not spending), unpriced usage, open rows and finality. Unavailable is not zero. Model/key/model-category/task-category breakdowns use that ledger. Total budget hot-applies; the per-task cap covers the next root tree (§7); raising it resumes no finalized or paused task.
 
-Storage (`storage.js`, `storage_deleted.js`): passive footprint/bar → Cleanup → folders; disk free space secondary. **Refresh sizes** counts in a low-I/O child (Stop, phase-only live region); shares/date/growth need a finished count. Cleanup separates removable/selected. Saved groups/manual copies start unchecked with whole-loss confirmation. Remove sends exact ids once; lost POSTs never replay, every outcome is reachable. Retirers re-judge at retention zero; cause accompanies compatible reason. Visible polling covers count, preview/deletion, not stuck items.
+Storage (`storage.js`, `storage_deleted.js`): passive footprint/bar → Cleanup → folders; disk free space secondary. **Refresh sizes** counts in a low-I/O child (Stop, phase-only live region); shares/date/growth need a finished count. Cleanup separates removable/selected. Saved groups/manual copies start unchecked with whole-loss confirmation. Remove sends exact ids once; lost POSTs never replay, every outcome is reachable. Retirers re-judge at retention zero; cause accompanies compatible reason. Session scratch is a counted place. The mind's `free_storage` runs the same Free on the ordinary pool by control event, receipted in the `storage_free` job row, told in Main. Visible polling covers count, preview/deletion, not stuck items.
 
 Evolution wraps campaign words, consciousness/allowance and actions before squeezing text. Start uses the shared dialog (empty = default; off in Light or without state), Pause when on; Run review. `evolution_history.py` serves saved history independently; new tags or Try again remeasure. Milestones share one measure; selected README row is below.
 

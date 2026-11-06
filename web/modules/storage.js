@@ -20,7 +20,7 @@ import { showToast } from './toast.js';
 import { escapeHtmlAttr, escapeHtmlText } from './utils.js';
 import { DOTS, durationLabel, formatBytes, isSize, largestPartsHtml, number, plural, signedBytes as signed, whenLabel } from './storage_format.js';
 import { DELETED_ROWS, deletedProjectsHtml } from './storage_deleted.js';
-import { EMPTY_LIST, MANUAL_ROWS, OUTDATES_PLAN, acceptPage, attemptSentences, confirmCopy, doorOffered, excludedCount, lostNotice, manualConfirmCopy, manualFacts, manualKnown, manualOf, notStarted, resultSentences, savedGroups, trayHtml, trayState } from './storage_free.js';
+import { EMPTY_LIST, MANUAL_ROWS, OUTDATES_PLAN, acceptPage, attemptSentences, confirmCopy, doorOffered, excludedCount, holdsPhrase, lostNotice, manualConfirmCopy, manualFacts, manualKnown, manualOf, notStarted, resultSentences, savedGroups, trayHtml, trayState } from './storage_free.js';
 
 export { durationLabel, formatBytes, whenLabel };
 
@@ -54,6 +54,7 @@ const PLACE_WORDS = {
     deliverables: { label: 'Deliverables', why: 'Files Ouroboros made for you. Not deleted here.' },
     work_folders: { label: 'Task work folders', why: 'Removed by the app’s own cleanup {days} days after a task finishes.' },
     working_copies: { label: 'Working copies', why: 'Copies of code that helpers work in. Removed {days} days after they were made, once their task has finished, their work is saved and you have not asked to keep them.' },
+    session_scratch: { label: 'Session scratch', why: 'Short-lived folders coding sessions write test files and package caches into, outside the data folder. Released by the app once their task or reviewer seat is over; the Storage line says what still holds them.' },
     app_state: { label: 'App state', why: 'The task database, settings, caches and working state.', parts: true },
     data_other: { label: 'Everything else in the data folder', why: 'Logs, attachments and anything not listed above.', parts: true },
     program: { label: 'Ouroboros program', why: 'The installed app and its history. Updated by the app.' },
@@ -72,6 +73,11 @@ const JOB_WORDS = {
     custody_trash: 'Deleting moved folders',
     evidence_packing: 'Evidence packing',
     record_compression: 'Compression',
+    drive_settlement: 'Work folder settlement',
+    copy_retirement: 'Working copy retirement',
+    review_checkout_prune: 'Review copy retirement',
+    session_scratch_release: 'Scratch release',
+    engine_runtime_prune: 'Engine program copies',
 };
 const JOB_STATES = {
     done: '{job}: done',
@@ -106,6 +112,12 @@ function jobPhrase(fact, now) {
     const job = fmt(JOB_WORDS[fact.id] || String(fact.id));
     if (fact.last_error) {
         return fmt('{job}: stopped by an error ({error}, {when})', { job, error: fact.last_error.class, when: whenLabel(fact.last_error.at, now) });
+    }
+    if (Array.isArray(fact.holds) || isSize(fact.released)) {  // a retirer pass: what it released, what it holds and why
+        const parts = [fact.at ? fmt('{job}: last change {when}', { job, when: whenLabel(fact.at, now) }) : job,
+            plural(fact.released || 0, '{n} released', '{count} released'), holdsPhrase(fact, now),
+            fact.errors > 0 ? plural(fact.errors, '{n} error', '{count} errors') : ''];
+        return parts.filter(Boolean).join(' · ');
     }
     if (fact.id === 'record_compression' && fact.state !== 'unsupported' && fact.compressed > 0) {
         // This place's own plane (task evidence, or reviewer seat homes), never one total under two places.

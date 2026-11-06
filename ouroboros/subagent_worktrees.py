@@ -1562,8 +1562,10 @@ def prune_orphans(
                         continue
                 else:
                     path_exists = bool(entry.get("path")) and Path(entry["path"]).exists()
-                    if (path_exists and float(entry.get("created_at") or 0) >= cutoff) \
-                            or not _task_proven_over(str(entry.get("task_id") or ""), data_dir, live):
+                    if path_exists and float(entry.get("created_at") or 0) >= cutoff:
+                        continue  # inside the retention term: the rule's wait, not a hold
+                    if not _task_proven_over(str(entry.get("task_id") or ""), data_dir, live):
+                        reasons[path] = "not_proven_over"
                         continue
         except (WorktreeOpsLockBusy, SubagentWorktreeRegistryCorrupt) as exc:
             reasons[path] = "record_busy" if isinstance(exc, WorktreeOpsLockBusy) else "record_unreadable"
@@ -1571,10 +1573,12 @@ def prune_orphans(
         # Refresh the queue probe before custody; recorded terminal/process and capture facts are rechecked inside.
         if entry.get("kind") != _KIND_BODY_CANDIDATE:
             try:
-                if live(str(entry.get("task_id") or "")) is not False:
-                    continue
+                answer = live(str(entry.get("task_id") or ""))
             except Exception:
-                continue  # unknown queue ownership still retains the copy
+                answer = None  # unknown queue ownership still retains the copy
+            if answer is not False:
+                reasons[path] = "liveness_unknown" if answer is None else str(getattr(answer, "cause", "task_live"))
+                continue
         removed += bool(_retire_worktree(entry, root, data_dir, branch, holds=partial(body_branch, verdicts[path]) if entry.get(
             "kind") == _KIND_BODY_CANDIDATE else partial(plain_copy_branch, root=root, data_dir=data_dir, live=lambda _: False), reasons=reasons))
     return {"removed": removed, "kept": len(_records(data_dir, op="prune_orphans"))}

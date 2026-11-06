@@ -226,6 +226,8 @@ CLAUDEXOR_DELEGATED_MARKER_MIN_VERSION: str = "3.3.0"
 CLAUDEXOR_DELEGATED_WORKSPACE_ROOT_MIN_VERSION: str = "3.8.1"
 CLAUDEXOR_MODEL_TURN_STATE_MIN_VERSION: str = "3.10.4"  # active-turn request field (`llm_claudexor.py` docstring)
 CLAUDEXOR_EPHEMERAL_SCOPE_MIN_VERSION: str = "3.3.7"  # `scope.ephemeral` for host-minted roots (`delegate_registration_policy`)
+# The same on a sticky thread: its lane needs an engine that sweeps unregistered namespaces (Claudexor C6, 5.1.0).
+CLAUDEXOR_EPHEMERAL_THREAD_MIN_VERSION: str = "5.1.0"
 
 
 # Boot-time runtime-mode baseline. Pinning the owner-selected mode after settings load stops an

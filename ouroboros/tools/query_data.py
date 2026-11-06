@@ -358,9 +358,11 @@ def _record(ctx, root, kind, identity, child, state_file, op, where, tail, cap, 
     if len(raw) > cap:  # the bounded read proves only a lower bound
         raise _over_input(subject, None, cap)
     if kind == "storage":  # the saved counts beside each place's removers, read now (``storage_removers``)
+        from ouroboros import maintenance_jobs
         from ouroboros.storage_removers import place_removers
 
-        value = {**json.loads(raw), "removers": place_removers(root)}
+        value = {**json.loads(raw), "removers": place_removers(root),
+                 "storage_free": maintenance_jobs.job(root, "storage_free") or {}}
         raw = _canonical(value)
         return raw, value, True, False, len(raw), False
     value = json.loads(raw)

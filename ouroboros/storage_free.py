@@ -30,10 +30,11 @@ storage copy; this module reports ids, counts, sizes and typed reasons.
 The ordinary action works on exact objects: the *pool* (``storage_free_view``) is every offered work folder,
 working copy and declared temporary environment (``copy_environments``), each addressed alone; everything else
 is listed with its reason. Selecting by ``items`` retires those objects, each re-judged under its retirer's own
-lock and the owner's keep (``owner_keep``); ``groups`` stays for the groups below, with their own words.
-``manual`` is a third, separate form: exact finished copies whose work no capture holds, each named with what it
-would lose (``view=manual``) and sent with ``accept_loss``; nothing else reaches them (``copy_capture_proof.discard_offer``,
-``copy_capture_proof.discard_unsaved_copy``).
+lock and the owner's keep (``owner_keep``); the dashboard still exposes saved groups below, with their own words.
+``manual`` is a third, separate form: exact finished copies whose work no capture holds, and session scratch its
+run marked to keep (a ``producer_retained`` custody-trash handoff, sized by the scratch it holds), each named with
+what it would lose (``view=manual``) and sent with ``accept_loss``; nothing else reaches them
+(``copy_capture_proof.discard_offer``, ``copy_capture_proof.discard_unsaved_copy``).
 
 Five more groups hold what no background retirer removes, so only the owner's press frees them
 (the client starts those holding saved work unchecked): G3, reviewer seat homes of tasks proven
@@ -96,7 +97,7 @@ _KEPT_REASONS = {
     "busy": ("custody_busy", "mailbox_busy", "store_busy", "busy", "record_busy"),
     "unreadable_record": ("task_result_unreadable", "unread_mailbox_unreadable", "record_unreadable", "review_state_unreadable", "marker_unreadable"),
     "capture_unproven": ("capture_unproven", "capture_incomplete"),
-    "retained_evidence": ("retained_process_environment", "undeclared_environment"),
+    "retained_evidence": ("retained_process_environment", "undeclared_environment", "producer_retained"),
     "changed": ("changed", "nothing_unsaved", "nested_repository", "commits_unprotected"),
     "unproven_excluded_inputs": ("unproven_excluded_inputs",),
     "owner_keep": ("owner_keep",),
@@ -250,6 +251,67 @@ def _free_bytes(root: pathlib.Path) -> Optional[int]:
         return None
 
 
+REQUEST_JOB = "storage_free"  # the mind's last Free request and its receipt (``FreeSpace.request``), a job row
+
+
+def maintenance_jobs_receipt(root: pathlib.Path) -> Dict[str, Any]:
+    """The receipt of the last request the mind made (``{}`` when none, or when the store cannot be read)."""
+    from ouroboros import maintenance_jobs
+
+    try:
+        return maintenance_jobs.job(root, REQUEST_JOB) or {}
+    except Exception:
+        return {}
+
+
+def _write_receipt(root: pathlib.Path, receipt: Dict[str, Any]) -> None:
+    from ouroboros import maintenance_jobs, store
+
+    try:
+        with store.open_store(root, write=True) as txn:
+            previous = txn.meta(maintenance_jobs.PREFIX + REQUEST_JOB)
+            if isinstance(previous, dict):  # one request, one receipt: the previous one is history (events.jsonl)
+                maintenance_jobs.forget_in(txn, REQUEST_JOB, *previous)
+            maintenance_jobs.record_in(txn, REQUEST_JOB, **receipt)
+    except Exception:
+        log.warning("storage_free receipt not recorded", exc_info=True)
+
+
+def _request_sentence(receipt: Dict[str, Any]) -> str:
+    """One plain English sentence for Main about a request the mind made; the client renders it as a system row."""
+    who = str(receipt.get("actor") or "the mind")
+    if receipt.get("refusal"):
+        return f"Free space ({who}): not run, {str(receipt['refusal']).replace('_', ' ')}."
+    outcome = receipt.get("outcome")
+    if not isinstance(outcome, dict):
+        preview = (receipt.get("preview") or {}).get("pool") or {}
+        size = preview.get("bytes")
+        return (f"Free space ({who}): looked only; {preview.get('count', 0)} items could go"
+                + (f", {size / 1e9:.1f} GB" if isinstance(size, int) else "") + ".")
+    kept = sum(int(row.get("count") or 0) for row in outcome.get("kept") or ())  # why: the Free tray's words
+    freed = outcome.get("removed_bytes") or 0
+    parts = [f"removed {outcome['removed']} ({freed / 1e9:.1f} GB)"] if outcome.get("removed") else []
+    if outcome.get("deleting"):
+        moving = (outcome.get("deleting_bytes") or 0) / 1e9
+        parts.append(f"moved {outcome['deleting']} aside ({moving:.1f} GB), deleted by the next maintenance run")
+    if not parts:
+        parts.append("nothing removed")
+    if outcome.get("stopped"):
+        parts.append("run stopped before all selected items were processed")
+    if outcome.get("error"):
+        parts.append("run failed")
+    if kept:
+        parts.append(f"kept {kept}, Storage → Free says why")
+    if outcome.get("failed"):
+        parts.append(f"{outcome['failed']} failed")
+    after = outcome.get("free_after")
+    if isinstance(after, int):
+        parts.append(f"free now {after / 1e9:.1f} GB")
+    return f"Free space ({who}): " + "; ".join(parts) + "."
+
+
+
+
 def _name_items(root: pathlib.Path, items: List["_Candidate"]) -> None:
     """Every listed object's name: its task's title when it has one, else the folder's; one display read
     (no bulky evidence) per page of ids."""
@@ -295,6 +357,7 @@ class FreeSpace:
         self._run: Optional[Dict[str, Any]] = None
         self._error: Optional[str] = None
         self._progress = {"done": 0, "total": 0}
+        self._request: Optional[Dict[str, Any]] = None  # the mind's request this preview/run serves
 
     # ---- the probe and the interlock ------------------------------------------------------
 
@@ -375,13 +438,17 @@ class FreeSpace:
 
     def _settled(self, root: pathlib.Path, run: Dict[str, Any]) -> Tuple[List[str], List[str], List[str]]:
         """The run's folders as they stand now, by id: a moved folder is removed once its trash entry is gone,
-        stuck once the ``custody_trash`` job recorded that this very entry survived its removal."""
+        stuck once the ``custody_trash`` job recorded that this very entry survived its removal, or stayed held
+        because its producer marked it again (a moved drive or seat home is named by its task, a discarded scratch
+        handoff by its own entry)."""
         from ouroboros.task_custody import custody_trash_entries
+        from ouroboros.workspace_preflight import _RELEASE_MARK
 
         entries = custody_trash_entries(root) if run["moved"] else []
-        survived = self._stuck_trash(root) if entries else {}
-        waiting = {name.rsplit("-", 1)[0] for name, identity in entries if survived.get(name) != identity}
-        blocked = {name.rsplit("-", 1)[0] for name, identity in entries if survived.get(name) == identity}
+        survived = self._survived_trash(root) if entries else {}
+        named = {name: name if _RELEASE_MARK in name else name.rsplit("-", 1)[0] for name, _identity in entries}
+        waiting = {named[name] for name, identity in entries if survived.get(name) != identity}
+        blocked = {named[name] for name, identity in entries if survived.get(name) == identity}
         deleting = [key for key in run["moved"] if key.split(":", 1)[-1] in waiting]
         stuck = [key for key in run["moved"] if key not in deleting and key.split(":", 1)[-1] in blocked]
         removed = [key for key in run["moved"] if key not in deleting and key not in stuck] + run["removed"]
@@ -421,15 +488,15 @@ class FreeSpace:
             for reason, count in sorted(run["kept"].items()) if count]
 
     @staticmethod
-    def _stuck_trash(root: pathlib.Path) -> Dict[str, Any]:
-        """The ``custody_trash`` job's record of entries that survived its removal (name -> the
-        identity it saw); nothing when the row is absent or the store cannot be read now."""
+    def _survived_trash(root: pathlib.Path) -> Dict[str, Any]:
+        """The ``custody_trash`` job's record of entries that survived its removal, stuck or held (name ->
+        the identity it saw); nothing when the row is absent or the store cannot be read now."""
         try:
             from ouroboros import maintenance_jobs
 
             row = maintenance_jobs.job(root, "custody_trash") or {}
-            stuck = row.get("stuck")
-            return stuck if isinstance(stuck, dict) else {}
+            return {name: identity for key in ("held", "stuck") if isinstance(row.get(key), dict)
+                    for name, identity in row[key].items()}
         except Exception:
             return {}
 
@@ -437,6 +504,10 @@ class FreeSpace:
 
     def _busy(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
+
+    def _busy_elsewhere(self) -> bool:
+        """A request's start may call back from the preview thread itself."""
+        return self._busy() and self._thread is not threading.current_thread()
 
     def preview(self, data_root: Any, repo_dir: Any) -> bool:
         """Start one preview unless one lists or a run runs; False means the caller joined it."""
@@ -460,7 +531,7 @@ class FreeSpace:
             return {"started": False, "reason": "selection_conflict"}
         chosen = [str(group) for group in groups] if isinstance(groups, list) else None
         with self._lock:
-            if self._stopped.is_set() or self._busy():
+            if self._stopped.is_set() or self._busy_elsewhere():
                 return {"started": False, "reason": "busy"}
             if self._plan is None or self._state != "ready" or str(plan_id or "") != self._plan["id"]:
                 return {"started": False, "reason": "preview_outdated"}
@@ -521,6 +592,77 @@ class FreeSpace:
             return "unknown_item", set()
         return ("not_offered", set()) if set(ids) - manual_ids(plan) else ("", set(ids))
 
+    # ---- the mind's request (owner Q3 = A, 05.11.2026) --------------------------------------
+
+    def request(self, data_root: Any, repo_dir: Any, *, actor: str, request_id: str,
+                dry_run: bool = False, notify: Optional[Callable[[str], Any]] = None) -> Dict[str, Any]:
+        """The same Free the owner presses, asked by the mind (``free_storage``): one preview with the same
+        probes, then a run of the ordinary pool (every work folder, working copy and declared temporary
+        environment the retirers' proofs offer); a ``dry_run`` stops after the
+        preview. The owner's Keep and every retirer proof hold exactly as for the owner. Its receipt is the
+        ``storage_free`` job row (``request_id``, ``actor``, the preview's pool and exclusions, the run's
+        outcome) and ``notify`` is told one sentence for Main when it ends. Refused while a listing or a run
+        is under way (``busy``: the receipt says so) and for a request id already answered."""
+        root = pathlib.Path(data_root)
+        receipt = maintenance_jobs_receipt(root)
+        if receipt.get("request_id") == request_id:
+            return {"started": False, "reason": "duplicate"}
+        with self._lock:
+            if self._stopped.is_set() or self._busy() or self._request is not None:
+                reason = "busy"
+            else:
+                reason = ""
+                self._request = {"request_id": request_id, "actor": actor,
+                                 "dry_run": bool(dry_run), "notify": notify, "requested_at": utc_now_iso()}
+        if reason:
+            _write_receipt(root, {"request_id": request_id, "actor": actor, "state": "failed", "refusal": reason,
+                                  "requested_at": utc_now_iso()})
+            return {"started": False, "reason": reason}
+        if not self.preview(root, repo_dir):  # a listing started between the lock and here: the receipt says busy
+            with self._lock:
+                self._request = None
+            _write_receipt(root, {"request_id": request_id, "actor": actor, "state": "failed", "refusal": "busy",
+                                  "requested_at": utc_now_iso()})
+            return {"started": False, "reason": "busy"}
+        return {"started": True, "reason": ""}
+
+    def _continue_request(self, root: pathlib.Path, repo_dir: pathlib.Path, plan: Optional[Dict[str, Any]]) -> None:
+        """After the request's preview: start its run, or settle a dry run / an empty pool / a failed listing."""
+        with self._lock:
+            request = self._request
+        if request is None:
+            return
+        if plan is None:
+            self._finish_request(root, {"state": "failed", "refusal": "preview_failed", "error": self._error})
+            return
+        summary = {"pool": pool(plan), "groups": [self._group_view(group) for group in plan["groups"]]}
+        if request["dry_run"]:
+            self._finish_request(root, {"state": "done", "preview": summary})
+            return
+        items = sorted(ordinary_ids(plan))
+        with self._lock:
+            request["preview"] = summary  # before the run starts: it may finish and write the receipt first
+        started = self.start(root, repo_dir, plan["id"], None, items=items) if items else {"started": False, "reason": "nothing_selected"}
+        if not started["started"]:
+            self._finish_request(root, {"state": "done", "refusal": started["reason"]})
+
+    def _finish_request(self, root: pathlib.Path, facts: Dict[str, Any]) -> None:
+        """Record the request's receipt once, then tell Main (the mind's run is the owner's to see)."""
+        with self._lock:
+            request, self._request = self._request, None
+        if request is None:
+            return
+        notify = request.pop("notify", None)
+        receipt = {**{key: value for key, value in request.items() if key != "preview"},
+                   **({"preview": request["preview"]} if "preview" in request else {}), **facts, "finished_at": utc_now_iso()}
+        _write_receipt(root, receipt)
+        if notify is not None:
+            try:
+                notify(_request_sentence(receipt))
+            except Exception:
+                log.debug("storage_free request notice not delivered", exc_info=True)
+
+
     def cancel(self) -> bool:
         """Stop the listing (nothing is kept) or the run (what was freed stays freed)."""
         with self._lock:
@@ -552,6 +694,7 @@ class FreeSpace:
         from ouroboros.headless import HEADLESS_TASKS_DIR, TASK_DRIVES_DIR, drive_candidates
         from ouroboros.private_copy_read import _copy_owner, read_records
         from ouroboros.retention import age_cutoff, get_gc_retention_days
+        from ouroboros.session_scratch import PRODUCER_RETAINED, retention_hold, scratch_records
         from ouroboros.subagent_worktrees import (
             _record_file, _record_name, _records_dir, _resolve_root, _task_proven_over, snapshot_released,
         )
@@ -636,11 +779,13 @@ class FreeSpace:
         if {GROUP_REVIEW_EVIDENCE, GROUP_REVIEW_CHECKOUTS} & set(self._offered):
             from ouroboros import review_checking_prune as seats
 
-            homes = seats.finished_seat_homes(root, live, self._closed)  # one proof per seat task for both groups
+            seat_causes: dict = {}
+            homes = seats.finished_seat_homes(root, live, self._closed, causes=seat_causes)  # one proof per seat task (per home for a pseudo owner) for both groups
             if GROUP_REVIEW_EVIDENCE in self._offered:
                 group = new_group(GROUP_REVIEW_EVIDENCE)
                 for home, verdict, task_id in homes:
-                    _sorted_into(root, group, verdict, _Candidate(GROUP_REVIEW_EVIDENCE, f"seat:{home.name}", home, "seat", task=task_id))
+                    _sorted_into(root, group, verdict, _Candidate(GROUP_REVIEW_EVIDENCE, f"seat:{home.name}", home, "seat", task=task_id),
+                                 seat_causes.get(home, ""))
                 groups.append(group)
             if GROUP_REVIEW_CHECKOUTS in self._offered:
                 group = new_group(GROUP_REVIEW_CHECKOUTS)
@@ -700,6 +845,30 @@ class FreeSpace:
                     if run.is_dir() and not run.is_symlink():
                         _sorted_into(root, group, "offer" if _run_finished(run) else "in_use",
                                      _Candidate(GROUP_SERVICE_FOLDERS, f"test_run:{_record_name(run)}", run, "test_run"))
+            # A producer-retained session scratch is owner-removable only after its marker's
+            # words and the loss are shown in the existing explicit-discard form.  One row per
+            # handoff entry keeps the trash remover's whole-entry boundary intact.
+            producer_entries: Dict[pathlib.Path, List[Dict[str, Any]]] = {}
+            for row in scratch_records(root, include_holds=False):  # no task's hold is judged for a trash row
+                record = pathlib.Path(str(row.get("record") or ""))
+                if row.get("holder") != "trash" or not row.get("valid") or not row.get("path") or len(record.parents) < 3:
+                    continue
+                entry = record.parents[2]
+                if entry.parent.name != "custody_trash" or not entry.is_dir() or entry.is_symlink():
+                    continue
+                hold = retention_hold(pathlib.Path(str(row["path"])))
+                if hold is not None and hold["class"] == PRODUCER_RETAINED:
+                    producer_entries.setdefault(entry, []).append({**row, "example": hold["example"]})
+            for entry, held in sorted(producer_entries.items(), key=lambda pair: pair[0].name):  # ``rows`` stays the copies'
+                examples = [str(row.get("example") or "producer-retained session scratch") for row in held]
+                loss = "; ".join(dict.fromkeys(examples))
+                paths = list(dict.fromkeys(row["path"] for row in held))  # what the entry holds, and what its size is
+                item = _Candidate(GROUP_SERVICE_FOLDERS, f"producer_retained:{entry.name}", entry, "producer_retained",
+                                  task=entry.name.split("+", 1)[0], row={"loss": loss, "scratch_paths": paths})
+                item.reason, item.cause, item.kind = "retained_evidence", PRODUCER_RETAINED, "scratch"
+                item.manual = {"signature": None, "unsaved_count": 0, "unsaved_bytes": 0, "unsaved": [],
+                               "keep_branch": False, "producer_retained": True, "loss": loss, "paths": paths}
+                group["excluded"].append(item)
             groups.append(group)
         if GROUP_RESULT_PINS in self._offered:
             # Held by custody (no disposition) while its task is over and its checkout is gone: only the pins remain.
@@ -718,11 +887,20 @@ class FreeSpace:
 
     def _size(self, root: pathlib.Path, repo_dir: pathlib.Path, candidates: List[_Candidate]) -> None:
         """Size every candidate folder in the count child and every pin pair through Git; each answer
-        lands as it is known."""
+        lands as it is known. A marked scratch handoff is the size of the scratch it holds, summed (unknown
+        when any part is), never of its small entry."""
         from ouroboros.startup_historical_audit import read_job_lines, spawn_maintenance_job
         from ouroboros.storage import PURPOSE
 
-        by_path = {str(item.path): item for item in candidates if item.layout != "pins"}
+        by_path: Dict[str, List[_Candidate]] = {}
+        owed: Dict[int, List[Any]] = {}  # per item: [parts still to size, bytes so far (None: unknown), unreadable]
+        for item in candidates:
+            if item.layout == "pins":
+                continue
+            parts = item.row["scratch_paths"] if item.layout == "producer_retained" else [str(item.path)]
+            owed[id(item)] = [len(parts), 0, 0]
+            for part in parts:
+                by_path.setdefault(str(part), []).append(item)
         with self._lock:
             self._progress = {"done": 0, "total": len(candidates)}
         for item in candidates:
@@ -754,11 +932,17 @@ class FreeSpace:
                 if not isinstance(line, dict):
                     return
                 if line.get("event") == "size" and str(line.get("path")) in by_path:
-                    item, size = by_path[str(line["path"])], line.get("bytes")
-                    item.bytes = size if isinstance(size, int) and not isinstance(size, bool) else None
-                    item.unreadable = line.get("unreadable") if isinstance(line.get("unreadable"), int) else 0
-                    with self._lock:
-                        self._progress["done"] += 1
+                    size = line.get("bytes")
+                    size = size if isinstance(size, int) and not isinstance(size, bool) else None
+                    for item in by_path[str(line["path"])]:
+                        part = owed[id(item)]
+                        part[0] -= 1
+                        part[1] = None if size is None or part[1] is None else part[1] + size
+                        part[2] += line.get("unreadable") if isinstance(line.get("unreadable"), int) else 0
+                        if part[0] == 0:
+                            item.bytes, item.unreadable = part[1], part[2]
+                            with self._lock:
+                                self._progress["done"] += 1
                 elif "status" in line and line.get("status") != "finished":
                     raise RuntimeError(str(line.get("message") or "The sizes could not be read."))
 
@@ -783,9 +967,12 @@ class FreeSpace:
             _name_items(root, [item for group in groups for item in [*group["candidates"], *group["excluded"]]])
             with self._lock:
                 self._plan, self._state = {**plan, "finished_at": utc_now_iso()}, "ready"
+                ready = self._plan
         except _Stopped:
             with self._lock:
                 self._state, self._plan = "idle", None
+            self._finish_request(root, {"state": "failed", "refusal": "stopped"})
+            return
         except Exception as exc:
             from ouroboros.launch_roots import WorkRootUnavailable  # its sentence names the setting that decides
 
@@ -794,6 +981,9 @@ class FreeSpace:
                 self._state, self._plan = "failed", None
                 authored = isinstance(exc, (RuntimeError, WorkRootUnavailable))
                 self._error = str(exc) if authored else f"{type(exc).__name__}"
+            self._continue_request(root, repo_dir, None)
+            return
+        self._continue_request(root, repo_dir, ready)  # the mind's request, if this preview served one
 
     # ---- the run ----------------------------------------------------------------------------
 
@@ -829,19 +1019,23 @@ class FreeSpace:
             self._plan = {**plan, "finished_at": utc_now_iso()}
         settled = self._settled(root, run)
         view = self._run_view(root, run, settled)
+        with self._lock:
+            actor = str((self._request or {}).get("actor") or "owner")
         self._record(root, view, time.monotonic() - started, settled, list(run["failed"]), dict(run["kept_items"]),
                      {item.key: {"unsaved_count": item.manual["unsaved_count"], "unsaved_bytes": item.manual["unsaved_bytes"]}
                       for item in manual},
-                     {item.key: item.cause for item in run["items"] if item.key in run["kept_items"] and item.cause})
-        supervisor_row(root, "storage_free", {"phase": self._state, "duration_seconds": round(time.monotonic() - started, 2),
+                     {item.key: item.cause for item in run["items"] if item.key in run["kept_items"] and item.cause}, actor=actor)
+        supervisor_row(root, "storage_free", {"phase": self._state, "actor": actor, "duration_seconds": round(time.monotonic() - started, 2),
                                                **{key: view[key] for key in ("groups", "selected", "removed", "removed_bytes",
                                                                              "deleting", "stuck", "kept", "failed", "not_started",
                                                                              "free_before", "free_after")}})
+        self._finish_request(root, {"state": "failed" if run["error"] else "done",
+                                    "outcome": {**view, "kept_items": dict(run["kept_items"])}})
 
     @staticmethod
     def _record(root: pathlib.Path, view: StorageFreeRun, seconds: float, settled: Tuple[List[str], ...],
                 failed: List[str], kept_ids: Dict[str, str], discards: Optional[Dict[str, Any]] = None,
-                causes: Optional[Dict[str, str]] = None) -> None:
+                causes: Optional[Dict[str, str]] = None, actor: str = "owner") -> None:
         try:
             from ouroboros.server_maintenance import _prune_event
 
@@ -849,7 +1043,7 @@ class FreeSpace:
             # cadence's own prune names what it removed: who removed a task's folder is then one search.
             removed, deleting, stuck = settled
             _prune_event("storage_free", ("removed", "deleting", "kept"), report={
-                **view, "duration_seconds": round(seconds, 2), "removed_ids": removed, "deleting_ids": deleting,
+                **view, "actor": actor, "duration_seconds": round(seconds, 2), "removed_ids": removed, "deleting_ids": deleting,
                 "stuck_ids": stuck, "failed_ids": failed, "kept_ids": kept_ids,
                 **({"kept_causes": causes} if causes else {}),
                 **({"manual_discards": discards} if discards else {})})
@@ -980,6 +1174,9 @@ class FreeSpace:
         for item in candidates:
             if self._closed():
                 raise _Stopped()
+            if item.layout == "producer_retained":
+                self._settle(run, item, self._free_producer_retained(root, item), moved=True)
+                continue
             path, reasons = str(item.row.get("path") or ""), {}
             try:
                 discard_unsaved_copy(item.row, item.manual["signature"], data_dir=root, live=live, reasons=reasons)
@@ -992,6 +1189,26 @@ class FreeSpace:
             else:
                 self._keep(run, item, reasons.get(path, "other"))
             self._tick(run, run["done"] + 1)
+
+    @staticmethod
+    def _free_producer_retained(root: pathlib.Path, item: _Candidate) -> str:
+        """Accept the owner's explicit loss choice: the marker is the producer's hold, and removing it is the
+        owner's acceptance. Exactly this handoff entry then goes like a moved drive, by the maintenance
+        child's custody-trash remover off the serving process: the entry is touched, so its new identity
+        makes that job due, and the child is asked. Deleting (or stuck) until the child settles it."""
+        from ouroboros import maintenance
+        from ouroboros.test_environment import retention_markers
+
+        try:
+            for scratch in item.row.get("scratch_paths") or ():
+                for marker in retention_markers(pathlib.Path(str(scratch))):
+                    marker.unlink(missing_ok=True)
+            with contextlib.suppress(FileNotFoundError):  # gone already: the child settled it meanwhile
+                os.utime(item.path)
+        except OSError:
+            return "other"
+        maintenance.child.request()
+        return ""
 
     @staticmethod
     def _copy_stays(root: pathlib.Path, item: _Candidate, task_id: str, live: Callable[[str], Optional[bool]], named: str = "") -> str:
