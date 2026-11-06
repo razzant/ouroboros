@@ -637,22 +637,19 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int) -> di
     from copy import deepcopy
     from ouroboros.config import get_consciousness_autonomy, runtime_setting
     from ouroboros.presence_runner import presence_event_identity
-    from ouroboros.places import FACT_LEGACY_ADDRESSED, is_owner_account, wake_matches
+    from ouroboros.places import is_owner_account, observed_facts, wake_matches, writes_as_owner
     place = admission.place
-    facts = event.facts if event.facts is not None else (FACT_LEGACY_ADDRESSED,)
-    if event.actor.get("is_bot") is True:
-        facts = (*facts, "from_bot")
+    facts = observed_facts(event)
     actor = str(event.actor.get("platform_actor_id") or event.actor.get("id") or "")
     owner_address = is_owner_account(place, actor, event.account_id)
     identity = deepcopy(event.identity)
-    sending = (identity or {}).get("sends_as") or {}
     allowance = dict(admission.allowance or {})
     metadata = {
         "initiator": "consciousness", "usage_category": "consciousness", "model_role": "consciousness",
         "consciousness_autonomy": get_consciousness_autonomy(), "wake_cause": "focus",
         "consciousness_cause": "place:" + place.place_id, "work_kind": "consciousness",
         "focus": {"place_id": place.place_id, "conversation_key": event.conversation_key,
-                  "identity": identity, "identity_owner": sending.get("kind") == "user" and is_owner_account(place, sending["id"], event.account_id),
+                  "identity": identity, "identity_owner": writes_as_owner(place, identity, event.account_id),
                   "room_chat_id": chat_id, "event_identity": presence_event_identity(admission.binding_id, event),
                   "actor": {"platform_actor_id": actor,
                             "display_name": str(event.actor.get("display_name") or event.actor.get("username") or ""),

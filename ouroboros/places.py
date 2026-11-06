@@ -387,6 +387,31 @@ def outbox_place(drive_root: Any, *, connector: str, provider: str, account_id: 
                          conversation_id=conversation_id, thread_id=thread_id)
 
 
+def observed_facts(event: Any) -> tuple[str, ...]:
+    """The facts attention reads on an event: the connector's own (an event with none is a legacy addressed
+    message), plus ``from_bot`` when the connector names its author a bot."""
+    facts = tuple(event.facts) if event.facts is not None else (FACT_LEGACY_ADDRESSED,)
+    return (*facts, FACT_FROM_BOT) if event.actor.get("is_bot") is True else facts
+
+
+def writes_as_owner(place: Place, identity: Mapping[str, Any] | None, account_id: str = "") -> bool:
+    """The place writes from my human's own account (``sends_as`` confirmed as theirs): its posts are theirs."""
+    sending = (identity or {}).get("sends_as") or {}
+    return sending.get("kind") == "user" and is_owner_account(place, str(sending.get("id") or ""), account_id)
+
+
+def own_account_event(place: Place, event: Any) -> bool:
+    """Written by the account this place writes as (``identity.sends_as``): by me, through the connector or any other
+    tool that acts as that account (my sends, my edits and merges). It stays in the room and my next own wake and
+    never wakes me. Not where that account is my human's own (their posts there are their words), and never for an
+    actor the connector reports unauthenticated (a mail From proves nothing) or an event without an identity."""
+    identity = getattr(event, "identity", None) or {}
+    sender = str((identity.get("sends_as") or {}).get("id") or "").strip()
+    actor = str(event.actor.get("platform_actor_id") or "").strip()
+    return (bool(sender) and actor == sender and event.actor.get("authenticated") is not False
+            and not writes_as_owner(place, identity, event.account_id))
+
+
 def wake_matches(place: Place, facts: Iterable[str]) -> tuple[WakeItem, ...]:
     present = set(facts)
     if FACT_FROM_BOT in present and not any(item.fact == FACT_FROM_BOT for item in place.wakes):

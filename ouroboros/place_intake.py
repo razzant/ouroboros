@@ -7,7 +7,7 @@ from pathlib import Path
 
 from ouroboros import presence_admission
 from ouroboros.dialogue_provenance import reaction_fact, reaction_words
-from ouroboros.places import FACT_LEGACY_ADDRESSED, PlaceError, get_place, wake_matches
+from ouroboros.places import PlaceError, get_place, observed_facts, own_account_event, wake_matches
 
 # What ``offer_arrival`` did: the reason its settlement records, or the mind's choice to make.
 HANDED_TO_AUTHOR, HANDED_TO_WORK, ROUTE_TO_MIND = "current_author", "conversation_work", "route"
@@ -116,13 +116,14 @@ def decide_attention(root: Path, admission, event) -> tuple[str, dict]:
         if exc.code != "place_not_found":
             raise
         return "silent", {"reason": "disconnected"}
-    facts = event.facts if event.facts is not None else (FACT_LEGACY_ADDRESSED,)
-    if event.actor.get("is_bot") is True:
-        facts = (*facts, "from_bot")
+    facts = observed_facts(event)
     if place.state == "paused":
         return "silent", {"reason": "paused"}
     if not presence_admission.focus_enabled(root):
         return "silent", {"reason": "off"}
+    if own_account_event(place, event):
+        # My own act (a send, an edit, a merge) is heard and kept, never a reason to wake me or to mail my live author.
+        return "silent", {"reason": "own_account"}
     reaction = reaction_fact(event.message)
     if reaction:
         # Context, whatever the wake list, owner or allowance says. A live author of the target's proven

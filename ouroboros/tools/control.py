@@ -368,8 +368,10 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("send_user_message", {
             "name": "send_user_message",
             "description": "Send a separate reply to the owner while work continues: the first line of longer work (what "
-                           "I am about to do and why), a question, an invitation to collaborate, or anything else that "
-                           "needs the owner now. It appears in this work's room as a normal reply, calls the owner back "
+                           "I am about to do and why), a question the work does not wait on, an invitation to "
+                           "collaborate, or anything else that needs the owner now; a decision this work needs from "
+                           "the owner is an escalate card, which shows its options, stays listed as waiting and brings "
+                           "the answer back here. It appears in this work's room as a normal reply, calls the owner back "
                            "and leaves the work running; work news goes on update_focus, later progress stays in the "
                            "card. For Presence-bound work that room is local, not the place conversation: a connector "
                            "tool reaches that, and your final answer only where your context names that route.",

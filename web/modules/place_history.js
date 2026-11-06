@@ -48,7 +48,8 @@ export function historyFactWords(row) {
     const facts = row.place_history || {};
     const attention = facts.attention;
     const heard = { paused: 'Heard while Paused', off: 'Heard while consciousness was off',
-        no_wake_match: 'Heard; no wake matched', reaction_context_only: 'Heard as context', current_author: 'Passed to the current author', disconnected: 'Heard after disconnection' };
+        no_wake_match: 'Heard; no wake matched', reaction_context_only: 'Heard as context', current_author: 'Passed to the current author', disconnected: 'Heard after disconnection',
+        own_account: 'Heard; written by the account I send as' };
     return [attention?.decision === 'focus_started' ? 'Focus started' : attention?.decision === 'heard'
         ? (attention.reason === 'conversation_work' ? `Passed to work ${attention.recipient || 'in this conversation'}` : heard[attention.reason] || 'Heard') : '',
     { authored: 'Delivery not confirmed', accepted: 'Accepted by service; delivery not confirmed',
