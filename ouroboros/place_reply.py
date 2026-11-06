@@ -100,17 +100,140 @@ def project_output(root, metadata, task_id, output):
     return dict(output)
 
 
+def conversation_send_tools(connector: str) -> list:
+    """The connector's declared ``effect: message`` tools whose targets all lie within one conversation identity
+    (account, conversation, thread) and that name a conversation argument: the doors through which words reach the
+    place a focus speaks in. Read from the published declarations the dispatcher uses; no connector is named here."""
+    from ouroboros import extension_registry_state as registry
+    from ouroboros.tool_effects import EFFECT_MESSAGE, effect_of
+
+    if not connector:
+        return []
+    with registry._lock:
+        tools = [(name, dict(tool)) for name, tool in registry._tools.items()
+                 if isinstance(tool, dict) and tool.get("skill") == connector]
+    found = []
+    for name, tool in tools:
+        effect = effect_of(name, ext_tool=tool)
+        if (effect.declared and effect.effect == EFFECT_MESSAGE and effect.conversation
+                and set(effect.targets) <= {"account_id", effect.conversation, effect.thread}):
+            found.append((name, effect))
+    return found
+
+
+def records_only(metadata) -> bool:
+    """A place focus whose own connector speaks through such a tool: its finish is its record and people hear only
+    what it sends (owner 06.11, 2A). A connector without one (a peer URL, mail recipients) keeps the final as its reply."""
+    metadata = metadata if isinstance(metadata, dict) else {}
+    presence = metadata.get("presence") or {}
+    return (metadata.get("wake_cause") == "focus" and bool(reply_carrier(metadata))
+            and bool(conversation_send_tools(str(presence.get("transport_skill") or ""))))
+
+
+def records_only_now(ctx) -> bool:
+    """``records_only`` for an Active place under Acts or Evolves. A Silent or Paused place and Advises keep today's
+    held draft (the owner's rehearsal before activating a place); an unreadable place keeps it too."""
+    metadata = getattr(ctx, "task_metadata", {}) or {}
+    if not records_only(metadata):
+        return False
+    from ouroboros.consciousness_authority import is_observe_origin
+    from ouroboros.tool_access import canonical_data_root
+    if is_observe_origin(metadata):
+        return False
+    try:
+        return get_place(canonical_data_root(ctx), reply_carrier(metadata)["place_id"]).state == "active"
+    except Exception:  # a missing or unreadable place: the held path says so, as it does for every final
+        return False
+
+
+def riding_sends(ctx, calls) -> list:
+    """This response's successful sends of the event's own connector into the turn's own conversation: words that reach
+    people beside the finish they ride with. A refused or failed send is ``is_error`` and stays a result to read."""
+    from ouroboros.place_guard import call_place_facts
+
+    metadata = getattr(ctx, "task_metadata", {}) or {}
+    carrier = reply_carrier(metadata)
+    tools = {name for name, _effect in conversation_send_tools(str((metadata.get("presence") or {}).get("transport_skill") or ""))}
+    if not carrier or not tools:
+        return []
+    riding = []
+    for call in calls or []:
+        if not isinstance(call, dict) or call.get("is_error") or call.get("tool") not in tools:
+            continue
+        facts = call_place_facts(ctx, str(call["tool"]), call.get("args") if isinstance(call.get("args"), dict) else {})
+        if any(carrier["conversation_key"] in (row.get("conversation_keys") or ()) for row in facts.get("places") or []):
+            riding.append(call)
+    return riding
+
+
+def speak_line(metadata) -> str:
+    """How words reach this place, from the connector's declarations and the event's own ids: the send tool and its
+    arguments, that the finish is a record (or held, or posted where no such tool exists), ``summary`` and Main."""
+    from ouroboros.consciousness_authority import is_observe_origin
+
+    metadata = metadata if isinstance(metadata, dict) else {}
+    presence = metadata.get("presence") or {}
+    event, place = presence.get("event") or {}, presence.get("place") or {}
+    label = place.get("label") or place.get("provider") or presence.get("place_id") or "this place"
+    tools = conversation_send_tools(str(presence.get("transport_skill") or "")) if metadata.get("wake_cause") == "focus" else []
+    if not tools:
+        return (f"Your non-silent finish is posted in {label} as your words; summary is one plain sentence seen only by "
+                "your human; send_user_message reaches them now.")
+    name, effect = tools[0]
+    args = [f"{effect.conversation}={event.get('conversation_id') or '…'}"]
+    if effect.thread and event.get("thread_id"):
+        args.append(f"{effect.thread}={event['thread_id']}")
+    if "account_id" in effect.targets and event.get("account_id"):
+        args.append(f"account_id={event['account_id']}")
+    state = str(place.get("state") or "")
+    held = (f" ({label} is {state.title()}: a send is refused and your finish is held for your human, not posted)"
+            if state in {"silent", "paused"} else
+            " (autonomy is Advises: a send is refused and your finish is held for your human, not posted)"
+            if is_observe_origin(metadata) else "")
+    return (f"Words reach {label} only when you send them: {name} with {', '.join(args)}; a send may ride in the same "
+            f"response as your finish. Your finish is your record, never posted{held}; summary is one plain sentence seen "
+            "only by your human; send_user_message reaches them now.")
+
+
+def record_note(ctx) -> str:
+    """The one return of a records-only finish that posted nothing and sent nothing in its response: the facts (where
+    words go, what this turn already sent there, how to send) and the two choices. The mind decides; once per run."""
+    from ouroboros.place_guard import this_turn_sends
+    from ouroboros.presence_context import _source_conversation
+
+    metadata = getattr(ctx, "task_metadata", {}) or {}
+    carrier = reply_carrier(metadata)
+    label, route = _source_conversation(metadata.get("presence") or {})
+    sends = this_turn_sends(ctx, carrier["conversation_key"])
+    pending = "; ".join(f"{row.get('tool')} at {row.get('at')}" + (f": {json.dumps(row['text'], ensure_ascii=False)}" if "text" in row else "")
+                        for row in sends["calls_without_receipt"]) or "none"
+    return (f"[FOCUS_FINISH_IS_A_RECORD] Nothing was posted: in {label} (route {route}) your finish is your record, and "
+            f"people hear only what you send. Confirmed sent there by this turn: {sends['confirmed']}. Your own send calls "
+            f"there without a receipt yet: {pending}. {speak_line(metadata)} Send it now, or finish again to keep this "
+            "text as your record.")
+
+
 def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, str]:
-    """Speech follows the mind's selection, never delivery receipts: an answer is new speech even
-    after a tool sent an acknowledgement, file or reaction, while ``quiet`` (an explicit silent
-    finish or a host-authored final) says nothing new. An admitted handoff stays deferred either
-    way; words that are not speech never ride it (``quiet`` in the completion)."""
+    """Speech follows the mind's selection, never delivery receipts: where the place has no in-conversation send
+    tool an answer is new speech even after a tool sent an acknowledgement, while ``quiet`` (an explicit silent
+    finish or a host-authored final) says nothing new. Where the place speaks by tool (``records_only_now``) the
+    finish is the record: nothing is posted; a finish with words that sent nothing in its own response returns
+    once with the facts (``record_note``), the next is accepted. An admitted handoff stays deferred either way;
+    words that are not speech never ride it (``quiet`` in the completion)."""
     metadata = getattr(ctx, "task_metadata", {}) or {}
     carrier = reply_carrier(metadata)
     if not carrier:
         return True, ""
     from ouroboros.tool_access import canonical_data_root
     from ouroboros.presence_continuation import _handoff_ref, selection_for
+    records = records_only_now(ctx)
+    if (records and text and not quiet and getattr(ctx, "_completion_riding_send", None) is False
+            and not getattr(ctx, "_records_only_noted", False)):
+        ctx._records_only_noted = True  # once: the mind then sends, or finishes again to keep its record
+        return False, record_note(ctx)
+    if records:
+        ctx._focus_record_only = True  # the loop's wake_silent usage follows the transport (R7)
+    quiet = quiet or records
     root = canonical_data_root(ctx)
     held = ""
     if not quiet and text:
@@ -143,7 +266,7 @@ def refusal_facts(ctx) -> str:
     from ouroboros.presence_context import _source_conversation
     metadata = getattr(ctx, "task_metadata", {}) or {}
     carrier = reply_carrier(metadata)
-    if not carrier:
+    if not carrier or records_only_now(ctx):  # a records-only place posts no finish: the record note says so
         return ""
     label, route = _source_conversation(metadata.get("presence") or {})
     sends = this_turn_sends(ctx, carrier["conversation_key"])
