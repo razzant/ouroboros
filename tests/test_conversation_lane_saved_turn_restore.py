@@ -308,8 +308,16 @@ def _resume_and_launch(system, task_id):
 
 def _boot_after_stop(system, monkeypatch, root):
     """The application stops (its teardown kill); the next generation restores the saved queue."""
+    _stop(system)
+    _boot(system, monkeypatch, root)
+
+
+def _stop(system):
     system.workers.kill_workers(force=True, terminal_status="cancelled", result_reason="Server shutdown.",
                                 stop_source="server_shutdown", retain_saved_work=True)
+
+
+def _boot(system, monkeypatch, root):
     system.workers.PENDING[:] = []
     system.workers.RUNNING.clear()
     _next_generation(monkeypatch, root)
@@ -1064,7 +1072,7 @@ def test_only_a_turn_with_no_effect_is_given_back_from_its_input(tmp_path, monke
     assert seed_returnable(root, task, attempt) is (fact == "nothing")
 
 
-@pytest.mark.parametrize("door", ["acknowledged_restart", "aborted_update"])
+@pytest.mark.parametrize("door", ["acknowledged_restart", "owner_restart", "aborted_update"])
 def test_a_project_room_turn_cut_before_its_first_save_comes_back_on_its_bound_basis(tmp_path, monkeypatch, door):
     """A room turn's seed carries the basis it was bound with; Project-hold revalidation admits it on its D5 proof."""
     from ouroboros.projects_registry import create_project
@@ -1081,11 +1089,16 @@ def test_a_project_room_turn_cut_before_its_first_save_comes_back_on_its_bound_b
     if door == "aborted_update":
         assert system.control._quiesce_repo_writers("auto_merge") == []
         system.control._respawn_workers_after_failed_update()
-    else:
+    else:  # the owner's own Restart door holds what it does not return (``hold_stopped_queue``)
+        from ouroboros import delegate_recovery as dr
+
+        tx = dr.prepare_owner_restart(tmp_path)["transaction_id"] if door == "owner_restart" else "tx-room"
         assert prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING,
-                                       transaction_id="tx-room") == {turn.id}
-        _ack(tmp_path, "tx-room")
-        _boot_after_stop(system, monkeypatch, tmp_path)
+                                       transaction_id=tx) == {turn.id}
+        _ack(tmp_path, tx)
+        _stop(system)
+        monkeypatch.setattr(dr, "_PROCESS_GENERATION", "the-next-generation")  # boot reads a prior generation's door
+        _boot(system, monkeypatch, tmp_path)
     [row] = [row for row in system.workers.PENDING if row["id"] == turn.id]
     assert row[SEED_RETURN]["from_attempt"] == 1 and row["_attempt"] == 2
     system.workers.assign_tasks()
@@ -1094,3 +1107,90 @@ def test_a_project_room_turn_cut_before_its_first_save_comes_back_on_its_bound_b
     assert sent["_project_admission"]["project"] == basis["project"] and "_project_scope_none" not in sent
     system.workers.assign_tasks()
     assert not _launched(system)
+
+
+@pytest.mark.parametrize("second", ["acknowledged_restart", "quit"])
+def test_a_seed_caught_again_before_its_launch_stays_recoverable(tmp_path, monkeypatch, second):
+    """The returned turn waits for a slot when a second stop comes: its published row keeps the proof, so an
+    acknowledged return gives it back once and a Quit holds it for a Resume that launches it once."""
+    from supervisor.events_budget import HOLD_SAVED_WORK
+    from supervisor.restart_retention import prepare_restart_returns
+    from supervisor.task_admission import SEED_RETURN
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    assert prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING,
+                                   transaction_id="tx-seed") == {turn.id}
+    _ack(tmp_path, "tx-seed")
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    assert system.queue.publish_queue_snapshot(reason="seed_waits") is not False
+    [published] = json.loads(system.queue.QUEUE_SNAPSHOT_PATH.read_text())["pending"]
+    assert published["task"][SEED_RETURN] == {"source_task_id": turn.id, "from_attempt": 1, "cause": "restart"}
+    if second == "acknowledged_restart":
+        assert prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING,
+                                       transaction_id="tx-second") == set()  # a queued row: named in queue_ids
+        _ack(tmp_path, "tx-second")
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    [row] = system.workers.PENDING
+    assert row[SEED_RETURN]["from_attempt"] == 1 and row["_attempt"] == 2
+    if second == "quit":
+        assert budget_hold_fact(row)["reason"] == HOLD_SAVED_WORK
+        system.workers.assign_tasks()
+        assert not _launched(system), "only the owner's Resume releases a quit's saved work"
+        sent = _resume_and_launch(system, turn.id)
+    else:
+        system.workers.assign_tasks()
+        sent = _launched(system)
+    assert [(item["id"], item["_attempt"]) for item in sent] == [(turn.id, 2)]
+    system.workers.assign_tasks()
+    assert not _launched(system)
+
+
+def test_an_answer_sent_after_the_stops_mark_is_never_given_back(tmp_path, monkeypatch):
+    """A degraded in-process executor is only asked to stop: an answer it delivers after the stop marked the
+    turn is an effect, so the boot's re-check keeps today's path instead of answering again."""
+    from supervisor.restart_retention import prepare_restart_returns
+    from supervisor.task_admission import SEED_RETURN
+    from supervisor.terminal_delivery import delivery_id_for, register_delivery
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    assert prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING,
+                                   transaction_id="tx-late") == {turn.id}
+    _ack(tmp_path, "tx-late")
+    _stop(system)
+    [kept] = [row for row in json.loads(system.queue.QUEUE_SNAPSHOT_PATH.read_text())["running"] if row["id"] == turn.id]
+    assert kept["task"][SEED_RETURN] == {"source_task_id": turn.id, "from_attempt": 1}  # the stop's own mark
+    register_delivery(tmp_path, delivery_id_for(turn.id, "the answer"))
+    _boot(system, monkeypatch, tmp_path)
+    assert turn.id not in [row["id"] for row in system.workers.PENDING] and turn.id not in system.workers.RUNNING
+    assert ci.has_active_intent(tmp_path, turn.id, strict=True)
+
+
+def test_a_quit_without_a_returning_door_keeps_the_stops_own_terminal(tmp_path, monkeypatch):
+    """Only a returning door's transaction names a seed: a Quit retains nothing unsaved and ends it as before."""
+    from ouroboros.task_results import _TRULY_TERMINAL_STATUSES
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    _stop(system)
+    running = json.loads(system.queue.QUEUE_SNAPSHOT_PATH.read_text())["running"]
+    assert turn.id not in [row["id"] for row in running]
+    assert load_task_result(tmp_path, turn.id)["status"] in _TRULY_TERMINAL_STATUSES
+
+
+@pytest.mark.parametrize("launch", ["none", "dispatch_mark", "recorded_start", "terminal"])
+def test_a_seed_proof_holds_until_the_attempt_it_gave_back_launches(launch):
+    """The proof rides the row by value; a dispatch mark or a recorded start of that attempt spends it."""
+    from supervisor.task_admission import SEED_RETURN, prestart_returned_unsent
+
+    row = {"id": "seed", "_is_direct_chat": True, "_attempt": 2,
+           SEED_RETURN: {"source_task_id": "seed", "from_attempt": 1, "cause": "restart"}}
+    stored = {"task_id": "seed", "status": "running", "task_attempt": 0,
+              **({"admitted_dispatch_attempt": 2} if launch == "dispatch_mark" else {}),
+              **({"task_attempt": 2} if launch == "recorded_start" else {}),
+              **({"status": "completed"} if launch == "terminal" else {})}
+    proof = prestart_returned_unsent(row, stored)
+    assert proof == ({"seed_return": True, "from_attempt": 1, "cause": "restart"} if launch == "none" else {})

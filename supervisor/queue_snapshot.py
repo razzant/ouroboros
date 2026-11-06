@@ -379,8 +379,8 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
          and str((row.get("task") or {}).get("id") or "") not in taken],
         _queue().DRIVE_ROOT, transaction=transaction, cause=stop_door)
     if handoffs is not None:
-        handoffs.update({str(task["id"]): source["from_attempt"] for task in recovered  # D5 seeds too
-                         if isinstance(source := task.get("_working_recovery") or task.get(SEED_RETURN), dict)
+        handoffs.update({str(task["id"]): source["from_attempt"] for task in recovered
+                         if isinstance(source := task.get("_working_recovery"), dict)
                          and source.get("source_task_id") == task["id"] and source.get("from_attempt")})
     parked += recovered
     unseen.update(str(task.get("id") or "") for task in parked

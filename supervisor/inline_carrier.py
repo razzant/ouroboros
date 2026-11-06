@@ -344,14 +344,15 @@ def run_inline_turn(
 
     The same RUNNING row and the same worker task body as a carrier
     (``inline_carrier.start_inline_turn``); a live call attaches its process-local
-    turn to the actor. Returns the RUNNING meta, or None when refused or deferred.
+    turn to the actor. Returns the RUNNING meta, or None when refused. A call is never saved for after a Restart
+    (its session cannot return), so a pending one admits it like any owner turn.
     """
-    from ouroboros.server_restart import agent_restart_draining, agent_restart_pending, note_started_restart_work
+    from ouroboros.server_restart import agent_restart_pending, note_started_restart_work
     from supervisor import queue
     from supervisor.active_activity import reply_expected
     from supervisor.conversation_lane import admit_turn, publish_awaiting_rows
     from supervisor.worker_chat_lane import (
-        _announce_turn_start, _client_message_id, _defer_chat_for_restart, _host_operation_failure,
+        _announce_turn_start, _client_message_id, _host_operation_failure,
         _report_direct_chat_error, _seed_task, owner_conversation_admitted,
     )
 
@@ -373,13 +374,10 @@ def run_inline_turn(
                 _pool().send_with_budget(chat_id, "Restart intake is closed. This turn was not accepted; send it after Restart.",
                     **_host_operation_failure(task_metadata), role="system", system_type="task_not_started")
                 return None
-            # Only the physical drain saves degraded text; a live call is never saved (its session cannot return).
-            deferred = agent_restart_draining() and realtime_turn is None
             # Reserved: the row is this executor's from its admission (the tick's lane pass in the barrier
             # window hands it to no carrier) until ``start_inline_turn`` binds it.
-            meta = None if deferred else admit_turn(task, chat_id=chat_id, client_message_id=client_msg_id, quiet=False,
-                                                    reply_expected=reply_expected({"metadata": task_metadata or {}}),
-                                                    reserved=True)
+            meta = admit_turn(task, chat_id=chat_id, client_message_id=client_msg_id, quiet=False,
+                              reply_expected=reply_expected({"metadata": task_metadata or {}}), reserved=True)
             if meta is not None:
                 note_started_restart_work(task)
         if meta is not None:
@@ -406,9 +404,6 @@ def run_inline_turn(
                         _pool().RUNNING.pop(str(task["id"]))
                     queue.persist_queue_snapshot(reason="conversation_turn_inline_refused")
                 raise
-        if deferred:
-            _defer_chat_for_restart(task, chat_id, task_metadata)
-            return None
         _announce_turn_start({"task": task, "chat_id": chat_id, "client_msg_id": client_msg_id, "kind": "direct_chat"})
         return meta
     except Exception as e:

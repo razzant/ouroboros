@@ -375,9 +375,9 @@ SEED_RETURN = "_seed_return"  # D5: a returning stop gave back a turn cut before
 def seed_returnable(root: Any, task: dict, attempt: int) -> bool:
     """An owner text turn of the conversation lane cut before its first working save (D5).
 
-    ``pre_effect`` holds every tool batch until its file is written; only without a durable root is nothing
-    written while the batch runs. So with that root present no file proves no tool ran, while a no-tool answer
-    saved non-gating, a live park and an owed or delivered final read as effects. Positive evidence only: a later
+    ``pre_effect`` holds every tool batch until its file is written; only without a durable root is nothing written
+    while the batch runs, and the task's stored record proves that root. So no file proves no tool ran, while a no-tool
+    answer saved non-gating, a live park and an owed or delivered final read as effects. Positive evidence only: a later
     attempt, a continuation, a wake, a call, Presence, a child or any unreadable fact keeps the interrupted path.
     """
     from ouroboros.consciousness_authority import wake_cause
@@ -389,8 +389,7 @@ def seed_returnable(root: Any, task: dict, attempt: int) -> bool:
     metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     if (not task_id or not task.get("_is_direct_chat") or attempt != 1 or governing_continuation(task)
             or wake_cause(metadata) or presence_turn(task, root) or metadata.get("execution_transport") is not None
-            or task.get("configured_subagent") or task.get("parent_task_id") not in (None, "", task_id)
-            or not root.is_dir()):
+            or task.get("configured_subagent") or task.get("parent_task_id") not in (None, "", task_id)):
         return False
     try:
         stored = load_task_result(root, task_id, strict=True) or {}

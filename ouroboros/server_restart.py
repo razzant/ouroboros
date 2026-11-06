@@ -270,8 +270,7 @@ def _perform_owner_restart(ctx: Any, reply=None) -> tuple[bool, str]:
             notice = ("Stopping active task. New settings apply to the next message."
                       if stopped_task_ids else "New settings apply to the next message.")
             if returning:
-                notice += (f" {returning} task{'' if returning == 1 else 's'} will continue from "
-                           f"{'its' if returning == 1 else 'their'} saved state after the restart.")
+                notice += f" {returning} task{'' if returning == 1 else 's'} will continue after the restart."
             if held:
                 notice += (f" {held} queued task{'' if held == 1 else 's'} held until you resume "
                            f"{'it' if held == 1 else 'them'}.")
