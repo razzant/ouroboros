@@ -534,7 +534,7 @@ function rowDetailsHtml(row, state, rowKey) {
     const stored = session ? '' : String(row.route.target_id || '').trim();
     const minted = MINTED_FROM[row.minted_from] || '';
     const fact = (label, value, attrs) => `<div${value ? '' : ' hidden'}${attrs ? ` ${attrs}` : ''}><dt>${label}</dt><dd>${escapeHtml(value)}</dd></div>`;
-    return `<details class="model-role-details available-subagent-details" data-subagent-details>
+    return `<details class="model-role-details available-subagent-details ui-disclosure" data-subagent-details>
                 <summary>Details &amp; history</summary>
                 <dl class="available-subagent-facts">
                     <div><dt>Review cost</dt><dd data-subagent-review-facts>${escapeHtml(reviewCost(row, state))}</dd></div>
@@ -1028,7 +1028,7 @@ export function createAvailableSubagentsEditor({
             </div>
             <div class="available-subagents-source" data-review-pool-stays ${pool.stays ? '' : 'hidden'}>${escapeHtml(pool.stays)}</div>
             <div class="available-subagents-diagnostics" data-review-pool-note ${pool.note ? '' : 'hidden'}>${escapeHtml(pool.note)}</div>
-            <details class="model-role-details" data-review-pool-history ${pool.history ? '' : 'hidden'}><summary>Reviewer origin</summary>
+            <details class="model-role-details ui-disclosure" data-review-pool-history ${pool.history ? '' : 'hidden'}><summary>Reviewer origin</summary>
                 <div class="available-subagents-source" data-review-pool-history-text>${escapeHtml(pool.history)}</div></details>
             <div class="available-subagents-source" data-subagents-read-problem ${readProblem ? '' : 'hidden'}>${escapeHtml(readProblem)}</div>
             <div data-subagents-diagnostics class="available-subagents-diagnostics" ${diagnostics.length ? '' : 'hidden'}>${escapeHtml(diagnostics.join(' · '))}</div>
