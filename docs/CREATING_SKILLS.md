@@ -1183,7 +1183,7 @@ Use the connector's ordinary content-hash-bound skill token for:
   (a forward, or another person's text the event copies under the sender). The host never records such an event as
   its sender's own words. A message from an account the place confirms as the owner's is their words by provenance
   (said where others can hear) at a turn's opening, mid-turn and when a focus hands it on, and a Continue of that work
-carries them to the successor whole (citable there, an order only by a cite); a forward of it is not.
+  carries them to the successor whole (citable there, an order only by a cite); a forward of it is not.
   Provenance is never a verdict: whom the words are for, and whether they ask for work, is the mind's reading. An
   order exists only where the mind cites their exact words (`owner_words` of `start_task`, `schedule_followup`,
   `manage_schedules` update) and the host verifies the bytes inside a message of theirs that reached that run.
