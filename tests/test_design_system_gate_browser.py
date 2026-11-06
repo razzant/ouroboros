@@ -60,28 +60,32 @@ MEASURE = """root => {
     const shown = """ + SHOWN + """;
     const name = e => e.tagName.toLowerCase() + (e.id ? '#' + e.id : '') +
         [...e.classList].slice(0,3).map(c=>'.'+c).join('');
-    const local = e => e.matches('.app-tab-strip, pre, .md-table-wrap, .widget-table-wrap, ' +
+    // [data-scroll-x] marks the product's own sideways strips (drawer_drag.js SIDEWAYS_SELECTOR: Skills' filters and
+    // categories on a phone), which scroll inside themselves with a fade like a tab strip.
+    const local = e => e.matches('.app-tab-strip, [data-scroll-x], pre, .md-table-wrap, .widget-table-wrap, ' +
         '.files-preview-content, .files-editor');
     const overflow = [], small = [], headers = [];
     const scope = document.querySelector(root);
     const doc = document.scrollingElement;
     // The 44px rule is a touch rule: it applies when the pointer is coarse, and it measures the HIT area, not the
     // box. A control passes when its centre ±21px (clipped to the viewport) lands on it or on something inside it
-    // (an invisible hit extension counts); otherwise its box is reported. A control below the fold is brought into
-    // view first, where a finger would meet it.
+    // (an invisible hit extension counts); otherwise its box is reported. A control the loop finds where a finger
+    // cannot meet it (below the fold, clipped by its own scroller, or with its reach under a bar such as the Save bar)
+    // is brought to the middle of its scroller first, where a finger would meet it, and judged there.
     const coarse = matchMedia('(pointer: coarse)').matches;
     const hits = (e, r) => {
-        if (r.bottom <= 0 || r.top >= innerHeight || r.right <= 0 || r.left >= innerWidth) {
-            e.scrollIntoView({block: 'center', inline: 'nearest'});
-            r = e.getBoundingClientRect();
-        }
-        const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
         const clampX = x => Math.min(Math.max(x, 0), innerWidth - 1);
         const clampY = y => Math.min(Math.max(y, 0), innerHeight - 1);
-        return [[cx - 21, cy], [cx + 21, cy], [cx, cy - 21], [cx, cy + 21]].every(([x, y]) => {
-            const t = document.elementFromPoint(clampX(x), clampY(y));
-            return Boolean(t) && (t === e || e.contains(t));
-        });
+        const reached = box => {
+            const cx = box.left + box.width / 2, cy = box.top + box.height / 2;
+            return [[cx - 21, cy], [cx + 21, cy], [cx, cy - 21], [cx, cy + 21]].every(([x, y]) => {
+                const t = document.elementFromPoint(clampX(x), clampY(y));
+                return Boolean(t) && (t === e || e.contains(t));
+            });
+        };
+        if (reached(r)) return true;
+        e.scrollIntoView({block: 'center', inline: 'nearest'});
+        return reached(e.getBoundingClientRect());
     };
     if (doc.scrollWidth > doc.clientWidth + 1)
         overflow.push({node:'document.scrollingElement',extra:doc.scrollWidth-doc.clientWidth});
