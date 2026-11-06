@@ -1045,7 +1045,7 @@ def test_an_unacknowledged_return_keeps_todays_interrupted_path(tmp_path, monkey
 
 
 @pytest.mark.parametrize("fact", ["nothing", "saved", "answer_delivered", "no_root", "call", "wake", "later_attempt",
-                                  "stopped", "model_called", "ledger_unreadable"])
+                                  "stopped", "model_called", "ledger_unreadable", "ledger_degraded"])
 def test_only_a_turn_with_no_effect_is_given_back_from_its_input(tmp_path, monkeypatch, fact):
     from supervisor.task_admission import seed_returnable
     from supervisor.terminal_delivery import delivery_id_for, register_delivery
@@ -1069,9 +1069,11 @@ def test_only_a_turn_with_no_effect_is_given_back_from_its_input(tmp_path, monke
         attempt = 2
     elif fact == "stopped":
         ci.request_cancel(tmp_path, turn.id, reason="owner stop", source="test")
-    elif fact in {"model_called", "ledger_unreadable"}:  # the usage ledger's own verdict, read at the predicate's seam
-        ledger = ({"cost_accounting_status": "available", "total_rounds": 1} if fact == "model_called"
-                  else {"cost_accounting_status": "unavailable", "total_rounds": None})
+    elif fact in {"model_called", "ledger_unreadable", "ledger_degraded"}:  # the ledger's verdict, at the seam
+        ledger = {"model_called": {"cost_accounting_status": "available", "total_rounds": 1},
+                  "ledger_unreadable": {"cost_accounting_status": "unavailable", "total_rounds": None},
+                  "ledger_degraded": {"cost_accounting_status": "available", "total_rounds": 0,
+                                      "ledger_integrity_degraded": True}}[fact]
         monkeypatch.setattr(system.queue, "reconstruct_task_cost", lambda *_a, **_k: ledger)
     assert seed_returnable(root, task, attempt) is (fact == "nothing")
 
@@ -1217,3 +1219,54 @@ def test_a_source_lost_after_a_real_save_before_the_door_decides_is_never_a_seed
     _ack(tmp_path, "tx-lost-source")
     _boot_after_stop(system, monkeypatch, tmp_path)
     assert turn.id not in [row["id"] for row in system.workers.PENDING] and turn.id not in system.workers.RUNNING
+
+
+@pytest.mark.parametrize("state", ["none", "reserved", "released", "dispatched", "settled", "unresolved"])
+def test_a_seed_reads_the_real_usage_ledger_of_its_own_task(tmp_path, monkeypatch, state):
+    """The real ledger, not a stub: a call reserved or released unsent leaves the seed; one dispatched never does."""
+    from ouroboros import usage_accounting as ua
+    from ouroboros.usage_origin import UsageScope
+    from supervisor.task_admission import seed_returnable
+
+    monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("TOTAL_BUDGET", "1000000")
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    if state != "none":
+        scope = UsageScope(drive_root=tmp_path, task_id=turn.id, root_task_id=turn.id, category="task", source="agent.task")
+        with ua.usage_scope(scope):
+            held = ua.reserve_attempt(ua.AttemptRequest(model="stub", provider="local", reservation_usd=0.01,
+                                                        drive_root=tmp_path, task_id=turn.id, root_task_id=turn.id))
+            if state == "released":
+                ua.release_attempt(held, "not sent")
+            elif state != "reserved":
+                ua.mark_dispatched(held)
+                if state == "settled":
+                    ua.settle_attempt(held, {}, cost_usd=0.01, cost_final=True)
+                elif state == "unresolved":
+                    ua.mark_unresolved(held, "killed in flight")
+    task = system.workers.RUNNING[turn.id]["task"]
+    assert seed_returnable(tmp_path, task, 1) is (state in {"none", "reserved", "released"})
+
+
+def test_a_returned_seed_at_an_exhausted_budget_is_paused_before_dispatch_not_failed(tmp_path, monkeypatch):
+    """Its given-back attempt never put: a spent budget pauses it before dispatch, and one Resume launches it."""
+    from supervisor import worker_assignment
+    from supervisor.restart_retention import prepare_restart_returns
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    assert prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING,
+                                   transaction_id="tx-budget") == {turn.id}
+    _ack(tmp_path, "tx-budget")
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    with monkeypatch.context() as spent:
+        spent.setattr(system.state, "budget_remaining", lambda *_a, **_k: 0.0)
+        spent.setattr(worker_assignment, "needs_paid_admission", lambda _task: True)
+        system.workers.assign_tasks()
+    [row] = [row for row in system.workers.PENDING if row["id"] == turn.id]
+    assert row["_budget_pause"]["replay_safe"] is True and load_task_result(tmp_path, turn.id)["status"] != "failed"
+    assert not _launched(system)
+    sent = _resume_and_launch(system, turn.id)
+    assert [(item["id"], item["_attempt"]) for item in sent] == [(turn.id, 2)]

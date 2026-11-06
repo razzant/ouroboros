@@ -660,6 +660,10 @@ def test_official_update_projection_after_a_channel_switch_is_unchecked(tmp_path
     assert fact["letter"]["text"] == "letter" and fact["letter"]["relation"] in ("superseded", "other")
     monkeypatch.setenv("OUROBOROS_UPDATE_CHANNEL", "stable")
     assert ul.official_update_projection("a" * 40, drive_root=drive, state=cache)["status"] == "up_to_date"
+    # A caller without the channel in its environment reads the settings' channel, as the server does.
+    monkeypatch.delenv("OUROBOROS_UPDATE_CHANNEL")
+    monkeypatch.setattr("ouroboros.config.load_settings", lambda *a, **k: {"OUROBOROS_UPDATE_CHANNEL": "stable"})
+    assert ul.official_update_projection("a" * 40, drive_root=drive, state=cache)["status"] == "up_to_date"
 
 
 def test_project_letter_failed_with_last_good_shows_previous_text_and_provenance():

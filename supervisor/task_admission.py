@@ -400,7 +400,7 @@ def seed_returnable(root: Any, task: dict, attempt: int) -> bool:
         return (cost.get("cost_accounting_status") == "available" and not cost.get("ledger_integrity_degraded")
                 and int(cost.get("total_rounds") or 0) == 0)
     except Exception:
-        log.warning("Return of %s before its first save is unprovable; interrupted path", task_id, exc_info=True)
+        log.warning("Return of %s before its first model call is unprovable; interrupted path", task_id, exc_info=True)
         return False
 
 
