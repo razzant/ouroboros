@@ -72,7 +72,7 @@ export function openNewProjectDialog({ apiClient, onCreated }) {
                 </div>
                 <div class="marketplace-modal-actions">
                     <button type="button" class="btn btn-default" data-np-cancel>Cancel</button>
-                    <button type="button" class="btn btn-primary" data-np-create>Create project</button>
+                    <button type="button" class="btn" data-primary data-np-create>Create project</button>
                 </div>
             </div>
         `;

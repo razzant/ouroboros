@@ -67,7 +67,7 @@ export function openConfirmDialog({
                 </div>
                 <div class="marketplace-modal-actions">
                     ${alert ? '' : `<button type="button" class="btn btn-default" data-confirm-cancel>${escapeHtml(cancelLabel)}</button>`}
-                    <button type="button" class="btn ${danger ? 'btn-danger' : 'btn-primary'}" data-confirm-ok>${escapeHtml(confirmLabel)}</button>
+                    <button type="button" class="btn${danger ? ' btn-danger' : ''}"${danger ? '' : ' data-primary'} data-confirm-ok>${escapeHtml(confirmLabel)}</button>
                 </div>
             </div>
         `;
