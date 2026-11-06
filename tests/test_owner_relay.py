@@ -315,6 +315,8 @@ def test_a_relayed_answer_carries_the_card_it_answers(tmp_path, shape):
     assert row["reply_to"] == {"address": "quiz q7 of task asker", "author": "Ouroboros, task asker",
                                "text": "Publish exactly this reply?\n1. Publish it\n2. Not now\n"
                                        "(host record: my human pressed option 1)"}
+    words = next(str(m["content"]) for m in messages if "Owner words quoted verbatim" in str(m["content"]))
+    assert "[Host question frame]" in words and "Publish exactly this reply?" in words  # the model reads it too
 
 
 def test_a_relay_answer_is_owed_before_the_queue_and_survives_a_failed_send(tmp_path, monkeypatch):
