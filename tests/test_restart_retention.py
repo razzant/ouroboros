@@ -437,7 +437,10 @@ def test_a_fault_boot_starts_one_recovery_turn_with_the_facts_bounded_by_the_pre
     queue, workers, turns = _fault_boot(tmp_path, monkeypatch)
     held = {"id": "held-1", "chat_id": 7, "type": "task"}
     held["_budget_pause_hold"] = hold_budget_row(held, reason=HOLD_SAVED_WORK)
-    workers.PENDING.extend([held, {"id": "plain-queued", "chat_id": 7, "type": "task"}])
+    earlier_quit = {"id": "held-by-an-earlier-quit", "chat_id": 7, "type": "task"}  # held before this fault's entry
+    earlier_quit["_budget_pause_hold"] = {**hold_budget_row(earlier_quit, reason=HOLD_SAVED_WORK),
+                                          "held_at": "2025-12-31T00:00:00+00:00"}
+    workers.PENDING.extend([held, earlier_quit, {"id": "plain-queued", "chat_id": 7, "type": "task"}])
     write_task_result(tmp_path, "root-cut", "cancelled", root_task_id="root-cut",
                       cancel_origin={"source": "server_shutdown", "reason": "fault"})
     write_task_result(tmp_path, "child-cut", "cancelled", root_task_id="root-cut", parent_task_id="root-cut",
@@ -455,6 +458,7 @@ def test_a_fault_boot_starts_one_recovery_turn_with_the_facts_bounded_by_the_pre
     assert "Tasks held with their saved state (Resume continues each from that state): held-1." in text
     assert "cancelled as server_shutdown (Continue-eligible): root-cut." in text
     assert "root-stopped" not in text and "child-cut" not in text and "plain-queued" not in text
+    assert "held-by-an-earlier-quit" not in text, "a hold older than this fault's entry is not this fault's work"
     assert "You decide what to resume or continue, with your Resume and Continue tools, and tell the owner once." in text
     assert "[auto-resume after restart]" not in text, "the planned-restart turn is not a second turn beside the fault's"
     [row] = [row for row in _supervisor_rows(tmp_path) if row["type"] == "auto_resume_triggered"]

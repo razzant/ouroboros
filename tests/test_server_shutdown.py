@@ -796,20 +796,48 @@ def test_a_fault_ends_its_held_tasks_own_runs_and_a_quit_leaves_them(tmp_path, m
 
 def test_the_startup_notice_names_the_previous_faults_cause_and_the_held_count(monkeypatch):
     """The Fault door (ARCHITECTURE §9): after a fault exit the next start says what ended the previous generation and
-    how many restored rows hold their saved work; after an ordinary stop the clause is absent (quiet)."""
+    how many restored rows THIS fault holds with their saved work (a hold placed before the faulted generation entered
+    its shutdown, by an earlier Quit or Restart nobody resumed, is not counted); after an ordinary stop the clause is
+    absent (quiet)."""
     from ouroboros import owned_shutdown, server_process
     from supervisor.events_budget import HOLD_SAVED_WORK, hold_budget_row
 
     held = [hold_budget_row({"id": "a"}, reason=HOLD_SAVED_WORK), hold_budget_row({"id": "b"}, reason=HOLD_SAVED_WORK)]
-    pending = [{"id": "a", "_budget_pause_hold": held[0]}, {"id": "b", "_budget_pause_hold": held[1]}, {"id": "plain"}]
-    assert server_process.held_saved_work_count(pending) == 2
+    older = {**hold_budget_row({"id": "c"}, reason=HOLD_SAVED_WORK), "held_at": "2026-01-01T00:00:00+00:00"}
+    pending = [{"id": "a", "_budget_pause_hold": held[0]}, {"id": "b", "_budget_pause_hold": held[1]},
+               {"id": "c", "_budget_pause_hold": older}, {"id": "plain"}]
+    fault = {"cause": "bus_lost", "entered_at": "2026-06-01T00:00:00+00:00"}
+    monkeypatch.setattr(owned_shutdown._GENERATION_STOP, "previous", fault)
+    assert server_process.held_saved_work_count(pending) == 2, "the earlier Quit's unresumed hold is not this fault's"
+    assert server_process.held_saved_work_ids(pending, "") == ["a", "b", "c"]
     monkeypatch.setattr(owned_shutdown._GENERATION_STOP, "previous", {"cause": "launcher_quit"})
-    assert server_process.previous_fault_sentence(2) == ""
+    assert server_process.previous_fault_sentence(2) == "" and server_process.held_saved_work_count(pending) == 0
     monkeypatch.setattr(owned_shutdown._GENERATION_STOP, "previous", {"cause": "bus_lost"})
     assert server_process.previous_fault_sentence(2) == (
         "The server restarted itself after its event-bus process exited. 2 tasks keep their saved work.")
     monkeypatch.setattr(owned_shutdown._GENERATION_STOP, "previous", {"cause": "loop_failed"})
     assert server_process.previous_fault_sentence(0).endswith("its task loop failed three times in a row. No task holds saved work.")
+
+
+def test_a_panic_during_a_faults_teardown_takes_the_fault_clause_and_turn_away(tmp_path, monkeypatch):
+    """A fault latched, then the owner pressed Panic before the teardown ended: the entry keeps the fault's first
+    cause, yet the stop was the Emergency Stop. While its input is unconsumed the next start states no fault (no
+    clause, no recovery turn); once consumed, a later fault entry speaks again."""
+    from ouroboros import owned_shutdown, server_process
+
+    monkeypatch.setattr(server_process, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(owned_shutdown._GENERATION_STOP, "previous",
+                        {"cause": "bus_lost", "entered_at": "2026-06-01T00:00:00+00:00", "generation": "g-prev"})
+    flag = tmp_path / "state" / "panic_stop.flag"
+    flag.parent.mkdir(parents=True)
+    flag.write_text("panic", encoding="utf-8")
+    assert server_process.previous_fault_sentence(1) == ""
+    assert server_process.core_loss_recovery_turn(
+        tmp_path, 7, [], admit=lambda *_a, **_k: pytest.fail("no recovery turn after a Panic"),
+        live=lambda: False, gate=lambda: True) is False
+    flag.unlink()
+    assert server_process.previous_fault_sentence(1) == (
+        "The server restarted itself after its event-bus process exited. 1 task keeps its saved work.")
 
 
 def test_emergency_cleanup_joins_the_one_owned_stop(monkeypatch):

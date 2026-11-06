@@ -655,13 +655,18 @@ def end_fault_held_runs() -> None:
         log.warning("The fault's held tasks' delegated runs were not ended; custody keeps them", exc_info=True)
 
 
-def previous_fault_entry() -> Dict[str, Any]:
+def previous_fault_entry(root: Any = None) -> Dict[str, Any]:
     """The previous generation's shutdown entry when it ended through the Fault door, else ``{}``: the record
-    the boot claim replaced (``owned_shutdown.claim_shutdown_entry``), with its ``cause`` and ``entered_at``."""
+    the boot claim replaced (``owned_shutdown.claim_shutdown_entry``), with its ``cause`` and ``entered_at``.
+    A Panic pressed while the fault's teardown ran keeps the entry's first cause, yet the stop was the owner's
+    Emergency Stop: while its input is unconsumed (``installation_panic``) this is ``{}`` too."""
+    from ouroboros.installation_stop import installation_panic
     from ouroboros.owned_shutdown import _GENERATION_STOP
 
     previous = dict(_GENERATION_STOP.previous)
-    return previous if str(previous.get("cause") or "") in FAULT_CAUSES else {}
+    if str(previous.get("cause") or "") not in FAULT_CAUSES or installation_panic(root or DATA_DIR):
+        return {}
+    return previous
 
 
 def _fault_cause_words(cause: str) -> str:
@@ -678,17 +683,22 @@ def previous_fault_sentence(held: int) -> str:
     return f"The server restarted itself after {_fault_cause_words(str(previous['cause']))}.{kept}"
 
 
-def held_saved_work_ids(pending: Any) -> List[str]:
+def held_saved_work_ids(pending: Any, since: str) -> List[str]:
     """The restored queue rows an application stop holds with their saved work (released by Resume), by id: the
-    typed stop policy decides (``work_stop.record_policy``), never a hold's name."""
+    typed stop policy decides (``work_stop.record_policy``), never a hold's name. Only holds placed at or after
+    ``since`` (the faulted generation's ``entered_at``): an earlier Quit's or Restart's hold nobody resumed is
+    not this fault's."""
     from ouroboros.work_stop import hold_fact, record_policy
 
     return [str(task.get("id") or "") for task in list(pending or ()) if isinstance(task, dict)
-            and (hold := hold_fact(task)) is not None and record_policy(hold)["cause"] == "app_stop"]
+            and (hold := hold_fact(task)) is not None and record_policy(hold)["cause"] == "app_stop"
+            and (not since or str(hold.get("held_at") or "") >= since)]
 
 
 def held_saved_work_count(pending: Any) -> int:
-    return len(held_saved_work_ids(pending))
+    """This fault's holds (``held_saved_work_ids`` since the previous Fault entry); 0 after any other stop."""
+    previous = previous_fault_entry()
+    return len(held_saved_work_ids(pending, str(previous.get("entered_at") or ""))) if previous else 0
 
 
 RECOVERY_TRIGGER = "core_lost"  # the ``auto_resume_triggered`` row's trigger for the Fault boot's recovery turn
@@ -800,7 +810,7 @@ def core_loss_recovery_turn(root: Any, chat_id: int, pending: Any, *, admit: Cal
     from supervisor.message_bus import send_with_budget
     from supervisor.state import append_jsonl
 
-    previous = previous_fault_entry()
+    previous = previous_fault_entry(root)
     if not previous:
         return False
     root = pathlib.Path(root)
@@ -812,7 +822,7 @@ def core_loss_recovery_turn(root: Any, chat_id: int, pending: Any, *, admit: Cal
                                "reason": "previous_recovery_turn_open" if open_turn else "conversation_turn_live",
                                "task_id": open_turn, "cause": cause})
         return True
-    held, cancelled = held_saved_work_ids(pending), cancelled_unsaved_roots(root, ended_at)
+    held, cancelled = held_saved_work_ids(pending, ended_at), cancelled_unsaved_roots(root, ended_at)
     gate_open = bool(gate())
     meta = admit(int(chat_id), recovery_turn_text(cause, ended_at, held, cancelled, root), None) if gate_open else None
     task_id = str(((meta or {}).get("task") or {}).get("id") or "") if isinstance(meta, dict) else ""
