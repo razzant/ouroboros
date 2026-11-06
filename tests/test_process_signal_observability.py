@@ -47,8 +47,14 @@ _KILL_NAME = signal_name_for_returncode(-9)
 
 
 @pytest.fixture(autouse=True)
-def _clean_facts_slot():
-    """Tests in one pytest worker share a thread; keep the TLS slot clean."""
+def _clean_facts_slot(monkeypatch):
+    """Tests in one pytest worker share a thread and a process: keep the TLS slot clean, and give each test its
+    own tracked registry. The runners keep naming a child whose tree they could not measure, and a double has no
+    group to measure: in the shared registry it would outlive its test and leave every later reader of that
+    registry in the worker (a teardown, an owned-work stop) a child that never settles."""
+    from ouroboros.tools import shell_process
+
+    monkeypatch.setattr(shell_process, "_active_subprocesses", set())
     consume_last_process_facts()
     yield
     consume_last_process_facts()
