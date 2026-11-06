@@ -1033,11 +1033,10 @@ class MCPManager:
             new_servers: Dict[str, MCPServerRuntime] = {}
             for cfg in new_configs:
                 old = self._servers.get(cfg.id)
-                if old is not None and mcp_catalog.identity(old.config) == mcp_catalog.identity(cfg):
-                    old.config = cfg
-                    new_servers[cfg.id] = old
-                else:
-                    new_servers[cfg.id] = MCPServerRuntime(config=cfg)
+                if old is None or mcp_catalog.identity(old.config) != mcp_catalog.identity(cfg):
+                    old = MCPServerRuntime(config=cfg)
+                old.config = cfg
+                new_servers[cfg.id] = old
             self._servers = new_servers
             from ouroboros.mcp_task_session import retire_changed  # a changed or disabled server ends its sessions
             retire_changed(new_configs if self._enabled else [])
@@ -1061,30 +1060,31 @@ class MCPManager:
         runtime.last_error = attempt.get("error", "") or ("; ".join(notes) if envelope else "")
 
     def rebind(self, *, skill: str = "", server_id: str = "", event_queue: Any = None) -> List[str]:
-        """Re-derive skill-bound configs (``skill_mcp.bind_config``) outside the lock; a moved identity gets a new runtime
-        (old catalog unadopted, task sessions retired) and a worker's ``event_queue`` asks the lister to list it."""
+        """Re-derive skill bindings, retiring changed sessions; return ready servers without catalog evidence.
+        Passive reads leave discovery owed until an attempt; a worker's event queue asks the lister for it."""
         from ouroboros.mcp_task_session import retire_changed
         from ouroboros.skill_mcp import bind_config
 
         with self._lock:
             bound = [rt.config for rt in self._servers.values()
                      if rt.config.skill and skill in ("", rt.config.skill) and server_id in ("", rt.config.id)]
-        fresh, moved = [(old, bind_config(old)) for old in bound], []
+        fresh = [(old, bind_config(old)) for old in bound]
         with self._lock:
             for old, cfg in fresh:
                 runtime = self._servers.get(cfg.id)
                 if runtime is None or runtime.config is not old or cfg == old:
                     continue
-                if mcp_catalog.identity(cfg) == mcp_catalog.identity(old):
-                    runtime.config = cfg  # same listing; a changed call lifetime still retires its sessions below
-                else:
-                    self._servers[cfg.id] = MCPServerRuntime(config=cfg)
-                    moved += [] if cfg.skill_error else [cfg.id]
+                if mcp_catalog.identity(cfg) != mcp_catalog.identity(old):
+                    self._servers[cfg.id] = runtime = MCPServerRuntime(config=cfg)
+                runtime.config = cfg
                 retire_changed([rt.config for rt in self._servers.values()] if self._enabled else [])
+            if fresh:
                 self.reload_catalogs()
-        if moved and event_queue is not None and not self.is_lister:
+            unlisted = [cfg.id for _, cfg in fresh if self._enabled and cfg.enabled and not cfg.skill_error
+                        and (rt := self._servers.get(cfg.id)) is not None and rt.config == cfg and rt.catalog is None]
+        if unlisted and event_queue is not None and not self.is_lister:
             event_queue.put_nowait({"type": "mcp_configuration_changed", "reason": "mcp_dispatch", "skill": skill})
-        return moved
+        return unlisted
 
     def reload_catalogs(self) -> None:
         """Adopt changed published files, without modifying any resident request array."""

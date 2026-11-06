@@ -71,8 +71,8 @@ def test_manifest_declares_servers_with_defaults_and_refuses_damage():
     assert manifest.mcp_servers == [{"id": "chrome_browser", "title": "Chrome (shared tab)", "runtime": "node",
                                      "entry": "scripts/server.mjs", "task_session": True, "browser_policy": True}]
     assert manifest.validate() == [] and "mcp_servers" not in manifest.raw_extra
-    minimal = parse_skill_manifest_text(_manifest('[{"id": "srv", "entry": "srv.py", "runtime": "python3"}]'))
-    assert minimal.mcp_servers[0] == {"id": "srv", "title": "srv", "runtime": "python3", "entry": "srv.py",
+    minimal = parse_skill_manifest_text(_manifest('[{"id": "srv", "entry": "srv.mjs", "runtime": "node"}]'))
+    assert minimal.mcp_servers[0] == {"id": "srv", "title": "srv", "runtime": "node", "entry": "srv.mjs",
                                       "task_session": False, "browser_policy": False}
     for bad, words in [('[{"id": "Chrome-Browser", "entry": "a.mjs"}]', "canonical"),
                        ('[{"id": "a", "entry": "../x.mjs"}]', "relative path"),
@@ -339,12 +339,16 @@ def test_accepted_update_relists_and_retires_sessions_while_a_disabled_row_stays
     assert "disabled" in off.text and "MCP_SKILL_UNAVAILABLE" not in off.text
 
 
-def test_lister_answers_a_worker_report_without_restart_refresh_or_incidental_reads(world, monkeypatch):
-    lister, worker = mcp_client.MCPManager(), mcp_client.MCPManager()
+def test_lister_answers_a_worker_report_without_restart_refresh_or_incidental_reads(world, manager, monkeypatch):
+    lister, worker = manager, mcp_client.MCPManager()
     lister.become_lister()
     monkeypatch.setattr(worker, "_lister_pid", -1)
     calls: list = []
-    monkeypatch.setattr(lister, "refresh_all_background", lambda *, reason: calls.append(("list", reason)))
+    def refresh(*, reason):
+        calls.append(("list", reason))
+        lister.refresh_all()
+
+    monkeypatch.setattr(lister, "refresh_all_background", refresh)
     _write_settings(world, _settings())
     lister.configuration_changed(config.load_settings(), reason="startup")
     calls.clear()
@@ -366,6 +370,107 @@ def test_lister_answers_a_worker_report_without_restart_refresh_or_incidental_re
     (world.skill_dir / "scripts" / "server.mjs").write_text("// accepted v3\n")
     skill_mcp.lifecycle_settled("chrome_browser", reason="skill_review")
     assert calls == [("list", "skill_review")]
+
+
+@pytest.mark.parametrize("gate", ["ready", "mcp_disabled", "server_disabled", "review_pending", "skill_disabled"])
+def test_accepted_update_is_discovered_after_passive_skills_get(world, manager, monkeypatch, gate):
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+    from ouroboros.gateway import extensions
+
+    manager.become_lister()
+    monkeypatch.setattr(mcp_client, "get_manager", lambda: manager)
+    monkeypatch.setattr(manager, "refresh_all_background", lambda *, reason: manager.refresh_all())
+    monkeypatch.setattr(extensions, "_request_drive_root", lambda _request: world.data)
+    monkeypatch.setattr(extensions, "discover_skills", lambda *_a, **_kw: [load_skill(world.skill_dir, world.data)])
+    settings = _settings(_bound_row(enabled=gate != "server_disabled"), enabled=gate != "mcp_disabled")
+    path = _write_settings(world, settings)
+    manager.configuration_changed(config.load_settings(), reason="startup")
+    before = len(manager.listed_calls)
+    (world.skill_dir / "scripts" / "server.mjs").write_text("// updated payload\n")
+    world.blockers = [gate] if gate in {"review_pending", "skill_disabled"} else []
+    revision = load_skill(world.skill_dir, world.data).content_hash
+
+    def disk_snapshot():
+        return {p.relative_to(world.data): (p.stat().st_mtime_ns, p.read_bytes())
+                for p in world.data.rglob("*") if p.is_file()}
+
+    unchanged = disk_snapshot()
+    with TestClient(Starlette(routes=[Route("/api/extensions", extensions.api_extensions_index)])) as client:
+        response = client.get("/api/extensions")
+    assert response.status_code == 200
+    card = response.json()["skills"][0]["mcp_servers"][0]
+    assert not card["listed"] and card["tool_count"] == 0
+    assert disk_snapshot() == unchanged, "passive GET must not write settings, catalogs or skill state"
+    assert len(manager.listed_calls) == before, "passive GET must not start discovery"
+    assert manager.listed(config.load_settings()), "the settings fingerprint did not change"
+
+    skill_mcp.lifecycle_settled("chrome_browser", reason="skill_review")
+    if gate == "ready":
+        assert len(manager.listed_calls) == before + 1
+        assert manager.listed_calls[-1].skill_revision == revision
+        assert manager.resolve_tool_name("mcp_chrome_browser__browser_snapshot").status == "callable"
+        assert manager.retired[-1][0].skill_revision == revision
+    else:
+        assert len(manager.listed_calls) == before, "disabled or unaccepted payloads must start nothing"
+        assert manager.resolve_tool_name("mcp_chrome_browser__browser_snapshot").status != "callable"
+    assert (path.stat().st_mtime_ns, path.read_bytes()) == unchanged[path.relative_to(world.data)]
+    settled = len(manager.listed_calls)
+    skill_mcp.lifecycle_settled("chrome_browser", reason="skill_review")
+    assert len(manager.listed_calls) == settled, "settled evidence must not cause another listing"
+
+
+def test_worker_reports_discovery_after_an_earlier_rebind_consumed_the_transition(world, manager, monkeypatch):
+    from supervisor.events import dispatch_event
+
+    lister, worker = manager, mcp_client.MCPManager()
+    lister.become_lister()
+    monkeypatch.setattr(lister, "refresh_all_background", lambda *, reason: lister.refresh_all())
+    _write_settings(world, _settings(_bound_row()))
+    settings = config.load_settings()
+    lister.configuration_changed(settings, reason="startup")
+    worker.reconfigure(settings)
+    assert worker.resolve_tool_name("mcp_chrome_browser__browser_snapshot").status == "callable"
+    (world.skill_dir / "scripts" / "server.mjs").write_text("// accepted update\n")
+    revision = load_skill(world.skill_dir, world.data).content_hash
+    worker.rebind()  # no event queue at the first observation
+    assert worker.status_payload()["servers"][0]["listed_at"] is None
+    assert len(lister.listed_calls) == 1
+
+    events: queue.Queue = queue.Queue()
+    result = worker._call_tool_result("mcp_chrome_browser__browser_snapshot", {},
+                                      types.SimpleNamespace(event_queue=events))
+    assert result.code == "MCP_CATALOG_UNAVAILABLE" and len(lister.listed_calls) == 1
+    assert not events.empty(), "an earlier reader must not consume the worker's owed discovery notification"
+    report = events.get_nowait()
+    assert report == {"type": "mcp_configuration_changed", "reason": "mcp_dispatch", "skill": ""}
+    monkeypatch.setattr(mcp_client, "get_manager", lambda: lister)
+    dispatch_event(report, types.SimpleNamespace(DRIVE_ROOT=world.data, append_jsonl=lambda *_a, **_kw: None))
+    assert len(lister.listed_calls) == 2 and lister.listed_calls[-1].skill_revision == revision
+    worker.rebind(event_queue=events)  # adopt the publication even though the config is already current
+    assert worker.resolve_tool_name("mcp_chrome_browser__browser_snapshot").status == "callable"
+    assert events.empty(), "the current catalog settles the worker's discovery notification"
+
+
+@pytest.mark.parametrize("outcome", ["empty", "failed"])
+def test_skill_lifecycle_does_not_repeat_a_current_catalog_attempt(world, manager, monkeypatch, outcome):
+    async def list_tools(cfg, _timeout):
+        manager.listed_calls.append(cfg)
+        if outcome == "failed":
+            raise RuntimeError("server unavailable")
+        return []
+
+    manager._async_list_tools = list_tools
+    manager.become_lister()
+    monkeypatch.setattr(mcp_client, "get_manager", lambda: manager)
+    monkeypatch.setattr(manager, "refresh_all_background", lambda *, reason: manager.refresh_all())
+    _write_settings(world, _settings(_bound_row()))
+    manager.configuration_changed(config.load_settings(), reason="startup")
+    status = manager.status_payload()["servers"][0]
+    assert status["tool_count"] == 0 and status["latest_attempt"]["ok"] is (outcome == "empty")
+    skill_mcp.lifecycle_settled("chrome_browser", reason="skill_review")
+    assert len(manager.listed_calls) == 1
 
 
 def test_import_never_rewrites_a_bound_row():
@@ -414,11 +519,10 @@ def agent_world(tmp_path, monkeypatch):
     skill_dir = drive / "skills" / "external" / "chrome_browser"
     (skill_dir / "scripts").mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(_manifest('[{"id": "chrome_browser", "title": "Chrome (shared tab)", '
-                                                  '"entry": "scripts/server.py", "task_session": true, '
-                                                  '"browser_policy": true}]', runtime="python3")
-                                        .replace("scripts: [setup.mjs]", "scripts: [setup.py]"), encoding="utf-8")
-    (skill_dir / "scripts" / "server.py").write_text("print('server')\n", encoding="utf-8")
-    (skill_dir / "scripts" / "setup.py").write_text("print('setup')\n", encoding="utf-8")
+                                                  '"entry": "scripts/server.mjs", "task_session": true, '
+                                                  '"browser_policy": true}]'), encoding="utf-8")
+    (skill_dir / "scripts" / "server.mjs").write_text("console.log('server');\n", encoding="utf-8")
+    (skill_dir / "scripts" / "setup.mjs").write_text("console.log('setup');\n", encoding="utf-8")
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(tmp_path / "empty"))
     monkeypatch.setattr(config, "DATA_DIR", drive)
     monkeypatch.setattr(config, "SETTINGS_PATH", drive / "settings.json")
@@ -449,7 +553,7 @@ def test_agent_connect_carries_an_answered_quiz_through_real_owner_source_valida
     record_answered(agent_world.drive, "connect-task", quiz_id="connect-chrome", option_index=0, request_id="answer-1")
     preview, blocked = _agent_call(agent_world, owner_source=source, preview=True)
     assert not blocked and preview["ready"] and preview["other_servers"] == [{"id": "github", "name": "GitHub"}]
-    assert preview["servers"][0]["executable"]["args"][0].endswith("scripts/server.py")
+    assert preview["servers"][0]["executable"]["args"][0].endswith("scripts/server.mjs")
     path = agent_world.drive / "settings.json"
     assert json.loads(path.read_text()) == {"MCP_SERVERS": [OTHER], "OUROBOROS_STARTER_SKILLS_TURN_ON": False}
     foreign = {**source, "task_id": "another-task"}

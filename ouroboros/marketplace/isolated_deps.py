@@ -140,9 +140,10 @@ def _installer_env(env_root: pathlib.Path, *, ecosystem: str = "", cache_root: p
     })
     if ecosystem == "node":
         # npm's `#!/usr/bin/env node` shebang must resolve a working runtime.
-        # node_runtime owns the emergency verdict and byte-identical healthy
+        # node_runtime owns the fallback verdict and byte-identical healthy
         # case for an existing npm launcher. A missing npm gets the reviewed
-        # managed Node/npm pair in _install_node_package instead.
+        # managed Node/npm pair in _install_node_package; the same prepared
+        # runtime remains available to skill execution afterwards.
         from ouroboros.platform_layer import prepend_skill_node_emergency_path
 
         prepend_skill_node_emergency_path(env)

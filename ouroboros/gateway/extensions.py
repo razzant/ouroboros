@@ -858,7 +858,9 @@ async def api_skill_mcp_connect(request: Request) -> JSONResponse:
     if errors := validate_ingress(body, SkillMcpConnectRequest):
         return JSONResponse({"ok": False, "saved": False, "code": "bad_request", "error": errors[0]}, status_code=400)
     payload = await _run_owner_skill_action(request, skill_name, "connect_mcp", body)
-    return JSONResponse(payload, status_code=int(payload.get("status_code") or 200))
+    if payload.get("error") and "saved" not in payload:
+        payload["saved"] = False  # early lifecycle refusals precede the settings writer
+    return JSONResponse(payload, status_code=int(payload.pop("status_code", 0) or 200))
 
 
 async def api_skill_reconcile(request: Request) -> JSONResponse:

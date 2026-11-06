@@ -747,9 +747,9 @@ def _parse_mcp_servers(raw: Any, manifest_runtime: str) -> List[Dict[str, Any]]:
                                      fix_hint="write entry as a path inside the skill, e.g. scripts/server.mjs")
         runtime = item.get("runtime", manifest_runtime)
         runtime = runtime.strip().lower() if isinstance(runtime, str) else runtime
-        if not isinstance(runtime, str) or not runtime or runtime not in VALID_SKILL_RUNTIMES:
-            raise SkillManifestError(f"mcp_servers {server_id!r} needs a supported runtime",
-                                     fix_hint=f"set runtime (here or manifest-level) to one of {sorted(r for r in VALID_SKILL_RUNTIMES if r)}")
+        if runtime != "node":
+            raise SkillManifestError(f"mcp_servers {server_id!r} currently supports only the node runtime",
+                                     fix_hint="set runtime to node; other skill runtimes keep their existing script path")
         title = item.get("title", server_id)
         flags = {key: item.get(key, False) for key in ("task_session", "browser_policy")}
         if not isinstance(title, str) or not title.strip() or any(not isinstance(v, bool) for v in flags.values()):

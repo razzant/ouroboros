@@ -163,6 +163,15 @@ def _path_node_runtime_health(timeout_sec: float = 10) -> NodeRuntimeHealth:
     return node_runtime_health(located, timeout_sec=timeout_sec)
 
 
+def _prepared_managed_node() -> str:
+    """Resolve the already installed, pin-verified Node/npm pair without preparation."""
+    from ouroboros.claudexor_runtime import get_runtime_manager
+
+    manager = get_runtime_manager()
+    pin = manager.pin
+    return manager._resolve_node_toolchain(pin) if pin is not None else ""
+
+
 def select_skill_node_runtime(timeout_sec: float = 10) -> Tuple[str, str]:
     """The ONE owner of the skill-family Node runtime precedence.
 
@@ -170,12 +179,15 @@ def select_skill_node_runtime(timeout_sec: float = 10) -> Tuple[str, str]:
     is present AND execution-probed healthy (the python symmetry — python
     skills/companions already run on the embedded interpreter) — with a health
     ROLLBACK to a healthy PATH node when the bundled runtime is absent or
-    provably broken. A candidate that fails its execution probe is never
+    provably broken. If neither is usable, reuse an already prepared managed
+    Node/npm toolchain. This last lookup is passive: it never prepares or
+    downloads a runtime. A candidate that fails its execution probe is never
     selected while a usable neighbour exists.
 
-    Returns ``(path, provenance)`` with provenance ``"bundled"`` or ``"path"``.
-    When neither runtime is usable, returns ``("", reason)`` where the reason
-    strings both probe verdicts verbatim for honest surface errors.
+    Returns ``(path, provenance)`` with provenance ``"bundled"``, ``"path"``
+    or ``"managed"``.
+    When none is usable, returns ``("", reason)`` with the probe verdicts
+    for honest surface errors.
     """
     facts: List[str] = []
     bundled = _platform.resolve_bundled_node()
@@ -193,33 +205,40 @@ def select_skill_node_runtime(timeout_sec: float = 10) -> Tuple[str, str]:
         f"path:{path_health.status}"
         + (f":{path_health.reason}" if path_health.reason else "")
     )
+    # The npm installer may have prepared this pinned toolchain in a source
+    # checkout with no bundled or PATH Node. Ask its owner to resolve only an
+    # existing, metadata-verified tree; do not call prepare_node_toolchain here.
+    managed = _prepared_managed_node()
+    if managed:
+        managed_health = node_runtime_health(managed, timeout_sec=timeout_sec)
+        if managed_health.healthy:
+            return managed, "managed"
+        facts.append(f"managed:{managed_health.status}:{managed_health.reason}")
+    else:
+        facts.append("managed:absent")
     return "", "; ".join(facts)
 
 
 def skill_node_emergency_path_dir(timeout_sec: float = 10) -> str:
-    """Bundled-node dir to PREPEND to a skill-family child PATH — emergency only.
+    """Selected fallback Node dir to PREPEND to a skill-family child PATH.
 
     npm/npx/pnpm/yarn are NOT bundled and are never rewritten; their launchers
     resolve node via a ``#!/usr/bin/env node`` shebang. Only when the PATH node
-    is missing or execution-probed broken AND the healthy bundled node was
-    selected does the child PATH gain the bundled-node directory (on POSIX it
-    contains exactly the ``node`` executable, so nothing else is shadowed; on
-    Windows it is the node-standalone root holding ``node.exe``). On a healthy
-    PATH this returns ``""`` and the child env stays byte-identical.
+    is missing or execution-probed broken AND a healthy bundled or managed
+    Node was selected does the child PATH gain its directory. On a healthy PATH
+    this returns ``""`` and the child env stays byte-identical.
 
     Known residuals (disclosed): an npm launcher rewritten to an absolute node
-    shebang ignores PATH and keeps failing honestly; and the "nothing else is
-    shadowed" claim holds for the official download scripts (which prune the
-    archive to the bare node binary) — a custom ``OUROBOROS_BUNDLE_DIR``
-    pointing at a FULL Node install would also shadow npm/npx with the bundled
-    copies while the emergency is active.
+    shebang ignores PATH and keeps failing honestly. The bundled archive is
+    pruned to the bare Node binary, but a custom full bundle or the managed
+    Node/npm directory can shadow npm/npx while this fallback is active.
     """
-    if not _platform.resolve_bundled_node():
-        # No bundled runtime installed (source checkouts, bench clones): no
-        # emergency lane exists and no probe is spent deciding that.
+    if not _platform.resolve_bundled_node() and not _prepared_managed_node():
+        # Without either fallback, even a broken PATH Node cannot be repaired
+        # by rewriting the child PATH, so no execution probe is needed here.
         return ""
     selected, provenance = select_skill_node_runtime(timeout_sec=timeout_sec)
-    if not selected or provenance != "bundled":
+    if not selected or provenance not in {"bundled", "managed"}:
         return ""
     if _path_node_runtime_health(timeout_sec=timeout_sec).healthy:
         return ""

@@ -248,7 +248,7 @@ def card_facts(skill: Any, settings: Dict[str, Any], status_rows: Dict[str, Dict
 
 def lifecycle_settled(skill_name: str = "", *, event_queue: Any = None, reason: str = "skill_lifecycle") -> None:
     """A skill lifecycle job (Connect included) ended here, or a worker reported one: the lister (the server) re-reads
-    settings, configures and lists what it has not listed yet, else lists a bound server whose payload moved; a
+    settings, configures and lists what it has not listed yet, else lists ready bindings without catalog evidence; a
     worker sends the content-free ``mcp_configuration_changed`` report on its event queue instead. Fail-soft."""
     from ouroboros import mcp_client
 

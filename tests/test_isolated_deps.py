@@ -80,8 +80,14 @@ def test_install_node_package_prepares_managed_npm_when_path_has_none(monkeypatc
     commands = []
 
     class Manager:
+        pin = object()
+
         def prepare_node_toolchain(self):
             prepared.append(True)
+            return str(node)
+
+        def _resolve_node_toolchain(self, pin):
+            assert pin is self.pin
             return str(node)
 
         def _managed_npm_cli(self, selected_node):
@@ -104,6 +110,58 @@ def test_install_node_package_prepares_managed_npm_when_path_has_none(monkeypatc
     assert kwargs["env"]["PATH"].split(os.pathsep)[0] == str(node.parent)
     assert kwargs["env"]["npm_config_cache"].startswith(str(tmp_path))
     assert kwargs["env"]["npm_config_prefix"].startswith(str(tmp_path))
+
+
+def test_prepared_managed_node_serves_skill_readiness_and_child_path(monkeypatch, tmp_path):
+    from ouroboros import claudexor_runtime, node_runtime
+    from ouroboros.marketplace import isolated_deps
+    from ouroboros.tools.skill_exec import _resolve_runtime_binary
+    from ouroboros.tools.skill_preflight import _resolve_runtime
+
+    node = tmp_path / "managed" / "bin" / "node"
+    npm_cli = tmp_path / "managed" / "lib" / "node_modules" / "npm" / "bin" / "npm-cli.js"
+    node.parent.mkdir(parents=True)
+    npm_cli.parent.mkdir(parents=True)
+    node.touch()
+    npm_cli.touch()
+    prepared = []
+
+    class Manager:
+        pin = object()
+
+        def prepare_node_toolchain(self):
+            prepared.append(True)
+            return str(node)
+
+        def _managed_npm_cli(self, selected_node):
+            assert selected_node == node
+            return npm_cli
+
+        def _resolve_node_toolchain(self, pin):
+            assert pin is self.pin
+            return str(node) if prepared else ""
+
+    monkeypatch.setattr(node_runtime._platform, "resolve_bundled_node", lambda: None)
+    monkeypatch.setattr(node_runtime._platform, "bootstrap_process_path", lambda: [])
+    monkeypatch.setattr(node_runtime, "node_runtime_health", lambda path, timeout_sec=10: node_runtime.NodeRuntimeHealth(
+        status="healthy", version="24.16.0", path=str(path)))
+    monkeypatch.setattr(isolated_deps.shutil, "which", lambda name: None)
+    monkeypatch.setattr(claudexor_runtime, "get_runtime_manager", lambda: Manager())
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    assert node_runtime.select_skill_node_runtime()[0] == ""
+    assert prepared == []  # a passive readiness lookup cannot download
+
+    monkeypatch.setattr(isolated_deps, "_run", lambda cmd, **kwargs: {"returncode": 0})
+    isolated_deps._install_node_package("left-pad", tmp_path / ".ouroboros_env", 1)
+    assert prepared == [True]
+    assert node_runtime.select_skill_node_runtime() == (str(node), "managed")
+    assert _resolve_runtime_binary("node") == (str(node), "")
+    assert _resolve_runtime("node") == (str(node), "")
+    assert node_runtime.skill_node_emergency_path_dir() == str(node.parent)
+    child_env = {"PATH": str(tmp_path / "empty")}
+    node_runtime.prepend_skill_node_emergency_path(child_env)
+    assert child_env["PATH"].split(os.pathsep)[0] == str(node.parent)
+    assert prepared == [True]
 
 
 def test_install_node_package_reports_managed_npm_preparation_failure(monkeypatch, tmp_path):

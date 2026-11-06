@@ -158,8 +158,8 @@ test('Connect tools: one confirmation names what runs and the servers MCP starts
             api: { skillMcpConnectPreview: async () => preview, skillMcpConnect: async (...args) => { sent.push(args); return { ok: true, saved: true }; } },
             dialog: async (model) => {
                 assert.equal(model.title, 'Connect the tools of chrome?');
-                assert.equal(model.body, 'Ouroboros adds Chrome (shared tab) to MCP Servers. It turns MCP on. A server starts when a task uses its tools. '
-                    + 'Turning MCP on also starts 1 server that is already on: GitHub.');
+                assert.equal(model.body, 'Ouroboros adds Chrome (shared tab) to MCP Servers. It turns MCP on. Ouroboros starts the server to list its tools, then uses it for tool calls. '
+                    + 'Turning MCP on also starts 1 server previously enabled in Settings: GitHub.');
                 assert.deepEqual(model.details.rows.map((row) => row.value), ['/opt/node /skills/chrome/scripts/server.mjs', '/skills/chrome',
                     'one process per task; Ouroboros checks its browser requests']);
                 assert.equal(model.confirmLabel, 'Connect tools');
@@ -191,7 +191,7 @@ test('Connect tools: one confirmation names what runs and the servers MCP starts
             skillMcpConnect: async () => ({ ok: true }) },
         dialog: async (model) => {
             assert.equal(model.title, 'Connect the tools of Chrome?');
-            assert.equal(model.body, 'Ouroboros turns Chrome (shared tab) on again in MCP Servers. A server starts when a task uses its tools.');
+            assert.equal(model.body, 'Ouroboros turns Chrome (shared tab) on again in MCP Servers. Ouroboros starts the server to list its tools, then uses it for tool calls.');
             return false;
         },
     });

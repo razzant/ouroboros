@@ -115,7 +115,7 @@ companion_processes:                # optional; PLURAL, and needs the companion_
     command: [python3, scripts/worker.py]
     runtime: python3
 mcp_servers:                        # optional; see "Declaring MCP servers (Connect tools)"
-  - {id: weather, entry: scripts/mcp_server.py}
+  - {id: weather, runtime: node, entry: scripts/mcp_server.mjs}
 scheduled_tasks:                    # optional cron suggestions; nothing runs until adopted
   - name: refresh-cache
     cron: "0 * * * *"                # 5-field cron, host-local timezone by default
@@ -712,7 +712,8 @@ Each item takes only these keys (anything else is a manifest error):
 - `entry` (required): a relative path of a file in the skill (no `..`, absolute path or
   cache/dependency folder such as `node_modules` or `.ouroboros_env`); it is part of the
   reviewed, hashed payload.
-- `runtime`: one of the skill runtimes; defaults to the manifest's `runtime`.
+- `runtime`: currently `node` only; defaults to the manifest's `runtime`. This first
+  consumer does not extend Python/Go or other runtimes' script execution paths.
 - `title`: the Settings display name; defaults to `id`.
 - `task_session`, `browser_policy`: the MCP call-lifetime choices (DEVELOPMENT §12);
   `browser_policy` needs `task_session: true`.
