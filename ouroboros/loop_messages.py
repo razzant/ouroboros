@@ -261,8 +261,8 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
     # A task-drafted objective, or the host's Continue work order (its facts are
     # the host's; the owner's exact words ride ``owner_corpus``).
     if isinstance(author, dict) and author.get("kind") in {"task", "continuation"}:
-        for row in metadata.get("owner_corpus") or []:
-            if isinstance(row, dict) and row.get("source") in OWNER_SOURCES:
+        for row in metadata.get("owner_corpus") or []:  # the owner's rows, and confirmed place words as provenance (citable, owed nothing)
+            if isinstance(row, dict) and (row.get("source") in OWNER_SOURCES or row.get("source") == PLACE_CONFIRMED):
                 _loop()._record_owner_directive(
                     ctx, source=str(row["source"]), content=row.get("content"),
                     msg_id=str(row.get("msg_id") or ""),

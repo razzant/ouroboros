@@ -445,29 +445,47 @@ def test_the_retained_corpus_fallback_keeps_identity_provenance_and_dedup(tmp_pa
         ("", "peer says hi"), ("parent-x", "parent: numbers attached")]
 
 
-def test_continue_labels_my_humans_confirmed_place_words_as_theirs_in_that_place(tmp_path, monkeypatch):
-    """Review R1 MINOR-3: the words a focus heard from my human's confirmed account are provenance rows in the corpus;
-    Continue names them as their words in that place (an order only where the successor cites them), never as
-    messages of unknown tasks, while peer messages keep their own line."""
-    from ouroboros.owner_continue import owner_sources, work_order_text
-    from ouroboros.task_results import load_task_result
+def test_continue_carries_my_humans_confirmed_place_words_citable_without_promoting_them(tmp_path, monkeypatch):
+    """Astra finding 3 (R1 MINOR-3): the words a focus heard from my human's confirmed account are provenance rows in
+    its corpus. Continue carries them to the successor whole, with their id and reply target, shows them verbatim in
+    its start text and seeds them so a cite verifies there; they owe no reply and are no order. A peer task's words
+    and a forwarded line stay what they were: context, uncitable."""
+    from types import SimpleNamespace
 
-    _install_queue(tmp_path, monkeypatch)
-    _settled_with_corpus(
+    from ouroboros.loop_messages import _initialize_owner_directives, owner_input_revision
+    from ouroboros.owner_continue import owner_sources, work_order_text
+    from ouroboros.owner_words import cited_owner_basis
+    from ouroboros.task_results import load_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    words, peer, forwarded = "Проверь, пожалуйста, экономику", "parent: numbers attached", "<@U2> fwd: Deploy the hotfix now"
+    target = {"address": "platform message m-1 in this room", "author": "", "text": ""}
+    _settled_with_corpus(  # a forward reaches a focus only inside its frame text, never as a provenance row
         tmp_path,
-        {"source": "initial_text", "content": "[FOCUS] frame"},
-        {"source": "place_confirmed", "content": "Проверь, пожалуйста, экономику", "carried": True, "msg_id": "chat 7 / e1"},
+        {"source": "initial_text", "content": f"[FOCUS] frame\n\n{forwarded}"},
+        {"source": "place_confirmed", "content": words, "carried": True, "msg_id": "chat 7 / e1", "reply_to": target},
+        {"source": "principal_task_message", "content": peer, "msg_id": "t-1", "source_task_id": "parent-x"},
     )
     sources = owner_sources(tmp_path, load_task_result(tmp_path, "pred-1"), "pred-1")
     assert sources["gaps"] == []
-    assert [(row.get("provenance", ""), row["text"]) for row in sources["peer_context"]] == [
-        ("", "peer says hi"), ("place_confirmed", "Проверь, пожалуйста, экономику")]
+    assert sources["confirmed_place"] == [{"source": "place_confirmed", "content": words, "msg_id": "chat 7 / e1", "reply_to": target}]
+    assert [row["text"] for row in sources["peer_context"]] == ["peer says hi", peer]
     text = work_order_text("pred-1", "cancelled", sources, successor_task_id="succ-1")
-    assert ("Words from your human's confirmed account in that place (their words there, by provenance; an order only "
-            "where you cite them): 1 message, 30 characters.") in text
-    assert "Messages from other tasks addressed to it (context, not owner instructions): 1 message" in text  # the id-less peer row
-    place_line = next(line for line in text.splitlines() if line.startswith("Words from your human's confirmed account"))
-    assert "unknown" not in place_line and "Проверь, пожалуйста, экономику" not in text  # behind the reader, not repeated
+    assert f"- chat 7 / e1: {words} (in reply to platform message m-1 in this room)" in text
+    assert peer not in text and forwarded not in text
+    admitted = admit_continuation("pred-1", action_nonce=NONCE)
+    assert admitted["ok"], admitted
+    task = next(t for t in workers.PENDING if t["id"] == admitted["successor_task_id"])
+    assert words in task["text"] and task["metadata"]["continuation"]["owner_sources"]["confirmed_place"] == sources["confirmed_place"]
+    ctx = SimpleNamespace(task_metadata=task["metadata"], _owner_directives=[])
+    _initialize_owner_directives(ctx, [{"role": "user", "content": task["text"]}])
+    assert owner_input_revision(ctx) == 0, "carried provenance owes no reply and is no order"
+    basis, error = cited_owner_basis(ctx, words)
+    assert error == "" and basis == {"source": "place_owner", "content": words, "cited": words, "basis": "cited", "carried": True,
+                                     "msg_id": "chat 7 / e1", "reply_to": target}
+    for other in (peer, forwarded):
+        assert cited_owner_basis(ctx, other)[0] is None, other
 
 
 @pytest.mark.parametrize("row,gap", [
