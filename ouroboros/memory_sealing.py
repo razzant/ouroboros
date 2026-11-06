@@ -1,4 +1,4 @@
-"""Terminal links of authored pages; they never invent page coverage."""
+"""Terminal links and covered rooms of authored pages; they never invent page coverage."""
 from __future__ import annotations
 
 from ouroboros import chat_chain, memory_inventory
@@ -106,6 +106,28 @@ def closure_link(root, record):
     at = chat_chain.format_address(found)
     return [f"- The closure notice of project {project}: memory_read(room_id='{record['room_id']}', rows=true, "
             f"from='{at}', to='{at}')"]
+
+
+def covered_rooms(root, record):
+    """A conversation page's rooms (``covers.rooms``) as ``(room, label, first, last)``, oldest first: the first and
+    last address of the rows it sealed there, read from that room's rows inside the page's span; none for a page over
+    one room."""
+    from ouroboros.memory_view import room_labeler
+
+    covers = record.get("covers") if isinstance(record.get("covers"), dict) else {}
+    rooms = covers.get("rooms") if record.get("kind") == "page" and isinstance(covers.get("rooms"), dict) else {}
+    label, found = room_labeler(root), []
+    label.warm(list(rooms))
+    for room, refs in rooms.items():
+        try:
+            rows = chat_chain.iter_room_rows(root, room, from_addr=covers.get("first"), to_addr=covers.get("last"))
+        except (chat_chain.RowAddressError, ValueError):  # a span bound that no longer resolves reads the room whole
+            rows = chat_chain.iter_room_rows(root, room)
+        wanted = set(refs)
+        sealed = [(pos, chat_chain.format_address(address)) for address, _row, pos in rows
+                  if address["row_sha256"] in wanted]
+        found += [(sealed[0][0], room, label(room), sealed[0][1], sealed[-1][1])] if sealed else []
+    return [entry[1:] for entry in sorted(found)]
 
 
 def terminal_links(root, record, cache=None):

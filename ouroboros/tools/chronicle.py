@@ -1007,7 +1007,12 @@ def _read_node(root: Path, node_id: str, start: int, limit: int, revision: str =
     if record is None:
         raise ValueError(f"memory node {node_id} not found")
     shown, document = _node_document(store, record, revision)
-    from ouroboros.memory_sealing import closure_link, terminal_links
+    from ouroboros.memory_sealing import closure_link, covered_rooms, terminal_links
+    rooms = covered_rooms(root, record)
+    if rooms:  # a conversation page: each room it sealed, with the exact reader of its rows there
+        document += "\n\nRooms this page covers:\n" + "\n".join(
+            f"- {name}: memory_read(room_id='{room}', rows=true, from='{first}', to='{last}')"
+            for room, name, first, last in rooms)
     links = terminal_links(root, shown) + closure_link(root, shown)
     if links:
         document += "\n\nHost-linked terminal facts (outside page coverage):\n" + "\n".join(links)
@@ -1157,10 +1162,14 @@ def _read_proposal(ctx: Any, root: Path, store: ChronicleStore, proposal: Dict[s
         return ", ".join(f"{r} ({n})" for r, n in sorted(Counter(str(record["room_id"]) for record in group).items()))
 
     def whole(record: Dict[str, Any]) -> List[str]:
+        from ouroboros.memory_sealing import covered_rooms
+
         covers = record.get("covers") if isinstance(record.get("covers"), dict) else {}
-        readers = [f"memory_read(node_id='{record['id']}')"] + (
-            [f"rows: memory_read(room_id='{record['room_id']}', rows=true, from='{_address_text(covers.get('first'))}', "
-             f"to='{_address_text(covers.get('last'))}')"] if record["kind"] == "page" and covers.get("first") else [])
+        spans = [(room, first, last) for room, _name, first, last in covered_rooms(root, record)] or (
+            [(record["room_id"], _address_text(covers.get("first")), _address_text(covers.get("last")))]
+            if record["kind"] == "page" and covers.get("first") else [])  # one reader per room the page sealed
+        readers = [f"memory_read(node_id='{record['id']}')"] + [
+            f"rows: memory_read(room_id='{room}', rows=true, from='{first}', to='{last}')" for room, first, last in spans]
         moves = (["(its words leave my story with this selection)"] if record["id"] in visible[0] - visible[1] else
                  ["(its words return to my story with this selection)"] if record["id"] in visible[1] - visible[0] else [])
         return ["", "\n".join([_listed(record, periods, told_now), *map(quote_line, record.get("quotes") or ()), *moves]),
