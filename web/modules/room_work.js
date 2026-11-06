@@ -29,7 +29,7 @@ import {
 } from './work_status.js';
 import { showToast } from './toast.js';
 import { motionMs, reducedMotion } from './motion.js';
-import { isStackLayout } from './layout.js';
+import { roomCoversMain } from './layout.js';
 import { closingLine } from './settled_card.js';
 
 // The closed list rises back as it fades (room_work.css rw-unfold, reversed).
@@ -734,8 +734,9 @@ export function createRoomWork({
     // mark stays and the control's name keeps the whole status. Measured again when the word, step, mark or available
     // width changes. Remember the capsule's width AFTER fitting, so observing its content-sized box does not feed a
     // hide/show cycle back into the ResizeObserver.
-    // A Project's name keeps one line (room_work.css). On a phone a name still cut there makes the consciousness chip
-    // show its brain alone (its name keeps the whole state); a desk keeps the chip's word and the name ellipsizes.
+    // A Project's name keeps one line (room_work.css). Where the room covers Main (a phone, a finger's docked column) a
+    // name still cut there makes the consciousness chip show its brain alone (its name keeps the whole state); a desk's
+    // panel beside Main keeps the chip's word and the name ellipsizes.
     // Panic never yields.
     let fittedWord = null, fittedWidth = null, fitNeeded = false;
     function fitWord() {
@@ -747,7 +748,7 @@ export function createRoomWork({
         const cut = () => statusBadge.scrollWidth > statusBadge.clientWidth + 1;
         if (statusBadge.dataset.step && cut()) trigger.dataset.step = 'off';
         if (cut()) trigger.dataset.word = 'off';
-        if (chip && isStackLayout({ root: doc.documentElement }) && name.scrollWidth > name.clientWidth + 1) {
+        if (chip && roomCoversMain({ root: doc.documentElement }) && name.scrollWidth > name.clientWidth + 1) {
             chip.dataset.fit = 'mark';
         }
         fittedWidth = titleRow?.clientWidth;
@@ -980,7 +981,8 @@ export function createRoomWork({
 
     // ---- wiring
     listen(globalThis.window, 'ouro:language-changed', schedule);
-    // Whether a cut Project name takes the chip's word depends on the layout (fitWord), so a switch fits again.
+    // Whether a cut Project name takes the chip's word depends on the layout and the input (fitWord), so a switch fits
+    // again.
     if (name) listen(globalThis.window, 'ouro:layout-changed', () => { fitNeeded = true; schedule(); });
     // A click with detail 0 is Enter or Space on the focused control: a keyboard open lands in the list.
     listen(trigger, 'click', (event) => { if (open) close(); else openSurface(event?.detail === 0); });

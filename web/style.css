@@ -254,7 +254,10 @@ body.resizing-panels { user-select: none; }
 @media (hover: hover) {
     .resize-handle:hover { background: var(--accent-10); }
 }
-html[data-layout="stack"] .resize-handle { display: none; }
+/* The stack layout has a drawer, not resizable columns; and a width handle is never offered to a finger: an 8 px strip
+   it cannot aim at, whose drag would rewrite the widths every device of the install shares (DESIGN "Shell"). */
+html[data-layout="stack"] .resize-handle,
+html[data-pointer="coarse"] .resize-handle { display: none; }
 
 /* The version is a readable fact in the meta ink (owner Q6=A), beside the update capsule. */
 #nav-version {
@@ -8711,6 +8714,19 @@ html[data-layout="docked"] .project-panel-backdrop {
 }
 html[data-layout="docked"] .project-panel-backdrop.open {
     transition-duration: var(--motion-fade);
+}
+/* Where the primary input is a finger (html[data-pointer="coarse"]), the docked Project takes the whole content column in
+   Main's place, dressed as the phone's room: nothing dimmed to tap by mistake, no edge or shadow over the sidebar, which
+   stays beside it and live. Its geometry and its slide from the window's right edge stay the docked ones (owner 20.10,
+   Q2 A); a desk with a mouse keeps the panel beside Main at its own width (owner 18.10, 4A; 06.11). Nothing here writes
+   the stored width. */
+html[data-layout="docked"][data-pointer="coarse"] .project-panel {
+    width: 100%;
+    border-left: none;
+    box-shadow: none;
+}
+html[data-layout="docked"][data-pointer="coarse"] .project-panel-backdrop {
+    display: none;
 }
 
 /* The stack layout: the project thread is a full-width layer over the room. It has no outside to tap and dims nothing:

@@ -32,6 +32,27 @@ export function isStackLayout(options) {
     return currentLayout(options) === 'stack';
 }
 
+/** The primary input theme.js paints beside the layout: `coarse` (a finger) or `fine` (a mouse or a trackpad); a
+ * document with neither (a test's fake DOM) is a desktop window's, as theme.js itself falls back. */
+export const POINTERS = Object.freeze(['fine', 'coarse']);
+
+export function currentPointer({ root = rootOf(), w = win() } = {}) {
+    const painted = root?.dataset?.pointer;
+    if (POINTERS.includes(painted)) return painted;
+    const resolved = w?.ouroLayout?.pointer;
+    return POINTERS.includes(resolved) ? resolved : 'fine';
+}
+
+export function isCoarsePointer(options) {
+    return currentPointer(options) === 'coarse';
+}
+
+/** A Project open over Main covers it whole: the stack layout's room, or the docked content column where the primary
+ * input is a finger (DESIGN "Shell"). Beside Main (a desk) it does not. */
+export function roomCoversMain(options) {
+    return isStackLayout(options) || isCoarsePointer(options);
+}
+
 /** A pinch is magnifying the page: the visual viewport is narrower than the layout one, the root's client width
  * (`innerWidth` runs a pixel past the screen at an Interface size below 100 % and counts a classic scrollbar). A
  * keyboard only takes height, and a page zoom moves both together, so neither counts. While it holds, the room keeps its

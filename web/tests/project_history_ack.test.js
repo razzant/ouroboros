@@ -378,6 +378,7 @@ function navigationHarness({ pendingWork, exitAtOnce = true }) {
         showPage: async () => true, isStackLayout: () => false, createChatInstance: instance,
         syncNavigationState() { if (exitAtOnce) for (const [pid, inst] of [...context.rooms.retiring]) context.rooms.settle(pid, inst); },
         markProjectViewed: async (id, revision) => { acked.push([id, revision]); },
+        mainReads: 0, acknowledgeMainAfterPaint() { context.mainReads += 1; },  // Main's read decision (its own tests)
         console: { error() {} }, createRoomRetirement,
     });
     vm.runInContext(`let projectNavigationGeneration = 0, projectPanelOpeningSince = 0;
@@ -466,8 +467,10 @@ test('leaving a Project for Main returns Main to its newest message', async () =
     await h.api.open();
     h.api.close();
     assert.equal(main.latestShown, 1, 'the panel closed over Main: Main opens at its newest message');
+    assert.equal(h.context.mainReads, 1, 'and what came while it was covered is offered its read (owner 06.11)');
     h.api.close();
     assert.equal(main.latestShown, 1, 'closing with no Project open moves nothing');
+    assert.equal(h.context.mainReads, 1);
     h.context.state.activePage = 'settings';
     await h.api.open();
     h.api.close();

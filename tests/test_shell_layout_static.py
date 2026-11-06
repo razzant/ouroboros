@@ -57,3 +57,43 @@ def test_shell_sheets_key_structure_off_the_layout_attribute_not_width_queries()
     assert "data-project-fill" not in css and "data-project-fill" not in _read("web/app.js")
     # What a drag writes, and when, is behaviour: tests/test_shell_interactions_browser.py drags both handles (the
     # stored widths change once, at the end; a Project closed mid-drag keeps its width).
+
+
+def test_a_finger_is_the_switchs_other_fact_and_opens_a_project_in_mains_place():
+    """The primary input (owner 06.11): theme.js paints `html[data-pointer]` from one `(pointer: coarse)` query beside the
+    layout, and only the shell's sheets read it; docked under a finger the Project takes the content column with no
+    scrim, and no width handle is offered to a finger. It is an input fact, never a width rule: a desk with a mouse keeps
+    the panel beside Main at its own width (owner 18.10, 4A)."""
+    theme = _read("web/theme.js")
+    assert theme.count("matchMedia('(pointer: coarse)')") == 2, "the layout's input fact and the Interface size's own read"
+    assert "root.dataset.pointer = pointer" in theme and "get pointer()" in theme
+    css = _read("web/style.css")
+    whole = css.split('html[data-layout="docked"][data-pointer="coarse"] .project-panel {', 1)[1].split("}", 1)[0]
+    assert "width: 100%;" in whole and "box-shadow: none;" in whole and "border-left: none;" in whole, whole
+    scrim = css.split('html[data-layout="docked"][data-pointer="coarse"] .project-panel-backdrop {', 1)[1].split("}", 1)[0]
+    assert "display: none;" in scrim, scrim
+    assert 'html[data-pointer="coarse"] .resize-handle' in css
+    # The shell asks the door; the pointer queries outside theme.js are a closed list that only shrinks (a component's
+    # own fact: the surface packet, a row's long press, the reader, the Interface size), never a new reader.
+    readers = sorted(path.relative_to(REPO).as_posix() for path in (REPO / "web").glob("**/*.js")
+                     if "tests" not in path.parts and "vendor" not in path.parts
+                     and "(pointer: coarse)" in path.read_text(encoding="utf-8"))
+    assert set(readers) <= {"web/theme.js", "web/modules/client_surface.js", "web/modules/chat_row_menu.js",
+                            "web/modules/document_reader.js", "web/modules/interface_size.js"}, readers
+    layout = _read("web/modules/layout.js")
+    assert "export function roomCoversMain" in layout and "export function currentPointer" in layout
+
+
+def test_mains_count_and_read_follow_one_predicate():
+    """While a Project is open Main is not the room on screen (owner 06.11; DESIGN "Unread"): its row counts its new
+    messages and nothing reads them until Main is back. The count, ☰'s dot and the read ask the same `mainOnScreen()`,
+    so a covered Main can neither hide its number nor be read behind the Project."""
+    app = _read("web/app.js")
+    assert "function mainOnScreen()" in app
+    body = app.split("async function acknowledgeMainAfterPaint()", 1)[1].split("\n}\n", 1)[0]
+    assert "!mainOnScreen()" in body and "&& mainOnScreen()) await markMainViewed(revision)" in body, body
+    observe = app.split("function observeMainRevision(revision)", 1)[1].split("\n}\n", 1)[0]
+    assert "if (mainOnScreen()) void acknowledgeMainAfterPaint();" in observe, observe
+    badge = app.split("function updateUnreadBadge()", 1)[1].split("\n}\n", 1)[0]
+    assert "mainOnScreen() ? 0 : mainUnreadCount()" in badge, badge
+    assert "(!mainOnScreen() && mainUnreadCount() > 0)" in app

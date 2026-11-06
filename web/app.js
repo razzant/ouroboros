@@ -39,7 +39,7 @@ import { SHELL_ICONS } from './modules/page_icons.js';
 import { renderNavRows, renderProjectsHeader } from './modules/pages.js';
 import { renderPageHeader } from './modules/page_header.js';
 import { createRoomHeader, panicButtonHtml } from './modules/chat_header.js';
-import { isStackLayout, measurePinnedBars, onLayoutChange, pinchMagnified } from './modules/layout.js';
+import { isCoarsePointer, isStackLayout, measurePinnedBars, onLayoutChange, pinchMagnified, roomCoversMain } from './modules/layout.js';
 import { createLayerStack } from './modules/layers.js';
 import { afterMotion, reducedMotion } from './modules/motion.js';
 import { createShellMotion } from './modules/shell_motion.js';
@@ -228,10 +228,16 @@ function mainUnreadCount() {
     return Number.isSafeInteger(revision) && Number.isSafeInteger(seen) ? unreadCount(revision, seen, readAheadFor(1)) : 0;
 }
 
+// Main is the room on screen only while its page is shown with no Project over it: a covered or dimmed Main's new
+// messages count on its row and in ☰'s dot (DESIGN "Shell"), where the owner sees them from the Project.
+function mainOnScreen() {
+    return state.activePage === 'chat' && !navState.activeProjectId;
+}
+
 function updateUnreadBadge() {
     const btn = document.querySelector('[data-nav-page="chat"]');
     let badge = btn?.querySelector('.unread-badge');
-    const count = state.activePage === 'chat' ? 0 : mainUnreadCount();
+    const count = mainOnScreen() ? 0 : mainUnreadCount();
     if (count > 0) {
         if (!badge) {
             badge = document.createElement('span');
@@ -255,7 +261,7 @@ function observeMainRevision(revision) {
     if (state.mainSeenRevision === null) void markMainViewed(state.mainVisibleRevision);
     else if (mainUnreadCount() > 0) {
         refreshSharedProjectSeen();
-        if (state.activePage === 'chat') void acknowledgeMainAfterPaint();
+        if (mainOnScreen()) void acknowledgeMainAfterPaint();
     }
     updateUnreadBadge();
 }
@@ -286,11 +292,11 @@ async function markMainViewed(revision) {
 }
 
 // Main reads as a Project room does (DESIGN "Unread"): a revision is acknowledged only once a history read covering it
-// was painted while Main is shown and its reader is at the newest message.
+// was painted while Main is the room on screen (no Project over it) and its reader is at the newest message.
 let mainPaintRequest = null;
 async function acknowledgeMainAfterPaint() {
     const revision = state.mainVisibleRevision;
-    if (state.activePage !== 'chat' || !mainChat?.refreshHistory || !Number.isSafeInteger(revision)
+    if (!mainOnScreen() || !mainChat?.refreshHistory || !Number.isSafeInteger(revision)
         || !Number.isSafeInteger(state.mainSeenRevision) || revision <= state.mainSeenRevision) return;
     if (mainPaintRequest && mainPaintRequest.revision >= revision) return mainPaintRequest.promise;
     const promise = (async () => {
@@ -298,7 +304,7 @@ async function acknowledgeMainAfterPaint() {
         try { paint = await mainChat.refreshHistory({ revision }); } catch (err) {
             console.error('Main history paint failed:', err);
         }
-        if (paint?.read && Number(paint.revision) === revision && state.activePage === 'chat') await markMainViewed(revision);
+        if (paint?.read && Number(paint.revision) === revision && mainOnScreen()) await markMainViewed(revision);
     })().finally(() => { if (mainPaintRequest?.promise === promise) mainPaintRequest = null; });
     mainPaintRequest = { revision, promise };
     return promise;
@@ -370,13 +376,14 @@ function syncNavigationState() {
         else button.removeAttribute('aria-current');
     });
     let exit = Promise.resolve();
+    let arrived = Promise.resolve();
     if (projectPanel) {
         if (activeProjectId) {
             panelExits += 1;
             projectPanel.hidden = false;
             if (projectPanelBackdrop) projectPanelBackdrop.hidden = false;
             requestAnimationFrame(() => projectPanelBackdrop?.classList.add('open'));
-            arrivePanel(activeProjectId, performance.now());
+            arrived = arrivePanel(activeProjectId, performance.now());
         } else if (!projectPanel.hidden) {
             // The panel leaves with its room in it and is hidden once its own motion has run (motion.js): docked it
             // slides home, on a phone or with reduced motion it fades.
@@ -395,17 +402,20 @@ function syncNavigationState() {
     const leftNow = rooms.exits();
     if (leftNow.length) Promise.all([settled, exit]).then(() => leftNow.forEach(([pid, inst, at]) => rooms.settle(pid, inst, true, at)));
     // One commit for both layers (layers.js), after the panel's unhide so focus can go into it: the drawer, and the
-    // Project panel's layer, modal only where it covers the room; on a phone only the covered room's inert (the whole
-    // room restyles) waits for the card's motion. Another Project is a new layer: its room takes the focus.
+    // Project panel's layer, modal only where it covers the room (the phone's card, a finger's docked column, where the
+    // sidebar beside it stays live); only the covered room's inert (the whole room restyles) waits for the motion that
+    // covers it, the phone's card or the docked panel's arrival. Another Project is a new layer: its room takes the focus.
+    const covers = roomCoversMain();
     layers.batch(() => {
         if (drawerOpen) {
             layers.push({ id: 'drawer', el: primarySidebar, modal: true, live: [navDrawerBackdrop].filter(Boolean),
                 onClose: () => setMobileDrawerOpen(false) });
         } else layers.remove('drawer');
         if (activeProjectId !== shownProjectId) layers.remove('project');
-        if (activeProjectId) layers.push({ id: 'project', el: projectPanel, modal: isStackLayout(),
-            live: [projectPanelBackdrop].filter(Boolean), onClose: () => closeProjectPanel(), focus: focusProjectRoom });
-    }, { inertAfter: isStackLayout() ? settled : null });
+        if (activeProjectId) layers.push({ id: 'project', el: projectPanel, modal: covers,
+            live: [projectPanelBackdrop, covers && !isStackLayout() ? primarySidebar : null].filter(Boolean),
+            onClose: () => closeProjectPanel(), focus: focusProjectRoom });
+    }, { inertAfter: isStackLayout() ? settled : covers ? arrived : null });
     // The layer's inert release is registered first. A delayed read behind the drawer keeps its notice pending.
     Promise.all([settled, exit]).then(() => {
         if (navState.mobileDrawerOpen) return;
@@ -422,18 +432,30 @@ function syncNavigationState() {
         navProjectsToggle?.focus({ preventScroll: true });
     }
     shownProjectId = activeProjectId;
-    paintNavToggles();  // a room's composer mounted since the last paint carries its ☰ too
+    // Main's count and ☰'s dot follow whether Main is the room on screen, which an open or a close just changed; a
+    // room's composer mounted since the last paint carries its ☰ too.
+    updateUnreadBadge();
 }
 
 // Docked, the panel comes in from the window's edge with its room in it (owner 20.10, Q2 A): it starts once the room
 // has painted, or at a slow read's bound, when it comes in with its loading row (a read seen to take seconds).
+// Its promise is the panel's arrival (its motion's end, at once when it was already in): a room that covers Main makes
+// it inert only then.
 const PANEL_ARRIVAL_BOUND_MS = 300;
+let panelArrival = Promise.resolve();  // the running arrival's end: a sync again mid-slide waits for the same one
 function arrivePanel(pid, since) {
-    requestAnimationFrame(() => {
-        if (navState.activeProjectId !== pid || projectPanel.classList.contains('open')) return;
-        const waits = !isStackLayout() && !reducedMotion() && !projectInstances.get(pid)?.hasPaintedHistory?.();
-        if (waits && performance.now() - since < PANEL_ARRIVAL_BOUND_MS) arrivePanel(pid, since);
-        else projectPanel.classList.add('open');
+    return new Promise((resolve) => {
+        const step = () => requestAnimationFrame(() => {
+            if (navState.activeProjectId !== pid) { resolve(); return; }
+            if (projectPanel.classList.contains('open')) { panelArrival.then(() => resolve()); return; }
+            const waits = !isStackLayout() && !reducedMotion() && !projectInstances.get(pid)?.hasPaintedHistory?.();
+            if (waits && performance.now() - since < PANEL_ARRIVAL_BOUND_MS) { step(); return; }
+            projectPanel.classList.add('open');
+            const property = reducedMotion() ? 'opacity' : 'transform';
+            panelArrival = afterMotion(projectPanel, { property }).done;
+            panelArrival.then(() => resolve());
+        });
+        step();
     });
 }
 
@@ -446,7 +468,8 @@ function focusProjectRoom() {
     try { feed.focus({ preventScroll: true }); } catch { /* detached */ }
 }
 
-// Crossing the switch: a drawer has no place in the docked layout; the Project layer changes its modality.
+// Crossing the switch (or a new primary input): a drawer has no place in the docked layout; the Project layer changes
+// its modality.
 onLayoutChange((layout) => {
     if (layout === 'docked') navState.mobileDrawerOpen = false;
     shellMotion.cancel();
@@ -481,7 +504,7 @@ const movingRooms = () => [roomEl, projectPanel?.classList.contains('open') ? pr
 const disposeDrawerDrag = DRAWER_DRAG ? bindDrawerDrag({
     sidebar: primarySidebar, scrim: navDrawerBackdrop, also: movingRooms,
     isOpen: () => navState.mobileDrawerOpen, setOpen: (open) => setMobileDrawerOpen(open),
-    isStack: () => isStackLayout(), isCoarse: () => window.matchMedia('(pointer: coarse)').matches,
+    isStack: () => isStackLayout(), isCoarse: () => isCoarsePointer(),
     onGrab: () => shellMotion.cancel(), onLayout: (sync) => onLayoutChange(() => sync()), onSnap: () => haptic('snap'),
 }) : () => {};
 const navDrawerClose = document.getElementById('nav-drawer-close');
@@ -651,7 +674,10 @@ function closeProjectPanel({ sync = true, reveal = false } = {}) {
     if (sync) syncNavigationState();
     // Leaving a Project for Main is a return to Main: its newest message (owner
     // decision 2026-10-05). Another page shows Main later through `ouro:page-shown`.
-    if (activeId && state.activePage === 'chat' && !reveal) void mainChat?.showLatest?.();
+    if (activeId && state.activePage === 'chat' && !reveal) {
+        void mainChat?.showLatest?.();
+        void acknowledgeMainAfterPaint();  // Main is the room on screen again: what came while it was covered is read now
+    }
 }
 
 async function openProjectPanel(project, { closeDrawer = true, openOnly = false, taskId = '', quizId = '', sourceReveal = null, pointer = false } = {}) {
@@ -985,7 +1011,7 @@ function paintMainRow() {
 // room's composer row) are painted; a composer that mounted later is painted by the navigation sync that shows it.
 function paintNavToggles() {
     const owner = (projectRooms.get('1') || IDLE_SUMMARY).owner || projectActivityIndex.aggregate.owner;
-    const unread = (state.activePage !== 'chat' && mainUnreadCount() > 0) || projectsNav.unreadRows().length > 0;
+    const unread = (!mainOnScreen() && mainUnreadCount() > 0) || projectsNav.unreadRows().length > 0;
     const view = markView({ owner, unread });
     const name = owner ? 'Open navigation · something waits for you' : unread ? 'Open navigation · new messages' : 'Open navigation';
     for (const toggle of document.querySelectorAll('[data-mobile-nav-toggle]')) {
