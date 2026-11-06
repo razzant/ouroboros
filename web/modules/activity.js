@@ -32,7 +32,8 @@ import {
 import { markView, statusMarkHtml } from './status_mark.js';
 import { whenLabel } from './storage_format.js';
 import { showToast } from './toast.js';
-import { allowanceLabel } from './utils.js';
+import { normalizeConsciousness } from './consciousness_api.js';
+import { allowanceText } from './consciousness_words.js';
 
 function esc(value) {
     return String(value ?? '').replace(/[&<>"']/g, (c) => (
@@ -252,7 +253,7 @@ export function scheduleRowHtml(s, expanded = false, viewerZone = viewerTimeZone
     const timeZone = zone || undefined;
     // One zone per row: a cron runs in its record's zone (the server's when none is stored), its cadence and times
     // are said there, and that zone is named on the row only when it is not this viewer's. Its code goes to Details.
-    const cadence = once ? `Once at ${scheduleInstantHtml(trigger.run_at, { timeZone })}` : esc(s.cadence || trigger.expr || s.cron || '');
+    const cadence = once ? `Once on ${scheduleInstantHtml(trigger.run_at, { timeZone })}` : esc(s.cadence || trigger.expr || s.cron || '');
     const timing = `${cadence}${zone && zone !== viewerZone ? ` (${esc(zone)})` : ''}`;
     const note = ['note', 'notify'].includes(s.kind);
     const next = s.next_run_at ? scheduleInstantHtml(s.next_run_at, { timeZone }) : '';
@@ -492,8 +493,8 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
         const facts = [
             bg.level ? `autonomy ${esc(bg.level)}` : '',
             bg.last_wake_at ? `last wake ${esc(whenLabel(bg.last_wake_at))}${bg.last_wake_outcome ? ` (${esc(bg.last_wake_outcome)})` : ''}` : '',
-            allowanceLabel(bg.spent_24h_usd, bg.daily_usd, bg.unknown_unmetered, bg.integrity_degraded)
-                ? `allowance ${esc(allowanceLabel(bg.spent_24h_usd, bg.daily_usd, bg.unknown_unmetered, bg.integrity_degraded))} (24 h)` : '',
+            // The money line in the Consciousness tab's own words ("≥ $1.50 of $20.00 in the last 24 hours").
+            esc(allowanceText(normalizeConsciousness(bg, { enabled }))),
             Number.isFinite(Number(bg.max_tasks)) ? esc(fmt('own tasks {running}/{max}', { running: Number(bg.tasks_running || 0), max: Number(bg.max_tasks) })) : '',
         ].filter(Boolean).join(' · ');
         return `<div class="ui-row activity-row">

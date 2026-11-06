@@ -176,7 +176,7 @@ def test_notes_reach_main_activity_and_the_live_banner(direct_server_with_data, 
             assert waiting.locator(".activity-name").inner_text() == LATER
             # The name already says the note's words: its Details keeps no second copy.
             assert waiting.locator(".activity-order").count() == 0
-            timing = waiting.locator(".activity-sub").filter(has_text=re.compile(r"^Reminder · Once at "))
+            timing = waiting.locator(".activity-sub").filter(has_text=re.compile(r"^Reminder · Once on "))
             assert timing.count() == 1
             assert timing.locator("time").get_attribute("datetime") == "2999-01-01T09:00:00Z"
             schedules.scroll_into_view_if_needed()

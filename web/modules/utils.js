@@ -350,16 +350,6 @@ export function formatUsdKnown(value) {
     return num > 0 && num < 0.0001 ? '<$0.0001' : `$${num > 0 && num < 0.01 ? num.toFixed(4) : num.toFixed(2)}`;
 }
 
-export function allowanceLabel(spent, daily, unknownUnmetered = 0, integrityDegraded = false) {
-    // The consciousness allowance line: an absent number stays absent (never $0.00), a
-    // window with unmetered rows prints as a floor ("≥"), a quarantined ledger says so.
-    if (spent === null || spent === undefined || daily === null || daily === undefined) return '';
-    if (!Number.isFinite(Number(spent)) || !Number.isFinite(Number(daily))) return '';
-    const floor = Number(unknownUnmetered) > 0 ? '≥ ' : '';
-    const degraded = integrityDegraded ? ' (ledger integrity degraded)' : '';
-    return `${floor}${formatUsd2(spent)} / ${formatUsd2(daily)}${degraded}`;
-}
-
 export function formatUsd4(value) {
     // A REAL zero is a fact and prints as $0.0000; only an ABSENT/unparseable
     // amount renders as nothing (C2 null policy — the `> 0` test used to hide a

@@ -101,7 +101,7 @@ test('a legacy note keeps its name, shows its words and offers the same lifecycl
     // Its words are behind the row's one Details, never sliced into a second title.
     assert.match(html, /<summary data-act="schedule-text" data-id="followup-t1-abc123">Details<\/summary>\s*<p class="activity-order" data-i18n-authored>Call &lt;mother&gt;<\/p>/);
     assert.doesNotMatch(html, /title="Call/);
-    assert.match(html, /<span class="activity-sub">Reminder · Once at <time /);
+    assert.match(html, /<span class="activity-sub">Reminder · Once on <time /);
     // The server's display name is the note's own first line: then the title says it and Details holds no copy.
     const named = scheduleRowHtml({ ...note, display_name: 'Call <mother>' });
     assert.match(named, /activity-name" data-i18n-authored>Call &lt;mother&gt;<\/span>/);
