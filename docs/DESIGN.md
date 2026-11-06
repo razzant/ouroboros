@@ -2457,10 +2457,11 @@ fade dims a card where the list cuts it.
   the column count changes only where a card is painted; a running widget
   keeps its frame and its state. Keyboard focus keeps the card's original
   position until the window reloads.
-- **Stop holds until Start.** A framed card the owner stopped rests as its
-  facade with Start on this device across reloads, until Start or a launch
-  policy of Auto or Keep running starts it. A card whose last start the page
-  did not outlive rests the same way, with its one line (Skills in the page).
+- **Stop holds until Start.** A running card's Stop is in its ⋮ menu. A card the
+  owner stopped rests as its facade with Start on this device across reloads,
+  until Start or a launch policy of Auto or Keep running starts it. A card whose
+  start the page did not outlive, or whose files went away, rests the same way
+  and says so in one line (Skills in the page).
 - **One arrangement per installation.** Order and widths are owner UI state
   stored on the server, the same for every window and device of the
   installation; when two windows arrange at once the last change wins. A
@@ -3053,7 +3054,7 @@ chip its brain and mark, its accessible name keeping the whole state; a desk kee
 never yield (audit №2, owner 2026-10-28T22:09Z; sidebar names wait for the navigation decision).
 Navigation sharing a toolbar also returns below the bar when the
 content column is too narrow, including while the sidebar is resized; the toolbar wraps in its
-own row. Files' location and actions return above the list, folder names fit and actions wrap.
+own row. Files' location and its actions return above the list on one row; folder names fit, actions wrap.
 Files shows the folder's list and the chosen file side by side while its own width holds both (the `files`
 container, 700 px); narrower, the list comes first and a chosen file replaces it under `Back to folder`, which
 keeps an unsaved draft: the file's row says `unsaved` (a new file's draft has its own row at the top) and reopens
