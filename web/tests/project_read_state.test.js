@@ -322,6 +322,9 @@ test('the distance to the named message is the feed\'s own, also while the room 
         delivered: () => true, nodes: () => [el(-200 * scale, -180 * scale)], viewport: el(0, 300 * scale, 300) });
     assert.equal(offset(1), -200, 'at full size the distance on screen is the scroll');
     assert.equal(Math.round(offset(0.9312)), -200, 'scaled, it still takes the feed\'s own 200 px');
+    const fractional = newestMessageOffset({ history_id: 'chat:9', out_of_order: false }, {
+        delivered: () => true, nodes: () => [el(-200, -180)], viewport: el(0, 300.4, 300) });
+    assert.equal(fractional, -200, 'a fractional height at full size is no scale: the distance stays exact');
 });
 
 // A page loaded while the reader stays put (a short room, `Load older`) can bring

@@ -17,11 +17,19 @@ function lift(name) {
     return source.slice(from + 1, until + 2);
 }
 
+// One top-level statement of app.js, by how it starts (a declaration or a listener it registers).
+function liftLine(start) {
+    const from = source.indexOf(`\n${start}`);
+    assert.ok(from >= 0, `${start}… is a top-level line in app.js`);
+    return source.slice(from + 1, source.indexOf('\n', from + 1) + 1);
+}
+
 // What the Projects list says of the rows it holds (projects_nav.js `unreadRows`): here the feed's, or those a case adds.
 const heldRows = (feed, beyond = []) => ({ unreadRows: () => [...(feed() || []).filter((row) => row._unread), ...beyond] });
 
 function harness({ revision = null, seen = null, loaded = true, page = 'files', project = null, answer = () => ({}) } = {}) {
     const posts = [], badges = [], acks = [], landings = [];
+    const feed = { moves: {}, addEventListener(type, move) { this.moves[type] = move; } };  // Main's #chat-messages
     const context = vm.createContext({
         ...readAhead,  // app.js imports these: a message read in full elsewhere (DESIGN "Unread")
         state: { mainVisibleRevision: revision, mainSeenRevision: seen, mainSeenLoaded: loaded, activePage: page },
@@ -30,15 +38,17 @@ function harness({ revision = null, seen = null, loaded = true, page = 'files', 
         refreshSharedProjectSeen: () => posts.push(['shared']),
         acknowledgeMainAfterPaint: () => acks.push(context.state.mainVisibleRevision),
         mainChat: { showLatest: (options) => landings.push(options?.arrive === true) },
+        document: { getElementById: (id) => (id === 'chat-messages' ? feed : null) },
         fetchJson: async (url, init = {}) => {
             posts.push([url, init.method || 'GET', JSON.parse(init.body || '{}')]);
             return answer(JSON.parse(init.body || '{}'));
         },
     });
-    vm.runInContext('let mainOpening = true;\n' + ['mainOnScreen', 'mainUnreadCount', 'observeMainRevision',
-        'mergeMainSeenRevision', 'markMainViewed'].map(lift).join('\n') + '\nglobalThis.mainUnreadCount = mainUnreadCount;'
+    vm.runInContext(liftLine('let mainOpening') + ['mainOnScreen', 'mainUnreadCount', 'observeMainRevision', 'landMain',
+        'mergeMainSeenRevision', 'markMainViewed'].map(lift).join('\n') + liftLine("for (const type of ['wheel'")
+        + '\nglobalThis.mainUnreadCount = mainUnreadCount;'
         + ' globalThis.api = { observeMainRevision, mergeMainSeenRevision, markMainViewed, mainUnreadCount };', context);
-    return { context, posts, badges, acks, landings, api: context.api };
+    return { context, posts, badges, acks, landings, feed, api: context.api };
 }
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -125,6 +135,17 @@ test('the app start lands an unread Main once; later arrivals never move it', ()
     unknown.api.mergeMainSeenRevision({ main_seen_revision: 3 });
     unknown.api.observeMainRevision(5);
     assert.deepEqual(unknown.landings, [true], 'the opening waits for the cursor, then lands');
+});
+
+test("the reader's own first move in Main ends the start's opening; Main is still offered its read", () => {
+    for (const move of ['wheel', 'touchstart', 'pointerdown']) {
+        const moved = harness({ revision: 3, seen: null, loaded: false, page: 'chat' });
+        moved.api.observeMainRevision(5);  // a slow cursor read: the opening still waits
+        moved.feed.moves[move]();
+        moved.api.mergeMainSeenRevision({ main_seen_revision: 3 });
+        moved.api.observeMainRevision(5);
+        assert.deepEqual([moved.landings, moved.acks], [[], [5]], `${move}: no landing over the reader's place`);
+    }
 });
 
 // The read itself: a revision is written only after a paint made while Main is the room on screen. Main's reader
@@ -243,8 +264,8 @@ test("another client's read reaches this one at its next state snapshot, a late 
             answers.push(() => resolve(JSON.parse(JSON.stringify(host))));  // the host's state when it answers
         }),
     });
-    vm.runInContext(['mainOnScreen', 'mainUnreadCount', 'observeMainRevision', 'mergeMainSeenRevision', 'mergeProjectSeenRevisions',
-        'refreshSharedProjectSeen', 'paintProjectsCount'].map(lift).join('\n')
+    vm.runInContext(liftLine('let mainOpening') + ['mainOnScreen', 'mainUnreadCount', 'observeMainRevision', 'landMain',
+        'mergeMainSeenRevision', 'mergeProjectSeenRevisions', 'refreshSharedProjectSeen', 'paintProjectsCount'].map(lift).join('\n')
         + '\nlet sharedSeenRead = null;\nglobalThis.api = { observeMainRevision, mainUnreadCount, paintProjectsCount };', context);
     context.api.paintProjectsCount();
     assert.deepEqual([context.api.mainUnreadCount(), count.textContent], [2, '3']);
@@ -319,10 +340,11 @@ function pageHarness({ unread = 0 } = {}) {
         document: { querySelectorAll: () => [], getElementById: () => null },
         window: { dispatchEvent(event) { if (event.detail?.page === 'chat') context.mainChat.showLatest(); } },
         CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init?.detail; } },
-        updateUnreadBadge() {}, acknowledgeMainAfterPaint() {}, closeProjectPanel() {}, syncNavigationState() {},
+        updateUnreadBadge() {}, acknowledgeMainAfterPaint() {}, syncNavigationState() {},
+        closeProjectPanel() { if (context.navState.activeProjectId) claims.push('closed'); },  // it lands Main itself
         mainUnreadCount: () => unread,
     });
-    vm.runInContext(`${lift('showPage')}\nglobalThis.show = showPage;`, context);
+    vm.runInContext(`${['showPage', 'mainOnScreen', 'landMain'].map(lift).join('\n')}\nglobalThis.show = showPage;`, context);
     return { context, claims };
 }
 
@@ -340,4 +362,19 @@ test('Main shown again from another page lands on what came while unread; read, 
     leaving.context.state.activePage = 'chat';
     await leaving.context.show('settings');
     assert.deepEqual(leaving.claims, [], 'another page shown while Main has news claims nothing for Main');
+});
+
+test("Main pressed again while shown (its row, a notification) lands what came; read, or under a Project, it does not", async () => {
+    const pressed = pageHarness({ unread: 2 });
+    pressed.context.state.activePage = 'chat';
+    await pressed.context.show('chat');
+    assert.deepEqual(pressed.claims, [true], 'no page change, so no plain return: the landing alone');
+    const read = pageHarness();
+    read.context.state.activePage = 'chat';
+    await read.context.show('chat');
+    assert.deepEqual(read.claims, [], 'a read Main keeps its reader where it is');
+    const covered = pageHarness({ unread: 2 });
+    Object.assign(covered.context, { state: { activePage: 'chat' }, navState: { activeProjectId: 'p1' } });
+    await covered.context.show('chat');
+    assert.deepEqual(covered.claims, ['closed'], 'the Project closes and lands Main: one claim, not two');
 });

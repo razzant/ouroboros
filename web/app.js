@@ -197,12 +197,10 @@ async function showPage(name, options = {}) {
         document.getElementById(`page-${pageName}`)?.classList.add('active');
         state.activePage = pageName;
         window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: pageName } }));
-        // An unread Main shown again lands on what came (DESIGN "Unread"); this claim supersedes the room's plain one.
-        if (pageName === 'chat' && options.closeProject !== false && mainUnreadCount() > 0) void mainChat?.showLatest?.({ arrive: true });
-        // Main's number shows only away from Main; showing it offers its read decision.
-        updateUnreadBadge();
-        if (pageName === 'chat') void acknowledgeMainAfterPaint();
+        updateUnreadBadge();  // Main's number shows only away from Main
     }
+    // Main shown or pressed again (its row, a notification) is an opening; a Project over Main lands it as it closes.
+    if (pageName === 'chat' && options.closeProject !== false) landMain();
     if (options.closeProject !== false) closeProjectPanel({ sync: false });
     if (options.closeDrawer !== false) navState.mobileDrawerOpen = false;
     if (options.sync !== false) syncNavigationState();
@@ -255,7 +253,7 @@ function updateUnreadBadge() {
 
 // Main's revision from a state snapshot (null: unreadable, keep what was known). A cursor the server has never held is
 // set to what Main holds now, as the per-window count this replaced started at zero; a newer one offers the read.
-let mainOpening = true;  // the app's start opens Main once: unread, it lands on what came (DESIGN "Unread")
+let mainOpening = true;  // the app's start opens Main once, unless the reader moved it first (DESIGN "Unread")
 function observeMainRevision(revision) {
     if (Number.isSafeInteger(revision)) state.mainVisibleRevision = revision;
     if (!Number.isSafeInteger(state.mainVisibleRevision)) return;
@@ -264,10 +262,17 @@ function observeMainRevision(revision) {
     if (state.mainSeenRevision === null) void markMainViewed(state.mainVisibleRevision);
     else if (mainUnreadCount() > 0) {
         refreshSharedProjectSeen();
-        if (mainOnScreen()) { if (mainOpening) void mainChat?.showLatest?.({ arrive: true }); void acknowledgeMainAfterPaint(); }
+        if (mainOpening) landMain(); else void acknowledgeMainAfterPaint();
     }
     mainOpening = false;
     updateUnreadBadge();
+}
+
+// An opening of Main (the app's start, a page, its row, a notification) lands an unread one (DESIGN "Unread").
+function landMain() {
+    if (!mainOnScreen()) return;
+    if (mainUnreadCount() > 0) void mainChat?.showLatest?.({ arrive: true });
+    void acknowledgeMainAfterPaint();
 }
 
 // The shared cursor only moves forward here (a stale answer never revives a read number). Only an answer that
@@ -602,6 +607,8 @@ function closeNotificationReaders() {
 }
 
 mainChat = initChat(ctx);
+// The start's opening, like any, ends at the reader's own first move in Main (DESIGN "Unread").
+for (const type of ['wheel', 'touchstart', 'pointerdown']) document.getElementById('chat-messages')?.addEventListener(type, () => { mainOpening = false; }, { passive: true });
 initFiles({ ...ctx, layers });
 
 // Skills' contributions (CLIENT_CONTRACT §11): one store, read now and on every lifecycle change; their message

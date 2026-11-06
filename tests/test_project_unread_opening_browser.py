@@ -535,7 +535,7 @@ def _bury_main(bus, children=160, cards=40):
 
 
 @pytest.mark.parametrize("opening, engine", [("start", "chromium"), ("files", "chromium"), ("files-phone", "webkit"),
-                                             ("project-closed", "webkit")])
+                                             ("project-closed", "webkit"), ("pressed-again", "chromium")])
 def test_an_unread_main_opens_on_the_reply_its_cards_buried(direct_server_with_data, monkeypatch, opening, engine):
     from ouroboros.projects_registry import create_project
     from playwright.sync_api import sync_playwright
@@ -587,12 +587,16 @@ def test_an_unread_main_opens_on_the_reply_its_cards_buried(direct_server_with_d
                 if opening == "project-closed":
                     page.locator('.nav-project-row[data-project-id="side-room"]').evaluate("el => el.click()")
                     page.wait_for_function("() => document.getElementById('project-panel')?.classList.contains('open')")
-                else:
+                elif opening == "files" or phone:
                     go("files")
                 _bury_main(bus)
                 news = revision()
                 _emit_ws_frame(page, {"type": "projects_changed"})
-                page.locator(badge).wait_for(state="attached", timeout=15_000)
+                if opening == "pressed-again":  # news while the owner is on Main: drawn, no count, nothing moves
+                    page.locator("#chat-messages [data-history-id]", has_text=MAIN_REPLY).wait_for(
+                        state="attached", timeout=15_000)
+                else:
+                    page.locator(badge).wait_for(state="attached", timeout=15_000)
                 page.wait_for_timeout(800)
                 facts["read_while_away"] = news in writes
                 if opening == "project-closed":
