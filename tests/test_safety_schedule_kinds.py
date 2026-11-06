@@ -177,24 +177,48 @@ def test_lifecycle_edits_use_host_relationship_and_ignore_payload_origin(q):
                 assert fired["consciousness_cause"] == ("started" if relation == "independent" else "place:p")
 
 
+def _stored(q, schedule_id):
+    return next(r for r in q.queue.list_scheduled_tasks(q.root)["tasks"] if r["id"] == schedule_id)
+
+
 def test_a_pause_or_restore_keeps_the_cite_a_schedule_runs_on(q):
-    """Review R1 MINOR-1: «Напомни мне каждый день…» created on a verified cite stays my human's when a later place
-    turn pauses or restores it without a cite (the cite lives on the schedule's next occurrence); an owner-kind record
-    that stores no cite is re-stamped from the writer, as before."""
+    """Review R1 MINOR-1 and Astra finding 1: «Напомни мне каждый день…» created on my human's cited words stays theirs
+    when a later place turn pauses, restores or re-times it without a cite (the cite lives on the schedule's next
+    occurrence); an owner-kind record that stores no cite is re-stamped from the writer, as before. The host carries
+    no old declaration onto new work: an uncited rewrite of the objective is the writer's own, and a rewrite that
+    passes a verified cite is my human's on that cite."""
+    from ouroboros.tools.followup import _update_schedule
     from supervisor.queue_schedules import _task_from_schedule
     cited = _register_origin(q, _focus_origin(cited=True), "independent", door="followup")
     assert cited["writer_kind"] == "owner" and CITE in cited["task"]["metadata"]["owner_corpus"]
     main = _register_origin(q, {"work_kind": "owner", "task_id": "main-author"}, "independent")
     assert main["writer_kind"] == "owner" and not any(row.get("basis") == "cited" for row in main["task"]["metadata"].get("owner_corpus") or [])
-    for action in ("disable", "restore"):
+    writer = SimpleNamespace(task_id="focus-author", task_metadata=_focus_origin(cited=False), task_contract={})
+    for action in ("disable", "restore", "retime"):
         for record, expected in ((cited, "owner"), (main, "consciousness")):
-            result = q.queue.mutate_scheduled_task(action, record["id"], drive_root=q.root, actor="agent",
-                reason="Pause it for now", writer_kind="consciousness", writer_metadata=_focus_origin(cited=False))
-            assert result["changed"], (action, record["id"], result)
-            stored = next(r for r in q.queue.list_scheduled_tasks(q.root)["tasks"] if r["id"] == record["id"])
+            if action == "retime":  # a timing-only edit: the same work, moved
+                _update_schedule(writer, q.root, record["id"], "Move it", {"run_at": "2099-01-01T12:00:00+00:00"})
+                assert _stored(q, record["id"])["trigger"] == {"type": "once", "run_at": "2099-01-01T12:00:00+00:00"}
+            else:
+                result = q.queue.mutate_scheduled_task(action, record["id"], drive_root=q.root, actor="agent",
+                    reason="Pause it for now", writer_kind="consciousness", writer_metadata=_focus_origin(cited=False))
+                assert result["changed"], (action, record["id"], result)
+            stored = _stored(q, record["id"])
             fired = _task_from_schedule(stored)["metadata"]
             assert stored["writer_kind"] == fired["work_kind"] == expected, (action, record["id"])
             assert ("consciousness_cause" in fired) is (expected == "consciousness")
+    # An uncited replacement of the assignment is the writer's own work; the old cite minted nothing new.
+    _update_schedule(writer, q.root, cited["id"], "Replace it with my own investigation",
+                     {"objective": "Investigate my independent optimization idea"})
+    stored = _stored(q, cited["id"])
+    assert stored["task"]["text"] == "Investigate my independent optimization idea"
+    assert stored["writer_kind"] == _task_from_schedule(stored)["metadata"]["work_kind"] == "consciousness"
+    # A replacement that passes a verified cite is my human's work on that cite, stored where Off and the lifecycle read.
+    again = {**CITE, "content": "Report tomorrow, and the margins too", "cited": "the margins too"}
+    _update_schedule(writer, q.root, cited["id"], "They asked for the margins", {"objective": "Report the margins"}, owner_basis=again)
+    stored = _stored(q, cited["id"])
+    assert stored["task"]["text"] == "Report the margins" and again in stored["task"]["metadata"]["owner_corpus"]
+    assert stored["writer_kind"] == _task_from_schedule(stored)["metadata"]["work_kind"] == "owner"
 
 
 @pytest.mark.parametrize("cited", [False, True])

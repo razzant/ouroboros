@@ -282,8 +282,9 @@ def patch_scheduled_task(schedule_id: str, patch: dict, *, reason: str, actor: s
                 from supervisor.followup_policy import relation_kind
 
                 _collapse_description_copies(incoming)
-                stamp_schedule_writer(incoming, writer_kind, writer_metadata,
-                                      started_root=relation_kind(incoming) == "independent")
+                stamp_schedule_writer(incoming, writer_kind, writer_metadata,  # the same work unless its assignment changed
+                                      started_root=relation_kind(incoming) == "independent",
+                                      same_work=not ({"objective", "context"} & set(changed_fields)))
                 if fingerprint(before) != fingerprint(incoming):
                     incoming.pop("hold", None)
                     occ = current.get("occurrence") or {}
@@ -529,8 +530,8 @@ def mutate_scheduled_task(action: str, schedule_id: str, *, reason: str,
             if changed:
                 _collapse_description_copies(current)
                 from ouroboros.consciousness_authority import stamp_schedule_writer
-                stamp_schedule_writer(current, writer_kind, writer_metadata,
-                                      started_root=relation_kind(current) == "independent")
+                stamp_schedule_writer(current, writer_kind, writer_metadata,  # a lifecycle step of the same work
+                                      started_root=relation_kind(current) == "independent", same_work=True)
                 current["updated_at"] = utc_now_iso()
                 data["tasks"] = tasks
                 _write_scheduled_tasks(data, root)
