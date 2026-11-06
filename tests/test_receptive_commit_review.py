@@ -1111,12 +1111,11 @@ def test_collection_exception_belongs_to_final_subject_after_lock_wait(author, m
 
 
 @pytest.mark.parametrize("mode", ["pro", "cyber_pro"])
-def test_a_decision_written_beside_its_review_waits_until_the_outcome_is_shown(author, monkeypatch, mode):
+def test_a_decision_written_beside_its_review_lands_only_with_the_reference_it_read(author, monkeypatch, mode):
     """Owner 11.10 (review 06.11), both directions with real Git and the real batch: a decision written in the same
-    assistant message as its review refuses without staging, since that outcome reaches the mind only after the
-    batch; in the next turn the same decision lands, its empty message taken from the reviewed call."""
+    assistant message as its review stages nothing and names that review's exact reference, which reaches the mind
+    with the outcome; the next call quoting it lands, its empty message taken from the reviewed call."""
     from ouroboros import config, loop_tool_execution as le
-    from ouroboros.utils import utc_now_iso
 
     config.reset_runtime_mode_baseline_for_tests()
     config.initialize_runtime_mode_baseline(mode)
@@ -1133,20 +1132,21 @@ def test_a_decision_written_beside_its_review_waits_until_the_outcome_is_shown(a
     monkeypatch.setattr(le, "_execute_with_timeout", execute)
     monkeypatch.setattr(le, "_get_tool_timeout", lambda *a: 60)
     monkeypatch.setattr(le, "process_tool_results", lambda *a, **k: shown.append(a[0]) or 0)
-    ask = {"id": "ask", "function": {"name": "commit_reviewed", "arguments": json.dumps({
-        "commit_message": "Change value", "paths": ["change.py"], "skip_advisory_review": True})}}
-    decision = {"id": "decision", "function": {"name": "commit_reviewed", "arguments": json.dumps({
-        "commit_message": "", "author_disposition": {"disposition": "accepted", "rationale": "Accept the review."}})}}
+    decided = {"disposition": "accepted", "rationale": "Accept the review."}
 
-    def turn(calls):
-        a.ctx._current_llm_call_meta = {"ts": utc_now_iso()}  # the model answer this batch rides with
+    def turn(*arguments):
+        calls = [{"id": f"call-{len(effects) + n}", "function": {"name": "commit_reviewed", "arguments": json.dumps(args)}}
+                 for n, args in enumerate(arguments)]
         le.handle_tool_calls(calls, SimpleNamespace(_ctx=a.ctx), a.data / "logs", TASK, None, [], {"tool_calls": []},
                              lambda *a: None)
 
-    turn([ask, decision])
+    turn({"commit_message": "Change value", "paths": ["change.py"], "skip_advisory_review": True},
+         {"commit_message": "", "author_disposition": decided})
     assert [effect[:2] for effect in effects] == [(False, False), (False, False)], effects
-    assert "not shown yet" in effects[1][2] and "Nothing was staged or committed" in effects[1][2]
-    turn([decision])
+    refusal = effects[1][2]
+    assert "Nothing was staged or committed" in refusal and "review_reference=" in refusal
+    reference = json.loads(refusal.split("review_reference=", 1)[1].strip().rstrip("."))
+    turn({"commit_message": "", "author_disposition": decided, "review_reference": reference})
     assert effects[2][:2] == (True, True), effects[2][2]
     assert _git(a.repo, "log", "-1", "--format=%s") == "Change value"
 

@@ -60,12 +60,8 @@ def test_a_live_holder_older_than_the_stale_age_is_never_evicted_and_a_dead_ones
     git_plumbing._release_git_lock(taken)
 
 
-ANSWERED = "2026-11-06T12:00:00+00:00"  # when the model answer these calls ride with was recorded
-
-
-def _attempt(n, phase, fingerprint, updated):
-    return SimpleNamespace(tool_name="commit_reviewed", attempt=n, phase=phase, pre_review_fingerprint=fingerprint,
-                           updated_ts=updated, finished_ts="", started_ts="", ts="")
+def _attempt(n, phase, fingerprint):
+    return SimpleNamespace(tool_name="commit_reviewed", attempt=n, phase=phase, pre_review_fingerprint=fingerprint)
 
 
 def _continuation_ctx(tmp_path, monkeypatch, attempts, *, enforcement="advisory"):
@@ -75,44 +71,33 @@ def _continuation_ctx(tmp_path, monkeypatch, attempts, *, enforcement="advisory"
         filter_attempts=lambda **_kw: list(attempts)))
     monkeypatch.setattr(config, "get_review_enforcement", lambda: enforcement)
     monkeypatch.setattr(config, "get_runtime_mode", lambda: "advanced")
-    return SimpleNamespace(repo_dir=str(tmp_path), drive_root=str(tmp_path), task_id="t1", _commit_call_notes=[],
-                           _current_llm_call_meta={"ts": ANSWERED})
+    return SimpleNamespace(repo_dir=str(tmp_path), drive_root=str(tmp_path), task_id="t1", _commit_call_notes=[])
 
 
 DECISION = {"disposition": "accepted", "rationale": "Read the panel."}
 
 
-def test_a_decision_without_a_reference_takes_this_copys_latest_returned_review(tmp_path, monkeypatch):
+def test_a_decision_without_a_reference_asks_for_the_review_or_names_the_exact_reference(tmp_path, monkeypatch):
+    """Owner 11.10 (review 06.11), both directions: with no outcome of this copy returned, the decision is set aside
+    and the call asks for the review; with one returned, nothing is staged and the refusal names that outcome's exact
+    reference, since the reference a decision quotes is what shows the outcome reached the mind. A named one passes."""
+    import json
     from ouroboros.tools import review_collection as rc
 
     attempts = []
     ctx = _continuation_ctx(tmp_path, monkeypatch, attempts)
     call = {"author_disposition": DECISION}
-    assert rc.default_commit_continuation(ctx, call) == "" and call["author_disposition"] is None  # none: ask first
+    assert rc.default_commit_continuation(ctx, call) == "" and call["author_disposition"] is None
     assert "no review of this copy was returned yet" in ctx._commit_call_notes[0]
-    attempts.extend(_attempt(n, phase, fp, f"2026-11-06T11:5{n}:00+00:00")
-                    for n, phase, fp in ((1, "review_only", "a"), (2, "committed", "b"), (3, "late_wait", "c")))
+    attempts.extend(_attempt(n, phase, fp) for n, phase, fp in ((1, "review_only", "a"), (2, "committed", "b"),
+                                                                  (3, "late_wait", "c")))
     call = {"author_disposition": DECISION}
-    assert rc.default_commit_continuation(ctx, call) == "" and call["author_disposition"] == DECISION
-    assert (call["review_reference"]["attempt"], call["review_reference"]["pre_review_fingerprint"]) == (3, "c")
-    named = {"surface": "commit", "tool_name": "commit_reviewed", "attempt": 1}
+    refusal = rc.default_commit_continuation(ctx, call)
+    assert "Nothing was staged or committed" in refusal and call == {"author_disposition": DECISION}
+    named = json.loads(refusal.split("review_reference=", 1)[1].rstrip("."))
+    assert (named["attempt"], named["pre_review_fingerprint"], named["task_id"]) == (3, "c", "t1")
     call = {"author_disposition": DECISION, "review_reference": named}
-    assert rc.default_commit_continuation(ctx, call) == "" and call["review_reference"] is named  # a named one stays
-
-
-@pytest.mark.parametrize("named", [False, True])
-def test_a_decision_waits_for_an_outcome_recorded_after_the_answer_it_rides_with(tmp_path, monkeypatch, named):
-    """Owner 11.10, both directions, named or defaulted: an outcome recorded in this same turn (or changed by a late
-    reviewer since the answer) is not shown yet, so the decision refuses without staging; the next answer decides."""
-    from ouroboros.tools import review_collection as rc
-
-    ctx = _continuation_ctx(tmp_path, monkeypatch, [_attempt(4, "review_only", "d", "2026-11-06T12:00:05+00:00")])
-    reference = {"surface": "commit", "tool_name": "commit_reviewed", "attempt": 4} if named else None
-    refusal = rc.default_commit_continuation(ctx, {"author_disposition": DECISION, "review_reference": reference})
-    assert "attempt 4" in refusal and "not shown yet" in refusal and "Nothing was staged or committed" in refusal
-    ctx._current_llm_call_meta = {"ts": "2026-11-06T12:01:00+00:00"}  # the next answer read it
-    call = {"author_disposition": DECISION, "review_reference": reference}
-    assert rc.default_commit_continuation(ctx, call) == "" and call["review_reference"]["attempt"] == 4
+    assert rc.default_commit_continuation(ctx, call) == "" and call["review_reference"] is named
 
 
 def test_the_continuation_texts_name_the_step_their_cause_leaves(tmp_path, monkeypatch):
@@ -125,10 +110,12 @@ def test_the_continuation_texts_name_the_step_their_cause_leaves(tmp_path, monke
     call = {"author_disposition": DECISION}
     assert rc.default_commit_continuation(blocking, call) == "" and call["author_disposition"] is None
     assert "under Blocking enforcement this call's review decides" in blocking._commit_call_notes[0]
+    reviewed = _continuation_ctx(tmp_path, monkeypatch, [_attempt(1, "review_only", "a")], enforcement="blocking")
+    assert "a passing review lands the commit" in rc.default_commit_continuation(reviewed, {"author_disposition": DECISION})
     assert "a passing review lands the commit" in rc.continuation_refusal(ValueError("requires Advisory"))
     monkeypatch.setattr("ouroboros.config.get_review_enforcement", lambda: "advisory")
     assert "collect that outcome" in rc.continuation_refusal(rc.ContinuationWaits("reviewers are still running"))
-    assert "decide on the outcome the last commit_reviewed call returned" in rc.continuation_refusal(ValueError("x"))
+    assert "decide with the review_reference an outcome you read returned" in rc.continuation_refusal(ValueError("x"))
 
     def unreadable(*_a, **_kw):
         raise OSError("state locked away")
