@@ -103,10 +103,9 @@ from ouroboros.deadline_utils import deadline_expired
 from ouroboros.delegate_directory import (
     blocked_geometry_refusal, git_directory_options_refusal, in_place_refusal, in_place_start, is_in_place_run,
     prepare_directory_execution, snapshot_checkout, started_receipt)
-from ouroboros.delegate_registration_policy import resolve_registration
+from ouroboros.delegate_registration_policy import minted_root, resolve_registration
 from ouroboros.delegate_documents import NO_DOCUMENTS, attach_selected_documents, attachment_parameters
 from ouroboros.delegate_readonly_inputs import NO_INPUTS, input_files_parameter, start_inputs
-from ouroboros.subagent_worktrees import registered_checkout
 from ouroboros.delegate_shared import (  # noqa: F401
     _emit,
     _fail,
@@ -573,8 +572,8 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                 run_binding = directory_copy_binding_instruction(target_root, binding_fingerprint, investigation=authority.investigation)
             instructions += run_binding  # and the same text in a continuation's prompt, which a resumed session reads (#2513)
             continuation = with_run_binding(continuation, authority, run_binding, execution_root or scope_root, inputs.selection_note)
-            project_id, owned_project_id, project_persistent, ephemeral = resolve_registration(
-                gateway, scope_root, execution_root, authority.access, minted=bool(readonly_root) or registered_checkout(scope_root))
+            project_id, owned_project_id, project_persistent, ephemeral = resolve_registration(gateway, scope_root, execution_root, authority.access,
+                minted=bool(readonly_root) or minted_root(scope_root, drive), thread=authority.mode == "plan" or bool(continuation.custody.get("thread_id")))
             if directory_options or is_in_place_run({"resource_ref": resource_ref}):
                 project_persistent = True
             if authority.access == "full":

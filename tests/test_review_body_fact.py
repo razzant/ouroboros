@@ -110,6 +110,18 @@ def test_a_remote_at_the_configured_managed_url_is_the_body_whatever_its_spellin
     assert layer_for(fact) == "body"
 
 
+def test_a_source_install_managed_remote_is_used_without_a_manifest(system, tmp_path):
+    """A source checkout's maintained managed remote is the configured source."""
+    _git(system, "remote", "add", "managed", MANAGED_URL)
+    official = _repo(tmp_path / "official-source-clone", remote=MANAGED_URL)
+
+    fact = body_fact(official, system_repo=system)
+
+    assert (fact.body, fact.how) == ("true", "managed_remote")
+    foreign = _repo(tmp_path / "foreign-source-clone", remote=FOREIGN_URL)
+    assert body_fact(foreign, system_repo=system).body == "false"
+
+
 def test_the_managed_url_is_the_installs_configured_source_not_a_fixed_official_one(system, tmp_path):
     mirror = _repo(tmp_path / "mirror-clone", remote="https://mirror.example.org/forks/ouro.git")
 

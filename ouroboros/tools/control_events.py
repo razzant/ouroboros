@@ -157,14 +157,18 @@ def _promotion_pool_disabled_from_snapshot(ctx: ToolContext) -> str:
     already says the executor pool was deliberately disabled.
     """
     try:
-        from ouroboros.queue_observation import load_queue_document
+        from ouroboros.queue_observation import load_queue_document, pool_observation_status
 
         root = Path(str(getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
         snapshot = load_queue_document(root)
         if snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid"):
             return ""
+        if pool_observation_status(snapshot) == "unknown":
+            # An unmeasured pool refuses, as its old zero-count form did (model_detach.pool_available too), under
+            # its honest reason: a failed measurement is not the absence ``no_workers`` names.
+            return "unknown"
         reason = str(snapshot.get("worker_pool_disabled_reason") or "")
-        if reason not in {"", "unknown"}:
+        if reason:
             return reason
         # Availability as ``model_detach.pool_available`` reads it: any started process answers. The
         # project pool idles at zero slots after boot and after every quiet period (the lane's spare is

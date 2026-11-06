@@ -14,7 +14,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D04 | Tool execution: registry, access & typed results | 24 | 0 |
 | D05 | Tool surfaces: files, code, shell, media, external | 51 | 0 |
 | D06 | Review stack | 99 | 0 |
-| D07 | Delegation, subagents & Claudexor | 108 | 0 |
+| D07 | Delegation, subagents & Claudexor | 109 | 0 |
 | D08 | Supervisor: queue, workers, events & runtime control | 76 | 0 |
 | D09 | Cancellation, owner control & process custody | 28 | 0 |
 | D10 | Git, update & release machinery | 40 | 0 |
@@ -23,12 +23,12 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D13 | Safety, guards & runtime mode | 11 | 0 |
 | D14 | Skills & extensions | 72 | 0 |
 | D15 | Memory, knowledge, consciousness & self-evolution | 35 | 0 |
-| D16 | Observability, usage accounting & cost | 30 | 0 |
-| D17 | Projects, workspaces & task results | 54 | 0 |
+| D16 | Observability, usage accounting & cost | 31 | 0 |
+| D17 | Projects, workspaces & task results | 55 | 0 |
 | D18 | Launcher, packaging, platform & shared substrate | 40 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 24 | 0 |
-| **total** | | **995** | **0** |
+| **total** | | **998** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -51,7 +51,7 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
 | **D13** | ✓ | ✓ | · | ✓ | · | · | · | · | · | · | · | ✓ | · | · | ✓ | · | ✓ | ✓ | · | ✓ |
 | **D14** | · | ✓ | ✓ | ✓ | ✓ | ✓ | · | · | ✓ | ✓ | ✓ | ✓ | ✓ | · | · | ✓ | ✓ | ✓ | ✓ | · |
 | **D15** | ✓ | · | ✓ | ✓ | · | · | · | · | · | · | · | ✓ | · | · | · | ✓ | ✓ | ✓ | ✓ | · |
-| **D16** | · | ✓ | · | · | · | ✓ | · | · | · | · | · | ✓ | · | · | · | · | ✓ | ✓ | ✓ | · |
+| **D16** | · | ✓ | · | ✓ | · | ✓ | · | · | · | · | · | ✓ | · | · | · | · | ✓ | ✓ | ✓ | · |
 | **D17** | ✓ | · | · | ✓ | ✓ | ✓ | ✓ | ✓ | · | · | ✓ | ✓ | · | · | ✓ | ✓ | · | ✓ | ✓ | · |
 | **D18** | · | · | · | · | · | · | · | · | ✓ | ✓ | · | ✓ | ✓ | · | · | · | · | · | · | · |
 | **D19** | · | · | · | · | · | · | · | · | · | · | · | · | · | ✓ | · | · | · | ✓ | · | · |
@@ -581,6 +581,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/delegate_recovery_holders.py`
 - `ouroboros/delegate_registration_policy.py`
 - `ouroboros/delegate_reply.py`
+- `ouroboros/delegate_result_taken.py`
 - `ouroboros/delegate_shared.py`
 - `ouroboros/delegate_source_coverage.py`
 - `ouroboros/delegate_start_claims.py`
@@ -1103,6 +1104,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/storage_free.py`
 - `ouroboros/storage_free_view.py`
 - `ouroboros/storage_removers.py`
+- `ouroboros/tools/control_storage.py`
 - `ouroboros/usage_accounting.py`
 - `ouroboros/usage_admission.py`
 - `ouroboros/usage_journal.py`
@@ -1141,6 +1143,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/room_appearances.py`
 - `ouroboros/room_membership.py`
 - `ouroboros/routing_wait.py`
+- `ouroboros/session_scratch.py`
 - `ouroboros/store.py`
 - `ouroboros/store_capture.py`
 - `ouroboros/store_empty.py`

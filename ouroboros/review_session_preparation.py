@@ -63,19 +63,21 @@ def session_material(surface: str, contract: str, schema: Any, accesses: Any) ->
 def seat_service_directories(gateway: Any, route_id: str, shape: Any, data_root: Any, task_id: str,
                              operation_id: str, area: str, thread_seat: str = "") -> Any:
     """What a writable seat may write outside its copy (``workspace_preflight.session_service_directories``):
-    one run's short scratch is owned by its review task's drive, keyed by the seat's directory name, and
-    granted, or at full access only named. A sticky thread's turns carry only geometry
+    one run's short scratch is held by the seat's own home beside the copy it serves (its record is
+    ``<home>/session_scratch_owners/seat-<home>/scratch.json``, released with the copy, never waiting for
+    the task: #2706, and the Skills-page and marketplace pseudo task ids hold nothing: #2707), and granted,
+    or at full access only named. A sticky thread's turns carry only geometry
     (``start_review_thread_turn``), so its seat gets none."""
     from ouroboros.review_checking import seat_dir
-    from ouroboros.workspace_preflight import ServiceDirectories, session_service_directories
+    from ouroboros.workspace_preflight import SEAT_SCRATCH_KEY_PREFIX, ServiceDirectories, session_service_directories
 
     if thread_seat:
         return ServiceDirectories(limitation="thread_turns_carry_no_grant: a review thread's turns carry "
                                              "no execution grant" if shape.access == "workspace_write" else "")
-    seat_home = seat_dir(data_root, task_id, operation_id)
+    home = seat_dir(data_root, task_id, operation_id)
     return session_service_directories(
         gateway, route_id, access=shape.access, mode=shape.mode, data_root=data_root, drive_root=data_root,
-        task_id=task_id, key=f"seat-{seat_home.name}", execution_root=area)
+        task_id=task_id, key=f"{SEAT_SCRATCH_KEY_PREFIX}{home.name}", execution_root=area, holder=home)
 
 
 # A writable seat's own note inside the environment facts every delegated run is given.

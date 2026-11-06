@@ -7,6 +7,7 @@ keeps it — an undelivered owner directive must survive any ambiguity.
 
 from __future__ import annotations
 
+import json
 
 from ouroboros.owner_mailbox import (
     _ack_path,
@@ -15,6 +16,7 @@ from ouroboros.owner_mailbox import (
     write_owner_message,
 )
 from ouroboros.task_result_schema import stamp_task_result_schema
+from ouroboros import maintenance_jobs, server_maintenance, store_import
 from tests._store_shared import seed_result
 
 
@@ -71,3 +73,15 @@ def test_the_drive_custody_pass_runs_the_mailbox_sweep():
 
     assert "sweep_settled_owner_mailboxes" in inspect.getsource(sm._run_drive_custody_pass)
     assert "sweep_settled_owner_mailboxes" not in inspect.getsource(sm._run_reconcile_prunes)
+
+
+def test_drive_pass_records_an_event_when_only_a_mailbox_was_removed(tmp_path, monkeypatch):
+    store_import.ensure_current_store(tmp_path)
+    write_owner_message(tmp_path, "goodbye", "t-done")
+    _settle(tmp_path, "t-done")
+    monkeypatch.setattr(server_maintenance, "DATA_DIR", tmp_path)
+    server_maintenance._run_drive_custody_pass()
+    row = maintenance_jobs.job(tmp_path, "drive_settlement")
+    events = [json.loads(line) for line in (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert row and events and events[-1]["type"] == "headless_task_drive_prune"
+    assert events[-1]["report"]["mailboxes"]["removed"] == ["t-done"]

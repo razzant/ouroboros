@@ -198,6 +198,7 @@ HOST_ROW_CLASSES = {
     "startup_notice": ("runtime_state", 2),
     "steer_not_delivered": ("not_started", 1),
     "storage_switch_notice": ("runtime_state", 1),
+    "storage_free_notice": ("runtime_state", 1),  # the mind's Free receipt is a Main System row
     "subagent_admission_notice": ("card_row", 1),
     "subagent_started": ("card_row", 1),
     "subagent_terminal_notice": ("card_row", 1),

@@ -669,6 +669,8 @@ def test_a_measured_build_times_each_section_on_its_receipt(tmp_path, monkeypatc
     from ouroboros import context_timing, skill_catalogue
     from types import SimpleNamespace
 
+    monkeypatch.setattr("shutil.disk_usage", lambda _path: SimpleNamespace(free=1, total=2))  # free space is dated too
+
     env, memory, _rooms = world(tmp_path)
     events = memory.drive_root / "logs" / "events.jsonl"
     # Skill discovery moved ahead of catalog rendering; its cost must still be
