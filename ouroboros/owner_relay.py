@@ -251,14 +251,24 @@ def write_relay(root, task_id: str, *, relay_id: str, note: str, quotes: list, c
     return entry, True
 
 
-def retained_relay(entry: dict) -> dict:
-    """The internal return/ACK envelope keeps each quoted source's store. The visible relay stays unchanged."""
+def retained_relay(entry: dict, delivered: set | None = None) -> dict:
+    """The internal return/ACK envelope names only injected quotes and their stores; the visible source is unchanged."""
     relay = copy.deepcopy(entry.get("relay") or {})
-    rows, roots = entry.get("owner_rows") or [], {}
-    for index, quote in enumerate(relay.get("quotes") or []):
+    rows, roots, kept = entry.get("owner_rows") or [], {}, []
+    quotes = relay.get("quotes") or []
+    for index, quote in enumerate(quotes):
+        if delivered is not None and index not in delivered:
+            continue
+        kept.append(quote)
         row = rows[index] if index < len(rows) else {}
         if root := row.get("_owner_source_root") or entry.get("relay_canonical_root"):
             roots[str(quote.get("source", {}).get("address") or "")] = str(root)
+    if delivered is not None and quotes:
+        if not kept:
+            return {}  # the peer note entered, but none of its owner quotes did
+        for key in quotes[0]:
+            relay.pop(key, None)
+        relay.update(kept[0], quotes=kept)
     if roots:
         relay["_owner_source_roots"] = roots
     return relay
@@ -277,7 +287,8 @@ def inject_relay(ctx, entry: dict, messages: list) -> None:
     # envelope root is the fallback for older rows, not a new source for all of them.
     fallback_root = entry.get("relay_canonical_root") or root
     accounts_by_root = {}
-    for row in entry.get("owner_rows") or []:
+    delivered = set()
+    for index, row in enumerate(entry.get("owner_rows") or []):
         source_root = row.get("_owner_source_root") or fallback_root
         key = str(source_root)
         if key not in accounts_by_root:
@@ -308,15 +319,22 @@ def inject_relay(ctx, entry: dict, messages: list) -> None:
             body += "\n[Host-retained attachments]\n" + json.dumps(row["attachments"], ensure_ascii=False)
         content = quote_content(ctx, entry, row, body)
         loop._append_or_merge_user_message(messages, content, slot=ctx, kind=OWNER_WORDS_KIND)
+        delivered.add(index)
     note = str(entry.get("text") or "")
     relay = entry["relay"]
     loop._append_or_merge_user_message(messages,
         f"[Message from Ouroboros in another turn; context, relay {relay['relay_id']}]\n{note}", slot=ctx)
+    # The deferred ACK describes this injection, not a later account snapshot. In particular, revocation after
+    # injection cannot erase a real read, while a row refused before it earns no read or return context.
+    entry["_relay_delivery"] = retained_relay(entry, delivered)
     if ctx is not None:
         relays = getattr(ctx, "_open_relays", None)
         if not isinstance(relays, dict):
             ctx._open_relays = relays = {}
-        relays[relay["relay_id"]] = retained_relay(entry)
+        if entry["_relay_delivery"]:
+            relays[relay["relay_id"]] = copy.deepcopy(entry["_relay_delivery"])
+        else:
+            relays.pop(relay["relay_id"], None)
         persist_held_state(ctx)
 
 
@@ -386,7 +404,7 @@ def select_return(ctx, relay_id: str) -> tuple[dict, str]:
 def acknowledge_relay(root, target: str, entry: dict) -> None:
     """Called only after the mailbox's durable content acknowledgement."""
     from ouroboros.project_dialogue import append_chat_annotation
-    relay = retained_relay(entry)
+    relay = entry["_relay_delivery"] if "_relay_delivery" in entry else retained_relay(entry)
     for quote in relay.get("quotes") or []:
         message_id = quote["source"].get("client_message_id")
         if message_id:

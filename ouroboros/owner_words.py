@@ -479,15 +479,17 @@ def _message_rows(drive_root: Any, task_id: str, text: Any, ref: Any, carrier: s
             raise
         log.debug("Reply source unreadable; retaining recorded owner words", exc_info=True)
         row = None
+    from ouroboros.owner_relay import owner_row_address
+    reference = _carrier_ref(row, canonical=owner_row_address(row)) if row else (_chat_ref(ref) if ref else "")
     if isinstance(text, str) and text.strip():
         target = reply_target(drive_root, _mapping(row).get("reply_to"))
         return _words_rows({"source": "origin_message", "content": text, "reply_to": target}, carrier=carrier,
-                           task_id=task_id, ts=ref.get("ts"), ref=_chat_ref(ref) if ref else "")
+                           task_id=task_id, ts=ref.get("ts"), ref=reference)
     if not owner_row(row, drive_root, accounts=accounts):
         return []
     return _words_rows({**row, "source": "origin_message", "content": row["text"],
                         "reply_to": reply_target(drive_root, row.get("reply_to"))}, carrier=carrier,
-                       task_id=task_id, ts=row.get("ts"), ref=_chat_ref(row))
+                       task_id=task_id, ts=row.get("ts"), ref=reference)
 
 
 def _corpus_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any], accounts: Any) -> List[Dict[str, str]]:
@@ -496,6 +498,16 @@ def _corpus_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any], ac
     corpus = _mapping(record.get("metadata")).get("owner_corpus") or record.get("owner_corpus")
     origin = _mapping(record.get("origin_message_ref") or _mapping(record.get("metadata")).get("origin_message_ref"))
     stamp = {"ts": origin.get("ts"), "ref": _chat_ref(origin)} if origin else {}
+    if origin and not origin.get("client_message_id"):
+        from ouroboros.project_dialogue import resolve_owner_message_source
+        from ouroboros.owner_relay import owner_row_address
+        from ouroboros.store import StoreError
+        try:
+            saved = resolve_owner_message_source(drive_root, dict(origin))
+        except (StoreError, OSError):
+            saved = None  # its carried words remain; an unreadable source supplies no new identity
+        if saved:
+            stamp["ref"] = _carrier_ref(saved, canonical=owner_row_address(saved))
     return [row for item in (corpus if isinstance(corpus, list) else [])
             if isinstance(item, Mapping) and item.get("source") in OWNER_SOURCES
             for row in _words_rows(item, carrier="owner_corpus", task_id=task_id,

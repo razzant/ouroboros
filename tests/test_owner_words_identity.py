@@ -45,6 +45,34 @@ def test_a_message_its_root_holds_and_names_as_its_origin_is_one_row(tmp_path):
     assert absent == ""
 
 
+@pytest.mark.parametrize("carrier", ["origin_ref", "origin_text", "binding", "corpus"])
+def test_legacy_origin_and_held_copy_share_identity_without_collapsing_another_message(tmp_path, monkeypatch, carrier):
+    from ouroboros.owner_relay import held_owner_messages, retain_owner_message
+    from tests.test_owner_relay import context
+
+    for ts in (TS, "2026-09-30T05:42:00+00:00"):
+        ds.append(tmp_path, "chat", {"chat_id": 1, "direction": "in", "ts": ts, "text": "yes"})
+    origin, other = [item.row for item in ds.iter_rows(tmp_path, "chat")]
+    ref = build_owner_message_ref(chat_id=1, client_message_id="", ts=TS, text="yes")
+    ctx = context(tmp_path); ctx.task_metadata = {"origin_message_ref": ref}
+    held_owner_messages(ctx)
+    retain_owner_message(ctx, other)
+    record = {"id": ROOT, "held_owner_messages": ctx._held_owner_messages}
+    if carrier == "binding":
+        monkeypatch.setattr("ouroboros.projects_registry.project_task_bindings", lambda _root: {
+            ROOT: {"source_text": "yes", "source_ref": ref}})
+    else:
+        record["metadata"] = {"origin_message_ref": ref}
+        if carrier == "origin_text":
+            record["metadata"]["origin_message_text"] = "yes"
+        elif carrier == "corpus":
+            record["metadata"]["owner_corpus"] = [{"source": "origin_message", "content": "yes"}]
+    rows, absent = ow.task_owner_words(tmp_path, ROOT, task=record)
+    assert not absent
+    assert [(r["ref"], r["text"]) for r in rows] == [(format_address(row_address(origin)), "yes"),
+                                                     (format_address(row_address(other)), "yes")]
+
+
 def test_two_messages_with_the_same_words_stay_two_rows(tmp_path):
     origin = _stored(tmp_path, "yes", "msg-a")
     other = _stored(tmp_path, "yes", "msg-b", ts="2026-09-30T05:42:00+00:00")

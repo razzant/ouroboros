@@ -123,7 +123,8 @@ def _drain_incoming_messages(
         if entry.get("relay") or entry.get("quiz_delivery") or entry.get("card_delivery"):
             from ouroboros.owner_relay import retained_relay
             event_queue.put_nowait({"type": "owner_message_injected", "task_id": task_id,
-                                   "relay_ack": retained_relay(entry) if entry.get("relay") else None,
+                                   "relay_ack": (entry["_relay_delivery"] if "_relay_delivery" in entry
+                                                 else retained_relay(entry)) if entry.get("relay") else None,
                                    "quiz_ack": entry.get("quiz_delivery"),
                                    "card_ack": entry.get("card_delivery")})
 
