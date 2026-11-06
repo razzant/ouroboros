@@ -8,7 +8,13 @@ owner of a battery (scripts/run_tests.py, the hermetic gate) warms the prefix on
 through one contained root process (``run``): ``compileall --invalidation-mode checked-hash``
 over the checkout's Python (valid whatever the sources' mtimes), then one collect-only walk
 of the test tree in as many shards as the run has workers, which writes pytest's rewritten
-test modules and the bytecode of every library module collection imports. Every later
+test modules and the bytecode of every library module collection imports. A walker hands
+pytest the ``tests`` directory as its one argument and passes over the other shards' modules
+(``pytest_ignore_collect`` below, loaded by path like the root): handed its files one by
+one, pytest re-collects their directory once per file (``Session.collect``, duplicates kept
+for files named on the command line), and with the collector paused for collection
+(tests/conftest.py) each walker held every node it discarded, 4.3 GB for a quarter of the
+tree; four of them reached 14 GB on a 16 GB runner and were stopped (run 42126810926). Every later
 controller, worker and child of the run reads them with the write ban kept. The prefix is
 declared disposable scratch of the run (``OUROBOROS_TEST_SCRATCH.txt``, role
 ``bytecode-prefix``), so the launcher or the gate releases it with the run's root; nothing
@@ -21,6 +27,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import time
 
 MODULE_PATH = Path(__file__).resolve()
@@ -32,6 +39,9 @@ _NOT_FOR_SHARDS = ("PYTHONDONTWRITEBYTECODE", "OUROBOROS_TEST_EVIDENCE_ROOT", "O
                    "OURO_TEST_WORKER_BUDGET", "PYTEST_XDIST_AUTO_NUM_WORKERS",
                    "PYTEST_XDIST_WORKER", "PYTEST_XDIST_TESTRUNUID", "PYTEST_XDIST_WORKER_COUNT")
 _CHECKOUT_DIRS = ("ouroboros", "supervisor", "tests", "scripts", "devtools")
+SHARD_ENV = "OUROBOROS_TEST_WARM_SHARD"  # a walker's list of its test modules, one checkout-relative path per line
+_WALK_PLUGIN = "ouroboros_warm_walk"  # written beside the shard lists: this file's hook, by path
+_WALKED: dict[str, set[str]] = {}
 
 
 def command(python: str, repo, *, workers: int, files_from=None) -> list[str]:
@@ -56,6 +66,29 @@ def shards(files, count: int) -> list[list[str]]:
     """``count`` interleaved slices of ``files``, never an empty one."""
     count = max(1, min(int(count), len(files) or 1))
     return [files[index::count] for index in range(count) if files[index::count]]
+
+
+def walker_command(python: str, shard) -> list[str]:
+    """One walker's argv: the ``tests`` directory as a single argument (its modules outside it by name) and the
+    plugin that keeps the walk to the shard listed under ``SHARD_ENV``."""
+    return [python, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider", "--no-header",
+            "-p", _WALK_PLUGIN, "tests", *[name for name in shard if not name.startswith("tests/")]]
+
+
+def _key(path) -> str:
+    return os.path.normcase(str(Path(path).resolve()))
+
+
+def pytest_ignore_collect(collection_path, config):
+    """In a walker, pass over the test modules of the other shards; outside a walker, decide nothing."""
+    source = os.environ.get(SHARD_ENV)
+    if not source or not collection_path.name.startswith("test_") or collection_path.suffix != ".py":
+        return None
+    if source not in _WALKED:
+        base = Path(str(config.invocation_params.dir))
+        _WALKED[source] = {_key(base / line.strip())
+                           for line in Path(source).read_text(encoding="utf-8").splitlines() if line.strip()}
+    return True if _key(collection_path) not in _WALKED[source] else None
 
 
 def run(argv) -> int:
@@ -84,10 +117,19 @@ def run(argv) -> int:
     facts = {"compile_seconds": round(time.monotonic() - started, 1), "compile_exit": compiled.returncode}
     files = test_files(repo, args.files_from)
     started = time.monotonic()
-    walkers = [subprocess.Popen([sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider",
-                                 "--no-header", *shard], cwd=repo, env=env, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL) for shard in shards(files, workers)]
-    exits = sorted({walker.wait() for walker in walkers})
+    with tempfile.TemporaryDirectory(prefix="ouroboros-warm-") as lists:
+        (Path(lists) / f"{_WALK_PLUGIN}.py").write_text(
+            f"import runpy\npytest_ignore_collect = runpy.run_path({str(MODULE_PATH)!r})['pytest_ignore_collect']\n",
+            encoding="utf-8")
+        walk_env = {**env, "PYTHONPATH": os.pathsep.join(filter(None, (lists, env.get("PYTHONPATH"))))}
+        walkers = []
+        for index, shard in enumerate(shards(files, workers)):
+            listed = Path(lists) / f"shard-{index}.txt"
+            listed.write_text("".join(name + "\n" for name in shard), encoding="utf-8")
+            walkers.append(subprocess.Popen(walker_command(sys.executable, shard), cwd=repo,
+                                            env={**walk_env, SHARD_ENV: str(listed)},
+                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        exits = sorted({walker.wait() for walker in walkers})
     facts.update(files=len(files), shards=len(walkers), collect_seconds=round(time.monotonic() - started, 1),
                  collect_exits=exits)
     print("WARM_BYTECODE " + json.dumps(facts), flush=True)

@@ -446,10 +446,10 @@ def serial_resource(item):
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_collection(session):  # noqa: ARG001
-    """Collection imports every test module at once: with the cyclic collector paused it costs a fraction
-    (a whole-tree parse runs 2-3.5x faster, opus_rework N3), and nothing it builds is garbage before it ends.
-    The collected tree is then frozen out of every later collection's reach, so the tests' own garbage
-    collections never rescan it."""
+    """Collection imports every test module at once: with the cyclic collector paused it runs 2-3.5x faster
+    (opus_rework N3), and the collected tree is then frozen out of reach of the tests' own collections. Files
+    named one by one are the exception: pytest re-collects their directory per file and the dropped copies
+    pile up while paused (4.3 GB for 803 files), so a caller names the directory once (test_bytecode walkers)."""
     gc.disable()
     try:
         yield

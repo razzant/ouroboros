@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 from ouroboros import test_bytecode
 
@@ -27,6 +28,24 @@ def test_the_warm_lifts_the_write_ban_for_itself_alone_and_the_owner_names_its_s
     assert argv[:2] == ["py", "-c"] and "runpy.run_path" in argv[2]
     assert argv[3:] == [str(test_bytecode.MODULE_PATH), "--repo", "/repo", "--workers", "1", "--files-from", "/sel.txt"]
     assert test_bytecode.command("py", "/repo", workers=3)[-2:] == ["--workers", "3"]
+
+
+def test_a_walker_hands_pytest_one_directory_and_keeps_to_its_shard(tmp_path, monkeypatch):
+    """Handed its modules one by one, pytest re-collects ``tests`` once per module and a walker with the collector
+    paused held every discarded node (4.3 GB for a quarter of the tree, run 42126810926): the walker names the
+    directory once, a module outside it by name, and its plugin passes over every test module not in its shard."""
+    argv = test_bytecode.walker_command("py", ["tests/test_a.py", "tests/sub/test_b.py", "skills/x/test_c.py"])
+    assert argv[argv.index("--no-header") + 1:] == ["-p", "ouroboros_warm_walk", "tests", "skills/x/test_c.py"]
+    listed = tmp_path / "shard.txt"
+    listed.write_text("tests/test_a.py\ntests/sub/test_b.py\n", encoding="utf-8")
+    config = SimpleNamespace(invocation_params=SimpleNamespace(dir=tmp_path))
+    ignore = test_bytecode.pytest_ignore_collect
+    assert ignore(tmp_path / "tests" / "test_other.py", config) is None  # outside a walker: decides nothing
+    monkeypatch.setenv(test_bytecode.SHARD_ENV, str(listed))
+    assert ignore(tmp_path / "tests" / "test_a.py", config) is None
+    assert ignore(tmp_path / "tests" / "sub" / "test_b.py", config) is None
+    assert ignore(tmp_path / "tests" / "test_other.py", config) is True
+    assert ignore(tmp_path / "tests" / "_helper.py", config) is None and ignore(tmp_path / "tests" / "sub", config) is None
 
 
 def test_the_warm_root_compiles_the_checkout_and_collects_the_walked_modules_into_the_runs_prefix(tmp_path):
