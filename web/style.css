@@ -5749,11 +5749,15 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 /* A group folds under its head and one line; the caret is drawn because the row's own layout drops the native marker. */
 .storage-group-fold > summary { position: relative; display: block; padding-inline-end: 20px; list-style: none; cursor: pointer; }
 .storage-group-fold > summary::-webkit-details-marker { display: none; }
+/* A caret drawn on a summary's ::after sets all four sides: under a finger ui.css gives every summary's ::after the
+   touch reach's inset, and a side left unset would pull the caret onto the row's first column. */
 .storage-group-fold > summary::after {
     content: '';
     position: absolute;
     inset-inline-end: 4px;
+    inset-inline-start: auto;
     top: 7px;
+    bottom: auto;
     width: 6px;
     height: 6px;
     border-right: 1.5px solid var(--text-meta);
@@ -5884,7 +5888,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .storage-folder-fold > summary { position:relative; display:grid; grid-template-columns:8px minmax(0,1fr) auto 64px; align-items:center; column-gap:var(--space-2); min-height:32px; padding:4px 18px 4px 0; list-style:none; cursor:pointer; }
 .storage-folder-fold .storage-place-label { grid-column:2; }
 .storage-folder-fold > summary::-webkit-details-marker { display:none; }
-.storage-folder-fold > summary::after { content:''; position:absolute; right:4px; top:50%; width:5px; height:5px; margin-top:-4px; border-right:1.5px solid var(--text-meta); border-bottom:1.5px solid var(--text-meta); transform:rotate(-45deg); }
+.storage-folder-fold > summary::after { content:''; position:absolute; inset:50% 4px auto auto; width:5px; height:5px; margin-top:-4px; border-right:1.5px solid var(--text-meta); border-bottom:1.5px solid var(--text-meta); transform:rotate(-45deg); }
 .storage-folder-fold[open] > summary::after { transform:rotate(45deg); }
 .storage-folder-fold > summary:focus-visible { outline:2px solid var(--focus-accent-border); outline-offset:2px; border-radius:var(--radius-inner); }
 .storage-folder-open { display:grid; gap:2px; padding:0 0 var(--space-2) calc(8px + var(--space-2)); }
