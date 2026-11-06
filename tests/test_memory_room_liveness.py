@@ -28,6 +28,24 @@ def _rank(snapshot, room, row):
     return next(word["rank"] for word in _room(snapshot, room)["words"] if word["address"] == _addr(row))
 
 
+def _thread():
+    """A GitHub thread: its room, a person's (u7) words there and my delivery there (a room where I spoke)."""
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_runner import presence_chat_id
+
+    room = presence_chat_id(conversation_key("github", "me", "repo.1", "i1"))
+    base = {"provider": "github", "account_id": "me", "conversation_id": "repo.1", "thread_id": "i1"}
+
+    def said(minute, text):
+        return shared.msg(_ts(minute), text, chat_id=room, source="presence:github",
+                          transport={**base, "actor": {"platform_actor_id": "u7"}})
+
+    def delivered(minute):
+        return shared.msg(_ts(minute), "Looking.", chat_id=room, direction="out", type="presence_delivery",
+                          task_id="p1", source="presence:github", transport={**base, "delivery": {"state": "delivered"}})
+    return str(room), said, delivered
+
+
 def test_every_room_with_open_rows_stays_in_the_block_and_the_directory_reads_each_by_conversation(tmp_path):
     rooms, rows = _install(tmp_path)
     for room, row in ((str(rooms["beta"]), rows[13]), ("777", rows[18])):
@@ -58,43 +76,47 @@ def test_a_quiet_finish_or_my_own_word_considers_earlier_words_and_a_host_or_chi
                                                                                                  mine):
     """A typed quiet finish of the mind considers what came before it, as my own words there do (a finish that
     spoke: its row is my reply); a host notice, a child's report or a canonical row without quiet does not."""
-    rooms, _rows = _install(tmp_path)
-    beta = str(rooms["beta"])
-    late = shared.msg(_ts(29), "late beta words", chat_id=int(beta))
-    finish = shared.msg(_ts(30), "silent is only text", chat_id=int(beta), direction="out", task_id="wake1",
+    _install(tmp_path)
+    room, said, delivered = _thread()
+    late = said(29, "late thread words")
+    finish = shared.msg(_ts(30), "silent is only text", chat_id=int(room), direction="out", task_id="wake1",
                         root_task_id="wake1", terminal_origin="model_final", wake_silent=True)
     finish.update(change)
-    shared.append(tmp_path / "logs" / "chat.jsonl", late, finish)
+    shared.append(tmp_path / "logs" / "chat.jsonl", delivered(28), late, finish)
     snapshot, text = _view(tmp_path, MAIN_TASK)
-    assert _rank(snapshot, beta, late) == (1 if quiet or mine else 2) and "late beta words" in text  # whole either way
+    assert _rank(snapshot, room, late) == (1 if quiet or mine else 2) and "late thread words" in text  # whole either way
     if quiet:
-        seal(tmp_path, beta, finish)  # the quiet row sealed still considers the words before it
-        assert _rank(_view(tmp_path, MAIN_TASK)[0], beta, late) == 1
-        newer = shared.msg(_ts(31), "new words", chat_id=int(beta))
+        seal(tmp_path, room, finish)  # the quiet row sealed still considers the words before it
+        assert _rank(_view(tmp_path, MAIN_TASK)[0], room, late) == 1
+        newer = said(31, "new words")
         shared.append(tmp_path / "logs" / "chat.jsonl", newer)
-        assert _rank(_view(tmp_path, MAIN_TASK)[0], beta, newer) == 2  # nothing considered what came after
+        assert _rank(_view(tmp_path, MAIN_TASK)[0], room, newer) == 2  # nothing considered what came after
 
 
 def test_my_answer_a_note_and_a_closing_sentence_each_move_the_point_and_time_or_another_room_never_do(tmp_path):
-    rooms, rows = _install(tmp_path)
+    rooms, _rows = _install(tmp_path)
     alpha, beta = str(rooms["alpha"]), str(rooms["beta"])
-    late = shared.msg(_ts(29), "late beta words", chat_id=int(beta))
-    shared.append(tmp_path / "logs" / "chat.jsonl", late)
-    assert _rank(_view(tmp_path, MAIN_TASK)[0], beta, late) == 2  # after my answer there: nobody considered it
-    assert _rank(_view(tmp_path, MAIN_TASK)[0], beta, rows[13]) == 1  # before it: my answer considered it
+    room, said, delivered = _thread()
+    early, late, human = said(27, "early thread words"), said(29, "late thread words"), shared.msg(
+        _ts(29), "late beta words", chat_id=int(beta))
+    shared.append(tmp_path / "logs" / "chat.jsonl", early, delivered(28), late, human)
+    snapshot = _view(tmp_path, MAIN_TASK)[0]
+    assert _rank(snapshot, room, late) == 2  # after my delivery there: nobody considered it
+    assert _rank(snapshot, room, early) == 1  # before it: my delivery considered it
+    assert _rank(snapshot, beta, human) == 1  # my human's words wait on F7, never as words nobody considered
     other = shared.msg(_ts(30), "", chat_id=int(alpha), direction="out", task_id="w2", root_task_id="w2",
                        terminal_origin="model_final", wake_silent=True)
     shared.append(tmp_path / "logs" / "chat.jsonl", other)  # another room's quiet finish, and time passing
-    assert _rank(_view(tmp_path, MAIN_TASK)[0], beta, late) == 2
-    ChronicleStore(tmp_path).write_note(room_id=beta, task_id="tb1", text="Beta asked late.", author=shared.MIND)
-    assert _rank(_view(tmp_path, MAIN_TASK)[0], beta, late) == 1  # a note I wrote there after it
-    retold = shared.msg(_ts(32), "Done.", chat_id=int(beta), direction="system", type="task_summary", task_id="tb2",
+    assert _rank(_view(tmp_path, MAIN_TASK)[0], room, late) == 2
+    ChronicleStore(tmp_path).write_note(room_id=room, task_id="tb1", text="u7 asked late.", author=shared.MIND)
+    assert _rank(_view(tmp_path, MAIN_TASK)[0], room, late) == 1  # a note I wrote there after it
+    retold = shared.msg(_ts(32), "Done.", chat_id=int(room), direction="system", type="task_summary", task_id="tb2",
                         root_task_id="tb2", summary_kind="terminal_root_projection", status="completed",
-                        wake_summary="Answered Beta's late question.")
+                        wake_summary="Answered the late question.")
     shared.append(tmp_path / "logs" / "chat.jsonl", retold)
     snapshot, text = _view(tmp_path, MAIN_TASK)
-    assert _rank(snapshot, beta, late) == 0 and _rank(snapshot, beta, rows[13]) == 0  # its sentence retells them
-    assert "completed; «Answered Beta's late question.»; rows 1; get_task_result(task_id='tb2')" in text
+    assert _rank(snapshot, room, late) == 0 and _rank(snapshot, room, early) == 0  # its sentence retells them
+    assert "completed; «Answered the late question.»; rows 1; get_task_result(task_id='tb2')" in text
 
 
 def test_running_work_names_itself_in_its_conversation_and_its_completion_takes_the_line_away(tmp_path):
@@ -283,4 +305,41 @@ def test_a_later_delivery_of_the_same_words_is_one_line_naming_the_earlier_copy(
     for row in (first, edited, other, elsewhere, empty, empty_again, ship, ship_again):  # each as it is
         assert "delivered again" not in words[_addr(row)] and chat_chain.row_address(row)["row_sha256"] in asked
     assert "Keep the old parser" in words[_addr(first)] and "ship it" in words[_addr(ship_again)]
+
+
+def test_a_row_with_no_recorded_speaker_is_nobody_and_only_a_persons_word_waits_unconsidered(tmp_path):
+    """A connector event without an actor (GitHub's later revision of a description) shows its text whole but is no
+    person: not in the room's people count, not in a silent room's «words nobody considered», and it ranks with the
+    considered words, as a reaction and my account's arrival do; a person's word after my last act is the word
+    nobody considered, counted and ranked last."""
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_runner import presence_chat_id
+
+    _install(tmp_path)
+    room = {thread: presence_chat_id(conversation_key("github", "me", "repo.1", thread)) for thread in ("i1", "i2")}
+    base = {"provider": "github", "account_id": "me", "conversation_id": "repo.1"}
+
+    def said(thread, minute, text, actor="u7", **transport):
+        who = {"platform_actor_id": actor} if actor else {"platform": "github", "attribution": "unknown"}
+        return shared.msg(_ts(minute), text, chat_id=room[thread], source="presence:github",
+                          transport={**base, "thread_id": thread, "actor": who, **transport})
+
+    reply = shared.msg(_ts(40), "Looking.", chat_id=room["i1"], direction="out", type="presence_delivery",
+                       task_id="p1", source="presence:github",
+                       transport={**base, "thread_id": "i1", "delivery": {"state": "delivered"}})
+    revision = said("i1", 41, "## Summary\nThe description, revised.", actor="")
+    reaction = said("i1", 42, "", message={"reaction": {"schema_version": 1, "action": "added",
+                                                        "values": [{"name": "eyes"}]}})
+    mine = said("i1", 43, "A comment my account published.", actor="ouro",
+                identity={"sends_as": {"id": "ouro", "kind": "bot"}})
+    asked = said("i1", 44, "can you look?")
+    shared.append(tmp_path / "logs" / "chat.jsonl", reply, revision, reaction, mine, asked,
+                  said("i2", 45, "## Summary\nAnother revision.", actor=""), said("i2", 46, "a question", actor="u9"))
+    snapshot, text = _view(tmp_path, MAIN_TASK)
+    spoke, silent = _room(snapshot, str(room["i1"])), _room(snapshot, str(room["i2"]))
+    assert [_rank(snapshot, str(room["i1"]), row) for row in (revision, reaction, mine, asked)] == [1, 1, 1, 2]
+    assert "The description, revised." in text  # its text stays whole where it is shown
+    assert (spoke["facts"]["people"], spoke["facts"]["unattributed"], spoke["facts"]["reactions"]) == (1, 1, 1)
+    assert "people 1, mine 2, reactions 1, author not recorded 1, " in text
+    assert not silent["engaged"] and "; 1 words nobody considered; " in silent["silent"]  # the person alone
 

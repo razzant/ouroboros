@@ -1066,6 +1066,7 @@ def _facts_text(facts: Mapping[str, Any], of: str = "this room") -> str:
     an earlier row can stay open, and the gap shows from the two facts without a frontier.
     """
     reactions = f"reactions {facts['reactions']}, " if facts.get("reactions") else ""
+    reactions += f"author not recorded {facts['unattributed']}, " if facts.get("unattributed") else ""
     rows = (f"open {_minute(facts['earliest'])} → {_minute(facts['latest'])}; people {facts['people']}, "
             f"mine {facts['mine']}, {reactions}task facts {facts['task_facts']}, ~{facts['chars']} chars" if facts["rows"]
             else "no open rows")

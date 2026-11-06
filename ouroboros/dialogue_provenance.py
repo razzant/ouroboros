@@ -801,7 +801,8 @@ def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch:
             return {"kind": "ouroboros", "label": f"{fact}: {dialogue_author(row)}", "via": "own_account"}  # sender work
         label = dialogue_author(row)
         return {"kind": "human", "label": f"{fact}: {label}" if fact else label,
-                **({"owner_confirmed": True} if fact == "my human" else {})}
+                **({"owner_confirmed": True} if fact == "my human" else {}),  # no speaker recorded: no person either
+                **({"unattributed": True} if row_provenance(row) == "place" and not recorded_speaker(row) else {})}
     if direction == "system":
         if row.get("summary_kind") == LEGACY_RETELLING_SUMMARY_KIND:
             return {"kind": "helper", "label": "Light (legacy retelling)"}
@@ -820,6 +821,12 @@ def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch:
         if pos < int(lineage_epoch["pos"]):
             return _pre_epoch_author(row, lineage_lookup)
     return _ouroboros_author(row)
+
+
+def recorded_person(author: Mapping[str, Any]) -> bool:
+    """A person's words, from ``row_author``'s answer: ``human`` with a recorded speaker. A connector event without
+    an actor (``unattributed``: GitHub's later revision of a description) shows whole but is nobody's."""
+    return author.get("kind") == "human" and not author.get("unattributed")
 
 
 def owner_speech(row: Mapping[str, Any], author: Mapping[str, Any]) -> bool:
@@ -1222,6 +1229,7 @@ __all__ = [
     "private_contact",
     "private_contact_text",
     "recorded_finality",
+    "recorded_person",
     "recorded_speaker",
     "render_memory_row",
     "render_row_text",

@@ -52,7 +52,8 @@ from typing import Any, Callable, Dict, FrozenSet, Iterable, Iterator, List, Map
 from ouroboros import chat_chain
 from ouroboros.chronicle_import import legacy_frontier
 from ouroboros.chronicle_store import ChronicleStore, capture, capture_memo, source_time_span
-from ouroboros.dialogue_provenance import in_reading_order, rooms_read_by_time, row_class, row_provenance
+from ouroboros.dialogue_provenance import (in_reading_order, recorded_person, rooms_read_by_time, row_class,
+                                           row_provenance)
 
 # The key of the memory view's last-capture fact in a task's ``llm_trace``.
 VIEW_TRACE_KEY = "memory_view"
@@ -725,13 +726,16 @@ def room_facts(store: ChronicleStore, room: str, entries: List[Entry], lineage: 
     ``row_class`` when the caller already has them.
     """
     classes = classes if classes is not None else [row_class(meta, pos=pos, **lineage) for _a, meta, pos in entries]
-    spoken = [cls["author"].get("kind") for cls in classes if cls["lane"] == 1]
+    authors = [cls["author"] for cls in classes if cls["lane"] == 1]
+    spoken = [author.get("kind") for author in authors]
+    unattributed = sum(1 for author in authors if author.get("unattributed"))
     pages = store.acting_pages(room)
     ends = [page["covered_end"] for page in pages if page["covered_end"]]
     span = source_time_span(meta.get("ts") for _address, meta, _pos in entries)
-    return {"rows": len(entries), "people": spoken.count("human"), "mine": spoken.count("ouroboros"),
-            "task_facts": len(entries) - len(spoken),
+    return {"rows": len(entries), "people": sum(1 for author in authors if recorded_person(author)),
+            "mine": spoken.count("ouroboros"), "task_facts": len(entries) - len(spoken),
             **({"reactions": reactions} if (reactions := spoken.count("place_fact")) else {}),
+            **({"unattributed": unattributed} if unattributed else {}),
             "chars": sum(int(meta.get("text_chars") or 0) for _address, meta, _pos in entries),
             "earliest": str(span["start"] or ""), "latest": str(span["end"] or ""), "notes": notes, "pages": len(pages),
             "last_covered": str(source_time_span(ends).get("end") or "") if ends else "",
