@@ -383,7 +383,10 @@ def test_files_late_mutations_keep_newer_work(direct_server_with_data, engine): 
                     elif newer == "directory":
                         page.locator(".files-entry").filter(has_text="docs").click()
                         page.get_by_role("button", name="Discard", exact=True).click()
-                        expect(page.locator("#files-preview-path")).to_contain_text("/docs")
+                        # The folder opened (its list starts with the way up); the preview keeps no header until a
+                        # file is chosen.
+                        expect(page.locator("#files-list .files-entry.parent-link")).to_have_count(1)
+                        expect(page.locator(".files-preview-header")).to_be_hidden()
                     else:
                         editor.fill("Newer input while action is pending")
                         editor.evaluate("el => {window.filesEditor = el; el.setSelectionRange(4, 9);}")
