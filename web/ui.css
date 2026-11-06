@@ -15,7 +15,6 @@
     --control-disabled-opacity: 0.55;
     --bg-primary: #0f0f11;
     --bg-secondary: #1a1b1c;
-    --bg-card: rgba(var(--neutral-rgb), 0.06);
     --bg-hover: rgba(var(--neutral-rgb), 0.08);
     /* Type scale + foreground semantics: docs/DESIGN.md. Four sizes, no fifth. */
     --type-meta: 12px;
@@ -38,8 +37,6 @@
     --accent-light: #fe7d85;
     --accent-dim: rgba(201, 53, 69, 0.15);
     /* Accent alpha tokens; keep future tweaks off hardcoded rgba literals. */
-    --accent-04: rgba(201, 53, 69, 0.04);
-    --accent-05: rgba(201, 53, 69, 0.05);
     --accent-08: rgba(201, 53, 69, 0.08);
     --accent-10: rgba(201, 53, 69, 0.10);
     --accent-12: rgba(201, 53, 69, 0.12);
@@ -65,9 +62,6 @@
     /* User / owner voice: the owner's chat bubble + sender accents. Tokenized so
        the hue lives in one place and stays clear of the project fuchsia (C7.2). */
     --user-bubble-from: rgba(71, 128, 210, 0.24);
-    --user-bubble-to: rgba(71, 128, 210, 0.18);
-    --user-border: rgba(110, 150, 210, 0.18);
-    --user-glow: rgba(160, 190, 245, 0.04);
     --user-sender: #a0c6ff;
     --user-text: #efeff2;
     /* System / owner-control voice (system bubble + sender), tokenized so it tracks one source (C7.2): in dark a
@@ -123,9 +117,6 @@
     --ui-card-bg-soft: var(--surface-card-soft);
     --ui-card-border: var(--surface-border);
     --ui-modal-bg: rgba(var(--modal-rgb), 0.98);
-    /* A live task card's lift off the transcript: soft in light (a near-black shadow that suits the
-       dark shell reads as grime on white), one plain shadow in dark (no light along the edge). */
-    --live-card-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
     /* Status triples: fg/bg/border named together, never derived
        (docs/DESIGN.md "Status and chips"). The fg tints are readable at 12px on the dark room, where a status body
        is a neutral veil carrying the hue's ink (a dark tint of green, amber or red goes olive or brown); inside the
@@ -156,6 +147,10 @@
     --status-live-fg: var(--accent-light);
     --status-live-bg: var(--accent-10);
     --panic-ink: var(--accent-light);
+    /* Panic's body (style.css .chat-header-btn.danger): on dark the red tone is already the capsule's neutral veil, and
+       stacking it would wash out Panic's ink, so the capsule's own fill; light lays the red tone over it. */
+    --panic-fill: var(--chip-float);
+    --panic-fill-hover: var(--chip-float-hover);
     --focus-accent-border: #fe7d85;
     --focus-accent-ring: rgba(211, 45, 67, 0.28);
     --radius-xs: 3px;
@@ -172,7 +167,6 @@
     --pill-padding-x: 14px;
     --pill-font-size: 13px;
     --pill-radius: 999px;
-    --pill-strip-padding: 6px 0 8px;
     --button-padding-y: 8px;
     --button-padding-x: 16px;
     --button-font-size: 13px;
@@ -394,7 +388,6 @@
     --diagram-line: #66606e;
     --diagram-secondary: #edf0f5;
     --diagram-tertiary: #f5f6f8;
-    --live-card-shadow: 0 6px 20px rgba(var(--neutral-rgb), 0.06), 0 1px 3px rgba(var(--neutral-rgb), 0.05);
     /* Airy dopamine seed, light values (the dark ones are in :root): white objects and capsules on two soft shadows. */
     --elev-rest: 0 1px 2px rgba(28, 33, 51, 0.05), 0 6px 18px rgba(28, 33, 51, 0.06);
     --elev-float: 0 2px 6px rgba(28, 33, 51, 0.06), 0 18px 44px rgba(28, 33, 51, 0.11);
@@ -441,7 +434,6 @@
     /* The light theme's own values of tokens the dark seed in :root sets differently (hues, status triples, the
        System voice, the owner's quote tint, the Project's tints). */
     --user-bubble-from: rgba(80, 120, 190, 0.14);
-    --user-bubble-to: rgba(55, 85, 155, 0.12);
     --system-bubble-bg: rgba(245, 158, 11, 0.12);
     --accent: #c93545;
     --focus-accent-ring: var(--accent-10);
@@ -464,6 +456,8 @@
     /* The answer roles and Panic's word on white: the ok pair flat for the chosen answer (only its accessible name says
        `Your choice`), meta words and the ok dot for `You answered`, the faded held controls and pending message. */
     --panic-ink: var(--status-error-fg);
+    --panic-fill: linear-gradient(var(--tone-red), var(--tone-red)), var(--chip-float);
+    --panic-fill-hover: linear-gradient(var(--tone-red-hover), var(--tone-red-hover)), var(--chip-float);
     --tone-chosen-answer: var(--tone-green);
     --tone-chosen-answer-ink: var(--status-ok-fg);
     --tone-chosen-answer-detail: var(--text-meta);
@@ -554,17 +548,21 @@
     text-align: center;
     min-height: 38px;
     line-height: 1.2;
-    border: 1px solid rgba(var(--neutral-rgb), 0.08);
-    background: rgba(var(--neutral-rgb), 0.04);
+    border: 1px solid transparent;
+    border-radius: var(--pill-radius);
+    background: var(--surface-capsule);
     color: var(--text-secondary);
-    border-radius: 12px;
+    box-shadow: var(--elev-rest);
     padding: 10px 16px;
     cursor: pointer;
     font-family: var(--font-sans);
     font-size: var(--button-font-size);
     font-weight: 600;
+    transition: var(--motion-tone);
 }
-.theme-choice:hover { color: var(--text-primary); }
+.theme-choice:hover { color: var(--text-primary); background: var(--surface-capsule-hover); }
+.theme-choice[aria-checked="true"] { background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); }
+.theme-choice:not(:disabled):active { filter: var(--press); }
 .theme-choice:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 .theme-choice-label {
     display: block;
@@ -575,13 +573,21 @@
 .theme-status { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .theme-status:empty { display: none; }
 
+/* ---- One control, three tones (DESIGN.md design bible) ---------------------------------------------------------
+   Everything pressable with a body is a capsule standing on the rest shadow, in every state and either theme:
+   neutral (the capsule surface), tonal (its hue's fill and that fill's ink: the crimson for the primary action, the
+   chosen tab or place and a count, the soft crimson for a chosen option or card, green for save, red for danger, amber
+   for the owner's turn). A quiet control (ghost, link, filter) has no body and no shadow. A state changes colour,
+   never height: hover deepens the fill a step, a press deepens it again (--press), a chosen one takes its tone; what
+   cannot be pressed now loses its shadow. Page styles map their controls onto these tones and add no fourth recipe
+   and no outline; an author frame may override any of it with its own CSS after this sheet. */
 .btn {
     box-sizing: border-box;
     padding: var(--button-padding-y) var(--button-padding-x);
-    border-radius: var(--radius-sm);
+    border-radius: var(--pill-radius);
     border: 1px solid transparent;
     font-size: var(--button-font-size);
-    font-weight: 500;
+    font-weight: 600;
     font-family: var(--font-sans);
     cursor: pointer;
     display: flex;
@@ -590,7 +596,7 @@
     gap: 6px;
     min-height: var(--button-min-height);
     text-align: center;
-    transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+    transition: var(--motion-tone);
 }
 
 .btn:focus-visible {
@@ -598,47 +604,37 @@
     outline-offset: 2px;
 }
 
+.btn:not(:disabled):active { filter: var(--press); }
 .btn:disabled {
     cursor: not-allowed;
     opacity: var(--control-disabled-opacity);
-    transform: none;
     box-shadow: none;
 }
 
-.btn-primary {
-    background: var(--accent-dim);
-    color: var(--accent-light);
-    border-color: var(--accent-18);
+/* The solid crimson under white ink deepens when pressed (--press-solid), so its words keep 4.5:1. */
+.btn-primary { background: var(--tone-crimson); color: var(--tone-crimson-ink); box-shadow: var(--elev-rest); --press: var(--press-solid); }
+.btn-primary:not(:disabled):hover { background: var(--tone-crimson-hover); }
+/* An action the owner can take is legible at rest (docs/DESIGN.md section 6): a neutral button carries the primary
+   ink, since a label parked at secondary ink reads as disabled next to the one beside it. */
+.btn-default,
+.btn-secondary { background: var(--surface-capsule); color: var(--text-primary); box-shadow: var(--elev-rest); }
+.btn-default:not(:disabled):hover,
+.btn-secondary:not(:disabled):hover { background: var(--surface-capsule-hover); }
+.btn-ghost { background: transparent; color: var(--text-primary); box-shadow: none; }
+.btn-ghost:not(:disabled):hover { background: var(--tone-quiet-hover); }
+.btn-danger { background: var(--tone-red); color: var(--status-error-fg); box-shadow: var(--elev-rest); }
+.btn-danger:not(:disabled):hover { background: var(--tone-red-hover); }
+.btn-save { background: var(--tone-green); color: var(--status-ok-fg); box-shadow: var(--elev-rest); }
+.btn-save:not(:disabled):hover { background: var(--tone-green-hover); }
+/* A capsule over content uses the same geometry, focus and disabled state, on glass. */
+.btn-float {
+    background: var(--surface-float); color: var(--text-primary); box-shadow: var(--elev-float);
+    -webkit-backdrop-filter: var(--glass); backdrop-filter: var(--glass);
 }
-/* An action the owner can take is legible at rest (docs/DESIGN.md section 6):
-   a button label parked at secondary ink reads as disabled next to the one
-   beside it. */
-.btn-secondary {
-    background: rgba(var(--neutral-rgb), 0.04);
-    color: var(--text-primary);
-    border-color: rgba(var(--neutral-rgb), 0.10);
+@media (hover: hover) {
+    .btn-float:not(:disabled):hover { filter: var(--press); }
 }
-.btn-ghost {
-    background: transparent;
-    color: var(--text-primary);
-    border-color: rgba(var(--neutral-rgb), 0.08);
-}
-.btn-danger {
-    background: rgba(220, 38, 38, 0.2);
-    color: var(--status-error-fg);
-    border: 1px solid rgba(220, 38, 38, 0.3);
-}
-
-.btn-save {
-    background: var(--green-dim);
-    color: var(--status-ok-fg);
-    border-color: rgba(34, 197, 94, 0.22);
-}
-.btn-default {
-    background: var(--bg-card);
-    color: var(--text-primary);
-    border-color: rgba(var(--neutral-rgb), 0.08);
-}
+.btn-float:not(:disabled):active { filter: var(--press) var(--press); }
 
 
 .ui-chip,
@@ -650,8 +646,8 @@
     white-space: nowrap;
 }
 
-/* The chip primitive reserves its border so a tone can paint it without
-   changing the chip's size. The aliases above keep their own geometry. */
+/* The chip primitive reserves its border so a tone can paint its fill without changing the chip's size; a chip and
+   a status badge never show an edge (a status chip lies flat). The aliases above keep their own geometry. */
 .ui-chip {
     border: 1px solid transparent;
 }
@@ -1002,53 +998,6 @@ textarea.ui-control { resize: vertical; }
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
 }
-
-/* ---- One control, three tones (DESIGN.md design bible) ---------------------------------------------------------
-   Everything pressable with a body is a capsule standing on the rest shadow, in every state and either theme:
-   neutral (the capsule surface), tonal (its hue's fill and that fill's ink: the crimson for the primary action, the
-   chosen tab or place and a count, the soft crimson for a chosen option or card, green for save, red for danger, amber
-   for the owner's turn). A quiet control (ghost, link, filter) has no body and no shadow. A state changes colour,
-   never height: hover deepens the fill a step, a press deepens it again
-   (--press), a chosen one takes its tone; what cannot be pressed now loses its shadow. `.ui-chrome-control` stays
-   geometry only (a floating control's own tone is its page's): page styles map their controls onto these tones and
-   add no fourth recipe and no outline. These recipes are the product documents' own (their root is `.ouro-ui`);
-   `:where` keeps the specificity, and an author frame that sets `data-theme` keeps the overridable base recipe. */
-:root[data-theme]:where(.ouro-ui) .btn { border-color: transparent; border-radius: var(--pill-radius); font-weight: 600; transition: var(--motion-tone); }
-:root[data-theme]:where(.ouro-ui) :is(.btn-default, .btn-secondary) {
-    border-color: transparent; background: var(--surface-capsule); color: var(--text-primary); box-shadow: var(--elev-rest);
-}
-:root[data-theme]:where(.ouro-ui) :is(.btn-default, .btn-secondary):not(:disabled):hover { border-color: transparent; background: var(--surface-capsule-hover); }
-:root[data-theme]:where(.ouro-ui) .btn-ghost { border-color: transparent; background: transparent; box-shadow: none; }
-:root[data-theme]:where(.ouro-ui) .btn-ghost:not(:disabled):hover { background: var(--tone-quiet-hover); }
-:root[data-theme]:where(.ouro-ui) .btn-primary { background: var(--tone-crimson); color: var(--tone-crimson-ink); box-shadow: var(--elev-rest); }
-:root[data-theme]:where(.ouro-ui) .btn-primary:not(:disabled):hover { background: var(--tone-crimson-hover); }
-:root[data-theme]:where(.ouro-ui) .btn-save { background: var(--tone-green); color: var(--status-ok-fg); box-shadow: var(--elev-rest); }
-:root[data-theme]:where(.ouro-ui) .btn-save:not(:disabled):hover { background: var(--tone-green-hover); }
-:root[data-theme]:where(.ouro-ui) .btn-danger { border-color: transparent; background: var(--tone-red); color: var(--status-error-fg); box-shadow: var(--elev-rest); }
-:root[data-theme]:where(.ouro-ui) .btn-danger:not(:disabled):hover { border-color: transparent; background: var(--tone-red-hover); }
-:root[data-theme]:where(.ouro-ui) .btn:hover { transform: none; }
-:root[data-theme]:where(.ouro-ui) :is(.btn, .theme-choice):not(:disabled):active { transform: none; filter: var(--press); }
-:root[data-theme]:where(.ouro-ui) .btn-primary { --press: var(--press-solid); }
-:root[data-theme]:where(.ouro-ui) .btn-ghost:not(:disabled):active { box-shadow: none; }
-/* A capsule over content uses the same geometry, focus and disabled state, on glass. */
-:root[data-theme]:where(.ouro-ui) .btn-float {
-    background: var(--surface-float); color: var(--text-primary); box-shadow: var(--elev-float);
-    -webkit-backdrop-filter: var(--glass); backdrop-filter: var(--glass);
-}
-@media (hover: hover) {
-    :root[data-theme]:where(.ouro-ui) .btn-float:not(:disabled):hover { filter: var(--press); }
-}
-:root[data-theme]:where(.ouro-ui) .btn-float:not(:disabled):active { filter: var(--press) var(--press); }
-:root[data-theme]:where(.ouro-ui) .btn:disabled { box-shadow: none; }
-/* The Appearance choice is one control in both documents (the SPA and the served setup page load only this sheet
-   in common): neutral capsules, the chosen one in the soft crimson, all standing. */
-:root[data-theme]:where(.ouro-ui) .theme-choice {
-    border-color: transparent; border-radius: var(--pill-radius); background: var(--surface-capsule); box-shadow: var(--elev-rest);
-    transition: var(--motion-tone);
-}
-:root[data-theme]:where(.ouro-ui) .theme-choice:hover { border-color: transparent; background: var(--surface-capsule-hover); }
-:root[data-theme]:where(.ouro-ui) .theme-choice[aria-checked="true"] { border-color: transparent; background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); }
-:root[data-theme]:where(.ouro-ui) :is(.ui-chip, .status-badge) { border-color: transparent; }
 
 /* ---- Status marks (docs/DESIGN.md "Status marks") --------------------------------------------------------------
    One small family for every surface, created and painted by web/modules/status_mark.js and drawn only here. The

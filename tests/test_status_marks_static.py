@@ -34,20 +34,18 @@ owner | web/style.css | .chat-budget-pill[data-attention="1"] .chat-budget-bar |
 owner | web/style.css | .chat-budget-pill[data-attention="1"] .chat-budget-bar-fill | background
 owner | web/style.css | .chat-budget-pill[data-attention="1"] .chat-budget-text | color
 owner | web/style.css | .chat-live-phase[data-chip-tone="owner"] | background, color
-owner | web/style.css | .chat-question-nav | background, border, color
+owner | web/style.css | .chat-question-nav | background, color
 owner | web/style.css | .skills-trust-value.is-suggested | color
-owner | web/style.css | :root[data-theme] .update-pill:is(.has-local, [data-tone="warn"]):not(:disabled) | background, color
-owner | web/style.css | @media (hover: hover) » :root[data-theme] .update-pill:is(.has-local, [data-tone="warn"]):not(:disabled):hover | background
-owner | web/style.css | :root[data-theme] .chat-budget-pill.ui-chrome-control[data-attention="1"] | background
-owner | web/style.css | :root[data-theme] .chat-question-nav | background, color
-owner | web/style.css | :root[data-theme] .chat-question-nav:hover | background
-owner | web/style.css | @media (hover: hover) » :root[data-theme] .chat-budget-pill.ui-chrome-control[data-attention="1"]:hover | background
+owner | web/style.css | .update-pill:is(.has-local, [data-tone="warn"]):not(:disabled) | background, color
+owner | web/style.css | @media (hover: hover) » .update-pill:is(.has-local, [data-tone="warn"]):not(:disabled):hover | background
+owner | web/style.css | .chat-budget-pill[data-attention="1"] | background
+owner | web/style.css | .chat-question-nav:hover | background
+owner | web/style.css | @media (hover: hover) » .chat-budget-pill[data-attention="1"]:hover | background
 owner | web/model_wait.css | .model-wait-row[data-owner="1"] | background, border-color
-owner | web/room_work.css | .rw-row .rw-pill-question | background, border-color, color
+owner | web/room_work.css | .rw-row .rw-pill-question | background, color
 owner | web/room_work.css | .rw-row[data-tone="wait"] .rw-state | color
 owner | web/room_work.css | .rw-trigger[data-tone="wait"] | color
-owner | web/room_work.css | :root[data-theme] .rw-row .rw-pill-question | background, color
-owner | web/room_work.css | :root[data-theme] .rw-row .rw-pill-question:not(:disabled):hover | background
+owner | web/room_work.css | .rw-row .rw-pill-question:not(:disabled):hover | background
 # A warning worth reading: warn sentences and chips, toasts, notes, warnings inside timelines, reviews, delegated
 # work, Logs events, widget tones, account quota and spent windows, unsaved settings and file drafts.
 warning | web/ui.css | .settings-inline-status[data-tone="warn"] | color
@@ -62,7 +60,7 @@ warning | web/style.css | .chat-live-line.warn .chat-live-line-title | color
 warning | web/style.css | .chat-quiz-storage-note | color
 warning | web/style.css | .document-reader-notice | background, border-bottom, color
 warning | web/style.css | @container files (max-width: 700px) » .files-entry:is(.is-draft, [data-unsaved]) .files-entry-unsaved | color
-warning | web/style.css | .harness-exhausted | background
+warning | web/style.css | .harness-account-row.harness-exhausted | background
 warning | web/style.css | .harness-exhausted .harness-account-meta | color
 warning | web/style.css | .harness-maintenance-notice[data-tone="warn"] | color
 warning | web/style.css | .log-entry .log-phase:is(.warn, .empty):not([data-chip-tone]) | background, border-color, color
@@ -75,7 +73,6 @@ warning | web/style.css | .updates-status-dot[data-tone="warn"] | color
 warning | web/style.css | .widget-callout[data-tone="warn"] | border-left-color
 warning | web/style.css | .widget-metric[data-tone="warn"] | border-left-color
 warning | web/style.css | .widget-table-status[data-tone="warn"] | color
-warning | web/style.css | :root[data-theme] :is(.harness-account-row, .agent-family-card .harness-account-row).harness-exhausted | background
 warning | web/settings.css | .available-subagent-status-reason | color
 warning | web/settings.css | .available-subagents-review-copies | color
 warning | web/settings.css | .available-subagents-review-empty | color

@@ -67,9 +67,9 @@ textarea.ui-control.consciousness-owner-words {
 /* On a phone, while a Project's one-line name is still cut, the chip shows its brain and mark alone (room_work.js
    fitWord); its name says it all. A desk keeps the chip's word and the name ends in an ellipsis. */
 .project-panel-bar > .cx-chip[data-fit="mark"] .cx-chip-word { display: none; }
-:root[data-theme] .cx-chip.ui-chrome-control[data-off="true"] .cx-chip-glyph,
-:root[data-theme] .cx-chip.ui-chrome-control[data-off="true"]:not([data-evolving="true"]) .cx-chip-word { color: var(--text-meta); }
-:root[data-theme] .cx-chip.ui-chrome-control[data-open="1"] { background: var(--chip-float-hover); }
+.cx-chip.ui-chrome-control[data-off="true"] .cx-chip-glyph,
+.cx-chip.ui-chrome-control[data-off="true"]:not([data-evolving="true"]) .cx-chip-word { color: var(--text-meta); }
+.cx-chip.ui-chrome-control[data-open="1"] { background: var(--chip-float-hover); }
 /* Its sheet is the work list's (room_work.css .rw-shade): its own opaque material hung under the bar's capsules, at
    most 40rem wide and ending under the bar's last control, so it opens under the chip. */
 .rw-shade.cx-shade { left: auto; width: min(40rem, calc(100% - var(--rw-left, 0px) - var(--rw-right, 0px))); }

@@ -114,11 +114,9 @@ textarea::placeholder {
   flex-direction: column;
   gap: 14px;
   padding: var(--wizard-shell-pad);
-  border: 1px solid var(--border);
+  border: 1px solid transparent;
   border-radius: 12px;
-  background: linear-gradient(180deg, rgba(var(--neutral-rgb), 0.035), rgba(var(--neutral-rgb), 0.02));
-  backdrop-filter: blur(18px);
-  box-shadow: var(--shadow);
+  background: transparent;
 }
 
 /* Was a one-off 32px (plus a 28px compact variant); joins the scale. */
@@ -148,17 +146,19 @@ textarea::placeholder {
   gap: 10px;
 }
 
+/* The step rail: trays, the current step a chosen card in the soft crimson, a done step's chip in green. */
 .wizard-step {
   min-width: 0;
   padding: 10px 12px;
-  border-radius: 12px;
-  border: 1px solid var(--border);
-  background: var(--panel-2);
+  border-radius: var(--radius-inner);
+  border: 1px solid transparent;
+  background: var(--surface-tray);
   transition: border-color 120ms ease, background 120ms ease;
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
+.wizard-step.active { background: var(--tone-crimson-soft); }
 
 
 
@@ -178,9 +178,10 @@ textarea::placeholder {
 }
 
 .wizard-step.active .wizard-step-index {
-  background: var(--accent-18);
-  color: var(--text);
+  background: transparent;
+  color: var(--tone-crimson-soft-ink);
 }
+.wizard-step.done .wizard-step-index { background: var(--tone-green); color: var(--status-ok-fg); }
 
 .wizard-step-title {
   margin: 0;
@@ -203,9 +204,10 @@ textarea::placeholder {
   flex-direction: column;
   gap: 18px;
   padding: var(--wizard-content-pad);
-  border-radius: 16px;
-  border: 1px solid var(--border);
-  background: var(--panel);
+  border-radius: var(--radius-object);
+  border: 1px solid transparent;
+  background: var(--surface-object);
+  box-shadow: var(--elev-rest);
 }
 
 .step-header {
@@ -231,14 +233,25 @@ textarea::placeholder {
   line-height: var(--line-body);
 }
 
+/* Cards, the collapse and the summary inside the step's body are trays; a tray inside a tray drops its fill. A choice
+   is a neutral capsule standing on the rest shadow (a card, since it carries a paragraph). */
 .panel-card,
 .summary-card,
-.wizard-choice,
 .wizard-collapse,
 .wizard-runtime-strip {
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--panel-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-inner);
+  background: var(--surface-tray);
+}
+:is(.panel-card, .summary-card, .wizard-collapse) :is(.agent-family-row, .panel-card, .summary-card) {
+  border-color: transparent;
+  background: transparent;
+}
+.wizard-choice {
+  border: 1px solid transparent;
+  border-radius: var(--radius-inner);
+  background: var(--surface-capsule);
+  box-shadow: var(--elev-rest);
 }
 
 .panel-card,
@@ -371,13 +384,14 @@ textarea::placeholder {
 }
 
 .selection-pill {
-  border: 1px solid var(--border);
-  background: rgba(var(--neutral-rgb), 0.03);
+  border: 1px solid transparent;
+  background: var(--surface-capsule);
   color: var(--text);
+  box-shadow: var(--elev-rest);
   padding: 10px 14px;
   border-radius: 999px;
   cursor: pointer;
-  transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+  transition: var(--motion-tone);
 }
 
 
@@ -429,12 +443,15 @@ textarea::placeholder {
 
 .wizard-choice {
   cursor: pointer;
-  transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+  transition: var(--motion-tone);
 }
 
-.wizard-choice:hover {
-  transform: translateY(-1px);
-}
+.wizard-choice:hover,
+.selection-pill:hover { background: var(--surface-capsule-hover); }
+.wizard-choice.active,
+.selection-pill.active { background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); }
+.wizard-choice:active,
+.selection-pill:active { filter: var(--press); }
 
 
 /* Choice-card chip: neutral by default, so no chip renders as bare white text. A setting's value is never
@@ -1443,68 +1460,6 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
 }
 /* track-migration:end */
 
-/* ---- Airy dopamine (DESIGN.md design bible) -------------------------------------------------------------------
-   The setup page maps onto the bible's roles in both themes: the shell is the plain room (no wash, no outline, no
-   heavy shadow); the step's body is the object on the rest shadow; cards, the collapse and the summary inside it are
-   trays, and a tray inside a tray drops its fill; the step rail is trays with the current step in the soft crimson (a
-   chosen card) and a done step's chip in green; choices and pills are neutral capsules standing on the rest shadow,
-   the chosen one in the soft crimson and still standing. Fields keep their hairline. States change colour, never
-   height. */
-:root[data-theme] .wizard-shell {
-  border-color: transparent;
-  background: transparent;
-  box-shadow: none;
-  -webkit-backdrop-filter: none;
-  backdrop-filter: none;
-}
-:root[data-theme] .wizard-content {
-  border-color: transparent;
-  border-radius: var(--radius-object);
-  background: var(--surface-object);
-  box-shadow: var(--elev-rest);
-}
-:root[data-theme] :is(.panel-card, .summary-card, .wizard-collapse, .wizard-runtime-strip) {
-  border-color: transparent;
-  border-radius: var(--radius-inner);
-  background: var(--surface-tray);
-}
-:root[data-theme] :is(.panel-card, .summary-card, .wizard-collapse) :is(.agent-family-row, .panel-card, .summary-card) {
-  border-color: transparent;
-  background: transparent;
-}
-:root[data-theme] .wizard-step {
-  border-color: transparent;
-  border-radius: var(--radius-inner);
-  background: var(--surface-tray);
-  box-shadow: none;
-}
-:root[data-theme] .wizard-step.active { background: var(--tone-crimson-soft); }
-:root[data-theme] .wizard-step.done { border-color: transparent; }
-:root[data-theme] .wizard-step.active .wizard-step-index { background: transparent; color: var(--tone-crimson-soft-ink); }
-:root[data-theme] .wizard-step.done .wizard-step-index { background: var(--tone-green); color: var(--status-ok-fg); }
-:root[data-theme] :is(.wizard-choice, .selection-pill) {
-  border-color: transparent;
-  background: var(--surface-capsule);
-  box-shadow: var(--elev-rest);
-  transition: var(--motion-tone);
-}
-:root[data-theme] .wizard-choice { border-radius: var(--radius-inner); }
-:root[data-theme] :is(.wizard-choice, .selection-pill):hover {
-  border-color: transparent;
-  background: var(--surface-capsule-hover);
-  box-shadow: var(--elev-rest);
-  transform: none;
-}
-:root[data-theme] :is(.wizard-choice, .selection-pill).active {
-  border-color: transparent;
-  background: var(--tone-crimson-soft);
-  color: var(--tone-crimson-soft-ink);
-  box-shadow: var(--elev-rest);
-}
-:root[data-theme] :is(.wizard-choice, .selection-pill):active { transform: none; filter: var(--press); }
-/* A mark inside a chosen card wears the card's ink (a chosen state's ink is its tone's, DESIGN.md principle 4). */
-:root[data-theme] .wizard-choice.active .skills-mark { color: inherit; }
-
 /* ---- Starter skills (board B13): one Summary row that opens in place into ONE vertical scroll of categorized
    cards — two columns, one on a phone; a ticked card takes the wizard's chosen tone. Under the list stay the two
    public hub rows' trust choices. The house edge fade and 6px scrollbar are named here so this list does not
@@ -1585,6 +1540,8 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
   font-weight: 500;
   white-space: nowrap;
 }
+/* A mark inside a chosen card wears the card's ink (a chosen state's ink is its tone's, DESIGN.md principle 4). */
+.wizard-choice.active .skills-mark { color: inherit; }
 .skills-mark-glyph { display: inline-flex; }
 .skills-mark svg { width: 14px; height: 14px; flex: 0 0 auto; }
 .ui-chip.skills-chip { padding: 3px 10px; font-size: var(--type-meta); line-height: var(--line-meta); font-weight: 500; }

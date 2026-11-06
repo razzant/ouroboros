@@ -13,7 +13,7 @@ const catalogJs = await readFile(new URL('../modules/settings_catalog.js', impor
 const primitivesJs = await readFile(new URL('../modules/ui_primitives.js', import.meta.url), 'utf8');
 
 test('neutral controls have one shared button role in both UI shells', () => {
-    assert.match(sharedCss, /\.btn-default\s*\{/);
+    assert.match(sharedCss, /\.btn-default[^{]*\{/);
     assert.match(sharedCss, /\.btn:focus-visible\s*\{/);
     // The app shell loads its main-interface /static; the wizard always loads the core's own tree.
     const [indexHtml, wizardHtml] = documents;

@@ -61,7 +61,7 @@ test('the budget pill asks for the owner only while a spending-limit stop waits 
     assert.deepEqual(budget.filter((rule) => amber.test(rule) && !rule.includes('[data-attention="1"]')), [],
         'nothing paints the budget amber without the owner\'s move');
     assert.ok(budget.some((rule) => amber.test(rule) && rule.includes('[data-attention="1"]')));
-    assert.ok(rules('.chat-header-btn.danger.ui-chrome-control').some((rule) => /--tone-red|--status-error/.test(rule)));
+    assert.ok(rules('.chat-header-btn.danger').some((rule) => /--panic-fill|--panic-ink|--tone-red|--status-error/.test(rule)));
 });
 
 test('task cards distinguish unavailable, pending zero, and final zero', () => {
