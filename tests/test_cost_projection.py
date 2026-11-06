@@ -326,6 +326,13 @@ class TestDisplay:
         assert cost_display({"cost_usd": 0.0, "cost_final": True}) == "$0.00"
         # Under a cent is not a priced zero: four places, as the card and the review records print it.
         assert cost_display({"cost_usd": 0.0004, "cost_final": True}) == "$0.0004"
+        # A non-finite amount is unknown, never a crash or $NaN (the web prints it as absent too); a huge one prints.
+        for odd in (float("inf"), float("nan")):
+            text = cost_display({"cost_usd": odd, "cost_final": True})
+            assert text.startswith("unknown") and "$" not in text
+        from ouroboros.cost_projection import usd_text
+        assert usd_text(float("inf")) == "unknown" and usd_text(1e26).endswith(".00")
+        assert usd_text(1e26, 6).startswith("$1000000000000000") and usd_text(1e26, 6).endswith(".000000")
         # Below four places a positive amount still never prints as zero (the card's formatUsdKnown).
         assert cost_display({"cost_usd": 0.00003, "cost_final": True}) == "<$0.0001"
 

@@ -22,6 +22,7 @@ meta set) so every surface tells the same story with the same names.
 from __future__ import annotations
 
 import logging
+import math
 import pathlib
 import threading
 import time
@@ -62,13 +63,15 @@ COST_OPENNESS_FIELDS = (
 
 
 def _as_amount(value: Any) -> Optional[float]:
-    """A dollar amount, or None. Booleans and unparseable values are None."""
+    """A dollar amount, or None. Booleans, unparseable and non-finite values are None (the web's
+    ``formatUsd2``/``formatUsdKnown`` print such a value as unknown too)."""
     if value is None or isinstance(value, bool):
         return None
     try:
-        return float(value)
+        amount = float(value)
     except (TypeError, ValueError):
         return None
+    return amount if math.isfinite(amount) else None
 
 
 def honest_accounted_amount(source: Optional[Mapping[str, Any]]) -> Optional[float]:
@@ -573,13 +576,18 @@ def usd_text(amount: float, decimals: int = 2) -> str:
     """A known dollar amount: ``decimals`` places, at least four under a cent and ``<$0.0001`` (at four
     places) below what they show, so a positive amount never prints as the priced zero ``$0.00`` (the web
     card's ``formatUsdKnown``); a caller asking for more places keeps them."""
-    from decimal import ROUND_HALF_UP, Decimal
+    from decimal import ROUND_HALF_UP, Context, Decimal
 
+    if not math.isfinite(amount):
+        return "unknown"
     places = max(decimals, 4) if 0 < amount < 0.01 else decimals
     if 0 < amount < 10 ** -places:
         return f"<${10 ** -places:.{places}f}"
-    # The exact binary value, a tie going up, as the card's toFixed and Telegram round it.
-    return f"${Decimal(amount).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)}"
+    # The exact binary value, a tie going up, as the card's toFixed and Telegram round it; the context holds
+    # every digit of the result, however large the amount.
+    exact = Decimal(amount)
+    context = Context(prec=max(28, exact.adjusted() + places + 2))
+    return f"${exact.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP, context=context)}"
 
 
 def uncounted_money_text(summary: Optional[Mapping[str, Any]], *, decimals: int = 2, prefix: str = "") -> str:
