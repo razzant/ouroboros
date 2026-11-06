@@ -610,6 +610,7 @@
  * @property {?string=} since
  * @property {string=} issuer
  * @property {boolean=} pending
+ * @property {string=} required_scope
  */
 
 /**

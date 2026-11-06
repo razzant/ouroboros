@@ -642,10 +642,17 @@ async def _http_with_guards(cfg: MCPServerConfig):
     from ouroboros.mcp_oauth import StoredBearer, applies
 
     guard, bearer = _CredentialOriginGuard(cfg), (StoredBearer(cfg) if applies(cfg) else None)
+
+    def bearer_client(headers: Any = None, timeout: Any = None, auth: Any = None) -> Any:
+        client = guard.client(headers=headers, timeout=timeout, auth=auth)
+        bearer.clients.append(client)  # a sign-in refusal ends the connection (``StoredBearer``)
+        return client
+
+    client_factory = bearer_client if bearer is not None else guard.client
     sse = cfg.transport == "sse"
     with _redacted_sdk_logs(cfg, "mcp.client.sse" if sse else "mcp.client.streamable_http"):
         opened = (sse_client if sse else streamablehttp_client)(
-            cfg.url, headers=cfg.wire_headers(), httpx_client_factory=guard.client, auth=bearer)
+            cfg.url, headers=cfg.wire_headers(), httpx_client_factory=client_factory, auth=bearer)
         try:
             async with opened as streams:
                 yield streams

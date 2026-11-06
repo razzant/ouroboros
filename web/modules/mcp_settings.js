@@ -5,7 +5,7 @@ import { openExternalViaHostBridge, revealNewRow } from './ui_helpers.js';
 import { resetSecretReveals } from './settings_secrets.js';
 import {
     renderHeaderFields, bindHeaderFields, credentialPayload, headerKeepsSavedValues, keptHeaderNames,
-    headerDraftRows, headerImportFacts, resetHeaderRows, serverIdentity, validateHeaderFields,
+    headerDraftRows, headerImportFacts, resetHeaderRows, serverIdentity, validateHeaderFields, canonicalServerId,
 } from './mcp_header_fields.js';
 import { endpointChange, openMcpImportDialog } from './mcp_import_dialog.js';
 
@@ -43,6 +43,7 @@ const cardMessages = new WeakMap();
 const draftGenerations = new WeakMap();
 const pendingActions = new WeakMap();
 const signInLinks = new WeakMap(); // the provider page of the sign-in this window began, per server
+const signInBusy = new WeakSet(); // a sign-in step in flight: a second press waits for it
 
 function looksMasked(value) {
     const text = String(value ?? '').trim();
@@ -179,7 +180,7 @@ function lifetimeNote(server) {
 
 /** What this server costs the request: its part of the connections map, and its call schemas. */
 function weightLabel(server) {
-    const status = mcpStatusByServer[String(server.id ?? '')] || null;
+    const status = statusOf(server);
     if (!status || status.schema_tokens == null) return '';
     const schemas = isPinned(server)
         ? `call schemas ${tokensLabel(status.schema_tokens)} in every Low/Max request from task start`
@@ -203,7 +204,7 @@ function unsupportedFields(server) {
 
 /** The saved-status parts of a card: its badge and its discovered tools' list items. */
 function statusParts(server) {
-    const status = mcpStatusByServer[String(server.id ?? '')] || null;
+    const status = statusOf(server);
     const toolCount = status ? Number(status.tool_count || 0) : 0;
     const lastError = status ? String(status.last_error || '') : '';
     const listedAt = status ? String(status.listed_at || '') : '';
@@ -226,18 +227,29 @@ function statusParts(server) {
     return { badgeText: badge[0], badgeClass: `mcp-server-status ${badge[1]}`, toolItems };
 }
 
+/** The status row of a saved server: the backend keys it by the canonical identity (id, slug or name). */
+function statusOf(server) {
+    return mcpStatusByServer[canonicalServerId(serverIdentity(server))] || mcpStatusByServer[String(server.id ?? '')] || null;
+}
+
 function signInKey(server) {
-    const signIn = mcpStatusByServer[String(server.id ?? '')]?.sign_in;
-    return signIn ? `${signIn.state}:${signIn.reason || ''}:${signInLinks.get(server) || ''}` : '';
+    const signIn = statusOf(server)?.sign_in;
+    return signIn ? `${signIn.state}:${signIn.reason || ''}:${signIn.required_scope || ''}:${signInLinks.get(server) || ''}` : '';
 }
 
 /** One fact and one button in view; the paste and the owner's own app registration under Details. */
 function signInRow(server) {
-    const signIn = mcpStatusByServer[String(server.id ?? '')]?.sign_in;
+    const signIn = statusOf(server)?.sign_in;
     if (!signIn) return '';
-    if (signIn.state === 'signed_in') {
+    if (signIn.state === 'signed_in' && signIn.reason !== 'insufficient_scope') {
         return `<span class="mcp-server-status mcp-server-status-ok">Signed in</span>
             <button type="button" class="btn btn-default" data-mcp-sign-in-action="sign_out">Sign out</button>`;
+    }
+    if (signIn.state === 'signed_in') { // still allowed what it was granted; a call needs more
+        return `<span class="mcp-server-status mcp-server-status-warn">Signed in; a call needs more access: ${escapeHtml(signIn.required_scope || '')}</span>
+            <button type="button" class="btn btn-default" data-mcp-sign-in-action="begin">Sign in again</button>
+            <button type="button" class="btn btn-default" data-mcp-sign-in-action="sign_out">Sign out</button>
+            ${signInLinks.get(server) ? `<a href="${escapeHtml(safeExternalUrl(signInLinks.get(server)))}" target="_blank" rel="noopener noreferrer" data-mcp-sign-in-link>Open the sign-in page ↗</a>` : ''}`;
     }
     const reason = SIGN_IN_REASONS[signIn.reason] || String(signIn.reason || 'not signed in yet').replaceAll('_', ' ');
     const link = signInLinks.get(server);
@@ -275,6 +287,10 @@ async function signInAction(card, server, sid, action) {
         setCardMessage(server, 'Paste the address your browser stopped on first.', 'warn', 'sign-in');
         return;
     }
+    if (signInBusy.has(server)) return;
+    signInBusy.add(server);
+    const buttons = [...card.querySelectorAll('[data-mcp-sign-in-action]')];
+    buttons.forEach((button) => { button.disabled = true; });
     setCardMessage(server, action === 'sign_out' ? 'Signing out...' : 'Contacting the provider...', 'muted', 'sign-in');
     try {
         const data = await jsonPost('/api/mcp/sign-in', body);
@@ -296,6 +312,9 @@ async function signInAction(card, server, sid, action) {
         }
     } catch (err) {
         setCardMessage(server, `Sign-in failed: ${err && err.message ? err.message : err}`, 'danger', 'sign-in');
+    } finally {
+        signInBusy.delete(server);
+        buttons.forEach((button) => { button.disabled = false; });
     }
     await refreshStatus();
 }
@@ -561,6 +580,7 @@ function bindCardEvents(card) {
             setCardMessage(server, `Test failed${stale ? ' for an earlier draft' : ''}: ${err && err.message ? err.message : err}`, 'danger', 'test');
         } finally {
             setPending(server, 'test', false);
+            await refreshStatus(); // a draft that asked for sign-in shows its Sign in
         }
     });
 

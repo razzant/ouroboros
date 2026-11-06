@@ -4,26 +4,32 @@ An HTTP/SSE server that carries no saved credential and answers ``401`` with a `
 asks for the owner's sign-in. Its transport carries one stored bearer (``StoredBearer``): refreshed
 when the recorded expiry passed or after a ``401``, under a cross-process lock with a re-read (the
 listing runs in the server process, calls in workers, and public clients' refresh tokens rotate);
-with no grant, a rejected refresh or a repeated ``401`` it refuses at once with ``MCPAuthRequired``.
-Nothing here opens a browser or starts a sign-in on its own; when to ask the owner is the mind's
-judgment. A sign-in is two explicit steps any process may run: ``begin`` (discovery, the client,
-PKCE; the pending sign-in is saved in the server's file, a later begin replaces it) and
-``complete`` (the provider's return, from the builtin return page or an address the owner pasted).
-One file per server holds everything: ``state/mcp/oauth/server-<id>.json``, mode 0600, removed by
-sign-out and by configuration cleanup. Only public helpers of the MCP SDK are used: its
-``OAuthClientProvider`` runs the interactive flow inside a call and forgets the expiry it learned.
+with no grant, a rejected refresh or a repeated ``401`` it refuses at once with ``MCPAuthRequired``,
+and a ``403 insufficient_scope`` records the wider scope the next sign-in asks for, keeping the grant
+for what it already allows. Nothing here opens a browser or starts a sign-in on its own; when to ask
+the owner is the mind's judgment. A sign-in is two explicit steps any process may run: ``begin``
+(discovery, the client, PKCE; the pending sign-in, with the issuer and endpoints it was made for, is
+saved in the server's file and a later begin replaces it) and ``complete`` (the provider's return, from
+the builtin return page or an address the owner pasted). One file per server holds everything:
+``state/mcp/oauth/server-<id>.json``, mode 0600 in a 0700 directory, removed by sign-out and by
+configuration cleanup; a draft of another address (Settings Test) never replaces it. Only public
+helpers of the MCP SDK are used: its ``OAuthClientProvider`` runs the interactive flow inside a call
+and forgets the expiry it learned.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import json
 import logging
 import os
 import secrets
+import threading
 import time
 import urllib.parse
+import weakref
 from typing import Any, Dict, Optional, Tuple
 
 import httpx
@@ -73,6 +79,9 @@ def _load(cfg: Any) -> Dict[str, Any]:
 
 def _save(cfg: Any, doc: Dict[str, Any]) -> None:
     path = _path(cfg.id)
+    recorded = (read_json_dict(path) or {}).get("url")
+    if recorded and recorded != cfg.url:
+        return  # another address's grant (a Test of an edited draft) is never replaced; Save prunes it
     path.parent.mkdir(parents=True, exist_ok=True)
     with contextlib.suppress(OSError):
         os.chmod(path.parent, 0o700)  # a rewrite's temporary file is never readable by another account
@@ -81,13 +90,34 @@ def _save(cfg: Any, doc: Dict[str, Any]) -> None:
         os.chmod(path, 0o600)
 
 
-@contextlib.contextmanager
-def _locked(cfg: Any):
-    """The owner-aware name lock (``store.name_lock``): one refresh or sign-in step at a time per server."""
+_LOOP_LOCKS: "weakref.WeakKeyDictionary[Any, Dict[str, asyncio.Lock]]" = weakref.WeakKeyDictionary()
+_LOOP_LOCKS_GUARD = threading.Lock()
+
+
+@contextlib.asynccontextmanager
+async def _locked(cfg: Any):
+    """One refresh or sign-in step at a time per server. Coroutines of one event loop (a session's GET and
+    POST) queue on an asyncio lock, so a waiter never blocks the loop that runs the holder's await; the
+    owner-aware file lock across threads and processes (``store.name_lock``) is then polled off it."""
     from ouroboros import store
 
-    with store.name_lock(config.DATA_DIR, f"mcp/oauth/server-{cfg.id}.lock", timeout_sec=MCP_OAUTH_LOCK_WAIT_SEC):
-        yield
+    with _LOOP_LOCKS_GUARD:
+        lock = _LOOP_LOCKS.setdefault(asyncio.get_running_loop(), {}).setdefault(cfg.id, asyncio.Lock())
+    async with lock:
+        deadline = time.monotonic() + MCP_OAUTH_LOCK_WAIT_SEC
+        while True:
+            held = store.name_lock(config.DATA_DIR, f"mcp/oauth/server-{cfg.id}.lock", timeout_sec=0)
+            try:
+                held.__enter__()  # one attempt: a busy name never blocks this loop
+                break
+            except store.StoreBusy:
+                if time.monotonic() >= deadline:
+                    raise
+                await asyncio.sleep(0.05)
+        try:
+            yield
+        finally:
+            held.__exit__(None, None, None)
 
 
 def _required(cfg: Any, doc: Dict[str, Any], reason: str, detail: str = "", **facts: Any) -> MCPAuthRequired:
@@ -100,7 +130,8 @@ def _required(cfg: Any, doc: Dict[str, Any], reason: str, detail: str = "", **fa
 
 
 def status(cfg: Any) -> Optional[Dict[str, Any]]:
-    """``{state, reason?, since, issuer, pending?}`` once the server asked for sign-in; else ``None``."""
+    """``{state, reason?, required_scope?, since, issuer, pending?}`` once the server asked for sign-in;
+    else ``None``. A grant that needs a wider scope stays signed in with reason ``insufficient_scope``."""
     if not applies(cfg):
         return None
     doc = _load(cfg)
@@ -112,6 +143,8 @@ def status(cfg: Any) -> Optional[Dict[str, Any]]:
                            "issuer": doc.get("issuer") or ""}
     if not signed_in:
         out["reason"] = record.get("reason") or "not_signed_in"
+    elif doc.get("required_scope"):
+        out.update(reason="insufficient_scope", required_scope=doc["required_scope"])
     if doc.get("pending"):
         out["pending"] = True
     return out
@@ -191,11 +224,11 @@ async def _token_request(http: httpx.AsyncClient, endpoint: str, client: Dict[st
     return await http.post(_checked(endpoint), data=data, auth=auth, headers={"Accept": "application/json"})
 
 
-def _tokens(token: Any, previous_refresh: Optional[str]) -> Dict[str, Any]:
-    """Absolute expiry (the SDK keeps only a relative one) and the previous refresh token when a refresh
-    response omits it (RFC 6749 §6 lets the server keep it)."""
+def _tokens(token: Any, previous_refresh: Optional[str], previous_scope: Optional[str]) -> Dict[str, Any]:
+    """Absolute expiry (the SDK keeps only a relative one); the previous refresh token and scope when a
+    response omits them (RFC 6749 §5.1 and §6: then they are unchanged)."""
     return {"access_token": token.access_token, "token_type": token.token_type or "Bearer",
-            "refresh_token": token.refresh_token or previous_refresh, "scope": token.scope,
+            "refresh_token": token.refresh_token or previous_refresh, "scope": token.scope or previous_scope,
             "expires_at": time.time() + token.expires_in if token.expires_in else None}
 
 
@@ -209,7 +242,7 @@ async def current_token(cfg: Any, rejected: Optional[str] = None) -> str:
     process may already hold a newer token). Raises ``MCPAuthRequired`` when sign-in is needed."""
     from mcp.shared.auth import OAuthToken
 
-    with _locked(cfg):
+    async with _locked(cfg):
         doc = _load(cfg)
         tokens = doc.get("tokens") or {}
         if not tokens.get("access_token"):
@@ -224,9 +257,14 @@ async def current_token(cfg: Any, rejected: Optional[str] = None) -> str:
             response = await _token_request(http, (doc.get("metadata") or {}).get("token_endpoint", ""),
                                             doc.get("client") or {}, data)
         if response.status_code in (400, 401):
-            raise _required(cfg, doc, "refresh_rejected", _oauth_error(response))
+            error = _oauth_error(response)
+            if error == "invalid_request":  # a malformed request, not a refused grant: the grant stays
+                response.raise_for_status()
+            # invalid_grant (expired or revoked), invalid_client (the registration is gone: register again)
+            raise _required(cfg, doc, "refresh_rejected", error, **({"client": None} if error == "invalid_client" else {}))
         response.raise_for_status()  # an unreachable authorization server is a failure, not a lost sign-in
-        doc["tokens"] = _tokens(OAuthToken.model_validate_json(response.content), tokens.get("refresh_token"))
+        doc["tokens"] = _tokens(OAuthToken.model_validate_json(response.content), tokens.get("refresh_token"),
+                                tokens.get("scope"))
         _save(cfg, doc)
         return doc["tokens"]["access_token"]
 
@@ -246,15 +284,26 @@ def _challenge(response: httpx.Response) -> Dict[str, Any]:
 
 class StoredBearer(httpx.Auth):
     """The transport's only OAuth part: the stored bearer on requests to the server's own origin; after a
-    Bearer ``401`` one refresh and one retry; otherwise ``self.refusal``. A bare ``401`` (no Bearer
-    challenge) passes through as today's error."""
+    Bearer ``401`` one refresh and one retry; a ``403 insufficient_scope`` (first answer or retried one)
+    records the scope it needs; otherwise ``self.refusal``. A bare ``401`` (no Bearer challenge) passes
+    through as today's error. A refusal also ends the connection (``clients``), so a session waiting on
+    another request (an SSE stream) fails at once instead of at its tool timeout."""
 
     def __init__(self, cfg: Any) -> None:
-        self.cfg, self.refusal = cfg, None
+        self.cfg, self.refusal, self.clients = cfg, None, []
 
-    def _refuse(self, exc: MCPAuthRequired) -> MCPAuthRequired:
+    def _own_challenge(self, response: httpx.Response) -> Dict[str, Any]:
+        from ouroboros.mcp_headers import origin_of
+
+        # The answering origin (a redirect may have left the server's): only the server's own challenge counts.
+        return _challenge(response) if origin_of(response.request.url) == origin_of(self.cfg.url) else {}
+
+    async def _refused(self, exc: MCPAuthRequired) -> MCPAuthRequired:
         exc.mcp_unsent_joined = True  # the server answered before running anything
         self.refusal = exc
+        for client in list(self.clients):
+            with contextlib.suppress(Exception):
+                await client.aclose()
         return exc
 
     async def async_auth_flow(self, request: httpx.Request):
@@ -267,15 +316,14 @@ class StoredBearer(httpx.Auth):
             try:
                 token = await current_token(self.cfg)
             except MCPAuthRequired as exc:
-                raise self._refuse(exc) from None
+                raise await self._refused(exc) from None
         if token:
             request.headers["Authorization"] = f"Bearer {token}"
         response = yield request
-        # The answering origin (a redirect may have left the server's): only the server's own challenge counts.
-        challenge = _challenge(response) if origin_of(response.request.url) == origin_of(self.cfg.url) else {}
+        challenge = self._own_challenge(response)
         if response.status_code == 401 and challenge:
             try:
-                with _locked(self.cfg):
+                async with _locked(self.cfg):
                     doc = _load(self.cfg)
                     if not (doc.get("tokens") or {}).get("access_token"):
                         raise _required(self.cfg, doc, (doc.get("sign_in") or {}).get("reason") or "not_signed_in",
@@ -283,18 +331,20 @@ class StoredBearer(httpx.Auth):
                     _save(self.cfg, {**doc, "challenge": challenge})
                 token = await current_token(self.cfg, rejected=token)
             except MCPAuthRequired as exc:
-                raise self._refuse(exc) from None
+                raise await self._refused(exc) from None
             request.headers["Authorization"] = f"Bearer {token}"
             response = yield request
-            if response.status_code == 401 and _challenge(response):
-                with _locked(self.cfg):
-                    raise self._refuse(_required(self.cfg, _load(self.cfg), "token_rejected")) from None
-        elif response.status_code == 403 and challenge.get("error") == "insufficient_scope":
-            with _locked(self.cfg):
+            challenge = self._own_challenge(response)
+            if response.status_code == 401 and challenge:
+                async with _locked(self.cfg):
+                    exc = _required(self.cfg, _load(self.cfg), "token_rejected")
+                raise await self._refused(exc) from None
+        if response.status_code == 403 and challenge.get("error") == "insufficient_scope":
+            async with _locked(self.cfg):
                 doc = _load(self.cfg)
-                wanted = _union((doc.get("tokens") or {}).get("scope"), challenge.get("scope"))
+                wanted = _union((doc.get("tokens") or {}).get("scope"), doc.get("required_scope"), challenge.get("scope"))
                 _save(self.cfg, {**doc, "challenge": challenge, "required_scope": wanted})
-            raise self._refuse(MCPAuthRequired(self.cfg.id, "insufficient_scope", challenge.get("scope") or ""))
+            raise await self._refused(MCPAuthRequired(self.cfg.id, "insufficient_scope", challenge.get("scope") or ""))
 
 
 def _union(*scopes: Optional[str]) -> Optional[str]:
@@ -356,8 +406,9 @@ def parse_return(address: str) -> Dict[str, str]:
 
 async def _discover(cfg: Any, doc: Dict[str, Any], http: httpx.AsyncClient):
     """RFC 9728 resource metadata (the challenge's address first), then the authorization server's metadata,
-    whose issuer must be the one the resource named; PKCE S256 must be offered. Also returns the metadata's
-    raw document: the SDK model drops ``authorization_response_iss_parameter_supported`` (RFC 9207)."""
+    whose issuer must be the one the resource named (without resource metadata, the server's origin);
+    PKCE S256 must be offered. Returns ``(prm, metadata, raw, issuer)``: the raw document keeps what the SDK
+    model normalizes or drops (the issuer exactly as published; ``authorization_response_iss_parameter_supported``)."""
     from mcp.client.auth.utils import (build_oauth_authorization_server_metadata_discovery_urls,
                                        build_protected_resource_metadata_discovery_urls, create_oauth_metadata_request,
                                        handle_auth_metadata_response, handle_protected_resource_response)
@@ -365,7 +416,10 @@ async def _discover(cfg: Any, doc: Dict[str, Any], http: httpx.AsyncClient):
     prm = None
     for url in build_protected_resource_metadata_discovery_urls(
             (doc.get("challenge") or {}).get("resource_metadata"), cfg.url):
-        prm = await handle_protected_resource_response(await http.send(create_oauth_metadata_request(_checked(url))))
+        response = await http.send(create_oauth_metadata_request(_checked(url)))
+        if response.status_code == 429 or response.status_code >= 500:
+            response.raise_for_status()  # a busy or failing server is not "no metadata": never another issuer
+        prm = await handle_protected_resource_response(response)
         if prm:
             break
     named = str(prm.authorization_servers[0]) if prm and prm.authorization_servers else None
@@ -381,22 +435,24 @@ async def _discover(cfg: Any, doc: Dict[str, Any], http: httpx.AsyncClient):
             break
     if metadata is None:
         raise MCPAuthRequired(cfg.id, "no_oauth_metadata", "the server publishes no authorization metadata")
-    if named and str(metadata.issuer).rstrip("/") != named.rstrip("/"):
-        raise MCPAuthRequired(cfg.id, "issuer_mismatch", f"{metadata.issuer} is not {named}")
+    parsed = urllib.parse.urlsplit(cfg.url)
+    expected = named or f"{parsed.scheme}://{parsed.netloc}"
+    if str(metadata.issuer).rstrip("/") != expected.rstrip("/"):
+        raise MCPAuthRequired(cfg.id, "issuer_mismatch", f"{metadata.issuer} is not {expected}")
     if "S256" not in (metadata.code_challenge_methods_supported or []):
         raise MCPAuthRequired(cfg.id, "no_pkce", "the authorization server does not offer PKCE S256")
-    return prm, metadata, raw
+    issuer = raw.get("issuer") if isinstance(raw.get("issuer"), str) and raw.get("issuer") else str(metadata.issuer)
+    return prm, metadata, raw, issuer
 
 
-async def _client_for(cfg: Any, doc: Dict[str, Any], metadata: Any, redirect: str, http: httpx.AsyncClient,
-                      client_id: str, client_secret: str) -> Dict[str, Any]:
+async def _client_for(cfg: Any, doc: Dict[str, Any], metadata: Any, issuer: str, redirect: str,
+                      http: httpx.AsyncClient, client_id: str, client_secret: str) -> Dict[str, Any]:
     """The owner's own registration if given, else the stored (or pending) client of this issuer and return
-    address, else dynamic registration (deprecated in 2026-07-28 but offered by most servers), else a typed refusal
-    naming the address to register."""
+    address, else dynamic registration (deprecated in 2026-07-28 but offered by most servers), else a typed
+    refusal naming the address to register."""
     from mcp.client.auth.utils import handle_registration_response
     from mcp.shared.auth import OAuthClientMetadata
 
-    issuer = str(metadata.issuer)
     if client_id:
         methods = metadata.token_endpoint_auth_methods_supported or []
         method = "none" if not client_secret else (
@@ -412,11 +468,15 @@ async def _client_for(cfg: Any, doc: Dict[str, Any], metadata: Any, redirect: st
                               f"the provider registers no apps itself: register one there for the return address "
                               f"{redirect}, then enter its client ID (and secret) under Sign in on this server's card "
                               "in Settings → MCP")
+    endpoint = _checked(str(metadata.registration_endpoint))
     body = OAuthClientMetadata(client_name="Ouroboros", redirect_uris=[redirect], token_endpoint_auth_method="none",
                                grant_types=["authorization_code", "refresh_token"], response_types=["code"]).model_dump(
         mode="json", exclude_none=True)
     body["application_type"] = "native" if urllib.parse.urlparse(redirect).hostname in _LOOPBACK else "web"
-    info = await handle_registration_response(await http.post(_checked(str(metadata.registration_endpoint)), json=body))
+    response = await http.post(endpoint, json=body)
+    if response.status_code not in (200, 201):
+        raise MCPAuthRequired(cfg.id, "registration_rejected", f"{_oauth_error(response)} from {endpoint}")
+    info = await handle_registration_response(response)
     return {"client_id": info.client_id, "client_secret": info.client_secret,
             "token_endpoint_auth_method": info.token_endpoint_auth_method or "none", "redirect_uri": redirect,
             "issuer": issuer, "source": "registered"}
@@ -429,13 +489,15 @@ async def begin(cfg: Any, *, return_base: str = "", client_id: str = "", client_
 
     doc = _load(cfg)
     async with _client() as http:
-        prm, metadata, raw = await _discover(cfg, doc, http)
+        prm, metadata, raw, issuer = await _discover(cfg, doc, http)
         stored = doc.get("client") or {}
         redirect = stored["redirect_uri"] if stored.get("source") == "owner" and not client_id else redirect_uri(return_base)
-        client = await _client_for(cfg, doc, metadata, redirect, http, client_id, client_secret)
+        client = await _client_for(cfg, doc, metadata, issuer, redirect, http, client_id, client_secret)
+    authorize = _checked(str(metadata.authorization_endpoint))
     pkce, nonce = PKCEParameters.generate(), secrets.token_urlsafe(24)
+    # A step-up keeps what the grant already allows and adds what the server asked for (MCP step-up flow).
     scope = _union(get_client_metadata_scopes((doc.get("challenge") or {}).get("scope"), prm, metadata),
-                   doc.get("required_scope"))
+                   (doc.get("tokens") or {}).get("scope"), doc.get("required_scope"))
     resource = str(prm.resource) if prm and prm.resource else None  # RFC 8707 where the server published PRM
     params = {"response_type": "code", "client_id": client["client_id"], "redirect_uri": client["redirect_uri"],
               "state": _state(cfg.id, nonce), "code_challenge": pkce.code_challenge, "code_challenge_method": "S256",
@@ -445,13 +507,12 @@ async def begin(cfg: Any, *, return_base: str = "", client_id: str = "", client_
                                          "revocation_endpoint") if key in facts}
     kept["authorization_response_iss_parameter_supported"] = raw.get(
         "authorization_response_iss_parameter_supported") is True
-    with _locked(cfg):  # the current grant keeps its own issuer and endpoints until this sign-in completes
+    async with _locked(cfg):  # the current grant keeps its own issuer and endpoints until this sign-in completes
         doc = _load(cfg)  # re-read: a call may have refreshed meanwhile
         doc["pending"] = {"nonce": nonce, "code_verifier": pkce.code_verifier, "client": client, "scope": scope,
-                          "issuer": str(metadata.issuer), "resource": resource, "metadata": kept,
-                          "started": utc_now_iso()}
+                          "issuer": issuer, "resource": resource, "metadata": kept, "started": utc_now_iso()}
         _save(cfg, doc)
-    return {"server": cfg.id, "url": f"{_checked(str(metadata.authorization_endpoint))}?{urllib.parse.urlencode(params)}",
+    return {"server": cfg.id, "url": f"{authorize}?{urllib.parse.urlencode(params)}",
             "redirect_uri": client["redirect_uri"]}
 
 
@@ -466,7 +527,7 @@ async def complete(cfg: Any, *, state: str, code: str = "", iss: Optional[str] =
     if not pending or not nonce or not secrets.compare_digest(str(pending.get("nonce", "")), str(nonce)):
         raise MCPAuthRequired(cfg.id, "sign_in_superseded", "this return belongs to an older or unknown sign-in")
     issuer, metadata = pending.get("issuer") or "", pending.get("metadata") or {}
-    if iss is not None and iss != issuer:  # RFC 9207: the response's issuer is the one the verifier was made for
+    if iss is not None and iss != issuer:  # RFC 9207: exactly the issuer the verifier was made for
         raise MCPAuthRequired(cfg.id, "issuer_mismatch", f"{iss} is not {issuer}")
     if iss is None and metadata.get("authorization_response_iss_parameter_supported"):
         raise MCPAuthRequired(cfg.id, "issuer_missing", "the provider promised an iss parameter and sent none")
@@ -481,22 +542,23 @@ async def complete(cfg: Any, *, state: str, code: str = "", iss: Optional[str] =
     if response.status_code != 200:
         raise MCPAuthRequired(cfg.id, "exchange_rejected", _oauth_error(response))
     token = OAuthToken.model_validate_json(response.content)
-    with _locked(cfg):
+    async with _locked(cfg):
         doc = _load(cfg)
         if (doc.get("pending") or {}).get("nonce") != pending.get("nonce"):
             raise MCPAuthRequired(cfg.id, "sign_in_superseded", "a newer sign-in started meanwhile")
         for key in ("pending", "challenge", "required_scope"):
             doc.pop(key, None)
         doc.update(issuer=issuer, resource=pending.get("resource"), metadata=metadata, client=client,
-                   tokens=_tokens(token, None), sign_in={"state": SIGNED_IN, "since": utc_now_iso()})
+                   tokens=_tokens(token, None, pending.get("scope")),
+                   sign_in={"state": SIGNED_IN, "since": utc_now_iso()})
         _save(cfg, doc)
-    return {"ok": True, "server": cfg.id, "scope": token.scope or ""}
+    return {"ok": True, "server": cfg.id, "scope": doc["tokens"]["scope"] or ""}
 
 
 async def sign_out(cfg: Any) -> Dict[str, Any]:
     """Forget this installation's tokens (the client stays for the next sign-in) and ask the provider to
     revoke them where it publishes a revocation endpoint (RFC 7009); ``revoked`` says what it confirmed."""
-    with _locked(cfg):
+    async with _locked(cfg):
         doc = _load(cfg)
         tokens = doc.pop("tokens", None) or {}
         doc.pop("pending", None)

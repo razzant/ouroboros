@@ -750,6 +750,7 @@ class McpSignIn(TypedDict, total=False):
     since: Optional[str]
     issuer: str
     pending: bool  # a sign-in was begun and not completed
+    required_scope: str  # with insufficient_scope: what a new sign-in asks for
 
 
 class McpServerStatus(TypedDict, total=False):

@@ -10,6 +10,7 @@ the builtin return page would.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import secrets
@@ -22,6 +23,7 @@ import httpx
 import pytest
 
 from ouroboros import config, mcp_client, mcp_oauth
+from tests.test_mcp_headers_loopback import loopback  # noqa: F401 -- the SSE fixture
 
 
 class _Provider:
@@ -335,3 +337,227 @@ def test_a_bare_401_without_a_bearer_challenge_stays_an_ordinary_error(tmp_path,
         for server, thread in running:
             server.should_exit = True
             thread.join(10)
+
+
+# -- review findings (MCP_RV1), each against its producer ------------------------------------------------------
+
+
+def _mock_as(monkeypatch, tmp_path, *, issuer="https://auth.example", token_scope=None, prm_status=200):
+    """An authorization server in memory: resource metadata (or not), metadata, registration and tokens."""
+    import types
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    cfg = mcp_client.normalize_server_config({"id": "rv1", "enabled": True, "url": "https://mcp.example/mcp"})
+    base = issuer.rstrip("/")
+    metadata = {"issuer": issuer, "authorization_endpoint": base + "/authorize", "token_endpoint": base + "/token",
+                "registration_endpoint": base + "/register", "code_challenge_methods_supported": ["S256"],
+                "authorization_response_iss_parameter_supported": True}
+    seen = types.SimpleNamespace(paths=[])
+
+    def answer(request):
+        seen.paths.append(request.url.path)
+        if "oauth-protected-resource" in request.url.path:
+            if prm_status != 200:
+                return httpx.Response(prm_status)
+            return httpx.Response(200, json={"resource": cfg.url, "authorization_servers": [issuer],
+                                             "scopes_supported": ["files:read"]})
+        if "oauth-authorization-server" in request.url.path:
+            return httpx.Response(200, json=metadata)
+        if request.url.path == "/register":
+            return httpx.Response(201, json={**json.loads(request.content), "client_id": "synthetic-client"})
+        if request.url.path == "/token":
+            body = {"access_token": "synthetic-access", "refresh_token": "synthetic-refresh", "expires_in": 3600,
+                    "token_type": "Bearer", **({"scope": token_scope} if token_scope is not None else {})}
+            return httpx.Response(200, json=body)
+        raise AssertionError(str(request.url))
+
+    monkeypatch.setattr(mcp_oauth, "_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(answer)))
+    return cfg, metadata, seen
+
+
+def _state_of(started) -> str:
+    return dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(started["url"]).query))["state"]
+
+
+def _bearer_call(cfg, resource):
+    async def call():
+        async with httpx.AsyncClient(auth=mcp_oauth.StoredBearer(cfg), transport=httpx.MockTransport(resource)) as client:
+            with pytest.raises(mcp_oauth.MCPAuthRequired) as caught:
+                await client.get(cfg.url)
+            return caught.value
+
+    return asyncio.run(call())
+
+
+def test_an_issuer_published_without_a_trailing_slash_is_compared_as_published(monkeypatch, tmp_path):
+    cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)  # "https://auth.example", as the RFC 9207 iss sends it
+    started = asyncio.run(mcp_oauth.begin(cfg))
+    assert asyncio.run(mcp_oauth.complete(cfg, state=_state_of(started), code="c", iss="https://auth.example"))["ok"]
+    assert _file(cfg)["issuer"] == "https://auth.example"
+
+
+def test_without_resource_metadata_the_issuer_must_be_the_servers_origin(monkeypatch, tmp_path):
+    cfg, metadata, _seen = _mock_as(monkeypatch, tmp_path, issuer="https://mcp.example", prm_status=404)
+    assert asyncio.run(mcp_oauth.begin(cfg))["url"].startswith("https://mcp.example/authorize")  # legacy, honest
+    metadata["issuer"] = "https://elsewhere.example"
+    with pytest.raises(mcp_oauth.MCPAuthRequired) as caught:
+        asyncio.run(mcp_oauth.begin(cfg))
+    assert caught.value.reason == "issuer_mismatch"
+
+
+def test_a_busy_resource_server_stops_discovery_instead_of_trying_another_issuer(monkeypatch, tmp_path):
+    cfg, _metadata, seen = _mock_as(monkeypatch, tmp_path, prm_status=503)
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(mcp_oauth.begin(cfg))
+    assert not any("oauth-authorization-server" in path for path in seen.paths)
+
+
+def test_a_draft_test_of_another_address_never_replaces_the_saved_sign_in(signin):
+    _provider, manager, cfg, settings = signin()
+    _complete(cfg, _provider_return(cfg))
+    before = _file(cfg)
+    draft = {**settings["MCP_SERVERS"][0], "url": cfg.url + "?edited-draft=1"}
+    assert manager.test_server(draft)["ok"] is False  # the draft asked for sign-in ...
+    assert _file(cfg) == before  # ... and the saved server keeps its grant
+    assert manager.test_server(settings["MCP_SERVERS"][0])["ok"] is True  # the saved address still uses it
+
+
+def test_an_sse_post_refused_for_sign_in_ends_the_session_at_once(loopback, monkeypatch, tmp_path):  # noqa: F811
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(mcp_client.MCPManager, "refresh_all_background", lambda *args, **kwargs: None)
+
+    class RefusePosts:
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] == "http" and scope["method"] == "POST":
+                await send({"type": "http.response.start", "status": 401, "headers": [(b"www-authenticate", b"Bearer")]})
+                await send({"type": "http.response.body", "body": b"no grant"})
+                return
+            await self.app(scope, receive, send)
+
+    _app, url = loopback("sse", {}, wrap=RefusePosts)
+    manager = mcp_client.get_manager()
+    manager.reconfigure({"MCP_ENABLED": True, "MCP_TOOL_TIMEOUT_SEC": 10, "MCP_SERVERS": [
+        {"id": "sseprobe", "enabled": True, "transport": "sse", "url": url}]})
+    began = time.monotonic()
+    result = manager.refresh_server("sseprobe")
+    assert result.get("code") == "MCP_AUTH_REQUIRED", result
+    assert time.monotonic() - began < 5  # not the 10 s tool timeout
+
+
+def test_insufficient_scope_keeps_the_grant_and_shows_the_step_up(monkeypatch, tmp_path):
+    cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)
+    mcp_oauth._save(cfg, {"tokens": {"access_token": "synthetic-access", "scope": "files:read"}})
+    refused = _bearer_call(cfg, lambda request: httpx.Response(403, headers={
+        "WWW-Authenticate": 'Bearer error="insufficient_scope", scope="files:write"'}))
+    assert refused.reason == "insufficient_scope"
+    row = mcp_oauth.status(cfg)
+    assert (row["state"], row["reason"], row["required_scope"]) == ("signed_in", "insufficient_scope", "files:read files:write")
+
+
+def test_a_403_after_a_refreshed_retry_is_still_the_typed_step_up(monkeypatch, tmp_path):
+    cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)
+    mcp_oauth._save(cfg, {"tokens": {"access_token": "old-access", "refresh_token": "synthetic-refresh"},
+                          "metadata": {"token_endpoint": "https://auth.example/token"}, "client": {"client_id": "c"}})
+    answers = [httpx.Response(401, headers={"WWW-Authenticate": "Bearer"}),
+               httpx.Response(403, headers={"WWW-Authenticate": 'Bearer error="insufficient_scope", scope="write"'})]
+    assert _bearer_call(cfg, lambda request: answers.pop(0)).reason == "insufficient_scope"
+    assert mcp_oauth._load(cfg)["required_scope"] == "write"
+
+
+def test_two_requests_of_one_event_loop_share_one_refresh_without_blocking_it(monkeypatch, tmp_path):
+    cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)
+    mcp_oauth._save(cfg, {"tokens": {"access_token": "old-access", "expires_at": 1, "refresh_token": "synthetic-refresh"},
+                          "metadata": {"token_endpoint": "https://auth.example/token"}, "client": {"client_id": "c"}})
+    monkeypatch.setattr(mcp_oauth, "MCP_OAUTH_LOCK_WAIT_SEC", 0.25)  # only the failure wait is shortened
+    refreshes = []
+
+    async def answer(request):
+        refreshes.append(request.url.path)
+        await asyncio.sleep(0.05)
+        return httpx.Response(200, json={"access_token": "new-access", "expires_in": 3600})
+
+    monkeypatch.setattr(mcp_oauth, "_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(answer)))
+
+    async def both():
+        return await asyncio.gather(mcp_oauth.current_token(cfg), mcp_oauth.current_token(cfg), return_exceptions=True)
+
+    assert asyncio.run(both()) == ["new-access", "new-access"] and refreshes == ["/token"]
+
+
+def test_a_scope_the_token_endpoint_does_not_repeat_survives_a_step_up(monkeypatch, tmp_path):
+    cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)  # token answers omit scope (RFC 6749 §5.1: unchanged)
+    started = asyncio.run(mcp_oauth.begin(cfg))
+    asyncio.run(mcp_oauth.complete(cfg, state=_state_of(started), code="c", iss="https://auth.example"))
+    assert _file(cfg)["tokens"]["scope"] == "files:read"
+    _bearer_call(cfg, lambda request: httpx.Response(403, headers={
+        "WWW-Authenticate": 'Bearer error="insufficient_scope", scope="files:write"'}))
+    again = asyncio.run(mcp_oauth.begin(cfg))
+    asked = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(again["url"]).query))["scope"]
+    assert set(asked.split()) == {"files:read", "files:write"}
+
+
+def test_a_malformed_refresh_keeps_the_grant_and_a_refused_one_asks_for_sign_in(monkeypatch, tmp_path):
+    cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)
+    grant = {"tokens": {"access_token": "old-access", "expires_at": 1, "refresh_token": "synthetic-refresh"},
+             "metadata": {"token_endpoint": "https://auth.example/token"}, "client": {"client_id": "c"}}
+    for error, kept in (("invalid_request", True), ("invalid_grant", False)):
+        mcp_oauth._save(cfg, grant)
+        monkeypatch.setattr(mcp_oauth, "_client", lambda error=error: httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: httpx.Response(400, json={"error": error}))))
+        with pytest.raises(httpx.HTTPStatusError if kept else mcp_oauth.MCPAuthRequired):
+            asyncio.run(mcp_oauth.current_token(cfg))
+        assert ("tokens" in _file(cfg)) is kept, error
+
+
+def test_parallel_streams_of_a_real_session_survive_one_rejected_access_token(signin, monkeypatch):
+    provider, manager, cfg, _settings = signin()
+    _complete(cfg, _provider_return(cfg))
+    old_access = _file(cfg)["tokens"]["access_token"]
+    load, refresh = provider.load_access_token, provider.exchange_refresh_token
+    old_seen, both_rejected = 0, None
+
+    async def reject_after_initialize(token):  # the GET stream and the POST are both refused together
+        nonlocal old_seen, both_rejected
+        if token == old_access:
+            old_seen += 1
+            if old_seen > 1:
+                if both_rejected is None:
+                    both_rejected = asyncio.Event()
+                else:
+                    both_rejected.set()
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(both_rejected.wait(), 2)
+                return None
+        return await load(token)
+
+    async def slow_refresh(client, refresh_token, scopes):
+        await asyncio.sleep(0.1)
+        return await refresh(client, refresh_token, scopes)
+
+    monkeypatch.setattr(provider, "load_access_token", reject_after_initialize)
+    monkeypatch.setattr(provider, "exchange_refresh_token", slow_refresh)
+    monkeypatch.setattr(mcp_oauth, "MCP_OAUTH_LOCK_WAIT_SEC", 0.25)
+    assert manager.refresh_server("docs")["ok"] is True
+
+
+def test_the_sign_in_tool_honours_the_tasks_network_contract(tmp_path):
+    from ouroboros.tools import registry_guards
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    repo, drive = tmp_path / "repo", tmp_path / "data"
+    repo.mkdir()
+    drive.mkdir()
+    ctx = ToolContext(repo_dir=repo, drive_root=drive, task_id="oauth-gate",
+                      task_metadata={"task_contract": {"allowed_resources": {"network": False}}})
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry.set_context(ctx)
+    args = {"action": "begin", "server": "docs"}
+    assert registry.get_schema_by_name("remote_mcp_sign_in") is None
+    assert getattr(registry_guards._capability_resource_guard_result(ctx, "remote_mcp_sign_in", args), "code",
+                   None) == "RESOURCE_CONSTRAINT_BLOCKED"
+    ctx.task_metadata["task_contract"]["allowed_resources"]["network"] = True
+    assert registry.get_schema_by_name("remote_mcp_sign_in") is not None
+    assert registry_guards._capability_resource_guard_result(ctx, "remote_mcp_sign_in", args) is None
