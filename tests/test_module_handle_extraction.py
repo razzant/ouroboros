@@ -70,6 +70,8 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "_origin_from_mapping", "_repo_writer_turn_allowed",
         "_report_binding_failure", "load_state",
         "repo_writer_admission_closed", "send_with_budget",
+        # The Fault boot's recovery turn names the rows the boot holds with saved work (owner 2A).
+        "PENDING",
     })),
     "supervisor/worker_pool_lifecycle.py": ("supervisor/workers.py", "_pool", frozenset({
         # Runtime676: execution reader/disable moved from the facade; RUNNING

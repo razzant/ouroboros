@@ -357,12 +357,13 @@ def test_only_the_planned_restart_record_triggers_the_boot_auto_resume(tmp_path,
         (tmp_path / "memory" / "scratchpad.md").write_text(scratchpad, encoding="utf-8")
     (tmp_path / "logs" / "supervisor.jsonl").write_text(json.dumps({"type": "launcher_start"}) + "\n",
                                                         encoding="utf-8")
-    pool = SimpleNamespace(DRIVE_ROOT=tmp_path, load_state=lambda: {"owner_chat_id": 7},
+    pool = SimpleNamespace(DRIVE_ROOT=tmp_path, load_state=lambda: {"owner_chat_id": 7}, PENDING=[],
                            chat_turn_liveness=lambda: False)
     monkeypatch.setattr(worker_chat_lane, "_pool", lambda: pool)
     monkeypatch.setattr(worker_chat_lane.time, "sleep", lambda _s: None)
     woke = threading.Event()
-    monkeypatch.setattr(worker_chat_lane, "handle_chat_direct", lambda *_a, **_k: woke.set())
+    monkeypatch.setattr(worker_chat_lane, "handle_chat_direct",
+                        lambda *_a, **_k: woke.set() or {"task": {"id": "resume-1"}})
 
     worker_chat_lane.auto_resume_after_restart()
     assert not woke.wait(0.2), "a log-tail launcher line alone never auto-resumes"
@@ -370,6 +371,115 @@ def test_only_the_planned_restart_record_triggers_the_boot_auto_resume(tmp_path,
     (tmp_path / "state" / "pending_restart_verify.json").write_text("{}", encoding="utf-8")
     worker_chat_lane.auto_resume_after_restart()
     assert woke.wait(5), "the planned restart's verify record works independently of scratchpad content"
+    [row] = [row for row in _supervisor_rows(tmp_path) if row["type"] == "auto_resume_triggered"]
+    assert row["trigger"] == "planned_restart" and row["task_id"] == "resume-1"
+
+
+# --- owner 2A (2026-11-06): one recovery turn for the mind after a Fault boot ---
+
+FAULT_ENDED_AT = "2026-01-01T00:00:00+00:00"  # before any row this test writes
+
+
+def _fault_boot(tmp_path, monkeypatch, *, cause="bus_lost", chat=7, live=False):
+    """A boot whose previous generation's shutdown entry carries ``cause``: the real queue module as the pool,
+    a known owner chat (unless ``chat`` is None), the lane's liveness and admission stubbed."""
+    from ouroboros import owned_shutdown
+    from supervisor import worker_chat_lane
+
+    queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    (tmp_path / "logs").mkdir(exist_ok=True)
+    (tmp_path / "state").mkdir(exist_ok=True)
+    monkeypatch.setattr(workers, "load_state", lambda: {"owner_chat_id": chat} if chat is not None else {})
+    monkeypatch.setattr(owned_shutdown._GENERATION_STOP, "previous",
+                        {"cause": cause, "entered_at": FAULT_ENDED_AT, "generation": "g-prev"} if cause else {})
+    monkeypatch.setattr(worker_chat_lane, "conversation_turn_live", lambda: live)
+    turns = []
+
+    def admit(chat_id, text, image_data=None, **_kw):
+        turns.append((chat_id, text))
+        return {"task": {"id": f"turn-{len(turns)}"}, "worker_id": None}
+
+    monkeypatch.setattr(worker_chat_lane, "handle_chat_direct", admit)
+    return queue, workers, turns
+
+
+def test_a_fault_boot_starts_one_recovery_turn_with_the_facts_bounded_by_the_previous_turns_result(tmp_path, monkeypatch):
+    """CANDIDATE_v2 §2(d), owner 2A. After a ``bus_lost``/``loop_failed`` entry the boot admits ONE turn through
+    the auto-resume seam with facts only: the cause, when the previous generation ended, the tasks held with
+    saved state and the interrupted roots cancelled without a saved point (``server_shutdown``, Continue-eligible;
+    an owner Stop and a child are not listed), and the owner's one decision (the mind resumes or continues and
+    tells once). Its task id rides the ``auto_resume_triggered`` row (``trigger: core_lost``). Bound by a fact:
+    while that result is not terminal a later fault boot starts none (and says so); once terminal, the next one
+    starts. A planned-restart verify record beside the fault adds no second turn."""
+    from supervisor import worker_chat_lane
+    from supervisor.events_budget import HOLD_SAVED_WORK, hold_budget_row
+    from ouroboros.task_results import write_task_result
+
+    queue, workers, turns = _fault_boot(tmp_path, monkeypatch)
+    held = {"id": "held-1", "chat_id": 7, "type": "task"}
+    held["_budget_pause_hold"] = hold_budget_row(held, reason=HOLD_SAVED_WORK)
+    workers.PENDING.extend([held, {"id": "plain-queued", "chat_id": 7, "type": "task"}])
+    write_task_result(tmp_path, "root-cut", "cancelled", root_task_id="root-cut",
+                      cancel_origin={"source": "server_shutdown", "reason": "fault"})
+    write_task_result(tmp_path, "child-cut", "cancelled", root_task_id="root-cut", parent_task_id="root-cut",
+                      cancel_origin={"source": "server_shutdown", "reason": "fault"})
+    write_task_result(tmp_path, "root-stopped", "cancelled", root_task_id="root-stopped",
+                      cancel_origin={"source": "owner_stop", "reason": "owner"})
+    (tmp_path / "state" / "pending_restart_verify.json").write_text("{}", encoding="utf-8")
+
+    worker_chat_lane.auto_resume_after_restart()
+
+    assert len(turns) == 1 and turns[0][0] == 7
+    text = turns[0][1]
+    assert text.startswith("[recovery after a server fault] The previous server generation ended at " + FAULT_ENDED_AT)
+    assert "its event-bus process exited" in text and "restarted itself with the same code" in text
+    assert "Tasks held with their saved state (Resume continues each from that state): held-1." in text
+    assert "cancelled as server_shutdown (Continue-eligible): root-cut." in text
+    assert "root-stopped" not in text and "child-cut" not in text and "plain-queued" not in text
+    assert "You decide what to resume or continue, with your Resume and Continue tools, and tell the owner once." in text
+    assert "[auto-resume after restart]" not in text, "the planned-restart turn is not a second turn beside the fault's"
+    [row] = [row for row in _supervisor_rows(tmp_path) if row["type"] == "auto_resume_triggered"]
+    assert row["trigger"] == "core_lost" and row["task_id"] == "turn-1" and row["cause"] == "bus_lost"
+    assert row["ended_at"] == FAULT_ENDED_AT and row["held"] == ["held-1"] and row["cancelled"] == ["root-cut"]
+
+    # Bound by a fact, not a counter: the turn's result is open, so the next fault boot starts none.
+    write_task_result(tmp_path, "turn-1", "running", chat_id=7)
+    worker_chat_lane.auto_resume_after_restart()
+    assert len(turns) == 1
+    skipped = [row for row in _supervisor_rows(tmp_path) if row["type"] == "auto_resume_skipped"]
+    assert skipped[-1]["reason"] == "previous_recovery_turn_open" and skipped[-1]["task_id"] == "turn-1"
+    # Once it is terminal the bound lifts: the next fault boot gets its own turn.
+    write_task_result(tmp_path, "turn-1", "completed", chat_id=7, result="told the owner")
+    worker_chat_lane.auto_resume_after_restart()
+    assert len(turns) == 2 and "its event-bus process exited" in turns[1][1]
+
+
+@pytest.mark.parametrize("cause", ["launcher_quit", "launcher_gone", "external_signal", "restart_requested",
+                                   "owner_restart", "panic", ""])
+def test_quit_panic_owner_restart_and_planned_restart_boots_start_no_recovery_turn(tmp_path, monkeypatch, cause):
+    """Only the Fault door's causes start the recovery turn; every other previous entry (or none) starts nothing
+    through this seam, and the planned-restart resume keeps its own trigger."""
+    from supervisor import worker_chat_lane
+
+    _queue, _workers, turns = _fault_boot(tmp_path, monkeypatch, cause=cause)
+    worker_chat_lane.auto_resume_after_restart()
+    assert turns == []
+    assert not [row for row in _supervisor_rows(tmp_path) if row["type"] in ("auto_resume_triggered", "auto_resume_skipped")]
+
+
+@pytest.mark.parametrize("chat,live,reason", [(None, False, ""), (7, True, "conversation_turn_live")],
+                         ids=["owner chat unknown", "a conversation turn is live"])
+def test_a_fault_boot_without_a_known_owner_chat_or_with_a_live_turn_starts_none(tmp_path, monkeypatch, chat, live, reason):
+    """The seam's own preconditions hold for the recovery turn too: an unknown owner chat admits nothing (and
+    records nothing: #1307); a live conversation turn at boot is the owner's and the recovery turn yields,
+    recording why."""
+    from supervisor import worker_chat_lane
+
+    _queue, _workers, turns = _fault_boot(tmp_path, monkeypatch, chat=chat, live=live)
+    worker_chat_lane.auto_resume_after_restart()
+    assert turns == []
+    rows = [row for row in _supervisor_rows(tmp_path) if row["type"] in ("auto_resume_triggered", "auto_resume_skipped")]
+    assert [row.get("reason", "") for row in rows] == ([reason] if reason else [])
 
 
 # --- Batch4 F1: the stop door's typed cause reaches the owner's Continue ---

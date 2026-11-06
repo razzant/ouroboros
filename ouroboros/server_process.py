@@ -20,7 +20,7 @@ import threading
 import time
 import urllib.parse
 from contextlib import nullcontext
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import uvicorn
 
@@ -584,27 +584,141 @@ def fault_cancel_reason() -> str:
     return _FAULT_CANCEL_REASONS.get(_stop_source, "")
 
 
-def previous_fault_sentence(held: int) -> str:
-    """The startup notice's clause after a fault exit: the previous generation's cause and the held count,
-    read from the shutdown entry the boot claim replaced (``owned_shutdown.claim_shutdown_entry``)."""
+def previous_fault_entry() -> Dict[str, Any]:
+    """The previous generation's shutdown entry when it ended through the Fault door, else ``{}``: the record
+    the boot claim replaced (``owned_shutdown.claim_shutdown_entry``), with its ``cause`` and ``entered_at``."""
     from ouroboros.owned_shutdown import _GENERATION_STOP
 
-    cause = str(_GENERATION_STOP.previous.get("cause") or "")
-    if cause not in FAULT_CAUSES:
+    previous = dict(_GENERATION_STOP.previous)
+    return previous if str(previous.get("cause") or "") in FAULT_CAUSES else {}
+
+
+def _fault_cause_words(cause: str) -> str:
+    return "its event-bus process exited" if cause == FAULT_BUS_LOST else "its task loop failed three times in a row"
+
+
+def previous_fault_sentence(held: int) -> str:
+    """The startup notice's clause after a fault exit: the previous generation's cause and the held count."""
+    previous = previous_fault_entry()
+    if not previous:
         return ""
-    what = ("its event-bus process exited" if cause == FAULT_BUS_LOST
-            else "its task loop failed three times in a row")
     kept = (" No task holds saved work." if held <= 0 else " 1 task is held with its saved state." if held == 1
             else f" {held} tasks are held with their saved state.")
-    return f"The previous server generation restarted itself: {what}.{kept}"
+    return f"The previous server generation restarted itself: {_fault_cause_words(str(previous['cause']))}.{kept}"
+
+
+def held_saved_work_ids(pending: Any) -> List[str]:
+    """The restored queue rows the boot holds under their saved-work hold (``HOLD_SAVED_WORK``), by id."""
+    from supervisor.events_budget import HOLD_SAVED_WORK, budget_hold_fact
+
+    return [str(task.get("id") or "") for task in list(pending or ()) if isinstance(task, dict)
+            and str((budget_hold_fact(task) or {}).get("reason") or "") == HOLD_SAVED_WORK]
 
 
 def held_saved_work_count(pending: Any) -> int:
-    """How many restored queue rows the boot holds under their saved-work hold (``HOLD_SAVED_WORK``)."""
-    from supervisor.events_budget import HOLD_SAVED_WORK, budget_hold_fact
+    return len(held_saved_work_ids(pending))
 
-    return sum(1 for task in list(pending or ()) if isinstance(task, dict)
-               and str((budget_hold_fact(task) or {}).get("reason") or "") == HOLD_SAVED_WORK)
+
+RECOVERY_TRIGGER = "core_lost"  # the ``auto_resume_triggered`` row's trigger for the Fault boot's recovery turn
+_RECOVERY_JOURNAL_TAIL_BYTES = 4_000_000  # how far back the live journal is read for the previous recovery turn
+
+
+def cancelled_unsaved_roots(root: pathlib.Path, since: str) -> List[str]:
+    """Root tasks the previous generation's teardown cancelled without a saved point: ``cancel_origin.source``
+    ``server_shutdown`` (Continue-eligible), written at or after that generation entered its shutdown. The
+    store's status prefilter bounds the read; children are their roots' business."""
+    from ouroboros.task_results import list_task_results
+
+    try:
+        rows = list_task_results(root, statuses=["cancelled"])
+    except Exception:
+        log.warning("Cancelled rows are unreadable; the recovery turn names none", exc_info=True)
+        return []
+    roots = []
+    for row in rows:
+        origin = row.get("cancel_origin") if isinstance(row.get("cancel_origin"), dict) else {}
+        task_id = str(row.get("task_id") or "")
+        if (task_id and str(origin.get("source") or "") == "server_shutdown"
+                and str(row.get("root_task_id") or task_id) == task_id
+                and (not since or str(row.get("updated_at") or "") >= since)):
+            roots.append(task_id)
+    return sorted(roots)
+
+
+def open_recovery_turn(root: pathlib.Path) -> str:
+    """The task id of the last core-loss recovery turn whose result is not yet terminal, else ``""``: the fact
+    that bounds the next one. Read from the journal's ``auto_resume_triggered`` rows (``trigger: core_lost``); a
+    turn whose row rotated out of the tail, or whose result is gone, binds nothing; an unreadable result holds."""
+    from ouroboros.task_results import (STATUS_CANCELLED, STATUS_COMPLETED, STATUS_FAILED, STATUS_REJECTED_DUPLICATE,
+                                        load_task_result)
+    from ouroboros.utils import iter_jsonl_objects
+
+    last = ""
+    try:
+        for row in iter_jsonl_objects(root / "logs" / "supervisor.jsonl", tail_bytes=_RECOVERY_JOURNAL_TAIL_BYTES):
+            if (row.get("type") == "auto_resume_triggered" and row.get("trigger") == RECOVERY_TRIGGER
+                    and row.get("task_id")):
+                last = str(row["task_id"])
+    except Exception:
+        log.warning("The journal tail is unreadable; no previous recovery turn is known", exc_info=True)
+    if not last:
+        return ""
+    try:
+        result = load_task_result(root, last)
+    except Exception:
+        return last  # not proven terminal: the bound holds
+    if not isinstance(result, dict):
+        return ""  # the turn's row is gone: nothing to hold on
+    terminal = {STATUS_CANCELLED, STATUS_COMPLETED, STATUS_FAILED, STATUS_REJECTED_DUPLICATE}
+    return "" if str(result.get("status") or "") in terminal else last
+
+
+def recovery_turn_text(cause: str, ended_at: str, held: List[str], cancelled: List[str], root: pathlib.Path) -> str:
+    """The recovery turn's message: facts, and the owner's one decision (2A: the mind decides and tells once)."""
+    from ouroboros.places import paused_places_sentence
+
+    return "\n".join(filter(None, (
+        f"[recovery after a server fault] The previous server generation ended at {ended_at or 'an unknown time'}: "
+        f"{_fault_cause_words(cause)}. This generation restarted itself with the same code.",
+        "Tasks held with their saved state (Resume continues each from that state): "
+        f"{', '.join(held) if held else 'none'}.",
+        "Interrupted roots with no saved point, cancelled as server_shutdown (Continue-eligible): "
+        f"{', '.join(cancelled) if cancelled else 'none'}.",
+        "You decide what to resume or continue, with your Resume and Continue tools, and tell the owner once.",
+        paused_places_sentence(root),
+    )))
+
+
+def core_loss_recovery_turn(root: Any, chat_id: int, pending: Any, *, admit: Callable[..., Any],
+                            live: Callable[[], bool]) -> bool:
+    """One recovery turn for the mind after a Fault boot (owner 2A), through the auto-resume seam.
+
+    False when the previous generation did not end through the Fault door (Quit, Panic, owner Restart and
+    planned restarts start nothing here). Otherwise the boot is handled here and True returns: one turn with
+    the facts (``recovery_turn_text``) is admitted unless a conversation turn is already live, or the previous
+    recovery turn's result is not terminal yet (``open_recovery_turn``): bound by that fact, never a counter
+    or timer. The turn's task id rides the ``auto_resume_triggered`` row (``trigger: core_lost``)."""
+    from supervisor.state import append_jsonl
+
+    previous = previous_fault_entry()
+    if not previous:
+        return False
+    root = pathlib.Path(root)
+    cause, ended_at = str(previous["cause"]), str(previous.get("entered_at") or "")
+    journal = root / "logs" / "supervisor.jsonl"
+    open_turn = open_recovery_turn(root)
+    if open_turn or live():
+        append_jsonl(journal, {"ts": utc_now_iso(), "type": "auto_resume_skipped", "trigger": RECOVERY_TRIGGER,
+                               "reason": "previous_recovery_turn_open" if open_turn else "conversation_turn_live",
+                               "task_id": open_turn, "cause": cause})
+        return True
+    held, cancelled = held_saved_work_ids(pending), cancelled_unsaved_roots(root, ended_at)
+    meta = admit(int(chat_id), recovery_turn_text(cause, ended_at, held, cancelled, root), None)
+    task_id = str(((meta or {}).get("task") or {}).get("id") or "") if isinstance(meta, dict) else ""
+    append_jsonl(journal, {"ts": utc_now_iso(), "type": "auto_resume_triggered", "trigger": RECOVERY_TRIGGER,
+                           "task_id": task_id, "cause": cause, "ended_at": ended_at, "held": held,
+                           "cancelled": cancelled})
+    return True
 
 
 def fault_exit(host: str, port: int, *, launcher_managed: bool, repo_dir: pathlib.Path,
