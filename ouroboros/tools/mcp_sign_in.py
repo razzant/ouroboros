@@ -1,4 +1,4 @@
-"""The mind's action for a remote MCP server's sign-in (``ouroboros/mcp_oauth.py``).
+"""``remote_mcp_sign_in``: the mind's action for a remote MCP server's sign-in (``ouroboros/mcp_oauth.py``).
 
 A call to such a server that needs the owner's sign-in returns ``MCP_AUTH_REQUIRED`` at once.
 Whether, when and where to ask the owner is the mind's judgment; this tool is its one action:
@@ -77,16 +77,12 @@ def _mcp_sign_in(ctx: ToolContext, action: str = "", server: str = "", returned_
         return _receipt(ctx, _run_async(lambda: mcp_oauth.sign_out(cfg)))
     except mcp_oauth.MCPAuthRequired as exc:  # refused before this step changed anything
         return _no_effect(ctx, "unavailable", "MCP_AUTH_REQUIRED", str(exc), sign_in_reason=exc.reason)
-    except Exception as exc:
-        log.warning("mcp_sign_in %s failed for %s", action, cfg.id, exc_info=True)
-        return _publish_tool_result(ctx, ToolResult(
-            status="error", code="MCP_ERROR",
-            text=f"⚠️ MCP_ERROR: {action} for server {cfg.id!r} failed: {type(exc).__name__}: {exc}"))
+    # Any other failure (an unreachable provider) is the registry's ordinary tool error: its effect is unknown.
 
 
 def get_tools() -> list:
-    return [ToolEntry("mcp_sign_in", {
-        "name": "mcp_sign_in",
+    return [ToolEntry("remote_mcp_sign_in", {
+        "name": "remote_mcp_sign_in",
         "description": (
             "Sign the owner in to a remote MCP server whose calls return MCP_AUTH_REQUIRED (an HTTP or SSE server "
             "without saved credentials), or sign them out. begin returns the provider's sign-in link to give the "

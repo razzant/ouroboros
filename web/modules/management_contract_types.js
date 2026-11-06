@@ -600,7 +600,6 @@
  * @property {boolean} ok
  * @property {string} error
  * @property {boolean} partial
- * @property {string=} code
  */
 
 /**

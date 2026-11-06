@@ -200,7 +200,7 @@ def _handle_ui_i18n_updated(evt: Dict[str, Any], ctx: Any) -> None:
 
 
 def _handle_mcp_signed_in(evt: Dict[str, Any], ctx: Any) -> None:
-    """A turn finished a remote MCP server's sign-in (``mcp_sign_in``); this process owns the tool
+    """A turn finished a remote MCP server's sign-in (``remote_mcp_sign_in``); this process owns the tool
     catalog, so it lists that server again, on its own thread: a listing waits on the network."""
     server_id = evt.get("server_id")
     if not isinstance(server_id, str) or not server_id.strip():

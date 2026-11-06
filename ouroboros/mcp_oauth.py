@@ -49,7 +49,7 @@ class MCPAuthRequired(RuntimeError):
         super().__init__(
             f"MCP_AUTH_REQUIRED: server {server_id!r} needs the owner's sign-in ({reason}"
             f"{': ' + detail if detail else ''}). Nothing ran there. The owner can press Sign in on its card in "
-            f"Settings → MCP, or mcp_sign_in(server={server_id!r}, action='begin') (enable_tools loads it) issues "
+            f"Settings → MCP, or remote_mcp_sign_in(server={server_id!r}, action='begin') (enable_tools loads it) issues "
             "a sign-in link to give them.")
 
 
@@ -74,6 +74,8 @@ def _load(cfg: Any) -> Dict[str, Any]:
 def _save(cfg: Any, doc: Dict[str, Any]) -> None:
     path = _path(cfg.id)
     path.parent.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        os.chmod(path.parent, 0o700)  # a rewrite's temporary file is never readable by another account
     atomic_write_json(path, {**doc, "v": 1, "url": cfg.url})
     with contextlib.suppress(OSError):
         os.chmod(path, 0o600)

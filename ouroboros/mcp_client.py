@@ -1252,14 +1252,15 @@ class MCPManager:
         except OwnerPauseRefused as exc:
             return {"ok": False, "not_started": True, "error": f"MCP listing NOT STARTED: {exc}"}
         except BaseException as exc:  # noqa: BLE001 - retain last-known tools on every failure
-            error, code = _exception_text(exc, cfg), str(getattr(exc, "code", "") or "")
+            error = _exception_text(exc, cfg)
+            code = exc.code if isinstance(exc, mcp_oauth.MCPAuthRequired) else ""
         at = datetime.now(timezone.utc).isoformat()
         with self._lock:
             target = self._servers.get(server_id)
             if target is not runtime or mcp_catalog.identity(target.config) != mcp_catalog.identity(cfg):
                 return {"ok": False, "published": False, "error": f"stale MCP refresh discarded for server {server_id!r}"}
             envelope = mcp_catalog.attempt_envelope(cfg, target.catalog, at=at, error=error, items=items, complete=complete,
-                                                   schema_omissions=schema_omissions, code=code,
+                                                   schema_omissions=schema_omissions,
                                                    instructions=_redact_error_text(instructions, cfg))
             target.published_before_failure = self._catalog_reader.load(cfg)
             try:

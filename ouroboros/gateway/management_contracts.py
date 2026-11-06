@@ -740,7 +740,6 @@ class McpListingAttempt(TypedDict):
     ok: bool
     error: str
     partial: bool
-    code: NotRequired[str]  # a typed refusal's code, e.g. MCP_AUTH_REQUIRED
 
 
 class McpSignIn(TypedDict, total=False):
