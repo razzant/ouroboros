@@ -37,7 +37,7 @@ def world(tmp_path, monkeypatch):
     (skill_dir / "scripts" / "setup.mjs").write_text("// setup\n", encoding="utf-8")
     monkeypatch.setattr(config, "DATA_DIR", data)
     monkeypatch.setattr(config, "SETTINGS_PATH", data / "settings.json")
-    state = types.SimpleNamespace(blockers=[], finds=0)
+    state = types.SimpleNamespace(blockers=[], finds=0, readiness=skill_mcp._not_ready)
 
     def find(_root, name):
         state.finds += 1
@@ -339,14 +339,32 @@ def test_accepted_update_relists_and_retires_sessions_while_a_disabled_row_stays
     assert "disabled" in off.text and "MCP_SKILL_UNAVAILABLE" not in off.text
 
 
-@pytest.mark.parametrize("initial_state", ["accepted_v1", "review_pending", "skill_disabled"])
+@pytest.mark.parametrize("initial_state", ["accepted_v1", "review_pending", "skill_disabled",
+                                           "source_install", "peer_conflict"])
 def test_registry_worker_adopts_published_skill_catalog_before_admission(world, manager, monkeypatch, initial_state):
     """A long-lived worker must admit the lister's new revision without a direct-call rebind."""
     from unittest.mock import Mock
     from ouroboros.tools.registry import ToolRegistry
 
-    (world.skill_dir / "SKILL.md").write_text(_manifest('[{"id": "chrome_browser", "entry": "scripts/server.mjs"}]'))
-    world.blockers = [] if initial_state == "accepted_v1" else [initial_state]
+    manifest = _manifest('[{"id": "chrome_browser", "entry": "scripts/server.mjs"}]')
+    (world.skill_dir / "SKILL.md").write_text(manifest)
+    blocker = {"source_install": "not installed", "peer_conflict": "skill_conflict:calendar"}.get(initial_state, initial_state)
+    world.blockers = [] if initial_state in {"accepted_v1", "source_install"} else [blocker]
+    if initial_state == "source_install":
+        (world.skill_dir / "SKILL.md").unlink()
+    elif initial_state == "peer_conflict":
+        from ouroboros.skill_loader import SkillReviewState, save_enabled, save_review_state
+
+        peer = world.skill_dir.parent / "calendar"
+        peer.mkdir()
+        (peer / "SKILL.md").write_text("---\nname: calendar\ndescription: peer\ntype: instruction\n"
+                                      "conflicts: [chrome_browser]\n---\n")
+        save_enabled(world.data, "calendar", True)
+        save_enabled(world.data, "chrome_browser", True)
+        save_review_state(world.data, "chrome_browser", SkillReviewState(
+            status="clean", content_hash=load_skill(world.skill_dir, world.data).content_hash))
+        monkeypatch.setattr(skill_mcp, "_not_ready", world.readiness)
+        assert world.readiness(world.data, load_skill(world.skill_dir, world.data)) == [blocker]
     path = _write_settings(world, _settings(_bound_row(task_session=False, browser_policy=False)))
     saved = path.stat().st_mtime_ns, path.read_bytes()
     settings = config.load_settings()
@@ -373,10 +391,16 @@ def test_registry_worker_adopts_published_skill_catalog_before_admission(world, 
         assert initial.status == "ok" and len(dispatched) == 1
     else:
         assert initial.code == "MCP_CATALOG_UNAVAILABLE" and not dispatched
-        assert initial_state in worker._servers["chrome_browser"].config.skill_error
+        assert blocker in worker._servers["chrome_browser"].config.skill_error
     old = worker._servers["chrome_browser"].config
 
-    (world.skill_dir / "scripts" / "server.mjs").write_text("// server v2 (accepted)\n")
+    if initial_state == "source_install":
+        (world.skill_dir / "SKILL.md").write_text(manifest)
+    elif initial_state == "peer_conflict":
+        save_enabled(world.data, "calendar", False)
+    else:
+        (world.skill_dir / "scripts" / "server.mjs").write_text("// server v2 (accepted)\n")
+    # Disabling a conflicting peer changes readiness, not this skill's payload or Settings row.
     world.blockers = []
     revision = load_skill(world.skill_dir, world.data).content_hash
 
@@ -388,7 +412,10 @@ def test_registry_worker_adopts_published_skill_catalog_before_admission(world, 
     lister._async_list_tools = list_updated
     with monkeypatch.context() as server:
         server.setattr(mcp_client, "get_manager", lambda: lister)
-        skill_mcp.lifecycle_settled("chrome_browser", reason="skill_review")
+        target, reason = {"source_install": ("ouroboros/chrome_browser", "skill_install"),
+                          "peer_conflict": ("calendar", "skill_disable")}.get(initial_state, ("chrome_browser", "skill_review"))
+        skill_mcp.lifecycle_settled(target, reason=reason)
+    assert lister.listed_calls, "lifecycle completion must list a newly ready binding even when its target differs"
     assert lister.listed_calls[-1].skill_revision == revision != old.skill_revision
     assert worker._servers["chrome_browser"].config is old, "the worker has not observed the lifecycle event"
     catalog = mcp_catalog.catalog_path("chrome_browser")

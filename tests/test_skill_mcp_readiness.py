@@ -25,6 +25,42 @@ def test_entry_alias_cannot_select_unreviewed_dependency(tmp_path, monkeypatch):
     assert not reason and launch["args"] == [str(root / "server.mjs")]
 
 
+@pytest.mark.parametrize("bucket,note", [("native", ".seed-origin"), ("ouroboroshub", ".ouroboroshub.json"),
+                                        ("clawhub", ".clawhub.json"), ("external", ".self_authored.json")])
+def test_entry_cannot_select_unhashed_install_notes(tmp_path, monkeypatch, bucket, note):
+    from ouroboros.skill_identity import payload_digest
+
+    root = tmp_path / bucket / "skill"
+    root.mkdir(parents=True)
+    (root / note).write_text('{"note": "v1"}')
+    before = payload_digest(root)
+    (root / note).write_text('{"note": "v2"}')
+    assert payload_digest(root) == before, "these bytes do not belong to the accepted release"
+    monkeypatch.setattr("ouroboros.tools.skill_exec._resolve_runtime_binary", lambda _: ("/node", ""))
+    for entry in (note, "server.mjs"):
+        if entry != note:
+            (root / entry).symlink_to(note)
+        launch, reason = skill_mcp._derive_launch(SimpleNamespace(skill_dir=root), {"entry": entry, "runtime": "node"})
+        assert launch is None and "outside the reviewed files" in reason
+
+
+@pytest.mark.parametrize("bucket,entry", [("native", "scripts/server.mjs"), ("external", ".seed-origin"),
+                                         ("native", "scripts/.seed-origin")])
+def test_entry_accepts_hashed_payload_including_non_note_names(tmp_path, monkeypatch, bucket, entry):
+    from ouroboros.skill_identity import payload_digest
+
+    root = tmp_path / bucket / "skill"
+    path = root / entry
+    path.parent.mkdir(parents=True)
+    path.write_text("// reviewed v1")
+    before = payload_digest(root)
+    path.write_text("// reviewed v2")
+    assert payload_digest(root) != before
+    monkeypatch.setattr("ouroboros.tools.skill_exec._resolve_runtime_binary", lambda _: ("/node", ""))
+    launch, reason = skill_mcp._derive_launch(SimpleNamespace(skill_dir=root), {"entry": entry, "runtime": "node"})
+    assert not reason and launch["args"] == [str(path)]
+
+
 def test_readiness_uses_conflict_inventory_not_peer_payloads(tmp_path, monkeypatch):
     from ouroboros import skill_loader, skill_peer_inventory, skill_readiness
     peer = SimpleNamespace(name="other")

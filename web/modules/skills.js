@@ -471,17 +471,19 @@ export function initSkills(ctx = {}) {
         showReads();
     }
 
-    // Local lifecycle progress only (never GitHub): the queue while work runs, the
-    // listing now and then while a review runs outside the lane.
+    // Local progress only (never GitHub): lifecycle work and pending MCP listings,
+    // plus the listing now and then while a review runs outside the lane.
     function schedulePoll() {
         clearTimeout(pollTimer);
-        if (destroyed || !visible || !snapshot) return;
+        if (destroyed || !visible || document.hidden || !snapshot) return;
         const working = inFlightCount(lifecycleEventsFromQueue(snapshot.queue)) > 0;
+        const listingTools = snapshot.rawSkills?.some((skill) => (skill.mcp_servers || [])
+            .some((server) => server.configured && !server.listed && !server.error));
         const reviewing = reviewingSkills.size > 0 || projected().some((skill) => /Reviewing/.test(installedSkillModel(skill).chip));
-        if (!working && !reviewing) return;
+        if (!working && !reviewing && !listingTools) return;
         pollTimer = setTimeout(async () => {
-            if (destroyed || !visible) return;
-            if (Date.now() - lastListingRead >= REVIEW_POLL_MS || working) await readInstalled({ quiet: true });
+            if (destroyed || !visible || document.hidden) return;
+            if (Date.now() - lastListingRead >= REVIEW_POLL_MS || working || listingTools) await readInstalled({ quiet: true });
             else schedulePoll();
         }, WORK_POLL_MS);
     }
@@ -1023,6 +1025,7 @@ export function initSkills(ctx = {}) {
     container.addEventListener('change', onChange);
     container.addEventListener('toggle', onToggle, true);
     window.addEventListener('ouro:page-shown', onPageShown);
+    document.addEventListener('visibilitychange', schedulePoll);
 
     // Another surface asks for one installed skill's entry ({skill}), a Browse search ({query}) or a Browse category
     // ({category}): the dictation chooser's engines (dictation_chooser.js), a place's connector (place_sheet.js).
@@ -1065,6 +1068,7 @@ export function initSkills(ctx = {}) {
         container.removeEventListener('change', onChange);
         container.removeEventListener('toggle', onToggle, true);
         window.removeEventListener('ouro:page-shown', onPageShown);
+        document.removeEventListener('visibilitychange', schedulePoll);
         window.removeEventListener('ouro:open-skills', onOpenSkills);
     } };
 }

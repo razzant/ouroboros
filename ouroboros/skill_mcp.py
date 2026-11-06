@@ -41,6 +41,7 @@ def _on(value: Any) -> bool:
 
 def _derive_launch(skill: Any, decl: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], str]:
     """``({command, args, cwd}, "")`` for one declaration, or ``(None, reason)``."""
+    from ouroboros.skill_identity import is_per_install_note, payload_bucket
     from ouroboros.skill_loader import _SKILL_DIR_CACHE_NAMES
     from ouroboros.tools.skill_exec import _resolve_runtime_binary
 
@@ -52,6 +53,10 @@ def _derive_launch(skill: Any, decl: Dict[str, Any]) -> Tuple[Optional[Dict[str,
         return None, f"its entry {decl['entry']!r} is not a file inside the skill"
     if any(part in _SKILL_DIR_CACHE_NAMES for part in entry.relative_to(root).parts):
         return None, f"its entry {decl['entry']!r} resolves into a cache or dependency folder, outside the reviewed files"
+    bucket = payload_bucket(root)
+    if any(is_per_install_note(rel, bucket) for rel in
+           (pathlib.PurePosixPath(decl["entry"]).as_posix(), entry.relative_to(root).as_posix())):
+        return None, f"its entry {decl['entry']!r} selects a per-install note, outside the reviewed files"
     binary, why = _resolve_runtime_binary(decl["runtime"])
     if not binary:
         return None, f"no usable {decl['runtime']} runtime was found" + (f" ({why})" if why else "")
@@ -266,7 +271,9 @@ def lifecycle_settled(skill_name: str = "", *, event_queue: Any = None, reason: 
             settings = load_settings()
             if not manager.listed(settings):
                 manager.configuration_changed(settings, reason=reason)
-            elif manager.rebind(skill=skill_name):
+            # Targets may be source/skill, and changing a peer can unblock another binding.
+            # Rebind all existing bindings; only missing current catalog evidence asks for a listing.
+            elif manager.rebind():
                 manager.refresh_all_background(reason=reason)
         elif event_queue is not None:
             event_queue.put_nowait({"type": "mcp_configuration_changed", "reason": reason, "skill": skill_name})

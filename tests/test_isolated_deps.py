@@ -302,7 +302,7 @@ def test_failed_python_install_persists_stderr_tail(monkeypatch, tmp_path):
 
 def test_python_and_npm_install_commands_disable_build_scripts(monkeypatch, tmp_path):
     from ouroboros.marketplace import isolated_deps
-    from ouroboros import claudexor_runtime
+    from ouroboros import claudexor_runtime, node_runtime
 
     calls = []
 
@@ -314,12 +314,21 @@ def test_python_and_npm_install_commands_disable_build_scripts(monkeypatch, tmp_
             (bin_dir / ("python.exe" if os.name == "nt" else "python")).write_text("", encoding="utf-8")
         return {"returncode": 0}
 
-    def unexpected_manager():
-        raise AssertionError("managed Node should stay unused when npm is on PATH")
+    class Manager:
+        pin = object()
+
+        def _resolve_node_toolchain(self, pin):
+            assert pin is self.pin
+            return ""  # a passive lookup is allowed, including in a source install
+
+        def prepare_node_toolchain(self):
+            raise AssertionError("managed Node must not be prepared when npm is on PATH")
 
     monkeypatch.setattr(isolated_deps, "_run", fake_run)
+    # Source installations need not have a bundled Node.
+    monkeypatch.setattr(node_runtime._platform, "resolve_bundled_node", lambda: None)
     monkeypatch.setattr(isolated_deps.shutil, "which", lambda name: "/usr/bin/npm" if name == "npm" else None)
-    monkeypatch.setattr(claudexor_runtime, "get_runtime_manager", unexpected_manager)
+    monkeypatch.setattr(claudexor_runtime, "get_runtime_manager", lambda: Manager())
     isolated_deps._install_python_packages(["wheelpkg"], tmp_path / ".ouroboros_env", 1)
     isolated_deps._install_node_package("left-pad", tmp_path / ".ouroboros_env", 1)
     assert any("--only-binary=:all:" in cmd for cmd in calls)
