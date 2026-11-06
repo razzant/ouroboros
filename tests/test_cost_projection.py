@@ -326,6 +326,8 @@ class TestDisplay:
         assert cost_display({"cost_usd": 0.0, "cost_final": True}) == "$0.00"
         # Under a cent is not a priced zero: four places, as the card and the review records print it.
         assert cost_display({"cost_usd": 0.0004, "cost_final": True}) == "$0.0004"
+        # Below four places a positive amount still never prints as zero (the card's formatUsdKnown).
+        assert cost_display({"cost_usd": 0.00003, "cost_final": True}) == "<$0.0001"
 
     def test_uncounted_money_names_each_part_and_says_nothing_without_one(self):
         from ouroboros.cost_projection import uncounted_money_text
@@ -337,11 +339,16 @@ class TestDisplay:
         assert uncounted_money_text({"global_reserved_usd": 3.0}, prefix="global_") == "$3.00 reserved for calls not yet sent"
         assert uncounted_money_text({"reserved_usd": 0.0, "unresolved_upper_bound_usd": None}) == ""
         assert uncounted_money_text(None) == ""
+        assert uncounted_money_text({"reserved_usd": 0.004}) == "$0.0040 reserved for calls not yet sent"
 
     def test_an_unknown_amount_says_why_as_far_as_it_is_known(self):
         unpriced = {"scope": "own", "tracked_amount": None, "has_unpriced": True, "tracked_final": False,
                     "accounting_open": False, "has_rows": True}
         assert cost_display({"cost_presentation": unpriced}) == "unknown (no price recorded for its calls)"
+        # A call still in flight may yet get its price: not the subscription words.
+        assert cost_display({"cost_presentation": {**unpriced, "accounting_open": True}}) == "unknown (not settled yet)"
+        for unreadable in ({"cost_custody": {"status": "unavailable"}}, {"ledger_integrity_degraded": True}):
+            assert cost_display({"cost_presentation": unpriced, **unreadable}) == "unknown (accounting unavailable)"
         assert cost_display({"cost_accounting_status": "unavailable"}) == "unknown (accounting unavailable)"
         assert cost_display({"status": "failed"}) == "unknown (accounting unavailable or not settled)"
 

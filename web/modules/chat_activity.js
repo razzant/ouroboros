@@ -12,7 +12,7 @@ import { delegatedActivityBodyHtml, delegatedHeadline, delegatedLineView } from 
 import { REUSABLE_TASK_IDS } from './task_control_menu.js';
 import { ownLiveDetail, paintLiveDetail } from './task_phase_chip.js';
 import { fmt, tr } from './i18n.js';
-import { formatMsgTime } from './utils.js';
+import { formatMsgTime, formatUsdKnown } from './utils.js';
 import { placeIngressNote } from './chat_attachments.js';
 import { hostRowDisplayText, hostSentenceText } from './host_notice_text.js';
 export { bootPhase, startingStatus, supervisorReady } from './host_starting_status.js';
@@ -668,9 +668,6 @@ export function headerBudgetPresentation(data) {
     };
 }
 
-// Under a cent keeps four places, as review records print it (`usdText`): `$0.00` is a priced zero only.
-const cardUsd = (value) => `$${value > 0 && value < 0.01 ? value.toFixed(4) : value.toFixed(2)}`;
-
 /**
  * Project the producer's scoped carrier (#498) into card meta: strings, not another cost
  * authority, never conflating unknown/non-final values with a final zero. The carrier
@@ -704,7 +701,7 @@ export function costPresentationMeta(presentation, context = null) {
         if (presentation.has_unpriced) return ['Cost not priced'];
         return ['Cost unknown'];
     }
-    const money = cardUsd(Number(amount));
+    const money = formatUsdKnown(Number(amount));  // never $0.00 for a positive amount
     if (presentation.has_unpriced) return [`Tracked: ${presentation.tracked_final ? money : `up to ${money}`}`];
     return [presentation.tracked_final ? money : `up to ${money}`];
 }
@@ -777,7 +774,7 @@ export function taskCostMeta(payload = {}) {
     // breakdowns and unmetered counts stay on Costs, Logs and task detail.
     if (total === null) return ['Cost unknown'];
     if (!(finalKnown || pendingKnown || total !== 0)) return [];
-    const amount = cardUsd(total);
+    const amount = formatUsdKnown(total);
     return [finalKnown ? amount : `up to ${amount}`];
 }
 

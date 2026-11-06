@@ -327,7 +327,10 @@ test('breakdown buckets say open and unpriced amounts in the card\'s words, neve
     }), 'Cost pending');
     assert.equal(costBucketPresentation({
         cost: 0.25, calls: 2, unknown_unmetered: 1, non_final_rows: 1, accounting_open_rows: 0, cost_final: false,
-    }), 'Tracked: $0.25');
+    }), 'Tracked: $0.25 · 1 without a price');
+    assert.equal(costBucketPresentation({
+        cost: 0.0004, calls: 1, unknown_unmetered: 0, non_final_rows: 0, accounting_open_rows: 0, cost_final: true,
+    }), '$0.0004', 'a positive sub-cent amount is never $0.00');
     assert.equal(costBucketPresentation({
         cost: 0.25, calls: 2, unknown_unmetered: 0, non_final_rows: 1, accounting_open_rows: 1, cost_final: false,
     }), '$0.25 (pending)');
@@ -460,6 +463,8 @@ test('#498 the scoped carrier answers the whole money question from one bucket',
     assert.deepEqual(costPresentationMeta(carrier({ tracked_amount: 0 })), ['$0.00']);
     // Under a cent is not that zero: four places, as review records print it.
     assert.deepEqual(costPresentationMeta(carrier({ tracked_amount: 0.0004, has_unpriced: true })), ['Tracked: $0.0004']);
+    // Below four places a positive amount still never reads as zero.
+    assert.deepEqual(costPresentationMeta(carrier({ tracked_amount: 0.00003 })), ['<$0.0001']);
     // An open subtotal is a ceiling, not a receipt.
     assert.deepEqual(costPresentationMeta(carrier({ tracked_final: false, accounting_open: true })),
         ['up to $1.20']);

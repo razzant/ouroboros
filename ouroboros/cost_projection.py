@@ -569,6 +569,14 @@ def current_costs(sources: Any, drive_root: Any) -> list:
     return rows
 
 
+def usd_text(amount: float, decimals: int = 2) -> str:
+    """A known dollar amount: ``decimals`` places, four under a cent and ``<$0.0001`` below that, so a
+    positive amount never prints as the priced zero ``$0.00`` (the web card's ``formatUsdKnown``)."""
+    if 0 < amount < 0.0001:
+        return "<$0.0001"
+    return f"${amount:.{4 if 0 < amount < 0.01 else decimals}f}"
+
+
 def uncounted_money_text(summary: Optional[Mapping[str, Any]], *, decimals: int = 2, prefix: str = "") -> str:
     """What a limit does not count as spending, each part under its own name and only when present (P8:
     known spend, estimates and unresolved charges stay distinct): reservations of calls not yet sent, and
@@ -577,8 +585,8 @@ def uncounted_money_text(summary: Optional[Mapping[str, Any]], *, decimals: int 
     src = summary if isinstance(summary, Mapping) else {}
     reserved, unresolved = (_as_amount(src.get(prefix + key)) or 0.0 for key in ("reserved_usd", "unresolved_upper_bound_usd"))
     return "; ".join(part for part in (
-        f"${reserved:.{decimals}f} reserved for calls not yet sent" if reserved > 0 else "",
-        f"up to ${unresolved:.{decimals}f} for calls without a known price" if unresolved > 0 else "") if part)
+        f"{usd_text(reserved, decimals)} reserved for calls not yet sent" if reserved > 0 else "",
+        f"up to {usd_text(unresolved, decimals)} for calls without a known price" if unresolved > 0 else "") if part)
 
 
 def cost_display(source: Optional[Mapping[str, Any]], *, decimals: int = 2) -> str:
@@ -586,9 +594,10 @@ def cost_display(source: Optional[Mapping[str, Any]], *, decimals: int = 2) -> s
 
     ``$1.23`` for a final amount, ``$1.23 (upper bound, not final)`` for an open
     one; with nothing accounted, the reason as known: ``unknown (accounting
-    unavailable)``, ``unknown (no price recorded for its calls)`` (the ledger read,
-    its rows carry no price, e.g. subscription work), else ``unknown (accounting
-    unavailable or not settled)``. ``Tracked: $1.23 (total unknown)`` preserves a
+    unavailable)``, ``unknown (not settled yet)`` (its calls are still open),
+    ``unknown (no price recorded for its calls)`` (the ledger read, its rows carry
+    no price, e.g. subscription work), else ``unknown (accounting unavailable or
+    not settled)``. ``Tracked: $1.23 (total unknown)`` preserves a
     known subtotal when unpriced work prevents a total or an upper bound.
     """
     projection = cost_projection(source)
@@ -596,13 +605,17 @@ def cost_display(source: Optional[Mapping[str, Any]], *, decimals: int = 2) -> s
     if amount is None:
         src = source if isinstance(source, Mapping) else {}
         carrier = projection.get("cost_presentation") or src.get("cost_presentation")
-        if src.get("cost_accounting_status") == "unavailable":
+        custody = src.get("cost_custody") if isinstance(src.get("cost_custody"), Mapping) else {}
+        # As the card says it (costPresentationMeta): an unreadable ledger, custody view or quarantined ledger.
+        if (src.get("cost_accounting_status") == "unavailable" or src.get("ledger_integrity_degraded") is True
+                or custody.get("status") == "unavailable"):
             return "unknown (accounting unavailable)"
+        if isinstance(carrier, Mapping) and carrier.get("accounting_open"):
+            return "unknown (not settled yet)"  # a price may still arrive
         if isinstance(carrier, Mapping) and carrier.get("has_rows"):
             return "unknown (no price recorded for its calls)"  # a readable ledger, rows without a price
         return "unknown (accounting unavailable or not settled)"
-    # Under a cent keeps four places (the card's and the review records' rule): $0.00 is a priced zero only.
-    text = f"${amount:.{4 if 0 < abs(amount) < 0.01 else decimals}f}"
+    text = usd_text(amount, decimals)  # $0.00 is a priced zero only
     from ouroboros.delegate_custody_usage import cost_coverage_open
     carrier = projection.get("cost_presentation") or {}
     if carrier.get("has_unpriced") or projection.get("unknown_unmetered") or cost_coverage_open(projection):

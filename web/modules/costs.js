@@ -1,4 +1,4 @@
-import { formatUsd2 } from './utils.js';
+import { formatUsd2, formatUsdKnown } from './utils.js';
 import { APP_SETTINGS_ORIGIN, apiFetch } from './api_client.js';
 
 const COST_BUDGET_INPUTS = {
@@ -30,8 +30,8 @@ function optionalFiniteNumber(value) {
 
 /** Render one breakdown bucket in the task card's words: `Cost pending` while a call of it is still open and
  *  nothing is priced, `Cost not priced` once its calls settled without a price (subscription work among
- *  them: no price will arrive), `Tracked:` before a priced subtotal beside unpriced calls, and `(pending)`
- *  after an amount more may join. Never an unpriced or open zero as free. */
+ *  them: no price will arrive), `Tracked:` before a priced subtotal beside unpriced calls with their count,
+ *  and `(pending)` after an amount more may join. Never an unpriced or open zero as free. */
 export function costBucketPresentation(info) {
     const cost = optionalFiniteNumber(info?.cost);
     if (cost === null) return 'unknown';
@@ -40,8 +40,8 @@ export function costBucketPresentation(info) {
     // Rows that can still settle; an older payload without the count has its non-final rows past the unpriced ones.
     const open = (optionalFiniteNumber(info?.accounting_open_rows) ?? nonFinal - unknown) > 0;
     if (cost === 0 && (open || unknown > 0)) return open ? 'Cost pending' : 'Cost not priced';
-    const amount = unknown > 0 ? `Tracked: ${formatUsd2(cost)}` : formatUsd2(cost);
-    return open ? `${amount} (pending)` : amount;
+    const amount = `${unknown > 0 ? 'Tracked: ' : ''}${formatUsdKnown(cost)}${open ? ' (pending)' : ''}`;
+    return unknown > 0 ? `${amount} · ${Math.trunc(unknown).toLocaleString('en-US')} without a price` : amount;
 }
 
 // A plain "saved" is an acknowledgement of what the owner just did and ends by itself; anything the owner may still
