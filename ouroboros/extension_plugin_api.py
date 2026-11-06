@@ -639,7 +639,7 @@ class PluginAPIImpl:
         # Fix-round-6: the descriptor build is purely computational — the env
         # stays EMPTY here; settings-derived values, the manifest env overlay,
         # the bridge URL and the auth token materialize only in the post-fence
-        # attach of ``_publish_registrations``.
+        # preparation of ``_publish_registrations``.
         workdir = self._runtime_skill_dir or self._skill_dir or self._state_dir
         descriptor = CompanionDescriptor(
             skill_name=self._skill,
@@ -801,14 +801,15 @@ class PluginAPIImpl:
     ) -> None:
         """Atomically publish the staged registration snapshot (ABI-9).
 
-        validate -> SWAP -> attach under ONE registry-lock hold. The definitive
+        validate -> prepare companion env outside the lock -> validate/SWAP/attach.
+        Both validations share the same check, so the definitive
         unload/conflict validation runs FIRST, so a refused publication has
         produced no externally visible effect at all — no supervised runner, no
         companion process, no bus subscription. The validated snapshot then
         swaps into the process-wide registries as the authoritative bundle,
         stamped with a fresh generation digest, and only AFTER the swap do the
         deferred side effects attach — event-bus subscriptions, supervised
-        runners, companion spawns — still inside the same critical section. A
+        runners — inside the same critical section; companion preparation/start is outside. A
         handler is therefore visible to the bus only for an already-published
         extension: a concurrent ``EventBus.publish()`` (which takes only the
         bus's own lock) landing between the validation and the attach cannot
@@ -823,8 +824,8 @@ class PluginAPIImpl:
         vanished bundle or a different generation raises a typed
         ``ExtensionStaleRecoveryError`` before any mutation (the whole companion
         env included — state dir, auth token and settings-derived values
-        materialize into the staged descriptors only in the post-swap attach
-        below, never during the purely computational descriptor build), and
+        materialize only after the initial fence, before any handler can run,
+        never during the purely computational descriptor build), and
         recovery never creates a bundle, so a completed unload/reload cannot be
         resurrected.
 
@@ -832,11 +833,11 @@ class PluginAPIImpl:
         (futures as they are created), so a failure while attaching leaves
         nothing orphaned: it is disclosed and raised into the caller's STANDARD
         dispose+unload path (``unload_extension`` reaps the bundle's surfaces,
-        subscriptions, futures and companions). No concurrent unload or
-        conflicting publication can interleave anywhere inside (both mutate only
-        under this lock).
+        subscriptions, futures and companions). Production callers hold the
+        same-skill lifecycle lock through preparation/start, preventing concurrent
+        unload/reload; the registry lock serializes publication and bus/runner attach.
         """
-        with _lock:
+        def validate_locked():
             try:
                 self._require_open_locked()
                 if require_live_generation is not None:
@@ -858,7 +859,24 @@ class PluginAPIImpl:
             except Exception:
                 self._staged = _StagedRegistrations()
                 raise
-            staged = self._staged
+            return self._staged
+
+        with _lock:
+            staged = validate_locked()
+        companion_spawns = list(staged.companion_spawns)
+        # No published handler/runner may race the first token mint. Production
+        # callers keep the same-skill lifecycle lock across both validations.
+        if companion_spawns:
+            self._state_dir.mkdir(parents=True, exist_ok=True)
+            token = mint_skill_token(self._state_dir, self._skill, self._skill_dir)
+            for spawn in companion_spawns:
+                spawn.descriptor.env.clear()
+                spawn.descriptor.env.update(companion_spawn_env(
+                    spawn.spec, token, env_allow=self._env_allow, granted_upper=self._granted_upper,
+                    skill=self._skill, skill_dir=self._skill_dir, state_dir=self._state_dir,
+                ))
+        with _lock:
+            staged = validate_locked()
             bundle = _extensions.get(self._skill)
             if bundle is None:
                 bundle = _ExtensionRegistrations()
@@ -924,22 +942,7 @@ class PluginAPIImpl:
             # ATTACH (post-swap, same lock hold): deferred side effects start
             # only against the already-published bundle — except the companion
             # PROCESSES, which start after the lock is released (below).
-            companion_spawns = list(staged.companion_spawns)
             try:
-                if companion_spawns:
-                    # The env and the auth token materialize only HERE, after
-                    # the generation fence admitted this publication (a mint
-                    # during descriptor build would let a stale recovery rotate
-                    # auth_token.json before its typed refusal); the pre-fence
-                    # build is pure — see ``extension_companion.companion_spawn_env``.
-                    self._state_dir.mkdir(parents=True, exist_ok=True)
-                    token = mint_skill_token(self._state_dir, self._skill, self._skill_dir)
-                    for spawn in staged.companion_spawns:
-                        spawn.descriptor.env.clear()
-                        spawn.descriptor.env.update(companion_spawn_env(
-                            spawn.spec, token, env_allow=self._env_allow, granted_upper=self._granted_upper,
-                            skill=self._skill, skill_dir=self._skill_dir, state_dir=self._state_dir,
-                        ))
                 bus = get_global_event_bus()
                 for sub in staged.event_subscriptions:
                     bus.subscribe(self._skill, sub.topic, sub.handler, sub_id=sub.sub_id)
@@ -966,13 +969,13 @@ class PluginAPIImpl:
         # a spawn under it stalled the whole surface (the Telegram wedge). The
         # names are already on the bundle, so a start failure routes to the
         # same dispose+unload path as a mid-attach failure.
-        for spawn in companion_spawns:
-            try:
+        try:
+            for spawn in companion_spawns:
                 companion_supervisor.start(spawn.descriptor)
-            except Exception:
-                log.warning("extension %s companion %s failed to start; disposed through "
-                            "the standard unload path", self._skill, spawn.descriptor.name, exc_info=True)
-                raise
+        except Exception:
+            log.warning("extension %s companion preparation/start failed; disposed through "
+                        "the standard unload path", self._skill, exc_info=True)
+            raise
 
     def _close_runtime_access(self) -> None:
         with _lock:

@@ -206,7 +206,7 @@ def skill_state_dir_path(drive_root: pathlib.Path, name: str) -> pathlib.Path:
 
     The generation-fenced companion recovery resolves the state dir through
     here BEFORE its fence (fix-round-6); creation belongs to the post-fence
-    attach in ``_publish_registrations``, so a stale refusal creates no
+    preparation in ``_publish_registrations``, so a stale refusal creates no
     directories. ``skill_state_dir`` is the creating variant for load paths.
 
     The name is normalized to its alnum-dashes shape before joining so a
@@ -1442,6 +1442,7 @@ def summarize_skills(drive_root: pathlib.Path, skills: Optional[List[LoadedSkill
     for s in skills:
         stale = s.review.is_stale_for(s.content_hash)
         gate = s.review.gate_for(s.content_hash)
+        executable = s.available_for_execution  # one fresh substrate observation per row
         if s.identity_collision:
             # Readiness probes include lifecycle/dependency state. A collision
             # has no unique lifecycle identity, so its UI projection must stay
@@ -1454,10 +1455,10 @@ def summarize_skills(drive_root: pathlib.Path, skills: Optional[List[LoadedSkill
             readiness = skill_readiness_for_execution(drive_root, s, skills=skills)
             grant_status = readiness.grant_status or grant_status_for_skill(drive_root, s)
             grants_usable = grant_status.get("usable", True)
-            runnable = s.available_for_execution and readiness.ready
+            runnable = executable and readiness.ready
             conflict = readiness.conflict or None
         available += int(runnable)
-        blocked_by_grants += int(s.available_for_execution and not grants_usable)
+        blocked_by_grants += int(executable and not grants_usable)
         pending_review += int(
             s.review.status in (_REVIEW_STATUS_PENDING, "")
             or (stale and not gate["executable_review"])
@@ -1484,7 +1485,7 @@ def summarize_skills(drive_root: pathlib.Path, skills: Optional[List[LoadedSkill
             "reviewed_content_hash": gate["reviewed_content_hash"],
             "executable_review": gate["executable_review"],
             "available_for_execution": runnable,
-            "runnable_via_skill_exec": s.available_for_execution,
+            "runnable_via_skill_exec": executable,
             "tool_surfaces": tool_surfaces_by_skill.get(s.name, []),
             "static_ready": runnable,
             "blocked_by_grants": not grants_usable,

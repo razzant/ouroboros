@@ -260,10 +260,11 @@ def test_terminal_received_chat_receipt_without_result_bytes_reads_them_once(env
             return {"id": operation_id, "state": "succeeded", "dispatch": {"state": "response_received"},
                     "response": {"state": "ready", "ref": ref}}
 
-        def get_model_result(self, operation_id, *, expected_ref, raw_bytes, **_kw):
-            assert expected_ref == ref and raw_bytes is True
+        def get_model_result(self, operation_id, *, expected_ref, raw_bytes=False, include_raw_bytes=False, **_kw):
+            assert expected_ref == ref
             calls.append(("result", operation_id))
-            return raw
+            value = json.loads(raw)
+            return (raw, value) if include_raw_bytes else raw if raw_bytes else value
 
         def acknowledge_model_result(self, operation_id, digest):
             calls.append(("ack", operation_id, digest))

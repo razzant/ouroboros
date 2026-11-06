@@ -764,7 +764,7 @@ def _capture_room(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
 def _room_focus(root, by_room, notes, shown_rooms, running):
     """Latest authored focus only for rooms actually shown in the directory."""
     from ouroboros.focus import compact_focus
-    from ouroboros.task_store import display_documents
+    from ouroboros.task_store import task_focuses
 
     ids = {room: {str(row.get("task_id") or "") for _a, row, _p in entries}
            for room, entries in by_room.items() if room in shown_rooms}
@@ -777,9 +777,8 @@ def _room_focus(root, by_room, notes, shown_rooms, running):
     for task_id, room in bindings.items():
         if str(room) in ids:
             ids[str(room)].add(task_id)
-    documents = display_documents(root, set().union(*ids.values()) if ids else ())
-    documents = {task_id: json.loads(text) for task_id, text in documents.items()}
-    focus = {task_id: compact_focus(doc.get("focus")) for task_id, doc in documents.items()}
+    values = task_focuses(root, set().union(*ids.values()) if ids else ())
+    focus = {task_id: compact_focus(value) for task_id, value in values.items()}
     dated = {}
     for task_id, line in focus.items():
         try:

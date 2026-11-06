@@ -776,11 +776,11 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
 
     def get_model_result(self, operation_id: str, *, expected_ref: Dict[str, Any],
                          timeout_sec: Optional[float] = None,
-                         raw_bytes: bool = False) -> Dict[str, Any] | bytes:
+                         raw_bytes: bool = False, include_raw_bytes: bool = False) -> Dict[str, Any] | bytes | tuple[bytes, Dict[str, Any]]:
         """Verify the complete result against ready custody; no ACK, redaction or caps.
         Failure preserves the handle: re-read this operation, never regenerate.
         The caller ACKs after retaining the result under its own custody contract.
-        ``raw_bytes`` keeps exact JSON encoding; size, digest, UTF-8 and object checks apply.
+        ``include_raw_bytes`` pairs the decoded object with exact bytes for custody callers.
         """
         ref = _model_payload_ref(expected_ref)
         data = self._request(
@@ -794,7 +794,7 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
         except (ValueError, UnicodeError) as exc:
             raise ClaudexorUnavailable("malformed_response", "Model result is not valid UTF-8 JSON") from exc
         body = _model_object(body)
-        return data if raw_bytes else body
+        return (data, body) if include_raw_bytes else data if raw_bytes else body
 
     def acknowledge_model_result(self, operation_id: str, sha256: str) -> Dict[str, Any]:
         """Acknowledge only the exact result the caller has retained; no implicit ACK."""

@@ -250,10 +250,11 @@ def test_late_model_result_keeps_only_exact_attempt_effort_evidence(tmp_path, mo
             return {"state": "succeeded", "dispatch": {"state": "response_received"},
                     "response": {"state": "ready", "ref": {"sha256": "fixture-ref"}}}
 
-        def get_result(operation, **kwargs):
+        def get_result(operation, *, raw_bytes=False, include_raw_bytes=False, **kwargs):
             assert operation == "exact-operation" and kwargs["expected_ref"] == {"sha256": "fixture-ref"}
             calls.append("read_result")
-            return raw.encode()
+            data = raw.encode()
+            return (data, result) if include_raw_bytes else data if raw_bytes else result
 
         def factory():
             assert online, "retained terminal evidence needs no gateway"

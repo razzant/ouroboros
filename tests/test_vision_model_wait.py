@@ -76,13 +76,14 @@ def _install_child_fixture(mode, events_path):
             event("poll", operation_id=operation_id)
             return self.detail()
 
-        def get_model_result(self, operation_id, **kwargs):
+        def get_model_result(self, operation_id, *, raw_bytes=False, include_raw_bytes=False, **kwargs):
             detail = self.detail()
             value = {"outcome": "failed" if detail["problem"] else "completed", "route": ROUTE,
                      "message": {"role": "assistant", "content": "pixels read exactly once 🐍"},
                      "usage": {"input_tokens": 21, "output_tokens": 5},
                      "cost": {"knowledge": "unknown", "cashUsd": None}, "problem": detail["problem"]}
-            return json.dumps(value).encode("utf-8")
+            raw = json.dumps(value).encode("utf-8")
+            return (raw, value) if include_raw_bytes else raw if raw_bytes else value
 
         def acknowledge_model_result(self, operation_id, sha256):
             event("ack", operation_id=operation_id)

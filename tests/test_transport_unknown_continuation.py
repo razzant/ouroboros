@@ -254,9 +254,11 @@ def test_claudexor_control_loss_keeps_same_operation_past_read_window(tmp_path, 
             if len(reads) <= 3: raise ClaudexorUnavailable("daemon_unreachable", "offline")
             return {"id": operation, "state": "succeeded", "dispatch": {"state": "response_received"},
                     "response": {"state": "ready", "ref": {"sha256": "exact"}}}
-        def get_model_result(self, operation, **kwargs):
+        def get_model_result(self, operation, *, raw_bytes=False, include_raw_bytes=False, **kwargs):
             assert operation == "same-op"
-            return b'{"outcome":"completed","message":{"content":"same paid answer"}}'
+            raw = b'{"outcome":"completed","message":{"content":"same paid answer"}}'
+            value = json.loads(raw)
+            return (raw, value) if include_raw_bytes else raw if raw_bytes else value
         def create_model_operation(self, *a, **kw): pytest.fail("second model operation")
         def close(self): pass
     gateway = inv.gateway = Gateway()

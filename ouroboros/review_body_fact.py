@@ -282,6 +282,11 @@ def body_fact(root: Any, *, system_repo: Any, manifest: Optional[dict] = None,
     nothing for a recognized body or a recognized foreign root (the caller
     records that its argument was not needed or was ignored)."""
     system = Path(system_repo).expanduser().resolve()
+    start = Path(root).expanduser().resolve()
+    # Directory identity is the first recognition rule; remote discovery cannot
+    # change it and need not start Git (or read a manifest) for this case.
+    if _inside(start, system):
+        return BodyFact(BODY_TRUE, "dir", f"{start} is the system repository {system} or lies inside it")
     if manifest is None:
         from ouroboros.launcher_bootstrap import load_repo_manifest
 
@@ -311,7 +316,6 @@ def body_fact(root: Any, *, system_repo: Any, manifest: Optional[dict] = None,
         origin_url=normalize_remote_url(origin.strip()),
         data_dir=data_dir,
     )
-    start = Path(root).expanduser().resolve()
     fact = _recognize(start, identity, 0, {str(start)})
     if treat_as_body and fact.body == BODY_UNKNOWN:
         return BodyFact(BODY_TRUE, fact.how, f"{fact.detail}; raised to body by treat_as_body")

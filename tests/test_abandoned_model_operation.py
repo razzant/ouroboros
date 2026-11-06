@@ -28,10 +28,11 @@ class Gateway:
         self.reads.append(operation_id)
         return self.detail
 
-    def get_model_result(self, operation_id, *, expected_ref, raw_bytes, **kwargs):
-        assert expected_ref == self.ref and raw_bytes is True
+    def get_model_result(self, operation_id, *, expected_ref, raw_bytes=False, include_raw_bytes=False, **kwargs):
+        assert expected_ref == self.ref
         self.results.append(operation_id)
-        return self.raw
+        value = json.loads(self.raw)
+        return (self.raw, value) if include_raw_bytes else self.raw if raw_bytes else value
 
     def acknowledge_model_result(self, operation_id, digest):
         self.acks.append((operation_id, digest))

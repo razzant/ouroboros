@@ -227,9 +227,11 @@ def test_control_loss_rejoins_the_accepted_operation_without_another_post(data_r
             return {"id": operation, "state": "succeeded", "dispatch": {"state": "response_received"},
                 "response": {"state": "ready", "ref": {"sha256": "exact"}}}
 
-        def get_model_result(self, operation, **_kwargs):
+        def get_model_result(self, operation, *, raw_bytes=False, include_raw_bytes=False, **_kwargs):
             assert operation == "accepted-operation"
-            return b'{"outcome":"completed","message":{"content":"same accepted answer"}}'
+            raw = b'{"outcome":"completed","message":{"content":"same accepted answer"}}'
+            value = json.loads(raw)
+            return (raw, value) if include_raw_bytes else raw if raw_bytes else value
 
         def create_model_operation(self, *_args, **_kwargs):
             pytest.fail("second POST while the accepted operation is recoverable")
