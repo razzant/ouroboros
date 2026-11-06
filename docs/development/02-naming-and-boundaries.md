@@ -147,8 +147,9 @@ another test module; shared fixtures live in `tests/_*.py` helpers, which select
 importers in the commit gate.
 
 Both are reference books: an entrypoint plus one chapter file per subject under
-`docs/architecture/` or `docs/development/`. The entrypoint's ordered `## Chapters`
-list is the one membership list; every chapter carries one authored introduction under
+`docs/architecture/` or `docs/development/`. An entrypoint holds its H1, one introduction
+and the ordered `## Chapters` list, the one membership list, and no fact of its own (Low
+and Nano read it whole); every chapter carries one authored introduction under
 its H1 (an H1 followed straight by a subsection is refused); moved prose replaces the
 description at its destination; `.gitattributes` pins `docs/**/*.md` to LF so the
 digests and byte offsets in source refs and inventories stay stable; readers ask for a
@@ -167,7 +168,8 @@ scanned.
 
 Size is pairwise: a change ends each composed book, entrypoint included,
 `BIBLE.md` and the prompts (`prompts/*.md` as one text) no larger than at its
-event base, so text it adds is paid by shortening the same text. With
+event base; what it adds is paid in the same text by a statement that leaves, never by a
+lost fact (03 "Paying down a size cap"). With
 ordinary push/PR CI disabled (ARCHITECTURE §8), manual/tag runs lack a
 per-change base and skip this comparison. Local qualification supplies
 `OURO_SIZE_RATCHET_BASE_REF` explicitly; review checks the actual
