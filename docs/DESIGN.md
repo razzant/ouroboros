@@ -657,7 +657,7 @@ needed restart or unconfirmed outcome it announces is kept in its authoritative 
 in-feed history edge) until that fact changes or the owner resolves it. A notice the owner may hide is hidden on the
 notice itself, per browser, never in its record (the Update indicator, owner 1B, 25.10). A plain acknowledgement in
 place may end by itself, but where the line is its fact's only home (Costs' budget save) an error, a warning or a
-needed restart stays until the next save replaces it. A current fact ends with its fact; unread ends when the message
+needed restart stays until the next save, or an edit of what it is about, replaces it. A current fact ends with its fact; unread ends when the message
 is shown; a retained record (Updates, history, the Settings save result, `Input saved`) lives with its record, with
 no timer. Toasts and statuses older than this rule are checked against it when touched.
 
@@ -675,7 +675,7 @@ A consumed one-shot is history whether its task succeeded or failed; the status
 never implies a result. A row is headed by its name; the instruction stays
 readable and expands by touch, and a waiting row says why inline, never in a
 hover-only tooltip. Retained rows (consumed and withdrawn) collapse into one
-History & withdrawn disclosure rather than padding the standing list or
+disclosure named for what it holds (Finished, Withdrawn) rather than padding the standing list or
 disappearing: history the owner can still open, read and act on. A withdrawn
 row says who withdrew it, when and why, and keeps Restore through the retention
 window once no hold remains on it; Restore cancels the withdrawal and brings
@@ -1981,7 +1981,7 @@ menu and capsule row, a saved reply's actions), and the host draws them: the
 skill's label verbatim, one glyph from the host set, the host's capsule or
 icon control, never the skill's markup. Connector icons may supply reviewed SVG geometry, painted by the host in monochrome currentColor with a fallback glyph and an adjacent visible label. In "+", after Attach file, each skill
 has a section under its name with its items in the owner's order; the host's
-own items close the menu under Ouroboros's name: Add dictation… while no
+own items close the menu under Add to composer: Add dictation… while no
 engine can dictate here, and Make a button…, which starts a request in
 the draft for the owner to finish and send. A chip is one of the row's
 capsules: the skill's name, then the value its source answers in the meta ink
