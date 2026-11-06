@@ -171,8 +171,8 @@ def call_place_facts(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
         sending = (identity or {}).get("sends_as")
         keys = _conversation_keys(place, effect, targets, account_id=account)
         rows.append({"place_id": place.place_id, "place_label": place.label, "place_state": place.state,
-                     **({"sends_as": dict(sending), "sends_as_owner": sending["kind"] == "user" and (bool(focus.get("identity_owner")) if same_focus
-                         else places.is_owner_account(place, sending["id"], account))} if sending else {}),
+                     **({"sends_as": dict(sending), "sends_as_owner": (sending.get("kind") == "user" and bool(focus.get("identity_owner")))
+                         if same_focus else places.writes_as_owner(place, identity, account)} if sending else {}),
                      "conversation_key": keys[0] if len(keys) == 1 else "", "conversation_keys": keys})
     return {"effect": effect.effect, "declared": effect.declared, "targets": targets,
             "attributable": attributable, "places": rows}

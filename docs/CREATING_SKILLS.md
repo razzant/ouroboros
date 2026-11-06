@@ -1052,9 +1052,8 @@ account, conversation and thread bounds, with observed provider facts. Do not di
 these events based on their text, perceived relevance, wake list or place state.
 A bot sender is the fact `from_bot`, not an intake filter. It names the author's provider account, not the
 client that posted: a person writing through an app or an assistant is that person, and app or bot markers on
-a message decide only when the provider names no person or cannot say what kind of account wrote it. Disable,
-unload, Panic and
-provider access still govern connector operation; this promises no access to events
+a message decide only when the provider names no person or cannot say what kind of account wrote it.
+Disable, unload, Panic and provider access still govern connector operation; this promises no access to events
 outside the provider API or the connector's declared support.
 
 The host validates and captures an event before applying authored wakes and execution
