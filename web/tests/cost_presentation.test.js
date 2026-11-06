@@ -442,6 +442,8 @@ test('#498 the scoped carrier answers the whole money question from one bucket',
     });
     // A proven zero: priced rows evidenced it and the accounting is closed.
     assert.deepEqual(costPresentationMeta(carrier({ tracked_amount: 0 })), ['$0.00']);
+    // Under a cent is not that zero: four places, as review records print it.
+    assert.deepEqual(costPresentationMeta(carrier({ tracked_amount: 0.0004, has_unpriced: true })), ['Tracked: $0.0004']);
     // An open subtotal is a ceiling, not a receipt.
     assert.deepEqual(costPresentationMeta(carrier({ tracked_final: false, accounting_open: true })),
         ['up to $1.20']);

@@ -668,6 +668,9 @@ export function headerBudgetPresentation(data) {
     };
 }
 
+// Under a cent keeps four places, as review records print it (`usdText`): `$0.00` is a priced zero only.
+const cardUsd = (value) => `$${value > 0 && value < 0.01 ? value.toFixed(4) : value.toFixed(2)}`;
+
 /**
  * Project the producer's scoped carrier (#498) into card meta: strings, not another cost
  * authority, never conflating unknown/non-final values with a final zero. The carrier
@@ -687,7 +690,7 @@ export function costPresentationMeta(presentation) {
         // measured zero. The card says so instead of inventing a free result.
         return ['Cost unknown'];
     }
-    const money = `$${Number(amount).toFixed(2)}`;
+    const money = cardUsd(Number(amount));
     if (presentation.has_unpriced) return [`Tracked: ${presentation.tracked_final ? money : `up to ${money}`}`];
     return [presentation.tracked_final ? money : `up to ${money}`];
 }
@@ -754,7 +757,7 @@ export function taskCostMeta(payload = {}) {
     // breakdowns and unmetered counts stay on Costs, Logs and task detail.
     if (total === null) return ['Cost unknown'];
     if (!(finalKnown || pendingKnown || total !== 0)) return [];
-    const amount = `$${total.toFixed(2)}`;
+    const amount = cardUsd(total);
     return [finalKnown ? amount : `up to ${amount}`];
 }
 

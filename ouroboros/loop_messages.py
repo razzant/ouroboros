@@ -719,7 +719,8 @@ def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None, meas
                  if cost is not None else "own cost unknown")
     facts = dict(money or {})
     parts.extend(_money_facts(facts))
-    parts.append(f"quota {facts['quota']}" if facts.get("quota") is not None else "quota unknown")
+    if facts.get("quota") is not None:  # no round producer fills it yet: absent, never a standing "unknown"
+        parts.append(f"quota {facts['quota']}")
     parts.append(cached_tariff_text(ctx.active_model, getattr(ctx.context_fit_plan, "provider", ""),
                                     usage.get("_context_prompt_estimate")))
     if tool_ctx is not None:

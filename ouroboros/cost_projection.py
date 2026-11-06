@@ -573,15 +573,24 @@ def cost_display(source: Optional[Mapping[str, Any]], *, decimals: int = 2) -> s
     """Human rendering of one task's cost. Null NEVER renders as ``$0.00``.
 
     ``$1.23`` for a final amount, ``$1.23 (upper bound, not final)`` for an open
-    one, ``unknown (accounting unavailable or not settled)`` when nothing is
-    accounted. ``Tracked: $1.23 (total unknown)`` preserves a known subtotal
-    when unpriced work prevents a total or an upper bound.
+    one; with nothing accounted, the reason as known: ``unknown (accounting
+    unavailable)``, ``unknown (no price recorded for its calls)`` (the ledger read,
+    its rows carry no price, e.g. subscription work), else ``unknown (accounting
+    unavailable or not settled)``. ``Tracked: $1.23 (total unknown)`` preserves a
+    known subtotal when unpriced work prevents a total or an upper bound.
     """
     projection = cost_projection(source)
     amount = projection["accounted_upper_bound_usd"]
     if amount is None:
+        src = source if isinstance(source, Mapping) else {}
+        carrier = projection.get("cost_presentation") or src.get("cost_presentation")
+        if src.get("cost_accounting_status") == "unavailable":
+            return "unknown (accounting unavailable)"
+        if isinstance(carrier, Mapping) and carrier.get("has_rows"):
+            return "unknown (no price recorded for its calls)"  # a readable ledger, rows without a price
         return "unknown (accounting unavailable or not settled)"
-    text = f"${amount:.{decimals}f}"
+    # Under a cent keeps four places (the card's and the review records' rule): $0.00 is a priced zero only.
+    text = f"${amount:.{4 if 0 < abs(amount) < 0.01 else decimals}f}"
     from ouroboros.delegate_custody_usage import cost_coverage_open
     carrier = projection.get("cost_presentation") or {}
     if carrier.get("has_unpriced") or projection.get("unknown_unmetered") or cost_coverage_open(projection):

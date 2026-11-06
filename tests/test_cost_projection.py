@@ -324,6 +324,15 @@ class TestDisplay:
         assert cost_display({"cost_usd": 1.234, "cost_final": True}) == "$1.23"
         assert cost_display({"cost_usd": 1.234}) == "$1.23 (upper bound, not final)"
         assert cost_display({"cost_usd": 0.0, "cost_final": True}) == "$0.00"
+        # Under a cent is not a priced zero: four places, as the card and the review records print it.
+        assert cost_display({"cost_usd": 0.0004, "cost_final": True}) == "$0.0004"
+
+    def test_an_unknown_amount_says_why_as_far_as_it_is_known(self):
+        unpriced = {"scope": "own", "tracked_amount": None, "has_unpriced": True, "tracked_final": False,
+                    "accounting_open": False, "has_rows": True}
+        assert cost_display({"cost_presentation": unpriced}) == "unknown (no price recorded for its calls)"
+        assert cost_display({"cost_accounting_status": "unavailable"}) == "unknown (accounting unavailable)"
+        assert cost_display({"status": "failed"}) == "unknown (accounting unavailable or not settled)"
 
 
 class TestProducers:
