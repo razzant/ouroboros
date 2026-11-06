@@ -42,10 +42,11 @@ test('each line is its word, the card\'s own money words and the recorded volume
 });
 
 test('purposes use the words of the card\'s Reviews doors, routes their product names; the rest reads as its key', () => {
-    // A review category is `<surface>_review` (review_substrate.review_usage_category).
-    assert.deepEqual(['task', 'subagent', 'commit_gate_review', 'preflight_review', 'task_acceptance_review',
-        'plan_review_review', 'multi_model_review_review', 'consciousness_task', ''].map(purposeWord),
-    ['Work', 'Helpers', 'Code review', 'Early look', 'Result review', 'Plan review', 'Multi model review',
+    // A review category is `<surface>_review` (review_substrate.review_usage_category); the commit gate's waves
+    // are recorded as `multi_model_review_review` (review_price.REVIEW_USAGE_CATEGORY).
+    assert.deepEqual(['task', 'subagent', 'multi_model_review_review', 'advisory_review', 'commit_gate_review',
+        'preflight_review', 'task_acceptance_review', 'plan_review_review', 'consciousness_task', ''].map(purposeWord),
+    ['Work', 'Helpers', 'Code review', 'Early look', 'Code review', 'Early look', 'Result review', 'Plan review',
         'Consciousness task', 'Other']);
     assert.deepEqual(['openrouter', 'openai', 'codex', 'claude', 'agy', 'claudexor', 'external-extension'].map(routeWord),
         ['OpenRouter', 'OpenAI', 'Codex', 'Claude Code', 'Antigravity', 'Claudexor', 'External extension']);

@@ -9,9 +9,12 @@ import { costPresentationMeta } from './chat_activity.js';
 import { SURFACE_LABELS } from './review_opinions.js';
 import { escapeHtmlText, formatCompactNumber } from './utils.js';
 
-// A task's own work and its helpers; a review surface's category (`<surface>_review`) takes the word its Reviews
-// door uses; the rest reads as its own key.
-const PURPOSE_WORDS = Object.freeze({ task: 'Work', subagent: 'Helpers' });
+// A task's own work and its helpers, the commit gate's review waves (`review_price.REVIEW_USAGE_CATEGORY`) and
+// the older advisory category; another review surface's category (`<surface>_review`) takes the word its
+// Reviews door uses; the rest reads as its own key.
+const PURPOSE_WORDS = Object.freeze({
+    task: 'Work', subagent: 'Helpers', multi_model_review_review: 'Code review', advisory_review: 'Early look',
+});
 
 const plural = (n, word) => `${n.toLocaleString('en-US')} ${word}${n === 1 ? '' : 's'}`;
 const mechanical = (key) => {
