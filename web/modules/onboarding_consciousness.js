@@ -168,7 +168,7 @@ export function runScreenHtml(run) {
         : PHASE_WORDS[run.phase] || PHASE_WORDS.waiting;
     const button = done || run.phase === 'started'
         ? '<button type="button" class="btn btn-primary" id="consciousness-open-btn">Open Ouroboros</button>'
-        : `<button type="button" class="btn btn-secondary" id="consciousness-open-btn"${run.leaving ? ' disabled' : ''}>${run.leaving ? 'Opening…' : 'Open Ouroboros now'}</button>`;
+        : `<button type="button" class="btn btn-default" id="consciousness-open-btn"${run.leaving ? ' disabled' : ''}>${run.leaving ? 'Opening…' : 'Open Ouroboros now'}</button>`;
     return `
             <div class="step-header">
                 <div>

@@ -118,8 +118,18 @@ test('an unloaded editor authors nothing and an API-only save does not create ro
 });
 
 test('context note uses the server projection, never catalogue arithmetic', () => {
-    const text = 'window 400,000 total: set in Settings; server metadata says 272,000';
-    assert.equal(modelContextNote({ window: { text } }), text);
+    // The projection's typed fields become owner words; its own sentence (for Main) is not copied.
+    const window = { tokens: 872000, kind: 'total', source: 'provider_metadata', observed_at: '2026-11-05T16:33:00Z',
+        reserve: 65536, usable: 806464, text: 'window 872,000 total: server metadata 2026-11-05 16:33; usable input 806,464; reply reserve 65,536' };
+    assert.equal(modelContextNote({ window }), 'Window 872k tokens (from the server) · 806k usable for input');
+    assert.equal(modelContextNote({ window: { ...window, source: 'user_setting', usable: undefined,
+        contradiction: { source: 'provider_metadata', tokens: 272000, kind: 'total' } } }),
+    'Window 872k tokens (set in Settings) · 806k usable for input · the server says 272k');
+    assert.equal(modelContextNote({ window: { ...window, retired_ack: { window_tokens: 1000000, ts: '2026-11-01T10:00:00Z' } } }),
+        'Window 872k tokens (from the server) · 806k usable for input · old confirmation 1M not used');
+    assert.doesNotMatch(modelContextNote({ window }), /2026|65,536|reserve|metadata/);
+    assert.equal(modelContextNote({ window: { tokens: 1050000, source: 'user_setting', usable: 984464 } }),
+        'Window 1.1M tokens (set in Settings) · 984k usable for input');
     assert.match(modelContextNote({ context_window: 272000, max_context_window: 872000 }), /not known/);
     assert.match(modelContextNote(null), /not known/);
 });
@@ -135,17 +145,12 @@ test('the same role sheets are loaded by both actual UI hosts', () => {
     }
 });
 
-test('role disclosures draw a visible open/closed marker on their own line', () => {
+test('role disclosures wear the one shared disclosure look on their own line', () => {
     const css = readFileSync(new URL('../model_roles.css', import.meta.url), 'utf8');
     const block = (selector) => css.match(new RegExp(`${selector}\\s*\\{([^}]*)\\}`))?.[1] ?? '';
-    // `display` other than list-item drops the native ::marker, so the sheet
-    // must hide it explicitly and draw the house glyph pair itself.
-    const summary = block('\\.model-role-details\\s*>\\s*summary');
-    assert.match(summary, /list-style:\s*none/);
-    assert.match(summary, /color:\s*var\(--text-primary\)/);
-    assert.match(block('\\.model-role-details\\s*>\\s*summary::-webkit-details-marker'), /display:\s*none/);
-    assert.match(block('\\.model-role-details\\s*>\\s*summary::before'), /content:\s*"▸ "/);
-    assert.match(block('\\.model-role-details\\[open\\]\\s*>\\s*summary::before'), /content:\s*"▾ "/);
+    // The caret and the quiet summary are ui.css details.ui-disclosure's; the role sheet draws no marker of its own.
+    assert.doesNotMatch(css, /summary::before|summary::-webkit-details-marker/);
+    assert.match(readFileSync(new URL('../modules/model_roles.js', import.meta.url), 'utf8'), /<details class="model-role-details ui-disclosure">/);
     // The disclosure owns a full row under the status text instead of sharing its baseline.
     assert.match(block('\\.model-role-notes'), /flex-wrap:\s*wrap/);
     assert.match(block('\\.model-role-notes\\s*>\\s*\\.model-role-details'), /flex-basis:\s*100%/);

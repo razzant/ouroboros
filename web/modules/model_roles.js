@@ -61,8 +61,23 @@ export function modelSourceGroups({ sources = [], providers = [], connections = 
     ];
 }
 
+// A window source as the owner says it: where the value comes from, and who says another value.
+const WINDOW_SOURCES = { user_setting: ['set in Settings', 'Settings say'], owner_ack: ['your confirmation', 'your confirmation says'],
+    provider_metadata: ['from the server', 'the server says'], local_health: ['the local serving window', 'the local server says'] };
+const tokenWords = (n) => (n >= 1e6 ? `${+(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
+
+/** The route's window in owner words, from the projection's typed fields (never catalogue arithmetic): the window,
+ *  where it comes from, the usable input, a source that disagrees and an old confirmation no longer used; the
+ *  observation stamps stay in the projection's record. */
 export function modelContextNote(preview) {
-    return preview?.window?.text || 'Context limit not known for this route.';
+    const window = preview?.window;
+    if (!window?.tokens) return 'Context limit not known for this route.';
+    const usable = Number.isFinite(window.usable) ? window.usable : window.tokens - (window.reserve || 0);
+    const other = window.contradiction;
+    const retired = Number(window.retired_ack?.window_tokens) || 0;
+    return `Window ${tokenWords(window.tokens)} tokens (${WINDOW_SOURCES[window.source]?.[0] || window.source}) · ${tokenWords(usable)} usable for input`
+        + (other ? ` · ${WINDOW_SOURCES[other.source]?.[1] || `${other.source} says`} ${tokenWords(other.tokens)}` : '')
+        + (retired ? ` · old confirmation ${tokenWords(retired)} not used` : '');
 }
 
 // The slot an empty role uses: Main, except the Safety Supervisor, which checks with the Light model (and so
@@ -212,20 +227,20 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
 
     function detailsHtml(row) {
         if (!showContext) return '';
-        return `<details class="model-role-details"><summary>Context &amp; processing · <span data-processing-summary>${escapeHtml(processingIntentLabel(row.processing_preference, processingPreference))}</span></summary>
+        return `<details class="model-role-details ui-disclosure"><summary><span>Context &amp; processing · <span data-processing-summary>${escapeHtml(processingIntentLabel(row.processing_preference, processingPreference))}</span></span></summary>
             <label class="ui-field">Processing ${processingSelectHtml(`data-model-role-processing aria-label="${escapeHtml(row.slot.label)} processing"`, row.processing_preference)}</label>
             <div class="ui-field-help">Uses the same model and reasoning effort. An explicit native service choice takes precedence.</div>
             <div class="ui-field-help" data-processing-capability></div>
             <div class="model-role-context">
                 <label class="ui-field">Window <input id="${escapeHtml(inputIdFor(row))}-context" class="ui-control" data-model-role-context type="number" min="0" step="1"
-                    placeholder="Auto" value="${escapeHtml(row.context || '')}" aria-label="${escapeHtml(row.slot.label)} context window"></label>
-                <span data-model-context-note>${escapeHtml(modelContextNote(row.windowPreview))}</span>
+                    placeholder="Auto" value="${escapeHtml(row.context || '')}" aria-label="${escapeHtml(row.slot.label)} context window">
+                    <span class="ui-field-help" data-model-context-note>${escapeHtml(modelContextNote(row.windowPreview))}</span></label>
                 <button type="button" class="btn btn-default" data-window-clear hidden>Clear confirmation</button>
             </div>
             <div class="model-role-context">
-                <label class="ui-field">Maximum response <input class="ui-control" data-response-limit type="number" min="0" step="1" placeholder="Auto" aria-label="${escapeHtml(row.slot.label)} maximum response"></label>
+                <label class="ui-field">Maximum response <input class="ui-control" data-response-limit type="number" min="0" step="1" placeholder="Auto" aria-label="${escapeHtml(row.slot.label)} maximum response">
+                    <span class="ui-field-help" data-response-note>Auto. Applies to this exact model and server; blank restores metadata.</span></label>
                 <button type="button" class="btn btn-default" data-response-apply>Apply maximum</button>
-                <span class="ui-field-help" data-response-note>Auto. Applies to this exact model and server; blank restores metadata.</span>
             </div></details>`;
     }
 
@@ -252,7 +267,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         element.innerHTML = (showContext ? `<section class="model-role-group"><label class="ui-field">Processing
             ${processingSelectHtml('data-global-processing aria-label="Global processing"', processingPreference, { global: true })}</label>
             <p class="model-role-copy">Applies to new tasks. Fast permits accelerated paid service within existing limits. Economy may fall back to the ordinary rate. Model and reasoning effort stay the same.</p>
-            <div class="ui-field-help">Keep route defaults preserves existing native choices. Explicit native service choices take precedence; the requested mode is not proof of the mode served.</div></section>` : '') + slots.map((slot) => {
+            <details class="model-role-details ui-disclosure"><summary>Details</summary><div class="ui-field-help">Keep route defaults preserves existing native choices. Explicit native service choices take precedence; the requested mode is not proof of the mode served.</div></details></section>` : '') + slots.map((slot) => {
             const matching = rows.filter((row) => row.slot.slot === slot.slot);
             const local = matching[0]?.local || false;
             return `<section class="model-role-group" data-model-role-group="${escapeHtml(slot.slot)}">

@@ -355,7 +355,8 @@ def test_widget_failed_list_retry_preserves_frames_stop_and_initial_recovery(bro
         kept = page.locator('[data-widget-key="retry_probe:kept"]')
         stopped = page.locator('[data-widget-key="retry_probe:stopped"]')
         kept.frame_locator("iframe").locator("#increment").click()
-        stopped.locator('[data-widget-power]').click()
+        stopped.locator('[data-widget-menu-trigger]').click()  # the owner's Stop is the card menu's
+        page.get_by_role("menuitem", name="Stop", exact=True).click()
         page.wait_for_function("!document.querySelector('[data-widget-key=\"retry_probe:stopped\"] iframe')")
         page.evaluate("window.keptFrame = document.querySelector('[data-widget-key=\"retry_probe:kept\"] iframe')")
         state["list_error"] = True

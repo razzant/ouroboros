@@ -847,8 +847,15 @@ export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRan
         if (destroyed || !row?.dataset || capsules.some((capsule) => !capsule.isSettled())) return;
         delete row.dataset.ownerCompact;
         row.style.setProperty('--capsule-value-cap', '');
-        capsules.forEach((capsule) => capsule.measureName());
+        capsules.forEach((capsule) => { delete capsule.el.dataset.nameFit; capsule.measureName(); });
         if (!wraps()) return;
+        // Names give way one at a time, the longest first, so two capsules of one value keep the words that tell them
+        // apart while the line can hold them (U123: never "Swarm · Max · Max" with room to spare).
+        const nameWidth = (capsule) => widthOf(capsule.el.querySelector('.chat-capsule-name'));
+        for (const capsule of [...capsules].sort((a, b) => nameWidth(b) - nameWidth(a))) {
+            capsule.el.dataset.nameFit = 'off';
+            if (!wraps()) return;
+        }
         row.dataset.ownerCompact = 'true';
         const rowStyle = win?.getComputedStyle?.(row);
         const room = widthOf(row) - px(rowStyle?.paddingLeft) - px(rowStyle?.paddingRight);

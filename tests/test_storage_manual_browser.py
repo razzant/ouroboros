@@ -99,7 +99,7 @@ class Stub:
 
 def _no_overflow(page, label):
     """Nothing in the Storage page is wider than its scroll area and no sentence is clipped by its own box."""
-    over = page.locator("#page-storage .costs-scroll").evaluate("node => node.scrollWidth - node.clientWidth")
+    over = page.locator("#page-storage").evaluate("node => node.scrollWidth - node.clientWidth")
     assert over <= 2, f"{label}: the page overflows by {over}px"
     clipped = page.locator("[data-storage-tray]").evaluate(
         "tray => [...tray.querySelectorAll('.storage-free-why, .storage-free-label, .storage-tray-text, .storage-status, .storage-meta')]"

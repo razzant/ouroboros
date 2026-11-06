@@ -553,7 +553,9 @@ def test_module_widget_theme_retains_state_when_hidden_and_releases_on_stop(subs
     assert retained.locator('#state').inner_text() == 'light:1'
     page.locator('[data-nav-page="widgets"]').click()
     page.wait_for_selector('#page-widgets.active')
-    card.locator('[data-widget-power]').click()
+    # The owner's Stop is the card menu's while the widget runs (the head offers Start only).
+    card.locator('[data-widget-menu-trigger]').click()
+    page.get_by_role('menuitem', name='Stop', exact=True).click()
     page.wait_for_function('window.__moduleThemeListeners.size === 0')
 
 
