@@ -297,7 +297,8 @@ def test_widget_heads_keep_the_menu_and_the_move_handle_as_one_visible_quiet_pai
             && Math.min(line.bottom, r.bottom) - Math.max(line.top, r.top) > 0.5)).length;
         const shown = (el, r) => r.width > 0 && r.height > 0 && getComputedStyle(el).opacity === '1'
             && getComputedStyle(el).visibility === 'visible' && getComputedStyle(el).display !== 'none';
-        const quiet = (el) => getComputedStyle(el).borderTopWidth === '0px'
+        // Quiet: no body and no visible edge (the shared capsule's 1px border is transparent).
+        const quiet = (el) => (getComputedStyle(el).borderTopWidth === '0px' || getComputedStyle(el).borderTopColor === 'rgba(0, 0, 0, 0)')
             && getComputedStyle(el).backgroundColor === 'rgba(0, 0, 0, 0)';
         return {title: card.querySelector('.widgets-card-title strong').textContent,
                 visible: shown(menu, m) && shown(drag, d), quiet: quiet(menu) && quiet(drag),

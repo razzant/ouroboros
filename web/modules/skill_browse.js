@@ -165,7 +165,7 @@ export function renderBrowseCard(item, { source, state, categoryLabels = new Map
     const cats = [connects ? chipHtml(connects, 'neutral') : '', ...(showCategory ? (item.category || [])
         .filter((cat) => cat !== CONNECTORS || !connects).map((cat) => chipHtml(categoryLabels.get(cat) || cat, 'neutral')) : [])].join('');
     const icon = connects ? `<span class="skills-card-icon" aria-hidden="true">${skillIconHtml(item.icon, 18)}</span>` : '';
-    return `<article class="marketplace-card skills-head-card" data-item="${id}" data-source="${escapeHtml(item.source_id)}">
+    return `<article class="ui-card marketplace-card skills-head-card" data-item="${id}" data-source="${escapeHtml(item.source_id)}">
         <div class="skills-head-title">${icon}<button type="button" class="skills-card-name" data-browse-action="open" data-item="${id}"><span data-i18n-authored>${escapeHtml(skillTitle(item))}</span><span class="skills-card-name-more" aria-hidden="true">›</span></button>${marks}</div>
         <p class="skills-card-purpose"${long ? ' data-clamped' : ''} data-i18n-authored>${escapeHtml(item.description || '')}</p>
         ${long ? `<button type="button" class="skills-read-more" data-browse-action="open" data-item="${id}">Read more ›</button>` : ''}
@@ -208,7 +208,7 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
             <label class="ui-field-inline skills-browse-filter"><span>Sort</span><select class="ui-control" data-browse-sort aria-label="Sort"></select></label>
             <label class="skills-official-toggle"><span class="skills-switch"><input type="checkbox" role="switch" data-browse-official aria-checked="false"><span class="skills-switch-track" aria-hidden="true"><span class="skills-switch-thumb"></span></span></span><span>Official only</span></label>
         </div>`;
-    pane.innerHTML = '<div class="skills-browse"><div class="skills-category-strip" data-browse-categories role="group" aria-label="Categories"></div><div class="ui-status skills-browse-status" data-browse-status role="status" aria-live="polite"></div><div data-browse-board></div></div>';
+    pane.innerHTML = '<div class="skills-browse"><div class="skills-category-strip" data-browse-categories role="group" aria-label="Categories" data-scroll-x></div><div class="ui-status skills-browse-status" data-browse-status role="status" aria-live="polite"></div><div data-browse-board></div></div>';
     const searchInput = chrome.querySelector('[data-browse-search]');
     const sourceSelect = chrome.querySelector('[data-browse-source]');
     const sortSelect = chrome.querySelector('[data-browse-sort]');

@@ -430,6 +430,15 @@ test('on a two-card board the edge drag reaches every width the menu gives, 2 an
     assert.deepEqual(saves[0].payload, { widget_size: { 'demo:a': { w: 3, h: 0 } } });
 });
 
+test('a card under 360px wide is marked narrow from the board plan (its lifecycle row goes under its title), a wider one is not', async () => {
+    const { cards, widths } = board(['demo:a', 'demo:b'], { width: 600 });
+    const marks = () => cards.map((card) => [width(card), card.hasAttribute('data-widget-narrow')]);
+    assert.deepEqual(marks(), [['293px', true], ['293px', true]]);
+    widths.setWidth('demo:a', 2);
+    await settle();
+    assert.deepEqual(marks(), [['600px', false], ['293px', true]], 'widened, the card loses the mark; its neighbour keeps it');
+});
+
 test('the only card on a wide board has no edge to drag; the menu still sizes it; a second card brings the edge back', async () => {
     for (const spans of [{}, { 'demo:solo': 2 }]) {
         const { list, cards, saves, widths, add } = board(['demo:solo'], { width: 1400, spans });

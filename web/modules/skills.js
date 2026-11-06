@@ -19,7 +19,7 @@ import { openSkillDetailSheet } from './skill_detail_sheet.js';
 import {
     openCompareDialog, openOfficialExplanation, openPublishDestinationDialog, openSkipReviewDialog, openUpdateDialog, updateWithoutReview,
 } from './skill_dialogs.js';
-import { plural, popularityText, repoLabel, routeExternalLink, versionText } from './skill_presentation.js';
+import { plural, popularityText, repoLabel, routeExternalLink, skillTitle, versionText } from './skill_presentation.js';
 import { runSkillPublishFlow } from './skill_publish_flow.js';
 import { installedTime } from './ui_helpers.js';
 import {
@@ -52,7 +52,7 @@ function skillsPageTemplate() {
             })}
             <div class="skills-search-chrome" data-chrome-pane="installed">
                 <input type="search" class="ui-control skills-search" id="skills-installed-search" placeholder="Find an installed skill" aria-label="Find an installed skill" autocomplete="off">
-                <div class="skills-filter-strip" id="skills-installed-filters" role="group" aria-label="Show"></div>
+                <div class="skills-filter-strip" id="skills-installed-filters" role="group" aria-label="Show" data-scroll-x></div>
             </div>
             <div class="skills-search-chrome" data-chrome-pane="browse" id="skills-browse-chrome" hidden></div>
             <div class="skills-scroll scroll-fade-y">
@@ -363,7 +363,7 @@ export function initSkills(ctx = {}) {
         paintFilters(skills);
         const candidates = skills ? updateAllCandidates(skills, cache.sourcesValue) : [];
         updateAllBtn.hidden = !(activeTab === 'installed' && candidates.length >= 2);
-        updateAllBtn.textContent = `Update all (${candidates.length})`;
+        updateAllBtn.textContent = `Update ${candidates.length} trusted`;
         const pill = document.getElementById('skills-tab-pill-installed');
         const count = inFlightCount(lifecycleEventsFromQueue(snapshot?.queue));
         if (pill) { pill.hidden = !count; pill.textContent = count ? String(count) : ''; }
@@ -755,7 +755,7 @@ export function initSkills(ctx = {}) {
         const catalogItem = catalogEntry(skill);
         const item = catalogItem || {
             id: `installed/${name}`, source_id: skill.install?.source?.id || '', source_name: installedSourceLabel(skill),
-            name, description: skill.description || '', version: skill.version, permissions: skill.permissions || [],
+            name, title: skillTitle(skill), description: skill.description || '', version: skill.version, permissions: skill.permissions || [],
             needs_keys: skill.grants?.requested_keys || [], official: Boolean(skill.install?.official), signals: null,
             category: skill.category || [],
         };
@@ -829,7 +829,7 @@ export function initSkills(ctx = {}) {
         const lines = candidates.map((skill) => `${skill.name} ${versionText(skill.install.release?.version || skill.version)} → ${versionText(skill.install.update_available.version)}`);
         const ok = await openConfirmDialog({
             title: `Update ${plural(candidates.length, 'skill')}?`,
-            body: `${lines.join(', ')}. Skills you changed here are not included; each of those asks what to keep.`,
+            body: `${lines.join(', ')}. Not included: skills you changed here and updates from sources that review each skill; each of those updates from its own card.`,
             confirmLabel: `Update ${candidates.length}`,
         });
         if (!ok) return;

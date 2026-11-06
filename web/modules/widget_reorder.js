@@ -160,6 +160,8 @@ export function bindWidgetCardReorder(list, currentOrder, onOrderChange) {
     });
 }
 
+// A card narrower than this keeps only ⋮ and ↕ beside its title; its lifecycle row goes under it (style.css).
+const NARROW_CARD_PX = 360;
 const WIDTH_NAMES = new Map(WIDGET_WIDTH_STEPS.map(({ w, label }) => [w, label.toLowerCase()]));
 const widthName = (w) => WIDTH_NAMES.get(w) || `${w} columns`;
 
@@ -224,7 +226,8 @@ export function createWidgetWidths(list, options) {
         (w) => placeAt(laid.replan(index, w), index), widthOf(laid.items[index].dataset.widgetKey || ''),
     );
     // Each masonry plan: kept for the edge drag; the list's mode for CSS and the
-    // menu; and on each card whether any step could change its width.
+    // menu; and on each card whether any step could change its width, and whether
+    // it is narrow (style.css then puts its lifecycle row under its title).
     const onLayout = (plan, items, replan) => {
         laid = { plan, items, replan };
         const mode = plan.availableColumns > 1 ? 'columns' : 'stack';
@@ -232,6 +235,8 @@ export function createWidgetWidths(list, options) {
         items.forEach((item, index) => {
             const fixed = choicesAt(index).length < 2;
             if (item.hasAttribute('data-widget-width-fixed') !== fixed) item.toggleAttribute('data-widget-width-fixed', fixed);
+            const narrow = plan.placements[index].width < NARROW_CARD_PX;
+            if (item.hasAttribute('data-widget-narrow') !== narrow) item.toggleAttribute('data-widget-narrow', narrow);
         });
     };
     const relayout = () => {

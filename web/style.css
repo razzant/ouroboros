@@ -876,6 +876,8 @@ html[data-layout="stack"] .resize-handle { display: none; }
 }
 
 .files-browser-header > .files-browser-actions { flex-wrap: wrap; flex-shrink: 1; min-width: 0; }
+/* On a phone (the stack layout) the location shares its row with its actions: its folders wrap beside them. */
+html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis: 0; }
 
 .files-crumb {
     border: none;
@@ -909,7 +911,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
 .files-entry {
     width: 100%;
     display: grid;
-    grid-template-columns: 20px minmax(0, 1fr) auto;
+    grid-template-columns: 20px minmax(0, 1fr) auto 16px;
     gap: 10px;
     align-items: center;
     border: none;
@@ -919,6 +921,11 @@ html[data-layout="stack"] .resize-handle { display: none; }
     padding: 10px 12px;
     cursor: pointer;
     text-align: left;
+    /* A row is a control: pressing or right-clicking it never selects its name (the preview keeps selection). */
+    -webkit-user-select: none;
+    user-select: none;
+    /* Rows touch, so no reach can stand out past them: a row is the touch minimum tall (44px under a finger). */
+    min-height: var(--touch-target-min);
 }
 
 .files-entry:hover {
@@ -929,15 +936,14 @@ html[data-layout="stack"] .resize-handle { display: none; }
     opacity: 0.88;
 }
 
-.files-entry.selected {
-    background: var(--accent-10);
-    box-shadow: inset 0 0 0 1px var(--accent-22);
-}
+/* The selected file keeps its own ink on the accent's faint wash, with no ring (DESIGN principle 4). */
+.files-entry.selected { background: var(--accent-10); }
 
-.files-entry-icon {
-    color: var(--accent);
-    font-size: 12px;
-}
+.files-entry-icon,
+.files-entry-chevron { display: inline-flex; align-items: center; justify-content: center; color: var(--text-secondary); }
+.files-entry-chevron { color: var(--text-muted); }
+.files-entry-icon svg { width: 16px; height: 16px; }
+.files-entry-chevron svg { width: 14px; height: 14px; }
 
 .files-entry-name {
     min-width: 0;
@@ -977,6 +983,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
     flex-shrink: 0;
 }
 
+.files-preview-header[hidden] { display: none; }
 .files-preview-header > :first-child { flex: 1 1 220px; min-width: 0; }
 .files-preview-actions {
     display: flex;
@@ -990,7 +997,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
     font-size: 14px;
     font-weight: 600;
     color: var(--text-primary);
-    word-break: break-all;
+    overflow-wrap: anywhere;
 }
 
 .files-preview-meta {
@@ -1014,6 +1021,8 @@ html[data-layout="stack"] .resize-handle { display: none; }
     white-space: pre-wrap;
     word-break: break-word;
 }
+/* The preview's own sentence (nothing chosen, no preview for this kind of file) reads in the system face. */
+.files-preview-content > .files-empty { padding: 0; font-family: var(--font-sans); white-space: normal; }
 
 .files-editor-shell {
     display: flex;
@@ -1284,7 +1293,7 @@ html[data-layout="docked"] .app-page-lead .app-tab { pointer-events: auto; }
    ink. A location longer than the bar's start scrolls inside it as a tab strip does, fading where folders hide: it
    rests at its end (files.js), so the folders above give way first, and no folder is wider than the strip less one
    fade, so the one you are in rests clear of it (a longer name ellipsizes; its words stay its accessible name). Its
-   own actions (Paste, + File, + Dir) join Refresh at the bar's end. */
+   own actions (Paste, + File, + Folder) join Refresh at the bar's end. */
 html[data-layout="docked"] .app-page-lead > .files-breadcrumb {
     flex: 1 1 auto;
     flex-wrap: nowrap;
@@ -5232,18 +5241,10 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 
-/* Objects and trays (DESIGN.md design bible; the role's own class is ui.css .ui-card). The page classes below are the
-   cards that have not yet taken .ui-card in their markup: they wear the same object material, read from the same
-   tokens, until their screens adopt the class. Inside an object a group or row is a tray: the soft neutral fill with
-   the inner radius and no shadow; a tray inside a tray drops its fill, so fills never stack and its rows part by space
-   alone. Neither has an edge: the transparent 1px border only keeps each box's size. */
-:is(.skills-card, .marketplace-card, .widgets-card) {
-    border: 1px solid transparent;
-    background: var(--surface-object);
-    border-radius: var(--radius-object);
-    box-shadow: var(--elev-rest);
-    padding: var(--card-pad);
-}
+/* Trays (DESIGN.md design bible; an object is ui.css .ui-card, which every card takes in its markup). Inside an object
+   a group or row is a tray: the soft neutral fill with the inner radius and no shadow; a tray inside a tray drops its
+   fill, so fills never stack and its rows part by space alone. Neither has an edge: the transparent 1px border only
+   keeps each box's size. */
 :is(.agent-family-card, .harness-account-row, .harness-login-card, .settings-effort-card,
     .settings-model-card, .settings-custom-secret-row, .settings-extension-section, .mcp-server-card) {
     border: 1px solid transparent; background: var(--surface-tray); border-radius: var(--radius-inner); box-shadow: none;
@@ -6137,17 +6138,14 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     display: none !important;
 }
 
-/* One disclosure, two surfaces: a Skills card's detail and Activity's retained
-   schedules (a fired one-shot, a withdrawn row) read the same, so they
-   share these rules instead of growing a second look for the same gesture. */
-.skills-details,
+/* Activity's retained schedules (a fired one-shot, a withdrawn row) and Storage's folds; a Skills card's Details is
+   the shared details.ui-disclosure (ui.css). */
 .activity-history {
     margin-top: 4px;
     border-top: 1px solid rgba(var(--neutral-rgb), 0.06);
     padding-top: 10px;
 }
 
-.skills-details > summary,
 .activity-history > summary {
     cursor: pointer;
     user-select: none;
@@ -6159,12 +6157,10 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     gap: 4px;
 }
 
-.skills-details > summary::-webkit-details-marker,
 .activity-history > summary::-webkit-details-marker {
     display: none;
 }
 
-.skills-details > summary::before,
 .activity-history > summary::before {
     content: '\25B8';
     display: inline-block;
@@ -6172,7 +6168,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     font-size: var(--type-meta);
 }
 
-.skills-details[open] > summary::before,
 .activity-history[open] > summary::before {
     transform: rotate(90deg);
 }
@@ -6182,28 +6177,9 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     display: inline-flex;
 }
 
-.skills-card-menu-trigger {
-    width: 32px;
-    min-height: 32px;
-    border-radius: var(--pill-radius);
-    border: 1px solid rgba(var(--neutral-rgb), 0.08);
-    background: rgba(var(--neutral-rgb), 0.04);
-    color: var(--text-secondary);
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    font-weight: 700;
-    font-size: 18px;
-    line-height: 1;
-    font-family: inherit;
-    padding: 0;
-}
-
-.skills-card-menu-trigger:hover {
-    border-color: var(--accent-25);
-    color: var(--text-primary);
-}
+/* The card menu's ⋮ is one quiet icon control on Skills, Sources and Widgets cards: the shared small capsule without a
+   body (.btn.btn-ghost.btn-sm, the quiet hover), a circle as tall as the row's controls, its glyph at the section size. */
+.skills-card-menu-trigger { --control-pad-x: 0; --button-font-size: var(--type-section); width: var(--control-h); }
 
 .skills-load-error {
     color: var(--status-error-fg);
@@ -6310,8 +6286,9 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 /* One card head for every skill (Installed, Browse, the detail sheet): the name opens the sheet, marks stay quieter
-   than the name, the purpose reads in meta ink, the who line and facts are meta lines. The run state is one flat status
-   chip beside the switch; what needs the owner is an attention tray (one sentence and its actions), visible on touch.
+   than the name, the purpose reads in meta ink, the who line and facts are meta lines, Details follows the head. The
+   switch is the run state; a chip beside it says only a state the switch cannot show; what needs the owner is an
+   attention tray (one sentence and its actions), visible on touch.
    Work shows only as the three-dot loop. Values are ui.css tokens (docs/DESIGN.md "Airy dopamine", §8). */
 .skills-list {
     display: flex;
@@ -6445,7 +6422,8 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 
 /* Attention trays: one sentence (and a quiet note) with its actions; a problem paints the error pair. */
 .skills-card-trays { display: grid; gap: var(--space-2); }
-.skills-card-trays:empty { display: none; }
+.skills-card-trays:empty,
+.skills-card [data-skill-errors]:empty { display: none; }
 .skills-tray { padding: var(--space-3) var(--space-4); border-radius: var(--radius-inner); background: var(--surface-tray); }
 .skills-tray[data-tone="danger"] { background: var(--status-error-bg); }
 .skills-tray[data-tone="danger"] .skills-tray-text { color: var(--status-error-word, var(--text-primary)); }
@@ -6502,12 +6480,9 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 .skills-switch.is-locked .skills-switch-thumb,
 .skills-switch input:disabled + .skills-switch-track .skills-switch-thumb { box-shadow: none; }
 
-/* Details: sentence-case labels at the meta size; values in meta ink, the label in the reading ink. */
-.skills-card-actions { display: flex; gap: var(--space-2); align-items: flex-start; flex-wrap: wrap; }
-/* The footer is a flex row: Details takes its whole width, so its summary sits at the card's right edge. */
-.skills-installed-card .skills-details { flex: 1 1 100%; min-width: 0; margin: 0; border: none; padding: 0; }
-.skills-installed-card .skills-details > summary { display: flex; width: fit-content; margin-left: auto; color: var(--text-primary); font-size: var(--type-meta); }
-.skills-details-body { display: grid; gap: var(--space-1); padding-top: var(--space-2); }
+/* Details (the shared disclosure, right under the head, its rows the card's width): sentence-case labels in the meta
+   ink at 500, values in the reading ink (DESIGN §2). */
+.skills-details-body { display: grid; gap: var(--space-1); }
 .skills-details-facts { display: contents; }
 .skills-detail-row {
     display: flex;
@@ -6519,15 +6494,12 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     font-size: var(--type-meta);
     line-height: var(--line-meta);
 }
-.skills-detail-label { min-width: 72px; color: var(--text-primary); font-size: var(--type-meta); font-weight: 600; }
-.skills-detail-value { min-width: 0; flex: 1 1 240px; overflow-wrap: anywhere; }
+.skills-detail-label { min-width: 72px; color: var(--text-meta); font-size: var(--type-meta); font-weight: 500; }
+.skills-detail-value { min-width: 0; flex: 1 1 240px; overflow-wrap: anywhere; color: var(--text-primary); }
 .skills-detail-row code { padding: 1px 6px; border-radius: var(--radius-inner); background: rgba(var(--neutral-rgb), 0.05); font-size: var(--type-meta); }
 .skills-review-block { display: grid; gap: var(--space-1); color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .skills-review-block:empty { display: none; }
 .skills-review-current { color: var(--text-meta); font-size: var(--type-meta); }
-.skills-review-history > summary,
-.skills-review-findings > summary,
-.skills-card-warnings > summary { cursor: pointer; color: var(--text-primary); font-size: var(--type-meta); font-weight: 600; }
 .skills-review-history ol,
 .skills-review-findings ul,
 .skills-card-warnings ul { margin: var(--space-1) 0 0; padding-left: 18px; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
@@ -6538,15 +6510,23 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 .skills-search-chrome[data-chrome-pane="installed"]:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .skills-filter-strip,
 .skills-category-strip { display: flex; flex-wrap: wrap; gap: 2px var(--space-1); min-width: 0; }
+/* On a phone the filters and the categories are one line that scrolls sideways ([data-scroll-x]: the drawer's swipe
+   leaves it to the strip), never a lone chip wrapped onto a second row. */
+html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip) {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+}
+html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-webkit-scrollbar { display: none; }
 .skills-filter-strip { flex-basis: 100%; margin-left: calc(-1 * var(--space-2)); }
 .skills-category-strip { margin: 0 0 var(--space-3) calc(-1 * var(--space-2)); }
 .skills-category-strip[hidden] { display: none; }
 .filter-chip.skills-category {
     --control-pad-x: var(--space-2);
     display: inline-flex;
-    align-items: baseline;
+    align-items: center;
     gap: var(--space-1);
-    font-weight: 600;
     line-height: var(--line-title);
     color: var(--text-secondary);
     white-space: nowrap;
@@ -6594,7 +6574,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     width: var(--masonry-w, auto);
     transform: translate(var(--masonry-x, 0px), var(--masonry-y, 0px));
 }
-.skills-head-card { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-4) 18px; min-width: 0; overflow-wrap: anywhere; }
+.skills-head-card { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; overflow-wrap: anywhere; }
 .skills-card-action-row { margin-top: auto; padding-top: var(--space-1); }
 .skills-card-actions-end { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
 
@@ -6949,51 +6929,21 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     gap: 4px 8px;
     min-width: 0;
     min-height: 32px;
+    /* A title breaks between its words: the card's own overflow-wrap (anywhere) split it inside one. */
+    overflow-wrap: break-word;
+    hyphens: auto;
 }
 
-/* The menu and the move handle are two quiet icon controls of one box: no body, no outline, the glyph alone, and a
-   hover or a press answers with the quiet tone (DESIGN §3, bible principle 4). The ⋮ is the Skills card menu's own
-   control; only its look inside this head is set here, so the Skills and Sources pages keep theirs. The explicit
-   height leaves the page-body touch minimum (`min-block-size`) to its owner. */
-.widgets-card-tools .skills-card-menu-trigger,
-.widgets-card-drag {
-    flex: 0 0 auto;
-    width: 32px;
-    height: 32px;
-    padding: 0;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    border: 0;
-    border-radius: var(--pill-radius);
-    background: transparent;
-    color: var(--text-secondary);
-    font: inherit;
-    font-size: 18px;
-    font-weight: 700;
-    line-height: 1;
-}
-
-.widgets-card-drag {
-    cursor: grab;
-}
-
-.widgets-card-tools .skills-card-menu-trigger:hover,
-.widgets-card-drag:hover {
-    background: var(--tone-quiet-hover);
-    color: var(--text-primary);
-}
-
-.widgets-card-drag:active {
-    cursor: grabbing;
-}
+/* The menu and the move handle are one quiet icon control twice: the ⋮ of every card menu (its rule is the Skills
+   card menu's) and the ↕ share the shared small capsule without a body (.btn.btn-ghost.btn-sm), its touch reach
+   included (DESIGN §3, bible principle 4). */
+.widgets-card-drag { --control-pad-x: 0; --button-font-size: var(--type-section); width: var(--control-h); cursor: grab; }
+.widgets-card-drag:active { cursor: grabbing; }
 
 /* Framed-card head controls (widgets lifecycle phase 2): status as dot + text
    (docs/DESIGN.md section 4 — the status pair is the semantic contract, not a
-   token migration of this surface), the one primary Start/Stop button, the
-   launch-policy menu on the Skills card menu primitive, and the drag handle.
-   Widgets is not a migrated surface (DESIGN.md section 8): these rules keep
-   the literal sizes and inks the surface already uses, not the type tokens. */
+   token migration of this surface), Start when stopped (Start again, neutral,
+   after a mount that ended by itself), Stop in the card menu, and the drag handle. */
 .widgets-card-controls {
     display: flex;
     align-items: center;
@@ -7021,6 +6971,10 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     flex: 0 0 auto;
 }
 
+/* A running card's Stop is the card menu's (rare, never the board's loudest word): the head offers Start only. The
+   board's fork, a neutral Stop capsule in the head, is this one rule deleted (widget_card.js marks the button). */
+.widgets-card-run [data-widget-power][data-running] { display: none; }
+
 .widgets-card-tools {
     display: inline-flex;
     flex: 0 0 auto;
@@ -7041,6 +6995,15 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 .widgets-card-controls .ui-status[data-tone]::before {
     margin-right: 6px;
 }
+
+/* A narrow card (under 360px; widget_reorder.js marks it from the board's plan, a card being no query container of
+   its own width) keeps only ⋮ and ↕ beside its title and puts its lifecycle row under it, so the title keeps the
+   card's width and breaks between words. */
+.widgets-card[data-widget-narrow] .widgets-card-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.widgets-card[data-widget-narrow] .widgets-card-controls { display: contents; }
+.widgets-card[data-widget-narrow] .widgets-card-title { grid-column: 1; grid-row: 1; }
+.widgets-card[data-widget-narrow] .widgets-card-tools { grid-column: 2; grid-row: 1; align-self: start; }
+.widgets-card[data-widget-narrow] .widgets-card-run { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; }
 
 .widgets-menu-heading {
     padding: 4px 10px 6px;
@@ -7468,17 +7431,11 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     margin-bottom: 10px;
 }
 
-.widget-tab-btn {
-    border: 1px solid rgba(var(--neutral-rgb), 0.08);
-    border-radius: 999px;
-    background: rgba(var(--neutral-rgb), 0.03);
-    color: var(--text-secondary);
-    cursor: pointer;
-    padding: 5px 10px;
-}
+/* A declarative widget's tabs are the shared quiet small capsule (.btn.btn-ghost.btn-sm); the chosen one keeps the
+   accent's wash under the reading ink. */
+.widget-tab-btn { color: var(--text-secondary); }
 
 .widget-tab-btn.active {
-    border-color: var(--accent-35);
     background: var(--accent-12);
     color: var(--text-primary);
 }
