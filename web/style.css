@@ -1361,48 +1361,7 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     display: none;
 }
 
-/* Tabs (DESIGN.md design bible): neutral capsules with the secondary ink; the chosen tab (a place) takes the crimson
-   tone and stays standing; a press deepens the colour, nothing changes height. */
-.app-tab {
-    flex: 0 0 auto;
-    white-space: nowrap;
-    min-block-size: var(--page-control-min, 0px);
-    border: 1px solid transparent;
-    background: var(--surface-capsule);
-    color: var(--text-secondary);
-    box-shadow: var(--elev-rest);
-    border-radius: var(--pill-radius);
-    padding: var(--pill-padding-y) var(--pill-padding-x);
-    font: inherit;
-    font-size: var(--pill-font-size);
-    font-weight: 600;
-    cursor: pointer;
-    transition: var(--motion-tone);
-}
-.app-tab:hover { background: var(--surface-capsule-hover); box-shadow: var(--elev-rest); color: var(--text-primary); }
-.app-tab.active,
-.app-tab.is-active { background: var(--tone-crimson); color: var(--tone-crimson-ink); box-shadow: var(--elev-rest); --press: var(--press-solid); }
-.app-tab:not(:disabled):active { filter: var(--press); }
-.app-tab:disabled { box-shadow: none; }
-
-/* A tab's count (Skills: the jobs in flight) is a neutral count pill on the shared type scale: it says how many,
-   while amber would say the owner has a move to make. */
-.app-tab-pill {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    margin-left: 6px;
-    padding: 0 6px;
-    min-width: 18px;
-    height: 18px;
-    border-radius: var(--pill-radius);
-    background: var(--status-neutral-bg);
-    color: var(--status-neutral-fg);
-    font-size: var(--type-meta);
-    font-weight: 600;
-    line-height: 1;
-    font-variant-numeric: tabular-nums;
-}
+/* The tab itself (.app-tab, its count pill) is ui.css's; the strip above is the page's composition. */
 
 .scroll-fade-y {
     --scroll-fade-edge: 32px;
@@ -5306,19 +5265,17 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 /* === design-system:migrated-end === */
 
-/* Objects and trays (DESIGN.md design bible). A card on the room is an object: the object surface on the rest shadow
-   with the object radius. Inside an object a group or row is a tray: the soft neutral fill with the inner radius and
-   no shadow; a tray inside a tray drops its fill, so fills never stack and its rows part by space alone. Neither has
-   an edge: the transparent 1px border only keeps each box's size. A status sentence stays a dot and a word, never a
-   box. */
-:is(.ui-card, .settings-shell .form-section, .settings-card, .settings-provider-card, .skills-card,
+/* Objects and trays (DESIGN.md design bible; the role's own class is ui.css .ui-card). The page classes below are the
+   cards that have not yet taken .ui-card in their markup: they wear the same object material, read from the same
+   tokens, until their screens adopt the class. Inside an object a group or row is a tray: the soft neutral fill with
+   the inner radius and no shadow; a tray inside a tray drops its fill, so fills never stack and its rows part by space
+   alone. Neither has an edge: the transparent 1px border only keeps each box's size. */
+:is(.settings-shell .form-section, .settings-card, .settings-provider-card, .skills-card,
     .marketplace-card, .widgets-card, .updates-card, .costs-budget-card, .stat-card, .log-task-card) {
     border: 1px solid transparent;
     background: var(--surface-object);
     border-radius: var(--radius-object);
     box-shadow: var(--elev-rest);
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
 }
 :is(.agent-family-card, .harness-account-row, .harness-login-card, .settings-effort-card,
     .settings-model-card, .settings-custom-secret-row, .settings-extension-section, .mcp-server-card) {
@@ -5447,23 +5404,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .logs-inline-clear {
     margin-left: auto;
 }
-
-/* Filters are quiet controls: no body, so no shadow; a chosen filter takes the soft crimson. */
-.filter-chip {
-    padding: 4px 12px;
-    border-radius: var(--pill-radius);
-    border: 1px solid transparent;
-    background: transparent;
-    color: var(--text-secondary);
-    box-shadow: none;
-    font-size: 12px;
-    font-family: inherit;
-    cursor: pointer;
-    transition: var(--motion-tone);
-}
-.filter-chip:hover { background: var(--tone-quiet-hover); }
-.filter-chip.active { background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); }
-.filter-chip:not(:disabled):active { filter: var(--press); }
 
 #log-entries {
     flex: 1;
@@ -5691,12 +5631,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 .settings-lan-hint[data-tone="info"] { border-color: var(--status-neutral-border); }
 .settings-lan-hint a { color: inherit; text-decoration: underline; opacity: 0.9; }
-.btn-sm {
-    padding: calc(var(--button-padding-y) - 4px) calc(var(--button-padding-x) - 4px);
-    font-size: calc(var(--button-font-size) - 1px);
-    min-height: 28px;
-}
-
 /* === design-system:migrated-begin (Dashboard Evolution tab) === */
 /* Dashboard Evolution (evolution.js): the campaign object, then one time line of versions with the chosen version
    beneath it. Both are .ui-card objects on the shared materials. The chart's inks: the line and its area, milestone
@@ -6949,7 +6883,6 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 .skills-first-about { flex-basis: 100%; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .skills-trust-segments { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); }
 .skills-trust-segments .ui-segment { min-height: 34px; padding: 6px 10px; font-size: var(--type-meta); }
-.skills-trust-segments .ui-segment.active { background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); }
 .skills-mark-popup {
     max-width: min(360px, var(--ui-popup-max-width, 360px));
     padding: var(--space-3) var(--space-4);

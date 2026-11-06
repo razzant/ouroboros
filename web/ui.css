@@ -635,6 +635,113 @@
     .btn-float:not(:disabled):hover { filter: var(--press); }
 }
 .btn-float:not(:disabled):active { filter: var(--press) var(--press); }
+/* A control inside a row is the small capsule. */
+.btn-sm {
+    padding: calc(var(--button-padding-y) - 4px) calc(var(--button-padding-x) - 4px);
+    font-size: calc(var(--button-font-size) - 1px);
+    min-height: 28px;
+}
+
+/* Tabs (DESIGN.md design bible): a tab is a neutral capsule with the secondary ink; the chosen tab (a place) takes the
+   crimson tone and stays standing; a press deepens the colour, nothing changes height. The strip that scrolls them is
+   the page's (style.css .app-tab-strip). */
+.app-tab {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    min-block-size: var(--page-control-min, 0px);
+    border: 1px solid transparent;
+    background: var(--surface-capsule);
+    color: var(--text-secondary);
+    box-shadow: var(--elev-rest);
+    border-radius: var(--pill-radius);
+    padding: var(--pill-padding-y) var(--pill-padding-x);
+    font: inherit;
+    font-size: var(--pill-font-size);
+    font-weight: 600;
+    cursor: pointer;
+    transition: var(--motion-tone);
+}
+.app-tab:hover { background: var(--surface-capsule-hover); box-shadow: var(--elev-rest); color: var(--text-primary); }
+.app-tab.active,
+.app-tab.is-active { background: var(--tone-crimson); color: var(--tone-crimson-ink); box-shadow: var(--elev-rest); --press: var(--press-solid); }
+.app-tab:not(:disabled):active { filter: var(--press); }
+.app-tab:disabled { box-shadow: none; }
+.app-tab:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+/* A tab's count (Skills: the jobs in flight) is a neutral count pill on the shared type scale: it says how many,
+   while amber would say the owner has a move to make. */
+.app-tab-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: 6px;
+    padding: 0 6px;
+    min-width: 18px;
+    height: 18px;
+    border-radius: var(--pill-radius);
+    background: var(--status-neutral-bg);
+    color: var(--status-neutral-fg);
+    font-size: var(--type-meta);
+    font-weight: 600;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Filters are quiet controls: no body, so no shadow; a chosen filter takes the soft crimson. */
+.filter-chip {
+    padding: 4px 12px;
+    border-radius: var(--pill-radius);
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-secondary);
+    box-shadow: none;
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: var(--motion-tone);
+}
+.filter-chip:hover { background: var(--tone-quiet-hover); }
+.filter-chip.active { background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); }
+.filter-chip:not(:disabled):active { filter: var(--press); }
+.filter-chip:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+
+/* A segmented choice (one option of a single-select group, page_header.js renderSegmentedField) is the one capsule
+   control: neutral options standing on the rest shadow, the chosen one in the soft crimson and still standing, no
+   outline. Hover and press change colour, never height. A word longer than its column (a translated label) breaks
+   rather than overflowing, so a segment keeps a minimum height, not a fixed one. A setting's value is never amber. */
+.ui-segment {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    min-height: 38px;
+    line-height: 1.2;
+    border: 1px solid transparent;
+    border-radius: var(--pill-radius);
+    background: var(--surface-capsule);
+    color: var(--text-secondary);
+    box-shadow: var(--elev-rest);
+    padding: 10px 12px;
+    cursor: pointer;
+    font-size: var(--button-font-size);
+    font-weight: 600;
+    overflow-wrap: anywhere;
+    transition: var(--motion-tone);
+}
+.ui-segment:not(:disabled):not(.active):hover { background: var(--surface-capsule-hover); color: var(--text-primary); }
+.ui-segment.active { background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); }
+.ui-segment:not(:disabled):active { filter: var(--press); }
+.ui-segment:disabled { cursor: not-allowed; opacity: var(--control-disabled-opacity); box-shadow: none; }
+.ui-segment:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+
+/* An object on the room (DESIGN.md design bible): one flat fill on the rest shadow with the object radius, no edge
+   (the transparent 1px border only keeps the box's size). Inside an object a group or row is a tray
+   (--surface-tray, --radius-inner, no shadow); fills never stack. */
+.ui-card {
+    border: 1px solid transparent;
+    background: var(--surface-object);
+    border-radius: var(--radius-object);
+    box-shadow: var(--elev-rest);
+}
 
 
 .ui-chip,

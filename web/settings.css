@@ -913,57 +913,7 @@
     --segment-columns: var(--segment-count, 5);
 }
 
-/* .ui-segment — SSOT base look for a segmented single-select button (sibling of
-   .app-tab). Settings-specific overrides (layout, accent colors) stay on
-   .settings-effort-*; the resting look + centering live here. The flex centering
-   fixes labels that sat top-left in taller cells (the effort-button bug); a word
-   longer than its column (a translated label) breaks rather than overflowing. */
-.ui-segment {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    text-align: center;
-    min-height: 38px;
-    line-height: 1.2;
-    border: 1px solid transparent;
-    border-radius: var(--pill-radius);
-    background: var(--surface-capsule);
-    color: var(--text-secondary);
-    box-shadow: var(--elev-rest);
-    padding: 10px 12px;
-    cursor: pointer;
-    font-size: var(--button-font-size);
-    font-weight: 600;
-    overflow-wrap: anywhere;
-    transition: var(--motion-tone);
-}
-/* A segmented choice is the one capsule control (DESIGN.md design bible): neutral options standing on the rest shadow,
-   the chosen one in the soft crimson and still standing, no outline. Hover and press change colour, never height. A
-   setting's value is never amber: Advisory reads like every other value. */
-.ui-segment:not(:disabled):not(.active):hover { background: var(--surface-capsule-hover); color: var(--text-primary); }
-.ui-segment:not(:disabled):active { filter: var(--press); }
-.ui-segment:disabled { box-shadow: none; }
-.settings-effort-btn.active,
-[data-enforcement-group] .settings-effort-btn[data-effort-value="blocking"].active {
-    background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink);
-}
-
-/* Keyboard focus is the one DESIGN ring, apart from the hover and selected paint. */
-.ui-segment:focus-visible {
-    outline: 2px solid var(--focus-accent-border);
-    outline-offset: 2px;
-}
-
-
-/* Shared disabled segmented-button style. */
-.settings-effort-btn:disabled {
-    cursor: not-allowed;
-    opacity: 0.55;
-}
-.settings-effort-btn:disabled:hover {
-    background: var(--surface-capsule);
-    color: var(--text-secondary);
-}
+/* The segment itself (.ui-segment, its states) is ui.css's; the group's layout stays here. */
 
 
 /* The local toggle's checkbox and gap: one pair of dimensions for the toggles and for the
