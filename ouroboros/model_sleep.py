@@ -744,7 +744,8 @@ def request_sleep(ctx: Any, chosen: Dict[str, Any], mode: str) -> Dict[str, Any]
         if holds:
             return {"reason": "dependency_held", "slept": False, "mode": mode, "held": holds, "note": HOLD_NOTE}
     from ouroboros.sleep_custody import transferable_pairs
-    retains_lane = mode == MODE_WARM
+    from ouroboros.task_carrier import LANE_CONVERSATION, execution_owner
+    retains_lane = mode == MODE_WARM and execution_owner(ctx).get("lane") != LANE_CONVERSATION  # a turn holds none
     if mode == MODE_COLD:
         try:
             _pairs, retains_lane = transferable_pairs(_canonical_root(ctx), str(ctx.task_id))

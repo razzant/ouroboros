@@ -212,6 +212,9 @@ def test_a_queued_retry_in_the_same_project_keeps_the_lane_check_until_it_runs(t
     refused = _wait_for_task(same, "held", sleep_mode="warm")
     assert "retains the project lane" in refused and not getattr(same, "_pending_task_wait", None)
     assert not getattr(same, "_model_sleep", None), "nothing sleeps on work only its own lane could admit"
+    reply = sleeper(retry["project_id"])  # a room's reply turn holds no lane, so the queued root can start
+    reply.task_metadata["_execution_owner"] = {"kind": "direct", "lane": "conversation"}
+    assert json.loads(_wait_for_task(reply, "held", sleep_mode="warm"))["reason"] == "sleep_armed"
     plain = sleeper(retry["project_id"])
     assert model_sleep.request_sleep(plain, model_sleep.selectors(plain, tasks=["held"]), "warm")[
         "reason"] == "sleep_armed", "an ordinary sleep keeps its own selected row's lane read"
