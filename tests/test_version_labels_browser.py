@@ -89,7 +89,7 @@ def facts(page, feed_selector=MAIN):
 
 
 def labels(core):
-    return f"v{core['runtime']}", f"app {core['app']} | rt {core['runtime']}"
+    return f"v{core['runtime']}", f"App {core['app']} · Runtime {core['runtime']}"
 
 
 class Transport(feed.Transport):

@@ -7,7 +7,7 @@ import { chipHtml, skillIconHtml } from './skill_presentation.js';
 import { tr, fmt } from './i18n.js';
 import { fetchJson } from './api_client.js';
 import { bindModelChoosers, modelChooserHtml, updateModelChooser } from './model_chooser.js';
-import { disconnectPlace, normalizePlace, normalizePlaceStatus, PLACES_CHANGED_EVENT, readPlaceConnector, readPlaceRooms, updatePlace } from './consciousness_api.js';
+import { disconnectPlace, failureText, normalizePlace, normalizePlaceStatus, PLACES_CHANGED_EVENT, readPlaceConnector, readPlaceRooms, updatePlace } from './consciousness_api.js';
 import { mountPlaceHistory, placeRoomsHtml } from './place_history.js';
 import {
     PLACE_STATES, SILENT_CARD, WAKE_FACT_WORDS, accountIdText, authorWord, capitalized, listWords, placeStateOf, placeStateWord, signalLabels, wakeFactWord,
@@ -185,7 +185,8 @@ export function placeSheetBodyHtml(place, ui = {}) {
     ].join('');
 }
 
-export const placeSheetMetaText = (place) => [place.label, placeStateWord(place.state)].filter(Boolean).join(' · ');
+// The sheet's title is the place; its meta line says only what the title does not: the state.
+export const placeSheetMetaText = (place) => placeStateWord(place.state);
 
 export function sheetShell(titleHtml, metaText, modifier = '') {
     const dialog = document.createElement('dialog');
@@ -314,7 +315,7 @@ export function openPlaceSheet(place, { returnFocus = document.activeElement, on
             if (room) { openRoom(room); if (history) return; }
         } catch (error) {
             if (sheet.closed || version !== roomGeneration) return;
-            ui.roomIndex = { error: error?.message || String(error) };
+            ui.roomIndex = { error: failureText(error) };
         }
         paint();
     }
@@ -344,7 +345,7 @@ export function openPlaceSheet(place, { returnFocus = document.activeElement, on
         }
         if (current && history) history.updatePlace(readerPlace());
         const meta = dialog.querySelector('[data-place-meta]');
-        if (meta) meta.innerHTML = `<span data-i18n-authored>${escapeHtml((current || place).label)}</span> · ${escapeHtml(ui.removed ? tr('places.disconnected.word', 'disconnected') : tr(`places.state.${current.state}`, placeStateWord(current.state)))}`;
+        if (meta) meta.textContent = ui.removed ? tr('places.disconnected.word', 'disconnected') : tr(`places.state.${current.state}`, placeStateWord(current.state));
         if (selected && meta) meta.innerHTML = `<span data-i18n-authored>${escapeHtml((current || place).label)}</span>`;
         dialog.querySelector('[data-place-label]').textContent = selected?.label || selected?.address || (current || place).label;
     }
@@ -353,7 +354,7 @@ export function openPlaceSheet(place, { returnFocus = document.activeElement, on
         if (error?.status === 409 && error.body?.code === 'place_revision_conflict' && Object.hasOwn(error.body, 'place')) {
             current = error.body.place ? normalizePlace(error.body.place) : null;
             ui.removed = !current; ui.conflict = true; ui.confirmDisconnect = false; ui.status = {}; ui.readiness = null;
-        } else ui.status = { [key]: { text: error?.message || String(error), tone: 'error' } };
+        } else ui.status = { [key]: { text: failureText(error), tone: 'error' } };
     }
 
     async function write(action, options = {}) {

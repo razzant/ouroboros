@@ -113,7 +113,7 @@ FACTS = """() => {
     const observed = (first < 0 ? [] : items.slice(first)).filter(shown);
     const heads = observed.filter((el) => el.classList.contains('updates-facts-head'));
     const labels = observed.filter((el) => el.tagName === 'DT' && !heads.includes(el));
-    const pairs = labels.map((dt) => ({label: text(dt), value: text(dt.nextElementSibling.firstChild),
+    const pairs = labels.map((dt) => ({label: text(dt), value: text(dt.nextElementSibling),
         exact: text(dt.nextElementSibling.querySelector('time')), labelBox: box(dt), valueBox: box(dt.nextElementSibling),
         valueOverflow: dt.nextElementSibling.scrollWidth - dt.nextElementSibling.clientWidth}));
     const of = (el) => (shown(el) ? window.__contrast.of(el).ratio : null);
@@ -215,6 +215,7 @@ def test_action_row_preserves_empty_notes_and_hidden_primary_buttons(updates_ui)
     expect(button).to_be_visible()
     expect(note).to_be_empty()
     expect(note).not_to_be_visible()
+    # The one next action stands at the headline's end (the tab body's hero), whatever the meta lines say.
     row_box, action_box = row.bounding_box(), button.bounding_box()
     assert abs(action_box["x"] + action_box["width"] - row_box["x"] - row_box["width"]) <= 1
     capture(page, "action-with-empty-note")
@@ -224,12 +225,11 @@ def test_action_row_preserves_empty_notes_and_hidden_primary_buttons(updates_ui)
     refresh(page, transport, reads)
     expect(note).to_be_visible()
     expect(button).not_to_be_visible()
-    expect(row).to_be_visible()
-    assert note.bounding_box()["width"] >= row.bounding_box()["width"] - 2
     capture(page, "checked-with-no-primary-action")
     current["status"]["checked_at"] = ""
     refresh(page, transport, reads)
-    expect(row).not_to_be_visible()
+    expect(note).not_to_be_visible()
+    expect(button).not_to_be_visible()
 
 
 def toggle(page, selector, key):
@@ -241,7 +241,7 @@ def toggle(page, selector, key):
 def restore_keeps_its_side(current, width):
     """Restore, the attempt's one button (the notice has its own close), sits where approved A placed it: at the end
     of the row on a wide card, at the start under the summary in a narrow one. Closed, it shares the summary's row
-    on a wide card; open, it is on the row below the list. It stays inside the attempt, above the meta chips."""
+    on a wide card; open, it is on the row below the list. It stays inside the attempt, under the headline's facts."""
     restore, foot, summary = current["restore"], current["foot"], current["summary"]
     if not restore:
         return False
@@ -250,7 +250,7 @@ def restore_keeps_its_side(current, width):
         row = restore["y"] >= current["details"]["bottom"]
     else:
         row = abs(restore["y"] - summary["y"]) < 12 if width >= 640 else summary["bottom"] <= restore["y"]
-    return side and row and restore["bottom"] <= current["meta"]["y"]
+    return side and row and restore["y"] >= current["meta"]["bottom"]
 
 
 @pytest.mark.parametrize("theme", ["dark", "light"])
@@ -261,13 +261,13 @@ def test_samples_are_rows_of_their_last_attempt_and_survive_refreshes(updates_ui
     prefix = f"populated-{theme}-{width}"
     closed = facts(page)
     # The card leads with the installation's state and its action; the samples add no block or sentence to it.
-    assert closed["headline"] == "Ouroboros is up to date at 7.8.0 (8d2b6e4f)." and closed["action"] == "Check again"
+    assert closed["headline"] == "Up to date · 7.8.0" and closed["action"] == "Check again"
     assert closed["attemptShown"] and not closed["open"] and closed["heads"] == [] and closed["strayBlocks"] == 0
     for word in ("RSS", "CPU", "Duty", "first model call", TARGET, "4e15961e", "Raw record"):
         assert word not in closed["cardText"], word
     # A confirmed success wears no notice: its record and samples are the panel's alone, which has no Dismiss.
     assert not closed["notice"]["shown"] and closed["footButtons"] == ["Restore previous version"], closed
-    assert closed["status"]["y"] < closed["summary"]["y"] < closed["meta"]["y"], closed
+    assert closed["status"]["y"] < closed["meta"]["y"] < closed["summary"]["y"], closed
     assert restore_keeps_its_side(closed, width), closed
     capture(page, prefix + "-closed")
 
@@ -276,16 +276,20 @@ def test_samples_are_rows_of_their_last_attempt_and_survive_refreshes(updates_ui
     opened = facts(page)
     assert opened["heads"] == ["Before the update (recorded sample, server process)",
                                "After the update (recorded sample, server process)"], opened["heads"]
-    assert [pair["label"] for pair in opened["pairs"]] == LABELS * 2, opened["pairs"]
-    before, after = ({pair["label"]: pair for pair in side} for side in (opened["pairs"][:7], opened["pairs"][7:]))
+    # A value the sample did not record leaves its row (the raw record keeps the null): Before has no Duty overruns.
+    before_labels = [label for label in LABELS if label != "Duty overruns"]
+    assert [pair["label"] for pair in opened["pairs"]] == before_labels + LABELS, opened["pairs"]
+    before, after = ({pair["label"]: pair for pair in side} for side in (opened["pairs"][:6], opened["pairs"][6:]))
     assert after["Source"]["value"] == TARGET and before["Source"]["value"] == BASE  # full technical values, whole
-    assert after["Observed"]["exact"] == AFTER["observed_at"] and "UTC" in after["Observed"]["value"]
-    assert after["RSS peak"]["value"] == "1270.00 MiB"
-    assert after["CPU time, process lifetime"]["value"] == "1137.43 seconds"
-    assert after["CPU share, sample interval"]["value"] == "58.39 % over 1428.22 seconds"
-    assert after["Duty overruns"]["value"] == '{"reconcile_owner_bindings":1}'
-    assert after["Direct message to first model call"]["value"] == "15.24 seconds from acceptance · task 4e15961e"
-    assert before["Duty overruns"]["value"] == "unobserved"  # null is not 0
+    # The local minute to read; the exact recorded stamp is the raw record's alone.
+    assert after["Observed"]["exact"] == "" and "UTC" in after["Observed"]["value"]
+    # Sizes and durations read as the other Dashboard tabs write them.
+    assert after["RSS peak"]["value"] == "1.3 GB"
+    assert after["CPU time, process lifetime"]["value"] == "19 min"
+    assert after["CPU share, sample interval"]["value"] == "58.4 % over 24 min"
+    assert after["Duty overruns"]["value"] == "reconcile owner bindings ×1"
+    assert after["Direct message to first model call"]["value"] == "15 s from acceptance · task 4e15961e"
+    assert "Duty overruns" not in before  # null is never shown as 0
     assert opened["rawShown"] and opened["rawLabel"] == "Raw record" and opened["rawText"] is None
     capture(page, prefix + "-open", "#updates-attempt-details > summary")
     capture(page, prefix + "-open-after", "#updates-attempt-facts .updates-facts-head >> nth=1")
@@ -317,7 +321,7 @@ def test_samples_are_rows_of_their_last_attempt_and_survive_refreshes(updates_ui
     refresh(page, transport, reads)
     moved = facts(page)
     assert moved["open"] and moved["rawOpen"] and '"seconds": 3.75' in moved["rawText"]
-    assert moved["pairs"][-1]["value"] == "3.75 seconds from acceptance · task 4e15961e"
+    assert moved["pairs"][-1]["value"] == "3.8 s from acceptance · task 4e15961e"
 
     toggle(page, "#updates-attempt-raw > summary", "Space")
     toggle(page, "#updates-attempt-details > summary", "Enter")
@@ -345,10 +349,10 @@ def test_zero_missing_and_long_values_keep_their_words_and_fit(updates_ui, width
     assert shown["heads"] == ["Before the update", "After the update (recorded sample, server process)"]
     values = {pair["label"]: pair["value"] for pair in shown["pairs"]}
     assert values["Sample"] == "unobserved"
-    assert values["RSS"] == "0.00 MiB" and values["CPU time, process lifetime"] == "0.00 seconds"  # zero is measured
-    assert values["CPU share, sample interval"] == "unobserved"
-    assert values["Direct message to first model call"] == "unobserved"
-    assert values["Duty overruns"] == json.dumps(duties, separators=(",", ":"))
+    assert values["RSS"] == "0 bytes" and values["CPU time, process lifetime"] == "0.0 s"  # zero is measured
+    # What the sample did not record leaves its row; the raw record below keeps the nulls.
+    assert "CPU share, sample interval" not in values and "Direct message to first model call" not in values
+    assert values["Duty overruns"] == ", ".join(f"{duty.replace('_', ' ')} ×{count}" for duty, count in duties.items())
     assert json.loads(shown["rawText"]) == current["status"]["after_update"] and '"before": null' in shown["rawText"]
     assert all(pair["valueOverflow"] <= 1 for pair in shown["pairs"]), shown["pairs"]
     assert shown["rawOverflow"] <= 1 and shown["cardOverflow"] <= 1 and shown["pageOverflow"] <= 1, shown
@@ -431,7 +435,7 @@ def test_the_notice_closes_itself_and_leaves_the_last_attempt_whole(updates_ui, 
     assert shown["notice"] == {"shown": True, "text": "Update outcome unconfirmed", "close": True, "tone": "neutral"}
     assert shown["attemptHeadline"] == "The last update outcome is unconfirmed." and shown["footButtons"] == []
     assert shown["heads"] == ["Before the update (recorded sample, server process)", "After the update"], shown["heads"]
-    assert [pair["label"] for pair in shown["pairs"]] == [*LABELS, "Sample"], shown["pairs"]
+    assert [pair["label"] for pair in shown["pairs"]] == [*(label for label in LABELS if label != "Duty overruns"), "Sample"], shown["pairs"]
     assert shown["pairs"][0]["value"] == BASE and shown["pairs"][-1]["value"] == "unobserved"
     assert shown["rawLabel"] == "Raw record" and json.loads(shown["rawText"]) == current["status"]["after_update"]
     capture(page, f"notice-{theme}-{width}-unconfirmed", "#updates-attempt-details > summary")
@@ -450,7 +454,8 @@ def test_the_notice_closes_itself_and_leaves_the_last_attempt_whole(updates_ui, 
     assert [request for request in transport.requests[sent:] if request[0] != "GET"] == [], transport.requests[sent:]
     refresh(page, transport, reads)
     kept = facts(page)
-    assert not kept["notice"]["shown"] and kept["rawText"] == shown["rawText"] and len(kept["pairs"]) == 8, kept
+    # Six recorded rows before the update (its unrecorded duty overruns leave their row) and the after side's one line.
+    assert not kept["notice"]["shown"] and kept["rawText"] == shown["rawText"] and len(kept["pairs"]) == 7, kept
     capture(page, f"notice-{theme}-{width}-closed", "#updates-attempt-details > summary")
 
     # The next attempt is a confirmed success: nothing to close, and its samples are the panel's.
@@ -459,7 +464,8 @@ def test_the_notice_closes_itself_and_leaves_the_last_attempt_whole(updates_ui, 
     refresh(page, transport, reads)
     success = facts(page)
     assert not success["notice"]["shown"] and success["attemptHeadline"] == "Update completed."
-    assert len(success["heads"]) == 2 and len(success["pairs"]) == 14 and success["rawLabel"] == "Raw record"
+    # Both sides recorded; the before side has no duty overruns, so its row leaves (13 rows, not 14).
+    assert len(success["heads"]) == 2 and len(success["pairs"]) == 13 and success["rawLabel"] == "Raw record"
     evidence(f"notice-{theme}-{width}", {"unconfirmed": shown, "noticeClosed": hidden, "refreshed": kept,
                                          "nextSuccess": success, "console": transport.console})
 
@@ -492,7 +498,7 @@ def test_a_frame_without_the_record_is_kept_as_a_negative_control_not_coverage(u
     current["status"] = status(record())
     refresh(page, transport, reads)
     populated = facts(page)
-    assert len(populated["heads"]) == 2 and len(populated["pairs"]) == 14
+    assert len(populated["heads"]) == 2 and len(populated["pairs"]) == 13  # the before side records no duty overruns
     evidence("negative-control", {
         "without_after_update": {"rows_painted": len(without["pairs"]), "counts_as_coverage": False, "facts": without},
         "with_after_update": {"rows_painted": len(populated["pairs"]), "counts_as_coverage": True}})

@@ -34,8 +34,8 @@ test('skill card shows the current review round over the runner-bounded ten-row 
     const html = renderInstalledSkillCard(skill);
 
     assert.match(html, /Skill review round 12 — snapshot snapshot-9 \(attempt 1\) — revised snapshot/);
-    assert.match(html, /<details class="skills-review-history ui-rich-content">/);
-    assert.match(html, /Skill Review history \(10\)/);
+    assert.match(html, /<details class="ui-disclosure skills-review-history ui-rich-content">/);
+    assert.match(html, /Review history \(10\)/);
     assert.doesNotMatch(html, /must stay private/);
 });
 
@@ -67,7 +67,7 @@ test('a bounded history window names the exact omitted remainder in its label', 
     };
 
     const html = renderInstalledSkillCard(skill);
-    assert.match(html, /Skill Review history \(10 of 24\)/);
+    assert.match(html, /Review history \(10 of 24\)/);
 });
 
 function reviewCard(skillReview) {
@@ -89,7 +89,7 @@ function currentOutcome(html) {
 }
 
 function historyOutcomes(html) {
-    return [...html.matchAll(new RegExp(`<li>Skill review round \\d+ — snapshot [^ ]+ \\(attempt \\d+\\) · ([^<]*)${REASON_ROW}(?:<details class="skills-review-reason">[\\s\\S]*?</details>)?</li>`, 'g'))]
+    return [...html.matchAll(new RegExp(`<li>Skill review round \\d+ — snapshot [^ ]+ \\(attempt \\d+\\) · ([^<]*)${REASON_ROW}(?:<details class="ui-disclosure skills-review-reason">[\\s\\S]*?</details>)?</li>`, 'g'))]
         .map((match) => ({ line: match[1], reason: match[3] ?? null }));
 }
 
@@ -192,7 +192,7 @@ test('a failed run never reads as pending and its history keeps the disclosed om
     });
     assert.equal(currentOutcome(html).line, UNAVAILABLE_FAILED);
     assert.doesNotMatch(html, /· pending</);
-    assert.match(html, /Skill Review history \(2 of 4\)/);
+    assert.match(html, /Review history \(2 of 4\)/);
     assert.deepEqual(historyOutcomes(html).map((row) => row.line), ['clean', UNAVAILABLE_FAILED]);
 });
 

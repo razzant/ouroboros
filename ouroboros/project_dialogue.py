@@ -571,16 +571,13 @@ def routing_target_label(
         return "Task"
 
 
-# Q3=A: the HOST owns the owner-facing sentence for a REFUSED routing act. One
-# factual PHRASE per typed reason (what the producer branch observed: ≤ 60
-# chars, lower-case start, no codes, no trailing period); the prefix comes from
-# the ACT and its outcome in routing_refusal_cause, so one reason reads
-# "Not started: …" on a promote and "Not moved: …" on a scope bind. The receipt
-# under the owner's message, the host-initiated System row and the picker's
-# 409 toast all read this table; the browser renders the sentence verbatim (no
-# client table). Tool results to the agent read the same table: they keep the
-# machine prefix and code, then append these words. A reason without a row stays raw ("Not started (<reason>)")
-# so a new refusal is visible before it has words.
+# Q3=A: the HOST owns the owner-facing sentence for a REFUSED routing act. One factual PHRASE per typed reason (what the
+# producer branch observed: ≤ 60 chars, lower-case start, no codes, no trailing period); the prefix comes from the ACT
+# and its outcome in routing_refusal_cause, so one reason reads "Not started: …" on a promote and "Not moved: …" on a
+# scope bind. The receipt under the owner's message, the host-initiated System row and the picker's 409 toast all read
+# this table; the browser renders the sentence verbatim (no client table). Tool results to the agent read the same
+# table: they keep the machine prefix and code, then append these words. A reason without a row stays raw
+# ("Not started (<reason>)") so a new refusal is visible before it has words.
 ROUTING_REFUSAL_CAUSES: Dict[str, str] = {
     "workspace_unusable": "the working folder can't be used",
     "workspace_provisioning_failed": "no working folder could be created for the project",
@@ -790,9 +787,8 @@ TASK_CAUSE_PHRASES = {
     "required_reference_unavailable": "The handbook this task requires could not be read",
     "output_recovery_exhausted": "Empty length-limited replies exhausted recovery; saved work remains available",
     "children_unabsorbed": "Some sub-task results were never folded in, so the task had to wrap up",
-    # The supervisor's timeout rails (queue_timeouts.TIMEOUT_TERMINAL_REASONS): the
-    # reaper's task_done reason_code, spoken on its grace toast, its kill notice
-    # and its salvage line through this same table, never as the code.
+    # The supervisor's timeout rails (queue_timeouts.TIMEOUT_TERMINAL_REASONS): the reaper's task_done reason_code,
+    # spoken on its grace toast, its kill notice and its salvage line through this same table, never as the code.
     "absolute_ceiling": "The task reached its maximum running time",
     "deadline": "The task reached its deadline",
     "idle_timeout": "The task made no progress for too long",
@@ -801,6 +797,10 @@ TASK_CAUSE_PHRASES = {
     "empty_final_text": "The task ended without a final answer",
     "deep_self_review_unavailable": "The deep self-review could not run",
     "deep_self_review_error": "The deep self-review stopped on an error",
+    # A helper the host could not start (agent_dispatch.executor_blocked_outcome): it never ran and spent nothing.
+    "subagent_executor_unavailable": "This helper could not start because its route was unavailable; it spent nothing",
+    "delegate_tools_invisible": "This helper could not start because the tools that run its session are hidden from it; it spent nothing",
+    "delegate_visibility_unverified": "This helper could not start because its tools could not be checked; it spent nothing",
     # #869: the provider-death rail's terminal words; the amount of retained text is
     # said by the notice, this clause only names why the task ended.
     "provider_unavailable": "The task could not get a usable model answer, so it could not finish",

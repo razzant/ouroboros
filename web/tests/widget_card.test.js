@@ -66,17 +66,26 @@ test('retain is the third policy: it starts like auto and keeps only a FRAMED ca
 });
 
 function fakeCard() {
-    const power = { textContent: '', disabled: false };
+    const tones = new Set(['btn-primary']);
+    const marks = new Set();
+    const power = { textContent: '', disabled: false, tones, marks,
+        classList: { toggle: (name, on) => (on ? tones.add(name) : tones.delete(name)) },
+        toggleAttribute: (name, on) => (on ? marks.add(name) : marks.delete(name)) };
+    const stop = { hidden: true };
     const status = { hidden: false, dataset: {}, textContent: '' };
+    const details = { hidden: true, textContent: '' };
     const items = WIDGET_START_MODES.map((mode) => {
         const attrs = {};
         return { dataset: { widgetStartMode: mode }, attrs, setAttribute: (name, value) => { attrs[name] = value; } };
     });
     return {
         power,
+        stop,
         status,
+        details,
         items,
-        querySelector: (selector) => (selector === '[data-widget-power]' ? power : selector === '[data-widget-status]' ? status : null),
+        querySelector: (selector) => ({ '[data-widget-power]': power, '[data-widget-stop]': stop, '[data-widget-status]': status,
+            '[data-widget-fault-details]': details })[selector] || null,
         querySelectorAll: (selector) => (selector === '[data-widget-start-mode]' ? items : []),
     };
 }
@@ -85,7 +94,10 @@ test('the status badge is honest about keep-alive: "Keeps running" only for a ru
     const card = fakeCard();
     syncWidgetCardControls(card, 'running', 'retain');
     assert.deepEqual(card.status, { hidden: false, dataset: { tone: 'ok' }, textContent: 'Keeps running' });
-    assert.equal(card.power.textContent, 'Stop');
+    // Running: the power says Stop on a neutral body, marked running (style.css keeps Stop in the menu), and the
+    // menu's Stop is offered; crimson is Start's alone.
+    assert.deepEqual([card.power.textContent, [...card.power.tones], [...card.power.marks]], ['Stop', ['btn-default'], ['data-running']]);
+    assert.equal(card.stop.hidden, false);
     assert.equal(card.power.disabled, false);
     assert.deepEqual(card.items.map((item) => item.attrs['aria-checked']), ['false', 'false', 'true']);
     syncWidgetCardControls(card, 'running', 'auto');
@@ -97,9 +109,11 @@ test('the status badge is honest about keep-alive: "Keeps running" only for a ru
     assert.equal(card.status.textContent, 'Stopping…');
     assert.equal(card.status.dataset.tone, 'neutral');
     assert.equal(card.power.disabled, true);
+    assert.deepEqual([card.power.textContent, [...card.power.marks]], ['Stop', ['data-running']]);
     syncWidgetCardControls(card, 'stopped', 'retain');
     assert.equal(card.status.hidden, true);
-    assert.equal(card.power.textContent, 'Start');
+    assert.deepEqual([card.power.textContent, [...card.power.tones], [...card.power.marks]], ['Start', ['btn-primary'], []]);
+    assert.equal(card.stop.hidden, true);
 });
 
 test('framed cards carry Start/Stop and the launch policy; every card carries the width steps', () => {
@@ -117,7 +131,7 @@ test('framed cards carry Start/Stop and the launch policy; every card carries th
     assert.match(controls, /class="ui-status" data-tone="neutral" data-widget-status hidden/);
     for (const markup of [controls, declarative]) {
         assert.match(markup, /<dialog class="skills-card-menu-dialog ui-popup" role="menu" aria-label="Widget options"/);
-        assert.match(markup, /aria-label="Widget options" aria-haspopup="menu" aria-expanded="false" data-widget-menu-trigger>⋮</);
+        assert.match(markup, /class="btn btn-ghost btn-sm skills-card-menu-trigger" aria-label="Widget options" aria-haspopup="menu" aria-expanded="false" data-widget-menu-trigger>⋮</);
         // The width steps are one radio group; Reset is a plain item, never checked.
         assert.match(markup, /<div role="group" aria-label="Size">/);
         for (const { w, label } of WIDGET_WIDTH_STEPS) {
@@ -128,6 +142,8 @@ test('framed cards carry Start/Stop and the launch policy; every card carries th
         assert.doesNotMatch(markup, /aria-checked="true"/);
     }
     assert.match(controls, /<div role="group" aria-label="Launch policy">/);
+    assert.match(controls, /data-widget-stop hidden[^>]*>.*Stop</);
+    assert.doesNotMatch(declarative, /data-widget-stop/);
     assert.ok(controls.indexOf('data-widget-start-mode') < controls.indexOf('data-widget-size'), 'the launch policy comes first');
     for (const mode of WIDGET_START_MODES) {
         assert.match(controls, new RegExp(`role="menuitemradio"[^>]*data-widget-start-mode="${mode}"`));
@@ -221,7 +237,7 @@ test('a widget fault survives unchanged reconciliation and clears on a lifecycle
     assert.equal(status.hidden, false);
     assert.equal(status.dataset.tone, 'error');
     assert.equal(status.textContent, 'Widget script error: boom');
-    // The frame is still mounted, so the primary button must keep saying Stop.
+    // The frame is still mounted, so the power keeps saying Stop (offered in the card menu).
     assert.equal(power.textContent, 'Stop');
     assert.equal(power.disabled, false);
 
@@ -234,4 +250,29 @@ test('a widget fault survives unchanged reconciliation and clears on a lifecycle
     assert.equal(status.dataset.widgetFault, undefined);
     assert.equal(status.dataset.tone, 'neutral');
     assert.equal(status.textContent, 'Stopping…');
+
+});
+
+test('a mount that ended by itself settles stopped with its fault, its cause in the menu, and Start again', () => {
+    const card = fakeCard();
+    syncWidgetCardControls(card, 'running', 'auto');
+    setWidgetCardFault(card, "Stopped — couldn't load its files", { details: 'Widget file access ended', ended: true });
+    assert.deepEqual([card.details.hidden, card.details.textContent], [false, 'Widget file access ended']);
+    // The page settles it stopped (widgets.js): the fault survives the stop, and Start again is the neutral recovery.
+    for (const state of ['stopping', 'stopped']) {
+        syncWidgetCardControls(card, state, 'auto');
+        assert.deepEqual([card.status.textContent, card.status.dataset.tone], ["Stopped — couldn't load its files", 'error'], state);
+    }
+    assert.deepEqual([card.power.textContent, [...card.power.marks], [...card.power.tones]], ['Start again', [], ['btn-default']]);
+    assert.equal(card.stop.hidden, true);
+    assert.equal(card.details.textContent, 'Widget file access ended');
+    // The owner's start clears it; the next stopped card offers the crimson Start.
+    syncWidgetCardControls(card, 'starting', 'auto');
+    assert.equal(card.status.dataset.widgetFault, undefined);
+    assert.deepEqual([card.details.hidden, card.details.textContent], [true, '']);
+    syncWidgetCardControls(card, 'stopped', 'auto');
+    assert.deepEqual([card.power.textContent, [...card.power.marks], [...card.power.tones]], ['Start', [], ['btn-primary']]);
+    // A fault of a frame that still runs is no ended mount: a stop clears it (the test above).
+    setWidgetCardFault(card, 'Widget script error: boom');
+    assert.equal(card.details.hidden, true);
 });

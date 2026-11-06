@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { collectCustomSecretDraft, paintSettingsFieldErrors, settingsWriteFailure } from '../modules/settings_controls.js';
+import { syncPolicyState } from '../modules/settings_policy.js';
+import { collectCustomSecretDraft, paintSettingsFieldErrors, settingsWriteFailure, webSearchPreviewWords } from '../modules/settings_controls.js';
 
 const draft = (overrides = {}) => ({
     key: '', value: '', appliedValue: '', originalKey: '', clear: false, removed: false,
@@ -90,4 +91,43 @@ test('settings write errors preserve saved, unsaved and unknown receipts', () =>
         assert.equal(result.unknown, true);
         assert.match(result.text, /outcome is unknown/);
     }
+});
+
+test('the web search preview names the sources once in order; models, gaps and credentials are Details', () => {
+    const names = { openai: 'OpenAI', openrouter: 'OpenRouter', anthropic: 'Anthropic', ddgs: 'DuckDuckGo' };
+    const name = (id) => names[id] || id;
+    const words = webSearchPreviewWords({
+        legs: [{ source: 'openai', model: 'gpt-5.2' }, { source: 'openrouter', model: 'openai/gpt-5.2', model_source: 'provider_default' },
+            { source: 'ddgs' }],
+        unavailable: [{ source: 'anthropic', unavailable_reason: 'package_missing' }],
+    }, name);
+    assert.equal(words.main, 'Uses OpenAI, then OpenRouter, then DuckDuckGo.');
+    assert.equal(words.details, 'OpenAI · gpt-5.2; OpenRouter · openai/gpt-5.2 (recommended). '
+        + 'Not available now: Anthropic (package not installed). Uses saved account credentials.');
+    // No id, arrow or model in the main line; the gap that changes nothing stays out of it.
+    assert.doesNotMatch(words.main, /openai|ddgs|→|gpt|Anthropic/);
+    // A saved model a source ignores changes what the owner does next, so it stays in the main line.
+    assert.match(webSearchPreviewWords({ legs: [{ source: 'ddgs' }], unapplied_model: 'x-1' }, name).main,
+        /^Uses DuckDuckGo\. No built-in search serves the saved model x-1/);
+    assert.deepEqual(webSearchPreviewWords({ legs: [] }, name), { main: 'No search source is ready.', details: 'Uses saved account credentials.' });
+    assert.deepEqual(webSearchPreviewWords({ error: 'Search routes are not ready' }), { main: 'Search routes are not ready', details: '' });
+});
+
+test('a policy line says one value once and spells the facts out only where they differ', () => {
+    const nodes = {};
+    const root = { querySelector: (selector) => (selector.startsWith('[data-policy-state') ? (nodes[selector] ||= { textContent: '' }) : null) };
+    const line = (key) => nodes[`[data-policy-state="${key}"]`].textContent;
+    const same = { configured: 'advisory', current_process: 'advisory', next_task: 'advisory' };
+    syncPolicyState(root, { policy_state: { access: { configured: 'pro', current_process: 'pro' }, supervisor: same,
+        review: { ...same, active_task_snapshot: true } } });
+    assert.equal(line('access'), 'Pro now and after restart');
+    assert.equal(line('supervisor'), 'Advisory now and for new tasks');
+    assert.equal(line('review'), 'Advisory now and for new tasks; the running task keeps the value it started with');
+    assert.doesNotMatch(line('review'), /Advisory.*Advisory/, 'never the same value three times');
+    syncPolicyState(root, { policy_state: { access: { configured: 'cyber_pro', current_process: 'light', restart_required: true },
+        supervisor: { ...same, next_task: 'blocking' }, review: { ...same, configured: 'blocking', next_task: 'blocking', active_task_snapshot: true } } });
+    assert.equal(line('access'), 'Saved: Cyber Pro · Current process: Light · After restart: Cyber Pro · Restart required');
+    assert.equal(line('supervisor'), 'Current process: Advisory · Next task: Blocking');
+    assert.match(line('review'), /^Saved: Blocking · Current process: Advisory · Next task: Blocking · Current task keeps its start snapshot · /);
+    assert.match(line('review'), /Blocking would not be enforced under the selected Cyber Pro$/, 'the Cyber Pro note still follows');
 });

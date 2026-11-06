@@ -5,19 +5,15 @@
 import { taskArtifactArchiveUrl, taskArtifactDownloadUrl, taskWrapUpDocumentUrl } from './api_client.js';
 import { isTerminalTaskDetail } from './log_events.js';
 import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
+import { formatBytes, number } from './storage_format.js';
 
 const RESULT_FILE_ROWS = 8;
 const FOLDER_TOOLTIP_PATHS = 20;
 
 function artifactBytes(value) {
     const bytes = Number(value);
-    if (value === null || value === undefined || value === '' || !Number.isFinite(bytes) || bytes < 0) return '';
-    if (bytes < 1024) return `${bytes} B`;
-    const units = ['KB', 'MB', 'GB', 'TB'];
-    let size = bytes / 1024;
-    let unit = 0;
-    while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit += 1; }
-    return `${size >= 10 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
+    return value === null || value === undefined || value === '' || !Number.isFinite(bytes) || bytes < 0
+        ? '' : formatBytes(bytes);
 }
 
 // The host's word on one folder's archive (`artifact_archives[name]`): null when it says
@@ -113,13 +109,13 @@ export function syncResultFilesItem(record, detail) {
     return true;
 }
 
-const fileCountText = (count) => `${count.toLocaleString('en-US')} ${count === 1 ? 'file' : 'files'}`;
+const fileCountText = (count) => `${number(count)} ${count === 1 ? 'file' : 'files'}`;
 const metaTail = (parts) => parts.filter(Boolean).map((part) => ` · ${escapeHtml(part)}`).join('');
 
 function folderTooltip(folder) {
     const shown = folder.relpaths.slice(0, FOLDER_TOOLTIP_PATHS);
     const more = folder.relpaths.length - shown.length;
-    return shown.join('\n') + (more > 0 ? `\n… ${more.toLocaleString('en-US')} more` : '');
+    return shown.join('\n') + (more > 0 ? `\n… ${number(more)} more` : '');
 }
 
 // Rows use the markdown list markup (`md-li`, `md-link`) this body already styles. Saved work
@@ -144,9 +140,9 @@ function resultArtifactsHtml(view, limit = RESULT_FILE_ROWS) {
                     : `${escapeHtml(folder.name)}/`)
                 + metaTail(folder.archive?.available
                     ? ['folder', fileCountText(folder.archive.fileCount), artifactBytes(folder.archive.bytes),
-                        folder.archive.excluded ? `${folder.archive.excluded.toLocaleString('en-US')} not archived` : '']
+                        folder.archive.excluded ? `${number(folder.archive.excluded)} not archived` : '']
                     : ['folder', fileCountText(folder.fileCount), artifactBytes(folder.bytes),
-                        folder.unavailableCount ? `${folder.unavailableCount.toLocaleString('en-US')} unavailable` : '',
+                        folder.unavailableCount ? `${number(folder.unavailableCount)} unavailable` : '',
                         folder.archive ? 'no archive' : ''])
                 + '</span>',
         })),

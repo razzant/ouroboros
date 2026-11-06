@@ -69,7 +69,8 @@ def test_server_navigation_and_chat_static_contracts():
     assert '"bg_consciousness_state": snap.get("bg_state") or {},' in _read("ouroboros/gateway/state_publication.py")
     assert 'request.query_params.get("force")' in control_source
     assert "window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: pageName } }));" in app_source
-    assert "evo-consciousness-detail" in evo_source
+    # Evolution names Consciousness once, as a pointer to its own tab (its detail is that tab's).
+    assert "openDashboardTab?.('consciousness')" in evo_source and "evo-consciousness-detail" not in evo_source
     # A room's bar says consciousness and a running campaign by its chip (DESIGN "Page header"); no More menu repeats them.
     status_source = _read("web/modules/consciousness_status.js")
     assert "normalizeConsciousness(data.bg_consciousness_state || {}, { enabled: data.bg_consciousness_enabled })" in status_source

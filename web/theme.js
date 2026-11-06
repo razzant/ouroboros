@@ -143,25 +143,34 @@
        before CSS, so the first paint is already the right shell, and kept current by
        the window's own media-query change (a resize, a rotation). The number lives
        here once; web/modules/layout.js is the ES-module door everything else reads it
-       through (tests/test_shell_layout_static.py). */
+       through (tests/test_shell_layout_static.py).
+       Beside it, `html[data-pointer]` carries the primary input: `coarse` where it is a finger (a tablet, a phone, a
+       Mini App on either), `fine` with a mouse or a trackpad. It never moves the columns; it decides how a room over Main sits:
+       on a docked screen a finger gets the Project in Main's place, a desk keeps it beside Main (owner 06.11). */
     const LAYOUT = Object.freeze({ dockedMinWidth: 720 });
     const layoutQuery = typeof window.matchMedia === 'function'
         ? window.matchMedia(`(min-width: ${LAYOUT.dockedMinWidth}px)`)
         : null;
-    // A client that cannot answer the query is a desktop window: docked.
+    const pointerQuery = typeof window.matchMedia === 'function' ? window.matchMedia('(pointer: coarse)') : null;
+    // A client that cannot answer the queries is a desktop window: docked, with a mouse.
     const resolveLayout = () => (layoutQuery && !layoutQuery.matches ? 'stack' : 'docked');
+    const resolvePointer = () => (pointerQuery?.matches ? 'coarse' : 'fine');
     let layout = resolveLayout();
-    const paintLayout = () => { root.dataset.layout = layout; };
+    let pointer = resolvePointer();
+    const paintLayout = () => { root.dataset.layout = layout; root.dataset.pointer = pointer; };
     const onLayoutQuery = () => {
         const next = resolveLayout();
-        if (next === layout) return;
+        const nextPointer = resolvePointer();
+        if (next === layout && nextPointer === pointer) return;
         layout = next;
+        pointer = nextPointer;
         paintLayout();
-        window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout } }));
+        window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout, pointer } }));
     };
     paintLayout();
     layoutQuery?.addEventListener?.('change', onLayoutQuery);
-    window.ouroLayout = Object.freeze({ ...LAYOUT, get layout() { return layout; } });
+    pointerQuery?.addEventListener?.('change', onLayoutQuery);
+    window.ouroLayout = Object.freeze({ ...LAYOUT, get layout() { return layout; }, get pointer() { return pointer; } });
 
     /* The desktop window's ordinary system caption takes the light or dark tint of
        the painted palette (launcher_appearance.py). Only a top-level document speaks
@@ -299,6 +308,7 @@
         window.removeEventListener('pagehide', cleanup);
         query?.removeEventListener?.('change', onSystemChange);
         layoutQuery?.removeEventListener?.('change', onLayoutQuery);
+        pointerQuery?.removeEventListener?.('change', onLayoutQuery);
         channel?.removeEventListener('message', onMessage);
         channel?.close();
     };

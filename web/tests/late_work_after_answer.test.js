@@ -59,18 +59,18 @@ test('an answered root names its work and that only the work after the answer re
     const row = (phase, late_work) => liveActivityRowHtml({ activity_id: 'late-root', kind: 'direct_chat', phase,
         started_at: 0, late_work }, 1_700_000_100_000);
     const pausing = row('budget_pausing', { title: 'Audit <the> release', answered_at: '2026-10-13T21:11:55Z' });
-    assert.match(pausing, /<span class="activity-name">Audit &lt;the&gt; release<\/span>/);
+    assert.match(pausing, /<span class="ui-row-title activity-name">Audit &lt;the&gt; release<\/span>/);
     assert.match(pausing, /Remaining work pausing · answer delivered <time datetime="2026-10-13T21:11:55.000Z"[^>]*>[^<]+<\/time>/);
     assert.doesNotMatch(pausing, /Direct turn|budget_pausing|data-budget-paused/);
     const running = row('finalizing', { title: 'Audit', answered_at: 'not a time' });
     assert.match(running, /Remaining work running · answer delivered<\/span>/, 'an unknown answer time is omitted');
     const deferred = row('budget_paused', {});
-    assert.match(deferred, /<span class="activity-name">Answered task<\/span>/);
+    assert.match(deferred, /<span class="ui-row-title activity-name">Answered task<\/span>/);
     assert.match(deferred, /Remaining work paused · answer delivered/);
     assert.match(deferred, /data-budget-paused="1"/, 'a deferred late review keeps the shared Resume');
     // Positive control: a live direct turn without late work keeps its plain census line, in the chip's word.
     assert.match(liveActivityRowHtml({ activity_id: 'turn', kind: 'direct_chat', phase: 'working', started_at: 0 }),
-        /<span class="activity-name">Direct turn<\/span>\s*<span class="activity-sub"><span data-i18n-skip>Working<\/span><\/span>/);
+        /<span class="ui-row-title activity-name">Direct turn<\/span>\s*<span class="ui-row-meta activity-sub"><span class="status-mark activity-mark"[^>]*>(?:<i><\/i>){3}<\/span><span data-i18n-skip>Working<\/span><\/span>/);
 });
 
 test('Resume of deferred late work says it continues in place, never that it returns to the queue', async () => {

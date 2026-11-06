@@ -463,6 +463,18 @@ def admission_names(body: Dict[str, Any], description: str) -> tuple:
     return "", clean_model_title(strip_markdown(description), max_len=PROJECT_NAME_MAX)
 
 
+def derived_run_name(task: Dict[str, Any]) -> str:
+    """The name a listed run shows until its namer coins one: its stored ``suggested_name``, else
+    ``admission_names`` over its request — the description a caller or a delegation wrote (a child's
+    text opens with its role block), else the owner's own text. A Presence turn's text is its
+    correspondent's words, never its name. "" when nothing names it."""
+    stored = str(task.get("suggested_name") or "").strip()
+    if stored or task.get("_presence_turn"):
+        return stored
+    request = task.get("description") or task.get("objective") or task.get("text") or ""
+    return admission_names(task, str(request))[1]
+
+
 def late_input_names(metadata: Dict[str, Any], answered: str, owner_words: str) -> tuple:
     """``(suggested_name, naming input)`` of the head a late answer or a press on a finished author's card
     starts, never its host frame: ``answered`` is what it answers (``owner_quiz.late_answer_name``,
