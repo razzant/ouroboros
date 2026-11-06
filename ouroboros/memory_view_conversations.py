@@ -106,7 +106,7 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
     running = running_by_room(root, by_room, notes, membership.bindings, projects or [])
     rooms = sorted((set(by_room) | set(notes) | {room for room, kinds in gaps.items() if kinds}
                     | {room for room, tasks in running.items() if tasks}) - {str(spec.room_id)})
-    linked = linked_rows(root, store, by_room)
+    linked = linked_rows(root, store, by_room, projects or ())
     here = {entry[0]["row_sha256"] for entry in by_room.get(str(spec.room_id), ())} if spec.room_lanes else set()
     # Labels come from the rows in hand (open and sealed): a room's newest row that came over a transport, whose tail
     # metadata 7 keeps its conversation's name and audience. Only rooms none of whose rows carries them, and their

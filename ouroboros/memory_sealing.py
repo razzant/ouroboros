@@ -63,30 +63,37 @@ def writer_terminal_rows(root, starts):
     return grouped
 
 
-def linked_rows(root, store, by_room):
+def linked_rows(root, store, by_room, projects=()):
     """The ``row_sha256`` of every writer's later terminal row its page links below it (``terminal_links``), and of
-    each closing page's own closure notice among the open rows ``by_room`` (``closure_notices``): that page's, never
-    read as an open row of my other conversations (``memory_view_conversations``) or a debt."""
+    each closure's own notice among the open rows ``by_room`` (``closure_notices``, over the registry's ``projects``
+    the capture holds): that page's or closed record's, never read as an open row of my other conversations
+    (``memory_view_conversations``) or a debt."""
     pages = store.room_records(None, kinds=("page",))
     grouped = capture_terminal_rows(root, pages)
     return {address["row_sha256"] for rows in grouped.values() for address, _facts, _pos in rows} | closure_notices(
-        pages, by_room)
+        pages, by_room, projects)
 
 
-def _closures(pages):
-    """``{room: the closure deliveries its closing pages name}`` (``metadata.closure_delivery``)."""
+def _closures(pages, projects=()):
+    """``{room: the closure deliveries its closing pages and its closed project name}`` (``metadata.closure_delivery``,
+    ``closed.delivery``)."""
     named = {}
     for page in pages:
         if (page.get("metadata") or {}).get("closure_delivery"):
             named.setdefault(str(page["room_id"]), set()).add(page["metadata"]["closure_delivery"])
+    for project in projects:
+        if (project.get("closed") or {}).get("delivery"):
+            named.setdefault(str(project["chat_id"]), set()).add(project["closed"]["delivery"])
     return named
 
 
-def closure_notices(pages, by_room):
-    """``close_project`` writes the room's page from its closing note, naming the delivery of the System row it then
-    posts there (``project_closure``): that one row, wherever it lands, is linked below the page; a reopening's notice
-    is its own delivery. No position or text decides it."""
-    return {address["row_sha256"] for room, ids in _closures(pages).items()
+def closure_notices(pages, by_room, projects=()):
+    """``close_project`` names the delivery of the System row it posts in the room (``project_closure``) on the
+    project's closed record and on the page it writes there from its closing note first, when anything is open: that
+    one row, wherever it lands, is the closure's, linked below the page or held by the record, so a project closed with
+    nothing open leaves nothing open. A reopening removes the record and posts a notice of its own delivery: the room
+    is open again. No position or text decides it."""
+    return {address["row_sha256"] for room, ids in _closures(pages, projects).items()
             for address, meta, _pos in by_room.get(room, ()) if meta.get("delivery_id") in ids}
 
 

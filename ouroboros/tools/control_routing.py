@@ -472,7 +472,8 @@ def _list_projects(ctx: ToolContext, limit: int = 50, closed: Optional[bool] = N
 
 
 def _close_project(ctx: ToolContext, project_id: str, note: str, reopen: bool = False) -> str:
-    """Record a project decision and owe its owner one System row in that room, after a closing page that names it."""
+    """Record a project decision and owe its owner one System row in that room, whose delivery the closed record names,
+    as does the closing page written before it when anything is open there."""
     meta = getattr(ctx, "task_metadata", {}) or {}
     lineage = (getattr(ctx, "task_contract", {}) or {}).get("lineage") or {}
     if str(meta.get("delegation_role") or lineage.get("delegation_role") or "") == "subagent":
@@ -488,9 +489,10 @@ def _close_project(ctx: ToolContext, project_id: str, note: str, reopen: bool = 
         return "⚠️ TOOL_ERROR (close_project): this work has no task id."
     root, at = canonical_data_root(ctx), utc_now_iso()
     by = f"ouroboros:{task_id}"
+    notice = f"project-closure:{uuid.uuid4().hex}"  # the record and the page name it first; it is posted after the page
     try:
-        project, changed = update_project(root, project_id, return_changed=True,
-            closed=None if reopen else {"at": at, "by": by, "note": note.strip()}) or (None, False)
+        closed = None if reopen else {"at": at, "by": by, "note": note.strip(), "delivery": notice}
+        project, changed = update_project(root, project_id, return_changed=True, closed=closed) or (None, False)
     except Exception as exc:
         return f"⚠️ PROJECTS_ERROR: {type(exc).__name__}: {exc}"
     if project is None:
@@ -502,7 +504,6 @@ def _close_project(ctx: ToolContext, project_id: str, note: str, reopen: bool = 
     text = f"Ouroboros ({task_id}) {action} this project. {note.strip()}"
     if not reopen:
         text += " A message from you in this room or a new task will reopen it."
-    notice = f"project-closure:{uuid.uuid4().hex}"  # the page names it first; the notice is posted after the page
     page = "" if reopen else _closing_page(ctx, root, project, note.strip(), notice)
     try:
         delivery = outbox.enqueue_terminal_delivery_outcome(root, {

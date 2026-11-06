@@ -49,7 +49,8 @@ def test_closed_is_optional_reversible_metadata_without_a_routing_change(room):
 
 
 @pytest.mark.parametrize("value", [True, False, "closed", {}, [], {**CLOSED, "by": ""},
-                                  {**CLOSED, "at": None}, {**CLOSED, "note": 1}, {**CLOSED, "extra": "x"}])
+                                  {**CLOSED, "at": None}, {**CLOSED, "note": 1}, {**CLOSED, "extra": "x"},
+                                  {**CLOSED, "delivery": ""}])
 @pytest.mark.parametrize("already_closed", [False, True])
 def test_malformed_closure_refuses_the_whole_partial_update(room, value, already_closed):
     if already_closed:
@@ -293,7 +294,8 @@ def test_closing_a_project_makes_its_note_the_rooms_page_and_links_its_own_notic
     that one row, landed before the page fixed its rows or after it, is the page's, never an open row of my other
     conversations, and the page's reader names its address; a reopening's notice is its own and keeps the project in
     view; an already closed project writes no second page or notice; a refused page leaves the closure standing, says
-    why and still owes its notice; nothing open writes none."""
+    why and still owes its notice; nothing open writes none, and the closed record holds the notice: out of my view
+    until a reopening."""
     from ouroboros import chat_chain, memory_inventory as mi, memory_view as mv
     from ouroboros.chronicle_store import ChronicleStore
     from ouroboros.tools import chronicle
@@ -348,4 +350,9 @@ def test_closing_a_project_makes_its_note_the_rooms_page_and_links_its_own_notic
     assert "Its page was not written (OSError: disk full); the closure stands." in refused and len(delivered) == 3
     assert registry.get_project(tmp_path, "beta")["closed"]["note"] == "Beta is done."
     registry.create_project(tmp_path, "gamma", name="Gamma")
+    gamma = str(registry.get_project(tmp_path, "gamma")["chat_id"])
     assert "Nothing is open in its room: no page." in _close_project(ctx, "gamma", "Never started.")
+    assert registry.get_project(tmp_path, "gamma")["closed"]["delivery"] == list(delivered)[-1]
+    assert gamma not in held()  # its one row, the notice, is the closed record's: nothing is open there
+    assert _close_project(ctx, "gamma", "Started after all.", reopen=True).startswith("OK: project gamma is open.")
+    assert gamma in held()  # reopening removes the record: its notices are the room's open rows again
