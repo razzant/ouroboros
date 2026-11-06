@@ -129,9 +129,9 @@ SKILLS = {
     "unfinished": ({**UNREVIEWED, "skill_review": {"current": {"lifecycle_status": "timeout",
                                                                 "terminal_reason": "the reviewer timed out"}}},
                    "Review didn’t finish", "warn", False),
-    "on": ({"enabled": True}, "On", "ok", False),
-    "off": ({}, "Off", "neutral", False),
 }
+# A row the switch says whole (on, off) carries no chip: the switch is its state.
+QUIET_SKILLS = {"on": {"enabled": True}, "off": {}}
 
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
@@ -141,6 +141,7 @@ def test_skills_jobs_in_flight_are_neutral_and_the_owner_move_amber(subscription
     page = open_app(subscription_ui)
     set_theme(page, theme)
     rows = [{**SKILL, **facts, "name": name} for name, (facts, _, _, _) in SKILLS.items()]
+    rows += [{**SKILL, **facts, "name": name} for name, facts in QUIET_SKILLS.items()]
     rows.append({**SKILL, "name": "locked", "conflict": {"code": "skill_conflict", "skills": ["other"], "omitted": 0}})
     found = page.evaluate("""async rows => {
         const { renderInstalledSkillCard } = await import('/static/modules/skill_card_renderer.js');
@@ -151,6 +152,7 @@ def test_skills_jobs_in_flight_are_neutral_and_the_owner_move_amber(subscription
         document.body.append(host);
         const chips = Object.fromEntries(rows.map(row => {
             const chip = host.querySelector(`.skills-card[data-skill="${row.name}"] .skills-card-status .skills-chip`);
+            if (!chip) return [row.name, null];
             const mark = chip.querySelector('.status-mark');
             const style = getComputedStyle(chip);
             return [row.name, { word: chip.textContent, tone: chip.dataset.tone, color: style.color,
@@ -166,6 +168,7 @@ def test_skills_jobs_in_flight_are_neutral_and_the_owner_move_amber(subscription
     pairs = {tone: (page.evaluate("t => __probe(`var(--status-${t}-fg)`)", tone),
                     page.evaluate("t => __probe(`var(--status-${t}-bg)`, 'backgroundColor')", tone))
              for tone in ("neutral", "warn", "ok")}
+    assert all(found["chips"][name] is None for name in QUIET_SKILLS), found["chips"]
     for name, (_facts, word, tone, moving) in SKILLS.items():
         chip = found["chips"][name]
         assert chip["word"] == word and chip["tone"] == tone, (name, chip)

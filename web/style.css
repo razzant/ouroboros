@@ -5256,8 +5256,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
    tokens, until their screens adopt the class. Inside an object a group or row is a tray: the soft neutral fill with
    the inner radius and no shadow; a tray inside a tray drops its fill, so fills never stack and its rows part by space
    alone. Neither has an edge: the transparent 1px border only keeps each box's size. */
-:is(.settings-shell .form-section, .settings-card, .settings-provider-card, .skills-card,
-    .marketplace-card, .widgets-card, .updates-card, .costs-budget-card, .stat-card, .log-task-card) {
+:is(.settings-shell .form-section, .settings-card, .settings-provider-card, .widgets-card,
+    .updates-card, .costs-budget-card, .stat-card, .log-task-card) {
     border: 1px solid transparent;
     background: var(--surface-object);
     border-radius: var(--radius-object);
@@ -6353,17 +6353,14 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     display: none !important;
 }
 
-/* One disclosure, two surfaces: a Skills card's detail and Activity's retained
-   schedules (a fired one-shot, a withdrawn row) read the same, so they
-   share these rules instead of growing a second look for the same gesture. */
-.skills-details,
+/* Activity's retained schedules (a fired one-shot, a withdrawn row) and Storage's folds; a Skills card's Details is
+   the shared details.ui-disclosure (ui.css). */
 .activity-history {
     margin-top: 4px;
     border-top: 1px solid rgba(var(--neutral-rgb), 0.06);
     padding-top: 10px;
 }
 
-.skills-details > summary,
 .activity-history > summary {
     cursor: pointer;
     user-select: none;
@@ -6375,12 +6372,10 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     gap: 4px;
 }
 
-.skills-details > summary::-webkit-details-marker,
 .activity-history > summary::-webkit-details-marker {
     display: none;
 }
 
-.skills-details > summary::before,
 .activity-history > summary::before {
     content: '\25B8';
     display: inline-block;
@@ -6388,7 +6383,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     font-size: var(--type-meta);
 }
 
-.skills-details[open] > summary::before,
 .activity-history[open] > summary::before {
     transform: rotate(90deg);
 }
@@ -6398,28 +6392,9 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     display: inline-flex;
 }
 
-.skills-card-menu-trigger {
-    width: 32px;
-    min-height: 32px;
-    border-radius: var(--pill-radius);
-    border: 1px solid rgba(var(--neutral-rgb), 0.08);
-    background: rgba(var(--neutral-rgb), 0.04);
-    color: var(--text-secondary);
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    font-weight: 700;
-    font-size: 18px;
-    line-height: 1;
-    font-family: inherit;
-    padding: 0;
-}
-
-.skills-card-menu-trigger:hover {
-    border-color: var(--accent-25);
-    color: var(--text-primary);
-}
+/* The card menu's ⋮ is one quiet icon control on Skills, Sources and Widgets cards: the shared small capsule without a
+   body (.btn.btn-ghost.btn-sm, the quiet hover), a circle as tall as the row's controls, its glyph at the section size. */
+.skills-card-menu-trigger { --control-pad-x: 0; --button-font-size: var(--type-section); width: var(--control-h); }
 
 .skills-load-error {
     color: var(--status-error-fg);
@@ -6526,8 +6501,9 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 /* One card head for every skill (Installed, Browse, the detail sheet): the name opens the sheet, marks stay quieter
-   than the name, the purpose reads in meta ink, the who line and facts are meta lines. The run state is one flat status
-   chip beside the switch; what needs the owner is an attention tray (one sentence and its actions), visible on touch.
+   than the name, the purpose reads in meta ink, the who line and facts are meta lines, Details ends the head. The switch
+   is the run state; a chip beside it says only a state the switch cannot show; what needs the owner is an attention
+   tray (one sentence and its actions), visible on touch.
    Work shows only as the three-dot loop. Values are ui.css tokens (docs/DESIGN.md "Airy dopamine", §8). */
 .skills-list {
     display: flex;
@@ -6718,12 +6694,9 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 .skills-switch.is-locked .skills-switch-thumb,
 .skills-switch input:disabled + .skills-switch-track .skills-switch-thumb { box-shadow: none; }
 
-/* Details: sentence-case labels at the meta size; values in meta ink, the label in the reading ink. */
-.skills-card-actions { display: flex; gap: var(--space-2); align-items: flex-start; flex-wrap: wrap; }
-/* The footer is a flex row: Details takes its whole width, so its summary sits at the card's right edge. */
-.skills-installed-card .skills-details { flex: 1 1 100%; min-width: 0; margin: 0; border: none; padding: 0; }
-.skills-installed-card .skills-details > summary { display: flex; width: fit-content; margin-left: auto; color: var(--text-primary); font-size: var(--type-meta); }
-.skills-details-body { display: grid; gap: var(--space-1); padding-top: var(--space-2); }
+/* Details (the shared disclosure, at the end of the head): sentence-case labels in the meta ink at 500, values in the
+   reading ink (DESIGN §2). */
+.skills-details-body { display: grid; gap: var(--space-1); }
 .skills-details-facts { display: contents; }
 .skills-detail-row {
     display: flex;
@@ -6735,15 +6708,12 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     font-size: var(--type-meta);
     line-height: var(--line-meta);
 }
-.skills-detail-label { min-width: 72px; color: var(--text-primary); font-size: var(--type-meta); font-weight: 600; }
-.skills-detail-value { min-width: 0; flex: 1 1 240px; overflow-wrap: anywhere; }
+.skills-detail-label { min-width: 72px; color: var(--text-meta); font-size: var(--type-meta); font-weight: 500; }
+.skills-detail-value { min-width: 0; flex: 1 1 240px; overflow-wrap: anywhere; color: var(--text-primary); }
 .skills-detail-row code { padding: 1px 6px; border-radius: var(--radius-inner); background: rgba(var(--neutral-rgb), 0.05); font-size: var(--type-meta); }
 .skills-review-block { display: grid; gap: var(--space-1); color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .skills-review-block:empty { display: none; }
 .skills-review-current { color: var(--text-meta); font-size: var(--type-meta); }
-.skills-review-history > summary,
-.skills-review-findings > summary,
-.skills-card-warnings > summary { cursor: pointer; color: var(--text-primary); font-size: var(--type-meta); font-weight: 600; }
 .skills-review-history ol,
 .skills-review-findings ul,
 .skills-card-warnings ul { margin: var(--space-1) 0 0; padding-left: 18px; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
@@ -6754,13 +6724,22 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 .skills-search-chrome[data-chrome-pane="installed"]:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .skills-filter-strip,
 .skills-category-strip { display: flex; flex-wrap: wrap; gap: 2px var(--space-1); min-width: 0; }
+/* On a phone the filters and the categories are one line that scrolls sideways ([data-scroll-x]: the drawer's swipe
+   leaves it to the strip), never a lone chip wrapped onto a second row. */
+html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip) {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+}
+html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-webkit-scrollbar { display: none; }
 .skills-filter-strip { flex-basis: 100%; margin-left: calc(-1 * var(--space-2)); }
 .skills-category-strip { margin: 0 0 var(--space-3) calc(-1 * var(--space-2)); }
 .skills-category-strip[hidden] { display: none; }
 .filter-chip.skills-category {
     --control-pad-x: var(--space-2);
     display: inline-flex;
-    align-items: baseline;
+    align-items: center;
     gap: var(--space-1);
     font-weight: 600;
     line-height: var(--line-title);
@@ -6810,7 +6789,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     width: var(--masonry-w, auto);
     transform: translate(var(--masonry-x, 0px), var(--masonry-y, 0px));
 }
-.skills-head-card { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-4) 18px; min-width: 0; overflow-wrap: anywhere; }
+.skills-head-card { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; overflow-wrap: anywhere; }
 .skills-card-action-row { margin-top: auto; padding-top: var(--space-1); }
 .skills-card-actions-end { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
 
