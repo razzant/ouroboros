@@ -1346,9 +1346,9 @@ def get_tools() -> List[ToolEntry]:
                 "properties": {
                 "prompt": {"type": "string", "description":
                     "Direct start: a complete standalone task (why the work exists, decisions, material paths); "
-                    "the session has none of my memory. The host appends my human's originating words verbatim. "
-                    "The run starts in my write root; a path named here does not move it: for another "
-                    "repository, schedule a child whose workspace is that repository. "
+                    "the session starts with my human's words for the work, the marks and the knowledge outline, "
+                    "none of my other memory; the host appends those words verbatim. The run starts in my write root; "
+                    "a path named here does not move it: for another repository, schedule a child whose workspace is that repository. "
                     "Direct retry_of: omit or pass '' to replay the recorded request; other text must equal "
                     "the original call's. Configured-session retry/replacement: optional advisory coordination "
                     "only, never sent with retry_of; the host supplies the canonical work order."},

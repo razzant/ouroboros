@@ -1410,7 +1410,8 @@ def render_room(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW, *, 
     reason and a reader that works without the chronicle.
     """
     parts = [snapshot.owner_words]
-    room = snapshot.room
+    spec = snapshot.spec  # a view drawing nothing of its room (a declared request's) prints no ``## This room``
+    room = snapshot.room if spec.room_page or spec.room_lanes or spec.origin_words else None
     if not snapshot.active:
         if room:
             parts.append(f"## This room ({room.get('label')})\n\nOpen conversation unavailable until my memory is "

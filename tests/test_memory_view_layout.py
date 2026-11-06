@@ -310,14 +310,17 @@ def test_the_view_fact_reaches_the_cap_info_the_task_context_and_one_event(tmp_p
     assert len(events) == 1 and events[0]["task_id"] == "tmain" and events[0]["blocks"] == facts["blocks"]
 
 
-def test_a_declared_input_child_carries_no_view_fact(tmp_path):
-    env, memory, _rooms = world(tmp_path)
+def test_a_declared_input_child_carries_the_view_fact_of_its_omissions(tmp_path):
+    """The one builder's view: a child's spec without the story and the room page, captured and recorded."""
+    env, memory, rooms = world(tmp_path)
     child = {"id": "kid", "chat_id": 1, "delegation_role": "subagent", "parent_task_id": "bound",
              "root_task_id": "bound", "task_contract": {"input_sources": "declared"},
              "configured_subagent": {"route": {"kind": "api_model"}}}
     _messages_out, cap = _messages(env, memory, child)
-    assert "memory_view" not in cap
-    assert not (memory.drive_root / "memory" / "chronicle").exists()  # no capture, no activation
+    spec = cap["memory_view"]["spec"]
+    assert cap["memory_view"]["role"] == "child" and spec["room_id"] == str(rooms["alpha"])
+    assert spec["marks"] == "room_and_global" and not spec["story"] and not spec["room_page"] and not spec["room_lanes"]
+    assert (memory.drive_root / "memory" / "chronicle").exists()  # the one capture activates, as a shared child's
 
 
 @pytest.mark.parametrize("route,story", [("api_model", True), ("agent_session", False)])

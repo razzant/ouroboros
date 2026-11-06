@@ -147,11 +147,16 @@ def test_a_direct_start_appends_the_words_after_the_host_contract(tmp_path):
     assert assignment_instructions(root) == ""  # no contract: no assignment block, words or not
 
 
-def test_a_declared_work_order_carries_the_words_and_one_scheduled_before_holds_none(tmp_path):
+def test_a_declared_work_order_carries_the_words_and_one_scheduled_before_holds_none(tmp_path, monkeypatch):
     """A declared child scheduled now carries the words in its work order and direct start, its receipt
-    naming them included; the same child scheduled before the fact keeps its parent's selection."""
+    naming them included; the same child scheduled before the fact keeps its parent's selection. A work
+    order's receipt names the marks and the outline only for a session record scheduled with its room rows;
+    a record without them (an API child's never carries them) keeps the literals it was rendered with."""
+    from ouroboros.tools import control
+    from tests.test_available_subagents_runtime import _api_row, _session_row, _settings
+
     marker = "HOST TASK CONTRACT AUTHORITY (normalized JSON; predecessor is a brief):\n"
-    words_item = "the owner's words that caused this work"
+    words_item = "the owner's words that caused this work"  # the literal a record without its room rows keeps
     root = _root(tmp_path)
     _event, stored, declared = _schedule(root, input_sources="declared")
     assert declared["metadata"][ow.FIELD] and declared["metadata"][DECLARED_WORDS_FACT] is True
@@ -160,7 +165,15 @@ def test_a_declared_work_order_carries_the_words_and_one_scheduled_before_holds_
     receipt = input_source_selection_receipt(declared)
     assert [item for item in receipt["included"] if item.startswith(words_item)]
     assert not [item for item in receipt["omitted_automatic"] if item.startswith(words_item)]
-    assert "the memory marks of that room and the global ones" in str(receipt["omitted_automatic"])  # still not loaded
+    assert "the memory marks of that room and the global ones" in str(receipt["omitted_automatic"])  # no room rows
+    monkeypatch.setattr(control, "load_settings", lambda: _settings(_api_row(), _session_row()))
+    _e, _s, session = _schedule(root, subagent_id="session-builder", input_sources="declared")
+    current = input_source_selection_receipt(session)
+    assert ow.ROOM_FIELD in session["metadata"] and words_item not in str(current)
+    assert [item for item in current["included"] if item.startswith("my human's words for this work, verbatim and dated")]
+    assert "the memory marks in force (this room's and the global ones) and the knowledge outline" in str(current["included"])
+    assert "the parent's room page and its open conversation" in str(current["omitted_automatic"])
+    assert "the memory marks of that room" not in str(current) and "started its project" not in str(current)
     order = _sections(rendered)
     assert order[order.index(SESSION_HEADING) - 1] == "OBJECTIVE"  # no parent context: right after the objective
     assert rendered.split("\n\n" + SESSION_HEADING, 1)[1].split("\n\nEXPECTED OUTPUT", 1)[0].endswith(LATER)
@@ -307,15 +320,17 @@ def test_the_parent_is_told_what_a_child_and_a_session_start_with():
     start = next(tool for tool in delegate.get_tools() if tool.name == "delegate_start")
     prompt = start.schema["parameters"]["properties"]["prompt"]["description"]
     context, selection = schedule["context"]["description"], schedule["input_sources"]["description"]
-    for text in (context + "\n" + selection, prompt):
-        assert "my human's originating words" in text
+    for text in (context, selection, prompt):
+        assert "my human's words" in text and "the marks and the knowledge outline" in text.replace("in force ", "")
     assert "input_sources says what it starts with" in context
-    assert "write the orientation it lacks" in context and "none of my memory" in context
+    assert "write the orientation it lacks" in context and "none of my other memory" in context
     assert "why the work exists" in prompt and "the host supplies the canonical work order" in prompt
-    assert selection.startswith("Omit or shared: the child starts with ") and "one read away" in selection
-    # The declared half carries the words too and keeps its own contract: no automatic shared memory, dialogue,
-    # project knowledge, parent context or attachments; the assignment governs exchange.
+    assert "none of my other memory; the host appends those words verbatim" in prompt
+    assert selection.startswith("Every child starts with my human's words for the work verbatim and dated, ")
+    assert "other knowledge stays one read away. Omit or shared: it also starts with " in selection
+    # The declared half keeps its own contract: the rest of shared memory, dialogue, parent context and attachments
+    # are not its inputs; the assignment governs exchange.
     shared, declared = selection.split("declared selects only the authored ", 1)
-    assert "my human's originating words verbatim" in shared and "my human's originating words verbatim" in declared
-    assert ("excludes automatic shared memory, dialogue, project knowledge, inherited parent context and attachments"
-            in " ".join(declared.split()))
+    assert "my identity, life's top-level account" in shared and "originating words" not in selection
+    assert ("excludes the rest of shared memory (identity, life account, room page), dialogue, inherited parent "
+            "context and attachments" in " ".join(declared.split()))

@@ -25,7 +25,7 @@ def declared_inputs_carry_owner_words(task: Mapping[str, Any]) -> bool:
     return task.get(DECLARED_WORDS_FACT) is True or metadata.get(DECLARED_WORDS_FACT) is True
 
 
-def input_source_selection_receipt(task: Mapping[str, Any]) -> dict[str, Any]:
+def input_source_selection_receipt(task: Mapping[str, Any], *, native: bool = False) -> dict[str, Any]:
     """Composition fact retained by existing work-order/model-send sources.
 
     This selects automatic inputs, never filesystem access or semantic purity;
@@ -33,11 +33,15 @@ def input_source_selection_receipt(task: Mapping[str, Any]) -> dict[str, Any]:
     the same selection, each recipient named in ``limitations``.
     The selection persists for the task; first-position/mail ordering is the
     caller's ordinary collaboration procedure, not a second host controller.
-    The owner's words that caused the work are included when the task was
-    scheduled with ``DECLARED_WORDS_FACT``; an older declared task names them
-    among the omitted inputs, as its work order always did. This receipt describes
-    case-input selection; standing owner rules are separate context/host governance,
-    outside the canonical work order so its retained bytes and fingerprint stay stable.
+    My human's words for the work are included when the task was scheduled with
+    ``DECLARED_WORDS_FACT``; an older declared task names them among the omitted
+    inputs, as its work order always did. A native request (``native``: the one
+    context builder's) and a work order of a session task scheduled with its room
+    rows (``work_order_room_words``) name the marks in force and the knowledge
+    outline among the included inputs; an older session task's work order keeps
+    the literals it was rendered with, so its retained bytes and fingerprint stay
+    stable. This receipt describes case-input selection; standing owner rules are
+    separate context/host governance, outside the canonical work order.
     """
     from ouroboros.contracts.task_contract import task_input_sources
 
@@ -48,22 +52,30 @@ def input_source_selection_receipt(task: Mapping[str, Any]) -> dict[str, Any]:
         ["explicitly selected input files (input_files), retained by the host before this task was queued"]
         if _selected_input_files(task) else [])
     with_words = declared_inputs_carry_owner_words(task)
+    current = native or work_order_room_words(task) is not None
+    words_item = ("my human's words for this work, verbatim and dated as the host carries them down the task tree, "
+                  "or the host's marker that none are recorded" if current else
+                  "the owner's words that caused this work, verbatim as the host carries them down the task tree, "
+                  "or the host's marker that none are recorded")
+    no_words_item = ("my human's words for this work" if current else "the owner's words that caused this work"
+                     ) + " (shared children receive them verbatim; include them in context if this case needs them)"
     return {
         "input_sources": "declared",
         "included": [
             "SYSTEM.md and BIBLE.md; reference-book projections; own-body DESIGN navigation or source-gap disclosure",
             "explicit assignment, question, evidence and normalized task authority",
-            *(["the owner's words that caused this work, verbatim as the host carries them down the task tree, "
-               "or the host's marker that none are recorded"] if with_words else []), *selected,
+            *([words_item] if with_words else []), *selected,
+            *(["the memory marks in force (this room's and the global ones) and the knowledge outline "
+               "(every note by address and title)"] if current else []),
             "runtime access, tools, workspace, clock, resource and budget facts",
             "the inherited delegation_budget.intent_note: parent-authored advice carried in the task contract, never authority",
             "this child's own retained progress, tool and event history",
         ],
         "omitted_automatic": [
             "shared autobiography: identity, WORLD, the top level of the life account, the parent's room page "
-            "(with the words that started its project) and the memory marks of that room and the global ones",
-            *([] if with_words else ["the owner's words that caused this work (shared children receive them verbatim; "
-                                     "include them in context if this case needs them)"]),
+            + ("and its open conversation" if current else
+               "(with the words that started its project) and the memory marks of that room and the global ones"),
+            *([] if with_words else [no_words_item]),
             "shared review history, health narratives, update letters, registry and installed-skill summaries",
             "parent context, notes, review_notes, predecessor narrative and inherited attachments",
             "task-tree blackboard, routing manifests and other-task summaries",

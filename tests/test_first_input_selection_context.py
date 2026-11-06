@@ -52,12 +52,17 @@ def test_capture_selects_channels_without_removing_governance_or_own_process(tmp
         if marker != knowledge:
             assert (marker in text) == (selection != "declared")
             assert (marker in calls) == (selection != "declared")
-    assert bool(core.memory_view_json) == (selection != "declared")  # a declared child carries no view
-    assert ("Input source selection" in text) == (selection == "declared")
-    # The owner's words: a shared child's view holds them; a declared child its own block, once its schedule
-    # recorded that its selection carries them. Every memory channel above stays shut either way.
-    assert ("OWNER_ASKED" in core.memory_view_json) == (selection != "declared")
-    assert ("OWNER_ASKED" in core.dynamic_text) == (selection == "declared" and words)
+    # One builder, one view: a declared child's draws the words, the marks and no story or room page.
+    import json
+
+    spec = json.loads(core.memory_view_json)["spec"]
+    assert spec["marks"] == "room_and_global" and spec["story"] == (selection != "declared")
+    assert spec["room_page"] == (selection != "declared") and not spec["room_lanes"] and not spec["knowledge"]
+    assert ("Input source selection" in core.dynamic_text) == (selection == "declared")
+    # The owner's words ride the view's block for a shared child and for a declared child whose schedule recorded
+    # that its selection carries them; never the dynamic text. Every memory channel above stays shut either way.
+    assert ("OWNER_ASKED" in core.memory_view_json) == (selection != "declared" or words)
+    assert spec["owner_words"] == (selection != "declared" or words) and "OWNER_ASKED" not in core.dynamic_text
 
 
 @pytest.mark.parametrize("explicit", [None, {"knowledge": True}])

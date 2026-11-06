@@ -59,17 +59,17 @@ def schedule_subagent_properties() -> Dict[str, Any]:
         "objective": {"type": "string", "description": "Focused OUTCOME and scope, not a step-by-step script. A harness-dispatched child forwards work to its delegated run; a scripted objective can read as orders to execute natively."},
         "expected_output": {"type": "string", "description": "Concrete handoff expected from the child."},
         "role": {"type": "string", "description": "Optional freeform lineage/UI role, e.g. architecture-reviewer; omission assigns no role."},
-        "context": {"type": "string", "description": "Optional reference context, not instructions: write the orientation it lacks (purpose, prior decisions, material paths). The child does not see this conversation; input_sources says what it starts with. For a harness-dispatched child this becomes its session's WORK ORDER; that session has none of my memory, so put recipes/details here, not in objective."},
+        "context": {"type": "string", "description": "Optional reference context, not instructions: write the orientation it lacks (purpose, prior decisions, material paths). The child does not see this conversation; input_sources says what it starts with. For a harness-dispatched child this becomes its session's WORK ORDER; that session starts with my human's words, the marks and the knowledge outline but none of my other memory, so put recipes/details here, not in objective."},
         "input_sources": {
             "type": "string", "enum": ["shared", "declared"],
             "description": (
-                "Omit or shared: the child starts with SYSTEM/BIBLE, book maps, my identity, life's top-level "
-                "account (except Agent-session supervisors), the child's room page, full assignment, "
-                "attachments and my human's originating words verbatim; knowledge and other material "
-                "remain one read away. declared selects only the authored objective/context/constraints, "
-                "my human's originating words verbatim and full governance/task authority for an independent "
-                "first position. It excludes automatic shared memory, dialogue, project knowledge, inherited "
-                "parent context and attachments; put common evidence in context. Descendants cannot widen inherited "
+                "Every child starts with my human's words for the work verbatim and dated, the marks in force "
+                "and the knowledge outline; other knowledge stays one read away. Omit or shared: it also starts "
+                "with SYSTEM/BIBLE, book maps, my identity, life's top-level account (except Agent-session "
+                "supervisors), the child's room page, full assignment and attachments. declared selects only "
+                "the authored objective/context/constraints and full governance/task authority for an independent "
+                "first position; it excludes the rest of shared memory (identity, life account, room page), "
+                "dialogue, inherited parent context and attachments; put common evidence in context. Descendants cannot widen inherited "
                 "declared. Selection lasts for the task; the assignment defines retention/collaboration, "
                 "and tool results/messages can broaden input. It prescribes no exchange sequence or "
                 "transport, provides no access isolation and makes no claim about provider context or priors."

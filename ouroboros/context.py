@@ -36,9 +36,10 @@ from ouroboros.context_fit import (
     estimate_context_prompt_tokens as estimate_context_prompt_tokens,
 )
 from ouroboros.context_input_selection import (
-    _capture_declared_context_core,
+    _declared_omissions,
     _explicit_self_body_docs_flag as _explicit_self_body_docs_flag,
     _validate_declared_input_task,
+    declared_receipt_section,
     development_required,
     development_resident,
     required_book_unavailable,
@@ -822,18 +823,6 @@ def _capture_context_core(
     )
     design_nav = task_design_navigation(design_ctx, task)
 
-    if declared:
-        from dataclasses import replace
-
-        core = _capture_declared_context_core(
-            env, memory, task, ctx, runtime_builder=build_runtime_section,
-            user_builder=lambda row: _first_user_content(row, env), captured_at=captured_at, base_prompt=base_prompt,
-            bible_md=bible_md, architecture_md=architecture_md, development_md=development_md,
-            books=books, book_errors=book_errors, design_nav=design_nav, connections=connections,
-        )
-        # Its governance maps use the same window ladder without opening shared memory.
-        return replace(core, section_root=_section_root_for(env, ctx), section_task_id=str(task["id"]))
-
     # A fork is an execution boundary, not a second mind.  Keep the agent's
     # writable Memory object task-local, but capture identity/dialogue from the
     # already-existing canonical budget root for promoted roots and subagents.
@@ -860,10 +849,13 @@ def _capture_context_core(
     from ouroboros.project_facts import resolve_project_id
 
     task_metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
-    is_child = str(task.get("delegation_role") or task_metadata.get("delegation_role") or "") == "subagent"
+    is_child = declared or str(task.get("delegation_role") or task_metadata.get("delegation_role") or "") == "subagent"
     # My memory view: one spec by role, its facts read once from the canonical root
     # (the one chronicle activation happens here); rendered per mode by the fit plan.
-    view_spec, view, view_json = _capture_memory_view(task, canonical_root, ctx)
+    # A declared request draws the role's view without the story and the parent's room;
+    # the rest it withholds (identity, WORLD, health, registry, skills, review continuity)
+    # is gated below and named in its receipt (``declared_receipt_section``).
+    view_spec, view, view_json = _capture_memory_view(task, canonical_root, ctx, declared=declared)
 
     # Max keeps the full capability/WHY map even for external work: binding a
     # folder changes tools' default target, not the mind's knowledge of its body.
@@ -889,9 +881,10 @@ def _capture_context_core(
         semi_stable_parts.append(review_facts_block(activity_out=review_activity))
     except Exception:
         log.warning("Failed to build the Review block", exc_info=True)
-    semi_stable_parts.extend(build_memory_sections(context_memory, partition="stable", ctx=ctx))
+    if not declared:
+        semi_stable_parts.extend(build_memory_sections(context_memory, partition="stable", ctx=ctx))
     from ouroboros.skill_catalogue import always_in_context_section, discover_context_skills
-    skills = timed("installed_skills", discover_context_skills, canonical_root)  # shared with the catalog below
+    skills = [] if declared else timed("installed_skills", discover_context_skills, canonical_root)  # and the catalog below
     if always_on := always_in_context_section(skills):
         semi_stable_parts.append(always_on)
     from ouroboros.safety_config import owner_rules_section
@@ -918,9 +911,9 @@ def _capture_context_core(
     # Same attempt normalization as terminal-wake acknowledgement.
     from ouroboros.delegate_supervision import _attempt_key
     attempt_key = _attempt_key(ctx if ctx is not None else SimpleNamespace(task_attempt=task.get("_attempt")))
-    health_section = build_health_invariants(context_env, task_id=str(task.get("id") or ""),
-                                             active_root=active_root, attempt_key=attempt_key)
-    dynamic_parts = [health_section] if health_section else []
+    health_section = "" if declared else build_health_invariants(
+        context_env, task_id=str(task.get("id") or ""), active_root=active_root, attempt_key=attempt_key)
+    dynamic_parts = [declared_receipt_section(task)] if declared else [health_section] if health_section else []
     dynamic_parts.extend(review_activity)
     try:
         from ouroboros.subagent_runtime import review_records_block, subagent_supervision_fact_line
@@ -932,17 +925,18 @@ def _capture_context_core(
         )))
     except Exception:
         log.warning("Failed to build the Review records block", exc_info=True)
-    dynamic_parts.extend(build_memory_sections(context_memory, partition="volatile", include_scratchpad=not is_child,
-                                               ctx=ctx))
-
-    registry = _build_registry_section(context_env)
+    if not declared:
+        dynamic_parts.extend(build_memory_sections(context_memory, partition="volatile",
+                                                   include_scratchpad=not is_child, ctx=ctx))
+    registry = "" if declared else _build_registry_section(context_env)
     if registry:
         dynamic_parts.append(registry)
-    installed_skills = _build_installed_skills_section(context_env, skills=skills)
+    installed_skills = "" if declared else _build_installed_skills_section(context_env, skills=skills)
     if installed_skills:
         dynamic_parts.append(installed_skills)
     dynamic_parts.extend([
-        labelled_section(_drive_state_section(context_env), lambda text: snapshot_labelled(text, captured_at)),
+        *([] if declared else [labelled_section(_drive_state_section(context_env),
+                                                lambda text: snapshot_labelled(text, captured_at))]),
         build_runtime_section(env, task, ctx=ctx, captured_at=captured_at,
                               supplementary_messages_out=supplementary_messages),
         (
@@ -960,7 +954,7 @@ def _capture_context_core(
                              + authored_backlog_text(canonical_root))
 
     review_section = ""
-    if review_context_builder is not None:
+    if review_context_builder is not None and not declared:
         try:
             review_section = review_context_builder() or ""
             if not isinstance(review_section, HostSection):
@@ -969,7 +963,7 @@ def _capture_context_core(
             log.debug("Failed to build review continuity section", exc_info=True)
     if review_section:
         dynamic_parts.append(review_section)
-    else:
+    elif not declared:  # shared review history is a declared request's named omission
         try:
             from ouroboros.context_sections import review_status_host_section
             from ouroboros.review_state import load_state
@@ -985,10 +979,10 @@ def _capture_context_core(
             log.debug("Failed to build advisory review status section", exc_info=True)
 
     if is_child:
-        # The role line lists exactly what this child's view loaded (the same spec).
-        from ouroboros.memory_view import working_sources_line
+        if not declared:  # the role line lists what this child's view loaded; a declared request has its receipt
+            from ouroboros.memory_view import working_sources_line
 
-        dynamic_parts.append(working_sources_line(view_spec, view))
+            dynamic_parts.append(working_sources_line(view_spec, view))
         # A child keeps its own process memory too (owner decision 2026-09-22):
         # its execution drive holds exactly its worker rows, progress is canonical.
         own_drive = memory if context_memory is not memory else None
@@ -1081,12 +1075,17 @@ def _deep_review_pointer(path: pathlib.Path, reader: Callable[[], str]) -> str:
 
 
 @timed_section("memory_view")
-def _capture_memory_view(task: Dict[str, Any], canonical_root: pathlib.Path, ctx: Any) -> Tuple[Any, Any, str]:
-    """``(ViewSpec, MemoryViewSnapshot, its canonical JSON)``, captured once from the canonical root."""
+def _capture_memory_view(task: Dict[str, Any], canonical_root: pathlib.Path, ctx: Any, *,
+                         declared: bool = False) -> Tuple[Any, Any, str]:
+    """``(ViewSpec, MemoryViewSnapshot, its canonical JSON)``, captured once from the canonical root.
+
+    A declared request's spec is the role's with its omissions (``_declared_omissions``)."""
     from ouroboros.memory_view import capture_memory_view, snapshot_json, view_spec_for_task
 
     view_ctx = ctx if isinstance(getattr(ctx, "task_metadata", None), dict) else None
     spec = view_spec_for_task(task, canonical_root, ctx=view_ctx)
+    if declared:
+        spec = _declared_omissions(task, spec)
     snapshot = capture_memory_view(canonical_root, task, spec)
     return spec, snapshot, snapshot_json(snapshot)
 
@@ -1128,7 +1127,7 @@ def _record_memory_view(env: Any, memory: Memory, task: Dict[str, Any], ctx: Any
                         plan: ContextFitPlan) -> Dict[str, Any]:
     """The view fact of the first send's projection: on the task context and one event receipt."""
     facts = dict(plan.projection(plan.initial_mode).memory_facts or {})
-    if not facts:  # a declared-input child carries no memory view
+    if not facts:  # a projection without a view fact records nothing
         return {}
     if ctx is not None:
         from ouroboros.memory_floor import trace_facts
