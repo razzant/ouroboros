@@ -152,9 +152,9 @@ function isTruthySetting(value) {
 // A loading, validation or editor owner may update its own status. A later
 // message from anyone else drops that ownership, protecting the newer result.
 // The footer's one result line (ui.css .ui-result): an acknowledgement ends by itself, a warning stays.
-function setStatus(text, tone = 'ok', owner = '', subject = '') {
+function setStatus(text, tone = 'ok', owner = '', subject = '', details = '') {
     const status = byId('settings-status');
-    setResult(status, { text, tone, ends: !owner && tone === 'ok' });
+    setResult(status, { text, tone, details, ends: !owner && tone === 'ok' });
     if (owner) status.dataset.owner = owner;
     else delete status.dataset.owner;
     if (subject) status.dataset.subject = subject;
@@ -1376,11 +1376,11 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             saveOutcomeUnknown = !confirmedSaved && receipt?.saved !== false;
             // The checker's keys are saved already: the next Save compares against them, never re-sends them.
             if (checkerSaved && !confirmedSaved) Object.assign(currentSettings, ownerDraft.safety.checker.settings);
-            setStatus(confirmedSaved
-                ? `Settings were saved, but a later step failed: ${e.message}. Your draft is kept.`
-                : saveOutcomeUnknown
-                    ? `Save outcome unknown: ${e.message}. Your draft is kept. Reload settings to check before saving again.`
-                    : `${checkerSaved ? `Changes in ${checkerTabsText(ownerDraft.safety)} were saved; the other settings were not` : 'Settings were not saved'}: ${e.message}. Your draft is kept.`, 'warn');
+            // The line says what happened and what to do; the error's own text is the result's Details.
+            setStatus(confirmedSaved ? 'Settings were saved, but a later step failed. Your draft is kept.'
+                : saveOutcomeUnknown ? 'Save outcome unknown. Your draft is kept; reload settings to check before saving again.'
+                    : `${checkerSaved ? `Changes in ${checkerTabsText(ownerDraft.safety)} were saved; the other settings were not` : 'Settings were not saved'}. Your draft is kept.`,
+            'warn', '', '', String(e?.message || e || ''));
         } finally {
             settingsSaving = false;
             setButtonBusy(saveButton, false);
