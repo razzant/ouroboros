@@ -200,7 +200,7 @@ def _steps_applied(monkeypatch, outcome=lambda step: True):
     return steps
 
 
-PASS_ONE, PASS_TWO = ("exec:round:1", "host_copies+bodies"), ("exec:round:1", "floor+books+unseen_bodies")
+PASS_ONE, PASS_TWO = ("exec:round:1", "host_copies+bodies+floor"), ("exec:round:1", "books+unseen_bodies")
 
 
 def test_fallback_success_preserves_complete_candidate_fit_facts(tmp_path):
@@ -309,8 +309,8 @@ def test_refusal_target_is_measured_from_a_stated_limit_or_the_accepted_floor_el
 
 @pytest.mark.parametrize("second_refused", [False, True])
 def test_each_pass_earns_one_retry_and_the_second_pass_runs_only_after_a_refused_retry(tmp_path, monkeypatch, second_refused):
-    """Both directions: pass 1 (host copies, shown bodies) earns one strictly smaller retry; when that retry
-    is accepted the floor and the late rescue never run; when it is refused again pass 2 runs once and its
+    """Both directions: pass 1 (host copies, shown bodies, memory) earns one strictly smaller retry; when that
+    retry is accepted the books and the late rescue never run; when it is refused again pass 2 runs once and its
     retry must shrink below THAT refused candidate, not the first one."""
     from ouroboros import loop
 
@@ -340,7 +340,7 @@ def test_each_pass_earns_one_retry_and_the_second_pass_runs_only_after_a_refused
     msg, _cost, mode = loop._call_round_model(context)
     assert msg["content"] == "fits" and mode == "max"
     assert len(sends) == (3 if second_refused else 2)
-    expected = ["host_copies", "bodies"] + (["floor", "books", "unseen_bodies"] if second_refused else [])
+    expected = ["host_copies", "bodies", "floor"] + (["books", "unseen_bodies"] if second_refused else [])
     assert [step for step, _target in steps] == expected
     assert all(target is None for _step, target in steps)  # a cold first request measures no target
     assert context.tools._ctx._context_overflow_retries == ({PASS_ONE, PASS_TWO} if second_refused else {PASS_ONE})
@@ -382,7 +382,7 @@ def test_the_rounds_first_failure_decides_whether_a_just_chosen_body_pays_last(t
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)  # a stated limit is a durable observation
     context = _ctx(tmp_path)
     monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit(estimated_input=520_000)]))
-    shed = {"host_copies": 10_000, "floor": 5_000}  # each pass sheds part of its target, never all of it
+    shed = {"host_copies": 10_000, "books": 5_000}  # each pass sheds part of its target, never all of it
     monkeypatch.setattr(loop_model_call, "_apply_refusal_step", lambda ctx, step, fit, target, slack=None: shed.get(step))
     chosen = []
     monkeypatch.setattr(loop_model_call, "_run_emergency_address_pass", lambda ctx, fit, *, rung, goal_tokens=None: (
@@ -408,7 +408,7 @@ def test_the_rounds_first_failure_decides_whether_a_just_chosen_body_pays_last(t
     msg, _cost, _mode = loop._call_round_model(context)
     assert msg["content"] == "fits" and len(sends) == 3
     assert context.tools._ctx._context_overflow_retries == {PASS_ONE, PASS_TWO}
-    # Pass 2 measures the predicted retry (30,000 over); the floor took 5,000 of it.
+    # Pass 2 measures the predicted retry (30,000 over); the books took 5,000 of it.
     assert chosen == ([("chosen_bodies", 25_000)] if started_by == "numbered_refusal" else [])
 
 
@@ -463,15 +463,15 @@ def test_a_fallback_candidate_in_the_same_round_walks_no_pass_again(tmp_path, mo
     monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit(round_id="exec:round:2")]))
     msg, _cost, _mode = loop._call_round_model(context)
     assert msg["content"] == "fits" and len(sends) == 2
-    assert [step for step, _target in steps] == ["host_copies", "bodies"]
-    assert ("exec:round:2", "host_copies+bodies") in context.tools._ctx._context_overflow_retries
+    assert [step for step, _target in steps] == ["host_copies", "bodies", "floor"]
+    assert ("exec:round:2", "host_copies+bodies+floor") in context.tools._ctx._context_overflow_retries
 
 
 @pytest.mark.parametrize("saved", [True, False])
-def test_the_floor_keeps_books_when_memory_alone_saved_the_target_and_drops_them_when_it_did_not(tmp_path, monkeypatch, saved):
-    """Both directions of the owner's books-last order: the floor narrows memory by the measured excess (the target
-    without its return-after-fold slack, review r1 17.10); when the narrowed view saved the whole target, Max keeps
-    its books; otherwise they become navigation (task-local Low)."""
+def test_the_floor_pays_the_excess_and_slack_and_books_wait_for_a_further_refusal(tmp_path, monkeypatch, saved):
+    """Owner order 7A with the 06.11 sizing: memory's detail pays the measured excess the bodies left plus the
+    return-after-fold slack, and Max keeps its books through the first pass; only a further refusal of that
+    narrowed candidate turns the books into navigation (task-local Low) in the second pass."""
     from ouroboros import loop, loop_model_call
 
     context = _ctx(tmp_path)
@@ -484,24 +484,24 @@ def test_the_floor_keeps_books_when_memory_alone_saved_the_target_and_drops_them
                         lambda ctx, fit, *, rung, goal_tokens=None: SimpleNamespace(status="no_eligible"))
     coarsened = []
     monkeypatch.setattr(loop_model_call, "_coarsen_memory_view",
-                        lambda ctx, fit, *, saving=None: coarsened.append(saving) or True)
+                        lambda ctx, fit, *, saving=None, slack=0: coarsened.append((saving, slack)) or True)
     monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: None)
     sends = []
 
     def dispatch(ctx, disposition, *, candidate_predicate=None, **_kwargs):
         sends.append(candidate_predicate)
-        if len(sends) == 1:
+        if len(sends) == 1 or (len(sends) == 2 and not saved):
             ctx.accumulated_usage["_last_llm_provider_message"] = NUMBERLESS
             ctx.accumulated_usage["_last_llm_error_kind"] = "context_overflow"
             return None, 0.0
-        assert candidate_predicate(_candidate_request(disposition, size=800))
+        assert candidate_predicate(_candidate_request(disposition, size=800 if len(sends) == 2 else 700))
         return {"role": "assistant", "content": "fits", "tool_calls": []}, 0.0
 
     monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
     monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: _failed_capture())
     msg, _cost, mode = loop._call_round_model(context)
-    assert msg["content"] == "fits" and len(sends) == 2
-    assert coarsened == [target - SLACK]  # memory narrows by the measured excess, from the level it shows
+    assert msg["content"] == "fits" and len(sends) == (2 if saved else 3)
+    assert coarsened[0] == (target - SLACK, SLACK)  # the excess the bodies left, and the slack, from the level shown
     if saved:
         assert mode == "max" and context.messages[0]["content"] == "MAX_SYSTEM"
         context.context_fit_plan.reproject_for_route.assert_not_called()
@@ -519,7 +519,7 @@ def test_already_low_overflow_never_emits_max_to_low_toast(tmp_path, monkeypatch
     monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit(profile="owner_low", mode="low")]))
     monkeypatch.setattr(loop_model_call, "_run_emergency_address_pass",
                         lambda ctx, fit, *, rung, goal_tokens=None: SimpleNamespace(status="no_eligible"))
-    monkeypatch.setattr(loop_model_call, "_coarsen_memory_view", lambda ctx, fit, *, saving=None: True)
+    monkeypatch.setattr(loop_model_call, "_coarsen_memory_view", lambda ctx, fit, *, saving=None, slack=0: True)
 
     def dispatch(ctx, disposition, *, candidate_predicate=None, **_kwargs):
         nonlocal calls
@@ -571,7 +571,7 @@ def test_equal_context_releases_retry_before_provider_send(tmp_path, monkeypatch
     assert msg is None
     assert provider_sends == 1  # both passes ran; each equal candidate was released before any send
     skipped = [event for event in events if event.get("reason") == "context_candidate_not_strictly_smaller"]
-    assert [event["rung"] for event in skipped] == ["host_copies+bodies", "floor+books+unseen_bodies"]
+    assert [event["rung"] for event in skipped] == ["host_copies+bodies+floor", "books+unseen_bodies"]
 
 
 def test_strict_shrink_predicate_uses_failed_physical_reserve():

@@ -819,15 +819,17 @@ def test_a_presend_low_fold_keeps_every_address_narrowed_from_the_max_view(
     from tests import _memory_view_synthetic as syn
 
     ctx, gateway, tools, events, plan, windows = _native(main_call, monkeypatch, tmp_path, owner_mode="max",
-                                                         view=snapshot_json(syn.actor("main")), books=120_000)
+                                                         view=snapshot_json(syn.actor("main")), books=400_000)
     roomy = plan(10_000_000)
     full = roomy.projected_tokens_with_tools("max", initial_tool_schemas(tools, context_mode="max"))
-    # A window that holds Max with all of my memory and both working margins; the owner's words then pass it by 20,000.
+    # A window that holds Max with all of my memory and both working margins.
     windows["account-a"] = window = math.ceil((full + roomy.output_reserve_tokens) * 4 / 3) + 4_000
     built = plan(window)
     assert built.initial_mode == "max" and not built.projection("max").memory_facts["floor"]["steps"]  # startup: whole
     words = "Owner, while you worked: keep the old API alive. "
-    owner = {"role": "user", "content": words * math.ceil((window - full - roomy.output_reserve_tokens + 20_000) * 4 / len(words))}
+    # The owner's words pass the window by 90,000: more than my memory's detail can give (06.11: memory pays in the
+    # first pass), while dropping the books alone would hold them; the books step down in the second pass.
+    owner = {"role": "user", "content": words * math.ceil((window - full - roomy.output_reserve_tokens + 90_000) * 4 / len(words))}
     ctx.messages[:] = [*built.messages_for("max"), owner]
     full_low = built.reproject_transcript(ctx.messages, "low")
     assert context_fit.estimate_context_prompt_tokens(full_low, initial_tool_schemas(tools, context_mode="low")) + \
@@ -841,7 +843,7 @@ def test_a_presend_low_fold_keeps_every_address_narrowed_from_the_max_view(
     [low] = [payload["messages"] for payload, _key in gateway.uploads]
     kinds = [row.get("checkpoint_kind") for row in _drained(events)]
     assert text == "Kept." and len(gateway.creates) == 1 and tools._ctx.active_context_mode == "low"
-    assert kinds.index("context_memory_coarsened") < kinds.index("context_fit_low_retry")  # one pass: memory, then books
+    assert "context_memory_coarsened" in kinds  # memory first; the books followed because it could not make room
 
     def shows(sent, whole):
         return json.dumps(whole, ensure_ascii=False)[1:-1] in json.dumps(sent, ensure_ascii=False)

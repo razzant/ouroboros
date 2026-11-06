@@ -312,7 +312,7 @@ def test_the_retry_is_measured_ordinarily_while_its_passes_measured_at_the_refus
     raw = loop._measure_round_main_fit(ctx, automatic_pass_used=False).measurement.raw_input_tokens
     ctx.accumulated_usage["_last_llm_provider_message"] = _stated(math.ceil(raw * DENSITY))
     passes, sends = [], []
-    monkeypatch.setattr(lmc, "_apply_refusal_pass", lambda c, steps, fit, *_a: passes.append(
+    monkeypatch.setattr(lmc, "_apply_refusal_pass", lambda c, steps, fit, *_a, **_kw: passes.append(
         fit.measurement.measurement_density) or True)
     monkeypatch.setattr(loop, "_dispatch_round_model", lambda c, disposition, **_kw: sends.append(
         disposition.measurement.measurement_density) or ({"role": "assistant", "content": "fits"}, 0.0))
@@ -331,7 +331,7 @@ def test_a_changed_view_that_was_never_sent_is_not_the_refused_request(tmp_path,
     failed = replace(_failed_capture(size=1_000), prompt_tokens_bounded_estimate=400_000)
     monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_round_fit()]))  # an ordinary 1.0 measure
     seen = []
-    monkeypatch.setattr(lmc, "_apply_refusal_pass", lambda ctx, steps, fit, target, slack=None, refused=False:
+    monkeypatch.setattr(lmc, "_apply_refusal_pass", lambda ctx, steps, fit, target, slack=None, refused=False, **_kw:
                         seen.append((steps, ctx.refused_density, target, slack)) or True)
 
     def unsent(*_args, **_kwargs):
@@ -340,8 +340,8 @@ def test_a_changed_view_that_was_never_sent_is_not_the_refused_request(tmp_path,
     assert lmc._recover_context_overflow(context, failed, 0.0)[0] is None
     target, slack = 524_000 + REPLY - 500_000 + 62_500, 62_500  # the provider's units while its density measures
     density = 524_000 / 400_000
-    assert seen == [(("host_copies", "bodies"), density, target, slack),
-                    (("floor", "books", "unseen_bodies"), None, *(math.ceil(n / density) for n in (target, slack)))]
+    assert seen == [(("host_copies", "bodies", "floor"), density, target, slack),
+                    (("books", "unseen_bodies"), None, *(math.ceil(n / density) for n in (target, slack)))]
 
 
 def test_a_reused_call_context_starts_ordinary(tmp_path, monkeypatch):

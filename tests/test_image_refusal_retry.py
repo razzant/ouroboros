@@ -427,7 +427,7 @@ def test_image_retry_size_failure_reaches_recovery_but_unknown_never_repeats(roo
     # Hold the view fixed: the real recovery still consumes each pass once,
     # but an unchanged candidate must earn no physical retry.
     monkeypatch.setattr(loop_model_call, "_apply_refusal_pass",
-                        lambda ctx, steps, *args: passes.append(steps) or False)
+                        lambda ctx, steps, *args, **_kw: passes.append(steps) or False)
     msg, _cost, _mode = loop._call_round_model(ctx)
     [event] = _events(root, "image_refusal_retry")
     if retry_kind in {"presend_size", "provider_size"}:
