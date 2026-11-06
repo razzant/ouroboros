@@ -172,7 +172,7 @@ def test_a_publication_during_the_kill_loop_keeps_its_name_until_its_exit(regist
     producer = _producer(registry, hold)
     _wait(lambda: len(registry.started) == 2 and shell_process._spawning_subprocesses == 1)
     late = registry.started[1]
-    kill, entered = shell_process._kill_process_group, []
+    kill, entered = shell_process._end_tree, []
 
     def kill_then_let_the_late_start_publish(proc):
         kill(proc)
@@ -181,12 +181,17 @@ def test_a_publication_during_the_kill_loop_keeps_its_name_until_its_exit(regist
             hold.set()  # the late child is published while this loop still runs
             _wait(lambda: late in shell_process._active_subprocesses)
 
-    monkeypatch.setattr(shell_process, "_kill_process_group", kill_then_let_the_late_start_publish)
-    outcome = owned_shutdown.stop_owned_work(registry.data)
-    producer.join(10)
-    assert entered == [early] and _stopped(early) and _stopped(late)
-    assert outcome["state"] == "completed" and outcome["memory_unconfirmed"] == {}
-    assert not shell_process._active_subprocesses, "only handles whose exit was observed left the registry"
+    monkeypatch.setattr(shell_process, "_end_tree", kill_then_let_the_late_start_publish)
+    try:
+        outcome = owned_shutdown.stop_owned_work(registry.data)
+        producer.join(10)
+        assert entered == [early] and _stopped(early) and _stopped(late)
+        assert outcome["state"] == "completed" and outcome["memory_unconfirmed"] == {}
+        assert not shell_process._active_subprocesses, "only handles whose exit was observed left the registry"
+    finally:
+        hold.set()
+        producer.join(10)  # settle the real publisher before fixture registry/counter restoration
+        assert not producer.is_alive()
 
 
 def test_an_unconfirmed_kill_keeps_its_handle_and_says_so(registry, monkeypatch):
@@ -194,7 +199,7 @@ def test_an_unconfirmed_kill_keeps_its_handle_and_says_so(registry, monkeypatch)
     child = shell_process.contained_popen(subprocess.Popen, SLEEP, **subprocess_new_group_kwargs())
     registry.started.append(child)
     shell_process._active_subprocesses.add(child)
-    monkeypatch.setattr(shell_process, "_kill_process_group", lambda proc: None)  # a request that ends nothing
+    monkeypatch.setattr(shell_process, "_end_tree", lambda proc: None)  # a request that ends nothing
     report = shell_process.kill_all_tracked_subprocesses(deadline=time.monotonic() + 0.3)
     assert report == {"state": "unconfirmed", "pids": [child.pid], "unpublished": 0}
     assert child in shell_process._active_subprocesses and child.poll() is None, "a sent request is no exit proof"

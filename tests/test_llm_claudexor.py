@@ -1232,11 +1232,12 @@ def test_daemon_read_timeout_repeats_only_before_create(setup, monkeypatch, phas
     from ouroboros.loop_llm_call import call_llm_with_retry
 
     root, _gateway, client = setup
-    sends, slept = [], []
+    sends, slept, clock = [], [], [0.0]
 
     def fail(request):
         assert request.url.path == ("/v2/uploads" if phase == "upload" else "/v2/model-operations")
         sends.append(request.headers["Idempotency-Key"])
+        clock[0] += 1.0  # expire only after the HTTP boundary, not during local client construction
         raise httpx.ReadTimeout("Lost daemon reply", request=request)
 
     def connect(**_kwargs):
@@ -1250,6 +1251,7 @@ def test_daemon_read_timeout_repeats_only_before_create(setup, monkeypatch, phas
     monkeypatch.setattr(transport, "ensure_owned_gateway", connect)
     monkeypatch.setattr(transport, "llm_transport_timeout_sec", lambda _timeout: 0.01)
     monkeypatch.setattr(transport.time, "sleep", slept.append)
+    monkeypatch.setattr(transport, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=slept.append))
     usage = {}
     answer, _ = call_llm_with_retry(client, [{"role": "user", "content": "hello"}], MODEL, None, "high", 3,
                                   root / "logs", "task-one", 1, None, usage)
