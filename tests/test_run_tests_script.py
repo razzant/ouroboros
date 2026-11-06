@@ -302,7 +302,7 @@ def test_a_deferred_full_escalation_runs_the_floor_and_says_so(run_tests, monkey
     monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "outputs"))
     monkeypatch.setattr(run_tests, "_node_lane", lambda: ran.append("node") or 0)
     monkeypatch.setattr(run_tests, "_run", lambda label, argv, cwd: ran.append((label, argv)) or 0)
-    run_tests.main(["--selected", "--defer-full", "--evidence-dir", str(tmp_path / "evidence")])
+    exit_after_warm = run_tests.main(["--selected", "--defer-full", "--evidence-dir", str(tmp_path / "evidence")])
     record = json.loads((tmp_path / "evidence" / "selection.json").read_text(encoding="utf-8"))
     # The leg still runs the Node lane, warms the prefix for the selection, and runs a pytest pass.
     assert ran[0] == "node" and ran[1][0] == "warm" and "--files-from" in ran[1][1] and ran[2][0] == "parallel"
@@ -315,6 +315,11 @@ def test_a_deferred_full_escalation_runs_the_floor_and_says_so(run_tests, monkey
     else:
         assert "deferred_full" not in record and record["files"] == ["tests/test_floor.py"]
         assert not summary.exists()
+    # The warm decides nothing: a warm stopped for memory (-9, run 42126810926) leaves the leg its own exit.
+    before = len(ran)
+    monkeypatch.setattr(run_tests, "_run", lambda label, argv, cwd: ran.append((label, argv)) or -9 * (label == "warm"))
+    assert run_tests.main(["--selected", "--defer-full", "--evidence-dir", str(tmp_path / "cold")]) == exit_after_warm
+    assert ran[before] == "node" and ran[before + 1][0] == "warm" and ran[before + 2][0] == "parallel"
 
 
 def test_a_deferred_full_escalation_keeps_what_the_other_changes_select(run_tests, monkeypatch, tmp_path):
@@ -433,6 +438,10 @@ def test_a_red_lane_stops_the_battery_and_an_empty_battery_is_red(run_tests, mon
     assert seen == ["warm", "parallel"]
     monkeypatch.setattr(run_tests, "_run", lambda label, argv, cwd: 0 if label == "warm" else 5)
     assert run_tests.main([]) == 1
+    # A red warm decides nothing: the battery still runs, cold, and its own exit is the run's.
+    seen.clear()
+    monkeypatch.setattr(run_tests, "_run", lambda label, argv, cwd: seen.append(label) or -9 * (label == "warm"))
+    assert run_tests.main([]) == 0 and seen == ["warm", "parallel", "serial"]
 
 
 def test_lane_groups_pin_resources_and_keep_other_files_whole(run_tests, monkeypatch):
