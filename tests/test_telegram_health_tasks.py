@@ -36,6 +36,18 @@ def test_health_snapshot(tmp_path):
     assert "Disk" in txt
 
 
+def test_health_says_an_unmeasured_pool_is_not_observed_never_zero(tmp_path):
+    plugin = _load_plugin()
+    api, data = _api_with_data(tmp_path)
+    snapshot = data / "state" / "queue_snapshot.json"
+    for document in ({"running": [], "pending": [], "pool_observation_status": "unknown", "worker_total": None},
+                     # the earlier publisher's failure form: zeros beside an unknown disablement
+                     {"running": [], "pending": [], "worker_total": 0, "worker_pool_disabled_reason": "unknown"}):
+        snapshot.write_text(json.dumps(document), encoding="utf-8")
+        txt = plugin._collect_health(api, "en")
+        assert "Workers: not observed" in txt and "Workers: 0" not in txt
+
+
 def test_health_degrades_when_files_missing(tmp_path):
     plugin = _load_plugin()
     api, data = _api_with_data(tmp_path)

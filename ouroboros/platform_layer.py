@@ -310,8 +310,10 @@ def acquire_exclusive_file_lock(
         return None
     started = time.monotonic()
     first_attempt = True
-    while first_attempt or (time.monotonic() - started) < timeout_sec:
+    retry_after_stale = False
+    while first_attempt or retry_after_stale or (time.monotonic() - started) < timeout_sec:
         first_attempt = False
+        retry_after_stale = False
         try:
             fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
             stamp = (metadata or f"pid={os.getpid()} ts={time.time()}\n").encode("utf-8")
@@ -373,6 +375,7 @@ def acquire_exclusive_file_lock(
                             if not IS_WINDOWS:  # Windows deletes no open file: it unlinks
                                 if _lock_identity(lock_path) == judged:  # below, after
                                     os.unlink(str(lock_path))  # under the held flock
+                                retry_after_stale = True
                                 continue
                 finally:
                     if IS_WINDOWS:  # the probe's hold goes before its handle
@@ -380,6 +383,7 @@ def acquire_exclusive_file_lock(
                     os.close(probe)
                 if stale and _lock_identity(lock_path) == judged:
                     lock_path.unlink()
+                    retry_after_stale = True
                     continue
             except Exception as exc:
                 if probe is None and isinstance(creation_error, FileExistsError) and isinstance(exc, FileNotFoundError):
