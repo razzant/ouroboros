@@ -184,6 +184,11 @@ def test_failed_check_row_live_expanded_finished_and_replayed(direct_server_with
                 f"() => ['Done', 'Done with warnings', 'Failed', 'Stopped'].includes(document.querySelector("
                 f"'.chat-live-card[data-task-id=\"{task_id}\"] [data-live-phase]')?.textContent)", timeout=180_000)
             assert card.locator("[data-live-phase]").first.inner_text() == "Done", "a failed check is not a failed task"
+            # "Done" shows first beside "Finalizing…" (the final answer's own frame); task_metrics and task_done
+            # follow it on the control lane, the calls' live frames ride telemetry behind them: the finished counts
+            # are the settled card's.
+            page.wait_for_selector(f'.chat-live-card[data-task-id="{task_id}"][data-finished="1"]', timeout=120_000)
+            assert card.locator("[data-live-phase]").first.inner_text() == "Done"
             _assert_row(card)
             # two checks, the fix and the finish_task completion act, each counted once
             assert "4 tool calls" in card.inner_text()
