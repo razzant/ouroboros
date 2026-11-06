@@ -229,8 +229,7 @@ def _storage():
 def test_temporary_space_keeps_a_groups_name_its_room_on_a_narrow_card(ui, width, theme):
     page = _open(ui, width=width, theme=theme, place="dashboard", tab="storage",
                  routes=[("**/api/storage", _json(_storage(), path="/api/storage"))])
-    # The saved groups stand behind "Not included": read-only rows first, the checklist on purpose.
-    page.locator('[data-free-disclosure="left"] > summary').click()
+    # The saved groups are one Cleanup decision row (DESIGN "Storage"); their checklist opens only on purpose.
     page.locator("[data-free-saved]").click()
     page.wait_for_selector("[data-free-group]")
     groups = page.evaluate("""() => [...document.querySelectorAll('.storage-free-group')].map((group) => {

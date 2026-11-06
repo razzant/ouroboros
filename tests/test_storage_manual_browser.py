@@ -120,12 +120,13 @@ def drive(page, url, stub, evidence, errors):
     door = page.locator("[data-storage-door]")
     expect(door).to_be_visible(timeout=10_000)
     door.click()
-    expect(tray).to_contain_text("Ready to remove", timeout=10_000)
-    tray.locator('summary[data-key="left-open"]').click()
-    expect(tray).to_contain_text("Finished copies not verified saved")
+    # The review (DESIGN "Storage"): the pool's one Remove, the copies not verified saved as their own decision row.
+    expect(tray.locator("[data-free-go]")).to_have_text("Remove 2 selected items", timeout=10_000)
+    copies = tray.locator(".storage-decision-row", has=page.locator("[data-free-manual-open]"))
+    expect(copies.locator(".storage-decision-label")).to_contain_text("3 finished copies not verified saved")
+    expect(copies.locator(".storage-decision-size")).to_have_text("7.2 GB")
     # What the pool leaves out: only the copy the owner kept cannot go; the three are offered by hand, not listed as blocked.
-    expect(tray.locator("p.storage-meta", has_text="you asked to keep it")).to_have_text("1: you asked to keep it")
-    expect(tray).to_contain_text("3 copies of finished work stay: some files in them are not verified saved. 7.2 GB counted.")
+    expect(tray.locator('summary[data-key="left-open"]')).to_have_text("Kept · 1 you asked to keep it")
     assert tray.locator("[data-free-manual-open]").count() == 1
     assert tray.locator(".btn-danger").count() == 0 and tray.locator("[data-free-manual-go]").count() == 0
     assert "manual" not in stub.reads, "closed: the copies are not read"
@@ -186,8 +187,7 @@ def drive(page, url, stub, evidence, errors):
 
     # A new list: nothing carries over; one more choice goes through, exactly its id.
     tray.locator("[data-free-preview]").click()
-    expect(tray).to_contain_text("Ready to remove", timeout=10_000)
-    tray.locator('summary[data-key="left-open"]').click()
+    expect(tray.locator("[data-free-go]")).to_have_text("Remove 2 selected items", timeout=10_000)
     tray.locator("[data-free-manual-open]").click()
     expect(tray.locator("[data-free-manual-pick]")).to_have_count(3, timeout=10_000)
     assert tray.locator("[data-free-manual-pick]:checked").count() == 0
