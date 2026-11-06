@@ -69,7 +69,7 @@ def _room(root, tasks):
         (root / "logs" / f"{name}.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
 
-@pytest.mark.parametrize("value", [None, {}, "legacy", False, 42, {"text": "Authored 🐍", "author_task_id": "task-a"}])
+@pytest.mark.parametrize("value", [None, {}, "legacy", False, True, 42, [False, True, 0.125], {"text": "Authored 🐍", "author_task_id": "task-a"}])
 def test_focus_projection_preserves_json_without_display_or_handoff_work(tmp_path, monkeypatch, value):
     _seed(tmp_path, "task-a", "completed", focus=value, context="x" * 1_000_000)
     _seed(tmp_path, "task-b", "running")
@@ -79,8 +79,9 @@ def test_focus_projection_preserves_json_without_display_or_handoff_work(tmp_pat
     monkeypatch.setattr(task_store, "_display_sql", unexpected)
     monkeypatch.setattr(task_store, "_handoff_capture", unexpected)
     assert task_store.task_focuses(tmp_path, []) == {}
-    assert task_store.task_focuses(tmp_path, ["task-a", "task-a", "task-b", "missing"]) == {
-        "task-a": value, "task-b": None}
+    values = task_store.task_focuses(tmp_path, ["task-a", "task-a", "task-b", "missing"])
+    assert values == {"task-a": value, "task-b": None}
+    assert type(values["task-a"]) is type(value)
     assert read_result(tmp_path, "task-a") == before
     _seed(tmp_path, "task-a", "completed", focus={"text": "fresh"})
     assert task_store.task_focuses(tmp_path, ["task-a"]) == {"task-a": {"text": "fresh"}}

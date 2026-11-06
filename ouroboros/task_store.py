@@ -559,7 +559,9 @@ def task_focuses(root: Any, task_ids: Iterable[str]) -> Dict[str, Any]:
         return {}
     with open_store(root, write=False) as txn:
         captured = capture(txn.conn,
-                           "SELECT task_id, json_quote(json_extract(body, '$.focus')) AS focus "
+                           "SELECT task_id, '' || CASE json_type(body, '$.focus') "
+                           "WHEN 'true' THEN 'true' WHEN 'false' THEN 'false' "
+                           "ELSE json_quote(json_extract(body, '$.focus')) END AS focus "
                            "FROM task_bodies WHERE task_id IN (SELECT value FROM json_each(?))",
                            (json.dumps(ids),), ("task_id", "focus"))
     return {task_id: json.loads(text) for task_id, text in captured.tuples()}
