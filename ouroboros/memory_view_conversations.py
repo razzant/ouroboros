@@ -16,8 +16,8 @@ running work, and each of its rooms that has open rows, a note of mine or runnin
   how many words nobody considered since, and its reader.
 
 A writer's terminal rows its page links below it (``memory_sealing.linked_rows``) are that page's, never open
-here. A room's later delivery of words it already holds (the same ``text_sha256``, not my human's, not from two
-different recorded speakers) is one line naming the earlier copy and its reader; its text is not read. A room's words are **retold** up to its newest finish that wrote a closing sentence and **considered** up
+here. A room's later delivery of words it already holds (the same ``text_sha256``, not my human's; by the same
+recorded speaker, or by none) is one line naming the earlier copy and its reader; its text is not read. A room's words are **retold** up to its newest finish that wrote a closing sentence and **considered** up
 to my newest act there (my own words, a quiet finish, a note: ``memory_room_activity``); the floor
 (``memory_floor``) folds them in that order -- retold, considered, then the words nobody considered, oldest
 first within each (``F6w``); then a group to its line (``F6g``); my human's words last of all, other
@@ -216,17 +216,20 @@ def conversation_label(label: Callable[..., str], place: Mapping[str, Any], rows
 
 def _repeats(rows: List[Entry]) -> Dict[str, Dict[str, Any]]:
     """``row_sha256 -> the earlier copy's address`` of a room's later deliveries of words it already holds, its rows
-    (sealed and open) in position order: the same non-empty words (``text_sha256``, whitespace aside) unless two
-    different speakers recorded them. Edited words and wordless rows are none; no similarity, prefix or length."""
-    first: Dict[str, Tuple[Dict[str, Any], str]] = {}
+    (sealed and open) in position order, the same non-empty words (``text_sha256``, whitespace aside): a row with no
+    recorded speaker repeats the room's earliest copy, a recorded speaker's row only that speaker's own earliest copy
+    (never an unrecorded one). Edited words and wordless rows are none; no similarity, prefix or length."""
+    first: Dict[Tuple[str, str], Dict[str, Any]] = {}  # (words, recorded speaker or "" for any) -> the earliest copy
     found: Dict[str, Dict[str, Any]] = {}
     for address, meta, _pos in rows:
         digest = meta.get("text_sha256") if int(meta.get("text_chars") or 0) else ""
         if digest:
             speaker = recorded_speaker(meta)
-            earlier, said = first.setdefault(digest, (address, speaker))
-            if earlier["row_sha256"] != address["row_sha256"] and not (said and speaker and said != speaker):
+            earlier = first.get((digest, speaker))
+            if earlier is not None and earlier["row_sha256"] != address["row_sha256"]:
                 found[address["row_sha256"]] = earlier
+            first.setdefault((digest, ""), address)
+            first.setdefault((digest, speaker), address)
     return found
 
 

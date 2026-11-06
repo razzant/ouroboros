@@ -263,15 +263,17 @@ def test_my_accounts_arrival_considers_nothing_and_my_delivery_there_does(tmp_pa
 def test_a_later_delivery_of_the_same_words_is_one_line_naming_the_earlier_copy(tmp_path, monkeypatch):
     """The first remedy for a crowded view (BIBLE P1): a room's later delivery of words it already holds (the same
     text, whitespace aside) is one line, its own head, «delivered again», the earlier copy's address and reader, and
-    its text is never read. Edited words, the same words in another room or from two different recorded speakers,
-    wordless rows and my human's words stay as they are."""
+    its text is never read. A row with no recorded speaker repeats the room's earliest copy; a recorded speaker's row
+    repeats only that speaker's own earlier copy, never an unrecorded one. Edited words, the same words in another
+    room or from two different recorded speakers, wordless rows and my human's words stay as they are."""
     from ouroboros import chat_chain, memory_view as mv
     from ouroboros.presence_bindings import conversation_key
     from ouroboros.presence_runner import presence_chat_id
 
     rooms, _rows = _install(tmp_path)
     beta = str(rooms["beta"])
-    room = {thread: presence_chat_id(conversation_key("github", "me", "repo.1", thread)) for thread in ("i1", "i2")}
+    room = {thread: presence_chat_id(conversation_key("github", "me", "repo.1", thread))
+            for thread in ("i1", "i2", "i3", "i4")}
     base = {"provider": "github", "account_id": "me", "conversation_id": "repo.1"}
 
     def said(thread, minute, text, actor="u7"):
@@ -289,8 +291,12 @@ def test_a_later_delivery_of_the_same_words_is_one_line_naming_the_earlier_copy(
     edited, other = said("i1", 42, body + "\n\nMerged."), said("i1", 43, body, actor="u8")
     elsewhere, empty, empty_again = said("i2", 44, body), said("i1", 45, ""), said("i1", 46, "")
     ship, ship_again = (shared.msg(_ts(minute), "ship it", chat_id=int(beta)) for minute in (47, 48))  # my human's
+    unknown, alice, bob = (said("i3", minute, "Approved.", who) for minute, who in ((51, ""), (52, "u10"), (53, "u11")))
+    alice4, bob4, bob4_again = (said("i4", minute, "Approved.", who) for minute, who in ((54, "u10"), (55, "u11"),
+                                                                                        (56, "u11")))
     shared.append(tmp_path / "logs" / "chat.jsonl", first, again, edited, other, elsewhere, empty, empty_again,
-                  reply("i1", 49), reply("i2", 50), ship, ship_again)
+                  reply("i1", 49), reply("i2", 50), ship, ship_again, unknown, alice, bob, alice4, bob4, bob4_again,
+                  reply("i3", 57), reply("i4", 58))
     asked, read = [], mv._row_texts
     monkeypatch.setattr(mv, "_row_texts", lambda root, entries: (
         asked.extend(entry[0]["row_sha256"] for entry in entries), read(root, entries))[1])
@@ -302,9 +308,13 @@ def test_a_later_delivery_of_the_same_words_is_one_line_naming_the_earlier_copy(
     assert words[_addr(again)].endswith(f"] delivered again: the same words as {earlier}; memory_read(room_id="
                                         f"'{room['i1']}', rows=true, from='{earlier}', to='{earlier}')")
     assert chat_chain.row_address(again)["row_sha256"] not in asked  # its text is never read
-    for row in (first, edited, other, elsewhere, empty, empty_again, ship, ship_again):  # each as it is
+    for row in (first, edited, other, elsewhere, empty, empty_again, ship, ship_again, unknown, alice, bob, alice4,
+                bob4):  # each as it is: unknown → Alice → Bob keeps both people's words whole
         assert "delivered again" not in words[_addr(row)] and chat_chain.row_address(row)["row_sha256"] in asked
     assert "Keep the old parser" in words[_addr(first)] and "ship it" in words[_addr(ship_again)]
+    bob_first = _addr(bob4)  # Alice → Bob → Bob: Bob's second copy is his own first copy's, not Alice's
+    assert words[_addr(bob4_again)].endswith(f"] delivered again: the same words as {bob_first}; memory_read(room_id="
+                                             f"'{room['i4']}', rows=true, from='{bob_first}', to='{bob_first}')")
 
 
 def test_a_row_with_no_recorded_speaker_is_nobody_and_only_a_persons_word_waits_unconsidered(tmp_path):
