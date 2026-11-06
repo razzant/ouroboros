@@ -233,7 +233,7 @@ class ChatHistoryWindow(TypedDict, total=False):
     archive import bounded it; ``truncated_by`` names each cause (quota, page, lineage_cap,
     ``<stream>_<gap>`` such as chat_malformed_jsonl, or ``<stream>_importing``: older rows exist
     below the archive import's frontier and are not readable yet; the older page that would cross
-    it answers 503 migrating). ``latest_message`` (Project rooms) names the latest eligible
+    it answers 503 migrating). ``latest_message`` (Main and Project rooms) names the latest eligible
     non-owner standalone message by stored arrival, excluding card content; null means unknown.
     Its ``out_of_order`` flag means it sorts
     above earlier arrivals or before the recent read. With a null message, ``latest_before`` says

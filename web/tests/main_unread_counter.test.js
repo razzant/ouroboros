@@ -21,7 +21,7 @@ function lift(name) {
 const heldRows = (feed, beyond = []) => ({ unreadRows: () => [...(feed() || []).filter((row) => row._unread), ...beyond] });
 
 function harness({ revision = null, seen = null, loaded = true, page = 'files', project = null, answer = () => ({}) } = {}) {
-    const posts = [], badges = [], acks = [];
+    const posts = [], badges = [], acks = [], landings = [];
     const context = vm.createContext({
         ...readAhead,  // app.js imports these: a message read in full elsewhere (DESIGN "Unread")
         state: { mainVisibleRevision: revision, mainSeenRevision: seen, mainSeenLoaded: loaded, activePage: page },
@@ -29,15 +29,16 @@ function harness({ revision = null, seen = null, loaded = true, page = 'files', 
         updateUnreadBadge: () => badges.push(context.mainUnreadCount()),
         refreshSharedProjectSeen: () => posts.push(['shared']),
         acknowledgeMainAfterPaint: () => acks.push(context.state.mainVisibleRevision),
+        mainChat: { showLatest: (options) => landings.push(options?.arrive === true) },
         fetchJson: async (url, init = {}) => {
             posts.push([url, init.method || 'GET', JSON.parse(init.body || '{}')]);
             return answer(JSON.parse(init.body || '{}'));
         },
     });
-    vm.runInContext(['mainOnScreen', 'mainUnreadCount', 'observeMainRevision', 'mergeMainSeenRevision', 'markMainViewed']
-        .map(lift).join('\n') + '\nglobalThis.mainUnreadCount = mainUnreadCount; globalThis.api = { observeMainRevision,'
-        + ' mergeMainSeenRevision, markMainViewed, mainUnreadCount };', context);
-    return { context, posts, badges, acks, api: context.api };
+    vm.runInContext('let mainOpening = true;\n' + ['mainOnScreen', 'mainUnreadCount', 'observeMainRevision',
+        'mergeMainSeenRevision', 'markMainViewed'].map(lift).join('\n') + '\nglobalThis.mainUnreadCount = mainUnreadCount;'
+        + ' globalThis.api = { observeMainRevision, mergeMainSeenRevision, markMainViewed, mainUnreadCount };', context);
+    return { context, posts, badges, acks, landings, api: context.api };
 }
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -104,6 +105,26 @@ test('a newer revision re-reads the shared cursors, and offers the read decision
     covered.api.observeMainRevision(5);
     assert.deepEqual(covered.acks, []);
     assert.equal(covered.api.mainUnreadCount(), 2);
+});
+
+// The app's start opens Main (DESIGN "Unread", owner 06.11): unread, it lands on what came, once; news that arrives
+// while the owner is on Main never moves the reader, and a read Main opens at its bottom.
+test('the app start lands an unread Main once; later arrivals never move it', () => {
+    const opened = harness({ revision: 3, seen: 3, page: 'chat' });
+    opened.api.observeMainRevision(5);
+    opened.api.observeMainRevision(6);
+    assert.deepEqual(opened.landings, [true], 'the first loaded snapshot is the opening, the next one only counts');
+    assert.deepEqual(opened.acks, [5, 6]);
+    const read = harness({ revision: 3, seen: 3, page: 'chat' });
+    read.api.observeMainRevision(3);
+    read.api.observeMainRevision(4);
+    assert.deepEqual(read.landings, [], 'opened read: the bottom, and a later arrival does not jump');
+    const unknown = harness({ revision: 3, seen: null, loaded: false, page: 'chat' });
+    unknown.api.observeMainRevision(5);
+    assert.deepEqual(unknown.landings, [], 'a cursor not yet read opens nothing yet');
+    unknown.api.mergeMainSeenRevision({ main_seen_revision: 3 });
+    unknown.api.observeMainRevision(5);
+    assert.deepEqual(unknown.landings, [true], 'the opening waits for the cursor, then lands');
 });
 
 // The read itself: a revision is written only after a paint made while Main is the room on screen. Main's reader
@@ -315,4 +336,8 @@ test('Main shown again from another page lands on what came while unread; read, 
     const opening = pageHarness({ unread: 2 });
     await opening.context.show('chat', { closeProject: false });
     assert.deepEqual(opening.claims, [false], 'a Project opening over Main: Main lands when it is shown again');
+    const leaving = pageHarness({ unread: 2 });
+    leaving.context.state.activePage = 'chat';
+    await leaving.context.show('settings');
+    assert.deepEqual(leaving.claims, [], 'another page shown while Main has news claims nothing for Main');
 });

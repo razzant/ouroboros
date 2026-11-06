@@ -255,6 +255,7 @@ function updateUnreadBadge() {
 
 // Main's revision from a state snapshot (null: unreadable, keep what was known). A cursor the server has never held is
 // set to what Main holds now, as the per-window count this replaced started at zero; a newer one offers the read.
+let mainOpening = true;  // the app's start opens Main once: unread, it lands on what came (DESIGN "Unread")
 function observeMainRevision(revision) {
     if (Number.isSafeInteger(revision)) state.mainVisibleRevision = revision;
     if (!Number.isSafeInteger(state.mainVisibleRevision)) return;
@@ -263,8 +264,9 @@ function observeMainRevision(revision) {
     if (state.mainSeenRevision === null) void markMainViewed(state.mainVisibleRevision);
     else if (mainUnreadCount() > 0) {
         refreshSharedProjectSeen();
-        if (mainOnScreen()) void acknowledgeMainAfterPaint();
+        if (mainOnScreen()) { if (mainOpening) void mainChat?.showLatest?.({ arrive: true }); void acknowledgeMainAfterPaint(); }
     }
+    mainOpening = false;
     updateUnreadBadge();
 }
 

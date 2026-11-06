@@ -223,7 +223,11 @@ export function newestMessageOffset(latest, { delivered, nodes, viewport, header
     const band = readBand(viewport, header, composer);
     const node = nodes(latest.history_id).map(shownBy).find((shown) => shown.getClientRects?.().length);
     if (!node || band.bottom <= band.top || historyNodeOnScreen(node, viewport, band)) return 0;
-    return node.getBoundingClientRect().top - band.top;
+    // Measured on screen, moved in the feed's own pixels: a room scaled mid-motion (the phone drawer's handover) shows
+    // the distance smaller than the scroll it takes. The Interface size never scales the page (interface_size.js).
+    const height = Number(viewport.offsetHeight) || 0;
+    const scale = height > 0 ? viewport.getBoundingClientRect().height / height : 1;
+    return (node.getBoundingClientRect().top - band.top) / (scale > 0 ? scale : 1);
 }
 
 /**

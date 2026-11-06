@@ -235,11 +235,24 @@ def test_an_unreadable_store_answers_the_whole_read_as_unavailable(room, monkeyp
     assert payload["messages"] == [] and payload["has_more"] is True and "latest_message" not in payload["window"]
 
 
-def test_main_names_nothing(room):
-    message_bus.send_with_budget(1, "a Main reply", task_id="root-1")
-    response = asyncio.run(history.make_chat_history_endpoint(message_bus.DATA_DIR)(
-        SimpleNamespace(query_params={})))
-    assert "latest_message" not in json.loads(response.body)["window"]
+def test_main_names_its_newest_arrival_as_a_project_does(room):
+    """Main lands on what arrived last too (owner 06.11, DESIGN "Unread"): a late answer that keeps its earlier ``ts``
+    is named out of order, and a child's own words are card content, never Main's arrival."""
+    def deliver_main(text: str, minute: int, task_id: str = "root-1") -> None:
+        delivery._handle_send_message({"type": "send_message", "chat_id": 1, "task_id": task_id, "text": text,
+                                       "ts": ts(minute)}, room.host)
+
+    def window() -> dict:
+        response = asyncio.run(history.make_chat_history_endpoint(room.root)(SimpleNamespace(query_params={})))
+        assert response.status_code == 200, response.body
+        return json.loads(response.body)["window"]
+
+    for minute in (10, 11):
+        deliver_main(f"main reply {minute}", minute)
+    deliver_main("late main final", 1)
+    assert window()["latest_message"] == {"history_id": room.row_id("late main final"), "out_of_order": True}
+    deliver_main("a child's own words", 12, task_id="kid-1")
+    assert window()["latest_message"]["history_id"] == room.row_id("late main final"), "card content is never it"
 
 
 def test_a_room_read_while_the_project_registry_is_unreadable_names_no_arrival_and_main_reads_on(room):

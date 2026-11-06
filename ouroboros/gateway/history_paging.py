@@ -845,9 +845,9 @@ def _arrived_unread(data_dir, chat_id):
 
 def latest_arrival(rows, page, data_dir, row_matches_thread, stored_chat_id, projected_gaps=frozenset(),
                    task_result=lambda _task_id: {}):
-    """``window.latest_message`` of a recent Project read (DESIGN "Unread").
+    """``window.latest_message`` of a recent Main or Project read (DESIGN "Unread").
 
-    The window is ordered and tailed by event time, but a Project message counts
+    The window is ordered and tailed by event time, but a room's message counts
     as unread when it ARRIVES: an answer the terminal outbox delivers late keeps
     its original ``ts``, so it can sort above messages that arrived before it
     (``out_of_order``) or below the window's floor, where the first older page
