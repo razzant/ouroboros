@@ -653,13 +653,24 @@ def _run_task_body(runner: Any, task: dict, task_drive_root: str, task_queue: An
 
     A Presence turn is its own runner, never the pool's generic ``handle_task``: a Host-admitted one
     (``presence_runner.PRESENCE_RUN_KEY``) re-admits from durable facts, takes the gate, runs and reports its
-    settlement as a frame; a moved turn's saved record (a Resume, a restart's return) continues there too."""
+    settlement as a frame; a moved turn's saved record (a Resume, a restart's return) continues there too.
+    Its gate, allowance, autonomy and cost cap are read before its agent starts, so it takes the task start's
+    settings here, as ``handle_task`` does: a worker's own environment is the one it was born with (a forkserver
+    child keeps the server's from the forkserver's start), and a saved change would never reach a fresh carrier.
+    A failed reload is disclosed on the turn's own endpoint, which names its chat (the pooled agent may still
+    carry its previous task's)."""
     if task.get("_presence_run") or task.get("_presence_turn"):
+        from ouroboros.config import task_settings_scope
         from ouroboros.presence_carrier import carry_presence_turn
+        from ouroboros.subagent_runtime import apply_task_start_settings_or_disclose
+        from ouroboros.utils import emit_log_event
 
         task.pop("_conversation_prepare", None)
-        return carry_presence_turn(task, task_queue, repo_dir, task_drive_root, worker_id=wid,
-                                   owner_wait_callback=getattr(runner, "owner_wait_callback", None)) or []
+        start = apply_task_start_settings_or_disclose(str(task.get("id") or ""), lambda kind, **facts: emit_log_event(
+            task_queue, {"type": kind, "ts": utc_now_iso(), **facts}, blocking=True, log_label="carrier settings"))
+        with task_settings_scope(start):
+            return carry_presence_turn(task, task_queue, repo_dir, task_drive_root, worker_id=wid,
+                                       owner_wait_callback=getattr(runner, "owner_wait_callback", None)) or []
     if task.get("_conversation_prepare"):
         from supervisor.worker_chat_lane import ConversationRefusal, prepare_conversation_task, refusal_terminal
 

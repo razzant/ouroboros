@@ -911,7 +911,8 @@ under one of the four categories above and fails on a new one;
 
 New messages are crimson, and only where the owner reads. The two sidebar numbers
 count the same thing, the standalone messages not read yet (below): Main's on its
-row, shown while another place is, and the Projects header's, summed over its rows,
+row, shown while another place is, and the Projects header's, summed over its rows
+(those it rests on, hidden or not, and the older ones an open find or browse shows),
 each a crimson pill in one column just before the marks (owner 19.10, Q1 = B). A
 Project row's mark takes the crimson tint (its work's shape, or a dot where nothing
 works), and ☰ carries a crimson dot while Main or a Project hidden in the drawer has
@@ -1297,10 +1298,21 @@ reader; composer files stay.
   controls translate. Titles preserve line breaks and wrap whole in a bounded
   keyboard scroller; actions wrap before squeezing the name. On a phone sheet
   the name keeps its row beside Close and every action stays in sight under it
-  in two groups, the view (`Formatted`/`Source`, `Fit`/`Actual size`), then the
+  in two groups, the view (`Formatted`/`Source`) or image-scene zoom controls
+  (`−`/`Reset`/`+`), then the
   file's (Copy, Open, Download): one row when both fit, else a row each; nothing
-  goes under a menu (audit №5, owner 2026-10-28T22:09Z).
-- Images open at `Fit` (whole, never enlarged); `Actual size` scrolls their pixels.
+  goes under a menu (audit №5, owner 2026-10-28T22:09Z). Image-only A Scene is
+  the scoped exception chosen by the owner on 2026-11-05: on a coarse phone its
+  existing chrome is visible when opened and a tap on the image stage toggles it;
+  keyboard focus, Escape and the existing actions remain available. Text readers
+  and non-image sheets keep the always-visible rule. This change does not add
+  swipe or sibling navigation between images.
+- Images open as an image scene fitted to the stage. The scene owns a bounded
+  focal zoom with visible minus/reset/plus controls, double click/tap zoom,
+  pinch zoom and pan; keyboard arrows pan while zoomed and `0`/Home resets.
+  Phone/coarse-pointer chrome is visible when opened and can be toggled by a
+  stage tap; keyboard focus, Escape and the existing file actions remain
+  available. There is no gallery or sibling-image swipe in this change.
 - Markdown follows the reading size and heading ladder of a rich answer (§1).
   Single newlines inside a paragraph are soft; explicit hard breaks stay.
   Raw HTML and SVG stay literal, images stay references and never load, and
@@ -1427,7 +1439,8 @@ that saved no choice reads `until it is woken`), unless a helper its sleep chose
 that helper (`… until Ouroboros resumes it` only when this episode may ask for it,
 or `until you resume it` after Panic; a Continue's earlier helper is just
 `paused`), with no new control or turn; helpers an earlier attempt left running
-read as `Working`, with their count; an
+read as `Working`, with their count; `Queued` carries no cause when the scheduler
+recorded none, never a free-worker claim; an
 access wait is not an answer wait, and unknown stays unknown. Under the state a
 live work shows its authored focus (`update_focus`: stage · done · left), led by its time,
 quiet, at most two lines. A finished row shows the author’s closing sentence,
@@ -2260,7 +2273,8 @@ there is ONE line whose wording carries its openness and never renders an
 unknown as a number: `$0.00` only where priced rows evidenced that zero,
 `up to $1.20` while the tracked subtotal is inexact, `Tracked: $1.20` when part
 of the same scope has no price (`Tracked: up to $1.20` when that subtotal is
-inexact too), and `Cost unknown` for unpriced rows with no tracked amount. An
+inexact too), `Cost pending` while accounting is open without a tracked amount,
+and `Cost not priced` once settled usage has no tracked price. An
 empty, intact ledger has no money line; an empty view with an integrity gap
 stays unknown; neither proves a free result. The chip's short word (`Sending`,
 `Queued`) and `Tracked:` are explained in the card's details (exact phase;
@@ -2946,11 +2960,20 @@ neither opens nor reads it. Pinned Projects lead the one list, and one `--space-
 shown row is their only boundary: no caption, glyph, tint, rule or column, so
 nothing reads as one more Project; the row's tooltip and accessible name say
 Pinned. Within each group unread leads, then recency; the column's places follow §5.
-After Unpin, a room outside the recent sidebar slice disappears from that slice,
-not from the registry. The Projects header collapses the whole list or opens it:
-collapsed, only the pinned Projects stay, in their order and with their air; every
-other row hides whatever it is doing, the open one included, and the header keeps
-its mark and unread count for them. The choice is remembered on the device; a row
+The list rests on the pins and the most recent other Projects. Every other one is one step away by the owner's
+choice A1: Find a project under the header and Show more at the end of the list. As built, the field is a
+capsule a row high in the header pills' material, made like the composer's field; it matches every Project's
+name, older and closed ones included, by its letters (any case or accent, each word anywhere in it), and a found
+name may take three lines. Show more ends a list the state knows more rooms for and adds the next fifty by
+recency; a find with no match says no project name contains those words and offers Clear search and Show all
+projects. A list that could not be read again says so, with the time of the one shown and Try again; until a
+read answers, nothing is said to be missing. Neither reads a room's history or marks anything read. Beyond the
+recent rows the order is the one the owner's last action gave, pins still leading: activity changes rows in
+place, and a room that comes or goes never moves the row in view. A Project outside the list opens by its own
+id; a missing or deleting one leaves the room on screen and says so. The Projects header collapses the whole
+list or opens it: collapsed, only the pinned Projects stay, in their order and with their air; every
+other row hides whatever it is doing, the open one included, a find or a browse ends, and the
+header keeps its mark and unread count for them. The choice is remembered on the device; a row
 that hides while it or its menu holds focus closes its menu and hands focus to the
 header. No label is set in capitals. A short window first compacts rows (fine pointer only), then lets the
 whole column scroll with Main pinned at the top and the version and the update on the bottom edge (owner 23.10);

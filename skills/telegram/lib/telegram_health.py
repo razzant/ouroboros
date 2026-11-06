@@ -6,13 +6,15 @@ import shutil
 import time
 from typing import Dict
 
+from ouroboros.queue_observation import pool_observation_status
+
 from .telegram_api import _LOCALIZED_TEXTS
 from .telegram_i18n import Index
 from .telegram_state import _data_dir, _jsonl_tail, _read_json_file
 
 
 _HEALTH_EN = {
-    "queue": "Queue", "idle": "idle", "busy": "working", "workers": "Workers",
+    "queue": "Queue", "idle": "idle", "busy": "working", "workers": "Workers", "not_observed": "not observed",
     "disk": "Disk", "logs": "logs", "incidents": "Incidents (1h)", "clean": "clean",
     "free": "free", "tasks_idle": "🟢 idle — nothing running",
     "tail_none": "none in bounded tail",
@@ -101,7 +103,9 @@ def _collect_health(api, lang: str = "en") -> str:
     q_icon = "🟢" if (rc + pc) == 0 else "🟡"
     q_state = s["idle"] if (rc + pc) == 0 else s["busy"]
     out.append(f"⚙️ {s['queue']}: {q_icon} {q_state} (RUNNING {rc} · PENDING {pc})")
-    if isinstance(snap.get("worker_total"), int):
+    if snap and pool_observation_status(snap) == "unknown":  # a failed pool measurement is not 0 processes
+        out.append(f"👷 {s['workers']}: {s['not_observed']}")
+    elif isinstance(snap.get("worker_total"), int):
         out.append(f"👷 {s['workers']}: {_started_processes(snap)}")
     inc, incidents_limited = _recent_incidents(api)
     if inc:
