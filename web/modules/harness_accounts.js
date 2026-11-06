@@ -1097,14 +1097,13 @@ export function accountRowFacts(row, payload,
     // percentage as current, and it never paints the row, because exhaustion is a claim about RIGHT NOW.
     if (action.resourceRead) quotaRead = READ_OK;
     if (action.activity === 'refresh' && action.error) quotaRead = READ_FAILED;
+    const metaParts = accountMetaParts(row, payload, { quotaRead, nowMs, action });
     return {
         badge: verificationBadge(row, { known: accountsRead === READ_OK }),
         quota: quotaSummary(payload?.quota || [], row.harness, row.profile_id,
             { quotaRead: resourceReadGap(action) ? READ_FAILED : quotaRead,
               nowMs, absences: payload?.quota_absences || [] }),
-        name: accountName(row),
-        meta: accountMetaLine(row, payload, { quotaRead, nowMs, action }),
-        metaParts: accountMetaParts(row, payload, { quotaRead, nowMs, action }),
+        name: accountName(row), meta: metaParts.map((part) => part.text).join(' · '), metaParts,
     };
 }
 
