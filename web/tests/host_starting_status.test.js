@@ -267,10 +267,11 @@ test('the Starting… header follows the phase: starting, chat ready, failed', (
     assert.deepEqual(startingStatus(SERVING), { kind: 'starting', text: 'Starting…', title: '' });
     assert.deepEqual(startingStatus(CHAT_READY),
         { kind: 'starting', text: 'Chat ready, restoring background tasks', title: '' });
-    assert.deepEqual(startingStatus(FAILED),  // the cause is the visible line, not a tooltip alone
-        { kind: 'starting', text: 'Start failed: current-facts store not published: failed',
+    assert.deepEqual(startingStatus(FAILED),  // the word stays whole; the cause is the step a short bar drops first
+        { kind: 'starting', text: 'Start failed', step: 'current-facts store not published: failed',
           title: 'current-facts store not published: failed' });
-    assert.deepEqual(startingStatus({ ...SERVING, phase: 'failed' }), { kind: 'starting', text: 'Start failed', title: '' });
+    assert.deepEqual(startingStatus({ ...SERVING, phase: 'failed' }),
+        { kind: 'starting', text: 'Start failed', step: '', title: '' });
     assert.deepEqual(startingStatus(SOFT_FAILED),
         { kind: 'starting', text: 'Chat ready, restoring background tasks', title: 'extensions: ValueError: bad manifest' },
         'a fail-soft step shows its error while the start goes on');
@@ -293,7 +294,8 @@ test('Main: the header paints the phase from the snapshot and forgets it on disc
         chat.instance.hydrateStateSnapshot({ supervisor_ready: false }, Infinity, 50);
         assert.equal(chat.status(), 'Chat ready, restoring background tasks', 'a body without the phase changes nothing');
         chat.snapshot({ supervisor_ready: false, boot: FAILED });
-        assert.equal(chat.status(), `Start failed: ${FAILED.error}`);
+        assert.equal(chat.status(), 'Start failed', 'the word alone, so a narrow bar never drops it with the cause');
+        assert.equal(globalThis.document.byId.get('chat-status').dataset.step, FAILED.error, 'the cause is the step');
         assert.equal(globalThis.document.byId.get('chat-status').title, FAILED.error, 'the cause rides the badge title');
         chat.snapshot({ supervisor_ready: true, boot: { ...CHAT_READY, phase: 'ready', tasks_ready: true } });
         assert.equal(chat.status(), 'Online');

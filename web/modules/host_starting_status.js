@@ -15,12 +15,12 @@ export function bootPhase(data) {
 }
 
 // The Starting… header's words for a boot phase: the chat accepts messages while the
-// background tasks are still being restored, or the start failed, its cause in the one
-// visible line (and the title). Nothing known about the phase keeps the plain Starting….
+// background tasks are still being restored, or the start failed: the word, its cause as the
+// step a short bar drops first (and the title). Nothing known about the phase keeps Starting….
 export function startingStatus(boot) {
     const failedStep = Array.isArray(boot?.steps) ? boot.steps.find((step) => step?.state === 'failed') : null;
     const title = String(boot?.error || (failedStep ? `${failedStep.name}: ${failedStep.error || ''}` : '') || '');
-    if (boot?.phase === 'failed') return { kind: 'starting', text: title ? `Start failed: ${title}` : 'Start failed', title };
+    if (boot?.phase === 'failed') return { kind: 'starting', text: 'Start failed', step: title, title };
     if (boot?.dialogue_ready === true) {
         return { kind: 'starting', text: 'Chat ready, restoring background tasks', title };
     }

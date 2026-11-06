@@ -625,7 +625,7 @@ observation confirms the supervisor can assign work; a live socket alone means
 only that the UI transport is open. The host's boot phases refine the word
 without changing the fact: `Chat ready, restoring background tasks` once the
 dialogue accepts messages durably while pooled work is still not admitted, and
-`Start failed: <cause>` (the cause as the visible line, the badge title too) when
+`Start failed` (its cause beside it where it fits, always the badge title) when
 the generation cannot become ready: a start that failed in its init. A ready generation
 that loses its task core does not fail this way: it ends and restarts (ARCHITECTURE §9,
 the Fault door), with one `supervisor_failure` Main row before and the startup notice after. `Online` is reserved for a ready, idle
