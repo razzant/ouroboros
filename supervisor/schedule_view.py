@@ -6,6 +6,7 @@ import datetime
 import re
 from typing import Any
 
+from ouroboros.utils import strip_markdown
 from supervisor.schedule_time import parse_schedule_time, timezone_for_schedule
 
 _LEGACY_NAME = re.compile(r"^(Follow-up|Reminder) of task \S+$")
@@ -91,8 +92,9 @@ def decorate(row: dict[str, Any], now: datetime.datetime) -> dict[str, Any]:
     template = template if isinstance(template, dict) else {}
     name = str(row.get("name") or "")
     objective = str(template.get("text") or template.get("description") or row.get("description") or "")
-    first_line = objective.splitlines()[0].strip() if objective else ""
-    # The whole first line: a surface clamps it, and a slice would cut a word and repeat itself under the title.
+    # The first line that says something, in plain words (a name shows no markdown), and the whole of it: a surface
+    # clamps it, and a slice would cut a word and repeat itself under the title.
+    first_line = next((line.strip() for line in strip_markdown(objective).splitlines() if line.strip()), "")
     out.update(display_name=name if authored_name(row) else first_line or name,
                kind="note" if note else "task", timezone=str(row.get("timezone") or ""),
                destination={"chat_id": template.get("chat_id"), "project_id": template.get("project_id")})

@@ -43,6 +43,13 @@ def test_note_name_uses_written_words_and_preserves_owner_names():
     assert decorate(note, NOW)["display_name"] == "Owner's name"
 
 
+def test_a_generated_name_is_the_first_line_that_says_something_in_plain_words():
+    blank_first = row(name="Follow-up of task abc", task={"text": "\n  \n**Buy** milk\nlater", "chat_id": 42})
+    assert decorate(blank_first, NOW)["display_name"] == "Buy milk"
+    # An authored name stays as written, markdown and all; only the request's own line is projected.
+    assert decorate({**blank_first, "name": "**Mine**"}, NOW)["display_name"] == "**Mine**"
+
+
 @pytest.mark.parametrize("expr,words", [
     ("0 9 * * *", "Daily at 09:00"), ("30 9,21 * * *", "Daily at 09:30 and 21:30"),
     ("0 11,15,19 * * *", "Daily at 11:00, 15:00 and 19:00"), ("0 11 * * 0", "Every Sunday at 11:00"),
