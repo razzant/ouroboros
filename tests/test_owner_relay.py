@@ -500,8 +500,9 @@ def test_one_address_is_one_entry_and_a_row_held_under_the_same_fact_renders_not
 
 def test_a_failed_write_stops_no_other_member_and_the_next_drain_writes_it_once(tmp_path, monkeypatch):
     """The carriage keeps no delivery state: a write that raises for one member leaves the others written, the next
-    drain writes exactly the missing entry, and a quiet drain of a helper reads no member while a drain that
-    delivered, scheduled a helper or follows a failed write runs the pass."""
+    drain (of a restarted drainer, with nothing kept in the process) writes exactly the missing entry, a root's
+    quiet drain writes a grandchild born below a settled child, and a quiet drain of a helper reads no member while
+    a drain that delivered, scheduled a helper or follows a failed write runs the pass."""
     from ouroboros import owner_relay
     from ouroboros.owner_relay import carry_to_members, retain_owner_message
     from ouroboros.task_results import write_task_result
@@ -524,11 +525,24 @@ def test_a_failed_write_stops_no_other_member_and_the_next_drain_writes_it_once(
     assert not drain_owner_entries(tmp_path, "a") and len(drain_owner_entries(tmp_path, "b")) == 1
     assert not drain_owner_entries(tmp_path, "done") and root._carriage_memo["failed"] is True
     monkeypatch.setattr(owner_relay, "write_relay", real)
-    carry_to_members(root, delivered=False)  # the drain after a failed write runs the pass, with nothing kept
+    restarted = context(tmp_path, row)  # the drainer restarted: a fresh context, no memo, the same retained row
+    restarted.task_id = "root"
+    retain_owner_message(restarted, row)
+    carry_to_members(restarted, delivered=False)
     assert [entry["msg_id"] for entry in drain_owner_entries(tmp_path, "a")] == [f"relay:carry:{address}:a"]
-    assert len(drain_owner_entries(tmp_path, "b")) == 1 and root._carriage_memo["failed"] is False
+    assert len(drain_owner_entries(tmp_path, "b")) == 1 and restarted._carriage_memo["failed"] is False
     monkeypatch.setattr(owner_relay, "write_relay", lambda *a, **k: (_ for _ in ()).throw(AssertionError("written twice")))
-    carry_to_members(root, delivered=True)  # a drain that delivered reads the members: nothing is missing
+    carry_to_members(root, delivered=True)  # the process that failed, a drain that delivered: nothing is missing
+    assert root._carriage_memo["failed"] is False
+    # A grandchild born below a child that settled since the last pass: the root's quiet drain writes it, once.
+    monkeypatch.setattr(owner_relay, "write_relay", real)
+    write_task_result(tmp_path, "b", "completed", delegation_role="subagent", parent_task_id="root", root_task_id="root")
+    write_task_result(tmp_path, "grand", "running", delegation_role="subagent", parent_task_id="b", root_task_id="root")
+    carry_to_members(root, delivered=False)
+    assert [entry["msg_id"] for entry in drain_owner_entries(tmp_path, "grand")] == [f"relay:carry:{address}:grand"]
+    assert len(drain_owner_entries(tmp_path, "b")) == 1 and root._carriage_memo["members"] == {"a", "grand"}
+    carry_to_members(root, delivered=False)
+    assert len(drain_owner_entries(tmp_path, "grand")) == 1
     # The skip rule at a helper, both ways: a quiet drain reads no member; delivery, a new helper or a failed write does.
     reads = []
     monkeypatch.setattr("ouroboros.task_status.find_child_tasks", lambda *a, **k: reads.append(k) or [])

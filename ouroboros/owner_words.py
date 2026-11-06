@@ -633,9 +633,12 @@ def _stage_birth_files(drive_root: Any, record: Mapping[str, Any], task_id: str,
     from types import SimpleNamespace
 
     from ouroboros.owner_relay import stage_quoted
+    from supervisor.queue_timeouts import _task_drive_for_task
 
     meta = _mapping(record.get("metadata"))
-    drive = str(record.get("child_drive_root") or record.get("drive_root") or meta.get("child_drive_root") or "")
+    # The record's drive fields, else the drive the mailbox writer resolves for the same task (``carry_to_members``).
+    drive = str(record.get("child_drive_root") or record.get("drive_root") or meta.get("child_drive_root") or "") or (
+        _task_drive_for_task(dict(record), task_id, canonical=drive_root) if drive_root is not None else "")
     ctx = SimpleNamespace(drive_root=pathlib.Path(drive) if drive else drive_root, task_id=task_id)
     for row in rows:
         if not row.get("attachments"):

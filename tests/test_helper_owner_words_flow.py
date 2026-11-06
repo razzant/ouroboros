@@ -312,11 +312,11 @@ def test_a_closing_helper_holds_its_final_once_for_an_addressed_row_and_not_for_
     assert not drain_owner_entries(tmp_path, "sealed")
 
 
-@pytest.mark.parametrize("single_semantic_turn", [True, False])
-def test_the_forced_rail_never_replaces_a_helpers_final_with_the_fallback_for_a_carried_row(tmp_path, monkeypatch,
-                                                                                            single_semantic_turn):
+@pytest.mark.parametrize("rail", ["one_turn", "two_turns", "provider_outcome_unknown"])
+def test_the_forced_rail_never_replaces_a_helpers_final_with_the_fallback_for_a_carried_row(tmp_path, monkeypatch, rail):
     """A carried row read after the forced call is no directive: a one-turn rail keeps the forced final, a two-turn
-    rail asks once more with the row in view; neither buys the resume fallback and the corpus does not grow."""
+    rail asks once more with the row in view, and a two-turn rail whose forced call left the provider outcome
+    unknown keeps its draft; none buys the resume or the no-resend fallback, and the corpus does not grow."""
     from tests.test_delivery_forced_finalization import _forced_test_context
     incoming = queue.Queue()
     loop, registry, ctx, _trace = _forced_test_context(tmp_path, incoming=incoming)
@@ -329,6 +329,8 @@ def test_the_forced_rail_never_replaces_a_helpers_final_with_the_fallback_for_a_
         calls += 1
         if calls == 1:
             _carried_mail(tmp_path, "parent1", row, address)
+            if rail == "provider_outcome_unknown":
+                ctx.accumulated_usage["_last_llm_error_kind"] = "provider_outcome_unknown"
         else:
             assert any(_carried_line(row, address) in str(m.get("content")) for m in messages)
             assert "[FORCED_OWNER_REFRESH]" in str(messages[-1]["content"])
@@ -339,10 +341,11 @@ def test_the_forced_rail_never_replaces_a_helpers_final_with_the_fallback_for_a_
     corpus = owner_source_sha256(registry._ctx)
     text, _usage, returned_trace = loop._forced_final_answer(
         ctx, prompt="finalize", fallback_text="fallback", reason_code="round_limit",
-        single_semantic_turn=single_semantic_turn)
-    assert calls == (1 if single_semantic_turn else 2) and text == f"forced draft {calls}"
-    assert "Resume the task" not in text
-    assert returned_trace["forced_finalization"].get("source") != "late_owner_directive_requires_resume"
+        single_semantic_turn=rail == "one_turn")
+    assert calls == (2 if rail == "two_turns" else 1) and text == f"forced draft {calls}"
+    assert "Resume the task" not in text and "blind resend" not in text
+    assert returned_trace["forced_finalization"].get("source") not in {"late_owner_directive_requires_resume",
+                                                                        "provider_outcome_unknown_no_resend"}
     assert owner_source_sha256(registry._ctx) == corpus and not getattr(registry._ctx, "_owner_directives", None)
     assert held_owner_messages(registry._ctx)[address]["carried"]["went_to"] == ""
 

@@ -333,6 +333,42 @@ def test_each_delivery_gate_names_itself_in_its_hold(turn, monkeypatch, reason):
     assert [facts(row) for row in holds(turn.root)] == [(1, origin, reason, None, sha(answer))]
 
 
+@pytest.mark.parametrize("standing", ["addressed", "context"])
+def test_a_completed_stop_is_held_once_for_an_addressed_carried_row_and_stands_for_a_context_row(tmp_path, monkeypatch,
+                                                                                                    standing):
+    """The completed stop reads a carried row of a closing helper: addressed, the selection is cleared, the hold is
+    observed once and the next round reads the row before the same stop is published; context, the stop stands.
+    The owner corpus and its acknowledgement hash are unchanged either way (the row enters no corpus)."""
+    from ouroboros.loop_messages import owner_source_sha256
+    from tests.test_helper_owner_words_flow import _carried_line, _carried_mail, _late_row
+
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    turn = runner(tmp_path, monkeypatch, task_id="helper")
+    turn.registry._ctx.is_direct_chat = False
+    turn.registry._ctx.task_metadata = {"delegation_role": "subagent", "root_task_id": "root", "parent_task_id": "root"}
+    turn.registry._ctx.owner_message_admission_lock = threading.Lock()
+    turn.registry._ctx.owner_message_admission_agent = SimpleNamespace(_busy=True, _current_task_id="helper",
+                                                                        _accepting_owner_messages=True)
+    row, address = _late_row(tmp_path)
+    before = []
+
+    def stop():
+        before.append((owner_source_sha256(turn.registry._ctx), json.dumps(turn.registry._ctx._owner_directives, default=str)))
+        _carried_mail(tmp_path, "helper", row, address, went_to="" if standing == "addressed" else "sibling")
+        return finish("Partial", action="stop", rationale="Unfinished")
+
+    text, _usage, trace = turn.run([stop, finish("Partial", action="stop", rationale="Unfinished")])
+
+    assert text == "Partial" and trace["task_completion"]["action"] == "stop"
+    assert (owner_source_sha256(turn.registry._ctx), json.dumps(turn.registry._ctx._owner_directives, default=str)) == before[0]
+    if standing == "addressed":
+        assert len(turn.calls) == 2 and [facts(held) for held in holds(tmp_path)] == [
+            (1, "selection", "owner_carried", None, sha("Partial"))]
+        assert any(_carried_line(row, address) in str(m.get("content")) for m in turn.calls[1])
+    else:
+        assert len(turn.calls) == 1 and holds(tmp_path) == []
+
+
 # --- Review answers settled since the mind's last read reach it before delivery (cec586e9) ------
 
 REFUTATION = "o1: the parser already reads fenced JSON"

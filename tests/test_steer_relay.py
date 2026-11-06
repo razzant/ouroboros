@@ -121,7 +121,7 @@ def test_a_context_row_the_head_then_tells_to_one_work_flips_its_members_fact_on
     from supervisor import queue as q
     from supervisor.steering import _handle_steer_task
     from ouroboros.owner_mailbox import drain_owner_entries
-    from ouroboros.owner_relay import owner_quote, write_relay
+    from ouroboros.owner_relay import ROUTED_BY_HEAD, owner_quote, write_relay
     from ouroboros.task_results import write_task_result
 
     row, address = source(tmp_path)
@@ -133,7 +133,7 @@ def test_a_context_row_the_head_then_tells_to_one_work_flips_its_members_fact_on
     root.task_metadata = {"root_task_id": "teller"}
     write_relay(tmp_path, "teller", relay_id=f"carry-context:{address}", note="", quotes=[owner_quote(tmp_path, row,
                 address=address)], chat_id=1, teller_task_id="teller", canonical_root=tmp_path,
-                host_carried={"went_to": "a head of the room"})  # the ingress: the row went to a head of the room
+                host_carried={"went_to": ROUTED_BY_HEAD})  # the ingress: a head of the room routed the row
 
     def drain(ctx, messages):
         return _drain_incoming_messages(messages, queue.Queue(), tmp_path, ctx.task_id, None, set(), owner_ctx=ctx)
@@ -148,8 +148,9 @@ def test_a_context_row_the_head_then_tells_to_one_work_flips_its_members_fact_on
                                                       "parent_task_id": "teller"}
     shown = []
     assert not drain(helper, shown).get("owner_carried_addressed")
-    assert len(shown) == 1 and "(went to a head of the room)" in shown[0]["content"]
-    assert held_owner_messages(helper)[address]["carried"]["went_to"] == "a head of the room"
+    assert len(shown) == 1 and "(in the project room; routed by a head)" in shown[0]["content"]
+    assert "routed:head" not in shown[0]["content"]  # the marker is the record's; the member reads the clause
+    assert held_owner_messages(helper)[address]["carried"]["went_to"] == ROUTED_BY_HEAD
     # The head tells the row to this work: addressed mail at the root, one more entry at the helper, its fact flipped.
     head = context(tmp_path, row)
     head.task_id, head.is_direct_chat = "head", True

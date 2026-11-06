@@ -16,6 +16,9 @@ from ouroboros.chat_chain import format_address, row_address
 from ouroboros.context_budget import OWNER_WORDS_KIND
 
 KIND_RELAY = "relay_entry"
+# A carried row's ``went_to`` when no work was delivered it: a head of the room routed it. A typed marker, never a
+# task id (an id carries no colon) and never the empty value that means ``reached this work``.
+ROUTED_BY_HEAD = "routed:head"
 
 
 def quotable_owner_row(row, drive_root=None, *, accounts=None) -> bool:
@@ -246,12 +249,15 @@ def write_relay(root, task_id: str, *, relay_id: str, note: str, quotes: list, c
 def carried_quote_line(quote: dict, *, address: str, fact=None) -> str:
     """The one line over an owner row's quoted words, for a relay's quote and a carried row alike: the pinned
     prefix, the time and the room the quote names (a part the host does not have is left out, never invented),
-    the carriage fact of a carried row (``reached this work`` | ``went to <task>``) and the row's handle."""
+    the carriage fact of a carried row (``reached this work`` | ``went to <task>`` | ``in the project room; routed by
+    a head``, for ``ROUTED_BY_HEAD``) and the row's handle."""
     source = quote.get("source") if isinstance(quote, dict) and isinstance(quote.get("source"), dict) else {}
     parts = ["Owner words quoted verbatim", str(source.get("ts") or ""), str(source.get("label") or "")]
     if isinstance(fact, dict):
         went = str(fact.get("went_to") or "")
-        parts.append(f"carried to this work by the host ({f'went to {went}' if went else 'reached this work'})")
+        where = ("in the project room; routed by a head" if went == ROUTED_BY_HEAD else f"went to {went}" if went
+                 else "reached this work")
+        parts.append(f"carried to this work by the host ({where})")
     return "[" + "; ".join(part for part in [*parts, f"handle {address}"] if part) + "]"
 
 
@@ -671,8 +677,8 @@ def carry_to_members(ctx, *, delivered: bool) -> None:
 def carry_room_context(drive_root, chat_id: int, client_message_id: str, roots: list, went_to: str) -> None:
     """At a Project room's ingress, after the routing outcome: one carried context entry of the accepted chat row
     to every other live root of the room (``addressable_roots``), naming where the row went (the work it was
-    delivered to, else a head of the room); each root's drain carries it down its tree. A write that fails stops
-    no other root and never the message."""
+    delivered to, else ``ROUTED_BY_HEAD``: a head of the room routed it); each root's drain carries it down its
+    tree. A write that fails stops no other root and never the message."""
     from supervisor.message_ingress import accepted_chat_message
     from supervisor.queue_timeouts import _task_drive_for_task
 
@@ -693,6 +699,6 @@ def carry_room_context(drive_root, chat_id: int, client_message_id: str, roots: 
         try:
             write_relay(_task_drive_for_task(root, tid, canonical=drive_root), tid, relay_id=f"carry-context:{address}",
                         note="", quotes=[quote], chat_id=int(chat_id), teller_task_id=tid, canonical_root=drive_root,
-                        host_carried={"went_to": went_to or "a head of the room"})
+                        host_carried={"went_to": went_to or ROUTED_BY_HEAD})
         except Exception:
             log.warning("Carriage: room %s row %s not written to root %s", chat_id, address, tid, exc_info=True)

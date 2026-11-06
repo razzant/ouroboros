@@ -1430,11 +1430,11 @@ def _no_tool_final_answer(
             return held("owner_followup")
         if post_controls.get("owner_carried_addressed"):  # my human's row for this work, read by no round yet:
             solving_again()  # one round reads it; corpus, acknowledgement hash and seal are untouched
-            if isinstance(candidate, _loop().DeliveryCandidate):  # the plain follow-up's shape: no control armed
+            if isinstance(candidate, _loop().DeliveryCandidate):  # the plain follow-up's shape, which a round reads:
                 candidate.finalization_control = "owner_revision_required"
-                if candidate.control_episode_seen:
+                if candidate.control_episode_seen:  # an open control episode keeps its control
                     _loop()._arm_delivery_control(tools, limit_ctx, llm_trace, control="owner_revision_required")
-                else:
+                else:  # else no control round
                     tools._ctx._delivery_control_required = False
             return held("owner_followup", "owner_carried")
         if provisional_assistant is not None and messages[-1] is provisional_assistant:
