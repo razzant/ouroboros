@@ -336,7 +336,8 @@ html[data-layout="stack"] .resize-handle { display: none; }
 }
 
 /* The chosen place: the crimson tone, its ink and a left mark (--place-mark: the accent on the light tint, the
-   fill's white ink on the dark solid). One row at a time; the Projects header is never chosen (a Project row is). */
+   fill's white ink on the dark solid), for Main and a Project row alike (U005): a Project's hue stays in its mark.
+   One row at a time; the Projects header is never chosen (a Project row is). */
 .nav-row.active::before {
     content: '';
     position: absolute;
@@ -363,7 +364,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
     background: var(--tone-crimson);
     color: var(--tone-crimson-ink);
     font-size: var(--type-meta);
-    font-weight: 700;
+    font-weight: 600;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -4703,7 +4704,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     background: var(--tone-crimson);
     color: var(--tone-crimson-ink);
     font-size: var(--composer-control-font-size);
-    font-weight: 700;
+    font-weight: 600;
     font-family: inherit;
     letter-spacing: 0;
     cursor: pointer;
@@ -4927,10 +4928,10 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     margin: 0;
     pointer-events: none;
 }
-/* A line too narrow for every name (a 360 px phone, a longer translation) keeps the closed
-   capsules' rings and values; composer_owner_controls.js measures it on the settled row, and
-   where that still wraps it cuts the longest values to one measured width. */
-.chat-toolbar-row[data-owner-compact] .chat-capsule:not([data-open="true"]) .chat-capsule-name {
+/* A line too narrow for every name (a 360 px phone, a longer translation) keeps the closed capsules' rings and values:
+   composer_owner_controls.js measures the settled row and lets the names give way one at a time, the longest first
+   (U123), and where that still wraps it cuts the longest values to one measured width. An open capsule keeps its name. */
+.chat-capsule[data-name-fit="off"]:not([data-open="true"]) .chat-capsule-name {
     display: none;
 }
 .chat-toolbar-row[data-owner-compact="values"] .chat-capsule:not([data-open="true"]) .chat-capsule-value {
@@ -8006,7 +8007,7 @@ body.keyboard-open .chat-instance-panel .chat-input-area {
 .nav-project-item.is-deleting .nav-project-row { grid-template-columns: minmax(0, 1fr); }
 
 @media (hover: hover) {
-    .nav-project-row:hover {
+    .nav-project-row:not(.active):hover {
         color: var(--text-primary);
     }
 }
@@ -8028,15 +8029,6 @@ body.keyboard-open .chat-instance-panel .chat-input-area {
     color: var(--text-meta);
     font-size: var(--type-meta);
     white-space: nowrap;
-}
-
-.nav-project-row.active {
-    color: var(--project);
-    background: var(--project-08);
-}
-
-.nav-project-row.active::before {
-    display: none;
 }
 
 /* The Projects header: the toggle, the unread count, its status mark, then "+" (New project). */
@@ -8116,7 +8108,7 @@ body.keyboard-open .chat-instance-panel .chat-input-area {
     background: var(--tone-crimson);
     color: var(--tone-crimson-ink);
     font-size: var(--type-meta);
-    font-weight: 700;
+    font-weight: 600;
     line-height: 18px;
     text-align: center;
 }
