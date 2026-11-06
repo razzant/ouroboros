@@ -157,7 +157,8 @@ def test_a_start_still_inside_popen_at_the_deadline_keeps_the_outcome_unconfirme
     hold.set()
     producer.join(10)
     assert _stopped(child), "the late publication meets the stop and its starter ends the child"
-    assert shell_process.unsettled_tracked_children() is None
+    _wait(lambda: shell_process.unsettled_tracked_children() is None,
+          why=shell_process.unsettled_tracked_children)
     joined = owned_shutdown.stop_owned_work(registry.data)  # a later door joins; it never claims completion
     assert joined["state"] == "unconfirmed"
 

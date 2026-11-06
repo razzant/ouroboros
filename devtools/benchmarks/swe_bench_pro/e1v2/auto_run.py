@@ -303,7 +303,7 @@ def main() -> int:
     ap.add_argument("--max-retries", type=int, default=5, help="max retries for one task before stopping")
     ap.add_argument("--total-budget", type=float, default=None,
                     help="shard budget forwarded to run_pro. Default: DERIVED as "
-                         "per_task_cost × scheduled tasks in [start, end]. run_pro treats "
+                         "per_task_cost times scheduled tasks in [start, end]. run_pro treats "
                          "CUMULATIVE ledger spend as the shard budget (run_pro.py budget rail), "
                          "so a value equal to the per-task cap starves every task after the "
                          "first (shard_07: task 1 spent $47.38 of a $50 'total'). With parallel "

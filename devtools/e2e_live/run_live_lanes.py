@@ -98,7 +98,14 @@ WATCH_INTERVAL_MIN_SEC = 5.0   # a watcher tick below this is a hot loop, not mo
 PROBE_MIN_INTERVAL_SEC = 60.0  # two provider requests per probe: never more often than this
 PROBE_BACKOFF_MAX_SEC = 900.0  # consecutive probe failures double the wait up to here
 SEED_POLICY = "detached_clone_of_ref"
-PROCFS_AVAILABLE = os.path.isdir("/proc")   # the orphan scan reads /proc environ: Linux only
+
+
+def _procfs_available() -> bool:
+    # On Windows, /proc may be an ordinary directory on the current drive.
+    return sys.platform.startswith("linux") and os.path.isdir("/proc")
+
+
+PROCFS_AVAILABLE = _procfs_available()
 
 
 def _log(msg: str) -> None:

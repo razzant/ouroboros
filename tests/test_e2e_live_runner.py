@@ -1480,6 +1480,16 @@ def test_stub_sm1_end_to_end_on_a_real_isolated_server(tmp_path):
     assert (out / "result_index.jsonl").read_text(encoding="utf-8").count("\n") == 1
 
 
+@pytest.mark.parametrize("platform,proc_directory,expected", [
+    ("win32", True, False), ("linux", True, True), ("linux", False, False),
+])
+def test_procfs_scan_requires_linux_and_a_proc_directory(monkeypatch, platform, proc_directory, expected):
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "platform", platform)
+        patch.setattr(os.path, "isdir", lambda _path: proc_directory)
+        assert run_live_lanes._procfs_available() is expected
+
+
 def test_orphan_after_stop_fails_a_passing_lane_with_a_typed_reason(tmp_path):
     """A process still carrying the lane's data root after stop flips a passing lane to fail with
     reason_code=checks_failed, in result.json AND in result_index.jsonl — never an empty reason."""
@@ -1507,6 +1517,8 @@ def test_orphan_after_stop_fails_a_passing_lane_with_a_typed_reason(tmp_path):
     assert len(dirty["orphans"][0]["cmdline"]) <= 120
     if run_live_lanes.PROCFS_AVAILABLE:   # the cmdline text is read from /proc: Linux only; elsewhere it is the typed ""
         assert "python" in dirty["orphans"][0]["cmdline"]
+    else:
+        assert dirty["orphans"][0]["cmdline"] == ""
     crowded = row()
     run_live_lanes._apply_orphan_scan(crowded, [os.getpid()] + [2 ** 22 + n for n in range(24)])
     assert len(crowded["orphans"]) == 20 and crowded["orphans_omitted"] == 5
