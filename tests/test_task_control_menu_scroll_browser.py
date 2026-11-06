@@ -17,7 +17,7 @@ import pytest
 from tests import test_subscription_setup_browser as setup_browser
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 # A scroller behind a floating sheet (the chat feed), the sheet holding a trigger, and a scroller that holds its trigger.
 STAGE = """async () => {

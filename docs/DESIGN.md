@@ -2261,7 +2261,8 @@ there is ONE line whose wording carries its openness and never renders an
 unknown as a number: `$0.00` only where priced rows evidenced that zero,
 `up to $1.20` while the tracked subtotal is inexact, `Tracked: $1.20` when part
 of the same scope has no price (`Tracked: up to $1.20` when that subtotal is
-inexact too), and `Cost unknown` for unpriced rows with no tracked amount. An
+inexact too), `Cost pending` while accounting is open without a tracked amount,
+and `Cost not priced` once settled usage has no tracked price. An
 empty, intact ledger has no money line; an empty view with an integrity gap
 stays unknown; neither proves a free result. The chip's short word (`Sending`,
 `Queued`) and `Tracked:` are explained in the card's details (exact phase;
@@ -3148,7 +3149,6 @@ page and every Settings tab in WebKit and Chromium at 360, 390, a Telegram-like
 390 × 780, 719, 720, 721, 1280 and short windows (no page scrolls sideways, coarse
 targets reach 44 px, default-width bars stay one row, one scroller per sidebar, Projects
 scroll by touch); `tests/test_shell_layout_static.py`,
-`tests/test_shell_header_static.py`, `tests/test_shell_drawer_static.py`,
 `tests/test_shell_tokens_static.py`, `tests/test_pages_registry_static.py` and
 `tests/test_design_system_css_static.py` keep the one switch, the registry, the
 glyph set, the breakpoint ratchet and sentence case; `web/tests/layers.test.js`,

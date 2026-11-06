@@ -7,7 +7,7 @@ import pytest
 
 from ouroboros.live_conversation import ConversationHost
 from ouroboros.realtime_session import joined
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 @pytest.mark.parametrize('cancel', [False, True])

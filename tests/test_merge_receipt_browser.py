@@ -17,7 +17,7 @@ from tests.test_merge_receipt_qualification import (
 world = merge_fixture.world
 subscription_ui = ui_fixture.subscription_ui
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def assert_coverage_placed(line, receipt):

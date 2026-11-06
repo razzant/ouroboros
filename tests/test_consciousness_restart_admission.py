@@ -39,7 +39,6 @@ from tests.conversation_carrier_support import carry, install_lane_spare
 from tests.test_agent_restart_intent import accept, runtime  # noqa: F401  # the shared real-queue fixture
 from tests.test_consciousness import AVAILABLE, CEILING, DEFAULT, FLOOR
 
-pytestmark = pytest.mark.serial
 
 OWNER_LINE = "owner line observed during the window"
 
@@ -264,8 +263,10 @@ def test_a_wake_on_the_degraded_executor_settles_the_clock_like_a_carried_one(ra
     assert race.state.load_state()[OWN_WAKE_STATE_KEY]["finished"] is True
 
 
-@pytest.mark.parametrize("outcome", ["ok", "runner_failure"])
-@pytest.mark.parametrize("delivery", ["task_done_reported", "terminal_unreported"])
+@pytest.mark.parametrize(("delivery", "outcome"), [
+    ("task_done_reported", "ok"),
+    ("terminal_unreported", "runner_failure"),
+])
 def test_a_started_wake_settles_once_however_its_terminal_reaches_the_clock(race, monkeypatch, delivery, outcome):
     """The task_done handler delivers the terminal (``finish_pooled_wake``), or — the event lost, the row
     released — the clock settles it itself at the tick that would start over it. A real failure still

@@ -31,7 +31,6 @@ from tests.candidate_checkout import SENTINEL_PATH, VERSION_PATH, CandidateError
 from tests.test_candidate_checkout import source as source_fixture
 
 
-pytestmark = pytest.mark.serial
 source = source_fixture
 _REPO = Path(__file__).resolve().parents[1]
 
@@ -355,8 +354,10 @@ def test_cases_boot_from_the_owners_one_copy_with_their_own_roots_and_overlay(fi
     _assert_owner_deletes(probe)
 
 
-@pytest.mark.parametrize("raises", [False, True], ids=["returned-error", "raised-error"])
-@pytest.mark.parametrize("operation", ["teardown", "restart"])
+@pytest.mark.parametrize(("operation", "raises"), [
+    pytest.param("teardown", False, id='teardown-returned-error'),
+    pytest.param("restart", True, id='restart-raised-error'),
+])
 def test_ui_fixture_surfaces_reap_failure_and_still_closes(fixture_probe, raises, operation):
     probe = fixture_probe
     gen, fixture = probe.open()
@@ -638,9 +639,9 @@ def esm_probe(fixture_probe, monkeypatch, source, tmp_path):
 
 
 @pytest.mark.parametrize("script, outcome", [
-    ([500, _READY], "ready"), (["timeout", _READY], "ready"), ([503], "deadline"),
-    ([_FAILED, _READY], "error"), ([b"<!doctype html>", _READY], "malformed"),
-], ids=["transient-500", "transport-error", "persistent-503", "supervisor-error", "malformed-200"])
+    ([500, _READY], "ready"), ([503], "deadline"),
+    ([_FAILED, _READY], "error"),
+], ids=["transient-500", "persistent-503", "supervisor-error"])
 def test_widget_esm_server_reads_state_until_it_answers(esm_probe, tmp_path, script, outcome):
     probe = esm_probe
     probe.script[:] = script

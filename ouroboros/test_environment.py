@@ -91,8 +91,8 @@ def without_launch_descriptors(env: dict) -> dict[str, str]:
 
 # A disposable tree whose processes were not PROVEN gone keeps this file at its
 # top. Every enclosing cleanup layer (candidate checkout, pytest session root,
-# safe_test launcher) refuses to delete a tree that contains one: retention is
-# in place, so a surviving process never loses the directory it is writing into.
+# safe_test launcher) leaves the folder that contains one (``retained_folders``):
+# retention is in place, so a surviving process never loses the directory it writes into.
 RETENTION_MARKER = "OUROBOROS_RETAINED.txt"
 SCRATCH_MARKER = "OUROBOROS_TEST_SCRATCH.txt"
 # Explicit diagnostic destinations accepted by existing test producers. They
@@ -104,14 +104,15 @@ DIAGNOSTIC_OUTPUT_KEYS = (
     "OUROBOROS_UI_SHOTS", "OUROBOROS_UI_SMOKE_SHOT_DIR", "QUIZ_BROWSER_EVIDENCE",
 )
 # Where a run writes, not what it tests: never part of a reusable proof identity.
-OUTPUT_LOCATION_KEYS = ("OUROBOROS_TEST_TEMP_ROOT", "OUROBOROS_TEST_EVIDENCE_ROOT", *DIAGNOSTIC_OUTPUT_KEYS)
+OUTPUT_LOCATION_KEYS = ("OUROBOROS_TEST_TEMP_ROOT", "OUROBOROS_TEST_EVIDENCE_ROOT", "OUROBOROS_TEST_DURATIONS",
+                        *DIAGNOSTIC_OUTPUT_KEYS)
 
 
 def declare_scratch(root, role: str, *, owner: str = "") -> None:
     """A fresh producer declares its tree disposable state it made: purpose, never liveness, deletion
     authority or a promise that the contents come back byte for byte.
     ``owner``: a one-line fact naming what it was made for (``copy_environments`` reads it)."""
-    if role not in {"pytest-session", "pytest-basetemp", "body-process", "process-temp"}:
+    if role not in {"pytest-session", "pytest-basetemp", "body-process", "process-temp", "bytecode-prefix"}:
         raise ValueError(f"unknown test scratch role: {role}")
     with (Path(root) / SCRATCH_MARKER).open("x", encoding="utf-8") as stream:
         stream.write(role + "\n" + (owner.strip() + "\n" if owner else ""))
@@ -144,6 +145,72 @@ def retention_markers(root) -> list[Path]:
         if RETENTION_MARKER in files:
             found.append(Path(directory) / RETENTION_MARKER)
     return found
+
+
+def marker_text(found) -> str:
+    """What a marker says; a subtree that could not be walked has no words of its own."""
+    try:
+        return Path(found).read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return "retention marker or unreadable subtree"
+
+
+def _kept_folder(root: Path, folder: Path) -> Path:
+    """The folder retention at ``folder`` keeps: its test's folder in a declared pytest basetemp
+    (``b<N>/t/<test>``, or ``b<N>/t/popen-gw<K>/<test>`` in an xdist worker's own basetemp), else the
+    direct child of ``root``. Never deeper: a test's processes work anywhere in its folder."""
+    parts = folder.relative_to(root).parts
+    try:
+        with (root / parts[0] / SCRATCH_MARKER).open(encoding="utf-8") as stream:
+            basetemp = stream.readline().strip() == "pytest-basetemp"
+    except (IndexError, OSError, UnicodeError):
+        basetemp = False
+    depth = 1 if not basetemp else 4 if parts[2:3] and parts[2].startswith("popen-") else 3
+    return root.joinpath(*parts[:depth])
+
+
+def retained_folders(root) -> dict[Path, list[Path]]:
+    """``{kept folder: [markers or unreadable subtrees]}`` beneath a run root: a marker keeps only its own
+    folder (``_kept_folder``), and one at the top of ``root`` all of it (then ``root`` is a key)."""
+    root, kept = Path(root), {}
+    for found in retention_markers(root):
+        folder = found.parent if found.name == RETENTION_MARKER else found
+        kept.setdefault(_kept_folder(root, folder), []).append(found)
+    return kept
+
+
+def kept_facts(kept) -> list[dict]:
+    """``retained_folders`` as a record: each kept path with each marker's first line."""
+    return [{"path": str(folder), "reasons": [marker_text(found).split("\n")[0] for found in markers]}
+            for folder, markers in kept.items()]
+
+
+def release_except_retained(root, kept, remove, *, declared_only=False) -> list[str]:
+    """Remove what ``root`` holds beyond ``kept`` (``retained_folders``); the removed paths.
+
+    The caller proved its run's processes gone. ``remove`` takes a directory tree; links go as links,
+    never followed. ``declared_only`` leaves direct children no scratch declaration names: unknown
+    command data, links included. The folders on the way to a kept one stay, declared as they were."""
+    released: list[str] = []
+    passed = {parent for folder in kept for parent in folder.parents}
+
+    def release(directory: Path, top: bool) -> None:
+        for entry in list(os.scandir(directory)):
+            path, is_dir = Path(entry.path), entry.is_dir(follow_symlinks=False)
+            if path in kept or entry.name == SCRATCH_MARKER:
+                continue
+            if path in passed:
+                release(path, False)
+            elif not (top and declared_only) or is_dir and (path / SCRATCH_MARKER).is_file():
+                if is_dir:
+                    remove(path)
+                else:
+                    os.unlink(path)
+                released.append(str(path))
+
+    if Path(root) not in kept:
+        release(Path(root), True)
+    return released
 
 
 def _retention_identity(path):
@@ -220,6 +287,17 @@ def owned_process_temp():
     temp = Path(tempfile.mkdtemp(prefix="c", dir=owner))
     declare_scratch(temp, "process-temp")
     return temp
+
+
+def gate_root() -> Path:
+    """One gate run's fresh root. A gate a test run starts lives beneath that run's owner, whose release
+    covers what it leaves, and short: the deepest listener stays inside AF_UNIX's limit. A top-level
+    gate's ``obs-`` name is what a record of a kept root requires (``test_evidence.record_kept_scratch``).
+    Debug retention holds the root before anything runs (a test's folder goes unless its root is held)."""
+    root = Path(owned_process_temp() or tempfile.mkdtemp(prefix="obs-preflight-", dir=default_temp_parent())).resolve()
+    if os.environ.get("OUROBOROS_PREFLIGHT_KEEP") == "1":
+        retain_tree(root, "explicit preflight debug retention")
+    return root
 
 
 def isolated_environment(root: Path, repo: Path, *, source=None, keep=(), create=True,

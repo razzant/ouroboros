@@ -11,7 +11,6 @@ wait, so the bounded finalizer runs. A hard Stop at the same admission keeps its
 
 import queue
 
-import pytest
 
 from ouroboros import cancel_intents, loop, owner_mailbox, owner_pause
 from ouroboros.llm_attempt import PhysicalDispatchInterrupted
@@ -23,7 +22,6 @@ from tests.test_model_wait import live_wait as wait_fixture
 from tests.test_model_wait_controls import _loop_tools
 from tests.test_subscription_main_wait import main_call as main_fixture
 
-pytestmark = pytest.mark.serial
 
 setup = gateway_fixture
 live_wait = wait_fixture

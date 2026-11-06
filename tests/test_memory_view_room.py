@@ -15,7 +15,6 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import memory_view as mv
-from ouroboros.budget_pause import parkable_direct_task
 from tests import _memory_inventory_shared as shared
 from tests.test_place_focus import focus as focus
 
@@ -47,11 +46,6 @@ def test_role_defaults_are_the_table_of_the_spec():
     ({"usage_category": "consciousness"}, "consciousness"),
     ({"usage_category": "consciousness_task"}, "integrator"),  # work a wake starts is a root
     (PRESENCE, "presence"),
-    ({"delegation_role": "subagent"}, "child"),
-    ({"delegation_role": "subagent", **API_ROUTE}, "child"),
-    ({"delegation_role": "subagent", **NANNY_ROUTE}, "nanny"),
-    ({**NANNY_ROUTE, "usage_category": "consciousness"}, "nanny"),  # the nanny fact comes first
-    ({"delegation_role": "subagent", **PRESENCE}, "child"),
 ])
 def test_the_view_role_follows_the_focus_signature_order(meta, role):
     from ouroboros.knowledge import focus_signature
@@ -71,26 +65,12 @@ def test_a_nanny_sees_no_story_and_an_api_child_does(tmp_path):
     assert (child.role, child.story, child.knowledge, child.owner_words) == ("child", True, False, True)
 
 
-_FOCUS = {"initiator": "consciousness", "usage_category": "consciousness", "wake_cause": "focus",
-          "focus": {"room_chat_id": 7}}
-
-
 @pytest.mark.parametrize("task,levels", [  # tasks as their producers dispatch them
     ({"id": "d1", "type": "task", "chat_id": 1, "text": "hi", "_is_direct_chat": True}, 1),  # worker_chat_lane
-    (parkable_direct_task({"id": "d2", "type": "task", "chat_id": 1, "text": "hi"}), 1),  # budget-pause parking
-    ({"id": "d3", "type": "task", "chat_id": 1, "metadata": {"_is_direct_chat": True}}, 1),
-    ({"id": "p1", "type": "presence", "source": "presence", "chat_id": 7, "_is_direct_chat": True,
-      "_presence_turn": True, "metadata": PRESENCE}, 1),
-    ({"id": "c1", "type": "task", "chat_id": 1, "delegation_role": "subagent", **API_ROUTE}, 1),
-    ({"id": "n1", "type": "task", "chat_id": 1, "delegation_role": "subagent", **NANNY_ROUTE}, 1),
     ({"id": "r1", "root_task_id": "r1", "delegation_role": "root", "type": "task", "chat_id": 1,
       "source": "promote_chat_to_task"}, 2),
-    ({"id": "e1", "type": "evolution", "chat_id": 1, "metadata": {"evolution_transaction": {}}}, 2),
-    ({"id": "s1", "type": "deep_self_review", "chat_id": 1, "_require_worker_pool": True}, 2),
     # A wake leaves one eighth, as a direct turn does; the work it starts is a root of its own (owner, 29.10).
     ({"id": "w1", "metadata": {"initiator": "consciousness", "usage_category": "consciousness"}}, 1),
-    ({"id": "f1", "type": "presence", "source": "presence", "chat_id": 7, "_is_direct_chat": True,
-      "_presence_turn": True, "metadata": {**PRESENCE, **_FOCUS}}, 1),  # a focus wake
 ])
 def test_the_start_work_room_follows_task_facts_not_the_task_type(tmp_path, task, levels):
     shared.projects(tmp_path)

@@ -19,7 +19,7 @@ from tests.ui_chat_viewport_smoke import (
 )
 
 direct_server_with_data = _server
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 _CLIPBOARD = """() => {
     window.__copied = [];

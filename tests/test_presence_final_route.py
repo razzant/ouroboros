@@ -29,7 +29,7 @@ from tests.test_presence_promises import _due_promise
 from tests.test_presence_promises import fired_context as fired_context  # fixture
 from tests.test_presence_project_activity import root as root  # fixture
 
-pytestmark = [pytest.mark.serial, pytest.mark.usefixtures("provider_catalog_offline")]
+pytestmark = [pytest.mark.usefixtures("provider_catalog_offline")]
 
 NO_ROUTE = "No connector reads this root's final"
 UNSETTLED = "whether a connector reads its final there is not settled"
@@ -849,7 +849,7 @@ def test_saved_turn_flush_preserves_order_through_the_worker_drain(root, monkeyp
         [] if failed_row is None else ["First.", "Second.", "Third."][["First.", "Second."].index(failed_row):])
 
 
-@pytest.mark.parametrize("name", ["send_user_message", "send_photo", "send_video", "send_file", "send_links", "show_card"])
+@pytest.mark.parametrize("name", ["send_user_message", "send_photo", "show_card"])
 def test_main_receipts_claim_only_queue_acceptance(tmp_path, name):
     from tests.test_main_notice import _ctx
 

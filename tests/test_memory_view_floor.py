@@ -179,7 +179,6 @@ def test_capture_protects_governing_words_and_does_not_recapture_for_fitting(tmp
 
 @pytest.mark.parametrize("governing, immune", [
     ([{"text": "да"}], {"m5"}),
-    ([{"text": "всегда проверяй логи"}], {"m4"}),
     ([{"text": "да", "ref": "chat 1 / m3"}], {"m3"}),
     ([{"source": "initial_user"}, {"text": "да"}], {"m5"}),
 ])

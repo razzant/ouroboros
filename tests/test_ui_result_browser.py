@@ -20,7 +20,7 @@ from tests.system_e2e.harness import (
 )
 
 wait_clone = clone_fixture
-pytestmark = [pytest.mark.serial, pytest.mark.browser]
+pytestmark = [pytest.mark.browser]
 
 
 def _journey_history_painted(page, project, task_id, since):

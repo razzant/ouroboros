@@ -23,7 +23,7 @@ import pytest
 
 from tests.test_subscription_setup_browser import subscription_ui as subscription_ui
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.fixture(params=["chromium", "webkit"])

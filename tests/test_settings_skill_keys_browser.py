@@ -45,7 +45,6 @@ def _held_completion(entered):
     return answer
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_a_settings_save_states_the_skill_key_rule_once(direct_server_with_data, monkeypatch, engine):

@@ -27,7 +27,6 @@ from tests.test_imagegen_tool import BODY, _transport, configured as configured,
 from tests.test_imagegen_wait_control import _setup
 from tests.test_pause_model_receiver import _call, _until, scope as scope
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

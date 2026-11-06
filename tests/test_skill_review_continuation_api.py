@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 
 from ouroboros import review_ledger
 from ouroboros.skill_loader import load_review_state
@@ -20,7 +19,6 @@ from tests.review_pool_rosters import pool_seat
 from tests.test_skill_review_usage_events import server_bus as _server_bus, skill_door as _skill_door
 
 server_bus, skill_door = _server_bus, _skill_door  # fixtures by name
-pytestmark = pytest.mark.serial
 URL = "/api/skills/weather/review"
 OFFER_LEAD = "Continuable stopped seats (skill_review(skill, review_reference=that reference, continue_seats=[{seat_id, operation_id}])): "
 

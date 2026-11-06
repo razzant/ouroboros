@@ -8,7 +8,7 @@ import os
 import pytest
 from ouroboros.test_evidence import diagnostic_directory
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 WEB = Path(__file__).resolve().parents[1] / 'web'
 BOOT = '''<script type="module">
 import {initDashboard} from '/static/modules/dashboard.js';

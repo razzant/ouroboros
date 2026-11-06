@@ -109,10 +109,11 @@ def _toggle(ctx, name, enabled, *, from_loop):
     return asyncio.run(inside_loop())
 
 
-@pytest.mark.parametrize("isolated", [False, True], ids=["in_process", "isolated"])
 @pytest.mark.parametrize("from_loop", [False, True], ids=["queue_direct", "queue_thread"])
-def test_save_enable_and_use_inside_the_task_that_started_before_the_key(world, isolated, from_loop):
-    world.extension("bridge", GATED, isolated=isolated)
+def test_save_enable_and_use_inside_the_task_that_started_before_the_key(world, from_loop):
+    # Child transport and grant propagation have dedicated witnesses below;
+    # this matrix exercises the task/queue state machine through its in-process seam.
+    world.extension("bridge", GATED, isolated=False)
     snapshot = subagent_runtime.apply_task_start_settings()
     with config.task_settings_scope(snapshot):
         before = observe()
@@ -140,10 +141,9 @@ def test_save_enable_and_use_inside_the_task_that_started_before_the_key(world, 
         assert config.runtime_settings().get("SVC_TOKEN") is None
 
 
-@pytest.mark.parametrize("isolated", [False, True], ids=["in_process", "isolated"])
-def test_every_later_call_reads_current_values_and_both_disclosures_agree(world, isolated):
+def test_every_later_call_reads_current_values_and_both_disclosures_agree(world):
     world.save(SVC_TOKEN="old-token", STRUCTURED_VALUE={"rows": [1]})
-    loaded = world.extension("reader", UNGATED, isolated=isolated)
+    loaded = world.extension("reader", UNGATED, isolated=False)
     save_enabled(world.data, loaded.name, True)
     snapshot = subagent_runtime.apply_task_start_settings()
     with config.task_settings_scope(snapshot):
@@ -255,14 +255,13 @@ def _script_env(world, name):
     return skill_exec._scrub_env(KEYS, world.data / "state" / "skills" / name, name, granted_keys=KEYS)
 
 
-@pytest.mark.parametrize("isolated", [False, True], ids=["in_process", "isolated"])
 @pytest.mark.parametrize("change", ["cleared", "deleted"])
-def test_a_key_saved_before_the_start_does_not_return_from_its_projection(world, isolated, change):
+def test_a_key_saved_before_the_start_does_not_return_from_its_projection(world, change):
     """The task start projects the saved key into this process's environment; a later clear stays a clear."""
     import os
 
     world.save(SVC_TOKEN="token", DEEPSEEK_API_KEY="test-deepseek")
-    loaded = world.extension("reader", UNGATED, isolated=isolated)
+    loaded = world.extension("reader", UNGATED, isolated=False)
     save_enabled(world.data, loaded.name, True)
     snapshot = subagent_runtime.apply_task_start_settings()
     assert os.environ["DEEPSEEK_API_KEY"] == "test-deepseek"  # the start's own projection
@@ -287,12 +286,11 @@ def test_a_key_saved_before_the_start_does_not_return_from_its_projection(world,
         assert _script_env(world, "reader")["DEEPSEEK_API_KEY"] == "test-rotated"
 
 
-@pytest.mark.parametrize("isolated", [False, True], ids=["in_process", "isolated"])
-def test_an_operator_variable_still_stands_in_for_an_unsaved_key_inside_a_task(world, isolated, monkeypatch):
+def test_an_operator_variable_still_stands_in_for_an_unsaved_key_inside_a_task(world, monkeypatch):
     """A key the document never set keeps reaching the skill from the operator's own environment."""
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-operator")
     world.save(SVC_TOKEN="token")
-    loaded = world.extension("reader", UNGATED, isolated=isolated)
+    loaded = world.extension("reader", UNGATED, isolated=False)
     save_enabled(world.data, loaded.name, True)
     snapshot = subagent_runtime.apply_task_start_settings()
     with config.task_settings_scope(snapshot):
@@ -325,9 +323,8 @@ TWO_READS = (
 )
 
 
-@pytest.mark.parametrize("isolated", [False, True], ids=["in_process", "isolated"])
 @pytest.mark.parametrize("change", ["rotated", "deleted"])
-def test_one_call_reads_a_save_made_between_its_two_reads(world, monkeypatch, isolated, change):
+def test_one_call_reads_a_save_made_between_its_two_reads(world, monkeypatch, change):
     """A long handler's later read sees the owner's save; the operator's own variable still stands in."""
     import contextvars
     import threading
@@ -335,7 +332,7 @@ def test_one_call_reads_a_save_made_between_its_two_reads(world, monkeypatch, is
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-operator")  # the document never sets it
     world.save(SVC_TOKEN="token-1", STRUCTURED_VALUE={"rows": [1]})
-    loaded = world.extension("reader", TWO_READS, isolated=isolated)
+    loaded = world.extension("reader", TWO_READS, isolated=False)
     state = world.data / "state" / "skills" / "reader"
     save_enabled(world.data, loaded.name, True)
     snapshot = subagent_runtime.apply_task_start_settings()
@@ -359,8 +356,7 @@ def test_one_call_reads_a_save_made_between_its_two_reads(world, monkeypatch, is
                                 **({"SVC_TOKEN": "token-2"} if change == "rotated" else {})}
 
 
-@pytest.mark.parametrize("isolated", [False, True], ids=["in_process", "isolated"])
-def test_a_key_cleared_between_two_tasks_of_one_process_stays_cleared_for_the_skill(world, isolated):
+def test_a_key_cleared_between_two_tasks_of_one_process_stays_cleared_for_the_skill(world):
     """The first task start leaves its projection in this process; the second task's skill reads the document."""
     import contextvars
     import os
@@ -369,7 +365,7 @@ def test_a_key_cleared_between_two_tasks_of_one_process_stays_cleared_for_the_sk
     from ouroboros.settings_integrity import runtime_environ, skill_settings
 
     world.save(SVC_TOKEN="token", DEEPSEEK_API_KEY="test-deepseek")
-    loaded = world.extension("reader", UNGATED, isolated=isolated)
+    loaded = world.extension("reader", UNGATED, isolated=False)
     save_enabled(world.data, loaded.name, True)
     first = subagent_runtime.apply_task_start_settings()
     with config.task_settings_scope(first):
@@ -399,12 +395,11 @@ def test_a_key_cleared_between_two_tasks_of_one_process_stays_cleared_for_the_sk
     assert skill_settings()["DEEPSEEK_API_KEY"] == ""  # and outside any task
 
 
-@pytest.mark.parametrize("isolated", [False, True], ids=["in_process", "isolated"])
-def test_an_operator_variable_survives_repeat_task_starts(world, monkeypatch, isolated):
+def test_an_operator_variable_survives_repeat_task_starts(world, monkeypatch):
     """A key only the operator's environment sets is no projection of ours: every task's skill keeps reading it."""
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-operator")
     world.save(SVC_TOKEN="token")
-    loaded = world.extension("reader", UNGATED, isolated=isolated)
+    loaded = world.extension("reader", UNGATED, isolated=False)
     save_enabled(world.data, loaded.name, True)
     assert extension_loader.load_extension(find_skill(world.data, loaded.name, repo_path=str(world.skills)),
                                            config.load_settings, drive_root=world.data,
@@ -416,8 +411,7 @@ def test_an_operator_variable_survives_repeat_task_starts(world, monkeypatch, is
             assert _script_env(world, "reader")["DEEPSEEK_API_KEY"] == "test-operator"
 
 
-@pytest.mark.parametrize("isolated", [False, True], ids=["in_process", "isolated"])
-def test_a_document_value_mirrored_without_a_record_never_stands_in(world, monkeypatch, isolated):
+def test_a_document_value_mirrored_without_a_record_never_stands_in(world, monkeypatch):
     """A launcher or an earlier release mirrored the document into the inherited environment with no record of
     it; the next projection recognises the mirror by the document itself, so a later clear stays a clear."""
     from ouroboros.settings_integrity import PROJECTED_SETTINGS_ENV
@@ -425,7 +419,7 @@ def test_a_document_value_mirrored_without_a_record_never_stands_in(world, monke
     world.save(SVC_TOKEN="token", DEEPSEEK_API_KEY="test-deepseek")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek")  # the inherited mirror ...
     monkeypatch.delenv(PROJECTED_SETTINGS_ENV, raising=False)  # ... and no record beside it
-    loaded = world.extension("reader", UNGATED, isolated=isolated)
+    loaded = world.extension("reader", UNGATED, isolated=False)
     save_enabled(world.data, loaded.name, True)
     first = subagent_runtime.apply_task_start_settings()
     with config.task_settings_scope(first):

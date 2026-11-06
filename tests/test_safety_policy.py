@@ -21,6 +21,7 @@ import tempfile
 from types import SimpleNamespace
 
 import pytest
+from tests._source_scan import parse
 
 
 @pytest.fixture(autouse=True)
@@ -443,7 +444,7 @@ def _scan_builtin_tool_literals(root: pathlib.Path | None = None) -> tuple[set[s
             # inside the safety module.
             continue
         try:
-            tree = ast.parse(py.read_text(encoding="utf-8"))
+            tree = parse(py.read_text(encoding="utf-8"))
         except SyntaxError:
             continue
         for node in ast.walk(tree):

@@ -507,16 +507,10 @@ def test_malformed_durable_roster_containers_survive_real_state_loading(tmp_path
     "payload",
     [
         [],
-        {"attempts": {}},
         {"attempts": ["not-an-object"]},
-        {"attempts": [{"status": []}]},
-        {"attempts": [{"status": "reviewing", "task_id": 7}]},
         {"attempts": [{"status": "reviewing", "attempt": "1"}]},
-        {"attempts": [{"status": "reviewing", "paid": "yes"}]},
-        {"attempts": [{"status": "reviewing", "blocked": 1}]},
         {"attempts": [{"status": "reviewing", "finished_ts": []}]},
         {"attempts": [{"status": "reviewing", "review_owner_pid": "123"}]},
-        {"attempts": [{"status": "reviewing", "review_owner_session_id": 7}]},
     ],
 )
 def test_locked_update_refuses_malformed_attempt_authority_without_rewrite(

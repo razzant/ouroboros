@@ -1,7 +1,7 @@
 """Call captions stay in their room; ordinary replies still reach transports."""
 import asyncio
 
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 def test_live_caption_source_stays_in_room_while_ordinary_reply_mirrors(host_world, monkeypatch):

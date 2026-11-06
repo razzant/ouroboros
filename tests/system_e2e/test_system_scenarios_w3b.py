@@ -276,7 +276,6 @@ S11_SCRIPT = [
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s11_delegated_transport_wire_custody_and_typed_refusals(
         e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)
@@ -436,7 +435,6 @@ S12_SCRIPT = [
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 @pytest.mark.skipif(sys.platform != "linux",
                     reason="process-group SIGKILL + /proc scans are Linux-only")
 def test_s12_sigkill_mid_run_restart_recovers_custody_without_orphans(
@@ -595,7 +593,6 @@ def _skill_entry(server, name: str) -> dict:
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s13_skills_lifecycle_review_grants_enable_dispatch_disable_delete(
         e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)
@@ -779,7 +776,6 @@ def _owner_turn_id(oracle: ArtifactOracle, client_message_id: str) -> str:
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s13_hot_enable_reaches_an_already_spawned_worker_without_a_restart(
         e2e_clone, tmp_path_factory):
     """The W3B-F1 defect, at the product surface: enable AFTER boot must reach the

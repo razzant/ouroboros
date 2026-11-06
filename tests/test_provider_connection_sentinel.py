@@ -19,6 +19,7 @@ import pytest
 
 from ouroboros.llm import LLMClient
 from ouroboros.provider_models import CONNECTIONS_KEY, ROUTE_CREDENTIAL_SETTING_KEYS
+from tests._source_scan import parse
 
 SENT_A, SENT_B = "sk-or-SENT-A-builtin-000000", "sk-or-SENT-B-named-111111"
 COMPAT_A, COMPAT_B = "sk-SENT-A-compatible-2222", "sk-SENT-B-vllm-3333"
@@ -153,7 +154,7 @@ JUSTIFIED = {
 
 
 def _named_settings(source: str) -> set[str]:
-    tree = ast.parse(source)
+    tree = parse(source)
     docstrings = {id(node.body[0].value) for node in ast.walk(tree)
                   if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
                   and node.body and isinstance(node.body[0], ast.Expr) and isinstance(node.body[0].value, ast.Constant)}

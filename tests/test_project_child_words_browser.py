@@ -12,7 +12,7 @@ from tests.test_ui_smoke_playwright import direct_server_with_data as direct_ser
 from tests.ui_chat_viewport_smoke import _SETTLE_RESTORE_FRAMES, _emit_ws_frame
 from tests.test_project_unread_read_band_browser import PANEL, _open_room, _seed_room, _wait_for
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 # The words a child's card shows, one entry per line it draws, opened down to that card.
 _CHILD_WORDS = """(messages, taskId) => {

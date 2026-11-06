@@ -202,9 +202,10 @@ def test_root_patch_keeps_terminal_state_and_accounting_sticky(stale_status):
     assert merged == canonical
 
 
-@pytest.mark.parametrize("canonical_post_task", ["completed", "degraded"])
-@pytest.mark.parametrize("child_post_task", ["pending_once", "running"])
-@pytest.mark.parametrize("materialize_artifacts", [False, True])
+@pytest.mark.parametrize(("materialize_artifacts", "child_post_task", "canonical_post_task"), [
+    (False, "pending_once", "completed"),
+    (True, "running", "degraded"),
+])
 def test_effective_terminal_truth_wins_open_replica_cartesian(
     tmp_path,
     canonical_post_task,

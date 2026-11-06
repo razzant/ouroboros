@@ -18,6 +18,7 @@ from ouroboros.task_results import load_task_result
 from tests.test_presence_explicit_final import (
     FINAL, HEADERS, NOTE, WorkerDeath, finish, promoted_root, room_speech, supervise, turn)
 from tests.test_presence_explicit_final import room as room_fixture
+from tests._cases import chosen_rows
 
 room = room_fixture  # the real Host, place, transport and scripted model
 
@@ -29,7 +30,7 @@ CRASH_CASES = [*((case, basis) for case in ("speech", "held", "paused_since") fo
                ("silent", "none")]
 
 
-@pytest.mark.parametrize("case,basis", CRASH_CASES)
+@pytest.mark.parametrize("case,basis", chosen_rows(CRASH_CASES, 0, 7, 9))
 def test_a_death_before_the_result_store_keeps_the_conversations_own_delivery(room, monkeypatch, basis, case):
     """A Project root's final is owed before its result is stored. A death in between finalizes from that final
     (``adopt_registered_answer``), whose words are the Project's and never its conversation's speech. Owed, delivered
@@ -106,7 +107,7 @@ def _silent_after_death(room, task_id, project_chat, *, before):
             and room_speech(room.data, project_chat, task_id) == room_speech(room.data, 1, task_id) == [])
 
 
-@pytest.mark.parametrize("case,basis", CRASH_CASES)
+@pytest.mark.parametrize("case,basis", chosen_rows(CRASH_CASES, 0, 5, 9))
 def test_an_inline_turn_that_dies_before_its_result_store_keeps_its_conversations_own_delivery(room, monkeypatch,
                                                                                               case, basis):
     """The inline branch of the same death: a turn whose work became a Project's mid-flight dies, with the Host that

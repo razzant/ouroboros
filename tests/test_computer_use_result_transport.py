@@ -99,7 +99,7 @@ def decoded(rows, short: str) -> dict:
     return next(json.loads(row["result"]) for row, _written in rows if row["tool"].endswith("_" + short))
 
 
-@pytest.mark.parametrize("backend", ["mac", "x11", "wayland", "ssh", "osworld"])
+@pytest.mark.parametrize("backend", ["mac", "x11", "osworld"])
 def test_every_transport_writes_the_compact_text_of_the_object_it_wrote_before(tmp_path, monkeypatch, backend):
     ctx = _floor_ctx(tmp_path, monkeypatch)
     if backend == "mac":

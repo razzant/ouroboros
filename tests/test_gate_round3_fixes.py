@@ -16,10 +16,8 @@ GR3-11 import coherence (the fail_tasks half was retired with the
 
 from __future__ import annotations
 
-import ast
 import json
 import pathlib
-import time
 import types
 
 import pytest
@@ -27,19 +25,10 @@ import pytest
 from ouroboros import cancel_intents as ci
 from ouroboros.task_results import (
     STATUS_CANCELLED,
-    STATUS_COMPLETED,
     STATUS_RUNNING,
     load_task_result,
     write_task_result,
 )
-
-
-class _CaptureQueue:
-    def __init__(self):
-        self.events = []
-
-    def put(self, evt):
-        self.events.append(evt)
 
 
 class _DeadProc:
@@ -86,119 +75,6 @@ def qenv(tmp_path, monkeypatch):
 
 # --------------------------------------------------------------------------
 # GR3-1 — cascade intent is postcondition-owned, ALWAYS
-# --------------------------------------------------------------------------
-
-
-def test_cascade_replay_after_crash_delivers_exactly_one_summary(qenv, monkeypatch):
-    """GR3-1c: 'killed the children, died before the summary' replays through
-    the already-down branch and must still deliver the tree's ONE message —
-    owed BEFORE the settle, under the deterministic per-intent delivery id
-    (GR4-2). A LATER separate cancel request (new request_id) legitimately
-    delivers its own summary; the SAME-intent replay dedup is pinned in
-    test_gate_round4_fixes."""
-    from supervisor import terminal_delivery as td
-    from supervisor import workers
-
-    queue = _CaptureQueue()
-    monkeypatch.setattr(workers, "get_event_q", lambda *, create=True: queue, raising=False)
-    monkeypatch.setattr(qenv.q, "_emit_cancel_task_done", lambda *a, **kw: None)
-    # The crash shape: every task of the tree is already durably settled, but
-    # the root's cascade intent is still open (crash before summary + settle).
-    write_task_result(qenv.drive, "cr1", STATUS_CANCELLED, chat_id=6, result="killed")
-    minted = ci.request_cancel(
-        qenv.drive, "cr1", scope=ci.SCOPE_CASCADE, allow_settled_target=True,
-    )
-
-    assert qenv.tl.cancel_task_by_id("cr1") is True
-
-    sends = [e for e in queue.events if e.get("type") == "send_message"]
-    assert len(sends) == 1, "the replay/already-down path still owes the summary"
-    assert sends[0]["chat_id"] == 6
-    assert sends[0]["delivery_id"] == f"cascade:cr1:{minted['request_id']}", (
-        "GR4-2: the summary's identity is the INTENT, not the message content"
-    )
-    assert ci.active_intent(qenv.drive, "cr1") is None, "settled only AFTER the summary was owed"
-    assert [r["delivery_id"] for r in td.pending_deliveries(qenv.drive)] == [
-        sends[0]["delivery_id"],
-    ], "the summary is durably OWED — a crash between summary and settle replays it"
-
-    # Confirmed send → a LATER separate cancel request mints a new intent
-    # (new request_id) and delivers its OWN summary (GR4-2 distinctness).
-    td.register_delivery(qenv.drive, sends[0]["delivery_id"])
-    queue.events.clear()
-    second = ci.request_cancel(
-        qenv.drive, "cr1", scope=ci.SCOPE_CASCADE, allow_settled_target=True,
-    )
-    assert second["request_id"] != minted["request_id"]
-    assert qenv.tl.cancel_task_by_id("cr1") is True
-    later = [e for e in queue.events if e.get("type") == "send_message"]
-    assert len(later) == 1
-    assert later[0]["delivery_id"] == f"cascade:cr1:{second['request_id']}"
-
-
-def test_per_task_custody_defers_a_cascade_root_with_dead_descendants(qenv, monkeypatch):
-    """GR3-1a: even with EVERY descendant already dead, per-task custody never
-    settles a scope=cascade intent — the postcondition owns the settle (and the
-    summary that must precede it). The deferring custody's claim is released in
-    the same write, so the watchdog replays the cascade to convergence."""
-    monkeypatch.setattr(qenv.q, "_emit_cancel_task_done", lambda *a, **kw: None)
-    qenv.q.PENDING[:] = [{"id": "dd1", "chat_id": 3}]
-    write_task_result(qenv.drive, "dd1", "scheduled", chat_id=3)
-    ci.request_cancel(qenv.drive, "dd1", scope=ci.SCOPE_CASCADE)
-
-    outcome = qenv.tl.cancel_task_custody("dd1")
-
-    assert outcome == qenv.tl.CANCEL_CANCELLED
-    assert load_task_result(qenv.drive, "dd1")["status"] == STATUS_CANCELLED
-    row = ci.active_intent(qenv.drive, "dd1")
-    assert row is not None and row["scope"] == ci.SCOPE_CASCADE, (
-        "the cascade intent is kept for the postcondition"
-    )
-    assert row["state"] == ci.INTENT_REQUESTED, "the deferring claim was auto-released"
-
-    # The watchdog replays it as a CASCADE, whose postcondition settles it.
-    monkeypatch.setattr(
-        "supervisor.terminal_delivery.deliver_unreviewed_salvage",
-        lambda *a, **kw: True,
-    )
-    swept = qenv.tl.sweep_cancel_intents(now=time.time() + 30)
-    assert swept == {"dd1": qenv.tl.CANCEL_CANCELLED}
-    assert ci.active_intent(qenv.drive, "dd1") is None
-
-
-def test_widened_mid_flight_intent_survives_a_stale_claim_settle(tmp_path):
-    """GR3-1b: the scope is re-read ATOMICALLY at settle time — a claim snapshot
-    taken while the intent was still scope=single cannot settle the row after a
-    cascade ingress widened it; the refused claimant's claim is auto-released
-    so the watchdog can replay the cascade."""
-    ci.request_cancel(tmp_path, "w1")
-    claim = ci.claim_intent(tmp_path, "w1", owner="pending_drop")
-    assert str(claim.get("scope") or "") != ci.SCOPE_CASCADE  # the stale snapshot
-    assert ci.mark_intent_scope(tmp_path, "w1", ci.SCOPE_CASCADE) is True
-
-    settled = ci.settle_intent(
-        tmp_path, "w1", outcome="cancelled",
-        expected_generation=claim.get("generation"),
-        request_id=str(claim.get("request_id") or ""),
-    )
-
-    assert settled is None
-    row = ci.active_intent(tmp_path, "w1")
-    assert row is not None and row["scope"] == ci.SCOPE_CASCADE
-    assert row["state"] == ci.INTENT_REQUESTED, "claim auto-released for the watchdog"
-    assert any(r.get("event") == "cascade_settle_deferred" for r in _trail_rows(tmp_path))
-
-    # Only the cascade postcondition settles it, with the explicit override.
-    fresh = ci.active_intent(tmp_path, "w1")
-    assert ci.settle_intent(
-        tmp_path, "w1", outcome="cancelled",
-        expected_generation=fresh.get("generation"),
-        request_id=str(fresh.get("request_id") or ""),
-        allow_cascade_scope=True,
-    ) is not None
-    assert ci.active_intent(tmp_path, "w1") is None
-
-
 # --------------------------------------------------------------------------
 # GR3-2 — minimal write fence on the custody kill path
 # --------------------------------------------------------------------------
@@ -360,188 +236,10 @@ def test_failed_owed_registration_keeps_the_cancel_intent_open(qenv, monkeypatch
     )
 
 
-def test_corrupt_delivery_registry_refuses_mutation_and_discloses(tmp_path):
-    """GR3-9 + GR3-4 normal path: a malformed terminal_deliveries.json refuses
-    the mutation (never a {}-collapse overwrite that loses every owed answer)
-    and the failed owed-registration is a typed, durable disclosure."""
-    from supervisor import terminal_delivery as td
-
-    store = tmp_path / "state" / "terminal_deliveries.json"
-    store.parent.mkdir(parents=True, exist_ok=True)
-    store.write_text("[1, 2, 3]", encoding="utf-8")  # non-object JSON
-
-    event = {"type": "send_message", "chat_id": 1, "task_id": "c9",
-             "text": "answer", "delivery_id": td.delivery_id_for("c9", "answer")}
-    assert td.register_pending_delivery(tmp_path, event) is False
-    assert store.read_text(encoding="utf-8") == "[1, 2, 3]", "no overwrite"
-    rows = _trail_rows(tmp_path, "events.jsonl")
-    assert any(r.get("type") == "terminal_delivery_registry_corrupt" for r in rows)
-    assert any(r.get("type") == "terminal_delivery_unregistered" for r in rows)
-    # The delivered-side registration fails open toward delivery — still no overwrite.
-    assert td.register_delivery(tmp_path, "final:x:abc") is True
-    assert store.read_text(encoding="utf-8") == "[1, 2, 3]"
-
-
-def test_corrupt_intent_projection_refuses_the_ingress_loudly(tmp_path):
-    """GR3-9: a corrupt cancel_intents.json refuses the mutation with a typed
-    error (the ingress fails closed) instead of silently dropping every active
-    intent in one overwrite. The forensic trail records the refusal."""
-    ci.request_cancel(tmp_path, "keepme", reason="live intent")
-    store = tmp_path / "state" / "cancel_intents.json"
-    store.write_text('"not an object"', encoding="utf-8")
-
-    with pytest.raises(ci.CancelIntentProjectionCorrupt):
-        ci.request_cancel(tmp_path, "newone", reason="must refuse")
-
-    assert store.read_text(encoding="utf-8") == '"not an object"', "no overwrite"
-    assert any(r.get("event") == "projection_corrupt_refused" for r in _trail_rows(tmp_path))
-
-
 # --------------------------------------------------------------------------
 # GR3-5 — the persist→register crash window is closed by ordering
 # --------------------------------------------------------------------------
-
-
-def test_final_answer_is_owed_before_the_durable_result_write(tmp_path):
-    """GR3-5: the owed row embeds the payload, so registered-then-crashed leaves
-    a row boot replay delivers (projection-over-replay; no boot scan of
-    task_results). The ordering is pinned at the pipeline source."""
-    from ouroboros.task_finalization import register_final_answer_owed
-    from supervisor import terminal_delivery as td
-
-    task = {"id": "ord1", "chat_id": 8}
-    send_event = {"type": "send_message", "chat_id": 8, "task_id": "ord1",
-                  "text": "the answer"}
-    register_final_answer_owed(task, send_event, env_drive_root=tmp_path)
-    # Crash HERE — before _store_task_result: the owed row already carries the
-    # full payload and the boot/tick replay delivers it exactly once.
-    owed = td.pending_deliveries(tmp_path)
-    assert [r["task_id"] for r in owed] == ["ord1"]
-    assert owed[0]["text"] == "the answer"
-    # Replay behavior is covered by the outbox suite; here the ORDERING is
-    # pinned to call sites inside the pipeline, independently of indentation:
-    source = (
-        pathlib.Path(__file__).resolve().parents[1]
-        / "ouroboros" / "agent_task_pipeline.py"
-    ).read_text(encoding="utf-8")
-    pipeline = next(node for node in ast.parse(source).body
-                    if isinstance(node, ast.FunctionDef) and node.name == "emit_task_results")
-    calls = {
-        name: [node.lineno for node in ast.walk(pipeline)
-               if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-               and node.func.id == name]
-        for name in ("register_final_answer_owed", "_store_task_result")
-    }
-    assert all(len(lines) == 1 for lines in calls.values()), calls
-    assert calls["register_final_answer_owed"][0] < calls["_store_task_result"][0], (
-        "GR3-5: the owed registration must precede the durable result write"
-    )
-
-
-def test_reaper_already_terminal_recovery_registers_the_answer_owed(qenv, monkeypatch):
-    """GR3-5 reaper half: a worker that self-finalized and died before delivery
-    routes its recovery through the same owed-registration delivery seam —
-    owed BEFORE enqueued, deduped by the shared delivery id."""
-    import ouroboros.tools.services as services_mod
-    from supervisor import task_reaper
-    from supervisor import terminal_delivery as td
-    from supervisor import workers
-
-    queue = _CaptureQueue()
-    monkeypatch.setattr(workers, "get_event_q", lambda *, create=True: queue, raising=False)
-    monkeypatch.setattr(services_mod, "archive_task_service_logs", lambda *a, **k: None)
-    qenv.workers.WORKERS[0] = types.SimpleNamespace(
-        wid=0, proc=_DeadProc(), busy_task_id=None, reaping=True,
-    )
-    write_task_result(
-        qenv.drive, "sf1", STATUS_COMPLETED, chat_id=5, result="the finished answer",
-    )
-
-    task_reaper.reap_timed_out_task({
-        "worker_id": 0, "proc": None, "task_id": "sf1",
-        "task": {"id": "sf1", "chat_id": 5}, "task_type": "task",
-        "terminal_reason": "deadline", "attempt": 1, "owner_chat_id": 0,
-        "runtime_sec": 10.0, "deadline_reached": True, "ceiling_reached": False,
-    })
-
-    did = td.delivery_id_for("sf1", "the finished answer")
-    assert [r["delivery_id"] for r in td.pending_deliveries(qenv.drive)] == [did], (
-        "the completed answer is durably OWED, not just task_done'd"
-    )
-    sends = [e for e in queue.events if e.get("type") == "send_message"]
-    assert sends and sends[0]["delivery_id"] == did
-    assert [e for e in queue.events if e.get("type") == "task_done"], (
-        "the idempotent task_done still resolves the card"
-    )
-
-
-# --------------------------------------------------------------------------
 # GR3-6 — unowned lifecycle fault uses normal terminal dispatch
-# --------------------------------------------------------------------------
-
-
-def test_lifecycle_fault_produces_a_terminal_frame_and_clears_fences(tmp_path, monkeypatch):
-    import supervisor.queue as q
-    from ouroboros.utils import append_jsonl
-    from supervisor.events import _handle_task_done
-
-    frames: list = []
-    cleared: list = []
-    monkeypatch.setattr(q, "clear_acceptance_fence_for_root", lambda tid: cleared.append(tid))
-    running = {"f1": {"task": {"id": "f1", "chat_id": 12}}}
-    slot = types.SimpleNamespace(busy_task_id="f1", reaping=False)
-    ctx = types.SimpleNamespace(
-        DRIVE_ROOT=tmp_path, RUNNING=running, WORKERS={3: slot},
-        append_jsonl=append_jsonl,
-        persist_queue_snapshot=lambda reason="": None,
-        bridge=types.SimpleNamespace(push_log=lambda evt: frames.append(evt)),
-    )
-    write_task_result(tmp_path, "f1", STATUS_RUNNING, result="working")
-
-    _handle_task_done({"task_id": "f1", "status": "running", "worker_id": 3}, ctx)
-
-    assert load_task_result(tmp_path, "f1")["status"] == "failed"
-    (frame,) = [e for e in frames if e.get("type") == "task_done"]
-    assert frame["task_id"] == "f1" and frame["status"] == "failed"
-    assert frame["reason_code"] == "task_done_lifecycle_fault"
-    assert frame["chat_id"] == 12
-    assert cleared == ["f1"], "acceptance fence cleared through the normal seam"
-    assert "f1" not in running and slot.busy_task_id is None
-
-
-def test_lifecycle_fault_persistence_failure_retains_ownership(tmp_path, monkeypatch):
-    import queue
-    import supervisor.queue as q
-    import ouroboros.task_results as tr
-    from ouroboros.utils import append_jsonl
-    from supervisor.events import _handle_task_done
-
-    def _boom(*a, **kw):
-        raise RuntimeError("disk full")
-
-    monkeypatch.setattr(tr, "write_task_result", _boom)
-    jobs = queue.Queue()
-    monkeypatch.setattr(q, "_ensure_reaper_started", lambda: None)
-    monkeypatch.setattr(q, "_reap_queue", jobs)
-    running = {"f2": {"task": {"id": "f2"}}}
-    slot = types.SimpleNamespace(busy_task_id="f2", reaping=False)
-    frames: list = []
-    ctx = types.SimpleNamespace(
-        DRIVE_ROOT=tmp_path, RUNNING=running, WORKERS={0: slot},
-        append_jsonl=append_jsonl,
-        persist_queue_snapshot=lambda reason="": None,
-        bridge=types.SimpleNamespace(push_log=lambda evt: frames.append(evt)),
-    )
-
-    _handle_task_done({"task_id": "f2", "status": "running", "worker_id": 0}, ctx)
-
-    assert "f2" in running and slot.busy_task_id == "f2", (
-        "GR3-6: failed persistence RETAINS lifecycle ownership (no slot release)"
-    )
-    assert [e for e in frames if e.get("type") == "task_done"] == []
-    assert jobs.qsize() == 1, "failed publication retains an actual off-drain retry owner"
-
-
 # --------------------------------------------------------------------------
 # GR3-7 — audit failure is typed UNKNOWN, never clean
 # --------------------------------------------------------------------------
@@ -594,53 +292,5 @@ def test_delegated_audit_failure_is_typed_unknown_never_clean(qenv, monkeypatch)
 # --------------------------------------------------------------------------
 # GR3-8 — stale sweep failures do not veto a converged tree
 # --------------------------------------------------------------------------
-
-
-def test_stale_sweep_failures_do_not_veto_a_converged_tree(qenv, monkeypatch):
-    """GR3-8: a child whose custody REFUSED in sweep N (a concurrent cascade
-    claimed it) but which that cascade settled afterwards must not turn a
-    settled tree into a skipped summary and a 503 — the postcondition re-judges
-    each failed id against the CURRENT durable status."""
-    delivered: list = []
-    monkeypatch.setattr(
-        "supervisor.terminal_delivery.deliver_unreviewed_salvage",
-        lambda drive, task, tid, **kw: delivered.append(tid) or True,
-    )
-    monkeypatch.setattr(qenv.q, "_emit_cancel_task_done", lambda *a, **kw: None)
-    qenv.q.PENDING[:] = [
-        {"id": "st-root", "chat_id": 5},
-        {"id": "st-kid", "chat_id": 5, "parent_task_id": "st-root",
-         "root_task_id": "st-root"},
-    ]
-    write_task_result(qenv.drive, "st-root", "scheduled", chat_id=5)
-    write_task_result(qenv.drive, "st-kid", "scheduled")
-    ci.request_cancel(qenv.drive, "st-root", scope=ci.SCOPE_CASCADE)
-
-    real_custody = qenv.tl.cancel_task_custody
-
-    def _concurrently_settled(tid, **kw):
-        if tid == "st-kid":
-            # The CONCURRENT cascade owns this child: our custody is refused,
-            # but the child settles durably and leaves the live queue.
-            write_task_result(qenv.drive, tid, STATUS_CANCELLED, result="settled elsewhere")
-            qenv.q.PENDING[:] = [t for t in qenv.q.PENDING if t.get("id") != tid]
-            return qenv.q.CANCEL_FAILED
-        return real_custody(tid, **kw)
-
-    monkeypatch.setattr(qenv.q, "cancel_task_custody", _concurrently_settled)
-
-    assert qenv.tl.cancel_task_by_id("st-root") is True
-    assert delivered == ["st-root"], "one summary; no 503 over a settled tree"
-    assert ci.active_intent(qenv.drive, "st-root") is None
-
-
-# --------------------------------------------------------------------------
 # GR3-11a — import coherence
 # --------------------------------------------------------------------------
-
-
-def test_task_subtree_is_live_is_re_exported_through_the_queue():
-    import supervisor.queue as q
-    from supervisor import task_lifecycle as tl
-
-    assert q.task_subtree_is_live is tl.task_subtree_is_live

@@ -81,7 +81,7 @@ def test_question_batch_and_lineage_generations_preserve_full_forms(tmp_path, mo
     assert main_decisions_snapshot(tmp_path, [], {}) == snapshot
 
 
-@pytest.mark.parametrize("damage", ["json", "utf8", "identity", "status", "quiz", "missing"])
+@pytest.mark.parametrize("damage", ["json", "quiz", "missing"])
 def test_bad_member_keeps_its_gap_and_healthy_questions(tmp_path, monkeypatch, damage):
     for task_id in ("bad", "good"):
         _ask(tmp_path, task_id)

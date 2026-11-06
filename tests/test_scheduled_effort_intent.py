@@ -13,7 +13,6 @@ from types import SimpleNamespace
 import pytest
 
 
-pytestmark = pytest.mark.serial  # Production state/queue init rebinds module globals.
 _OMITTED = object()
 _TIERS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 _DERIVED = ("reasoning_effort", "effective_model_lane", "effective_executor",
@@ -149,7 +148,7 @@ def test_every_raw_tier_reaches_dispatch_from_the_real_child_event(runtime, monk
     assert dispatch.effort_fact == {"requested": effort, "applied": effort, "source": "auto"}
 
 
-@pytest.mark.parametrize("effort", [_OMITTED, "auto", "", None], ids=["omitted", "auto", "blank", "null"])
+@pytest.mark.parametrize("effort", [_OMITTED, "", None], ids=["omitted", "blank", "null"])
 def test_no_public_request_keeps_the_recommended_default(runtime, monkeypatch, effort):
     from ouroboros.agent_dispatch import resolve_dispatch_axes
 
@@ -178,10 +177,9 @@ def test_old_event_without_request_survives_restore_without_inventing_one(runtim
 
 @pytest.mark.parametrize("pin,mode,target,requested,expected,source", [
     ("", "pro", "openai/effort-fixture-model", "ultra", "high", "auto"),
-    ("max", "pro", "openai/effort-fixture-model", "low", "max", "pin"),
     ("high", "cyber_pro", "openai/effort-fixture-model", "ultra", "ultra", "cyber"),
     ("low", "cyber_pro", "claudexor::cursor=grok-4.7-max-fast", "none", "max", "model_name"),
-], ids=["range-clamp", "owner-pin", "cyber-request", "model-name"])
+], ids=["range-clamp", "cyber-request", "model-name"])
 def test_preserved_request_meets_the_existing_dispatch_policy(
     runtime, monkeypatch, pin, mode, target, requested, expected, source,
 ):

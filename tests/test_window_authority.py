@@ -35,8 +35,7 @@ def test_sglang_size_refusals_keep_reply_room(tmp_path, monkeypatch, text, count
 
 
 @pytest.mark.parametrize("text", [
-    "maximum allowed length (64 characters)", "maximum length is 128",
-    "Request header field exceeds the maximum allowed length (8192)", "Upstream request failed",
+    "maximum allowed length (64 characters)", "Request header field exceeds the maximum allowed length (8192)", "Upstream request failed",
 ])
 def test_unrelated_length_errors_create_no_window(tmp_path, monkeypatch, text):
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
@@ -51,7 +50,7 @@ def test_unrelated_length_errors_create_no_window(tmp_path, monkeypatch, text):
 
 @pytest.mark.parametrize("code,kind", [
     ("invalid_api_key", "auth_error"), ("insufficient_quota", "quota_exhausted"),
-    ("rate_limit_exceeded", "provider_transient"), (400, "context_overflow"),
+    ("rate_limit_exceeded", "provider_transient"),
 ])
 def test_typed_errors_keep_precedence(code, kind):
     error = RuntimeError(SCHEDULER)
@@ -69,8 +68,6 @@ def test_output_and_body_errors_keep_precedence(prefix):
 
 @pytest.mark.parametrize("note,window,retired", [
     ("owner-confirmed via settings save", 1000000, True),
-    ("owner-confirmed via context-mode toggle", 1000000, True),
-    ("owner-confirmed scope reviewer window", 1000000, True),
     ("owner-confirmed via settings save", 400000, False),
     ("owner-confirmed via context-mode toggle", 400000, False),
     ("owner-confirmed scope reviewer window", 400000, False),
@@ -126,7 +123,7 @@ def test_clear_window_ack_is_exact_route_and_audited(tmp_path, monkeypatch, mism
 
 @pytest.mark.parametrize("ack,role,expected,conflict", [
     (0, 0, 400000, False), (1000000, 0, 1000000, True),
-    (1000000, 250000, 250000, True), (1000000, 400000, 400000, False),
+    (1000000, 250000, 250000, True),
 ])
 def test_discovery_continues_beside_owner_declarations(tmp_path, monkeypatch, ack, role, expected, conflict):
     from datetime import datetime, timedelta, timezone

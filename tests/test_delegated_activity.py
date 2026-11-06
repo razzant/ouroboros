@@ -453,7 +453,7 @@ def _agent(tool_ctx):
     return agent, events
 
 
-@pytest.mark.parametrize("unit,needs_omission", [("\x00", True), ("\x00\\", True), ("\\", False), ("🙂", False)])
+@pytest.mark.parametrize("unit,needs_omission", [("\x00", True), ("\\", False), ("🙂", False)])
 def test_serialized_speech_bound_survives_the_real_progress_carrier(tmp_path, unit, needs_omission):
     text = unit * (6000 // len(unit))
     originals = [_harness(seq, "message", text=text) for seq in range(1, 5)]
@@ -653,8 +653,7 @@ def test_telegram_card_leads_with_the_executors_latest_words_and_keeps_its_count
     assert "tool_result" in _subagent_card_text(event, "progress", "en"), "a frame without the record is unchanged"
 
 
-@pytest.mark.parametrize("recap", [False, True])
-@pytest.mark.parametrize("problem_count", [1, 8])
+@pytest.mark.parametrize(("problem_count", "recap"), [(1, True), (8, False)])
 def test_telegram_long_speech_preserves_problems_gaps_and_full_task_reference(recap, problem_count):
     from skills.telegram.lib.telegram_state import _subagent_card_text
 

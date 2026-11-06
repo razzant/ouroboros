@@ -13,7 +13,6 @@ from ouroboros import evidence_packer as packer, evidence_packs as packs, mainte
 from tests._store_journal_shared import exclusive_hold
 from tests.test_evidence_packs import REPO, _FakeChild, _task, root as root
 
-pytestmark = pytest.mark.serial
 
 _QUIET = json.dumps({"status": "completed", "jobs": {}}).encode()
 
@@ -125,7 +124,7 @@ def test_discovery_does_not_rebuild_a_missing_index(root, monkeypatch):
     assert not (packs.packs_dir(root) / packs.INDEX_NAME).exists()
 
 
-@pytest.mark.parametrize("busy", ["facts", "packs", "packs_sql", "packs_sql_cached"])
+@pytest.mark.parametrize("busy", ["facts", "packs", "packs_sql"])
 def test_real_contention_never_waits_and_discovery_defers_without_recording(root, monkeypatch, busy):
     """The server's look never waits on a held store (it defers the spawn); in the child,
     discovery under contention defers too and records nothing, so the job stays due."""

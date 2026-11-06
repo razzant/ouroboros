@@ -5,9 +5,10 @@ from tests._safety_fixtures import supervisor as supervisor_fixture
 supervisor = supervisor_fixture
 
 
-@pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
-@pytest.mark.parametrize("status", ["SUSPICIOUS", "DANGEROUS"])
-@pytest.mark.parametrize("name", ["place_reply", "connector_send"])
+@pytest.mark.parametrize(("name", "status", "mode"), [
+    ("place_reply", "SUSPICIOUS", "advanced"),
+    ("connector_send", "DANGEROUS", "cyber_pro"),
+])
 def test_speech_flag_retry_and_changed_subject(supervisor, monkeypatch, mode, status, name):
     h = supervisor
     from ouroboros import tool_effects

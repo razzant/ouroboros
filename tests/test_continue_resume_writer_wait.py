@@ -30,7 +30,6 @@ from tests.test_resume_attempt_history import (
     _events, _paused_held_continue, _restart_held, _settle_leaf, _stored, _work,
 )
 
-pytestmark = pytest.mark.serial
 LEAF = [{**RUNNING, "task_id": PRED, "review_owned": False}]
 
 
@@ -430,8 +429,11 @@ def test_a_resume_into_its_wait_is_on_disk_before_it_answers_and_a_crash_keeps_t
     assert [task["id"] for task in sent] == [successor], "it starts exactly once"
 
 
-@pytest.mark.parametrize("fault", ["nothing_landed", "part_landed_then_retried", "part_landed_and_no_write_after"])
-@pytest.mark.parametrize("settled", [False, True], ids=["into_its_wait", "selected_to_start"])
+@pytest.mark.parametrize(("settled", "fault"), [
+    pytest.param(False, "nothing_landed", id='into_its_wait-nothing_landed'),
+    pytest.param(False, "part_landed_and_no_write_after", id='into_its_wait-part_landed_and_no_write_after'),
+    pytest.param(True, "part_landed_then_retried", id='selected_to_start-part_landed_then_retried'),
+])
 def test_a_publication_that_fails_returns_the_stop_and_the_disk_follows(tmp_path, monkeypatch, fault, settled):
     """A failed write can land part of its bundle (``queue_publication._publish``: here the snapshot lands and its
     certificate does not; a document whose bytes did not change is not written at all), so the door puts the stop

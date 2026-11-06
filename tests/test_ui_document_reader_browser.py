@@ -208,7 +208,6 @@ def _check_brief(state, title="brief.md"):
 
 
 @pytest.mark.ui_browser
-@pytest.mark.serial
 def test_delivered_documents_open_in_the_reader_live_and_after_reload(direct_server_with_data, monkeypatch, tmp_path):  # noqa: F811
     from playwright.sync_api import sync_playwright
     from ouroboros.artifacts import task_artifact_dir_path
@@ -474,7 +473,6 @@ def _release(page, held):
 
 
 @pytest.mark.ui_browser
-@pytest.mark.serial
 def test_project_room_reader_survives_reload_and_closes_with_its_room(direct_server_with_data, monkeypatch, tmp_path):  # noqa: F811
     """A Project room's delivered documents read live and after a reload; leaving the room
     destroys its chat, which aborts a pending read and removes an open reader, and the room
@@ -686,7 +684,6 @@ def _hold_artifacts(page):
 
 
 @pytest.mark.ui_browser
-@pytest.mark.serial
 def test_reader_closes_when_its_chat_leaves_the_screen_and_staged_files_stay(direct_server_with_data, monkeypatch, tmp_path):  # noqa: F811
     """A document open — or still loading — in Main or in a room closes when that chat leaves the
     screen without being destroyed: a notification opening a room over Main, a notification back to
@@ -887,7 +884,6 @@ COPY_STATE = """() => {
 
 
 @pytest.mark.ui_browser
-@pytest.mark.serial
 def test_reader_in_a_translated_ui_and_copy_without_async_clipboard(direct_server_with_data, monkeypatch, tmp_path):  # noqa: F811
     """With a non-English dictionary (the house idiom: the gateway's /api/ui/i18n answer, stubbed),
     the reader's controls are translated while the document — its name, even one the dictionary

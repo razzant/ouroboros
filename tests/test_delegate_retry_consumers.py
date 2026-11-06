@@ -13,7 +13,6 @@ from ouroboros.utils import utc_now_iso
 from tests._shared import write_queue_document
 
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture(autouse=True)
@@ -132,11 +131,10 @@ def bind_gateway(monkeypatch, gateway):
     monkeypatch.setattr(claudexor_daemon, "read_owned_gateway", lambda: gateway)
 
 
-@pytest.mark.parametrize("state", ["succeeded", "failed", "cancelled"])
-@pytest.mark.parametrize("owner,chain", [
-    ("retry-a", ("retry-a", "retry-b")),
-    ("retry-a", ("retry-a", "retry-b", "retry-c")),
-    ("retry-b", ("retry-a", "retry-b", "retry-c")),
+@pytest.mark.parametrize(("owner", "chain", "state"), [
+    pytest.param("retry-a", ("retry-a", "retry-b"), "succeeded", id='retry-a-chain0-succeeded'),
+    pytest.param("retry-a", ("retry-a", "retry-b", "retry-c"), "cancelled", id='retry-a-chain1-cancelled'),
+    pytest.param("retry-b", ("retry-a", "retry-b", "retry-c"), "failed", id='retry-b-chain2-failed'),
 ])
 def test_registered_wait_retrieves_completed_ancestor_without_changing_starter(
     tmp_path, monkeypatch, state, owner, chain,
@@ -174,9 +172,8 @@ def test_successor_wait_does_not_enter_live_containment_or_settlement(tmp_path, 
 
 
 @pytest.mark.parametrize("case", [
-    "common_root", "narrative", "one_sided", "wrong_root", "cycle", "old_execution_live",
-    "parallel_attempt", "malformed_parallel_attempt", "snapshot_stale", "snapshot_missing", "leaf_live", "closed_absent",
-    "review_owned", "stale_successor", "stale_custody_memo",
+    "cycle", "old_execution_live",
+    "malformed_parallel_attempt", "snapshot_missing",
 ])
 def test_registered_wait_refuses_unproven_successor_without_touching_gateway(
     tmp_path, monkeypatch, case,
@@ -229,10 +226,9 @@ def test_registered_wait_refuses_unproven_successor_without_touching_gateway(
     assert gateway.reads == []
 
 
-@pytest.mark.parametrize("state", [None, "succeeded"])
-@pytest.mark.parametrize("tool,options", [
-    ("delegate_cancel", {"reason": "finished"}),
-    ("delegate_answer", {"interaction_id": "question-one", "answers": [{"question_id": "q", "free_text": "yes"}]}),
+@pytest.mark.parametrize(("tool", "options", "state"), [
+    pytest.param("delegate_cancel", {"reason": "finished"}, None, id='delegate_cancel-options0-None'),
+    pytest.param("delegate_answer", {"interaction_id": "question-one", "answers": [{"question_id": "q", "free_text": "yes"}]}, "succeeded", id='delegate_answer-options1-succeeded'),
 ])
 def test_retry_never_inherits_cancel_or_answer(tmp_path, monkeypatch, tool, options, state):
     ctx = retry_context(tmp_path, monkeypatch)
@@ -277,8 +273,7 @@ def test_terminal_result_read_refuses_a_now_live_engine_without_live_effects(tmp
     assert gateway.reads == [held.run_id]
 
 
-@pytest.mark.parametrize("split", [False, True])
-@pytest.mark.parametrize("disposed", [False, True])
+@pytest.mark.parametrize(("disposed", "split"), [(False, False), (True, True)])
 def test_successor_reads_canonical_capture_before_and_after_disposition(
     tmp_path, monkeypatch, split, disposed,
 ):

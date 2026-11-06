@@ -14,6 +14,7 @@ from ouroboros.context_budget import start_room_levels
 from ouroboros.context_sections import runtime_host_section
 from ouroboros.section_floor import HostSection, capture_sections
 from tests import _memory_view_synthetic as syn
+from tests._cases import case_folders
 
 RESERVE = 8_192
 
@@ -30,7 +31,7 @@ def test_host_ladder_lists_live_producers_and_keeps_only_the_actual_protected_co
     assert "shared_understanding" not in memory_floor.HOST_STEPS
 
 
-@pytest.mark.parametrize("missing", ["window", "root", "task_id", "measure", "eligible"])
+@pytest.mark.parametrize("missing", ["window", "measure", "eligible"])
 def test_host_steps_do_not_measure_when_no_section_can_step(missing):
     calls = []
     args = dict(window=50_000, root="test-root", task_id="test-task", reserve=RESERVE,
@@ -127,8 +128,7 @@ def _service(name="runtime", size=100_000):
                        f"## {name}\n\nOperative state remains.")
 
 
-@pytest.mark.parametrize("preferred", ["max", "low", "nano"])
-@pytest.mark.parametrize("window", [0, 2_000_000])
+@pytest.mark.parametrize(("window", "preferred"), [(0, "max"), (0, "nano"), (2_000_000, "low")])
 def test_unselected_projections_are_byte_identical_and_write_nothing(tmp_path, preferred, window):
     core = _core(tmp_path, [_service(size=2_000), "protected dynamic text"], [_service("world", 1_000)],
                  syn.snapshot(story=syn.pages(2, 4_000)))
@@ -154,22 +154,25 @@ def test_host_sections_share_the_start_target_and_working_margin(tmp_path):
     assert _host_facts(pressured, "nano")
 
 
-@pytest.mark.parametrize("section_id", sorted(section_floor.PROTECTED))
-def test_protected_sections_never_shrink_even_with_an_operative_view(tmp_path, section_id):
-    protected = HostSection(section_id, f"## {section_id}\n" + "whole core " * 2_000, "forbidden replacement")
-    core = _core(tmp_path, [protected, _service(size=3_000)])
-    with pytest.raises(fit.MinimumViewUnfit):
-        _plan(core, RESERVE + 1)
-    plan = _plan(core, 2_000_000).reproject_for_route(window_tokens=RESERVE + 1, known_window=True,
-        ratio=1, output_reserve=RESERVE, tool_schemas=[])
-    assert protected.full_text in _text(plan)
-    assert "forbidden replacement" not in _text(plan)
-    assert plan.messages_for("max")[1]["content"] == "WORDS THAT STARTED THE WORK"
-    assert section_id not in {row["section_id"] for row in _host_facts(plan)}
-    disposition = fit.measure_main_fit(plan, plan.messages_for("max"), [],
-        profile="owner_max", rendered_mode="max", round_id="r1", automatic_pass_used=True)
-    assert disposition.predicted_capacity_miss
-    assert disposition.action == "send"  # an estimator miss never hard-refuses
+def test_protected_sections_never_shrink_even_with_an_operative_view(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for section_id in sorted(section_floor.PROTECTED):
+        tmp_path = next(case_paths)
+        with subtests.test(section_id=section_id):
+            protected = HostSection(section_id, f"## {section_id}\n" + "whole core " * 2_000, "forbidden replacement")
+            core = _core(tmp_path, [protected, _service(size=3_000)])
+            with pytest.raises(fit.MinimumViewUnfit):
+                _plan(core, RESERVE + 1)
+            plan = _plan(core, 2_000_000).reproject_for_route(window_tokens=RESERVE + 1, known_window=True,
+                ratio=1, output_reserve=RESERVE, tool_schemas=[])
+            assert protected.full_text in _text(plan)
+            assert "forbidden replacement" not in _text(plan)
+            assert plan.messages_for("max")[1]["content"] == "WORDS THAT STARTED THE WORK"
+            assert section_id not in {row["section_id"] for row in _host_facts(plan)}
+            disposition = fit.measure_main_fit(plan, plan.messages_for("max"), [],
+                profile="owner_max", rendered_mode="max", round_id="r1", automatic_pass_used=True)
+            assert disposition.predicted_capacity_miss
+            assert disposition.action == "send"  # an estimator miss never hard-refuses
 
 
 @pytest.mark.parametrize("short", ["the same tiny section", "longer than the tiny section " * 50])

@@ -12,7 +12,6 @@ import pathlib
 import threading
 import time
 
-import pytest
 
 from ouroboros import subagent_worktrees as trees
 from ouroboros.task_results import STATUS_REQUESTED, STATUS_SCHEDULED
@@ -22,7 +21,6 @@ from supervisor import workspace_preparation as prep
 from tests.test_workspace_preparation import _WAIT_SEC, spy_provisions
 from tests.test_workspace_preparation import env as env
 
-pytestmark = pytest.mark.serial
 
 _COPY_THREAD, _VALIDATION_THREAD = "workspace-preparation", "workspace-preparation-validation"
 

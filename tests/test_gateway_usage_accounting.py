@@ -202,7 +202,6 @@ def test_api_state_money_and_call_count_are_ledger_projections(tmp_path, monkeyp
     assert payload["accounting"]["remaining_known_usd"] == 7.25
 
 
-@pytest.mark.serial
 def test_api_state_unbounded_budget_does_not_expose_private_breakdown_keys(tmp_path, monkeypatch):
     """The no-limit branch keeps internal ledger provenance off the wire."""
     from ouroboros.gateway.state import api_state
@@ -514,7 +513,6 @@ def test_task_detail_cost_breakdown_view_discloses_unattributed_money(tmp_path, 
     assert round(view["own_usd"] + view["children_usd"] + view["unattributed_usd"], 6) == 0.50
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("limit", [7.5, 0.0])
 def test_api_state_reads_the_slim_writer_snapshot_never_the_full_breakdown(tmp_path, monkeypatch, limit):
     """Both budget branches serve the same values without the five grouped axes."""

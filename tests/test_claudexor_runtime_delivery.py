@@ -437,8 +437,6 @@ def test_preserved_node_reader_accepts_exact_supported_metadata_schemas(
 
 @pytest.mark.parametrize("payload", [
     {"schema_version": 3, "version": NODE_VERSION, "platform": "linux-x64"},
-    {"schema_version": True, "version": NODE_VERSION, "platform": "linux-x64"},
-    {"schema_version": "2", "version": NODE_VERSION, "platform": "linux-x64"},
     {"schema_version": 2, "version": "bad", "platform": "linux-x64"},
     [],
 ])

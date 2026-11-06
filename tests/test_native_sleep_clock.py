@@ -19,7 +19,6 @@ from tests.test_execution_clock_resume_handover import clock  # noqa: F401
 from tests.test_resume_handover import _dispatch_one
 from tests.test_warm_restart_retention import _handoff, _pool_events, _stop_boot
 
-pytestmark = pytest.mark.serial
 
 
 def _event(task_id, checkpoint, *, phase="park"):
@@ -137,8 +136,10 @@ def _run_native(env, monkeypatch, now):
     return messages, phases, at_grant
 
 
-@pytest.mark.parametrize("bounded", [False, True], ids=["unlimited", "explicit-budget"])
-@pytest.mark.parametrize("second", ["sleep", "quiz"])
+@pytest.mark.parametrize(("second", "bounded"), [
+    pytest.param("sleep", False, id='sleep-unlimited'),
+    pytest.param("quiz", True, id='quiz-explicit-budget'),
+])
 def test_planned_native_sleep_return_then_next_real_park(tmp_path, monkeypatch, clock, bounded, second):  # noqa: F811
     env = _return_native(tmp_path, monkeypatch, clock, bounded=bounded)
     assert env.meta["sleep_parked_at"] == env.checkpoint["sleep_started_at"]

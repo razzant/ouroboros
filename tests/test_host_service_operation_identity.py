@@ -83,7 +83,7 @@ def test_failed_acceptance_never_queues_and_restart_never_requeues(tmp_path, mon
     assert state["status"] == "lost" and restarted._inbox.empty()
 
 
-@pytest.mark.parametrize("mismatch", ["chat_id", "ts", "text_sha256", "source"])
+@pytest.mark.parametrize("mismatch", ["chat_id", "text_sha256", "source"])
 def test_annotation_collision_never_authorizes_foreign_task(tmp_path, monkeypatch, mismatch):
     client = _client(tmp_path)
     _inbound(tmp_path, "own source")

@@ -30,7 +30,6 @@ from ouroboros.platform_layer import subprocess_new_group_kwargs
 from ouroboros.tools import shell_process
 from tests._shared import wait_test_child_stop
 
-pytestmark = pytest.mark.serial
 POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="a real sh tree and process groups; Windows has fakes below")
 
 

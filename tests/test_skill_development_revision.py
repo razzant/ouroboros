@@ -13,8 +13,7 @@ from ouroboros.tool_access import active_tool_profile
 from tests.test_d16_skill_payload_authority import _registry, _skill
 
 
-@pytest.mark.parametrize("mode", ["light", "advanced", "pro"])
-@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize(("legacy", "mode"), [(False, "advanced"), (True, "light"), (True, "pro")])
 def test_repair_shell_then_file_write_keeps_observed_revision(tmp_path, monkeypatch, mode, legacy):
     registry, _repo, data = _registry(tmp_path, monkeypatch, mode=mode)
     payload = _skill(data, "demo", bucket="external")

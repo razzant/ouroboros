@@ -40,7 +40,6 @@ def _send(n: int = 0, **extra: object) -> dict:
     return {"type": "send_message", "n": n, "task_id": "answer-task", "chat_id": 1, "text": "final", **extra}
 
 
-@pytest.mark.serial
 def test_a_send_behind_five_thousand_telemetry_frames_is_the_first_event_served_on_the_real_manager():
     context = multiprocessing.get_context("spawn")
     with EventQueueManager(ctx=context) as manager:

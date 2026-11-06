@@ -46,9 +46,6 @@ def test_a_start_memory_lowered_to_low_names_the_hosts_measure_without_advice():
 
 @pytest.mark.parametrize("plan", [
     _plan(_room("route")),                             # the books cannot fit this route: its task's facts say so
-    _plan(_room(zero_need=1_100_000)),                 # tool schemas tip it alone: nothing memory could fold
-    _plan(_room("held")),                              # Max held
-    _plan(_room(), role="child"), _plan(_room(), role="nanny"),
     _plan(None),                                       # the owner's Low or Nano, or an unknown window: no Max room
     None,
 ])

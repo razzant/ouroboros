@@ -18,7 +18,7 @@ from tests._work_projection_shared import work_fields
 from tests.test_design_system_gate_browser import PROJECTS, rest, save_evidence, seed_page, settle
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 CHATS = {p['id']: p['chat_id'] for p in PROJECTS}
 MENU = 'body > .project-row-menu:not([data-leaving])'  # the open one: a closed menu's picture fades a moment
 

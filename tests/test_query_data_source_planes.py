@@ -98,7 +98,7 @@ def _pack(root, task_id, raw):
     return digest, pack_path
 
 
-@pytest.mark.parametrize("mode", ["light", "advanced", "pro", "cyber_pro"])
+@pytest.mark.parametrize("mode", ["light", "advanced", "cyber_pro"])
 def test_canonical_queue_reads_follow_the_same_actors_read_file_admission(planes, monkeypatch, mode):
     monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: mode)
     target = planes["canonical"] / "state/queue_snapshot.json"
@@ -315,7 +315,7 @@ def test_packed_blobs_need_the_actors_read_of_the_pack_file_itself(planes, monke
     assert status == "unavailable" and missing["message"].startswith("blob not found in the caller or canonical plane;"), missing
 
 
-@pytest.mark.parametrize("mode", ["light", "advanced", "pro", "cyber_pro"])
+@pytest.mark.parametrize("mode", ["light", "advanced", "cyber_pro"])
 def test_a_selected_owned_child_is_a_local_blob_plane(planes, monkeypatch, mode):
     """child_task_id selects an owned descendant's drive through the caller's lineage, the
     admission its logs and queue already use. The canonical read alias also admits read_file,

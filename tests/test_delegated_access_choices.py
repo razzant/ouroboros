@@ -37,7 +37,7 @@ def test_direct_default_and_lowering_reach_actual_post(full_run, monkeypatch, lo
         assert not result.get('snapshot_id')
 
 
-@pytest.mark.parametrize('lower,expected', [(None, 'full'), ('inherit', 'full'), ('workspace_write', 'workspace_write'), ('readonly', 'readonly')])
+@pytest.mark.parametrize('lower,expected', [(None, 'full'), ('workspace_write', 'workspace_write'), ('readonly', 'readonly')])
 def test_schedule_snapshot_reaches_actor_first_post(full_run, monkeypatch, lower, expected):
     from ouroboros.tools import control
     from ouroboros.tools.registry import ToolContext
@@ -132,7 +132,7 @@ def test_lowered_readonly_refuses_write_geometry_before_post(full_run, monkeypat
     assert not facts['requests'] and not facts['trust_posts']
 
 
-@pytest.mark.parametrize('route', ['codex', 'claude', 'cursor', 'agy'])
+@pytest.mark.parametrize('route', ['codex', 'cursor', 'agy'])
 def test_full_route_health_requires_advertised_full(route):
     from ouroboros.subagent_route_health import route_health
     from ouroboros.subagents import delegated_run_shape

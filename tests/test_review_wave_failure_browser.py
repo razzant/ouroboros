@@ -24,7 +24,7 @@ from tests.test_review_record_card_projection import _gate_record
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 STOPPED, EARLIER, ANSWERED = "wave-failure-stopped", "wave-failure-earlier", "wave-failure-answered"
 COMBOS = (("light", 1148, 808), ("dark", 1148, 808), ("light", 390, 844), ("dark", 390, 844))
 SECRET = "sk-ant-api03-" + "Zq9xW2" * 7

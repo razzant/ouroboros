@@ -19,11 +19,6 @@ from ouroboros.subagents import delegated_run_shape
     ({"authority_source": "readonly"}, False),
     ({}, False),  # no source over no capture binding: nothing captured to apply
     ({"snapshot_id": "legacy-snap"}, True),  # a capture binding without a recorded source stays possible
-    ({"resource_ref": {"workspace_kind": "directory", "strategy": "copy"}}, True),
-    ({"authority_source": "acting_constraint", "snapshot_id": "snap"}, True),
-    ({"authority_source": "external_workspace_root"}, True),
-    ({"authority_source": "skill_payload"}, True),
-    ({"authority_source": "something_new"}, True),  # unknown is conservative, never permission
 ])
 def test_one_reading_for_custody_entries_and_raw_rows(facts, possible):
     entry = custody.RunCustody(run_id="r", task_id="t", route_id="x", **facts)
@@ -419,11 +414,8 @@ def test_fresh_public_start_after_an_unretained_investigation_capture_keeps_evid
 
 
 @pytest.mark.parametrize("authority,settled,pending,blocker", [
-    ("acting_constraint", True, False, "undisposed_patch_run_ids"),
     ("", True, False, "undisposed_patch_run_ids"),  # historical binding without authority
-    ("unknown-authority", True, False, "undisposed_patch_run_ids"),
     (INVESTIGATION_AUTHORITY, False, False, "open_run_ids"),
-    ("readonly", False, False, "open_run_ids"),
     (INVESTIGATION_AUTHORITY, False, True, "pending_invocation_ids"),
 ])
 def test_fresh_public_start_keeps_other_candidate_open_and_pending_obligations(

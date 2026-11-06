@@ -57,7 +57,6 @@ def _record(launcher, data, proc, **fingerprint_changes):
     return path
 
 
-@pytest.mark.serial
 def test_a_wrong_birth_is_another_process_and_is_never_signalled(launcher_root, sentinel):
     launcher, data = launcher_root
     path = _record(launcher, data, sentinel, start_time="Thu Jan  1 00:00:00 1970", start_time_boot="1.0")
@@ -68,7 +67,6 @@ def test_a_wrong_birth_is_another_process_and_is_never_signalled(launcher_root, 
     assert not path.exists(), "a refuted record retires"
 
 
-@pytest.mark.serial
 def test_an_unmeasurable_identity_keeps_the_record_and_blocks(launcher_root, sentinel, monkeypatch):
     from ouroboros import process_custody
 
@@ -80,7 +78,6 @@ def test_an_unmeasurable_identity_keeps_the_record_and_blocks(launcher_root, sen
     assert sentinel.poll() is None and path.exists()
 
 
-@pytest.mark.serial
 def test_a_proven_predecessor_is_stopped_and_its_record_retired(launcher_root, sentinel):
     launcher, data = launcher_root
     path = _record(launcher, data, sentinel)
@@ -90,7 +87,6 @@ def test_a_proven_predecessor_is_stopped_and_its_record_retired(launcher_root, s
     assert not path.exists()
 
 
-@pytest.mark.serial
 def test_an_unconfirmed_stop_keeps_the_record_and_the_next_generation_waits(launcher_root, sentinel, monkeypatch):
     launcher, data = launcher_root
     path = _record(launcher, data, sentinel)
@@ -103,7 +99,6 @@ def test_an_unconfirmed_stop_keeps_the_record_and_the_next_generation_waits(laun
     assert path.exists() and sentinel.poll() is None
 
 
-@pytest.mark.serial
 def test_a_reaped_roots_former_group_is_reported_and_never_signalled(launcher_root):
     """Both callers reap the child first; after that its PID and group id are names a later
     process may hold, so a group that still has members proves nothing and is not signalled."""
@@ -161,7 +156,6 @@ def _child(seconds="120"):
     return subprocess.Popen([sys.executable, "-c", f"import time; time.sleep({seconds})"], start_new_session=True)
 
 
-@pytest.mark.serial
 def test_readiness_is_the_endpoint_the_child_published(launcher_root):
     from ouroboros.server_process import record_service_binding
 

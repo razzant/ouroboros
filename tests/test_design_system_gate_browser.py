@@ -16,7 +16,7 @@ import pytest
 from tests import test_subscription_setup_browser as setup_browser
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 WEB = Path(__file__).resolve().parents[1] / 'web'
 VIEWPORTS = [
     (360, 844, False), (390, 844, False), (390, 780, True),

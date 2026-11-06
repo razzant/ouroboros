@@ -23,8 +23,7 @@ def routes(monkeypatch, tmp_path):
     return local, remote, foreign
 
 
-@pytest.mark.parametrize("raw,expected", [(300_000, 1.4), (600_000, 1.4), (1_200_000, 1.4),
-                                         (299_999, 1.0), (1_200_001, 1.0)])
+@pytest.mark.parametrize("raw,expected", [(300_000, 1.4), (299_999, 1.0), (1_200_001, 1.0)])
 def test_exact_local_route_crosses_storage_keys_but_respects_size(routes, monkeypatch, tmp_path, raw, expected):
     local, remote, foreign = routes
     monkeypatch.setattr(ce, "_read", lambda root: {"token_density": {

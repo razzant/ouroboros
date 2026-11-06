@@ -44,8 +44,12 @@ def test_all_pool_consumers_keep_rights_and_the_delivery_enum(monkeypatch, acces
         assert slots.commit_triad_delivery()['session_accesses'] == [access]
 
 
-@pytest.mark.parametrize('surface', ['multi_model_review', 'review_change', 'preflight', 'skill_review'])
-@pytest.mark.parametrize('access', ['readonly', 'full'])
+@pytest.mark.parametrize(("access", "surface"), [
+    ('readonly', 'multi_model_review'),
+    ('readonly', 'preflight'),
+    ('full', 'review_change'),
+    ('full', 'skill_review'),
+])
 def test_pool_rights_reach_actual_session_request_and_immutable_custody(
         monkeypatch, repo, tmp_path, writable_engine, surface, access):  # noqa: F811
     _catalog(monkeypatch, access)

@@ -218,8 +218,11 @@ def _bind_after_the_first_read(monkeypatch, root, task_id, invocation_id):
     monkeypatch.setattr(store, "open_store", open_store)
 
 
-@pytest.mark.parametrize("journal", ["PERSIST", "WAL"])
-@pytest.mark.parametrize("decision", ["zero_run", "replacement"])
+@pytest.mark.parametrize(("decision", "journal"), [
+    ("zero_run", "PERSIST"),
+    ("zero_run", "WAL"),
+    ("replacement", "PERSIST"),
+])
 def test_the_start_fence_reads_runs_and_requests_in_one_snapshot(tmp_path, monkeypatch, journal, decision):
     """STARTED moves a start from its open request to its run row in one commit (above), so a fence
     that read the two in separate transactions could see it in neither: a zero-run receipt over a

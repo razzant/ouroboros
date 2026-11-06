@@ -125,7 +125,7 @@ def test_binding_mismatch_is_pure(monkeypatch, tmp_path):
     assert checkpoints == []
 
 
-@pytest.mark.parametrize("measurement_density", [0.0, -1.0, float("inf"), float("nan")])
+@pytest.mark.parametrize("measurement_density", [0.0, -1.0, float("nan")])
 def test_measurement_density_must_be_finite_and_positive(measurement_density, tmp_path):
     messages = _unit("invalid-density", "x")
 

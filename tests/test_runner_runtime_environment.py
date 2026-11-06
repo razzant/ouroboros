@@ -16,7 +16,6 @@ from tests.test_preflight_node import requires_node
 from tests.test_preflight_receipts import _git, _tiny_repo
 from tests.test_run_tests_script import run_tests as run_tests
 
-pytestmark = pytest.mark.serial
 REPO = Path(__file__).resolve().parents[1]
 SHORT_TEMP = pytest.mark.skipif(sys.platform != "darwin" and not sys.platform.startswith("linux"),
                                 reason="the short AF_UNIX temp-root default is macOS and Linux")
@@ -130,6 +129,20 @@ if __name__ == "__main__":  # a spawned manager child re-imports this file
         shutil.rmtree(scratch, ignore_errors=True)
 
 
+def test_a_nested_gate_lives_under_its_owner_and_a_top_level_gate_keeps_the_default_parent(tmp_path, monkeypatch):
+    owner = (tmp_path / "owner").resolve()
+    owner.mkdir()
+    monkeypatch.setenv("OUROBOROS_TEST_TEMP_ROOT", str(owner))
+    nested = test_environment.gate_root()
+    assert nested.parent == owner and (nested / test_environment.SCRATCH_MARKER).is_file(), "its owner's release takes it"
+    monkeypatch.delenv("OUROBOROS_TEST_TEMP_ROOT")
+    parent = (tmp_path / "default").resolve()
+    parent.mkdir()
+    monkeypatch.setattr(test_environment, "default_temp_parent", lambda: parent)
+    top = test_environment.gate_root()
+    assert top.parent == parent and top.name.startswith("obs-"), "a record of a kept root needs this name"
+
+
 def test_fingerprint_environment_projection_creates_no_directories(tmp_path):
     root = tmp_path / "not-created"
     env = preflight_runner._preflight_env(root, root / "repo", create=False)
@@ -211,7 +224,8 @@ def test_a_gate_rooted_in_the_inherited_long_temp_cannot_hold_its_nested_manager
     for key in ("TMPDIR", "TEMP", "TMP"):
         monkeypatch.setenv(key, str(ambient))
     monkeypatch.setattr(tempfile, "tempdir", str(ambient))
-    monkeypatch.setattr(preflight_runner, "default_temp_parent", lambda: Path(tempfile.gettempdir()))
+    monkeypatch.delenv("OUROBOROS_TEST_TEMP_ROOT", raising=False)  # a top-level gate takes the default parent
+    monkeypatch.setattr(test_environment, "default_temp_parent", lambda: Path(tempfile.gettempdir()))
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TEST_WORKERS", "2")
     monkeypatch.setenv("OURO_TEST_WORKER_BUDGET", "2")
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_SERIAL", raising=False)

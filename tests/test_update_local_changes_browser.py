@@ -32,7 +32,6 @@ STATES = {
 }
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_update_pill_and_panel_name_local_content_not_commit_counts(direct_server_with_data, engine):

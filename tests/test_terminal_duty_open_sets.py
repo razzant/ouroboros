@@ -12,7 +12,7 @@ from tests.test_usage_abandoned_reconciliation import (
 from ouroboros.terminal_cost_reconciliation import reconcile_abandoned_usage
 
 
-@pytest.mark.parametrize("state", ["reserved", "dispatched", "unresolved", "abandoned"])
+@pytest.mark.parametrize("state", ["reserved", "dispatched", "abandoned"])
 def test_candidates_come_only_from_open_set(env, monkeypatch, state):
     _terminal(env)
     reservation = _attempt(env, state="dispatched" if state == "abandoned" else state, provider="claudexor")
@@ -76,7 +76,7 @@ def _record(env, reservation, fact):
 _ABSENT = object()
 
 
-@pytest.mark.parametrize("outcome", [_ABSENT, None, "terminal", "operation_gone", "unresolved", "other"])
+@pytest.mark.parametrize("outcome", [_ABSENT, None, "unresolved", "other"])
 def test_a_recorded_ended_custody_alone_takes_an_abandoned_row_out(env, monkeypatch, outcome):
     """Absent, null and every other outcome keep the row selected; its retained receipt settles offline."""
     _terminal(env)

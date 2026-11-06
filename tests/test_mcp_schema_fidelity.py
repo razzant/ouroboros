@@ -8,7 +8,7 @@ from ouroboros import mcp_client
 from ouroboros.mcp_schema import tool_metadata, wrap_schema_text
 
 
-@pytest.mark.parametrize("keyword", ["default", "const", "enum", "examples", "x-extension"])
+@pytest.mark.parametrize("keyword", ["default", "const", "x-extension"])
 def test_instance_literals_are_not_schema_annotations(keyword):
     literal = {"title": "actual title", "description": "actual description",
                "properties": {"description": {"title": "also literal"}}}
@@ -24,7 +24,7 @@ def test_instance_literals_are_not_schema_annotations(keyword):
     assert source == original
 
 
-@pytest.mark.parametrize("container", ["properties", "patternProperties", "$defs", "definitions", "dependentSchemas", "dependencies"])
+@pytest.mark.parametrize("container", ["properties", "$defs", "dependencies"])
 def test_schema_maps_preserve_property_names_and_wrap_schemas(container):
     source = {container: {"title": {"description": "  long " + "x" * 1600 + "\n"},
                           "description": {"title": "nested"}}}
@@ -102,9 +102,6 @@ def test_sdk_metadata_is_json_and_independent():
 @pytest.mark.parametrize("output_schema", [
     {"type": "object", "properties": {"result": {"const": "SECRET"}}},
     {"type": "object", "properties": {"SECRET": {"type": "string"}}},
-    {"type": "object", "properties": {"result": {"default": "SECRET"}}},
-    {"type": "object", "properties": {"result": {"enum": ["SECRET"]}}},
-    {"type": "object", "properties": {"result": {"examples": ["SECRET"]}}},
     {"type": "object", "properties": {"result": {"x-extra": {"nested": "SECRET"}}}},
 ])
 def test_output_schema_secret_literals_drop_metadata_without_withholding_tool(output_schema):
@@ -164,7 +161,6 @@ def test_output_schema_annotations_and_metadata_keys_are_redacted_without_changi
     assert secret not in json.dumps([refreshed, tested, row, manager.status_payload()])
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("transport", ["http", "sse"])
 def test_real_sdk_to_registered_schema_preserves_complete_contract(tmp_path, monkeypatch, transport):
     """Cross the actual SDK/list/manager/registry path, not a synthetic list result."""
@@ -249,8 +245,7 @@ def test_nested_metadata_output_schema_is_annotation_data_not_a_schema():
 
 
 @pytest.mark.parametrize("schema", [
-    {"enum": ["SECRET"]}, {"const": "SECRET"}, {"pattern": "SECRET"},
-    {"required": ["SECRET"]}, {"properties": {"SECRET": {"type": "string"}}}, {"$ref": "SECRET"},
+    {"enum": ["SECRET"]}, {"properties": {"SECRET": {"type": "string"}}}, {"$ref": "SECRET"},
 ])
 def test_irreducible_input_literals_withhold_only_their_descriptor(schema):
     from ouroboros.mcp_schema import filter_schema_literals

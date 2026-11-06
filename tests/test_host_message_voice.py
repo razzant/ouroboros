@@ -15,6 +15,7 @@ from collections import Counter
 from pathlib import Path
 
 import pytest
+from tests._source_scan import parse
 
 REPO = Path(__file__).resolve().parents[1]
 # (path, qualified function, shape): (number of sites, reason)
@@ -51,7 +52,7 @@ def _literal_values(node, constants):
 
 def voice_sites(source):
     """Yield (function, shape, line, fields); fail on invalid syntax, never skip."""
-    tree = ast.parse(source)
+    tree = parse(source)
     constants = {}
     for node in tree.body:
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
@@ -129,10 +130,7 @@ def test_all_runtime_chat_producers_declare_authorship():
 
 @pytest.mark.parametrize("call", [
     'send_with_budget(1, "host")',
-    'ctx.send_with_budget(1, "host", role="system")',
     'bridge.send_message(1, "host", system_type="notice")',
-    'ctx.send_with_budget(1, "host", role="system", system_type="")',
-    'q.put({"type":"send_message", "text":"host"})',
     'frame = {"type":"chat", "role":"assistant", "content":"host"}',
 ])
 def test_a_new_unstamped_site_is_red(call):

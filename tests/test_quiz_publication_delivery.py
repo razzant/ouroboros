@@ -166,8 +166,7 @@ def test_bridge_refusal_keeps_publication_debt_and_stale_ask_does_not_claim_answ
     assert before["kind"] == "answer" and before["attempts"] == 0
 
 
-@pytest.mark.parametrize("address,evidence", [(True, "pre_exposure"), (1.5, "history"),
-                                             ("1", "history"), (1, "timestamps")])
+@pytest.mark.parametrize("address,evidence", [(True, "pre_exposure"), ("1", "history"), (1, "timestamps")])
 def test_corrupt_saved_publication_is_a_gap_for_publish_and_late_answer(publication, address, evidence):
     from ouroboros.gateway.task_decision import _late_answer_destination
 

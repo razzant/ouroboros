@@ -251,8 +251,10 @@ def test_a_library_client_without_its_http_clients_is_reported_and_a_stand_in_is
     assert "exposes 0 of 2 HTTP clients" in caplog.records[-1].getMessage()
 
 
-@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
-@pytest.mark.parametrize("override", [33.0, None], ids=["override", "client-default"])
+@pytest.mark.parametrize(("override", "asynchronous"), [
+    pytest.param(33.0, False, id='override-sync'),
+    pytest.param(None, True, id='client-default-async'),
+])
 def test_local_send_narrows_its_timeout_to_the_window_left_after_preparation(env, monkeypatch, asynchronous,
                                                                             override):
     """The override, else the client's own phases, never a wider default (connect stays 5 s)."""

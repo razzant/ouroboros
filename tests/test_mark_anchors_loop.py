@@ -29,7 +29,6 @@ from tests.test_delegated_run_ack_consumers import (  # noqa: F401  (autouse fix
     no_provider,
 )
 
-pytestmark = pytest.mark.serial
 
 
 def _mark_delegate_wait(ctx):

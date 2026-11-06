@@ -109,7 +109,6 @@ def stub_sentry(monkeypatch):
     return calls
 
 
-@pytest.mark.serial
 def test_the_error_tracker_loads_in_process_with_a_safe_sdk(tmp_path, monkeypatch, stub_sentry):
     from ouroboros import extension_loader
     from ouroboros.contracts.skill_manifest import parse_skill_manifest_text

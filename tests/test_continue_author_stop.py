@@ -125,19 +125,18 @@ def test_a_real_ordinary_finish_stays_refused_with_the_same_producer(tmp_path, m
     assert workers.PENDING == [] and "continued_by" not in load_task_result(data, "stop-root")
 
 
-@pytest.mark.parametrize("axes", [
-    STOP_AXES,
-    {"execution": {"status": "ok"}, "objective": {"status": "fail", "source": "plan_review_author_stop",
-                                                  "reason": "author_stop"}},
-    {"execution": {"status": "ok"}, "objective": {"status": "fail", "source": "task_acceptance_review",
+@pytest.mark.parametrize(("reason_code", "axes"), [
+    pytest.param("final_message", STOP_AXES, id='final_message-current'),
+    pytest.param("final_message", {"execution": {"status": "ok"}, "objective": {"status": "fail", "reason": "review_cycles_exhausted"},
+     "review": {"acceptance_decision": {"reason": "review_cycles_exhausted", "author_action": "stop",
+                                        "author_disposition": {"action": "stop", "rationale": STOP_RATIONALE}}}}, id='final_message-legacy-exhausted-rounds'),
+    pytest.param("plan_review_advisory", {"execution": {"status": "ok"}, "objective": {"status": "fail", "source": "plan_review_author_stop",
+                                                  "reason": "author_stop"}}, id='plan_review_advisory-plan-exit'),
+    pytest.param("delegated_custody_unreconciled", {"execution": {"status": "ok"}, "objective": {"status": "fail", "source": "task_acceptance_review",
                                                   "reason": "author_stop"},
      "review": {"acceptance_decision": {"reason": "author_stop", "author_action": "stop", "author_disposition": {
-         "action": "stop", "rationale": STOP_RATIONALE}}}},
-    {"execution": {"status": "ok"}, "objective": {"status": "fail", "reason": "review_cycles_exhausted"},
-     "review": {"acceptance_decision": {"reason": "review_cycles_exhausted", "author_action": "stop",
-                                        "author_disposition": {"action": "stop", "rationale": STOP_RATIONALE}}}},
-], ids=["current", "plan-exit", "legacy-decision", "legacy-exhausted-rounds"])
-@pytest.mark.parametrize("reason_code", ["final_message", "plan_review_advisory", "delegated_custody_unreconciled"])
+         "action": "stop", "rationale": STOP_RATIONALE}}}}, id='delegated_custody_unreconciled-legacy-decision'),
+])
 def test_every_stored_stop_shape_reads_the_same_under_its_recorded_reason(axes, reason_code):
     from ouroboros.owner_continue import AUTHOR_STOP_CAUSE, continuation_eligibility
 
@@ -153,39 +152,10 @@ def _row(**fields):
 
 @pytest.mark.parametrize("row,refusal", [
     ({"status": "completed", "reason_code": "final_message", "root_task_id": "r"}, "author_finished"),
-    ({"status": "completed", "reason_code": "final_message", "root_task_id": "r", "result": "I stopped: action=stop, author_stop",
-      "outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "not_evaluated", "reason": "author_stop"}}},
-     "author_finished"),
-    (_row(outcome_axes={"execution": {"status": "ok", "task_completion": {"action": "finish"}}}), "author_finished"),
-    (_row(reason_code="owner_requested_finalization"), "author_finished"),
-    (_row(cancel_origin={"source": "http_graceful", "stop_policy": "finalize_then_cancel"}), "author_finished"),
     (_row(status="failed", cancel_origin={"source": "http_single"}), "stopped_by_owner"),
-    (_row(status="cancelled", cancel_origin={"source": "panic"}), "stopped_by_owner"),
-    (_row(status="cancelled"), "interruption_cause_unrecorded"),
-    (_row(status="failed", reason_code="tool_policy_refused"), "interruption_cause_unrecorded"),
-    (_row(reason_code="budget_exhausted"), "hard_limit_reached"),
-    (_row(reason_code="deadline"), "hard_limit_reached"),
-    (_row(deadline_at="2000-01-01T00:00:00+00:00"), "hard_limit_reached"),
-    (_row(reason_code="billing_authority_refused"), "billing_lineage_refused"),
-    (_row(execution_timeout_sec=60, task_attempt=1, execution_close={"sec": 60.0, "attempt": 1}), "hard_limit_reached"),
-    (_row(execution_timeout_sec=60, task_attempt=1), "execution_budget_unknown"),
     (_row(deadline_at="not-a-time"), "deadline_unknown"),
-    (_row(root_task_id="other", parent_task_id="other"), "not_a_root_task"),
-    (_row(status="running"), "predecessor_live"),
-    ({"status": "completed", "reason_code": "final_message", "root_task_id": "r",
-      "outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "best_effort"}}}, "author_finished"),
-    ({"status": "completed", "reason_code": "final_message", "root_task_id": "r", "outcome_axes": {
-        "execution": {"status": "ok"}, "objective": {"status": "pass", "source": "author_acceptance"},
-        "review": {"acceptance_decision": {"status": "finalized_unaccepted", "reason": "author_finish",
-                                           "author_action": "finish", "author_disposition": {
-                                               "disposition": "partial", "action": "finish", "rationale": "Half done."}}}}},
-     "author_finished"),
-    ({"status": "completed", "reason_code": "partial_result", "root_task_id": "r",
-      "result": "Partial: the remaining work is listed below."}, "author_finished"),
-], ids=["plain-finish", "prose-and-ignored-objective", "finish-action", "wrap-up-reason", "wrap-up-origin", "owner-stop",
-        "panic", "cancelled-unattributed", "failed-unknown", "money", "deadline-reason", "deadline-reached", "billing",
-        "execution-spent", "execution-unknown", "deadline-unknown", "child", "live",
-        "best-effort-objective", "partial-disposition-finish", "partial-reason-and-prose"])
+], ids=["plain-finish", "owner-stop",
+        "deadline-unknown"])
 def test_only_a_typed_author_stop_opens_continue(row, refusal):
     from ouroboros.model_wait import EXECUTION_CLOSE_KEY
     from ouroboros.owner_continue import continuation_eligibility

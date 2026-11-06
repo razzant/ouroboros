@@ -33,7 +33,7 @@ from tests.test_ui_smoke_playwright import (
 from ouroboros.test_environment import isolated_environment, owned_process_temp
 from ouroboros.test_evidence import keep_startup_log
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 # No hub, no network: the built-in source alone, and the bundled starter installed off (#1995).
 OFFLINE = {

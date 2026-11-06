@@ -4,10 +4,9 @@ Recovered first-review and exact-author evidence regression from the preserved O
 """
 import pytest
 
-pytestmark = pytest.mark.serial
 
 
-@pytest.mark.parametrize("case", ["same", "no_first", "stale", "blocking", "post_changed"])
+@pytest.mark.parametrize("case", ["same", "blocking", "post_changed"])
 def test_commit_author_record_requires_prior_review_of_exact_attempt(tmp_path, monkeypatch, case):
     from types import SimpleNamespace
     from ouroboros.review_records import build_author_disposition

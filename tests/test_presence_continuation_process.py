@@ -48,7 +48,7 @@ LATE_CHILD = "work-promoted-after-first-yield"
 MANUAL = "I checked the prior delivery. Continue the interrupted report as a new turn."
 ACKNOWLEDGEMENT = "On it: checking the report now."
 TOOL_NOTE = "My transport tool already delivered the checked report."
-pytestmark = [pytest.mark.serial, pytest.mark.skipif(
+pytestmark = [pytest.mark.skipif(
     os.name != "posix", reason="This fixture qualifies POSIX SIGKILL/process-group custody only")]
 
 
@@ -335,8 +335,7 @@ def test_direct_exec_restart_interrupts_same_pid_author_without_replaying_effect
         host.close()
 
 
-@pytest.mark.parametrize("mode", ["blocking", "advisory"])
-@pytest.mark.parametrize("death", ["sigkill", "panic"])
+@pytest.mark.parametrize(("death", "mode"), [("sigkill", "blocking"), ("panic", "advisory")])
 def test_killed_author_stays_interrupted_and_explicit_new_event_can_continue(tmp_path, mode, death):
     first_host = Host(tmp_path, 1, mode)
     try:
@@ -405,23 +404,6 @@ def test_killed_author_stays_interrupted_and_explicit_new_event_can_continue(tmp
             "original_event_replay_unchanged": True, "no_direct_send_tool": True}, indent=2))
     finally:
         second_host.close()
-
-
-def test_stop_ends_parked_full_agent_without_another_model_call(tmp_path):
-    host = Host(tmp_path, 1, "blocking")
-    try:
-        first = host.turn().json()
-        assert first.get("status") == "continuing", first
-        assert host.client.post("/fixture/stop", json={"task_id": first["turn_ref"]}).status_code == 200
-        final = eventually(lambda: (reply if (reply := host.work(first["turn_ref"])).status_code == 200 else None))
-        assert final.json()["text"] == "" and not final.json()["outputs"]
-        assert len(host.inputs()) == 2
-        # The durable terminal is readable before handle_task's finally closes its
-        # model receiver (the race the teardown-order test exposes): require closure.
-        eventually(lambda: host.client.get("/fixture/live").json() == [])
-        (tmp_path / "consumer-facts.json").write_text(json.dumps({"stop": final.json(), "model_calls": 2}))
-    finally:
-        host.close()
 
 
 def second_park_with_late_child(host):

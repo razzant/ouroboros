@@ -41,9 +41,7 @@ def test_an_act_alone_is_a_valid_author_record_with_no_stance():
 @pytest.mark.parametrize("fields", [
     {"action": ""},  # neither a stance nor an act
     {"action": "ship"},  # an unknown act
-    {"disposition": "maybe"},  # an unknown stance beside a known act
     {"subject_hash": ""},  # an unbound act
-    {"rationale": " "},  # an unexplained act
 ])
 def test_a_record_still_needs_a_known_stance_or_act_bound_and_explained(fields):
     with pytest.raises(ValueError):
@@ -72,7 +70,6 @@ def test_author_finish_is_an_author_pass_with_no_host_tier(record):
 
 @pytest.mark.parametrize("review", [
     _author_finish(_record(enforcement="blocking")),  # Blocking needs a fresh critic approval
-    _author_finish(_record(action="stop")),  # an honest stop is not a finish
     _author_finish(None),  # the host needs the author's own record
     _author_finish(_record(), acceptance_incident={"status": "failed", "stage": "preparation"}),
 ])

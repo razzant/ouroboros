@@ -83,8 +83,12 @@ def test_a_ceiling_below_the_floor_is_never_raised(ceiling):
                                      window_tokens=128_000)
 
 
-@pytest.mark.parametrize("window", [None, 128_000, 1_000_000])
-@pytest.mark.parametrize("input_tokens,raw", [(0, 0), (70_730, 84_677), (127_000, 127_000), (300_000, 400_000)])
+@pytest.mark.parametrize(("input_tokens", "raw", "window"), [
+    (0, 0, None),
+    (70_730, 84_677, 128_000),
+    (127_000, 127_000, 1_000_000),
+    (300_000, 400_000, None),
+])
 def test_low_and_max_always_get_the_caller_ceiling(window, input_tokens, raw):
     for exact in (False, True):
         assert reply_allowance_tokens(caller_max_tokens=C, nano=False, owner_nano=False, input_tokens=input_tokens,

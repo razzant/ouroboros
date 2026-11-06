@@ -28,7 +28,6 @@ from supervisor import cancel_publication as cancel
 from tests._cancel_intents_shared import DeliveryBus
 from supervisor import events_chat_delivery, message_bus, queue, terminal_delivery as delivery, workers
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

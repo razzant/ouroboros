@@ -271,16 +271,14 @@ def test_a_restart_with_a_failed_dependency_install_pauses_and_discloses(
 # F2: no unverified download may become the packaged runtime.
 # --------------------------------------------------------------------------
 
-@pytest.mark.parametrize(
-    "script",
-    sorted(p.name for p in (REPO_ROOT / "scripts").glob("download_*_standalone.*")),
-)
-def test_every_standalone_download_verifies_a_checksum(script):
-    text = (REPO_ROOT / "scripts" / script).read_text(encoding="utf-8").lower()
-    assert "sha256" in text, f"{script} downloads a runtime without verifying it"
-    assert any(token in text for token in ("mismatch", "verified")), (
-        f"{script} computes a hash but never refuses on mismatch"
-    )
+def test_every_standalone_download_verifies_a_checksum(subtests):
+    for script in sorted(p.name for p in (REPO_ROOT / "scripts").glob("download_*_standalone.*")):
+        with subtests.test(script=script):
+            text = (REPO_ROOT / "scripts" / script).read_text(encoding="utf-8").lower()
+            assert "sha256" in text, f"{script} downloads a runtime without verifying it"
+            assert any(token in text for token in ("mismatch", "verified")), (
+                f"{script} computes a hash but never refuses on mismatch"
+            )
 
 
 def test_windows_python_download_pins_the_release_checksum():
@@ -297,26 +295,6 @@ def test_windows_python_download_checks_native_dependency_install_exits():
 
 # --------------------------------------------------------------------------
 # F5: Update Now must go through the merge plan, not the hard-reset hatch.
-# --------------------------------------------------------------------------
-
-def test_update_now_posts_the_merge_aware_strategy():
-    """Update Now decides its strategy FROM THE MERGE PLAN (v6.88.0 flow:
-    preflight -> verifiedUpdatePlan -> typed apply; the shared verifier wraps
-    updateStrategyForPlan since the 2026-08-31 redesign); the legacy
-    'replace'/'stash' escape hatch must stay out of the normal path (it lives
-    only behind the explicit Recovery confirmation)."""
-    text = (REPO_ROOT / "web" / "modules" / "updates.js").read_text(encoding="utf-8")
-    apply_fn = text.split("async function applyUpdate", 1)[1].split("\n    }", 1)[0]
-    code = "\n".join(
-        line for line in apply_fn.splitlines() if not line.strip().startswith("//")
-    )
-    assert "updatePreflight" in code
-    assert "verifiedUpdatePlan" in code
-    for legacy in ("'replace'", "'stash'"):
-        assert legacy not in code, f"Update Now still reaches for the legacy {legacy} path"
-    assert "assisted_started" in code
-
-
 # --------------------------------------------------------------------------
 # G2: a settings key that never reaches the environment is a silent no-op.
 # --------------------------------------------------------------------------

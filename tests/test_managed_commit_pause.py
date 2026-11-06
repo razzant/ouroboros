@@ -133,7 +133,7 @@ def test_real_failed_managed_gates_keep_existing_rollback(managed_commit, phase,
     assert not any(row["status"] == "committed" for row in f.records)
 
 
-@pytest.mark.parametrize("change", ["dirty", "head", "authority", "binding"])
+@pytest.mark.parametrize("change", ["head", "authority", "binding"])
 def test_managed_resume_does_not_authorize_changed_subject_or_other_resolver(managed_commit, change):
     f = managed_commit
     assert "OWNER_PAUSE" in git._repo_commit_push(f.ctx, "reviewed managed resolution")

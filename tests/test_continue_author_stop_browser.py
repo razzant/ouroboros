@@ -20,7 +20,7 @@ from tests import test_batch4_owner_controls_browser as b4
 direct_server_with_data = b4.direct_server_with_data
 _keep_checkout_across_restart = b4._keep_checkout_across_restart
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 STOPPED, FINISHED = "b4-echo", "b4-foxtrot"
 RATIONALE = "Not ready: the export endpoint still fails on empty input."

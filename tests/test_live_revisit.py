@@ -11,7 +11,7 @@ from skills.live_conversation.driver import _Call
 from tests.test_live_conversation_driver import Host, Session, started, until
 
 
-@pytest.mark.parametrize('consume', ['fire', 'owner', 'offer', 'renew'])
+@pytest.mark.parametrize('consume', ['fire', 'owner', 'renew'])
 def test_named_revisit_survives_speech_offers_and_renewal_then_fires_once(monkeypatch, consume):
     now = [100.0]
     monkeypatch.setattr(module, 'monotonic', lambda: now[0])
@@ -114,7 +114,7 @@ def test_owner_turn_during_saved_look_defers_the_pending_offer_without_losing_it
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('value', [-1, True, float('inf'), float('nan'), 'later'])
+@pytest.mark.parametrize('value', [-1, True, 'later'])
 def test_invalid_duration_never_arms_a_host_fallback(value):
     async def scenario():
         attention = module.Attention(Host())

@@ -3,7 +3,6 @@ from types import SimpleNamespace
 
 import pytest
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("mode", ["pro", "cyber_pro"])

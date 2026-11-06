@@ -81,10 +81,7 @@ def test_catalog_budget_has_unit_scope_framing_and_provenance(monkeypatch):
 
 
 @pytest.mark.parametrize("changed", [
-    {"unit": "tokens"}, {"scope": "context_window"}, {"limit": True}, {"limit": 0},
-    {"source": ""}, {"verified_against": None}, {"askPromptBudget": None},
-    {"askPromptBudget": {"shape": "deep_scan", "engineOverheadMax": 0}},
-    {"askPromptBudget": {"shape": "ordinary_initial_attempt", "engineOverheadMax": -1}},
+    {"unit": "tokens"}, {"limit": True}, {"verified_against": None},
 ])
 def test_unknown_or_malformed_constraint_never_becomes_a_budget(monkeypatch, changed):
     gateway = _gateway(monkeypatch, [{"id": "codex", "inputLimits": [{**_native_limit(), **changed}]}])

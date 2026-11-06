@@ -47,7 +47,7 @@ from tests.ui_console_errors import PageErrors
 
 direct_server_with_data = smoke.direct_server_with_data
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 ALPHA, BRAVO, CHARLIE = "rw-alpha", "rw-bravo", "rw-charlie"
 TEXT = {

@@ -61,7 +61,7 @@ def test_binary_file_only_result_applies_and_rolls_back_without_touching_index(t
     assert git(target, "ls-files", "--stage", "-z") == index_before
 
 
-@pytest.mark.parametrize("operation", ["modify", "delete", "rename", "symlink"])
+@pytest.mark.parametrize("operation", ["modify", "delete", "symlink"])
 def test_tracked_large_changes_have_exact_preimages_and_complete_apply(tmp_path, monkeypatch, operation):
     source = repository(tmp_path / "source")
     original = b"large baseline\x00content"

@@ -223,6 +223,19 @@ _ACTIVE_LOCAL_KEYS = (
     "USE_LOCAL_MAIN", "USE_LOCAL_LIGHT", "USE_LOCAL_CONSCIOUSNESS", "USE_LOCAL_FALLBACK",
 )
 
+_BUDGET_NOTE = (
+    "Spending limits use known spend only: confirmed and estimated prices count toward the applicable limit; "
+    "known $0 local calls are priced at $0 and do not use the limit. Unpriced calls stay Unknown / unmetered "
+    "and are not counted as $0: they add nothing to known spend, so unpriced spending alone never triggers a limit. "
+    "Open reservations and unresolved charges are not counted as spending. The Total Budget covers all work: once "
+    "known spend reaches it, new paid calls are refused, API calls with an unknown price included, while known $0 "
+    "calls and subscription or local calls on a route that has charged nothing continue. The Per-task Cost Cap "
+    "covers one task's whole tree, subagents included: once that tree's known spend reaches it, every new model call "
+    "of the tree is refused, known $0 and unpriced calls included. A resumable task pauses with its work saved; "
+    "without a continuation it ends budget-exhausted. Calls already in flight settle normally and can overshoot the "
+    "limit. Raising the cap does not resume a paused task; it must be resumed explicitly."
+)
+
 _BUDGET_FIELDS = [
     {
         "stateKey": "totalBudget",
@@ -231,7 +244,9 @@ _BUDGET_FIELDS = [
         "settingsInputId": "s-total-budget",
         "title": "Total budget",
         "label": "Total Budget (USD)",
-        "note": "Global spend budget across the runtime. Keep this editable even after onboarding.",
+        # Owner 2026-10-03 Q4-A / 2026-10-07: the cap is the limit itself,
+        # decided on known spend; no default share of the wallet or margin.
+        "note": _BUDGET_NOTE,
         "default": float(SETTINGS_DEFAULTS["TOTAL_BUDGET"]),
         "min": "0.01",
         "step": "any",
@@ -243,16 +258,7 @@ _BUDGET_FIELDS = [
         "settingsInputId": "s-settings-per-task-cost",
         "title": "Per-task cost cap",
         "label": "Per-task Cost Cap (USD)",
-        # Owner 2026-10-03 Q4-A / 2026-10-07: the cap is the limit itself, decided
-        # on known spend; no default share of the wallet or margin before it.
-        "note": (
-            "Hard cap over one task's WHOLE tree, subagents included: new model calls are "
-            "refused once the tree's known spend (confirmed and estimated) reaches it. A resumable "
-            "task then pauses with its work saved; a run that cannot be resumed ends as "
-            "budget-exhausted instead. Calls already in flight settle normally and can take the "
-            "total past the cap. Reservations and unresolved charges are shown separately, not "
-            "counted as spending. Raising the cap does not resume a paused task."
-        ),
+        "note": _BUDGET_NOTE,
         "default": float(SETTINGS_DEFAULTS.get("OUROBOROS_PER_TASK_COST_USD", 50.0)),
         "min": "0.01",
         "step": "any",

@@ -136,7 +136,6 @@ def test_index_pages_whole_records_with_previews_to_every_name(registry):
     assert not full & set(row)
 
 
-@pytest.mark.serial
 def test_tool_name_preview_counts_omissions_and_name_returns_all(registry, monkeypatch):
     from ouroboros import extension_loader
     _seed(registry, "toolkit")
@@ -151,7 +150,6 @@ def test_tool_name_preview_counts_omissions_and_name_returns_all(registry, monke
     assert "schema" not in json.dumps(named["tool_surfaces"])
 
 
-@pytest.mark.serial
 def test_oversized_metadata_and_tool_names_fit_the_first_record(registry, monkeypatch):
     from ouroboros import extension_loader
 
@@ -420,7 +418,6 @@ def _extension(data, name, plugin="def register(api):\n    pass\n", frontmatter=
     return find_skill(data, name)
 
 
-@pytest.mark.serial
 def test_broken_counts_every_load_error_its_rows_show(registry, worker_extensions, monkeypatch):
     """#600 (owner choice A): broken is the number of finished rows that show a load_error."""
     from ouroboros import extension_health, extension_loader

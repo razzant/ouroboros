@@ -25,6 +25,7 @@ from ouroboros.loop_llm_call import call_llm_with_retry
 from ouroboros.task_pacing import main_loop_wire_options
 
 from tests.test_tree_cost_ceiling import _ctx, _patch_execute_candidate
+from tests._cases import case_folders
 
 _IDENTITY = ("model", "provider", "candidate_raw_sha256", "candidate_raw_size_bytes")
 _MESSAGES = [{"role": "system", "content": "policy"}, {"role": "user", "content": "wrap up"}]
@@ -61,93 +62,98 @@ class _Captured(Exception):
     """Stops the real send once the physical request exists."""
 
 
-@pytest.mark.parametrize("model,env", _ROUTES)
-def test_prospective_wrapup_candidate_is_the_candidate_the_main_loop_sends(monkeypatch, tmp_path, model, env):
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
-    captured = {}
+def test_prospective_wrapup_candidate_is_the_candidate_the_main_loop_sends(subtests, monkeypatch, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for model, env in _ROUTES:
+        tmp_path = next(case_paths)
+        with subtests.test(model=model, env=env), monkeypatch.context() as monkeypatch:
+            for key, value in env.items():
+                monkeypatch.setenv(key, value)
+            captured = {}
 
-    def execute(request, send, before_dispatch):
-        captured["request"] = request
-        raise _Captured()
+            def execute(request, send, before_dispatch):
+                captured["request"] = request
+                raise _Captured()
 
-    _patch_execute_candidate(monkeypatch, llm_module, execute)
-    client = LLMClient(api_key="unused")
-    logs = tmp_path / "logs"
-    logs.mkdir()
-    with usage_accounting.usage_scope(usage_accounting.UsageScope(
-        drive_root=tmp_path, task_id="parity", root_task_id="parity",
-    )):
-        prospective = task_pacing.prospective_wrapup_attempt_request(
-            llm=client, messages=_MESSAGES, model=model, reasoning_effort="high",
-            tools=_TOOLS, cache_affinity=cache_key_for_model(model),
-        )
-        try:
-            call_llm_with_retry(client, _MESSAGES, model, _TOOLS, "high", 1, logs, "parity", 1,
-                                queue.Queue(), {}, initial_messages=_MESSAGES)
-        except _Captured:
-            pass
-    assert "request" in captured, "the real send never reached the physical executor"
-    assert {key: getattr(captured["request"], key) for key in _IDENTITY} == {
-        key: getattr(prospective, key) for key in _IDENTITY}
+            _patch_execute_candidate(monkeypatch, llm_module, execute)
+            client = LLMClient(api_key="unused")
+            logs = tmp_path / "logs"
+            logs.mkdir()
+            with usage_accounting.usage_scope(usage_accounting.UsageScope(
+                drive_root=tmp_path, task_id="parity", root_task_id="parity",
+            )):
+                prospective = task_pacing.prospective_wrapup_attempt_request(
+                    llm=client, messages=_MESSAGES, model=model, reasoning_effort="high",
+                    tools=_TOOLS, cache_affinity=cache_key_for_model(model),
+                )
+                try:
+                    call_llm_with_retry(client, _MESSAGES, model, _TOOLS, "high", 1, logs, "parity", 1,
+                                        queue.Queue(), {}, initial_messages=_MESSAGES)
+                except _Captured:
+                    pass
+            assert "request" in captured, "the real send never reached the physical executor"
+            assert {key: getattr(captured["request"], key) for key in _IDENTITY} == {
+                key: getattr(prospective, key) for key in _IDENTITY}
 
 
-@pytest.mark.parametrize("model,env", _ROUTES)
-def test_the_sealed_boundary_is_one_marker_in_the_priced_copy_and_the_send_alike(monkeypatch, tmp_path, model, env):
+def test_the_sealed_boundary_is_one_marker_in_the_priced_copy_and_the_send_alike(subtests, monkeypatch, tmp_path):
     """A re-seal after this round's facts row puts the boundary on it: the forced final's priced
     copy and the real send render the same marker, and their candidate identity includes it."""
-    from ouroboros.context_budget import bound_host_row
-    from ouroboros.context_fit import seal_task_transcript
-    from ouroboros.loop_messages import CONTEXT_FACTS_NAME
-    from tests.test_message_cache_boundary import _marked_texts
+    case_paths = case_folders(tmp_path)
+    for model, env in _ROUTES:
+        tmp_path = next(case_paths)
+        with subtests.test(model=model, env=env), monkeypatch.context() as monkeypatch:
+            from ouroboros.context_budget import bound_host_row
+            from ouroboros.context_fit import seal_task_transcript
+            from ouroboros.loop_messages import CONTEXT_FACTS_NAME
+            from tests.test_message_cache_boundary import _marked_texts
 
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
-    messages = [*copy.deepcopy(_MESSAGES), {"role": "assistant", "content": "", "tool_calls": [
-        {"id": "probe-1", "type": "function", "function": {"name": "probe", "arguments": "{}"}}]},
-        {"role": "tool", "tool_call_id": "probe-1", "content": "probe output"},
-        bound_host_row(CONTEXT_FACTS_NAME, "[facts] this round")]
-    seal_task_transcript(messages, min_prefix_tokens=0)
-    assert "cache_control" in messages[-1]
-    finalized, captured = [], {}
-    real_finalize = LLMClient._normalize_payload_cache_ttl
+            for key, value in env.items():
+                monkeypatch.setenv(key, value)
+            messages = [*copy.deepcopy(_MESSAGES), {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "probe-1", "type": "function", "function": {"name": "probe", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "probe-1", "content": "probe output"},
+                bound_host_row(CONTEXT_FACTS_NAME, "[facts] this round")]
+            seal_task_transcript(messages, min_prefix_tokens=0)
+            assert "cache_control" in messages[-1]
+            finalized, captured = [], {}
+            real_finalize = LLMClient._normalize_payload_cache_ttl
 
-    def finalize(self, target, payload):
-        applied = real_finalize(self, target, payload)
-        finalized.append(copy.deepcopy(payload))
-        return applied
+            def finalize(self, target, payload):
+                applied = real_finalize(self, target, payload)
+                finalized.append(copy.deepcopy(payload))
+                return applied
 
-    monkeypatch.setattr(LLMClient, "_normalize_payload_cache_ttl", finalize)
+            monkeypatch.setattr(LLMClient, "_normalize_payload_cache_ttl", finalize)
 
-    def execute(request, send, before_dispatch):
-        captured["request"] = request
-        raise _Captured()
+            def execute(request, send, before_dispatch):
+                captured["request"] = request
+                raise _Captured()
 
-    _patch_execute_candidate(monkeypatch, llm_module, execute)
-    client = LLMClient(api_key="unused")
-    logs = tmp_path / "logs"
-    logs.mkdir()
-    with usage_accounting.usage_scope(usage_accounting.UsageScope(
-        drive_root=tmp_path, task_id="parity", root_task_id="parity",
-    )):
-        prospective = task_pacing.prospective_wrapup_attempt_request(
-            llm=client, messages=messages, model=model, reasoning_effort="high",
-            tools=_TOOLS, cache_affinity=cache_key_for_model(model),
-        )
-        try:
-            call_llm_with_retry(client, messages, model, _TOOLS, "high", 1, logs, "parity", 1,
-                                queue.Queue(), {}, initial_messages=messages)
-        except _Captured:
-            pass
-    assert "request" in captured, "the real send never reached the physical executor"
-    assert {key: getattr(captured["request"], key) for key in _IDENTITY} == {
-        key: getattr(prospective, key) for key in _IDENTITY}
-    marked = [] if model.startswith("openai::") else ["[facts] this round"]
-    assert len(finalized) == 2 and [_marked_texts(payload) for payload in finalized] == [marked, marked]
+            _patch_execute_candidate(monkeypatch, llm_module, execute)
+            client = LLMClient(api_key="unused")
+            logs = tmp_path / "logs"
+            logs.mkdir()
+            with usage_accounting.usage_scope(usage_accounting.UsageScope(
+                drive_root=tmp_path, task_id="parity", root_task_id="parity",
+            )):
+                prospective = task_pacing.prospective_wrapup_attempt_request(
+                    llm=client, messages=messages, model=model, reasoning_effort="high",
+                    tools=_TOOLS, cache_affinity=cache_key_for_model(model),
+                )
+                try:
+                    call_llm_with_retry(client, messages, model, _TOOLS, "high", 1, logs, "parity", 1,
+                                        queue.Queue(), {}, initial_messages=messages)
+                except _Captured:
+                    pass
+            assert "request" in captured, "the real send never reached the physical executor"
+            assert {key: getattr(captured["request"], key) for key in _IDENTITY} == {
+                key: getattr(prospective, key) for key in _IDENTITY}
+            marked = [] if model.startswith("openai::") else ["[facts] this round"]
+            assert len(finalized) == 2 and [_marked_texts(payload) for payload in finalized] == [marked, marked]
 
 
-@pytest.mark.parametrize("model,env", _OPENAI_FAMILY_ROUTES)
-def test_declared_system_prefix_split_is_projected_once_inside_the_candidate_builder(monkeypatch, tmp_path, model, env):
+def test_declared_system_prefix_split_is_projected_once_inside_the_candidate_builder(subtests, monkeypatch, tmp_path):
     """The prospective wrap-up candidate and the real send agree on the SPLIT copy, and
     the split happens INSIDE ``_build_remote_kwargs`` (llm_openai_compatible.py, the
     ``openai_family_route`` block before the direct/OpenRouter branch split): the spy sees
@@ -156,57 +162,61 @@ def test_declared_system_prefix_split_is_projected_once_inside_the_candidate_bui
     canonical transcript or ``chat()``) would show an already-split system entering; one
     that ran later (``_finalized_physical_candidate``) would show a whole system leaving;
     removing the block keeps the identity parity but fails every wire-shape assertion."""
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
-    builds, captured = [], {}
-    real_build = LLMClient._build_remote_kwargs
+    case_paths = case_folders(tmp_path)
+    for model, env in _OPENAI_FAMILY_ROUTES:
+        tmp_path = next(case_paths)
+        with subtests.test(model=model, env=env), monkeypatch.context() as monkeypatch:
+            for key, value in env.items():
+                monkeypatch.setenv(key, value)
+            builds, captured = [], {}
+            real_build = LLMClient._build_remote_kwargs
 
-    def spy(self, target, messages, *args, **kwargs):
-        entering = copy.deepcopy(messages)
-        payload = real_build(self, target, messages, *args, **kwargs)
-        builds.append((entering, copy.deepcopy(payload["messages"]), copy.deepcopy(target.get("wire_layout"))))
-        return payload
+            def spy(self, target, messages, *args, **kwargs):
+                entering = copy.deepcopy(messages)
+                payload = real_build(self, target, messages, *args, **kwargs)
+                builds.append((entering, copy.deepcopy(payload["messages"]), copy.deepcopy(target.get("wire_layout"))))
+                return payload
 
-    monkeypatch.setattr(LLMClient, "_build_remote_kwargs", spy)
+            monkeypatch.setattr(LLMClient, "_build_remote_kwargs", spy)
 
-    def execute(request, send, before_dispatch):
-        captured["request"] = request
-        raise _Captured()
+            def execute(request, send, before_dispatch):
+                captured["request"] = request
+                raise _Captured()
 
-    _patch_execute_candidate(monkeypatch, llm_module, execute)
-    client = LLMClient(api_key="unused")
-    logs = tmp_path / "logs"
-    logs.mkdir()
-    canonical = copy.deepcopy(_DECLARED_MESSAGES)
-    with usage_accounting.usage_scope(usage_accounting.UsageScope(
-        drive_root=tmp_path, task_id="parity", root_task_id="parity",
-    )):
-        prospective = task_pacing.prospective_wrapup_attempt_request(
-            llm=client, messages=_DECLARED_MESSAGES, model=model, reasoning_effort="high",
-            tools=_TOOLS, cache_affinity=cache_key_for_model(model),
-        )
-        try:
-            call_llm_with_retry(client, _DECLARED_MESSAGES, model, _TOOLS, "high", 1, logs, "parity", 1,
-                                queue.Queue(), {}, initial_messages=_DECLARED_MESSAGES)
-        except _Captured:
-            pass
-    assert _DECLARED_MESSAGES == canonical, "the canonical transcript is never mutated"
-    assert "request" in captured, "the real send never reached the physical executor"
-    assert {key: getattr(captured["request"], key) for key in _IDENTITY} == {
-        key: getattr(prospective, key) for key in _IDENTITY}
-    assert len(builds) == 2, "exactly one priced build and one sent build"
-    for entering, wire, layout in builds:
-        assert entering == canonical, "the canonical declaration enters the builder unsplit"
-        stable = entering[0]["content"][:-1]
-        assert entering[0][STABLE_PREFIX_BLOCKS_KEY] == len(stable)
-        assert [message["role"] for message in wire] == ["system"] * len(stable) + ["user", "user"]
-        assert [message["content"][0]["text"] for message in wire[:len(stable)]] == [block["text"] for block in stable]
-        assert all(("cache_control" in message["content"][0]) == model.startswith("openai/") for message in wire[:len(stable)])
-        assert wire[-2]["content"] == "[SYSTEM NOTICE]\n" + HOST_CONTEXT_NOTICE_BEFORE_TASK + "\n\nevidence"
-        assert wire[-1] == {"role": "user", "content": "wrap up"}
-        assert all(STABLE_PREFIX_BLOCKS_KEY not in message for message in wire)
-        assert layout == {"system_prefix_split": True, "moved_blocks": 1}
-    assert builds[0][1] == builds[1][1], "the priced copy and the sent copy are one wire"
+            _patch_execute_candidate(monkeypatch, llm_module, execute)
+            client = LLMClient(api_key="unused")
+            logs = tmp_path / "logs"
+            logs.mkdir()
+            canonical = copy.deepcopy(_DECLARED_MESSAGES)
+            with usage_accounting.usage_scope(usage_accounting.UsageScope(
+                drive_root=tmp_path, task_id="parity", root_task_id="parity",
+            )):
+                prospective = task_pacing.prospective_wrapup_attempt_request(
+                    llm=client, messages=_DECLARED_MESSAGES, model=model, reasoning_effort="high",
+                    tools=_TOOLS, cache_affinity=cache_key_for_model(model),
+                )
+                try:
+                    call_llm_with_retry(client, _DECLARED_MESSAGES, model, _TOOLS, "high", 1, logs, "parity", 1,
+                                        queue.Queue(), {}, initial_messages=_DECLARED_MESSAGES)
+                except _Captured:
+                    pass
+            assert _DECLARED_MESSAGES == canonical, "the canonical transcript is never mutated"
+            assert "request" in captured, "the real send never reached the physical executor"
+            assert {key: getattr(captured["request"], key) for key in _IDENTITY} == {
+                key: getattr(prospective, key) for key in _IDENTITY}
+            assert len(builds) == 2, "exactly one priced build and one sent build"
+            for entering, wire, layout in builds:
+                assert entering == canonical, "the canonical declaration enters the builder unsplit"
+                stable = entering[0]["content"][:-1]
+                assert entering[0][STABLE_PREFIX_BLOCKS_KEY] == len(stable)
+                assert [message["role"] for message in wire] == ["system"] * len(stable) + ["user", "user"]
+                assert [message["content"][0]["text"] for message in wire[:len(stable)]] == [block["text"] for block in stable]
+                assert all(("cache_control" in message["content"][0]) == model.startswith("openai/") for message in wire[:len(stable)])
+                assert wire[-2]["content"] == "[SYSTEM NOTICE]\n" + HOST_CONTEXT_NOTICE_BEFORE_TASK + "\n\nevidence"
+                assert wire[-1] == {"role": "user", "content": "wrap up"}
+                assert all(STABLE_PREFIX_BLOCKS_KEY not in message for message in wire)
+                assert layout == {"system_prefix_split": True, "moved_blocks": 1}
+            assert builds[0][1] == builds[1][1], "the priced copy and the sent copy are one wire"
 
 
 def test_every_wire_option_of_the_send_reaches_the_priced_copy():

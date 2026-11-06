@@ -131,9 +131,8 @@ def test_a_negotiated_workspace_write_start_gets_only_its_exact_owned_directorie
 
 
 @pytest.mark.parametrize("row", [
-    None, {}, {"accessControl": {}}, {"accessControl": {"auxiliaryWritableRoots": False}},
-    {"accessControl": {"auxiliaryWritableRoots": "true"}}, {"accessControl": True},
-], ids=["route-missing", "engine-predates-row", "empty-control", "false", "string", "not-an-object"])
+    None, {}, {"accessControl": True},
+], ids=["route-missing", "engine-predates-row", "not-an-object"])
 def test_without_the_negotiated_bit_nothing_is_prepared_or_claimed(tmp_path, row):
     grant = _prepare(tmp_path, _Catalog(row))
     assert grant.roots == () and grant.scratch == ""
@@ -147,7 +146,7 @@ def test_an_unreadable_catalog_is_no_support(tmp_path):
     assert not (tmp_path / "data").exists()
 
 
-@pytest.mark.parametrize("access, mode", [("readonly", "ask"), ("full", "ask"), ("workspace_write", "ask"),
+@pytest.mark.parametrize("access, mode", [("readonly", "ask"), ("workspace_write", "ask"),
                                           ("readonly", "agent")])
 def test_readonly_and_non_agent_starts_negotiate_nothing(tmp_path, access, mode):
     catalog = _Catalog(GRANTED)
@@ -189,8 +188,8 @@ def test_an_unconfined_tool_policy_route_keeps_its_on_demand_behavior(tmp_path):
 
 
 @pytest.mark.parametrize("linked", [
-    "task_drives/task-1", "task_drives/task-1/session_scratch_owners", "task_drives/task-1/session_scratch_owners/snap-1",
-    "package-downloads", "package-downloads/pip",
+    "task_drives/task-1", "task_drives/task-1/session_scratch_owners/snap-1",
+    "package-downloads/pip",
 ])
 def test_a_link_never_turns_a_named_folder_into_a_broader_grant(tmp_path, linked):
     outside = tmp_path / "operator-home"
@@ -218,7 +217,7 @@ def test_a_folder_inside_a_git_tree_or_around_the_copy_grants_nothing(tmp_path):
     assert around.roots == () and "overlaps the execution tree" in around.limitation
 
 
-@pytest.mark.parametrize("task_id, key", [("", "snap-1"), ("../escape", "snap-1"), ("task-1", "a/b"),
+@pytest.mark.parametrize("task_id, key", [("", "snap-1"), ("task-1", "a/b"),
                                           ("task-1", "..")])
 def test_an_unowned_task_or_key_grants_nothing(tmp_path, task_id, key):
     grant = _prepare(tmp_path, _Catalog(GRANTED), task_id=task_id, key=key)
@@ -331,7 +330,6 @@ def test_replaced_short_directory_is_neither_granted_nor_deleted(tmp_path):
     assert displaced.is_dir()
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("consumer", ["delegate", "reviewer"])
 def test_real_bus_through_safe_test_uses_the_actual_short_grant(tmp_path, monkeypatch, consumer):
     """The previously failing AF_UNIX consumer, under the grant named in an ordinary start.

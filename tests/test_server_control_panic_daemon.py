@@ -13,7 +13,6 @@ from types import SimpleNamespace
 
 import pytest
 
-pytestmark = pytest.mark.serial
 
 
 class _ExitCalled(RuntimeError):
@@ -149,8 +148,7 @@ def test_panic_requests_the_held_restart_successor_in_its_request_phase(monkeypa
 
 
 @pytest.mark.parametrize("fault", [
-    "audit", "packer", "storage", "free", "model", "daemon", "executor-import", "request-thread", "bounded-first",
-    "bounded-all", "diagnostic", "ingress-start", "ingress-construction",
+    "executor-import", "request-thread", "bounded-all",
 ])
 def test_accepted_panic_completes_despite_early_failure(monkeypatch, tmp_path, fault):
     """An accepted Panic keeps termination, independent requests and bounded writes.

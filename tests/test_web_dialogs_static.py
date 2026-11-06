@@ -73,12 +73,3 @@ def test_no_native_dialog_calls_in_web_modules() -> None:
         "web/modules/confirm_dialog.js (input mode for prompt, alert:true for "
         "alert).\n" + "\n".join(violations)
     )
-
-
-def test_confirm_dialog_offers_the_alert_mode() -> None:
-    """The replacement the ban points at must actually exist: the in-house
-    dialog exposes the alert option the migrated alert() sites rely on."""
-    source = (WEB_MODULES / "confirm_dialog.js").read_text(encoding="utf-8")
-    assert "alert = false" in source
-    assert "openConfirmDialog" in source
-

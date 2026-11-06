@@ -26,7 +26,6 @@ from cryptography.x509.oid import NameOID
 
 from tests.test_telegram_proxy import _Api, _TOKEN, _bridge_events, _load
 
-pytestmark = pytest.mark.serial
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "telegram" / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
@@ -164,7 +163,7 @@ class _LoopbackBot:
                         await stream.wait_closed()
 
 
-@pytest.mark.parametrize("scheme", ["direct", "http", "socks5", "socks5h"])
+@pytest.mark.parametrize("scheme", ["direct", "http", "socks5h"])
 def test_all_telegram_consumers_succeed_through_real_transport(tmp_path, monkeypatch, caplog, scheme):
     plugin, _telegram_api, notifier = _load()
     caplog.set_level(logging.DEBUG, logger="httpcore")

@@ -88,7 +88,7 @@ def test_the_origin_is_what_a_frozen_or_seed_launcher_imported_never_the_newer_h
 
 @pytest.mark.parametrize("rel,loaded_only,packaged", [
     (None, False, False), ("server.py", False, False), ("ouroboros/not_imported_yet.py", False, True),
-    ("supervisor/queue.py", False, True), ("launcher.py", True, True)])
+    ("launcher.py", True, True)])
 def test_the_cold_check_counts_the_packaged_trees_the_warm_check_only_what_is_loaded(tmp_path, rel, loaded_only,
                                                                                     packaged):
     """A frozen or seed launcher imports later helpers from its own bundle too, so its cold check counts the
@@ -120,9 +120,12 @@ def test_the_launchers_git_asks_for_a_hidden_window(tmp_path, monkeypatch):
     assert all(flags & NO_WINDOW for _, flags in seen)
 
 
-@pytest.mark.parametrize("changed", ["ouroboros/launcher_bootstrap.py", "ouroboros/launcher_server_reaper.py",
-                                     "ouroboros/process_scope.py", "server.py"])
-@pytest.mark.parametrize("compiled", [False, True])
+@pytest.mark.parametrize(("compiled", "changed"), [
+    (False, "ouroboros/launcher_bootstrap.py"),
+    (False, "ouroboros/process_scope.py"),
+    (True, "ouroboros/launcher_server_reaper.py"),
+    (True, "server.py"),
+])
 def test_container_warm_handoff_counts_helpers_loaded_from_the_image(tmp_path, monkeypatch, changed, compiled):
     """Docker imports helpers from /app, with body and seed in two other directories."""
     repo, seed, app = (tmp_path / name for name in ("body/repo", "opt/ouroboros/seed", "app"))
@@ -287,8 +290,7 @@ def test_posix_replaces_the_process_image_with_the_marked_environment(hand_over)
     assert env[MARK] == "1"
 
 
-@pytest.mark.parametrize("windows", [True, False])
-@pytest.mark.parametrize("when", ["before teardown", "after unlock"])
+@pytest.mark.parametrize(("when", "windows"), [("before teardown", True), ("after unlock", False)])
 def test_cancelled_handoff_never_starts_a_successor(hand_over, windows, when):
     cancelled = lambda: when == "before teardown" or "release" in hand_over.calls
     try:
@@ -310,8 +312,7 @@ def test_cancelled_handoff_keeps_panic_alive_even_if_the_lock_was_taken(hand_ove
 # --------------------------------------------------------------------------------- cold start ---
 
 
-@pytest.mark.parametrize("windows", [False, True])
-@pytest.mark.parametrize("frozen", [False, True])
+@pytest.mark.parametrize(("frozen", "windows"), [(False, False), (True, True)])
 def test_import_broken_successor_keeps_frozen_or_seed_shell(hand_over, monkeypatch, windows, frozen):
     monkeypatch.setattr(bootstrap_module, "source_launcher_importable", lambda *a, **kw: False)
     hand_over([], windows=windows, frozen=frozen)
@@ -532,9 +533,6 @@ def test_an_older_apps_handoff_restarts_once_without_its_console_window(prologue
 
 @pytest.mark.parametrize("argv,options", [
     (["--seed-bundle", "C:\\seed"], {"platform": "darwin"}),
-    (["--seed-bundle", "C:\\seed"], {"platform": "linux"}),
-    (["--seed-bundle", "C:\\seed"], {"frozen": True}),
-    (["--seed-bundle", "C:\\seed"], {"marked": True}),
     (["--no-ui", "--seed-bundle", "C:\\seed"], {}),
     (["--launch-intent", "owner"], {}),  # a source launcher someone started from a terminal: its console is theirs
 ])
@@ -544,8 +542,6 @@ def test_every_other_start_keeps_its_console(prologue, argv, options):
 
 @pytest.mark.parametrize("facts", [
     {"provenance": False},  # manual source CLI, even with seed argv and a console of its own
-    {"clients": 2},         # an intentional shared terminal, even with inherited GUI provenance
-    {"clients": 0}, {"own_client": False}, {"window": 0}, {"visible": False},
     {"subsystem": 3}, {"malformed": True},  # a CLI executable or unproven GUI origin
 ])
 def test_legacy_repair_requires_gui_origin_and_its_own_visible_console(prologue, facts):

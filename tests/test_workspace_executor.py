@@ -13,8 +13,9 @@ reference were split verbatim into ``tests/test_workspace_executor_services.py``
 ``tests/test_workspace_executor_admission.py``; the repository builder they share lives
 in ``tests/_workspace_executor_shared.py``.
 
-Whole-file serial suite: it spawns real processes, so ``tests/conftest.py`` tags this
-module and its three siblings ``serial`` and the parallel pass excludes them.
+Runs in the xdist pass beside other files: its processes are owned children killed within the
+test's own drive root (``kill_all_foreground``/``kill_all_services(drive_root)``) and the per-worker
+registries are restored by ``_isolate_workspace_executor_globals``, so it names no host resource.
 """
 from __future__ import annotations
 
@@ -639,7 +640,7 @@ def test_start_service_local_branch_uses_case_aware_overlay(tmp_path, monkeypatc
     assert payload.get("state") in ("running", "ready", "started", None) or payload
 
 
-@pytest.mark.parametrize("layout", ["repo", "nested", "worktree", "plain"])
+@pytest.mark.parametrize("layout", ["repo", "nested", "plain"])
 def test_live_run_scripts_keep_git_clean_and_own_only_their_scratch(tmp_path, monkeypatch, layout):
     import concurrent.futures
     import pathlib

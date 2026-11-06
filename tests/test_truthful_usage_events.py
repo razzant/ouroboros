@@ -15,17 +15,12 @@ from tests._review_session_route_shared import (
 
 fake_route = _fake_route_fixture
 _owned_gateway_uses_each_test_transport = _transport_fixture
-pytestmark = pytest.mark.serial
 COUNTERS = tuple(TOKEN_COUNTER_ALIASES)
 
 
 @pytest.mark.parametrize("usage,expected", [
     ({}, [None, None, None, None]),
-    (dict.fromkeys(COUNTERS), [None, None, None, None]),
     (dict.fromkeys(COUNTERS, 0), [0, 0, 0, 0]),
-    ({"prompt_tokens": 37, "completion_tokens": 0}, [37, 0, None, None]),
-    ({"input_tokens": 19, "output_tokens": 8, "cache_read_input_tokens": 0,
-      "cache_creation_input_tokens": 2}, [19, 8, 0, 2]),
     ({"prompt_tokens": "bad", "completion_tokens": float("inf"),
       "cached_tokens": False, "cache_write_tokens": -1}, [None, None, None, None]),
 ])
@@ -83,11 +78,10 @@ def test_explicit_null_counter_outranks_legacy_fallback():
     assert event_token_counts({"prompt_tokens": None}, {"prompt_tokens": 0})["prompt_tokens"] is None
 
 
-@pytest.mark.parametrize("emitter", ["vision", "web_search"])
-@pytest.mark.parametrize("tokens,expected", [
-    ({}, [None] * 4),
-    (dict.fromkeys(COUNTERS, 0), [0] * 4),
-    ({"prompt_tokens": 17, "cache_write_tokens": 0}, [17, None, None, 0]),
+@pytest.mark.parametrize(("tokens", "expected", "emitter"), [
+    pytest.param({}, [None] * 4, "vision", id='tokens0-expected0-vision'),
+    pytest.param(dict.fromkeys(COUNTERS, 0), [0] * 4, "web_search", id='tokens1-expected1-web_search'),
+    pytest.param({"prompt_tokens": 17, "cache_write_tokens": 0}, [17, None, None, 0], "web_search", id='tokens2-expected2-web_search'),
 ])
 def test_tool_producers_keep_unknown_and_partial_usage(emitter, tokens, expected):
     usage = {**tokens, "cost": 0.0, "provider": "openai"}

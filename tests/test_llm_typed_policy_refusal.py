@@ -257,21 +257,22 @@ def test_a_refusal_carrying_a_foreign_code_is_not_treated_as_a_refusal(client):
 # rather than any marker table it happens to consult on the way.
 
 
-@pytest.mark.parametrize("refusal", _REFUSALS, ids=_REFUSAL_IDS)
-def test_the_retry_loop_classifies_a_typed_refusal_as_permanent(refusal):
+def test_the_retry_loop_classifies_a_typed_refusal_as_permanent(subtests):
     """A refused call is a named, non-retryable class.
 
     Its kind is the declared code itself, so `events.jsonl` names the refusal
     instead of laundering it into the catch-all `provider_error`; and
     `retry_same_request` is False, so the loop stops rather than spending its
     whole attempt budget re-running a call no provider ever saw."""
-    classification = classify_llm_exception(refusal)
+    for refusal in _REFUSALS:
+        with subtests.test(refusal=refusal):
+            classification = classify_llm_exception(refusal)
 
-    assert classification.kind == PROVIDER_POLICY_REFUSAL
-    assert classification.retry_same_request is False
-    assert classification.provider_code == PROVIDER_POLICY_REFUSAL
-    # Recovery is not a known instant; nothing here may schedule a wake-up.
-    assert classification.retry_after_sec is None
+            assert classification.kind == PROVIDER_POLICY_REFUSAL
+            assert classification.retry_same_request is False
+            assert classification.provider_code == PROVIDER_POLICY_REFUSAL
+            # Recovery is not a known instant; nothing here may schedule a wake-up.
+            assert classification.retry_after_sec is None
 
 
 def test_the_retry_loop_prefers_the_typed_fact_over_recoverable_prose():

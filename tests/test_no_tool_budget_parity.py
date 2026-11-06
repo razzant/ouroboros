@@ -142,7 +142,6 @@ def test_only_the_unfinished_no_tool_branch_arms_the_budget_tail():
         assert guards, "an arming must sit in a continuing round: unfinished no-tool, or output exhaustion"
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("rail,completed_rounds", [("global", 1), ("soft_land", 1), ("soft_land", 0)])
 def test_eligible_monetary_stops_preserve_exact_continuation(tmp_path, monkeypatch, rail, completed_rounds):
     """A first batch is work; a soft threshold also pauses before any work."""

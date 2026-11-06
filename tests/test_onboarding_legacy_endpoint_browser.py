@@ -18,7 +18,7 @@ from tests.test_ui_smoke_playwright import direct_server_with_data as direct_ser
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
 from tests.ui_console_errors import record_console_errors, record_failed_loads, unexpected_console_errors
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 LEGACY_KEY = "sk-legacy-pair-0123456789"
 EDITED_KEY = "sk-edited-legacy-pair-0123456789"

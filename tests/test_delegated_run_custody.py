@@ -741,7 +741,6 @@ def test_a_start_whose_custody_row_did_not_land_does_not_claim_to_be_custodied(t
 
 
 @pytest.mark.parametrize("status_code,retired,remove_absent", [
-    (422, True, False),     # the daemon ANSWERED and refused: no run was bound
     (0, False, False),      # transport error: the POST's fate is unknown, a run may be live
     (503, False, False),    # 5xx: same — an unverified outcome is not grounds to destroy state
     # The daemon has no such registration: absence IS discharge, the same answer

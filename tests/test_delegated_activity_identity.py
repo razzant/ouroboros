@@ -10,7 +10,6 @@ from ouroboros import delegate_activity
 from ouroboros.delegate_custody import RunCustody
 from tests.test_delegated_activity import Daemon, _agent, _ctx, _gateway, _harness, _observe
 
-pytestmark = pytest.mark.serial
 
 
 def test_producer_fragment_offsets_are_unicode_code_points(tmp_path):

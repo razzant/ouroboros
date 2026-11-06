@@ -343,7 +343,6 @@ def test_warmup_is_one_background_ensure_for_a_provisioned_home_only(restart_roo
     assert "live = not pytest_default_real_data_dir" in lifespan and "warm_daemon=live" in lifespan
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(os.name == "nt", reason="POSIX measured process custody")
 def test_unconfirmed_daemon_stop_leaves_one_daemon_for_the_next_generation(startup, monkeypatch):  # noqa: F811
     """After an unconfirmed stop the re-exec'd generation attaches to the live daemon; no second spawn."""

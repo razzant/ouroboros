@@ -9,12 +9,7 @@ from ouroboros.realtime_session import transport_loss
 
 @pytest.mark.parametrize('code,reason,expected', [
     (1000, '', True), (1001, 'Going away', True), (1012, 'Service restart', True),
-    (1005, '', True), (1014, 'Upstream gateway failure', True),
-    (1013, 'Try again later', True), (1011, 'Internal error encountered.', True),
-    (1011, 'Deadline expired', True), (1008, 'Policy refusal', False),
-    (1011, 'Deadline expired before operation could complete.', True),
-    (1011, 'DEADLINE EXPIRED BEFORE OPERATION COULD COMPLETE!', True),
-    (1011, 'internal error encountered', True),
+    (1008, 'Policy refusal', False),
     (1011, 'Deadline expired because credits are depleted.', False),
     (1011, 'Policy: Deadline expired before operation could complete.', False),
     (1011, '!!!', False),

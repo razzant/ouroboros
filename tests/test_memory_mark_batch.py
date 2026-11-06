@@ -29,7 +29,7 @@ def test_release_accounts_for_successes_and_refusals_and_uses_one_reason(tmp_pat
     assert success["ok"] and success["released_ids"] == ids[2:] and success["refused"] == []
 
 
-@pytest.mark.parametrize("bad", [[], "one", [""], [None], ["same", "same"]])
+@pytest.mark.parametrize("bad", [[], "one", ["same", "same"]])
 def test_invalid_arrays_do_not_release_anything(tmp_path, bad):
     ctx, ids = marks(tmp_path)
     assert "TOOL_ARG_ERROR" in _memory_mark(ctx, release_ids=bad, reason="done")

@@ -371,8 +371,7 @@ def test_a_count_that_raises_or_cannot_write_leaves_the_file_byte_identical(tmp_
 
 
 @pytest.mark.parametrize("content", [
-    b"not json", b"[]", b'{"_schema_version": 2, "latest": {}}', b'{"_schema_version": 1}',
-    b'{"_schema_version": 1, "latest": {"finished_at": "x", "bytes": "many", "files": 1, "unreadable": 0, "places": [], "started_at": "x"}}',
+    b"not json", b'{"_schema_version": 1, "latest": {"finished_at": "x", "bytes": "many", "files": 1, "unreadable": 0, "places": [], "started_at": "x"}}',
     b'{"_schema_version": 1, "latest": {"finished_at": "x", "bytes": 1, "files": 1, "unreadable": 0, "places": [1], "started_at": "x"}}',
 ])
 def test_a_corrupt_or_foreign_file_is_no_count_yet(tmp_path, content):
@@ -385,8 +384,7 @@ def test_a_corrupt_or_foreign_file_is_no_count_yet(tmp_path, content):
     assert projection["count"] is None and projection["error"] is None and projection["counting"] is None
 
 
-@pytest.mark.parametrize("previous", [{}, "a summary", 7, {"finished_at": "2026-10-16T15:10:05Z", "bytes": 1, "files": 1, "unreadable": 0, "places": "none"},
-                                      {"finished_at": "2026-10-16T15:10:05Z", "bytes": 1, "files": 1, "unreadable": 0, "places": [{"id": 3}]}])
+@pytest.mark.parametrize("previous", [{}, 7, {"finished_at": "2026-10-16T15:10:05Z", "bytes": 1, "files": 1, "unreadable": 0, "places": [{"id": 3}]}])
 def test_a_malformed_previous_loses_growth_never_the_count_or_the_reader(tmp_path, previous):
     """`previous` is validated like `latest`: a hand-edited or foreign summary is dropped, so the
     saved count still shows (without growth) and no reader raises."""

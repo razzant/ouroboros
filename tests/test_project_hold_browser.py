@@ -17,7 +17,7 @@ from tests.test_project_admission_refusal_browser import (
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 TASK = "same-id-project-wait"
 WAIT = "Waiting for Project verification"
 

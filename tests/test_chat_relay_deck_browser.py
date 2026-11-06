@@ -23,7 +23,7 @@ from tests._shared import producer_evidence_dir
 from tests.test_chat_history_paging_browser import _FRAMES, _open, _open_project, MAIN
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 QUOTE = "\n".join([
     "Please keep the existing environment and check the dependency versions before changing the setup.",

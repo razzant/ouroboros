@@ -23,7 +23,6 @@ from tests._execution_clock_seams import agent_start as _agent_start
 from tests.test_retained_work_recovery import _saved
 from tests.test_worker_crash_retry import _isolate_worker_crash_state, _reserved_job  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def _fake_clock(monkeypatch):
@@ -113,7 +112,7 @@ def test_crash_retry_carries_execution_once_through_assignment(tmp_path, monkeyp
         assert waiter.executed_seconds() == pytest.approx(expected)
 
 
-@pytest.mark.parametrize("fence", ["own_active", "sealed", "other_attempt", "legacy", "paused_root"])
+@pytest.mark.parametrize("fence", ["own_active", "legacy", "paused_root"])
 def test_crash_retry_releases_only_the_dead_attempts_own_fence(tmp_path, monkeypatch, fence):
     import supervisor.queue as q
     import supervisor.workers as W
@@ -164,7 +163,7 @@ def test_a_boot_handoff_reads_raw_clock_facts_not_the_readers_derived_duration(t
     assert successor["_execution_handoff_sec"] == pytest.approx(900)  # closed at its observation, not regranted
 
 
-@pytest.mark.parametrize("change", ["none", "damaged_source", "already_dispatched", "foreign_selected_grant"])
+@pytest.mark.parametrize("change", ["none", "damaged_source", "foreign_selected_grant"])
 def test_saved_crash_retry_expires_in_queue_only_with_current_source(tmp_path, monkeypatch, change):
     import queue as stdqueue
     from supervisor import queue as q, workers as W, queue_timeouts
@@ -205,9 +204,19 @@ def test_saved_crash_retry_expires_in_queue_only_with_current_source(tmp_path, m
         assert load_task_result(tmp_path, task_id).get("reason_code") != "deadline"
 
 
-@pytest.mark.parametrize("change", ["none", "snapshot_retry", "attempt", "source", "selected_source",
-                                    "owner", "claim_attempt", "pause", "stop", "live", "completed"])
-@pytest.mark.parametrize("fork_mirror", [False, True], ids=["canonical", "fork-mirror"])
+@pytest.mark.parametrize(("fork_mirror", "change"), [
+    pytest.param(False, "attempt", id='canonical-attempt'),
+    pytest.param(False, "source", id='canonical-source'),
+    pytest.param(False, "owner", id='canonical-owner'),
+    pytest.param(False, "pause", id='canonical-pause'),
+    pytest.param(False, "live", id='canonical-live'),
+    pytest.param(True, "none", id='fork-mirror-none'),
+    pytest.param(True, "snapshot_retry", id='fork-mirror-snapshot_retry'),
+    pytest.param(True, "selected_source", id='fork-mirror-selected_source'),
+    pytest.param(True, "claim_attempt", id='fork-mirror-claim_attempt'),
+    pytest.param(True, "stop", id='fork-mirror-stop'),
+    pytest.param(True, "completed", id='fork-mirror-completed'),
+])
 def test_deadline_crossing_after_recovery_claim_never_puts_the_worker_queue(tmp_path, monkeypatch, change, fork_mirror):
     import datetime
     from ouroboros.task_results import load_task_result

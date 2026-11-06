@@ -14,10 +14,16 @@ import httpx
 import pytest
 
 from tests._budget_pause_exact_helpers import _install_queue
+from tests._worlds import clone, world
 from tests.test_continue_successor_context import FIELD, _mutation_evidence
 from tests.test_doc_context import _make_env_and_memory, foreign_tree
 from tests.test_main_authored_context import call
 from tests.test_owner_continue import NONCE, _interrupted
+
+
+@pytest.fixture(scope="module")
+def foreign_world():
+    return world("continue-foreign-tree", lambda root: foreign_tree(root))
 
 
 def _run_refusal(registry, messages, task, monkeypatch):
@@ -69,7 +75,7 @@ def _run_refusal(registry, messages, task, monkeypatch):
 
 @pytest.mark.parametrize("flag", [True, False, None])
 @pytest.mark.parametrize("mode", ["max", "low"])
-def test_continue_brief_survives_overflow_relocation(tmp_path, monkeypatch, flag, mode):
+def test_continue_brief_survives_overflow_relocation(tmp_path, monkeypatch, foreign_world, flag, mode):
     from ouroboros.agent_startup_checks import validate_task_authority_sources
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.context import build_llm_messages
@@ -88,7 +94,7 @@ def test_continue_brief_survives_overflow_relocation(tmp_path, monkeypatch, flag
     monkeypatch.setattr("ouroboros.context.resolve_context_fit_route", lambda *_a, **_kw: (
         {"model": "openai/test-model", "provider": "openai"},
         SimpleNamespace(route_fp="fixture", status="asserted", stale=False, window_tokens=1_000_000)))
-    workspace = foreign_tree(tmp_path / "working-copy")  # proven foreign: only the flag restores the handbook
+    workspace = clone(foreign_world, tmp_path / "working-copy")  # proven foreign: only the flag restores the handbook
     _interrupted(env.drive_root, workspace_root=str(workspace), workspace_mode="external",
         task_contract={"context": "PREDECESSOR-CONTRACT-SENTINEL", **({FIELD: flag} if flag is not None else {})},
         mutation_evidence=_mutation_evidence())

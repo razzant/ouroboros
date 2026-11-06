@@ -10,7 +10,6 @@ import pytest
 from ouroboros.gateway import control, logs, schedules
 
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("surface", ["updates", "logs", "schedules"])

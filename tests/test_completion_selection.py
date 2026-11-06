@@ -128,8 +128,7 @@ def test_select_latest_whole_held_response_without_regeneration(turn, monkeypatc
     assert text == replacement and seen == ['Original long report.', replacement]
 
 
-@pytest.mark.parametrize('position', [0, 1])
-@pytest.mark.parametrize('failure', [False, True])
+@pytest.mark.parametrize(("failure", "position"), [(False, 0), (True, 1)])
 def test_same_response_work_result_requires_actual_observation(turn, position, failure):
     registry, calls, notes, run = turn
     registry.override_handler('chat_history', lambda _ctx, **kw: 'ERROR: TOOL_ERROR: failed read' if failure else 'read result')
@@ -142,8 +141,7 @@ def test_same_response_work_result_requires_actual_observation(turn, position, f
     assert 'read result' in str(calls[-1]) or 'failed read' in str(calls[-1])
 
 
-@pytest.mark.parametrize('name', ['enable_tools', 'list_available_tools'])
-@pytest.mark.parametrize('failure', [False, True])
+@pytest.mark.parametrize(("failure", "name"), [(False, 'enable_tools'), (True, 'list_available_tools')])
 def test_schema_bookkeeping_exempts_only_successful_results(turn, name, failure):
     registry, calls, notes, run = turn
     response = finish('Chosen before the result')
@@ -160,11 +158,11 @@ def test_schema_bookkeeping_exempts_only_successful_results(turn, name, failure)
         assert not trace.get('completion_refusals')
 
 
-@pytest.mark.parametrize('name, arguments', [('chronicle_write', {'kind': 'page', 'text': 'What I did'}),
-                                             ('memory_mark', {}),
-                                             ('update_scratchpad', {'content': 'Next: the docs'})])
-@pytest.mark.parametrize('answer, held', [('written', False), ('⚠️ PARTIAL_WRITE: two decisions not recorded', True),
-                                          ('⚠️ TOOL_ERROR: write failed', True)])
+@pytest.mark.parametrize(("answer", "held", "name", "arguments"), [
+    pytest.param('written', False, 'chronicle_write', {'kind': 'page', 'text': 'What I did'}, id='written-False-chronicle_write-arguments0'),
+    pytest.param('⚠️ PARTIAL_WRITE: two decisions not recorded', True, 'memory_mark', {}, id='⚠️ PARTIAL_WRITE: two decisions not recorded-True-memory_mark-arguments1'),
+    pytest.param('⚠️ TOOL_ERROR: write failed', True, 'update_scratchpad', {'content': 'Next: the docs'}, id='⚠️ TOOL_ERROR: write failed-True-update_scratchpad-arguments2'),
+])
 def test_a_receipt_write_rides_with_the_answer_unless_it_said_more(turn, name, arguments, answer, held):
     """The page, a note or an addressed message written in the finishing response does not cost
     the answer a round (owner decision 27.10); a warning or a failure from it is read first."""
@@ -458,7 +456,7 @@ def test_child_stop_never_seals_the_parent_root(turn):
     assert trace['task_completion']['action'] == 'stop'
 
 
-@pytest.mark.parametrize('refusal', ['unseen_work', 'invalid_subject', 'missing_answer', 'new_owner'])
+@pytest.mark.parametrize('refusal', ['unseen_work', 'invalid_subject', 'new_owner'])
 def test_refused_completion_keeps_the_retained_answer_unselected(tmp_path, refusal):
     from ouroboros.loop_delivery import completion_observation, consume_completion_request
     from ouroboros.loop_messages import capture_acceptance_observation

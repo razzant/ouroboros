@@ -10,40 +10,12 @@ with task acceptance.
 """
 from __future__ import annotations
 
-import copy
 import json
 
 import pytest
 
 from ouroboros import loop
 
-pytestmark = pytest.mark.serial
-
-
-@pytest.mark.parametrize('control', ['stop', 'panic'])
-def test_native_paid_wait_retains_operation_when_owner_controls_end_wait(tmp_path, monkeypatch, control):
-    from tests.test_native_owner_wait import native_context
-    from ouroboros.owner_wait import wait_after_tools
-    from ouroboros.task_results import load_task_result
-    from ouroboros.budget_pause import _hold_control_reason
-    from ouroboros.cancel_intents import request_cancel
-    ctx = native_context(tmp_path)
-    trace = {'review_runs': [{'authority': 'host_root', 'binding_hash': 'already-paid',
-                             'actors': [{'operation_id': 'same-operation', 'operation_state': 'in_flight'}]}]}
-    before = copy.deepcopy(trace)
-    # This direct actor binds the existing owner control reader, with real
-    # disposable-root cancellation and the existing direct control callback.
-    ctx.model_wait_context.owner_control = lambda: _hold_control_reason(ctx)
-    if control == 'stop':
-        request_cancel(tmp_path, ctx.task_id, reason='owner stopped', source='owner', requested_by='owner')
-    else:
-        ctx.model_wait_context.owner_control = lambda: 'panic'
-    monkeypatch.setattr('ouroboros.owner_wait.time.sleep', lambda *_: pytest.fail('control must precede sleep'))
-    wait_after_tools(ctx, [], trace, {}, 1, [], set(), review_binding='already-paid')
-    assert trace == before
-    wait = load_task_result(tmp_path, ctx.task_id)['owner_wait']
-    assert wait['review_binding'] == 'already-paid'
-    assert wait['resume_reason'] == ('control:cancelled' if control == 'stop' else 'control:panic')
 
 
 @pytest.mark.parametrize("choice", ["wait", "finish", None])

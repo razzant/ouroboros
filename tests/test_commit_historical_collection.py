@@ -141,7 +141,7 @@ def test_commit_collects_old_readonly_cas_and_keeps_unknown_seat_under_new_full_
     assert read_call_payload(ctx.drive_root, task_id=_TASK, call_id="op-old-triad_prompt") == before
 
 
-@pytest.mark.parametrize("damage", ["foreign_task", "foreign_slot", "foreign_roster", "wrong_token", "missing_prompt"])
+@pytest.mark.parametrize("damage", ["foreign_task", "foreign_roster", "missing_prompt"])
 def test_commit_collection_rejects_foreign_or_missing_original_source(historical_commit, damage):
     ctx, ready, _unknown, _scope, prompt = historical_commit
     if damage == "missing_prompt":

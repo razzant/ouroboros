@@ -159,7 +159,6 @@ def test_control_refusal_arrives_as_system_task_mail_not_owner_words(tmp_path, m
     assert pushed[0]["actor_task_id"] == "mind-root"
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("actor", ["ordinary-analysis", "silence-analysis"])
 def test_api_selected_task_id_retains_pause_resume_continue(api_host, actor):
     from starlette.requests import Request

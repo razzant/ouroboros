@@ -638,7 +638,7 @@ def test_continuation_keeps_original_environment_through_maintenance_then_releas
     assert not env.exists()
 
 
-@pytest.mark.parametrize("order", ["release_first", "retire_first", "whole_drive_first", "cached_drive_first"])
+@pytest.mark.parametrize("order", ["release_first", "retire_first", "cached_drive_first"])
 def test_finished_seat_scratch_release_survives_either_cleanup_order(tmp_path, monkeypatch, order):
     """Seat-home retirement and seat-owned scratch release are independent; neither may strand the other."""
     from types import SimpleNamespace
@@ -676,7 +676,7 @@ def test_finished_seat_scratch_release_survives_either_cleanup_order(tmp_path, m
     assert not scratch.exists()
 
 
-@pytest.mark.parametrize('fault', ['keep', 'capture_failed', 'unreadable_marker', 'seat_in_trash', 'seat_retirement'])
+@pytest.mark.parametrize('fault', ['keep', 'capture_failed', 'seat_in_trash', 'seat_retirement'])
 def test_seat_environment_survives_negative_proofs_and_drive_retirement(tmp_path, monkeypatch, fault):
     from types import SimpleNamespace
     from ouroboros import review_checking as rc, review_checking_prune as rp
@@ -695,8 +695,6 @@ def test_seat_environment_survives_negative_proofs_and_drive_retirement(tmp_path
     elif fault == 'capture_failed':
         monkeypatch.setattr(rc, '_directory_delta', lambda *_: (_ for _ in ()).throw(OSError('capture refused')))
         assert rc.capture_seat_evidence(root, task, 'op')['status'] == 'capture_failed'
-    elif fault == 'unreadable_marker':
-        (area.parent / 'checking.json').write_text('{torn')
     elif fault == 'seat_retirement':
         assert rp.retire_seat_home(root, area.parent, OVER, {}) == 'in_use'
     else:

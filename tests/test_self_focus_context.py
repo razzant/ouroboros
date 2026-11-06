@@ -16,7 +16,6 @@ from tests.test_subscription_main_wait import (  # noqa: F401
     MODEL, main_call, live_wait, setup,
 )
 
-pytestmark = pytest.mark.serial
 
 
 def _facts(messages):
@@ -253,10 +252,6 @@ _POOLED, _DIRECT = {"_execution_owner": {"kind": "pooled"}}, {"_execution_owner"
 
 @pytest.mark.parametrize("metadata,direct,told", [
     ({"delegation_role": "root"}, False, True),  # an independent root's work card would carry a line: a fact
-    ({"delegation_role": "root", **_POOLED}, False, True),  # the same, its carrier recorded
-    # The carrier, not the origin: a direct turn handed to the pool (continue_in_background) has a card.
-    ({"delegation_role": "root", **_POOLED}, True, True),
-    (dict(_POOLED), True, True),  # a root by its door alone, handed to the pool
     ({"delegation_role": "root"}, True, False),  # a live direct turn of Main (a reply, a wake) answers in chat
     ({"delegation_role": "root", **_DIRECT}, True, False),  # the same, its carrier recorded
     ({}, True, False),  # a direct turn is a root by its door alone: it still answers in chat

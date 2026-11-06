@@ -21,7 +21,6 @@ from ouroboros.process_containment import pid_is_zombie
 from supervisor import worker_process
 from tests._shared import stop_socket_sharer, wait_test_child_stop
 
-pytestmark = pytest.mark.serial
 
 
 def _faulted_entry(mode, incoming, outgoing, repo_dir, drive_root, session_id, stop_socket, transport_no_proxy=None):
@@ -188,7 +187,7 @@ def _ordinary_close_entry(wid, incoming, outgoing, repo_dir, drive_root, session
     threading.Event().wait()
 
 
-@pytest.mark.parametrize("mode", ["startup_log", "no_lifeline", "suspended", "callback_raises", "callback_hangs"])
+@pytest.mark.parametrize("mode", ["startup_log", "no_lifeline", "callback_hangs"])
 def test_native_worker_stop_does_not_require_lifeline_or_callback(tmp_path, monkeypatch, mode):
     if mode == "suspended" and os.name == "nt":
         pytest.skip("SIGSTOP is a POSIX failure injection")

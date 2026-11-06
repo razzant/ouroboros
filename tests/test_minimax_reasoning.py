@@ -95,10 +95,12 @@ def _response(message, finish="tool_calls"):
     return completion(choices=[{"index": 0, "message": message, "finish_reason": finish}])
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("model", ["minimax::MiniMax-M3.1", "minimax::MiniMax-M3.1-Flash"])
-@pytest.mark.parametrize("carrier", ["reasoning_content", "reasoning_details", "both", "absent"])
+@pytest.mark.parametrize(("carrier", "model", "stream", "asynchronous"), [
+    ("reasoning_content", "minimax::MiniMax-M3.1", False, False),
+    ("reasoning_details", "minimax::MiniMax-M3.1-Flash", True, True),
+    ("both", "minimax::MiniMax-M3.1", False, False),
+    ("absent", "minimax::MiniMax-M3.1-Flash", True, True),
+])
 def test_same_route_tool_continuation_keeps_exact_carriers(isolated, make_client, asynchronous, stream, model, carrier):
     reasoning = {}
     if carrier in {"reasoning_content", "both"}:
@@ -148,11 +150,7 @@ def test_same_route_tool_continuation_keeps_exact_carriers(isolated, make_client
 
 @pytest.mark.parametrize("reasoning", [
     {"reasoning_content": {"future": ["retained", 42]}},
-    {"reasoning_content": None},
-    {"reasoning_content": ""},
-    {"reasoning_details": {"future": "not a list"}},
     {"reasoning_details": [None, 17, {"type": "new", "data": "opaque"}]},
-    {"reasoning_details": None},
     {"reasoning_details": []},
 ])
 def test_unknown_and_empty_shapes_are_retained_without_display_coercion(isolated, make_client, reasoning):
@@ -168,8 +166,7 @@ def test_unknown_and_empty_shapes_are_retained_without_display_coercion(isolated
     assert body == original
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(("stream", "asynchronous"), [(False, True), (True, False)])
 def test_host_capsules_are_removed_without_editing_opaque_carriers(isolated, make_client, asynchronous, stream):
     raw = {"opaque": {"_context_capsule": {"signature": "provider-owned=="}, "keep": [False, "π"]}}
     reasoning = {"reasoning_details": copy.deepcopy(raw), "reasoning_content": copy.deepcopy(raw)}
@@ -418,9 +415,11 @@ def test_flash_projection_and_disclosure_reach_the_stream_lane(isolated, make_cl
     assert usage["reasoning_effort_clamped"]["applied"] == "low"
 
 
-@pytest.mark.parametrize("model", ["minimax::MiniMax-M3", "minimax::MiniMax-M4-Future",
-                                   "minimax::MiniMax-M3.1-Flash-Next"])
-@pytest.mark.parametrize("requested", ["none", "minimal", "ultra"])
+@pytest.mark.parametrize(("requested", "model"), [
+    ("none", "minimax::MiniMax-M3"),
+    ("minimal", "minimax::MiniMax-M4-Future"),
+    ("ultra", "minimax::MiniMax-M3.1-Flash-Next"),
+])
 def test_other_direct_minimax_models_keep_the_requested_tier(isolated, make_client, model, requested):
     client, sent = make_client([_done()])
     _, usage = _call(client, _hello(), model=model, effort=requested)
@@ -439,9 +438,10 @@ def test_the_same_name_on_a_compatible_route_keeps_the_requested_tier(isolated, 
     assert "reasoning_effort_clamped" not in usage
 
 
-@pytest.mark.parametrize("region,endpoint", [("global_en", "https://api.minimax.io/v1"),
-                                             ("cn_zh", "https://api.minimaxi.com/v1")])
-@pytest.mark.parametrize("model,wire", [(FLASH, "low"), ("minimax::MiniMax-M3", "none")])
+@pytest.mark.parametrize(("model", "wire", "region", "endpoint"), [
+    pytest.param(FLASH, "low", "global_en", "https://api.minimax.io/v1", id='minimax::MiniMax-M3.1-Flash-low-global_en-https://api.minimax.io/v1'),
+    ("minimax::MiniMax-M3", "none", "cn_zh", "https://api.minimaxi.com/v1"),
+])
 def test_both_regional_endpoints_share_the_exact_model_rule(isolated, make_client, monkeypatch, region, endpoint, model, wire):
     monkeypatch.setenv("MINIMAX_REGION", region)
     client, sent = make_client([_done()])

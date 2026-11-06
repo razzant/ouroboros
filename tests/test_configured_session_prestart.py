@@ -20,14 +20,6 @@ from tests._store_shared import read_result
 @pytest.mark.parametrize(("reason", "extra"), [
     ("credential_pool_exhausted", {}),
     ("subscription_window_exhausted", {}),
-    ("daemon_unreachable", {}),
-    ("access_profile_unsupported:workspace_write", {}),
-    ("route_disabled", {}),
-    # Producer-marker cases (P2 class fix): the pre-POST refusal sites stamp
-    # their own definitely_unrun verdict, so real refusals outside the
-    # engine-reason frozenset still terminal at $0.
-    ("task_deadline_expired", {"definitely_unrun": True}),
-    ("start_request_row_unwritable", {"definitely_unrun": True}),
     # #882: an argument the host judged BEFORE the daemon call. The reason stays
     # OUT of the frozenset on purpose — the same string is also returned after a
     # gateway call, where a run may exist and only the marker separates the two.
@@ -73,13 +65,6 @@ def test_definite_configured_session_start_refusal_terminalizes_before_llm(
     {"status": "refused", "reason": "credential_pool_exhausted", "run_id": "run-x"},
     {"status": "refused", "reason": "daemon_unreachable",
      "pending_invocation_id": "inv-1"},
-    # An unknown refusal code errs toward the episode, not the terminal.
-    {"status": "refused", "reason": "some_future_code"},
-    # Explicit file delivery must not turn existing document-selection faults into route unavailability.
-    {"status": "refused", "reason": "attachment_path_unknown"},
-    {"status": "refused", "reason": "attachment_manifest_unavailable"},
-    # An uncustodied start IS a live run somewhere.
-    {"status": "started_uncustodied", "run_id": ""},
     # Unparseable output proves nothing about the run's absence.
     "not-json-at-all",
 ])

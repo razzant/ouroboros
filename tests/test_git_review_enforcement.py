@@ -70,14 +70,11 @@ _PARSE_REVIEW_JSON_CASES = [
 ]
 
 
-@pytest.mark.parametrize(
-    "case_id,data,predicate",
-    _PARSE_REVIEW_JSON_CASES,
-    ids=[c[0] for c in _PARSE_REVIEW_JSON_CASES],
-)
-def test_parse_review_json(case_id, data, predicate):
-    review = _get_review_module()
-    assert predicate(review._parse_review_json(data))
+def test_parse_review_json(subtests):
+    for case_id, data, predicate in _PARSE_REVIEW_JSON_CASES:
+        with subtests.test(case_id=case_id, data=data, predicate=predicate):
+            review = _get_review_module()
+            assert predicate(review._parse_review_json(data))
 
 
 class TestReviewHistoryBuilding:

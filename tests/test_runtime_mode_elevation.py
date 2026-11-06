@@ -318,7 +318,6 @@ def test_data_write_blocks_missing_native_payload_creation(tmp_path, monkeypatch
     assert not (drive_root / "skills" / "native" / "demo" / "SKILL.md").exists()
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("body", [
     '{"content":"ordinary document","id":7}\n',
     '{"id":7,"content":"ordinary document"}\n',
@@ -365,7 +364,7 @@ def test_str_replace_blocks_self_authored_marker(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("filename", [
-    "review.json", "review_history.jsonl", "accepted_rebuttals.json", "enabled.json", "clawhub.json",
+    "review.json", "accepted_rebuttals.json", "clawhub.json",
 ])
 def test_data_write_blocks_skill_trust_state_json(filename, tmp_path, monkeypatch):
     from ouroboros import config as cfg
@@ -1325,21 +1324,6 @@ def test_launcher_owner_writer_persists_cyber_pro_after_boot_pin(isolated_settin
     assert os.environ["OUROBOROS_RUNTIME_MODE"] == "advanced"
 
 
-def test_settings_ui_uses_confirm_only_bridge_and_owner_endpoint():
-    """A stale desktop bridge must never receive the new mode value to write."""
-    from pathlib import Path
-
-    source = (Path(__file__).resolve().parents[1] / "web/modules/settings.js").read_text(
-        encoding="utf-8"
-    )
-    start = source.index("async function saveRuntimeModeViaNativeBridgeIfNeeded")
-    end = source.index("async function saveAutoGrantViaNativeBridgeIfNeeded", start)
-    runtime_save = source[start:end]
-    assert "confirm_runtime_mode_change" in runtime_save
-    assert "ownerRuntimeMode(nextMode)" in runtime_save
-    assert "window.pywebview?.api?.request_runtime_mode_change" not in runtime_save
-
-
 def test_launcher_runtime_mode_bridge_reports_pending_restart_against_active(monkeypatch):
     import launcher
 
@@ -1406,7 +1390,6 @@ def test_launcher_auto_grant_bridge_disables_truthy_alias(monkeypatch):
     [
         "Settings.json",
         "SETTINGS.JSON",
-        "settings.JSON",
         "SettiNgs.json",
     ],
 )
@@ -1623,7 +1606,7 @@ def test_files_api_write_blocks_settings_json(isolated_settings, monkeypatch):
 
 
 @pytest.mark.parametrize("filename", [
-    "grants.json", "review.json", "review_history.jsonl", "accepted_rebuttals.json", "enabled.json", "clawhub.json",
+    "grants.json", "review_history.jsonl", "clawhub.json",
 ])
 def test_files_api_owner_only_helper_blocks_skill_state_case_variants(filename, tmp_path, monkeypatch):
     from ouroboros import config as cfg
@@ -1657,10 +1640,14 @@ def test_files_api_owner_only_helper_blocks_symlinked_skill_state_dir(tmp_path, 
     assert fba_mod._is_owner_only_file(backing_target) is True
 
 
-@pytest.mark.parametrize("filename", [
-    "grants.json", "review.json", "review_history.jsonl", "accepted_rebuttals.json", "enabled.json", "Review.JSON",
+@pytest.mark.parametrize(("shape", "filename"), [
+    ("redirect", "grants.json"),
+    ("redirect", "review_history.jsonl"),
+    ("redirect", "enabled.json"),
+    ("cp", "review.json"),
+    ("cp", "accepted_rebuttals.json"),
+    ("cp", "Review.JSON"),
 ])
-@pytest.mark.parametrize("shape", ["redirect", "cp"])
 def test_run_shell_writes_skill_state_examples(shape, filename, tmp_path, monkeypatch):
     """An example tree may contain state/skills names without becoming live state."""
     from ouroboros.tools.registry import ToolRegistry

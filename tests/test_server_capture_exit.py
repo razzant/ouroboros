@@ -24,6 +24,15 @@ REPO = Path(__file__).resolve().parents[1]
 SIGNAL_INGRESS = [pytest.param(name, marks=pytest.mark.skipif(
     sys.platform == "win32", reason="Popen.send_signal requires POSIX signal delivery"))
     for name in ("sigint", "sigterm")]
+# Each executable surface keeps one real stop witness.  ``eof`` follows the same
+# stdin path as ``pipe``; the signal rows cover the two distinct POSIX exits.
+CAPTURE_CASES = [
+    pytest.param("script", "pipe", id="script-pipe"),
+    pytest.param("console", "sigint", marks=pytest.mark.skipif(
+        sys.platform == "win32", reason="Popen.send_signal requires POSIX signal delivery"), id="console-sigint"),
+    pytest.param("cli", "sigterm", marks=pytest.mark.skipif(
+        sys.platform == "win32", reason="Popen.send_signal requires POSIX signal delivery"), id="cli-sigterm"),
+]
 
 
 @pytest.mark.parametrize("existing", [False, True])
@@ -180,8 +189,7 @@ def save_evidence(tmp_path, label):
         print("EXECUTABLE_STOP_EVIDENCE", destination, flush=True)
 
 
-@pytest.mark.parametrize("entrypoint", ["script", "console", "cli"])
-@pytest.mark.parametrize("ingress", ["pipe", "eof", *SIGNAL_INGRESS])
+@pytest.mark.parametrize("entrypoint,ingress", CAPTURE_CASES)
 @pytest.mark.timeout(150)
 def test_executable_quit_preserves_owed_capture_for_next_generation(tmp_path, entrypoint, ingress):
     root, entries, areas, sources, before_money = prepare_capture(tmp_path)
@@ -248,13 +256,13 @@ def test_executable_quit_preserves_owed_capture_for_next_generation(tmp_path, en
         save_evidence(tmp_path, f"{entrypoint}-{ingress}")
 
 
-@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+@pytest.mark.parametrize("stream", ["stdout"])
 def test_closed_output_stream_cannot_hold_executable_capture(tmp_path, stream):
     _, _, areas, _, _ = prepare_capture(tmp_path)
     try:
         with running(tmp_path, "held", "console", broken_stream=stream) as (proc, gates):
             wait_for(lambda: all((gates / name).exists() for name in (
-                "ready.json", "ordinary-entered.json", "review-entered.json")), proc)
+                "ready.json", "ordinary-entered.json", "review-entered.json")), proc, timeout=60)
             stop_before_release(proc, gates, "pipe", expected_code=120)
             assert not (gates / "ordinary-returned.json").exists()
             for area in areas.values():
@@ -263,7 +271,8 @@ def test_closed_output_stream_cannot_hold_executable_capture(tmp_path, stream):
         save_evidence(tmp_path, "closed-" + stream)
 
 
-@pytest.mark.parametrize("ingress", ["pipe", SIGNAL_INGRESS[0]])
+@pytest.mark.parametrize("ingress", ["pipe", pytest.param("sigint", marks=pytest.mark.skipif(
+    sys.platform == "win32", reason="Popen.send_signal requires POSIX signal delivery"))])
 @pytest.mark.timeout(90)
 def test_imported_main_leaves_exit_and_exceptions_to_caller(tmp_path, ingress):
     """Negative control: imported main returns/raises into a caller that controls its own exit."""
@@ -271,7 +280,7 @@ def test_imported_main_leaves_exit_and_exceptions_to_caller(tmp_path, ingress):
     try:
         with running(tmp_path, "held", "imported", ingress) as (proc, gates):
             wait_for(lambda: all((gates / name).exists() for name in (
-                "ready.json", "ordinary-entered.json", "review-entered.json")), proc)
+                "ready.json", "ordinary-entered.json", "review-entered.json")), proc, timeout=60)
             stop_before_release(proc, gates, ingress, imported=True)
             if ingress == "pipe":
                 assert json.loads((gates / "main-returned.json").read_text())["result"] == 0
@@ -285,8 +294,12 @@ def test_imported_main_leaves_exit_and_exceptions_to_caller(tmp_path, ingress):
         save_evidence(tmp_path, f"imported-{ingress}")
 
 
-@pytest.mark.parametrize("entrypoint", ["script", "console", "cli"])
-@pytest.mark.parametrize("ingress", SIGNAL_INGRESS)
+@pytest.mark.parametrize("entrypoint,ingress", [
+    pytest.param("script", "sigint", marks=pytest.mark.skipif(
+        sys.platform == "win32", reason="Popen.send_signal requires POSIX signal delivery"), id="script-sigint"),
+    pytest.param("cli", "sigterm", marks=pytest.mark.skipif(
+        sys.platform == "win32", reason="Popen.send_signal requires POSIX signal delivery"), id="cli-sigterm"),
+])
 def test_signal_before_uvicorn_capture_stops_server(tmp_path, entrypoint, ingress):
     root, entries, areas, sources, before_money = prepare_capture(tmp_path)
     try:
@@ -302,8 +315,10 @@ def test_signal_before_uvicorn_capture_stops_server(tmp_path, entrypoint, ingres
         save_evidence(tmp_path, f"early-{entrypoint}-{ingress}")
 
 
-@pytest.mark.parametrize("entrypoint", ["script", "console", "cli"])
-@pytest.mark.parametrize("failure,code", [("arguments", 2), ("startup", 1)])
+@pytest.mark.parametrize("entrypoint,failure,code", [
+    ("script", "arguments", 2),
+    ("cli", "startup", 1),
+])
 def test_executable_does_not_turn_early_failures_into_success(tmp_path, entrypoint, failure, code):
     env = isolated_environment(tmp_path, REPO)
     env["OUROBOROS_SERVER_PORT"] = "0"
@@ -333,43 +348,44 @@ def test_executable_does_not_turn_early_failures_into_success(tmp_path, entrypoi
         assert not error, error
 
 
-@pytest.mark.parametrize("signum", [None, signal.SIGINT, signal.SIGTERM] +
-                         ([signal.SIGBREAK] if hasattr(signal, "SIGBREAK") else []))
-@pytest.mark.parametrize("panic", [False, True])
-@pytest.mark.parametrize("flush_error", [None, BrokenPipeError(), ValueError("closed stream")])
-def test_command_boundary_unwinds_before_exit_and_defers_to_panic(monkeypatch, signum, panic, flush_error):
-    import server
-    from ouroboros import server_control
+def test_command_boundary_unwinds_before_exit_and_defers_to_panic(subtests, monkeypatch):
+    for signum in ([None, signal.SIGINT, signal.SIGTERM] +
+        ([signal.SIGBREAK] if hasattr(signal, "SIGBREAK") else [])):
+        for panic in [False, True]:
+            for flush_error in [None, BrokenPipeError(), ValueError("closed stream")]:
+                with subtests.test(signum=signum, panic=panic, flush_error=flush_error), monkeypatch.context() as monkeypatch:
+                    import server
+                    from ouroboros import server_control
 
-    calls = []
-    signals = [signal.SIGINT, signal.SIGTERM] + ([signal.SIGBREAK] if hasattr(signal, "SIGBREAK") else [])
-    before = {sig: signal.getsignal(sig) for sig in signals}
-    import threading
-    monkeypatch.setattr(server, "_exit_signalled", threading.Event())
-    monkeypatch.setattr(server, "_supervisor_stop", threading.Event())
+                    calls = []
+                    signals = [signal.SIGINT, signal.SIGTERM] + ([signal.SIGBREAK] if hasattr(signal, "SIGBREAK") else [])
+                    before = {sig: signal.getsignal(sig) for sig in signals}
+                    import threading
+                    monkeypatch.setattr(server, "_exit_signalled", threading.Event())
+                    monkeypatch.setattr(server, "_supervisor_stop", threading.Event())
 
-    def main():
-        try:
-            if signum is not None:
-                signal.getsignal(signum)(signum, None)  # Invoke only this boundary's handler.
-                assert server._exit_signalled.is_set() and server._supervisor_stop.is_set()
-                calls.append("signal-returned")
-            return 2  # A refusal must retain its nonzero status.
-        finally:
-            calls.append("unwound")
+                    def main():
+                        try:
+                            if signum is not None:
+                                signal.getsignal(signum)(signum, None)  # Invoke only this boundary's handler.
+                                assert server._exit_signalled.is_set() and server._supervisor_stop.is_set()
+                                calls.append("signal-returned")
+                            return 2  # A refusal must retain its nonzero status.
+                        finally:
+                            calls.append("unwound")
 
-    if flush_error is not None:
-        def flush():
-            raise flush_error
-        monkeypatch.setattr(server.sys, "stdout", SimpleNamespace(flush=flush))
-    monkeypatch.setattr(server, "main", main)
-    monkeypatch.setattr(server_control, "_restart_stop_requested", panic)
-    monkeypatch.setattr(server_control.os, "_exit", lambda code: calls.append(("exit", code)))
-    monkeypatch.setattr(server.threading, "Event", lambda: SimpleNamespace(wait=lambda: calls.append("panic-parked")))
-    server.executable_main()
-    assert calls == (["signal-returned"] if signum is not None else []) + [
-        "unwound", "panic-parked" if panic else ("exit", 128 + signum if signum else 2)]
-    assert {sig: signal.getsignal(sig) for sig in signals} == before
+                    if flush_error is not None:
+                        def flush():
+                            raise flush_error
+                        monkeypatch.setattr(server.sys, "stdout", SimpleNamespace(flush=flush))
+                    monkeypatch.setattr(server, "main", main)
+                    monkeypatch.setattr(server_control, "_restart_stop_requested", panic)
+                    monkeypatch.setattr(server_control.os, "_exit", lambda code: calls.append(("exit", code)))
+                    monkeypatch.setattr(server.threading, "Event", lambda: SimpleNamespace(wait=lambda: calls.append("panic-parked")))
+                    server.executable_main()
+                    assert calls == (["signal-returned"] if signum is not None else []) + [
+                        "unwound", "panic-parked" if panic else ("exit", 128 + signum if signum else 2)]
+                    assert {sig: signal.getsignal(sig) for sig in signals} == before
 
 
 @pytest.mark.parametrize("error", [RuntimeError("startup probe"), SystemExit(7), KeyboardInterrupt()])

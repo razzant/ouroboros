@@ -13,7 +13,6 @@ from ouroboros.task_results import write_task_result
 from supervisor import worker_health
 from tests._budget_pause_exact_helpers import _fast_hold, _install_queue, _loop_ctx, _quiet_external
 
-pytestmark = pytest.mark.serial
 
 
 class _WorkerDied(BaseException):

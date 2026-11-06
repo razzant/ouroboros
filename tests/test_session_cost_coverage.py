@@ -25,6 +25,24 @@ def attempts():
             {"usageCost": {"cashUsd": None, "cashKnowledge": "unknown"}}]
 
 
+def card_consumers(frames):
+    """The task card's own JS words for real producer frames: label and detail, frame as context."""
+    import json
+    import subprocess
+    from pathlib import Path
+
+    script = """
+        import fs from 'node:fs';
+        import {taskCostMeta, costPresentationDetail} from './web/modules/chat_activity.js';
+        const frames = JSON.parse(fs.readFileSync(0, 'utf8'));
+        console.log(JSON.stringify(frames.map(frame => ({label: taskCostMeta(frame),
+            detail: costPresentationDetail(frame.cost_presentation, frame)}))));
+    """
+    rendered = subprocess.run(['node', '--input-type=module', '-e', script], cwd=Path(__file__).parents[1],
+                              input=json.dumps(frames), capture_output=True, text=True, check=True)
+    return json.loads(rendered.stdout)
+
+
 @pytest.mark.parametrize("ambiguous_failure", [False, True])
 def test_accepted_pending_start_is_not_free_and_final(tmp_path, ambiguous_failure):
     assert custody.record_start_requested(tmp_path, invocation_id="pending", task_id="task-one",
@@ -249,6 +267,10 @@ def test_unreadable_custody_keeps_known_money_but_not_finality(tmp_path, monkeyp
     assert fields["cost_custody"]["status"] == "unavailable"
     assert fields["cost_presentation"]["has_unpriced"] is True
     assert fields["non_final_rows"] == 0
+    # The card keeps the known $2 as a qualified subtotal; only a missing amount reads unknown.
+    [card] = card_consumers([fields])
+    assert card["label"] == ["Tracked: $2.00"]
+    assert "only the priced steps" in card["detail"]
 
 
 @pytest.mark.parametrize("spend,final,tracked", [(0, True, 0), (None, False, None)])
@@ -470,8 +492,6 @@ def test_public_result_queue_gateway_and_heartbeat_carry_pending_cost(tmp_path, 
 
 def test_actual_cost_frames_use_existing_card_labels(tmp_path):
     import json
-    import subprocess
-    from pathlib import Path
 
     from ouroboros.delegate_collection import record_terminal_money
 
@@ -483,16 +503,7 @@ def test_actual_cost_frames_use_existing_card_labels(tmp_path):
     zero = start(tmp_path, run="zero", task="zero", tree="zero")
     record_terminal_money(tmp_path, zero, {"summary": {"state": "succeeded", "spendUsd": 0}})
     frames = [reconstruct_task_cost(tid, fields=True, drive_root=tmp_path) for tid in ("pending", "partial", "zero")]
-    script = """
-        import fs from 'node:fs';
-        import {taskCostMeta, costPresentationDetail} from './web/modules/chat_activity.js';
-        const frames = JSON.parse(fs.readFileSync(0, 'utf8'));
-        console.log(JSON.stringify(frames.map(frame => ({label: taskCostMeta(frame),
-            detail: costPresentationDetail(frame.cost_presentation)}))));
-    """
-    rendered = subprocess.run(['node', '--input-type=module', '-e', script], cwd=Path(__file__).parents[1],
-                              input=json.dumps(frames), capture_output=True, text=True, check=True)
-    cards = json.loads(rendered.stdout)
-    assert [card["label"] for card in cards] == [["Cost unknown"], ["Tracked: $2.00"], ["$0.00"]]
+    cards = card_consumers(frames)
+    assert [card["label"] for card in cards] == [["Cost pending"], ["Tracked: $2.00"], ["$0.00"]]
     assert "only the priced steps" in cards[1]["detail"]
     print(json.dumps({"cost_observations": frames, "card_consumers": cards}, sort_keys=True))

@@ -129,7 +129,7 @@ export function wakeRowHtml(wake, { open = false } = {}) {
         .map((check) => chipHtml(wakeCheckText(check), 'warn')).join(' ');
     const note = wake.note ? `<p class="consciousness-wake-note-label">${escapeHtml(tr('consciousness.own_note', 'Its own note'))}</p>
         <div class="consciousness-wake-note ui-rich-content" data-i18n-authored>${escapeHtml(wake.note)}</div>` : '';
-    const costDetail = costPresentationDetail(wake.cost.cost_presentation);
+    const costDetail = costPresentationDetail(wake.cost.cost_presentation, wake.cost);
     // Main cards open in Main; a focus opens its captured conversation in the place sheet.
     const door = wake.chatId === 1 && wake.taskId ? taskReferenceHtml(wake.taskId)
         : wake.cause === 'focus' && wake.chatId ? `<button type="button" class="consciousness-inline-link ui-hit-area" data-cx-open-room="${wake.chatId}">${escapeHtml(tr('consciousness.open_room', 'Open the conversation'))} ↗</button>` : '';

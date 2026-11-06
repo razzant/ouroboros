@@ -61,13 +61,18 @@ def pytest_collection_finish(session):
     if not _worker and session.items:
         _emit("collection", ids=[item.nodeid for item in session.items])
 
+def _plain(nodeid):
+    # `--dist loadgroup` schedules by a group at the end of an id (`id@group`); a test's name is the id without it.
+    head, at, group = nodeid.rpartition("@")
+    return head if at and "]" not in group else nodeid
+
 @pytest.hookimpl(optionalhook=True)
 def pytest_xdist_node_collection_finished(node, ids):
-    _emit("collection", ids=list(ids))
+    _emit("collection", ids=[_plain(nodeid) for nodeid in ids])
 
 def pytest_runtest_logreport(report):
     if report.when == "teardown" or report.skipped or report.failed:
-        _emit("report", nodeid=report.nodeid, when=report.when, outcome=report.outcome)
+        _emit("report", nodeid=_plain(report.nodeid), when=report.when, outcome=report.outcome)
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_sessionfinish(session, exitstatus):
@@ -83,7 +88,7 @@ def selection_passes(selection, *, probe_module="", temp_root=None, inventory_di
     begins with ``tests/`` for a selected scope, so no reader takes it for the full one.
     ``launch_args`` is what a process is started with: the plugin written here carries the scope.
     """
-    from ouroboros import preflight_runner as pr
+    from ouroboros import preflight_probe, preflight_runner as pr
 
     names = [] if selection.tier == "full" else list(selection.files)
     scope = [*(f"{SELECT}={path}" for path in names), "tests/"]
@@ -92,7 +97,7 @@ def selection_passes(selection, *, probe_module="", temp_root=None, inventory_di
         module = MODULE
         if temp_root is not None:
             module += "_" + uuid.uuid4().hex
-            probe = pr._probe_dir(Path(temp_root))
+            probe = preflight_probe.probe_dir(Path(temp_root))
             probe.mkdir(parents=True, exist_ok=True)
             result = Path(inventory_dir or temp_root) / f"inventory-{spec.label}.jsonl"
             result.write_text("", encoding="utf-8")
@@ -202,6 +207,7 @@ def note_lane_process(exc: BaseException, container, proc) -> None:
     try:
         exc.preflight_lane_process = True if proc is not None else False if created is False else None
         exc.preflight_lane_teardown = teardown
+        exc.preflight_lane_token = container.token
     except (AttributeError, TypeError):  # an exception that takes no attributes stays unknown
         pass
 
@@ -222,6 +228,7 @@ def launching(evidence: dict):
         evidence["execution"] = "executed" if acquired is True else before if acquired is False else "attempted"
         if isinstance(teardown := getattr(exc, "preflight_lane_teardown", None), str):
             evidence["lane_teardown"] = teardown
+        evidence.setdefault("containment_tokens", []).append(getattr(exc, "preflight_lane_token", ""))
         raise
     evidence["execution"] = "executed"
 

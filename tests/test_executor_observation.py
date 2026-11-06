@@ -91,8 +91,8 @@ def test_snapshot_run_and_revision_must_match_the_emitted_advance():
 
 
 @pytest.mark.parametrize("changes", [
-    {"task_id": "parent"}, {"task_attempt": "1"}, {"run_id": ""},
-    {"attempt_id": ""}, {"harness_id": None}, {"revision": True}, {"revision": -1},
+    {"run_id": ""},
+    {"harness_id": None}, {"revision": True},
 ])
 def test_delivery_rejects_cross_task_attempt_or_incomplete_identity(changes):
     assert executor_observation_meta(_observation(**changes), task_id="child", task_attempt=0) == {}

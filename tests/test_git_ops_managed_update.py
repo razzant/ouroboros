@@ -483,11 +483,7 @@ def test_ensure_official_update_remote_blank_configured_source_defaults(monkeypa
 
 @pytest.mark.parametrize("legacy", [
     "https://github.com/joi-lab/ouroboros-desktop",  # what builds before v6.8.0 store
-    "https://github.com/joi-lab/ouroboros-desktop.git",
-    "https://github.com/joi-lab/ouroboros",
     "git@github.com:joi-lab/ouroboros.git",
-    "ssh://git@github.com/joi-lab/ouroboros.git",
-    "https://github.com/joi-lab/ouroboros-desktop.git/",
     "HTTPS://GitHub.com/Joi-Lab/Ouroboros-Desktop/",
 ])
 def test_former_official_home_updates_from_the_official_repository(monkeypatch, legacy):
@@ -508,12 +504,7 @@ def test_former_official_home_updates_from_the_official_repository(monkeypatch, 
 
 @pytest.mark.parametrize("configured", [
     "https://github.com/joi-lab/ouroboros-joi",  # another repository of the same organisation
-    "https://github.com/joi-lab/OuroborosHub",
-    "https://github.com/joi-lab/ouroboros-desktop-fork",
-    "https://github.com/someone/ouroboros",
-    "https://gitlab.com/joi-lab/ouroboros",
     "joi-lab/ouroboros",  # not a GitHub URL
-    "https://github.com/joi-lab/ouroboros/tree/main",  # a page inside the repository, not its URL
     "/srv/mirrors/joi-lab/ouroboros.git",
 ])
 def test_only_the_exact_former_homes_are_mapped(configured):

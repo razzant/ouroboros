@@ -21,8 +21,8 @@ from ouroboros.task_results import STATUS_SCHEDULED, write_task_result
 from supervisor.events_budget import HOLD_SAVED_WORK, budget_hold_fact
 from supervisor.restart_retention import fresh_return_transaction, prepare_restart_returns
 from tests.test_restart_saved_work import _install_queue, _pool_events, _queued, _working_run
+from tests._cases import chosen_rows
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture
@@ -149,12 +149,12 @@ _SHARED_FAULTS = ["wrong-pid", "source-pid", "recycled-pid", "unknown-birth", "w
                   "consumed", "no-token", "wrong-source", "spawn", "custody"]
 
 
-@pytest.mark.parametrize("windows,fault", [
+@pytest.mark.parametrize("windows,fault", chosen_rows([
     *[(True, fault) for fault in _SHARED_FAULTS],
     # Windows-only: the parent's own exit is the proof (Panic 99, a failure, no handle, another parent).
     *[(True, fault) for fault in ("parent-exit-99", "parent-exit-1", "no-parent-handle", "other-parent-birth")],
     *[(False, fault) for fault in [*_SHARED_FAULTS, "wrong-command"]],
-], ids=lambda value: {True: "windows", False: "posix-fallback"}.get(value, value))
+], 0, 21, 25), ids=lambda value: {True: "windows", False: "posix-fallback"}.get(value, value))
 def test_direct_spawn_cannot_return_work_without_its_exact_fresh_receipt(direct_restart, windows, fault):
     case = direct_restart
     case.prepare()

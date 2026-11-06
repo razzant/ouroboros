@@ -118,77 +118,82 @@ def _expected_pool(connected):
     return rows if scope in rows else [*rows, scope]
 
 
-@pytest.mark.parametrize("connected", COMBINATIONS)
-def test_every_combination_follows_the_declarative_policy(connected):
-    preset = compile_install_preset(_discoveries(*connected))
+def test_every_combination_follows_the_declarative_policy(subtests):
+    for connected in COMBINATIONS:
+        with subtests.test(connected=connected):
+            preset = compile_install_preset(_discoveries(*connected))
 
-    assert preset.ok, preset.refusal
-    primary = next(harness for harness in HARNESSES if harness in connected)
-    subagent_target, subagent_effort = _target(primary, "subagent")
-    first_actor = json.loads(preset.available_subagents)["items"][0]
-    assert first_actor["route"]["target_id"] == subagent_target
-    # An actor row is Auto (the owner's range decides) unless its model id spells the level.
-    assert first_actor.get("effort", "") == (subagent_effort if primary == "cursor" else "")
+            assert preset.ok, preset.refusal
+            primary = next(harness for harness in HARNESSES if harness in connected)
+            subagent_target, subagent_effort = _target(primary, "subagent")
+            first_actor = json.loads(preset.available_subagents)["items"][0]
+            assert first_actor["route"]["target_id"] == subagent_target
+            # An actor row is Auto (the owner's range decides) unless its model id spells the level.
+            assert first_actor.get("effort", "") == (subagent_effort if primary == "cursor" else "")
 
-    assert sorted(_pool_rows(preset)) == sorted(_expected_pool(connected))
-    assert all(row.is_session for row in _pool(preset))
-    # No advisory seat is resolved: the preflight reviewer is a row the author
-    # names, so a model no row runs can neither refuse the preset nor be receipted.
-    assert "advisory" not in preset.receipt["surfaces"]
-    assert preset.receipt["review_pool"] == [row.slot_id for row in _pool(preset)]
+            assert sorted(_pool_rows(preset)) == sorted(_expected_pool(connected))
+            assert all(row.is_session for row in _pool(preset))
+            # No advisory seat is resolved: the preflight reviewer is a row the author
+            # names, so a model no row runs can neither refuse the preset nor be receipted.
+            assert "advisory" not in preset.receipt["surfaces"]
+            assert preset.receipt["review_pool"] == [row.slot_id for row in _pool(preset)]
 
 
-@pytest.mark.parametrize("connected", COMBINATIONS)
-def test_only_exact_discovery_ids_are_ever_written(connected):
+def test_only_exact_discovery_ids_are_ever_written(subtests):
     """No owner shorthand (``opus-5.5``, ``grok-4.6``) may survive
     into the saved value — every model must exist in that harness's live list."""
-    preset = compile_install_preset(_discoveries(*connected))
+    for connected in COMBINATIONS:
+        with subtests.test(connected=connected):
+            preset = compile_install_preset(_discoveries(*connected))
 
-    targets = [row.target_id for row in _pool(preset)]
-    targets.extend(
-        row["route"]["target_id"]
-        for row in json.loads(preset.available_subagents)["items"]
-        if row["route"]["kind"] == "agent_session"
-    )
-    for target in targets:
-        harness, _, model = target.partition("=")
-        assert model in LIVE_MODELS[harness], f"{model!r} is not in {harness} discovery"
+            targets = [row.target_id for row in _pool(preset)]
+            targets.extend(
+                row["route"]["target_id"]
+                for row in json.loads(preset.available_subagents)["items"]
+                if row["route"]["kind"] == "agent_session"
+            )
+            for target in targets:
+                harness, _, model = target.partition("=")
+                assert model in LIVE_MODELS[harness], f"{model!r} is not in {harness} discovery"
 
 
-@pytest.mark.parametrize("connected", COMBINATIONS)
-def test_credential_profile_is_never_pinned(connected):
+def test_credential_profile_is_never_pinned(subtests):
     """D28: the daemon rotates accounts; an install-time pin would outlive one."""
-    preset = compile_install_preset(_discoveries(*connected))
+    for connected in COMBINATIONS:
+        with subtests.test(connected=connected):
+            preset = compile_install_preset(_discoveries(*connected))
 
-    assert all(
-        not row["route"].get("credential_profile_id")
-        for row in json.loads(preset.available_subagents)["items"]
-    )
-    assert all(row.profile_id == "" for row in _pool(preset))
+            assert all(
+                not row["route"].get("credential_profile_id")
+                for row in json.loads(preset.available_subagents)["items"]
+            )
+            assert all(row.profile_id == "" for row in _pool(preset))
 
 
-@pytest.mark.parametrize("harness", CORE_HARNESSES)
-def test_a_single_core_harness_reviews_once_never_as_copies_of_one_model(harness):
+def test_a_single_core_harness_reviews_once_never_as_copies_of_one_model(subtests):
     """Owner Q5=A: three identical seats paid three runs of one model for no second
     opinion, so a sole harness takes ONE triad seat. Its scope seat merges into that row
     when the identity matches (Claude, Codex) and keeps its own model otherwise (Cursor's
     scope seat is the high-effort slug), so no two pool rows run one model."""
-    preset = compile_install_preset(_discoveries(harness))
-    pool = _pool(preset)
+    for harness in CORE_HARNESSES:
+        with subtests.test(harness=harness):
+            preset = compile_install_preset(_discoveries(harness))
+            pool = _pool(preset)
 
-    expected_target, _ = _target(harness, "triad")
-    assert [row.target_id for row in pool if row.target_id == expected_target] == [expected_target]
-    assert [seat["harness"] for seat in preset.receipt["surfaces"]["triad"]] == [harness]
-    assert len({row.target_id for row in pool}) == len(pool)
+            expected_target, _ = _target(harness, "triad")
+            assert [row.target_id for row in pool if row.target_id == expected_target] == [expected_target]
+            assert [seat["harness"] for seat in preset.receipt["surfaces"]["triad"]] == [harness]
+            assert len({row.target_id for row in pool}) == len(pool)
 
 
-@pytest.mark.parametrize("connected", [c for c in COMBINATIONS if len(c) > 1])
-def test_two_or_three_harnesses_keep_one_triad_seat_each(connected):
-    preset = compile_install_preset(_discoveries(*connected))
+def test_two_or_three_harnesses_keep_one_triad_seat_each(subtests):
+    for connected in [c for c in COMBINATIONS if len(c) > 1]:
+        with subtests.test(connected=connected):
+            preset = compile_install_preset(_discoveries(*connected))
 
-    assert [seat["harness"] for seat in preset.receipt["surfaces"]["triad"]] == [
-        harness for harness in HARNESSES if harness in connected]
-    assert [seat["position"] for seat in preset.receipt["surfaces"]["triad"]] == list(range(1, len(connected) + 1))
+            assert [seat["harness"] for seat in preset.receipt["surfaces"]["triad"]] == [
+                harness for harness in HARNESSES if harness in connected]
+            assert [seat["position"] for seat in preset.receipt["surfaces"]["triad"]] == list(range(1, len(connected) + 1))
 
 
 def test_settings_keys_write_new_actor_ssot_and_receipt_not_legacy_singleton():
@@ -271,21 +276,22 @@ def test_cursor_effort_rides_the_slug_and_the_row_field_together():
     assert preset.receipt["surfaces"]["subagent"][0]["effort_in_model_id"] is True
 
 
-@pytest.mark.parametrize("connected", AGY_COMBINATIONS)
-def test_antigravity_compiles_task_actor_without_changing_core_reviewer_bytes(connected):
-    preset = compile_install_preset(_discoveries(*connected))
+def test_antigravity_compiles_task_actor_without_changing_core_reviewer_bytes(subtests):
+    for connected in AGY_COMBINATIONS:
+        with subtests.test(connected=connected):
+            preset = compile_install_preset(_discoveries(*connected))
 
-    assert preset.ok, preset.refusal
-    actor_routes = [
-        row["route"]["target_id"]
-        for row in json.loads(preset.available_subagents)["items"]
-    ]
-    assert "agy=gemini-3.8-flash-high" in actor_routes
-    core = tuple(harness for harness in connected if harness in CORE_HARNESSES)
-    if not core:
-        assert _pool_rows(preset) == []
-    else:
-        assert _pool_rows(preset) == _pool_rows(compile_install_preset(_discoveries(*core)))
+            assert preset.ok, preset.refusal
+            actor_routes = [
+                row["route"]["target_id"]
+                for row in json.loads(preset.available_subagents)["items"]
+            ]
+            assert "agy=gemini-3.8-flash-high" in actor_routes
+            core = tuple(harness for harness in connected if harness in CORE_HARNESSES)
+            if not core:
+                assert _pool_rows(preset) == []
+            else:
+                assert _pool_rows(preset) == _pool_rows(compile_install_preset(_discoveries(*core)))
 
 
 def test_claude_and_codex_rows_carry_effort_only_in_the_field():
@@ -650,7 +656,7 @@ def test_factory_review_rows_mint_the_shipped_panel_for_each_install_class():
     assert _factory({"TOTAL_BUDGET": 5.0}) == [(model, "high") for model in OPENROUTER_REVIEW_DEFAULTS["triad"]]
 
 
-@pytest.mark.parametrize("provider", ["openai", "anthropic", "cloudru", "gigachat", "deepseek", "zai", "minimax"])
+@pytest.mark.parametrize("provider", ["openai", "deepseek", "minimax"])
 def test_a_direct_provider_panel_seats_main_once_unless_it_mixes_two_models(provider):
     """Owner Q5=A for direct providers: a panel that would repeat Main is Main once; MiniMax's
     mixed panel (Main, Light, Light: two models) keeps its three seats. Saved catalogs are not

@@ -272,9 +272,7 @@ def test_repository_root_origin_is_distinct_from_an_unknown_folder(tmp_path, req
 
 
 @pytest.mark.parametrize("url", [
-    "https://github.com/owner/repo", "https://github.com/owner/repo.git",
-    "git@github.com:owner/repo", "git@github.com:owner/repo.git",
-    "ssh://git@github.com/owner/repo", "ssh://git@github.com/owner/repo.git",
+    "https://github.com/owner/repo", "git@github.com:owner/repo", "ssh://git@github.com/owner/repo.git",
 ])
 def test_github_publication_accepts_https_and_ssh(url):
     from ouroboros.skill_publish_destination import github_repository

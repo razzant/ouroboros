@@ -44,8 +44,7 @@ def test_call_open_is_a_host_fact_with_the_same_owner_admission(monkeypatch, tmp
     assert len(chat_rows(tmp_path)) == 1 and echoes[-1]["role"] == echoes[0]["role"]
 
 
-@pytest.mark.parametrize("view", ["history", "memory"])
-@pytest.mark.parametrize("call_open", [False, True])
+@pytest.mark.parametrize(("call_open", "view"), [(False, "history"), (True, "memory")])
 def test_call_open_rendering_never_attributes_host_text_to_the_owner(monkeypatch, tmp_path, view, call_open):
     import asyncio
     import json

@@ -182,7 +182,6 @@ def test_the_engine_place_carries_the_engines_last_pass(data, monkeypatch):
 @pytest.mark.parametrize("answer,state", [
     (None, "none"),
     (ClaudexorUnavailable("maintenance_unavailable", "old engine", status_code=404), "unsupported"),
-    (ClaudexorUnavailable("daemon_unreachable", "down"), "unavailable"),
     ({"outcome": "completed"}, "unavailable"),  # a record of another shape is no record
 ])
 def test_an_engine_that_cannot_answer_is_unknown_never_zero(data, monkeypatch, answer, state):

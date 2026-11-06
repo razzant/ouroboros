@@ -19,7 +19,6 @@ from tests.test_delegated_directory import DirectoryEngine
 from tests._store_shared import result_signature
 
 
-pytestmark = pytest.mark.serial
 
 
 def directory_result(tmp_path, monkeypatch, *, chain=("retry-a", "retry-b"),

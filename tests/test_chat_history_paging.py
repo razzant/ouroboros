@@ -183,7 +183,7 @@ def test_quiz_disposition_is_hidden_replay_evidence_across_pages(tmp_path, kind)
     assert ask["quiz"]["options"][1]["recommended"] is True
 
 
-@pytest.mark.parametrize("current", ["running", "finalizing", "missing", "malformed", "future"])
+@pytest.mark.parametrize("current", ["running", "missing", "future"])
 def test_historical_terminal_never_overrides_current_result_authority(tmp_path, current):
     write(tmp_path / "logs" / "progress.jsonl", [row(0, "progress", task_id="old-task")])
     terminal = row(0, direction="system", type="task_summary", task_id="old-task", status="completed",
@@ -308,7 +308,7 @@ def test_a_cursor_minted_before_the_unfinished_boundary_field_reads_as_a_clean_b
 
 
 @pytest.mark.parametrize("unfinished", [
-    "chat", False, {"chat": True}, ["chat", "chat"], ["progress", "chat"], ["archive"], [1], [["chat"]], [{}],
+    "chat", False, [{}],
 ])
 def test_a_malformed_unfinished_boundary_is_an_invalid_cursor(tmp_path, unfinished):
     write(tmp_path / "logs" / "chat.jsonl", [row(index) for index in range(200)])

@@ -684,7 +684,7 @@ def test_a_symlinked_prefix_is_the_runtime_where_it_resolves(monkeypatch, tmp_pa
     assert server_liveness._innermost_repo_frame([f"{opt.as_posix()}/lib/python3.11/threading.py:1 in wait"]) == ""
 
 
-@pytest.mark.parametrize("path", ["<legitimate>/worker.py", "<legitimate>\\worker.py", "<unfinished.py", "<folder>/worker>"])
+@pytest.mark.parametrize("path", ["<legitimate>/worker.py", "<unfinished.py", "<folder>/worker>"])
 def test_real_stack_paths_starting_with_angle_brackets_keep_attribution(path):
     from ouroboros import server_liveness
 

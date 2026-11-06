@@ -21,7 +21,6 @@ import pytest
 
 from tests.test_panic_owned_requests import owners  # noqa: F401 - restores every Panic owner latch
 
-pytestmark = pytest.mark.serial
 
 
 def _call(call_id, name, arguments):

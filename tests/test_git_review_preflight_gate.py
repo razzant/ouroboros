@@ -12,6 +12,7 @@ import subprocess
 import sys
 
 import pytest
+from tests._cases import case_folders
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
@@ -78,7 +79,7 @@ def _stub_preflight_lanes(repo, monkeypatch):
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_SERIAL", raising=False)
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", raising=False)
     monkeypatch.setattr(pr, "_verify_preflight_plugins", lambda *a: [])
-    monkeypatch.setattr(pr, "_observed_worker_ids", lambda *a: {"gw0", "gw1"})
+    monkeypatch.setattr(pr, "observed_worker_ids", lambda *a: {"gw0", "gw1"})
     monkeypatch.setattr(git, "_consecutive_test_failures", 0)
     lanes = []
 
@@ -193,26 +194,25 @@ _PREFLIGHT_CASES = [
 ]
 
 
-@pytest.mark.parametrize(
-    "case_id,message,staged_files,expected",
-    _PREFLIGHT_CASES,
-    ids=[c[0] for c in _PREFLIGHT_CASES],
-)
-def test_preflight_check(case_id, message, staged_files, expected, monkeypatch, tmp_path):
-    review = _get_review_module()
-    values = {"VERSION": "3.24.0", "README.md":
-              "[![Version 3.24.0](https://img.shields.io/badge/version-3.24.0-green.svg)]\n| 3.24.0 | release |"}
-    monkeypatch.setattr(review, "_git_show_staged", lambda repo, path: values.get(path))
-    from ouroboros import commit_admission
+def test_preflight_check(subtests, monkeypatch, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for case_id, message, staged_files, expected in _PREFLIGHT_CASES:
+        tmp_path = next(case_paths)
+        with subtests.test(case_id=case_id, message=message, staged_files=staged_files, expected=expected), monkeypatch.context() as monkeypatch:
+            review = _get_review_module()
+            values = {"VERSION": "3.24.0", "README.md":
+                      "[![Version 3.24.0](https://img.shields.io/badge/version-3.24.0-green.svg)]\n| 3.24.0 | release |"}
+            monkeypatch.setattr(review, "_git_show_staged", lambda repo, path: values.get(path))
+            from ouroboros import commit_admission
 
-    monkeypatch.setattr(commit_admission, "_head_text", lambda repo, path: values.get(path))  # HEAD == index
-    result = review._preflight_check(message, staged_files, tmp_path)
-    if expected is None:
-        assert result is None, f"expected pass, got: {result!r}"
-    else:
-        assert result is not None
-        for needle in expected:
-            assert needle in result, f"missing {needle!r} in: {result!r}"
+            monkeypatch.setattr(commit_admission, "_head_text", lambda repo, path: values.get(path))  # HEAD == index
+            result = review._preflight_check(message, staged_files, tmp_path)
+            if expected is None:
+                assert result is None, f"expected pass, got: {result!r}"
+            else:
+                assert result is not None
+                for needle in expected:
+                    assert needle in result, f"missing {needle!r} in: {result!r}"
 
 
 # ---------------------------------------------------------------------------

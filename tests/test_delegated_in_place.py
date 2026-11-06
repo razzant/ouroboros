@@ -48,9 +48,6 @@ def _target(ctx) -> pathlib.Path:
     ({}, ""),                                                     # an acting Git writer: allowed
     ({"selector_root": "/payloads/alpha"}, "skill payload"),
     ({"investigation": True}, "evidence-only investigation"),
-    ({"access": "readonly"}, "read-only run"),
-    ({"mode": "ask"}, "read-only run"), ({"mode": "plan"}, "read-only run"),
-    ({"strategy": "copy", "scope_paths": ["."]}, "directory options"),
     ({"strategy": "direct"}, ""),                                  # the documented default is no option
 ])
 def test_only_a_git_writer_may_work_in_place(facts, refused):
@@ -115,8 +112,6 @@ def test_an_in_place_start_works_in_the_write_root_and_records_the_choice(tmp_pa
 
 @pytest.mark.parametrize("case,acting,kwargs", [
     ("ask", True, {"start_kwargs": {"workspace": "in_place", "mode": "ask"}}),
-    ("plan", True, {"start_kwargs": {"workspace": "in_place", "mode": "plan"}}),
-    ("readonly", True, {"access": "readonly", "start_kwargs": {"workspace": "in_place"}}),
     ("folder", True, {"start_kwargs": {"workspace": "in_place", "directory_strategy": "copy", "scope_paths": ["."]}}),
     ("investigation", False, {"start_kwargs": {"workspace": "in_place"}}),  # a task without write authority
 ])

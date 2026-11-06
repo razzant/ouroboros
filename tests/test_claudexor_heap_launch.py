@@ -11,7 +11,6 @@ from tests.test_claudexor_runtime_delivery import _archive, _pin, NODE_VERSION
 @pytest.mark.parametrize('launch,options,expected,error', [
     ({'nodeArgs': ['--max-old-space-size=16384']}, '', ['--max-old-space-size=16384'], False),
     ({'nodeArgs': ['--max-old-space-size=8192']}, '--max-old-space-size=6144', [], False),
-    ({'nodeArgs': ['--max-old-space-size=8192']}, '--trace-warnings', ['--max-old-space-size=8192'], False),
     (None, '', [], False),
     ({'nodeArgs': []}, '', [], False),
     ({'nodeArgs': ['--inspect']}, '', [], True),

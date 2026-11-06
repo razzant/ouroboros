@@ -3,7 +3,7 @@ import asyncio
 import json
 from dataclasses import replace
 
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 def test_presence_selected_input_has_one_labelled_opening_across_connections(host_world):

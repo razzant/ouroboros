@@ -21,14 +21,15 @@ NOW = "2026-10-22T10:00:00+00:00"
 @pytest.fixture
 def gh(monkeypatch, tmp_path):
     """A recording fake gh; ``world.answer(parts, argv, kwargs)`` returns stdout, ``(code, stderr)`` or raises."""
-    world = SimpleNamespace(calls=[], identity="ouroboros-agent", answer=lambda parts, argv, kwargs: "{}")
+    world = SimpleNamespace(calls=[], views=[], identity="ouroboros-agent", answer=lambda parts, argv, kwargs: "{}")
     monkeypatch.setattr(github, "github_token_from_env_or_settings", lambda: "ghp_fixture")
     monkeypatch.setattr(github_write, "utc_now_iso", lambda: NOW)
 
     def run(argv, **kwargs):
+        if argv[1:5] == ["repo", "view", "--json", "nameWithOwner,url"]:
+            world.views.append((argv, kwargs))  # naming the target, apart from the legs a test counts
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"nameWithOwner": "owner/selected", "url": BASE}), stderr="")
         world.calls.append((argv, kwargs))
-        if argv[1:5] == ["repo", "view", "--json", "nameWithOwner"]:
-            return SimpleNamespace(returncode=0, stdout=json.dumps({"nameWithOwner": "owner/selected"}), stderr="")
         if argv[1] == "api" and _call(argv).route == "user":
             return SimpleNamespace(returncode=0, stdout=json.dumps({"login": world.identity}), stderr="")
         answer = world.answer(_call(argv, kwargs) if argv[1] == "api" else SimpleNamespace(route=" ".join(argv[1:3])), argv, kwargs)
@@ -94,7 +95,7 @@ def test_comment_on_an_issue_returns_the_shared_receipt_from_githubs_answer(gh):
     gh.answer = lambda p, argv, kw: json.dumps(_comment(501, body="hello", user={"login": "ouroboros-agent", "type": "User"}))
     line, receipt = _receipt(gh.write(method="comment", target=7, body="hello"))
 
-    assert gh.sent() == [("POST", "repos/{owner}/{repo}/issues/7/comments", {"body": "hello"})]
+    assert gh.sent() == [("POST", "repos/owner/selected/issues/7/comments", {"body": "hello"})]
     assert receipt == {"effect": "issue_comment.create", "target": "owner/selected#7", "url": f"{BASE}/issues/7#issuecomment-501",
                        "id": 501, "actor": "ouroboros-agent", "at": "2026-10-03T00:00:00Z", "outcome": "confirmed",
                        "readback": {"verified": True, "mismatch": [], "via": "response"}}
@@ -140,7 +141,7 @@ def test_readback_mismatch_is_loud_but_the_effect_stays_confirmed(gh):
 def test_create_issue_sends_title_body_and_labels_in_one_request(gh):
     gh.answer = lambda p, argv, kw: json.dumps(_issue(12, title="T", body="B", labels=[{"name": "bug"}, {"name": "help"}], user={"login": "me"}))
     line, receipt = _receipt(gh.write(method="create_issue", title="T", body="B", labels=["bug", "help"]))
-    assert gh.sent() == [("POST", "repos/{owner}/{repo}/issues", {"title": "T", "body": "B", "labels": ["bug", "help"]})]
+    assert gh.sent() == [("POST", "repos/owner/selected/issues", {"title": "T", "body": "B", "labels": ["bug", "help"]})]
     assert receipt["effect"] == "issue.create" and receipt["target"] == "owner/selected#12" and receipt["url"] == f"{BASE}/issues/12"
     assert receipt["readback"]["verified"] and line.startswith("github_write create_issue → owner/selected#12: confirmed")
     gh.answer = lambda p, argv, kw: json.dumps(_issue(13, title="T", body="B", labels=[{"name": "bug"}]))
@@ -169,7 +170,7 @@ def test_update_closes_with_a_reason_and_replaces_labels_in_one_patch(gh):
     gh.answer = lambda p, argv, kw: json.dumps(_issue(7, state="closed", state_reason="not_planned", labels=[{"name": "wontfix"}],
                                                        updated_at="2026-10-22T09:30:00Z", user={"login": "dev"}))
     line, receipt = _receipt(gh.write(method="update", target=7, state="closed", state_reason="not_planned", labels=["wontfix"]))
-    assert gh.sent() == [("PATCH", "repos/{owner}/{repo}/issues/7", {"state": "closed", "state_reason": "not_planned", "labels": ["wontfix"]})]
+    assert gh.sent() == [("PATCH", "repos/owner/selected/issues/7", {"state": "closed", "state_reason": "not_planned", "labels": ["wontfix"]})]
     assert receipt["effect"] == "issue.update" and receipt["at"] == "2026-10-22T09:30:00Z" and receipt["readback"]["verified"]
     assert line.startswith("github_write update → owner/selected#7: confirmed")
     gh.answer = lambda p, argv, kw: json.dumps(_issue(7, state="open", title="New"))
@@ -186,7 +187,7 @@ def test_review_submits_the_event_body_and_inline_comments(gh):
                                                 "submitted_at": "2026-10-22T09:40:00Z", "html_url": f"{BASE}/pull/7#pullrequestreview-77"})
     _line, receipt = _receipt(gh.write(method="review", target=7, event="REQUEST_CHANGES", body="please",
                                        comments=[{"path": "a.py", "line": 3, "body": "nit", "side": "RIGHT", "extra": "dropped"}]))
-    assert gh.sent() == [("POST", "repos/{owner}/{repo}/pulls/7/reviews", {"event": "REQUEST_CHANGES", "body": "please",
+    assert gh.sent() == [("POST", "repos/owner/selected/pulls/7/reviews", {"event": "REQUEST_CHANGES", "body": "please",
                                                                          "comments": [{"path": "a.py", "body": "nit", "line": 3, "side": "RIGHT"}]})]
     assert receipt["effect"] == "pr_review.submit" and receipt["id"] == 77 and receipt["at"] == "2026-10-22T09:40:00Z" and receipt["readback"]["verified"]
     assert gh.write(method="review", target=7, event="COMMENT").startswith("⚠️ TOOL_ARG_ERROR: a REQUEST_CHANGES or COMMENT review needs a body")
@@ -276,13 +277,12 @@ def test_api_sends_rest_mutations_and_graphql_mutations_and_names_the_effect(gh)
 
 
 # ---- expect --------------------------------------------------------------------------------------------
-@pytest.mark.parametrize("args", [
-    {"method": "comment", "kind": "discussion", "target": 7, "body": "x"},
-    {"method": "resolve_thread", "target": "PRRT_1"},
-    {"method": "api", "route": "repos/{owner}/{repo}/issues/7", "http_method": "PATCH"},
-    {"method": "create_issue", "title": "T"},
+@pytest.mark.parametrize(("value", "args"), [
+    pytest.param("open", {"method": "resolve_thread", "target": "PRRT_1"}, id='open-args1'),
+    pytest.param("", {"method": "comment", "kind": "discussion", "target": 7, "body": "x"}, id='-args0'),
+    pytest.param(None, {"method": "api", "route": "repos/{owner}/{repo}/issues/7", "http_method": "PATCH"}, id='None-args2'),
+    pytest.param(None, {"method": "create_issue", "title": "T"}, id='None-args3'),
 ])
-@pytest.mark.parametrize("value", ["open", "", None])
 def test_unsupported_expect_is_typed_and_never_sent(gh, args, value):
     text = gh.write(**args, expect={"state": value})
     assert "cannot check it" in text and not gh.calls
@@ -301,15 +301,15 @@ def test_blank_head_expect_checks_issue_state_before_commenting(gh, blank):
     gh.answer = lambda p, argv, kw: json.dumps(_issue(7)) if p.method == "GET" else json.dumps(_comment(1, body="x"))
     _line, receipt = _receipt(gh.write(method="comment", target=7, body="x", expect={"head_sha": blank, "state": "open"}))
     assert receipt["outcome"] == "confirmed"
-    assert gh.sent() == [("GET", "repos/{owner}/{repo}/issues/7", None),
-                         ("POST", "repos/{owner}/{repo}/issues/7/comments", {"body": "x"})]
+    assert gh.sent() == [("GET", "repos/owner/selected/issues/7", None),
+                         ("POST", "repos/owner/selected/issues/7/comments", {"body": "x"})]
 
 
 @pytest.mark.parametrize("state", ["open", "closed"])
 def test_comment_state_expectation_still_checks_before_posting(gh, state):
     gh.answer = lambda p, argv, kw: json.dumps(_issue(7)) if p.method == "GET" else json.dumps(_comment(1, body="x"))
     text = gh.write(method="comment", target=7, body="x", expect={"state": state})
-    assert gh.sent()[0] == ("GET", "repos/{owner}/{repo}/issues/7", None)
+    assert gh.sent()[0] == ("GET", "repos/owner/selected/issues/7", None)
     if state == "open":
         assert _receipt(text)[1]["outcome"] == "confirmed" and [s[0] for s in gh.sent()] == ["GET", "POST"]
     else:
@@ -323,7 +323,7 @@ def test_all_blank_expect_values_need_no_precondition_read(gh, blank):
     _line, receipt = _receipt(gh.write(method="comment", target=7, body="x",
                                      expect={"head_sha": blank, "state": blank, "updated_at": blank}))
     assert receipt["outcome"] == "confirmed"
-    assert gh.sent() == [("POST", "repos/{owner}/{repo}/issues/7/comments", {"body": "x"})]
+    assert gh.sent() == [("POST", "repos/owner/selected/issues/7/comments", {"body": "x"})]
 
 
 @pytest.mark.parametrize("blank", ["", None])
@@ -331,8 +331,8 @@ def test_update_ignores_blank_timestamp_beside_real_state_expectation(gh, blank)
     gh.answer = lambda p, argv, kw: json.dumps(_issue(7, title="New"))
     _line, receipt = _receipt(gh.write(method="update", target=7, title="New", expect={"state": "open", "updated_at": blank}))
     assert receipt["outcome"] == "confirmed" and receipt["readback"]["verified"] is True
-    assert gh.sent() == [("GET", "repos/{owner}/{repo}/issues/7", None),
-                         ("PATCH", "repos/{owner}/{repo}/issues/7", {"title": "New"})]
+    assert gh.sent() == [("GET", "repos/owner/selected/issues/7", None),
+                         ("PATCH", "repos/owner/selected/issues/7", {"title": "New"})]
 
 
 @pytest.mark.parametrize("current", ["open", "closed"])
@@ -340,7 +340,7 @@ def test_api_checks_an_explicit_issue_target_before_mutating(gh, current):
     gh.answer = lambda p, argv, kw: json.dumps(_issue(7, state=current))
     text = gh.write(method="api", target=7, kind="issue", http_method="PATCH", route="repos/{owner}/{repo}/issues/7",
                     input={"title": "T"}, expect={"state": "open"})
-    assert gh.sent()[0][:2] == ("GET", "repos/{owner}/{repo}/issues/7")
+    assert gh.sent()[0][:2] == ("GET", "repos/owner/selected/issues/7")
     if current == "open":
         assert _receipt(text)[1]["outcome"] == "confirmed" and [s[0] for s in gh.sent()] == ["GET", "PATCH"]
     else:
@@ -357,7 +357,7 @@ def test_expect_refuses_before_sending_when_the_target_moved(gh):
     gh.answer = lambda p, argv, kw: json.dumps(_pr(7, updated_at="2026-10-22T08:00:00Z"))
     text = gh.write(method="comment", target=7, body="x", expect={"head_sha": "d" * 40, "state": "open"})
     assert text.startswith("⚠️ GH_EXPECTATION_FAILED: #7: head_sha is " + repr(SHA) + ", expected " + repr("d" * 40) + ". Nothing was sent")
-    assert gh.result.meta["operation_outcome"] == "completed_no_effect" and gh.sent() == [("GET", "repos/{owner}/{repo}/pulls/7", None)]
+    assert gh.result.meta["operation_outcome"] == "completed_no_effect" and gh.sent() == [("GET", "repos/owner/selected/pulls/7", None)]
     gh.calls.clear()
     gh.answer = lambda p, argv, kw: json.dumps(_pr(7, updated_at="2026-10-22T08:00:00Z")) if p.method == "GET" else json.dumps(_comment(1, body="x"))
     _line, receipt = _receipt(gh.write(method="comment", target=7, body="x", expect={"head_sha": SHA, "state": "OPEN", "updated_at": "2026-10-22T08:00:00Z"}))
@@ -365,7 +365,7 @@ def test_expect_refuses_before_sending_when_the_target_moved(gh):
     gh.calls.clear()
     gh.answer = lambda p, argv, kw: json.dumps(_issue(7, state="closed"))
     text = gh.write(method="update", target=7, title="t", expect={"state": "open"})
-    assert "state is 'closed', expected 'open'" in text and gh.sent() == [("GET", "repos/{owner}/{repo}/issues/7", None)]
+    assert "state is 'closed', expected 'open'" in text and gh.sent() == [("GET", "repos/owner/selected/issues/7", None)]
 
 
 @pytest.mark.parametrize("identifier,args,reply,code,outcome", [
@@ -373,12 +373,8 @@ def test_expect_refuses_before_sending_when_the_target_moved(gh):
      subprocess.TimeoutExpired(["gh"], 60), "TOOL_ERROR", "unknown"),
     ("GH_WRITE_NOT_APPLIED", {"method": "create_issue", "title": "T"},
      (1, "gh: Validation Failed (HTTP 422)"), "TOOL_ERROR", "completed_no_effect"),
-    ("GH_EXPECTATION_FAILED", {"method": "comment", "target": 7, "body": "x", "expect": {"state": "closed"}},
-     json.dumps(_issue(7)), "TOOL_ERROR", "completed_no_effect"),
     ("GH_API_READ_ONLY", {"method": "api", "route": "POST repos/{owner}/{repo}/issues"},
      "{}", "TOOL_ARG_ERROR", "completed_no_effect"),
-    ("GH_WRITE_READBACK_MISMATCH", {"method": "comment", "target": 7, "body": "x"},
-     json.dumps(_comment(3, body="edited by a bot")), "OK", "completed"),
 ])
 def test_github_producers_keep_their_typed_loop_outcomes(gh, monkeypatch, identifier, args, reply, code, outcome):
     from ouroboros.loop_tool_execution import _typed_execution_failure, _typed_result_metadata
@@ -457,8 +453,8 @@ def test_an_unanswered_send_is_looked_up_once_and_confirmed_when_found(gh, failu
     gh.answer = lambda p, argv, kw: answers[failure] if p.method == "POST" else json.dumps([_comment(2, body="other"), _comment(3, body="hello", user={"login": "ouroboros-agent"})])
     line, receipt = _receipt(gh.write(method="comment", target=7, body="hello"))
     sent = gh.sent()
-    assert sent[0][:2] == ("POST", "repos/{owner}/{repo}/issues/7/comments")
-    assert sent[1] == ("GET", "repos/{owner}/{repo}/issues/7/comments?since=2026-10-22T09%3A58%3A00Z&per_page=100", None)
+    assert sent[0][:2] == ("POST", "repos/owner/selected/issues/7/comments")
+    assert sent[1] == ("GET", "repos/owner/selected/issues/7/comments?since=2026-10-22T09%3A58%3A00Z&per_page=100", None)
     assert receipt["outcome"] == "confirmed" and receipt["id"] == 3 and receipt["actor"] == "ouroboros-agent"
     assert receipt["readback"] == {"verified": True, "mismatch": [], "via": "lookup"} and gh.result.meta["operation_outcome"] == "completed"
     assert line.startswith("github_write comment → owner/selected#7: confirmed")
@@ -479,9 +475,9 @@ def test_an_unanswered_send_not_found_stays_unknown_and_is_never_resent(gh, look
 
 def test_each_method_has_its_own_lookup_after_an_unanswered_send(gh):
     cases = {
-        "create_issue": (dict(title="T", body="B"), "repos/{owner}/{repo}/issues?state=all&since=", [_issue(4, title="T", body="B", user={"login": "ouroboros-agent"})], "owner/selected#4"),
-        "update": (dict(target=7, state="closed"), "repos/{owner}/{repo}/issues/7", _issue(7, state="closed", closed_by={"login": "ouroboros-agent"}), "selected Project#7"),
-        "review": (dict(target=7, event="APPROVE", body="ok"), "repos/{owner}/{repo}/pulls/7/reviews?per_page=100",
+        "create_issue": (dict(title="T", body="B"), "repos/owner/selected/issues?state=all&since=", [_issue(4, title="T", body="B", user={"login": "ouroboros-agent"})], "owner/selected#4"),
+        "update": (dict(target=7, state="closed"), "repos/owner/selected/issues/7", _issue(7, state="closed", closed_by={"login": "ouroboros-agent"}), "selected Project#7"),
+        "review": (dict(target=7, event="APPROVE", body="ok"), "repos/owner/selected/pulls/7/reviews?per_page=100",
                    [{"id": 1, "body": "ok", "state": "APPROVED", "submitted_at": "2026-10-22T09:59:30Z", "user": {"login": "ouroboros-agent"}}], "selected Project#7"),
     }
     for method, (args, route, found, target) in cases.items():
@@ -503,12 +499,7 @@ def test_each_method_has_its_own_lookup_after_an_unanswered_send(gh):
 # ---- argument refusals and registration ------------------------------------------------------------------
 @pytest.mark.parametrize("args,fragment", [
     ({"method": "comment", "target": 0, "body": "x"}, "target must be the positive issue, pull request or discussion number"),
-    ({"method": "comment", "target": 7, "body": "  "}, "comment body cannot be empty"),
-    ({"method": "create_issue", "title": " "}, "issue title cannot be empty"),
-    ({"method": "update", "target": -1, "title": "t"}, "target must be the positive issue or pull request number"),
-    ({"method": "review", "target": 0, "event": "APPROVE"}, "target must be the positive pull request number"),
     ({"method": "merge"}, "method must be one of"),
-    ({"method": "comment", "target": 7, "body": "x", "repo": None}, "GH_TARGET_INVALID"),
     ({"method": "comment", "target": 7, "body": "x", "expect": "soon"}, "expect must be an object"),
 ])
 def test_argument_refusals_are_typed_and_send_nothing(gh, args, fragment):

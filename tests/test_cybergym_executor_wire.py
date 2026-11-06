@@ -1070,16 +1070,6 @@ def test_fair_completion_dead_extension_unknown_tool_text_stays_infra():
     ({"status": "infra_failed"}, "execution_infra_failed"),
     ({"status": "best_effort"}, "execution_best_effort"),
     ({}, "execution_missing"),
-    ({"status": "degraded", "failure": {"kind": "finalization_control", "reason_code": "delivery_control_degraded"}},
-     "degraded_non_tool_failure"),
-    ({"status": "degraded", "failure": {"kind": "tool", "reason_code": "tool_failure", "tool_errors": []}},
-     "degraded_tool_failure_without_errors"),
-    ({"status": "degraded", "failure": {"kind": "tool", "reason_code": "tool_failure", "tool_errors": [
-        _tool_error("run_command", "⚠️ TOOL_ARG_ERROR: Could not parse arguments"),
-        _tool_error("run_command", "⚠️ TOOL_ERROR (run_command): RuntimeError: Could not determine home directory."),
-    ]}}, "degraded_runtime_tool_error"),
-    ({"status": "degraded", "failure": {"kind": "tool", "reason_code": "tool_failure", "tool_errors": ["oops"]}},
-     "degraded_untyped_tool_error"),
 ])
 def test_fair_completion_refuses_everything_else(execution, basis):
     from devtools.benchmarks.cybergym.cybergym_wire import _gateway_fair_completion

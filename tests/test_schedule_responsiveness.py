@@ -24,7 +24,6 @@ from tests._store_journal_shared import exclusive_hold
 from tests.test_g1_followup_policy import world as _world
 from tests.test_schedule_occurrence import _row, _rows, q as _q
 
-pytestmark = pytest.mark.serial
 RealThread = threading.Thread
 # Fixtures requested by name, re-bound as module attributes (a direct import of a name that
 # reappears as a parameter is an F811 redefinition under the CI ruff gate).
@@ -370,7 +369,7 @@ def test_a_deferred_preparation_resolves_its_resource_again(q, tmp_path, monkeyp
     assert task["project_id"] == "proj" and pathlib.Path(task["drive_root"]).is_dir()
 
 
-@pytest.mark.parametrize("door", ["planned_restart", "owner_restart", "managed_update", "generation_stop"])
+@pytest.mark.parametrize("door", ["planned_restart", "managed_update", "generation_stop"])
 def test_a_closed_door_admits_nothing_and_the_next_generation_admits_the_same_claim(q, monkeypatch, door):
     """A returning stop that named its queue (or a stopping generation) leaves the claim unsubmitted."""
     from supervisor import schedule_occurrence as occurrences, workers

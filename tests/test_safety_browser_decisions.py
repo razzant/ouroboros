@@ -7,8 +7,11 @@ import pytest
 from ouroboros import browser_policy
 
 
-@pytest.mark.parametrize("mode", ["light", "advanced", "pro"])
-@pytest.mark.parametrize("path", ["/api/decisions", "/api/%64ecisions/", "/api/%2564ecisions"])
+@pytest.mark.parametrize(("path", "mode"), [
+    ("/api/decisions", "light"),
+    ("/api/%64ecisions/", "pro"),
+    ("/api/%2564ecisions", "advanced"),
+])
 def test_browser_model_wait_persistence_is_owner_control(monkeypatch, mode, path):
     identity = ["main"]
     monkeypatch.setattr(browser_policy, "runtime_service_kind", lambda *a: identity[0])

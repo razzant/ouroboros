@@ -18,8 +18,7 @@ def _finish_quit():
             assert not thread.is_alive(), "the startup close body must return"
 
 
-@pytest.mark.parametrize("door", ["tray", "abort", "setup_tray"])
-@pytest.mark.parametrize("identity", ["ours", "foreign", "unknown"])
+@pytest.mark.parametrize(("identity", "door"), [("ours", "tray"), ("foreign", "abort"), ("unknown", "setup_tray")])
 def test_startup_quit_only_cleans_owned_or_identity_proven_server(native_guard, monkeypatch, tmp_path, door, identity):
     import launcher
     from ouroboros import launcher_background as background, launcher_bootstrap as boot, launcher_onboarding

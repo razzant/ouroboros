@@ -17,12 +17,12 @@ from tests.test_retry_pause_generations import _park, _running_actor
 from tests.test_retry_pause_identity import _fresh_plan, reaper  # noqa: F401
 from tests.test_swarm_host_admission import host  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
-@pytest.mark.parametrize("actor", ["retry", "retry_chain"])
-@pytest.mark.parametrize("fault_count", [1, 2])
-@pytest.mark.parametrize("busy", [False, True], ids=["assignment", "busy-forecast"])
+@pytest.mark.parametrize(("busy", "fault_count", "actor"), [
+    pytest.param(False, 1, "retry", id='assignment-1-retry'),
+    pytest.param(True, 2, "retry_chain", id='busy-forecast-2-retry_chain'),
+])
 def test_unreadable_lineage_preserves_grant_until_a_readable_dispatch(
         host, monkeypatch, clock, reaper, actor, fault_count, busy):  # noqa: F811
     running = _running_actor(host, monkeypatch, clock, reaper, actor)

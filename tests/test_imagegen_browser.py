@@ -17,7 +17,7 @@ from tests.test_ui_smoke_playwright import direct_server_with_data as direct_ser
 from tests.test_imagegen_tool import configured as configured, _transport, _summary
 from tests.test_chat_history_paging_browser import _open, _open_project, _idle, MAIN
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def test_generated_image_delivery_and_reload_in_main_and_project(direct_server_with_data, monkeypatch, tmp_path):

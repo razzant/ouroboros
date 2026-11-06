@@ -31,7 +31,7 @@ from tests.test_room_work_browser import Transport, open_app, trigger, wait_fact
 from tests.test_room_work_browser import room_ui as room_ui  # noqa: F401 — fixture
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 CASES = ("failed_owner", "gateway_unknown", "unbound", "known_live", "failed_owner_late", "known_live_late",
          "settled_pause", "review_finishing")

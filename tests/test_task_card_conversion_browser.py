@@ -33,7 +33,7 @@ from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
 from tests.ui_console_errors import PageErrors
 
 wait_clone = clone_fixture
-pytestmark = [pytest.mark.serial, pytest.mark.ui_browser]
+pytestmark = [pytest.mark.ui_browser]
 
 ANSWER = "The converted turn finished its work.\n\n" + "\n\n".join(
     f"Verified section {i}: the complete answer remains readable in the Project and selectable in Main."

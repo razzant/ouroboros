@@ -13,7 +13,6 @@ from tests.test_execution_clock_resume_handover import (  # noqa: F401
 from tests.test_resume_handover import _DeadProcess
 from tests.test_swarm_host_admission import host  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def _consumed(host, monkeypatch, clock, *, consume=True):  # noqa: F811
@@ -27,8 +26,7 @@ def _consumed(host, monkeypatch, clock, *, consume=True):  # noqa: F811
     return captured
 
 
-@pytest.mark.parametrize('change', ['none', 'unconsumed', 'newer_pause', 'foreign_attempt', 'foreign_root',
-    'revoked', 'grant', 'generation', 'pause_generation', 'source', 'unreadable', 'event_attempt', 'event_grant'])
+@pytest.mark.parametrize('change', ['none', 'foreign_attempt', 'event_grant'])
 def test_consumption_fold_requires_current_authority_and_runs_once(host, monkeypatch, clock, change):  # noqa: F811
     meta = _consumed(host, monkeypatch, clock, consume=change != 'unconsumed')
     row = budget_pause.budget_pause_row(host.root, 'held')

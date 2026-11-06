@@ -30,7 +30,7 @@ from ouroboros import chromium_runtime, config, platform_layer
 from ouroboros.process_containment import pid_is_zombie
 from ouroboros.tools import shell_process
 
-pytestmark = [pytest.mark.browser, pytest.mark.serial]
+pytestmark = [pytest.mark.browser]
 _EXPECTED_BROWSER_ENGINES = {item.strip().lower()
                              for item in os.environ.get("OUROBOROS_EXPECT_BROWSER_ENGINES", "").split(",")
                              if item.strip()}

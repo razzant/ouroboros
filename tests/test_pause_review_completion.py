@@ -22,7 +22,6 @@ from ouroboros.task_results import write_task_result
 from tests.test_review_operation_lifetime import TASK, _parent, _request, _slot, env, until  # noqa: F401
 from tests._usage_store_testing import attempt_rows_in_start_order
 
-pytestmark = pytest.mark.serial
 
 
 def _extract(_response):

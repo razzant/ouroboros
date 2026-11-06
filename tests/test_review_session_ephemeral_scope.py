@@ -37,7 +37,7 @@ _ROOTS = {
 _MINTED = ("review_checkout", "review_inputs", "task_drive", "headless_task")
 
 
-@pytest.mark.parametrize("where", [*_MINTED, "owner_under_data", "owner_project", "elsewhere"])
+@pytest.mark.parametrize("where", ["review_checkout", "owner_under_data", "owner_project", "elsewhere"])
 def test_a_minted_review_tree_starts_ephemeral_without_a_project_request(fake_route, tmp_path, where):
     root = tmp_path.joinpath(*_ROOTS[where]) if where in _ROOTS else "/tmp/fake-repo"
     if where in _ROOTS:

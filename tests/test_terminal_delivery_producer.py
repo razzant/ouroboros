@@ -18,7 +18,6 @@ class _BusManager(SyncManager):
 
 _BusManager.register("Queue", DeliveryBus)
 
-pytestmark = pytest.mark.serial
 
 
 def _finish_in_worker(root_text, task, event_queue, report_queue, attach):

@@ -22,7 +22,7 @@ from tests.test_room_work_browser import (  # noqa: F401 - pytest fixtures (room
     subscription_ui, trigger, wait_facts,
 )
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 _NOW = datetime.now(timezone.utc).replace(microsecond=0)
 PRESSED = (_NOW - timedelta(minutes=24)).isoformat()

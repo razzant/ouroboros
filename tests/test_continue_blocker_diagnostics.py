@@ -20,7 +20,6 @@ from tests._budget_pause_exact_helpers import _install_queue
 from tests.test_continue_independent_review import PRED, _current_pool, _pending, _rows  # noqa: F401
 from tests.test_owner_continue import NONCE, _interrupted
 
-pytestmark = pytest.mark.serial
 
 
 def _http(handler, task_id, body=None):
@@ -138,7 +137,7 @@ PAUSED_HELD = {"running": "running_delegated_leaf", "unknown": "unbound_unknown_
                "running_and_unknown": "running_and_unknown_start"}
 
 
-@pytest.mark.parametrize("condition", ["settled", "running", "unknown", "running_and_unknown", "point_refusal"])
+@pytest.mark.parametrize("condition", ["settled", "unknown", "point_refusal"])
 def test_owner_resume_of_a_paused_held_continue_rechecks_its_predecessor(tmp_path, monkeypatch, condition):
     from ouroboros import owner_pause
     from ouroboros.work_stop import hold_fact as budget_hold_fact

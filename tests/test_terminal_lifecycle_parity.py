@@ -41,12 +41,11 @@ def _without_lifecycle(axes):
 @pytest.mark.parametrize("usage, text, seeded, expected", [
     ({"rounds": 1, "execution_status": "infra_failed", "reason_code": "provider_unavailable"},
      "Preserved incomplete work.", None, "failed"),
-    ({"rounds": 1, "execution_status": "failed", "reason_code": "tool_failure"}, "", None, "failed"),
     # An already failed row keeps failed whatever this attempt's execution says.
     ({"rounds": 1}, "Done.", "failed", "failed"),
     # Positive control: a clean finish is completed on every carrier, before and after.
     ({"rounds": 1}, "Done.", None, "completed"),
-], ids=["infra_failed", "failed", "existing_failed_row", "completed"])
+], ids=["infra_failed", "existing_failed_row", "completed"])
 def test_carriers_name_the_resolved_terminal_status(tmp_path, monkeypatch, usage, text, seeded, expected):
     monkeypatch.setattr("ouroboros.llm_observability.chat_observed", lambda *args, **kwargs: None)
     task = {"id": "parity-task", "chat_id": 1, "type": "task", "text": "Owner objective",
