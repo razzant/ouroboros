@@ -385,6 +385,7 @@ def test_nonoptional_failures_still_kill_real_supervisor(monkeypatch, tmp_path, 
         monkeypatch.setattr(workers, "ensure_workers_healthy", fail)
     _run(rec, server)
     assert len(attempts) == 3
-    assert not rec.ready.is_set() and "3 consecutive crashes" in server._supervisor_error
+    assert not rec.ready.is_set() and server._supervisor_error is None  # the generation ended; no boot "failed" state
+    assert rec.exit.is_set() and rec.backstops == ["loop_failed"]
     assert rec.stop.waits == [2, 4]
-    assert len(rec.alerts) == 1 and "died after repeated crashes" in rec.alerts[0][1]
+    assert len(rec.alerts) == 1 and rec.alerts[0][1].startswith("🛑 The task loop failed three times in a row")

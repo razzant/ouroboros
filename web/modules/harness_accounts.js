@@ -37,6 +37,7 @@ import {
     quotaConstraintFact,
     readsFor,
 } from './claudexor_status_store.js';
+import { RESTART_LABEL, createRestartController } from './claudexor_restart.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { harnessIdentityMarkup, planLabel } from './harness_presentation.js';
 import { SIGN_IN_SCOPE_NOTE, createLoginCardController, normalizeProfileName, preserveCardFocus } from './harness_login_cards.js';
@@ -486,7 +487,7 @@ function daemonBaseStatusLine(payload, { checking = false, reads = null } = {}) 
     // same facet gate decides whether the line may say what is serving.
     if (runtimeState === 'newer_serving') {
         const pinned = runtime.target_version || '?';
-        const refusal = `After a Restart, Panic or engine exit, ${pinned} may refuse data a newer engine served.`;
+        const refusal = `After Restart Claudexor, Panic or an engine exit, ${pinned} may refuse data a newer engine served.`;
         if (!unread.length) {
             return { tone: 'warn', text: `Engine ${daemon.engine_version || '?'} keeps serving; this Ouroboros version pins older Claudexor ${pinned}. ${refusal}` };
         }
@@ -812,8 +813,8 @@ function faultOutranksReassurance(service, note) {
 // tense: status carries no engine process identity, so a replacement made from another tab or
 // phone is only noticed by this page's next inspection (opening the tab, Refresh, Check version).
 const MISSING_EXECUTABLE_NOTICE = 'The executable reported by the last program inspection is no longer present. '
-    + 'Versions below are last known. If the app was moved or replaced, Restart in the chat header may help; '
-    + 'it interrupts engine sessions, and success is not guaranteed.';
+    + 'Versions below are last known. If the app was moved or replaced, Restart Claudexor in Accounts may help; '
+    + 'it ends every run on the engine, and success is not guaranteed.';
 
 function withMissingExecutable(line, problem) {
     const context = problem.context;
@@ -1008,6 +1009,7 @@ const state = {
     // its accounts. The wake POST itself is the STORE's (single writer).
     wakeError: '',
     wakeBusy: false,
+    restart: null, // the Restart Claudexor controller: its request in flight and the last outcome's note
 };
 
 // The disclosure's quiet chevron (it turns when open).
@@ -1079,7 +1081,8 @@ export function renderAgentAccountsSection() {
             your existing assignments. ${SIGN_IN_SCOPE_NOTE} Check the intended route in Models or Agents separately.
             Unpinned work uses enabled accounts; disabling keeps the login out of rotation.
             Accounts live in Ouroboros's own agent home; personal logins are never imported.`,
-        actions: '<button type="button" class="btn btn-default" id="btn-harness-refresh">Refresh</button>',
+        actions: `<button type="button" class="btn btn-default" id="btn-harness-refresh">Refresh</button>
+            <button type="button" class="btn btn-default" id="btn-claudexor-restart" hidden>${RESTART_LABEL}</button>`,
         body: `${renderAgentsServiceBanner()}
             <div id="harness-accounts-error" class="settings-inline-status" data-tone="error" hidden></div>
             <div id="harness-model-marks-note" class="settings-inline-status" data-tone="muted" hidden></div>
@@ -1190,13 +1193,14 @@ function renderRows() {
             : resourceBusy ? 'Refreshing…' : refreshActionLabel(state.store.snapshot);
         refreshEl.disabled = Boolean(state.wakeBusy || resourceBusy);
     }
+    state.restart?.paint(document.getElementById('btn-claudexor-restart'), state.store.snapshot, state.wakeBusy);
     if (!host) return;
     const errorBox = document.getElementById('harness-accounts-error');
     if (errorBox) {
-        const text = state.removeError || state.removeNotice;
+        const text = state.removeError || state.removeNotice || state.restart?.note?.text || '';
         errorBox.hidden = !text;
         errorBox.textContent = text;
-        errorBox.dataset.tone = state.removeError ? 'error' : 'warn';
+        errorBox.dataset.tone = state.removeError ? 'error' : state.removeNotice ? 'warn' : state.restart?.note?.tone || 'warn';
     }
     const payload = state.store.snapshot || {};
     const marksNote = document.getElementById('harness-model-marks-note');
@@ -1292,6 +1296,7 @@ async function toggleAccountEnabled(harness, profileId, enabled) {
     if (!harness || !profileId) return;
     state.removeError = '';
     state.removeNotice = '';
+    state.restart?.clear();
     try {
         await setAccountEnabled(harness, profileId, enabled);
     } catch (error) {
@@ -1326,6 +1331,7 @@ export async function confirmRemoveAccount(harness, profileId, {
     if (answer !== true) return;
     state.removeError = '';
     state.removeNotice = '';
+    state.restart?.clear();
     try {
         const receipt = await removeImpl(harness, profileId);
         state.removeNotice = vendorCredentialRetainedNotice(
@@ -1441,11 +1447,11 @@ async function refreshHarnessStatusOnActivation() {
  * Mount the section. The exported destroy seam is an honest local detach, so
  * remount never waits on or invents daemon release proof.
  */
-export function initHarnessAccounts({ store = claudexorStatus } = {}) {
-    return _init(store);
+export function initHarnessAccounts({ store = claudexorStatus, restartDeps = {} } = {}) {
+    return _init(store, restartDeps);
 }
 
-async function _init(store) {
+async function _init(store, restartDeps) {
     _destroy();
     state.store = store;
     state.resources = createAccountResourcesController({ store, render: renderRows });
@@ -1453,6 +1459,10 @@ async function _init(store) {
     state.removeNotice = '';
     state.wakeError = '';
     state.wakeBusy = false;
+    // Restart Claudexor (`claudexor_restart.js`): preview, the in-app confirmation, then the restart.
+    state.restart = createRestartController({ store, render: renderRows,
+        onStart: () => { state.removeError = state.removeNotice = ''; },
+        onSettled: () => { void state.maintenance?.refresh({ fresh: true }); } });
     state.maintenance = createHarnessMaintenanceController({
         host: () => document.getElementById('harness-accounts-groups'),
         onInventory: renderRows,
@@ -1473,6 +1483,8 @@ async function _init(store) {
                 ? refreshAllAccounts()
                 : wakeDaemon();
         });
+    document.getElementById('btn-claudexor-restart')
+        ?.addEventListener('click', () => (state.initialized ? state.restart?.run(restartDeps) : undefined));
     // The SHARED surface binding: the visibility predicate that lets this
     // section keep the poll armed, and the catch-up read when the panel becomes
     // reachable — one implementation, released by one disposer. It carries no
@@ -1503,6 +1515,7 @@ async function refreshAllAccounts() {
     if (!state.store.refreshResources) return state.store.refresh();
     if (state.store.resourceAction(null).busy) return;
     state.removeError = '';
+    state.restart?.clear();
     const result = await state.store.refreshResources();
     if (!result) state.removeError = state.store.resourceAction(null).error || 'Account refresh did not complete';
     else await state.store.refresh();

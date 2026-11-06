@@ -268,8 +268,11 @@ test('the Starting… header follows the phase: starting, chat ready, failed', (
     assert.deepEqual(startingStatus(SERVING), { kind: 'starting', text: 'Starting…', title: '' });
     assert.deepEqual(startingStatus(CHAT_READY),
         { kind: 'starting', text: 'Chat ready, restoring background tasks', title: '' });
-    assert.deepEqual(startingStatus(FAILED), { kind: 'failed', text: 'Start failed', tone: 'failed',
-        title: 'current-facts store not published: failed' }, 'a failed start is its own state, never a starting one');
+    assert.deepEqual(startingStatus(FAILED),  // the word stays whole; the cause is the step a short bar drops first
+        { kind: 'failed', text: 'Start failed', tone: 'failed', step: 'current-facts store not published: failed',
+          title: 'current-facts store not published: failed' }, 'a failed start is its own state, never a starting one');
+    assert.deepEqual(startingStatus({ ...SERVING, phase: 'failed' }),
+        { kind: 'failed', text: 'Start failed', tone: 'failed', step: '', title: '' });
     assert.deepEqual(startingStatus(SOFT_FAILED),
         { kind: 'starting', text: 'Chat ready, restoring background tasks', title: 'extensions: ValueError: bad manifest' },
         'a fail-soft step shows its error while the start goes on');
@@ -309,8 +312,9 @@ test('Main: the header paints the phase from the snapshot and forgets it on disc
         assert.equal(trigger.disabled, true, 'Main with nothing listed while it starts: nothing to open');
         assert.equal(failure.hidden, true, 'a start that goes on says no failure');
         chat.snapshot({ supervisor_ready: false, boot: FAILED });
-        assert.equal(chat.status(), 'Start failed');
+        assert.equal(chat.status(), 'Start failed', 'the word alone, so a narrow bar never drops it with the cause');
         assert.equal(chat.kind(), 'status-badge failed');
+        assert.equal(globalThis.document.byId.get('chat-status').dataset.step, FAILED.error, 'the cause is the step');
         assert.equal(globalThis.document.byId.get('chat-status').title, FAILED.error, 'the cause rides the badge title');
         // U001/U003: the capsule says the failure with its red dot and stays pressable; its list reads the same state
         // and heads with the failure's line, Restart beside it and the cause behind Details, never "starting".

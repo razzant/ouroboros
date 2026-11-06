@@ -24,8 +24,8 @@ from supervisor.queue import _queue_lock
 def _pool():
     """The parent module, read at call time.
 
-    The pool owns the repo/drive roots, its size, the worker table, the shared
-    PENDING/RUNNING refs and the crash clock, and ``init`` REBINDS them.
+    The pool owns the repo/drive roots, its size, the worker table and the shared
+    PENDING/RUNNING refs, and ``init`` REBINDS them.
     Reading them through the module is what keeps one binding: a from-import
     here would freeze the value this module saw at import time (the
     owner-approved D18/D33 mechanical exception).

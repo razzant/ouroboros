@@ -652,8 +652,8 @@ def _start_supervisor_liveness_watchdog(
     meanwhile. ``loop_thread_ident`` is the thread whose stack a stall row carries;
     it defaults to the CALLER, because the loop thread starts its own watchdog
     (startup phase included). ``stop_event`` is
-    a PER-GENERATION token: when the supervisor loop that owns ``liveness`` exits (incl.
-    the crash-storm death path, which never sets the global restart flag), it is set so
+    a PER-GENERATION token: when the supervisor loop that owns ``liveness`` exits (the
+    Fault door included, which never sets the global restart flag), it is set so
     this watchdog stops watching a now-stale liveness list (no false post-revival alert)."""
     from ouroboros.config import get_supervisor_liveness_deadline_sec
 

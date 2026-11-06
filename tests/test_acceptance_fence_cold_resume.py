@@ -191,7 +191,6 @@ def _dying_before_consumption(monkeypatch, reap_queue):
     worker.proc.pid = 2222
     workers.WORKERS[0] = worker
     monkeypatch.setattr(workers, '_LAST_SPAWN_TIME', 0)
-    monkeypatch.setattr(workers, 'CRASH_TS', [])
     monkeypatch.setattr(queue, '_reap_queue', reap_queue)
     monkeypatch.setattr(queue, '_ensure_reaper_started', lambda: None)
     monkeypatch.setattr(workers, 'respawn_worker', lambda *_a, **_k: None)
