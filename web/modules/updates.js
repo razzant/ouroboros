@@ -573,7 +573,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
             <section class="ui-card updates-card" id="updates-status-card">
                 <div class="dashboard-hero">
                     <p class="dashboard-hero-kicker">Official updates</p>
-                    <p class="dashboard-hero-figure"><span id="updates-summary">Loading…</span>${statusMarkHtml('consciousness-mark updates-mark')}</p>
+                    <p class="dashboard-hero-figure"><span id="updates-summary">Loading update status…</span>${statusMarkHtml('consciousness-mark updates-mark')}</p>
                     <p class="dashboard-hero-meta" id="updates-meta"></p>
                     <p class="dashboard-hero-meta" id="updates-action-note"></p>
                     <div class="dashboard-hero-actions"><button type="button" class="btn btn-primary" id="btn-update-primary" hidden></button></div>
