@@ -81,7 +81,7 @@ def test_an_omitted_permitted_schema_loads_stays_through_the_next_fit_and_dispat
     registry = _child(tmp_path, monkeypatch, profile, mode, grants=extensions)
     resident = initial_tool_schemas(registry, context_mode=mode)
     assert tool_schema_limit(OPENAI) == 128 < len(resident)
-    assert "enable_tools" in _names(resident) and "compact_context" not in _names(resident)
+    assert "enable_tools" in _names(resident) and "compact_context" in _names(resident)
     loop._setup_dynamic_tools(registry, resident, [], context_mode=mode)
     first = _round(registry, resident)
     assert loop_model_call._fit_route_tool_ceiling(first)
@@ -115,7 +115,7 @@ def test_a_fitting_catalog_keeps_its_envelope_and_the_selector_grants_nothing(su
                 registry = _child(tmp_path, monkeypatch, profile, mode)
                 resident = initial_tool_schemas(registry, context_mode=mode)
                 assert len(resident) <= 128 and "enable_tools" in _names(resident)
-                assert ("compact_context" in _names(resident)) is (mode == "nano")
+                assert "compact_context" in _names(resident)  # its own fold, in every mode
                 before = list(resident)
                 loop._setup_dynamic_tools(registry, resident, [], context_mode=mode)
                 assert loop_model_call._fit_route_tool_ceiling(_round(registry, resident)) is False
@@ -203,6 +203,8 @@ def test_a_low_or_max_diagnostic_keeps_its_role_and_is_not_told_to_call_the_sele
     registry = _child(tmp_path, monkeypatch, "local_readonly_subagent", "max")
     resident = initial_tool_schemas(registry, context_mode="max")
     assert set(_names(resident)) <= TASK_DIAGNOSTIC_TOOL_NAMES and "enable_tools" not in _names(resident)
+    assert "compact_context" in _names(resident)  # its own fold, without the selector
+    assert registry.execute_result("compact_context", {"inspect": True}).status != "blocked"
     monkeypatch.setitem(provider_models.PROVIDER_TOOL_SCHEMA_LIMITS, "openai", len(resident) - 2)
     loop._setup_dynamic_tools(registry, resident, [], context_mode="max")
     fitted = _round(registry, resident)
