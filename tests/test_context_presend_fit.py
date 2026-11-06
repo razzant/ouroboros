@@ -86,7 +86,7 @@ def test_irreducible_prediction_exhausts_passes_without_a_paid_blind_round(main_
 def test_a_claimed_change_still_needs_the_existing_strict_shrink_check(main_call, monkeypatch):
     ctx, gateway, *_ = main_call
     _large(ctx)
-    monkeypatch.setattr(loop_model_call, "_apply_refusal_pass", lambda *a: True)
+    monkeypatch.setattr(loop_model_call, "_apply_refusal_pass", lambda *a, **_kw: True)
     assert loop._call_round_model(ctx)[0] is None
     assert not gateway.creates
     skipped = [event.get("data", {}) for event in list(ctx.event_queue.queue)]
