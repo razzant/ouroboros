@@ -778,6 +778,7 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
                       can_resume: bool = False, owner_resumed: bool = False, live: bool = False,
                       view: Optional[dict] = None) -> Dict[str, Any]:
             from ouroboros.project_admission import project_hold_fact
+            from ouroboros.project_naming import derived_run_name
             from ouroboros.task_activity_facts import card_facts
             from ouroboros.work_stop import parked_stop_view
 
@@ -799,6 +800,7 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
                 # A moved Presence turn's saved work is the queue's, never a direct owner chat (its origin flag stays).
                 "kind": "direct_chat" if row.get("_is_direct_chat") and not row.get("_presence_turn") else "managed_task",
                 "phase": phase,
+                **({"suggested_name": name} if (name := derived_run_name(row)) else {}),
                 # Cancel stops a lineage-resolved root (``ChatOutbound.cancelable``); Resume is the
                 # parked row's own release rule (``work_stop.current_stop``).
                 "can_resume": bool(can_resume), "cancelable": bool(root),
