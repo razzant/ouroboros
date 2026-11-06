@@ -375,7 +375,7 @@ def acquire_exclusive_file_lock(
                             if not IS_WINDOWS:  # Windows deletes no open file: it unlinks
                                 if _lock_identity(lock_path) == judged:  # below, after
                                     os.unlink(str(lock_path))  # under the held flock
-                                retry_after_stale = True
+                                    retry_after_stale = True  # only our own eviction outlives the deadline
                                 continue
                 finally:
                     if IS_WINDOWS:  # the probe's hold goes before its handle
