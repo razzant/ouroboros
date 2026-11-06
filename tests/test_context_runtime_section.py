@@ -650,10 +650,10 @@ def test_captured_recent_and_drive_sections_carry_one_capture_label(tmp_path, mo
 
 
 class TestStorageFact:
-    """The disk and the last finished storage count reach the Runtime block as one compact fact (Commit 5
-    of the storage plan): the disk in the Storage page's decimal GB with its read time, with or without a
-    count; the count when there is one; never zero, and no threshold, tier or WARNING stands in for the
-    mind's judgment."""
+    """The disk reaches the Runtime block as one compact fact (Commit 5 of the storage plan): free and
+    total space every turn, in the Storage page's decimal GB with its read time, the last finished count
+    with its growth once there is one, never a zero for what is unknown, and no threshold, tier or
+    WARNING stands in for the mind's judgment."""
 
     def _env(self, tmp_path):
         class FakeEnv:
@@ -673,7 +673,7 @@ class TestStorageFact:
         section = build_runtime_section(env, {"id": "t1", "type": "task"})
         return section, json.loads(section.split("## Runtime context\n\n", 1)[1])
 
-    def test_absent_until_the_owner_counts_then_the_count_with_growth(self, tmp_path, monkeypatch):
+    def test_free_space_every_turn_then_the_count_with_growth_once_counted(self, tmp_path, monkeypatch):
         from types import SimpleNamespace
 
         from ouroboros import storage
@@ -727,13 +727,14 @@ class TestStorageFact:
         for key in ("free_bytes", "free_gb", "volume_total_bytes", "volume_total_gb", "disk_read_at"):
             assert key not in child_data["storage"], f"an unreadable disk is absent, never zero: {key}"
 
-    def test_an_unreadable_saved_count_is_no_fact(self, tmp_path):
+    def test_an_unreadable_saved_count_is_no_count(self, tmp_path):
         from ouroboros import storage
 
         env = self._env(tmp_path)
         (tmp_path / storage.MEASUREMENT_FILE).write_bytes(b"not json")
         _section, data = self._runtime(env)
-        assert "counted_at" not in data["storage"] and "free_gb" in data["storage"], "no count, the disk still read"
+        assert set(data["storage"]) == {"free_bytes", "free_gb", "volume_total_bytes", "volume_total_gb", "disk_read_at"}, \
+            "an unreadable count is no count fact; the disk is still read"
 
     @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs a folder this user cannot list")
     def test_unreadable_items_qualify_the_headline_and_the_growth(self, tmp_path):

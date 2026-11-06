@@ -177,8 +177,9 @@ def test_storage_uses_the_installation_or_native_pin_with_existing_read_authorit
     status, result = _query(native, op="json", kind="storage")
     assert status == "ok" and result["source"]["plane"] == "native_pin" and result["data"]["plane"] == "retained"
     pin.unlink()
-    status, missing = _query(native, op="json", kind="storage")  # no count there: its removers and disk alone
-    assert status == "ok" and missing["source"]["plane"] == "native_pin" and set(missing["data"]) == {"removers", "disk"}
+    status, missing = _query(native, op="json", kind="storage")  # no count there: its removers, receipt and disk
+    assert status == "ok" and missing["source"]["plane"] == "native_pin" and set(missing["data"]) == {
+        "removers", "storage_free", "disk"}
 
 
 def test_explicit_child_queue_logs_and_sql_keep_their_local_planes(planes, monkeypatch):

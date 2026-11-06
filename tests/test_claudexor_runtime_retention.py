@@ -52,7 +52,7 @@ def _names(root):
 def test_unpinned_versions_go_running_and_pinned_stay_and_young_staging_waits(cx):
     report = retention.prune_unpinned_runtimes()
     assert sorted(report["removed"]) == ["3.9.0-dddddddddddd", "4.0.0-eeeeeeeeeeee", "claudexor-3.9.0.tar.gz"], report
-    assert not report["errors"]
+    assert not report["errors"] and report.get("rested") is None
     kept = _names(cx)
     for name in (PINNED, "4.1.1-bbbbbbbbbbbb", "4.1.1-cccccccccccc", "node/24.1.0-darwin-arm64",
                  "cache/claudexor-4.2.0.tar.gz", "unrecognized"):
@@ -82,7 +82,7 @@ def test_an_unproven_serving_version_removes_nothing(cx, monkeypatch):
     before = _names(cx)
     monkeypatch.setattr("ouroboros.claudexor_daemon.owned_engine_version", lambda: "")
     report = retention.prune_unpinned_runtimes(now=time.time() + 7200)
-    assert report["skipped"] == "serving_version_unproven" and not report["removed"]
+    assert report["skipped"] == "serving_version_unproven" and report["rested"] is True and not report["removed"]
     assert _names(cx) == before
 
 
@@ -95,5 +95,19 @@ def test_an_install_holding_the_lock_is_never_raced(cx):
         report = retention.prune_unpinned_runtimes()
     finally:
         release_exclusive_file_lock(lock, fd)
-    assert report["skipped"] == "install_in_progress" and _names(cx) == before
+    assert report["skipped"] == "install_in_progress" and report["rested"] is True and _names(cx) == before
     assert "3.9.0-dddddddddddd" in retention.prune_unpinned_runtimes()["removed"]
+
+
+def test_unreadable_or_empty_runtime_passes_rest_and_a_normal_pass_does_not(cx, monkeypatch, tmp_path):
+    monkeypatch.setattr(claudexor_runtime, "get_runtime_manager", lambda: (_ for _ in ()).throw(OSError("pin")))
+    unreadable = retention.prune_unpinned_runtimes()
+    assert unreadable["skipped"].startswith("pin_unreadable:") and unreadable["rested"] is True
+    monkeypatch.setattr(claudexor_runtime, "get_runtime_manager", lambda: SimpleNamespace(
+        pin=SimpleNamespace(install_name=PINNED, archive_name="claudexor-4.2.0.tar.gz")))
+    monkeypatch.setattr(claudexor_runtime, "managed_runtime_root", lambda: tmp_path / "missing-cx")
+    empty = retention.prune_unpinned_runtimes()
+    assert empty["skipped"] == "nothing_installed" and empty["rested"] is True
+    monkeypatch.setattr(claudexor_runtime, "managed_runtime_root", lambda: cx)
+    normal = retention.prune_unpinned_runtimes()
+    assert normal.get("rested") is None

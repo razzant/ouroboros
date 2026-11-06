@@ -151,7 +151,7 @@
  * @property {string} id  // work_folders | working_copies | review_evidence | review_checkouts | lost_copies | service_folders | result_pins
  * @property {number} count
  * @property {number} inside_wait  // finished less than retention_days ago
- * @property {number} in_use  // live, pending, unknown or non-terminal: offered nowhere, named here
+ * @property {number} in_use  // held: not offered and not unreadable; each item names the typed reason it stays for
  * @property {number} unreadable  // no readable task record or custody: shown, never freed
  * @property {number|null} bytes
  * @property {boolean} bytes_complete
@@ -161,7 +161,7 @@
 /**
  * A typed reason and how many items it holds, for what a pool leaves out and what a run kept.
  * @typedef {Object} StorageFreeKept
- * @property {string} reason  // results_pending | in_use | busy | unreadable_record | restart | capture_unproven | unproven_excluded_inputs | retained_evidence | undeclared_environment | owner_keep | changed | other; and, only for what a pool leaves out, advanced_group (offered as a whole saved-work group)
+ * @property {string} reason  // the owner's compatible reason group (results_pending | in_use | busy | unreadable_record | restart | capture_unproven | … | other); the exact retirer code is in `causes`, and only a pool's saved group uses advanced_group
  * @property {number} count
  * @property {{cause: string, count: number}[]=} causes  // run: exact retirer codes, beside compatible reason
  * @property {number=} manual_count  // a pool's row only, when above zero: how many of `count` can be discarded by hand (view=manual). Never subtract the pool's global manual count from a row: each row says its own.
@@ -176,7 +176,7 @@
  * @property {boolean} bytes_complete
  * @property {{work_folder?: number, working_copy?: number, environment?: number}} kinds
  * @property {StorageFreeKept[]} excluded  // same reason vocabulary as a run's kept items
- * @property {{count: number, bytes: number|null, bytes_complete: boolean}} manual  // finished copies the owner may discard one by one, never in `count`; the door shows when `count` > 0; bytes: null = unknown, never zero
+ * @property {{count: number, bytes: number|null, bytes_complete: boolean, retained: number}} manual  // what the owner may discard one by one, never in `count`: finished copies not verified saved and `retained` marked session scratch; the door shows when `count` > 0; bytes: null = unknown, never zero
  */
 
 /**
@@ -188,6 +188,9 @@
  * @property {{path: string, bytes: number}[]} not_proven_saved  // the largest first, at most 50, paths relative to the copy
  * @property {number} omitted_count  // not_proven_saved_count minus the listed ones: say so when above zero
  * @property {boolean} keeps_commits  // its branch or pin stays, with any commits it holds
+ * @property {boolean=} producer_retained  // a session scratch its run marked to keep (not a copy): `loss` and `paths` say what goes
+ * @property {string=} loss  // the run's marker words
+ * @property {string[]=} paths  // the marked scratch folders; the entry's size is theirs
  */
 
 /**
@@ -195,7 +198,7 @@
  * @typedef {Object} StorageFreeEntry
  * @property {string} id
  * @property {string} group  // the id of its StorageFreeGroup
- * @property {'work_folder'|'working_copy'|'environment'|'other'} kind
+ * @property {'work_folder'|'working_copy'|'environment'|'scratch'|'other'} kind
  * @property {string} name
  * @property {string} path
  * @property {string|null} task_id
@@ -272,18 +275,20 @@
  */
 
 /**
- * One remover of a place, read fresh: a maintenance job's row or the engine's last retention pass.
+ * One remover of a place, read fresh: a maintenance job's row, a server retirer pass's row or the engine's last retention pass.
  * @typedef {Object} StorageRemover
- * @property {string} id  // engine | runtime_retirement | custody_trash | evidence_packing | record_compression
+ * @property {string} id  // engine | runtime_retirement | custody_trash | evidence_packing | record_compression | drive_settlement | copy_retirement | review_checkout_prune | session_scratch_release | engine_runtime_prune
  * @property {string} state  // a job: pending | running | done | failed | never | unsupported | unavailable; the engine: completed | held | truncated | failed | none | unavailable | unsupported
  * @property {string|null} at  // the job row's last write; the engine pass's end
  * @property {{class: string, at: string}=} last_error  // a job whose last run threw, until a run returns normally
  * @property {number=} compressed  // record_compression: files compressed so far in this place's plane
  * @property {(number|null)=} saved_bytes  // record_compression: that plane's allocation saved; null where unreported
  * @property {number=} freed_bytes  // the engine pass
- * @property {number=} held  // the engine pass: folders it held (project roots and native homes)
+ * @property {number=} released  // a retirer pass: items it released
+ * @property {{class: string, count: number, example: string, since: string}[]=} holds  // a retirer pass or the engine pass: what it keeps, by typed reason, since when
+ * @property {number=} held  // the engine pass: folders it held (project roots and native homes); a retirer pass: items held
  * @property {string=} held_since  // the earliest of those holds
- * @property {number=} errors  // the engine pass's errors
+ * @property {number=} errors  // the engine pass's errors; a retirer pass's pass-level errors
  * @property {(string|null)=} first_error
  */
 

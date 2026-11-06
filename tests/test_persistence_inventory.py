@@ -1137,7 +1137,7 @@ STALE_ROW_EXEMPTIONS = frozenset({
     # live writer (``review_source_closure.retain_review_request_sources`` left
     # with the acceptance machine); old snapshots are still read
     # (``review_source_closure._owned_attachment_path`` during child-ref promotion,
-    # ``delegate_registration_policy.minted_review_root``).
+    # ``delegate_registration_policy.minted_root``).
     "task_results/artifacts/*/source_handles/review_inputs",
     # A LIVE plane the scan cannot see: ``delegate_output.retain_terminal_bytes``
     # and ``delegate_collection._retain`` spell each source id as an f-string over a

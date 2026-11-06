@@ -1050,8 +1050,10 @@ A place connector reports observations; the host decides attention. While runnin
 authenticated, report every supported event within the connected place's granted
 account, conversation and thread bounds, with observed provider facts. Do not discard
 these events based on their text, perceived relevance, wake list or place state.
-A bot sender is the fact `from_bot`, not an intake filter. Disable, unload, Panic and
-provider access still govern connector operation; this promises no access to events
+A bot sender is the fact `from_bot`, not an intake filter. It names the author's provider account, not the
+client that posted: a person writing through an app or an assistant is that person, and app or bot markers on
+a message decide only when the provider names no person or cannot say what kind of account wrote it.
+Disable, unload, Panic and provider access still govern connector operation; this promises no access to events
 outside the provider API or the connector's declared support.
 
 The host validates and captures an event before applying authored wakes and execution
@@ -1082,7 +1084,12 @@ Neither carrier adds fields to `places.json`.
 The owner's “This is my account” confirms `sends_as.id` using the existing `owner_accounts` writer.
 For `kind: user` only, a matching `platform_actor_id` in the same `account_id` scope derives `owner: true`; revocation removes it.
 This says whose credential writes or reads, independently of who sent an incoming message. Never return your own
-sends as incoming events: from the owner's confirmed account they would read as the owner's words. Bot identities
+sends as incoming events: from the owner's confirmed account they would read as the owner's words. Where the
+provider lets you tell them apart (GitHub does), do report the account's other activity (its edits, merges and posts
+made by other tools acting as it): the host settles an event whose actor is `sends_as.id`, not reported
+unauthenticated, as heard with reason `own_account`; it stays in the room and the next own wake and never wakes a
+focus. Where `sends_as` is the owner's confirmed account, its posts are the owner's words and keep the ordinary path.
+Otherwise, other people who post from the sending account are heard as it, not woken on. Bot identities
 never derive owner status or offer this confirmation. Only the human activates a place, through its sheet or an owner-door Main turn;
 consciousness may still set Silent or Paused.
 

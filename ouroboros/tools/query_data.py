@@ -44,8 +44,9 @@ _BLOB_KIND_HINT = ("; op=blob reads observability CAS blobs only. A digest in a 
                    "result names, memory_read(source_ref={kind, root, path, size, sha256, task_id})")
 # ``context_snapshot``: the skill's current declared context snapshot, the address its outdated note names.
 _STATES = ("review", "review_job", "health", "enabled", "deps", "grants", "context_snapshot")
-# Each knowledge history row holds both complete versions of its note, so the ordinary
-# 8 MiB log window would cover hours of writes; this read budget covers far more of them.
+# A knowledge history row holds the complete version it published and, unless it names an
+# earlier row, the one it replaced, so the ordinary 8 MiB log window would cover hours of
+# writes; this read budget covers far more of them.
 _HISTORY_SCAN_BYTES = 256 * 1024 * 1024
 _HISTORY_BODY_FIELDS = ("old_content", "new_content")
 _SELECTOR = re.compile(r"(?:[^.\[\]]+|\[(?:\d+|\*)\])(?:\.[^.\[\]]+|\[(?:\d+|\*)\])*")
@@ -357,11 +358,13 @@ def _record(ctx, root, kind, identity, child, state_file, op, where, tail, cap, 
         raw = b"{}"  # no count yet: the removers below are read all the same
     if len(raw) > cap:  # the bounded read proves only a lower bound
         raise _over_input(subject, None, cap)
-    if kind == "storage":  # the saved counts beside each place's removers and the disk, both read now
+    if kind == "storage":  # the saved counts beside each place's removers, the Free receipt and the disk, read now
+        from ouroboros import maintenance_jobs
         from ouroboros.context_runtime_facts import disk_view
         from ouroboros.storage_removers import place_removers
 
-        value = {**json.loads(raw), "removers": place_removers(root), "disk": disk_view(root)}
+        value = {**json.loads(raw), "removers": place_removers(root),
+                 "storage_free": maintenance_jobs.job(root, "storage_free") or {}, "disk": disk_view(root)}
         raw = _canonical(value)
         return raw, value, True, False, len(raw), False
     value = json.loads(raw)
