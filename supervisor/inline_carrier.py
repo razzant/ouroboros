@@ -346,7 +346,7 @@ def run_inline_turn(
     (``inline_carrier.start_inline_turn``); a live call attaches its process-local
     turn to the actor. Returns the RUNNING meta, or None when refused or deferred.
     """
-    from ouroboros.server_restart import agent_restart_pending
+    from ouroboros.server_restart import agent_restart_draining, agent_restart_pending, note_started_restart_work
     from supervisor import queue
     from supervisor.active_activity import reply_expected
     from supervisor.conversation_lane import admit_turn, publish_awaiting_rows
@@ -373,12 +373,15 @@ def run_inline_turn(
                 _pool().send_with_budget(chat_id, "Restart intake is closed. This turn was not accepted; send it after Restart.",
                     **_host_operation_failure(task_metadata), role="system", system_type="task_not_started")
                 return None
-            deferred = agent_restart_pending()
+            # Only the physical drain saves degraded text; a live call is never saved (its session cannot return).
+            deferred = agent_restart_draining() and realtime_turn is None
             # Reserved: the row is this executor's from its admission (the tick's lane pass in the barrier
             # window hands it to no carrier) until ``start_inline_turn`` binds it.
             meta = None if deferred else admit_turn(task, chat_id=chat_id, client_message_id=client_msg_id, quiet=False,
                                                     reply_expected=reply_expected({"metadata": task_metadata or {}}),
                                                     reserved=True)
+            if meta is not None:
+                note_started_restart_work(task)
         if meta is not None:
             admitted = {"task": task, "chat_id": chat_id, "client_msg_id": client_msg_id, "kind": "direct_chat",
                         "task_metadata": task_metadata, "realtime_turn": realtime_turn, "agent": None}

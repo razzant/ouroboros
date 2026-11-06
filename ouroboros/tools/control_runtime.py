@@ -241,7 +241,8 @@ def self_change_tool_entries() -> list:
             "name": "request_restart",
             "description": (
                 "Ask supervisor to restart runtime after this task finalizes; confirmed acceptance holds new "
-                "independent work, including Main, for Restart. An unconfirmed reply proves no acceptance. "
+                "independent background work for Restart, never the owner's conversation (saved only in the final "
+                "drain). An unconfirmed reply proves no acceptance. "
                 "evolution requires its exact active commit receipt. A restart alone adopts nothing: pass "
                 "adopt_commit (the exact reviewed commit of your body candidate) to adopt it locally at this "
                 "restart, after the running generation's readers have stopped."),

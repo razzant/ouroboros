@@ -239,6 +239,13 @@ def _queue_context_fact(task: Dict[str, Any]) -> Dict[str, Any]:
         rows = snapshot.get(key)
         fact[key + "_count"] = sum(isinstance(row, dict) and execution_kind(row.get("task") or {}) != "presence"
                                    for row in rows) if isinstance(rows, list) else None
+    intent = snapshot.get("restart_intent")
+    if isinstance(intent, dict) and intent.get("status") in {"awaiting", "accepted", "ready"}:
+        # The host's acknowledged restart request at this snapshot (``server_restart.agent_restart_snapshot``); the reason
+        # is the requester's own words. Until its task finishes nothing restarts; ``ready`` is the bounded drain.
+        fact["pending_restart"] = {
+            "requested_by_task": intent.get("task_id"), "phase": "draining" if intent["status"] == "ready" else "requested",
+            **({"requester_reason": intent["reason"]} if intent.get("reason") else {})}
     fact["reaping_count"] = snapshot.get("reaping_count")
     fact["worker_total"] = snapshot.get("worker_total")  # project slots: what max_workers bounds; idle is 0
     fact["lane_carrier_total"] = snapshot.get("lane_carrier_total")  # the conversation lane's carriers, apart
