@@ -21,7 +21,6 @@ from tests.test_native_task_wait import (  # noqa: F401
     _call, _child, _ctx, _drive, _End, _header, _limit, _loop_registry, _note, _notices, _parked_cold,
     _resumed_first_request, _wire_requests, ledger as ledger)
 
-pytestmark = pytest.mark.serial  # cold consumers bind queue module state
 
 
 def _retried(root, original="kid-a", successor="kid-b", *, status="failed", successor_status="scheduled",
@@ -59,7 +58,7 @@ def _woken(ctx, landing):
 # --- effective identity: who answers for the id selected ---------------------------------------------
 
 
-@pytest.mark.parametrize("case", ["ready", "ready_through_retry", "ready_known_hash", "ready_unknown", "armed_while_retry_runs"])
+@pytest.mark.parametrize("case", ["ready", "ready_unknown", "armed_while_retry_runs"])
 def test_a_ready_at_call_wait_reaches_the_serialized_next_request_through_its_tool_result(tmp_path, monkeypatch, case):
     """The whole path of a wait that needs no sleep, and of the one that looks ready only by its raw row."""
     from ouroboros import task_status

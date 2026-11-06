@@ -9,7 +9,6 @@ and the disclosures (delegated runs, scoped homes) a cancelled result must carry
 from __future__ import annotations
 import json
 import types
-import pytest
 from ouroboros import cancel_intents as ci, delegate_custody as dc
 from ouroboros.task_results import (
     STATUS_CANCELLED,
@@ -81,7 +80,6 @@ def test_finalize_on_miss_promotes_a_child_result_before_cancelling(qenv):
     assert stored["status"] == STATUS_COMPLETED
     assert stored["result"] == "the child's finished answer"
 
-@pytest.mark.serial
 def test_cancel_of_a_task_with_no_durable_result_never_fabricates_completed(qenv, monkeypatch):
     """A-F5, PROVEN class: killed inside the spawn→RUNNING-write window.
 
@@ -185,7 +183,6 @@ def test_watchdog_replays_a_cascade_intent_as_a_cascade(qenv, monkeypatch):
 
     assert calls == [("casc-root", {})]
 
-@pytest.mark.serial
 def test_unreconciled_delegated_runs_are_disclosed_on_the_cancelled_result(
     qenv, monkeypatch,
 ):
@@ -409,7 +406,6 @@ def test_reconcile_discloses_open_runs_even_when_outcomes_are_nonempty(qenv, mon
     assert qenv.tl._reconcile_delegated_runs_on_kill(qenv.q, "rt1") == ["run-open"]
 
 
-@pytest.mark.serial
 def test_kill_path_clean_audit_clears_a_stale_unreconciled_list(qenv, monkeypatch):
     """D1b + R2: the running-kill terminal write carries the fresh audit
     UNCONDITIONALLY, so a clean audit clears a stale non-empty list left by an

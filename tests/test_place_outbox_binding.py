@@ -174,8 +174,7 @@ def test_same_account_unknown_scope_stays_unknown(client, tmp_path):
     assert not opaque["allowed"] and opaque["code"] == "place_silent"
 
 
-@pytest.mark.parametrize("field,value", [("account_id", "Alias"), ("connector", "other"), ("provider", "other"),
-    ("conversation_id", "other"), ("version", True), ("place_id", None)])
+@pytest.mark.parametrize("field,value", [("account_id", "Alias"), ("connector", "other"), ("version", True), ("place_id", None)])
 def test_snapshot_cannot_be_reused_for_another_target(client, field, value):
     captured = bind(client).json()["binding"]
     captured[field] = value

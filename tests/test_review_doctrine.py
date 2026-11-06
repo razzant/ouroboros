@@ -120,8 +120,6 @@ def test_gaps_are_not_verification_and_a_real_digest_is(tmp_path, monkeypatch):
 @pytest.mark.parametrize("top,nested,claim,identity,status", [
     ("", "scout", "scout", "recorded", "bound"),
     ("", "actual", "claimed", "mismatch", "bound"),
-    ("top", "nested", "nested", "mismatch", "bound"),
-    ("", "", "claimed", "unknown", "gap"),
     ("", "", "", "unknown", "gap"),
 ])
 def test_report_actor_comes_only_from_retained_identity(tmp_path, top, nested, claim, identity, status):

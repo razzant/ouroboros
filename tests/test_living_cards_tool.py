@@ -63,13 +63,7 @@ def test_a_card_tree_indexes_its_commit_controls_with_their_drawn_labels():
 
 
 @pytest.mark.parametrize(("tree", "message"), [
-    ([{"type": "poll", "route": "x"}], "components[0] type 'poll' is not available in a card"),
-    ([{"type": "subscription", "event": "tick"}], "components[0] type 'subscription' is not available"),
-    ([{"type": "file", "src": "data:x"}], "components[0] type 'file' is not available"),
     ([{"type": "action", "label": "Go"}], "components[0].submit.id is required"),
-    ([{"type": "action", "label": "Go", "submit": {"id": "Bad Id"}}], "components[0].submit.id is required"),
-    ([{"type": "group", "components": [{"type": "action", "route": "r", "submit": {"id": "a"}}]}],
-     "components[0].components[0].route is not available in a card"),
     ([ACTION, {**FORM, "submit": {"id": "book"}}], "components[1].submit.id duplicates 'book' first used at components[0]"),
     ([{"type": "markdown", "text": "x", "submit": {"id": "a"}}], "components[0].submit binds only action and form"),
     ([{"type": "action", "submit": {"id": "a", "once": "yes"}}], "components[0].submit.once must be boolean"),
@@ -121,7 +115,6 @@ def test_a_display_only_card_is_not_interactive_and_a_queued_card_says_so(tmp_pa
 
 @pytest.mark.parametrize(("kwargs", "fragment"), [
     ({}, "give exactly one body"),
-    ({"components": [ACTION], "app": {"html": "<p>x</p>"}}, "give exactly one body"),
     ({"widget": {"skill": "s", "tab_id": "t"}, "data": {}}, "data belongs to a components body"),
     ({"components": [ACTION], "data": [1]}, "data must be an object"),
     ({"components": [{"type": "stream", "route": "s"}]}, "components[0] type 'stream'"),

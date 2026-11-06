@@ -23,9 +23,11 @@ main_call = main_fixture
 
 
 # Main dispatch is synchronous; the async transport also uses the native-repair callback.
-@pytest.mark.parametrize("asynchronous,quota_wait", [(False, False), (False, True), (True, False)],
-                         ids=["sync-repair", "sync-quota-wait", "async-repair"])
-@pytest.mark.parametrize("route", [ROUTE, ROUTE_B], ids=["same-account", "changed-account"])
+@pytest.mark.parametrize(("route", "asynchronous", "quota_wait"), [
+    pytest.param(ROUTE, True, False, id='same-account-async-repair'),
+    pytest.param(ROUTE_B, False, False, id='changed-account-sync-repair'),
+    pytest.param(ROUTE_B, False, True, id='changed-account-sync-quota-wait'),
+])
 def test_main_dual_token_reset_survives_wait_reprepare_and_adopts_new_envelope(
     main_call, turn_engine, asynchronous, route, quota_wait,
 ):

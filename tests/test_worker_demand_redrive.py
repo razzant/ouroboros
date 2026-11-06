@@ -21,7 +21,6 @@ from tests.test_owner_wait_pool import InputQueue, Process, pool as pool  # noqa
 from tests.test_worker_demand import acknowledge, assigning as assigning, task  # noqa: F401
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 _REAL_THREAD = threading.Thread  # the pool fixture stubs Thread; the reaper below is real
 
@@ -124,8 +123,7 @@ def _retired_rows(root):
     return [(r["worker_id"], r["pid"], r["token"], r["replaced"]) for r in rows if r["type"] == "worker_retired"]
 
 
-@pytest.mark.parametrize("kill_raises", [False, True])
-@pytest.mark.parametrize("kind", ["idle", "unready"])
+@pytest.mark.parametrize(("kind", "kill_raises"), [("idle", False), ("unready", True)])
 def test_a_retained_stop_spends_one_bounded_join_and_its_re_drives_never_wait(assigning, monkeypatch, kind, kill_raises):
     monkeypatch.setattr(workers, "MAX_WORKERS", 3)
     monkeypatch.setattr(task_reaper, "_deferred_reap_jobs", [])
@@ -207,8 +205,7 @@ def _tick_until(predicate, ticks=12):
     return None
 
 
-@pytest.mark.parametrize("wedged", [True, False])
-@pytest.mark.parametrize("kind", ["idle", "unready"])
+@pytest.mark.parametrize(("kind", "wedged"), [("idle", True), ("unready", False)])
 def test_an_unconfirmable_stop_never_starves_independent_dispatch_or_growth(
         assigning, monkeypatch, record_property, kind, wedged):
     """Real reaper thread and assignment, MAX 3, slot 0 idle and ready. Before the fix each re-drive

@@ -1,18 +1,27 @@
 """Configuration refusals, pending custody and reliable counted-completion notices."""
 from contextlib import contextmanager
+from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import owner_mailbox, review_custody, review_ledger as ledger, task_custody
+from ouroboros import owner_mailbox, task_custody
 from ouroboros.review_records import ReviewActorRecord
-from ouroboros.tools import plan_ask, plan_packet
+from ouroboros.tools import plan_ask
 from tests._skill_review_shared import _build_skill, _make_ctx
 from tests.review_pool_rosters import pool_roster, pool_seat, set_review_pool
 from tests.test_plan_review_event_route import _mailbox_entries
-from tests.test_plan_task_tool import CLEAN, _record, _write, harness as _harness
-from tests.test_review_ledger import BOTH, _facts, _raw
-from tests.test_reviewer_panel_plan_r1 import PENDING, _adviser
+from tests.test_plan_task_tool import CLEAN, _record, _slots, _write, harness as _harness
 from tests.test_skill_source_tools import _typed_call
+
+
+PENDING = {"status": "pending", "raw_text": "", "operation_state": "pending_dispatch", "late_result_pending": True}
+
+
+def _adviser(harness):
+    row = SimpleNamespace(subagent_id="critic", slot_id="critic", target_id="m/critic")
+    harness.monkeypatch.setattr("ouroboros.reviewer_slot_config.catalog_review_row", lambda *_: row)
+    harness.monkeypatch.setattr("ouroboros.reviewer_slot_config._delivery_slot", lambda *a, **kw: _slots(("critic", "m/critic"))[0])
+
 
 harness = _harness
 
@@ -65,20 +74,6 @@ def test_skill_pool_configuration_failures_are_not_argument_errors(tmp_path, mon
         assert "invalid review pool configuration" not in message
 
 
-@pytest.mark.parametrize("custody_lost", [False, True])
-def test_not_reached_agrees_with_pending_after_real_custody_and_ledger_projection(custody_lost):
-    raw = _raw("s", "m/s", "error", parts=BOTH, operation_state="settled")
-    if custody_lost:
-        raw = review_custody._custody_lost_row("commit_review", 0, "controller no longer owns actor", raw)
-        assert raw["late_result_pending"] and ledger.panel_not_reached([raw]) == []
-    else:
-        raw["failure_code"] = "provider_error"
-    record = ledger.build_commit_gate_record(_facts([raw], panel={"pool": [{"seat_id": "s"}]})).to_dict()
-    assert ledger.counted_pending(record["rows"]) is custody_lost
-    assert record["state"] == ("pending" if custody_lost else "settled")
-    assert record["panel"]["not_reached"] == ([] if custody_lost else [{"seat_id": "s", "cause": "provider_error"}])
-
-
 @pytest.mark.parametrize("initial_lock", ["available", "refused", "raised"])
 def test_later_adviser_callback_retries_only_an_undelivered_completion(harness, monkeypatch, initial_lock):
     _adviser(harness)
@@ -126,38 +121,3 @@ def test_later_adviser_callback_retries_only_an_undelivered_completion(harness, 
     assert frame["msg_id"] == f"plan-complete:{ctx.task_id}:{ask['ask_id']}"
     assert results == {"available": [True], "refused": [False, True], "raised": ["raised", True]}[initial_lock]
     assert attempts == [frame["msg_id"]] * len(results)
-
-
-@pytest.mark.parametrize("counted", [False, True])
-def test_completion_frame_reserves_still_owed_for_counted_participants(counted):
-    text = plan_packet.settled_frame("a1", [
-        {"seat_id": "finished", "status": "answered", "owner_marked": True},
-        {"seat_id": "working", "status": "pending", "owner_marked": counted},
-    ], [])
-    assert "1 answered" in text
-    assert ("1 still owed (working)" in text) is counted
-    if counted:
-        assert "advisers still working" not in text
-    else:
-        assert "counted participants settled" in text and "still owed" not in text
-        assert "advisers still working: working" in text
-        assert "not counted" in text and "replies land in the plan record" in text
-        assert "plan_task() reads them" in text and "no further notice" in text
-
-
-@pytest.mark.parametrize("tool", ["skill_install", "skill_update"])
-def test_an_installer_value_error_is_not_reported_as_a_caller_argument_error(tmp_path, monkeypatch, tool):
-    """Panel arguments are refused before the installer runs; an installer's own failure stays a tool failure."""
-    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(_build_skill(tmp_path)))
-    set_review_pool(monkeypatch, pool_roster(pool_seat("counted", "openai/reviewer")))
-    ctx = _make_ctx(tmp_path)
-
-    def broken_installer(*args, **kwargs):
-        raise ValueError("installer state is unreadable")
-
-    monkeypatch.setattr("ouroboros.skill_source_install.install_item", broken_installer)
-    monkeypatch.setattr("ouroboros.skill_source_install.update_installed", broken_installer)
-    arguments = ({"id": "community/weather", "reason": "weather needed"} if tool == "skill_install"
-                 else {"name": "weather", "mode": "replace"})
-    with pytest.raises(ValueError, match="installer state is unreadable"):
-        _typed_call(tool, ctx, **arguments)

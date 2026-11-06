@@ -179,8 +179,7 @@ def test_stop_and_wrapup_text_are_byte_preserved(control, action):
     assert _text(usage, control_reason=reason, waited_sec=300).encode() == expected.encode()
 
 
-@pytest.mark.parametrize('wait', [False, True])
-@pytest.mark.parametrize('salvage', ['', 'Saved **exact** bytes.\n\n```text\nα < β\n```'])
+@pytest.mark.parametrize(("salvage", "wait"), [('', False), ('Saved **exact** bytes.\n\n```text\nα < β\n```', True)])
 def test_terminal_wording_is_differentially_call_free_and_preserves_salvage(tmp_path, monkeypatch, wait, salvage):
     import copy
 

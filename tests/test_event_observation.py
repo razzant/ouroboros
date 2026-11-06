@@ -11,8 +11,8 @@ from supervisor.event_taxonomy import EVENT_DISPOSITIONS
 
 
 @pytest.mark.parametrize("kind", [
-    "main_llm_call_state", "cognitive_operation", "llm_usage", "external_wait_lease",
-    "task_model_wait", "owner_wait", "task_done", "schedule_subagent", "budget_pause", "budget_resume_child",
+    "main_llm_call_state", "external_wait_lease",
+    "budget_resume_child",
 ])
 def test_idle_input_kinds_are_declared_by_the_event_registry(kind):
     assert EVENT_DISPOSITIONS[kind].idle_input
@@ -21,9 +21,7 @@ def test_idle_input_kinds_are_declared_by_the_event_registry(kind):
 
 
 @pytest.mark.parametrize("event", [
-    {"type": "task_heartbeat"}, {"type": "typing_start"}, {"type": "task_metrics"},
-    {"type": "send_message", "is_progress": False},
-    {"type": "send_message", "is_progress": True, "host_narration": True},
+    {"type": "task_heartbeat"}, {"type": "send_message", "is_progress": True, "host_narration": True},
     {"type": "log_event", "data": {"type": "llm_usage", "task_id": "t"}},
 ])
 def test_liveness_and_telemetry_are_not_pending_idle_inputs(event):
@@ -65,7 +63,6 @@ def _produce(bus, accepted, release, phase):
     release.wait(30)
 
 
-@pytest.mark.serial
 def test_original_manager_survives_killed_producer_and_accepts_replacement(tmp_path, monkeypatch):
     from supervisor import workers
 

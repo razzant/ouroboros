@@ -15,7 +15,7 @@ from ouroboros.preflight_runner import LANE_EXCLUSION_EXPR
 from tests.test_preflight_runner import _make_repo
 
 WINDOWS_COMMAND_LINE = 32_767  # CreateProcess takes a command line shorter than this, terminator included
-# The fields the two plugins a run writes are filled from (``preflight_runner._WORKER_PROBE_SOURCE``,
+# The fields the two plugins a run writes are filled from (``preflight_probe.WORKER_PROBE_SOURCE``,
 # ``preflight_inventory.SOURCE``). A path or a module name may spell any of them, and that is never a field.
 TEMPLATE_FIELDS = ("__WORKER_LOG__", "__RESULTS_POINTER__", "__SCOPE__", "__RESULT_PATH__")
 
@@ -50,7 +50,6 @@ def refuse_long_pytest_launches(monkeypatch, limit=WINDOWS_COMMAND_LINE):
     return accepted
 
 
-@pytest.mark.serial
 def test_selected_cli_skips_unrelated_collection_and_records_both_lanes(tmp_path, monkeypatch, capsys):
     spec = importlib.util.spec_from_file_location("selected_cli", Path(__file__).resolve().parents[1] / "scripts/run_tests.py")
     cli = importlib.util.module_from_spec(spec)
@@ -93,7 +92,6 @@ def test_selected_cli_skips_unrelated_collection_and_records_both_lanes(tmp_path
     assert node == [True, True]
 
 
-@pytest.mark.serial
 def test_selected_cli_runs_a_changed_test_modules_importers_and_only_selects_opt_in_ones(tmp_path, monkeypatch, capsys):
     """Selection names modules: an importer whose only test is in an excluded lane is scope, not execution."""
     spec = importlib.util.spec_from_file_location("selected_cli", Path(__file__).resolve().parents[1] / "scripts/run_tests.py")
@@ -132,7 +130,6 @@ def test_selected_cli_runs_a_changed_test_modules_importers_and_only_selects_opt
     assert "selected: 4/5 Python modules" in capsys.readouterr().out
 
 
-@pytest.mark.serial
 def test_selected_cli_starts_pytest_with_a_scope_longer_than_one_windows_command_line(tmp_path, monkeypatch, capsys):
     """Windows CI refused the post-merge run before pytest started: 662 ``--select-test`` options made a
     command line past 32,767 characters (WinError 206). The scope now travels in the run's inventory plugin, off
@@ -145,7 +142,7 @@ def test_selected_cli_starts_pytest_with_a_scope_longer_than_one_windows_command
     spec.loader.exec_module(cli)
     importer = "from leaf import value\n\n\ndef test_it():\n    assert value == 2\n"
     lanes = ("import pytest\nfrom leaf import value\n\n\ndef test_plain():\n    assert value == 2\n\n\n"
-             "@pytest.mark.serial\ndef test_serial():\n    assert value == 2\n\n\n"
+             "@pytest.mark.serial('exclusive')\ndef test_serial():\n    assert value == 2\n\n\n"
              "@pytest.mark.ui_browser\ndef test_opt_in():\n    raise AssertionError('an excluded lane must not run')\n")
     folder = "tests/проверки_выбранной_области"  # kept short: the longest path stays under a Windows MAX_PATH
     long_scope = {f"{folder}/test_проверка_{n:03d}_имя_модуля_для_заполнения_вектора.py": importer for n in range(340)}
@@ -184,7 +181,7 @@ def test_selected_cli_starts_pytest_with_a_scope_longer_than_one_windows_command
         assert not [arg for arg in launch if arg.startswith(SELECT)] and len(subprocess.list2cmdline(launch)) < 2_000
         assert plugin_scope(launch, evidence / "probe") == selected  # exactly the selection, in order
     assert [launch[launch.index("tests/") + 2] for launch in launches] == [
-        f"not serial and {LANE_EXCLUSION_EXPR}", f"serial and {LANE_EXCLUSION_EXPR}"]  # the lane policy is unchanged
+        f"not exclusive and {LANE_EXCLUSION_EXPR}", f"exclusive and {LANE_EXCLUSION_EXPR}"]  # the gate's pass split
     parallel, serial = row["inventory"]["parallel"], row["inventory"]["serial"]
     assert sorted(parallel["executed"]) == sorted(parallel["expected"])
     assert {node.split("::")[0] for node in parallel["executed"]} == set(selected)  # every selected module ran
@@ -197,7 +194,6 @@ def test_selected_cli_starts_pytest_with_a_scope_longer_than_one_windows_command
     assert SELECT not in capsys.readouterr().out  # the command the CLI prints no longer lists the scope
 
 
-@pytest.mark.serial
 def test_selected_cli_runs_where_the_evidence_directory_and_a_module_spell_template_fields(tmp_path, monkeypatch):
     """``--evidence-dir`` is the caller's path and the scope is the selection's: spelling a field of either plugin's
     template (``TEMPLATE_FIELDS``) changes neither, so the worker probe and the inventory plugin the run writes
@@ -228,13 +224,13 @@ def test_selected_cli_runs_where_the_evidence_directory_and_a_module_spell_templ
     assert sorted(parallel["executed"]) == sorted(parallel["expected"]) == sorted([
         "tests/test_floor.py::test_floor", f"{named}::test_named"])
     assert row["outcomes"] == {"parallel": "success", "serial": "success"} and row["outcome"] == "success"
-    # The worker probe reported where its readers look (_observed_worker_ids, _recorded_session): a file per worker, a pointer.
+    # The gate's plugin reported where its readers look (observed_worker_ids, recorded_session): a file per worker of
+    # the parallel pass, and the pointer each pass's controller leaves at its own results directory (the serial pass last).
     workers = [path.name for path in (evidence / "workers").iterdir()]
     assert workers and all(name.startswith("gw") for name in workers), workers
-    assert (evidence / "ci-evidence-dir").read_text(encoding="utf-8") == str((evidence / "parallel").resolve())
+    assert (evidence / "ci-evidence-dir").read_text(encoding="utf-8") == str((evidence / "serial").resolve())
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(os.name == "nt", reason="the fixture links the real package; Windows symlinks need privileges")
 def test_cli_wrapper_owns_a_selected_run_and_keeps_its_full_inventory(tmp_path):
     """The real `python scripts/run_tests.py --selected` path: safe_test owns it, CI's REQUIRE
@@ -302,7 +298,7 @@ def test_merges_run_the_selected_scope_and_qualification_runs_remain_full():
     post = yaml.safe_load((ROOT / ".github/workflows/post-merge.yml").read_text(encoding="utf-8"))
     steps = {step.get("id"): step for step in post["jobs"]["post-merge"]["steps"] if step.get("id")}
     selected = steps["selected"]
-    assert selected["run"].startswith('python scripts/run_tests.py --selected --base "$BASE" --sequential --keep-going')
+    assert selected["run"].startswith('python scripts/run_tests.py --selected --base "$BASE" --keep-going')
     # The run's exit belongs to classify and summary, which retry, bisect and decide the job.
     assert selected["timeout-minutes"] > 0 and selected["continue-on-error"] is True
     assert "continue-on-error" not in steps["classify"]

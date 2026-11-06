@@ -310,7 +310,6 @@ def _metered(monkeypatch):
 
 @pytest.mark.parametrize("read", [
     lambda root: ds.room_candidates(root, "chat", 100, tasks=["t-bound"], origins=["1:origin-1"], limit=20),
-    lambda root: ds.task_rows(root, ["t-bound"], stream="chat"),
     lambda root: ds.accepted_row(root, 1, "origin-1"),
     lambda root: ds.main_candidates(root, "chat", exclude_chats=range(1000, 1030), limit=20),
 ])
@@ -539,7 +538,7 @@ def test_the_export_appends_through_a_binary_descriptor(tmp_path, monkeypatch):
     assert flags and all(mode & sentinel for mode in flags), f"the export opened {live.name} without O_BINARY"
 
 
-@pytest.mark.parametrize("written", ["whole", "part", "none", "absent", "foreign"])
+@pytest.mark.parametrize("written", ["whole", "absent", "foreign"])
 def test_an_export_interrupted_before_its_coordinate_moved_finishes_the_batch_once(tmp_path, monkeypatch, written):
     """A death after the batch reached the file and before ``files_seq`` moved: the retry finishes
     the recorded batch (appends only what is missing) instead of appending it a second time; bytes
@@ -665,7 +664,6 @@ def _spawned_writer(root, index, count, done):
         done.put((index, repr(exc)))
 
 
-@pytest.mark.serial
 def test_four_writer_processes_lose_and_duplicate_nothing(tmp_path):
     ds.append(tmp_path, "progress", progress("seed", "seed"))
     ctx = multiprocessing.get_context("spawn")

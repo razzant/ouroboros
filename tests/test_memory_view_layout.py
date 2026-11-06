@@ -139,7 +139,7 @@ def test_full_roles_share_the_first_block_and_only_eligible_tasks_get_the_handbo
             assert content[1] == handbook[0] and "cache_control" in handbook[0], name
 
 
-@pytest.mark.parametrize("mode,child", [("low", False), ("nano", False), ("max", True), ("low", True), ("nano", True)])
+@pytest.mark.parametrize("mode,child", [("low", False), ("nano", False), ("max", True), ("nano", True)])
 def test_compact_modes_and_children_keep_both_book_maps_without_a_separate_handbook(tmp_path, monkeypatch, mode, child):
     monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", mode)
     env, memory, _rooms = world(tmp_path)

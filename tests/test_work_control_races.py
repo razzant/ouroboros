@@ -15,7 +15,6 @@ from tests.test_owner_relay import context, source
 from tests import _dialogue as dialogue_test
 from tests.test_swarm_host_admission import host, rows  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("winner", ["owner", "mind"])

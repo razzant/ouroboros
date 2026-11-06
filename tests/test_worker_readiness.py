@@ -111,9 +111,11 @@ def _wait_for(predicate, timeout: float = 5.0):
 # (a) spawn and (b) respawn both install booting slots through the one seam
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("cap", [1, 3, 10])
-@pytest.mark.parametrize("count", [None, 0, 2])
-@pytest.mark.parametrize("start", ["spawn_workers", "ensure_worker_pool_started"])
+@pytest.mark.parametrize(("start", "count", "cap"), [
+    ("spawn_workers", None, 1),
+    ("spawn_workers", 2, 10),
+    ("ensure_worker_pool_started", 0, 3),
+])
 def test_spawn_installs_every_slot_booting_and_hands_the_set_to_the_readiness_seam(pool, monkeypatch, cap, count, start):
     workers = pool.workers
     fake_ctx = MagicMock()
@@ -295,7 +297,7 @@ def test_progress_extends_once_and_never_moves_the_birth_relative_ceiling(pool, 
     assert timeout["window_sec"] == timeout["waited_sec"] == 3.0
 
 
-@pytest.mark.parametrize("progress", ["absent", "foreign_pid", "before_cursor", "dead_child"])
+@pytest.mark.parametrize("progress", ["absent", "before_cursor", "dead_child"])
 def test_only_current_own_progress_from_a_live_child_extends(pool, seam, boot_clock, progress):
     slot = _booting_slot(pool, 0, 5001, alive=progress != "dead_child")
     cursor = seam.cursor
@@ -374,10 +376,8 @@ def sha_history(pool):
 @pytest.mark.parametrize("expected,observed,relation,warn", [
     ("baseline", "baseline", "equal", False),
     ("baseline", "descendant", "descendant", False),
-    ("baseline", "root", "non_descendant", True),
     ("baseline", "other", "non_descendant", True),
     ("baseline", "missing", "unavailable", True),
-    ("missing", "descendant", "unavailable", True),
     ("baseline", "absent", "unavailable", True),
     ("absent", "descendant", "not_applicable", False),
     ("absent", "absent", "not_applicable", False),

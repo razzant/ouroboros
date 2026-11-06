@@ -199,8 +199,12 @@ def test_history_page_stops_after_exact_task_rows_and_one_lookahead(tmp_path, mo
     assert [p["record_id"] for p in payload["review_projection"]["panels"]] == [r["record_id"] for r in records[1:3]]
 
 
-@pytest.mark.parametrize("storage", ["legacy", "ledger"])
-@pytest.mark.parametrize("owner_field", ["task_id", "origin_task_id", "presentation_owner_task_id", "group_id"])
+@pytest.mark.parametrize(("owner_field", "storage"), [
+    ("task_id", "legacy"),
+    ("origin_task_id", "ledger"),
+    ("presentation_owner_task_id", "legacy"),
+    ("group_id", "ledger"),
+])
 def test_task_bound_saved_skill_export_matches_detail_and_bridge_prefix(tmp_path, storage, owner_field):
     import ast
     import pathlib

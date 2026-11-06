@@ -15,7 +15,7 @@ from tests.test_subscription_setup_browser import capture
 from tests.test_subscription_setup_browser import subscription_ui as subscription_ui  # the suite's fixture
 from tests.ui_clipboard_sink import INSTALL, recorded, set_sink
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 FIRST, SECOND = "http://192.0.2.44:8765", "http://192.0.2.45:9000"
 WARNING = "Set a Network Password before sharing this address."

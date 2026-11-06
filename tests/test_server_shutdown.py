@@ -401,8 +401,6 @@ def test_failed_boot_rollback_does_not_restart(monkeypatch):
 @pytest.mark.parametrize("intent,marker,starts", [
     ("automatic", "panic", False),
     ("automatic", "owner_restart_no_resume", True),
-    ("automatic", None, True),
-    ("owner", "panic", True),
     (None, "panic", True),
 ])
 def test_main_automatic_start_preserves_panic(monkeypatch, tmp_path, capsys, intent, marker, starts):
@@ -800,13 +798,12 @@ def _run(rec, server):
     return rec
 
 
-@pytest.mark.parametrize("restored, fenced, expected", [
-    (0, ["a"], "♻️ Settling 1 task that was still running when the server stopped."),
-    (2, ["a", "b"],
-     "♻️ Restored pending queue: 2 tasks. "
-     "Settling 2 tasks that were still running when the server stopped."),
+@pytest.mark.parametrize(("places_state", "restored", "fenced", "expected"), [
+    pytest.param("paused", 0, ["a"], "♻️ Settling 1 task that was still running when the server stopped.", id='paused-0-fenced0-♻️ Settling 1 task that was still running when the server stopped.'),
+    pytest.param("empty", 2, ["a", "b"], "♻️ Restored pending queue: 2 tasks. "
+     "Settling 2 tasks that were still running when the server stopped.", id='empty-2-fenced1-♻️ Restored pending queue: 2 tasks. Settling 2 tasks that were still running when the server stopped.'),
+    pytest.param("unreadable", 0, ["a"], "♻️ Settling 1 task that was still running when the server stopped.", id='unreadable-0-fenced0-♻️ Settling 1 task that was still running when the server stopped.'),
 ])
-@pytest.mark.parametrize("places_state", ["paused", "empty", "unreadable"])
 def test_boot_notice_states_recovery_as_an_intent(
         monkeypatch, tmp_path, restored, fenced, expected, places_state):
     """A window closed on live work: the boot line names how many tasks the

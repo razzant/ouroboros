@@ -11,11 +11,13 @@ scan could not see: ``pending_events.append(build_presence_result_event(...))``.
 """
 
 import ast
+import gc
 import pathlib
 from types import MappingProxyType
 from typing import Mapping, NamedTuple
 
 import pytest
+from tests._source_scan import parse
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
@@ -96,11 +98,17 @@ def _runtime_trees():
     files += list((REPO / "ouroboros").rglob("*.py"))
     files += list((REPO / "supervisor").rglob("*.py"))
     trees = {}
-    for path in files:
-        try:
-            trees[path] = ast.parse(path.read_text(encoding="utf-8"))
-        except (OSError, SyntaxError):
-            continue
+    collecting = gc.isenabled()
+    gc.disable()  # AST nodes are acyclic; avoid a full heap walk between files.
+    try:
+        for path in files:
+            try:
+                trees[path] = parse(path.read_text(encoding="utf-8"))
+            except (OSError, SyntaxError):
+                continue
+    finally:
+        if collecting:
+            gc.enable()
     return trees
 
 

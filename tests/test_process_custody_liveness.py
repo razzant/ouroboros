@@ -33,7 +33,6 @@ def test_unreadable_service_group_is_not_proven_quiet(monkeypatch):
     assert process_containment.process_group_has_live_members(123) is True
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux waitid WNOWAIT zombie fixture")
 @pytest.mark.parametrize("live_child", [False, True])
 def test_update_quiesces_zombie_leader_without_losing_live_child(tmp_path, live_child):
@@ -106,7 +105,6 @@ def test_test_group_cleanup_requires_positive_quiet_census(monkeypatch, live_or_
     assert waits == [{"timeout": 0}]
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(os.name == "nt", reason="test-owned POSIX process group")
 def test_test_group_cleanup_reaps_live_helper(tmp_path):
     from tests._shared import reap_test_process_group

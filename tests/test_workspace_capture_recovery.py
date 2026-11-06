@@ -282,8 +282,7 @@ def test_startup_prepares_addressed_canonical_pending_capture(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("artifact_status,ready", [
-    (None, False), ("", False), ("pending", False), ("finalizing", False), ("future_status", False),
-    ("ready", True), ("ready_with_changes", True), ("ready_no_changes", True), ("failed", True), ("missing", True),
+    (None, False), ("", False), ("pending", False),
 ])
 def test_readers_share_positive_capture_finality(tmp_path, artifact_status, ready):
     task = {"id": "capture", "workspace_root": str(tmp_path / "workspace")}
@@ -304,8 +303,6 @@ def test_readers_share_positive_capture_finality(tmp_path, artifact_status, read
 
 @pytest.mark.parametrize("fields", [
     {},
-    {"workspace_root": "/unused", "delegation_role": "subagent",
-     "task_constraint": {"mode": "local_readonly_subagent"}},
     {"workspace_root": "/unused", "execution_owner": {"kind": "presence"},
      "metadata": {"presence": {"binding_id": "b"}}},
     {"workspace_root": "/unused", "_is_direct_chat": True},

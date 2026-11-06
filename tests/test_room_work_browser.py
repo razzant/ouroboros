@@ -24,10 +24,11 @@ import pytest
 
 from ouroboros.consciousness_view import describe_consciousness_state
 from tests import test_subscription_setup_browser as setup_browser
+from tests._shared import answer_projects
 from tests._work_projection_shared import work_fields
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 # The facts one room's control and list expose to the owner, read in one frame.
 ROOM_FACTS = """(scope) => {
@@ -204,7 +205,7 @@ class Transport:
                 if msg.type in {"error", "warning"} else None)
         page.route_web_socket("**/ws", self._connect)
         page.route("**/api/state*", self._state)
-        page.route("**/api/projects*", lambda route: route.fulfill(json={"projects": self.projects}))
+        page.route("**/api/projects*", lambda route: answer_projects(route, self.projects))
         page.route("**/api/chat/history*", self._history)
         page.route("**/api/tasks/**", self._tasks)
         page.route("**/api/decisions*", self._decision)

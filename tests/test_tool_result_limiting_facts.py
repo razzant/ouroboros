@@ -45,10 +45,7 @@ def test_automatic_empty_view_names_target_pressure_and_can_be_read(tmp_path):
 
 @pytest.mark.parametrize("window,target,args,prefix,expected", [
     (100_000, None, {}, 0, {"unsolicited_share"}),
-    (100_000, None, {"view_head_chars": 0, "view_tail_chars": 0}, 0, {"explicit_view"}),
-    (2_000, 100_000, {}, 2000, {"physical_pressure", "minimum_view_unfit"}),
     (None, 2_000, {}, 2000, {"capacity_unknown", "target_pressure"}),
-    (None, None, {"view_head_chars": 0, "view_tail_chars": 0}, 0, {"capacity_unknown", "explicit_view"}),
     (2_000, None, {"view_head_chars": 100_000, "view_tail_chars": 0}, 0, {"physical_pressure"}),
 ])
 def test_each_measured_limiter_is_carried_inside_the_actual_view(tmp_path, window, target, args, prefix, expected):

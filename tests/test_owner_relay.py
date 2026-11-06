@@ -336,6 +336,17 @@ def test_pending_text_replay_merges_late_consciousness_origin(tmp_path, monkeypa
     assert row["progress_meta"]["initiator"] == "consciousness"
 
 
+def test_pending_reregistration_without_deferral_keeps_original_timestamp(tmp_path, monkeypatch):
+    from supervisor.terminal_delivery import pending_deliveries, register_pending_delivery
+
+    first = {"type": "send_message", "delivery_id": "stable-ts", "task_id": "wake", "chat_id": 1,
+             "text": "wake", "ts": "2026-11-05T00:00:00+00:00"}
+    assert register_pending_delivery(tmp_path, first)
+    assert register_pending_delivery(tmp_path, {**first, "ts": None})
+    row = next(row for row in pending_deliveries(tmp_path) if row["delivery_id"] == "stable-ts")
+    assert row["ts"] == first["ts"]
+
+
 def test_an_unrecordable_relay_answer_sends_nothing_and_keeps_the_relay_open(tmp_path, monkeypatch):
     from ouroboros.tools.control_runtime import _send_user_message
     row, handle = source(tmp_path)

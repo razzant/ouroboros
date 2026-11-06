@@ -14,7 +14,6 @@ import pytest
 
 # This suite executes real shell subprocesses through ``_run_shell``; keep it
 # in the dedicated serial pytest lane so xdist workers cannot crash or race it.
-pytestmark = pytest.mark.serial
 
 from ouroboros.tool_access import (
     active_tool_profile,

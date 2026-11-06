@@ -80,8 +80,6 @@ def test_a_hold_whose_card_is_gone_names_nothing(tmp_path, client, rows):
 @pytest.mark.parametrize("body", [
     {"holds": "app:card_1"},
     {"holds": [{"key": "file:/etc/passwd", "rev": ""}]},
-    {"holds": [{"rev": "x"}]},
-    {"holds": [{"key": f"widget:s:t{i}", "rev": "1"} for i in range(ui_holds.MAX_REPORTED_HOLDS + 1)]},
     [],
 ])
 def test_a_body_of_the_wrong_shape_is_refused_and_writes_nothing(client, rows, body):

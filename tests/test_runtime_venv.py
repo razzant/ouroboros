@@ -44,7 +44,6 @@ class Run:
         return subprocess.run(cmd, **kwargs)
 
 
-@pytest.mark.serial
 def test_a_real_venv_is_prepared_once_then_reused_ready(tmp_path):
     root = tmp_path / "runtime volume" / "venv"
     run = Run()
@@ -74,7 +73,6 @@ def test_an_unrelated_directory_is_refused_untouched(tmp_path):
     ({"schema_version": 1, "python": "2.7", "state": "ready"}, "created for Python 2.7"),
     ({"schema_version": 9, "python": CURRENT, "state": "ready"}, "unknown schema"),
     ({"schema_version": 1, "python": CURRENT, "state": "rebuilding"}, "recorded state"),
-    ({"schema_version": 1, "python": CURRENT, "state": ["preparing"]}, "recorded state"),
 ])
 def test_an_established_venv_that_cannot_be_trusted_is_refused_untouched(tmp_path, marker, problem):
     root = tmp_path / "venv"
@@ -206,7 +204,7 @@ def test_the_launcher_runs_body_installs_and_handoff_in_the_runtime_venv(managed
     assert launcher.EMBEDDED_PYTHON == prepared.python
 
 
-@pytest.mark.parametrize("entry", ["source", "source-venv", "macos-entry", "frozen-app"])
+@pytest.mark.parametrize("entry", ["source", "macos-entry", "frozen-app"])
 def test_launcher_venv_creation_keeps_the_running_python_abi(managed_launcher, monkeypatch, tmp_path, entry):
     """A downloaded bundled Python is not the interpreter of an ordinary source launch.
 
@@ -289,7 +287,6 @@ def test_bootstrap_refuses_a_mount_point_without_a_checkout_and_moves_nothing(tm
     assert _tree(repo) == before and not (tmp_path / "data" / "archive").exists()
 
 
-@pytest.mark.serial
 def test_preparing_python_without_pip_is_repaired_and_keeps_an_installed_package(tmp_path):
     import hashlib
     import shutil

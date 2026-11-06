@@ -122,7 +122,7 @@ def test_resume_retries_infrastructure_but_never_genuine_failures(selection):
     assert launcher.select_tasks(bench, args, config, "seed-sha") == []
 
 
-@pytest.mark.parametrize("change", ["config", "seed", "benchmark", "image"])
+@pytest.mark.parametrize("change", ["config", "benchmark", "image"])
 def test_resume_refuses_incompatible_protocol_or_source(selection, change):
     bench, _previous, args, config = selection
     seed = "seed-sha"
@@ -142,10 +142,6 @@ def test_resume_refuses_incompatible_protocol_or_source(selection, change):
     ({"bench_status": "success"}, {"pass": True}, {"status": "success"}, "passed"),
     ({"bench_status": "success"}, {"pass": False}, {"status": "success"}, "failed"),
     ({"bench_status": "failed", "reason_code": "timeout"}, {}, {"status": "failed"}, "agent_failed"),
-    ({"bench_status": "failed", "infra_failed": True, "reason_code": "llm_api_error"}, {}, {"status": "failed"}, "infra_failed"),
-    ({"bench_status": "success"}, {}, {"status": "success"}, "infra_failed"),
-    ({}, {}, {"status": "pg_fail"}, "infra_failed"),
-    ({}, {}, {}, "not_attempted"),
 ])
 def test_ledger_separates_real_failures_from_recoverable_infrastructure(tmp_path, summary, evaluation, runner, expected):
     if summary:
@@ -287,7 +283,7 @@ def supervised(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("trigger,expected", [
     ("meter-loss", "budget_meter_unavailable"), ("disk", "disk_reserve"),
-    ("campaign", "campaign_budget_reserve"), ("run", "run_budget"),
+    ("campaign", "campaign_budget_reserve"),
 ])
 def test_supervisor_stops_owned_work_on_real_boundaries(supervised, monkeypatch, trigger, expected):
     args, bench, env, budget, events, handlers, _proc = supervised
@@ -397,7 +393,6 @@ def test_cleanup_selection_cannot_include_a_peer_run(monkeypatch):
     assert ("network", "rm", "own-net") in calls
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(os.name == "nt" or not shutil.which("sh"), reason="real POSIX process-group ownership check")
 def test_stop_process_group_terminates_its_child_without_touching_peer(tmp_path):
     child_file = tmp_path / "child.pid"

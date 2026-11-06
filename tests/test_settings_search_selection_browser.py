@@ -13,7 +13,7 @@ from ouroboros.search_routes import SEARCH_BACKENDS, SEARCH_MODELS
 from tests import test_model_route_contribution_browser as routes
 from tests import test_task_settings_snapshot as task_settings
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 subscription_ui = routes.subscription_ui
 role_ui = routes.role_ui
 route_ui = routes.route_ui

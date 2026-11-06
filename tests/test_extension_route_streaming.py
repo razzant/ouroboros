@@ -436,7 +436,6 @@ def register(api):
     asyncio.run(run())
 
 
-@pytest.mark.serial
 def test_real_http_second_route_and_module_respond_during_child_startup(widget_server, monkeypatch):
     import threading
     import httpx
@@ -493,7 +492,6 @@ def test_real_http_second_route_and_module_respond_during_child_startup(widget_s
     assert not _active_subprocesses
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("startup_fails", [False, True])
 def test_real_http_startup_cancel_retains_spawned_child_until_cleanup(widget_server, monkeypatch, startup_fails):
     import threading

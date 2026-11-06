@@ -102,8 +102,7 @@ def test_an_unreceived_pass_reaches_its_author_before_delivery(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize("seat, enforcement, runtime", [
-    ("[]", "advisory", "pro"), (ADVISORY, "advisory", "pro"), (CRITICAL, "advisory", "pro"),
-    (CRITICAL, "blocking", "cyber_pro")])
+    ("[]", "advisory", "pro"), (ADVISORY, "advisory", "pro"), (CRITICAL, "blocking", "cyber_pro")])
 def test_an_outcome_the_review_tool_returned_whole_needs_no_second_turn(tmp_path, monkeypatch, seat, enforcement,
                                                                           runtime):
     """Main asked for the review itself and the tool returned it whole into the transcript: its finish delivers

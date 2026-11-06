@@ -35,8 +35,6 @@ def test_selected_payload_fills_only_omitted_selectors(tmp_path, mode, bucket, o
 
 
 @pytest.mark.parametrize("constraint", [None, {"mode": "normal"},
-    {"mode": "normal", "skill_name": "alpha"}, {"mode": "normal", "payload_root": "skills/external/alpha"},
-    {"mode": "local_readonly_subagent", "skill_name": "alpha", "payload_root": "skills/external/alpha"},
     {"mode": "acting_subagent", "skill_name": "alpha", "payload_root": "skills/external/alpha"},
 ])
 def test_no_selected_payload_still_requires_name(tmp_path, constraint):

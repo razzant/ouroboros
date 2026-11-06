@@ -23,7 +23,7 @@ from devtools.e2e_live.ui_probe import UIProbe
 from tests import test_subscription_setup_browser as setup_browser
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 TARGET = scenarios.SM1_NEW_ACCENT
 DARK_ROOT, LIGHT_ROOT = ":root {", ':root[data-theme="light"] {'

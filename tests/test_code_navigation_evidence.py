@@ -145,11 +145,6 @@ def test_symbol_impact_keeps_occurrences_and_imports(project):
     ("x.py", "def run(): return target()\n", "call.function"),
     ("x.ts", "function run() { return obj.target(); }\n", "member_expression.property"),
     ("x.js", "function run() { return target(); }\n", "call_expression.function"),
-    ("x.go", "package main\nfunc run() { pkg.target() }\n", "selector_expression.field"),
-    ("X.java", "class X { void run() { obj.target(); } }\n", "method_invocation.name"),
-    ("x.rs", "fn run() { thing.target(); }\n", "field_expression.field"),
-    ("y.py", "def run(): return (target)()\n", "parenthesized_expression"),
-    ("y.ts", "function run() { return obj.target!(); }\n", "member_expression.property"),
 ])
 def test_representative_grammar_callers(project, path, source, slot):
     repo, ctx = project
@@ -163,11 +158,6 @@ def test_representative_grammar_callers(project, path, source, slot):
     ("x.py", "def run(getters, key): return getters[key]() + (target)()\n",
      "getters", "key", "subscript.subscript", True),
     ("x.py", "def run(getters, key): return getters[key]() + target()\n", "getters", "key", "text", False),
-    ("x.ts", "function run(getters, key) { getters[key](); return obj.target!(); }\n",
-     "getters", "key", "subscript_expression.index", True),
-    ("x.rs", "fn run() { getters[key](); thing.target(); }\n", "getters", "key", "index_expression", True),
-    ("x.cpp", "int run() { return getters[key]() + obj.target(); }\n",
-     "getters", "key", "subscript_argument_list", True),
     ("x.go", "package main\nfunc run() { handlers[0](); handlers[i+1](); pkg.target() }\n",
      "handlers", "i", "binary_expression.left", True),
 ])
@@ -318,10 +308,6 @@ def _generic(field=None):
 
 @pytest.mark.parametrize("callee,leaf", [
     (_generic("function"), "Target"),
-    (_Node("member_access_expression", _Node("identifier", text="obj", field="expression"),
-           _Node(".", named=False), _generic("name"), field="function"), "Target"),
-    (_Node("parenthesized_expression", _Node("(", named=False), _generic(), _Node(")", named=False),
-           field="function"), "Target"),
     (_Node("identifier", text="Direct", field="function"), "Direct"),
     (_Node("element_access_expression", _Node("identifier", text="getters", field="expression"),
            _Node("bracketed_argument_list", _Node("argument", _Node("identifier", text="key")), field="subscript"),

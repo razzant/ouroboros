@@ -8,7 +8,7 @@ from dataclasses import replace
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 def test_owner_call_door_mints_opening_id_and_rejoins_one_call(host_world, monkeypatch):

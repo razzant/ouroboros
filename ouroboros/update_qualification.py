@@ -16,26 +16,43 @@ TRAILER = "Ouroboros-Qualification: "
 CHECKS = ("full_battery", "cost_contract")
 STATES = ("passed", "failed", "not_run", "unknown")
 RED_LABEL = "post-merge-red"  # scripts/post_merge_routing.py labels each red it hands over with it
+REVIEW_STATES = ("settled", "pending", "unknown", "no_record")
+REVIEW_RELATIONS = ("covers_head", "changes_after_review", "unknown", "not_declared", "delta_only")
 
 
-def merge_qualification(review: dict, checks: list | None = None) -> dict:
+def merge_qualification(review: dict, checks: list | None = None, *, relation: str = "") -> dict:
+    """The trailer's facts. ``relation`` is the subject relation the merge request saw (its coverage
+    status); with it the observed verdict keeps its record's state. Without it neither is recorded."""
     declared = {row["name"]: {**row, "source": "author_declared"} for row in checks or []}
     for name in CHECKS:
         declared.setdefault(name, {"name": name, "status": "unknown", "source": "missing",
                                    "detail": "No execution evidence was supplied."})
     record = review.get("record") or {}
+    seen = {"observed": (record.get("verdict") or {}).get("aggregate", "unknown")}
+    if relation:
+        seen.update(state=str(record.get("state") or "unknown") if record else "no_record", relation=relation)
+    seen["declared"] = (review.get("declared") or {}).get("verdict", "unknown")
     return {"schema": 1, "checks": list(declared.values()),
-            "review": {"observed": (record.get("verdict") or {}).get("aggregate", "unknown"),
-                       "declared": (review.get("declared") or {}).get("verdict", "unknown")},
+            "review": seen,
             "post_merge": {"status": "not_run", "detail": "The post-merge check follows this merge."}}
+
+
+def _review_line(review: dict) -> str:
+    """The observed verdict beside its record state and the relation the merge request saw; a receipt
+    written before both were carried says so instead of inventing them."""
+    if "state" in review or "relation" in review:
+        seen = (f"record {review.get('state', 'not recorded')}, subject relation at the merge request "
+                f"{review.get('relation', 'not recorded')}")
+    else:
+        seen = "record state and subject relation at the merge request not recorded"
+    return f"- Review: observed {review['observed']} ({seen}); author declared {review['declared']}"
 
 
 def commit_summary(qualification: dict) -> str:
     lines = ["Ouroboros qualification receipt (declarations are not host-observed PASS):"]
     for row in qualification["checks"]:
         lines.append(f"- {row['name']}: {row['status']} ({row['source']}); {row.get('detail') or 'no detail supplied'}")
-    review = qualification["review"]
-    lines += [f"- Review: observed {review['observed']}; author declared {review['declared']}",
+    lines += [_review_line(qualification["review"]),
               "- Post-merge check: not run yet.", TRAILER + json.dumps(qualification, ensure_ascii=False)]
     return "\n".join(lines)
 
@@ -191,8 +208,10 @@ def range_qualification(material: dict, repo_url: str) -> dict:
 def compact_qualification(value):
     """A context form of qualification receipts, never a new qualification verdict.
 
-    Count declared/observed outcomes separately; unknown evidence and new fields
-    stay verbatim, bound to their commit. Exact receipts live in the host capture.
+    Checks count by outcome; each review counts as one combination (observed verdict, record
+    state, request-time relation, declaration), never as separate totals; a receipt without state
+    and relation counts as ``not_recorded``. Unknown evidence and new fields stay verbatim, bound
+    to their commit. Exact receipts live in the host capture.
     """
     import copy
     from collections import Counter
@@ -221,11 +240,15 @@ def compact_qualification(value):
                 else:
                     checks[(check.get('name', ''), check['status'], check['source'])] += 1
             review = receipt.get('review') or {}
-            if (set(review) - {'observed', 'declared'} or any(review.get(k) not in ('PASS', 'FAIL')
-                                                           for k in ('observed', 'declared'))):
+            recorded = {'state', 'relation'} & set(review)
+            if (set(review) - {'observed', 'declared', 'state', 'relation'}
+                    or any(review.get(k) not in ('PASS', 'FAIL') for k in ('observed', 'declared'))
+                    or (recorded and (review.get('state') not in REVIEW_STATES
+                                      or review.get('relation') not in REVIEW_RELATIONS))):
                 unknown['review'] = review
             else:
-                reviews[(review['observed'], review['declared'])] += 1
+                reviews[(review['observed'], review.get('state', 'not_recorded'),
+                         review.get('relation', 'not_recorded'), review['declared'])] += 1
             post = receipt.get('post_merge') or {}
             if set(post) - {'status', 'detail'} or post.get('status') not in ('passed', 'failed', 'not_run'):
                 unknown['post_merge'] = post
@@ -236,8 +259,8 @@ def compact_qualification(value):
         result['commits'] = {'count': len(commits),
             'checks': [{'name': name, 'status': status, 'source': source, 'count': count}
                        for (name, status, source), count in sorted(checks.items())],
-            'reviews': [{'observed': observed, 'declared': declared, 'count': count}
-                        for (observed, declared), count in sorted(reviews.items())],
+            'reviews': [{'observed': observed, 'state': state, 'relation': relation, 'declared': declared,
+                         'count': count} for (observed, state, relation, declared), count in sorted(reviews.items())],
             'post_merge': dict(post_merge), 'unabridged': whole,
             'fact': 'Declarations are not observed PASS; missing or unconfirmed evidence remains unknown.',
             'details': 'retained full runtime section: official_update.letter.qualification'}
@@ -284,32 +307,52 @@ def qualification_summary(qualification: dict | None) -> dict | None:
 
     The panel, preflight and the letter's author keep the full record (owner 8B); a task sees the range, how
     many commits carry a receipt, each check's outcomes by their source (``author_declared``: the author's
-    word, not a host run) and the reviews observed and declared, the post-merge read with its runs and gaps.
+    word, not a host run), each review combination as one row (observed verdict, record state, request-time
+    relation, declaration; ``not_recorded`` for older receipts, unknown fields kept), the post-merge read.
     """
     if not isinstance(qualification, dict):
         return qualification
     commits = [c for c in qualification.get("commits") or [] if isinstance(c, dict)]
     receipts = [c["receipt"] for c in commits if isinstance(c.get("receipt"), dict)]
     checks: dict = {}
-    reviews: dict = {"observed": {}, "declared": {}}
+    reviews: dict = {}
     for receipt in receipts:
         for row in receipt.get("checks") or []:
             outcome = checks.setdefault(str(row.get("name")), {})
             key = f"{row.get('status')} ({row.get('source') or 'unknown'})"
             outcome[key] = outcome.get(key, 0) + 1
-        for side, verdicts in reviews.items():
-            verdict = str((receipt.get("review") or {}).get(side) or "unknown")
-            verdicts[verdict] = verdicts.get(verdict, 0) + 1
+        review = receipt.get("review") if isinstance(receipt.get("review"), dict) else {}
+        # One row per combination, so a verdict never meets another commit's state or relation.
+        row = {"observed": "unknown", "state": "not_recorded", "relation": "not_recorded", "declared": "unknown"}
+        # Runtime summaries are a projection, but not a lossy one: future JSON fields, including
+        # explicit null/empty values and nested shapes, remain their original values.
+        row.update({str(k): v for k, v in review.items()})
+        key = json.dumps(row, sort_keys=True)
+        reviews[key] = reviews.get(key, 0) + 1
     github = qualification.get("github") if isinstance(qualification.get("github"), dict) else {}
     conclusions: dict = {}
     for run in github.get("runs") or []:
         key = str(run.get("conclusion") or run.get("status") or "unknown")
         conclusions[key] = conclusions.get(key, 0) + 1
     return {"base_sha": qualification.get("base_sha"), "target_sha": qualification.get("target_sha"),
-            "commits": len(commits), "with_receipt": len(receipts), "checks": checks, "reviews": reviews,
+            "commits": len(commits), "with_receipt": len(receipts), "checks": checks,
+            "reviews": _review_summary_rows(reviews),
             "post_merge": {"read": github.get("status", "unknown"), "reason": github.get("reason"),
                            "runs": conclusions, "missing": len(github.get("missing_shas") or [])},
             "full": "query_data(op='json', kind='update_letter')"}
+
+
+def _review_summary_rows(reviews: dict) -> list[dict]:
+    """Add the projection's aggregate count without overwriting an unknown source field."""
+    rows = []
+    for encoded, aggregate_count in reviews.items():
+        row = json.loads(encoded)
+        key = "count"
+        while key in row:
+            key = f"_{key}"
+        row[key] = aggregate_count
+        rows.append(row)
+    return rows
 
 
 def runtime_letter(letter: dict | None) -> dict | None:

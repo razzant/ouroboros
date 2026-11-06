@@ -25,7 +25,7 @@ from tests.test_emoji_free_browser import _browser, _open, _server
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
 
 direct_server_with_data = _server
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial, pytest.mark.skipif(os.name == "nt", reason="drives the child with POSIX signals")]
+pytestmark = [pytest.mark.ui_browser, pytest.mark.skipif(os.name == "nt", reason="drives the child with POSIX signals")]
 
 MB = 1_000_000
 LONG_NAME = "Example: refactoring pass, fifty tasks for next sprints, second try after rollback"[:80]  # the longest a project takes

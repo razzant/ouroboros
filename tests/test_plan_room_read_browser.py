@@ -35,7 +35,7 @@ from ouroboros.configured_subagents import SUBAGENTS_SETTING
 from tests.test_batch4_owner_controls_browser import _reply, _user_text, _wait
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 OWNER_WORDS = "ROOMREAD-7Q: plan the room read facts and ask the council."
 SEATS = ("part", "whole", "zero", "other", "sol", "brief", "skip")
 PAGED = ("brief", "skip")

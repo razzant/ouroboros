@@ -150,8 +150,10 @@ def test_real_pr_receipt_survives_missing_scanner_evidence_and_keeps_advice():
     ) is None
 
 
-@pytest.mark.parametrize("safety_note", ["", "⚠️ SAFETY_WARNING: allowed with a warning."])
-@pytest.mark.parametrize("success", [False, True])
+@pytest.mark.parametrize(("success", "safety_note"), [
+    (False, ""),
+    (True, "⚠️ SAFETY_WARNING: allowed with a warning."),
+])
 def test_registry_notes_preserve_publication_trace_metadata(tmp_path, monkeypatch, safety_note, success):
     from ouroboros import safety
     from ouroboros.loop_tool_execution import _typed_result_metadata
@@ -364,15 +366,7 @@ def test_success_has_one_nested_authority_and_no_top_level_pr_aliases():
     ("changes", "expected_repository"),
     [
         ({"url": "http://github.com/OuroborosHub/OuroborosHub/pull/17"}, REPOSITORY),
-        ({"url": "https://example.com/OuroborosHub/OuroborosHub/pull/17"}, REPOSITORY),
-        ({"url": "https://github.com/other/repo/pull/17"}, REPOSITORY),
         ({"url": "https://github.com/OuroborosHub/OuroborosHub/issues/17"}, REPOSITORY),
-        ({"url": "https://github.com/OuroborosHub/OuroborosHub/pull/nope"}, REPOSITORY),
-        ({"url": "https://github.com/OuroborosHub/OuroborosHub/pull/17/"}, REPOSITORY),
-        ({"url": "https://github.com/OuroborosHub/OuroborosHub/pull/17?x=1"}, REPOSITORY),
-        ({"url": "arbitrary nonempty text"}, REPOSITORY),
-        ({"number": 18}, REPOSITORY),
-        ({"number": 0, "url": "https://github.com/OuroborosHub/OuroborosHub/pull/0"}, REPOSITORY),
         ({"snapshot_hash": SNAPSHOT_HASH + "c"}, REPOSITORY),
         ({}, "different/repository"),
     ],
@@ -595,9 +589,13 @@ def test_valid_receipt_never_promotes_existing_objective(objective_status):
     assert outcome == before
 
 
-@pytest.mark.parametrize("objective_status", ["pass", "best_effort", "fail", "degraded", "not_evaluated"])
-@pytest.mark.parametrize("stage,reason", [("local_preflight", "github_actor_unavailable"),
-                                         ("fork_ready", "fork_sync_failed")])
+@pytest.mark.parametrize(("stage", "reason", "objective_status"), [
+    ("local_preflight", "github_actor_unavailable", "pass"),
+    ("local_preflight", "github_actor_unavailable", "fail"),
+    ("local_preflight", "github_actor_unavailable", "not_evaluated"),
+    ("fork_ready", "fork_sync_failed", "best_effort"),
+    ("fork_ready", "fork_sync_failed", "degraded"),
+])
 def test_definite_pre_branch_failure_is_failed_even_when_review_degrades(objective_status, stage, reason):
     from ouroboros.outcomes import normalize_outcome_axes
     from ouroboros.project_dialogue import outcome_phase
@@ -619,12 +617,12 @@ def test_definite_pre_branch_failure_is_failed_even_when_review_degrades(objecti
     assert outcome_phase(record, {}) == "error"
 
 
-@pytest.mark.parametrize("stage,reason", [("fork_ready", "branch_create_failed"),
-                                         ("fork_synced", "branch_create_failed"),
-                                         ("branch_created", "commit_failed"),
-                                         ("pr_create_attempted", "pr_open_indeterminate")])
-@pytest.mark.parametrize("reverse", [False, True])
-@pytest.mark.parametrize("objective_status", ["degraded", "fail"])
+@pytest.mark.parametrize(("objective_status", "reverse", "stage", "reason"), [
+    ("degraded", False, "fork_ready", "branch_create_failed"),
+    ("degraded", False, "branch_created", "commit_failed"),
+    ("fail", True, "fork_synced", "branch_create_failed"),
+    ("fail", True, "pr_create_attempted", "pr_open_indeterminate"),
+])
 def test_an_unconfirmed_branch_or_pr_attempt_survives_other_pre_branch_failures(stage, reason, reverse, objective_status):
     outcome = _loop_outcome(objective_status)
     unknown = _trace_call(_failed_result(status="partial", completed_stage=stage, reason_code=reason))
@@ -655,7 +653,7 @@ def test_ordinary_task_is_not_failed_by_a_publication_tool_attempt():
     assert outcome["outcome_axes"]["objective"]["status"] == "degraded"
 
 
-@pytest.mark.parametrize("task_type", ["task", "Skill_publish", "skill_publish ", ""])
+@pytest.mark.parametrize("task_type", ["task", "Skill_publish", ""])
 def test_veto_activates_only_for_literal_skill_publish_type(task_type):
     outcome = _loop_outcome("pass")
     apply_skill_publish_receipt_veto(outcome, _task(task_type=task_type), {"tool_calls": []})

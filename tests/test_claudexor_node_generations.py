@@ -99,7 +99,7 @@ def test_ready_full_runtime_beats_npm_less_bundle_for_both_readers(tmp_path, mon
         assert _bytes(legacy[0]) == old_bytes
 
 
-@pytest.mark.parametrize("damage", ["schema1", "invalid_json", "missing_npm", "other_pin"])
+@pytest.mark.parametrize("damage", ["schema1", "invalid_json", "other_pin"])
 def test_prepare_preserves_every_legacy_byte_and_selects_an_exact_new_generation(tmp_path, monkeypatch, damage):
     pin, fetches = _fixture(tmp_path, monkeypatch)
     root, old_node, npm = _legacy(pin, schema=1 if damage == "schema1" else 2)

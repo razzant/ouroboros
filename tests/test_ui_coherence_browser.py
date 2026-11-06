@@ -11,9 +11,10 @@ from urllib.parse import urlparse
 import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
+from tests._shared import answer_projects
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def open_app(ui, path="/"):
@@ -450,6 +451,7 @@ def test_question_mirrors_full_form_settle_and_reload(subscription_ui, width, he
         ws.send(json.dumps({'type': 'heartbeat'}))
     page.route_web_socket('**/ws', connect)
     page.route('**/api/projects', lambda r: r.fulfill(json={'projects': [project]}))
+    page.route('**/api/projects?id=*', lambda r: answer_projects(r, [project]))
     # A stable served SHA: a reconnect re-reads history in place instead of reloading the window.
     page.route('**/api/state', lambda r: r.fulfill(json={'sha': 'browser-fixture', 'supervisor_ready': True,
         'active_chat_activities': activities, 'projects': [project], 'project_chat_ids': [42],
@@ -796,6 +798,7 @@ def test_main_waiting_pill_reaches_each_target_and_one_tap_close(subscription_ui
               'attention_reason': 'budget', 'pause_cause': 'budget'}
     canonical, decisions = {'questions': [question]}, []
     page.route('**/api/projects', lambda r: r.fulfill(json={'projects': [project]}))
+    page.route('**/api/projects?id=*', lambda r: answer_projects(r, [project]))
     page.route('**/api/state', lambda r: r.fulfill(json={'sha': 'browser-fixture', 'supervisor_ready': True,
         'active_chat_activities': [], 'projects': [project], 'project_chat_ids': [42],
         'current_questions': canonical['questions'], 'current_questions_complete': True,

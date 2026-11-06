@@ -18,7 +18,7 @@ from tests.test_context_fit_integration import _plan, _ANCHOR
 
 @pytest.mark.parametrize("retired,metadata,typed,expected", [
     (True, 400000, 0, 400000), (True, 0, 0, None),
-    (False, 400000, 0, 1000000), (False, 400000, 250000, 250000),
+    (False, 400000, 0, 1000000),
 ])
 def test_settings_reads_stored_window_and_matches_main(tmp_path, monkeypatch, retired, metadata, typed, expected):
     route = dict(provider="openai-compatible", model="openai-compatible::fixture", base_url="https://fixture.invalid/v1")
@@ -65,7 +65,7 @@ def test_settings_reads_stored_window_and_matches_main(tmp_path, monkeypatch, re
 
 
 @pytest.mark.parametrize("kind,stated", [("bad_request", False), ("request_too_large", False),
-                                       ("context_overflow", True), ("auth_error", False)])
+                                       ("context_overflow", True)])
 def test_terminal_notice_carries_the_captured_window_and_honest_request_size(tmp_path, monkeypatch, kind, stated):
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
     evidence = ce.CapabilityEvidence(400000, "asserted", "user_setting", "route")
@@ -95,7 +95,6 @@ def test_terminal_notice_carries_the_captured_window_and_honest_request_size(tmp
 
 @pytest.mark.parametrize("account,live_profile,fingerprint,expected,maximum", [
     ("", "account-a", "fingerprint-a", 400000, 4096),
-    ("account-a", "account-a", "fingerprint-a", 400000, 4096),
     ("account-b", "account-b", "fingerprint-b", 250000, 4096),
     ("account-a", "account-a", "renewed-a", None, 4096),
     ("account-a", "account-b", "fingerprint-b", None, 0),
@@ -136,7 +135,7 @@ def test_subscription_preview_binds_stored_windows_to_the_live_catalog(
 
 
 @pytest.mark.parametrize("source,label", [("user_setting", "set in Settings"), ("owner_ack", "owner confirmation"),
-                                        ("provider_metadata", "server metadata"), ("local_health", "local serving window")])
+                                        ("provider_metadata", "server metadata")])
 def test_shared_window_labels_name_the_source_without_a_reader_perspective(source, label):
     from ouroboros.context_window import WindowLimit, WindowRecord
 

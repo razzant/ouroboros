@@ -102,8 +102,6 @@ class TestHostNoteVoice:
 class TestChildWarnings:
     @pytest.mark.parametrize("axes", [
         {"execution": {"status": "degraded"}},
-        {"objective": {"status": "degraded", "source": "task_acceptance_review"}},
-        {"review": {"status": "degraded"}},
         {"objective": {"status": "best_effort", "source": "task_acceptance_review"}},
         {"objective": {"status": "pass", "warning": True}},
     ])

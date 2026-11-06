@@ -94,27 +94,28 @@ def _rule_count(value) -> int:
                for item in value.values())
 
 
-@pytest.mark.parametrize("name", sorted(ENCODERS))
-def test_splice_reproduces_the_encoder_bytes_for_random_documents(name):
-    encode, lenient = ENCODERS[name]
-    shared_documents = 0
-    for seed in range(240):
-        document = _document(seed, nan_ok=lenient, foreign_ok=lenient and name == "observability")
-        expected = encode(document)
-        tokenized = sv.tokenize(document, encode)
-        if tokenized is None:  # only a token-shaped value outside the rule refuses sharing here
-            assert b'{"$shared"' in expected.replace(b'\\"', b"")
-            continue
-        shared_documents += 1
-        assert tokenized.whole() == expected
-        assert sv.splice(tokenized.skeleton, tokenized.parts) == expected
-        assert tokenized.whole_digest() == (hashlib.sha256(expected).hexdigest(), len(expected))
-        assert all(hashlib.sha256(raw).hexdigest() == digest for digest, raw in tokenized.parts.items())
-        assert set(sv.token_digests(tokenized.skeleton)) == set(tokenized.parts)
-        assert tokenized.shared == _rule_count(document)
-        expanded = sv.expand(json.loads(tokenized.skeleton), lambda digest: json.loads(tokenized.parts[digest]))
-        assert _canonical(expanded) == _canonical(json.loads(expected))
-    assert shared_documents > 200
+def test_splice_reproduces_the_encoder_bytes_for_random_documents(subtests):
+    for name in sorted(ENCODERS):
+        with subtests.test(name=name):
+            encode, lenient = ENCODERS[name]
+            shared_documents = 0
+            for seed in range(240):
+                document = _document(seed, nan_ok=lenient, foreign_ok=lenient and name == "observability")
+                expected = encode(document)
+                tokenized = sv.tokenize(document, encode)
+                if tokenized is None:  # only a token-shaped value outside the rule refuses sharing here
+                    assert b'{"$shared"' in expected.replace(b'\\"', b"")
+                    continue
+                shared_documents += 1
+                assert tokenized.whole() == expected
+                assert sv.splice(tokenized.skeleton, tokenized.parts) == expected
+                assert tokenized.whole_digest() == (hashlib.sha256(expected).hexdigest(), len(expected))
+                assert all(hashlib.sha256(raw).hexdigest() == digest for digest, raw in tokenized.parts.items())
+                assert set(sv.token_digests(tokenized.skeleton)) == set(tokenized.parts)
+                assert tokenized.shared == _rule_count(document)
+                expanded = sv.expand(json.loads(tokenized.skeleton), lambda digest: json.loads(tokenized.parts[digest]))
+                assert _canonical(expanded) == _canonical(json.loads(expected))
+            assert shared_documents > 200
 
 
 def test_elements_are_the_outermost_dicts_of_lists_reached_through_dicts():

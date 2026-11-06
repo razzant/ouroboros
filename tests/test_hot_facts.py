@@ -8,6 +8,7 @@ import pytest
 from ouroboros import budget_pause, maintenance, maintenance_jobs, owner_pause, store, store_hot_facts as hot
 from ouroboros.task_results import write_task_result
 from ouroboros.task_store import patch_document
+from tests._cases import case_folders
 
 
 def _task(txn, tid, **fields):
@@ -802,18 +803,21 @@ _NOT_THIS_TASK = {"torn": "{", "array": "[]", "null": "null", "empty": "{}", "fo
     "task_id": "other", "status": "running", "swarm_fanout_rollup": _HISTORY, "swarm_fanout_basis": {"base": _HISTORY}})}
 
 
-@pytest.mark.parametrize("kind", list(_NOT_THIS_TASK))
-def test_a_body_that_is_not_this_task_leaves_only_its_own_row_unknown(tmp_path, kind):
-    with store.open_store(tmp_path, write=True) as txn:
-        _old_task(txn, "bad")
-        _old_task(txn, "legacy", budget_pause={"state": "pausing", "task_attempt": 2})
-        txn.conn.execute("UPDATE task_bodies SET body=? WHERE task_id='bad'", (_NOT_THIS_TASK[kind],))
-    with store.open_store(tmp_path, write=False) as txn:
-        rows = hot._read_rows(txn, ["bad", "legacy"])
-    assert rows["bad"]["control_valid"] == 0
-    assert (rows["legacy"]["control_valid"], rows["legacy"]["budget_pause_attempt"]) == (1, 2)
-    with pytest.raises(ValueError, match="unreadable or invalid"):
-        hot.read(tmp_path, "bad")
+def test_a_body_that_is_not_this_task_leaves_only_its_own_row_unknown(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for kind in list(_NOT_THIS_TASK):
+        tmp_path = next(case_paths)
+        with subtests.test(kind=kind):
+            with store.open_store(tmp_path, write=True) as txn:
+                _old_task(txn, "bad")
+                _old_task(txn, "legacy", budget_pause={"state": "pausing", "task_attempt": 2})
+                txn.conn.execute("UPDATE task_bodies SET body=? WHERE task_id='bad'", (_NOT_THIS_TASK[kind],))
+            with store.open_store(tmp_path, write=False) as txn:
+                rows = hot._read_rows(txn, ["bad", "legacy"])
+            assert rows["bad"]["control_valid"] == 0
+            assert (rows["legacy"]["control_valid"], rows["legacy"]["budget_pause_attempt"]) == (1, 2)
+            with pytest.raises(ValueError, match="unreadable or invalid"):
+                hot.read(tmp_path, "bad")
 
 
 def test_a_fault_in_column_derivation_still_fails_the_read(tmp_path, monkeypatch):
@@ -825,19 +829,22 @@ def test_a_fault_in_column_derivation_still_fails_the_read(tmp_path, monkeypatch
         hot._read_rows(txn, ["legacy"])
 
 
-@pytest.mark.parametrize("kind", list(_NOT_THIS_TASK))
-def test_a_whole_upsert_replaces_such_a_body_with_only_its_own_basis(tmp_path, kind):
-    base = {**_HISTORY, "fanout_count": 1, "requested_count": 1, "child_ids": ["own"]}
-    with store.open_store(tmp_path, write=True) as txn:
-        for tid in ("plain", "carried"):
-            _old_task(txn, tid)
-            txn.conn.execute("UPDATE task_bodies SET body=? WHERE task_id=?", (_NOT_THIS_TASK[kind], tid))
-        _task(txn, "plain")
-        _task(txn, "carried", swarm_fanout_rollup=base, swarm_fanout_basis={"base": base})
-        plain, carried = txn.load("plain"), txn.load("carried")
-    assert "swarm_fanout_rollup" not in plain and "swarm_fanout_basis" not in plain
-    assert (carried["swarm_fanout_rollup"], carried["swarm_fanout_basis"]) == (base, {"base": base})
-    assert hot.read(tmp_path, "plain")["control_valid"] == 1
+def test_a_whole_upsert_replaces_such_a_body_with_only_its_own_basis(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for kind in list(_NOT_THIS_TASK):
+        tmp_path = next(case_paths)
+        with subtests.test(kind=kind):
+            base = {**_HISTORY, "fanout_count": 1, "requested_count": 1, "child_ids": ["own"]}
+            with store.open_store(tmp_path, write=True) as txn:
+                for tid in ("plain", "carried"):
+                    _old_task(txn, tid)
+                    txn.conn.execute("UPDATE task_bodies SET body=? WHERE task_id=?", (_NOT_THIS_TASK[kind], tid))
+                _task(txn, "plain")
+                _task(txn, "carried", swarm_fanout_rollup=base, swarm_fanout_basis={"base": base})
+                plain, carried = txn.load("plain"), txn.load("carried")
+            assert "swarm_fanout_rollup" not in plain and "swarm_fanout_basis" not in plain
+            assert (carried["swarm_fanout_rollup"], carried["swarm_fanout_basis"]) == (base, {"base": base})
+            assert hot.read(tmp_path, "plain")["control_valid"] == 1
 
 
 def test_a_whole_upsert_keeps_a_valid_held_basis_and_patches_stay_strict(tmp_path):

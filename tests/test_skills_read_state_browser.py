@@ -21,7 +21,7 @@ from tests._skills_page_harness import (
     skills_browser as _skills_browser,
 )
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 skills_browser = _skills_browser
 
 WEATHER = {

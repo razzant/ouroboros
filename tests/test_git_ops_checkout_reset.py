@@ -430,7 +430,6 @@ def test_checkout_and_reset_blocks_when_status_read_is_unreadable(monkeypatch, t
     assert events[-1]["dirty_count"] == 0
     assert events[-1]["warnings"] == ["status_error:git status exited -9 without stderr"]
 
-@pytest.mark.serial
 def test_checkout_and_reset_blocks_clean_merge_in_linked_worktree(monkeypatch, tmp_path):
     """A linked worktree stores MERGE_HEAD outside its .git pointer file."""
     repo = tmp_path / "repo"

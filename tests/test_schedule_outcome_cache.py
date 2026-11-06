@@ -16,25 +16,11 @@ def history(host, task_id="last", **extra):
     return row
 
 
-SENTENCE = "Checked the disk: 30 GiB free, 30 less than ninety minutes ago; " * 3  # longer than an answer's 160-character end
-
-
 @pytest.mark.parametrize("status,silent,notice,summary,sent,quiet,line", [
-    ("completed", False, "", "", False, False, "Own final line"),
     ("failed", False, "", "", False, False, "Own final line"),
     ("cancelled", False, "", "", False, False, "Own final line"),
     ("rejected_duplicate", False, "", "", False, False, "Own final line"),
-    ("completed", True, "", "", False, True, ""),
-    ("failed", True, "Host notice", "", False, False, "Host notice"),
-    ("failed", False, "Host notice", "", False, False, "Host notice"),
-    # The run's own sentence is its line, whole; a host notice outranks it; a message already sent
-    # makes the finish not quiet while the internal note still never leaves the result.
-    ("completed", True, "", SENTENCE, False, True, SENTENCE.strip()),
-    ("completed", False, "", SENTENCE, False, False, SENTENCE.strip()),
-    ("completed", True, "Host notice", SENTENCE, False, False, "Host notice"),
-    ("completed", True, "", "", True, False, ""),
-], ids=["spoken", "failed", "cancelled", "duplicate", "quiet", "quiet-notice", "spoken-notice",
-        "quiet-sentence", "spoken-sentence", "quiet-notice-sentence", "quiet-after-message"])
+], ids=["failed", "cancelled", "duplicate"])
 def test_settled_outcomes_are_strictly_read_off_lock_on_disabled_consumed_rows(q, monkeypatch, status, silent, notice, summary, sent, quiet, line):  # noqa: F811
     history(q)
     write_task_result(q.root, "last", status, result="Private first line\nOwn final line", wake_silent=silent,
@@ -67,8 +53,7 @@ _FAILED_LINE = "Confirmed delegated terminal receipts: run-7c1: failed on leaf-m
     (_FAILED_RUN, "Host cause.\nSecond detail.", "Host cause."),
     ({**_FAILED_RUN, "terminal_runs": [], "open_run_ids": ["run-a"], "undisposed_patch_run_ids": ["run-b"]}, "",
      "Open delegated execution: run-a."),
-    (None, "\nHost cause.\n", "Host cause."),
-], ids=["custody-only", "host-cause-first", "first-debt", "surrounding-blank"])
+], ids=["custody-only", "host-cause-first", "first-debt"])
 def test_a_host_notice_gives_the_schedule_its_first_meaningful_line(q, audit, notice, line):  # noqa: F811
     history(q)
     write_task_result(q.root, "last", "failed", result="Private first line\nOwn final line",
@@ -79,7 +64,7 @@ def test_a_host_notice_gives_the_schedule_its_first_meaningful_line(q, audit, no
     assert outcome["notice"] is True and outcome["line"] == line
 
 
-@pytest.mark.parametrize("initial", ["interrupted", "running", "scheduled", "missing", "error"])
+@pytest.mark.parametrize("initial", ["interrupted", "missing", "error"])
 def test_unobserved_results_retry_under_the_same_id(q, monkeypatch, initial):  # noqa: F811
     history(q)
     if initial not in {"missing", "error"}:

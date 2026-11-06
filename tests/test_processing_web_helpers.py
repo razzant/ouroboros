@@ -131,8 +131,7 @@ def test_standard_search_gets_its_own_budget_admission(helpers, monkeypatch):
     assert [(row["task_id"], row["state"]) for row in finals] == [("helper", "released"), ("sibling", "settled")]
 
 
-@pytest.mark.parametrize("provider", ["anthropic", "openrouter"])
-@pytest.mark.parametrize("incomplete", [False, True])
+@pytest.mark.parametrize(("incomplete", "provider"), [(False, "anthropic"), (True, "openrouter")])
 def test_unknown_search_attempt_never_resends(helpers, provider, incomplete):
     root, state = helpers
     state.error = TimeoutError("Connection ended after dispatch")

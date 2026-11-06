@@ -17,7 +17,7 @@ import pytest
 from tests.test_mcp_headers_loopback import loopback  # noqa: F401
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 BEARER = "Bearer synthetic-browser-0001"
 BASIC = "Basic c3ludGhldGljOmJyb3dzZXI="

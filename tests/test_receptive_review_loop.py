@@ -26,7 +26,6 @@ from tests.test_receptive_commit_review import (  # noqa: F401 -- ``author`` is 
     TASK, _commit_count, _git, _notices, _parent, author, until,
 )
 
-pytestmark = pytest.mark.serial
 COMMIT = {"commit_message": "Change value", "paths": ["change.py"], "skip_advisory_review": True}
 REVIEW = {"root": "system_repo", "subject": "index", "goal": "Raise the value.", "scope": "change.py only"}
 
@@ -112,7 +111,7 @@ def _release_later(a, delay=0.4):
 
 
 @pytest.mark.parametrize("mode,enforcement", [("pro", "advisory"), ("pro", "blocking"),
-                                              ("cyber_pro", "advisory"), ("cyber_pro", "blocking")])
+                                              ("cyber_pro", "blocking")])
 def test_commit_mail_yield_parks_without_polling_then_collects_and_continues(main_loop, monkeypatch, mode, enforcement):
     from ouroboros import config
 

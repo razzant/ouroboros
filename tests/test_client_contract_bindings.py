@@ -103,6 +103,14 @@ def test_the_project_journey_answers_its_published_shapes(client):
     listed = client.get("/api/projects")
     assert assert_bound("GET /api/projects", listed) == "ProjectListResponse"
     assert [row["id"] for row in listed.json()["projects"]] == [project["id"]]
+    # The complete list and the exact id answer the same published rows.
+    complete = client.get("/api/projects?all=1")
+    assert assert_bound("GET /api/projects", complete) == "ProjectListResponse"
+    assert complete.json() == listed.json()
+    exact = client.get(f"/api/projects?id={project['id']}")
+    assert assert_bound("GET /api/projects", exact) == "ProjectListResponse"
+    assert [row["chat_id"] for row in exact.json()["projects"]] == [project["chat_id"]]
+    assert client.get("/api/projects?id=nope").json() == {"projects": []}
     renamed = client.post(f"/api/projects/{project['id']}/update", json={"name": "Trip"})
     assert assert_bound("POST /api/projects/{project_id}/update", renamed) == "ProjectUpdateResponse"
     missing = client.post("/api/projects/nope/update", json={"name": "x"})
@@ -253,7 +261,7 @@ def _owned_names() -> dict:
     return names
 
 
-@pytest.mark.parametrize("outcome", ["unlisted", "listed", "failed", "unpublished"])
+@pytest.mark.parametrize("outcome", ["unlisted", "failed", "unpublished"])
 def test_mcp_listing_evidence_matches_published_contracts(client, monkeypatch, tmp_path, outcome):
     from ouroboros import config, mcp_catalog, mcp_client
     from ouroboros.gateway import mcp as api

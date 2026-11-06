@@ -14,7 +14,6 @@ from ouroboros import claudexor_daemon as owned
 from ouroboros.gateways.claudexor import ClaudexorUnavailable
 from ouroboros.model_wait import execution_deadline_scope, monotonic_now
 
-pytestmark = pytest.mark.serial  # real loopback ports, as in test_claudexor_admission_wait.py
 
 
 def _point_owned_home(monkeypatch, config_dir: pathlib.Path, data_dir: pathlib.Path) -> None:

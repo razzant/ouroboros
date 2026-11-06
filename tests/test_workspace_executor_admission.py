@@ -6,8 +6,9 @@ an empty or malformed reference or mapping entry, a mapping onto the system repo
 data drive, a mapping that does not cover the workspace, the reserved metadata aliases,
 and ``network=none`` asked of the local backend.
 
-Whole-file serial suite: it spawns real processes, so ``tests/conftest.py`` tags it
-``serial`` and the parallel pass excludes it.
+Runs in the xdist pass beside other files: its processes are owned children killed within the
+test's own drive root and the per-worker registries are restored by
+``_isolate_workspace_executor_globals`` (``tests/test_workspace_executor.py``), so it names no host resource.
 """
 
 from __future__ import annotations

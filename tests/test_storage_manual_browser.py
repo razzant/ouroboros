@@ -16,7 +16,7 @@ import pytest
 from tests.test_emoji_free_browser import _browser, _open, _server
 
 direct_server_with_data = _server
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 VOLUME = {"free_bytes": 170_000_000_000, "total_bytes": 4_000_000_000_000, "observed_at": "2026-10-30T10:00:00Z"}
 STORAGE_API = re.compile(r"/api/storage(/|\?|$)")

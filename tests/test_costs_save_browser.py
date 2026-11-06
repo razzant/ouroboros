@@ -16,7 +16,7 @@ import pytest
 
 from tests.test_subscription_setup_browser import subscription_ui as subscription_ui
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 ACK_MS = 4000
 
 
@@ -52,6 +52,7 @@ def _open_costs(ui, *, width, theme, answers):
     page.click('[data-nav-page="dashboard"]')
     page.click('[data-dashboard-tab="costs"]')
     page.wait_for_selector("#btn-save-budget", state="visible")
+    page.wait_for_function("document.getElementById('costs-budget-help').textContent.includes('confirmed and estimated prices count')")
     return page, saves
 
 

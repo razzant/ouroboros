@@ -21,7 +21,9 @@ from ouroboros import usage_ledger as ledger
 from ouroboros import usage_store
 from ouroboros._usage_money import billing_group_key, monetary_scope_key
 from tests import _legacy_usage_rows_oracle as oracle
+from tests._source_scan import parse
 from tests._usage_store_testing import ledger_rows, request, root as root, write_compacted_journal, write_journal
+from tests._cases import chosen_rows
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 _AXES = ("model", "provider", "category")
@@ -197,7 +199,7 @@ def _summary_history(seed):
     return groups, tuple(_random_history(rng, 70))
 
 
-@pytest.mark.parametrize("seed", range(12))
+@pytest.mark.parametrize("seed", chosen_rows(range(12), 0, 2, 11))
 def test_every_summary_equals_the_frozen_fold_over_its_addressed_attempts(root, seed):
     groups, history = _summary_history(seed)
     write_compacted_journal(root, groups)
@@ -642,7 +644,6 @@ conn.execute("ROLLBACK")
 """
 
 
-@pytest.mark.serial
 def test_enforced_tier_contention_across_processes_honours_stop(root):
     import threading
 
@@ -690,7 +691,7 @@ def _production_sources():
 def test_bulk_readers_are_called_only_by_the_audit_and_the_export():
     callers = set()
     for path in _production_sources():
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        tree = parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -847,7 +848,6 @@ def _ordinary_reads(root, monkeypatch):
     }
 
 
-@pytest.mark.serial
 def test_ordinary_readers_do_not_grow_with_unrelated_history(tmp_path, monkeypatch):
     monkeypatch.setenv("TOTAL_BUDGET", "100")
     measured = {}

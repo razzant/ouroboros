@@ -21,7 +21,6 @@ from tests.test_doc_context import _make_env_and_memory
 from tests.test_scheduled_effort_intent import _admit, _restore, runtime  # noqa: F401
 from tests._delegated_transport_shared import _owned_gateway_uses_each_test_transport  # noqa: F401
 
-pytestmark = pytest.mark.serial  # Production state/queue init rebinds module globals.
 BRIEF, BINARY = b"parent brief\n", b"\xff\x00binary\n"
 SELECTION = [{"root": "task_drive", "path": "brief.md"}, {"root": "task_drive", "path": "fixture.bin"}]
 
@@ -61,6 +60,9 @@ def _child_context(rt, payload):
                         task_constraint=TaskConstraint(mode="local_readonly_subagent"),
                         task_contract=payload.get("task_contract") or {})  # as agent.py builds it
     child.task_id, child.project_id = payload["id"], resolve_project_id(payload)
+    child.workspace_root = (pathlib.Path(payload["workspace_root"]).resolve(strict=False)
+                            if payload.get("workspace_root") else None)
+    child.workspace_mode = str(payload.get("workspace_mode") or "")
     child.task_metadata = {**payload["metadata"], **{key: payload[key] for key in (
         "root_task_id", "parent_task_id", "drive_root", "child_drive_root", "budget_drive_root") if payload.get(key)}}
     return child
@@ -103,8 +105,7 @@ def _text_of(content):
     return content if isinstance(content, str) else "\n".join(str(block.get("text") or "") for block in content)
 
 
-@pytest.mark.parametrize("memory_mode", ["empty", "forked"])
-@pytest.mark.parametrize("sources", ["shared", "declared"])
+@pytest.mark.parametrize(("sources", "memory_mode"), [("shared", "forked"), ("declared", "empty")])
 def test_a_native_child_receives_and_reads_the_retained_copies_through_the_real_chain(
         chain, monkeypatch, tmp_path, memory_mode, sources):  # noqa: F811
     from ouroboros.artifacts import collect_task_artifact_records
@@ -147,19 +148,33 @@ def test_a_native_child_receives_and_reads_the_retained_copies_through_the_real_
                     if "delegated_readonly_inputs" in row["path"]]
 
 
-@pytest.mark.parametrize("folderless", [False, True], ids=["repository", "folderless"])
+@pytest.mark.parametrize("folderless,project_id", [(False, ""), (True, ""), (True, "prj-inputs")],
+                         ids=["repository", "folderless", "folderless-project"])
 def test_a_session_childs_selection_crosses_admission_snapshot_and_bootstrap_to_the_sender(
-        chain, monkeypatch, folderless):  # noqa: F811
+        chain, monkeypatch, folderless, project_id):  # noqa: F811
     rt, parent, engine, sid = chain
     drive = _parent_files(rt)
     if folderless:
-        parent.project_id = "prj-inputs"  # the worker's own project scope, which the child inherits at admission
-    _reply, event = _schedule(chain, sid, input_sources="declared", input_files=SELECTION[:1])
+        parent.project_id = project_id
+        parent.task_metadata["resource_intent"] = {"kind": "explicit_none"}
+    reply, event = _schedule(chain, sid, input_sources="declared", input_files=SELECTION[:1])
+    if folderless:
+        assert "agent_session selected source: folderless task/artifact lineage" in reply
+    else:
+        assert "agent_session selected source: inherited repository/folder" in reply
+    assert "supervisor: child capabilities — profile=" in reply
+    assert "Prompt-only paths are not prepared" in reply
+    assert "preparation is not a read" in reply
     [row] = event["prepared_input_files"]
     digest = hashlib.sha256(BRIEF).hexdigest()
     assert row["sha256"] == digest
     task = _admit(rt, event)
     assert "[SELECTED INPUT FILES]" in task["text"] and row["local"] in task["text"], "the nanny can read them too"
+    if folderless:
+        assert event.get("resource_intent") == {"kind": "explicit_none"}
+        assert task["metadata"].get("resource_intent") == {"kind": "explicit_none"}
+        from ouroboros.task_results import load_task_result
+        assert load_task_result(rt.drive, task["id"])["resource_intent"] == {"kind": "explicit_none"}
     payload = _restore(rt)
     assert payload["prepared_input_files"] == [row]
     (drive / "brief.md").write_bytes(b"edited after queueing\n")
@@ -189,6 +204,34 @@ def test_a_session_childs_selection_crosses_admission_snapshot_and_bootstrap_to_
     assert request["input_files"] == receipt["startup"]["input_files"]
 
 
+def test_a_session_workspace_root_preserves_explicit_resource_and_leaf_scope(chain, monkeypatch):  # noqa: F811
+    rt, parent, engine, sid = chain
+    parent.task_metadata["resource_intent"] = {"kind": "explicit_none"}
+    _parent_files(rt)
+    reply, event = _schedule(chain, sid, input_sources="declared", workspace_root=str(rt.repo),
+                             input_files=SELECTION[:1])
+    from ouroboros.task_results import load_task_result
+    requested = load_task_result(rt.drive, event["task_id"])
+    assert requested["status"] == "requested"
+    assert requested["resource_intent"] == event["resource_intent"]
+    assert "agent_session selected source: workspace_root=" in reply
+    assert "Prompt-only paths are not prepared" in reply
+    assert "supervisor read roots are not a leaf-access guarantee" in reply
+    assert event["resource_intent"] == {"kind": "explicit_resource", "root": str(rt.repo)}
+    [row] = event["prepared_input_files"]
+    task = _admit(rt, event)
+    assert task["metadata"]["resource_intent"] == event["resource_intent"]
+    payload = _restore(rt)
+    child, wake = _session_first_start(chain, monkeypatch, payload)
+    receipt = json.loads(wake)
+    assert receipt["status"] == "configured_session_started", receipt
+    (_, _, body), = engine.of("run")
+    assert body["scope"]["root"] == str(rt.repo)
+    [started] = receipt["startup"]["input_files"]
+    assert started["carrier"] == "outside_scope_path" and started["local"] == row["local"]
+    assert child.workspace_root == pathlib.Path(rt.repo).resolve()
+
+
 def test_a_tampered_retained_copy_refuses_the_first_start(chain, monkeypatch):  # noqa: F811
     rt, _parent, engine, sid = chain
     _parent_files(rt)
@@ -201,6 +244,47 @@ def test_a_tampered_retained_copy_refuses_the_first_start(chain, monkeypatch):  
     refusal = child._configured_startup_refusal
     assert refusal["reason"] == "input_files_unavailable", refusal
     assert [row["status"] for row in refusal["input_files"]] == ["changed"]
+
+
+def test_losing_resource_intent_reproduces_a_folderless_leaf_scope_mismatch(chain, monkeypatch):  # noqa: F811
+    """Negative control at the real bootstrap: saved input bytes alone did not prove the scope."""
+    from ouroboros import subagents
+
+    rt, parent, engine, sid = chain
+    _parent_files(rt)
+    parent.task_metadata["resource_intent"] = {"kind": "explicit_none"}
+    parent.project_id = ""
+    monkeypatch.setattr(subagents, "SUBAGENT_INTENT_FIELDS",
+                        tuple(key for key in subagents.SUBAGENT_INTENT_FIELDS if key != "resource_intent"))
+    reply, event = _schedule(chain, sid, input_sources="declared", input_files=SELECTION[:1])
+    assert "selected source: folderless" in reply
+    task = _admit(rt, event)
+    assert not task["metadata"].get("resource_intent")
+    _, wake = _session_first_start(chain, monkeypatch, _restore(rt))
+    (_, _, body), = engine.of("run")
+    assert body["scope"]["root"] == str(rt.repo), "the missing intent silently changes the scope"
+    assert json.loads(wake)["startup"]["input_files"][0]["carrier"] == "outside_scope_path"
+
+
+def test_prose_only_worktrees_are_not_selected_or_claimed_prepared(chain, monkeypatch):  # noqa: F811
+    rt, parent, engine, sid = chain
+    parent.project_id = ""
+    parent.task_metadata["resource_intent"] = {"kind": "explicit_none"}
+    drive = _parent_files(rt)
+    worktrees = [rt.repo.parent / f"external-{n}" for n in range(3)]
+    for root in worktrees:
+        root.mkdir()
+        (root / "source.md").write_text("not a selected source", encoding="utf-8")
+    reply, event = _schedule(chain, sid, context="Inspect these worktrees: " + ", ".join(map(str, worktrees)))
+    assert "Prompt-only paths are not prepared" in reply
+    assert "prepared_input_files" not in event
+    _admit(rt, event)
+    _, wake = _session_first_start(chain, monkeypatch, _restore(rt))
+    assert json.loads(wake)["status"] == "configured_session_started"
+    (_, _, body), = engine.of("run")
+    manifest = json.loads((pathlib.Path(body["scope"]["root"]) / "inputs.json").read_text())
+    assert any(item["source"] == str(drive / "brief.md") for item in manifest)
+    assert not any(str(root) in item["source"] for item in manifest for root in worktrees)
 
 
 def test_without_the_intent_registry_entry_the_selection_never_reaches_a_child(chain, monkeypatch, tmp_path):  # noqa: F811

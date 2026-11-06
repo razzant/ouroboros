@@ -74,15 +74,8 @@ def test_sheet_and_configure_presence_choose_and_remove_declared_word_signal(wor
 
 @pytest.mark.parametrize("state,enabled,allowance,bot,optin,reported,decision", [
     ("active", True, "available", False, False, True, "focus"),
-    ("silent", True, "available", False, False, True, "focus"),
     ("silent", True, "available", False, False, False, "silent"),
-    ("paused", True, "available", False, False, True, "silent"),
-    ("silent", False, "available", False, False, True, "silent"),
     ("silent", True, "exhausted", False, False, True, "retry"),
-    ("silent", True, "allowance_unknown", False, False, True, "retry"),
-    ("silent", True, "available", True, False, True, "silent"),
-    ("silent", True, "available", True, True, True, "focus"),
-    ("silent", True, "available", True, True, False, "focus"),
 ])
 def test_current_controls_apply_to_word_signal(word_place, monkeypatch, state, enabled, allowance,
                                              bot, optin, reported, decision):

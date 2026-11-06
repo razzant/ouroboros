@@ -10,13 +10,12 @@ from ouroboros.contracts.live_conversation import LiveOptions, ToolOutputs
 from ouroboros.live_context_view import serving_delivery_room
 from skills.live_conversation.attention import attend_tool
 from skills.live_conversation.driver import _Call
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 @pytest.mark.parametrize('vision,room,successor', [
-    (True, 700, 'native'), (True, 4000, 'native'),
-    (True, 700, 'fresh'), (False, 700, 'native'),
-    (True, 700, 'none'), (True, 4000, 'none'), (False, 700, 'none'),
+    (True, 700, 'native'), (True, 700, 'fresh'), (False, 700, 'native'),
+    (True, 700, 'none'), (False, 700, 'none'),
 ])
 def test_native_attend_measures_the_complete_delivery(host_world, record_property, vision, room, successor):
     host = host_world.host

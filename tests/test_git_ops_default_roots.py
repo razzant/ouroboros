@@ -14,7 +14,6 @@ import pathlib
 import subprocess
 import sys
 
-import pytest
 
 import supervisor.git_ops as git_ops
 import supervisor.update_merge as update_merge
@@ -71,7 +70,6 @@ def test_log_supervisor_writes_into_env_root_when_unpinned(request, monkeypatch,
     assert "hermetic_probe" in probe.read_text(encoding="utf-8")
 
 
-@pytest.mark.serial
 def test_pre_isolation_import_still_writes_isolated_root(tmp_path):
     """Red on the pre-fix tree: all four OUROBOROS_* set, module imported, and
     the write STILL went to the (fake) home live root instead of the isolated

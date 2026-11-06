@@ -63,7 +63,6 @@ ZERO_SHA = "0" * 40
 # running. Either way a hang ends as a named failure instead of the job's timeout, and a module
 # that does not import leaves the other ids running.
 SESSION_FLAGS = ("--continue-on-collection-errors", "--timeout=300")
-_COMPLETE_EXITS = (0, 1, 5)  # pytest finished its session: green, some red, or nothing collected
 _USAGE_ERROR = 4
 
 
@@ -107,17 +106,16 @@ def merges(base: str, head: str) -> list[tuple[str, str]]:
 def tree_source(sha: str):
     """A reader of commit `sha`'s files: the text, or None where that tree has no such file."""
     def read(path: str) -> str | None:
-        try:
-            return _git("show", f"{sha}:{path}", strip=False)
-        except subprocess.CalledProcessError:
+        if not _git("ls-tree", "--name-only", sha, "--", path):
             return None
+        return _git("show", f"{sha}:{path}", strip=False)
     return read
 
 
 def working_source(path: str) -> str | None:
     try:
         return (REPO_ROOT / path).read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
+    except FileNotFoundError:
         return None
 
 
@@ -182,7 +180,8 @@ def read_session(directory: Path) -> dict:
         return {"final": True, "evidence": True, "rows": [row for row in reports if _report(row)],
                 "collection": [row["nodeid"] for row in data.get("collection_failures") or []
                                if isinstance(row, dict) and isinstance(row.get("nodeid"), str)],
-                "running": list(running), "exit": status if type(status) is int else None}
+                "running": list(running), "exit": status if type(status) is int else None,
+                "collected": data.get("tests_collected")}
     return {"final": False, "evidence": journal, "rows": journal_rows, "collection": [],
             "running": list(running), "exit": None}
 
@@ -204,10 +203,10 @@ def candidates(session: dict) -> dict[str, str]:
 
 
 def outcomes(session: dict, ids) -> dict[str, str]:
-    """Each id in one session: failed, passed, skipped, absent (the session completed without it,
-    so its tree has no such test) or unknown (the session ended before reporting it).
+    """Each id in one session: failed, passed, skipped or unknown (no report).
 
-    A module id (one that did not collect) stands for every test of that module.
+    A module id stands for every reported test of that module; a skipped member is not a pass.
+    A completed session can deselect a live test. Only ``check_ids`` establishes a missing module.
     """
     failed, passed, skipped = set(session["running"]), set(), set()  # a test running at the end hung
     for row in session["rows"]:
@@ -218,7 +217,6 @@ def outcomes(session: dict, ids) -> dict[str, str]:
         elif row["phase"] == "call":
             passed.add(row["nodeid"])
     broken = set(session["collection"])
-    complete = session["final"] and session["exit"] in _COMPLETE_EXITS
     result = {}
     for nodeid in ids:
         path = nodeid.split("::", 1)[0]
@@ -226,12 +224,12 @@ def outcomes(session: dict, ids) -> dict[str, str]:
                    else {node for node in failed | passed | skipped if node.split("::", 1)[0] == path})
         if path in broken or members & failed:
             result[nodeid] = "failed"
-        elif members & passed:
-            result[nodeid] = "passed"
         elif members & skipped:
             result[nodeid] = "skipped"
+        elif members & passed:
+            result[nodeid] = "passed"
         else:
-            result[nodeid] = "absent" if complete else "unknown"
+            result[nodeid] = "unknown"
     return result
 
 
@@ -493,6 +491,9 @@ def classify(evidence: Path, *, run=run_pytest, node=run_node_lane, lint=None, s
                                       if session["evidence"] else f"the {label} pass left no evidence")
     if selection.get("node") == "failure":
         found[NODE_LANE] = ("node", "the Node lane was red")
+    if (selection.get("outcome") == "failure" and selection.get("node") == "success"
+            and all(value == "success" for value in (selection.get("outcomes") or {}).values())):
+        record["problems"].append("the selected runner failed after its passes (read the inventory/floor diagnostics)")
     findings = lint() if lint is not None else {}
     record["lint_checked"] = lint is not None and findings is not None
     if findings is None:
@@ -630,7 +631,7 @@ class Prober:
             if tests:
                 found = check_ids(tests, self.evidence / "probes" / label, read_source=tree_source(sha),
                                   run=lambda args, directory: self.run(args, directory, cwd=tree))
-                answers.update({nodeid: {"failed": "fail", "unknown": "error"}.get(value, "pass")
+                answers.update({nodeid: {"failed": "fail", "passed": "pass", "absent": "pass"}.get(value, "error")
                                 for nodeid, value in found.items()})
             if NODE_LANE in ids:
                 answers[NODE_LANE] = "pass" if self.node(tree) == 0 else "fail"
@@ -711,8 +712,29 @@ def command_route(args, environ=os.environ) -> int:
 
 # --- summary ---------------------------------------------------------------------------------
 
-def render_summary(evidence: Path, merged=(), web: str = "", system: str = "linux") -> tuple[str, bool]:
-    """(markdown, red): red when a FAILED test remains after its retry or the check did not finish.
+def _cost_summary(evidence: Path, outcome: str) -> tuple[list[str], bool]:
+    """The independent workflow step and its existing session evidence, without retry or attribution."""
+    session = read_session(evidence / "cost-contract")
+    failed = candidates(session)
+    skipped = sorted({row["nodeid"] for row in session["rows"] if row["outcome"] == "skipped"})
+    passed = {row["nodeid"] for row in session["rows"] if row["phase"] == "call" and row["outcome"] == "passed"}
+    passed.difference_update(failed, skipped)
+    complete = session["final"] and session["exit"] == 0 and bool(passed) and not failed and not skipped
+    collected = session.get("collected")
+    if type(collected) is int and collected > len(passed):
+        complete = False
+    lines = [f"Cost contract: workflow **{outcome or 'unknown'}**; pytest exit {session['exit']}; "
+             f"{len(passed)} passed, {len(failed)} failed/unfinished, {len(skipped)} skipped."]
+    lines += [f"- Cost check `{_cell(node)}`: {_cell(why)}." for node, why in failed.items()]
+    lines += [f"- Cost check `{_cell(node)}` was skipped." for node in skipped]
+    if not complete:
+        lines.append("- **Cost contract not fully verified:** missing, interrupted, failed or skipped session evidence.")
+    return lines, outcome != "success" or not complete
+
+
+def render_summary(evidence: Path, merged=(), web: str = "", system: str = "linux", *,
+                   cost_outcome: str | None = None, step_outcomes: dict | None = None) -> tuple[str, bool]:
+    """(markdown, red): red when any selected test/check/stage fails or evidence is incomplete.
 
     `web` is the repository's address (https://github.com/owner/name); with it commits, pull
     requests and issues become links. `system` is the leg's operating system.
@@ -721,11 +743,18 @@ def render_summary(evidence: Path, merged=(), web: str = "", system: str = "linu
     base, classification = _read_json(evidence / "base.json") or {}, _read_json(evidence / "classification.json")
     attribution, routing = _read_json(evidence / "attribution.json") or {}, _read_json(evidence / "routing.json") or {}
     if not isinstance(classification, dict):
-        return f"{title} — RED\n\nThe check did not finish: nothing was classified (read the step logs).\n", True
+        classification = {"problems": ["the check did not finish: nothing was classified (read the step logs)"]}
     problems, failed, flaky = (list(classification.get(key) or []) for key in ("problems", "failed", "flaky"))
+    for step, outcome in (step_outcomes or {}).items():
+        if outcome != "success":
+            problems.append(f"the {step} step is {outcome or 'unknown'} (read its log)")
     if classification.get("complete") is False:
         problems.append("the retry did not finish, so every red below counts as FAILED and none was bisected")
-    red = bool(failed or problems)
+    red = bool(failed or problems or any((classification.get("not_run") or {}).values()))
+    cost_lines = ["Cost contract: not selected on Windows (measured on Linux)."] if system == "windows" else []
+    if system == "linux" and cost_outcome is not None:
+        cost_lines, cost_red = _cost_summary(evidence, cost_outcome)
+        red = red or cost_red
     lines = [f"{title} — {'RED' if red else 'GREEN'}", ""]
     if base:
         numbers = sorted({int(found[0]) for _, subject in merged if (found := re.findall(r"#(\d+)", subject))})
@@ -739,11 +768,16 @@ def render_summary(evidence: Path, merged=(), web: str = "", system: str = "linu
                     "other changes select."
                     if selection.get("deferred_full") else ""))
     lines.append(_gates(classification, web))
+    lines += cost_lines
     lines += [f"- **The check is incomplete:** {_cell(problem)}." for problem in problems]
     verdicts = {row["id"]: row for row in attribution.get("verdicts") or []}
     handed = {nodeid: group for group in routing.get("handed") or [] for nodeid in group.get("ids") or []}
     if failed:
-        lines += ["", f"### Failed ({len(failed)}): red again on retry", "",
+        counts = {kind: sum(verdicts.get(row["id"], {}).get("verdict", "unattributed") == kind for row in failed)
+                  for kind in ("culprit", "pre-existing", "unattributed")}
+        lines += ["", f"### Failed checks ({len(failed)})", "",
+                  f"Attributed to a merge: {counts['culprit']}; also failed at the base: {counts['pre-existing']}; "
+                  f"unattributed: {counts['unattributed']}. All remain RED. A base failure does not establish the same cause.", "",
                   "| Test | First failure | Verdict | First bad | Last good | Handed to |",
                   "| --- | --- | --- | --- | --- | --- |"]
         for row in failed:
@@ -806,7 +840,9 @@ def command_summary(args) -> int:
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     web = f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{repo}" if repo else ""
     text, red = render_summary(evidence, merges(base["base"], base["head"]) if base.get("base") and base.get("head")
-                               else [], web, args.os)
+                               else [], web, args.os, cost_outcome=os.environ.get("COST_CONTRACT_OUTCOME", "unknown"),
+                               step_outcomes={step: os.environ[key] for step in ("classify", "attribute", "route")
+                                              if (key := f"POST_MERGE_{step.upper()}_OUTCOME") in os.environ})
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
             stream.write(text)

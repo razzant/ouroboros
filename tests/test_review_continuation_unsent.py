@@ -34,7 +34,6 @@ from tests._review_session_route_shared import _owned_gateway_uses_each_test_tra
 from tests.test_receptive_commit_review import TASK, _git
 
 author, fake_route, stopped_wave = _author, _fake_route, _stopped_wave  # fixtures by name
-pytestmark = pytest.mark.serial
 
 
 def _entered_at(monkeypatch):

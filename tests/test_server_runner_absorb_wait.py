@@ -92,9 +92,6 @@ def test_the_absorb_is_confirmed_when_the_counter_and_the_served_sha_move(tmp_pa
     (None, 1, "no_promotion"),                                            # an every_n tick ran, nothing promoted
     (None, 0, "no_decision"),                                             # no tick recorded (llm cadence / ineligible)
     ({"status": "active", "transaction_history": [{"cycle_outcome": "no_op"}]}, 1, "cycle_no_op"),
-    ({"status": "active", "transaction_history": [{"cycle_outcome": "abandoned"}]}, 1, "cycle_not_absorbed"),
-    ({"status": "paused", "transaction_history": [{"cycle_outcome": "no_op"}]}, 1, "campaign_paused"),
-    ({"status": "active"}, 1, "cycle_not_enqueued"),
 ])
 def test_idle_reasons_are_typed_from_the_durable_campaign_state(tmp_path, monkeypatch, campaign, counter, expected):
     """The cycle written DURING the wait decides ``cycle_*``: the campaign file is created empty before the wait

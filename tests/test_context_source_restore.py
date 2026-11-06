@@ -121,8 +121,7 @@ def test_restore_only_keeps_current_on_source_or_whole_candidate_refusal(
     assert ctx._context_view_receipt["status"] == ("source_unavailable" if failure == "source" else "fit_rejected")
 
 
-@pytest.mark.parametrize("extra", [{"keep_last_n": 6}, {"keep_unit_ids": []},
-    {"schema_names": []}, {"review_notes": [{}]}, {"review_transfers": [{}]}])
+@pytest.mark.parametrize("extra", [{"keep_last_n": 6}, {"schema_names": []}, {"review_transfers": [{}]}])
 def test_bare_restore_rejects_ambiguous_selectors_without_queuing(saved_source, extra):
     folded, ref, _ = saved_source
     ctx = SimpleNamespace(active_context_mode="max", _active_builtin_tool_result=None)

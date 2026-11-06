@@ -17,7 +17,7 @@ from threading import Thread
 
 import pytest
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 WEB = Path(__file__).resolve().parents[1] / "web"
 
 HTML = """<!doctype html><html lang="en" class="ouro-ui"><head><meta charset="utf-8">

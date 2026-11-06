@@ -420,7 +420,6 @@ print(json.dumps({"results": results, "network_attempts": len(attempts)}))
 """
 
 
-@pytest.mark.serial
 def test_fresh_process_shares_the_evidence_store_not_the_names(cold, monkeypatch):
     """A cold child (the VLM child is one) reads the same evidence its parent recorded:
     the recorded "no" still withholds pixels there, and an unknown model still sends."""

@@ -27,7 +27,7 @@ from tests.system_e2e.harness import (
 )
 
 wait_clone = clone_fixture
-pytestmark = [pytest.mark.serial, pytest.mark.browser]
+pytestmark = [pytest.mark.browser]
 
 WINNER = "Both sources"
 COMMENT = "Use the replication data as well."

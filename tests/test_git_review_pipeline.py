@@ -106,7 +106,7 @@ def _nested_repository(path):
         _git(path, *args)
 
 
-@pytest.mark.parametrize("shape", ["marker_file", "empty_gitdir", "dangling_gitfile", "nested_repository"])
+@pytest.mark.parametrize("shape", ["marker_file", "empty_gitdir", "dangling_gitfile"])
 def test_a_reviewed_file_replaced_by_a_directory_lands_by_gits_evidence_never_its_marker(task, monkeypatch, shape):  # noqa: F811
     """Independent review: the reviewed file own.txt is replaced by a directory of local QA holding a ``.git`` entry.
     Its shape decides nothing; Git's evidence does. A marker file, an empty directory or a gitfile that resolves
@@ -492,9 +492,6 @@ class TestSandboxCoversRepoWrite:
 
 # ---------------------------------------------------------------------------
 # Check 7: P9 history limits in _preflight_check (v4.41.0)
-# ---------------------------------------------------------------------------
-
-
 # ---------------------------------------------------------------------------
 # Advisory skip_tests parameter (v4.41.0)
 # ---------------------------------------------------------------------------

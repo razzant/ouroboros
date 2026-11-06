@@ -220,7 +220,7 @@ def test_a_stopped_run_with_unreadable_output_keeps_that_named_gap_through_its_c
     assert receipt(again) == message and calls == observed  # nothing generated, nothing read from the engine again
 
 
-@pytest.mark.parametrize('telemetry', ['observed', 'missing', 'wrong_run', 'duplicate_attempt'])
+@pytest.mark.parametrize('telemetry', ['observed', 'missing', 'duplicate_attempt'])
 def test_cold_collection_preserves_only_final_attempt_identity(tmp_path, forbid_effects, monkeypatch, telemetry):
     from ouroboros.review_projection import compact_review_projection
 

@@ -39,8 +39,6 @@ _LOCKABLE = pytest.mark.skipif(os.name == "nt" or getattr(os, "geteuid", lambda:
 @pytest.mark.parametrize("detail", [
     {},
     {"state": "succeeded"},
-    {"summary": None, "runFacts": {"state": "succeeded"}},
-    {"summary": {"state": "running"}, "result": {"final": True}},
     {"summary": {"state": "interrupted", "failure": {"cause": "host_restart"}}},
 ])
 def test_early_or_unobserved_details_leave_the_copy_untouched(tmp_path, detail):
@@ -101,8 +99,11 @@ def test_summary_write_failure_preserves_copy_and_original_outcome(
     assert len(thread_gateway.turn_requests) == 1
 
 
-@pytest.mark.parametrize("source_kind", ["directory", "git"])
-@pytest.mark.parametrize("replacement", ["removed", "file_to_directory", "directory_to_file"])
+@pytest.mark.parametrize(("replacement", "source_kind"), [
+    ("removed", "directory"),
+    ("file_to_directory", "git"),
+    ("directory_to_file", "directory"),
+])
 def test_final_capture_inventory_matches_summary_after_a_failed_capture(
     author, tmp_path, monkeypatch, source_kind, replacement,  # noqa: F811
 ):

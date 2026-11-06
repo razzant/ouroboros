@@ -19,7 +19,6 @@ from supervisor import conversation_lane, queue, worker_chat_lane, worker_pool_l
 from tests.test_owner_wait_pool import InputQueue, Process, pool as pool  # noqa: F401 -- fixture
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 _THREAD = threading.Thread  # the real class: the pool fixture stubs ``threading.Thread`` for the pool's own threads
 

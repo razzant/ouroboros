@@ -14,7 +14,7 @@ from ouroboros.test_evidence import diagnostic_directory
 from tests.test_onboarding_legacy_endpoint_browser import _endpoint, _frame, _listed
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 SAVED_KEY = "sk-dedicated-pair-0123456789"
 

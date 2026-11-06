@@ -9,8 +9,7 @@ import ouroboros.review_substrate as substrate
 from tests.test_review_skill import harness  # noqa: F401 -- shared offline review fixture
 
 
-@pytest.mark.parametrize("operation", ["install", "update"])
-@pytest.mark.parametrize("author_ended", [False, True])
+@pytest.mark.parametrize(("author_ended", "operation"), [(False, "install"), (True, "update")])
 def test_source_tool_review_keeps_the_real_caller_after_the_tool_returns(harness, operation, author_ended):  # noqa: F811 -- imported pytest fixture
     """The install/update starts one ordinary wave; an HTTP Skills review remains manual."""
     import contextvars

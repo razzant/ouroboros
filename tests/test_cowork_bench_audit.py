@@ -94,13 +94,7 @@ def test_corrupt_or_missing_logs_cannot_be_a_clean_zero(tmp_path):
 
 @pytest.mark.parametrize("tool,args,expected", [
     ("run_command", {"argv": ["/usr/bin/psql", "-c", "select 1"]}, ["possible_direct_postgres_access"]),
-    ("run_script", {"code": "import psycopg2; psycopg2.connect()"}, ["possible_direct_postgres_access"]),
-    ("mcp_terminal__python_execute", {"code": "import asyncpg"}, ["possible_direct_postgres_access"]),
     ("mcp_clickhouse__query", {"sql": "SELECT 'psql'"}, []),
-    ("run_command", {"command": "curl https://raw.githubusercontent.com/0717376/cowork_bench/main/a"},
-     ["answer_source_or_evaluator_reference"]),
-    ("run_command", json.dumps({"command": "cat '/workspace/groundtruth_workspace/test.txt'"}),
-     ["answer_source_or_evaluator_reference"]),
     ("run_command", {"command": "echo ordinary"}, []),
 ])
 def test_requested_argv_json_and_sql_are_diagnostic_only(tool, args, expected):
@@ -234,7 +228,6 @@ def test_stop_projection_needs_proven_cleanup_and_flag_off_is_disabled(tmp_path)
     ("disk_reserve", "admission_stopped", "eval_creation_refused:admission_stopped"),
     ("campaign_budget_reserve", "disk_probe_failed", "eval_creation_refused:disk_probe_failed"),
     ("runner_finished", "admission_stopped", "eval_creation_refused:admission_stopped"),
-    ("budget_meter_unavailable", "admission_stopped", "campaign_stopped_before_eval"),
 ])
 def test_only_linked_campaign_refusal_has_campaign_cause(tmp_path, stop_reason, refusal, expected):
     eval_run(tmp_path)

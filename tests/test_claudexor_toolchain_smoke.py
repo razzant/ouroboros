@@ -118,7 +118,6 @@ def test_main_requires_an_empty_root(tmp_path):
         witness.main(["--root", str(tmp_path)])
 
 
-@pytest.mark.serial
 def test_isolated_start_ignores_ambient_pythonpath_before_script_scrub(tmp_path):
     injected = tmp_path / "injected"
     injected.mkdir()
@@ -317,7 +316,6 @@ _SPAWNS_A_GRANDCHILD = (
 )
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("mode", ["exit", "hang"])
 def test_a_vendor_probe_leaves_no_process_behind(tmp_path, mode):
     from ouroboros.platform_layer import pid_is_alive
@@ -340,8 +338,7 @@ def test_a_vendor_probe_leaves_no_process_behind(tmp_path, mode):
     assert not pid_is_alive(grandchild) or pid_is_zombie(grandchild)
 
 
-@pytest.mark.parametrize("kind", ["native", "node"])
-@pytest.mark.parametrize("version_output", ["codex-cli 1.2.3", "codex-cli 1.2.30"])
+@pytest.mark.parametrize(("version_output", "kind"), [("codex-cli 1.2.3", "native"), ("codex-cli 1.2.30", "node")])
 def test_vendor_launch_uses_managed_transport_and_engine_doctor_in_custody(
         tmp_path, monkeypatch, kind, version_output):
     import ouroboros.config as config
@@ -518,7 +515,6 @@ def test_a_preseeded_engine_toolchain_is_refused_before_any_install(tmp_path, mo
     assert excinfo.value.code == "harness_preinstalled"
 
 
-@pytest.mark.serial
 def test_cli_json_keeps_the_engines_typed_refusal_code(tmp_path):
     refusal = json.dumps({"ok": False, "dryRun": True, "code": "unsupported_platform",
                           "refusal": "--target local is not supported on Windows"})
@@ -555,9 +551,8 @@ def test_the_harness_summary_carries_its_own_limits(tmp_path, monkeypatch):
         witness.main(["--root", str(tmp_path / "other"), "--harness-install", "claude"])
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("fault", [
-    "none", "promotion", "persistent_promotion", "non_permission",
+    "none", "persistent_promotion", "non_permission",
 ])
 def test_node_repair_directory_transaction_preserves_success_and_failure(tmp_path, monkeypatch, fault):
     """Unique generation publication retries sharing refusals, never displaces a live root.

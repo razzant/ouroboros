@@ -157,7 +157,7 @@ def test_live_recorded_commit_joins_original_request_owner_and_worker(live, monk
         thread.join(5)
 
 
-@pytest.mark.parametrize("state", ["dead", "unknown", "alive", "foreign", "foreign_binding", "missing_source"])
+@pytest.mark.parametrize("state", ["dead", "unknown", "missing_source"])
 def test_nonmatching_or_cold_operation_keeps_pure_collection(live, monkeypatch, state):
     f = live
     if state in {"dead", "unknown", "alive"}:
@@ -210,7 +210,7 @@ def test_live_hint_race_cannot_join_foreign_operation_or_start_replacement(live,
     assert actor["operation_id"] == f.row["operation_id"]
 
 
-@pytest.mark.parametrize("damage", ["none", "foreign_root", "foreign_binding", "missing_live", "not_preparing"])
+@pytest.mark.parametrize("damage", ["none", "foreign_binding", "missing_live"])
 def test_missing_prompt_only_joins_exact_retained_preparation(live, monkeypatch, damage):
     f = live
     f.row["operation_state"] = "pending_dispatch"

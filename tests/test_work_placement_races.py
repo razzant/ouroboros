@@ -16,7 +16,6 @@ from ouroboros.projects_registry import (
 from tests import _dialogue as dialogue_test
 from tests.test_swarm_host_admission import host, rows  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def move(host, entrance, pid):  # noqa: F811

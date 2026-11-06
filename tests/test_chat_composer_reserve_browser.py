@@ -197,7 +197,6 @@ def test_a_reply_strip_opens_and_closes_like_the_capsule_rows_fold(direct_server
 
 
 @pytest.mark.ui_browser
-@pytest.mark.serial
 def test_wizard_enabled_checkbox_stays_inline(subscription_ui):
     """The real wizard keeps its already-fixed checkbox width at phone scale."""
     from tests.test_ui_smoke_agents_panel import _wizard_step_until, _WIZARD_ON_AGENTS_JS

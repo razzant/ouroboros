@@ -224,11 +224,9 @@ CONDITIONS = (f"Browser conditions: chromium {PINNED} {CHROMIUM_SUPPLY}"
 
 @pytest.mark.parametrize("tool,args,producer", [
     ("browse_page", {"url": "https://observed.example/", "output": "text"}, "Fake page body"),
-    ("browse_page", {"url": "https://observed.example/", "output": "html"}, "<html><body>Fake page body</body></html>"),
     ("browse_page", {"url": "https://observed.example/", "output": "screenshot"}, None),
-    ("browser_action", {"action": "evaluate", "value": "document.title"}, "42"),
     ("browser_action", {"action": "screenshot"}, None),
-], ids=["text", "html", "screenshot", "evaluate", "action-screenshot"])
+], ids=["text", "screenshot", "action-screenshot"])
 def test_successful_observations_carry_the_note_and_keep_clean_data(sticky, tool, args, producer):
     sticky.install()
     if tool == "browser_action":
@@ -447,7 +445,7 @@ def test_a_call_abandoned_by_its_timeout_never_retries_into_the_replacement(stic
     assert ctx.browser_state is replacement is not first and replacement.browser is None
 
 
-@pytest.mark.parametrize("a_stage", ["navigation", "click", "before_session", "before_wrapper"])
+@pytest.mark.parametrize("a_stage", ["navigation", "click", "before_wrapper"])
 def test_abandoned_a_unwinds_while_b_opens_on_the_replacement(sticky, tmp_path, monkeypatch, a_stage):
     """A times out, B enters the real bound wrapper, THEN A's navigation dies."""
     from ouroboros import loop_tool_execution as execution

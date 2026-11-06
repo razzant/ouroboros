@@ -729,9 +729,9 @@ def check_worktree_readiness(
 def _run_review_preflight_tests(ctx: "Any", timeout: Optional[int] = None, *, force: bool = False) -> Optional[str]:
     """Run pytest before expensive review steps unless disabled or unavailable.
 
-    Timeout is owned by ``run_hermetic_pytest`` (default + ``OUROBOROS_PREFLIGHT_TIMEOUT_SEC``
-    env) so callers do not re-pin a stale literal; an explicit ``timeout`` still
-    overrides for tests."""
+    The budget is owned by ``run_hermetic_pytest``: none for the full suite (owner 5A), and for
+    a bounded run ``OUROBOROS_PREFLIGHT_TIMEOUT_SEC`` else the default, so callers do not re-pin
+    a stale literal; an explicit ``timeout`` still bounds any tier (tests use it)."""
     if not force and os.environ.get("OUROBOROS_PRE_PUSH_TESTS", "1") != "1":
         return None
     repo_dir = getattr(ctx, "repo_dir", None)

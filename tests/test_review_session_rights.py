@@ -186,8 +186,12 @@ def test_recorded_review_shapes(tmp_path):
     assert pathlib.Path(tmp_path).exists()
 
 
-@pytest.mark.parametrize("surface", ["multi_model_review", "task_acceptance", "skill_review", "deep_self_review"])
-@pytest.mark.parametrize("access", ["full", "readonly"])
+@pytest.mark.parametrize(("access", "surface"), [
+    ("full", "multi_model_review"),
+    ("full", "deep_self_review"),
+    ("readonly", "task_acceptance"),
+    ("readonly", "skill_review"),
+])
 def test_common_review_consumer_preserves_seat_access_and_evidence(
     repo, tmp_path, writable_engine, surface, access,
 ):

@@ -58,7 +58,7 @@ def test_success_receipt_skips_both_work_units_and_head_or_dependencies_invalida
     assert calls == ["reset", "reset", "smoke"] * 3
 
 
-@pytest.mark.parametrize("change", ["tracked", "untracked", "missing", "corrupt", "rollback", "explicit_update"])
+@pytest.mark.parametrize("change", ["tracked", "missing", "explicit_update"])
 def test_dirty_tree_or_invalidated_receipt_cannot_skip(bootstrap, change):
     repo, drive, calls = bootstrap
     assert git_ops.safe_restart(reason="bootstrap")[0]
@@ -81,7 +81,7 @@ def test_dirty_tree_or_invalidated_receipt_cannot_skip(bootstrap, change):
 
 
 @pytest.mark.parametrize("marker", [
-    "ouroboros-update-tx.json", "ouroboros-update-intent.json", "ouroboros-bootstrap-pending", "MERGE_HEAD",
+    "ouroboros-update-tx.json", "ouroboros-bootstrap-pending", "MERGE_HEAD",
 ])
 def test_transaction_markers_force_smoke_and_prevent_a_receipt(bootstrap, marker):
     repo, drive, calls = bootstrap

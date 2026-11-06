@@ -20,7 +20,7 @@ from tests.test_shell_interactions_browser import DRAWER, UNDER, boot, chromium_
 from tests.test_ui_smoke_playwright import _install_controlled_visual_viewport
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 __all__ = ['chromium_ui', 'shell_ui', 'subscription_ui']
 
 
@@ -365,7 +365,13 @@ def test_a_pull_past_fully_open_shows_the_drawer_at_the_edge_not_the_room(chromi
         page.locator('#page-chat .chat-toolbar-row [data-mobile-nav-toggle]').click()
         page.wait_for_function("() => document.getElementById('primary-sidebar').classList.contains('open')")
         page.wait_for_timeout(500)
-        y = height // 2
+        if height <= 400:
+            # The A1 Projects search field occupies the old midpoint on a short landscape viewport and intentionally
+            # refuses drawer drags that start on an input; begin on the first visible Project row instead.
+            box = page.locator('#nav-projects-list > .nav-project-item:not([hidden]) .nav-project-row').first.bounding_box()
+            y = box['y'] + box['height'] / 2
+        else:
+            y = height // 2
         cdp = page.context.new_cdp_session(page)
         try:
             # Left first (the close direction locks the axis), then right to the screen's far edge, past fully open.

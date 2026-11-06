@@ -16,7 +16,6 @@ from tests.system_e2e.harness import ArtifactOracle
 from tests.system_e2e.interfaces import FAKE_HANG_MARKER, FakeClaudexorDaemon
 from tests.test_restart_saved_work import _working_run
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("owner_stop", [False, True], ids=["natural-completion", "owner-stop"])

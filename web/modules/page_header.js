@@ -12,7 +12,7 @@ function classAttr(parts) {
 // The shell's ☰: one of the shell's icon controls (style.css .shell-icon-control), shown in the stack layout. A
 // page's header carries it in its leading slot, where the drawer's × then sits; a room (Main, a Project) carries it
 // as the composer row's first control instead, under the thumb (owner 19.10, 1A), as tall as the capsules beside it
-// with the touch minimum as its finger target (tests/test_shell_drawer_static.py). Its status dot says what waits
+// with the touch minimum as its finger target. Its status dot says what waits
 // behind it, in the drawer the ☰ opens (app.js paints it and the name's words).
 export function renderMobileNavToggle({ inComposer = false } = {}) {
     const classes = inComposer ? 'shell-icon-control mobile-nav-toggle composer-menu ui-hit-area' : 'shell-icon-control mobile-nav-toggle';

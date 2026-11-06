@@ -136,7 +136,6 @@ def test_rewrite_without_append_lock_preserves_every_byte(tmp_path, monkeypatch)
     assert path.read_bytes() == raw
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX group fixture")
 def test_failed_stop_retains_live_identity_and_does_not_publish_stopped(tmp_path, monkeypatch):
     proc = custody.spawn_supervised(
@@ -156,7 +155,6 @@ def test_failed_stop_retains_live_identity_and_does_not_publish_stopped(tmp_path
         proc.wait(timeout=5)
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX group fixture")
 def test_successful_stop_only_prunes_the_observed_identity(tmp_path, monkeypatch):
     proc = custody.spawn_supervised(
@@ -212,7 +210,6 @@ def test_unconfirmed_startup_child_cannot_be_replaced(monkeypatch, tmp_path):
     assert manager._proc.pid == 123
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX detached harness fixture")
 def test_stop_ledgered_process_ends_detached_harness_children(tmp_path):
     from ouroboros.platform_layer import force_kill_pid

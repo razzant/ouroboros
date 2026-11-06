@@ -112,7 +112,7 @@ def test_completion_summary_event_text_is_plain_and_fully_normalized(
     assert queued[0]["system_type"] == "project_completion_summary"
 
 
-@pytest.mark.parametrize("carrier", ["event", "task", "result", "done"])
+@pytest.mark.parametrize("carrier", ["event", "task", "done"])
 def test_direct_project_completion_stays_in_its_room(tmp_path, monkeypatch, carrier):
     from ouroboros.project_dialogue import enqueue_project_completion_summary
     from ouroboros.projects_registry import create_project

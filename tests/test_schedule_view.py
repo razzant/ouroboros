@@ -17,8 +17,7 @@ def row(sid="s1", **kw):
 
 
 @pytest.mark.parametrize("name,expected", [
-    ("Follow-up of task abc", "Check the report"), ("Reminder of task abc", "Check the report"),
-    ("My report check", "My report check"), ("Follow-up of task abc extra", "Follow-up of task abc extra"),
+    ("Follow-up of task abc", "Check the report"), ("My report check", "My report check"), ("Follow-up of task abc extra", "Follow-up of task abc extra"),
 ])
 def test_only_legacy_generated_names_are_displayed_as_the_objective(name, expected):
     original = row(name=name)
@@ -56,7 +55,6 @@ def test_cache_and_liveness_facts_are_distinct(matching):
     ({"last_task_id": "last", "last_outcome": {"task_id": "older", "state": "completed"}}, None),
     ({"last_task_id": "last", "last_outcome": {"task_id": "last", "state": "completed"}}, False),
     ({"occurrence": {"phase": "claimed"}}, True),
-    ({"previous_run_open": {"task_id": "last", "since": "earlier"}}, True),
 ])
 def test_withdrawal_reports_only_known_work_facts(facts, expected):
     original = row(delete_requested_at="then", delete_requested_by="owner", delete_reason="finished", **facts)

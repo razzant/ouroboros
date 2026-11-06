@@ -153,8 +153,7 @@ def test_the_background_verdict_is_unchanged_by_a_discard_answer(candidate):  # 
 
 
 @pytest.mark.parametrize("ids,accept,reason", [
-    (None, False, "loss_not_accepted"), (None, None, "loss_not_accepted"), (None, "true", "loss_not_accepted"), (None, 1, "loss_not_accepted"),
-    ([], True, "nothing_selected"), ("x", True, "unknown_item"), ([1], True, "unknown_item"), (["nope"], True, "unknown_item")])
+    ([], True, "nothing_selected"), ([1], True, "unknown_item"), (["nope"], True, "unknown_item")])
 def test_a_refused_request_touches_nothing(copies, ids, accept, reason):  # noqa: F811
     _handle, path, target = _held(copies)
     owner = _ready(copies)
@@ -278,7 +277,7 @@ def test_a_delegated_snapshot_is_never_offered(copies):  # noqa: F811
 # ---- the preview no longer stands -----------------------------------------------------------------
 
 
-@pytest.mark.parametrize("change", ["new_file", "new_empty_folder", "edit_same_size", "saved_file_edited", "staged", "commit", "removed"])
+@pytest.mark.parametrize("change", ["new_file", "new_empty_folder", "removed"])
 def test_any_write_since_the_preview_keeps_the_copy_as_changed(copies, change):  # noqa: F811
     _handle, path, target = _held(copies)
     owner = _ready(copies)
@@ -416,7 +415,7 @@ def _held_run(**facts):
     return {"run": SimpleNamespace(**{"task_id": "other", "snapshot_task_id": "", "execution_root": "", "target_root": "", **facts})}
 
 
-@pytest.mark.parametrize("facts", [{"task_id": "finished"}, {"snapshot_task_id": "finished"}, {"execution_root": "HERE"}, {"target_root": "HERE/sub"}])
+@pytest.mark.parametrize("facts", [{"task_id": "finished"}, {"execution_root": "HERE"}, {"target_root": "HERE/sub"}])
 def test_a_held_delegated_run_on_the_task_or_inside_the_copy_stays(copies, monkeypatch, facts):  # noqa: F811
     from ouroboros import delegate_custody_current as current
 

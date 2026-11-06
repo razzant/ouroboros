@@ -27,7 +27,6 @@ def repair_clone(tmp_path):
 
 
 @pytest.mark.ui_browser
-@pytest.mark.serial
 def test_repair_button_records_owner_intent_and_runs_the_installed_skill(tmp_path, repair_clone):
     if os.environ.get("OUROBOROS_RUN_UI_SMOKE") != "1":
         pytest.skip("set OUROBOROS_RUN_UI_SMOKE=1")

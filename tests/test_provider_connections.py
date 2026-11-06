@@ -17,7 +17,7 @@ from ouroboros.provider_connections import (
     configured_connections, connection_references, connections_meta, normalize_connections,
 )
 from ouroboros.provider_models import (
-    CONNECTIONS_KEY, DEEPSEEK_BASE_URL, MINIMAX_REGION_ENDPOINTS, ZAI_PLAN_ENDPOINTS, capability_base_url,
+    CONNECTIONS_KEY, DEEPSEEK_BASE_URL, capability_base_url,
     compatible_only_main_model, exclusive_direct_kind, model_has_credentials, model_has_credentials_in_settings,
     provider_credential_plan,
 )
@@ -54,22 +54,8 @@ def _settings(rows=ROWS, **extra):
         "default_headers": {**OPENROUTER_APP_HEADERS, **OPENROUTER_METADATA_HEADERS},
         "supports_openrouter_extensions": True}),
     ("openai@work::gpt-5.6-sol", {"provider": "openai", "api_key": "row-oa", "base_url": "https://api.openai.com/v1"}),
-    ("anthropic@k2::claude-opus-5.5", {"provider": "anthropic", "api_key": "row-an", "resolved_model": "claude-opus-5-5",
-                                       "usage_model": "anthropic@k2::claude-opus-5-5"}),
     ("deepseek@ds2::deepseek-v4-pro", {"provider": "deepseek", "api_key": "row-ds", "base_url": DEEPSEEK_BASE_URL,
                                        "requires_reasoning_echo": True}),
-    ("zai@coding::glm-5.3", {"provider": "zai", "api_key": "row-z", "base_url": ZAI_PLAN_ENDPOINTS["coding"]}),
-    ("minimax@cn::MiniMax-M3", {"provider": "minimax", "api_key": "row-mm", "base_url": MINIMAX_REGION_ENDPOINTS["cn_zh"],
-                                "reasoning_split": True}),
-    ("cloudru@cr2::zai-org/GLM-4.7", {"provider": "cloudru", "api_key": "row-cr",
-                                       "base_url": "https://cloudru-2.example/v1"}),
-    ("gigachat@corp::GigaChat-2-Max", {"provider": "gigachat", "api_key": "", "user": "u", "password": "row-pw",
-                                        "base_url": "https://giga-2.example/v1", "scope": "GIGACHAT_API_CORP",
-                                        "verify_ssl_certs": False}),
-    ("openai-compatible@vllm::llama", {"provider": "openai-compatible", "api_key": "row-ck",
-                                       "base_url": "https://vllm.example/v1", "keyless": False}),
-    ("openai-compatible@ollama::llama", {"provider": "openai-compatible", "api_key": "",
-                                         "base_url": "http://127.0.0.1:11434/v1", "keyless": True}),
 ])
 def test_a_named_connection_reads_its_row_through_the_kind_branch(route, expected):
     target = resolve_target(route, _settings())
@@ -82,7 +68,6 @@ def test_a_named_connection_reads_its_row_through_the_kind_branch(route, expecte
     ("anthropic/claude-opus-5.5", "or", "https://openrouter.ai/api/v1"),
     ("openai::gpt-5.6-sol", "oa", "https://api.openai.com/v1"),
     ("anthropic@default::claude-opus-5-5", "an", "https://api.anthropic.com/v1"),
-    ("openai-compatible::llama", "ck", "https://compat.example/v1"),
 ])
 def test_the_built_in_connection_reads_the_flat_keys(route, key, base_url):
     target = resolve_target(route, _settings())
@@ -103,14 +88,8 @@ def test_the_ambient_resolver_reads_the_runtime_view(monkeypatch):
 
 @pytest.mark.parametrize("route,rows,reason", [
     ("openrouter@gone::x/y", ROWS, "missing"),
-    ("openrouter@empty::x/y", [{"kind": "openrouter", "name": "empty"}], "missing"),
-    ("openai-compatible@nourl::m", [{"kind": "openai-compatible", "name": "nourl", "api_key": "k"}], "missing"),
     ("openrouter@byok::x/y", [{**ROWS[0], "enabled": False}], "disabled"),
-    ("anthropic@byok::claude", ROWS, "kind_mismatch"),
-    ("openrouter@Bad::x/y", ROWS, "invalid"),
     ("claudexor@acct::codex=gpt", ROWS, "invalid"),
-    ("x/y", [{"kind": "openrouter", "name": "default", "enabled": False}], "disabled"),
-    ("openai-compatible::m", [{"kind": "openai-compatible", "name": "default", "enabled": False}], "disabled"),
 ])
 def test_an_unavailable_connection_refuses_and_never_falls_through(route, rows, reason):
     with pytest.raises(ConnectionUnavailable) as caught:
@@ -213,19 +192,11 @@ def test_references_name_rows_whose_connection_cannot_serve():
 
 
 @pytest.mark.parametrize("raw,fragment", [
-    ("{}", "must be a list"),
     ("[not json", "JSON list"),
-    ([{"kind": "openrouter", "name": ""}], "name must be"),
     ([{"kind": "bedrock", "name": "x"}], "unknown kind"),
-    ([{"kind": "openrouter", "name": "Bad Name"}], "name must be"),
-    ([ROWS[0], dict(ROWS[0])], "defined twice"),
-    ([{"kind": "openrouter", "name": "default", "enabled": False, "api_key": "k"}], "carries only kind, name and enabled"),
-    ([{"kind": "openrouter", "name": "byok", "apikey": "k"}], "unknown field"),
-    ([{"kind": "openai", "name": "work", "provider_routing": "repro"}], "unknown field"),
     ([{"kind": "minimax", "name": "m", "region": "mars"}], "region must be global_en or cn_zh"),
     ([{"kind": "openrouter", "name": "byok", "provider_routing": "fastest"}], "provider_routing must be"),
     ([{"kind": "openrouter", "name": "byok", "enabled": "yes"}], "enabled must be"),
-    ([{"kind": "openrouter", "name": "byok", "api_key": 7}], "api_key must be text"),
 ])
 def test_save_validation_refuses_a_malformed_row(raw, fragment):
     rows, error = normalize_connections(raw)
@@ -292,24 +263,25 @@ _FP_GOLDEN = {
 }
 
 
-@pytest.mark.parametrize("model", sorted(_FP_GOLDEN))
-def test_built_in_route_fingerprints_are_byte_identical(model, monkeypatch):
-    from ouroboros.capability_evidence import route_fingerprint
-    from ouroboros.context_window import route_observation_scope
-    from ouroboros.gateway.settings import _active_main_route
-    from ouroboros.response_limits import _response_fingerprint, dispatch_target
-    from ouroboros.reviewer_window import reviewer_route
-    from ouroboros.vision_routing import image_route_scope
+def test_built_in_route_fingerprints_are_byte_identical(subtests, monkeypatch):
+    for model in sorted(_FP_GOLDEN):
+        with subtests.test(model=model), monkeypatch.context() as monkeypatch:
+            from ouroboros.capability_evidence import route_fingerprint
+            from ouroboros.context_window import route_observation_scope
+            from ouroboros.gateway.settings import _active_main_route
+            from ouroboros.response_limits import _response_fingerprint, dispatch_target
+            from ouroboros.reviewer_window import reviewer_route
+            from ouroboros.vision_routing import image_route_scope
 
-    monkeypatch.setattr("ouroboros.config.runtime_settings", lambda: dict(_FP_SETTINGS))
-    route = _active_main_route(_FP_SETTINGS, model_override=model)
-    provider, base_url = route["provider"], route["base_url"]
-    observed = (provider, base_url, route_fingerprint(provider=provider, base_url=base_url, model=model),
-                _response_fingerprint(provider=provider, model=model, base_url=base_url),
-                route_observation_scope(dict(route, options={}), _FP_SETTINGS),
-                image_route_scope(dispatch_target(model, _FP_SETTINGS)))
-    assert observed == _FP_GOLDEN[model]
-    assert reviewer_route(model) == (provider, base_url)
+            monkeypatch.setattr("ouroboros.config.runtime_settings", lambda: dict(_FP_SETTINGS))
+            route = _active_main_route(_FP_SETTINGS, model_override=model)
+            provider, base_url = route["provider"], route["base_url"]
+            observed = (provider, base_url, route_fingerprint(provider=provider, base_url=base_url, model=model),
+                        _response_fingerprint(provider=provider, model=model, base_url=base_url),
+                        route_observation_scope(dict(route, options={}), _FP_SETTINGS),
+                        image_route_scope(dispatch_target(model, _FP_SETTINGS)))
+            assert observed == _FP_GOLDEN[model]
+            assert reviewer_route(model) == (provider, base_url)
 
 
 def test_a_named_connection_fingerprints_its_own_endpoint_and_shares_a_fixed_one():

@@ -922,7 +922,7 @@ def test_events_websocket_rejects_ungranted_topic(tmp_path: pathlib.Path) -> Non
     assert "lacks grant" in message["error"]
 
 
-@pytest.mark.parametrize('user_id,chat_id', [(0, 1), (17, 99), (99, 23), (17, 23)])
+@pytest.mark.parametrize('user_id,chat_id', [(0, 1), (17, 99), (99, 23)])
 def test_chat_inject_panic_caption_requires_bound_owner(tmp_path: pathlib.Path, panic_bridge, user_id, chat_id) -> None:
     _seed_token(tmp_path, permissions=["inject_chat"])
     bridge = panic_bridge

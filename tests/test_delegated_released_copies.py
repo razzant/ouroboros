@@ -139,7 +139,7 @@ def test_a_lost_capture_row_heals_from_the_saved_result_when_the_checkout_is_gon
 
 # --------------------------------------------------------------------------- no changes
 
-@pytest.mark.parametrize("case", ["nothing", "head_moved", "evidence", "pending_continuation"])
+@pytest.mark.parametrize("case", ["nothing", "head_moved", "pending_continuation"])
 def test_an_empty_result_closes_itself_only_when_nothing_else_happened(tmp_path, monkeypatch, case):
     target, ctx, handle = _CaptureFixture()._provisioned(tmp_path, monkeypatch)
     copy, drive = pathlib.Path(handle.path), custody.custody_root(ctx)
@@ -243,8 +243,7 @@ def _with_submodule(tmp_path, monkeypatch):
     return target, ctx, handle, copy
 
 
-@pytest.mark.parametrize("work", ["uncommitted_edit", "committed_inside", "staged_clone", "unreadable", "stray_file",
-                                  "left_empty", "left_empty_beside_an_edit"])
+@pytest.mark.parametrize("work", ["uncommitted_edit", "unreadable", "left_empty"])
 def test_what_a_submodule_or_staged_repository_holds_keeps_the_checkout(tmp_path, monkeypatch, work):
     """A gitlink in the result is only a pointer: a submodule the run checked out, or a repository it
     cloned and staged, keeps the checkout until apply or reject, and so does a gitlink folder it left

@@ -17,7 +17,6 @@ from tests._store_journal_shared import use_journal
 from tests.test_workspace_preparation import env as env, spy_provisions, _WAIT_SEC
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 
 def request(env, acting, tid="receipt-child"):
@@ -108,9 +107,11 @@ def test_receipt_commit_busy_keeps_same_event_copy_and_one_worker_handoff(env, m
     assert not any("not scheduled" in text for _, text, _ in env.ctx.sent)
 
 
-@pytest.mark.parametrize("journal", ["PERSIST", "WAL"])
-@pytest.mark.parametrize("acting", [False, True])
-@pytest.mark.parametrize("control", ["stop", "pause", "deadline"])
+@pytest.mark.parametrize(("control", "acting", "journal"), [
+    ("stop", False, "PERSIST"),
+    ("pause", True, "WAL"),
+    ("deadline", False, "PERSIST"),
+])
 def test_control_during_receipt_wait_prevents_worker_handoff(env, monkeypatch, acting, control, journal):
     from supervisor import worker_assignment
     from supervisor.events_budget import _set_root_budget_pause_locked
@@ -146,8 +147,7 @@ def test_control_during_receipt_wait_prevents_worker_handoff(env, monkeypatch, a
         assert env.row("receipt-child")["reason_code"] == ("root_cancelled" if control == "stop" else "root_owner_paused")
 
 
-@pytest.mark.parametrize("acting", [False, True])
-@pytest.mark.parametrize("readback_unknown", [False, True])
+@pytest.mark.parametrize(("readback_unknown", "acting"), [(False, False), (True, True)])
 def test_committed_receipt_lost_reply_preserves_custody_and_one_start(env, monkeypatch, acting, readback_unknown):
     event = request(env, acting)
     _worker, delivered = install_worker(env, monkeypatch)

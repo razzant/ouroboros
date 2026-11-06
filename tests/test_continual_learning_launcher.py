@@ -329,7 +329,7 @@ def _pin_live_roots(tmp_path, monkeypatch, *, live_repo: Path) -> None:
     earlier version of these tests set only the environment and therefore asserted a verdict it
     did not own. It passed in a worktree (where `_WORKSPACE_ROOT/repo` is a different tree) and
     failed in the advisory preflight sandbox, where the suite runs from
-    `/tmp/ouroboros-preflight-*/repo` and that sibling IS the checkout under test. The
+    `/tmp/obs-preflight-*/repo` and that sibling IS the checkout under test. The
     production logic was right in both places; the test was reading ambient state.
 
     Tests here assert the gate's SHAPE, or a verdict every input of which they control. This is

@@ -11,7 +11,6 @@ from tests._usage_store_testing import attempt_rows_in_start_order
 # Holders below take the same model key as the wrapped physical send (ROUTE names no
 # usage_model), so they contend for that model's slots on this route.
 
-pytestmark = pytest.mark.serial
 
 
 def test_abandoned_receiver_does_not_release_physical_slot(tmp_path, monkeypatch, scope):

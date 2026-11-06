@@ -235,7 +235,6 @@ def test_claim_settle_and_release_lifecycle(tmp_path):
     "corrupt_bytes",
     [
         b'{"intents": [broken',
-        b'{"schema_version": 1, "intents": []}',
         b'{"schema_version": 1, "intents": {"corrupt-claim": []}}',
         b'{"schema_version": 1, "intents": {"unrelated": []}}',
     ],

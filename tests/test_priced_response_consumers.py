@@ -66,9 +66,7 @@ def presence(root, monkeypatch, consumer):
     return loop.run_llm_loop(**kwargs)
 
 
-@pytest.mark.parametrize("cost", [0.0, 1.25])
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("recover", [False, True])
+@pytest.mark.parametrize(("recover", "asynchronous", "cost"), [(False, False, 0.0), (True, True, 1.25)])
 def test_real_inline_presence_recovers_priced_incomplete_stream_with_shared_wait(
         isolated, monkeypatch, cost, asynchronous, recover):
     consumer = StreamConsumer(cost, asynchronous=asynchronous, recover=recover)
@@ -91,8 +89,7 @@ def test_real_inline_presence_recovers_priced_incomplete_stream_with_shared_wait
         assert trace["forced_finalization"]["source"] == "provider_outcome_unknown_no_resend"
 
 
-@pytest.mark.parametrize("cost", [0.0, 1.25])
-@pytest.mark.parametrize("stop", [False, True])
+@pytest.mark.parametrize(("stop", "cost"), [(False, 0.0), (True, 1.25)])
 def test_real_presence_priced_timeout_or_owner_stop_sends_no_repeat(isolated, monkeypatch, cost, stop):
     from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN
 

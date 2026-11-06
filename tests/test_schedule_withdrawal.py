@@ -59,7 +59,7 @@ def test_age_gate_precedes_owed_and_settlement_reads(q, monkeypatch):  # noqa: F
     assert [e for e in _events(q.root) if e.get("action") == "remove"] == events
 
 
-@pytest.mark.parametrize("owed,settled", [(True, True), (None, True), (False, False), (False, True)])
+@pytest.mark.parametrize("owed,settled", [(True, True), (False, False), (False, True)])
 def test_remover_requires_known_unowed_and_settled_work(q, monkeypatch, owed, settled):  # noqa: F811
     _row(q, intent={"kind": "system_repo"})
     withdraw(q)

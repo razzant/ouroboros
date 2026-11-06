@@ -289,10 +289,24 @@ def _finalize_schedule_emission(ctx: ToolContext, emission: Dict[str, Any]) -> s
     try:
         from ouroboros.tool_access import predicted_subagent_profile, summarize_subagent_profile
 
-        profile_note = "\n" + summarize_subagent_profile(
+        profile_note = ("\nsupervisor: " if route_kind == "agent_session" else "\n") + summarize_subagent_profile(
             predicted_subagent_profile(write_surface=write_surface))
     except Exception:
         pass
+    leaf_scope_note = ""
+    if route_kind == "agent_session" and not write_surface:
+        selected = emission.get("input_files")
+        selected_note = " Selected input_files are retained; preparation is not a read." if selected else ""
+        workspace = str(emission.get("workspace_root") or "").strip()
+        if workspace:
+            leaf_scope_note = f"\nagent_session selected source: workspace_root={workspace}; one directory."
+        else:
+            intent = emission.get("resource_intent") or {}
+            source = ("folderless task/artifact lineage and selected files" if intent.get("kind") == "explicit_none"
+                      else "inherited repository/folder")
+            leaf_scope_note = f"\nagent_session selected source: {source}."
+        leaf_scope_note += (" First start confirms the scope or private checking copy; supervisor read roots "
+                            "are not a leaf-access guarantee. Prompt-only paths are not prepared." + selected_note)
     coop_note = ""
     if str(coop_shared_tree or "").strip():
         try:
@@ -322,7 +336,7 @@ def _finalize_schedule_emission(ctx: ToolContext, emission: Dict[str, Any]) -> s
     return (
         f"Subagent request queued {task_ids[0]}: {objective} "
         f"(subagent_id={selected_name}, route={route_kind}, {commitment})"
-        f"{worker_note}{pool_note}{profile_note}{coop_note}{legacy_note}{access_note}{inputs_note}"
+        f"{worker_note}{pool_note}{profile_note}{leaf_scope_note}{coop_note}{legacy_note}{access_note}{inputs_note}"
         f"{_effort_request_note(configured, str(emission.get('requested_effort') or ''), getattr(ctx, 'task_metadata', None))}"
     )
 
@@ -754,6 +768,15 @@ def _inherited_execution_allowance(ctx: ToolContext) -> Any:
     return explicit_execution_window_remaining(ctx)
 
 
+def _schedule_resource_intent(ctx: ToolContext, metadata: Dict[str, Any], workspace_root: str) -> Dict[str, Any]:
+    """Resolve the requested child's resource scope once, before its requested row is persisted."""
+    if workspace_root:
+        return {"kind": "explicit_resource", "root": workspace_root}
+    if folderless_scratch_dir(ctx) is not None:
+        return {"kind": "explicit_none"}
+    return dict(metadata.get("resource_intent") or {})
+
+
 def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, **params: Any) -> str:
     allowed_params = schedule_subagent_param_names() | HIDDEN_LEGACY_SCHEDULE_PARAMS
     unsupported = sorted(str(key) for key in params if key not in allowed_params)
@@ -920,7 +943,6 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         intent_note=params.get("delegation_intent", ""),
         requested_depth=params.get("requested_depth", 0),
     )
-
     child_contract = _build_child_subagent_contract({
         "tid": tid, "objective": objective, "expected_output": expected_output, "constraints": constraints,
         "workspace_root": workspace_root, "workspace_mode": workspace_mode, "parent_project_id": parent_project_id,
@@ -932,9 +954,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         **({"input_sources": fields["input_sources"]} if "input_sources" in fields else {}),
         **child_attachment_authority,
     })
-    # The requested-status envelope carries the REQUEST. Its derived half stays
-    # empty until dispatch fills it, so a queued child's public description never
-    # names a lane, a model or an effort that no resolution has produced.
+    # Requested-status carries intent; derived dispatch fields stay empty until dispatch.
     envelope = build_subagent_envelope(
         task_id=tid,
         parent_task_id=parent_task_id,
@@ -945,6 +965,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         executor=requested_executor,
         status=STATUS_REQUESTED,
     )
+    resource_intent = _schedule_resource_intent(ctx, metadata, workspace_root)
     intent_fields = {
         "model_lane": requested_model_lane,
         "requested_model_lane": requested_model_lane,
@@ -957,6 +978,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "parent_cognitive_route": parent_cognitive_route,
         **{key: fields[key] for key in ("directory_strategy", "scope_paths", "delegated_mode", "workspace", "attachment_paths",
                                         "attachment_import", "document_import_intent", "prepared_input_files") if key in fields},
+        "resource_intent": resource_intent,
     }
     owner_origin = {**governing_words_for_schedule(ctx), **declared_words_fact(child_contract)}  # the owner's words, by value
     child_facts = {
@@ -990,8 +1012,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "depth": new_depth,
         "ts": utc_now_iso(),
         "write_surface": requested_surface,
-        "resource_intent": ({"kind": "explicit_none"} if folderless_scratch_dir(ctx) is not None
-                            else dict(metadata.get("resource_intent") or {})),
+        "resource_intent": resource_intent,
         "origin_metadata": {**consciousness_origin_metadata({**metadata, "task_id": str(getattr(ctx, "task_id", "") or "")}), **owner_origin,
                             **({"evolution_root_task_id": metadata.get("evolution_root_task_id") or root_task_id}
                                if metadata.get("evolution_root_task_id") or metadata.get("evolution_transaction") else {})},  # tree origin: consciousness label/level + owner words
@@ -1042,6 +1063,8 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "root_task_id": root_task_id_seed or current_task_id,
         "emitted_modes": [_emit_control_event(ctx, evt)],
         "write_surface": requested_surface,
+        **{"workspace_root": workspace_root, "workspace_mode": workspace_mode,
+           "resource_intent": evt["resource_intent"]},
         "configured_subagent": configured_subagent, "parent_cognitive_route": parent_cognitive_route,
         "legacy_selection": legacy_selection,
         "requested_access": params.get("access"),

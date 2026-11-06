@@ -24,7 +24,7 @@ from tests.test_project_unread_read_band_browser import _seed_room, _unread, _wa
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 from tests.ui_chat_viewport_smoke import _SETTLE_RESTORE_FRAMES, _emit_ws_frame
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 LATEST = "NEW ARRIVAL: opening must reach this reply"
 # The socket drops; the client reconnects on its own and reads the newest page whole.
 _RECONNECT = """() => {

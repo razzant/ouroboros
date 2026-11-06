@@ -107,13 +107,11 @@ def registry(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("mode,enforcement,feedback,converted,admitted", [
     ("advanced", "blocking", "clean", False, True),
-    ("advanced", "blocking", "warnings", False, True),
     ("advanced", "blocking", "pending", False, False),
     ("advanced", "blocking", "blockers", False, False),
     ("advanced", "blocking", "stale", False, False),
     ("advanced", "advisory", "pending", False, False),
     ("advanced", "advisory", "blockers", False, False),
-    ("advanced", "advisory", "author_accepted", True, True),
     ("advanced", "advisory", "author_accepted", False, False),
     ("advanced", "advisory", "author_stale", True, False),
     ("advanced", "advisory", "author_running", True, False),

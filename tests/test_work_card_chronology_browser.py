@@ -28,7 +28,7 @@ from tests.ui_chat_viewport_smoke import (
 )
 from tests.ui_console_errors import PageErrors
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 TASK = "order-949-turn"
 PORTAL = "order-949-portal"
 

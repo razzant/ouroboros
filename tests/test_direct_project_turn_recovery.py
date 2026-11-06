@@ -127,7 +127,6 @@ def _resume_and_revalidate(queue, task_id):
     return row
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("door", ["published_stop", "crash_without_projections"])
 def test_a_direct_project_turn_continues_after_stop_restore_and_resume(tmp_path, monkeypatch, door):
     from ouroboros import cancel_intents as ci
@@ -192,7 +191,6 @@ def _held_row_without_basis(tmp_path, monkeypatch, queue, tid="legacy-direct"):
     return _resume_and_revalidate(queue, tid)
 
 
-@pytest.mark.serial
 def test_a_direct_turn_without_a_recorded_basis_keeps_its_project_hold(tmp_path, monkeypatch):
     """A row from before the basis existed proves no original identity; Resume never synthesizes one."""
     queue, _workers = _install(tmp_path, monkeypatch)
@@ -205,7 +203,6 @@ def test_a_direct_turn_without_a_recorded_basis_keeps_its_project_hold(tmp_path,
     assert "_project_admission" not in row, "no basis is recaptured from today's registry"
 
 
-@pytest.mark.serial
 def test_the_owners_re_placement_readmits_a_row_without_a_recorded_basis(tmp_path, monkeypatch):
     """The recovery for such a row is an explicit present-day decision: the existing move into
     its own Project grants a basis for this room now, and its saved continuation then runs."""
@@ -231,7 +228,6 @@ def test_the_owners_re_placement_readmits_a_row_without_a_recorded_basis(tmp_pat
         assert _candidate_ineligible(queue, row, 5.0, {}) is False
 
 
-@pytest.mark.serial
 def test_a_parked_direct_project_turn_keeps_its_basis_through_the_queue_and_a_stop(tmp_path, monkeypatch):
     """The pause branch (31 Oct: Nova, Circles): a lane turn's exact pause takes the ordinary pooled
     path — its ``budget_pause`` frame parks the turn's own record, RUNNING -> PENDING — which a later

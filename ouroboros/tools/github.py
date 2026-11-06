@@ -9,6 +9,9 @@ module owns the transport, the repository binding and the registration.
 ``gh`` launch is published ``completed_no_effect``. The checks reader's literal ``gh api``
 annotation path is the one subcall that does not take the explicit repo, alongside workflow
 literal API paths.
+``gh api`` takes a repository from the directory but its host from gh's default, so a ``repo=""``
+REST or GraphQL leg never leaves the host to gh: ``_selected_target`` resolves one (host, owner, name)
+per public invocation, and an unresolved target refuses instead of reaching the default host.
 Exact captures stream stdout to a capped file with size/sha256 and retain CRLF and final bytes;
 the cap bounds this destination, not gh internal downloads/cache. Stderr is drained and bounded.
 """
@@ -26,7 +29,8 @@ import threading
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from functools import wraps
-from typing import List, Optional
+from typing import List, Optional, Tuple
+from urllib.parse import urlsplit
 
 from ouroboros.secret_masking import redact_known_values
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -37,6 +41,8 @@ log = logging.getLogger(__name__)
 _GENERIC_TRANSPORT = object()
 # One public tool invocation's "a gh subprocess was already launched" fact.
 _SUBMITTED: ContextVar[Optional[List[bool]]] = ContextVar("github_invocation_submitted", default=None)
+# The repository one public tool invocation resolved; empty until a leg needs it.
+_PINNED: ContextVar[Optional[List["GhTarget"]]] = ContextVar("github_invocation_target", default=None)
 
 
 def _canonical_github_args(args: dict) -> dict:
@@ -48,13 +54,14 @@ def _canonical_github_args(args: dict) -> dict:
 
 
 def _one_invocation(handler):
-    """Scope ``_gh_run``'s first-submission fact to one public tool invocation."""
+    """Scope ``_gh_run``'s first-submission fact and the resolved repository to one public tool invocation."""
     @wraps(handler)
     def invoke(ctx, *args, **kwargs):
-        token = _SUBMITTED.set([False])
+        token, pinned = _SUBMITTED.set([False]), _PINNED.set([])
         try:
             return handler(ctx, *args, **kwargs)
         finally:
+            _PINNED.reset(pinned)
             _SUBMITTED.reset(token)
     return invoke
 
@@ -110,6 +117,18 @@ class GhResult:
     failure: str
     # The exact branch's capture; None for the text transport and for every failure.
     capture: Optional[GhCapture] = None
+
+
+@dataclass(frozen=True)
+class GhTarget:
+    """One repository as a REST or GraphQL leg addresses it; an empty host follows gh's host configuration."""
+    host: str
+    owner: str
+    name: str
+
+    @property
+    def slug(self) -> str:
+        return f"{self.owner}/{self.name}"
 
 
 # One pipe read; stderr of an exact capture is kept up to this many bytes for classification. A stderr that
@@ -252,12 +271,31 @@ def github_token_from_env_or_settings() -> str:
 
 
 def _gh_env(ctx: ToolContext) -> dict:
+    # Only the public family is exported: gh sends it to github.com and *.ghe.com alone, and an Enterprise host
+    # keeps its own credential, so a public token is never copied into an enterprise variable.
     env = os.environ.copy()
     token = github_token_from_env_or_settings()
     if token:
         env["GH_TOKEN"] = token
         env["GITHUB_TOKEN"] = token
     return env
+
+
+def _enterprise_host(host: str) -> bool:
+    """gh's own split of credential families: a GitHub Enterprise Server host, not github.com or a ``*.ghe.com`` tenant."""
+    name = host.casefold()
+    return not (name in ("github.com", "github.localhost")
+                or name.endswith((".github.com", ".github.localhost", ".ghe.com")))
+
+
+def _acting_credential(host: str) -> Tuple[str, str]:
+    """The token gh selects for ``host`` and where it comes from; an empty token means gh's host configuration."""
+    if _enterprise_host(host):
+        name = next((name for name in ("GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN") if os.environ.get(name)), "")
+        return (os.environ[name], f"env {name}") if name else ("", "gh CLI host configuration")
+    token = github_token_from_env_or_settings()
+    return token, ("env GITHUB_TOKEN" if os.environ.get("GITHUB_TOKEN") else "env GH_TOKEN" if os.environ.get("GH_TOKEN")
+                   else "settings GITHUB_TOKEN" if token else "gh CLI host configuration")
 
 
 def github_cli_configured() -> bool:
@@ -285,6 +323,17 @@ def github_cli_configured() -> bool:
         return False
 
 
+def _refused(ctx: ToolContext, text: str, failure: str, typed: Optional[ToolResult] = None,
+             *, no_effect: Optional[bool] = None) -> GhResult:
+    """A local refusal; a caller may preserve a proven pre-effect failure after submission was marked."""
+    if no_effect is None:
+        no_effect = _no_launch_yet()
+    if no_effect:
+        typed = _replace_tool_result(typed or LegacyTextResultAdapter.from_text("", text),
+                                     meta_updates={"operation_outcome": "completed_no_effect"})
+    return GhResult(False, _publish_tool_result(ctx, typed) if typed else text, None, None, failure)
+
+
 def _gh_run(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Optional[str] = None,
             *, repo: object = _GENERIC_TRANSPORT, capture_to: Optional[pathlib.Path] = None,
             max_bytes: int = 0) -> GhResult:
@@ -296,21 +345,19 @@ def _gh_run(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
     # A refusal before this invocation's FIRST gh launch also attests that the
     # invocation had no effect; after any launch it attests nothing.
     submitted = _SUBMITTED.get()
-    first = submitted is not None and not submitted[0]
-
-    def refused(text: str, failure: str, typed: Optional[ToolResult] = None) -> GhResult:
-        if first:
-            typed = _replace_tool_result(typed or LegacyTextResultAdapter.from_text("", text),
-                                         meta_updates={"operation_outcome": "completed_no_effect"})
-        return GhResult(False, _publish_tool_result(ctx, typed) if typed else text, None, None, failure)
-
+    first_submission = submitted is not None and not submitted[0]
     if capture_to is not None and (input_data is not None or type(max_bytes) is not int or max_bytes <= 0):
         raise ValueError("an exact capture takes a positive max_bytes and no stdin")
     if repo is not _GENERIC_TRANSPORT and not isinstance(repo, str):
-        return refused("", "target", ToolResult(
+        return _refused(ctx, "", "target", ToolResult(
             status="error", code="TOOL_ARG_ERROR",
             text="⚠️ GH_TARGET_INVALID: repo must be a string; omit it to use the selected Project.",
         ))
+    # Every later step takes its host from GitHub's answers; none may leave the host this invocation resolved.
+    pinned, named = _PINNED.get(), args[args.index("--hostname") + 1] if "--hostname" in args[:-1] else ""
+    if pinned and named and named.casefold() != pinned[0].host.casefold():
+        return _refused(ctx, f"⚠️ GH_TARGET_UNAVAILABLE: this call resolved {pinned[0].slug} on {pinned[0].host}, but a "
+                             f"later step named {named}; that step was not sent.", "target")
     try:
         cwd, env = pathlib.Path(ctx.repo_dir), _gh_env(ctx)
         cmd = ["gh", *args]
@@ -326,11 +373,11 @@ def _gh_run(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
                 note = str(metadata.get("_project_room_note") or "")
                 selected = workspace or room_dir
                 if note or (selected and not pathlib.Path(selected).is_dir()):
-                    return refused(
-                        f"⚠️ GH_TARGET_UNAVAILABLE: {note or 'The selected Project directory is unavailable.'}",
+                    return _refused(
+                        ctx, f"⚠️ GH_TARGET_UNAVAILABLE: {note or 'The selected Project directory is unavailable.'}",
                         "target")
                 if project and not selected:
-                    return refused("", "target", ToolResult(
+                    return _refused(ctx, "", "target", ToolResult(
                         status="error", code="TOOL_ARG_ERROR",
                         text="⚠️ GH_TARGET_REQUIRED: this Project has no repository directory; pass repo='[HOST/]OWNER/REPO'.",
                     ))
@@ -339,11 +386,11 @@ def _gh_run(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
             try:
                 binding = build_resolved_resource_binding(ctx, operation="read", process_cwd="")
             except ValueError as exc:  # Never another directory, e.g. the system repository.
-                return refused(f"⚠️ GH_TARGET_UNAVAILABLE: no directory could be bound for gh: {exc}", "target")
+                return _refused(ctx, f"⚠️ GH_TARGET_UNAVAILABLE: no directory could be bound for gh: {exc}", "target")
             cwd = binding.target_path
             if workspace and cwd != pathlib.Path(workspace).resolve(strict=False):
-                return refused("⚠️ GH_TARGET_UNAVAILABLE: the task's Project binding could not be resolved.",
-                               "target")
+                return _refused(ctx, "⚠️ GH_TARGET_UNAVAILABLE: the task's Project binding could not be resolved.",
+                                "target")
             if workspace or room_dir or project:
                 env.pop("GH_REPO", None)  # Ambient defaults cannot replace the selected Project.
             if repo and args[:1] != ["api"]:  # API routes carry the repository.
@@ -381,9 +428,9 @@ def _gh_run(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
     except FileNotFoundError as e:
         missing = str(getattr(e, "filename", "") or "")
         if not missing or pathlib.Path(missing).name == "gh":
-            return refused(
-                "⚠️ GH_ERROR: `gh` CLI not found. Install GitHub CLI and ensure it is on PATH (https://cli.github.com/)",
-                "cli_missing")
+            return _refused(
+                ctx, "⚠️ GH_ERROR: `gh` CLI not found. Install GitHub CLI and ensure it is on PATH (https://cli.github.com/)",
+                "cli_missing", no_effect=first_submission)
         detail = truncate_within_limit(redact_known_values(str(e), [github_token_from_env_or_settings()]), 600)
         return GhResult(False, f"⚠️ GH_ERROR: {detail}", None, None, "exception")
     except subprocess.TimeoutExpired:
@@ -399,6 +446,9 @@ def _gh_cmd(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
 
 
 _REPO_RE = re.compile(r"^(?:(?P<host>[^/\s]+)/)?(?P<owner>[^/\s]+)/(?P<name>[^/\s]+)$")
+_TARGET_URL_RE = re.compile(r"https://([^/\s]+)/([^/\s]+)/([^/\s]+)/?")
+# gh's own placeholders for a repository; `{branch}` stays with gh, which reads it from the directory.
+_ROUTE_SLOTS = re.compile(r"\{owner\}|\{repo\}|:owner\b|:repo\b")
 _GRAPHQL_LITERALS = re.compile(r'"""(?:\\.|(?!""")[\s\S])*"""|"(?:\\.|[^"\\])*"|#[^\r\n]*')
 
 
@@ -444,29 +494,105 @@ def _target_refusal(ctx: ToolContext, text: str) -> GhResult:
     return GhResult(False, _refuse(ctx, text, no_effect=_no_launch_yet()), None, None, "target")
 
 
+def _ambient_repo(ctx: ToolContext) -> str:
+    """``GH_REPO`` where it still selects the repository: ``_gh_run`` drops it once a Project is selected."""
+    metadata = getattr(ctx, "task_metadata", {})
+    metadata = metadata if isinstance(metadata, dict) else {}
+    selected = (getattr(ctx, "workspace_root", None) or getattr(ctx, "project_id", "")
+                or metadata.get("_project_room_dir") or metadata.get("_project_room_note"))
+    return "" if selected else os.environ.get("GH_REPO", "").strip()
+
+
+def _project_is_bound(ctx: ToolContext) -> bool:
+    """Whether an omitted repository denotes a selected Project rather than generic gh transport."""
+    metadata = getattr(ctx, "task_metadata", {})
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return bool(getattr(ctx, "workspace_root", None) or getattr(ctx, "project_id", "")
+                or metadata.get("_project_room_dir") or metadata.get("_project_room_note"))
+
+
+def _selected_target(ctx: ToolContext, *, refuse: bool = True) -> Tuple[Optional[GhTarget], Optional[GhResult]]:
+    """The repository of a ``repo=""`` call as GitHub names it, resolved once per public invocation.
+
+    ``gh repo view`` chooses it as ``gh pr`` and ``gh issue`` do, and its URL is the one answer that carries the
+    host. An unresolved target is a typed refusal, never gh's default host; ``refuse=False`` leaves that refusal
+    unpublished for a caller with its own fallback. Naming the target is a read, so it does not end the
+    invocation's no-effect fact."""
+    pinned, submitted = _PINNED.get(), _SUBMITTED.get()
+    if pinned:
+        return pinned[0], None
+    launched = bool(submitted and submitted[0])
+    res = _gh_run(["repo", "view", "--json", "nameWithOwner,url"], ctx, repo=_ambient_repo(ctx))
+    if submitted is not None:
+        submitted[0] = launched
+    if res.failure in ("target", "cli_missing"):  # The transport already refused.
+        return None, res
+    try:
+        info = json.loads(res.text) if res.ok else {}
+    except ValueError:
+        info = None
+    where = _TARGET_URL_RE.fullmatch(str(info.get("url") or "")) if isinstance(info, dict) else None
+    target = GhTarget(*where.groups()) if where else None
+    if target is not None and target.slug.casefold() == str(info.get("nameWithOwner") or "").casefold():
+        if pinned is not None:
+            pinned.append(target)
+        return target, None
+    detail = res.text.removeprefix("⚠️ ") if not res.ok else f"gh named no repository URL: {res.text[:300]}"
+    text = (f"⚠️ GH_TARGET_UNAVAILABLE: the selected repository's GitHub host could not be resolved ({detail}), so "
+            "nothing else was sent; pass repo='[HOST/]OWNER/REPO' to name it.")
+    return None, _refused(ctx, text, "target") if refuse else GhResult(False, text, None, None, "target")
+
+
+def _leg_target(ctx: ToolContext, repo: str, *, require_target: bool = False) -> Tuple[Optional[GhTarget], Optional[GhResult]]:
+    """The destination of one REST or GraphQL leg: an explicit repo as written, else the selected repository."""
+    if not repo:
+        if not (_project_is_bound(ctx) or _ambient_repo(ctx) or require_target):
+            # Routes such as ``user`` and viewer-only GraphQL have no repository to resolve. Preserve the
+            # generic transport; a bound Project or explicit ambient GH_REPO is handled by _selected_target below.
+            return GhTarget("", "", ""), None
+        return _selected_target(ctx)
+    parts = _split_repo(repo)
+    if parts is None:
+        return None, _target_refusal(ctx, "⚠️ GH_TARGET_INVALID: repo must be [HOST/]OWNER/REPO; omit it to use the selected Project.")
+    return GhTarget(*parts), None
+
+
+def _leaves_host(route: str, host: str) -> bool:
+    """Whether gh would send ``route`` off ``host``: any route holding ``://`` is taken as the URL, whatever
+    ``--hostname`` says. An HTTPS URL on the host or a subdomain of it (``api.``, ``uploads.``) stays."""
+    if "://" not in route:
+        return False
+    try:
+        url = urlsplit(route)
+        name = (url.hostname or "").casefold()
+    except ValueError:
+        return True
+    return url.scheme != "https" or not (name == host.casefold() or name.endswith("." + host.casefold()))
+
+
 def _gh_api(ctx: ToolContext, route: str, *, repo: str, method: str = "GET", body: Optional[dict] = None,
             include: bool = False, timeout: int = 30) -> GhResult:
     """One REST call through ``gh api`` under the public repository binding.
 
-    A bound Project (``repo=""``) keeps gh's ``{owner}/{repo}`` placeholders, which gh resolves
-    from the bound directory exactly as ``gh issue list`` does; an explicit repo is substituted
-    into the route and its host passed as ``--hostname``. ``include`` keeps the status line and
-    headers in the output (pagination reads the ``Link`` header)."""
+    The repository placeholders are filled from the leg's target, explicit or resolved, and its host
+    passed as ``--hostname``; ``gh api`` would otherwise fill them from the directory and still send
+    the request to gh's default host. ``include`` keeps the status line and headers in the output
+    (pagination reads the ``Link`` header)."""
+    target, refusal = _leg_target(ctx, repo, require_target=bool(_ROUTE_SLOTS.search(route)))
+    if target is None:
+        return refusal or GhResult(False, "⚠️ GH_TARGET_UNAVAILABLE: no repository target.", None, None, "target")
+    generic = not (target.host or target.owner or target.name)
+    if not generic and target.host and _leaves_host(route, target.host):
+        return _target_refusal(ctx, f"⚠️ GH_TARGET_INVALID: an absolute route must stay on {target.host}; pass that "
+                                    "host in repo to address it.")
     args = ["api"]
     if method != "GET":
         args.extend(["--method", method])
     if include:
         args.append("--include")
-    host = ""
-    if repo:
-        parts = _split_repo(repo)
-        if parts is None:
-            return _target_refusal(ctx, "⚠️ GH_TARGET_INVALID: repo must be [HOST/]OWNER/REPO; omit it to use the selected Project.")
-        host, owner, name = parts
-        route = route.replace("{owner}/{repo}", f"{owner}/{name}")
-    args.append(route)
-    if host:
-        args.extend(["--hostname", host])
+    args.append(route if generic else _ROUTE_SLOTS.sub(lambda slot: target.owner if "owner" in slot[0] else target.name, route))
+    if not generic and target.host:
+        args.extend(["--hostname", target.host])
     input_data = None
     if body is not None:
         args.extend(["--input", "-"])
@@ -479,26 +605,16 @@ def _gh_graphql(ctx: ToolContext, document: str, variables: dict, *, repo: str, 
     """One GraphQL call under the public repository binding; ``$owner``/``$name`` name the repository.
 
     The document and variables travel in one JSON envelope, preserving every variable's type."""
+    target, refusal = _leg_target(ctx, repo, require_target=repo_vars)
+    if target is None:
+        return refusal or GhResult(False, "⚠️ GH_TARGET_UNAVAILABLE: no repository target.", None, None, "target")
     args = ["api", "graphql", "--input", "-"]
     values = dict(variables or {})
-    host = ""
-    if repo:
-        parts = _split_repo(repo)
-        if parts is None:
-            return _target_refusal(ctx, "⚠️ GH_TARGET_INVALID: repo must be [HOST/]OWNER/REPO; omit it to use the selected Project.")
-        host, owner, name = parts
-        if repo_vars:
-            values = {"owner": owner, "name": name, **values}
-    elif repo_vars:
-        from ouroboros.tools.github_read import _Read
-
-        slug, error = _Read(ctx, "api", repo).slug()
-        if error:
-            return GhResult(False, error, None, None, "target")
-        owner, name = slug.split("/", 1)
-        values = {"owner": owner, "name": name, **values}
-    if host:
-        args.extend(["--hostname", host])
+    generic = not (target.host or target.owner or target.name)
+    if repo_vars and not generic:
+        values = {"owner": target.owner, "name": target.name, **values}
+    if not generic and target.host:
+        args.extend(["--hostname", target.host])
     return _gh_run(args, ctx, timeout=timeout, repo=repo,
                    input_data=json.dumps({"query": document, "variables": values}))
 
@@ -685,6 +801,6 @@ def get_tools() -> List[ToolEntry]:
     for entry in tools:
         entry.schema["parameters"]["properties"]["repo"] = {
             "type": "string", "default": "",
-            "description": "Explicit [HOST/]OWNER/REPO. Omit for the active Project repository; required for a Project without a repository folder. An omitted HOST follows GitHub CLI host configuration.",
+            "description": "Explicit [HOST/]OWNER/REPO. Omit for the active Project repository, on its own host; required for a Project without a repository folder. An omitted HOST follows GitHub CLI host configuration.",
         }
     return tools

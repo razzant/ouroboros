@@ -54,7 +54,6 @@ from tests.test_swarm_host_admission import host  # noqa: F401
 from tests.worker_pool_support import affirm_ready
 from tests._silence_reaper_support import historical_timeout_retry, historical_unsaved_pause_hold
 
-pytestmark = pytest.mark.serial
 
 
 class _WorkerDied(BaseException):

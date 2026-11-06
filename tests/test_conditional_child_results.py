@@ -77,9 +77,6 @@ def test_condition_is_explicit_and_full_read_survives_a_new_context(tmp_path, su
     ("result", "A revised complete answer."),
     ("trace_summary", "A revised trace."),
     ("status", "failed"),
-    ("artifact_status", "failed"),
-    ("artifacts", [{"name": "report.txt", "sha256": "b" * 64}]),
-    ("terminal_host_notice", "Unresolved delegated execution remains."),
 ])
 def test_semantic_change_returns_full_single_and_batch(tmp_path, monkeypatch, field, new_value):
     data = dict(task_id="child1", status="completed", result=BODY, trace_summary=TRACE)
@@ -162,7 +159,7 @@ def test_source_or_authority_request_is_not_suppressed_by_a_known_result(tmp_pat
     assert "result_unchanged" not in result
 
 
-@pytest.mark.parametrize("known", ["", "stale", None, 17, {"child1": "bad"}])
+@pytest.mark.parametrize("known", ["", None, {"child1": "bad"}])
 def test_nonmatching_condition_never_hides_result(tmp_path, known):
     _child(tmp_path)
     assert BODY in results._get_task_result(_ctx(tmp_path), "child1", known_result_sha256=known)

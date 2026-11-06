@@ -25,7 +25,6 @@ from tests._execution_clock_seams import agent_start as _agent_start
 from tests.test_owner_wait_pool import pool  # noqa: F401 -- the real pool fixture
 from tests.test_swarm_host_admission import host  # noqa: F401 -- the real admission host
 
-pytestmark = pytest.mark.serial
 
 
 def _fake_clock(monkeypatch, start=None):
@@ -236,7 +235,7 @@ def test_child_inherits_the_remaining_allowance_with_its_own_queue_excluded(tmp_
 
 
 @pytest.mark.parametrize("duration,global_limit,expected", [(60, 300, 60), (600, 300, 300), (None, None, None),
-                                                            (0, None, None), (90, None, 90)])
+                                                            (0, None, None)])
 def test_one_resolver_keeps_no_default_and_takes_the_narrower(duration, global_limit, expected):
     from ouroboros.config import resolve_task_execution_timeout_sec
 

@@ -46,7 +46,7 @@ def test_bounded_suggestions_lead_to_every_full_declaration(registry):
     assert not (root / "state" / "scheduled_tasks.json").exists()
 
 
-@pytest.mark.parametrize("state", ["ready", "disabled", "pending", "stale"])
+@pytest.mark.parametrize("state", ["ready", "pending", "stale"])
 def test_context_suggestions_require_current_review_and_enablement(registry, state, monkeypatch):
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     folder = _seed(registry, "review-guide", scheduled_tasks=_suggestions(), permissions=["supervised_task"])

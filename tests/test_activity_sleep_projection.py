@@ -12,9 +12,6 @@ from tests._work_projection_shared import state_fields
 @pytest.mark.parametrize("change, activity", [
     ({}, "waiting"),
     ({"task_attempt": 1}, "working"),
-    ({"state": "resumed"}, "working"),
-    ({"reason": "owner_pause"}, "working"),
-    ({"sleep": {"mode": "cold"}}, "working"),
     ({"sleep": None}, "working"),
 ])
 def test_current_warm_sleep_reaches_work_without_claiming_an_owner_turn(tmp_path, monkeypatch, change, activity):

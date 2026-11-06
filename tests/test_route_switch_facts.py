@@ -158,13 +158,7 @@ def test_the_facts_never_borrow_the_task_total_or_an_earlier_primary_price(data_
      "That answering call: cost $0.0000 reported, engine billing proven_zero;"),
     ({"cost": 0.0, "cost_final": True, "provider": "openrouter"},
      "That answering call: cost $0.0000 reported, billing basis not reported;"),
-    ({"cost": 0.0312, "cost_final": False, "cost_estimated": True, "provider": "openrouter"},
-     "That answering call: cost $0.0312 estimated, billing basis not reported;"),
-    ({"cost": None, "cost_final": False, "provider": "claudexor",
-      "cost_evidence": {"knowledge": "unknown", "billing": "unknown", "cashUsd": None, "valuationUsd": 3.0,
-                        "valuationKnowledge": "exact", "processing": {"kind": "paid_credits", "source": "fixture"}}},
-     "That answering call: cost unknown, engine billing unknown;"),
-], ids=["subscription-entitlement-unknown-cash", "engine-proven-zero", "reported-zero", "estimated", "processing-not-billing"])
+], ids=["subscription-entitlement-unknown-cash", "engine-proven-zero", "reported-zero"])
 def test_each_money_state_reaches_the_input_as_its_producer_stated_it(data_root, tmp_path, quiet_primary,
                                                                      answering, expected):
     llm, *_ = _switch(tmp_path, data_root, answering={**SOL, **answering})

@@ -22,7 +22,6 @@ from tests.test_delegate_retry_consumers import (
     isolated_retry_state as isolated_retry_state,  # noqa: F401 -- re-export the autouse pytest fixture
 )
 
-pytestmark = pytest.mark.serial
 
 
 def _captured(tmp_path, monkeypatch, *, named=True, split=False):

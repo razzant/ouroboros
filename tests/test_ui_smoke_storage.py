@@ -14,7 +14,7 @@ from tests.test_emoji_free_browser import _browser, _open, _server
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
 
 direct_server_with_data = _server
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 AVOIDED = ("At least", "Excluded", "System data", "Junk", "Clean ", "Prune", "%")
 

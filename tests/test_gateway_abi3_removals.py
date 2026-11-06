@@ -13,6 +13,7 @@ import json
 from typing import get_type_hints
 
 import pytest
+from tests._source_scan import parse
 from tests._store_shared import seed_result
 
 
@@ -269,7 +270,7 @@ class TestAliasProducerFanOutSweep:
         for package in ("ouroboros", "supervisor"):
             for path in sorted((repo_root / package).rglob("*.py")):
                 rel = path.relative_to(repo_root).as_posix()
-                visit(ast.parse(path.read_text(encoding="utf-8")), rel, "<module>")
+                visit(parse(path.read_text(encoding="utf-8")), rel, "<module>")
         return dict_hits, writer_kwarg_hits
 
     def test_no_task_result_writer_passes_a_retired_alias(self):

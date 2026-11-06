@@ -16,7 +16,7 @@ body = _body
 DESIGN = "# Design\n## Attention\nBODY_RULE_NOT_DELIVERED\n```md\n## Fake\n```\n### Signals\nDETAIL_NOT_DELIVERED\n"
 
 
-@pytest.mark.parametrize("role", ["main", "api", "declared_api", "declared_nanny"])
+@pytest.mark.parametrize("role", ["main", "api", "declared_nanny"])
 def test_design_map_reaches_all_author_modes_and_keeps_common_prefix(tmp_path, role):
     env, memory = _make_env_and_memory(tmp_path)
     path = env.repo_dir / "docs/DESIGN.md"

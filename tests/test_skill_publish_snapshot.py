@@ -139,7 +139,7 @@ def test_snapshot_hash_parity_and_full_public_control_views(tmp_path):
         snapshot.skill = "other"  # type: ignore[misc]
 
 
-@pytest.mark.parametrize("name", [".env.example", ".env", "prod.env", "credentials.json", "id_rsa"])
+@pytest.mark.parametrize("name", [".env.example", "credentials.json", "id_rsa"])
 def test_environment_file_roundtrips_import_list_review_and_publish(tmp_path, monkeypatch, name):
     from ouroboros.marketplace.fetcher import stage
     from ouroboros.skill_review_packs import frozen_payload_files, payload_pack

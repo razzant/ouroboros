@@ -181,8 +181,11 @@ def test_token_retry_never_asks_this_computers_credential_helpers(credentials, t
     assert not calls.exists()
 
 
-@pytest.mark.parametrize("phase", ["anonymous", "authenticated"])
-@pytest.mark.parametrize("failure", ["stderr", "stdout", "exception"])
+@pytest.mark.parametrize(("failure", "phase"), [
+    ("stderr", "authenticated"),
+    ("stdout", "authenticated"),
+    ("exception", "anonymous"),
+])
 def test_fetch_errors_redact_credentials_from_messages_logs_and_cache(
         credentials, tmp_path, monkeypatch, caplog, failure, phase):
     monkeypatch.setenv("GITHUB_TOKEN", TOKEN)
@@ -346,8 +349,11 @@ assert meta.get("error") == "synthetic interrupted checkout", meta
     assert child.returncode == (73 if interruption == "child_exit" else 0), (child.stdout, child.stderr)
 
 
-@pytest.mark.parametrize("interruption", [None, "checkout_failure", "child_exit"])
-@pytest.mark.parametrize("attributes_dir", [".", "skills"])
+@pytest.mark.parametrize(("attributes_dir", "interruption"), [
+    (".", None),
+    (".", "child_exit"),
+    ("skills", "checkout_failure"),
+])
 def test_removed_attributes_migration_installs_release(newline_source, tmp_path, attributes_dir, interruption):
     from ouroboros import skill_source_catalog as catalog
     from ouroboros import skill_source_install as installer

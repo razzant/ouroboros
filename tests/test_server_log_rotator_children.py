@@ -13,12 +13,10 @@ import pathlib
 import subprocess
 import sys
 
-import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
 
-@pytest.mark.serial
 def test_a_spawn_child_importing_server_configures_no_logging(tmp_path):
     data = tmp_path / "data"
     data.mkdir()

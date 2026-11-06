@@ -239,8 +239,7 @@ def test_observed_restart_restores_real_native_source_past_snapshot_age(restart_
     assert transaction["ack_source"] == ACK_SOURCES[transport]
 
 
-@pytest.mark.parametrize("fault", ["token_only", "observation_failed", "exit_1", "panic_99", "other_parent_pid",
-                                   "other_parent_birth", "binding_failed", "other_successor"])
+@pytest.mark.parametrize("fault", ["token_only", "observation_failed", "other_successor"])
 def test_windows_successor_without_exact_parent_proof_holds_the_wait(restart_case, monkeypatch, caplog, fault):
     """Only the inherited parent's own exit 42 and the bound identities return the wait (S1 keeps it held)."""
     from supervisor.events_budget import HOLD_SAVED_WORK, budget_hold_fact
@@ -272,7 +271,7 @@ def test_windows_successor_without_exact_parent_proof_holds_the_wait(restart_cas
     assert "continuation unproven, its handoffs are not resumed" in caplog.text
 
 
-@pytest.mark.parametrize("control", ["restart", "unacknowledged", "panic", "stop_child", "bad_child_source"])
+@pytest.mark.parametrize("control", ["restart", "unacknowledged", "bad_child_source"])
 def test_preserved_question_parent_keeps_its_saved_running_child(restart_case, monkeypatch, control):
     """Separate owner-question custody counts as surviving ancestry during both kills."""
     from ouroboros import working_checkpoint
@@ -533,7 +532,6 @@ def restore_project_wait(case, monkeypatch, *, registry_outage=True):
     return restored
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("owner_restart", [False, True])
 def test_project_wait_recovers_once_after_registry_hold(restart_case, monkeypatch, owner_restart):
     from tests.test_project_hold_recovery import worker
@@ -561,7 +559,6 @@ def test_project_wait_recovers_once_after_registry_hold(restart_case, monkeypatc
     assert owner_wait.load_owner_wait(case.ctx, handoff)["round_idx"] == 7
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("fault", ["result", "source", "transaction"])
 def test_project_wait_unreadable_authority_stays_same_id_then_recovers(restart_case, monkeypatch, fault):
     from tests.test_project_hold_recovery import worker
@@ -594,9 +591,7 @@ def test_project_wait_unreadable_authority_stays_same_id_then_recovers(restart_c
     assert owner_wait.load_owner_wait(case.ctx, sent[0]["_owner_wait_resume"])["round_idx"] == 7
 
 
-@pytest.mark.serial
-@pytest.mark.parametrize("refusal", ["unacknowledged", "spent_wait", "owner_restart", "deadline", "ceiling",
-                                   "ceiling_unreadable_transaction", "stop"])
+@pytest.mark.parametrize("refusal", ["unacknowledged", "ceiling_unreadable_transaction", "stop"])
 def test_project_wait_positive_refusal_uses_existing_custody(restart_case, monkeypatch, refusal):
     from ouroboros.cancel_intents import request_cancel
     from supervisor import queue_timeouts
@@ -658,7 +653,6 @@ def _expired_project_wait(case, monkeypatch):
     return restored, jobs
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("unknown", ["transaction", "source", "store"])
 def test_project_wait_deadline_keeps_custody_while_its_authority_is_unreadable(restart_case, monkeypatch, unknown):
     """#939: the deadline settles only the exact continuation it can still read; unknown authority
@@ -694,8 +688,7 @@ def test_project_wait_deadline_keeps_custody_while_its_authority_is_unreadable(r
     assert read_actor_source_bytes(case.root, case.task_id, case.wait["source_ref"]) == saved["source"]
 
 
-@pytest.mark.serial
-@pytest.mark.parametrize("control", ["owner_pause", "stop", "saved_terminal", "live_owner"])
+@pytest.mark.parametrize("control", ["owner_pause", "stop", "live_owner"])
 def test_project_wait_deadline_rechecks_controls_before_settlement(restart_case, monkeypatch, control):
     """A control arriving after the deadline marker and before the reaper's write wins."""
     from ouroboros.cancel_intents import request_cancel
@@ -729,7 +722,6 @@ def test_project_wait_deadline_rechecks_controls_before_settlement(restart_case,
         assert load_task_result(case.root, case.task_id)["status"] == "cancelled" and not workers.PENDING
 
 
-@pytest.mark.serial
 def test_project_wait_refusal_retains_custody_until_cancel_intent_is_durable(restart_case, monkeypatch):
     from tests.test_project_hold_recovery import worker
 

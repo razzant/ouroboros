@@ -98,9 +98,7 @@ def is_mount_point(path: pathlib.Path | str) -> bool:
 def is_container_env() -> bool:
     """Return whether explicit env or Docker sentinel indicates a container."""
     # /.dockerenv is Docker's Linux sentinel.
-    return os.environ.get("OUROBOROS_CONTAINER") == "1" or (
-        IS_LINUX and pathlib.Path("/.dockerenv").exists()
-    )
+    return os.environ.get("OUROBOROS_CONTAINER") == "1" or (IS_LINUX and pathlib.Path("/.dockerenv").exists())
 
 
 def bootstrap_process_path() -> list[str]:
@@ -312,8 +310,10 @@ def acquire_exclusive_file_lock(
         return None
     started = time.monotonic()
     first_attempt = True
-    while first_attempt or (time.monotonic() - started) < timeout_sec:
+    retry_after_stale = False
+    while first_attempt or retry_after_stale or (time.monotonic() - started) < timeout_sec:
         first_attempt = False
+        retry_after_stale = False
         try:
             fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
             stamp = (metadata or f"pid={os.getpid()} ts={time.time()}\n").encode("utf-8")
@@ -375,6 +375,7 @@ def acquire_exclusive_file_lock(
                             if not IS_WINDOWS:  # Windows deletes no open file: it unlinks
                                 if _lock_identity(lock_path) == judged:  # below, after
                                     os.unlink(str(lock_path))  # under the held flock
+                                retry_after_stale = True
                                 continue
                 finally:
                     if IS_WINDOWS:  # the probe's hold goes before its handle
@@ -382,6 +383,7 @@ def acquire_exclusive_file_lock(
                     os.close(probe)
                 if stale and _lock_identity(lock_path) == judged:
                     lock_path.unlink()
+                    retry_after_stale = True
                     continue
             except Exception as exc:
                 if probe is None and isinstance(creation_error, FileExistsError) and isinstance(exc, FileNotFoundError):
@@ -526,9 +528,8 @@ def _broadcast_windows_environment_change() -> None:
         import ctypes
 
         result = ctypes.c_ulong()
-        ctypes.windll.user32.SendMessageTimeoutW(  # HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG
-            0xFFFF, 0x001A, 0, "Environment", 0x0002, 5000, ctypes.byref(result),
-        )
+        # HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG
+        ctypes.windll.user32.SendMessageTimeoutW(0xFFFF, 0x001A, 0, "Environment", 0x0002, 5000, ctypes.byref(result))
     except Exception:
         pass
 
@@ -1039,11 +1040,8 @@ def tcp_keepalive_socket_options() -> List[tuple]:
     idle_name = "TCP_KEEPIDLE" if IS_LINUX else ("TCP_KEEPALIVE" if IS_MACOS else "")
     if not idle_name:
         return options
-    for name, value in (
-        (idle_name, TCP_KEEPALIVE_IDLE_SEC),
-        ("TCP_KEEPINTVL", TCP_KEEPALIVE_INTERVAL_SEC),
-        ("TCP_KEEPCNT", TCP_KEEPALIVE_PROBE_COUNT),
-    ):
+    for name, value in ((idle_name, TCP_KEEPALIVE_IDLE_SEC), ("TCP_KEEPINTVL", TCP_KEEPALIVE_INTERVAL_SEC),
+                        ("TCP_KEEPCNT", TCP_KEEPALIVE_PROBE_COUNT)):
         if hasattr(socket, name):
             options.append((socket.IPPROTO_TCP, getattr(socket, name), value))
     return options
@@ -1065,10 +1063,8 @@ def kill_process_on_port(port: int) -> None:
             # selector also matches ESTABLISHED client sockets — on browser
             # installs that would SIGKILL the owner's browser mid-session);
             # -nP skips name resolution so a slow resolver can't eat the 5s.
-            res = subprocess.run(
-                ["lsof", "-nP", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
-                capture_output=True, text=True, timeout=5,
-            )
+            res = subprocess.run(["lsof", "-nP", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
+                                 capture_output=True, text=True, timeout=5)
             listeners = [int(pid) for pid in res.stdout.split() if pid.isdigit()]
         for pid in listeners:
             if pid != os.getpid():
@@ -1116,11 +1112,8 @@ def project_venv_python(project_root: pathlib.Path) -> str:
     env_root = pathlib.Path(project_root) / ".venv"
     if not (env_root / "pyvenv.cfg").is_file():
         return ""
-    candidates = (
-        (env_root / "Scripts" / "python.exe",)
-        if IS_WINDOWS
-        else (env_root / "bin" / "python", env_root / "bin" / "python3")
-    )
+    candidates = ((env_root / "Scripts" / "python.exe",) if IS_WINDOWS
+                  else (env_root / "bin" / "python", env_root / "bin" / "python3"))
     for candidate in candidates:
         try:
             if candidate.is_file() and os.access(candidate, os.X_OK):
@@ -1261,9 +1254,7 @@ def get_cpu_info() -> str:
     os_name = platform.system()
     try:
         if os_name == "Darwin":
-            return subprocess.check_output(
-                ["sysctl", "-n", "machdep.cpu.brand_string"],
-            ).strip().decode()
+            return subprocess.check_output(["sysctl", "-n", "machdep.cpu.brand_string"]).strip().decode()
         elif os_name == "Windows" and (line := _wmic_value_line("cpu", "get", "Name")):
             return line.split("=", 1)[1].strip()
     except Exception:
@@ -1279,16 +1270,33 @@ def create_new_session() -> None:
         os.setsid()
 
 
-def subprocess_new_group_kwargs(*, breakaway_from_job: bool = False, suspended: bool = False) -> dict:
-    """Return subprocess kwargs for killable process-group/session isolation."""
+def subprocess_new_group_kwargs(*, breakaway_from_job: bool = False, suspended: bool = False,
+                                background: bool = False) -> dict:
+    """Return subprocess kwargs for killable process-group/session isolation; ``background`` (Windows) starts
+    the tree in the below-normal priority class (POSIX: ``lower_tree_priority`` once the root exists)."""
     if IS_WINDOWS:
         flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)
         if breakaway_from_job:
             flags |= _windows_breakaway_flags()
         if suspended:
             flags |= WINDOWS_CREATE_SUSPENDED
+        if background:
+            flags |= getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x4000)
         return {"creationflags": flags}
     return {"start_new_session": True}
+
+
+def lower_tree_priority(pid: int, pgid: int = 0) -> bool:
+    """POSIX: nice a root that is still starting (its whole group when it leads one) ten steps below the caller,
+    capped at 19, so all it forks inherits it. False on Windows (the creation flag did it) or for a root gone."""
+    if IS_WINDOWS or not hasattr(os, "setpriority"):
+        return False
+    try:
+        os.setpriority(os.PRIO_PGRP if pgid else os.PRIO_PROCESS, pgid or pid,
+                       min(os.getpriority(os.PRIO_PROCESS, 0) + 10, 19))
+    except OSError:
+        return False
+    return True
 
 
 def install_shutdown_signal_handlers(handler) -> None:
@@ -1339,19 +1347,10 @@ if IS_WINDOWS:
     import ctypes.wintypes
 
     from ouroboros.platform_win32_abi import (  # noqa: F401 — preserve native symbol exports
-        _kernel32,
-        _OVERLAPPED,
-        _INVALID_HANDLE_VALUE,
-        _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        _JOB_OBJECT_LIMIT_BREAKAWAY_OK,
-        _JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
-        _JOBOBJECTINFOCLASS_EXTENDED, _JOBOBJECTINFOCLASS_PROCESS_ID_LIST, _JOBOBJECT_BASIC_PROCESS_ID_LIST,
-        _PROCESS_SET_QUOTA,
-        _PROCESS_TERMINATE,
-        _PROCESS_SUSPEND_RESUME,
-        _CREATE_SUSPENDED,
-        _JOBOBJECT_BASIC_LIMIT_INFORMATION,
-        _IO_COUNTERS,
+        _kernel32, _OVERLAPPED, _INVALID_HANDLE_VALUE, _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        _JOB_OBJECT_LIMIT_BREAKAWAY_OK, _JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, _JOBOBJECTINFOCLASS_EXTENDED,
+        _JOBOBJECTINFOCLASS_PROCESS_ID_LIST, _JOBOBJECT_BASIC_PROCESS_ID_LIST, _PROCESS_SET_QUOTA, _PROCESS_TERMINATE,
+        _PROCESS_SUSPEND_RESUME, _CREATE_SUSPENDED, _JOBOBJECT_BASIC_LIMIT_INFORMATION, _IO_COUNTERS,
         _ExtendedLimitInfo,
     )
 
@@ -1459,9 +1458,8 @@ def _windows_breakaway_flags() -> int:
         if not in_job.value:
             return 0
         info = _ExtendedLimitInfo()
-        if _kernel32.QueryInformationJobObject(
-            None, _JOBOBJECTINFOCLASS_EXTENDED, ctypes.byref(info), ctypes.sizeof(info), None,
-        ):
+        if _kernel32.QueryInformationJobObject(None, _JOBOBJECTINFOCLASS_EXTENDED, ctypes.byref(info),
+                                               ctypes.sizeof(info), None):
             flags = info.BasicLimitInformation.LimitFlags
             if flags & _JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK:
                 return 0

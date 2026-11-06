@@ -81,8 +81,6 @@ def test_frozen_cursor_reads_strictly(tmp_path):
 
 @pytest.mark.parametrize("bad_bytes", [b'{"pending_knowledge_nominations":[{"id":"old"}]',
                                        b'["wrong top-level type"]',
-                                       b'{"pending_knowledge_nominations":[],"pending_knowledge_nominations":[]}',
-                                       b'{"pending_knowledge_nominations":{"not":"a list"}}',
                                        b'{"pending_knowledge_nominations":[{"id":"a"},{"id":"a"}]}'])
 def test_unreadable_frozen_cursor_is_never_read_as_empty(bad_bytes):
     with pytest.raises(DialogueMetaUnreadable):

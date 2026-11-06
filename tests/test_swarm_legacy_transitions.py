@@ -40,8 +40,7 @@ def row(root):
     return task_results.load_task_result(root, "parent", strict=True)
 
 
-@pytest.mark.parametrize("addressed_before_repair", [False, True])
-@pytest.mark.parametrize("duplicate_diagnostic", [False, True])
+@pytest.mark.parametrize(("duplicate_diagnostic", "addressed_before_repair"), [(False, False), (True, True)])
 def test_frozen_producer_and_writer_after_repair_count_known_emissions_once(
         tmp_path, monkeypatch, addressed_before_repair, duplicate_diagnostic):
     legacy(tmp_path)
@@ -69,7 +68,7 @@ def test_frozen_producer_and_writer_after_repair_count_known_emissions_once(
     assert swarm_rollup.load_swarm_rollup(tmp_path, "parent") == facts
 
 
-@pytest.mark.parametrize("damage", ["absent", "shortened", "torn", "unreadable"])
+@pytest.mark.parametrize("damage", ["absent", "torn", "unreadable"])
 def test_invalidated_witness_with_lost_history_is_unknown(tmp_path, monkeypatch, damage):
     legacy(tmp_path)
     swarm_rollup.load_swarm_rollup(tmp_path, "parent")

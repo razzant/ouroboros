@@ -22,8 +22,11 @@ def native_root(tmp_path):
     return root
 
 
-@pytest.mark.parametrize('entry', ['direct', 'appimage', 'symlink'])
-@pytest.mark.parametrize('value', [None, '', '/caller/lib:literal $() `code` "quoted"\nКириллица:'])
+@pytest.mark.parametrize(("value", "entry"), [
+    (None, 'direct'),
+    ('', 'appimage'),
+    ('/caller/lib:literal $() `code` "quoted"\nКириллица:', 'symlink'),
+])
 def test_packaged_entry_preserves_exact_caller_environment_across_hooks_and_exec(tmp_path, entry, value):
     payload = tmp_path / 'app/usr/lib/ouroboros'
     root = native_root(payload)
@@ -131,8 +134,7 @@ def test_start_agent_passes_host_environment_to_actual_server_child(tmp_path, mo
         process.stdin.close()
 
 
-@pytest.mark.parametrize('external', [False, True])
-@pytest.mark.parametrize('status', [0, 7])
+@pytest.mark.parametrize(("status", "external"), [(0, False), (7, True)])
 def test_browser_uses_real_clean_child_without_mutating_gui(tmp_path, monkeypatch, gui_environment, external, status):
     import launcher
 

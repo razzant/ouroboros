@@ -19,9 +19,11 @@ from tests.test_delegate_body_collection import _until, started, terminal, money
 from tests.test_delegated_directory import DirectoryEngine, context
 
 
-@pytest.mark.parametrize("strategy", ["direct", "copy"])
-@pytest.mark.parametrize("registration", ["existing", "fresh"])
-@pytest.mark.parametrize("owner", ["body", "task_exit", "orphan"])
+@pytest.mark.parametrize(("owner", "registration", "strategy"), [
+    ("body", "fresh", "copy"),
+    ("task_exit", "existing", "direct"),
+    ("orphan", "fresh", "copy"),
+])
 def test_real_directory_producer_recovers_owed_capture_under_each_existing_owner(
         tmp_path, monkeypatch, money, strategy, registration, owner):  # noqa: F811
     from ouroboros.gateways import claudexor

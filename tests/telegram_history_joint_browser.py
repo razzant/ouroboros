@@ -40,7 +40,7 @@ from tests.telegram_history_joint import _mutation as _mutation  # the red contr
 
 REPO = Path(__file__).resolve().parents[1]
 HUB_WIDGET_TESTS = SKILL.parents[1] / "tests" / "test_telegram_participant_widget_browser.py"
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial,
+pytestmark = [pytest.mark.ui_browser, 
               pytest.mark.skipif(not (SKILL / "userbot" / "history_import.py").is_file() or not HUB_WIDGET_TESTS.is_file(),
                                  reason="set OUROBOROS_TELEGRAM_SKILL_ROOT to a telegram-user-session checkout")]
 BOARD = -1001  # the Hub widget harness's synthetic group

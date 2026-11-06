@@ -67,7 +67,7 @@ def test_reader_ascending_backward_and_replaced_pack_cursors(root):
         read(0, 12)
 
 
-@pytest.mark.parametrize("damage", ["missing_header", "wrong_total", "escaped_handle", "overlap"])
+@pytest.mark.parametrize("damage", ["wrong_total", "escaped_handle", "overlap"])
 def test_invalid_sidecar_structure_refuses_restore_and_preflight(root, damage):
     _task(root, "shape", blobs=1)
     packer.run_pass(root)

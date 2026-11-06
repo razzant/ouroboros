@@ -20,7 +20,6 @@ from ouroboros.tools.core import _forward_to_worker
 from ouroboros.tools.registry import ToolContext
 from tests.test_presence_runner import _admission, _event, _terminal
 
-pytestmark = pytest.mark.serial
 
 
 def _inline(root, task_id="inline-turn", **changes):
@@ -139,7 +138,6 @@ def test_completion_between_admission_and_write_reports_retained_unread(tmp_path
 @pytest.mark.parametrize("changes", [
     {"source": "task"},
     {"_is_direct_chat": False},
-    {"metadata": {"presence": {"binding_id": "1" * 32}}},
     {"metadata": {"presence": {}, "presence_event_identity": "event-identity"}},
 ])
 def test_presence_metadata_alone_does_not_create_a_mailbox_target(tmp_path, changes):

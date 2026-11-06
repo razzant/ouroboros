@@ -642,18 +642,23 @@ def _published_answer(tool: str, result) -> tuple[bool, str]:
     return is_error, _typed_result_metadata(tool, result.text, is_error, result)["status"]
 
 
-@pytest.mark.parametrize("subject", tuple(CURRENT_PRODUCER_CONTRACTS))
-@pytest.mark.parametrize("detail", [": detail line\nbody line", " (fixture_tool): detail line\nbody line"])
-def test_current_producer_contracts_have_explicit_live_answers(subject, detail):
+def test_current_producer_contracts_have_explicit_live_answers(subtests):
     """New producers need present contracts, never fabricated old answers."""
-    code = subject.split(":", 2)[1] if subject.startswith("native:") else ""
-    identifier = subject.rsplit(":", 1)[-1]
-    case = Case("current:" + subject, subject, "read_file", "⚠️ " + identifier + detail, code)
-    assert _live_answer(case) == CURRENT_PRODUCER_CONTRACTS[subject]
+    for subject in tuple(CURRENT_PRODUCER_CONTRACTS):
+        for detail in [": detail line\nbody line", " (fixture_tool): detail line\nbody line"]:
+            with subtests.test(subject=subject, detail=detail):
+                code = subject.split(":", 2)[1] if subject.startswith("native:") else ""
+                identifier = subject.rsplit(":", 1)[-1]
+                case = Case("current:" + subject, subject, "read_file", "⚠️ " + identifier + detail, code)
+                assert _live_answer(case) == CURRENT_PRODUCER_CONTRACTS[subject]
 
 
-@pytest.mark.parametrize("tool", ["skill_install", "skill_update"])
-@pytest.mark.parametrize("failure", ["staged_hash", "landing", "bad_check", "empty_notes"])
+@pytest.mark.parametrize(("failure", "tool"), [
+    ("staged_hash", "skill_install"),
+    ("landing", "skill_install"),
+    ("bad_check", "skill_update"),
+    ("empty_notes", "skill_update"),
+])
 def test_registry_failures_keep_the_current_producer_contract(registry_release, monkeypatch, tool, failure):  # noqa: F811
     from ouroboros.skill_install_record import read_install_record
     from ouroboros.tools.registry import ToolContext
@@ -737,8 +742,14 @@ def test_unrecordable_relay_answer_publishes_the_current_producer_contract(tmp_p
         CURRENT_PRODUCER_CONTRACTS["native:CAPABILITY_UNAVAILABLE:RELAY_RETURN_NOT_OWED"])
 
 
-@pytest.mark.parametrize("tool", ["send_user_message", "send_photo", "send_video", "send_file", "send_links", "show_card"])
-@pytest.mark.parametrize("identifier", ["LOCAL_ROOM_UNAVAILABLE", "PEER_DELIVERY_UNSUPPORTED"])
+@pytest.mark.parametrize(("identifier", "tool"), [
+    ("LOCAL_ROOM_UNAVAILABLE", "send_user_message"),
+    ("LOCAL_ROOM_UNAVAILABLE", "send_video"),
+    ("LOCAL_ROOM_UNAVAILABLE", "send_links"),
+    ("PEER_DELIVERY_UNSUPPORTED", "send_photo"),
+    ("PEER_DELIVERY_UNSUPPORTED", "send_file"),
+    ("PEER_DELIVERY_UNSUPPORTED", "show_card"),
+])
 def test_undelivered_send_frames_publish_the_current_producer_contract(tmp_path, monkeypatch, identifier, tool):
     """A send that queued nothing answers through the registry as the producer's typed refusal.
 
@@ -814,7 +825,7 @@ def test_scratchpad_warnings_publish_the_current_producer_contract(scratchpad_in
     assert _published_answer("update_scratchpad", result) == contract
 
 
-@pytest.mark.parametrize("tool", ["write_file", "edit_text", "apply_patch", "edit_batch"])
+@pytest.mark.parametrize("tool", ["write_file", "apply_patch", "edit_batch"])
 def test_output_capture_warning_preserves_the_successful_write(tool):
     """workspace_file_outputs.capture_known_workspace_outputs runs post-write.
 

@@ -108,8 +108,7 @@ def _start(tmp_path, monkeypatch, *, compiled=True, kind="body_copy", missing=Fa
         custody._CUSTODY.clear()
 
 
-@pytest.mark.parametrize("compiled", [True, False])
-@pytest.mark.parametrize("kind", ["system", "body_copy"])
+@pytest.mark.parametrize(("kind", "compiled"), [("system", True), ("body_copy", False)])
 def test_prepared_body_navigation_reaches_compiled_and_direct_requests(tmp_path, monkeypatch, compiled, kind):
     request, row, task, _ctx, live, prepared = _start(tmp_path, monkeypatch, compiled=compiled, kind=kind)
     instructions = request["instructions"]

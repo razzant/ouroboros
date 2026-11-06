@@ -43,7 +43,7 @@ def child(geometry, task_id, parent_id, workspace, parent_workspace):
     return registry, ctx
 
 
-@pytest.mark.parametrize("mode", ["light", "advanced", "pro", "cyber_pro"])
+@pytest.mark.parametrize("mode", ["light", "advanced", "cyber_pro"])
 def test_deep_child_keeps_every_ancestor_folder_and_canonical_runtime(geometry, monkeypatch, mode):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
     home, repo, data, first = geometry

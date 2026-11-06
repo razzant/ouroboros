@@ -94,7 +94,6 @@ def data_root(tmp_path):
     return root, alias
 
 
-@pytest.mark.serial
 def test_a_second_process_is_refused_through_any_spelling_until_the_holder_exits(tmp_path, data_root):
     root, alias = data_root
     holder = _probe(tmp_path, root, mode="hold")
@@ -113,7 +112,6 @@ def test_a_second_process_is_refused_through_any_spelling_until_the_holder_exits
     assert (root / "state" / "server.lock").exists(), "the lock file is never unlinked"
 
 
-@pytest.mark.serial
 def test_a_restart_successor_is_admitted_once_its_parent_exits(tmp_path, data_root):
     root, _alias = data_root
     parent = _probe(tmp_path, root, mode="exit-after:1.0")
@@ -129,7 +127,6 @@ def test_a_restart_successor_is_admitted_once_its_parent_exits(tmp_path, data_ro
         parent.wait(timeout=10)
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX fork")
 def test_neither_a_forked_child_nor_an_exec_survivor_keeps_a_dead_servers_admission(tmp_path, data_root):
     root, _alias = data_root
@@ -178,7 +175,6 @@ def test_a_filesystem_without_kernel_locks_refuses_with_the_reason(tmp_path, dat
     assert server_entrypoint._admission == {}
 
 
-@pytest.mark.serial
 def test_importing_the_server_admits_nothing(tmp_path, data_root):
     root, _alias = data_root
     env = {**os.environ, "OUROBOROS_DATA_DIR": str(root), "PYTHONPATH": str(REPO)}
@@ -225,7 +221,6 @@ def _server_env(tmp_path, data_dir, port, *, pid_file):
     }
 
 
-@pytest.mark.serial
 def test_two_real_servers_on_one_data_root_admit_one_and_a_launcher_exit_ends_it(tmp_path, data_root):
     """Server A is launcher-shaped (private stop pipe), server B a direct start through a
     symlinked spelling with its own port and PID file: B exits 2 without serving while A

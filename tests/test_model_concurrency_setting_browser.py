@@ -225,7 +225,6 @@ class _Run:
         return facts
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 def test_concurrency_field(direct_server_with_data, monkeypatch):
     # A short name on purpose: pytest's tmp_path carries it into the server's socket paths (macOS caps them at 104 bytes).

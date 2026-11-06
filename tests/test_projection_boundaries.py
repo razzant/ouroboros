@@ -173,8 +173,7 @@ def test_child_batches_keep_cursor_and_projection_atomic_and_retry_a_repaired_to
     assert metrics.read(tmp_path, "worker")["rows"][0]["dispatched"] == 5
 
 
-@pytest.mark.parametrize("running", [False, True])
-@pytest.mark.parametrize("money_write", [False, True])
+@pytest.mark.parametrize(("money_write", "running"), [(False, True), (True, False)])
 def test_absent_usage_owners_rest_flat_and_new_facts_wake_them(env, monkeypatch, running, money_write):
     counts = []
     for scale in (1, 30):

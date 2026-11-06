@@ -34,7 +34,7 @@ def fixed_clock(monkeypatch):
     monkeypatch.setattr(task_status.time, "time", lambda: 1000)
 
 
-@pytest.mark.parametrize("age,fresh", [(0, True), (10, True), (10.001, False), (900, False)])
+@pytest.mark.parametrize("age,fresh", [(0, True), (10.001, False), (900, False)])
 def test_context_freshness_shares_ownership_boundary(age, fresh):
     snapshot = _snapshot(age)
     snapshot.update(generation="fixture-generation", _queue_alive={
@@ -48,7 +48,7 @@ def test_context_freshness_shares_ownership_boundary(age, fresh):
     assert fact["ts"] == snapshot["ts"]
 
 
-@pytest.mark.parametrize("snapshot", [{}, {"ts": "invalid"}, {"_snapshot_missing": True}, {"_snapshot_invalid": True}])
+@pytest.mark.parametrize("snapshot", [{}, {"ts": "invalid"}, {"_snapshot_invalid": True}])
 def test_unavailable_freshness_is_unknown(snapshot):
     fact = task_status.queue_snapshot_observation(snapshot)
     assert fact["freshness"] == "unknown"

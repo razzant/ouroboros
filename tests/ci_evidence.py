@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from datetime import datetime, timezone
 import hashlib
 import json
 import math
@@ -35,9 +36,9 @@ if str(Path(__file__).resolve().parents[1]) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.ci_verdicts import (  # noqa: E402 -- stdlib only, as everything above `import pytest` below
-    DURATIONS_ENV, PHASES as _PHASES, ROUND_DIR as _ROUND_DIR, SECTIONS as _SECTIONS, attempt_text as _attempt,
-    cell as _cell, durations_command, error_text as _error, final as _final, journal_rows as _journal_rows,
-    run_verdict_command, system_of as _system, valid as _valid,
+    DURATIONS_ENV, PHASES as _PHASES, ROUND_DIR as _ROUND_DIR, SECTIONS as _SECTIONS, TEST_DURATIONS_ENV,
+    attempt_text as _attempt, cell as _cell, durations_command, error_text as _error, final as _final,
+    journal_rows as _journal_rows, record_session_durations, run_verdict_command, system_of as _system, valid as _valid,
     verdict_counts as _verdict_counts, verdict_file as _verdict_file, verdict_passes as _verdict_passes, write_json,
 )
 
@@ -725,8 +726,9 @@ def _timeout_callback(directory, report):
 def pytest_collection_finish(session):  # noqa: ARG001
     """The run's weight table shaped this session's own lanes, which are collected now
     (tests/default_lane.py, tests/browser_lane.py). The sessions its tests start are
-    other lanes: none of them inherits it."""
+    other lanes: none of them inherits it, nor the owner's table this session updates."""
     os.environ.pop(DURATIONS_ENV, None)
+    os.environ.pop(TEST_DURATIONS_ENV, None)
 
 
 def _redact(value, secrets):
@@ -759,6 +761,7 @@ class _Results:
         self.config = config
         self.reports = []
         self.collection_failures = []
+        self.durations = os.environ.get(TEST_DURATIONS_ENV, "")  # the owner's table; the env is dropped at collection
         self.secrets = tuple(os.environ[key] for key in MASKED_SECRET_SETTING_KEYS if os.environ.get(key))
         self.safe_text = {}
         self.started_at = monotonic()
@@ -944,6 +947,22 @@ class _Results:
                     error_type=row["error_type"], duration_seconds=row["duration_seconds"],
                     is_subtest=row["is_subtest"], **cause)
 
+    def _record_durations(self, session):
+        """Fold this session's whole file times into the owner's table (ouroboros.test_evidence.durations_path for the
+        gate, the evidence parent's for scripts/run_tests.py). A session that measured no whole file writes nothing:
+        one narrowed by `-k`, `--deselect` or `--lf`, or one that stopped before its end."""
+        option = self.config.option
+        if not self.durations or getattr(option, "keyword", "") or getattr(option, "deselect", None) \
+                or getattr(option, "lf", False) or session.exitstatus in (
+                    pytest.ExitCode.INTERRUPTED, pytest.ExitCode.USAGE_ERROR, pytest.ExitCode.NO_TESTS_COLLECTED):
+            return
+        problem = record_session_durations(
+            self.durations, self.reports, system=platform.system(), rootpath=self.config.rootpath,
+            run_id=f"session {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}",
+            sha=os.environ.get("GITHUB_SHA", ""))
+        if problem:
+            print(f"DURATIONS_NOT_RECORDED {problem}")
+
     def pytest_collectreport(self, report):
         if report.failed:
             self.collection_failures.append({"nodeid": report.nodeid, "outcome": "failed"})
@@ -971,6 +990,7 @@ class _Results:
             if crash:
                 facts["worker_crash"] = crash
             write_json(output_dir(self.config) / "results.json", _redact(facts, self.secrets))
+            self._record_durations(session)
         except Exception as error:
             # Diagnostics alone never alter session.exitstatus or expose a body.
             from ouroboros.test_evidence import diagnostics_incomplete

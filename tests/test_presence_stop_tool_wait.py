@@ -27,7 +27,6 @@ from tests.test_presence_owner_contact import contact_runtime as _contact_runtim
 from tests.test_presence_owner_stop import SUMMARY, owner_stop as _owner_stop
 
 contact_runtime, owner_stop = _contact_runtime, _owner_stop
-pytestmark = pytest.mark.serial
 
 WAIT_SEC = 25
 PROMPT_SEC = 8  # the press-to-end bound: one poll and the dispatch gate, far below the 25 s wait

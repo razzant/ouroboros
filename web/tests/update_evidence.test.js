@@ -66,6 +66,26 @@ test('confirmation details name failed, absent and green evidence without conver
         [{ label: 'Checks', value: 'Qualification for this range is unknown.' }]);
 });
 
+test('each commit keeps its own verdict, record state and request-time relation; a legacy receipt invents neither', () => {
+    const at = (sha, review) => ({ sha, subject: sha, receipt: { checks: [], review } });
+    const qualification = { ...plan, github: { status: 'observed', runs: [] }, commits: [
+        at('pass-different', { observed: 'PASS', state: 'settled', relation: 'changes_after_review', declared: 'PASS' }),
+        at('fail-same', { observed: 'FAIL', state: 'settled', relation: 'covers_head', declared: 'PASS' }),
+        at('legacy', { observed: 'PASS', declared: 'PASS' }),
+        at('future', { observed: 'PASS', state: 'pending', relation: 'covers_head', declared: 'unknown', landing: 'same' }),
+    ] };
+    const value = Object.fromEntries(preflightEvidenceRows({ merge_plan: plan, letter, qualification })
+        .map((row) => [row.label, row.value]));
+    assert.ok(value['pass-dif'].endsWith(
+        'Review observed PASS, author declared PASS; record settled, subject relation at the merge request changes_after_review.'));
+    assert.ok(value['fail-sam'].endsWith(
+        'Review observed FAIL, author declared PASS; record settled, subject relation at the merge request covers_head.'));
+    assert.ok(value.legacy.endsWith(
+        'Review observed PASS, author declared PASS; record state and subject relation at the merge request not recorded.'));
+    assert.doesNotMatch(value.legacy, /settled|covers_head/);
+    assert.ok(value.future.endsWith('record pending, subject relation at the merge request covers_head; landing same.'));
+});
+
 const sides = (rows) => {
     const at = rows.findIndex((row, index) => index > 0 && row.head);
     return [rows.slice(0, at), rows.slice(at)];

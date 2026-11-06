@@ -19,7 +19,6 @@ from tests.test_loop_transport_wait import _FakeClock
 from tests.test_loop_transport_wait_interactive import _ctx, _enter, _NoteRecorder, _run_until_terminal
 
 # Real file locks, as in test_model_concurrency.
-pytestmark = pytest.mark.serial
 
 ROUTE = {"provider": "openrouter", "base_url": "https://provider.invalid/v1", "api_key": "fake-secret"}
 TERMINAL = dict(is_context_overflow=False, is_transport_wait=True, is_deadline_exhausted=False,

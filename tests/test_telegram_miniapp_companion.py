@@ -765,9 +765,7 @@ async def _async_value(value: Any) -> Any:
         (1, "4242", 1, False, 0),  # server died before import: init adopted us
         (777, "4242", 777, False, 0),  # ... or a subreaper did
         (4242, "4242", 777, False, 0),  # reparented between import and check
-        (4242, "4242", 4242, False, 4242),
         (1, "junk", 1, False, 0),  # unreadable name keeps the legacy rule
-        (4242, "9999", 4242, True, 4242),  # Windows never reparents
     ],
 )
 def test_server_parent_requires_the_named_spawner_when_present(

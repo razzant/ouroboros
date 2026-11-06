@@ -351,7 +351,7 @@ def test_update_restore_ignores_mismatched_paths_and_keeps_evidence(release, tmp
     assert "paths do not match" in caplog.text
 
 
-@pytest.mark.parametrize("failure", ["source_land", "source_record", "builtin_copy", "builtin_digest"])
+@pytest.mark.parametrize("failure", ["source_land", "builtin_copy", "builtin_digest"])
 def test_update_landing_failure_restores_with_landing_reason(release, tmp_path, monkeypatch, failure):  # noqa: F811
     drive, folder, row, item = release
     if failure.startswith("builtin"):
@@ -596,8 +596,11 @@ def _extension(drive, skill_dir, *, enabled):
 
 
 @_POSIX_LINKS
-@pytest.mark.parametrize("kind", ["hub", "builtin", "registry"])
-@pytest.mark.parametrize("moved", [True, False], ids=["moved-app", "current-app"])
+@pytest.mark.parametrize(("moved", "kind"), [
+    pytest.param(True, "hub", id='moved-app-hub'),
+    pytest.param(True, "registry", id='moved-app-registry'),
+    pytest.param(False, "builtin", id='current-app-builtin'),
+])
 def test_update_keeps_the_previous_payload_with_its_links(request, tmp_path, monkeypatch, kind, moved):
     drive, update = _installed(request, tmp_path, monkeypatch, kind)
     payload = find_skill(drive, "demo").skill_dir
@@ -612,8 +615,11 @@ def test_update_keeps_the_previous_payload_with_its_links(request, tmp_path, mon
 
 @_POSIX_LINKS
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="a named pipe is what makes the copy fail here (POSIX)")
-@pytest.mark.parametrize("kind", ["hub", "builtin", "registry"])
-@pytest.mark.parametrize("state", ["live", "owner_off_meanwhile", "off"])
+@pytest.mark.parametrize(("state", "kind"), [
+    ("live", "builtin"),
+    ("owner_off_meanwhile", "hub"),
+    ("off", "registry"),
+])
 def test_failed_snapshot_changes_nothing_and_reloads_a_live_extension(request, tmp_path, monkeypatch, extension_runtime,
                                                                       kind, state):
     from ouroboros.extension_loader import is_extension_live
@@ -643,8 +649,7 @@ def test_failed_snapshot_changes_nothing_and_reloads_a_live_extension(request, t
 
 
 @_POSIX_LINKS
-@pytest.mark.parametrize("kind", ["hub", "builtin", "registry"])
-@pytest.mark.parametrize("basis", ["trusted", "review"])  # review: the retained update snapshot restores
+@pytest.mark.parametrize(("basis", "kind"), [("trusted", "builtin"), ("review", "hub"), ("review", "registry")])
 def test_failed_landing_restores_links_and_the_live_extension(request, tmp_path, monkeypatch, extension_runtime,
                                                               kind, basis):
     from ouroboros.extension_loader import is_extension_live

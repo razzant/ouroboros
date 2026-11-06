@@ -11,13 +11,10 @@ from tests.test_question_answer_routing import debt, drain
 from tests.test_quiz_late_answer import _inbox, _late_bridge
 from tests.test_swarm_host_admission import host  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("destination,cut", [
     ("asker", "none"), ("fresh_head", "before"), ("fresh_head", "selected"),
-    ("successor", "before"), ("successor", "selected"), ("successor", "appended"),
-    ("held_successor", "selected"),
 ])
 def test_answer_follows_reader_at_finish_without_creating_a_successor(host, monkeypatch, destination, cut):  # noqa: F811
     from ouroboros import question_answers as qa

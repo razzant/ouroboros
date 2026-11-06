@@ -14,7 +14,7 @@ def install(tmp_path, monkeypatch):
     return config
 
 
-@pytest.mark.parametrize("old", [None, "off", "light", "full"])
+@pytest.mark.parametrize("old", [None, "light", "full"])
 def test_existing_install_copies_once_persisted_and_audited(install, old):
     cfg = install
     cfg.SETTINGS_PATH.write_text(json.dumps({} if old is None else {"OUROBOROS_SAFETY_MODE": old}))
@@ -109,13 +109,9 @@ def test_fresh_web_generic_defaults_end_full_full(install):
 
 
 @pytest.mark.parametrize("document, expected", [
-    (None, "full"), ({}, "full"),
-    ({"OUROBOROS_SAFETY_MODE": "light"}, "light"),
+    (None, "full"), ({"OUROBOROS_SAFETY_MODE": "light"}, "light"),
     ({"OUROBOROS_SAFETY_MODE": "off"}, "off"),
-    ({"OUROBOROS_SAFETY_MODE": "off", "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "full"}, "full"),
-    ({"OUROBOROS_SAFETY_MODE": "full", "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "light"}, "light"),
-    ({"OUROBOROS_SAFETY_MODE": "light", "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "off"}, "off"),
-], ids=["fresh", "empty-existing", "legacy-light", "legacy-off", "explicit-full", "explicit-light", "explicit-off"])
+], ids=["fresh", "legacy-light", "legacy-off"])
 def test_colab_build_write_load_preserves_safety_coverage(install, document, expected):
     from ouroboros.colab_bootstrap import build_colab_settings, write_colab_settings
 

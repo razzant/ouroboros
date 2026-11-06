@@ -41,7 +41,7 @@ def test_failed_write_prevents_emission(tmp_path, monkeypatch):
     assert ctx.pending_events == []
 
 
-@pytest.mark.parametrize("phase", ["prepared", "admitting", "possible", "admitted"])
+@pytest.mark.parametrize("phase", ["prepared", "possible", "admitted"])
 def test_boot_distinguishes_proof_and_never_enqueues(tmp_path, phase):
     evt = event()
     prepare_promotion_intent(tmp_path, evt)

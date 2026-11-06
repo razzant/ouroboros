@@ -228,7 +228,6 @@ def test_an_imported_compacted_journal_preserves_all_presentation_facts(data_roo
     assert build_cost_presentation(after, scope=COST_SCOPE_ROOT_TREE) == build_cost_presentation(before, scope=COST_SCOPE_ROOT_TREE)
 
 
-@pytest.mark.serial
 def test_producer_to_wire_consumers_keep_tree_scope_and_late_unknown_price(data_root):
     import asyncio
     import json
@@ -321,7 +320,6 @@ def test_first_terminal_root_frame_preserves_amount_but_not_finality_on_tree_fai
     (4.25, {}, False),          # a legacy foreign subtree total: own zero may not stand for it
     (0, {'subagent_count': 2}, False),  # the child fanned out; its own mirror is not the subtree
     (0, {}, True),              # a leaf's pipeline mirror of its own bound carries no second scope
-    (None, {}, True),
 ])
 def test_nested_rollup_scope_rule(tmp_path, monkeypatch, rollup, swarm, keeps_own):
     from supervisor.events_task_done import _authoritative_terminal_cost

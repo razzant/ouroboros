@@ -15,8 +15,9 @@ import pytest
 from ouroboros import workspace_executor as executor
 from ouroboros.docker_process_observer import proc_observer_function
 from tests._workspace_executor_shared import fake_docker_cli
+from tests._cases import case_folders
 
-pytestmark = [pytest.mark.serial, pytest.mark.skipif(not shutil.which("sh"), reason="POSIX sh required")]
+pytestmark = [pytest.mark.skipif(not shutil.which("sh"), reason="POSIX sh required")]
 
 
 def _stat(root, pid=42, state="S", pgrp=42, comm="a tricky ) process (name)"):
@@ -32,13 +33,16 @@ def _observe(root, scope, *, prefix=""):
     return subprocess.run(["sh", "-c", shell], capture_output=True, text=True, timeout=5)
 
 
-@pytest.mark.parametrize("state,expected", [(s, "running") for s in ("R", "S", "D", "T", "t", "I")]
-                         + [(s, "exited") for s in ("Z", "X", "x")])
-@pytest.mark.parametrize("scope", ["leader", "group"])
-def test_states_and_names_with_parentheses(tmp_path, state, expected, scope):
-    _stat(tmp_path, state=state)
-    result = _observe(tmp_path, scope)
-    assert (result.returncode, result.stdout) == (0, expected)
+def test_states_and_names_with_parentheses(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for state, expected in ([(s, "running") for s in ("R", "S", "D", "T", "t", "I")]
+         + [(s, "exited") for s in ("Z", "X", "x")]):
+        for scope in ["leader", "group"]:
+            tmp_path = next(case_paths)
+            with subtests.test(state=state, expected=expected, scope=scope):
+                _stat(tmp_path, state=state)
+                result = _observe(tmp_path, scope)
+                assert (result.returncode, result.stdout) == (0, expected)
 
 
 @pytest.mark.parametrize("leader", ["Z", "absent"])
@@ -61,9 +65,15 @@ def test_live_leader_without_its_own_group_still_blocks_cleanup(tmp_path):
     assert _observe(tmp_path, "group").stdout == "running"
 
 
-@pytest.mark.parametrize("line", ["", "garbage", "42 (short) S 1 42", "42 (bad) Q 1 42",
-                                  "42 (bad) S 1 nope", "42 (bad) Z 1 4:2", "99 (wrong) Z 1 42"])
-@pytest.mark.parametrize("scope", ["leader", "group"])
+@pytest.mark.parametrize(("scope", "line"), [
+    ("leader", ""),
+    ("leader", "42 (short) S 1 42"),
+    ("leader", "42 (bad) S 1 nope"),
+    ("leader", "99 (wrong) Z 1 42"),
+    ("group", "garbage"),
+    ("group", "42 (bad) Q 1 42"),
+    ("group", "42 (bad) Z 1 4:2"),
+])
 def test_malformed_stat_is_unknown(tmp_path, line, scope):
     path = _stat(tmp_path)
     path.write_text(line + " " + " ".join(["0"] * 47) if line != "42 (short) S 1 42" else line)

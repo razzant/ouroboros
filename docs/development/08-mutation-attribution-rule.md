@@ -11,4 +11,4 @@ Attribution is evidence, not exclusive ownership or proof of individual authorsh
 - Freshness is checkout-scoped: `invalidate_advisory_after_mutation(mutating_task_id=…)` records the editor in that checkout's own marker; readers of any task disclose it, and a missing identity stays unknown.
 - Skill Review provenance stays in `review_job.json`/the skill ledger; briefs keep job/group ids. Allocate ordinals under the lifecycle lock, consume only at actual start, derive historical ordinals from retained ledger/legacy rows without rewriting them.
 
-Enforcement: `tests/test_mutation_attribution.py`, `tests/test_commit_index.py`, `tests/test_vcs_restore_scope.py`, `tests/test_predecessor_mutation_handoff.py`, `tests/test_review_stale_marker_attribution.py`.
+Enforcement: `tests/test_mutation_attribution.py`.

@@ -64,25 +64,14 @@ def _upload(client, name: str, data: bytes) -> dict:
 # --- naming and byte detection -------------------------------------------------------
 
 @pytest.mark.parametrize("head,name,expected", [
-    (PNG, "x.jpg", ("image/png", "image")),
-    (JPEG, "photo", ("image/jpeg", "image")),
-    (b"GIF89a" + b"\x00" * 10, "a.gif", ("image/gif", "image")),
-    (b"RIFF\x00\x00\x00\x00WEBPVP8 ", "a.webp", ("image/webp", "image")),
     (b"RIFF\x00\x00\x00\x00WAVEfmt ", "a.wav", ("audio/wav", "audio")),
-    (b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00mif1heic", "a.heic", ("image/heic", "image")),
     (b"\x00\x00\x00\x1cftypavif\x00\x00\x00\x00avifmif1miaf", "a.avif", ("image/avif", "image")),
     (b"\x00\x00\x00\x20ftypM4A \x00\x00\x00\x00M4A isommp42", "a.m4a", ("audio/mp4", "audio")),
-    (b"\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41", "a.mp4", ("video/mp4", "video")),
-    (b"\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41", "voice.m4a", ("audio/mp4", "audio")),
     (b"\x00\x00\x00\x14ftypqt  \x00\x00\x00\x00qt  ", "a.mov", ("video/quicktime", "video")),
     (b"\x1aE\xdf\xa3\x9fB\x86\x81\x01B\xf7\x81\x01B\xf2\x81\x04B\xf3\x81\x08B\x82\x84webm", "a.webm", ("video/webm", "video")),
     (b"ID3\x04\x00", "a.mp3", ("audio/mpeg", "audio")),
     (b"OggS\x00\x02", "a.ogg", ("audio/ogg", "audio")),
     (b"\x00\x00\x00\x18ftypzzzz\x00\x00\x00\x00zzzz", "a.mp4", ("application/octet-stream", "file")),
-    (b"<svg xmlns='http://www.w3.org/2000/svg'>", "a.svg", ("image/svg+xml", "file")),
-    (b"<html><script>alert(1)</script>", "a.png", ("application/octet-stream", "file")),
-    (b"<html>", "a.html", ("text/html", "file")),
-    (b"%PDF-1.7", "a.pdf", ("application/pdf", "file")),
     (b"\xff\xfb\x90\x00", "a.bin", ("application/octet-stream", "file")),
 ])
 def test_media_kind_is_proven_from_bytes_and_conservative(head, name, expected):

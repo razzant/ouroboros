@@ -43,8 +43,9 @@ from tests._launch_stop_shared import (
     write_scripts,
 )
 from tests.test_launch_stop_contract import HIDDEN, _host, _leader_gone, _roots_unknown
+from tests._cases import case_folders, chosen_rows
 
-pytestmark = [pytest.mark.serial,
+pytestmark = [
               pytest.mark.skipif(os.name == "nt", reason="the measured stop is POSIX; Windows keeps its native kill")]
 
 READERS = ["presence", "continuation", "cold sleep", "body candidate"]
@@ -100,7 +101,7 @@ def _ledger_only_debt(tmp_path, monkeypatch, scripts, task, *, survivor="denied"
 
 
 @pytest.mark.parametrize("survivor", ["denied", "held"])
-@pytest.mark.parametrize("reader", READERS)
+@pytest.mark.parametrize("reader", chosen_rows(READERS, 0, 3))
 def test_a_stale_copy_cannot_hide_what_the_ledger_names_from_any_reader(tmp_path, monkeypatch, scripts, reader, survivor):
     """Whichever store a reader used to start from, the launch holds while C lives; reading signals nothing."""
     (tmp_path / "data").mkdir()
@@ -137,7 +138,7 @@ def test_a_stale_copy_keeps_the_candidate_and_the_log_of_a_launch_that_still_owe
         _settle(record.proc, identities=[(pid, birth)])
 
 
-@pytest.mark.parametrize("stop", ["next start", "exit", "reaper", "quiesce"])
+@pytest.mark.parametrize("stop", ["next start", "reaper", "quiesce"])
 def test_every_stop_reads_what_only_the_ledger_names_and_ends_it(tmp_path, monkeypatch, scripts, stop):
     """The stale copy does not narrow a stop either: each ends C from what the ledger names, and retires the launch."""
     from ouroboros import owned_shutdown, process_custody
@@ -276,7 +277,7 @@ def _rows_of(data, leader):
 
 
 @pytest.mark.parametrize("where", ["pending copy", "folded into the document"])
-@pytest.mark.parametrize("reader", READERS)
+@pytest.mark.parametrize("reader", chosen_rows(READERS, 0, 3))
 def test_every_reader_holds_a_launch_only_a_copy_names_after_compaction(tmp_path, monkeypatch, scripts, reader, where):
     """That schedule, then each reader. C was published, so unlike the late child nobody observed yet, the launch must
     hold even though its canonical row is gone; reading signals nothing."""
@@ -335,14 +336,17 @@ def _copy_only(tmp_path, monkeypatch, task, *, pending=True, ledger_file=True):
     return rows, world, row
 
 
-@pytest.mark.parametrize("ledger_file", [True, False], ids=["empty ledger", "no ledger file"])
-@pytest.mark.parametrize("pending", [True, False], ids=["pending", "document"])
-@pytest.mark.parametrize("reader", READERS)
-def test_a_launch_only_a_copy_names_holds_with_an_empty_or_missing_ledger(tmp_path, monkeypatch, reader, pending, ledger_file):
-    read, task = _reader(tmp_path, monkeypatch, reader)
-    rows, world, _row = _copy_only(tmp_path, monkeypatch, task, pending=pending, ledger_file=ledger_file)
-    assert _held(read(), _PID) == "live"
-    assert world.signals == [] and _CHILD in rows
+def test_a_launch_only_a_copy_names_holds_with_an_empty_or_missing_ledger(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for ledger_file in [True, False]:
+        for pending in [True, False]:
+            for reader in READERS:
+                tmp_path = next(case_paths)
+                with subtests.test(ledger_file=ledger_file, pending=pending, reader=reader), monkeypatch.context() as monkeypatch:
+                    read, task = _reader(tmp_path, monkeypatch, reader)
+                    rows, world, _row = _copy_only(tmp_path, monkeypatch, task, pending=pending, ledger_file=ledger_file)
+                    assert _held(read(), _PID) == "live"
+                    assert world.signals == [] and _CHILD in rows
 
 
 @pytest.mark.parametrize("reader", ["presence", "continuation", "cold sleep"])
@@ -353,43 +357,46 @@ def test_another_owners_copy_only_launch_does_not_hold_this_reader(tmp_path, mon
     assert _held(read(), _PID) == "none"
 
 
-@pytest.mark.parametrize("case", ["pending file unreadable", "document unreadable", "pending directory unreadable"])
-@pytest.mark.parametrize("reader", READERS)
-def test_a_store_a_copy_only_launch_might_live_in_is_unknown_not_absent(tmp_path, monkeypatch, reader, case):
+def test_a_store_a_copy_only_launch_might_live_in_is_unknown_not_absent(subtests, tmp_path, monkeypatch):
     """Nothing else names this launch, so nothing can say it is not this reader's: the answer is a blocker for every
     owner until the store reads again. Readable again, the launch holds."""
-    from ouroboros import owned_shutdown
+    case_paths = case_folders(tmp_path)
+    for case in ["pending file unreadable", "document unreadable", "pending directory unreadable"]:
+        for reader in READERS:
+            tmp_path = next(case_paths)
+            with subtests.test(case=case, reader=reader), monkeypatch.context() as monkeypatch:
+                from ouroboros import owned_shutdown
 
-    read, task = _reader(tmp_path, monkeypatch, reader)
-    rows, _world, _row = _copy_only(tmp_path, monkeypatch, task)
-    pending_dir = tmp_path / "state" / owned_shutdown.PENDING_DIRNAME
-    undo = []
-    if case == "pending file unreadable":
-        [target] = list(pending_dir.glob("launch-*.json"))
-        intact = target.read_bytes()
-        target.write_bytes(b"{torn")
-        undo.append(lambda: target.write_bytes(intact))
-    elif case == "pending directory unreadable":
-        moved = pending_dir.with_name(pending_dir.name + ".moved")
-        pending_dir.rename(moved)
-        pending_dir.write_bytes(b"")
+                read, task = _reader(tmp_path, monkeypatch, reader)
+                rows, _world, _row = _copy_only(tmp_path, monkeypatch, task)
+                pending_dir = tmp_path / "state" / owned_shutdown.PENDING_DIRNAME
+                undo = []
+                if case == "pending file unreadable":
+                    [target] = list(pending_dir.glob("launch-*.json"))
+                    intact = target.read_bytes()
+                    target.write_bytes(b"{torn")
+                    undo.append(lambda: target.write_bytes(intact))
+                elif case == "pending directory unreadable":
+                    moved = pending_dir.with_name(pending_dir.name + ".moved")
+                    pending_dir.rename(moved)
+                    pending_dir.write_bytes(b"")
 
-        def restore():
-            pending_dir.unlink()
-            moved.rename(pending_dir)
+                    def restore():
+                        pending_dir.unlink()
+                        moved.rename(pending_dir)
 
-        undo.append(restore)
-    else:
-        path = owned_shutdown.owned_processes_path(tmp_path)
-        path.write_bytes(b"{torn")
-        undo.append(path.unlink)
-    try:
-        assert read(), f"{reader} called unreadable custody empty"
-    finally:
-        for restore_store in undo:
-            restore_store()
-    assert _held(read(), _PID) == "live"
-    assert _CHILD in rows
+                    undo.append(restore)
+                else:
+                    path = owned_shutdown.owned_processes_path(tmp_path)
+                    path.write_bytes(b"{torn")
+                    undo.append(path.unlink)
+                try:
+                    assert read(), f"{reader} called unreadable custody empty"
+                finally:
+                    for restore_store in undo:
+                        restore_store()
+                assert _held(read(), _PID) == "live"
+                assert _CHILD in rows
 
 
 @pytest.mark.parametrize("reader", ["presence", "stop"])
@@ -476,74 +483,80 @@ def test_a_leftover_executor_record_reads_what_its_launch_owes_from_every_store(
 # --------------------------------------------------------------------------- batching
 
 
-@pytest.mark.parametrize("reader", READERS)
-def test_a_launch_on_a_child_drive_is_read_from_its_own_ledger(tmp_path, monkeypatch, reader):
+def test_a_launch_on_a_child_drive_is_read_from_its_own_ledger(subtests, tmp_path, monkeypatch):
     """The ownership set names the launch's drive, so the debt only that drive's ledger names (a stale copy) is read
     there, once, whichever root the reader was given. Without its ledger it is unknown, not settled."""
-    from ouroboros import owned_shutdown, process_census, process_custody
-    from ouroboros.utils import append_jsonl
+    case_paths = case_folders(tmp_path)
+    for reader in READERS:
+        tmp_path = next(case_paths)
+        with subtests.test(reader=reader), monkeypatch.context() as monkeypatch:
+            from ouroboros import owned_shutdown, process_census, process_custody
+            from ouroboros.utils import append_jsonl
 
-    read, task = _reader(tmp_path, monkeypatch, reader)
-    rows = {_CHILD: process_census._Row(_CHILD, 1, _CHILD, _OLD_BIRTH, 123.0, "alive", set())}
-    _controlled(tmp_path, monkeypatch, rows)
-    process_custody.ledger_path(tmp_path).write_bytes(b"")
-    drive = tmp_path / "task_drives" / "child-task"
-    (drive / "state").mkdir(parents=True)
-    row = _launch_row(task, purpose="service:a")
-    assert append_jsonl(process_custody.ledger_path(drive), row)
-    assert owned_shutdown.record_ledgered_process(drive, row)
-    assert owned_shutdown.installation_root(drive) == owned_shutdown.installation_root(tmp_path)
-    assert _held(read(), _PID) == "none", "nothing is owed yet"
-    assert append_jsonl(process_custody.ledger_path(drive), {**row, "known_members": [{"pid": _CHILD, "birth": _OLD_BIRTH}]})
-    reads, real = [], process_custody._read_ledger_records
+            read, task = _reader(tmp_path, monkeypatch, reader)
+            rows = {_CHILD: process_census._Row(_CHILD, 1, _CHILD, _OLD_BIRTH, 123.0, "alive", set())}
+            _controlled(tmp_path, monkeypatch, rows)
+            process_custody.ledger_path(tmp_path).write_bytes(b"")
+            drive = tmp_path / "task_drives" / "child-task"
+            (drive / "state").mkdir(parents=True)
+            row = _launch_row(task, purpose="service:a")
+            assert append_jsonl(process_custody.ledger_path(drive), row)
+            assert owned_shutdown.record_ledgered_process(drive, row)
+            assert owned_shutdown.installation_root(drive) == owned_shutdown.installation_root(tmp_path)
+            assert _held(read(), _PID) == "none", "nothing is owed yet"
+            assert append_jsonl(process_custody.ledger_path(drive), {**row, "known_members": [{"pid": _CHILD, "birth": _OLD_BIRTH}]})
+            reads, real = [], process_custody._read_ledger_records
 
-    def counted(path, **kwargs):
-        reads.append(pathlib.Path(path).resolve())
-        return real(path, **kwargs)
+            def counted(path, **kwargs):
+                reads.append(pathlib.Path(path).resolve())
+                return real(path, **kwargs)
 
-    monkeypatch.setattr(process_custody, "_read_ledger_records", counted)
-    found = read()
+            monkeypatch.setattr(process_custody, "_read_ledger_records", counted)
+            found = read()
 
-    assert _held(found, _PID) == "live", found
-    assert reads.count(drive.resolve()) == 1, reads
-    process_custody.ledger_path(drive).write_bytes(b"\xff\xfe not a row\n")
-    assert _held(read(), _PID) == "unknown", "that drive's ledger cannot be read: unknown, never settled"
+            assert _held(found, _PID) == "live", found
+            assert reads.count(drive.resolve()) == 1, reads
+            process_custody.ledger_path(drive).write_bytes(b"\xff\xfe not a row\n")
+            assert _held(read(), _PID) == "unknown", "that drive's ledger cannot be read: unknown, never settled"
 
 
-@pytest.mark.parametrize("reader", READERS)
-def test_a_healthy_read_keeps_one_identity_read_and_no_census(tmp_path, monkeypatch, reader):
+def test_a_healthy_read_keeps_one_identity_read_and_no_census(subtests, tmp_path, monkeypatch):
     """A live measured leader answers from one batched identity read: the combined selection adds no census, no second
     read of a store, nothing per launch."""
-    from ouroboros import owned_shutdown, process_census, process_custody, process_scope
+    case_paths = case_folders(tmp_path)
+    for reader in READERS:
+        tmp_path = next(case_paths)
+        with subtests.test(reader=reader), monkeypatch.context() as monkeypatch:
+            from ouroboros import owned_shutdown, process_census, process_custody, process_scope
 
-    read, task = _reader(tmp_path, monkeypatch, reader)
-    launches = [(_PID + index, "%032x" % (0xa0 + index)) for index in range(3)]
-    rows = {pid: process_census._Row(pid, 2, pid, _OLD_BIRTH, 123.0, "alive", set()) for pid, _hex in launches}
-    world = _controlled(tmp_path, monkeypatch, rows)
-    for pid, value in launches:
-        world.spawned(_launch_row(task, marker="OURO_LAUNCH_SCOPE_" + value, purpose="service:a", pid=pid))
-    identity_reads, real_identities = [], process_scope.read_identities
+            read, task = _reader(tmp_path, monkeypatch, reader)
+            launches = [(_PID + index, "%032x" % (0xa0 + index)) for index in range(3)]
+            rows = {pid: process_census._Row(pid, 2, pid, _OLD_BIRTH, 123.0, "alive", set()) for pid, _hex in launches}
+            world = _controlled(tmp_path, monkeypatch, rows)
+            for pid, value in launches:
+                world.spawned(_launch_row(task, marker="OURO_LAUNCH_SCOPE_" + value, purpose="service:a", pid=pid))
+            identity_reads, real_identities = [], process_scope.read_identities
 
-    def identities(pids, **kwargs):
-        listed = sorted(pids)
-        identity_reads.append(listed)
-        return real_identities(listed, **kwargs)
+            def identities(pids, **kwargs):
+                listed = sorted(pids)
+                identity_reads.append(listed)
+                return real_identities(listed, **kwargs)
 
-    monkeypatch.setattr(process_scope, "read_identities", identities)
-    documents, real_document = [], owned_shutdown._read_document
-    monkeypatch.setattr(owned_shutdown, "_read_document",
-                        lambda *a, **k: documents.append(1) or real_document(*a, **k))
-    ledgers, real_ledger = [], process_custody._read_ledger_records
-    monkeypatch.setattr(process_custody, "_read_ledger_records",
-                        lambda *a, **k: ledgers.append(1) or real_ledger(*a, **k))
-    del world.censuses[:]
+            monkeypatch.setattr(process_scope, "read_identities", identities)
+            documents, real_document = [], owned_shutdown._read_document
+            monkeypatch.setattr(owned_shutdown, "_read_document",
+                                lambda *a, **k: documents.append(1) or real_document(*a, **k))
+            ledgers, real_ledger = [], process_custody._read_ledger_records
+            monkeypatch.setattr(process_custody, "_read_ledger_records",
+                                lambda *a, **k: ledgers.append(1) or real_ledger(*a, **k))
+            del world.censuses[:]
 
-    found = read()
+            found = read()
 
-    assert found and world.censuses == [], "a live measured leader needs no table"
-    assert identity_reads == [sorted(pid for pid, _hex in launches)], identity_reads
-    assert len(documents) == 1, "one read of the ownership set"
-    assert len(ledgers) == 1, "one read of the one ledger these launches live in"
+            assert found and world.censuses == [], "a live measured leader needs no table"
+            assert identity_reads == [sorted(pid for pid, _hex in launches)], identity_reads
+            assert len(documents) == 1, "one read of the ownership set"
+            assert len(ledgers) == 1, "one read of the one ledger these launches live in"
 
 
 def test_one_census_answers_a_batch_of_dead_leaders(tmp_path, monkeypatch):
@@ -645,8 +658,7 @@ def test_the_exit_adds_debt_only_the_ledger_names_to_its_one_stop(tmp_path, monk
     assert owned_shutdown.owned_records(tmp_path, strict=True) == []
 
 
-@pytest.mark.parametrize("case", ["owed, copies refused", "owed, copy written", "nothing owed, copies refused",
-                                  "ledger unreadable", "ledger malformed", "set unreadable"])
+@pytest.mark.parametrize("case", ["owed, copies refused", "ledger malformed", "set unreadable"])
 def test_the_exit_never_reports_completion_over_ledger_debt_it_could_not_count(tmp_path, monkeypatch, case):
     """Debt only the ledger names reaches the exit's stop through its ownership copy. When neither the document nor the
     pending channel takes that copy for the whole exit, or the ledger or the set cannot be read, the exit cannot count

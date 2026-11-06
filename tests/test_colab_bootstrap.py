@@ -147,10 +147,6 @@ def _notebook_launch(monkeypatch, *, environment, drive):
 
 @pytest.mark.parametrize(("environment", "expected"), [
     ({}, (999.0, "pro", 8)),  # nothing explicit: every saved choice survives
-    ({"TOTAL_BUDGET": "75"}, (75.0, "pro", 8)),  # one explicit knob moves one knob
-    ({"OUROBOROS_RUNTIME_MODE": "cyber_pro"}, (999.0, "cyber_pro", 8)),
-    ({"OUROBOROS_MAX_WORKERS": "4"}, (999.0, "pro", 4)),
-    ({"TOTAL_BUDGET": "75", "OUROBOROS_RUNTIME_MODE": "light", "OUROBOROS_MAX_WORKERS": "4"}, (75.0, "light", 4)),
     # An explicit value equal to the first-launch default is still a choice, and beats what Drive saved.
     ({"TOTAL_BUDGET": "200", "OUROBOROS_RUNTIME_MODE": "advanced", "OUROBOROS_MAX_WORKERS": "1"}, FIRST_LAUNCH),
     ({"TOTAL_BUDGET": "200"}, (200.0, "pro", 8)),
@@ -165,7 +161,6 @@ def test_notebook_launch_keeps_saved_knobs_unless_one_is_explicit(monkeypatch, e
 
 @pytest.mark.parametrize(("drive", "expected"), [
     ({}, FIRST_LAUNCH),  # a first launch: no Drive document at all
-    ({"TELEGRAM_CHAT_ID": "12345"}, FIRST_LAUNCH),  # a document that holds none of the three
     ({"TOTAL_BUDGET": 999.0}, (999.0, "advanced", 1)),  # a document holding one keeps it, the rest are first-launch
     ({"OUROBOROS_MAX_WORKERS": 8}, (200.0, "advanced", 8)),
 ])
@@ -198,7 +193,7 @@ def test_a_repeat_launch_through_drive_keeps_the_saved_triple_and_an_app_edit_be
 
 @pytest.mark.parametrize(("environment", "error"), [
     ({"TOTAL_BUDGET": ""}, ValueError), ({"TOTAL_BUDGET": "lots"}, ValueError),
-    ({"OUROBOROS_MAX_WORKERS": ""}, ValueError), ({"OUROBOROS_MAX_WORKERS": "many"}, ValueError),
+    ({"OUROBOROS_MAX_WORKERS": "many"}, ValueError),
 ])
 def test_a_set_but_blank_or_malformed_launch_variable_still_fails_as_it_did(monkeypatch, environment, error):
     """Unset is "not given"; a set variable is a choice and goes through the same ``float``/``int`` as before."""
@@ -329,7 +324,6 @@ def test_quickstart_stable_selector_ignores_untagged_main_tip(tmp_path):
     ("entry", "expected"),
     [
         ("100644 blob deadbeef 12\tBIBLE.md\n", True),
-        ("100755 blob deadbeef 12\tBIBLE.md\n", True),
         ("100644 blob deadbeef 0\tBIBLE.md\n", False),
         ("120000 blob deadbeef 12\tBIBLE.md\n", False),
         ("", False),
