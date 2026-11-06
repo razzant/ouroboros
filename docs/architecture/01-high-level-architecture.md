@@ -223,7 +223,7 @@ ouroboros/ — agent core and shared runtime (§6)
   project_handoff.py — the Main transfer receipt owed through the terminal outbox after a durable bind (§3 Project handoff receipts)
   project_dialogue.py — read-only chat lens; append-only `logs/chat_annotations.jsonl` (`ROUTING_RECEIPT_FIELDS`) routes only `needs_manual_target` cards; `routing_refusal_cause` (§3 Chat and Projects)
   room_membership.py, room_appearances.py — canonical stored-row membership and its derived appearance index (§3)
-  owner_words.py — the owner's words that caused a work tree, by value and verbatim for roots, helpers and reviewers
+  owner_words.py — the owner's words for a work: one set, by value, verbatim and dated, for roots, helpers, sessions and reviewers
   project_lease.py — one-writer-per-project lease in `assign_tasks`; same-project swarms exempt (§6 Project registry and lease)
   context.py, context_timing.py — Main context, timing, subagent catalog (§6)
   context_input_selection.py — declared inputs, historical author views (not criteria), first-build overflow rescue (§6 Selected first-input sources; Context fitting)
@@ -306,7 +306,7 @@ ouroboros/ — agent core and shared runtime (§6)
   triad_review.py — shared review primitives: JSON-array extraction, per-actor records, quorum/degraded accounting; `REVIEW_JSON_ARRAY_CONTRACT` (clean is exactly `[]`); `review_output_shape(surface)` is the one form fact
   onboarding_wizard.py, subscription_install_presets.py — Shared desktop/web onboarding bootstrap and validation; pure sibling install compilers from one draft and one discovery snapshot, all-or-nothing (§2)
   settings_setup_contract.py — SSOT for the setup contract, derived bootstrap state, payload validation and `TOTAL_BUDGET` resolver `resolve_total_budget_usd`
-  owner_relay.py — `tell_task` relays: held owner quotes, one atomic mailbox row, the room's `relay_entry`, return addresses (§6 Owner routing verbs)
+  owner_relay.py — `tell_task` relays: held owner quotes, one atomic mailbox row, the room's `relay_entry`, return addresses; `carry_to_members` carries held rows to a tree's live members (§6 Owner routing verbs)
   owner_mailbox.py — per-task user message mailbox: revocation-aware drain, proven-empty peek, closed provenance set
   peer_roster.py — listed queue/direct roots and moved live Presence, hidden included; recorded waits and source-bound `forward_to_worker` mailboxes (§12; §6 Owner routing verbs)
   launcher_bootstrap.py, runtime_venv.py, launcher_onboarding.py — Bootstrap/sync, source-shell handoff and compatibility probe, native host and body interpreter; desktop onboarding on the gateway /onboarding page (§2)

@@ -84,9 +84,7 @@ proof.
 
 `prompts/SYSTEM.md` is tier-0 for every Main and task profile in every context mode. It carries identity and tone, the decision loop,
 cross-tool policy, prohibitions and safety invariants stated once, and the memory
-contract: whole indexes keep active summaries; outlines keep every active address/title
-and people's summaries. Archives remain readable/listable (ARCHITECTURE §6 "Durable memory and project focus").
-A missing carrier stays a visible gap.
+contract (ARCHITECTURE §6 "Durable memory and project focus"). A missing carrier stays a visible gap.
 It never carries how a tool works: parameters, recipes, typed outcomes and "when to
 choose it" belong to the `get_tools()` schemas selected for the acting profile, so
 prompt schema copy drifts and a new tool needs no SYSTEM.md mention. Every prompt change reports its before/after byte size in
@@ -263,7 +261,7 @@ never as `KIND_OWNER_TEXT`; the value lands at three seams in one change
 (`owner_mailbox.TASK_MESSAGE_PROVENANCES`, `deliver_task_message`,
 `loop_round_limits`) and enters no owner corpus (`owner_source_sha256`, the result review's
 ask), because it would let a task author its own request
-(`tests/test_task_authored_messages.py`; ARCHITECTURE §6 "Owner routing verbs").
+(`tests/test_task_authored_messages.py`; ARCHITECTURE §6 "Owner routing verbs"). The converse holds: a host-held owner row stays my human's wherever the host carries it in a tree, by possession of its ingress row, never because a task's text says so; to a receiver it is not addressed to it is context and precedence, never acceptance criteria or a reply debt; an addressed live task that cannot receive the exact row at its next input boundary is an incomplete implementation (`tests/test_helper_owner_words_flow.py`).
 
 ### The owner corpus archives inputs; the owner door's stamp is the only authority
 
