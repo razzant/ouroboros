@@ -744,7 +744,8 @@ def request_sleep(ctx: Any, chosen: Dict[str, Any], mode: str) -> Dict[str, Any]
         if holds:
             return {"reason": "dependency_held", "slept": False, "mode": mode, "held": holds, "note": HOLD_NOTE}
     from ouroboros.sleep_custody import transferable_pairs
-    retains_lane = mode == MODE_WARM
+    from ouroboros.task_carrier import LANE_CONVERSATION, execution_owner
+    retains_lane = mode == MODE_WARM and execution_owner(ctx).get("lane") != LANE_CONVERSATION  # a turn holds none
     if mode == MODE_COLD:
         try:
             _pairs, retains_lane = transferable_pairs(_canonical_root(ctx), str(ctx.task_id))
@@ -767,8 +768,9 @@ def request_sleep(ctx: Any, chosen: Dict[str, Any], mode: str) -> Dict[str, Any]
             if (project_id and row.get("project_id") == project_id
                     and str(row.get("root_task_id") or selected) != tree_id
                     and row.get("status") in {"requested", "scheduled"}):
-                raise ValueError("this sleep retains the project lane needed by the selected queued root; "
-                                 "choose another source or finish the external writer before releasing its lane")
+                raise ValueError("this sleep retains the project lane needed by the selected queued root, so it cannot "
+                                 "start while you wait for it here: wait on another source or end this turn; a cold "
+                                 "sleep releases the lane unless your bound external runs keep it")
     gaps: List[Dict[str, str]] = []
     if mode == MODE_COLD:
         blockers = cold_blockers(ctx, chosen=chosen, allow_transfer=True, gaps=gaps)
@@ -893,10 +895,23 @@ def in_slot_wait(ctx: Any, window_sec: float, target: str = "mail", *, task_ids=
         end_in_slot_wait(ctx, key)
 
 
-def wake_notice(chosen: Dict[str, Any], outcome: str, slept: float | None) -> Dict[str, Any]:
+def resumer_words(by: Any) -> str:
+    """An explicit Resume named from its grant's ``by`` (``budget_resume``); '' when it names nobody."""
+    actor = str(by.get("actor") or "") if isinstance(by, dict) else ""
+    if actor == "owner":
+        return "an explicit Resume by your human"
+    if actor != "ouroboros":
+        return ""
+    reason = " ".join(str(by.get("text") or "").split())  # whole: a resumer's reason is never cut
+    return ("an explicit Resume by Ouroboros" + (f" (task {by['task_id']})" if by.get("task_id") else "")
+            + (f', saying "{reason}"' if reason else ""))
+
+
+def wake_notice(chosen: Dict[str, Any], outcome: str, slept: float | None, by: Any = None) -> Dict[str, Any]:
     """Host facts for the woken model: what woke it — a fact, never a verdict.
 
-    ``slept`` is ``None`` when no sleep start was recorded: no duration is claimed."""
+    ``slept`` is ``None`` when no sleep start was recorded: no duration is claimed. ``by`` is the declared actor of
+    the Resume grant that ended a cold sleep (``budget_resume``); it names that Resume instead of an unnamed control."""
     native = isinstance(chosen.get("task_wait"), dict)  # its result follows in a host notice (``native_task_wait``)
     what = {
         "timeout": "the wake time you chose",
@@ -928,6 +943,8 @@ def wake_notice(chosen: Dict[str, Any], outcome: str, slept: float | None) -> Di
             what = "the owner's message or control"
         else:
             what = outcome or "an unconfirmed input"
+    if (resumer := resumer_words(by)) and (not outcome or outcome.startswith("control:")):
+        what = resumer
     return {"role": "user", "content": (
         "[SYSTEM NOTICE]\nYou slept" + ("" if slept is None else f" {slept:.0f}s")
         + f" ({chosen.get('mode') or 'warm'}) and were woken by {what}. "

@@ -64,8 +64,8 @@ def _reaction_actions(actions: Any) -> list[str]:
 
 # A moved turn's author whose saved work the queue keeps, or may keep (``presence_continuation.continuation_status``).
 _HELD_AUTHOR = {
-    "saved": ("The queue keeps its saved work (the owner's Pause, or a restart's return): it does not run now, "
-              "continues only when the owner resumes it or the queue returns it, and may then still reply. It is not "
+    "saved": ("The queue keeps its saved work (a Pause, or a restart's return): it does not run now, "
+              "continues only when that Pause is resumed or the queue returns it, and may then still reply. It is not "
               "lost; do not redo its work or report it lost."),
     "custody_unknown": ("Its saved work was handed to the queue, but no current read confirms the queue keeps it: it "
                         "is neither confirmed lost nor running, and may still continue and reply."),

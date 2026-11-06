@@ -1086,8 +1086,8 @@ def scheduled_admission_rejection(
         extra = {"root_task_id": str(root_task_id or "")}
     elif reason in {"root_budget_fence", "root_owner_paused"}:
         detail = (
-            "Subagent not scheduled: the owner paused this task tree; it accepts no new "
-            "work until the owner resumes it." if reason == "root_owner_paused" else
+            "Subagent not scheduled: this task tree is paused; it accepts no new "
+            "work until it is resumed." if reason == "root_owner_paused" else
             "Subagent not scheduled: the root budget is paused and requires an "
             "explicit replay-safe resume, cancellation, or a new run."
         )
