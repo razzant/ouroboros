@@ -83,12 +83,21 @@ def _end_pids(*pids) -> None:
             pass
 
 
+def _tracked_facts() -> list:
+    """Each child the tracked registry still names: pid, argv, observed exit and its retained group witness
+    (held, birth), so a failure names the command that left it, wherever in the session it was started."""
+    return [(proc.pid, getattr(proc, "args", None), getattr(proc, "returncode", None),
+             getattr(proc, "__dict__", {}).get("_ouroboros_group_held"),
+             getattr(proc, "__dict__", {}).get("_ouroboros_group_birth")) for proc in list(_active_subprocesses)]
+
+
 @pytest.fixture(autouse=True)
 def _own_cleanup_threads():
     yield
     ps.wait_for_cleanups(15)
     from ouroboros.tools.shell_process import unsettled_tracked_children
-    assert unsettled_tracked_children() is None
+    leaked = unsettled_tracked_children()
+    assert leaked is None, (leaked, _tracked_facts())
 
 
 @pytest.mark.parametrize("task_id", ["t-end", "manual"])
