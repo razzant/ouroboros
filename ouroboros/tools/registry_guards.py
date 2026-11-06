@@ -362,7 +362,7 @@ def disabled_tools_dispatch_only(ctx: Any) -> bool:
 
 _GITHUB_TOKEN_TOOLS = frozenset({"github_read", "github_write", "pr_merge", "submit_skill_to_hub"})
 _NETWORK_BUILTIN_TOOLS = _WEB_TOOLS | _GITHUB_TOKEN_TOOLS | {
-    "vcs_pull_ff", "generate_image", "list_image_models", "recover_image",
+    "vcs_pull_ff", "generate_image", "list_image_models", "recover_image", "remote_mcp_sign_in",
 }
 
 

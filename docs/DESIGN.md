@@ -342,8 +342,8 @@ Two failure modes this table exists to prevent, both observed in this codebase:
 
 The brand red is **one value**, `--accent`. Every appearance of it is either
 that token, the named roles built on it (`--accent-light` for accent text, the crimson ink on light,
-`--accent-dim` for a fill, `--focus-accent-border` / `--focus-accent-ring` for
-focus), or a rung of the accent alpha ladder (`--accent-04` … `--accent-55`; in the light theme the crimson tone
+`--focus-accent-border` / `--focus-accent-ring` for focus), or a rung of the accent alpha ladder
+(`--accent-08` … `--accent-55`, fills included; in the light theme the crimson tone
 and its hover are `--accent-10` and `--accent-14`, while the dark theme's crimson tones are opaque fills of their own,
 listed in the seed table).
 A new alpha is a rung added to the ladder, never an `rgba()` literal in a rule:
@@ -2137,8 +2137,10 @@ this device" only when the browser marks it local, otherwise "Online voice".
 
 Live Conversation keeps the glass wave, phone controls and collapsed transcript.
 Talk occupies empty Send only when Calls (beta) is enabled and the server confirms
-the selected engine is loaded and its credential grants are current. Text or a
-file restores equal-width Send; empty Enter never calls. The dictation mic hides
+the selected engine is loaded and its credential grants are current. Until a page's
+first read answers, the answer this device last got stands from the first frame; a
+device without one (new, or its storage blocked) shows Send until that read. Text or
+a file restores equal-width Send; empty Enter never calls. The dictation mic hides
 during the call and returns with the draft intact. The glass keeps the composer's
 fixed corner as it becomes a card; End remains visible in phone and keyboard
 views. A model without vision hides Show and says, “This voice engine does not
