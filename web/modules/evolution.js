@@ -59,6 +59,7 @@ function shortStatusLabel(status, fallback = 'off') {
     if (status === 'budget_blocked' || status === 'budget_stopped') return 'budget';
     if (status === 'error_backoff') return 'retrying';
     if (status === 'stopped') return 'stopped';
+    if (status === 'starting') return 'starting';  // the boot window (consciousness_view): no alarm, a neutral tone
     return fallback;
 }
 

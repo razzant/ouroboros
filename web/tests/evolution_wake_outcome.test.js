@@ -31,7 +31,8 @@ test('enabled consciousness keeps historical pause and unknown wake outcomes vis
         // one is neutral too (a green dot over a wake that has not started said success, U071).
         for (const [next, label, tone] of [['wake_paused', 'paused', 'neutral'],
             ['wake_outcome_unknown', 'unknown', 'neutral'], ['sleeping', 'sleeping', 'neutral'], ['due', 'due', 'neutral'],
-            ['thinking', 'thinking', 'ok'], ['future_status', 'off', 'neutral'], ['disabled', 'off', 'neutral']]) {
+            ['thinking', 'thinking', 'ok'], ['starting', 'starting', 'neutral'], ['future_status', 'off', 'neutral'],
+            ['disabled', 'off', 'neutral']]) {
             status = next;
             ws.emit('open');
             await flush();
