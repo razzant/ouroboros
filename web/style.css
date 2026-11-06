@@ -10715,8 +10715,10 @@ body.keyboard-open .secret-request-backdrop .secret-request-dialog {
 .chat-panel-statusbar { flex-wrap: wrap; gap: var(--space-2) var(--space-1); }
 .chat-live-executor-chip { max-width: 100%; white-space: normal; }
 .chat-live-meta-text, .chat-live-executor-chip .harness-identity-label { overflow-wrap: anywhere; }
-.chat-bubble .message:not(:has(> *)),
-.chat-bubble .message > :is(p:not(:has(img, video)), ul, ol, blockquote, .md-h1, .md-h2, .md-h3) {
+/* A reading measure for the owner's bubbles; the left voice's prose takes the feed's one measure (--feed-measure,
+   ~75 characters at its widest), so a long answer ends on the work cards' edge (U009). */
+.chat-bubble:not(.assistant, .system) .message:not(:has(> *)),
+.chat-bubble:not(.assistant, .system) .message > :is(p:not(:has(img, video)), ul, ol, blockquote, .md-h1, .md-h2, .md-h3) {
     max-inline-size: 72ch;
 }
 
