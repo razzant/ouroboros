@@ -225,7 +225,7 @@ _ACTIVE_LOCAL_KEYS = (
 
 _BUDGET_NOTE = (
     "Spending limits use known spend only: confirmed and estimated prices count toward the applicable limit; "
-    "known $0 local calls are priced at $0 and do not use the limit. Unpriced calls stay Unknown / unmetered "
+    "known $0 local calls are priced at $0 and do not use the limit. Unpriced calls stay without a price "
     "and are not counted as $0: they add nothing to known spend, so unpriced spending alone never triggers a limit. "
     "Open reservations and unresolved charges are not counted as spending. The Total Budget covers all work: once "
     "known spend reaches it, new paid calls are refused, API calls with an unknown price included, while known $0 "

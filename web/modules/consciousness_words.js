@@ -2,6 +2,7 @@ import { tr, fmt } from './i18n.js';
 import { taskPresentation } from './log_events.js';
 import { taskCostMeta } from './chat_activity.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
+import { formatUsdKnown } from './utils.js';
 
 /** The same account stamp on wake and delivery rows; account names remain authored. */
 export function sendsAsHtml(sender) {
@@ -152,12 +153,7 @@ export function placeScopeText(place) {
 }
 
 /** A dollar amount as Costs writes it; an absent amount is the dash, never $0.00. */
-export function usdText(value) {
-    if (value === null || value === undefined || value === '') return '—';
-    const number = Number(value);
-    if (!Number.isFinite(number)) return '—';
-    return `$${number < 0.01 && number > 0 ? number.toFixed(4) : number.toFixed(2)}`;
-}
+export const usdText = (value) => formatUsdKnown(value);
 
 /** «12:40» in the viewer's clock, or '' for an absent or unreadable instant. */
 export function clockText(value) {
