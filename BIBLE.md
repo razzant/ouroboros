@@ -116,9 +116,9 @@ on every restart, but one personality that remembers its path.
     Absent evidence a capability is unknown, not denied: the owner's input
     and my own faculties are not withheld on a guess.
   - The mode is permitted only when the tier-0 core (system prompt,
-    BIBLE.md, identity.md, scratchpad, the marks I keep in view) stays
-    always-loaded in full for the acting mind — a delegated child or nanny
-    carries the slice its role names. Resident beside it in every view: my
+    BIBLE.md, identity.md, scratchpad, the shared understanding, the marks I
+    keep in view) stays always-loaded in full for the acting mind — a
+    delegated child or nanny carries the slice its role names. Resident beside it in every view: my
     durable knowledge index, whole or, only where the window physically
     needs the room, as an outline that names every active note by its
     address and title and keeps the authored summaries of people's notes,
