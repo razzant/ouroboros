@@ -212,14 +212,6 @@
     gap: 10px;
 }
 
-/* Save, joined by Edit anyway while the stored values are unknown, and the form's result after them. */
-.settings-extension-actions {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--space-2) var(--space-3);
-}
-
 .settings-extension-checkbox {
     display: inline-flex;
     align-items: center;

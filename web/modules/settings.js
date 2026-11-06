@@ -34,7 +34,7 @@ import { claudexorStatus } from './claudexor_status_store.js';
 import { createModelRolesEditor } from './model_roles.js';
 import { PROCESSING_PREFERENCE_KEY } from './route_editor_primitives.js';
 import { collectSafeFieldValues, normalizeTone, renderSafeField, setInlineStatus, revealNewRow, copyTextWithToast } from './ui_helpers.js';
-import { setResult } from './ui_primitives.js';
+import { clearResultOnEdit, setResult } from './ui_primitives.js';
 import { extensionActionStatus } from './extension_status_text.js';
 import { bindLanguageSettings } from './settings_language.js';
 import { mountInterfaceSize } from './interface_size.js';
@@ -339,11 +339,11 @@ export async function renderExtensionSettingsSections(root, sections, { isCurren
                 <form class="settings-extension-form" data-extension-settings-form data-extension-settings-key="${escapeHtml(formKey)}" data-skill="${escapeHtml(section.skill || '')}" data-route="${escapeHtml(rawRoute)}"${failed || unread ? ' data-extension-settings-blocked="1"' : ''}>
                     ${unread ? `<div class="settings-inline-status" data-extension-settings-read data-tone="${normalizeTone('warn')}">${escapeHtml(EXTENSION_VALUES_UNAVAILABLE)}</div>` : ''}
                     <div class="form-grid two">${fields.map((field) => renderSafeField(field, values, fieldOptions)).join('')}</div>
-                    <div class="settings-extension-actions">
-                        <button class="btn btn-primary btn-sm" type="submit"${disabled || failed || unread ? ' disabled' : ''}>${escapeHtml(component.submit_label || component.label || 'Save')}</button>
-                        ${unread ? '<button class="btn btn-default btn-sm" type="button" data-extension-settings-edit-anyway>Edit anyway</button>' : ''}
+                    <div class="settings-extension-actions ui-action-row">
+                        <button class="btn ${type === 'form' ? 'btn-save' : 'btn-primary'}" type="submit"${disabled || failed || unread ? ' disabled' : ''}>${escapeHtml(component.submit_label || component.label || 'Save')}</button>
+                        ${unread ? '<button class="btn btn-default" type="button" data-extension-settings-edit-anyway>Edit anyway</button>' : ''}
+                        <div class="ui-result" data-extension-settings-status${failed ? ` data-tone="${normalizeTone('warn')}"` : ''}>${failed ? escapeHtml(EXTENSION_VALUES_UNREADABLE) : ''}</div>
                     </div>
-                    <div class="settings-inline-status" data-extension-settings-status${failed ? ` data-tone="${normalizeTone('warn')}"` : ''}>${failed ? escapeHtml(EXTENSION_VALUES_UNREADABLE) : ''}</div>
                 </form>
             `;
         }
@@ -366,6 +366,9 @@ export async function renderExtensionSettingsSections(root, sections, { isCurren
         `;
     }).join('');
     host.querySelectorAll('[data-extension-settings-form]').forEach((form) => {
+        // An edit clears the form's last result; a warning that its stored values are unreadable is a current fact and stays.
+        const result = form.querySelector('[data-extension-settings-status]');
+        if (!result?.textContent) clearResultOnEdit(form, result);
         // The owner's explicit choice to send this form without its stored values: it unlocks
         // the fields the schema does not disable, and Save sends every one of them as before.
         form.querySelector('[data-extension-settings-edit-anyway]')?.addEventListener('click', (event) => {
@@ -397,7 +400,7 @@ export async function renderExtensionSettingsSections(root, sections, { isCurren
                 button.disabled = true;
                 button.textContent = spec.busy_label || 'Saving…';
             }
-            setInlineStatus(status, 'Saving...', 'muted');
+            setResult(status, { text: 'Saving…', tone: 'muted' });
             try {
                 const cleanRoute = cleanExtensionRoute(route);
                 if (!cleanRoute) throw new Error('invalid extension settings route');
@@ -409,12 +412,12 @@ export async function renderExtensionSettingsSections(root, sections, { isCurren
                 const data = await resp.json().catch(() => ({}));
                 if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
                 const outcome = extensionActionStatus(data);
-                setInlineStatus(status, outcome.text, outcome.tone);
+                setResult(status, { ...outcome, ends: outcome.tone === 'ok' });
                 if (data.ok !== false) globalThis.window?.dispatchEvent(new CustomEvent('ouro:settings-updated', {
                     detail: { reason: 'extension settings saved', source: 'settings', skill, route },
                 }));
             } catch (err) {
-                setInlineStatus(status, err.message || String(err), 'danger');
+                setResult(status, { text: err.message || String(err), tone: 'danger' });
             } finally {
                 pendingExtensionSettings.delete(requestKey);
                 if (button) {
