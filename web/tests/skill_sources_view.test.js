@@ -21,7 +21,7 @@ const FIXTURE_NOW = Date.parse('2026-10-17T15:10:00Z');
 test('the official hub row carries the Official glyph; the folder row says Folder; counts come from the catalog', (t) => {
     t.mock.timers.enable({ apis: ['Date'], now: FIXTURE_NOW });
     const official = renderSourceRow(source('ouroboros'), { items: items('ouroboros'), health: health('ouroboros') });
-    assert.match(official, /<strong>Ouroboros<\/strong><button type="button" class="skills-mark"/);
+    assert.match(official, /<strong>Ouroboros<\/strong><button type="button" class="skills-mark ui-hit-area"/);
     assert.match(text(official), /github\.com\/razzant\/OuroborosHub at main · 4 skills · read 12 min ago/);
     assert.match(text(official), /The Ouroboros project’s own skills, marked Official by its maintainer\./);
     const community = renderSourceRow(source('ouroboros-community'), { items: items('ouroboros-community'), health: health('ouroboros-community') });

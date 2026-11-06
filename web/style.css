@@ -895,6 +895,13 @@ html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis
     color: var(--text-primary);
 }
 
+/* The location's folders wrap on a phone inside a row that clips (overflow: hidden), so under a finger each folder
+   takes the touch minimum as its own height rather than a reach the row would cut. */
+@media (pointer: coarse) {
+    .files-breadcrumb { align-items: center; }
+    .files-crumb { min-height: var(--touch-target-min); }
+}
+
 .files-crumb-sep {
     color: var(--text-muted);
     font-size: 12px;
@@ -1349,6 +1356,11 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 }
 .app-tab-strip[data-scroll-start] { --tab-fade-start: var(--space-4); }
 .app-tab-strip[data-scroll-end] { --tab-fade-end: var(--space-4); }
+/* A strip that scrolls clips a reach, so under a finger its tabs take the touch minimum as their own height (the
+   control token; the lock writes the box). */
+@media (pointer: coarse) {
+    .app-tab-strip { --control-h: var(--touch-target-min); }
+}
 
 .app-tab-strip::-webkit-scrollbar {
     display: none;
@@ -5367,6 +5379,11 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     background: var(--bg-primary);
 }
 
+/* The filter chips wrap on a phone: under a finger they take the touch minimum as their own height. */
+@media (pointer: coarse) {
+    .logs-filters { --control-h: var(--touch-target-min); }
+}
+
 .logs-inline-clear {
     margin-left: auto;
 }
@@ -5583,6 +5600,11 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .evo-campaign-actions { --control-h: auto; --control-pad-y: var(--space-2);
     display: flex; flex-wrap: wrap; gap: var(--space-2); max-width: 100%; margin-inline-start: auto; }
 .evo-campaign .evo-campaign-actions .btn { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+/* The verbs wrap onto rows of their own on a phone: under a finger each takes the touch minimum as its height (two
+   lines of a long label still fit). */
+@media (pointer: coarse) {
+    .evo-campaign-actions { --control-h: var(--touch-target-min); --control-pad-y: 0px; }
+}
 .evo-campaign :is(.evo-meta, .ui-status) { overflow-wrap: anywhere; }
 @container (max-width: 420px) {
     .evo-campaign-actions { margin-inline-start: 0; }
@@ -5598,6 +5620,10 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .evo-story-status .ui-status { margin: 0; }
 .evo-progress { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .evo-measures { --control-h: var(--control-h-sm); display: flex; flex-wrap: wrap; gap: 6px; }
+/* The measures wrap on a narrow card: under a finger they take the touch minimum as their own height. */
+@media (pointer: coarse) {
+    .evo-measures { --control-h: var(--touch-target-min); }
+}
 .evo-measures-sep { width: 1px; align-self: stretch; margin: 0; background: rgba(var(--neutral-rgb), 0.12); }
 .evo-quiet { --control-pad-x: var(--space-2); }
 .evo-quiet svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
@@ -5639,6 +5665,10 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .evo-detail-top .evo-meta { flex: 1 1 auto; min-width: 0; }
 .evo-detail-version { color: var(--text-primary); font-size: var(--type-meta); font-weight: 600; font-variant-numeric: tabular-nums; }
 .evo-detail-nav { display: flex; gap: 2px; margin-left: auto; }
+/* Under a finger the two arrows part by their sideways reaches. */
+@media (pointer: coarse) {
+    .evo-detail-nav { gap: var(--space-3); }
+}
 .evo-detail-title { margin: 0; color: var(--text-primary); font-size: var(--type-section); line-height: var(--line-title); font-weight: 600; overflow-wrap: anywhere; }
 .evo-detail-lead { margin: 0; max-width: 68ch; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
 /* A tag annotation's body keeps its author's lines (its bullets); a README row has none. */
@@ -6061,6 +6091,11 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .activity-lines { display: grid; gap: 2px; }
 /* A row's one Details (the whole order, a schedule's codes) takes the row's full width under its words. */
 .activity-row > .activity-details { grid-column: 1 / -1; min-width: 0; }
+/* Under a finger the row's small actions (each with its reach) and the Details summary under them part by more than
+   that reach, so a tap just under Stop… or Delete never opens Details. */
+@media (pointer: coarse) {
+    .activity-row > .activity-details { margin-top: var(--space-3); }
+}
 .activity-order,
 .activity-facts { margin: 0; overflow-wrap: anywhere; }
 .activity-order { color: var(--text-secondary); font-size: var(--type-body); line-height: var(--line-body); }
@@ -6180,6 +6215,10 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 .activity-history > summary::-webkit-details-marker {
     display: none;
+}
+/* Under a finger the fold's words are the touch minimum tall, like a shared disclosure's (ui.css "Touch reach"). */
+@media (pointer: coarse) {
+    .activity-history > summary { min-height: var(--touch-target-min); }
 }
 
 .activity-history > summary::before {
@@ -6342,6 +6381,12 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     min-width: 0;
 }
 .skills-head-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); min-width: 0; }
+/* A head that wraps (a long name, its marks on the next line) parts its lines under a finger by the two reaches between
+   them (a name's and a mark's overshoot, together less than the touch minimum less --space-4), so neither covers the
+   other; a head on one line is unchanged. */
+@media (pointer: coarse) {
+    .skills-head-title { row-gap: calc(var(--touch-target-min) - var(--space-4)); }
+}
 .skills-card-marks { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); }
 .skills-card-name {
     padding: 0;
@@ -6532,14 +6577,27 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 .skills-filter-strip,
 .skills-category-strip { display: flex; flex-wrap: wrap; gap: 2px var(--space-1); min-width: 0; }
 /* On a phone the filters and the categories are one line that scrolls sideways ([data-scroll-x]: the drawer's swipe
-   leaves it to the strip), never a lone chip wrapped onto a second row. */
+   leaves it to the strip), never a lone chip wrapped onto a second row. Like a tab strip it fades on each side that
+   still hides chips (scroll_fade.js sets the edges), and under a finger its chips take the touch minimum as their own
+   height, since the strip clips a reach. */
 html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip) {
     flex-wrap: nowrap;
     overflow-x: auto;
     overscroll-behavior-x: contain;
     scrollbar-width: none;
+    --strip-fade-start: 0px;
+    --strip-fade-end: 0px;
+    -webkit-mask-image: linear-gradient(to right, transparent, black var(--strip-fade-start),
+        black calc(100% - var(--strip-fade-end)), transparent);
+    mask-image: linear-gradient(to right, transparent, black var(--strip-fade-start),
+        black calc(100% - var(--strip-fade-end)), transparent);
 }
+html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)[data-scroll-start] { --strip-fade-start: var(--space-4); }
+html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)[data-scroll-end] { --strip-fade-end: var(--space-4); }
 html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-webkit-scrollbar { display: none; }
+@media (pointer: coarse) {
+    html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip) { --control-h: var(--touch-target-min); }
+}
 .skills-filter-strip { flex-basis: 100%; margin-left: calc(-1 * var(--space-2)); }
 .skills-category-strip { margin: 0 0 var(--space-3) calc(-1 * var(--space-2)); }
 .skills-category-strip[hidden] { display: none; }
@@ -6634,6 +6692,10 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
 }
 .skills-trust-value.is-suggested { color: var(--status-warn-fg); }
 .skills-sources-foot p { margin: var(--space-2) 0 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+/* Under a finger the two lines' links part by their reaches (each line's link grows to the touch minimum). */
+@media (pointer: coarse) {
+    .skills-sources-foot p + p { margin-top: var(--space-5); }
+}
 @container skillspane (max-width: 600px) {
     .skills-source-row { grid-template-columns: minmax(0, 1fr); grid-template-areas: "main" "meta" "actions"; }
     .skills-source-actions { justify-content: space-between; }
@@ -7002,6 +7064,12 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
     align-items: center;
     gap: 4px;
 }
+/* Under a finger the pair parts by the two reaches (8px each side of a 28px capsule), so neither covers the other, and
+   the head's lines (the pair over Start) part the same way when they wrap. */
+@media (pointer: coarse) {
+    .widgets-card-tools { gap: var(--space-4); }
+    .widgets-card-controls { row-gap: var(--space-4); }
+}
 
 .widgets-card-controls .ui-status:not([hidden]) {
     display: inline-flex;
@@ -7025,6 +7093,10 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
 .widgets-card[data-widget-narrow] .widgets-card-title { grid-column: 1; grid-row: 1; }
 .widgets-card[data-widget-narrow] .widgets-card-tools { grid-column: 2; grid-row: 1; align-self: start; }
 .widgets-card[data-widget-narrow] .widgets-card-run { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; }
+/* Under a finger the lifecycle row parts from ⋮ and ↕ above it by the two small capsules' reaches. */
+@media (pointer: coarse) {
+    .widgets-card[data-widget-narrow] .widgets-card-head { row-gap: var(--space-4); }
+}
 
 .widgets-menu-heading {
     padding: 4px 10px 6px;
@@ -7192,6 +7264,11 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
     display: flex;
     flex-direction: column;
     gap: 10px;
+}
+/* An action (or a poll's button) under a form or under another action parts from it under a finger by the two
+   buttons' reaches. */
+@media (pointer: coarse) {
+    :is(.widget-action, [data-widget-poll]) { margin-top: var(--space-3); }
 }
 
 .widget-form-fields {
@@ -8522,6 +8599,10 @@ body.keyboard-open .project-panel {
 }
 .settings-disclosure[hidden] { display: none; }
 .settings-disclosure:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+/* Under a finger it is a disclosure's summary: its words are the touch minimum tall, standing in their own place. */
+@media (pointer: coarse) {
+    .settings-disclosure { min-height: var(--touch-target-min); margin-block: 0; }
+}
 @media (hover: hover) {
     .settings-disclosure:hover { background: var(--tone-quiet-hover); }
 }
@@ -10490,10 +10571,12 @@ body.keyboard-open .secret-request-backdrop .secret-request-dialog {
 @media (prefers-reduced-motion: reduce) {
     .chat-field > .chat-quote--composer[data-motion] { transition: none; }
 }
-/* A finger needs the shared touch target on the controls these blocks add (the clamp toggle, the doubt's actions, a
-   question's recovery row, which wraps on a phone, so an invisible reach would cover its neighbour's words);
-   the time under the doubt's actions then keeps clear of the Reply / Copy targets that sit on its line. */
+/* A finger needs the shared touch target on the controls these blocks add: the doubt's actions and a question's
+   recovery row wrap on a phone, so their buttons take the minimum as their own height through the control tokens
+   (an invisible reach would cover a neighbour; audit №4, owner 2026-10-28), while the clamp toggle keeps its look and
+   its reach; the time under the doubt's actions then keeps clear of the Reply / Copy targets that sit on its line. */
 @media (pointer: coarse) {
+    :is(.msg-pending, .chat-quiz-feedback) { --control-h: var(--touch-target-min); --control-h-sm: var(--touch-target-min); }
     .chat-bubble:is(.has-reply, .has-copy) > .msg-pending:has(.btn):has(+ .msg-time) { margin-bottom: var(--space-3); }
 }
 

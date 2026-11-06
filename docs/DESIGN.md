@@ -3102,11 +3102,11 @@ applies only where a pointer can hover (`@media (hover: hover)`).
 the invisible hit area of the one `.ui-hit-area` recipe in `web/ui.css`, which a
 link inside a sentence takes too so the sentence keeps its lines. A chevron is an
 element (the Reviews door's), so a control's `::after` stays the recipe's; a row
-that wraps on a phone (a question's recovery) gives its buttons the minimum as
-their own height, so no reach covers a neighbour (audit №4, owner
-2026-10-28T22:09Z). Inside a strip
-that scrolls (a capsule's open levels on a narrow phone) a value keeps only its drawn
-height, since the strip clips that reach. Nothing that acts is hidden until hover
+that wraps on a phone (a question's recovery, an account's actions) and a strip of
+tabs or chips that scrolls give their controls the minimum as their own height, so no
+reach covers a neighbour or is clipped (audit №4, owner 2026-10-28T22:09Z); so do a
+disclosure's summary and a field. In a capsule's open levels on a narrow phone a value
+keeps only its drawn height. Nothing that acts is hidden until hover
 there (a Project row's menu is reached by its long press).
 No page scrolls sideways at any width; only code, tables, tab strips and a bar's
 Files location scroll sideways, inside themselves, with a fade where content

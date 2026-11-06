@@ -53,6 +53,12 @@
    summary); its name and value are one span (one word space after the "·"), the value in meta ink. padding-inline cancels the 14px that .wizard-collapse summary
    leaks onto the nested Available subagents / Reviewers summaries. */
 .model-role-details > summary { padding-block: var(--space-1); padding-inline: 0; }
+/* Under a finger the narrow ↑ and ↓ part by their two sideways reaches, and a row's Details stands below its controls'
+   reach, so no target covers its neighbour. */
+@media (pointer: coarse) {
+    .model-role-order { gap: var(--space-4); }
+    .model-role-details { margin-top: var(--space-2); }
+}
 .model-role-details > summary [data-processing-summary] { display: inline-block; color: var(--text-meta); }  /* moves to the next line whole */
 .model-role-editor button:focus-visible {
     outline: 2px solid var(--focus-accent-border);

@@ -1279,7 +1279,10 @@ textarea.ui-control { resize: vertical; }
    --space-2). The one recipe, inset by the one --ui-hit-inset: the shared control families carry it by selector, a
    page's own small control adds .ui-hit-area, style.css gives a page's links the same extension, and in the product
    documents every disclosure's summary has it (a summary that draws its own ::after caret keeps it: that rule is as
-   specific and later). */
+   specific and later). Where a reach would cover a neighbour or be clipped, the minimum is the control's own height
+   instead (DESIGN "Touch and containment"): a row that wraps on a phone and a strip that scrolls set it through the
+   control tokens on their scope (--control-h, and --control-h-sm for the small capsules in it; the lock writes the
+   box); a disclosure's summary, words without a body, takes it below, and so does a field. */
 .ui-hit-area, .btn, .app-tab, .filter-chip, .theme-choice, .ui-segment,
 :root:where(.ouro-ui) summary { position: relative; }
 @media (pointer: coarse) {
@@ -1289,6 +1292,11 @@ textarea.ui-control { resize: vertical; }
         position: absolute;
         inset: var(--ui-hit-inset);
     }
+    /* A disclosure stacked under controls or under another one: its line of words is the minimum tall, so its reach
+       covers neither (its look stays a line: the summary has no body). A field is a target too, and a native select
+       cannot carry the ::after. */
+    details.ui-disclosure > summary,
+    .ui-control { min-height: var(--touch-target-min); }
 }
 
 .ui-chrome-group {

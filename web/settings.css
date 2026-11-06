@@ -391,6 +391,16 @@
     align-items: center;
     gap: 10px;
 }
+/* Rows that wrap on a phone (a toolbar, a secret's buttons, an account's actions and its resources, a segmented scale):
+   under a finger their controls take the touch minimum as their own height through the control tokens (the lock
+   writes the box), so no reach covers a neighbour (DESIGN "Touch and containment"). */
+@media (pointer: coarse) {
+    :is(.settings-toolbar, .secret-input-row, .harness-account-actions, .account-resource-panel, .settings-effort-group,
+        .settings-extension-actions, .harness-maintenance-actions) {
+        --control-h: var(--touch-target-min);
+        --control-h-sm: var(--touch-target-min);
+    }
+}
 
 /* One reader left, outside Settings: the Skills › Browse cards (skill_browse.js). Settings and Dashboard › Updates
    compose ui.css .ui-action-row; this goes with its last reader, once Skills composes the shared row too. */

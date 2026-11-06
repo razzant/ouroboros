@@ -69,7 +69,7 @@ test('the Official promise is bound to the source that set it and follows its tr
     const trusted = officialPromise({ name: 'Ouroboros', url: 'https://github.com/razzant/OuroborosHub', trust: 'trusted' });
     assert.equal(trusted, 'Official — the maintainer of Ouroboros vouches for this exact version. It comes from the Ouroboros source (github.com/razzant/OuroborosHub), so it installs without review while you trust that source.');
     assert.match(officialPromise({ name: 'Ouroboros', trust: 'review' }), /Ouroboros still reviews it, because you chose to review each skill/);
-    assert.match(officialMarkHtml(), /^<button type="button" class="skills-mark" data-mark="official" data-official-mark aria-haspopup="dialog">/);
+    assert.match(officialMarkHtml(), /^<button type="button" class="skills-mark ui-hit-area" data-mark="official" data-official-mark aria-haspopup="dialog">/);
     assert.match(officialMarkHtml({ control: false }), /^<span class="skills-mark"/);
     assert.match(officialMarkHtml({ sourceId: 'builtin' }), /data-official-source="builtin"/);
     assert.match(officialMarkHtml({ sourceId: 'x"<y' }), /data-official-source="x&quot;&lt;y"/);

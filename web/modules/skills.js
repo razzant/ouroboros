@@ -22,6 +22,7 @@ import {
 import { plural, popularityText, repoLabel, routeExternalLink, skillTitle, versionText } from './skill_presentation.js';
 import { runSkillPublishFlow } from './skill_publish_flow.js';
 import { installedTime } from './ui_helpers.js';
+import { bindScrollFade } from './scroll_fade.js';
 import {
     boundedText, emitSkillLifecycle, escapeHtmlAttr as escapeHtml, grantReady, renderSkillRepairPrompt,
     reviewTone, reviewReady,
@@ -284,6 +285,7 @@ export function initSkills(ctx = {}) {
     const emptyEl = document.getElementById('skills-empty');
     const filterEmpty = document.getElementById('skills-filter-empty');
     const filtersEl = document.getElementById('skills-installed-filters');
+    if (filtersEl) bindScrollFade(filtersEl, { axis: 'x' });  // a phone's one scrolling line fades where chips hide
     const searchInput = document.getElementById('skills-installed-search');
     const refreshBtn = document.getElementById('skills-refresh');
     const updateAllBtn = document.getElementById('skills-update-all');

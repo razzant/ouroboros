@@ -29,7 +29,7 @@ function skill(overrides = {}) {
 
 test('one head: the name opens the detail sheet, marks stay beside it, the who line names the source', () => {
     const html = renderInstalledSkillCard(row('weather'));
-    assert.match(html, /<button type="button" class="skills-card-name" data-skill="weather" data-skill-action="open_detail"><span data-i18n-authored>weather<\/span><span class="skills-card-name-more" aria-hidden="true">›<\/span><\/button>/);
+    assert.match(html, /<button type="button" class="skills-card-name ui-hit-area" data-skill="weather" data-skill-action="open_detail"><span data-i18n-authored>weather<\/span><span class="skills-card-name-more" aria-hidden="true">›<\/span><\/button>/);
     assert.match(html, /data-official-mark[^>]*>[\s\S]*?Official<\/button>/, 'Official comes from the install record');
     assert.match(installedWhoHtml(row('weather')), /^Ouroboros · v0\.3\.1 · installed .* by Ouroboros$/);
     assert.match(installedWhoHtml(row('telegram')), /^Built in · v1\.3\.0 · came with Ouroboros /);

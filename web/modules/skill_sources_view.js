@@ -117,8 +117,8 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
                 <div class="skills-source-rows">${sources.map((source) => renderSourceRow(source, { items: items.get(source.id) || [], health: health.get(source.id) })).join('')}</div>
             </section>
             <div class="skills-sources-foot">
-                <p>Skills made on this computer${host.installedSkills() ? ` (${madeHere})` : ''} don’t come from a source. <button type="button" class="skills-link-quiet" data-source-action="made_here">Publish one to share it ›</button></p>
-                <p>Automatic keys for skills that may run: <button type="button" class="skills-link-quiet" data-source-action="behavior">Settings → Behavior ›</button></p>
+                <p>Skills made on this computer${host.installedSkills() ? ` (${madeHere})` : ''} don’t come from a source. <button type="button" class="skills-link-quiet ui-hit-area" data-source-action="made_here">Publish one to share it ›</button></p>
+                <p>Automatic keys for skills that may run: <button type="button" class="skills-link-quiet ui-hit-area" data-source-action="behavior">Settings → Behavior ›</button></p>
             </div>`;
     }
 
