@@ -2507,8 +2507,9 @@ or its host page, and a checked box is not re-said beside it. A conditional line
 moves the control that caused it.
 
 The result of an action sits in the row of its control, right after it, on a line
-the row keeps for it, so a late result moves nothing: never under the button, never
-at the far end. It ends as §4 says, and an edit in the same subject clears it.
+the row keeps for it, so a late result moves nothing: never glued under the button,
+never at the far end; a row too narrow for both gives it its own line, the row's gap
+apart. It ends as §4 says, and an edit in the same subject clears it.
 Long content stays whole.
 
 Rows of the same kind are equivalent: no row gets extra visual weight for
