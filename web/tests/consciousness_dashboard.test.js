@@ -737,6 +737,22 @@ test('a first read that fails names the error without claiming earlier values', 
     assert.match(mount.querySelector('[data-cx-wakes]').innerHTML, /Recent wakes could not be read: HTTP 500/);
 });
 
+test('a read that never reached Ouroboros says so in owner words; a server answer keeps its own', async (t) => {
+    const cleanups = [];
+    const { mount } = setup({ after: cleanup => cleanups.push(cleanup) });
+    let controller;
+    t.after(() => { controller?.destroy(); cleanups.forEach(cleanup => cleanup()); });
+    controller = initConsciousnessDashboard({ mount, state: { activePage: 'chat' },
+        read: async () => { throw new TypeError('Load failed'); },
+        readFallback: async () => { throw new TypeError('Load failed'); },
+        readPlacesFn: async () => { throw new TypeError('Load failed'); } });
+    await controller.refresh();
+    const said = mount.querySelector('[data-cx-status]').textContent + mount.querySelector('[data-cx-places]').textContent;
+    assert.match(said, /Could not read consciousness: Couldn't reach Ouroboros\.(?!\.)/, 'one full stop, never two');
+    assert.match(said, /Places could not be read: Couldn(?:'|&#39;)t reach Ouroboros\./);
+    assert.doesNotMatch(said, /Load failed/, "the browser's transport text is never the sentence");
+});
+
 test('Safety chips name what they checked in sentence case, keeping raw tool ids as they are', () => {
     assert.equal(wakeCheckText({ chip: 'warned', tool: 'place_reply' }), 'Safety Supervisor warned about the reply');
     assert.equal(wakeCheckText({ chip: 'sent_despite', tool: 'place_reply' }), 'The reply sent despite the check');

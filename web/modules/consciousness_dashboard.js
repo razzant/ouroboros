@@ -9,7 +9,7 @@ import { statusMarkHtml } from './status_mark.js';
 import { controlIcon } from './page_icons.js';
 import { chipHtml, skillIconHtml } from './skill_presentation.js';
 import { tr, fmt } from './i18n.js';
-import { PLACES_CHANGED_EVENT, readConsciousness, readConsciousnessFromState, readPlaces } from './consciousness_api.js';
+import { PLACES_CHANGED_EVENT, failureText, readConsciousness, readConsciousnessFromState, readPlaces } from './consciousness_api.js';
 import { getContributions } from './contributions.js';
 import { CHECK_CHIPS, allowanceText, clockText, consciousnessMark, splitWakes, durationText, placeStatusText, sendsAsHtml, usdText, wakePhaseText, wakeFactsText, wakeCheckChip, wakeCheckText, wakeCostText } from './consciousness_words.js';
 import { mountChatMarkdown, enhanceChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
@@ -309,7 +309,7 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettingsTab, 
                 places = data.places; placesError = '';
             } catch (error) {
                 if (destroyed || current !== placesGeneration) return;
-                placesError = fmt('Places could not be read: {reason}', { reason: error?.message || error });
+                placesError = fmt('Places could not be read: {reason}', { reason: failureText(error) });
             }
             paint();
         })().finally(() => { if (current === placesGeneration) placesPending = null; });
@@ -329,17 +329,19 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettingsTab, 
         try { next = await read(); } catch (error) {
             // A server without the panel (404) is read from its state; any other failure keeps the painted rows and says so.
             const served = error?.status !== 404;
-            if (served) readError = error?.message || String(error);
+            if (served) readError = failureText(error);
             try {
                 const state = await readFallback();
                 next = served ? { ...state, recentWakes: snapshot?.recentWakes ?? null,
                     coverage: snapshot?.recentWakes ? snapshot.coverage : fmt('Recent wakes could not be read: {error}', { error: readError }) } : state;
-            } catch (fallbackError) { readError = fallbackError?.message || String(fallbackError); }
+            } catch (fallbackError) { readError = failureText(fallbackError); }
         }
         if (destroyed || current !== generation) return;
         if (next) snapshot = next;
         if (toggling && Date.now() - toggledAt >= COMMAND_SETTLE_MS) toggling = '';
-        regions.status.textContent = readError ? `Could not read consciousness: ${readError}. ${earlier ? 'Earlier values are shown.' : ''}` : '';
+        // One sentence per fact, each ending once: a reason that already ends its sentence gets no second full stop.
+        const reason = /[.!?]$/.test(readError) ? readError : `${readError}.`;
+        regions.status.textContent = readError ? `Could not read consciousness: ${reason}${earlier ? ' Earlier values are shown.' : ''}` : '';
         regions.status.dataset.tone = readError ? 'error' : '';
         paint();
         schedule();

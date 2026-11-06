@@ -2,7 +2,7 @@
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { tr, fmt } from './i18n.js';
 import { skillIconHtml } from './skill_presentation.js';
-import { connectPlace, readPlaceConnector, readPlaces } from './consciousness_api.js';
+import { connectPlace, failureText, readPlaceConnector, readPlaces } from './consciousness_api.js';
 import { openPlaceSheet, openSkillsFor, sheetShell, showSheet, statusLine } from './place_sheet.js';
 
 export const connectPlaceButtonHtml = () => `<button type="button" class="btn btn-default btn-sm" data-place-connect>${tr('places.connect', 'Connect a place')}</button>`;
@@ -99,7 +99,7 @@ export function openConnectPlace({ returnFocus = document.activeElement, read = 
     const load = async () => {
         view.error = ''; view.connectors = null; paint();
         try { Object.assign(view, await read({ signal: abort.signal })); }
-        catch (error) { view.error = fmt('Could not read the connectors: {reason}', { reason: error?.message || error }); }
+        catch (error) { view.error = fmt('Could not read the connectors: {reason}', { reason: failureText(error) }); }
         // A connector's own card opens the flow filtered to that connector.
         if (connector && view.connectors) view.connectors = view.connectors.filter((row) => row.connector === connector);
         paint();
@@ -143,7 +143,7 @@ export function openConnectPlace({ returnFocus = document.activeElement, read = 
             const place = await connect({ connector: view.selected.connector, ...choice });
             // The list projection joins the declared service name later; the flow already holds it.
             if (!sheet.closed) { sheet.close(); openPlace({ ...place, serviceLabel: place.serviceLabel || view.selected.label }, { returnFocus }); }
-        } catch (error) { view.status = { text: error?.message || String(error), tone: 'error' }; }
+        } catch (error) { view.status = { text: failureText(error), tone: 'error' }; }
         finally { view.busy = false; paint(); }
     });
     void load();

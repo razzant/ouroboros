@@ -1,5 +1,6 @@
 // Captured conversation content mounted inside the Place sheet. The sheet owns navigation and drafts.
 import { apiClient } from './api_client.js';
+import { failureText } from './consciousness_api.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { mountChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
 import { tr } from './i18n.js';
@@ -210,7 +211,7 @@ export function mountPlaceHistory(host, place, room, { onBack, readHistory = api
             if (hadRows && target === null) scroller.scrollTop = beforeTop + scroller.scrollHeight - beforeHeight;
         } catch (error) {
             if (closed || version !== generation) return;
-            find('[data-history-status]').textContent = error?.message || String(error);
+            find('[data-history-status]').textContent = failureText(error);
             find('[data-history-status]').dataset.tone = 'error';
             retry = () => loadPage(cursor, target); find('[data-history-retry]').hidden = false;
         } finally {

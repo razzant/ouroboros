@@ -125,7 +125,9 @@ def test_costs_names_the_known_spend_with_what_is_still_open_before_anything_els
     assert {key: seen["facts"].get(key) for key in facts} == facts, seen["facts"]
     # One tab body is the panel's root and scroller; the open facts are the hero card's own Details, closed.
     assert seen["body"] and (seen["detailsInCard"] or status != 200), seen
-    assert seen["lead"] < seen["metaTop"] < seen["budget"] < seen["tables"], seen
+    assert seen["lead"] < seen["budget"] < seen["tables"], seen
+    if meta:  # an empty meta line takes no room (an unavailable ledger has nothing to say under its word)
+        assert seen["lead"] < seen["metaTop"] < seen["budget"], seen
     # The known spend is the one headline figure; its line steps down to the meta size.
     assert seen["sizes"][0] > seen["sizes"][1], seen["sizes"]
     # On the first screen of a phone: the number and what is open about it, without a scroll.
