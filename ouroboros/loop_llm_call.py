@@ -35,7 +35,7 @@ from ouroboros.send_clock import main_send_scope
 from ouroboros.task_pacing import main_loop_wire_options
 from ouroboros.task_custody import canonical_owner_root
 from ouroboros.transport_custody import attempt_custody_event_fields, is_pre_dispatch_transport_failure, is_retryable_transport_death, outcome_unknown_on_chain
-from ouroboros._usage_response import OUTPUT_LIMIT_FINISH_REASONS, output_exhaustion_facts, response_finish_reason
+from ouroboros._usage_response import CONTENT_REFUSAL_FINISH_REASONS, OUTPUT_LIMIT_FINISH_REASONS, output_exhaustion_facts, response_finish_reason
 from ouroboros.usage_accounting import PhysicalAttemptContext, UsageAccountingError, bind_physical_attempt_context, current_usage_scope, last_physical_attempt_capture
 from ouroboros.contracts.record_contract import RECORD_CONTRACT_VERSION
 from ouroboros.event_usage import REPORTED_TOKENS_KEY, event_token_counts
@@ -263,8 +263,9 @@ def _classify_empty_response(usage: Dict[str, Any], msg: Dict[str, Any]) -> Tupl
     transport, so retrying here only burns the transient budget. So is output
     exhaustion, an empty reply without a body error that ended on its output limit:
     the same request ends the same way. It stays an ``llm_empty_response`` (the only
-    permanent one; its kind is ``llm_output_exhausted``). Only rate_limit /
-    provider_transient body errors and a missing or null finish (a glitch) retry."""
+    permanent one; its kind is ``llm_output_exhausted``). So is the provider's own
+    content refusal: ``provider_content_refusal``, kind ``content_filter``, a route fact.
+    Only rate_limit / provider_transient body errors and a missing or null finish (a glitch) retry."""
     finish = str(response_finish_reason(usage, msg)[1] or "").strip().lower()
     if finish in _STRUCTURED_CONTEXT_OVERFLOW_CODES:
         return "remote_context_overflow", False, True
@@ -276,6 +277,8 @@ def _classify_empty_response(usage: Dict[str, Any], msg: Dict[str, Any]) -> Tupl
         return "remote_context_overflow", False, True
     if not body_err and finish in OUTPUT_LIMIT_FINISH_REASONS:
         return "llm_empty_response", False, True
+    if not body_err and finish in CONTENT_REFUSAL_FINISH_REASONS:
+        return "provider_content_refusal", False, True
     is_provider_glitch = not finish
     transient_body = isinstance(body_err, dict) and body_err.get("kind") in ("rate_limit", "provider_transient")
     permanent = bool(body_err) and not transient_body
@@ -306,11 +309,13 @@ def _record_and_emit_empty_response(
     body_error = usage.get("provider_error") if isinstance(usage, dict) and isinstance(usage.get("provider_error"), dict) else {}
     event_type, is_provider_glitch, permanent = _classify_empty_response(usage, msg)
     exhausted = event_type == "llm_empty_response" and permanent  # the classifier's output exhaustion
-    log_msg = _empty_response_log_msg(usage, is_provider_glitch, exhausted)
+    refused = event_type == "provider_content_refusal"
+    log_msg = (f"Provider refused the content (finish_reason={finish_reason})" if refused
+               else _empty_response_log_msg(usage, is_provider_glitch, exhausted))
     log.warning("%s, attempt %d/%d", log_msg, attempt + 1, transient_budget)
     _emit_empty_response_events(
         event_type, event_queue=event_queue, drive_logs=drive_logs,
-        base={"task_id": task_id, "execution_id": execution_id, "round_id": round_id,
+        base={"task_id": task_id, "execution_id": execution_id, "round_id": round_id, **_scope_lineage(),
               "llm_call_id": llm_call_id, "round": round_idx, "attempt": attempt + 1,
               "model": model, "finish_reason": finish_reason, "task_attempt": task_attempt,
               # WHICH upstream endpoint served (or refused) this round, plus the typed class
@@ -329,7 +334,8 @@ def _record_and_emit_empty_response(
         status = "infra_failed" if (is_provider_glitch and not permanent) else "failed"
         reason = event_type
         # Cooldown signal for the F1 fallback gate (see helper; not a retry change); exhaustion never cools.
-        kind = "llm_output_exhausted" if exhausted else _cooldown_kind_for_empty_response(body_error, event_type)
+        kind = ("llm_output_exhausted" if exhausted else "content_filter" if refused
+                else _cooldown_kind_for_empty_response(body_error, event_type))
     accumulated_usage.update({
         "_last_llm_error": _short_error_text(log_msg), "execution_status": status,
         "reason_code": reason, "_last_llm_error_kind": kind, "_last_llm_attempt_custody": "",  # a response arrived
