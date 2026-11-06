@@ -39,6 +39,13 @@ export const GENERIC_HARNESS_MARK = Object.freeze({
 });
 
 const GENERIC_LABELS = Object.freeze({ agy: 'Antigravity' });
+// Names of the API providers (a task card's route rows, the route editor's fallback when the setup contract
+// does not describe one, e.g. GigaChat). The contract's label wins wherever it exists.
+export const API_PROVIDER_LABELS = Object.freeze({
+    openrouter: 'OpenRouter', openai: 'OpenAI', anthropic: 'Anthropic', deepseek: 'DeepSeek',
+    zai: 'Z.ai (GLM)', minimax: 'MiniMax', cloudru: 'Cloud.ru Foundation Models', gigachat: 'GigaChat',
+    'openai-compatible': 'OpenAI-compatible endpoint',
+});
 const API_IDS = new Set(['api', 'api_chat', 'api_model', 'native']);
 
 /** Return presentation facts only; callers retain status and evidence ownership. */

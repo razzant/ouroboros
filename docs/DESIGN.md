@@ -2255,7 +2255,9 @@ One positive task-local tool-call count joins that line and remains after Done
 (owner 22.10, A). Helpers are not aggregated. Rounds (usable solve responses)
 and known zero calls stay in Details, making no work or footer row; missing
 counts stay absent. Session nanny counts appear only in `Supervision` (footer and
-Details), apart from unreported executor counts. Portals keep one count. Model provenance, origin and a finished card's update time stay in Details. Money
+Details), apart from unreported executor counts. Portals keep one count. Model provenance, origin and a finished card's update time stay in Details. A root's Details add `Spent on` and `Ran on`, its read-time cost breakdown by purpose and by the route that
+served the rows: each line in the card's money words beside the model calls, sessions and tokens the ledger
+recorded, a part it did not record absent; the main line keeps its one amount (owner 02.09). Money
 there is ONE line whose wording carries its openness and never renders an
 unknown as a number: `$0.00` only where priced rows evidenced that zero,
 `up to $1.20` while the tracked subtotal is inexact, `Tracked: $1.20` when part
