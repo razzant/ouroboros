@@ -990,3 +990,30 @@ def test_evolution_completion_retries_unknown_decision_on_existing_restart_tick(
                         on_restart=runtime.server._handle_restart_in_supervisor)
     assert requested == [{"restart_reason": "finish first", "evolution_restart": True}]
     assert runtime.restart.agent_restart_holds(queued) and queued in runtime.queue.PENDING
+
+
+def test_restart_drain_tells_the_owner_how_many_tasks_it_waits_for_and_logs_their_ids(monkeypatch, caplog):
+    """Audit 05.11 item 8: the drain row in Main says how many tasks it waits for; their ids go to one log line."""
+    import logging
+    import uuid
+
+    from ouroboros import server_restart
+
+    monkeypatch.setattr(server_restart, "_started_restart_work", lambda: {})
+    monkeypatch.setattr("ouroboros.config.get_restart_drain_max_sec", lambda: 600)
+    for live, words in ((["task-b", "task-a"], "2 running tasks"), (["task-a"], "1 running task")):
+        monkeypatch.setattr(server_restart, "_AGENT_RESTART", {})
+        sent = []
+        server = SimpleNamespace(uuid=uuid, time=time, log=server_restart.log, _pending_restart={},
+                                 _live_running_task_ids=lambda ctx, live=live: list(live),
+                                 _perform_supervisor_restart=lambda *a, **k: pytest.fail("the drain comes first"))
+        ctx = SimpleNamespace(load_state=lambda: {"owner_chat_id": 1},
+                              send_with_budget=lambda chat, text, **kwargs: sent.append(text))
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger=server_restart.log.name):
+            server_restart._handle_restart_in_supervisor(server, {"reason": "body update"}, ctx)
+        drain = [text for text in sent if text.startswith("⏳ Restart drain:")]
+        assert drain == [f"⏳ Restart drain: waiting up to 600s for {words} to finish."]
+        assert not any(task in drain[0] for task in live), "no task id in the owner's feed"
+        assert ", ".join(sorted(live)) in caplog.text
+        assert server._pending_restart["request_id"]

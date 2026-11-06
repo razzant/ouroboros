@@ -812,10 +812,12 @@ def _handle_restart_in_supervisor(server, evt: Dict[str, Any], ctx: Any) -> None
             "evolution_restart": bool(evt.get("evolution_restart")),
         })
         if st.get("owner_chat_id"):
+            # The owner reads how many tasks it waits for; their ids belong to the log.
+            log.info("Restart drain waits for %s", ", ".join(sorted(live)))
             ctx.send_with_budget(
                 int(st["owner_chat_id"]),
-                f"⏳ Restart drain: waiting up to {max_wait}s for running task(s) "
-                f"{', '.join(sorted(live))} to finish.",
+                f"⏳ Restart drain: waiting up to {max_wait}s for {len(live)} running "
+                f"task{'' if len(live) == 1 else 's'} to finish.",
                 role="system", system_type="restart_notice")
         return
     server._perform_supervisor_restart(

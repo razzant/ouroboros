@@ -174,7 +174,8 @@ def test_project_work_name_survives_real_outbox_bus_live_and_history(tmp_path, m
 @pytest.mark.parametrize("fields,expected", [
     ({"title": "**Current › title**", "suggested_name": "Other title"}, "Current › title"),
     ({"suggested_name": "**Suggested › title**"}, "Suggested › title"),
-    ({}, "Task"),
+    # Nameless work of a Project is called by that Project, never a bare "Task" (audit 05.11, U012).
+    ({}, "Project"),
 ])
 def test_legacy_work_name_uses_cached_structured_result_and_preserves_recorded_name(tmp_path, activity_queue, monkeypatch, fields, expected):
     from ouroboros import task_status
