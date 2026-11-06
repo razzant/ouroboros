@@ -52,7 +52,8 @@ warning | web/ui.css | .settings-inline-status[data-tone="warn"] | color
 warning | web/ui.css | .settings-test-result[data-tone="warn"] | color
 warning | web/ui.css | .ui-chip[data-tone="warn"] | background, color
 warning | web/ui.css | .ui-status[data-tone="warn"] | color
-warning | web/ui.css | :is(.ui-status, .settings-inline-status, .wizard-runtime-status)[data-tone="warn"]:not(:empty)::before | background
+warning | web/ui.css | .ui-result[data-tone="warn"] | color
+warning | web/ui.css | :is(.ui-status, .ui-result, .settings-inline-status, .wizard-runtime-status)[data-tone="warn"]:not(:empty)::before | background
 warning | web/style.css | .chat-composer-chip[data-tone="warn"] .chat-chip-dot | background
 warning | web/style.css | .chat-delegated-final | color
 warning | web/style.css | .chat-delegated-problem | color

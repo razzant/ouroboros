@@ -774,6 +774,162 @@
     font-size: var(--button-font-size) !important;
 }
 
+/* ---- The shared parts (DESIGN.md principles 6 and 7; the 06.11 convergence) -------------------------------------
+   Five decisions each have one owner here and screens compose them: the result of an action (.ui-action-row +
+   .ui-result, ui_primitives.js setResult / errorWords), main vs Details (details.ui-disclosure), a row of one fact
+   (.ui-row), the length of a list (.ui-list-more), and the one primary action of a place (the [data-primary] slot).
+   The contract of each part is its comment here and its home test (web/tests/ui_primitives.test.js). */
+
+/* The action row: the trigger, then its result as the next sibling, 8px apart. The result keeps one meta line of
+   height from the start (reserved, never display: none), so a late word never moves the control or its neighbours;
+   in a narrow container the result wraps under the trigger into that same reserved line. */
+.ui-action-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+    min-width: 0;
+}
+.ui-action-row > .ui-result { flex: 1 1 var(--result-copy-min-width); }
+/* The result: a status sentence (the meta size, a dot and a word in the tone's ink) with the raw text, if any, behind
+   one disclosure. ui_primitives.js setResult writes it; a plain acknowledgement ends by itself, a warning, a needed
+   restart or a failure stays until the next result or an edit in the same subject replaces it (DESIGN "Status and
+   chips"). */
+.ui-result {
+    display: block;
+    min-width: 0;
+    min-height: calc(var(--type-meta) * var(--line-meta));
+    overflow-wrap: anywhere;
+}
+.ui-result > .ui-disclosure { margin-top: var(--space-1); }
+.ui-result-details {
+    margin: var(--space-1) 0 0;
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
+    color: var(--text-secondary);
+    font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+/* The one disclosure look: a quiet summary with one caret, the secondary ink, the meta size; what it opens keeps its
+   own layout. A section's lead stays in the main view; the rest, a paragraph or a record, lives behind this. */
+details.ui-disclosure > summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 0;
+    list-style: none;
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    font-weight: 500;
+}
+details.ui-disclosure > summary::-webkit-details-marker { display: none; }
+details.ui-disclosure > summary::before {
+    content: "";
+    flex: none;
+    width: 6px;
+    height: 6px;
+    margin-inline: 2px var(--space-1);
+    border-right: 1.5px solid currentColor;
+    border-bottom: 1.5px solid currentColor;
+    transform: rotate(-45deg);
+    transition: transform var(--motion-fade) var(--ease-sheet);
+}
+details.ui-disclosure[open] > summary::before { transform: rotate(45deg); }
+details.ui-disclosure > summary:hover { color: var(--text-primary); }
+details.ui-disclosure > summary:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; border-radius: var(--radius-inner); }
+details.ui-disclosure > :not(summary) { margin-top: var(--space-2); }
+
+/* The row: one fact as a tray inside its object — a title the CSS clamps to two lines, one meta line under it, and
+   its actions at the end; in a narrow row the actions move under the words (a container query, never a viewport
+   one). The words for titles, meta and counts come from the caller. */
+.ui-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "words actions" "meta actions";
+    align-items: center;
+    column-gap: var(--space-3);
+    row-gap: var(--space-1);
+    min-width: 0;
+    padding: var(--space-3);
+    border: 1px solid transparent;
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
+    container-type: inline-size;
+}
+.ui-row-title {
+    grid-area: words;
+    min-width: 0;
+    margin: 0;
+    color: var(--text-primary);
+    font-size: var(--type-body);
+    line-height: var(--line-title);
+    font-weight: 500;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+}
+.ui-row-meta {
+    grid-area: meta;
+    min-width: 0;
+    margin: 0;
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    overflow-wrap: anywhere;
+}
+.ui-row-meta:empty { display: none; }
+.ui-row-actions {
+    grid-area: actions;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--space-2);
+    min-width: 0;
+}
+@container (max-width: 28rem) {
+    .ui-row { grid-template-columns: minmax(0, 1fr); grid-template-areas: "words" "meta" "actions"; }
+    .ui-row-actions { justify-content: flex-start; }
+}
+.ui-row + .ui-row { margin-top: var(--space-2); }
+
+/* The list's one length control: "Show all (N)" is a quiet small capsule at the list's start edge; the label and its
+   count come from the caller. */
+.ui-list-more { align-self: flex-start; justify-self: start; margin-top: var(--space-2); }
+
+/* The primary slot (DESIGN principle 4: the crimson is the one primary action of a place). The containers that have
+   one — the page header's actions, a section's actions, an action row, a dialog's foot — paint their [data-primary]
+   control crimson; a second [data-primary] in the same slot is neutral, so two crimsons in one place cannot be
+   expressed. Any other crimson there is a page-level choice the review sees. */
+.ui-section-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; }
+:is(.app-page-actions, .ui-section-actions, .ui-action-row, .marketplace-modal-actions, .ui-dialog-foot) > [data-primary] {
+    background: var(--tone-crimson);
+    color: var(--tone-crimson-ink);
+    box-shadow: var(--elev-rest);
+    --press: var(--press-solid);
+}
+:is(.app-page-actions, .ui-section-actions, .ui-action-row, .marketplace-modal-actions, .ui-dialog-foot) > [data-primary]:not(:disabled):hover {
+    background: var(--tone-crimson-hover);
+}
+:is(.app-page-actions, .ui-section-actions, .ui-action-row, .marketplace-modal-actions, .ui-dialog-foot) > [data-primary] ~ [data-primary] {
+    background: var(--surface-capsule);
+    color: var(--text-primary);
+    --press: brightness(1.12);
+}
+:is(.app-page-actions, .ui-section-actions, .ui-action-row, .marketplace-modal-actions, .ui-dialog-foot) > [data-primary] ~ [data-primary]:not(:disabled):hover {
+    background: var(--surface-capsule-hover);
+}
+
 
 .ui-chip,
 :where(.status-badge, .mcp-server-status) {
@@ -791,6 +947,7 @@
 }
 
 .ui-status,
+.ui-result,
 :where(.settings-inline-status, .wizard-runtime-status) {
     color: var(--text-secondary);
     font-size: var(--type-meta);
@@ -828,13 +985,17 @@
 }
 
 .ui-status[data-tone="ok"],
+.ui-result[data-tone="ok"],
 .settings-inline-status[data-tone="ok"],
 .settings-test-result[data-tone="ok"] { color: var(--status-ok-fg); }
 .ui-status[data-tone="warn"],
+.ui-result[data-tone="warn"],
 .settings-inline-status[data-tone="warn"],
 .settings-test-result[data-tone="warn"] { color: var(--status-warn-fg); }
 .ui-status[data-tone="danger"],
 .ui-status[data-tone="error"],
+.ui-result[data-tone="danger"],
+.ui-result[data-tone="error"],
 .settings-inline-status[data-tone="danger"],
 .settings-inline-status[data-tone="error"],
 .settings-test-result[data-tone="danger"],
@@ -842,14 +1003,19 @@
 /* `muted` is a tone the code emits but no rule named. */
 .ui-status[data-tone="neutral"],
 .ui-status[data-tone="muted"],
+.ui-result[data-tone="neutral"],
+.ui-result[data-tone="muted"],
 .settings-inline-status[data-tone="neutral"],
 .settings-inline-status[data-tone="muted"] { color: var(--status-neutral-fg); }
+.ui-status[data-tone="info"],
+.ui-result[data-tone="info"] { color: var(--status-info-fg); }
 
 /* A status sentence's own dot, one anatomy in every consumer (docs/DESIGN.md "Status marks"). CSS draws it, not
    status_mark.js, because ui.css and ui_primitives.js reach skill authors on their own; it takes the marks' fact
    size and the saturated hues (ok green, warn amber, error red, any other tone the neutral meta ink) while the
    sentence keeps its word tone. */
 .ui-status[data-tone]:not(:empty)::before,
+.ui-result[data-tone]:not(:empty)::before,
 .settings-inline-status[data-tone]:not(:empty)::before,
 .wizard-runtime-status[data-tone]:not(:empty)::before {
     content: "";
@@ -864,9 +1030,9 @@
     position: relative;
     top: -1px;
 }
-:is(.ui-status, .settings-inline-status, .wizard-runtime-status)[data-tone="ok"]:not(:empty)::before { background: var(--green); }
-:is(.ui-status, .settings-inline-status, .wizard-runtime-status)[data-tone="warn"]:not(:empty)::before { background: var(--amber); }
-:is(.ui-status, .settings-inline-status, .wizard-runtime-status):is([data-tone="danger"], [data-tone="error"]):not(:empty)::before {
+:is(.ui-status, .ui-result, .settings-inline-status, .wizard-runtime-status)[data-tone="ok"]:not(:empty)::before { background: var(--green); }
+:is(.ui-status, .ui-result, .settings-inline-status, .wizard-runtime-status)[data-tone="warn"]:not(:empty)::before { background: var(--amber); }
+:is(.ui-status, .ui-result, .settings-inline-status, .wizard-runtime-status):is([data-tone="danger"], [data-tone="error"]):not(:empty)::before {
     background: var(--red);
 }
 
