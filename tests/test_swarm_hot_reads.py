@@ -183,6 +183,23 @@ def test_public_list_and_detail_keep_summary_but_not_swarm_storage_evidence(tmp_
     assert swarm_rollup.load_swarm_rollup(tmp_path, "root")["fanout_count"] == 1
 
 
+def test_a_delegated_run_child_is_collected_by_its_run_actor_and_an_unknown_one_stays_missing(tmp_path):
+    """A delegated run's fan-out names its run id: its custody row is the collected child; an absent run is a gap."""
+    from ouroboros import delegate_custody_current as current
+
+    write_task_result(tmp_path, "root", "completed", result="answer")
+    swarm_rollup.record_swarm_fanout(tmp_path, {"event_id": "swarm:run", "type": "swarm_fanout",
+        "parent_task_id": "root", "task_ids": ["run-1"], "requested_count": 1})
+    with store.open_store(tmp_path, write=True) as txn:
+        txn.put_custody("run-1", {"run_id": "run-1", "task_id": "root", "settled": True}, state=current.CLOSED)
+    collected = tree_inputs(tmp_path, "root")
+    assert any(actor["id"] == "run:run-1" and actor["collected"] for actor in collected["actors"])
+    assert "missing_child_results" not in collected["coverage"]["gaps"]
+    swarm_rollup.record_swarm_fanout(tmp_path, {"event_id": "swarm:gone", "type": "swarm_fanout",
+        "parent_task_id": "root", "task_ids": ["run-gone"], "requested_count": 1})
+    assert "missing_child_results" in tree_inputs(tmp_path, "root")["coverage"]["gaps"]
+
+
 @pytest.mark.parametrize("children", [42, ["known-child", {"damaged": "child"}]])
 def test_unreadable_legacy_children_keep_receipt_unknown(tmp_path, children):
     seed_result(tmp_path, "root", {"status": "completed", "swarm_fanout_rollup": {"child_ids": children}})
