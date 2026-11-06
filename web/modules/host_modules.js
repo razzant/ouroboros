@@ -37,6 +37,7 @@ export function createHostModules({ store, draft = null, win = globalThis.window
     const mounts = new Map();  // contribution key -> { item, controller, status, stage, handle, settle }
     const providers = new Map();  // contribution key -> { entry, record }
     const providerListeners = new Set();
+    const factListeners = new Set();
     const disposers = [];
     const announced = new Set();  // `key@revision` of held modules a notice already named
     let mode = 'idle';  // idle → running → stopped (Panic, unload, destroy)
@@ -46,6 +47,12 @@ export function createHostModules({ store, draft = null, win = globalThis.window
     function notifyProviders() {
         for (const listener of [...providerListeners]) {
             try { listener(); } catch (error) { console.error('provider listener failed', error); }
+        }
+    }
+
+    function notifyFacts() {
+        for (const listener of [...factListeners]) {
+            try { listener(); } catch (error) { console.error('page-module fact listener failed', error); }
         }
     }
 
@@ -77,6 +84,7 @@ export function createHostModules({ store, draft = null, win = globalThis.window
         const { item } = rec;
         const reason = String(error?.message || error || 'unknown error');
         store.markFault(item, reason);
+        notifyFacts();
         const skill = item.skill_label || item.skill;
         const name = item.label && item.label !== skill ? `${item.label} (${skill})` : skill;
         notice(fmt('{name} stopped working: {reason}. It stays off until you reload or update the skill.', { name, reason }),
@@ -167,10 +175,27 @@ export function createHostModules({ store, draft = null, win = globalThis.window
                 : labels.length > 1 ? fmt('{names} did not start: the page stopped while they were starting last time.', { names })
                     : fmt('{names} did not start: the page stopped while it was starting last time.', { names });
             notice(text, 'warn', { ttl: 0, action: { label: tr('holds.start_it', 'Start it'), run() {
-                group.forEach((item) => holds.release(moduleHoldKey(item)));
-                sync();
+                group.forEach((item) => startHeldModule(item.key));
             } } });
         }
+    }
+
+    function startHeldModule(key) {
+        const item = store.byKey(key);
+        if (!item || mode !== 'running') return false;
+        holds.release(moduleHoldKey(item));
+        sync();
+        notifyFacts();
+        return true;
+    }
+
+    function pageModuleFacts() {
+        const entries = store.hostEntries();
+        const faults = store.faults().filter((fault) => fault.current);
+        const held = entries.filter((item) => holds.reason(moduleHoldKey(item), item.revision))
+            .map((item) => ({ key: item.key, skill: item.skill, skill_label: item.skill_label, label: item.label,
+                revision: item.revision, reason: holds.reason(moduleHoldKey(item), item.revision) }));
+        return { faults, held };
     }
 
     function sync() {
@@ -216,17 +241,26 @@ export function createHostModules({ store, draft = null, win = globalThis.window
         mode: () => mode,
         /** Keys of the modules mounted now. */
         mounted: () => [...mounts.values()].filter((rec) => rec.status === 'mounted').map((rec) => rec.item.key),
+        /** Page-local faults and holds for the Skills owner surface. */
+        pageModuleFacts,
+        /** One owner path for the held-module recovery offered by both toast and Skills. */
+        startHeldModule,
         /** Providers page modules registered (`ctx.providers.register`), of one kind (`stt`, `tts`). */
         clientProviders: (kind) => [...providers.values()].map(({ entry }) => entry).filter((entry) => entry.kind === kind),
         onProvidersChange(listener) {
             providerListeners.add(listener);
             return () => providerListeners.delete(listener);
         },
+        onFactsChange(listener) {
+            factListeners.add(listener);
+            return () => factListeners.delete(listener);
+        },
         stop,
         destroy() {
             stop();
             for (const dispose of disposers.splice(0)) dispose();
             providerListeners.clear();
+            factListeners.clear();
         },
     };
     return api;

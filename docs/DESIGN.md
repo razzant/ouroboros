@@ -652,7 +652,8 @@ Status, owner action, and urgent notification are separate product concepts:
   task as a proxy.
 
 A status names what ends it, by role, and what the owner may still need stays where its fact lives. An announcement
-(a toast) says its news once and may end after its time, hover and focus pausing it, whatever its tone: the problem,
+(a toast) says its news once and may end after its time, hover and focus pausing it, whatever its tone; a non-expiring
+announcement always has a visible keyboard-reachable close. The problem,
 needed restart or unconfirmed outcome it announces is kept in its authoritative view (a card, the Updates record, the
 in-feed history edge) until that fact changes or the owner resolves it. A notice the owner may hide is hidden on the
 notice itself, per browser, never in its record (the Update indicator, owner 1B, 25.10). A plain acknowledgement in

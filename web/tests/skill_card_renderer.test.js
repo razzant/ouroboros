@@ -80,6 +80,24 @@ test('each attention tray is one sentence with its own actions, visible without 
     assert.match(otherEdit, /data-skill-action="rereview"[^>]*>Review</);
 });
 
+test('page-module faults and holds are owner-visible and keep recovery discoverable', () => {
+    const faulty = renderInstalledSkillCard(skill({ enabled: true }), new Set(), new Set(), {}, {
+        pageModules: { faults: [{ skill: 'demo', reason: 'boom', current: true }], held: [] },
+    });
+    assert.deepEqual(chipOf(faulty).slice(1), ['warn', 'Off in this window']);
+    assert.match(traysOf(faulty), /page module stopped in this window: boom/);
+    assert.doesNotMatch(traysOf(faulty), /data-host-module-key/);
+    const held = renderInstalledSkillCard(skill({ enabled: true }), new Set(), new Set(), {}, {
+        pageModules: { faults: [], held: [{ key: 'demo:voice', skill: 'demo', reason: 'start' }] },
+    });
+    assert.match(traysOf(held), /Held back: the page stopped while this was starting last time\./);
+    assert.match(held, /data-skill-action="start_host_module"[^>]*data-host-module-key="demo:voice"/);
+    const stale = renderInstalledSkillCard(skill({ enabled: true }), new Set(), new Set(), {}, {
+        pageModules: { faults: [{ skill: 'demo', reason: 'old', current: false }], held: [] },
+    });
+    assert.deepEqual(chipOf(stale).slice(1), ['ok', 'On']);
+});
+
 test('updates: one click for an unmodified skill, «Update…» asks what to keep for a modified one', () => {
     const plain = traysOf(renderInstalledSkillCard(row('weather')));
     assert.match(plain, /v0\.3\.2 is available\./);

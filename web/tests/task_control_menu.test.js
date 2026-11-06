@@ -500,8 +500,9 @@ test('a gap notice keeps all its words beside its close button; the page stack i
     assert.equal(short.className, 'toast-words');
     assert.ok(!stack.hasAttribute('tabindex'), 'words that fit make no keyboard stop');
     const plain = showToast('Saved.', 'ok', { ttl: 0 });
-    assert.equal(plain.textContent, 'Saved.');
-    assert.equal(plain.children.length, 0, 'a toast without a close button keeps its words as its own text');
+    assert.equal(plain.querySelector('.toast-words')?.textContent, 'Saved.');
+    assert.equal(plain.querySelector('.toast-dismiss')?.getAttribute('aria-label'), 'Dismiss notice',
+        'a non-expiring toast always has a keyboard-reachable close');
     cut = true;  // a room's stack keeps its own place: never the page's scrolling region
     const host = env.doc.createElement('div');
     env.doc.body.append(host);

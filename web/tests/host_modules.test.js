@@ -123,6 +123,40 @@ test('a live page module mounts with exactly the versioned context and is let go
     assert.deepEqual(h.drafts, ['Read this to me']);
 });
 
+test('page-module facts stay observable after a producer failure', async () => {
+    const item = hostItem('demo:voice', { runtime: 'client', provides: 'tts' });
+    const h = await setup({ items: [item], modules: { [item.render.url]: new Error('broken module') }, start: false });
+    let changes = 0;
+    const off = h.runtime.onFactsChange(() => { changes += 1; });
+    h.runtime.start();
+    await tick(10);
+    assert.equal(h.runtime.pageModuleFacts().faults[0].key, item.key);
+    assert.ok(changes >= 1, 'a producer failure reaches the Skills consumer');
+    off();
+    h.runtime.destroy();
+});
+
+test('held-module facts expose one owner recovery path', async () => {
+    const item = hostItem('demo:voice', { runtime: 'client', provides: 'tts' });
+    const local = seeded({ [`module:${item.key}`]: { reason: 'start', rev: 'r1', at: 1 } });
+    const h = await setup({ items: [item], local, modules: { [item.render.url]: { mount: () => ({ dispose() {} }) } } });
+    assert.equal(h.runtime.pageModuleFacts().held[0].key, item.key);
+    assert.equal(h.runtime.startHeldModule(item.key), true);
+    await tick();
+    assert.deepEqual(h.runtime.mounted(), [item.key]);
+    h.runtime.destroy();
+});
+
+test('held recovery refuses after the page has stopped', async () => {
+    const item = hostItem('demo:voice', { runtime: 'client', provides: 'tts' });
+    const local = seeded({ [`module:${item.key}`]: { reason: 'start', rev: 'r1', at: 1 } });
+    const h = await setup({ items: [item], local, modules: { [item.render.url]: { mount: () => ({ dispose() {} }) } } });
+    h.runtime.stop();
+    assert.equal(h.runtime.startHeldModule(item.key), false);
+    assert.equal(h.runtime.pageModuleFacts().held[0].key, item.key, 'the hold stays available for a fresh page');
+    h.runtime.destroy();
+});
+
 test('a module that fails in any way is off for this page with one notice naming it; the others run', async () => {
     const good = hostItem('good:ok');
     const failing = {
