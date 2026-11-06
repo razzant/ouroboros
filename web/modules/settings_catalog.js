@@ -172,7 +172,7 @@ export function catalogReadNote(data = {}, { compact = false } = {}) {
         : errors.length ? `Model catalog could not be read: ${clauses}.`
             : state === 'stale' ? 'Model catalog is last known.' : state === 'partial' ? 'Some account model lists could not be read.'
                 : ['failed', 'transport'].includes(state) ? 'Model catalog could not be read.' : 'Model catalog has not been read yet.';
-    return `${reason} Existing suggestions and your selection are kept. Refresh Model Catalog in Models to retry.`;
+    return `${reason} Existing suggestions and your selection are kept. Refresh model catalog in Models to retry.`;
 }
 
 // The catalog's result beside its Refresh button (ui.css .ui-action-row): a count ends by itself, a gap stays.

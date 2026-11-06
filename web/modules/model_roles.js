@@ -227,7 +227,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
 
     function detailsHtml(row) {
         if (!showContext) return '';
-        return `<details class="model-role-details ui-disclosure"><summary>Context &amp; processing · <span data-processing-summary>${escapeHtml(processingIntentLabel(row.processing_preference, processingPreference))}</span></summary>
+        return `<details class="model-role-details ui-disclosure"><summary><span>Context &amp; processing · <span data-processing-summary>${escapeHtml(processingIntentLabel(row.processing_preference, processingPreference))}</span></span></summary>
             <label class="ui-field">Processing ${processingSelectHtml(`data-model-role-processing aria-label="${escapeHtml(row.slot.label)} processing"`, row.processing_preference)}</label>
             <div class="ui-field-help">Uses the same model and reasoning effort. An explicit native service choice takes precedence.</div>
             <div class="ui-field-help" data-processing-capability></div>

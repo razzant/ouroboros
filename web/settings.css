@@ -705,10 +705,11 @@
     font-size: var(--type-meta);
 }
 
+/* A key is its name, its field and who asked for it; the space between two keys is wider than inside one. */
 .settings-secret-list {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: var(--space-4);
 }
 
 /* A custom key's row: its name beside its value (the value's field row holds every button). */
@@ -841,7 +842,10 @@
 /* The notification choices sit under their master switch; while it is off they are disabled (the words say so
    in the disabled ink). */
 .notify-choices { display: flex; flex-direction: column; gap: 10px; padding-left: calc(var(--local-toggle-box) + var(--local-toggle-gap)); }
-.notify-choices .local-toggle:has(> input:disabled) { color: var(--text-disabled); cursor: default; }
+.notify-choices :is(.local-toggle:has(> input:disabled), .notify-tone-volume:has(> input:disabled) > label) {
+    color: var(--text-disabled);
+    cursor: default;
+}
 
 /* A slider row (Notifications: the soft app tone's level, under Sound; Appearance: the interface size). The label on
    its own line, the slider and its value on one, then its action and the note across the row. */

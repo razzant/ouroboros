@@ -65,7 +65,7 @@ function secretSettingsSection() {
         ${settingsSection({
             title: 'Stored Secrets',
             lead: 'Tokens Ouroboros itself signs in with. Provider API keys are in Accounts.',
-            details: 'Tokens, passwords and the secrets skills request. Provider API keys are in Accounts. Skills only receive grant-only keys after explicit human approval.',
+            details: 'Tokens and the secrets skills request. Skills only receive grant-only keys after explicit human approval.',
             body: `<div class="form-grid two">
                 ${SECRET_KEYS.map(([key, label, placeholder]) => secretField({
                     id: `s-secret-${key.toLowerCase().replace(/_/g, '-')}`,

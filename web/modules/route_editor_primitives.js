@@ -39,7 +39,7 @@ export function processingSelectHtml(attrs, selected, { global = false } = {}) {
 
 /** Intent controls never change model/effort or claim the route served this mode. */
 export function processingDetailsHtml(attrs, selected, inherited = '') {
-    return `<details class="model-role-details ui-disclosure" data-processing-details><summary>Processing · <span data-processing-summary>${escapeHtml(processingIntentLabel(selected, inherited))}</span></summary>
+    return `<details class="model-role-details ui-disclosure" data-processing-details><summary><span>Processing · <span data-processing-summary>${escapeHtml(processingIntentLabel(selected, inherited))}</span></span></summary>
         <label class="ui-field">Processing ${processingSelectHtml(attrs, selected)}</label>
         <div class="ui-field-help">Uses the same model and reasoning effort. An explicit native service choice takes precedence.</div></details>`;
 }
@@ -544,7 +544,7 @@ export function routeChoiceGroups({
                     ? 'No model sources listed — refresh Model Catalog'
                     : 'No model sources listed — connect one in Accounts')
                 : catalogKnown ? 'No model sources listed; accounts have not been checked'
-                    : 'Model sources have not been read — use Refresh Model Catalog' }] }] : []),
+                    : 'Model sources have not been read — use Refresh model catalog' }] }] : []),
         { label: 'API keys', options: apiValues },
         ...(includeSessions ? [sessionValues.length
             ? { label: 'Agents · sessions', options: sessionValues }

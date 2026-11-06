@@ -584,7 +584,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         if (saveBtn) {
             saveBtn.disabled = !settingsLoaded || settingsSaving || saveOutcomeUnknown;
             saveBtn.title = settingsLoaded
-                ? (saveOutcomeUnknown ? 'Reload Settings to check the previous save before saving again.' : '')
+                ? (saveOutcomeUnknown ? 'Reload settings to check the previous save before saving again.' : '')
                 : 'Reload current settings successfully before saving.';
         }
     }
@@ -1363,7 +1363,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
                 statusType = 'warn';
             }
             if (draftKept) {
-                statusMsg += saveOutcomeUnknown ? '. Your draft is kept. Reload Settings to check before saving again.' : '. Your current draft is kept.';
+                statusMsg += saveOutcomeUnknown ? '. Your draft is kept. Reload settings to check before saving again.' : '. Your current draft is kept.';
                 statusType = 'warn';
             }
             setStatus(statusMsg, statusType);
@@ -1379,7 +1379,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             setStatus(confirmedSaved
                 ? `Settings were saved, but a later step failed: ${e.message}. Your draft is kept.`
                 : saveOutcomeUnknown
-                    ? `Save outcome unknown: ${e.message}. Your draft is kept. Reload Settings to check before saving again.`
+                    ? `Save outcome unknown: ${e.message}. Your draft is kept. Reload settings to check before saving again.`
                     : `${checkerSaved ? `Changes in ${checkerTabsText(ownerDraft.safety)} were saved; the other settings were not` : 'Settings were not saved'}: ${e.message}. Your draft is kept.`, 'warn');
         } finally {
             settingsSaving = false;
