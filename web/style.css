@@ -813,23 +813,9 @@ html[data-layout="stack"] .resize-handle { display: none; }
     overflow: hidden;
 }
 
-/* Page-body controls use the shared touch minimum in the stack layout and on
-   coarse pointers. Headers and navigation keep their shell-owned recipes. */
-:root[data-layout="stack"] {
-    --page-control-min: var(--touch-target-min);
-}
-@media (pointer: coarse) {
-    :root {
-        --page-control-min: var(--touch-target-min);
-    }
-}
-:is(.files-layout, .skills-scroll, .skills-search-chrome, .widgets-scroll, .dashboard-shell, .settings-shell)
-    :is(button, a[href], summary, select) {
-    min-inline-size: var(--page-control-min, 0px);
-    min-block-size: var(--page-control-min, 0px);
-}
-/* Links stay inline, where the minimum above does not apply, and wrap before they widen a column. Under a finger
-   they take the hit extension's inset (ui.css --ui-hit-inset), so a link inside a sentence keeps its lines. */
+/* Page-body controls take the touch reach of their family (ui.css): no 44px body on a phone. Links stay inline and
+   wrap before they widen a column; under a finger they take the hit extension's inset (ui.css --ui-hit-inset), so a
+   link inside a sentence keeps its lines. */
 :is(.files-layout, .skills-scroll, .skills-search-chrome, .widgets-scroll, .dashboard-shell, .settings-shell) a[href] {
     position: relative;
     overflow-wrap: anywhere;
@@ -7153,7 +7139,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     align-items: baseline;
     gap: 4px 8px;
     min-width: 0;
-    min-height: max(32px, var(--page-control-min, 0px));
+    min-height: 32px;
 }
 
 /* The menu and the move handle are two quiet icon controls of one box: no body, no outline, the glyph alone, and a
@@ -10737,7 +10723,6 @@ body.keyboard-open .secret-request-backdrop .secret-request-dialog {
    question's recovery row, which wraps on a phone, so an invisible reach would cover its neighbour's words);
    the time under the doubt's actions then keeps clear of the Reply / Copy targets that sit on its line. */
 @media (pointer: coarse) {
-    .chat-clamp-toggle, .msg-pending .btn, .chat-quiz-feedback .btn { min-height: var(--touch-target-min); }
     .chat-bubble:is(.has-reply, .has-copy) > .msg-pending:has(.btn):has(+ .msg-time) { margin-bottom: var(--space-3); }
 }
 

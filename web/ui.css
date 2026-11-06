@@ -1111,15 +1111,20 @@ textarea.ui-control { resize: vertical; }
     /* A coarse pointer (a phone) raises the shared touch minimum to a finger's 44px, and the whole family with it. */
     :root { --touch-target-min: 44px; --control-h-float: var(--touch-target-min); }
 }
-/* ---- Touch hit extension ----------------------------------------------------------------------------------------
+/* ---- Touch reach --------------------------------------------------------------------------------------------------
    A small control keeps its look and, under a finger, gains an invisible hit area centred on it and at least the
-   touch minimum each way: the pseudo-element reaches out only on the sides that fall short (a 32px-tall capsule
-   gains 6px above and below, nothing sideways). Composition keeps at least that overshoot between neighbouring
-   controls, so hit areas never overlap (the composer rows part by --space-2). The one recipe, inset by the one
-   --ui-hit-inset; controls add the class, and style.css gives a page's links the same extension. */
-.ui-hit-area { position: relative; }
+   touch minimum each way: the pseudo-element reaches out only on the sides that fall short (a 34px-tall capsule
+   gains 5px above and below, nothing sideways), so the one-height capsules need no 44px body on a phone. Composition
+   keeps at least that overshoot between neighbouring controls, so hit areas never overlap (the composer rows part by
+   --space-2). The one recipe, inset by the one --ui-hit-inset: the shared control families carry it by selector, a
+   page's own small control adds .ui-hit-area, style.css gives a page's links the same extension, and in the product
+   documents every disclosure's summary has it (a summary that draws its own ::after caret keeps it: that rule is as
+   specific and later). */
+.ui-hit-area, .btn, .app-tab, .filter-chip, .theme-choice, .ui-segment,
+:root:where(.ouro-ui) summary { position: relative; }
 @media (pointer: coarse) {
-    .ui-hit-area::after {
+    :is(.ui-hit-area, .btn, .app-tab, .filter-chip, .theme-choice, .ui-segment)::after,
+    :root:where(.ouro-ui) summary::after {
         content: "";
         position: absolute;
         inset: var(--ui-hit-inset);
