@@ -4117,8 +4117,8 @@ html[data-layout="stack"] #primary-sidebar {
    at every scroller, so it is declared on the scrollers themselves; a code block or a table inside scrolls sideways
    as its own scroller. */
 html[data-layout="stack"] :is(#chat-messages, .chat-messages, .files-list, .files-sidebar, .files-preview-content,
-    .skills-scroll, .widgets-scroll, .settings-scroll, .costs-scroll, .activity-scroll,
-    #log-entries, .updates-scroll) {
+    .skills-scroll, .widgets-scroll, .settings-scroll, .costs-scroll,
+    #log-entries, .dashboard-body, .updates-scroll) {
     touch-action: pan-y pinch-zoom;
 }
 /* Outside the scrollers too (a header, the composer's row of capsules, the attach button): the page itself only pans
@@ -6176,73 +6176,26 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 @container dashboard (max-width: 480px) {
     .dashboard-hero-actions { grid-column: 1; grid-row: auto; align-self: start; }
 }
+/* foundation-request: a card's title role (16/600) belongs in ui.css with the other shared parts (U136); until it
+   moves there, the Dashboard tabs' cards share this one (lane D2 writes the same rule). */
+.dashboard-card-title { margin: 0; color: var(--text-primary); font-size: var(--type-section); line-height: var(--line-title); font-weight: 600; }
 
-/* P4: Activity subtab — cron schedules, running/queued tasks, background status. */
-.activity-scroll {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    padding: 16px 20px;
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-}
-
-.activity-section {
-    margin-bottom: 18px;
-}
-
-.activity-h {
-    margin: 0 0 8px;
-    font-size: var(--type-body);
-    font-weight: 600;
-    color: var(--text-meta);
-}
-
-/* A row names its work first (body size, primary ink) and the quieter facts under it; the name wraps rather than
-   losing its tail, and a row's controls drop under the words only when there is no room for 192px of text beside
-   them (a pair of buttons on a phone; one control stays beside the words) (DESIGN §2). */
-.activity-row {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-2) var(--space-3);
-    padding: var(--space-3);
-    border: 1px solid transparent;
-    border-radius: var(--radius-inner);
-    margin-bottom: var(--space-2);
-    background: var(--surface-tray);
-}
-
-.activity-row.off {
-    opacity: 0.55;
-}
-
-.activity-row-main {
-    display: flex;
-    flex: 1 1 192px;
-    flex-direction: column;
-    gap: 2px;
-    min-width: 0;
-}
-
-.activity-name {
-    font-size: var(--type-body);
-    line-height: var(--line-body);
-    font-weight: 500;
-    color: var(--text-primary);
-    overflow-wrap: anywhere;
-}
-
-/* Every sub line wraps whole: a held Continue's cause (#1721) is bounded owner text the owner must read to act, a
-   schedule's state and a Consciousness fact are read in full, and none of them is cut by an ellipsis. */
-.activity-sub {
-    font-size: var(--type-meta);
-    line-height: var(--line-meta);
-    color: var(--text-meta);
-    overflow-wrap: anywhere;
-}
+/* P4: Activity subtab — what runs now, the background mind, scheduled tasks: three cards on the Dashboard tab body.
+   A row is the shared .ui-row tray (title clamped to two lines, one meta line, its controls beside the words or under
+   them in a narrow row, ui.css); only what the shared parts do not say lives here. Every meta line wraps whole: a held
+   Continue's cause (#1721) is bounded owner text the owner must read to act, and a schedule's state is read in full. */
+.activity-section { display: grid; gap: var(--space-3); min-width: 0; }
+.activity-section-content { min-width: 0; }
+.activity-section-content > .activity-group { margin-top: var(--space-2); }
+.activity-lines { display: grid; gap: 2px; }
+/* A row's one Details (the whole order, a schedule's codes) takes the row's full width under its words. */
+.activity-row > .activity-details { grid-column: 1 / -1; min-width: 0; }
+.activity-order,
+.activity-facts { margin: 0; overflow-wrap: anywhere; }
+.activity-order { color: var(--text-secondary); font-size: var(--type-body); line-height: var(--line-body); }
+.activity-facts { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+/* The state's shared status mark leads its word (moving while it works, the pause bars when paused). */
+.activity-mark { margin-inline-end: var(--space-1); vertical-align: middle; }
 
 /* A known outcome's shared chip and its quieter second fact lead the meta line. */
 .activity-phase {
@@ -6252,24 +6205,15 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     vertical-align: middle;
 }
 
-.activity-row-actions {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-shrink: 0;
-}
-
 .activity-tag {
     font-size: var(--type-meta);
     color: var(--text-meta);
-    font-style: italic;
 }
 
-.activity-empty,
-.activity-loading {
+.activity-empty {
+    margin: 0;
     font-size: var(--type-body);
     color: var(--text-secondary);
-    padding: 8px 2px;
 }
 
 /* P2: main-screen Update pill — a pointer to Dashboard -> Updates. */

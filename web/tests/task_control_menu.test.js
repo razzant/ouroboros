@@ -22,6 +22,7 @@ import {
     resumeTaskAction,
     stopPolicyFor,
     taskControlActions,
+    taskControlTriggerLabel,
 } from '../modules/task_control_menu.js';
 import { ownerHurryProjection, summarizeChatLiveEvent, taskSoftStopPending } from '../modules/log_events.js';
 
@@ -223,10 +224,63 @@ test('Chat and Activity both wire the shared dropdown', () => {
     assert.match(activity, /openTaskControlMenu\(/);
     assert.match(activity, /hurryTaskAction\(/);
     assert.match(activity, /requestStop\(/);
-    // The trigger renders the shared label on both surfaces.
+    // The trigger renders the shared label on both surfaces; Activity names a single offered action itself.
     assert.match(chat, /TASK_CONTROL_TRIGGER_LABEL/);
-    assert.match(activity, /TASK_CONTROL_TRIGGER_LABEL/);
+    assert.match(activity, /taskControlTriggerLabel\(/);
     assert.equal(typeof TASK_CONTROL_TRIGGER_LABEL, 'string');
+});
+
+test('a single offered action is the trigger itself: it names the action and a stop asks first', async (t) => {
+    const { closeTaskControlMenu, openTaskControlMenu } = await import('../modules/task_control_menu.js');
+    const { installDomDouble } = await import('./dom_double.js');
+    const env = installDomDouble();
+    const prior = globalThis.IntersectionObserver;
+    globalThis.IntersectionObserver = class { observe() {} disconnect() {} takeRecords() { return []; } };
+    t.after(() => { closeTaskControlMenu(); globalThis.IntersectionObserver = prior; env.restore(); });
+    assert.equal(taskControlTriggerLabel([ACTION_STOP_NOW]), TASK_CONTROL_LABELS[ACTION_STOP_NOW]);
+    assert.equal(taskControlTriggerLabel([ACTION_RESUME]), 'Resume');
+    for (const many of [[ACTION_RESUME, ACTION_STOP_NOW], [], undefined]) {
+        assert.equal(taskControlTriggerLabel(many), TASK_CONTROL_TRIGGER_LABEL, 'a menu keeps its ellipsis');
+    }
+    const anchor = env.doc.createElement('button');
+    anchor.dataset.taskControlDirect = '1';
+    env.doc.body.append(anchor);
+    const settle = () => new Promise((resolve) => setImmediate(resolve));
+    const done = [];
+    const asked = [];
+    for (const [action, answer, ran] of [[ACTION_STOP_NOW, true, true], [ACTION_STOP_EARLIER, false, false],
+        [ACTION_RESUME, null, true]]) {
+        done.length = 0;
+        asked.length = 0;
+        const menu = openTaskControlMenu(anchor, { actions: [action], onAction: (a) => done.push(a),
+            confirm: async (dialog) => { asked.push(dialog); return answer; } });
+        await settle();
+        assert.equal(menu, null, 'no menu of one item');
+        assert.equal(env.doc.body.querySelector('[role="menu"]'), null);
+        assert.equal(anchor.getAttribute('aria-haspopup'), null, 'the trigger is a plain button');
+        assert.deepEqual(done, ran ? [action] : [], action);
+        if (answer === null) assert.equal(asked.length, 0, 'only a stop asks');
+        else assert.deepEqual([asked.length, asked[0].confirmLabel, asked[0].danger], [1, TASK_CONTROL_LABELS[action], true]);
+    }
+    done.length = 0;
+    openTaskControlMenu(anchor, { actions: [ACTION_STOP_NOW], busy: true, onAction: (a) => done.push(a), confirm: async () => true });
+    await settle();
+    assert.deepEqual(done, [], 'a busy task takes no second press');
+    // Two actions are a real choice: the menu opens and nothing runs until an item is chosen.
+    const menu = openTaskControlMenu(anchor, { actions: [ACTION_HURRY, ACTION_STOP_NOW], onAction: (a) => done.push(a),
+        confirm: async () => { throw new Error('a menu item never asks again'); } });
+    assert.ok(menu);
+    assert.equal(anchor.getAttribute('aria-expanded'), 'true');
+    menu.querySelector(`[data-task-control="${ACTION_STOP_NOW}"]`).click();
+    await settle();
+    assert.deepEqual(done, [ACTION_STOP_NOW]);
+    closeTaskControlMenu();
+    // A trigger that always says Stop… (a chat card's) keeps its menu even for one action: its label promised one.
+    const plain = env.doc.createElement('button');
+    env.doc.body.append(plain);
+    assert.ok(openTaskControlMenu(plain, { actions: [ACTION_STOP_NOW], onAction: (a) => done.push(a),
+        confirm: async () => { throw new Error('no dialog on a menu trigger'); } }));
+    assert.deepEqual(done, [ACTION_STOP_NOW], 'nothing runs before an item is chosen');
 });
 
 test('the dropdown replaced the old cancel confirm dialogs (dismiss = continue)', () => {

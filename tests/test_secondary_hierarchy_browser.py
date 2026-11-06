@@ -169,7 +169,7 @@ def test_activity_rows_keep_each_name_whole_and_say_how_long_in_words(ui, width,
         const control = row.querySelector('[data-act]').getBoundingClientRect();
         const box = row.getBoundingClientRect();
         const range = document.createRange();
-        range.selectNodeContents(row.querySelector('.activity-row-main'));
+        range.setStartBefore(name); range.setEndAfter(sub);
         const lines = [...range.getClientRects()].filter((r) => r.width > 0);
         const style = (el) => getComputedStyle(el);
         return {
@@ -196,7 +196,7 @@ def test_activity_rows_keep_each_name_whole_and_say_how_long_in_words(ui, width,
     # The Consciousness row keeps its last fact (it was cut by an ellipsis).
     background = next(row for row in rows if row["name"] == "Consciousness")
     assert "tasks 0/2" in background["sub"], background
-    assert not page.evaluate("""() => { const e = document.querySelector('.activity-scroll');
+    assert not page.evaluate("""() => { const e = document.querySelector('#dashboard-panel-activity .dashboard-body');
         return e.scrollWidth > e.clientWidth + 1; }""")
     _shot(page, ui, "activity", width, theme)
 

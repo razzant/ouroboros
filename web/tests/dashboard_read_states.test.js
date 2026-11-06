@@ -64,6 +64,30 @@ test('Activity names known non-Project scope waits without implying a Project', 
     assert.match(mount.textContent, /&lt;bindings unavailable&gt;/);
 });
 
+test('Activity names a run as its card does, keeps the whole order behind Details, and refreshes without a word', async (t) => {
+    const { mount, routes, ws } = setup(t);
+    emptyActivity(routes);
+    const order = 'Complete two confirmed recovery defects\nof the existing candidate <exact tree>.';
+    routes.set(queueUrl, response({ queue: { running: [
+        { id: 'named', type: 'task', runtime_sec: 60, task: { id: 'named', suggested_name: 'Complete two confirmed recovery defects', text: order } },
+    ], pending: [{ task: { id: 'short', suggested_name: 'Continue the project', text: 'Continue the project.' } }] } }));
+    const activity = initActivity({ mount, ws });
+    await activity.refresh();
+    const rows = section(mount, 'queue').querySelectorAll('.activity-row');
+    assert.equal(rows[0].querySelector('.activity-name').textContent, 'Complete two confirmed recovery defects');
+    const details = rows[0].querySelector('details');
+    assert.equal(details.querySelector('summary').textContent, 'Details');
+    assert.match(details.querySelector('.activity-order').textContent, /of the existing candidate &lt;exact tree&gt;\./);
+    assert.doesNotMatch(rows[0].querySelector('.activity-name').textContent, /exact tree/, 'never the whole order as its title');
+    assert.equal(rows[1].querySelector('details'), null, 'an order its name already says keeps no copy behind Details');
+    // A refresh reads silently (aria-busy only): no line comes and goes under the heading and moves the rows.
+    details.open = true;
+    const again = activity.refresh();
+    assert.equal(message(section(mount, 'queue')), '');
+    await again;
+    assert.equal(section(mount, 'queue').querySelector('.activity-row').querySelector('details').hasAttribute('open'), true, 'an open Details stays open');
+});
+
 test('Activity failed reads stay unknown; independent successful empty state stays empty', async (t) => {
     const { mount, routes, ws } = setup(t);
     emptyActivity(routes);
@@ -128,6 +152,7 @@ test('Activity separates standing schedules from retained history and keeps Rest
     assert.match(standing[1].textContent, /Disabled schedule[\s\S]*disabled/);
     assert.equal(standing[1].querySelector('button').textContent, 'Enable');
     assert.equal(standing[1].querySelector('button').dataset.action, 'restore');
+    assert.equal(standing[1].querySelector('button').dataset.done, 'enabled', 'its outcome says the button\'s own word');
 
     assert.equal(history.hasAttribute('open'), false);
     assert.match(history.querySelector('summary').textContent, /withdrawn \(2\)/);
@@ -384,23 +409,33 @@ test('Activity unites live direct turns with queue identities and preserves queu
         running: [{ id: 'queued-1', type: 'task', runtime_sec: 9, task: { title: 'Queue title' } }],
         pending: [{ task: { id: 'paused-1', title: 'Paused work', _budget_pause: true } }],
     } }));
-    await initActivity({ mount, ws }).refresh();
+    const activity = initActivity({ mount, ws });
+    await activity.refresh();
     const queue = section(mount, 'queue');
     const rows = queue.querySelectorAll('.activity-row');
     assert.equal(rows.length, 3, 'partial positive census adds exactly the missing direct identity');
+    // The list reads by state: what works now first, then paused work collapsed under its count.
     assert.match(rows[0].textContent, /Queue title[\s\S]*Working · task · 9s/);
-    assert.match(rows[1].textContent, /Paused work[\s\S]*Paused/);
-    assert.equal(rows[1].querySelector('button').dataset.budgetPaused, '1');
+    const paused = queue.querySelector('details[data-open-key="paused"]');
+    assert.equal(paused.querySelector('summary').textContent, 'Paused (1)');
+    assert.equal(paused.hasAttribute('open'), true, 'open until the owner folds it: Resume stays one press away');
+    assert.ok(paused.contains(rows[2]) && !paused.contains(rows[0]) && !paused.contains(rows[1]));
+    assert.match(rows[2].textContent, /Paused work[\s\S]*Paused/);
+    assert.equal(rows[2].querySelector('button').dataset.budgetPaused, '1');
     // A live census row says its state in the chip's own word (translated at its producer), never the census code.
-    assert.equal(rows[2].querySelector('[data-i18n-skip]').textContent, 'Thinking');
-    assert.match(rows[2].textContent, /Direct turn[\s\S]*· 12s/);
-    assert.doesNotMatch(rows[2].textContent, /thinking/);
-    assert.equal(rows[2].querySelector('button').dataset.id, 'direct-1');
-    assert.equal(rows[2].querySelector('button').dataset.act, 'task-control');
+    assert.equal(rows[1].querySelector('[data-i18n-skip]').textContent, 'Thinking');
+    assert.match(rows[1].textContent, /Direct turn[\s\S]*· 12s/);
+    assert.doesNotMatch(rows[1].textContent, /thinking/);
+    assert.equal(rows[1].querySelector('button').dataset.id, 'direct-1');
+    assert.equal(rows[1].querySelector('button').dataset.act, 'task-control');
     // Stop… is the neutral shared trigger on every row, never a danger button.
-    assert.deepEqual(rows.map((row) => row.querySelector('button').className), Array(3).fill('btn btn-xs btn-default'));
+    assert.deepEqual(rows.map((row) => row.querySelector('button').className), Array(3).fill('btn btn-sm btn-default'));
     assert.doesNotMatch(queue.textContent, /Nothing running/);
     assert.deepEqual(calls, [queueUrl, backgroundUrl, schedulesUrl], 'reuse the existing state read');
+    // A group the owner folded stays folded through the next refresh.
+    paused.open = false;
+    await activity.refresh();
+    assert.equal(section(mount, 'queue').querySelector('details[data-open-key="paused"]').hasAttribute('open'), false);
 });
 
 test('Activity names work held by an application stop as held, never as a money pause', async (t) => {
@@ -419,14 +454,17 @@ test('Activity names work held by an application stop as held, never as a money 
     await initActivity({ mount, ws }).refresh();
     const rows = section(mount, 'queue').querySelectorAll('.activity-row');
     assert.equal(rows.length, 3);
-    for (const row of rows.slice(0, 2)) {
+    // Queued work leads; the two held rows collapse under "Paused (2)", their order kept.
+    assert.equal(section(mount, 'queue').querySelector('details[data-open-key="paused"]').querySelector('summary').textContent, 'Paused (2)');
+    for (const row of rows.slice(1)) {
         assert.match(row.textContent, /Paused/);
         assert.doesNotMatch(row.textContent, /budget/);
         assert.equal(row.querySelector('button').dataset.budgetPaused, '1', 'the same Resume is offered');
     }
+    assert.match(rows[1].textContent, /Saved before Quit/);
     // The owner's Resume released this hold: it is neither held nor paused any more.
-    assert.doesNotMatch(rows[2].textContent, /Held after a restart|Paused/);
-    assert.equal(rows[2].querySelector('button').dataset.budgetPaused, undefined);
+    assert.doesNotMatch(rows[0].textContent, /Held after a restart|Paused/);
+    assert.equal(rows[0].querySelector('button').dataset.budgetPaused, undefined);
 });
 
 test('Activity complete empty census differs from unknown and failed state preserves queue facts', async (t) => {
