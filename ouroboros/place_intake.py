@@ -222,8 +222,10 @@ def _arrival_append(root, drive, recipient: str, task: dict, event, wake: bool, 
     """
     from ouroboros.owner_mailbox import write_task_message
     from ouroboros.place_arrivals import pin_recipient
+    from ouroboros.owner_words import place_owner_words
     source = _arrival_source(root, task, event) if isinstance(event.conversation.get("transport_queue"), dict) else None
     reaction = reaction_fact(event.message)
+    owner_words = "" if reaction else place_owner_words(task["metadata"].get("focus"), event.text, event.message)
     text = json.dumps({"actor": dict(event.actor), "event": event.text,
                        **({"non_speech": f"Reaction, not speech: {reaction_words(reaction)}"} if reaction else {}),
                        "source_event_id": event.source_event_id, "conversation_key": event.conversation_key,
@@ -244,7 +246,8 @@ def _arrival_append(root, drive, recipient: str, task: dict, event, wake: bool, 
                               sender_origin={"place_id": task["metadata"]["focus"]["place_id"],
                                              "conversation_key": event.conversation_key},
                               place_arrival={"source_event_id": event.source_event_id,
-                                             "message": dict(event.message), "wake": bool(wake)},
+                                             "message": dict(event.message), "wake": bool(wake),
+                                             **({"owner_words": owner_words} if owner_words else {})},
                               admit=inside_lock):
             return True
         if verdicts == [False]:

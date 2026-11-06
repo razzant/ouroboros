@@ -1146,6 +1146,9 @@ Use the connector's ordinary content-hash-bound skill token for:
   facts. `review_requested` and `assigned` mean requests addressed to the watched
   identity; narrow wake declarations may use them. A new discussion is not a
   `new_issue`; `any_message` is the generic alternative. Bots require an explicit bot wake item.
+- Optional `event.message.forward_origin` (any non-empty value): the message carries another author's words,
+  forwarded. The host never records such an event as its sender's own words: an addressed message from an account
+  the place confirms as the owner's is the owner's words at a turn's opening and mid-turn, a forward of it is not.
 - Optional `event.message.reaction` (object with `schema_version: 1`; `text` and files empty; an object
   without that key is not this fact): `change` `add`/`remove`/`replace`/`count`; `old`/`new` lists hold provider
   `{type, value}`; `count` instead has only `counts` entries `{type, value, count}` (non-negative integer),

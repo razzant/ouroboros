@@ -236,6 +236,25 @@ def carried_owner_corpus(ctx: Any, source_text: Any = "") -> List[Dict[str, Any]
     return [row for row in rows if row["content"].strip()]
 
 
+def place_owner_words(focus: Any, text: Any, message: Any) -> str:
+    """A place event's words when they are my human's: addressed to me from an account its place confirmed, the
+    same rule at a turn's opening and mid-turn. A forwarded message carries another author's words: context."""
+    focus, words = _mapping(focus), str(text or "")
+    confirmed = focus.get("addressed") is True and _mapping(focus.get("actor")).get("owner_confirmed") is True
+    return words if confirmed and words.strip() and not _mapping(message).get("forward_origin") else ""
+
+
+def owner_words_contain(ctx: Any, text: Any) -> bool:
+    """``text`` is my human's own words that reached this run: exact, as a quote is (``chronicle_quotes.quote_in``),
+    inside one owner row of the run, never a reply target (another author's words beside theirs). Provenance of
+    bytes, never their meaning."""
+    from ouroboros.chronicle_quotes import quote_in
+
+    wanted = str(text or "").strip()
+    return bool(wanted) and any(quote_in(wanted, row["text"])
+                                for row in directive_owner_rows(ctx) if row["source"] in OWNER_SOURCES)
+
+
 def _corpus_keys(row: Mapping[str, Any]) -> set:
     """One carried row's identities: its ``msg_id`` and origin ``client_message_id`` (an empty id names none),
     else its source and words."""
@@ -253,6 +272,31 @@ def merged_corpus(kept: Any, added: Any) -> List[Dict[str, Any]]:
             seen |= keys
             merged.append(dict(row))
     return merged
+
+
+def answered_card_reply(block: Any, task_id: Any) -> Dict[str, str]:
+    """The card my human answered, as the message their answer replies to (a corpus row's ``reply_to``), or {}.
+
+    The whole subject the card showed (question, options with details, stake, assumption, materials) is the asking
+    task's words: it rides beside the owner's answer for every reader of the corpus (Safety, reviewers, children,
+    Continue), never as the owner's words; the host's record of the pressed option closes it, so a choice survives
+    beside a comment. A secret request's form has none."""
+    block = _mapping(block)
+    if block.get("secret_request") or not str(block.get("question") or "").strip():
+        return {}
+    options = block.get("options") if isinstance(block.get("options"), list) else []
+    details = block.get("option_details") if isinstance(block.get("option_details"), list) else []
+    lines = [str(block["question"]), *(f"{n}. {label}" + (f" ({details[n - 1]})" if n <= len(details) and str(
+        details[n - 1]).strip() else "") for n, label in enumerate(options, 1))]
+    lines += [f"{name}: {block[key]}" for key, name in (("stake", "Stake"), ("assumption", "If unanswered"),
+                                                        ("host_facts", "Host facts")) if str(block.get(key) or "").strip()]
+    materials = [f"{m.get('name')} (task {m.get('task_id') or task_id})" for m in block.get("materials") or []
+                 if isinstance(m, Mapping) and m.get("name")]
+    lines += [f"Materials: {', '.join(materials)}"] * bool(materials)
+    if type(block.get("answered_index")) is int:
+        lines.append(f"(host record: my human pressed option {block['answered_index'] + 1})")
+    return {"address": f"quiz {block.get('quiz_id')} of task {task_id}", "author": f"Ouroboros, task {task_id}",
+            "text": "\n".join(lines)}
 
 
 def reply_target(drive_root: Any, reference: Any) -> Dict[str, str]:

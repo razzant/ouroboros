@@ -551,3 +551,27 @@ def test_quiz_answers_and_principal_messages_enter_the_directive_corpus_but_syst
     delivered = "\n".join(str(m["content"]) for m in messages)
     assert "[System task message]" in delivered and "[Escalation from descendant task grandchild]" in delivered
     assert "[Message from task sibling-7, relayed by ancestor root-1]" in delivered
+
+
+def test_an_owner_answer_is_recorded_with_the_card_it_answers_beside_never_inside_its_words(tmp_path):
+    """Audit 05.11 item 37: Safety saw "1. Publish it" without the card that held the text. The answered card rides
+    beside the owner's words as the message they reply to: the asking task's question and options, the pressed
+    option marked; the owner's words stay what they pressed. An answer without a snapshot gets no invented card."""
+    from ouroboros.owner_mailbox import KIND_QUIZ_ANSWER, write_owner_message
+
+    ctx = SimpleNamespace()
+    messages = [{"role": "user", "content": "Initial requirement verbatim"}]
+    _initialize_owner_directives(ctx, messages)
+    card = {"quiz_id": "q7", "question": "Publish exactly this reply?\n> Thanks, taking it up.", "state": "answered",
+            "options": ["Publish it", "Not now"], "option_details": ["Post the quoted text", ""], "answered_index": 0}
+    write_owner_message(tmp_path, "[Owner quiz answer] quiz q7", task_id="root", msg_id="qa-7", kind=KIND_QUIZ_ANSWER,
+                        quiz_delivery={"task_id": "asker", "quiz_id": "q7", "answer_snapshot": card})
+    write_owner_message(tmp_path, "[Owner quiz answer] legacy", task_id="root", msg_id="qa-8", kind=KIND_QUIZ_ANSWER)
+    _drain_incoming_messages(messages, queue.Queue(), tmp_path, "root", None, set(), owner_ctx=ctx)
+    answered, legacy = ctx._owner_directives[-2:]
+    assert answered["content"] == "1. Publish it" and answered["quiz_id"] == "q7"
+    assert answered["reply_to"] == {
+        "address": "quiz q7 of task asker", "author": "Ouroboros, task asker",
+        "text": "Publish exactly this reply?\n> Thanks, taking it up.\n1. Publish it (Post the quoted text)\n2. Not now\n"
+                "(host record: my human pressed option 1)"}
+    assert legacy["content"] == "[Owner quiz answer] legacy" and "reply_to" not in legacy

@@ -83,6 +83,20 @@ def _reply_bundle(root, monkeypatch, prompts, *, thread="", before_reply=None, t
     return ctx, bundle, prompt
 
 
+def test_an_owner_answer_reaches_the_supervisor_with_the_card_it_answers(focus, monkeypatch, checker):
+    """The Supervisor reads an owner's answer together with what it answers (audit 05.11 item 37)."""
+    from ouroboros.owner_words import answered_card_reply
+
+    card = {"quiz_id": "q7", "question": "Publish exactly this reply?\n> Thanks, taking it up.",
+            "options": ["Publish it", "Not now"], "answered_index": 0}
+    row = {"source": "owner_quiz_answer", "content": "1. Publish it", "msg_id": "quiz_answer:asker:q7",
+           "source_task_id": "asker", "quiz_id": "q7", "reply_to": answered_card_reply(card, "asker")}
+    root, _place, _admission, _event = focus
+    _ctx, bundle, _prompt = _reply_bundle(root, monkeypatch, checker, extra_rows=(row,))
+    assert row in bundle["occasion"]["sources"]
+    assert "> Thanks, taking it up." in row["reply_to"]["text"] and "Thanks" not in row["content"]
+
+
 def test_each_source_projection_appears_once_and_the_event_is_typed(focus, monkeypatch, checker):
     root, place, _admission, _event = focus
     p.edit_place(root, place.place_id, "add_note", author="owner", text="OWNER NOTE: reply in Russian here.")

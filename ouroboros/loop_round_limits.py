@@ -220,7 +220,10 @@ def _drain_incoming_messages(
                 provenance = str(entry.get("provenance") or "ancestor_task")
                 if provenance == "place_event":
                     from ouroboros.presence_continuation import note_place_delivery
-                    note_place_delivery(owner_ctx, entry, controls)  # context, never owner authority
+                    note_place_delivery(owner_ctx, entry, controls)  # the event is context; my human's words are theirs
+                    if (words := (entry.get("place_arrival") or {}).get("owner_words")):  # as at the opening
+                        _loop()._record_owner_directive(owner_ctx, source="place_owner", content=words, carried=True,
+                                                        msg_id=str(entry.get("msg_id") or ""))
                 if provenance not in CONTEXT_ONLY_TASK_PROVENANCES:
                     _loop()._record_owner_directive(
                         owner_ctx, content=dmsg, msg_id=str(entry.get("msg_id") or ""),
@@ -257,15 +260,17 @@ def _drain_incoming_messages(
                 continue
             if kind == KIND_QUIZ_ANSWER:
                 from ouroboros.owner_quiz import late_answer_owner_text
+                from ouroboros.owner_words import answered_card_reply
                 delivery = entry.get("quiz_delivery") or {}
                 answer = delivery.get("answer_snapshot")
                 owner_words = late_answer_owner_text(answer) if isinstance(answer, dict) else dmsg
                 if isinstance(answer, dict):
                     from ouroboros.owner_relay import retain_owner_message
                     retain_owner_message(owner_ctx, (answer.get("delivery") or {}).get("answer_row"))
-                _loop()._record_owner_directive(  # the delivered card's identity: its question stays findable
+                _loop()._record_owner_directive(  # the card it answers rides beside it, the asking task's words
                     owner_ctx, source="owner_quiz_answer", content=owner_words, msg_id=str(entry.get("msg_id") or ""),
-                    origin={"source_task_id": delivery.get("task_id"), "quiz_id": delivery.get("quiz_id")})
+                    origin={"source_task_id": delivery.get("task_id"), "quiz_id": delivery.get("quiz_id")},
+                    reply_to=answered_card_reply(answer, delivery.get("task_id")))
                 deliver_quiz_answer(
                     entry, task_id, event_queue,
                     lambda text: _loop()._append_or_merge_user_message(messages, text, slot=owner_ctx,

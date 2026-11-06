@@ -46,7 +46,7 @@ import pathlib
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from ouroboros.owner_words import OWNER_SOURCES, reply_target
+from ouroboros.owner_words import OWNER_SOURCES, answered_card_reply, reply_target
 from ouroboros.utils import utc_now_iso
 from ouroboros.task_store import patch_document
 
@@ -116,7 +116,7 @@ def row_identity(row: Dict[str, Any]) -> str:
 
 
 # What a successor reads of an answered card beside the owner's words (``answered_card``).
-CARD_FIELDS = ("quiz_id", "question", "options", "answered_index", "comment", "asked_at", "answered_at")
+CARD_FIELDS = ("quiz_id", "question", "options", "option_details", "stake", "assumption", "host_facts", "materials", "answered_index", "comment", "asked_at", "answered_at")
 # The binding's copy of the work's explicit execution budget (``execution_carry``).
 EXECUTION_CARRY_KEYS = ("execution_timeout_sec", "execution_consumed_sec")
 WAKE_OPENING = "consciousness_wake"
@@ -717,14 +717,15 @@ def carried_execution_fields(binding: Dict[str, Any]) -> Dict[str, Any]:
 
 def owner_corpus_rows(sources: Dict[str, Any]) -> List[Dict[str, Any]]:
     """The successor's seeded owner corpus (``_initialize_owner_directives``): exact words with their typed ids and
-    reply targets, the start's answers first; a card's question never enters it."""
+    reply targets, the start's answers first; an answered card rides beside its answer as its reply target."""
     rows: List[Dict[str, Any]] = []
     original = sources.get("original") if isinstance(sources.get("original"), dict) else {}
     start = sources.get("start") if isinstance(sources.get("start"), dict) else {}
     for row in [{**original, "source": "origin_message"}, *(start.get("answers") or []), *(sources.get("later") or [])]:
         if isinstance(row, dict) and str(row.get("content") or "").strip():
-            rows.append({"source": row.get("source") or "owner_mailbox", "content": row["content"],
-                         **{key: row[key] for key in (*ROW_IDS, "reply_to") if row.get(key)}})
+            card = answered_card_reply(row.get("card"), row.get("source_task_id"))
+            rows.append({"source": row.get("source") or "owner_mailbox", "content": row["content"],  # a card wins
+                         **{key: row[key] for key in (*ROW_IDS, "reply_to") if row.get(key)}, **({"reply_to": card} if card else {})})
     return rows
 
 
