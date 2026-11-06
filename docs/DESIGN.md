@@ -2137,8 +2137,10 @@ this device" only when the browser marks it local, otherwise "Online voice".
 
 Live Conversation keeps the glass wave, phone controls and collapsed transcript.
 Talk occupies empty Send only when Calls (beta) is enabled and the server confirms
-the selected engine is loaded and its credential grants are current. Text or a
-file restores equal-width Send; empty Enter never calls. The dictation mic hides
+the selected engine is loaded and its credential grants are current. Until a page's
+first read answers, the answer this device last got stands from the first frame; a
+device without one (new, or its storage blocked) shows Send until that read. Text or
+a file restores equal-width Send; empty Enter never calls. The dictation mic hides
 during the call and returns with the draft intact. The glass keeps the composer's
 fixed corner as it becomes a card; End remains visible in phone and keyboard
 views. A model without vision hides Show and says, “This voice engine does not
