@@ -667,3 +667,87 @@ def test_a_contended_lock_does_not_keep_its_finished_event_loop(monkeypatch, tmp
     loop_ref = asyncio.run(contend())
     gc.collect()
     assert loop_ref() is None
+
+
+# -- review findings (MCP_RV3) ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("replacement", ["issuer", "secret"])
+def test_invalid_client_of_the_old_grant_keeps_a_pending_sign_in_with_new_credentials(monkeypatch, tmp_path,
+                                                                                         replacement):
+    issuer = "https://auth.example"
+    cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path, issuer=issuer)
+    first = asyncio.run(mcp_oauth.begin(cfg, client_id="owner-app", client_secret="old-secret"))
+    assert asyncio.run(mcp_oauth.complete(cfg, state=_state_of(first), code="first", iss=issuer))["ok"]
+    old_access = _file(cfg)["tokens"]["access_token"]
+    new_issuer = "https://replacement.example" if replacement == "issuer" else issuer
+    new_secret = "new-secret" if replacement == "secret" else "old-secret"
+    _mock_as(monkeypatch, tmp_path, issuer=new_issuer)  # the same MCP address, newly published metadata
+    started = asyncio.run(mcp_oauth.begin(cfg, client_id="owner-app", client_secret=new_secret))
+
+    async def refused_old_client(http, endpoint, client, data):
+        assert client["client_secret"] == "old-secret"
+        return httpx.Response(401, json={"error": "invalid_client"}, request=httpx.Request("POST", endpoint))
+
+    with monkeypatch.context() as stub:
+        stub.setattr(mcp_oauth, "_token_request", refused_old_client)
+        with pytest.raises(mcp_oauth.MCPAuthRequired):
+            asyncio.run(mcp_oauth.current_token(cfg, rejected=old_access))
+    assert asyncio.run(mcp_oauth.complete(cfg, state=_state_of(started), code="new", iss=new_issuer))["ok"]
+
+
+def test_a_new_pending_sign_in_survives_an_old_refresh_that_finishes_after_it(signin, monkeypatch):
+    from ouroboros import store
+
+    _provider, manager, cfg, settings = signin()
+    _complete(cfg, _provider_return(cfg))
+    old_access = _file(cfg)["tokens"]["access_token"]
+    newer = {**settings, "MCP_SERVERS": [{**settings["MCP_SERVERS"][0], "url": cfg.url + "?saved=2"}]}
+    real_token_request, real_save, real_name_lock = mcp_oauth._token_request, mcp_oauth._save, store.name_lock
+    entered, release, failures = threading.Event(), threading.Event(), []
+    main_thread = threading.current_thread()
+
+    # The old refresh resumes when the new begin either writes its pending (the broken order) or finds the
+    # lock busy (the fixed one); no scheduling sleep decides the order.
+    def saved(new_cfg, doc):
+        real_save(new_cfg, doc)
+        if new_cfg.url == newer["MCP_SERVERS"][0]["url"]:
+            release.set()
+
+    @contextlib.contextmanager
+    def observed_lock(root, filename, **kwargs):
+        try:
+            with real_name_lock(root, filename, **kwargs):
+                yield
+        except store.StoreBusy:
+            if threading.current_thread() is main_thread and filename == f"mcp/oauth/server-{cfg.id}.lock":
+                release.set()
+            raise
+
+    async def delayed(http, endpoint, client, data):
+        if data["grant_type"] == "refresh_token":
+            entered.set()
+            assert await asyncio.to_thread(release.wait, 20)
+        return await real_token_request(http, endpoint, client, data)
+
+    def old_refresh():
+        try:
+            asyncio.run(mcp_oauth.current_token(cfg, rejected=old_access))
+        except BaseException as exc:  # noqa: BLE001 -- reported below
+            failures.append(exc)
+
+    monkeypatch.setattr(mcp_oauth, "_token_request", delayed)
+    monkeypatch.setattr(mcp_oauth, "_save", saved)
+    monkeypatch.setattr(store, "name_lock", observed_lock)
+    thread = threading.Thread(target=old_refresh, name="mcp-oauth-old-refresh")
+    thread.start()
+    try:
+        assert entered.wait(10)
+        manager.configuration_changed(newer, reason="settings")  # Save prunes the old address's file
+        new_cfg = manager.server_config("docs")
+        returned = _provider_return(new_cfg)
+    finally:
+        release.set()
+        thread.join(20)
+    assert not thread.is_alive() and not failures
+    assert _complete(new_cfg, returned)["ok"] is True

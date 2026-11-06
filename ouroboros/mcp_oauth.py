@@ -194,7 +194,8 @@ def secret_values(server_id: str) -> tuple:
 
 def prune(configs: list) -> None:
     """Configuration-event remover (beside ``mcp_catalog.prune_catalogs``): a removed server, or one whose
-    address changed, loses its sign-in file and lock."""
+    address changed, loses its sign-in file. Its lock file is never touched here: the holder removes it on
+    release, and a refresh still holding it must keep later steps waiting until its own write is done."""
     directory = config.DATA_DIR / "state" / "mcp" / "oauth"
     wanted = {cfg.id: cfg.url for cfg in configs}
     with contextlib.suppress(OSError):
@@ -202,7 +203,6 @@ def prune(configs: list) -> None:
             server_id = path.name[len("server-"):-len(".json")]
             if wanted.get(server_id) != (read_json_dict(path) or {}).get("url"):
                 path.unlink(missing_ok=True)
-                path.with_suffix(".lock").unlink(missing_ok=True)
 
 
 # -- the authorization server -------------------------------------------------------------------
@@ -252,6 +252,12 @@ def _tokens(token: Any, previous_refresh: Optional[str], previous_scope: Optiona
             "expires_at": time.time() + token.expires_in if token.expires_in else None}
 
 
+def _same_registration(one: Dict[str, Any], other: Dict[str, Any]) -> bool:
+    """One client registration: same issuer, id and authentication (a new secret is another registration)."""
+    keys = ("issuer", "client_id", "client_secret", "token_endpoint_auth_method")
+    return bool(one) and bool(other) and all(one.get(key) == other.get(key) for key in keys)
+
+
 def _fresh(tokens: Dict[str, Any], rejected: Optional[str]) -> bool:
     return bool(tokens.get("access_token")) and tokens["access_token"] != rejected and (
         tokens.get("expires_at") is None or time.time() < float(tokens["expires_at"]))
@@ -285,7 +291,7 @@ async def current_token(cfg: Any, rejected: Optional[str] = None) -> str:
             facts: Dict[str, Any] = {}
             if error == "invalid_client":
                 facts["client"] = None
-                if ((doc.get("pending") or {}).get("client") or {}).get("client_id") == (doc.get("client") or {}).get("client_id"):
+                if _same_registration((doc.get("pending") or {}).get("client") or {}, doc.get("client") or {}):
                     facts["pending"] = None
             raise _required(cfg, doc, "refresh_rejected", error, **facts)
         response.raise_for_status()  # an unreachable authorization server is a failure, not a lost sign-in
