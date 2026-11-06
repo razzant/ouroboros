@@ -49,12 +49,10 @@ export function applyHistoricalModelExecution(record, historical) {
     return true;
 }
 
-export function senderLabel(role, isProgress = false, systemType = '', opts = {}, chatSessionId = '') {
+export function senderLabel(role, isProgress = false, systemType = '', opts = {}) {
     if (role === 'user') {
         if (opts.source === 'telegram') return opts.senderLabel || 'Telegram';
-        if (opts.senderSessionId && opts.senderSessionId !== chatSessionId) {
-            return `WebUI (${opts.senderSessionId.slice(0, 8)})`;
-        }
+        // The owner's words from another window or device are still the owner's: no session id.
         return opts.senderLabel || 'You';
     }
     if (role === 'system') {
@@ -1486,6 +1484,8 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
     ) : '';
     const model = chip ? executorModelText(chip, compactModel)
         : execution && !execution.observed ? execution.value : execution?.model || coordinator;
+    // The compact line names the model a Claudexor route ran on, not the route's spelling `codex=…` (Details keep it).
+    const lineModel = String(model || '').replace(/(^|\s)[a-z][\w.-]*=(?=\S)/i, '$1');
     // A key added under Accounts follows its model ("claude-opus-5.5 · Claude credits"); the built-in key adds nothing.
     const keyRoute = chip || (execution && !execution.observed) ? '' : execution ? record.modelExecution?.used_model : agentModel;
     const key = connectionLabel(routeConnectionId(keyRoute));
@@ -1501,13 +1501,15 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
         // final (with its own end time) arrives as a message.
         toolCalls, ...cost, clock,
     ].filter(Boolean).map(text)) : metaLineHtml([
-        chip ? executorIdentityMarkup(chip, { model }) : (model ? text(key ? `${model} · ${key}` : model) : ''),
+        chip ? executorIdentityMarkup(chip, { model }) : (lineModel ? text(key ? `${lineModel} · ${key}` : lineModel) : ''),
         effortChipMarkup(record.effort),
         ...[
             record.historicalUnavailable ? 'Outcome unavailable' : (record.historicalUnconfirmed ? 'Activity unconfirmed' : ''),
             !record.finished && record.projectHoldDetail || '',
             record.historyRetentionProblem || '',
-            record.toolErrors > 0 ? `${record.toolErrors} error${record.toolErrors === 1 ? '' : 's'}` : '',
+            // Under a Done chip the block's own rows name the errors; this line does not repeat them (DESIGN principle 7).
+            record.toolErrors > 0 && !(record.finished && record.phaseEl?.dataset?.phase === 'done')
+                ? `${record.toolErrors} error${record.toolErrors === 1 ? '' : 's'}` : '',
             Number.isFinite(record.durationSec) ? formatLogDuration(record.durationSec) : '',
             !supervision && record.toolCalls > 0 ? toolCalls : '',
             ...(Array.isArray(record._lastFrameMeta) ? record._lastFrameMeta : []),

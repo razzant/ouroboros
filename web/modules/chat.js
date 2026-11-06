@@ -286,7 +286,6 @@ export function createChatInstance({
         reading: () => reading, onDomWrite: withStableViewport, history: () => historyReveal,
         navigate: revealQuotedSource, present: () => !destroyed && isInstanceVisible() });
     const chatMedia = createChatMedia({
-        chatSessionId,
         durableChatMediaUrl,
         formatMsgTime,
         insertMessageNode,
@@ -1820,14 +1819,14 @@ export function createChatInstance({
         if (!record) return false;
         const before = captureLiveCardProjection(record);
         const typingBefore = typingEl.style.display;
-        if (setHistoricalUnavailable(record, false)) renderLiveCardMeta(record);
+        setHistoricalUnavailable(record, false);
         markReviewAnchor(record);
         const wasFinished = record.finished;
         record.finished = true;
         record.finalizingHold = false;
         const presentation = taskPresentation(phase || 'done', record.quietEffective ?? record.historicalTerminal?.quiet_effective);
         setLiveCardPhase(record, presentation.phase, presentation.headline);
-        syncCardHeadline(record);
+        syncCardHeadline(record); renderLiveCardMeta(record);
         settleLiveCard(record, wasFinished);
         ensureLiveCardVisible(record);
         if (activeLiveGroupId === record.groupId) activeLiveGroupId = '';
@@ -2254,7 +2253,7 @@ export function createChatInstance({
         const pendingHtml = pending ? `<div class="msg-pending">Queued until reconnect</div>` : '';
         // Preserve the card's source link in a standalone row.
         bubble.innerHTML = `
-            <div class="sender">${escapeHtml(senderLabel(role, isProgress, systemType, meta, chatSessionId))}</div>
+            <div class="sender">${escapeHtml(senderLabel(role, isProgress, systemType, meta))}</div>
             <div class="message${richMarkdown ? ' ui-rich-content' : ''}">${rendered}</div>
             ${evidenceLinkHtml(opts.evidenceRef)}
             ${pendingHtml}
@@ -3439,7 +3438,7 @@ export function createChatInstance({
                 systemType: msg.system_type || '', narration: msg.narration,
                 source: msg.source || '',
                 initiator: msg.initiator || '',
-                taskId: explicitTaskId, reply: msg,
+                taskId: explicitTaskId, reply: msg, projectId: msg.project_id, projectName: msg.project_name,
                 // The saved row's own name, as history keys it; this frame's client_message_id is the owner's.
                 clientMessageId: msg.row_client_message_id || '',
                 // A placed row whose card is not in this chat keeps its record link.

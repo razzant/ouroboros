@@ -765,6 +765,71 @@ test('the summary warns, and still offers Start, when Blocking review has no rev
     }
 });
 
+// Audit 05.11 item 13: with a subscription, Summary says what an exhausted quota does. A set Fallback continues the
+// work before any wait (PR #1443); without one the work waits for the reset. A model row names its source in words.
+test('Summary says what an exhausted subscription quota does, with and without a Fallback', async () => {
+    const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
+    const fetch = async (url, init = {}) => {
+        let body = {};
+        if (String(url) === '/api/model-catalog') body = subscription.catalog;
+        else if (String(url) === '/api/claudexor/status') body = subscription.status;
+        else if (String(url) === '/api/onboarding/subagents/preview') {
+            const payload = JSON.parse(init.body);
+            body = { ok: true, available_subagents: { enabled: true, items: [] },
+                model_settings: Object.fromEntries(Object.keys(subscription.preview.model_settings).map((key) => [key, payload[key]])) };
+        }
+        return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+    };
+    const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+    // Walk from Accounts (where the connected subscription is observed) to Summary.
+    const summary = async (query, fallbackModel, mainModel = 'claudexor::codex=gpt-test', openrouterKey = '') => {
+        let html = '', budget = '';
+        const bootstrap = { ...BOOTSTRAP, initialState: { ...BOOTSTRAP.initialState, openrouterKey, mainModel, fallbackModel } };
+        await withWizard(bootstrap, query, async ({ doc }) => {
+            await settle();
+            for (let step = 0; step < 4; step += 1) {
+                doc.getElementById('next-btn').fire('click');
+                await settle();
+                if (step === 2) budget = doc.getElementById('root').innerHTML;  // the Budget step's quota card
+            }
+            html = doc.getElementById('root').innerHTML;
+        }, { fetch });
+        return { html, budget };
+    };
+    const waits = await summary('quota-without-fallback', '');
+    assert.match(waits.html, /When quota runs out[\s\S]*?Waits for the reset, then continues/);
+    assert.match(waits.html, /Codex · gpt-test · Auto rotation/, 'a subscription source by its catalog label, not its id');
+    assert.match(waits.budget, /If the pool is exhausted, Ouroboros waits for the reset\./, 'no Fallback is promised when none is set');
+    const routed = await summary('quota-with-fallback', 'openai/gpt-5.6-luna');
+    assert.match(routed.html, /When quota runs out[\s\S]*?Tries the Fallback, then waits for the reset/);
+    assert.match(routed.html, /OpenRouter · openai\/gpt-5\.6-luna/, 'the Fallback row names its source in words');
+    assert.match(routed.budget, /If the pool is exhausted, the Fallback models go first, then Ouroboros waits for the reset\./);
+    for (const { html } of [waits, routed]) assert.doesNotMatch(html, /wait and auto-continue on reset/);
+    // Codex connected while every slot runs on an API route: no quota serves a model, so no such row.
+    const api = await summary('quota-api-main', '', 'google/gemini-3.8-flash', 'sk-or-v1-test-not-a-secret');
+    assert.match(api.html, /Total API budget/, 'the walk reached Summary');
+    assert.doesNotMatch(api.html, /When quota runs out/);
+});
+
+// Review R1 (C3): a model the local runtime serves is named Local in Summary, never by the cloud source its stored id implies.
+test('Summary names a model the local runtime serves as Local, and a cloud one by its source', async () => {
+    const summary = async (query, localRoutingMode) => {
+        let html = '';
+        const bootstrap = { ...BOOTSTRAP, stepOrder: ['summary', ...BOOTSTRAP.stepOrder.filter((step) => step !== 'summary')],
+            initialState: { ...BOOTSTRAP.initialState, localSource: '/models/local-test.gguf', localRoutingMode,
+                mainModel: 'google/gemini-3.8-flash', fallbackModel: 'openai/gpt-5.6-luna' } };
+        await withWizard(bootstrap, query, ({ doc }) => { html = doc.getElementById('root').innerHTML; });
+        return html;
+    };
+    const row = (html, label) => html.match(new RegExp(`<strong>${label}</strong>\\s*<span>([^<]*)`))?.[1] || '';
+    const all = await summary('local-all-summary', 'all');
+    assert.match(row(all, 'Main'), /^Local · google\/gemini-3\.8-flash/);
+    assert.match(row(all, 'Fallback'), /^Local · openai\/gpt-5\.6-luna/);
+    const fallbackOnly = await summary('local-fallback-summary', 'fallback');
+    assert.match(row(fallbackOnly, 'Main'), /^OpenRouter · google\/gemini-3\.8-flash/);
+    assert.match(row(fallbackOnly, 'Fallback'), /^Local · openai\/gpt-5\.6-luna/);
+});
+
 // PR #1560: walk the real wizard from Accounts to the completion POST. A fresh Z.ai-only
 // setup saves the provider's image-capable Vision; an owner's edit and an existing
 // install's saved value, blank included, are what gets saved instead.

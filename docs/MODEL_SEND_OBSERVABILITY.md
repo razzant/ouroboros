@@ -131,7 +131,7 @@ violation.
 
 | class | what | why excluded | disclosure |
 |---|---|---|---|
-| `secret_redaction` | Secret VALUES masked in the CAS blob by the observability redaction rules | The durable copy must not carry live credentials; equality is digest-anchored instead (pre-redaction sha256) | existing `RedactionRecord`s → `{class, path}` rows |
+| `secret_redaction` | Secret VALUES masked in the CAS blob by the observability redaction rules; a tool schema's parameter names and shapes are not values (under a credential-named parameter all but its notes are) | The durable copy must not carry live credentials; equality is digest-anchored instead (pre-redaction sha256) | existing `RedactionRecord`s → `{class, path}` rows |
 | `provider_native_custody` | Provider-owned opaque content (e.g. encrypted reasoning replay items) projected before persistence | Bytes are provider property; replay semantics are server-side | existing `anthropic_native_custody_projected` flag → per-item `{class, path, opaque_sha256}` |
 | `transport_envelope` | HTTP headers, auth, SDK-added transport fields (user-agent, idempotency keys, `stream` flag where the SDK owns it) | Below the seam by construction; carries secrets and transport identity, not model-visible content | class-level row (no per-call enumeration) |
 | `provider_side_transform` | Server-side effects the host cannot observe pre-flight: prompt-cache application, provider truncation/normalization | Not host-controlled; the seam is the LAST host-controlled point, not the last point | class-level row |

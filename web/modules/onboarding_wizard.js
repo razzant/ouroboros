@@ -585,10 +585,9 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
                 : profileLabel(activeProviderProfile())],
             ['Review mode', reviewLabel(state.reviewEnforcement)],
             ['Runtime mode', runtimeModeLabel(state.runtimeMode)],
-            ...((hasApiAccess() || !hasModelSubscription()) ? [
-                ['Total API budget', formatUsd(state.totalBudget)],
-                ['Per-task API cap', formatUsd(state.perTaskCostUsd)],
-            ] : [['Budget', 'Subscription quota · wait and auto-continue on reset']]),
+            ...((hasApiAccess() || !hasModelSubscription()) ? [['Total API budget', formatUsd(state.totalBudget)],
+                ['Per-task API cap', formatUsd(state.perTaskCostUsd)]] : []),
+            ...(MODEL_SLOTS.some((slot) => trim(state[slot.stateKey]).split(',').some((value) => parseModelSource(value.trim()).source.startsWith('subscription:'))) ? [['When quota runs out', trim(state.fallbackModel) ? 'Tries the Fallback, then waits for the reset' : 'Waits for the reset, then continues']] : []),  // a subscription serves a slot
             // The Consciousness offer above already uses that word alone (#1603); its model row says what it is.
             ...MODEL_SLOTS.map((slot) => [slot.slot === 'consciousness' ? 'Consciousness model' : slot.label.replace(/ Model$/, ''), modelSummary(slot)]),
         ];
@@ -617,13 +616,14 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         const inherited = !values.length && slot.slot !== 'fallback';
         const from = MODEL_SLOTS.find((entry) => entry.slot === inheritTargetOf(slot)) || { stateKey: 'mainModel', label: 'Main' };
         if (inherited) values.push(trim(state[from.stateKey] || '') || trim(state.mainModel));  // Safety: Light, then Main
+        const local = hasLocalModel() && LOCAL_ROUTING_MODES.find((mode) => mode.value === state.localRoutingMode)?.flags?.[['main', 'light', 'consciousness', 'fallback'].indexOf(inherited ? from.slot || 'main' : slot.slot)] === true;  // the local runtime serves it: say so, not the cloud source its id implies
         return values.map((value, index) => {
             const { source, model } = parseModelSource(value);
             const account = slot.slot === 'fallback' ? state.modelAccounts.fallback?.[index] : state.modelAccounts[slot.slot];
             const context = slot.slot === 'fallback' ? state.modelContextWindows.fallback?.[index] : state.modelContextWindows[slot.slot];
             const processing = slot.slot === 'fallback' ? state.modelProcessingPreferences?.fallback?.[index] : state.modelProcessingPreferences?.[slot.slot];
-            const assignment = source.startsWith('subscription:')
-                ? `${source.slice(13)} · ${model} · ${account ? `Account: ${account}` : 'Auto rotation'}` : value;
+            const assignment = source.startsWith('subscription:') ? `${modelSources.find((entry) => entry.id === source.slice(13))?.label || source.slice(13)} · ${model} · ${account ? `Account: ${account}` : 'Auto rotation'}`
+                : `${local ? 'Local' : apiProviderLabel(source, PROVIDER_PROFILES)} · ${model}`;  // a source in words, never its id
             return `${inherited ? `Uses ${from.label.replace(/ Model$/, '')} · ` : ''}${assignment} · Processing: ${processingIntentLabel(processing, state.processingPreference)}${Number(context) > 0 ? ` · ${Number(context).toLocaleString('en-US')} tokens, set by you` : ''}`;
         }).join(' → ') || 'None';
     }
@@ -824,7 +824,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
                 <span>${escapeHtml(facts.quota.label)}</span></div>`;
         }).join('');
         return `<div class="panel-card"><h3>Subscription quota</h3>${lines}
-            <p class="field-note">Compatible accounts rotate automatically. If the pool is exhausted, Ouroboros waits and continues when quota resets. You can switch the waiting role yourself.</p>
+            <p class="field-note">Compatible accounts rotate automatically. If the pool is exhausted, ${trim(state.fallbackModel) ? 'the Fallback models go first, then ' : ''}Ouroboros waits for the reset.</p>
             </div>
         `;
     }
