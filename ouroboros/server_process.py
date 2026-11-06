@@ -721,8 +721,17 @@ def recovery_turn_text(cause: str, ended_at: str, held: List[str], cancelled: Li
     )))
 
 
+def recovery_refused_row(held: List[str], cancelled: List[str]) -> str:
+    """Main's one row when no recovery turn was admitted: owner words, no ids, nothing written for the mind."""
+    if held:
+        return "♻️ Ouroboros has not looked at the interrupted work yet; tasks with saved work wait for Resume."
+    if cancelled:
+        return "♻️ Ouroboros has not looked at the interrupted work yet."
+    return "♻️ Ouroboros has not looked at the fault yet."
+
+
 def core_loss_recovery_turn(root: Any, chat_id: int, pending: Any, *, admit: Callable[..., Any],
-                            live: Callable[[], bool]) -> bool:
+                            live: Callable[[], bool], gate: Callable[[], bool]) -> bool:
     """One recovery turn for the mind after a Fault boot (owner 2A), through the auto-resume seam.
 
     False when the previous generation did not end through the Fault door (Quit, Panic, owner Restart and
@@ -730,11 +739,11 @@ def core_loss_recovery_turn(root: Any, chat_id: int, pending: Any, *, admit: Cal
     the facts (``recovery_turn_text``) is admitted unless a conversation turn is already live, or the recovery
     turn admitted in the generation that just died is not terminal yet (``open_recovery_turn``: a fault loop,
     bound by that fact, never a counter or timer). An admitted turn is recorded durably (``record_recovery_turn``)
-    and journalled (``auto_resume_triggered``, ``trigger: core_lost``). A REFUSED admission (the repository-writer
-    gate of a managed update, or the lane) is not a consumed turn: no record is written, so a later fault boot
-    admits its own turn, and the facts are posted in Main as a host row the mind meets on its next turn; no
-    other seam retries a refused owner turn (``auto_resume_after_restart`` runs at boot alone and the
-    Restart-pending deferral covers a pending Restart only), so the row is the one path that keeps 2A's promise."""
+    and journalled (``auto_resume_triggered``, ``trigger: core_lost``). The repository-writer gate (``gate``, the
+    owner-conversation predicate, quiet) is asked first: closed, ``admit`` is not called, so no owner-message
+    refusal is posted for a message the owner never sent. A closed gate or a refused admission is not a consumed
+    turn: no record is written, so a later fault boot admits its own turn; Main gets one short row in owner words
+    (``recovery_refused_row``) and the facts go to the ``auto_resume_skipped`` journal row."""
     from supervisor.message_bus import send_with_budget
     from supervisor.state import append_jsonl
 
@@ -751,16 +760,18 @@ def core_loss_recovery_turn(root: Any, chat_id: int, pending: Any, *, admit: Cal
                                "task_id": open_turn, "cause": cause})
         return True
     held, cancelled = held_saved_work_ids(pending), cancelled_unsaved_roots(root, ended_at)
-    text = recovery_turn_text(cause, ended_at, held, cancelled, root)
-    meta = admit(int(chat_id), text, None)
+    gate_open = bool(gate())
+    meta = admit(int(chat_id), recovery_turn_text(cause, ended_at, held, cancelled, root), None) if gate_open else None
     task_id = str(((meta or {}).get("task") or {}).get("id") or "") if isinstance(meta, dict) else ""
     if not task_id:
         try:
-            send_with_budget(int(chat_id), text, role="system", system_type="startup_notice")
+            send_with_budget(int(chat_id), recovery_refused_row(held, cancelled),
+                             role="system", system_type="startup_notice")
         except Exception:
-            log.warning("The recovery facts could not be posted in Main after the refused admission", exc_info=True)
+            log.warning("The refused recovery turn's row could not be posted in Main", exc_info=True)
         append_jsonl(journal, {"ts": utc_now_iso(), "type": "auto_resume_skipped", "trigger": RECOVERY_TRIGGER,
-                               "reason": "admission_refused", "facts_posted": True, "cause": cause})
+                               "reason": "admission_refused" if gate_open else "repo_writer_gate_closed",
+                               "cause": cause, "ended_at": ended_at, "held": held, "cancelled": cancelled})
         return True
     record_recovery_turn(root, task_id, cause)
     append_jsonl(journal, {"ts": utc_now_iso(), "type": "auto_resume_triggered", "trigger": RECOVERY_TRIGGER,
@@ -825,7 +836,7 @@ def fault_exit() -> int:
 
 def _decide_fault_exit(host: str, port: int, *, launcher_managed: bool, repo_dir: pathlib.Path,
                        cleanup: Callable[[], Any], restart: Callable[..., Any]) -> int:
-    """The fault door's exit decision (§2(b)); ``fault_exit`` takes it once.
+    """The Fault door's exit decision (ARCHITECTURE §9); ``fault_exit`` takes it once.
 
     Launcher-managed installs (desktop, Linux browser fallback, managed Docker, systemd, Android) return 1:
     the launcher's crash path restarts the same code (sleep 2 + 3 s, fuse 5 in 120 s) and spares the shared

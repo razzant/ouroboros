@@ -108,16 +108,16 @@ def wake_gate_refusal() -> str:
     return "" if not reason or conversation_admitted_during_update(reason) else "repo_writer_gate_closed"
 
 
-def owner_conversation_admitted(chat_id: int, client_message_id: str = "") -> bool:
-    """Admit one owner chat turn: open gate, or a resolver-held update.
-
-    A refused turn gets the pool's existing lock notice (``_repo_writer_turn_allowed``),
-    naming the submission it answers.
-    """
+def owner_conversation_gate_open() -> bool:
+    """The repository-writer gate admits an owner chat turn: open, or a resolver-held update. Quiet."""
     reason = _pool().repo_writer_admission_closed()
-    if not reason or conversation_admitted_during_update(reason):
-        return True
-    return bool(_pool()._repo_writer_turn_allowed(chat_id, client_message_id))
+    return not reason or conversation_admitted_during_update(reason)
+
+
+def owner_conversation_admitted(chat_id: int, client_message_id: str = "") -> bool:
+    """Admit one owner chat turn (``owner_conversation_gate_open``); a refused turn gets the pool's
+    existing lock notice (``_repo_writer_turn_allowed``), naming the submission it answers."""
+    return owner_conversation_gate_open() or bool(_pool()._repo_writer_turn_allowed(chat_id, client_message_id))
 
 
 def marker_window_closed() -> bool:
@@ -987,7 +987,8 @@ def auto_resume_after_restart() -> None:
             return  # an autonomous resume turn needs a KNOWN owner chat (#1307)
         from ouroboros.server_process import core_loss_recovery_turn
 
-        if core_loss_recovery_turn(root, int(chat_id), _pool().PENDING, admit=handle_chat_direct, live=conversation_turn_live):
+        if core_loss_recovery_turn(root, int(chat_id), _pool().PENDING, admit=handle_chat_direct,
+                                   live=conversation_turn_live, gate=owner_conversation_gate_open):
             return  # a Fault boot: its one recovery turn, or the previous one still open, is the resume (owner 2A)
 
         # The one real trigger: a planned restart's verify record. A launcher
