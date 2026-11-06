@@ -2615,7 +2615,8 @@ leaves later configuration to Settings. Summary names exactly the assignments
 the one atomic Finish saves, including deep self-review. Reviewers remain
 editable with the same controls as Settings. A subscription-only Budget step leads with quota/reset facts and keeps
 optional API spending fields collapsed. "No API key" never claims unlimited free
-work or that paid provider credits were enabled.
+work or that paid provider credits were enabled. When a subscription serves a model, Summary says
+what an exhausted quota does: a set Fallback is tried first, then the work waits for the reset.
 
 Before the first completion, Summary offers Consciousness as an unchecked choice. Its
 row names the autonomy, daily allowance and own-task limit consciousness runs under
