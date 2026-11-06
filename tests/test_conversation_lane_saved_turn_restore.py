@@ -960,3 +960,105 @@ def test_a_main_turn_held_across_a_second_quit_still_waits_for_one_resume(tmp_pa
     assert [(row["id"], row["_attempt"]) for row in _resume_and_launch(system, turn.id)] == [(turn.id, 2)]
     system.workers.assign_tasks()
     assert not _launched(system)
+
+
+# ---------------------------------------------------------------------------
+# D5: a returning stop gives back an owner turn it cut before its first save (05.11, 88cb09a6)
+# ---------------------------------------------------------------------------
+
+def _assert_seed_runs_once(system, root, turn, cause):
+    from ouroboros import body_candidate
+    from supervisor.task_admission import SEED_RETURN
+
+    [row] = [row for row in system.workers.PENDING if row["id"] == turn.id]
+    assert row[SEED_RETURN] == {"source_task_id": turn.id, "from_attempt": 1, "cause": cause}
+    assert row["_attempt"] == 2 and "_working_recovery" not in row and budget_hold_fact(row) is None
+    assert row["text"] == "keep working" and row["_project_scope_none"] is True  # its own admitted input
+    # Nothing of it took effect: no child was scheduled and no body candidate was opened (both are gated tools).
+    assert [r["id"] for r in system.workers.PENDING] == [turn.id] and body_candidate.find(turn.id) is None
+    system.workers.assign_tasks()
+    [sent] = _launched(system)
+    assert (sent["id"], sent["_attempt"]) == (turn.id, 2) and "_working_recovery" not in sent
+    _persist_running(root, sent)  # its launch records attempt 2: the proof is spent
+    from supervisor.task_admission import prestart_returned_unsent
+
+    assert prestart_returned_unsent(sent) == {}
+    system.workers.assign_tasks()
+    assert not _launched(system)
+
+
+def test_a_turn_cut_before_its_first_save_comes_back_once_from_its_own_input(tmp_path, monkeypatch):
+    """05.11 (88cb09a6): the owner's Main message was cut 17 s into its preparation and lost: no working save
+    existed, so the returning stop had nothing to give back. Every tool batch waits for its pre_effect save, so
+    with the task's root present no save means nothing took effect: the return starts it again from its input."""
+    from supervisor.restart_retention import prepare_restart_returns
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    assert not wc.checkpoint_path(tmp_path, turn.id, 1).is_file()
+    assert prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING,
+                                   transaction_id="tx-seed") == {turn.id}
+    _ack(tmp_path, "tx-seed")
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    _assert_seed_runs_once(system, tmp_path, turn, "restart")
+
+
+@pytest.mark.parametrize("outcome", ["aborted", "completed"])
+def test_the_update_door_gives_back_a_turn_it_cut_in_preparation(tmp_path, monkeypatch, outcome):
+    """88cb09a6 replayed on the managed Update door, whose census and stop are the ones that cut it."""
+    from ouroboros import delegate_recovery as dr
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    assert system.control._quiesce_repo_writers("auto_merge") == []
+    assert dr.active_restart_transaction(tmp_path)["return_ids"] == [turn.id]
+    if outcome == "aborted":
+        system.control._respawn_workers_after_failed_update()
+        _assert_seed_runs_once(system, tmp_path, turn, "update_aborted")
+    else:
+        _ack(tmp_path, dr.active_restart_transaction(tmp_path)["transaction_id"])
+        _boot_after_stop(system, monkeypatch, tmp_path)
+        _assert_seed_runs_once(system, tmp_path, turn, "restart")
+
+
+def test_an_unacknowledged_return_keeps_todays_interrupted_path(tmp_path, monkeypatch):
+    """The exit was never acknowledged: the turn the door named is neither returned nor held, its boot fences it."""
+    from supervisor.restart_retention import prepare_restart_returns
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    assert prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING,
+                                   transaction_id="tx-lost") == {turn.id}
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    assert turn.id not in [row["id"] for row in system.workers.PENDING] and turn.id not in system.workers.RUNNING
+    assert ci.has_active_intent(tmp_path, turn.id, strict=True)
+
+
+@pytest.mark.parametrize("fact", ["nothing", "saved", "answer_delivered", "no_root", "call", "wake", "later_attempt",
+                                  "stopped"])
+def test_only_a_turn_with_no_effect_is_given_back_from_its_input(tmp_path, monkeypatch, fact):
+    from supervisor.task_admission import seed_returnable
+    from supervisor.terminal_delivery import delivery_id_for, register_delivery
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    task, attempt, root = dict(system.workers.RUNNING[turn.id]["task"]), 1, tmp_path
+    if fact == "saved":  # the ordinary saved return takes it instead
+        _save_work(tmp_path, turn)
+    elif fact == "answer_delivered":  # a no-tool answer saved non-gating, then sent
+        register_delivery(tmp_path, delivery_id_for(turn.id, "done"))
+    elif fact == "no_root":  # nothing could have been saved, so no file proves nothing
+        root = tmp_path / "missing-root"
+    elif fact == "call":
+        task["metadata"] = {**task.get("metadata", {}), "execution_transport": {"kind": "live_conversation"}}
+    elif fact == "wake":
+        from ouroboros.consciousness_authority import WAKE_CAUSE_OWN_CLOCK
+
+        task["metadata"] = {**task.get("metadata", {}), "wake_cause": WAKE_CAUSE_OWN_CLOCK}
+    elif fact == "later_attempt":
+        attempt = 2
+    elif fact == "stopped":
+        ci.request_cancel(tmp_path, turn.id, reason="owner stop", source="test")
+    assert seed_returnable(root, task, attempt) is (fact == "nothing")

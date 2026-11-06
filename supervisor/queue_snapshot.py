@@ -296,6 +296,7 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
                                               recover_saved_running, returned_before_body,
                                               retained_pending, HOLD_SAVED_SLEEP_RECOVERY, unseen_pause)
     from supervisor.schedule_occurrence import first_attempt, first_dispatch_unsent, restore_verdict
+    from supervisor.task_admission import SEED_RETURN
 
     from ouroboros.work_stop import clear_refusal, continuation_refusal, current_stop, writer_wait
 
@@ -378,8 +379,8 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
          and str((row.get("task") or {}).get("id") or "") not in taken],
         _queue().DRIVE_ROOT, transaction=transaction, cause=stop_door)
     if handoffs is not None:
-        handoffs.update({str(task["id"]): source["from_attempt"] for task in recovered
-                         if isinstance(source := task.get("_working_recovery"), dict)
+        handoffs.update({str(task["id"]): source["from_attempt"] for task in recovered  # D5 seeds too
+                         if isinstance(source := task.get("_working_recovery") or task.get(SEED_RETURN), dict)
                          and source.get("source_task_id") == task["id"] and source.get("from_attempt")})
     parked += recovered
     unseen.update(str(task.get("id") or "") for task in parked
@@ -484,7 +485,7 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
                 project_hold = {"reason": "project_routing_fence_lookup_failed", "detail": (
                     "The return receipt was unreadable at restore; recovery is checked when it is readable.")}
             saved_or_accepted = (never_started(task) or isinstance(task.get("_working_recovery"), dict)
-                                 or returned and not project_hold)
+                                 or isinstance(task.get(SEED_RETURN), dict) or returned and not project_hold)
             kept = retained_pending(task, sleep_hold_reason=sleep_hold_reason)
             if panicked and not current_stop(task) or not certified and writer_wait(task):
                 # This also covers a planned delegate return under Project custody:
