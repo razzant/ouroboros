@@ -6,8 +6,8 @@ the dying task can no longer publish for itself. Only a recorded stop terminaliz
 a task; any unrecorded death, a signal's included, takes the one bounded retry from
 saved state (``QUEUE_MAX_RETRIES``), then ``worker_crash_retry_exhausted``. There is
 no crash-storm fence: a pool dying repeatedly costs each task its retry and nothing
-else, boot-death loops stay fenced by readiness exhaustion, and a lost event bus ends
-the generation (``workers.EventBusLost``). Direct chat keeps its own lane.
+else, readiness exhaustion bounds only live-but-unready replacements, and a lost event
+bus ends the generation (``workers.EventBusLost``). Direct chat keeps its own lane.
 """
 
 from __future__ import annotations

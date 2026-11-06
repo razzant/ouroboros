@@ -12,7 +12,7 @@ import { fmt, tr, tx } from './i18n.js';
 
 export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
     startup_notice: ['♻️ Restored pending queue: ', '♻️ Settling ', '♻️ The server restarted itself after ',
-        '♻️ Ouroboros has not looked at '],
+        '♻️ Ouroboros did not start its recovery turn '],
     command_reply: ['⚠️ Command ignored: ', '✅ Owner chat registered.', '♻️ Restarting.', '⚠️ Restart cancelled: ',
         '🧬 Evolution campaign: ', '🧬 Evolution stayed OFF: ', '🧬 Evolution did not turn on: ',
         '🧠 Background consciousness ', '🧠 Background consciousness:'],

@@ -237,6 +237,17 @@ def test_the_owners_restart_teardown_takes_the_one_pin_rule(owners, restart_root
     assert [c[0] for c in owners.calls].count("daemon_stop") == 1, "a forward pin replaces the engine"
 
 
+def test_the_downgrade_note_names_restart_claudexor_as_the_engine_stop():
+    """The test above in words: the header Restart keeps a newer engine, so PERSISTENCE's forward-only store note
+    names the Accounts action that does stop it, never the header Restart."""
+    import pathlib
+
+    text = (pathlib.Path(__file__).resolve().parents[1] / "docs" / "PERSISTENCE.md").read_text(encoding="utf-8")
+    text = " ".join(text.split())
+    assert "Once it stops (Restart Claudexor in Accounts, Panic, exit), the older engine refuses the store" in text
+    assert "manual Restart" not in text
+
+
 def test_the_owners_restart_ends_the_runs_of_the_work_it_returns(owners, restart_root, monkeypatch):
     """Owner 3A: Restart restarts Ouroboros and stops only its own runs, returned work included. A task the Restart
     returns gets no cancel intent and continues from its saved state, while its own live delegated run is cancelled
@@ -262,6 +273,42 @@ def test_the_owners_restart_ends_the_runs_of_the_work_it_returns(owners, restart
     assert stopped == ["direct-1"] and [c[1] for c in owners.calls if c[0] == "cancel"] == ["direct-1"]
     assert live.cancels == [("run-returned", "owner_task_gone")], "the returned task's run ends; the panel's stays"
     assert "daemon_stop" not in [c[0] for c in owners.calls], "the shared engine is kept"
+
+
+def test_the_owners_restart_ends_a_sleeping_tasks_own_run_and_keeps_its_sleep(restart_root, monkeypatch):
+    """Owner 3A and D24 for a task asleep on its own delegated run (a warm sleep is a saved pause, neither returned
+    nor stopped): the Restart keeps the sleep, parked under its restart hold with no cancel intent, and still ends
+    that run with the abrupt-loss verdict; a review panel's run on that task stays its panel's."""
+    from ouroboros import delegate_recovery
+    from supervisor import restart_retention
+    from tests._budget_pause_exact_helpers import _install_queue
+    from tests._delegated_transport_shared import _LiveRunStub
+    from tests.test_restart_retention import _pool_events
+    from tests.test_warm_restart_retention import _park
+
+    _queue, _state, workers = _install_queue(restart_root, monkeypatch)
+    _pool_events(workers, monkeypatch)
+    _park(restart_root, workers, "sleep")
+    assert restart_retention.pause_retention(restart_root, "saved-warm", 1) == restart_retention.RETAIN_SLEEP
+    for run_id, source in (("run-sleep", "delegated_subagent"), ("run-panel", "review_substrate")):
+        custody._CUSTODY.clear()
+        custody.record_started(restart_root, custody.RunCustody(
+            run_id=run_id, task_id="saved-warm", route_id="r", model="m", project_id="p", project_owned=False,
+            root_task_id="saved-warm", ledger_root=str(restart_root), source=source))
+    custody._CUSTODY.clear()
+    live = _LiveRunStub()
+    monkeypatch.setattr(owned, "read_owned_gateway", lambda **_kw: live)
+    monkeypatch.setitem(server_restart._LAST_RETURN_TX, "id",
+                        delegate_recovery.prepare_owner_restart(restart_root)["transaction_id"])
+    try:
+        stopped = server_restart._stop_owned_work(
+            SimpleNamespace(RUNNING=workers.RUNNING, PENDING=workers.PENDING, kill_workers=workers.kill_workers))
+    finally:
+        custody._CUSTODY.clear()
+    parked = next(task for task in workers.PENDING if task.get("id") == "saved-warm")
+    assert stopped == [] and "saved-warm" not in server_restart._LAST_RETURNING
+    assert parked["_budget_pause_hold"]["reason"] == "owner_restart_hold", "the sleep is kept, not stopped"
+    assert live.cancels == [("run-sleep", "owner_task_gone")], "the sleeping task's own run ends; the panel's stays"
 
 
 def test_an_abandoned_restart_does_not_keep_its_stop_fact(owners, restart_root, monkeypatch):

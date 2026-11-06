@@ -537,12 +537,11 @@ def test_a_refused_recovery_admission_is_not_a_consumed_turn(tmp_path, monkeypat
                       cancel_origin={"source": "server_shutdown", "reason": "fault"})
     monkeypatch.setattr(workers, "_repo_writer_gate_reason", "managed update")
     worker_chat_lane.auto_resume_after_restart()
-    row = "♻️ Ouroboros has not looked at the interrupted work yet; tasks with saved work wait for Resume."
+    row = "♻️ Ouroboros did not start its recovery turn after the fault; tasks with saved work wait for Resume."
     assert posted == [(7, row, "startup_notice")], "one owner row, no lock notice for a message never sent"
     assert turns == [] and _recovery_record(tmp_path) is None, "a closed gate is not asked to admit"
-    assert server_process.recovery_refused_row([], ["root-cut"]) == (
-        "♻️ Ouroboros has not looked at the interrupted work yet.")
-    assert server_process.recovery_refused_row([], []) == "♻️ Ouroboros has not looked at the fault yet."
+    # No "yet": nothing in this generation schedules a later turn, so the row promises none.
+    assert server_process.recovery_refused_row([]) == "♻️ Ouroboros did not start its recovery turn after the fault."
     skipped = [r for r in _supervisor_rows(tmp_path) if r["type"].startswith("auto_resume_")]
     assert [(r["type"], r["reason"], r["cause"], r["ended_at"], r["held"], r["cancelled"]) for r in skipped] == [
         ("auto_resume_skipped", "repo_writer_gate_closed", "bus_lost", FAULT_ENDED_AT, ["held-1"], ["root-cut"])]

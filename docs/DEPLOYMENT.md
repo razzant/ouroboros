@@ -175,7 +175,7 @@ that returns after every boot costs one turn per cycle. No new turn starts when 
 while the previous recovery turn was going (admitted in the generation that fell, unfinished); an
 earlier turn waiting with saved work does not block a later fault's turn. Neither path is a
 planned restart (exit 42) or Panic (99); the shared Claudexor
-daemon is untouched. A persistent cause cycles about every two minutes with a Main row
+daemon is untouched, while the kept tasks' own delegated runs end. A persistent cause cycles about every two minutes with a Main row
 each time until someone looks.
 
 **Browser sandbox.** Browser tools launch only the pinned Chromium (`ouroboros/chromium_runtime.py`)

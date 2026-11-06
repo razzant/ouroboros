@@ -291,10 +291,10 @@ def _owner_restart_held_count(ctx: Any) -> int:
         return 0
 
 
-def _owned_live_task_ids(ctx: Any) -> list:
+def _owned_live_task_ids(ctx: Any, *, saved_pauses: bool = False) -> list:
     """Every id this generation's cancel intent can address: pooled tasks,
     in-process direct/ephemeral activities and running post-task synthesis —
-    minus every saved pause (``restart_retention``): a task whose checkpoint
+    minus every saved pause (``restart_retention``) unless ``saved_pauses``: a task whose checkpoint
     is already stored survives the Restart as the same paused task, and a
     cancel intent minted for it here would outrank that pause at restore. A correspondent's Presence turn
     is never the owner's to stop here (``restart_retention.presence_turn``): the stop's custody ends it."""
@@ -310,7 +310,8 @@ def _owned_live_task_ids(ctx: Any) -> list:
     root = str(pathlib.Path(DATA_DIR).resolve(strict=False))
     with POST_TASK_SYNTHESIS_LOCK:
         task_ids.extend(task_id for (path, task_id) in POST_TASK_SYNTHESIS_INFLIGHT if path == root)
-    return census_without_saved_pauses([tid for tid in dict.fromkeys(task_ids) if tid], DATA_DIR)
+    task_ids = [tid for tid in dict.fromkeys(task_ids) if tid]
+    return task_ids if saved_pauses else census_without_saved_pauses(task_ids, DATA_DIR)
 
 
 def _stop_owned_work(ctx: Any) -> list:
@@ -322,14 +323,12 @@ def _stop_owned_work(ctx: Any) -> list:
     remainder. Its caller paused admission before that door
     (``pause_admission``), so no launch is left between its marks and its worker.
     First prepare the retained-return transaction: native saved work returns only
-    after its fresh acknowledgment, while prior holds stay.
-    Record cancel intents for owned live ids outside that return set (saved
-    pauses excluded), then ``kill_workers`` with ``retain_saved_work``,
-    ``preserve_pending``, preserved owner waits and
-    ``reconcile_delegate_custody=False``. Tasks actually settled record the
-    typed ``owner_restart`` cause (an earlier Stop keeps its own). External
-    runs gain no adoption authority from native continuation: the returned tasks'
-    own delegated runs end with the abrupt-loss verdict (``end_task_runs``), the
+    after its fresh acknowledgment, while prior holds stay. Record cancel intents for owned
+    live ids outside that return set and the saved pauses, then ``kill_workers`` with ``retain_saved_work``,
+    ``preserve_pending``, preserved owner waits and ``reconcile_delegate_custody=False``. Tasks actually
+    settled record the typed ``owner_restart`` cause (an earlier Stop keeps its own). External
+    runs gain no adoption authority from native continuation: every kept task's (returned, or a saved
+    pause such as a sleep) own delegated runs end with the abrupt-loss verdict (``end_task_runs``), the
     stopped tasks' through the public owner-gone seam, both over the attach-only
     gateway, and finally the generation's one bounded stop of its owned processes
     (``stop_owned_work``), which the teardown and the restart watcher later join.
@@ -340,14 +339,14 @@ def _stop_owned_work(ctx: Any) -> list:
     calls ``ensure_owned_gateway``: a stop admits nothing and never starts or
     repairs the engine; every transport only attaches.
 
-    Returns the owned live task ids it addressed — captured ONCE, before the
-    stop makes them unreadable — so the caller can tell the owner what was
-    stopped instead of claiming a task was stopped when nothing was running.
+    Returns the owned live task ids it addressed — captured ONCE, before the stop makes them unreadable —
+    so the caller can tell the owner what was stopped instead of claiming a task was stopped when nothing was running.
     """
     from ouroboros.cancel_intents import request_cancel
     from ouroboros.claudexor_daemon import read_owned_gateway
     from ouroboros.delegate_custody import reconcile_orphaned_runs
     from ouroboros.owned_shutdown import begin_owned_stop
+    from supervisor.restart_retention import census_without_saved_pauses
 
     _OWNER_STOP_BEGAN.set()  # owner Rollback/Apply Update also restart as the owner, but never get here
     begin_owned_stop(DATA_DIR, cause="owner_restart")  # the grace starts here; cause and every pending stop are recorded before its waits
@@ -355,7 +354,8 @@ def _stop_owned_work(ctx: Any) -> list:
     _LAST_RETURNING.clear()
     _LAST_RETURNING.update(returning)
     # owner 2026-10-08 (quiz d2f7532b): this Restart returns saved work instead of stopping it
-    stopped = [task_id for task_id in _owned_live_task_ids(ctx) if task_id not in returning]
+    census = _owned_live_task_ids(ctx, saved_pauses=True)  # the kept saved pauses too: their runs end below
+    stopped = [task_id for task_id in census_without_saved_pauses(census, DATA_DIR) if task_id not in returning]
     for task_id in stopped:
         try:
             request_cancel(DATA_DIR, task_id, reason="Owner restart", source="owner_restart",
@@ -378,7 +378,8 @@ def _stop_owned_work(ctx: Any) -> list:
         if confirmed is False:
             log.critical("Owner restart: worker shutdown is unconfirmed; the restart proceeds and "
                          "the next generation reconciles the remainder")
-    end_task_runs(DATA_DIR, returning, gateway_factory=read_owned_gateway)  # returned work continues; its runs end
+    end_task_runs(DATA_DIR, [*returning, *(task_id for task_id in census if task_id not in stopped)],
+                  gateway_factory=read_owned_gateway)  # kept work continues; its runs end
     try:  # attach only; no replay_pending: a Restart re-POSTs nothing, the next generation's sweep does
         reconcile_orphaned_runs(DATA_DIR, running_task_ids=set(), gateway_factory=read_owned_gateway)
     except Exception:

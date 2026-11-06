@@ -603,8 +603,9 @@ def fault_cancel_reason() -> str:
 
 
 def end_task_runs(root: Any, task_ids: Any, *, gateway_factory: Optional[Callable[[], Any]] = None) -> None:
-    """End Ouroboros's OWN open delegated runs of tasks a stop keeps for the next boot (the owner Restart's returns,
-    the Fault door's holds): the tasks continue from their saved state, their runs end (owner 3A, 1A). The verdict
+    """End Ouroboros's OWN open delegated runs of tasks a stop keeps for the next boot (the owner Restart's returns
+    and saved pauses, the Fault door's holds; a sleep included): the tasks continue from their saved state, their
+    runs end (owner 3A, 1A). The verdict
     is the abrupt loss a signal-death retry passes (``reconcile_task_runs(..., deliberate_terminal=
     STATUS_INTERRUPTED)``), over an attach-only transport (default ``attach_only_gateway``): a review panel's run
     stays its panel's (only a cancellation speaks for it), and other programs' runs on the kept engine are not
@@ -636,8 +637,10 @@ def end_task_runs(root: Any, task_ids: Any, *, gateway_factory: Optional[Callabl
 
 def end_fault_held_runs() -> None:
     """The Fault door after its teardown's terminal custody: the rows it holds with their saved work
-    (``RETAINED_FOR_BOOT``) continue at the next boot, and their own delegated runs end now (``end_task_runs``).
-    Any other stop, a restart and an accepted Panic: nothing here."""
+    (``RETAINED_FOR_BOOT``) and the saved pauses it parked under an app-stop hold (a sleep: ``held_saved_work_ids``
+    since this generation's entry, the list the next boot names) continue at the next boot, and their own delegated
+    runs end now (``end_task_runs``). Any other stop, a restart and an accepted Panic: nothing here."""
+    from ouroboros.owned_shutdown import _GENERATION_STOP
     from ouroboros.server_control import panic_termination_requested
 
     if _stop_source not in FAULT_CAUSES or _restart_requested.is_set() or panic_termination_requested():
@@ -647,9 +650,11 @@ def end_fault_held_runs() -> None:
         from supervisor.queue import _queue_lock
         from supervisor.restart_retention import RETAINED_FOR_BOOT
 
+        since = str(_GENERATION_STOP.entry.get("entered_at") or "")  # no entry: an earlier stop's holds are not ours
         with _queue_lock:
             held = [str(task_id) for task_id, meta in workers.RUNNING.items()
                     if isinstance(meta, dict) and meta.get(RETAINED_FOR_BOOT)]
+            held += held_saved_work_ids(workers.PENDING, since) if since else []
         end_task_runs(workers.DRIVE_ROOT, held)
     except Exception:
         log.warning("The fault's held tasks' delegated runs were not ended; custody keeps them", exc_info=True)
@@ -784,13 +789,11 @@ def recovery_turn_text(cause: str, ended_at: str, held: List[str], cancelled: Li
     )))
 
 
-def recovery_refused_row(held: List[str], cancelled: List[str]) -> str:
-    """Main's one row when no recovery turn was admitted: owner words, no ids, nothing written for the mind."""
-    if held:
-        return "♻️ Ouroboros has not looked at the interrupted work yet; tasks with saved work wait for Resume."
-    if cancelled:
-        return "♻️ Ouroboros has not looked at the interrupted work yet."
-    return "♻️ Ouroboros has not looked at the fault yet."
+def recovery_refused_row(held: List[str]) -> str:
+    """Main's one row when no recovery turn was admitted: owner words, no ids, nothing written for the mind. Only a
+    later fault boot admits a turn, so the row says what did not happen, never that a look is still to come."""
+    row = "♻️ Ouroboros did not start its recovery turn after the fault"
+    return f"{row}; tasks with saved work wait for Resume." if held else f"{row}."
 
 
 def core_loss_recovery_turn(root: Any, chat_id: int, pending: Any, *, admit: Callable[..., Any],
@@ -828,7 +831,7 @@ def core_loss_recovery_turn(root: Any, chat_id: int, pending: Any, *, admit: Cal
     task_id = str(((meta or {}).get("task") or {}).get("id") or "") if isinstance(meta, dict) else ""
     if not task_id:
         try:
-            send_with_budget(int(chat_id), recovery_refused_row(held, cancelled),
+            send_with_budget(int(chat_id), recovery_refused_row(held),
                              role="system", system_type="startup_notice")
         except Exception:
             log.warning("The refused recovery turn's row could not be posted in Main", exc_info=True)

@@ -794,6 +794,132 @@ def test_a_fault_ends_its_held_tasks_own_runs_and_a_quit_leaves_them(tmp_path, m
     assert live.cancels == ([("run-held", "owner_task_gone")] if stop_source == "bus_lost" else [])
 
 
+def _record_runs(root, *rows):
+    from ouroboros import delegate_custody as custody
+
+    for run_id, task_id, source in rows:
+        custody._CUSTODY.clear()
+        custody.record_started(root, custody.RunCustody(
+            run_id=run_id, task_id=task_id, route_id="r", model="m", project_id="p", project_owned=False,
+            root_task_id=task_id, ledger_root=str(root), source=source))
+    custody._CUSTODY.clear()
+
+
+@pytest.mark.parametrize("stop_source", ["bus_lost", "launcher_quit"])
+def test_a_fault_ends_a_sleeping_tasks_own_run_and_a_quit_leaves_it(tmp_path, monkeypatch, stop_source):
+    """Owner 1A for a task asleep on its own delegated run: the teardown parks the sleep with its saved work under an
+    app-stop hold (the list the next boot names), and after a fault its own run ends now with the abrupt-loss verdict;
+    the panel's run stays, and a hold an earlier stop placed is not this fault's (its run stays too). A Quit parks
+    the same sleep and addresses no run."""
+    from ouroboros import claudexor_daemon, delegate_custody as custody, owned_shutdown, server_process
+    from ouroboros.utils import utc_now_iso
+    from supervisor.events_budget import HOLD_SAVED_WORK, hold_budget_row
+    from tests._budget_pause_exact_helpers import _install_queue
+    from tests._delegated_transport_shared import _LiveRunStub
+    from tests.test_restart_retention import _pool_events
+    from tests.test_warm_restart_retention import _park
+
+    _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    _pool_events(workers, monkeypatch)
+    _park(tmp_path, workers, "sleep")
+    older = {**hold_budget_row({"id": "t-older"}, reason=HOLD_SAVED_WORK), "held_at": "2026-01-01T00:00:00+00:00"}
+    workers.PENDING.append({"id": "t-older", "_budget_pause_hold": older})
+    _record_runs(tmp_path, ("run-sleep", "saved-warm", "delegated_subagent"),
+                 ("run-panel", "saved-warm", "review_substrate"), ("run-older", "t-older", "delegated_subagent"))
+    live = _LiveRunStub()
+    monkeypatch.setattr(claudexor_daemon, "read_owned_gateway", lambda **_kw: live)
+    monkeypatch.setattr(owned_shutdown, "stop_deadline", lambda: time.monotonic() + 20)
+    monkeypatch.setattr(owned_shutdown._GENERATION_STOP, "entry", {"entered_at": utc_now_iso(), "cause": stop_source})
+    monkeypatch.setattr(server_process, "_stop_source", stop_source)
+    try:
+        workers.kill_workers(force=True, terminal_status="cancelled",
+                             result_reason=server_process.fault_cancel_reason() or "Server shutdown.",
+                             stop_source="server_shutdown", retain_saved_work=True)
+        server_process.end_fault_held_runs()
+    finally:
+        custody._CUSTODY.clear()
+    parked = next(task for task in workers.PENDING if task.get("id") == "saved-warm")
+    assert parked["_budget_pause_hold"]["reason"] == "saved_sleep_recovery", "the sleep keeps its saved work"
+    assert live.cancels == ([("run-sleep", "owner_task_gone")] if stop_source == "bus_lost" else [])
+
+
+def test_the_fault_door_texts_say_its_kept_works_runs_end():
+    """The two tests above in words: the Fault door's row (ARCHITECTURE §9) and DEPLOYMENT's fault paragraph say the
+    kept work's own delegated runs end, which a Close does not do, while the shared engine stays."""
+    docs = pathlib.Path(__file__).resolve().parents[1] / "docs"
+    rows = (docs / "architecture" / "09-shutdown-and-process-cleanup.md").read_text(encoding="utf-8").splitlines()
+    row = next(line for line in rows if line.startswith("| Fault ("))
+    assert row.split(" | ")[1] == "as Close; kept work's delegated runs end"
+    deployment = " ".join((docs / "DEPLOYMENT.md").read_text(encoding="utf-8").split())
+    assert "daemon is untouched, while the kept tasks' own delegated runs end." in deployment
+
+
+@pytest.mark.parametrize("door", ["restart", "panic"])
+def test_a_fault_under_a_restart_or_an_accepted_panic_ends_no_held_run(tmp_path, monkeypatch, door):
+    """The Fault door's run end belongs to the fault alone: a restart keeps its own run rule, and an accepted Panic
+    owns the exit (the Emergency Stop is never a fault), so neither ends a held task's run here."""
+    from ouroboros import claudexor_daemon, delegate_custody as custody, owned_shutdown, server_control, server_process
+    from ouroboros.task_results import write_task_result
+    from supervisor import workers
+    from supervisor.restart_retention import RETAINED_FOR_BOOT
+    from tests._delegated_transport_shared import _LiveRunStub
+
+    write_task_result(tmp_path, "t-held", "running", root_task_id="t-held")
+    _record_runs(tmp_path, ("run-held", "t-held", "delegated_subagent"))
+    live = _LiveRunStub()
+    monkeypatch.setattr(claudexor_daemon, "read_owned_gateway", lambda **_kw: live)
+    monkeypatch.setattr(owned_shutdown, "stop_deadline", lambda: time.monotonic() + 20)
+    monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
+    monkeypatch.setattr(workers, "RUNNING", {"t-held": {"task": {"id": "t-held"}, RETAINED_FOR_BOOT: True}})
+    monkeypatch.setattr(server_process, "_stop_source", "bus_lost")
+    if door == "restart":
+        restart = threading.Event()
+        restart.set()
+        monkeypatch.setattr(server_process, "_restart_requested", restart)
+    else:
+        monkeypatch.setattr(server_control, "_restart_stop_requested", True)
+    try:
+        server_process.end_fault_held_runs()
+    finally:
+        custody._CUSTODY.clear()
+    assert live.cancels == []
+
+
+def test_ending_kept_runs_returns_within_half_the_stop_grace_on_a_hung_engine(tmp_path, monkeypatch):
+    """A sick engine never holds a door: the pass joins for at most half the generation's remaining stop grace, the
+    rest stays with the owned-process stop, and the pass goes on in the background while the process lives."""
+    from ouroboros import owned_shutdown, server_process
+    from ouroboros.task_results import write_task_result
+
+    release = threading.Event()
+
+    class _HungEngine:
+        def handshake(self, **_kw): return {}
+        def get_run(self, rid, *, timeout_sec=None):
+            release.wait(5)
+            raise RuntimeError("never answered")
+        def cancel_run(self, rid, reason=""):
+            release.wait(5)
+            return {}
+        def close(self): pass
+
+    write_task_result(tmp_path, "t-kept", "running", root_task_id="t-kept")
+    _record_runs(tmp_path, ("run-kept", "t-kept", "delegated_subagent"))
+    deadline = time.monotonic() + 2.0
+    monkeypatch.setattr(owned_shutdown, "stop_deadline", lambda: deadline)
+    started = time.monotonic()
+    try:
+        server_process.end_task_runs(tmp_path, ["t-kept"], gateway_factory=_HungEngine)
+        elapsed = time.monotonic() - started
+        hung = [t for t in threading.enumerate() if t.name == "kept-task-runs-end" and t.is_alive()]
+    finally:
+        release.set()
+        for thread in threading.enumerate():
+            if thread.name == "kept-task-runs-end":
+                thread.join(10)
+    assert elapsed < 1.5 and hung, "the door returned at its bound while the pass still waits on the engine"
+
+
 def test_the_startup_notice_names_the_previous_faults_cause_and_the_held_count(monkeypatch):
     """The Fault door (ARCHITECTURE §9): after a fault exit the next start says what ended the previous generation and
     how many restored rows THIS fault holds with their saved work (a hold placed before the faulted generation entered

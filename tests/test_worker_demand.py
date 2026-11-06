@@ -750,6 +750,15 @@ def test_an_unready_child_reaped_on_join_continues_its_bounded_step_in_one_pass(
     assert respawned == [(1, {"ready_attempt": 2})]
 
 
+def test_the_health_module_claims_the_readiness_bound_only_for_live_but_unready_replacements():
+    """The test above is what readiness exhaustion bounds: a live-but-unready child's replacement steps to its next
+    attempt. A child that dies before readiness respawns at attempt 1, so the module claims no boot-death fence."""
+    from supervisor import worker_health
+
+    doc = " ".join(worker_health.__doc__.split())
+    assert "readiness exhaustion bounds only live-but-unready replacements" in doc and "boot-death" not in doc
+
+
 def test_a_failed_birth_ledger_is_a_visible_warning(assigning, monkeypatch, caplog):
     from ouroboros import process_custody
     monkeypatch.setattr(lifecycle, "_record_worker_processes", _REAL_RECORD)
