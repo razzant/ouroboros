@@ -1246,11 +1246,13 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
 def collect_trace_refs(usage: Dict[str, Any], llm_trace: Dict[str, Any]) -> Dict[str, Any]:
     # Keep received responses, including incomplete ones with unavailable capture.
     # Sparse pre-response failures stay in usage/history and raw error events.
+    # A forced rail's verdict and its reply's completion request are the trace's only record of why an answer
+    # was not adopted; the trace itself is not stored, so they ride here (``loop_forced_finalization``).
     refs: Dict[str, Any] = {}
     execution_id = str(usage.get("execution_id") or "").strip()
     if execution_id:
         refs["execution_id"] = execution_id
-    for key in ("timeout_repeat", "output_recovery"):
+    for key in ("timeout_repeat", "output_recovery", "forced_finalization", "forced_completion_request"):
         if isinstance(llm_trace.get(key), dict):
             refs[key] = copy.deepcopy(llm_trace[key])
     llm_refs = [
