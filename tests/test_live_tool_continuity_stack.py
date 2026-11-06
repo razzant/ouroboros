@@ -796,7 +796,7 @@ def test_only_a_turn_begun_after_delivery_settles_a_written_result(host_world, m
     or its closing receipt never answers that result; a later fresh session gets one pointer. Extended thinking
     may continue the call's own turn after the result (``call_turn_continues``): no native signal tells that from
     talk-over, so the answer stays owed and the neutral pointer leaves the choice to the mind and its history."""
-    from tests._live_stack import stack
+    from tests._live_stack import owed_state, stack
     slow = Held(monkeypatch)
     in_progress = {'serverContent': {'turnComplete': True, 'interactionStatus': 'IN_PROGRESS'}}
 
@@ -861,7 +861,7 @@ def test_only_a_turn_begun_after_delivery_settles_a_written_result(host_world, m
             while time.monotonic() < deadline and not pointers():
                 await asyncio.sleep(.01)
             await live.quiet()
-            assert pointers() == owed, (case, pointers())
+            assert pointers() == owed, (case, pointers(), owed_state(call))
             assert len(written) == 1 and not any(native_output(wire, cid) for wire in live.provider.connections[1:]
                                                  for cid in written), 'its one native output, never repeated'
         assert live.result[1]['execution_status'] == 'ok', live.result
