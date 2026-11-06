@@ -470,7 +470,7 @@ def test_s30_exact_budget_pause_then_owner_resume_continues_the_same_task_id(
             assert park_events[-1].get("park_state") == STATE_PAUSED, park_events[-1]
             assert park_events[-1].get("pause_source") == "worker_event", park_events[-1]
             assert park_events[-1].get("status") == STATUS_PAUSED_EXACT, park_events[-1]
-            assert park_events[-1].get("owner_visible") is True, park_events[-1]
+            assert not {"owner_visible", "toast_once"}.intersection(park_events[-1]), park_events[-1]
 
             # The owner's census: the root is a managed task in phase budget_paused.
             activity = wait_until(

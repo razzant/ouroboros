@@ -311,10 +311,11 @@ def prepare_terminal_send_event(
 
 
 def terminal_result_fields(usage: Dict[str, Any], *, existing: Dict[str, Any] | None = None,
-                           title: str | None = "") -> Dict[str, Any]:
+                           title: str | None = "", metadata: Dict[str, Any] | None = None,
+                           task_contract: Dict[str, Any] | None = None) -> Dict[str, Any]:
     """Carry current custody and origin facts without minting empty custody envelopes."""
     from ouroboros.delegate_terminal import _stored_disclosure_matches
-
+    from ouroboros.project_naming import summary_names_run
     fields: Dict[str, Any] = {}
     audit = usage.get("delegate_terminal_reconciliation")
     prior = existing or {}
@@ -331,10 +332,9 @@ def terminal_result_fields(usage: Dict[str, Any], *, existing: Dict[str, Any] | 
     if usage.get("wake_silent") is True:
         fields["wake_silent"] = True
     if usage.get("wake_summary"):
-        # The run's one sentence for its human names the card only when no authored name does
-        # (a wake); a schedule-born root keeps the schedule's name and shows the sentence under it.
+        # Self-started runs may take this name; an authored title always stays.
         fields["wake_summary"] = str(usage["wake_summary"])
-        if not str(title or prior.get("title") or "").strip():
+        if summary_names_run(metadata, task_contract) and not str(title or prior.get("title") or "").strip():
             fields["suggested_name"] = fields["wake_summary"]
     if usage.get("owner_message_sent") is True:
         fields["owner_message_sent"] = True

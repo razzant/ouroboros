@@ -272,6 +272,7 @@ def test_admission_reads_the_private_origin_itself_before_any_project_or_source_
                                (lambda e: e.update(attachment_uploads=[{"upload": "foreign"}]), "private_owner_source_invalid"),
                                (lambda e: e.update(work_kind="consciousness"), "private_owner_source_invalid"),
                                (lambda e: e.update(owner_quote="another-answer"), "private_owner_source_invalid"),
+                               (lambda e: e.update(source="https://example.test/repo.git"), "private_owner_source_invalid"),
                                (lambda e: e.update(task_contract={}), "private_owner_source_invalid"),
                                (lambda e: e.update(destination="place", presence={"binding_id": r.admission.binding_id}),
                                 "private_owner_source_invalid")):
@@ -291,7 +292,9 @@ def test_admission_reads_the_private_origin_itself_before_any_project_or_source_
                 raise StoreBusy("record busy", reason="contention")
 
             scoped.setattr("ouroboros.project_dialogue.resolve_owner_message_source", busy)
-            assert private_start_refusal(r.root, dict(emitted[0])) == "private_owner_source_unavailable"
+            busy_event = dict(emitted[0])
+            busy_event["source"] = ""
+            assert private_start_refusal(r.root, busy_event) == "private_owner_source_unavailable"
 
     _run(r, during)
 

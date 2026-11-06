@@ -1185,7 +1185,7 @@ def _recheck_occupant(canonical: pathlib.Path, drive: pathlib.Path, prepared: Di
 # I/O error) is attempted again on the next pass.
 TRANSIENT_RETENTIONS = frozenset({"liveness_unknown", "task_live", "generation_closed", "custody_busy",
                                    "mailbox_busy", "store_busy", "canonical_changed", "drive_occupant_changed",
-                                   "call_inventory_changed", "task_result_unreadable"})
+                                   "call_inventory_changed", "task_result_unreadable", "review_environment_held"})
 
 
 def settlement_basis(parent: pathlib.Path, task_id: str, task_dir: pathlib.Path, drive: pathlib.Path) -> list:
@@ -1330,14 +1330,19 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
             raise _Retained("not_own_drive")
         if live is None:
             raise _Retained("liveness_unknown")
+        from ouroboros.workspace_preflight import review_scratch_held
+        if review_scratch_held(canonical, drive):
+            raise _Retained("review_environment_held")
         occupants = _occupants(drive, tid)
         prepared = [_prepare_occupant(canonical, drive, occupant, live=live, staging=staging,
                                       admission_rollback=admission_rollback and occupant == tid, stop=closed)
                     for occupant in occupants]
         if closed():
             raise _Retained("generation_closed")
-        if any(live(item["task_id"]) is not False for item in prepared):
-            raise _Retained("task_live")  # ownership back after preparation; asked BEFORE any custody lock
+        for item in prepared:
+            alive = live(item["task_id"])
+            if alive is not False:
+                raise _Retained("liveness_unknown" if alive is None else "task_live")
         with contextlib.ExitStack() as stack:  # Phase A: publication, per occupant, every write fenced
             stack.enter_context(publication_fence(closed))
             for item in prepared:
@@ -1347,13 +1352,24 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
                 outcome["published"] += _secure_occupant(canonical, drive, item, closed)
         if closed():
             raise _Retained("generation_closed")
+        # Phase A may have published custody onto the canonical row. Prepare the
+        # supervisor's signed ownership read AFTER that publication, outside its
+        # queue lock; Phase B still rejects any subsequent change or new owner.
+        for item in prepared:
+            alive = live(item["task_id"])
+            if alive is not False:
+                raise _Retained("liveness_unknown" if alive is None else "task_live")
         with (guard() if guard is not None else contextlib.nullcontext(True)) as allowed:  # Phase B: the move
             if not allowed:
                 raise _Retained("generation_closed")
             if _occupants(drive, tid) != occupants:
                 raise _Retained("drive_occupant_changed")
-            if any(live(item["task_id"]) is not False for item in prepared):
-                raise _Retained("task_live")
+            if review_scratch_held(canonical, drive):
+                raise _Retained("review_environment_held")
+            for item in prepared:
+                alive = live(item["task_id"])
+                if alive is not False:
+                    raise _Retained("liveness_unknown" if alive is None else "task_live")
             with contextlib.ExitStack() as stack:
                 for item in prepared:
                     if not stack.enter_context(task_custody_lock(canonical, item["task_id"],
@@ -1377,6 +1393,8 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
     except _Retained as retained:
         # A fenced write surfaces as its caller's own failure reason: a closed generation names the close.
         outcome["reason"] = "generation_closed" if closed() else str(retained)
+    except StoreBusy:
+        outcome["reason"] = "generation_closed" if closed() else "store_busy"
     except (OSError, ValueError, TimeoutError) as exc:
         outcome["reason"] = "generation_closed" if closed() else f"custody_error: {type(exc).__name__}"
         if not closed():
@@ -1459,9 +1477,9 @@ def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], boo
             if entry.is_dir() and not entry.is_symlink():
                 from ouroboros.workspace_preflight import release_session_scratch
 
-                report["retained"] += release_session_scratch(entry)
+                report["retained"] += release_session_scratch(entry, data_root=canonical_root)
                 if (entry / "data").is_dir() and not (entry / "data").is_symlink():
-                    report["retained"] += release_session_scratch(entry / "data")
+                    report["retained"] += release_session_scratch(entry / "data", data_root=canonical_root)
             _remove_entry(entry)
         try:
             stat = entry.lstat()

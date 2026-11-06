@@ -791,8 +791,8 @@ def test_a_place_root_at_its_round_limit_keeps_the_silence_it_selected(room, mon
 
 
 @pytest.mark.parametrize("form", ["native", "text"])
-def test_a_place_root_gets_no_sentence_for_its_human_at_its_round_limit(room, monkeypatch, form):
-    """Silence is the carrier's; the sentence stays a self-started run's, on a forced rail as in the handler."""
+def test_a_place_root_keeps_its_sentence_out_of_the_place_at_its_round_limit(room, monkeypatch, form):
+    """The root's sentence stays in its record; silence still belongs to its reply carrier."""
     monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "1")
     request = {"action": "finish", "silent": True, "summary": "A line for the human.", "answer": NOTE}
     root = promoted_root(room, monkeypatch, [
@@ -800,9 +800,11 @@ def test_a_place_root_gets_no_sentence_for_its_human_at_its_round_limit(room, mo
         finish(silent=True, summary=request["summary"], answer=NOTE) if form == "native"
         else {"content": json.dumps(request)}])
     fact = root.trace["forced_completion_request"]
-    assert fact["status"] == "refused" and fact["reason"].startswith("invalid_completion_request: silent and summary")
-    assert root.stored.get("wake_silent") is not True and not root.stored.get("wake_summary")
+    assert fact["status"] == "selected"
+    assert root.stored["wake_silent"] is True and root.stored["wake_summary"] == request["summary"]
     assert NOTE not in room.transport.texts() and NOTE not in root.stored["metadata"]["presence_result_text"]
+    assert request["summary"] not in room.transport.texts()
+    assert request["summary"] not in root.stored["metadata"]["presence_result_text"]
 
 
 def test_a_voided_place_final_points_at_finish_task_and_frozen_registries_keep_their_words(tmp_path, monkeypatch):

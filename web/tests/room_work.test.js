@@ -736,3 +736,37 @@ test('Back reads the page it left again, stays after a failed read and takes a f
         assert.equal(revisits.length, 3);
     } finally { work?.destroy(); restoreDom(prior); }
 });
+
+for (const asPanel of [false, true]) for (const [words, expected] of [
+    [{ wakeSummary: 'Export fixed.' }, 'Export fixed.'],
+    [{ wakeSummary: 'Export fixed.', suggestedName: 'Export fixed.' }, ''],
+    [{ wakeSummary: 'Export fixed.', causeHeld: true, collapsedActivity: 'The upload failed.' }, 'The upload failed.'],
+    [{}, ''],
+]) test(`settled room row keeps its closing words, never its old focus (${asPanel}, ${expected})`, () => {
+    const { prior, mount } = installDom();
+    let shade;
+    try {
+        const node = (cls, parent) => { const el = document.createElement('div'); el.className = cls; parent.appendChild(el); return el; };
+        const panel = asPanel ? node('project-panel', mount) : mount;
+        const page = node('page', panel), header = node(asPanel ? 'project-panel-bar' : 'chat-page-header', page);
+        if (asPanel) page.closest = selector => selector === '.project-panel' ? panel : null;
+        const titleRow = node('app-page-title-row', node('app-page-title-block', header));
+        const badge = node('status-badge', node('app-page-actions', header));
+        const messages = node('chat-messages', page);
+        const record = { root: node('chat-live-card', messages), groupId: 't-run', phase: 'working',
+            collapsedActivity: 'Old activity.', ...words };
+        let works = [running('t-run', { focus: { text: 'Testing the export.', at: null } })];
+        shade = createRoomWork({ page, statusBadge: badge, messagesDiv: messages, asPanel,
+            ws: { isConnected: () => true }, reading: { cancel() {}, scroll() {} },
+            works: () => workState(works), liveCardRecords: new Map([['t-run', record]]), pendingSubmissions: new Map() });
+        titleRow.children.find(el => el.classList.contains('rw-trigger')).click();
+        const list = header.children.find(el => el.classList.contains('rw-shade-anchor')).children[0].children[0];
+        assert.equal(list.children[0].querySelector('.rw-focus').textContent, 'Testing the export.');
+        Object.assign(record, { finished: true, phase: words.causeHeld ? 'error' : 'done' });
+        works = [];
+        shade.update();
+        assert.equal(list.children[0].dataset.settled, '1');
+        assert.equal(list.children[0].querySelector('.rw-focus').textContent, expected);
+        assert.equal(list.children[0].querySelector('.rw-focus').hidden, !expected);
+    } finally { shade?.destroy(); restoreDom(prior); }
+});

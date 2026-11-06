@@ -144,7 +144,7 @@ def _task_exception_terminal(env: Any, task: Dict[str, Any], exc: Exception, dri
                 "task_exception", review_trigger="agent_exception"),
             trace_summary=build_trace_summary(llm_trace),
             trace_refs=loop_outcome.get("trace_refs") or collect_trace_refs(usage, llm_trace),
-            **effort_result_fields(task), **terminal_result_fields(usage, title=task.get("title")),
+            **effort_result_fields(task), **terminal_result_fields(usage, title=task.get("title"), metadata=task.get("metadata"), task_contract=task.get("task_contract")),
         )
     except Exception:
         log.debug("Failed to persist task exception projection", exc_info=True)
@@ -289,8 +289,6 @@ def _emit_budget_pause_checkpoint(
 
     _emit_checkpoint_event(event_queue, task_id, drive_logs, {
         "checkpoint_kind": "budget_scope_paused",
-        "owner_visible": True,
-        "toast_once": f"{task_id}:budget-paused:{resource_limit['scope']}",
         **resource_limit,
     })
 

@@ -490,9 +490,7 @@
  * @property {string=} card_row_id  // the row's stable identity across live delivery, outbox replay and history
  * @property {number=} card_row_revision  // canonical source order, independent of delivery timestamp
  * @property {"retained_work"=} terminal_receipt  // a placed row the host types as a terminal receipt (Wrap up's saved work), not progress
- * @property {Object=} late_evidence
- *   Late-review identity, reviewed revision and exact applied source_ref served by
- *   taskSourceDownloadUrl; not an original reviewer transcript or a copy of the row.
+ * @property {Object=} late_evidence  // late-review identity, revision and applied source_ref (taskSourceDownloadUrl); no transcript copy
  * @property {string=} target_label
  * @property {string=} project_id
  * @property {string=} task_name  // structured work title on Project creation/transfer entries
@@ -501,6 +499,7 @@
  * @property {Object=} terminal_time  // host-owned occurrence; ts remains publication time
  * @property {string=} completion_answer  // a Project root's model-authored final answer, mirrored into Main
  * @property {string=} completion_reason One recorded nonclean-outcome fact beside the answer.
+ * @property {string=} wake_summary  // a Project root's own closing sentence, for its Main portal
  * @property {Object=} completion_notice Transport view: neutral/detail/phase/salvage; Main adds cause and undescribed codes.
  * @property {string=} delivery_id Stable logical publication identity across transport retries.
  * @property {string=} set_at  // a `reminder` row: when its words were written (live frame only; the text carries the signature)
@@ -1483,9 +1482,9 @@
  * @property {('kept'|'released'|'partly_retired'|'already_retired'|'release_unconfirmed'|'inflight'|'refused')} status
  * @property {string} reason
  * @property {string[]} retained  // material on disk now: paths, `pins:<snapshot>` for result pins, `review_thread:<id>` no recorded release let go
- * @property {string[]} retired  // material a record names as gone OR accepted for deletion: acceptance alone is no removal
+ * @property {string[]} retired  // gone, accepted for deletion, or managed import ID reuse released; not proof of deleted bytes
  * @property {string[]} unknown  // material classes that could not be read: nothing is claimed about them
- * @property {Object<string, string>} releases  // `review_thread:<id>` -> release_unconfirmed | accepted_pending_removal | removed | purged | not_found | held | refused | abandoned | unrecorded, as last observed
+ * @property {Object<string, string>} releases  // `review_thread:<id>` -> release_unconfirmed | accepted_pending_removal | removed | purged | not_found | held | refused | abandoned | unrecorded; `managed_import:<key>` -> held | release_unconfirmed | future_reuse_released | upload_cancelled | binding_unavailable:<outcome> | release_refused:<code> (not deleted bytes)
  */
 /**
  * @typedef {Object} LogTailResponse

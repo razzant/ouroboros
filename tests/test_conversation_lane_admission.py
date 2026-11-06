@@ -405,13 +405,16 @@ def test_custody_publishes_only_its_own_row_never_a_resend_admitted_under_the_sa
 
 
 @pytest.mark.parametrize("live, resumes", [("presence", True), ("direct", False)])
-def test_a_correspondents_presence_turn_never_holds_the_owners_auto_resume(lane, monkeypatch, live, resumes):
+@pytest.mark.parametrize("places_state", ["paused", "empty", "unreadable"])
+def test_a_correspondents_presence_turn_never_holds_the_owners_auto_resume(lane, monkeypatch, live, resumes, places_state):
     """Review N8: the Host serves at boot before auto-resume, so a correspondent's Presence turn can be a live lane
     row when the planned restart's resume runs. It is its place's conversation, never the owner's: only an owner
     turn (base's registered direct actors) holds the resume."""
     from tests.conversation_carrier_support import lane_row
 
     started = []
+    from tests.test_places import paused_inventory
+    suffix = paused_inventory(workers.DRIVE_ROOT, places_state)
     (workers.DRIVE_ROOT / "state").mkdir(parents=True, exist_ok=True)
     (workers.DRIVE_ROOT / "state" / "pending_restart_verify.json").write_text("{}", encoding="utf-8")
     monkeypatch.setattr(workers, "load_state", lambda: {"owner_chat_id": 7})
@@ -424,3 +427,6 @@ def test_a_correspondents_presence_turn_never_holds_the_owners_auto_resume(lane,
     lane_row(workers, {**turn, **({"_presence_turn": True} if live == "presence" else {})}, wid=97)
     worker_chat_lane.auto_resume_after_restart()
     assert bool(started) is resumes and all(text.startswith("[auto-resume after restart]") for text in started)
+    if resumes:
+        original = "[auto-resume after restart] Continue your work. Read scratchpad and identity — they contain context of what you were doing."
+        assert started == [original + (f"\n{suffix}" if suffix else "")]

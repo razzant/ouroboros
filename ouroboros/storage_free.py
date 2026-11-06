@@ -89,14 +89,14 @@ LARGEST_ITEMS = 20
 _KEPT_REASONS = {
     "results_pending": ("child_result_unadopted", "child_refs_pending", "call_inventory_pending", "call_inventory_changed",
                         "inputs_uncustodied", "unread_mailbox_uncustodied", "verification_receipts_uncustodied",
-                        "canonical_changed", "drive_occupant_changed", "canonical_not_settled", "post_work_open",
-                        "artifacts_not_terminal", "child_drive_mismatch"),
+                        "raw_evidence_uncustodied", "artifact_source_missing", "canonical_changed", "drive_occupant_changed",
+                        "canonical_not_settled", "post_work_open", "artifacts_not_terminal", "child_drive_mismatch"),
     "in_use": ("task_live", "liveness_unknown", "owner_processes_live", "owner_not_terminal", "task_not_terminal", "parent_not_terminal",
-               "not_proven_over", "custody_held", "owner_paused"),
+               "not_proven_over", "custody_held", "owner_paused", "review_custody_active", "seat_checking", "operation_live", "review_environment_held"),
     "busy": ("custody_busy", "mailbox_busy", "store_busy", "busy", "record_busy"),
-    "unreadable_record": ("task_result_unreadable", "unread_mailbox_unreadable", "record_unreadable"),
+    "unreadable_record": ("task_result_unreadable", "unread_mailbox_unreadable", "record_unreadable", "review_state_unreadable", "marker_unreadable"),
     "capture_unproven": ("capture_unproven", "capture_incomplete"),
-    "retained_evidence": ("retained_process_environment",),
+    "retained_evidence": ("retained_process_environment", "undeclared_environment"),
     "changed": ("changed", "nothing_unsaved", "nested_repository", "commits_unprotected"),
     "unproven_excluded_inputs": ("unproven_excluded_inputs",),
     "owner_keep": ("owner_keep",),
@@ -172,7 +172,7 @@ class _Stopped(Exception):
 
 class _Candidate:
     __slots__ = ("group", "key", "path", "layout", "inside_wait", "bytes", "unreadable", "name", "task", "row",
-                 "owner", "kind", "ordinary", "reason", "eligible_after", "manual")
+                 "owner", "kind", "ordinary", "reason", "cause", "eligible_after", "manual")
 
     def __init__(self, group: str, key: str, path: pathlib.Path, layout: str, *, inside_wait: bool = False,
                  task: str = "", row: Optional[Dict[str, Any]] = None, owner: str = "") -> None:
@@ -186,6 +186,7 @@ class _Candidate:
         self.kind = {GROUP_WORK_FOLDERS: "work_folder", GROUP_WORKING_COPIES: "working_copy"}.get(group, "other")
         self.ordinary = group in (GROUP_WORK_FOLDERS, GROUP_WORKING_COPIES)  # the ordinary action's pool
         self.reason: Optional[str] = None  # why it stays out of the pool
+        self.cause: Optional[str] = None  # the retirer's exact code, beside the compatible category
         self.eligible_after: Optional[str] = None
         self.manual: Optional[Dict[str, Any]] = None  # ``discard_offer``'s answer, its largest paths and ``unsaved_count``,
         # when the owner may discard it by hand
@@ -201,7 +202,9 @@ def _sorted_into(root: pathlib.Path, group: Dict[str, Any], verdict: str, candid
         group["candidates"].append(candidate)
         return
     group["unreadable" if verdict == "unreadable" else "in_use"] += 1
-    candidate.reason = reason or ("unreadable_record" if verdict == "unreadable" else verdict if verdict == OWNER_KEEP else "in_use")
+    candidate.reason = (reason if reason in _KEPT_REASONS else _reason(reason)) if reason else (
+        "unreadable_record" if verdict == "unreadable" else verdict if verdict == OWNER_KEEP else "in_use")
+    candidate.cause = reason or None
     candidate.ordinary = False
     group["excluded"].append(candidate)
 
@@ -393,7 +396,7 @@ class FreeSpace:
             "removed": len(removed), "removed_bytes": sum(sizes.get(key) or 0 for key in removed),
             "deleting": len(deleting), "deleting_bytes": sum(sizes.get(key) or 0 for key in deleting),
             "stuck": len(stuck),
-            "kept": [{"reason": reason, "count": count} for reason, count in sorted(run["kept"].items()) if count],
+            "kept": self._kept_view(run),
             "failed": len(run["failed"]),
             "not_started": sum(1 for item in run["items"] if item.key not in run["kept_items"] and item.key not in run["failed"]
                                and item.key not in removed and item.key not in deleting and item.key not in stuck),
@@ -402,6 +405,20 @@ class FreeSpace:
             "free_after": _free_bytes(root),
             "stopped": run["stopped"], "error": run["error"],
         }
+
+    @staticmethod
+    def _kept_view(run: Dict[str, Any]) -> List[StorageFreeKept]:
+        causes: Dict[str, Dict[str, int]] = {}
+        for item in run["items"]:
+            category = run["kept_items"].get(item.key)
+            if category:
+                counts = causes.setdefault(category, {})
+                code = item.cause or category
+                counts[code] = counts.get(code, 0) + 1
+        return [{"reason": reason, "count": count, **({"causes": [
+            {"cause": code, "count": n} for code, n in sorted(causes[reason].items())]}
+            if any(code != reason for code in causes.get(reason, {})) else {})}
+            for reason, count in sorted(run["kept"].items()) if count]
 
     @staticmethod
     def _stuck_trash(root: pathlib.Path) -> Dict[str, Any]:
@@ -560,8 +577,10 @@ class FreeSpace:
                     item = _Candidate(GROUP_WORK_FOLDERS, f"{layout}:{task_id}", base / task_id, layout, inside_wait=inside, task=task_id)
                     item.eligible_after = _eligible_after(at, days)
                     # No readable row: shown, never freed.
-                    _sorted_into(root, group, "unreadable" if not fact else "in_use" if status not in FINAL_STATUSES
-                                 or live(task_id) is not False else "offer", item)
+                    alive = live(task_id) if fact and status in FINAL_STATUSES else False
+                    cause = "task_result_unreadable" if not fact else "task_not_terminal" if status not in FINAL_STATUSES else (
+                        "liveness_unknown" if alive is None else "task_live" if alive else "")
+                    _sorted_into(root, group, "unreadable" if not fact else "in_use" if cause else "offer", item, cause)
             groups.append(group)
         read = read_records(root)  # one passive read per copy: no import, no event row; unreadable ones are named
         rows = list(read.rows)
@@ -625,8 +644,9 @@ class FreeSpace:
                 groups.append(group)
             if GROUP_REVIEW_CHECKOUTS in self._offered:
                 group = new_group(GROUP_REVIEW_CHECKOUTS)
-                for entry, verdict in seats.orphan_review_checkouts(root, live, homes):
-                    _sorted_into(root, group, verdict, _Candidate(GROUP_REVIEW_CHECKOUTS, f"checkout:{entry.name}", entry, "checkout"))
+                causes: dict = {}
+                for entry, verdict in seats.orphan_review_checkouts(root, live, homes, causes=causes):
+                    _sorted_into(root, group, verdict, _Candidate(GROUP_REVIEW_CHECKOUTS, f"checkout:{entry.name}", entry, "checkout"), causes.get(entry, ""))
                 groups.append(group)
             if self._closed():
                 raise _Stopped()
@@ -653,7 +673,9 @@ class FreeSpace:
                     named_unreadable.add(_record_file(entry, root).name)
                     _sorted_into(root, group, "unreadable", item)  # a record may name it: unread is not unregistered
                     continue
-                _sorted_into(root, group, "in_use" if live(owner) is not False else "offer", item)
+                alive = live(owner)
+                _sorted_into(root, group, "in_use" if alive is not False else "offer", item,
+                             "liveness_unknown" if alive is None else "task_live" if alive else "")
             groups.append(group)
         if copies_group is not None:  # a record whose folder this listing did not reach is still named
             for name in sorted(read.unreadable - named_unreadable):
@@ -809,7 +831,8 @@ class FreeSpace:
         view = self._run_view(root, run, settled)
         self._record(root, view, time.monotonic() - started, settled, list(run["failed"]), dict(run["kept_items"]),
                      {item.key: {"unsaved_count": item.manual["unsaved_count"], "unsaved_bytes": item.manual["unsaved_bytes"]}
-                      for item in manual})
+                      for item in manual},
+                     {item.key: item.cause for item in run["items"] if item.key in run["kept_items"] and item.cause})
         supervisor_row(root, "storage_free", {"phase": self._state, "duration_seconds": round(time.monotonic() - started, 2),
                                                **{key: view[key] for key in ("groups", "selected", "removed", "removed_bytes",
                                                                              "deleting", "stuck", "kept", "failed", "not_started",
@@ -817,7 +840,8 @@ class FreeSpace:
 
     @staticmethod
     def _record(root: pathlib.Path, view: StorageFreeRun, seconds: float, settled: Tuple[List[str], ...],
-                failed: List[str], kept_ids: Dict[str, str], discards: Optional[Dict[str, Any]] = None) -> None:
+                failed: List[str], kept_ids: Dict[str, str], discards: Optional[Dict[str, Any]] = None,
+                causes: Optional[Dict[str, str]] = None) -> None:
         try:
             from ouroboros.server_maintenance import _prune_event
 
@@ -827,6 +851,7 @@ class FreeSpace:
             _prune_event("storage_free", ("removed", "deleting", "kept"), report={
                 **view, "duration_seconds": round(seconds, 2), "removed_ids": removed, "deleting_ids": deleting,
                 "stuck_ids": stuck, "failed_ids": failed, "kept_ids": kept_ids,
+                **({"kept_causes": causes} if causes else {}),
                 **({"manual_discards": discards} if discards else {})})
         except Exception:
             log.debug("storage_free event not recorded", exc_info=True)
@@ -839,6 +864,8 @@ class FreeSpace:
     @staticmethod
     def _keep(run: Dict[str, Any], item: _Candidate, reason: str) -> None:
         """One object stays with its reason; a removal that failed for no named reason is ``failed``."""
+        item.cause = reason or None
+        reason = reason if reason in _KEPT_REASONS or reason == "other" else _reason(reason)
         if reason == "other":
             run["failed"].append(item.key)
             return
@@ -883,7 +910,7 @@ class FreeSpace:
                 if not item.path.exists():
                     run["moved"].append(item.key)  # the cadence settled it first; its trash may still exist
                 else:
-                    self._keep(run, item, _reason(row.get("reason")))
+                    self._keep(run, item, str(row.get("reason") or "other"))
             for row in report["errors"]:
                 item = selected.get(row["task_id"])
                 if item is None:
@@ -963,7 +990,7 @@ class FreeSpace:
             if not item.path.exists():
                 run["removed"].append(item.key)
             else:
-                self._keep(run, item, _reason(reasons.get(path, "")))
+                self._keep(run, item, reasons.get(path, "other"))
             self._tick(run, run["done"] + 1)
 
     @staticmethod
@@ -990,7 +1017,7 @@ class FreeSpace:
         except SubagentWorktreeRegistryCorrupt:
             return "unreadable_record"
         if named:
-            return _reason(named)
+            return named
         if item.layout == "delegated":
             try:
                 if delegate_custody.custody_log_unreadable(root):

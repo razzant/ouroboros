@@ -250,9 +250,11 @@ def test_the_two_step_followup_fires_as_the_owners_scheduled_work_and_reads_thei
     assert metadata["work_kind"] == "owner" and metadata["presence_binding_relation"] == {"binding_id": world.place.place_id}
     assert not (SPEAKER_KEYS | FOCUS_KEYS) & set(metadata) and presence_related_work(world.place.place_id, fired)
 
-    # No new owner ingress: no owner stamp, words or corpus of its own, and no handle it could cite as theirs.
+    # No new owner ingress: the follow-up carries the root's already-admitted owner corpus by value,
+    # but it gets no new owner stamp or source handle of its own.
     assert run_origin(fired)["owner_ingress"] is False and not fired.get("origin_message_ref")
-    assert not {"origin_message_ref", "origin_message_text", "owner_corpus"} & set(metadata)
+    assert metadata.get("owner_corpus")
+    assert not {"origin_message_ref", "origin_message_text"} & set(metadata)
     assert metadata["objective_author"] == {"kind": "task", "task_id": root["id"]}
 
     seen = {}
@@ -271,5 +273,5 @@ def test_the_two_step_followup_fires_as_the_owners_scheduled_work_and_reads_thei
     assert WORDS in seen["read"]["get_task_result-0"], seen["read"]  # and its record's owner origin
     assert lineage_task_ids(seen["ctx"]) == (fired["id"], root["id"])
     assert presence_caller_binding(seen["ctx"]) is None and held_owner_messages(seen["ctx"]) == {}
-    assert WORDS not in json.dumps(getattr(seen["ctx"], "_owner_directives", []), ensure_ascii=False)
+    assert WORDS in json.dumps(getattr(seen["ctx"], "_owner_directives", []), ensure_ascii=False)
     assert objective_author_text(seen["ctx"]) == f"drafted by task {root['id']}, not spoken by my human"

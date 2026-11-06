@@ -92,15 +92,9 @@ def _emit_checkpoint_event(
 
 def _extract_plain_text_from_content(content: Any) -> str:
     """Extract text from strings or multipart content for transcript sealing."""
-    if isinstance(content, str):
-        return content
     if isinstance(content, list):
-        parts = []
-        for block in content:
-            if isinstance(block, dict):
-                parts.append(block.get("text", ""))
-        return "".join(parts)
-    return str(content) if content is not None else ""
+        return "".join(block.get("text", "") for block in content if isinstance(block, dict))
+    return content if isinstance(content, str) else "" if content is None else str(content)
 
 
 def _append_or_merge_user_message(
@@ -181,6 +175,8 @@ def _record_owner_directive(
     content: Any,
     msg_id: str = "",
     origin: Optional[Dict[str, str]] = None,
+    reply_to: Optional[Dict[str, str]] = None,
+    carried: bool = False,
 ) -> None:
     """Retain the task-local owner corpus across transcript compaction.
 
@@ -193,6 +189,11 @@ def _record_owner_directive(
     sibling's words; an owner answer's card as ``source_task_id`` + ``quiz_id``): the row
     keeps them so every reader of this one corpus can tell a directive from a relayed
     proposal, and find an answer's question, without inferring it from the text.
+    ``reply_to`` is the message these words reply to (``owner_words.reply_target``): its
+    author's words beside them, carried with the row, never counted as my human's.
+    ``carried``: words that reached this run unaddressed (a relayed quote, a drafted objective's
+    corpus, a place event), kept but owing no reply. One source is one row (the same id or owner
+    message); my human's direct delivery of words first carried makes that row owed.
     """
     if ctx is None:
         return
@@ -205,11 +206,14 @@ def _record_owner_directive(
         directives = []
         setattr(ctx, "_owner_directives", directives)
     stable_id = str(msg_id or "").strip()
-    if stable_id and any(
-        isinstance(row, dict) and str(row.get("msg_id") or "") == stable_id
-        for row in directives
-    ):
-        return
+    client, room = (str((origin or {}).get(key) or "") for key in ("client_message_id", "chat_id"))  # unique per room
+    for known in directives:  # a client id is one message unless both rows name different rooms (``dialogue_store``)
+        if isinstance(known, dict) and ((stable_id and str(known.get("msg_id") or "") == stable_id) or (
+                client and str(known.get("client_message_id") or "") == client
+                and room in ("", str(known.get("chat_id") or room)))):
+            if not carried:
+                known.pop("carried", None)
+            return
     try:
         frozen_content = json.loads(json.dumps(content, ensure_ascii=False, default=str))
     except (TypeError, ValueError):
@@ -218,6 +222,10 @@ def _record_owner_directive(
     if stable_id:
         row["msg_id"] = stable_id
     row.update({key: str(value) for key, value in (origin or {}).items() if value})
+    if reply_to:
+        row["reply_to"] = dict(reply_to)
+    if carried:
+        row["carried"] = True
     directives.append(row)
 
 
@@ -249,28 +257,41 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
                                       origin={"source_task_id": late["task_id"], "quiz_id": late["quiz_id"]})
         return
     author = metadata.get("objective_author")
+    from ouroboros.owner_words import OWNER_SOURCES, reply_target
     # A task-drafted objective, or the host's Continue work order (its facts are
     # the host's; the owner's exact words ride ``owner_corpus``).
     if isinstance(author, dict) and author.get("kind") in {"task", "continuation"}:
         for row in metadata.get("owner_corpus") or []:
-            if isinstance(row, dict) and row.get("source") in {
-                    "owner_mailbox", "owner_quiz_answer", "origin_message", "owner_corpus", "direct_incoming",
-                    "initial_user"}:  # the routing turn's own stamped owner row (a suppressed origin)
+            if isinstance(row, dict) and row.get("source") in OWNER_SOURCES:
                 _loop()._record_owner_directive(
                     ctx, source=str(row["source"]), content=row.get("content"),
                     msg_id=str(row.get("msg_id") or ""),
-                    origin={key: row[key] for key in ("source_task_id", "relayed_from_task_id", "quiz_id") if row.get(key)},
+                    origin={key: row[key] for key in ("source_task_id", "relayed_from_task_id", "quiz_id",
+                                                      "client_message_id", "chat_id") if row.get(key)},
+                    reply_to=row.get("reply_to") if isinstance(row.get("reply_to"), dict) else None, carried=True,
                 )
         return  # The task-drafted objective is never an owner directive.
+    focus, presence = metadata.get("focus") or {}, metadata.get("presence") or {}
+    if (focus.get("addressed") is True and (focus.get("actor") or {}).get("owner_confirmed") is True
+            and str(presence.get("observed_text") or "").strip()):
+        # A place turn addressed to me from an account its place confirmed at admission: my human's exact
+        # words, beside the event frame (``initial_text``, which Safety reads); an unaddressed one is not work.
+        event = presence.get("event") or {}
+        replied = str((event.get("message") or {}).get("reply_to_message_id") or "")
+        target = {"address": f"platform message {replied} in this room", "author": "", "text": ""} if replied else None
+        _loop()._record_owner_directive(ctx, source="place_owner", content=presence["observed_text"], carried=True,
+            msg_id=f"chat {focus.get('room_chat_id')} / {event.get('source_event_id') or ''}", reply_to=target)
     for message in messages:
         if isinstance(message, dict) and str(message.get("role") or "") == "user":
             from ouroboros.dialogue_provenance import run_origin
 
             stamped = run_origin({"metadata": metadata})["owner_ingress"]
+            target = reply_target(getattr(ctx, "drive_root", None), metadata.get("reply_reference")) if stamped else {}
             _loop()._record_owner_directive(
                 ctx,
                 source="initial_user" if stamped else "initial_text",
                 content=message.get("content"),
+                reply_to=target or None,
             )
             return
 
@@ -278,17 +299,15 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
 def owner_source_sha256(ctx: Any) -> str:
     """Address the retained exact owner corpus, independently of its meaning."""
     rows = getattr(ctx, "_owner_directives", [])
-    return hashlib.sha256(json.dumps(
-        rows if isinstance(rows, list) else [], ensure_ascii=False,
-        sort_keys=True, separators=(",", ":"), default=str,
-    ).encode("utf-8")).hexdigest()
+    return hashlib.sha256(json.dumps(rows if isinstance(rows, list) else [], ensure_ascii=False, sort_keys=True,
+                                     separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
 
 
 def owner_input_revision(ctx: Any) -> int:
-    """How many of the owner's own rows this run has admitted (``initial_text`` and peers are not theirs)."""
+    """How many of the owner's own rows were delivered to this run (never ``initial_text``, peers or carried words)."""
     from ouroboros.owner_words import OWNER_SOURCES
 
-    return sum(isinstance(row, dict) and row.get("source") in OWNER_SOURCES
+    return sum(isinstance(row, dict) and row.get("source") in OWNER_SOURCES and not row.get("carried")
                for row in getattr(ctx, "_owner_directives", None) or [])
 
 
@@ -354,13 +373,9 @@ def owner_authority_kinds(entries: List[Dict[str, Any]]) -> List[str]:
 
     kinds: List[str] = []
     for entry in entries:
-        kind = str(entry.get("kind") or KIND_OWNER_TEXT)
-        if kind == KIND_TASK_MESSAGE:
-            provenance = str(entry.get("provenance") or "ancestor_task")
-            if provenance in CONTEXT_ONLY_TASK_PROVENANCES:
-                continue
-            kind = f"{kind}:{provenance}"
-        kinds.append(kind)
+        kind, provenance = str(entry.get("kind") or KIND_OWNER_TEXT), str(entry.get("provenance") or "ancestor_task")
+        if kind != KIND_TASK_MESSAGE or provenance not in CONTEXT_ONLY_TASK_PROVENANCES:
+            kinds.append(f"{kind}:{provenance}" if kind == KIND_TASK_MESSAGE else kind)
     return kinds
 
 
@@ -575,17 +590,10 @@ def _visible_round_text(content: Any) -> str:
     visible text' (narration falls back to readable reasoning)."""
     if isinstance(content, str):
         return content.strip()
-    if isinstance(content, list):
-        out: List[str] = []
-        for b in content:
-            if not isinstance(b, dict):
-                continue
-            if str(b.get("type") or "") in ("thinking", "reasoning", "redacted_thinking") or b.get("thought") is True:
-                continue  # reasoning/thinking blocks are display reasoning, not visible answer text
-            txt = b.get("text")
-            if isinstance(txt, str):
-                out.append(txt)
-        return "".join(out).strip()
+    if isinstance(content, list):  # reasoning/thinking blocks are display reasoning, not visible answer text
+        return "".join(b["text"] for b in content if isinstance(b, dict) and isinstance(b.get("text"), str)
+                       and str(b.get("type") or "") not in ("thinking", "reasoning", "redacted_thinking")
+                       and b.get("thought") is not True).strip()
     return ""
 
 

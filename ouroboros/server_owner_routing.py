@@ -283,6 +283,7 @@ def _route_project_chat_to_running_task(
                     task_metadata.get("late_answer") if isinstance(task_metadata, dict) else None
                 ),
                 card_press=task_metadata.get("card_press") if isinstance(task_metadata, dict) else None,
+                reply_reference=task_metadata.get("reply_reference") if isinstance(task_metadata, dict) else None,
                 # Only while that author's loop still reads mail, checked under the mail lock its final drain closes
                 # the intake under (``conversation_lease.accept_author_mail``): else the words start their own turn.
                 admit=(lambda: author_intake_accepting(task_drive, tid)) if remote_author else None,

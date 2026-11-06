@@ -144,6 +144,79 @@ def test_saved_ack_updates_each_quoted_owner_row(tmp_path):
     assert events.get_nowait()["relay_ack"]["relay_id"] == "both"
 
 
+def test_revoked_place_owner_row_is_not_quoted_or_relayed(tmp_path):
+    """A held place row is rechecked when the account is revoked before delivery."""
+    from ouroboros import places
+    from ouroboros.owner_relay import inject_relay
+    from tests.test_place_owner_author import _place_row
+
+    connected = places.connect_place(tmp_path, connector="bridge", provider="chat", account_id="qa",
+                                     label="Team chat")
+    places.edit_place(tmp_path, connected.place_id, "confirm_owner_account", author="owner",
+                      platform_actor_id="anton", account_id="qa")
+    row = _place_row(connected.place_id)
+    dialogue_store.append(tmp_path, "chat", row)
+    stored = next(entry.row for entry in dialogue_store.iter_rows(tmp_path, "chat"))
+    handle = format_address(row_address(stored))
+    sender = context(tmp_path, stored)
+    assert handle in held_owner_messages(sender)
+
+    places.edit_place(tmp_path, connected.place_id, "revoke_owner_account", author="owner",
+                      platform_actor_id="anton", account_id="qa")
+    assert quote_rows(sender, [handle])[0] == []
+
+    receiver = context(tmp_path)
+    receiver.task_id = "receiver"
+    inject_relay(receiver, {"relay": {"relay_id": "r1", "quotes": []},
+                            "owner_rows": [stored], "source_task_id": "sender", "text": "note"}, [])
+    assert not [row for row in getattr(receiver, "_owner_directives", []) if row.get("source") == "owner_mailbox"]
+    assert not held_owner_messages(receiver)
+
+
+def test_cross_root_relay_validates_source_place_but_holds_on_recipient_root(tmp_path):
+    """A relay keeps source-place authority when sender and recipient use different data roots."""
+    from ouroboros import places
+    from ouroboros.owner_relay import inject_relay
+    from tests.test_place_owner_author import _place_row
+
+    source_root, recipient_root = tmp_path / "source", tmp_path / "recipient"
+    source_root.mkdir()
+    recipient_root.mkdir()
+    connected = places.connect_place(source_root, connector="bridge", provider="chat", account_id="qa",
+                                     label="Source chat")
+    places.edit_place(source_root, connected.place_id, "confirm_owner_account", author="owner",
+                      platform_actor_id="anton", account_id="qa")
+    row = _place_row(connected.place_id)
+    dialogue_store.append(source_root, "chat", row)
+    stored = next(entry.row for entry in dialogue_store.iter_rows(source_root, "chat"))
+    sender = context(source_root, stored)
+    handle = format_address(row_address(stored))
+    quotes, error = quote_rows(sender, [handle])
+    assert not error
+    relay, created = write_relay(recipient_root, "receiver", relay_id="cross", note="note", quotes=quotes,
+                                 chat_id=1, teller_task_id="sender", canonical_root=source_root)
+    assert created
+
+    receiver = context(recipient_root)
+    receiver.task_id = "receiver"
+    inject_relay(receiver, relay, [])
+    assert [row.get("content") for row in receiver._owner_directives] == [stored["text"]]
+    assert handle in held_owner_messages(receiver)
+
+    third_root = tmp_path / "third"
+    third_root.mkdir()
+    forwarded, error = quote_rows(receiver, [handle])
+    assert not error and forwarded[0]["text"] == stored["text"]
+    forwarded_entry, created = write_relay(third_root, "receiver", relay_id="cross-again", note="note",
+                                            quotes=forwarded, chat_id=1, teller_task_id="receiver",
+                                            canonical_root=recipient_root)
+    assert created
+    third = context(third_root)
+    third.task_id = "receiver"
+    inject_relay(third, forwarded_entry, [])
+    assert [row.get("content") for row in third._owner_directives] == [stored["text"]]
+
+
 def test_retained_current_quotes_extend_owner_corpus_without_the_note(tmp_path):
     from ouroboros.task_results import write_task_result
     from ouroboros.owner_words import task_owner_words

@@ -157,6 +157,38 @@ def test_the_answer_survives_live_frame_durable_row_and_history_replay(monkeypat
         "cause": "The recorded reason has no description yet.", "undescribed": ["future_reason"]}
 
 
+@pytest.mark.parametrize("sentence", ["Empty tables now export as a header-only CSV.", "   ", None])
+def test_the_roots_closing_sentence_rides_its_row_live_durable_and_replayed(monkeypatch, tmp_path, sentence):
+    """The portal of a work that moved into a Project settles from this row, not from the task record, so the
+    root's own closing sentence (``wake_summary``) rides it whole or not at all (DESIGN "Work portal")."""
+    event = _enqueue_row(tmp_path / "queued", monkeypatch,
+                         _result(**({"wake_summary": sentence} if sentence is not None else {})))
+    meta = event["progress_meta"]
+    if not (sentence or "").strip():
+        assert "wake_summary" not in meta  # no sentence recorded: ABSENT, never empty or invented
+        return
+    assert meta["wake_summary"] == sentence
+    assert event["text"] == "Launch › Ship release · Done"  # the row's own text does not change
+    bridge = message_bus.LocalChatBridge({})
+    frames = []
+    bridge._broadcast_fn = frames.append
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
+    monkeypatch.setattr(message_bus, "load_state", lambda: {"session_id": "s", "owner_id": 7})
+    monkeypatch.setattr(message_bus, "publish_event", lambda *_a, **_k: None)
+    message_bus.send_with_budget(1, event["text"], task_id="root-project", role="system",
+                                 system_type="project_completion_summary", progress_meta=meta)
+    live = next(frame for frame in frames if frame.get("type") == "chat")
+    stored = next(row for row in dialogue_test.log_rows(tmp_path / "logs" / "chat.jsonl")
+                  if row.get("type") == "project_completion_summary")
+    from ouroboros.gateway.history import make_chat_history_endpoint
+
+    response = asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params={"chat_id": "1"})))
+    replayed = next(row for row in json.loads(response.body.decode("utf-8"))["messages"]
+                    if row.get("system_type") == "project_completion_summary")
+    assert live["wake_summary"] == stored["wake_summary"] == replayed["wake_summary"] == sentence
+
+
 def test_a_row_without_the_key_replays_without_it(monkeypatch, tmp_path):
     logs = tmp_path / "logs"
     logs.mkdir(parents=True)

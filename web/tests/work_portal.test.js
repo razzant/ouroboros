@@ -227,6 +227,27 @@ test('the author\'s final settles the portal from its typed outcome; without one
     } finally { f.close(); }
 });
 
+test('the completion row carries the root\'s closing sentence to its portal; without one the old line goes', async () => {
+    const f = fixture();
+    try {
+        for (const id of ['w-6', 'w-7']) f.narrate(id, 'Copying the export presets into the v3 store.');
+        f.state({ task_bindings: { 'w-6': { project_id: 'p-1' }, 'w-7': { project_id: 'p-1' } },
+            active_chat_activities: [room({ activity_id: 'w-6' }), room({ activity_id: 'w-7' })] });
+        await settle();
+        const done = { role: 'system', system_type: 'project_completion_summary', project_id: 'p-1', project_name: 'Audit',
+            outcome_axes: { lifecycle: { status: 'completed' }, execution: { status: 'ok' } }, status: 'completed' };
+        f.frame({ ...done, task_id: 'w-6', content: 'Audit › Export · Done', ts: '2026-10-10T13:00:00Z',
+            wake_summary: 'The export settings moved to v3; nothing needed you.' });
+        f.frame({ ...done, task_id: 'w-7', content: 'Audit › Export · Done', ts: '2026-10-10T13:00:01Z' });
+        await settle();
+        assert.equal(f.part('w-6', 'live-phase').textContent, 'Done');
+        assert.equal(f.part('w-6', 'live-activity').textContent, 'The export settings moved to v3; nothing needed you.',
+            'the row\'s own closing sentence replaces the census line');
+        assert.equal(f.part('w-7', 'live-activity').textContent, '', 'no recorded sentence: nothing, never the old census line');
+        assert.ok(!f.reads.includes('w-6'), 'the row carries the sentence: no record read');
+    } finally { f.close(); }
+});
+
 test('Main only: a Project room\'s portals bind nothing and read nothing', () => {
     const records = new Map([['w-1', { groupId: 'w-1', root: { dataset: {}, isConnected: true } }]]);
     const calls = [];
@@ -611,7 +632,7 @@ test('a successor that finished before Main\'s census is the work\'s current epi
         const f = fixture({ details });
         try {
             const node = await runningPortal(f);
-            details['w-1'] = failedDetail(continuedBy(claim));
+            details['w-1'] = failedDetail({ ...continuedBy(claim), wake_summary: 'The first attempt stopped here.' });
             details['w-1-c1'] = successor;
             // Failed, continued in its room, and the successor already finished: the census lists neither.
             f.state({ task_bindings: { ...bindings, 'w-1-c1': { project_id: 'p-1', chat_id: 7 } }, active_chat_activities: [] });
@@ -627,6 +648,7 @@ test('a successor that finished before Main\'s census is the work\'s current epi
                 continue;
             }
             assertSettledFollow(f, [node]);
+            assert.equal(f.part('w-1-c1', 'live-activity').textContent, '', 'Continue without a sentence leaves no old closing line');
         } finally { f.close(); }
     }
 });
@@ -639,13 +661,14 @@ test('after a Main reload a finished successor named by the record still settles
             task_name: 'Audit the projects', text: 'Audit › Audit the projects · Started', ts: '2026-10-10T12:00:00Z',
             history_id: 'h-2' },
     ];
-    const f = fixture({ history, details: { 'w-1': failedDetail(continuedBy()), 'w-1-c1': finishedSuccessor() } });
+    const f = fixture({ history, details: { 'w-1': failedDetail({ ...continuedBy(), wake_summary: 'The first attempt stopped here.' }), 'w-1-c1': finishedSuccessor() } });
     try {
         await f.instance.refreshHistory({ revision: 1 });
         await settle();
         f.state({ task_bindings: bindings, projects: [{ id: 'p-1', name: 'Audit' }], active_chat_activities: [] });
         await settle();
         assertSettledFollow(f, [f.card('w-1')]);
+        assert.equal(f.part('w-1-c1', 'live-activity').textContent, '', 'reload keeps the second episode free of the first sentence');
     } finally { f.close(); }
 });
 
@@ -721,4 +744,24 @@ test('W3: an unrelated work in the same Project, or a claim still bound, leaves 
             assert.deepEqual(controls(f, 'w-1'), [claim === 'bound' ? 'Retry Continue' : 'Continue']);
         } finally { f.close(); }
     }
+});
+
+for (const [words, expected] of [
+    [{ wakeSummary: 'Export fixed.' }, 'Export fixed.'],
+    [{ wakeSummary: 'Export fixed.', suggestedName: 'Export fixed.' }, ''],
+    [{ wakeSummary: 'Export fixed.', causeHeld: true, collapsedActivity: 'The upload failed.' }, 'The upload failed.'],
+    [{ wakeSummary: 'Export fixed.', finished: false }, ''],
+    [{}, ''],
+]) test(`a portal leaving the census keeps its closing words (${expected})`, () => {
+    const { prior, mount } = installDom();
+    try {
+        const root = document.createElement('div'); mount.appendChild(root); root.dataset.portal = '1';
+        const activityEl = document.createElement('div'); root.appendChild(activityEl);
+        const record = { root, groupId: 'w-1', activityEl, finished: true, collapsedActivity: 'Old activity.', ...words };
+        const portals = createWorkPortals({ isMain: true, feed: mount, records: new Map([['w-1', record]]),
+            onDomWrite: write => write(), card: new Proxy({}, { get: () => () => false }) });
+        portals.sync({ supervisor_ready: true, active_chat_activities_complete: true, active_chat_activities: [] });
+        assert.equal(record.collapsedActivity, expected);
+        assert.equal(activityEl.textContent, expected);
+    } finally { restoreDom(prior); }
 });

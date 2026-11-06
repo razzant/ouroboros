@@ -676,3 +676,52 @@ test('child words: the same words said again are another line, live as on reload
             'a reload draws as many lines as were drawn live');
     } finally { reload.instance.destroy(); restoreDom(reload.prior); }
 });
+
+// A later review changes the passive projection, not the merge receipt's revision or row identity.
+test('a retained merge row refreshes its later review and report without another card or message', async () => {
+    const supplied = process.env.LATE_MERGE_PROJECTION
+        ? JSON.parse(readFileSync(process.env.LATE_MERGE_PROJECTION, 'utf8')) : null;
+    const old = supplied?.before || { task_id: 'merge-task', role: 'system', system_type: 'host_progress',
+        is_progress: true, card_row: 'reviews', card_row_id: 'merge-receipt:r', card_row_revision: 2,
+        history_id: 'h-receipt', ts: '2026-09-16T00:01:00Z',
+        text: '⚠️ PR #7 merge: merged · earlier version reviewed\nThis review was for earlier code; it does not cover what merged.' };
+    const current = supplied?.after || { ...old, text: old.text + '\nIts later review: FAIL.',
+        late_evidence: { kind: 'merge_review', record_id: 'review', revision: 2, verdict: 'FAIL',
+            review_source: { task_id: 'merge-task', record_id: 'review', seat_id: 'critic',
+                role: 'response', part: 'change', sha256: 'a'.repeat(64) } } };
+    const rows = [{ task_id: 'merge-task', is_progress: true, text: 'Reading the PR.',
+        ts: '2026-09-16T00:00:00Z' }, { ...old, chat_id: 1 }];
+    const replay = await replayChat(rows);
+    try {
+        const markup = captureRenderedLines();
+        await replay.instance.refreshHistory({ revision: 1 });
+        const card = walkCard(replay.messages(), 'merge-task');
+        assert.doesNotMatch(markup().at(-1), /Its later review/);
+        rows[1] = { ...current, chat_id: 1 };
+        await replay.instance.refreshHistory({ revision: 2 });
+        assert.equal(walkCard(replay.messages(), 'merge-task'), card);
+        const rendered = markup().at(-1);
+        assert.match(rendered, /Its later review: FAIL/);
+        assert.match(rendered, /data-body-format="text"/, 'coverage and later review keep their visible line break');
+        assert.match(rendered, /href="\/api\/tasks\/[^" ]+\/reviews\/[^" ]+"/);
+        assert.ok(rendered.indexOf('merge: merged') < rendered.indexOf('Its later review: FAIL'));
+        const [head, detail] = old.text.replace(/^⚠️ /u, 'Warning: ').split('\n'); // the carrier badge becomes a severity word in the card
+        assert.ok(rendered.includes(`class="chat-live-line-title">${head}</span>`), 'the receipt keeps its head');
+        const label = head.split(' · ')[1];
+        if (label) assert.equal(rendered.split(label).length - 1, 1, 'coverage is labelled once, in the head');
+        if (detail) {
+            assert.ok(rendered.indexOf('chat-live-line-body') < rendered.indexOf(detail), 'coverage stays in details');
+            assert.ok(rendered.indexOf(detail) < rendered.indexOf('Its later review: FAIL'), 'the late FAIL follows coverage');
+        }
+        assert.equal(phasedLines(card, 'result').length, 1);
+        assert.equal(systemBubbles(replay.messages()).length, 0);
+        rows[1] = { ...current, chat_id: 1, text: old.text,
+            late_evidence: { ...current.late_evidence, revision: current.late_evidence.revision + 1,
+                verdict: 'PASS', review_source: undefined } };
+        await replay.instance.refreshHistory({ revision: 3 });
+        assert.doesNotMatch(markup().at(-1), /Its later review: FAIL|data-live-line-evidence/);
+        rows[1] = { ...current, chat_id: 1 };
+        await replay.instance.refreshHistory({ revision: 4 });
+        assert.doesNotMatch(markup().at(-1), /Its later review: FAIL|data-live-line-evidence/, 'an older review cannot replace the newer read');
+    } finally { replay.instance.destroy(); restoreDom(replay.prior); }
+});

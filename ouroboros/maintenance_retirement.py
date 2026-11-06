@@ -6,8 +6,11 @@ and unrelated completions never wake a sweep. Age grants no deletion authority.
 Source removers (a retired copy, snapshot or drive) schedule the ``bytecode`` step
 at once; a step that stops at its unlink budget owes the rest through ``next_due``.
 The ``review_threads`` step lets the engine retire a finished reviewer thread only
-after its export is retained here (``review_thread_retention``). It adds no wake: the tasks
-it left waiting run it alone in a child running for another job, and it yields between operations
+after its export is retained here (``review_thread_retention``), and over the same tasks releases the
+managed document imports a finished work can no longer name (``delegate_documents``); an import that
+opens its obligation before the step's first pass sets where that pass starts reading
+(``release_opened``). A managed import owner's terminal write schedules this step even without local files.
+Otherwise waiting tasks run it only in a child running for another job; it yields between operations
 to a delegate capture that child's capture pass never had, the rest waiting for the next run.
 What the step newly saved of the engine's answers (``observed``) reaches ``logs/events.jsonl`` once.
 """
@@ -64,11 +67,40 @@ def artifact_changed(root, *, timestamp=None, immediate=False):
         log.debug("Retirement publication awaits startup discovery", exc_info=True)
 
 
+def release_opened(txn, *, restored_tasks=()):
+    """A managed document import opened its release obligation in this custody transaction
+    (``delegate_documents.opens_release``). Until the ``review_threads`` step's first pass, keep the
+    terminal-write position this transaction stands at as that pass's ``floor`` (the lowest wins), so
+    its first pin goes no later and the owner's terminal write, always after this point, is read. An
+    active step's cursor already reads every later write: nothing is written then. A floor written
+    after the first pass read the job row is at or above its pin, so that race loses nothing.
+    Explicit store import/fold instead supplies the restored owners: their terminal positions
+    were rebuilt, so keep the owners in this step's waiting set and schedule its existing job."""
+    from ouroboros.review_thread_retention import JOB_FIELD
+
+    row = txn.meta(maintenance_jobs.PREFIX + JOB) or {}
+    state = row.get(JOB_FIELD) if isinstance(row.get(JOB_FIELD), dict) else {}
+    if restored_tasks:
+        # A store rebuild writes task rows before it restores custody. Their new terminal
+        # positions cannot be reconstructed from an old cursor: re-offer the actual owners.
+        waiting = sorted(set(state.get("waiting") or ()) | set(restored_tasks))
+        maintenance_jobs.record_in(txn, JOB, **{JOB_FIELD: {**state, "waiting": waiting}})
+        schedule_in(txn, time.time())
+        return
+    position = int(txn.meta(store.TERMINAL_WRITES) or 0)
+    if not state.get("activated_at") and not (type(state.get("floor")) is int and state["floor"] <= position):
+        maintenance_jobs.record_in(txn, JOB, **{JOB_FIELD: {**state, "floor": position}})
+
+
 def task_written(txn, task_id, columns):
-    """A task can wake retirement only if it owns physical retirement inputs."""
+    """A task can wake retirement only for its own physical inputs or managed import obligations."""
     from ouroboros.task_status import SETTLED_STATUSES
     if txn.root is None or columns.get("status") not in SETTLED_STATUSES:
         return
+    if (txn.get_row("custody_marks", task_id) or {}).get("managed_imports"):
+        # An import can end before START and leave no filesystem retirement input. Its terminal
+        # write still owes this pass, including one racing the first activation's cursor read.
+        schedule_in(txn, time.time())
     names = (f"task_trees/{task_id}", f"services/{task_id}",
              f"state/delegate_recovery/{task_id}.json", f"state/delegate_supervision/{task_id}.json",
              f"task_results/artifacts/{task_id}/{WIRE_JOURNAL}")

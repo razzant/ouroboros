@@ -891,6 +891,12 @@ def _transport_death_repeats(accumulated_usage: Dict[str, Any], round_id: str) -
     return 0
 
 
+def _scope_lineage() -> Dict[str, str]:
+    """The producer's own known lineage, never a history walk."""
+    scope = current_usage_scope()
+    return {key: str(getattr(scope, key)) for key in ("root_task_id", "parent_task_id") if getattr(scope, key, "")}
+
+
 def _record_llm_call_error(
     error: Exception,
     ctx: _LlmErrorContext,
@@ -944,7 +950,7 @@ def _record_llm_call_error(
         # The granted repeat's own failure class (a grant writes no class; a later free redial finds it filled).
         ctx.accumulated_usage[TRANSPORT_DEATHS_KEY].setdefault("error_kind", classification.kind)
     identity = {
-        "task_id": ctx.task_id, "execution_id": ctx.execution_id, "round_id": ctx.round_id,
+        "task_id": ctx.task_id, "execution_id": ctx.execution_id, "round_id": ctx.round_id, **_scope_lineage(),
         "llm_call_id": ctx.llm_call_id, "round": ctx.round_idx, "attempt": ctx.attempt + 1,
         "model": ctx.model,
     }
@@ -1518,12 +1524,10 @@ def call_llm_with_retry(
                 _record_round_cache_facts(accumulated_usage, usage, round_idx=round_idx, round_id=round_id,
                                           model=display_model, provider=provider))
             ledger_ids = list(usage.get("ledger_attempt_ids") or [])  # the last one carried this response (#807)
-            scope = current_usage_scope()  # #1578: the producer's own known lineage, never a history walk
             _round_event = {
                 "ts": utc_now_iso(), "type": "llm_round", "record_contract_version": RECORD_CONTRACT_VERSION,
                 **{key: accumulated_usage[key] for key in ("first_request_at", "first_answer_at")},
-                "task_id": task_id, "execution_id": execution_id, **{key: str(getattr(scope, key)) for key in (
-                    "root_task_id", "parent_task_id") if getattr(scope, key, "")},
+                "task_id": task_id, "execution_id": execution_id, **_scope_lineage(),
                 "round_id": round_id, "llm_call_id": llm_call_id, "round": round_idx, "model": display_model,
                 "reasoning_effort": effort,
                 **{key: usage[key] for key in ("effort", "effort_resolution", "request_wire", "claudexor") if key in usage},

@@ -99,6 +99,7 @@ def test_an_author_stop_offers_the_existing_continue_and_one_press_admits_one_su
                 assert finished["continuation_offer"]["refusal"] == "author_finished", record
 
                 card = b4._card(page, STOPPED)
+                expect(card.locator(":scope > [data-live-summary-button] [data-live-phase]")).to_have_text("Stopped")
                 button = card.locator("[data-continue-task]")
                 expect(button).to_have_text("Continue", timeout=60_000)
                 expect(button).to_have_attribute("title", "Start a new task that continues this unfinished work")

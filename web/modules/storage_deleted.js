@@ -170,7 +170,7 @@ export function deletedProjectsHtml(count, { placeLabel, shown = {}, now = new D
     if (!count) return '';  // no finished count, no places: Where it is already says so
     const deleted = count.deleted_projects;
     // A count saved before this list existed knows nothing about it: never read as none.
-    if (!deleted || typeof deleted !== 'object') return staticHtml(fmt('Not counted yet'), fmt('Measure again to list them.'), true);
+    if (!deleted || typeof deleted !== 'object') return staticHtml(fmt('Not counted yet'), fmt('Refresh sizes to list them.'), true);
     if (deleted.state === 'unavailable') return staticHtml(fmt('Could not be read'), fmt('The project list could not be read, so some may remain.'), true);
     const never = deleted.no_folder > 0 ? plural(deleted.no_folder, '{n} deleted project never had a folder.', '{count} deleted projects never had a folder.') : '';
     const lists = deletedLists(deleted);

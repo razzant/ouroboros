@@ -989,7 +989,8 @@ test('Storage opens with one passive read; only the button measures, then polls 
     start();
     await settle();
     assert.deepEqual(calls, [storageUrl]);
-    assert.match(storageSummary(mount), /Not counted yet/);
+    assert.match(storageSummary(mount), /Not measured yet/);
+    assert.match(storageSummary(mount), /This disk: .* free of/, 'the free space is read before any count');
     assert.equal(timers.polls(), 0, 'nothing runs, so nothing is polled');
     assert.equal(mount.querySelector('[data-storage-places]').textContent, '', 'no list before a finished count');
 
@@ -1006,7 +1007,7 @@ test('Storage opens with one passive read; only the button measures, then polls 
     await timers.fire();
     await settle();
     assert.deepEqual(calls, [storageUrl, measureUrl, storageUrl]);
-    assert.match(storageSummary(mount), /Ouroboros uses 1\.4 MB/);
+    assert.match(storageSummary(mount), /Space used by Ouroboros\s*1\.4 MB/);
     assert.equal(timers.polls(), 0, 'a finished count is not polled');
     assert.equal(mount.querySelector('[data-storage-panel]').hidden, false);
     assert.equal(mount.querySelector('[data-storage-action="stop"]').hidden, true);
@@ -1041,7 +1042,7 @@ test('Storage holds one count busy from the click to the finished walk, and name
     routes.set(storageUrl, response(measuredBody()));
     await timers.fire();
     await settle();
-    assert.equal(button.textContent, 'Measure again');
+    assert.equal(button.textContent, 'Refresh sizes');
     assert.equal(button.getAttribute('aria-disabled'), 'false');
     assert.equal(button.hasAttribute('aria-busy'), false);
 
@@ -1106,7 +1107,7 @@ test('Storage Stop asks the server to kill the count and keeps the saved count',
     assert.deepEqual(calls, [storageUrl, cancelUrl]);
     assert.match(storageSummary(mount), /1\.4 MB[\s\S]*Stopped before it finished\. Showing the count from/);
     assert.equal(stop.hidden, true);
-    assert.equal(mount.querySelector('[data-storage-action="measure"]').textContent, 'Measure again');
+    assert.equal(mount.querySelector('[data-storage-action="measure"]').textContent, 'Refresh sizes');
 });
 
 test('Storage drops a read answered after its tab was left, and does not poll for it', async (t) => {

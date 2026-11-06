@@ -206,8 +206,10 @@ def promote_source_payload(raw: bytes, *, source_id: str, extension: str, catego
             or ('required_sources_ref' in payload and 'read_provenance' in payload))
         checkpoint = isinstance(payload, dict) and all(key in payload for key in (
             'messages', 'selection_fingerprint', 'observed_view_revision', 'selected_unit_ids'))
+        candidate_receipt = (isinstance(payload, dict) and payload.get('stage') == 'candidate_materialization'
+                             and isinstance(payload.get('receipt'), dict))
         retained_review = source_id.startswith('review-retrieval-')
-        if plan_wave or plan_history or native_source or checkpoint or retained_review or (isinstance(payload, list) and source_id == "acceptance_tool_trajectory") or (
+        if plan_wave or plan_history or native_source or checkpoint or candidate_receipt or retained_review or (isinstance(payload, list) and source_id == "acceptance_tool_trajectory") or (
             isinstance(payload, dict) and isinstance(payload.get("request"), dict)
             and payload["request"].get("surface") == "task_acceptance"
         ):
@@ -216,9 +218,12 @@ def promote_source_payload(raw: bytes, *, source_id: str, extension: str, catego
             if isinstance(payload, list) and source_id in {'acceptance_tool_trajectory', 'review-retrieval-tool-trajectory'}:
                 rewritten = [_rewrite_service_payload(call, parent_root, child_root, task_id, state)
                              for call in payload]
+            elif candidate_receipt:
+                rewritten = {**payload, 'receipt': _rewrite_child_ref_tree(
+                    payload['receipt'], parent_root, child_root, task_id, state)}
             else:
                 rewritten = _rewrite_child_ref_tree(payload, parent_root, child_root, task_id, state, carrier=role)
-            if checkpoint and rewritten != payload:
+            if (checkpoint or candidate_receipt) and rewritten != payload:
                 # Capsules bind raw messages/unit identities. Copying their
                 # relative source closure may not rewrite the captured transcript.
                 raise ValueError('context checkpoint closure requires transcript rebinding')

@@ -4,7 +4,7 @@
 import { META_PART_SEPARATOR, executorIdentityMarkup, executorModelText, formatCoordinatorProvenance, harnessPresentation } from './harness_presentation.js';
 import { effortChipMarkup } from './effort_chip.js';
 import { resultFilesItemHtml } from './result_files.js';
-import { taskSourceDownloadUrl, readState } from './api_client.js';
+import { taskSourceDownloadUrl, taskReviewSourceUrl, readState } from './api_client.js';
 import { compactModel, formatLogDuration, modelExecutionView } from './log_events.js';
 import { connectionLabel, routeConnectionId } from './connection_labels.js';
 import { fitText, fullText } from './text_fit.js';
@@ -79,18 +79,17 @@ export function isLiveLineExpandable(item) {
     );
 }
 
-// A late-review row links its exact applied review record through the task artifact
-// route (#1369) — an absent or unsupported `late_evidence.source_ref` offers no link
-// rather than a guessed one. The card's timeline and a card-less System row share it.
+// Exact record (#1369) or reviewer report: timeline and card-less System rows share readers; absent selectors offer no link.
 export function cardRowEvidenceRef(msg) {
+    const source = msg?.late_evidence?.kind === 'merge_review' && msg.late_evidence.review_source;
+    if (source?.task_id && source.record_id && source.seat_id && /^[0-9a-f]{64}$/.test(source.sha256 || ''))
+        return { href: taskReviewSourceUrl(source.task_id, source.record_id, source.seat_id, source), label: 'Download the reviewer’s report' };
     const evidence = msg?.late_evidence && typeof msg.late_evidence === 'object'
         ? taskSourceDownloadUrl(String(msg.task_id || '').trim(), msg.late_evidence.source_ref) : '';
     return evidence ? { href: evidence, label: 'Download the review record' } : null;
 }
 
-// The stored record link as one download anchor, or nothing. A value restored from
-// the session snapshot is held to the task artifact route it was minted on. It wears
-// the chat link ink (`md-link`), as the result-file downloads beside it do.
+// A restored snapshot keeps its task reader; the download wears chat link ink (md-link), like result-file downloads.
 export function evidenceLinkHtml(evidenceRef) {
     const href = typeof evidenceRef?.href === 'string' && evidenceRef.href.startsWith('/api/tasks/') ? evidenceRef.href : '';
     return href
@@ -107,6 +106,7 @@ export function cardRowSummary(msg, phase, rawTs = '') {
     return {
         phase, headline: lines[0].trim(), body: lines.slice(1).join('\n').trim(), dedupeKey: `cardrow|${rowId}`,
         cardRowRevision: msg.card_row_revision, evidenceRef: cardRowEvidenceRef(msg),
+        cardReview: msg?.late_evidence?.kind === 'merge_review' ? msg.late_evidence : null,
     };
 }
 
@@ -128,7 +128,8 @@ export function buildTimelineItemHtml(item, record) {
     const loadingFull = expanded && Boolean(item.truncated && item.fullRef && !item.fetchedFull && !item.fullReadError);
     // A late-review row offers its exact applied review record (`cardRowSummary`).
     const evidenceHtml = evidenceLinkHtml(item.evidenceRef);
-    const bodyHtml = !displayBody ? '' : item.bodyFormat === 'text'
+    const plainBody = item.bodyFormat === 'text' || item.cardReview?.kind === 'merge_review';
+    const bodyHtml = !displayBody ? '' : plainBody
         ? escapeHtml(displayBody) : renderMarkdown(displayBody, { inlineHeadingBreaks: true });
     const isProgressLine = item.phase === 'working' || item.phase === 'thinking';
     const bodyId = `chat-live-line-body-${String(record.groupId || 'task').replace(/[^A-Za-z0-9_-]/g, '-')}-${String(item.lineKey || '').replace(/[^A-Za-z0-9_-]/g, '-')}`;
@@ -161,7 +162,7 @@ export function buildTimelineItemHtml(item, record) {
         >
             ${headHtml}
             ${delegated ? `<div class="chat-live-line-body chat-delegated-activity" id="${escapeHtmlAttr(bodyId)}">${delegatedActivityBodyHtml(delegated, { expanded })}</div>`
-        : displayBody || evidenceHtml ? `<div class="chat-live-line-body${showingFetched ? ' chat-live-line-body-full' : ''}"${item.bodyFormat === 'text' ? ' data-body-format="text"' : ''} id="${escapeHtmlAttr(bodyId)}">${bodyHtml}${evidenceHtml}${loadingFull ? '<div class="chat-live-line-loading">Loading full output…</div>' : ''}</div>` : ''}
+        : displayBody || evidenceHtml ? `<div class="chat-live-line-body${showingFetched ? ' chat-live-line-body-full' : ''}"${plainBody ? ' data-body-format="text"' : ''} id="${escapeHtmlAttr(bodyId)}">${bodyHtml}${evidenceHtml}${loadingFull ? '<div class="chat-live-line-loading">Loading full output…</div>' : ''}</div>` : ''}
         </div>
     `;
 }
@@ -1427,7 +1428,7 @@ function metaLineHtml(parts) {
 function paintLiveFacts(record, rows) {
     const el = ownLiveDetail(record, 'liveFacts');
     if (!el) return false;
-    if (record.wakeSummary) rows.unshift([tr('task.fact.wake_summary', 'In its words'), `<span data-i18n-authored>${escapeHtml(record.wakeSummary)}</span>`]);
+    if (record.wakeSummary && (record.initiator === 'consciousness' || record.scheduleName || record.causeHeld)) rows.unshift([tr('task.fact.wake_summary', 'In its words'), `<span data-i18n-authored>${escapeHtml(record.wakeSummary)}</span>`]);
     const html = rows.filter(([, value]) => value).map(([label, value]) =>
         `<div class="chat-live-fact"><dt>${escapeHtml(label)}</dt><dd>${value}</dd></div>`).join('');
     if (el.innerHTML === html && el.hidden === !html) return false;

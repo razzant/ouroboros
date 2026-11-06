@@ -13,7 +13,7 @@ import hashlib
 import json
 import logging
 import pathlib
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros.context_fit import ContextCore as _ContextCore
 from ouroboros.context_runtime_facts import snapshot_labelled
@@ -330,13 +330,47 @@ def task_input_pointer(env: Any, task: Dict[str, Any], user_content_json: str) -
                       + json.dumps(source, ensure_ascii=False, sort_keys=True), ensure_ascii=False)
 
 
-def wake_projection_input(task: Dict[str, Any]) -> Optional[str]:
-    """An own-clock wake's bound projection as user content JSON, only while its complete source reads back exactly.
+def _wake_forms(wake: Dict[str, Any]) -> List[str]:
+    """A wake's bound deliveries in rescue order (``consciousness_wake.bind_wake_observation``): the projection (my
+    human's words whole and every other person's row by address, beside the exact pointer), then my human's words
+    alone with the others counted when bound apart from it (a busy window), then the bare pointer when bound apart.
+    The choice among them is only ever their actual fit."""
+    keys = ("projection_text", "owner_projection_text", "pointer_text")
+    return [text for text in dict.fromkeys(wake.get(key) for key in keys) if text]
 
-    ``consciousness_wake.bind_wake_observation`` stores the whole observation and renders this projection around its
-    pointer; the round boundary delivers the same text (``loop_model_call._project_wake_input``). A source its
-    producer could not store, or one that no longer verifies, leaves no projection: the whole input stays the only
-    delivery and a refused start names its frame.
+
+def wake_deliveries(wake: Dict[str, Any], full: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The round boundary's choices (``loop_model_call._project_wake_input``): this wake's bound forms as its first
+    user message, in rescue order with the bare pointer last, each only when strictly smaller than ``full``."""
+    size = len(json.dumps(full, ensure_ascii=False))
+    forms = [{"role": "user", "content": text} for text in _wake_forms(wake)]
+    return [form for form in forms if len(json.dumps(form, ensure_ascii=False)) < size]
+
+
+def wake_input_checkpoint(wake: Dict[str, Any], content: Any, *, round_idx: int, after_overflow: bool) -> Dict[str, Any]:
+    """The record of the wake delivery a request carried (``content``; ``None``: the whole observation): its
+    ``form`` is ``whole``, ``projection`` (my human's words inline: ``inline_rows_in_fallback`` covers only this
+    form) or ``pointer`` (the bare pointer, nothing inline)."""
+    forms = _wake_forms(wake)
+    if content is None:
+        form = "whole"
+    elif content in forms[:-1]:  # any bound form before the last carries my human's words inline
+        form = "projection"
+    else:  # the last bound form, or a projection with no words of mine: the bare pointer
+        form = "pointer"
+    return {"checkpoint_kind": "wake_input_inline" if form == "whole" else "wake_input_by_source", "round": round_idx,
+            "after_overflow": after_overflow, "form": form, "composition": wake.get("composition"),
+            "source_sha256": (wake.get("source") or {}).get("sha256")}
+
+
+def wake_projection_inputs(task: Dict[str, Any]) -> List[str]:
+    """An own-clock wake's bound deliveries as user content JSON (``_wake_forms``), only while its complete source
+    reads back exactly.
+
+    ``consciousness_wake.bind_wake_observation`` stores the whole observation and renders these around its pointer;
+    the round boundary delivers the same texts (``loop_model_call._project_wake_input``). A source its producer could
+    not store, or one that no longer verifies, leaves none: the whole input stays the only delivery and a refused
+    start names its frame.
     """
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.consciousness_authority import is_own_clock_wake
@@ -345,15 +379,15 @@ def wake_projection_input(task: Dict[str, Any]) -> Optional[str]:
     metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     wake = metadata.get(WAKE_OBSERVATION_KEY)
     if not is_own_clock_wake(metadata) or not isinstance(wake, dict) or not wake.get("projection_text"):
-        return None
+        return []
     source = wake.get("source")
     try:
         read_actor_source_bytes(source["canonical_root"], str(source["task_id"]), source)
     except (KeyError, TypeError, OSError, ValueError) as exc:
         log.warning("Wake %s observation source does not verify (%s: %s); its whole input stays the only delivery",
                     task.get("id"), type(exc).__name__, exc)
-        return None
-    return json.dumps(str(wake["projection_text"]), ensure_ascii=False, sort_keys=True)
+        return []
+    return [json.dumps(str(text), ensure_ascii=False, sort_keys=True) for text in _wake_forms(wake)]
 
 
 def rescued_start(env: Any, task: Dict[str, Any], user_content_json: str, unfit: Any, preferred: str,
@@ -362,24 +396,27 @@ def rescued_start(env: Any, task: Dict[str, Any], user_content_json: str, unfit:
 
     Physical rescue only (owner 2026-10-13, #1527): an exact source replaces the whole input only when no view of the
     known window holds it; a room-only shortfall, the directly required handbook, an unusable source or an unfit
-    rescue names the start (7A). An own-clock wake's bound projection comes first, in every mode
-    (``wake_projection_input``); owner-Nano's exact input pointer stays the last rescue (``task_input_pointer``).
+    rescue names the start (7A). An own-clock wake's bound deliveries come first, in every mode: its projection, then,
+    after that too proves physically unfit, its bare pointer (``wake_projection_inputs``); owner-Nano's exact input
+    pointer stays the last rescue (``task_input_pointer``).
     """
     from ouroboros.context_fit import MinimumViewUnfit
 
     if not unfit.physical or unfit.required_book_tokens:
         raise unfit
-    wake = wake_projection_input(task)
-    if wake is not None:
+    refused = None
+    for wake in wake_projection_inputs(task):
         try:
             contents, mode = fit(wake)
-        except MinimumViewUnfit:
-            if preferred != "nano":
-                raise
-            log.info("Wake %s projection cannot fit the owner-Nano start either; the exact input pointer is the last "
-                     "rescue", task.get("id"))
-        else:
-            return contents, mode, dict.fromkeys(contents, wake)
+        except MinimumViewUnfit as exc:
+            refused = exc
+            continue
+        return contents, mode, dict.fromkeys(contents, wake)
+    if refused is not None:
+        if preferred != "nano":
+            raise refused
+        log.info("Wake %s projections cannot fit the owner-Nano start either; the exact input pointer is the last "
+                 "rescue", task.get("id"))
     pointer = task_input_pointer(env, task, user_content_json) if preferred == "nano" else None
     if pointer is None:
         raise unfit
@@ -390,19 +427,21 @@ def rescued_start(env: Any, task: Dict[str, Any], user_content_json: str, unfit:
 def whole_wake_input(message: Dict[str, Any], plan: Any, wake: Dict[str, Any]) -> Dict[str, Any]:
     """The whole wake input the round boundary measures again (``loop_model_call._project_wake_input``).
 
-    A first message that already holds this wake's projection (``rescued_start``, or a restored transcript) is that
-    message with its plan's captured whole input; any other first message is itself.
+    A first message that already holds one of this wake's deliveries, its projection or its bare pointer
+    (``rescued_start``, or a restored transcript), is that message with its plan's captured whole input; any other
+    first message is itself.
     """
     from ouroboros.context_fit import extract_plain_text_from_content
 
     whole, captured = copy.deepcopy(message), getattr(plan, "user_content_json", None)
-    if isinstance(captured, str) and extract_plain_text_from_content(message.get("content")) == wake["projection_text"]:
+    if isinstance(captured, str) and extract_plain_text_from_content(message.get("content")) in _wake_forms(wake):
         whole["content"] = json.loads(captured)
     return whole
 
 
 def wake_start_checkpoint(task: Dict[str, Any], plan: Any) -> Optional[Dict[str, Any]]:
-    """The round boundary's ``wake_input_by_source`` checkpoint for a start that delivered the bound projection.
+    """The round boundary's ``wake_input_by_source`` checkpoint for a start that delivered a bound projection or
+    bare pointer, naming which (``wake_input_checkpoint``).
 
     ``round`` 0 is the start itself, before the first round; ``None`` when the start delivered any other input.
     """
@@ -413,10 +452,9 @@ def wake_start_checkpoint(task: Dict[str, Any], plan: Any) -> Optional[Dict[str,
 
     metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     wake = metadata.get(WAKE_OBSERVATION_KEY)
-    if not isinstance(wake, dict) or json.loads(shown) != wake.get("projection_text"):
+    if not isinstance(wake, dict) or json.loads(shown) not in _wake_forms(wake):
         return None
-    return {"checkpoint_kind": "wake_input_by_source", "round": 0, "after_overflow": False,
-            "composition": wake.get("composition"), "source_sha256": (wake.get("source") or {}).get("sha256")}
+    return wake_input_checkpoint(wake, json.loads(shown), round_idx=0, after_overflow=False)
 
 
 def _validate_declared_input_task(task: Dict[str, Any]) -> None:

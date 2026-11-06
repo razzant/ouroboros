@@ -108,11 +108,11 @@ def private_answer_row(root, ref) -> dict:
 
     ``ref`` hashes the owner's words on that card at that time, and history outlives the quiz
     block. A store that cannot answer raises ``StoreError``: unknown stays the caller's to say."""
-    from ouroboros.owner_relay import _owner_row
+    from ouroboros.owner_relay import quotable_owner_row
     from ouroboros.project_dialogue import owner_message_ref_is_valid, resolve_owner_message_source
 
     row = resolve_owner_message_source(root, dict(ref)) if owner_message_ref_is_valid(ref) else None
-    return row if _private_answer(row) and _owner_row(row) else {}
+    return row if _private_answer(row) and quotable_owner_row(row, root) else {}
 
 
 def _private_start_source_fields(row: dict) -> dict:
@@ -186,6 +186,8 @@ def private_start_refusal(root, evt: dict) -> str:
 
     if evt.get("destination") != DESTINATION_OWNER:
         return "private_owner_source_invalid" if evt.get("owner_quote") not in (None, "") else ""
+    if str(evt.get("source") or "").strip():
+        return "private_owner_source_invalid"
     try:
         row = private_answer_row(root, evt.get("source_ref"))
     except StoreError:
