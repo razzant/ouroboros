@@ -247,17 +247,17 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
     metadata = getattr(ctx, "task_metadata", None)
     metadata = metadata if isinstance(metadata, dict) else {}
     from ouroboros.owner_quiz import late_answer_ref, late_answer_owner_text
+    from ouroboros.owner_words import OWNER_SOURCES, answered_card_reply, place_owner_words, place_reply_target, reply_target
     late = late_answer_ref(metadata.get("late_answer"))
     answered = ((late or {}).get("answer_snapshot") or {}).get("quiz") or {}
     if answered.get("presence_contact"):
-        # The named owner ingress carries the host-bound answer snapshot. Keep
-        # its human words as authority; the source-work link in the model's
-        # surrounding frame and the external request are context, not orders.
+        # The named owner ingress carries the host-bound answer snapshot: its human words are authority, the card
+        # rides beside them; the source-work link in the model's frame and the external request are context.
         _loop()._record_owner_directive(ctx, source="owner_quiz_answer", content=late_answer_owner_text(answered),
-                                      origin={"source_task_id": late["task_id"], "quiz_id": late["quiz_id"]})
+                                      origin={"source_task_id": late["task_id"], "quiz_id": late["quiz_id"]},
+                                      reply_to=answered_card_reply(answered, late["task_id"]))
         return
     author = metadata.get("objective_author")
-    from ouroboros.owner_words import OWNER_SOURCES, reply_target
     # A task-drafted objective, or the host's Continue work order (its facts are
     # the host's; the owner's exact words ride ``owner_corpus``).
     if isinstance(author, dict) and author.get("kind") in {"task", "continuation"}:
@@ -272,27 +272,23 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
                 )
         return  # The task-drafted objective is never an owner directive.
     focus, presence = metadata.get("focus") or {}, metadata.get("presence") or {}
-    if (focus.get("addressed") is True and (focus.get("actor") or {}).get("owner_confirmed") is True
-            and str(presence.get("observed_text") or "").strip()):
+    event = presence.get("event") or {}
+    if words := place_owner_words(focus, presence.get("observed_text"), event.get("message")):
         # A place turn addressed to me from an account its place confirmed at admission: my human's exact
         # words, beside the event frame (``initial_text``, which Safety reads); an unaddressed one is not work.
-        event = presence.get("event") or {}
-        replied = str((event.get("message") or {}).get("reply_to_message_id") or "")
-        target = {"address": f"platform message {replied} in this room", "author": "", "text": ""} if replied else None
-        _loop()._record_owner_directive(ctx, source="place_owner", content=presence["observed_text"], carried=True,
-            msg_id=f"chat {focus.get('room_chat_id')} / {event.get('source_event_id') or ''}", reply_to=target)
+        _loop()._record_owner_directive(ctx, source="place_owner", content=words, carried=True, reply_to=place_reply_target(
+            event.get("message")), msg_id=f"chat {focus.get('room_chat_id')} / {event.get('source_event_id') or ''}")
     for message in messages:
         if isinstance(message, dict) and str(message.get("role") or "") == "user":
             from ouroboros.dialogue_provenance import run_origin
 
             stamped = run_origin({"metadata": metadata})["owner_ingress"]
             target = reply_target(getattr(ctx, "drive_root", None), metadata.get("reply_reference")) if stamped else {}
-            _loop()._record_owner_directive(
-                ctx,
-                source="initial_user" if stamped else "initial_text",
-                content=message.get("content"),
-                reply_to=target or None,
-            )
+            # A late answer's head: my human's words with the card they answered, never the host's frame.
+            late_words = late_answer_owner_text(answered) if answered and stamped else ""
+            card = answered_card_reply(answered, late["task_id"]) if late_words else {}
+            _loop()._record_owner_directive(ctx, source="initial_user" if stamped else "initial_text",
+                                            content=late_words or message.get("content"), reply_to=card or target or None)
             return
 
 

@@ -316,7 +316,7 @@ def get_tools() -> List[ToolEntry]:
                 "quote": {"type": "array", "items": {"type": "string"}, "default": [],
                           "description": "Owner row addresses held by this turn; exact words and attachments travel together."},
                 "arrival": {"type": ["boolean", "string"], "default": False,
-                            "description": "Place focus only: forward the exact message as context, never owner words. true selects the opening "
+                            "description": "Place focus only: forward the exact message as it arrived (your human's own words stay theirs, any other is context). true selects the opening "
                                            "message; a string, a later source_event_id delivered here from this conversation. One receiving work. "
                                            "Not with quote; note stays your own, separately."},
             }, "required": ["task_id"]},
