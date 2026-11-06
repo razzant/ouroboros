@@ -221,6 +221,41 @@ def test_a_pause_or_restore_keeps_the_cite_a_schedule_runs_on(q):
     assert stored["writer_kind"] == _task_from_schedule(stored)["metadata"]["work_kind"] == "owner"
 
 
+@pytest.mark.parametrize("door", ["notification", "time_only_update"])
+def test_every_cited_producer_stores_the_cite_where_off_and_the_lifecycle_read(q, door):
+    """Astra finding 2: a notify=true reminder and a timing-only update that pass a verified cite store it on the
+    record's next occurrence (the one home), so Off names the schedule and a pause or restore keeps owner kind; the
+    same doors without a cite leave the writer's own work, unlisted."""
+    from ouroboros.tools.followup import _register_note, _update_schedule
+    from supervisor.consciousness_carriers import cited_owner_schedules
+    from supervisor.queue_schedules import _task_from_schedule
+    ids = {}
+    for label, basis in (("cited", CITE), ("own", None)):
+        ctx = SimpleNamespace(task_id="focus-author", task_metadata=_focus_origin(), task_contract={})
+        if door == "notification":
+            result = _register_note(ctx, ctx.task_id, q.root, "Report tomorrow",
+                                    {"type": "once", "run_at": "2099-01-01T12:00:00+00:00"}, "", "", "",
+                                    {"task_id": ctx.task_id, "root_task_id": ctx.task_id}, {"kind": "independent"}, owner_basis=basis)
+            assert result.startswith("FOLLOWUP_SCHEDULED"), result
+            ids[label] = q.queue.list_scheduled_tasks(q.root)["tasks"][-1]["id"]
+        else:
+            ids[label] = _register_origin(q, _focus_origin(), door="followup")["id"]
+            _update_schedule(ctx, q.root, ids[label], "Move it as requested", {"run_at": "2099-01-01T12:00:00+00:00"}, owner_basis=basis)
+    for label, expected in (("cited", "owner"), ("own", "consciousness")):
+        stored = _stored(q, ids[label])
+        assert stored["writer_kind"] == expected and (CITE in (stored["task"]["metadata"].get("owner_corpus") or [])) is (expected == "owner"), (door, label)
+        assert (ids[label] in dict(cited_owner_schedules(q.root))) is (expected == "owner"), (door, label)
+        for action in ("disable", "restore"):
+            result = q.queue.mutate_scheduled_task(action, ids[label], drive_root=q.root, actor="agent",
+                reason="Pause or resume the same work", writer_kind="consciousness", writer_metadata=_focus_origin())
+            assert result["changed"], (door, label, action, result)
+            stored = _stored(q, ids[label])
+            assert stored["writer_kind"] == expected, (door, label, action)
+            if door != "notification":  # a note fires as a System reminder, never as a task
+                assert _task_from_schedule(stored)["metadata"]["work_kind"] == expected, (door, label, action)
+    assert dict(cited_owner_schedules(q.root)).get(ids["cited"]) == "Report tomorrow"
+
+
 @pytest.mark.parametrize("cited", [False, True])
 def test_hold_restore_stamps_origin_after_resolving_relationship(world, cited):
     from tests.test_g1_followup_policy import ORIGIN, row as stored_row, stop, restore

@@ -61,13 +61,14 @@ def cited_owner_roots() -> list[tuple[str, str]]:
 def cited_owner_schedules(drive_root) -> list[tuple[str, str]]:
     """Enabled schedules and follow-ups the switch leaves firing because they run on my human's cited words:
     ``(schedule_id, quote)`` for every owner-kind record whose next occurrence carries such a row."""
+    from ouroboros.consciousness_authority import schedule_owner_corpus
     from supervisor.queue import list_scheduled_tasks
 
     found = []
     for record in list_scheduled_tasks(drive_root).get("tasks") or []:
         if not isinstance(record, dict) or not record.get("id") or record.get("enabled") is False or record.get("writer_kind") != "owner":
             continue
-        quote = _cited_quote(((record.get("task") or {}).get("metadata") or {}).get("owner_corpus"))
+        quote = _cited_quote(schedule_owner_corpus(record))
         if quote:
             found.append((str(record["id"]), quote))
     return found

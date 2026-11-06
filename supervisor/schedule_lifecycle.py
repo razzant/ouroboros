@@ -225,12 +225,13 @@ def _patched_definition(current, patch):
     _require_template_effort(template)
     if not note:
         incoming["task"] = template
-        if patch.get("owner_corpus") and any(_patch_value(current, key) != _patch_value(incoming, key)
-                                             for key in ("objective", "context")):
-            from ouroboros.owner_words import merged_corpus  # the words of the run that changed the assignment
+    cited = any(isinstance(row, dict) and row.get("basis") == "cited" for row in patch.get("owner_corpus") or [])
+    if patch.get("owner_corpus") and (cited or any(_patch_value(current, key) != _patch_value(incoming, key)
+                                                   for key in ("objective", "context"))):
+        from ouroboros.owner_words import merged_corpus  # the words of the run that changed the assignment, or its cite
 
-            metadata = template.setdefault("metadata", {})
-            metadata["owner_corpus"] = merged_corpus(metadata.get("owner_corpus"), patch["owner_corpus"])
+        metadata = incoming.setdefault("task", {}).setdefault("metadata", {})  # the one home, a note's template too
+        metadata["owner_corpus"] = merged_corpus(metadata.get("owner_corpus"), patch["owner_corpus"])
     changed = sorted(key for key in patch if _patch_value(current, key) != _patch_value(incoming, key))
     if "trigger" in changed or "timezone" in changed:
         old = current.get("trigger") or {}

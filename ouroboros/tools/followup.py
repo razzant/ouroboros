@@ -244,10 +244,11 @@ def _update_schedule(ctx: ToolContext, root: Any, schedule_id: str, reason: str,
         patch["trigger"] = {"type": "once", "run_at": patch.pop("run_at")}
     elif "cron" in patch:
         patch["trigger"] = {"type": "cron", "expr": patch.pop("cron")}
-    if patch.keys() & {"objective", "context"}:  # a new assignment keeps the words that changed it
+    assignment = bool(patch.keys() & {"objective", "context"})
+    if assignment or owner_basis:  # a new assignment keeps the words that changed it; a verified cite is stored either way
         from ouroboros.owner_words import carried_owner_corpus
 
-        if words := [*carried_owner_corpus(ctx), *([owner_basis] if owner_basis else [])]:
+        if words := [*(carried_owner_corpus(ctx) if assignment else []), *([owner_basis] if owner_basis else [])]:
             patch["owner_corpus"] = words
     outcome = patch_scheduled_task(schedule_id, patch, reason=reason, actor="agent",
                                    task_id=str(getattr(ctx, "task_id", "") or ""), drive_root=root,
@@ -633,6 +634,8 @@ def _register_note(ctx: ToolContext, task_id: str, drive_root: Any, objective: s
         "kind": "notify", "source": FOLLOWUP_SOURCE, "enabled": True,
         "timezone": timezone, "trigger": trigger,
         "notification": {"text": objective, "set_at": utc_now_iso()},
+        # My human's cited words live in the one home the lifecycle and Off read; a note's template holds only them.
+        **({"task": {"metadata": {"owner_corpus": [owner_basis]}}} if owner_basis else {}),
     }
     try:
         stored = upsert_scheduled_task(
