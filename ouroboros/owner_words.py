@@ -53,6 +53,9 @@ log = logging.getLogger(__name__)
 OWNER_SOURCES = frozenset({"initial_user", "owner_mailbox", "owner_quiz_answer", "origin_message",
                            "owner_corpus", "direct_incoming", "place_owner"})
 FIELD, ABSENT_FIELD = "governing_owner_words", "governing_owner_words_absent"
+# A session task's record alone: the bound room's rows it was scheduled with, by value, read by its work order
+# only (never inherited, carried or read by a Safety check); its presence tells a work order rendered after it.
+ROOM_FIELD = "work_order_room_words"
 NOT_RECORDED = "not_recorded"
 REPLY_TARGET = "reply_target"  # the message my human replied to: its author's words beside theirs, never theirs
 UNREAD_TARGET = "(its words are not carried here; this address reads them)"
@@ -573,12 +576,20 @@ def _absent(ctx: Any) -> str:
         {"type": getattr(ctx, "current_task_type", None), "metadata": dict(metadata)})
 
 
-def governing_words_for_schedule(ctx: Any) -> Dict[str, Any]:
+def governing_words_for_schedule(ctx: Any, *, session: bool = False) -> Dict[str, Any]:
     """``{FIELD: rows}`` or ``{ABSENT_FIELD: marker}`` for the helper this run is about to schedule: the rows
     addressed to the tree, by value (``_tree_words``). A helper passes on what it inherited and what reached it
-    since; the room, the origins and the marked rows are read live at the helper's own start (``work_words``)."""
+    since; the room, the origins and the marked rows are read live at the helper's own start (``work_words``).
+    ``session`` (the helper compiles an external work order): the bound room's rows as read here ride beside them
+    under ``ROOM_FIELD``, by value (an empty list when the room has none), so that work order stays a function of
+    the helper's record; a room that cannot be read gives the rows that could be, and its gap is logged."""
     rows = _tree_words(ctx)[0]
-    return {FIELD: rows} if rows else {ABSENT_FIELD: _absent(ctx)}
+    facts: Dict[str, Any] = {FIELD: rows} if rows else {ABSENT_FIELD: _absent(ctx)}
+    if session:
+        root, metadata, task_id = _data_root(ctx), _ctx_metadata(ctx), str(getattr(ctx, "task_id", "") or "")
+        facts[ROOM_FIELD] = [] if root is None else _live_words(root, _room_of(
+            root, task_id, metadata.get("parent_task_id"), metadata.get("root_task_id")), owner_place_accounts(root))[0]
+    return facts
 
 
 def _room_of(drive_root: Any, task_id: Any, parent_id: Any, root_id: Any) -> int:

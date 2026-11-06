@@ -118,6 +118,7 @@ def _drain_incoming_messages(
     _owner_msg_seen: set,
     owner_ctx: Any = None,
     defer_content_ack: bool = False,
+    place_live_runs: bool = False,
 ) -> Dict[str, Any]:
     """Injects dialogue; returns typed controls.
 
@@ -125,7 +126,9 @@ def _drain_incoming_messages(
     a saved state holds it (``working_checkpoint``: the next ``ready`` save, a
     returned result's final save, or the published exact pause), so a crash in
     between delivers it again instead of losing it. Non-content controls are
-    acknowledged at once.
+    acknowledged at once. ``place_live_runs`` (the round top alone, never a delivery
+    close, a forced finalization or a live call): my human's rows this run carries
+    are placed into the sessions it holds open (``place_rows_into_runs``), each once.
     """
     controls: Dict[str, Any] = {}
 
@@ -358,6 +361,10 @@ def _drain_incoming_messages(
         from ouroboros.owner_relay import carry_to_members
         grown = len(getattr(owner_ctx, "_owner_directives", None) or []) > before_rows
         carry_to_members(owner_ctx, delivered=delivered or grown)
+        if place_live_runs:  # and the sessions this run holds open, each row once per run
+            from ouroboros.delegate_interactions import place_rows_into_runs
+            for line in place_rows_into_runs(owner_ctx):
+                _loop()._append_or_merge_user_message(messages, line, slot=owner_ctx)
     if owner_ctx is not None and getattr(owner_ctx, "_held_owner_messages", None) and (
             getattr(owner_ctx, "task_metadata", None) or {}).get("delegation_role") != "subagent":
         handles = list(owner_ctx._held_owner_messages)  # a helper has no verb that takes a handle: no list for it

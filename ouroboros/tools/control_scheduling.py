@@ -976,7 +976,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
                                         "attachment_import", "document_import_intent", "prepared_input_files") if key in fields},
         "resource_intent": resource_intent,
     }
-    owner_origin = {**governing_words_for_schedule(ctx), **declared_words_fact(child_contract)}  # the owner's words, by value
+    owner_origin = {**governing_words_for_schedule(ctx, session=requested_executor == "harness"), **declared_words_fact(child_contract)}  # the owner's words, by value
     child_facts = {
         **({"execution_timeout_sec": execution_left} if execution_left is not None else {}),
         "objective": objective,

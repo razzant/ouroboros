@@ -163,6 +163,17 @@ def assignment_instructions(ctx: Any) -> str:
     )
 
 
+def work_order_room_words(task: Mapping[str, Any]) -> list | None:
+    """The bound room's rows a session task was scheduled with (``owner_words.ROOM_FIELD``, by value, at the top
+    level or under ``metadata``); ``None`` for a task scheduled before the key existed, whose work order keeps the
+    constants it was rendered with. The key is read here alone."""
+    from ouroboros.owner_words import ROOM_FIELD
+
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}
+    rows = task.get(ROOM_FIELD, metadata.get(ROOM_FIELD))
+    return list(rows) if isinstance(rows, list) else None
+
+
 def _owner_words_section(task: Mapping[str, Any]) -> str:
     """The owner's words carried into this task by value; "" for a task scheduled without them.
 
@@ -170,15 +181,20 @@ def _owner_words_section(task: Mapping[str, Any]) -> str:
     give the same bytes, so a source-range check never sees a digest mismatch. A
     declared task scheduled before ``DECLARED_WORDS_FACT`` carries the field too, but
     its receipt names the words among the omitted inputs, so its work order holds none
-    and keeps the bytes and fingerprint it started with.
+    and keeps the bytes and fingerprint it started with. A session task's room rows
+    (``work_order_room_words``) follow the field's rows, one row per identity; nothing
+    is read from a store here, so the order is a function of the record.
     """
     from ouroboros.contracts.task_contract import task_input_sources
-    from ouroboros.owner_words import render_owner_words, task_governing_words
+    from ouroboros.owner_words import FIELD, _deduped, render_owner_words, task_governing_words
 
     if task_input_sources(task) == "declared" and not declared_inputs_carry_owner_words(task):
         return ""
-    return render_owner_words(*task_governing_words(task), audience="session",
-                              root_task_id=str(task.get("root_task_id") or ""))
+    rows, absent = task_governing_words(task)
+    room = work_order_room_words(task)
+    if room is not None:
+        rows = _deduped(rows + task_governing_words({FIELD: room})[0])
+    return render_owner_words(rows, absent, audience="session", root_task_id=str(task.get("root_task_id") or ""))
 
 
 def _render_external_work_order(task: Mapping[str, Any]) -> str:
@@ -488,8 +504,37 @@ def in_place_scratch(ctx: Any, gateway: Any, route: Any, authority: Any, invocat
                    execution_root=target_root, in_place=invocation_id)
 
 
+_ATTACHMENTS_HOLDER = (" An attachment named under a row is retained by the host: the task that started this "
+                       "session holds it and can be asked for it.")
+START_TAIL_FACT = ("[Host fact: these rows of my human's were not in the work order or instructions above; "
+                   "the host carries them with this start, verbatim." + _ATTACHMENTS_HOLDER + "]")
+CONTINUATION_TAIL_FACT = ("[Host fact: these rows of my human's stand in no earlier start of this session; "
+                          "the host carries them with this continuation, verbatim." + _ATTACHMENTS_HOLDER + "]")
+
+
+def unseen_words_section(ctx: Any, text: str, fact: str) -> str:
+    """My human's rows of the starter's set at this handoff (``words_unseen_in``: the room read live) whose
+    identity ``text`` does not hold, each with the reply target that follows it in the set (another author's
+    words beside theirs, under its own stamp), under the session heading with ``fact`` as the host's closing
+    line; "" when ``text`` holds them all. A text with no stamp holds none: every row rides."""
+    from ouroboros.owner_words import REPLY_TARGET, render_owner_words, words_unseen_in, work_words
+
+    unseen = words_unseen_in(ctx, text)
+    if not unseen:
+        return ""
+    rows, take = [], False
+    for row in work_words(ctx)[0]:
+        take = take if row.get("source") == REPLY_TARGET else row in unseen
+        if take:
+            rows.append(row)
+    meta = getattr(ctx, "task_metadata", None)
+    root = str((meta.get("root_task_id") if isinstance(meta, Mapping) else "") or getattr(ctx, "task_id", "") or "")
+    return render_owner_words(rows, audience="session", root_task_id=root, gaps=[fact])
+
+
 def session_host_references(ctx: Any, *, target_root: str, source_root: str,
-                            private_copy: bool = False, payload_skill: str = "", service: Any = None) -> str:
+                            private_copy: bool = False, payload_skill: str = "", service: Any = None,
+                            start_body: str | None = None) -> str:
     """Host references pinned in a session's start request, computed once at first start.
 
     Own-body DESIGN navigation and BIBLE path, the owner's standing rules for every session (declared
@@ -498,17 +543,23 @@ def session_host_references(ctx: Any, *, target_root: str, source_root: str,
     selection, and any other private copy its environment facts: dependency files read at the
     copy's repository root, the environment placed where the session may write (``source_root``,
     possibly a folder below that root, or the scratch ``service`` grants); a read-only session
-    has no copy, so it gets neither. A retry replays the recorded bytes."""
+    has no copy, so it gets neither. A retry replays the recorded bytes. ``start_body`` (a start
+    that continues no run: the prompt and instructions composed so far) closes the text with the
+    start tail: my human's rows of the starter's set that body does not hold (``unseen_words_section``),
+    so the interval between a session task's scheduling and its first start loses nothing; a
+    continuation's rows ride its own prompt instead (``delegate_continuation``)."""
     from ouroboros.safety_config import owner_rules_section
     from ouroboros.skill_catalogue import session_skill_index, skill_contract_references  # lazy skill reads
 
     text = (session_design_navigation(ctx, target_root=target_root, source_root=source_root)
             + session_constitution_pointer(ctx, target_root=target_root, source_root=source_root)
             + owner_rules_section(session=True) + session_skill_index(ctx))
+    tail = unseen_words_section(ctx, start_body, START_TAIL_FACT) if start_body is not None else ""
+    tail = f"\n\n{tail}" if tail else ""
     if payload_skill:
         from ouroboros.body_candidate import serving_repo_dir_for
 
-        return text + skill_contract_references(serving_repo_dir_for(ctx))
+        return text + skill_contract_references(serving_repo_dir_for(ctx)) + tail
     if private_copy:
         from pathlib import Path
 
@@ -520,8 +571,8 @@ def session_host_references(ctx: Any, *, target_root: str, source_root: str,
         root, body = _own_body_source(ctx, target_root, source_root)  # the copy's repository root
         root = root if body else git_ancestor(start) or start
         return text + session_environment_facts(root, data_root=canonical_data_root(ctx), body=body, write_root=start,
-                                                **({"service": service} if service is not None else {}))
-    return text
+                                                **({"service": service} if service is not None else {})) + tail
+    return text + tail
 
 
 def start_binding_fingerprints(ctx: Any, prompt: str) -> tuple[str, str]:
@@ -546,5 +597,5 @@ __all__ = [
     "assignment_instructions", "compile_external_work_order", "canonical_work_order_source",
     "work_order_source_projection",
     "validate_work_order_source_response",
-    "start_binding_fingerprints", "work_order_fingerprint",
+    "start_binding_fingerprints", "work_order_fingerprint", "work_order_room_words", "unseen_words_section",
 ]

@@ -107,6 +107,7 @@ class ContinuationStart(NamedTuple):
     custody: Dict[str, Any] = {}     # START_REQUESTED/STARTED: lineage + same-tree capture identity
     snapshot: Optional[AdoptedSnapshot] = None
     note: str = ""                   # the caller's text, for the prompt once the run is bound
+    words: str = ""                  # my human's rows no START body of the line holds (``continuation_words``)
 
 
 NO_CONTINUATION = ContinuationStart()
@@ -369,12 +370,14 @@ def _adopted_snapshot(entry: Any, authority: Any) -> Tuple[Optional[AdoptedSnaps
                            tuple(record.get("excluded_untracked") or ()), not checkout_whole(record)), "", ""
 
 
-def continuation_prompt(facts: Dict[str, Any], caller_text: str, run_binding: str = "") -> str:
+def continuation_prompt(facts: Dict[str, Any], caller_text: str, run_binding: str = "", words: str = "") -> str:
     """The continuing child's prompt: carrier-neutral host facts, then the caller's text.
 
     The engine puts its own notice (which carrier, what stopped) in front; this
-    block states only what the host knows about the tree and the old result, and
-    ``run_binding`` this run's access and workspace (``with_run_binding``).
+    block states only what the host knows about the tree and the old result,
+    ``run_binding`` this run's access and workspace (``with_run_binding``), and
+    ``words`` my human's rows no start of the line holds, a paragraph of their own
+    between the binding and the caller's text (``continuation_words``).
     """
     rid, workspace = facts.get("continuation_of"), str(facts.get("workspace") or "")
     disposition = str(facts.get("prior_patch_disposition") or "")
@@ -414,8 +417,46 @@ def continuation_prompt(facts: Dict[str, Any], caller_text: str, run_binding: st
     text = "\n".join(lines)
     if run_binding:
         text += "\n\nTHIS RUN'S ACCESS AND WORKSPACE (current host facts of this turn):" + run_binding
+    if words:
+        text += "\n\n" + words
     note = str(caller_text or "").strip()
     return f"{text}\n\n{note}" if note else text
+
+
+def continuation_words(ctx: Any, root: Any, run_id: str) -> str:
+    """The continuation tail: my human's rows of the starter's set (a continuation is a handoff: the room read
+    live) whose identity stands in no recorded START body of ``run_id`` and its ``continuation_of`` line (the
+    stamps' reference tokens, under either reference a row has printed), under the session heading with the
+    host's closing line (``subagent_work_order.unseen_words_section``). A body that cannot be read holds no row:
+    every row rides (a duplicate is the cheaper error). A row a live frame delivered rides once too: the host
+    cannot know whether the engine resumes the native session that holds that frame. "" when nothing is owed."""
+    from ouroboros.subagent_work_order import CONTINUATION_TAIL_FACT, unseen_words_section
+
+    bodies = line_start_bodies(root, run_id)
+    return unseen_words_section(ctx, "\n".join(bodies) if bodies is not None else "", CONTINUATION_TAIL_FACT)
+
+
+def line_start_bodies(root: Any, run_id: str) -> Optional[List[str]]:
+    """The recorded START bodies (prompt and instructions, as POSTed) of ``run_id`` and of every run its
+    ``continuation_of`` line names; ``None`` when any of them cannot be read."""
+    from ouroboros.delegate_custody_current import run as current_run
+    from ouroboros.delegate_invocation import invocation_record
+
+    bodies: List[str] = []
+    seen: set = set()
+    while run_id and run_id not in seen:
+        seen.add(run_id)
+        try:
+            entry = current_run(root, run_id)
+            request = (invocation_record(root, entry.invocation_id) or {}).get("request") if entry else None
+        except Exception:  # noqa: BLE001 — an unreadable body is one typed answer: None
+            log.warning("START body of run %s unreadable; every row rides", run_id, exc_info=True)
+            return None
+        if not isinstance(request, dict):
+            return None
+        bodies.append(f"{request.get('prompt') or ''}\n{request.get('instructions') or ''}")
+        run_id = str(entry.continuation_of or "")
+    return bodies
 
 
 def with_run_binding(start: ContinuationStart, authority: Any, binding: str, workdir: str,
@@ -436,10 +477,10 @@ def with_run_binding(start: ContinuationStart, authority: Any, binding: str, wor
     if not start.facts:
         return start
     if "workspace" not in start.facts:
-        return start._replace(prompt="\n\n".join(part for part in (start.prompt, inputs) if part)) if inputs else start
+        return start._replace(prompt="\n\n".join(part for part in (start.prompt, start.words, inputs) if part))
     current = (access_instruction(authority.access, investigation=authority.investigation)
                + (binding or no_copy_binding_instruction(workdir)) + inputs)
-    return start._replace(prompt=continuation_prompt(start.facts, start.note, current))
+    return start._replace(prompt=continuation_prompt(start.facts, start.note, current, start.words))
 
 
 def engine_continues(gateway: Any) -> bool:
@@ -459,7 +500,8 @@ def start_binding(ctx: Any, drive: Any, token: str, *, gateway: Any, actor: Dict
     no-run recorded as a start-blocked evidence row. The caller's continuation
     text is the configured session's coordination note, else the start prompt —
     never the canonical work order, which the old session (or the engine's
-    evidence packet) already holds.
+    evidence packet) already holds; my human's rows no start of the line holds
+    ride beside it (``continuation_words``).
     """
     from ouroboros.delegate_custody_current import runs as current_runs
     from ouroboros.delegate_evidence import record_start_blocked
@@ -486,7 +528,7 @@ def start_binding(ctx: Any, drive: Any, token: str, *, gateway: Any, actor: Dict
                 from ouroboros.delegate_source_coverage import inherit_source_obligations
 
                 inherit_source_obligations(prior, source_binding)
-            return bound, None
+            return bound._replace(words=continuation_words(ctx, drive, token)), None
         except ClaudexorUnavailable as exc:
             code, detail = exc.code, str(exc)
     adopted = None
@@ -525,7 +567,7 @@ def start_binding(ctx: Any, drive: Any, token: str, *, gateway: Any, actor: Dict
     return ContinuationStart(
         facts=facts, prompt=continuation_prompt(facts, caller),
         request=request,
-        custody=record, snapshot=adopted, note=caller), None
+        custody=record, snapshot=adopted, note=caller, words=continuation_words(ctx, drive, token)), None
 
 
 def replayed_custody(record: Dict[str, Any]) -> ContinuationStart:
@@ -673,9 +715,11 @@ __all__ = [
     "NO_CONTINUATION",
     "bind_continuation",
     "continuation_prompt",
+    "continuation_words",
     "disposition_refusal",
     "engine_continues",
     "inherited_access",
+    "line_start_bodies",
     "replayed_custody",
     "retry_matches_caller_text",
     "snapshot_handover",

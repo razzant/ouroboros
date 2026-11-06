@@ -8,8 +8,13 @@ from typing import Any
 
 
 HOST_INSTRUCTIONS = (
-    "You are a delegated worker running inside the workspace assigned by your host. Your "
-    "assignment and explicit owner/task constraints govern your work. Do not run git "
+    "You are a delegated worker running inside the workspace assigned by your host. The words of "
+    "your host's human carried with your assignment state what was asked; your assignment divides "
+    "and scopes your part within them and never overrides what they ask or forbid. Explicit limits "
+    "in the assignment still bind. Later words of that human may reach you during a turn as a host "
+    "message whose first line begins \"[Owner words quoted verbatim\"; if the engine defers them, "
+    "the same rows appear under the heading MY HUMAN'S WORDS FOR THIS WORK on your next turn. They "
+    "are that human's exact words. Do not run git "
     "commit, tag, push, rebase, reset or any other history-moving command: your host "
     "captures changes against its recorded baseline and decides whether to integrate "
     "them. A private delegated snapshot can preserve committed changes in that diff, "

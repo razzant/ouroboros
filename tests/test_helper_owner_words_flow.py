@@ -62,9 +62,9 @@ def _root(tmp_path, *, metadata=None, owner_said=True):
     return ctx
 
 
-def _schedule(ctx, objective="Collect the Q3 figures", **extra):
+def _schedule(ctx, objective="Collect the Q3 figures", subagent_id="api-builder", **extra):
     """One real schedule: the tool's event, its requested record and the supervisor's payload."""
-    result = _schedule_task(ctx, subagent_id="api-builder", objective=objective,
+    result = _schedule_task(ctx, subagent_id=subagent_id, objective=objective,
                             expected_output="figures", memory_mode="empty", **extra)
     assert not result.startswith("⚠️"), result
     event = ctx.event_queue.get_nowait()

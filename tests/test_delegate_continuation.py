@@ -293,9 +293,10 @@ def test_prompt_states_tree_facts_and_advice_and_no_session_claim():
 
 def _start(tmp_path, monkeypatch, *, acting, run_id, prompt="finish the remaining work", start_kwargs=None,
            capabilities=("continueFrom",), engine_version="3.22.0", start_error=None, task_id=None, access=None,
-           harness_row=None):
+           harness_row=None, prepare=None):
     """Run _delegate_start against a stub engine; returns (last request, payload, ctx, calls).
-    ``harness_row`` adds fields to the route's catalog row (a negotiated access-control grant)."""
+    ``harness_row`` adds fields to the route's catalog row (a negotiated access-control grant);
+    ``prepare`` shapes the starter's context before the start (what it holds of my human's words)."""
     import ouroboros.tools.delegate as delegate
     from ouroboros.gateways import claudexor as gw
 
@@ -324,6 +325,8 @@ def _start(tmp_path, monkeypatch, *, acting, run_id, prompt="finish the remainin
     monkeypatch.setattr(gw, "ClaudexorGateway", lambda *a, **k: _Stub())
     delegate._CUSTODY.clear()
     ctx = _delegating_ctx(tmp_path, acting=acting, task_id=task_id or f"t-nanny-{'write' if acting else 'read'}")
+    if prepare is not None:
+        prepare(ctx)
     if access is None:
         result = delegate._delegate_start(ctx, prompt, **(start_kwargs or {}))
     else:
@@ -631,6 +634,95 @@ def test_a_configured_session_continues_with_its_note_never_the_canonical_work_o
     assert payload["status"] == "started"
     assert request["prompt"].endswith("the coordination note") and "CANONICAL" not in request["prompt"]
     assert "the coordination note" not in request["instructions"]
+
+
+def test_a_continuation_carries_the_rows_no_start_of_its_line_held_under_its_own_heading(tmp_path, monkeypatch):
+    """The continuation tail, both directions. A first start's references carry the rows its body does not hold
+    (the start tail); a continuation carries exactly the rows absent from the START bodies of its ``continue_from``
+    line, never the canonical order (the witness above stays), a relayed row dated before the run's start included,
+    under its own heading after the binding and before the caller's note, a row's attachment named; a second
+    continuation carries only the row that arrived after the first; a row a frame delivered live rides the next
+    continuation once, under ``packet`` too, and not the one after; a continuation carries no start-tail row; an
+    unreadable START body carries every row."""
+    from ouroboros import delegate_message_store as frames, owner_words as ow
+    from ouroboros.subagent_work_order import CONTINUATION_TAIL_FACT, START_TAIL_FACT
+
+    heading = ow._HEADINGS["session"]
+    file = {"upload": "u1", "name": "quota.png", "mime": "image/png", "kind": "image", "size": 1234, "sha256": "ab" * 32}
+    rows = [ow._row("Build it", source="initial_user", carrier="ctx", task_id="t-root", ts="2026-10-04T05:00:00+00:00",
+                    ref="chat 1 / msg-a"),
+            ow._row("Before the run started", source="owner_mailbox", carrier="held", task_id="t-root",
+                    ts="2026-10-04T04:00:00+00:00", ref="chat 1 / msg-b"),
+            ow._row("See the file", source="owner_mailbox", carrier="held", task_id="t-root",
+                    ts="2026-10-04T06:00:00+00:00", ref="chat 1 / msg-c", attachments=[file]),
+            ow._row("Delivered live", source="owner_mailbox", carrier="held", task_id="t-root",
+                    ts="2026-10-04T06:30:00+00:00", ref="chat 1 / msg-d"),
+            ow._row("After the first continuation", source="owner_mailbox", carrier="held", task_id="t-root",
+                    ts="2026-10-04T07:00:00+00:00", ref="chat 1 / msg-e")]
+
+    def holding(*held):
+        def prepare(ctx):
+            ctx.task_metadata[ow.FIELD] = [rows[index] for index in held]
+        return prepare
+
+    def section(text, fact):
+        assert text.count(heading) == 1 and text.count(fact) == 1, text
+        return text.split(heading, 1)[1].split(fact, 1)[0]
+
+    _select_transport_access(monkeypatch, "readonly")
+    first, payload, _ctx, _calls = _start(tmp_path, monkeypatch, acting=False, run_id="run-prev", prepare=holding(0))
+    assert payload["status"] == "started"
+    tail = section(first["instructions"], START_TAIL_FACT)  # the start tail: the body held no stamp of row a
+    assert "\nBuild it\n" in tail and "msg-a]" in tail and heading not in first["prompt"]
+    _settle(tmp_path, "run-prev", "t-nanny-read")
+    # A frame delivered live into run-prev: its row is not in any START body, so it rides the next continuation.
+    entry = custody.replay(tmp_path)["run-prev"]
+    live = frames.prepare(_ctx, entry, "starter", "Delivered live", "", None,
+                          owner_words={"address": "row:1@2026-10-04T06:30:00+00:00#abc", "chat_id": 1,
+                                       "ts": "2026-10-04T06:30:00+00:00"})
+    frames.record_outcome(_ctx, "run-prev", live["frame"]["message_id"], "delivered", "")
+    assert frames.placed_words(_ctx, "run-prev")[0]["outcome"] == "delivered"
+    request, payload, _ctx, _calls = _start(
+        tmp_path, monkeypatch, acting=False, run_id="run-next", prompt="the coordination note",
+        start_kwargs={"continue_from": "run-prev", "continue_carrier": "packet"}, prepare=holding(0, 1, 2, 3))
+    assert payload["status"] == "started" and request["continueFrom"] == "run-prev"
+    prompt = request["prompt"]
+    tail = section(prompt, CONTINUATION_TAIL_FACT)
+    assert "Build it" not in tail  # held by run-prev's START body
+    assert "\nBefore the run started\n" in tail and "msg-b]" in tail  # dated before the run, absent from it: rides
+    assert "\nSee the file\n[Host-retained attachments: quota.png (image/png, 1234 bytes)]\n" in tail
+    assert "\nDelivered live\n" in tail  # the live frame's row rides once: the host cannot know what the engine resumes
+    binding, _words = prompt.split("\n\n" + heading, 1)
+    assert "THIS RUN'S ACCESS AND WORKSPACE" in binding and prompt.endswith(CONTINUATION_TAIL_FACT + "\n\nthe coordination note")
+    assert START_TAIL_FACT not in request["instructions"] and heading not in request["instructions"]  # no start tail
+    _settle(tmp_path, "run-next", "t-nanny-read")
+    # The second continuation carries only the row that arrived after the first; the delivered row does not ride again.
+    request, payload, _ctx, _calls = _start(
+        tmp_path, monkeypatch, acting=False, run_id="run-third", prompt="go on",
+        start_kwargs={"continue_from": "run-next"}, prepare=holding(0, 1, 2, 3, 4))
+    assert payload["status"] == "started"
+    tail = section(request["prompt"], CONTINUATION_TAIL_FACT)
+    assert "\nAfter the first continuation\n" in tail and "msg-e]" in tail
+    for held in ("Build it", "Before the run started", "See the file", "Delivered live"):
+        assert held not in tail
+    assert START_TAIL_FACT not in request["instructions"]
+    _settle(tmp_path, "run-third", "t-nanny-read")
+    # The other side: every row held by the line's START bodies, no tail at all; an unreadable body, every row.
+    request, payload, _ctx, _calls = _start(
+        tmp_path, monkeypatch, acting=False, run_id="run-fourth", prompt="and on",
+        start_kwargs={"continue_from": "run-third"}, prepare=holding(0, 1, 2, 3, 4))
+    assert payload["status"] == "started" and heading not in request["prompt"] and request["prompt"].endswith("and on")
+    assert continuation.line_start_bodies(tmp_path, "run-third") is not None
+    assert len(continuation.line_start_bodies(tmp_path, "run-third")) == 3  # run-third, run-next, run-prev
+    import ouroboros.delegate_invocation as invocation
+
+    monkeypatch.setattr(invocation, "invocation_record", lambda *_a, **_k: (_ for _ in ()).throw(OSError("locked")))
+    assert continuation.line_start_bodies(tmp_path, "run-third") is None
+    holding(0, 1, 2, 3, 4)(_ctx)
+    every = continuation.continuation_words(_ctx, tmp_path, "run-third")
+    for row in rows:
+        assert f"\n{row['text']}\n" in every + "\n"
+    assert every.endswith(CONTINUATION_TAIL_FACT) and every.startswith(heading)
 
 
 @pytest.mark.parametrize("prompt", ["add tests", ""])

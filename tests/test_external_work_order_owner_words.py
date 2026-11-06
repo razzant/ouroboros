@@ -27,7 +27,7 @@ from ouroboros.subagent_work_order import (
     work_order_source_projection,
 )
 from ouroboros.task_status import load_effective_task_result
-from tests.test_helper_owner_words_flow import ASKED, LATER, _child, _root, _schedule
+from tests.test_helper_owner_words_flow import ASKED, LATER, LATEST, _child, _root, _schedule
 from tests.test_helper_owner_words_flow import _one_api_actor as _one_api_actor  # noqa: F401  (autouse fixture)
 
 SESSION_HEADING = ow._HEADINGS["session"]
@@ -185,6 +185,99 @@ def test_a_declared_work_order_carries_the_words_and_one_scheduled_before_holds_
     assert DECLARED_WORDS_FACT not in shared["metadata"] and DECLARED_WORDS_FACT not in shared_stored
     assert SESSION_HEADING in compile_external_work_order(shared) and ASKED in compile_external_work_order(shared)
     assert assignment_instructions(_child(tmp_path, shared)).split("\n\n", 1)[1].startswith(SESSION_HEADING)
+
+
+def test_a_session_tasks_work_order_is_a_function_of_its_record_and_its_first_start_carries_the_rows_since(
+        tmp_path, monkeypatch):
+    """Both directions of the session rule. A session task's record holds the bound room's rows it was scheduled
+    with, by value under their own key, and its work order renders them from the record alone: after a later
+    room row and a carried row the fingerprint stands, recovery binds the holder, the projection and a source read
+    return the launched bytes, and a re-render with the chat store unavailable returns them too. A sibling work's
+    row of the room rides the work order under that key while the inherited field, the rows to carry and the
+    Safety sources do not hold it. A task scheduled before the key keeps its bytes. The rows that arrived between
+    the scheduling and the first start ride that start's session references (the start tail), a start that
+    continues a run gets none, and a pre-existing row the body already holds never rides twice."""
+    import ouroboros.chat_chain as chat_chain
+    import ouroboros.dialogue_store as ds
+    import ouroboros.project_dialogue as project_dialogue
+    from ouroboros.delegate_recovery import _successor_binding_mismatch, authority_fingerprint_from_task
+    from ouroboros.owner_relay import _rows_to_carry
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+    from ouroboros.subagent_work_order import START_TAIL_FACT, session_host_references, work_order_room_words
+    from ouroboros.tools import control
+    from tests.test_available_subagents_runtime import _api_row, _session_row, _settings
+    from tests.test_helper_owner_words_flow import _drain, _late_row
+
+    monkeypatch.setattr(control, "load_settings", lambda: _settings(_api_row(), _session_row()))
+    room = create_project(tmp_path, "quotas", name="Quotas")["chat_id"]
+    bind_task_to_project(tmp_path, "root", "quotas", room, origin={"absent": "system"})
+    root = _root(tmp_path)
+    sibling = "Sibling work: audit the quotas"
+    ds.append(tmp_path, "chat", {"chat_id": room, "direction": "in", "ts": "2026-10-04T05:30:00+00:00",
+                                 "text": sibling, "client_message_id": "msg-s"})
+    _event, stored, session = _schedule(root, subagent_id="session-builder")
+    assert [row["text"] for row in stored[ow.ROOM_FIELD]] == [sibling]  # the key, on the record at top level
+    assert session["metadata"][ow.ROOM_FIELD] == stored[ow.ROOM_FIELD] == work_order_room_words(session)
+    assert [row["text"] for row in session["metadata"][ow.FIELD]] == [ASKED, LATER]  # the inherited field: not it
+    launched, fingerprint = compile_external_work_order(session), work_order_fingerprint(session)
+    assert f"chat {room} / msg-s]\n{sibling}\n" in launched and launched.count(SESSION_HEADING) == 1
+    nanny = _child(tmp_path, session)
+    assert sibling not in json.dumps(_rows_to_carry(nanny, tmp_path), default=str)  # its rows to carry: not it
+    assert sibling not in json.dumps(nanny._owner_directives, default=str)  # the Safety sources: not it
+    def recorded():  # the record as recovery reads it: a task named by its id
+        return {**load_effective_task_result(tmp_path, session["id"], materialize_artifacts=False), "id": session["id"]}
+
+    record = recorded()
+    binding = {"authority_fingerprint": authority_fingerprint_from_task(record), "actor_binding_source": "task_snapshot",
+               "config_fingerprint": record["configured_subagent"]["config_fingerprint"],
+               "selected_subagent_id": record["configured_subagent"]["selected_subagent_id"],
+               "work_order_fingerprint": fingerprint}
+    assert work_order_fingerprint(record) == fingerprint and _successor_binding_mismatch(binding, record) == ""
+    # A later room row and a carried row: the record, its work order and its fingerprint do not move.
+    ds.append(tmp_path, "chat", {"chat_id": room, "direction": "in", "ts": "2026-10-04T05:45:00+00:00",
+                                 "text": "A later room row", "client_message_id": "msg-r"})
+    _row, _address = _late_row(tmp_path)
+    _drain(root)
+    record = recorded()
+    assert record[ow.ROOM_FIELD] == stored[ow.ROOM_FIELD] and ow.ROOM_FIELD not in record.get("metadata", {})
+    assert compile_external_work_order(record) == launched and work_order_fingerprint(record) == fingerprint
+    assert _successor_binding_mismatch(binding, record) == ""
+    projected, reason = work_order_source_projection(record, 0, len(launched))
+    assert reason == "" and projected["text"] == launched
+    request = {"complete_sha256": hashlib.sha256(launched.encode("utf-8")).hexdigest(), "complete_chars": len(launched),
+               "source": {"kind": "task_result", "task_id": session["id"], "tool": "get_task_result",
+                          "arguments": {"task_id": session["id"], "include_authority": True,
+                                        "include_work_order_source": True}, "projection": "canonical_work_order"}}
+    assert canonical_work_order_source(nanny, request) == (launched, "")
+    with monkeypatch.context() as store_down:
+        for module, name in ((ds, "iter_probes"), (chat_chain, "room_rows"), (project_dialogue, "project_origin_rows"),
+                             (project_dialogue, "resolve_owner_message_source")):
+            store_down.setattr(module, name, lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("store read")))
+        assert compile_external_work_order(record) == launched and work_order_fingerprint(record) == fingerprint
+    # The other side: a record without the key (scheduled before it) renders as before, the room's row unread.
+    older = {**session, "metadata": {key: value for key, value in session["metadata"].items() if key != ow.ROOM_FIELD}}
+    assert work_order_room_words(older) is None and sibling not in compile_external_work_order(older)
+    assert SESSION_HEADING in compile_external_work_order(older) and ASKED in compile_external_work_order(older)
+    assert compile_external_work_order(SNAPSHOT_TASK) == SNAPSHOT_TEXT
+    # The first start's references carry the rows that arrived since the scheduling, under the host's fact, their
+    # attachments named; a row the body holds does not ride again; a start that continues a run gets no tail.
+    _drain(nanny)
+    file = {"upload": "u1", "name": "quota.png", "mime": "image/png", "kind": "image", "size": 1234, "sha256": "ab" * 32}
+    ds.append(tmp_path, "chat", {"chat_id": room, "direction": "in", "ts": "2026-10-04T05:50:00+00:00",
+                                 "text": "See the file", "client_message_id": "msg-f", "attachments": [file]})
+    body = launched  # a compiled start: the canonical order is the prompt; no live assignment block rides with it
+    plain = session_host_references(nanny, target_root=str(tmp_path), source_root=str(tmp_path))
+    with_tail = session_host_references(nanny, target_root=str(tmp_path), source_root=str(tmp_path), start_body=body)
+    tail = with_tail[len(plain):]
+    assert with_tail.startswith(plain) and tail.startswith("\n\n" + SESSION_HEADING) and tail.endswith(START_TAIL_FACT)
+    assert "A later room row" in tail and "See the file" in tail and "quota.png (image/png, 1234 bytes)" in tail
+    assert f"\n{LATEST}\n" in tail  # the carried row the nanny holds since its scheduling rides too
+    assert sibling not in tail and ASKED not in tail and LATER not in tail  # the body holds these: never twice
+    assert session_host_references(nanny, target_root=str(tmp_path), source_root=str(tmp_path), start_body=None) == plain
+    assert session_host_references(nanny, target_root=str(tmp_path), source_root=str(tmp_path),
+                                   start_body=body + tail) == plain  # every row held: no tail
+    direct = body + "\n" + assignment_instructions(nanny)  # a direct start's instructions render the live set
+    assert session_host_references(nanny, target_root=str(tmp_path), source_root=str(tmp_path), start_body=direct) == plain
 
 
 def test_the_authority_fingerprint_does_not_move_with_the_words(tmp_path):

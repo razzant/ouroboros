@@ -849,14 +849,16 @@ def test_payload_instructions_variant_is_payload_only(tmp_path, monkeypatch, acc
     from ouroboros.tools.delegate import _HOST_INSTRUCTIONS, _host_instructions
 
     ordinary = _host_instructions(delegated_run_shape(False))
-    ban = "do not touch the host's runtime controls, or modify its memory or skills;"
+    ban = ("do not touch the host's runtime controls, or modify its memory or skills; unless your assignment "
+           "restricts reads, you may read the memory files your session references name")
     assert ban in ordinary
     assert "PAYLOAD ASSIGNMENT" not in ordinary
     mutating = _host_instructions(delegated_run_shape(True, access))
     assert ban in mutating
     payload = _host_instructions(delegated_run_shape(True, access), payload_skill="alpha")
-    assert "memory or skills" not in payload
-    assert "do not touch the host's runtime controls, or modify its memory;" in payload
+    assert "modify its memory or skills" not in payload
+    assert ("do not touch the host's runtime controls, or modify its memory; unless your assignment "
+            "restricts reads, you may read the memory files your session references name") in payload
     assert "PAYLOAD ASSIGNMENT" in payload and "'alpha'" in payload
     assert ban in _HOST_INSTRUCTIONS  # source intact
 
