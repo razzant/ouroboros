@@ -902,6 +902,8 @@ def admit_commit_gate_wave(ctx, seats) -> str | None:
     if admission is None:
         return None
     usd = lambda value: "unknown" if value is None else f"${float(value):.6f}"  # noqa: E731
+    from ouroboros.cost_projection import uncounted_money_text  # each uncounted part by its ledger name (P8)
+    _beside = lambda facts, prefix="": f" ({text}; not counted)" if (text := uncounted_money_text(facts, decimals=6, prefix=prefix)) else ""  # noqa: E731,E501
     bounds = list(admission.get("slot_bounds") or []) + [None] * len(seats)
     wave, remaining = admission.get("estimated_wave_usd"), admission.get("remaining_usd")
     limit, known = admission.get("limit_usd"), admission.get("known_usd")
@@ -911,16 +913,14 @@ def admit_commit_gate_wave(ctx, seats) -> str | None:
         # a per-task fence the wave would have fit.
         fence = (
             f"the global budget TOTAL_BUDGET {usd(admission.get('global_limit_usd'))}: "
-            f"known spend={usd(admission.get('global_known_usd'))} across every task (plus "
-            f"{usd(admission.get('global_reserved_usd'))} of open holds, not counted), "
+            f"known spend={usd(admission.get('global_known_usd'))} across every task{_beside(admission, 'global_')}, "
             f"remaining={usd(remaining)}; the per-task budget fence "
             f"{usd(limit)} alone would leave {usd(root_remaining)}"
         )
     else:
         label = "whole-work billing-group budget fence" if admission.get("binding_axis") == "group" else "per-task budget fence"
         fence = (
-            f"the {label} {usd(limit)}: known spend={usd(known)} (plus "
-            f"{usd(admission.get('reserved_usd'))} of open holds, not counted), "
+            f"the {label} {usd(limit)}: known spend={usd(known)}{_beside(admission)}, "
             f"remaining={usd(remaining)}; the global budget "
             f"{usd(admission.get('global_limit_usd'))} alone would leave {usd(admission.get('global_remaining_usd'))}"
         )

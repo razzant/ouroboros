@@ -930,7 +930,7 @@ _EXACT_IDENTIFIER_CODES = MappingProxyType(
         # hung-session backlog refusal is browser unavailability.
         "BROWSER_SESSION_RETIRED": "TOOL_TIMEOUT",
         "BROWSER_ACTION_OUTCOME_UNKNOWN": "TOOL_ERROR",
-        "BROWSER_BACKLOG_RETIRED_SESSIONS": "LEGACY_UNAVAILABLE",
+        "BROWSER_BACKLOG_RETIRED_SESSIONS": "LEGACY_UNAVAILABLE", "BROWSER_PREPARING": "LEGACY_UNAVAILABLE",
         # imagegen typed markers: the same no-blind-retry contract as the
         # browser unknown-outcome marker, with the rate window its own lane.
         "IMAGE_RATE_LIMITED": "IMAGE_RATE_LIMITED",

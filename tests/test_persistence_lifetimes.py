@@ -110,6 +110,33 @@ def test_every_retirer_is_a_real_function():
     assert not unresolved, f"retirers that name no function in this repository: {unresolved}"
 
 
+# The server's retirers of disposable planes and the job row each writes (``maintenance_jobs.record_pass``): a name
+# in a row is not proof the remover fires (#2710 passed the AST check with 0 of 288 copies removed), so every one is
+# witnessed in ``tests/test_retirer_holds.py`` in both directions, releasing one fixture and holding another in the
+# shared hold shape, and is a remover the Storage page lists (``storage_removers.PLACE_REMOVERS``).
+SERVER_RETIRERS = {
+    "ouroboros.task_custody.settle_child_drive": "drive_settlement",
+    "ouroboros.subagent_worktrees.prune_orphans": "copy_retirement",
+    "ouroboros.review_checking_prune.prune_review_checkouts": "review_checkout_prune",
+    "ouroboros.workspace_preflight.release_finished_scratch": "session_scratch_release",
+    "ouroboros.claudexor_runtime_retention.prune_unpinned_runtimes": "engine_runtime_prune",
+}
+
+
+def test_every_server_retirer_is_named_witnessed_in_both_directions_and_listed_as_a_remover():
+    from ouroboros.storage_removers import PASS_JOBS, PLACE_REMOVERS
+    from tests import test_retirer_holds as witnesses
+
+    named = {retirer for _path, cell in ROWS for kind, retirer in [lifetime(cell) or ("", None)] if kind == "disposable"}
+    assert set(SERVER_RETIRERS) <= named, sorted(set(SERVER_RETIRERS) - named)
+    assert set(witnesses.WITNESSES) == set(SERVER_RETIRERS), "each server retirer has exactly one witness"
+    for dotted, job in SERVER_RETIRERS.items():
+        test = witnesses.WITNESSES[dotted]
+        assert test.startswith("test_") and callable(getattr(witnesses, test)), dotted
+        assert any(job in removers for removers in PLACE_REMOVERS.values()), f"{job} is no place's remover"
+    assert set(PASS_JOBS) == set(SERVER_RETIRERS.values())
+
+
 def test_disposable_planes_without_a_retirer_only_shrink():
     debts = {path for path, cell in ROWS if lifetime(cell) == ("disposable", "none")}
     assert debts == DISPOSABLE_WITHOUT_RETIRER, (

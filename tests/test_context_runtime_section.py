@@ -650,8 +650,9 @@ def test_captured_recent_and_drive_sections_carry_one_capture_label(tmp_path, mo
 
 
 class TestStorageFact:
-    """The last finished storage count reaches the Runtime block as one compact fact (Commit 5 of
-    the storage plan): present with a count, absent without, never zero, and no threshold, tier or
+    """The disk reaches the Runtime block as one compact fact (Commit 5 of the storage plan): free and
+    total space every turn, in the Storage page's decimal GB with its read time, the last finished count
+    with its growth once there is one, never a zero for what is unknown, and no threshold, tier or
     WARNING stands in for the mind's judgment."""
 
     def _env(self, tmp_path):
@@ -672,14 +673,19 @@ class TestStorageFact:
         section = build_runtime_section(env, {"id": "t1", "type": "task"})
         return section, json.loads(section.split("## Runtime context\n\n", 1)[1])
 
-    def test_absent_until_the_owner_counts_then_the_count_with_growth(self, tmp_path, monkeypatch):
+    def test_free_space_every_turn_then_the_count_with_growth_once_counted(self, tmp_path, monkeypatch):
         from types import SimpleNamespace
 
         from ouroboros import storage
 
         env = self._env(tmp_path)
         _section, data = self._runtime(env)
-        assert "storage" not in data, "no count yet: no fact, never zero"
+        disk = data["storage"]
+        assert set(disk) == {"free_bytes", "free_gb", "volume_total_bytes", "volume_total_gb", "disk_read_at"}, \
+            "no count yet: the disk alone, never a zero count"
+        assert disk["free_gb"] == round(disk["free_bytes"] / 1e9, 1) and disk["volume_total_gb"] == round(
+            disk["volume_total_bytes"] / 1e9, 1), "the decimal GB the Storage page prints (storage_format.js)"
+        assert disk["disk_read_at"] == data["context_captured_at"], "read in the build the section is dated by"
 
         (tmp_path / "observability").mkdir()
         (tmp_path / "observability" / "a.bin").write_bytes(b"x" * 4096)
@@ -688,7 +694,8 @@ class TestStorageFact:
         storage.save_count(tmp_path, first)
         section, data = self._runtime(env)
         fact = data["storage"]
-        assert set(fact) == {"counted_at", "bytes", "unreadable", "basis", "previous_at", "growth_bytes", "free_bytes", "volume_total_bytes"}
+        assert set(fact) == {"counted_at", "bytes", "unreadable", "basis", "previous_at", "growth_bytes", "free_bytes",
+                             "free_gb", "volume_total_bytes", "volume_total_gb", "disk_read_at"}
         assert fact["counted_at"] == first["finished_at"] and fact["bytes"] == first["bytes"] > 0
         assert fact["unreadable"] == 0 and "growth_flag" not in fact
         assert fact["previous_at"] is None and fact["growth_bytes"] is None
@@ -717,16 +724,17 @@ class TestStorageFact:
         monkeypatch.setattr("shutil.disk_usage", unavailable)
         _section, child_data = self._runtime(child_env)
         assert child_data["storage"]["bytes"] == second["bytes"]
-        assert child_data["storage"]["free_bytes"] is None
-        assert child_data["storage"]["volume_total_bytes"] is None
+        for key in ("free_bytes", "free_gb", "volume_total_bytes", "volume_total_gb", "disk_read_at"):
+            assert key not in child_data["storage"], f"an unreadable disk is absent, never zero: {key}"
 
-    def test_an_unreadable_saved_count_is_no_fact(self, tmp_path):
+    def test_an_unreadable_saved_count_is_no_count(self, tmp_path):
         from ouroboros import storage
 
         env = self._env(tmp_path)
         (tmp_path / storage.MEASUREMENT_FILE).write_bytes(b"not json")
         _section, data = self._runtime(env)
-        assert "storage" not in data
+        assert set(data["storage"]) == {"free_bytes", "free_gb", "volume_total_bytes", "volume_total_gb", "disk_read_at"}, \
+            "an unreadable count is no count fact; the disk is still read"
 
     @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs a folder this user cannot list")
     def test_unreadable_items_qualify_the_headline_and_the_growth(self, tmp_path):

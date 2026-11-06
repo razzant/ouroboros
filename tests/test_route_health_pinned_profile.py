@@ -136,7 +136,8 @@ def test_blocked_pin_wording_is_uniform_without_the_structural_verdict():
         requested="harness", executor="blocked",
         reason="route_status_degraded"))
     assert "Reschedule once the route recovers" not in text
-    assert "route_status_degraded" in text and "no replacement executor was selected" in text
-    assert "NOT run on metered API tokens" in text  # the pin still spent nothing
-    assert usage == {"execution_status": "infra_failed",
-                     "reason_code": "subagent_executor_unavailable"}
+    assert "route_status_degraded" in text and "did not substitute another model, route or substrate" in text
+    assert "NOT run and spent nothing" in text  # the pin still spent nothing
+    assert usage == {"execution_status": "infra_failed", "reason_code": "subagent_executor_unavailable",
+                     "unavailable_reason": "route_status_degraded", "alternatives": [], "host_fallback": False,
+                     "terminal_origin": "host_notice"}

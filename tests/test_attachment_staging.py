@@ -749,7 +749,7 @@ if __name__ == "__main__":  # pragma: no cover
 
 
 def test_a_turn_saved_across_restart_still_stages_its_attachments_in_the_worker(tmp_path, monkeypatch):
-    """Astra C3: a message admitted while a Restart is pending is saved on the durable queue before the lane adds
+    """Astra C3: a message admitted while a Restart drains is saved on the durable queue before the lane adds
     its first-step facts. The saved seed keeps the preparation obligation in the saved queue's own row shape
     (``_PENDING_FIELDS``), so the worker that runs it after Restart stages its uploads as a carrier would."""
     from types import SimpleNamespace
@@ -765,6 +765,7 @@ def test_a_turn_saved_across_restart_still_stages_its_attachments_in_the_worker(
         send_chat_action=lambda *_a, **_k: None, broadcast=lambda *_a, **_k: None, push_log=lambda *_a, **_k: None))
     monkeypatch.setattr(workers, "send_with_budget", lambda *_a, **_k: None)
     monkeypatch.setattr("ouroboros.server_restart.agent_restart_pending", lambda: True)  # intake still open
+    monkeypatch.setattr("ouroboros.server_restart.agent_restart_draining", lambda: True)  # the drain saves the turn
     monkeypatch.setattr(supervisor_queue, "RETURNS_NAMED", False)
     saved = []
     monkeypatch.setattr(supervisor_queue, "enqueue_with_admission_receipt",

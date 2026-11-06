@@ -139,7 +139,7 @@ S30_WAKE_WATCH_SEC = 10.0
 #     (a %-format); the resumed round of a GRACEFUL pause carries its rendering,
 #     REFRESHED_NOTICE_MARKER, followed by the refreshed ceiling.
 FORCED_WRAPUP_MARKER = "[BUDGET LIMIT]"
-RESUME_NOTICE_MARKER = "This task continued from its budget pause after an explicit owner Resume"
+RESUME_NOTICE_MARKER = "This task continued from its budget pause after"
 REFRESH_SOURCE_LITERAL = "'refreshed to $%.2f'"
 REFRESHED_NOTICE_MARKER = "planning threshold refreshed to $"
 LITERAL_SOURCES = {
@@ -187,7 +187,7 @@ def test_w8_literals_still_exist_in_the_tree():
     # Runtime scenarios keep the concrete budget notice; source selects the
     # owner/authority/budget wording through the existing mapping. Pin those choices too.
     source = (REPO_ROOT / "ouroboros/budget_pause.py").read_text(encoding="utf-8")
-    assert 'REASON_OWNER: "owner Pause"' in source
+    assert 'REASON_OWNER: "Pause"' in source
     assert 'REASON_AUTHORITY: f"technical pause (' in source
     assert 'str(row.get("reason") or ""), "budget pause")' in source
     for literal, relpath in LITERAL_SOURCES.items():

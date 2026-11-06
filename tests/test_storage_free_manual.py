@@ -23,6 +23,7 @@ from tests._store_shared import seed_result
 from tests.test_body_candidate_retention import candidate  # noqa: F401 -- the body fixture
 from tests.test_storage_free import _fake_sizer, _join, _owner, _preview, _run
 from tests.test_storage_free_safety import _capture, _copy, _git, _prune, copies  # noqa: F401 -- the plain copies fixture
+from tests.test_session_service_directories import _synthetic_temp_parent  # noqa: F401 -- keep scratch below the isolated root
 from tests.test_store import document
 
 KEEP = {"basis": "test"}
@@ -141,6 +142,133 @@ def test_nothing_else_reaches_it(copies, monkeypatch):  # noqa: F811
     assert owner.start(copies[0], copies[1], owner.projection(copies[0])["plan"], None, [row["id"]]) == {"started": False, "reason": "not_offered"}
     assert _run(owner, copies[0], copies[0].parent, groups=("working_copies", "lost_copies", "service_folders"))["run"]["removed"] == 0
     assert target.read_bytes() == b"only here" and path.is_dir()
+
+
+def _producer_retained(tmp_path, marker_words):
+    """A finished task's session scratch whose producer marked a tree inside it: its record ends as a
+    ``producer_retained`` handoff in the custody trash. Returns the data root and the scratch."""
+    from tests.test_session_scratch_release import _started
+    from ouroboros.workspace_preflight import release_finished_scratch
+
+    data, scratch = _started(tmp_path)
+    nested = scratch / "held" / "run.noindex"
+    nested.mkdir(parents=True)
+    assert environment.retain_tree(nested, marker_words)
+    assert release_finished_scratch(data, lambda _task: False)["released"]
+    assert task_custody.remove_custody_trash(data)["holds"][0]["class"] == "producer_retained"
+    return data, scratch
+
+
+def test_a_producer_retained_handoff_is_manual_loss_acceptance_and_not_the_ordinary_pool(tmp_path, monkeypatch):
+    """A marked handoff is named with the producer's words; the owner's explicit discard removes its marker
+    and hands exactly that entry to the maintenance child (its identity touched, the child asked), deleting
+    nothing on Free's thread, so another settled entry waits for the child too; an ordinary item press
+    cannot reach it, and a handoff its producer marks again before the child runs reads as kept."""
+    from tests.test_session_scratch_release import _started
+    from ouroboros import maintenance
+    from ouroboros.workspace_preflight import release_finished_scratch
+
+    data, scratch = _started(tmp_path)
+    nested = scratch / "held" / "run.noindex"
+    nested.mkdir(parents=True)
+    marker_words = "producer kept this evidence for inspection"
+    assert environment.retain_tree(nested, marker_words)
+    assert release_finished_scratch(data, lambda _task: False)["released"]
+    monkeypatch.setattr(maintenance, "JOBS", {"custody_trash": maintenance.JOBS["custody_trash"]})
+    assert maintenance.run_job(data, "custody_trash") == {"state": "done", "items": 0}
+    [entry] = (data / "state" / "custody_trash").iterdir()
+    other = data / "state" / "custody_trash" / "other-0123456789ab"  # a settled drive the child has not reached
+    (other / "work").mkdir(parents=True)
+    held_identity, requests = [entry.stat().st_ino, entry.stat().st_mtime_ns], []
+    assert maintenance.run_job(data, "custody_trash") == {"state": "done", "items": 1} and not other.exists()
+    (other / "work").mkdir(parents=True)
+    assert maintenance.due(data) == ["custody_trash"]  # the unrelated new entry; the held one alone rests
+    monkeypatch.setattr(maintenance.child, "request", lambda: requests.append(1))
+
+    _fake_sizer(monkeypatch)
+    owner = _owner({}, offered=("service_folders",))
+    _preview(owner, data, data.parent)
+    plan = owner.projection(data)
+    assert plan["pool"]["count"] == 0 and plan["pool"]["manual"]["count"] == 1
+    [row] = _page(owner, (data, data.parent))["items"]
+    assert row["availability"] == "manual_discard" and row["name"] == "task-1", "named by its task, the marker said once below"
+    assert row["kind"] == "scratch", "it is the session scratch its run kept, never an other item"
+    assert row["manual"]["producer_retained"] and marker_words in row["manual"]["loss"]
+    assert owner.start(data, data.parent, plan["plan"], None, [row["id"]]) == {"started": False, "reason": "not_offered"}
+    assert _discard(owner, (data, data.parent), [row["id"]]) == {"started": True, "reason": ""}
+    assert not (nested / environment.RETENTION_MARKER).exists() and requests, "the owner's acceptance, then the child"
+    assert scratch.is_dir() and entry.is_dir() and (other / "work").is_dir(), "Free's thread deletes nothing"
+    assert [entry.stat().st_ino, entry.stat().st_mtime_ns] != held_identity, "a touched entry makes the job due"
+    run = owner.projection(data)["run"]
+    assert (run["deleting"], run["removed"], run["failed"]) == (1, 0, 0)
+    assert environment.retain_tree(nested, marker_words)  # its producer marks it again before the child runs
+    assert maintenance.run_job(data, "custody_trash") == {"state": "done", "items": 1} and not other.exists()
+    run = owner.projection(data)["run"]
+    assert (run["deleting"], run["stuck"]) == (0, 1), "a handoff marked again is kept, not still being deleted"
+    assert retire_synthetic_retention(nested, marker_words)
+    assert maintenance.run_job(data, "custody_trash") == {"state": "done", "items": 1}
+    assert not scratch.exists() and not any((data / "state" / "custody_trash").iterdir())
+    run = owner.projection(data)["run"]
+    assert (run["deleting"], run["removed"], run["stuck"]) == (0, 1, 0)
+
+
+def test_a_producer_retained_handoff_is_sized_by_the_scratch_it_holds(tmp_path, monkeypatch):
+    """The handoff entry is a few KB of record; the owner frees the scratch it holds, so that is its size and the
+    by-hand fact's, and the row names the scratch, while a work folder beside it keeps its own folder's size. The
+    preview reads only the trash's records for it, judging no running task's scratch hold."""
+    from ouroboros import session_scratch, storage
+    from tests.test_session_scratch_release import _started
+    from tests.test_storage_free import _group
+
+    data, scratch = _producer_retained(tmp_path, REASON)
+    (scratch / "held" / "blob.bin").write_bytes(b"x" * 262_144)
+    _started(tmp_path, task_id="task-2", status="running")  # a task whose own scratch record stays in its drive
+    judged = []
+    real_hold = session_scratch.task_hold
+    monkeypatch.setattr(session_scratch, "task_hold", lambda *args: judged.append(args[1]) or real_hold(*args))
+    _fake_sizer(monkeypatch)
+    owner = _owner({}, offered=("work_folders", "service_folders"))
+    try:
+        plan = _preview(owner, data, data.parent)
+        assert judged == [], "the preview keeps trash rows only: no task's scratch hold is judged for them"
+        assert session_scratch.scratch_records(data) and judged == ["task-2"], "the ordinary listing still judges it"
+        [row] = _page(owner, (data, data.parent))["items"]
+        measured = lambda path: sum(part["bytes"] for part in storage.size_paths([str(path)], sleep=lambda _s: None))  # noqa: E731
+        assert [Path(path).resolve() for path in row["manual"]["paths"]] == [scratch.resolve()]
+        assert row["bytes"] == measured(scratch) > measured(Path(row["path"])), "the scratch it holds, not its entry"
+        assert plan["pool"]["manual"] == {"count": 1, "bytes": row["bytes"], "bytes_complete": True, "retained": 1}
+        [folder] = _group(plan, "work_folders")["items"]
+        assert folder["bytes"] == measured(data / "task_drives" / "task-1"), "an ordinary item keeps its own folder's size"
+    finally:
+        assert retire_synthetic_retention(scratch / "held" / "run.noindex", REASON)
+
+
+def test_a_producer_retained_handoff_beside_a_result_pin_leaves_the_pin_offered(tmp_path, monkeypatch):
+    """Under the default offered groups a marked scratch handoff and a finished writer's result pins are
+    listed together: the handoff in the manual form, the pins in their own group."""
+    from ouroboros import delegate_custody as custody
+    from tests.test_storage_free import _group, _init_repo
+
+    data, scratch = _producer_retained(tmp_path, REASON)
+    repo, wtroot = tmp_path / "repo", tmp_path / "wtroot"
+    _init_repo(repo)
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_WORKTREE_ROOT", str(wtroot))
+    handle = sw.provision_execution_snapshot(target_root=repo, task_id="writer", snapshot_id="snap-w",
+                                             worktree_root=wtroot, data_dir=data)
+    (Path(handle.path) / "a.txt").write_text("changed by the writer\n", encoding="utf-8")
+    sw.capture_result_commit("snap-w", tmp_path / "saved" / "workspace.patch", data_dir=data)
+    assert sw.release_snapshot_checkout("snap-w", worktree_root=wtroot, data_dir=data)
+    seed_result(data, "writer", document("writer", "completed"))
+    custody.record_started(data, custody.RunCustody(run_id="run-w", task_id="writer", snapshot_id="snap-w",
+                                                    execution_root=handle.path))
+    _fake_sizer(monkeypatch)
+    owner = _owner({})
+    try:
+        view = _preview(owner, data, data.parent)
+        assert [item["id"] for item in _group(view, "result_pins")["items"]] == ["pins:snap-w"], "the handoff hides no pin"
+        assert view["pool"]["manual"]["count"] == 1, "the handoff stays the owner's explicit discard"
+    finally:
+        assert retire_synthetic_retention(scratch / "held" / "run.noindex", REASON)
 
 
 def test_the_background_verdict_is_unchanged_by_a_discard_answer(candidate):  # noqa: F811

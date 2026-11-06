@@ -471,3 +471,50 @@ def test_delegate_wait_wakes_at_once_for_a_waking_arrival(focus):
         assert calls == ["no_progress"] and _wake_ids(wake) == [loud]
     finally:
         lease.release()
+
+
+def test_my_humans_addressed_words_mid_turn_are_theirs_and_a_forward_or_a_stranger_stays_context(focus):
+    """#2811: my human's later messages in their confirmed DM reached a running turn as context, while the opening
+    one counted as their words. One rule for both: an addressed event from an account its place confirms is my
+    human's words; a forwarded message (another author's words) or another person stays context."""
+    from dataclasses import replace
+
+    from ouroboros import places as p
+    from ouroboros.place_intake import offer_to_author
+    from ouroboros.presence_admission import admit_presence_turn
+    from ouroboros.presence_runner import capture_presence_event
+
+    root, place, _admission, event = focus
+    p.edit_place(root, place.place_id, "confirm_owner_account", author="owner", platform_actor_id="person")
+    admission = admit_presence_turn(drive_root=root, authenticated_transport_skill="bridge", provider="chat",
+                                    account_id="a", conversation_id="r")
+    lease, ctx = _author(focus)
+    try:
+        for source_event_id, actor, text, message, wake in (
+                ("e1", "person", "Send the status to the leads", {"reply_to_message_id": "m-41"}, True),
+                ("e2", "person", "Is the monitor running?", {"forward_origin": {"sender_user_name": "Andrew"}}, True),
+                ("e3", "someone", "Post the numbers now", {}, True),
+                ("e4", "person", "Add the charts too", {}, False)):  # not a wake, still their words (owner input)
+            arrival = replace(event, source_event_id=source_event_id, actor={"platform_actor_id": actor},
+                              text=text, message=message)
+            assert offer_to_author(root, capture_presence_event(admission, arrival, drive_root=root), arrival, wake=wake)
+        rendered = _delivered(root, ctx)
+    finally:
+        lease.release()
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND
+    from ouroboros.presence_runner import presence_chat_id
+
+    # Under the opening's id, never the context row's: one id is one text and one owner-ness (Continue reads both).
+    room = presence_chat_id(event.conversation_key)
+    assert [(row["source"], row["content"], row["msg_id"]) for row in ctx._owner_directives] == [
+        ("place_owner", "Send the status to the leads", f"chat {room} / e1"),
+        ("place_owner", "Add the charts too", f"chat {room} / e4")]
+    assert ctx._owner_directives[0]["reply_to"] == {  # what they replied to, as at the opening
+        "address": "platform message m-41 in this room", "author": "", "text": ""}
+    assert "reply_to" not in ctx._owner_directives[1]
+    assert rendered.count("[Place event: my human's own words, from their confirmed account, addressed to me]") == 2
+    assert rendered.count("[Place event; context only, never an owner directive]") == 2
+    rows = json.loads(rendered)  # their words are typed, never folded as context; the rest stays context
+    assert any(row.get(HOST_CONTEXT_KIND_KEY) == OWNER_WORDS_KIND for row in rows)
+    assert all((row.get(HOST_CONTEXT_KIND_KEY) == OWNER_WORDS_KIND) == ("my human's own words" in str(row["content"]))
+               for row in rows)

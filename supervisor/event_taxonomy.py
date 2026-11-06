@@ -140,6 +140,9 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
     "rollback_request": _handled("supervisor.events_runtime_controls", "ouroboros/tools/git_rollback.py"),
     "promote_to_stable": _handled(
         "supervisor.events_runtime_controls", "ouroboros/tools/control_runtime.py"),
+    "free_storage": _handled(
+        "supervisor.events_runtime_controls", "ouroboros/tools/control_storage.py",
+        note="the mind's Storage -> Free (owner Q3 = A): the server's one Free owner runs it with the supervisor's probes"),
     "review_late_result": _handled(
         "supervisor.cognitive_operations", "ouroboros/review_custody.py"),
     "schedule_subagent": _handled(

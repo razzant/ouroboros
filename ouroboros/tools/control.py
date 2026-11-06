@@ -197,18 +197,25 @@ def _project_tool_entries() -> List[ToolEntry]:
     ]
 
 
+def _sibling_tool_entries() -> List[ToolEntry]:
+    """The control tools homed in sibling modules: harness maintenance, the mind's Storage -> Free, the
+    mind's lifecycle choices, UI translation and update descriptions."""
+    from ouroboros.tools.control_maintenance import maintenance_tool_entries
+    from ouroboros.tools.control_mind import mind_tool_entries
+    from ouroboros.tools.control_storage import storage_tool_entries
+    from ouroboros.tools.control_ui_translation import ui_translation_tool_entries
+    from ouroboros.tools.control_update_description import update_description_tool_entries
+
+    return [*maintenance_tool_entries(), *storage_tool_entries(), *mind_tool_entries(), *ui_translation_tool_entries(),
+            *update_description_tool_entries()]
+
+
 def get_tools() -> List[ToolEntry]:
     from ouroboros.native_task_wait import SLEEP_PARAMS
     from ouroboros.subagent_inspection import inspect_subagent_tool
-    from ouroboros.tools.control_maintenance import maintenance_tool_entries
-    from ouroboros.tools.control_mind import mind_tool_entries
-    from ouroboros.tools.control_ui_translation import ui_translation_tool_entries
-    from ouroboros.tools.control_update_description import update_description_tool_entries
+
     return [
-        *maintenance_tool_entries(),
-        *mind_tool_entries(),
-        *ui_translation_tool_entries(),
-        *update_description_tool_entries(),
+        *_sibling_tool_entries(),
         ToolEntry("inspect_subagent", {
             "name": "inspect_subagent",
             "description": "Inspect one configured actor from this task's captured catalog: exact route, model, account pin and access, with dated passive engine quota/resource facts. Works without Quotas. Never starts or refreshes an engine/provider, changes accounts, or chooses an executor. Missing/stale facts and unhonored model/request selectors remain unknown; availability is not an execution guarantee.",
@@ -218,13 +225,14 @@ def get_tools() -> List[ToolEntry]:
             }, "required": ["subagent_id"], "additionalProperties": False},
         }, inspect_subagent_tool),
         ToolEntry("finish_task", {"name": "finish_task",
-            "description": "Select the complete answer after considering the work. Use finish, or stop with a rationale naming unfinished work or why you are stopping. "
-                "A root's stop records unfinished work for explicit Continue under the same limits. Continue does not reopen an ordinary finish or a final reply without this tool, even when its text calls it partial. "
+            "description": "Select the complete answer after considering the work. Use finish when nothing of this work is left for you; use stop, with a rationale naming what remains or why you are stopping, while a step of it is still yours, including when a limit ends this turn first. "
+                "A root's stop records unfinished work for explicit Continue under the same limits (a reached deadline or money limit refuses it): your human's Continue or a later focus's continue_task starts a new root that reads this one, with a root's work room, also when this is a chat turn; continue_in_background keeps this same turn and its work room. Continue does not reopen an ordinary finish or a final reply without this tool, even when its text calls it partial. "
+                "Ending closes this task's browser, task-session connections and services not kept alive, and any link they serve; when your work can go on only after your human's act or choice, a live root asks with escalate (wait_for_answer=true) before ending. "
                 "Select exactly one of answer or a host-offered answer_sha256. Successful page, note, mark and addressed-message writes may ride in the same response; any other result is read before the finish. On a self-started run (a consciousness wake's own turn, or a schedule-born root without a Presence binding) or a root answering its place, silent=true sends no message (any answer stays your internal note), refused while your human awaits a reply. No answer is needed. The run records no message unless a host notice is owed. This grants no success, cancels no children, and retains all configured review and owner controls.",
             "parameters": {"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["finish", "stop"]}, "answer": {"type": "string", "description": "The complete answer, including a short correction; a child's parent reads it as your report, a root's goes where that root answers (its owner's chat, or the conversation a Presence root answers, as your context names)."},
                 "answer_sha256": {"type": "string", "description": "Exact offered retained or whole held response hash."},
-                "rationale": {"type": "string", "description": "For stop, what remains unfinished or why you are stopping; the owner reads it as the stop's cause on the task row. Optional for finish."}, "acceptance_subject": {"type": "object", "properties": {"owner_source_sha256": {"type": "string"},
+                "rationale": {"type": "string", "description": "For stop, what remains unfinished, whose step it is and why you end now; the owner reads it as the stop's cause on the task row. Optional for finish."}, "acceptance_subject": {"type": "object", "properties": {"owner_source_sha256": {"type": "string"},
                     "effective_criteria": {"type": "string"}, "material_tool_indices": {"type": "array", "items": {"type": "integer"}},
                 }, "required": ["owner_source_sha256"]},
                 "pending_review": {"type": "string", "enum": ["wait", "finish"], "default": "wait"},
@@ -309,7 +317,7 @@ def get_tools() -> List[ToolEntry]:
                 "quote": {"type": "array", "items": {"type": "string"}, "default": [],
                           "description": "Owner row addresses held by this turn; exact words and attachments travel together."},
                 "arrival": {"type": ["boolean", "string"], "default": False,
-                            "description": "Place focus only: forward the exact message as context, never owner words. true selects the opening "
+                            "description": "Place focus only: forward the exact message as it arrived (your human's own words stay theirs, any other is context). true selects the opening "
                                            "message; a string, a later source_event_id delivered here from this conversation. One receiving work. "
                                            "Not with quote; note stays your own, separately."},
             }, "required": ["task_id"]},
@@ -368,8 +376,10 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("send_user_message", {
             "name": "send_user_message",
             "description": "Send a separate reply to the owner while work continues: the first line of longer work (what "
-                           "I am about to do and why), a question, an invitation to collaborate, or anything else that "
-                           "needs the owner now. It appears in this work's room as a normal reply, calls the owner back "
+                           "I am about to do and why), a question the work does not wait on, an invitation to "
+                           "collaborate, or anything else that needs the owner now; a decision this work needs from "
+                           "the owner is an escalate card, which shows its options, stays listed as waiting and brings "
+                           "the answer back here. It appears in this work's room as a normal reply, calls the owner back "
                            "and leaves the work running; work news goes on update_focus, later progress stays in the "
                            "card. For Presence-bound work that room is local, not the place conversation: a connector "
                            "tool reaches that, and your final answer only where your context names that route.",

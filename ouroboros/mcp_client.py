@@ -38,10 +38,11 @@ from ouroboros.secret_masking import (
 )
 from ouroboros.mcp_browser_guard import GUARD_ENV_NAMES
 from ouroboros.mcp_headers import validate_headers
-from ouroboros.mcp_schema import filter_schema_literals, redact_metadata, tool_metadata
+from ouroboros.mcp_schema import (carrying_server_stderr, filter_schema_literals, heard_from_server,
+                                  redact_metadata, server_stderr_note, tool_metadata)
 from ouroboros.tools.tool_result import ToolResult, _replace_tool_result
 from ouroboros.platform_layer import IS_WINDOWS
-from ouroboros.config import MCP_STDIO_STDERR_TAIL_BYTES, get_runtime_mode
+from ouroboros.config import MCP_STDIO_STDERR_NOTE_BYTES, MCP_STDIO_STDERR_TAIL_BYTES, get_runtime_mode
 from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
 from ouroboros.workspace_executor import resolve_process_env, validate_process_env
 
@@ -620,6 +621,7 @@ async def _stdio_with_diagnostics(params: Any, cfg: MCPServerConfig):
                 diagnostic = _stderr_diagnostic(stderr, cfg, MCP_STDIO_STDERR_TAIL_BYTES)
                 if diagnostic:
                     log.warning("MCP stdio stderr (%s): %s", cfg.id, diagnostic)
+                    heard_from_server(_stderr_diagnostic(stderr, cfg, MCP_STDIO_STDERR_NOTE_BYTES))
 
 
 class MCPRedirectRefused(RuntimeError):
@@ -728,7 +730,7 @@ def _transport_factory(cfg: MCPServerConfig, host_env: Optional[Dict[str, str]] 
         if cfg.cwd:
             selected["cwd"] = cfg.cwd
         params = StdioServerParameters(command=cfg.command, args=list(cfg.args), **selected)
-        return _stdio_with_diagnostics(params, cfg) if cfg.env or host_env else stdio_client(params)
+        return _stdio_with_diagnostics(params, cfg)  # every server's stderr: masked, bounded, kept for a failure
     raise RuntimeError(f"Unsupported transport: {cfg.transport!r}")
 
 
@@ -789,9 +791,8 @@ async def _list_tools_async(cfg: MCPServerConfig, *, timeout_sec: int) -> List[D
             return tools_raw
 
     # Server listings and draft probes name no task; no task's Pause gates them.
-    return await asyncio.wait_for(
-        submit_async_preparation(_do_with_session), timeout=timeout_sec
-    )
+    with carrying_server_stderr():
+        return await asyncio.wait_for(submit_async_preparation(_do_with_session), timeout=timeout_sec)
 
 
 async def _call_tool_async(
@@ -834,19 +835,20 @@ async def _call_tool_async(
         return with_returned(_tool_result_from_call_result(result), result)
 
     # Launch admission precedes transport entry: a stdio server starts there.
-    try:
-        pending = submit_async_preparation(_do)
-    except (OwnerPauseRefused, ModelWaitInterrupted, PhysicalDispatchInterrupted, UsageAccountingError, StoreError) as exc:
-        exc.mcp_unsent_joined = True  # no transport task was handed off
-        raise
-    try:
-        return await asyncio.wait_for(pending, timeout=timeout_sec)
-    except BaseException as exc:
-        if unsent_joined:
-            # wait_for replaces CancelledError with TimeoutError; carry proof,
-            # not exception-class inference, over that conversion.
-            exc.mcp_unsent_joined = True
-        raise
+    with carrying_server_stderr():
+        try:
+            pending = submit_async_preparation(_do)
+        except (OwnerPauseRefused, ModelWaitInterrupted, PhysicalDispatchInterrupted, UsageAccountingError, StoreError) as exc:
+            exc.mcp_unsent_joined = True  # no transport task was handed off
+            raise
+        try:
+            return await asyncio.wait_for(pending, timeout=timeout_sec)
+        except BaseException as exc:
+            if unsent_joined:
+                # wait_for replaces CancelledError with TimeoutError; carry proof,
+                # not exception-class inference, over that conversion.
+                exc.mcp_unsent_joined = True
+            raise
 
 
 def _tool_result_from_call_result(result: Any) -> ToolResult:
@@ -1497,7 +1499,7 @@ class MCPManager:
                    else "The remote outcome is unknown: side effects may already have happened, "
                    "and remote cancellation is not confirmed. Use the server-specific status/read "
                    "tool, if available, to reconcile the operation before retrying.")
-            )
+            ) + server_stderr_note(exc)
             return ToolResult(status="timeout", code="MCP_TIMEOUT", text=text,
                               meta={"mcp_call_not_sent": not_sent or closing})
         except BaseException as exc:  # noqa: BLE001 - any failure is reported

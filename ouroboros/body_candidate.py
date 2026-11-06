@@ -139,6 +139,75 @@ def context_fact(owner: str = "", data_dir: Optional[Any] = None, *, limit: int 
     return shown
 
 
+# One wall-clock bound for all open neighbours' lock-free Git reads at a bind: a transport bound, never a judgment.
+_NEIGHBOUR_READ_SECONDS = 3.0
+
+
+def _changed_now(row: Dict[str, Any], deadline: float) -> str:
+    """One neighbour's changed paths at this moment against its base (committed, staged, unstaged, untracked),
+    read without its index lock; a failure or the time bound reads as such, never as nothing changed."""
+    from ouroboros.git_observation import host_git_env
+
+    path, base = str(row.get("path") or ""), str(row.get("base_sha") or "")
+    if not os.path.isdir(path):
+        return "its checkout is missing"
+    names: set = set()
+    for argv in (["status", "--porcelain=v1", "-z", "--no-renames"],
+                 *([["diff", "--name-only", "-z", "--no-renames", base, "HEAD", "--"]] if base else [])):
+        try:
+            if (left := deadline - time.monotonic()) <= 0:
+                raise subprocess.TimeoutExpired(argv, 0)
+            out = subprocess.run(["git", *argv], cwd=path, capture_output=True, env=host_git_env(), check=True,
+                                 timeout=left).stdout
+        except subprocess.TimeoutExpired:
+            return "changed paths not read (time bound)"
+        except Exception as exc:
+            return f"changed paths unreadable ({type(exc).__name__})"
+        entries = out.decode("utf-8", "surrogateescape").split("\0")
+        names.update(entry[3:] if argv[0] == "status" else entry for entry in entries if entry)
+    shown = sorted(names)
+    return (f"changed {', '.join(shown[:8])}" + (f" (+{len(shown) - 8} more in that path)" if len(shown) > 8 else "")
+            if shown else "nothing changed yet")
+
+
+def neighbour_note(ctx: Any, *, with_ended: bool = False) -> str:
+    """Other body candidates at a bind, read now and never stored: open owners in full with this moment's changed
+    paths, ended owners as a count (``with_ended``; the Runtime ``body_candidates`` fact lists them). Without an
+    open neighbour or ``with_ended`` it says nothing. Never raises into the write it accompanies."""
+    try:
+        owner = owner_id(ctx)
+        rows = [row for row in list_candidates() if not row.get("retiring") and row.get("task_id") != owner]
+        try:
+            from ouroboros.task_store import task_drive_status
+
+            stored = {task_id: status for task_id, (status, _drive) in task_drive_status(
+                _wt._data_dir(_results_root(ctx)), [str(row.get("task_id") or "") for row in rows]).items()}
+        except Exception:
+            stored = None  # unknown stays unknown: only a stored final status counts as ended
+        from ouroboros.task_status import FINAL_STATUSES
+
+        rows.sort(key=lambda row: max(float(row.get("created_at") or 0), float(row.get("used_at") or 0)), reverse=True)
+        unknown = "status unreadable" if stored is None else "no task record"
+        open_rows = [(row, state) for row in rows
+                     if (state := (stored or {}).get(str(row.get("task_id") or ""), unknown)) not in FINAL_STATUSES]
+        ended = len(rows) - len(open_rows)
+        if not open_rows and not (with_ended and ended):
+            return ""
+        deadline = time.monotonic() + _NEIGHBOUR_READ_SECONDS
+        lines = [f"- {row.get('candidate_id')}: task {row.get('task_id')} ({state}), branch {row.get('branch')}, "
+                 f"base {str(row.get('base_sha') or '')[:12]}, path {row.get('path')}: {_changed_now(row, deadline)}"
+                 for row, state in open_rows[:8]]
+        if len(open_rows) > 8:
+            lines.append(f"- {len(open_rows) - 8} more open: state/private_copies/*.json (kind=body_candidate records)")
+        if with_ended and ended:
+            lines.append(f"- {ended} more belong to ended tasks: retained work, listed in the Runtime body_candidates "
+                         "fact; prepare_self_change(resume=<id>) continues one.")
+        return "Other body candidates, read now (never stored):\n" + "\n".join(lines)
+    except Exception as exc:
+        log.debug("body candidate neighbour note failed", exc_info=True)
+        return f"Other body candidates: unreadable now ({type(exc).__name__})."
+
+
 def _select(selector: str, data_dir: Optional[Any] = None) -> Optional[Dict[str, Any]]:
     selector = str(selector or "").strip()
     for row in _rows(data_dir) if selector else []:
@@ -664,9 +733,9 @@ def _targets_body(ctx: Any, root: str) -> bool:
         return False
 
 
-def authoring_seam(ctx: Any, name: str, args: Dict[str, Any]) -> Optional[CandidateRefused]:
+def authoring_seam(ctx: Any, name: str, args: Dict[str, Any]) -> CandidateRefused | str | None:
     """Bind the candidate BEFORE an ordinary body write, a PR-integration verb or an acting
-    body child resolves a target.
+    body child resolves a target; the bind that prepared or resumed it returns the neighbour note.
 
     Process tools are deliberately absent: no command text is classified. The
     mind prepares explicitly before process-first work. A refusal that the
@@ -694,12 +763,12 @@ def authoring_seam(ctx: Any, name: str, args: Dict[str, Any]) -> Optional[Candid
     try:
         if _git(serving_repo_dir_for(ctx), "rev-parse", "--is-inside-work-tree", check=False).returncode != 0:
             return None  # no Git body (wheel/image install): the legacy in-place contract, disclosed in the map
-        prepare(ctx)
+        bound = prepare(ctx)
     except CandidateRefused as exc:
         return exc
     except Exception as exc:
         return CandidateRefused("CANDIDATE_UNAVAILABLE", f"the candidate could not be prepared: {type(exc).__name__}: {exc}")
-    return None
+    return None if bound.get("state") == "bound" else neighbour_note(ctx) or None
 
 
 def process_environment(ctx: Any, work_dir: Any, *, source=None) -> Optional[Dict[str, str]]:

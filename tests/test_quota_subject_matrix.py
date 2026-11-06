@@ -124,8 +124,8 @@ def _consumers(monkeypatch, case: dict) -> dict:
     monkeypatch.setattr(claudexor_daemon, "ensure_owned_gateway", lambda **_: _Gateway(case["envelope"]))
     monkeypatch.setattr(claudexor_daemon, "owned_daemon_provisioned", lambda: True)
     monkeypatch.setattr(review_execution, "session_route_for_review_slot", lambda slot: route)
-    executors = {requested: subagents.probe_subagent_executor(requested, shape=shape)
-                 for requested in ("auto", "harness")}
+    # The delegate_start pin: the rule table fed with the same health facts.
+    pin = subagents.resolve_subagent_executor("harness", route=route, unavailable_reason=health[0], reset_at=health[1])
     try:
         review_execution._require_route_headroom(gateway, route, shape)
         headroom = "starts"
@@ -134,8 +134,7 @@ def _consumers(monkeypatch, case: dict) -> dict:
     slot = SimpleNamespace(route=review_execution.ReviewRouteKind.AGENT_SESSION, slot_id="s1", session_access="readonly")
     skip = plan_review_runtime.plan_panel_health_snapshot([slot])
     assert gateway.reads and all(read["model"] == case["model"] for read in gateway.reads)
-    return {"health": health, "executors": {key: (value.executor, value.reason, value.reset_at)
-                                            for key, value in executors.items()},
+    return {"health": health, "pin": (pin.executor, pin.reason, pin.reset_at),
             "headroom": headroom, "skip": skip}
 
 
@@ -146,8 +145,7 @@ def test_a_known_block_reaches_every_guard_with_its_recheck(monkeypatch, name):
     reset = case["expect"]["resets_at"]
     facts = _consumers(monkeypatch, case)
     assert facts["health"] == ("", reset)
-    assert facts["executors"] == {"auto": ("native", "subscription_window_exhausted", reset),
-                                  "harness": ("blocked", "subscription_window_exhausted", reset)}
+    assert facts["pin"] == ("blocked", "subscription_window_exhausted", reset)
     assert facts["headroom"] == f"window_exhausted:{reset}"
     assert facts["skip"] == {"s1": {"failure_code": "subscription_window_exhausted", "reset_at": reset}}
 
@@ -157,6 +155,6 @@ def test_a_known_block_reaches_every_guard_with_its_recheck(monkeypatch, name):
 def test_available_and_unknown_both_fail_open_unchanged(monkeypatch, name):
     facts = _consumers(monkeypatch, CASES[name])
     assert facts["health"] == ("", "")
-    assert facts["executors"] == {"auto": ("harness", "harness_ready", ""), "harness": ("harness", "harness_ready", "")}
+    assert facts["pin"] == ("harness", "harness_ready", "")
     assert facts["headroom"] == "starts"
     assert facts["skip"] == {}

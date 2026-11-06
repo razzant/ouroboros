@@ -253,7 +253,7 @@ test('cost dashboard distinguishes loading, unavailable, pending, and final zero
     const pending = costDashboardPresentation(base);
     assert.equal(pending.knownLimit, '$0.00 / $10.00');
     // An older payload carries no cause. Say only what is known — never invent "0 open".
-    assert.equal(pending.final, 'Pending');
+    assert.equal(pending.final, 'No');
     assert.equal(pending.calls, '0');
 
     // A flag without its cause is not reconstructible. This exact snapshot — every dollar
@@ -262,11 +262,17 @@ test('cost dashboard distinguishes loading, unavailable, pending, and final zero
     assert.equal(costDashboardPresentation({
         ...base,
         accounting: { ...base.accounting, non_final_rows: 1 },
-    }).final, 'Pending (1 open)');
+    }).final, 'No (1 open)');
     assert.equal(costDashboardPresentation({
         ...base,
         accounting: { ...base.accounting, non_final_rows: 3 },
-    }).final, 'Pending (3 open)');
+    }).final, 'No (3 open)');
+    // Open rows are the ledger's open ones: calls that will never get a price (subscription
+    // work, in non_final_rows) are not "open" (05.11: 3,176 open among 294,141 non-final).
+    assert.equal(costDashboardPresentation({
+        ...base,
+        accounting: { ...base.accounting, non_final_rows: 294141, accounting_open_rows: 3176 },
+    }).final, 'No (3,176 open)');
     // The count never contradicts the flag it explains, and a settled ledger says "Yes".
     assert.equal(costDashboardPresentation({
         ...base,
@@ -278,7 +284,7 @@ test('cost dashboard distinguishes loading, unavailable, pending, and final zero
     assert.equal(costDashboardPresentation({
         ...base,
         accounting: { ...base.accounting, cost_final: false, non_final_rows: 0 },
-    }).final, 'Pending');
+    }).final, 'No');
 
     const final = costDashboardPresentation({
         ...base,
@@ -308,16 +314,29 @@ test('cost dashboard sets the limit against known spend, open holds beside it (#
         ['$1.50', '$0.50', '$4.00', '$20.00']);
 });
 
-test('legacy breakdown buckets disclose unknown and pending zero amounts', () => {
+test('breakdown buckets say open and unpriced amounts in the card\'s words, never a free zero', () => {
+    // Subscription calls settle without a price: none will arrive, so not pending; a session row may have no call.
     assert.equal(costBucketPresentation({
-        cost: 0, calls: 1, unknown_unmetered: 1, non_final_rows: 1, cost_final: false,
-    }), 'cost pending (unmetered=1)');
+        cost: 0, calls: 0, unknown_unmetered: 3, non_final_rows: 3, accounting_open_rows: 0, cost_final: false,
+    }), 'Cost not priced · 3 without a price');
     assert.equal(costBucketPresentation({
-        cost: 0, calls: 1, unknown_unmetered: 0, non_final_rows: 1, cost_final: false,
-    }), 'cost pending');
+        cost: 0, calls: 1, unknown_unmetered: 1, non_final_rows: 1, accounting_open_rows: 1, cost_final: false,
+    }), 'Cost pending · 1 without a price');
     assert.equal(costBucketPresentation({
-        cost: 0.25, calls: 2, unknown_unmetered: 1, non_final_rows: 1, cost_final: false,
-    }), '$0.25 (pending, unmetered=1)');
+        cost: 0, calls: 1, unknown_unmetered: 0, non_final_rows: 1, accounting_open_rows: 1, cost_final: false,
+    }), 'Cost pending');
+    assert.equal(costBucketPresentation({
+        cost: 0.25, calls: 2, unknown_unmetered: 1, non_final_rows: 1, accounting_open_rows: 0, cost_final: false,
+    }), 'Tracked: $0.25 · 1 without a price');
+    assert.equal(costBucketPresentation({
+        cost: 0.0004, calls: 1, unknown_unmetered: 0, non_final_rows: 0, accounting_open_rows: 0, cost_final: true,
+    }), '$0.0004', 'a positive sub-cent amount is never $0.00');
+    assert.equal(costBucketPresentation({
+        cost: 0.25, calls: 2, unknown_unmetered: 0, non_final_rows: 1, accounting_open_rows: 1, cost_final: false,
+    }), '$0.25 (pending)');
+    // An older payload without the open count: its non-final rows past the unpriced ones are the open ones.
+    assert.equal(costBucketPresentation({ cost: 0, calls: 1, unknown_unmetered: 1, non_final_rows: 1, cost_final: false }),
+        'Cost not priced · 1 without a price');
     assert.equal(costBucketPresentation({
         cost: 0, calls: 1, unknown_unmetered: 0, non_final_rows: 0, cost_final: true,
     }), '$0.00');
@@ -442,6 +461,10 @@ test('#498 the scoped carrier answers the whole money question from one bucket',
     });
     // A proven zero: priced rows evidenced it and the accounting is closed.
     assert.deepEqual(costPresentationMeta(carrier({ tracked_amount: 0 })), ['$0.00']);
+    // Under a cent is not that zero: four places, as review records print it.
+    assert.deepEqual(costPresentationMeta(carrier({ tracked_amount: 0.0004, has_unpriced: true })), ['Tracked: $0.0004']);
+    // Below four places a positive amount still never reads as zero.
+    assert.deepEqual(costPresentationMeta(carrier({ tracked_amount: 0.00003 })), ['<$0.0001']);
     // An open subtotal is a ceiling, not a receipt.
     assert.deepEqual(costPresentationMeta(carrier({ tracked_final: false, accounting_open: true })),
         ['up to $1.20']);

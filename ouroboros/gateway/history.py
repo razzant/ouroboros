@@ -38,6 +38,7 @@ from ouroboros.outcomes import normalize_outcome_axes
 from ouroboros.history_retention import retention_summary
 from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
 from ouroboros.project_dialogue import ORIGIN_ADDRESSED_NOTICE_TYPES, ROUTING_RECEIPT_FIELDS, historical_terminal_projection
+from ouroboros.room_appearances import frame_project, room_project
 from ouroboros.store import StoreError, StoreMigrating
 from ouroboros.subagent_messages import SUBAGENT_MESSAGE_FIELDS, delegated_activity_meta, executor_observation_meta, initiator_meta, subagent_message_meta
 from ouroboros.task_results import TASK_COST_META_FIELDS as _TASK_COST_META_FIELDS
@@ -547,8 +548,8 @@ def _annotate_terminal_task_truth(
             if not task_id or message.get("system_type") in ("project_question_pointer", *ORIGIN_ADDRESSED_NOTICE_TYPES):
                 continue
             if message.get("system_type") in {"project_started", "project_handoff"} and not message.get("task_name"):
-                # Legacy rows reuse this request's result read, never split the prose label.
-                message["task_name"] = task_presentation_name(cache.get(task_id))
+                message["task_name"] = task_presentation_name(  # a legacy row reuses this request's result read;
+                    cache.get(task_id), fallback=message.get("project_name") or "Task")  # nameless: its Project
             # Selected receipt events keep their physical identity, but show current task-result truth.
             row_id = str(message.get("card_row_id") or "")
             if message.get("card_row") == "reviews" and row_id.startswith("merge-receipt:"):
@@ -703,7 +704,6 @@ def _collect_chat_rows(
     # Quiz lifecycle merge (#Q-2b): the chat row froze the card at ask time ("open"); the durable
     # truth is the owner_quiz task-result projection, read once per asking task in this call.
     quiz_projection_cache: Dict[str, Dict[str, Any]] = {}
-    question_projects = None
     question_keys = set()
 
     def _quiz_source(task_id):
@@ -774,14 +774,11 @@ def _collect_chat_rows(
             pointer_chat = getattr(row_matches_thread, "question_project_chat", lambda row: 0)(entry)
             if pointer_chat:
                 from ouroboros.project_dialogue import project_question_pointer
-                from ouroboros.projects_registry import list_reserved_projects
 
-                if question_projects is None:
-                    question_projects = {row["chat_id"]: row for row in list_reserved_projects(chat_path.parent.parent)}
                 tid, qid = str(entry.get("task_id") or ""), str(entry["quiz"].get("quiz_id") or "")
                 source = _quiz_source(tid)
                 pointer = project_question_pointer(entry, source["quizzes"].get(qid) or answered.get((tid, qid)),
-                                                   question_projects.get(pointer_chat), source["wait"])
+                                                   room_project(chat_path.parent.parent, pointer_chat, strict=True), source["wait"])
                 if pointer and (tid, qid) not in question_keys:
                     question_keys.add((tid, qid))
                     pointer.update(_history_identity(entry))
@@ -831,6 +828,7 @@ def _collect_chat_rows(
                             "completion_reason", "delivery_id", "handoff_id", "wake_summary"):
                     if key in entry:
                         rec[key] = str(entry.get(key) or "")
+            rec.update(frame_project(chat_path.parent.parent, entry))
             annotation = _user_annotation(role, rec["client_message_id"], chat_annotations)
             if origin := getattr(row_matches_thread, "origin_identity", lambda entry: "")(entry):
                 rec["origin_id"] = origin

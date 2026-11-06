@@ -44,26 +44,36 @@ def _doomed(entry: pathlib.Path, root: pathlib.Path, pin: Any, serving: str, cut
 
 
 def prune_unpinned_runtimes(*, now: Optional[float] = None) -> Dict[str, Any]:
-    """One pass over ``state/cx``, its ``node/`` and ``cache/`` (module docstring); never raises."""
+    """One pass over ``state/cx``, its ``node/`` and ``cache/`` (module docstring); never raises. Reports the
+    shared retirer shape (``maintenance_jobs.pass_report``): ``removed`` names, ``released`` their count,
+    ``holds`` the doomed entries this pass could not remove (``removal_failed``: in use or survived their
+    removal; the next pass retries them), ``errors`` nothing of its own; a pass that judged nothing says why
+    in ``skipped``."""
     from ouroboros import claudexor_runtime as runtime
     from ouroboros.claudexor_daemon import owned_engine_version
+    from ouroboros.maintenance_jobs import Holds, pass_report
     from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
     from ouroboros.force_remove import force_rmtree as _force_rmtree
 
-    report: Dict[str, Any] = {"removed": [], "errors": []}
+    removed: List[str] = []
+    holds = Holds()
+
+    def shaped(**extra: Any) -> Dict[str, Any]:
+        return {**pass_report(removed, holds), "removed": removed, **extra}
+
     try:
         serving, pin, root = owned_engine_version(), runtime.get_runtime_manager().pin, runtime.managed_runtime_root()
     except Exception as exc:  # a pin that cannot be read keeps everything
-        return {**report, "skipped": f"pin_unreadable: {type(exc).__name__}"}
+        return shaped(skipped=f"pin_unreadable: {type(exc).__name__}", rested=True)
     if not serving:
-        return {**report, "skipped": "serving_version_unproven"}
+        return shaped(skipped="serving_version_unproven", rested=True)
     if pin is None or not root.is_dir():
-        return {**report, "skipped": "nothing_installed"}
+        return shaped(skipped="nothing_installed", rested=True)
     lock = root / runtime._INSTALL_LOCK_FILENAME
     fd = acquire_exclusive_file_lock(lock, timeout_sec=0, stale_sec=runtime._INSTALL_LOCK_STALE_SEC,
                                      metadata=f"pid={os.getpid()} retiring unpinned runtimes\n")
     if fd is None:
-        return {**report, "skipped": "install_in_progress"}
+        return shaped(skipped="install_in_progress", rested=True)
     aside: List[Tuple[str, pathlib.Path]] = []
     try:
         cutoff = (time.time() if now is None else now) - _LEFTOVER_AGE_SEC
@@ -74,20 +84,20 @@ def prune_unpinned_runtimes(*, now: Optional[float] = None) -> Dict[str, Any]:
                         continue
                     if not entry.is_dir():
                         entry.unlink()
-                        report["removed"].append(entry.name)
+                        removed.append(entry.name)
                         continue
                     moved = entry if entry.name.startswith(".") else entry.with_name(f".old-{uuid.uuid4().hex[:8]}")
                     if moved != entry:
                         os.replace(entry, moved)
                     aside.append((entry.name, moved))
                 except OSError as exc:  # in use (Windows) or vanished: kept, the next pass retries
-                    report["errors"].append(f"{entry.name}: {type(exc).__name__}")
+                    holds.note("removal_failed", f"{entry.name}: {type(exc).__name__}")
     finally:
         release_exclusive_file_lock(lock, fd)
     for name, moved in aside:
         _force_rmtree(moved)
         if moved.exists():  # renamed aside: a later pass retries it as a leftover
-            report["errors"].append(f"{name}: survived its removal")
+            holds.note("removal_failed", f"{name}: survived its removal")
         else:
-            report["removed"].append(name)
-    return report
+            removed.append(name)
+    return shaped()

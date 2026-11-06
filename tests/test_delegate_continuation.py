@@ -416,7 +416,7 @@ def test_readonly_continuation_starts_while_the_writers_patch_awaits_disposition
 
     scratch_parent = tmp_path / "temp"
     scratch_parent.mkdir()
-    monkeypatch.setattr(test_environment, "default_temp_parent", lambda: scratch_parent)
+    monkeypatch.setattr(test_environment, "session_scratch_parent", lambda: scratch_parent)
     row = {"writeMechanism": "fs_sandbox", "accessControl": {
         "auxiliaryWritableRoots": auxiliary_supported}}
     first, _p, ctx, _calls = _start(
