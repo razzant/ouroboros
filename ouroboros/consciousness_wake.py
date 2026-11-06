@@ -11,9 +11,9 @@ is the view's), then every answerable owner card. The wake accepts a chain posit
 identities (``_transitions_since``) and the last journal sequence, never the alarm's finish time, so a fact written
 during a wake or late under an older stamp reaches the next one; a wake never activates the journal.
 ``bind_wake_observation`` stores the whole observation as an exact source under the registered wake; a request that
-cannot fit it gets composition, window, coverage, that pointer, my human's words whole and every other person's row by
-author, size and address, else only my human's words with the others counted, else the bare pointer (first build:
-``context_input_selection.rescued_start``; rounds: ``loop_model_call``).
+cannot fit it gets its composition, window, coverage and that pointer with my human's card answers whole (their other
+words are in my view), else the bare pointer (``overview_text``; first build: ``context_input_selection.rescued_start``;
+rounds: ``loop_model_call``).
 ``wake_task_metadata`` is the wake's origin/authority envelope for ``handle_wake_direct`` (``consciousness_authority``).
 """
 

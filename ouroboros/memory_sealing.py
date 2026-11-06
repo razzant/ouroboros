@@ -123,6 +123,8 @@ def covered_rooms(root, record):
 
     covers = record.get("covers") if isinstance(record.get("covers"), dict) else {}
     rooms = covers.get("rooms") if record.get("kind") == "page" and isinstance(covers.get("rooms"), dict) else {}
+    if not rooms:  # a note, an account, a page over one room: no labeler to build (it reads two registries)
+        return []
     label, found = room_labeler(root), []
     label.warm(list(rooms))
     for room, refs in rooms.items():
