@@ -6,6 +6,14 @@ const COST_BUDGET_INPUTS = {
     OUROBOROS_PER_TASK_COST_USD: 's-per-task-cost',
 };
 
+// The setup contract is authoritative once /api/settings answers. Keep a useful
+// non-empty explanation during the request and on a failed read so aria-describedby
+// never points at an empty node; the fallback is deliberately shorter than the
+// canonical note and is replaced whenever the contract is available.
+const BUDGET_NOTE_FALLBACK =
+    'Budget limits use known spend: Total Budget applies globally, while Per-task Cost Cap applies to one root task tree. '
+    + 'Unpriced calls remain unknown and are not counted as $0; reservations and unresolved charges are not counted as spending.';
+
 function readPositiveBudget(id) {
     const input = document.getElementById(id);
     const raw = String(input?.value || '').trim();
@@ -130,14 +138,14 @@ export function initCosts({ state, mount }) {
                 <div class="costs-budget-fields">
                     <div class="form-field ui-field">
                         <label for="s-budget">Total Budget ($)</label>
-                        <input id="s-budget" class="ui-control" type="number" value="200">
+                        <input id="s-budget" class="ui-control" type="number" value="200" aria-describedby="costs-budget-help">
                     </div>
                     <div class="form-field ui-field">
                         <label for="s-per-task-cost">Per-task Cost Cap ($)</label>
-                        <input id="s-per-task-cost" class="ui-control" type="number" value="50" aria-describedby="costs-per-task-note">
-                        <div class="settings-inline-note ui-field-help" id="costs-per-task-note">Hard dispatch cap for the whole root task tree, reached when its known spend (confirmed and estimated) gets there. In-flight calls settle normally; increasing the cap does not auto-resume paused work.</div>
+                        <input id="s-per-task-cost" class="ui-control" type="number" value="50" aria-describedby="costs-budget-help">
                     </div>
                 </div>
+                <div class="settings-inline-note ui-field-help" id="costs-budget-help" role="note">${BUDGET_NOTE_FALLBACK}</div>
                 <button class="btn btn-save costs-budget-save" id="btn-save-budget">Save Budget</button>
                 <div id="budget-save-status" class="settings-inline-status"></div>
             </div>
@@ -243,6 +251,12 @@ export function initCosts({ state, mount }) {
             const resp = await apiFetch('/api/settings', { cache: 'no-store' });
             const s = await resp.json().catch(() => ({}));
             const fields = s?._meta?.setup_contract?.budgetFields || [];
+            const note = fields.map((field) => String(field.note || '').trim()).find(Boolean) || '';
+            const noteEl = document.getElementById('costs-budget-help');
+            if (noteEl && note) {
+                noteEl.textContent = note;
+                noteEl.hidden = false;
+            }
             fields.forEach((field) => {
                 const input = document.getElementById(COST_BUDGET_INPUTS[field.settingKey]);
                 if (!input) return;

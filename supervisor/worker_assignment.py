@@ -817,6 +817,26 @@ def _choose_candidate(queue, remaining, unresolved_invalid_id_set, refused_this_
         return chosen_idx, False
 
 
+def _forecast_or_unknown(assign):
+    """One assignment pass. A pass that ends before growth recorded its forecast (a busy serializer,
+    a fenced pool, unreadable authority, an exception) leaves that forecast unknown: an older
+    value is never published as this pass's."""
+    @functools.wraps(assign)
+    def one_pass() -> None:
+        from supervisor.worker_pool_lifecycle import demand_forecast_passes, record_demand_forecast
+
+        passes = demand_forecast_passes()
+        try:
+            assign()
+        finally:
+            if demand_forecast_passes() == passes:
+                record_demand_forecast(None, reason="pool_disabled" if _pool()._WORKER_POOL_DISABLED_REASON
+                                       else "assignment_pass_incomplete")
+
+    return one_pass
+
+
+@_forecast_or_unknown
 def assign_tasks() -> None:
     from supervisor import queue
     from supervisor.state import budget_remaining

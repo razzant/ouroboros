@@ -35,6 +35,16 @@ def queue_stamp(document: dict, *, boot: bool = False) -> dict:
     return stamp if document.get("generation") and document["generation"] == stamp.get("generation") else {}
 
 
+def pool_observation_status(document: dict) -> str:
+    """``unknown`` when the publisher could not measure its pool (``queue_publication._pool_counts``), else
+    ``observed``. A document from before the status existed is unknown only when its disablement says
+    ``unknown``: that publisher's failed measurement wrote zeros, which are no count."""
+    status = document.get("pool_observation_status")
+    if status is None:
+        return "unknown" if document.get("worker_pool_disabled_reason") == "unknown" else "observed"
+    return "observed" if status == "observed" else "unknown"
+
+
 def expand_shared(document: dict) -> dict:
     """Resolve every ``{"$shared": address}`` in the rows from the document's own table, in place.
 

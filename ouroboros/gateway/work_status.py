@@ -57,7 +57,7 @@ REASON_TEXT = {
     "model_access": "The model needs you: sign in or restore access",
     "model_wait": "Waiting for the model to become available",
     "project_admission": "Waiting for Project verification",
-    "queued": "Waiting for a free worker",
+    "queued": "",  # a queued row records no cause: never claim one (a free worker)
     "review_work_finishing": "Review work finishing",
     "external_runs_unconfirmed": ("1 external run may still be running", "{count} external runs may still be running"),
     # A sleeping episode's chosen helpers a stop holds, by who releases them (classify_member's release).

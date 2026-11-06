@@ -302,9 +302,10 @@ def normalize_budget_profile(value: Any) -> Dict[str, Any]:
     in-task cost stop as a percentage of the budget remaining at task start.
     None -> no explicit percentage: an ordinary task has no early cost stop of
     the host's own (owner 2026-10-07, #1128 — formerly the historical 50%
-    default); new paid calls are refused only when known spend reaches the real
-    global/root/group limits, and a producer's allowance (a consciousness wake)
-    still stops at its actual value. A positive value keeps the authored math
+    default); only the real limits refuse new calls once known spend reaches
+    them, every model call at the root and group limits and paid calls at the
+    global one, and a producer's allowance (a consciousness wake) still stops
+    at its actual value. A positive value keeps the authored math
     (that share of the starting wallet, min the per-task cap minus a planning
     margin). 0 -> NO in-task cost stop at all (bench contract). The ceiling is
     resolved in ``task_pacing.resolve_cost_ceiling`` (typed; 0 and None map to

@@ -634,6 +634,12 @@ export const apiClient = {
         items, ...(expectedContentHash ? { expected_content_hash: expectedContentHash } : {}),
         ...(enableAfterGrant ? { enable_after_grant: true } : {}),
     }, { headers: { Prefer: 'respond-async' } }),
+    /** Every active and deleting Project, uncapped (the sidebar reads it only when asked to look beyond its feed).
+     *  @returns {Promise<import('./client_contract_types.js').ProjectListResponse>} */
+    projectList: ({ signal } = {}) => fetchJson('/api/projects?all=1', { cache: 'no-store', signal }),
+    /** One Project by its id while active or deleting; an empty list when it is neither.
+     *  @returns {Promise<import('./client_contract_types.js').ProjectListResponse>} */
+    projectById: (projectId) => fetchJson(`/api/projects?id=${encodeURIComponent(projectId)}`, { cache: 'no-store' }),
     projectFromTask: (taskId, id, name) => jsonPost('/api/projects/from-task', { task_id: taskId, id, name }),
     /** @param {import('./api_types.js').ProjectCreateRequest} payload */
     projectCreate: (payload) => jsonPost('/api/projects', payload),

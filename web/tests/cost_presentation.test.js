@@ -456,12 +456,38 @@ test('#498 the scoped carrier answers the whole money question from one bucket',
     // An estimated $0.00 is open, so it never reads as a settled free result.
     assert.deepEqual(costPresentationMeta(carrier({ tracked_amount: 0, tracked_final: false, accounting_open: true })),
         ['up to $0.00']);
-    // Nothing priced anything: an empty ledger and an all-unpriced one both say unknown.
+    // An open empty ledger is pending; a closed all-unpriced one is not free.
     assert.deepEqual(costPresentationMeta(carrier({ tracked_amount: null, tracked_final: false, accounting_open: true })),
-        ['Cost unknown']);
+        ['Cost pending']);
     assert.deepEqual(costPresentationMeta(carrier({
         tracked_amount: null, has_unpriced: true, tracked_final: false, accounting_open: true,
-    })), ['Cost unknown']);
+    })), ['Cost pending']);
+    assert.deepEqual(costPresentationMeta(carrier({
+        tracked_amount: null, has_unpriced: false, tracked_final: false, accounting_open: true,
+    }), { ledger_integrity_degraded: true }), ['Cost unknown']);
+    assert.deepEqual(costPresentationMeta(carrier({
+        tracked_amount: null, has_unpriced: true, tracked_final: false, accounting_open: true,
+    }), { cost_custody: { status: 'unavailable' } }), ['Cost unknown']);
+    // A known subtotal survives an unreadable custody view or a damaged ledger,
+    // qualified as its producer qualified it; only the missing amount reads unknown.
+    assert.deepEqual(costPresentationMeta(carrier({
+        tracked_amount: 2, has_unpriced: true, tracked_final: false, accounting_open: true,
+    }), { cost_custody: { status: 'unavailable' } }), ['Tracked: up to $2.00']);
+    assert.deepEqual(costPresentationMeta(carrier({
+        tracked_final: false, accounting_open: true,
+    }), { ledger_integrity_degraded: true }), ['up to $1.20']);
+    assert.equal(costPresentationDetail(carrier({
+        tracked_amount: 2, has_unpriced: true, tracked_final: false, accounting_open: true,
+    }), { cost_custody: { status: 'unavailable' } }), 'Cost: some steps have no price, so Tracked counts only the priced steps.');
+    assert.equal(costPresentationDetail(carrier({
+        tracked_amount: null, has_unpriced: true, tracked_final: false, accounting_open: true,
+    }), { cost_custody: { status: 'unavailable' } }), '');
+    assert.deepEqual(costPresentationMeta(carrier({
+        tracked_amount: null, has_unpriced: true, tracked_final: true, accounting_open: false,
+    })), ['Cost not priced']);
+    assert.equal(costPresentationDetail(carrier({
+        tracked_amount: null, has_unpriced: true, tracked_final: true, accounting_open: false,
+    })), 'Cost: settled usage has no price, so it is not counted as known spend or as $0.');
     // Mixed: the tracked number is a subtotal and says so by its own word; the reason is
     // stated in words in the card's details (owner 2026-10-12, option B), never in a tooltip.
     const why = 'Cost: some steps have no price, so Tracked counts only the priced steps.';
@@ -469,9 +495,12 @@ test('#498 the scoped carrier answers the whole money question from one bucket',
     assert.equal(costPresentationDetail(carrier({ has_unpriced: true })), why);
     assert.deepEqual(costPresentationMeta(carrier({ tracked_amount: 0, has_unpriced: true })), ['Tracked: $0.00']);
     assert.equal(costPresentationDetail(carrier({ tracked_amount: 0, has_unpriced: true })), why);
-    // Nothing to explain where the amount stands alone or is unknown.
-    for (const over of [{}, { tracked_final: false, accounting_open: true }, { tracked_amount: null, has_unpriced: true }])
-        assert.equal(costPresentationDetail(carrier(over)), '');
+    // Open tracked accounting and closed unpriced accounting each explain their state.
+    assert.equal(costPresentationDetail(carrier({})), '');
+    assert.equal(costPresentationDetail(carrier({ tracked_final: false, accounting_open: true, has_unpriced: true })),
+        'Cost: some steps have no price, so Tracked counts only the priced steps.');
+    assert.equal(costPresentationDetail(carrier({ tracked_amount: null, has_unpriced: true, accounting_open: false })),
+        'Cost: settled usage has no price, so it is not counted as known spend or as $0.');
     // No accountable row at all is not a free result and not a money line.
     assert.deepEqual(costPresentationMeta(carrier({ has_rows: false, tracked_amount: null })), []);
     // No carrier at all defers to the legacy derivation.
@@ -490,7 +519,7 @@ test('#498 a card with a carrier uses it; legacy frames keep the old derivation'
             scope: 'root_tree', tracked_amount: null, has_unpriced: true,
             tracked_final: false, accounting_open: true, has_rows: true,
         },
-    }), ['Cost unknown']);
+    }), ['Cost pending']);
     // An unreadable ledger still outranks the carrier.
     assert.deepEqual(taskCostMeta({
         cost_accounting_status: 'unavailable', cost_presentation: null,
@@ -549,7 +578,20 @@ test('#498 legacy null tree is never replaced by own zero; empty damaged ledger 
     assert.deepEqual(taskCostMeta({ accounted_upper_bound_usd_with_children: null,
         accounted_upper_bound_usd: 0, cost_final: true }), ['Cost unknown']);
     assert.deepEqual(costPresentationMeta({ scope: 'root_tree', tracked_amount: null,
+        has_rows: true, has_unpriced: false, tracked_final: false, accounting_open: true }), ['Cost pending']);
+    assert.deepEqual(costPresentationMeta({ scope: 'root_tree', tracked_amount: null,
+        has_rows: false, has_unpriced: true, tracked_final: false, accounting_open: true }), ['Cost pending']);
+    assert.deepEqual(costPresentationMeta({ scope: 'root_tree', tracked_amount: null,
         has_rows: false, has_unpriced: false, tracked_final: false, accounting_open: true }), ['Cost unknown']);
+    assert.deepEqual(taskCostMeta({ cost_presentation: { scope: 'root_tree', tracked_amount: null,
+        has_rows: false, has_unpriced: true, tracked_final: false, accounting_open: true,
+    }, cost_custody: { status: 'unavailable' } }), ['Cost unknown']);
+    assert.deepEqual(taskCostMeta({ cost_presentation: { scope: 'root_tree', tracked_amount: null,
+        has_rows: false, has_unpriced: false, tracked_final: false, accounting_open: true,
+    }, ledger_integrity_degraded: true }), ['Cost unknown']);
+    assert.deepEqual(taskCostMeta({ cost_presentation: { scope: 'root_tree', tracked_amount: 2,
+        has_rows: true, has_unpriced: true, tracked_final: false, accounting_open: true,
+    }, cost_custody: { status: 'unavailable' } }), ['Tracked: up to $2.00']);
 });
 
 test('#498 exact live subtotal cannot freeze a still-running root heartbeat', () => {

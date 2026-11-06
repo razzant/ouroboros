@@ -520,6 +520,9 @@ def test_setup_contract_has_no_secret_values():
     contract = build_setup_contract("web")
     text = repr(contract)
     budget_fields = {field["settingKey"]: field for field in contract["budgetFields"]}
+    assert budget_fields["TOTAL_BUDGET"]["note"] == budget_fields["OUROBOROS_PER_TASK_COST_USD"]["note"]
+    assert "known spend" in budget_fields["TOTAL_BUDGET"]["note"]
+    assert "not counted as $0" in budget_fields["TOTAL_BUDGET"]["note"]
 
     assert contract["hostMode"] == "web"
     assert "providerFields" in contract

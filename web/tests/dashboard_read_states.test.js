@@ -532,7 +532,7 @@ test('Costs numeric inputs have visible associated names and the task cap descri
     }
     const input = mount.querySelector('#s-per-task-cost');
     const description = mount.querySelector(`#${input.getAttribute('aria-describedby')}`);
-    assert.match(description.textContent, /whole root task tree/);
+    assert.match(description.textContent, /root task tree/);
 });
 
 test('Dashboard binds stored, keyboard and programmatic selection to the same named panels', async (t) => {

@@ -365,7 +365,7 @@ HTTP_SHAPES: dict[str, Shape] = {
     "POST /api/chat/upload": Shape("200:UploadResponse 400:ErrorResponse", "multipart", note="form field file"),
     "DELETE /api/chat/upload": Shape("200:ChatUploadDeleteResponse 400,404,409:ErrorResponse", "ChatUploadDeleteRequest",
                                      note="pending uploads only; a repeat answers 404"),
-    "GET /api/projects": Shape("200:ProjectListResponse 500:ErrorResponse"),
+    "GET /api/projects": Shape("200:ProjectListResponse 500:ErrorResponse", query="all chat_id id"),
     "POST /api/projects": Shape("200:ProjectCreateResponse 400,401,409,500:ErrorResponse", "ProjectCreateRequest",
                                 note="401 error_code auth_required: the git clone needs credentials (not the network gate)"),
     "POST /api/projects/from-task": Shape("200:ProjectFromTaskResponse 400,409,500:ErrorResponse", "ProjectFromTaskRequest",

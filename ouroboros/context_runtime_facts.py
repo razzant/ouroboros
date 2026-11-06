@@ -233,20 +233,57 @@ def _queue_context_fact(task: Dict[str, Any]) -> Dict[str, Any]:
             "max_active_subagents_per_root": int(get_max_active_subagents_per_root())}
     if snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid"):
         return {**fact, "note": "Queue observation unavailable; current capacity is unknown."}
+    from ouroboros.project_admission import project_hold_fact
+    from ouroboros.queue_observation import pool_observation_status
     from ouroboros.task_carrier import execution_kind
+    from ouroboros.work_stop import continuation_refusal, current_stop
 
     for key in ("running", "pending"):  # a correspondent's Presence turn is its place's, never counted as the owner's
         rows = snapshot.get(key)
         fact[key + "_count"] = sum(isinstance(row, dict) and execution_kind(row.get("task") or {}) != "presence"
                                    for row in rows) if isinstance(rows, list) else None
-    fact["reaping_count"] = snapshot.get("reaping_count")
-    fact["worker_total"] = snapshot.get("worker_total")  # project slots: what max_workers bounds; idle is 0
-    fact["lane_carrier_total"] = snapshot.get("lane_carrier_total")  # the conversation lane's carriers, apart
+    pending_rows = [row for row in snapshot.get("pending") or () if isinstance(row, dict)
+                    and execution_kind(row.get("task") or {}) != "presence"]
+    budget_fences = {str(fence.get("root_task_id") or ""): fence
+                     for fence in snapshot.get("budget_root_fences") or ()
+                     if isinstance(fence, dict)}
+    # Compose the existing hold owners: current_stop, project admission, and continuation refusal.
+    # A budget-pause marker without a known reason remains uncounted; no marker classifier lives here.
+    pending_stop_status = "observed"
+    pending_stops = 0
+    if isinstance(snapshot.get("pending"), list):
+        for row in pending_rows:
+            try:
+                task_row = row.get("task") or {}
+                if (current_stop(task_row, {"budget": budget_fences})
+                        or project_hold_fact(task_row) or continuation_refusal(task_row)):
+                    pending_stops += 1
+            except Exception:
+                pending_stop_status = "unknown"
+                break
+    else:
+        pending_stop_status = "unknown"
+    fact["pending_paused_or_held_count"] = pending_stops if pending_stop_status == "observed" else None
+    fact["pending_paused_or_held_status"] = pending_stop_status
+    observed = pool_observation_status(snapshot)
+    fact["pool_observation_status"] = observed
+    for key in ("max_workers", "worker_total", "active_worker_count", "busy_worker_count", "booting_count",
+                "reaping_count", "retiring_count", "lane_carrier_total"):
+        # worker_total: project slots that exist (the pool grows on demand below the ceiling); the
+        # conversation lane's carriers are apart. A snapshot's max_workers is its writer's ceiling.
+        fact["recorded_max_workers" if key == "max_workers" else key] = (
+            snapshot.get(key) if observed == "observed" else None)
+    demand = snapshot.get("project_demand")  # the last assignment pass's growth forecast, as it published it
+    fact["project_demand"] = dict(demand) if isinstance(demand, dict) else {"status": "not_recorded"}
     assignable = snapshot.get("assignable_idle_workers")
-    if assignable is not None:
+    if observed != "observed":
+        fact["free_worker_slots"] = None
+        fact["free_worker_slots_basis"] = "unknown_pool_observation"
+    elif assignable is not None:
         fact["free_worker_slots"] = max(0, int(assignable))
         fact["free_worker_slots_basis"] = "recorded_assignable_idle_workers"
-    elif fact["running_count"] is not None:
+    elif "assignable_idle_workers" not in snapshot and fact["running_count"] is not None:
+        # Only a snapshot from before the pool was published: a recorded null is unknown, never spare.
         fact["free_worker_slots"] = max(0, fact["max_workers"] - fact["running_count"]
                                           - int(fact["reaping_count"] or 0))
         fact["free_worker_slots_basis"] = "legacy_estimate_from_configured_limit"
@@ -257,6 +294,11 @@ def _queue_context_fact(task: Dict[str, Any]) -> Dict[str, Any]:
         "Last recorded queue counts at ts; freshness and age were measured when this context "
         "was built and do not refresh during the task. Stale or unknown observations do not "
         "establish current load. Legacy free-slot estimates are not measured capacity. "
+        "pending_count counts rows, not runnable demand: project_demand.admissible_pending is what the "
+        "scheduler's last pass could dispatch (capped by the ceiling), paused or held rows say so explicitly, and "
+        "other rows record no wait cause here. free_worker_slots is assignable idle existing capacity, not headroom; "
+        "the configured ceiling applies on the next task/restart. booting and reaping overlap for fresh slots. "
+        "active_worker_count is dispatch-enabled capacity, not work. "
         "Scheduling owns admission; these observations reserve no slots."
     )
     return fact

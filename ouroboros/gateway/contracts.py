@@ -797,8 +797,8 @@ class StateResponse(WorkStateFields):
     accounting: Dict[str, Any]
     # Multi-project sidebar feed: compact registered projects [{id, name, chat_id, working_dir, last_active_at, ...}].
     projects: list
-    # COMPLETE (uncapped) registered project chat_ids — the live WS fan-out isolation SSOT, unlike `projects`.
-    project_chat_ids: list
+    project_listable_count: Optional[int]  # active/deleting Projects the sidebar can list; null when unavailable
+    project_chat_ids: list  # COMPLETE (uncapped) registered chat_ids; the live WS fan-out isolation SSOT
     # Main's room revision (its standalone messages, the kind a Project's visible_revision counts); null while unreadable.
     main_visible_revision: NotRequired[Optional[int]]
     # Task->project bindings ({task_id: {project_id, chat_id, project_name}}): a bound card hides the stray
