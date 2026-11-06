@@ -910,7 +910,7 @@ def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]]
         detail = "Evolution task is running now."
     elif isinstance(queued_task, dict):
         status = "queued"
-        detail = "Evolution task is queued and waiting for a worker."
+        detail = "Evolution task is queued."
     elif not accounting_available:
         status = "accounting_unavailable"
         detail = "Cost accounting is unavailable; evolution dispatch is paused without changing the campaign."

@@ -15,8 +15,8 @@
  */
 /** @typedef {Object} StateResponse
  * @property {number} uptime
- * @property {number} workers_alive
- * @property {number} workers_total
+ * @property {number} workers_alive  // live worker slots of both lanes; inline carriers may be thread-backed
+ * @property {number} workers_total  // every slot of both lanes; never the project ceiling or assignable capacity
  * @property {number} pending_count
  * @property {number} running_count
  * @property {?number} spent_usd
