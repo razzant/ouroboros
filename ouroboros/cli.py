@@ -160,7 +160,7 @@ def _status_command(args: argparse.Namespace) -> int:
         _print_json({"health": health, "state": state})
         return 0
     print(f"Ouroboros {health.get('version', '?')} at {client.base_url}")
-    print(f"branch={state.get('branch', '?')} sha={state.get('sha', '?')} workers={state.get('workers_alive', 0)}/{state.get('workers_total', 0)}")
+    print(f"branch={state.get('branch', '?')} sha={state.get('sha', '?')} worker_slots={state.get('workers_alive', 0)}/{state.get('workers_total', 0)} (project pool and conversation lane; inline carriers may be thread-backed)")
     print(f"pending={state.get('pending_count', 0)} running={state.get('running_count', 0)} runtime_mode={state.get('runtime_mode', '?')}")
     return 0
 

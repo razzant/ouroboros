@@ -408,7 +408,12 @@ def _write_repo_manifest(repo_dir: pathlib.Path, manifest: dict[str, Any]) -> No
     # repo generation and re-bootstrap over a healthy checkout.
     from ouroboros.utils import atomic_write_json
 
-    atomic_write_json(_managed_meta_path(repo_dir), manifest, trailing_newline=True)
+    payload = dict(manifest)
+    # The launcher marker is only meaningful for the checkout it describes;
+    # retaining its canonical path prevents a copied/stale metadata file from
+    # authorizing managed reset/bootstrap behavior in another checkout.
+    payload["managed_repo_dir"] = str(repo_dir.resolve(strict=False))
+    atomic_write_json(_managed_meta_path(repo_dir), payload, trailing_newline=True)
 
 
 def _mark_bootstrap_pin_pending(repo_dir: pathlib.Path) -> None:

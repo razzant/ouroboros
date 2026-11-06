@@ -17,6 +17,9 @@ function lift(name) {
     return source.slice(from + 1, until + 2);
 }
 
+// What the Projects list says of the rows it holds (projects_nav.js `unreadRows`): here the feed's, or those a case adds.
+const heldRows = (feed, beyond = []) => ({ unreadRows: () => [...(feed() || []).filter((row) => row._unread), ...beyond] });
+
 function harness({ revision = null, seen = null, loaded = true, page = 'files', answer = () => ({}) } = {}) {
     const posts = [], badges = [], acks = [];
     const context = vm.createContext({
@@ -117,6 +120,7 @@ test('the Projects number sums the unread messages of the unread rows', () => {
     const context = vm.createContext({
         ...readAhead,
         navProjectsCount: count,
+        projectsNav: heldRows(() => context.lastProjectRows),
         state: { projectSeenRevision: { a: 1, b: 4, c: 0 } },
         lastProjectRows: [{ id: 'a', visible_revision: 4, _unread: true }, { id: 'b', visible_revision: 4, _unread: false },
             { id: 'c', visible_revision: 2, _unread: true }, { id: 'd', visible_revision: 3, _unread: false }],
@@ -139,6 +143,7 @@ test('a message read in full in another room leaves the counts without moving a 
         assert.equal(main.context.state.mainSeenRevision, 40);
         const count = { textContent: '', title: '', attrs: {}, setAttribute() {}, removeAttribute() {} };
         const context = vm.createContext({ ...readAhead, navProjectsCount: count, state: { projectSeenRevision: { nova: 1 } },
+            projectsNav: heldRows(() => context.lastProjectRows),
             lastProjectRows: [{ id: 'nova', chat_id: 5551, visible_revision: 4, _unread: true }] });
         vm.runInContext(`${lift('paintProjectsCount')}\nglobalThis.paint = paintProjectsCount;`, context);
         context.paint();
@@ -156,6 +161,7 @@ test("another client's read reaches this one at its next state snapshot, a late 
     const context = vm.createContext({
         ...readAhead,
         navProjectsCount: count,
+        projectsNav: heldRows(() => context.lastProjectRows),
         state: { mainVisibleRevision: 72, mainSeenRevision: 70, mainSeenLoaded: true, activePage: 'files',
             projectSeenRevision: { nova: 1 } },
         lastProjectRows: [{ id: 'nova', chat_id: 7302, visible_revision: 4, _unread: true }],
@@ -183,16 +189,16 @@ test("another client's read reaches this one at its next state snapshot, a late 
     assert.deepEqual([context.api.mainUnreadCount(), count.textContent], [1, '2']);
 });
 
-test("a snapshot showing only a Project unread reads another client's record as well", async () => {
-    const host = { main_seen_revision: 90, project_seen_revision: { vega: 2 }, read_ahead_revisions: { 7303: [[5, 5]] } };
+function snapshotHarness({ host, beyond = [], seen }) {
     const answers = [];
     const count = { textContent: '', title: '', attrs: {}, setAttribute() {}, removeAttribute() {} };
     const context = vm.createContext({
         ...readAhead,
         navProjectsCount: count,
+        heldRows, beyond,
         navState: { activeProjectId: null },
         state: { mainVisibleRevision: 90, mainSeenRevision: 90, mainSeenLoaded: true, activePage: 'files',
-            projectSeenRevision: { vega: 2 } },
+            projectSeenRevision: seen },
         closeProjectPanel() {}, patchProjectActivityMarkers() {}, syncNavigationState() {}, acknowledgeProjectAfterPaint() {},
         updateUnreadBadge() {},
         fetchJson: () => new Promise((resolve) => { answers.push(() => resolve(JSON.parse(JSON.stringify(host)))); }),
@@ -200,11 +206,31 @@ test("a snapshot showing only a Project unread reads another client's record as 
     vm.runInContext(['renderProjectsNav', 'mergeMainSeenRevision', 'mergeProjectSeenRevisions', 'refreshSharedProjectSeen',
         'paintProjectsCount'].map(lift).join('\n')
         + '\nlet sharedSeenRead = null, knownProjectsJson = null, lastProjectRows = null, projectActivityIndex = {};'
+        + '\nconst projectsNav = heldRows(() => lastProjectRows, beyond);'
         + '\nfunction paintProjectsNav() { paintProjectsCount(); }\nglobalThis.api = { renderProjectsNav };', context);
+    return { context, count, answers };
+}
+
+test("a snapshot showing only a Project unread reads another client's record as well", async () => {
+    const host = { main_seen_revision: 90, project_seen_revision: { vega: 2 }, read_ahead_revisions: { 7303: [[5, 5]] } };
+    const { context, count, answers } = snapshotHarness({ host, seen: { vega: 2 } });
     context.api.renderProjectsNav([{ id: 'vega', chat_id: 7303, visible_revision: 5, lifecycle: 'active' }], [7303]);
     assert.equal(count.textContent, '3');  // 3, 4 and 5: the other client read 5 in Main, this one does not know yet
     assert.equal(answers.length, 1, 'Main shows nothing unread: the Project row alone reads the shared cursors again');
     answers.shift()();
     await flush();
     assert.equal(count.textContent, '2');
+});
+
+test("a room beyond the feed counts and asks after another client's read though the feed shows nothing unread", async () => {
+    const host = { main_seen_revision: 90, project_seen_revision: { old: 3 }, read_ahead_revisions: {} };
+    const old = { id: 'old', chat_id: 7304, visible_revision: 3 };
+    const { context, count, answers } = snapshotHarness({ host, beyond: [old], seen: { old: 1 } });
+    context.api.renderProjectsNav([{ id: 'vega', chat_id: 7303, visible_revision: 0, lifecycle: 'active' }], [7303, 7304]);
+    assert.equal(count.textContent, '2', 'revisions 2 and 3 of the room a complete list showed');
+    assert.equal(answers.length, 1, 'that room alone reads the shared cursors again');
+    context.beyond.length = 0;  // the room reads as read once its cursor has moved, as the list module would say
+    answers.shift()();
+    await flush();
+    assert.equal(count.textContent, '');
 });

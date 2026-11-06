@@ -12,6 +12,7 @@ from typing import Any
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from ouroboros.gateway._helpers import json_exception, request_drive_root, request_repo_dir
 from ouroboros.project_admission import ProjectAdmissionError
@@ -284,14 +285,25 @@ def _emit_naming_reason(drive_root: object, task_id: str, name: str, reason: str
 
 async def api_projects_list(request: Request) -> JSONResponse:
     try:
+        from ouroboros.project_facts import explicit_project_id_ok
         from ouroboros.projects_registry import (
             projects_summary,
         )
 
         drive_root = request_drive_root(request)
-        if "chat_id" in request.query_params:
-            return JSONResponse({"projects": projects_summary(drive_root, chat_id=request.query_params["chat_id"])})
-        return JSONResponse({"projects": projects_summary(drive_root, limit=200)})
+        query = request.query_params
+        if "chat_id" in query:
+            projects = await run_in_threadpool(projects_summary, drive_root, chat_id=query["chat_id"])
+            return JSONResponse({"projects": projects})
+        if "id" in query:
+            if not explicit_project_id_ok(query["id"]):
+                return JSONResponse({"projects": []})
+            projects = await run_in_threadpool(projects_summary, drive_root, project_id=query["id"])
+            return JSONResponse({"projects": projects})
+        # The plain list stays capped; `all=1` names the complete list (every active and deleting Project).
+        projects = await run_in_threadpool(projects_summary, drive_root,
+                                           limit=None if query.get("all") == "1" else 200)
+        return JSONResponse({"projects": projects})
     except Exception as exc:
         return json_exception(exc)
 
