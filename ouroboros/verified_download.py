@@ -72,8 +72,10 @@ def fetch_exact_file(
     label: str,
     timeout_sec: float,
     error_type: type[RuntimeError] = VerifiedDownloadError,
+    progress: "dict | None" = None,
 ) -> pathlib.Path:
-    """Atomically fetch one exact file; an existing verified cache wins."""
+    """Atomically fetch one exact file; an existing verified cache wins. ``progress`` (optional)
+    receives the bytes written so far, for a caller reporting a download it does not wait out."""
     # Imported here so ``verify_exact_file`` needs only the standard library (a
     # Docker build stage verifies the pinned Chromium archive with this module alone).
     from ouroboros.utils import replace_atomic
@@ -97,6 +99,8 @@ def fetch_exact_file(
                         if not chunk:
                             continue
                         written += len(chunk)
+                        if progress is not None:
+                            progress["bytes"] = written
                         if written > size_bytes:
                             raise error_type(
                                 overflow_code, f"{label} download exceeded the reviewed size"

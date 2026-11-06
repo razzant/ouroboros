@@ -117,7 +117,7 @@ def test_tool_waits_for_host_acceptance_before_reporting_success(runtime):
         assert not thread.is_alive()
 
 
-def test_new_root_and_main_are_durable_without_model_calls_while_child_and_mail_work(runtime, monkeypatch):
+def test_new_root_is_durable_and_held_while_child_and_mail_work(runtime, monkeypatch):
     from ouroboros.owner_mailbox import mailbox_holds
     from supervisor import worker_chat_lane
 
@@ -131,16 +131,10 @@ def test_new_root_and_main_are_durable_without_model_calls_while_child_and_mail_
     for task in ({**new, "parent_task_id": "requester"},
                  {**child, "root_task_id": "unrelated"}, {**child, "parent_task_id": "invented"}):
         assert runtime.restart.agent_restart_holds(task), "a parent label does not establish existing work"
-
-    model_calls, notices = [], []
-    monkeypatch.setattr(runtime.workers, "_get_chat_agent", lambda: model_calls.append(True))
-    monkeypatch.setattr(runtime.workers, "send_with_budget", lambda *a, **k: notices.append((a, k)))
-    worker_chat_lane.handle_chat_direct(7, "A new Main request", task_metadata={"client_message_id": "main-input"})
-    assert model_calls == []
-    main = next(task for task in runtime.queue.PENDING if task.get("text") == "A new Main request")
     snapshot = json.loads(runtime.queue.QUEUE_SNAPSHOT_PATH.read_text())
-    assert {new["id"], main["id"]} <= {row["id"] for row in snapshot["pending"]}
-    assert "Saved for execution" in notices[-1][0][1]
+    assert new["id"] in {row["id"] for row in snapshot["pending"]}
+    model_calls = []
+    monkeypatch.setattr(runtime.workers, "_get_chat_agent", lambda: model_calls.append(True))
     assert worker_chat_lane.handle_wake_direct(7, "new wake", {})["reason"] == "restart_pending"
     assert model_calls == []
 
@@ -150,26 +144,88 @@ def test_new_root_and_main_are_durable_without_model_calls_while_child_and_mail_
     assert mailbox_holds(runtime.root, "requester", "owner-control")
     runtime.workers.assign_tasks()
     assert [task["id"] for task in delivered] == [child["id"]]
-    assert {new["id"], main["id"]} <= {task["id"] for task in runtime.queue.PENDING}
+    assert new["id"] in {task["id"] for task in runtime.queue.PENDING}
 
 
-@pytest.mark.parametrize("kind", ["root", "main"])
-def test_completion_event_gap_keeps_pending_work_then_returns_it_once(runtime, monkeypatch, kind):
+def test_owner_turn_admitted_while_awaiting_keeps_its_child_through_the_ack(runtime, monkeypatch):
+    """A turn the owner door admits before the ACK may finish before it: the ACK merges, never replaces, the
+    request's started work, so that turn's queued subagent still passes while an unrelated root waits."""
+    from supervisor import message_bus, worker_chat_lane as chat
+    from tests.conversation_carrier_support import install_lane_spare, lane_rows
+
+    monkeypatch.setattr(runtime.workers, "_get_chat_agent", lambda: pytest.fail("the server constructed an agent"))
+    monkeypatch.setattr(runtime.workers, "send_with_budget", lambda *a, **k: None)
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(send_chat_action=lambda *a, **k: None))
+    install_lane_spare(runtime.workers)
+    runtime.restart._AGENT_RESTART.update(request_id="r-awaiting", task_id="requester", task_attempt=1,
+                                          status="awaiting", started={})
+    chat.handle_chat_direct(7, "Main while awaiting")
+    [main] = lane_rows(runtime.workers)
+    assert runtime.restart._AGENT_RESTART["started"] == {main: main}
+    runtime.workers.RUNNING.pop(main)  # it finished before the ACK
+    assert runtime.restart._accept_agent_restart(runtime.host)
+    child = enqueue(runtime, "late-child", parent_task_id=main, root_task_id=main, delegation_role="subagent", depth=1)
+    assert not runtime.restart.agent_restart_holds(child)
+    assert runtime.restart.agent_restart_holds(enqueue(runtime, "unrelated-root"))
+
+
+def test_main_saved_during_the_drain_returns_once_after_the_restart(runtime, monkeypatch):
+    """Only the physical drain saves an owner turn: its requester finished and the restart waits only for live work.
+    The saved turn keeps its words and image, starts nothing now, and returns once under the restart's ACK."""
+    from ouroboros import agent_task_pipeline as pipeline
+    from supervisor.worker_chat_lane import handle_chat_direct
+    from tests.test_restart_retention import _pool_events
+    from tests.test_restart_saved_work import _ack, _stop_and_boot
+
+    accept(runtime)
+    monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *a, **k: None)
+    final_events = []
+    pipeline.emit_task_results(SimpleNamespace(drive_root=runtime.root, repo_dir=runtime.root), None, None,
+        final_events, {**runtime.workers.RUNNING["requester"]["task"], "chat_id": 0, "text": "A"},
+        "Finished A", {"rounds": 1}, {"tool_calls": [], "reasoning_notes": []}, 0, runtime.root / "logs", ctx=runtime.ctx)
+    ready = final_events[-1]
+    runtime.server._handle_restart_in_supervisor(ready, runtime.host)  # the requester row is still live: the drain opens
+    assert runtime.restart.agent_restart_draining() and runtime.server._pending_restart
+    notices = []
+    monkeypatch.setattr(runtime.workers, "_get_chat_agent", lambda: pytest.fail("a drain-time turn is saved"))
+    monkeypatch.setattr(runtime.workers, "send_with_budget", lambda *a, **k: notices.append(a[1]))
+    handle_chat_direct(7, "Main after Restart", image_data=("cGhvdG8=", "image/png"))
+    queued = runtime.queue.PENDING[-1]
+    assert queued["text"] == "Main after Restart" and queued.get("image_source_ref") and "image_base64" not in queued
+    assert notices[-1] == "Saved for execution after Restart."
+    runtime.workers.RUNNING.pop("requester")  # the task_done half of a bounded event batch
+
+    exits, kills = [], []
+    monkeypatch.setattr(runtime.server, "_safe_restart_serialized", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(runtime.server, "_begin_task_teardown", lambda **k: ("cancelled", "restart"))
+    monkeypatch.setattr(runtime.server, "_managed_update_pending_kwargs", lambda: {})
+    monkeypatch.setattr(runtime.server, "_request_restart_exit", lambda: exits.append(True))
+    runtime.host.safe_restart = lambda **k: (True, "")
+    runtime.host.update_state = lambda f: f({})
+    runtime.host.kill_workers = lambda **k: kills.append(k)
+    runtime.server._check_pending_restart_drain(runtime.host)  # no live work is left: the restart performs
+    assert exits == [True] and kills[0]["preserve_pending"] is True
+    _ack(runtime.root, runtime.server._planned_delegate_restart_transaction_id)
+    monkeypatch.setattr(runtime.workers, "WORKERS", {})
+    _pool_events(runtime.workers, monkeypatch)
+    runtime.restart._AGENT_RESTART.clear()
+    runtime.queue.RETURNS_NAMED.clear()
+    _stop_and_boot(runtime.queue, runtime.workers)
+    _, returned_calls = worker(runtime, monkeypatch)
+    assert [row["id"] for row in runtime.queue.PENDING] == [queued["id"]]
+    runtime.workers.assign_tasks()
+    assert [row["id"] for row in returned_calls] == [queued["id"]]
+    assert returned_calls[0]["image_source_ref"] == queued["image_source_ref"]
+    assert returned_calls[0]["text"] == "Main after Restart"
+
+
+def test_completion_event_gap_keeps_pending_work_then_returns_it_once(runtime, monkeypatch):
     from ouroboros import agent_task_pipeline as pipeline
     from tests.test_restart_retention import _pool_events
     from tests.test_restart_saved_work import _ack, _stop_and_boot
 
     accept(runtime)
-    if kind == "main":
-        from supervisor.worker_chat_lane import handle_chat_direct
-
-        monkeypatch.setattr(runtime.workers, "_get_chat_agent", lambda: pytest.fail("Main must wait for Restart"))
-        monkeypatch.setattr(runtime.workers, "send_with_budget", lambda *a, **k: None)
-        handle_chat_direct(7, "Main after Restart", image_data=("cGhvdG8=", "image/png"))
-        queued = runtime.queue.PENDING[-1]
-        assert queued.get("image_source_ref") and "image_base64" not in queued
-    else:
-        queued = enqueue(runtime, "later")
+    queued = enqueue(runtime, "later")
     _, delivered = worker(runtime, monkeypatch)
     monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *a, **k: None)
     final_events = []
@@ -209,9 +265,6 @@ def test_completion_event_gap_keeps_pending_work_then_returns_it_once(runtime, m
     assert [row["id"] for row in runtime.queue.PENDING] == [queued["id"]]
     runtime.workers.assign_tasks()
     assert [row["id"] for row in returned_calls] == [queued["id"]]
-    if kind == "main":
-        assert returned_calls[0]["image_source_ref"] == queued["image_source_ref"]
-        assert returned_calls[0]["text"] == "Main after Restart"
     assert runtime.queue.PENDING == []
     assert runtime.queue.restore_pending_from_snapshot() == 0
 
@@ -266,6 +319,7 @@ def test_late_or_unconfirmed_intake_promises_no_execution(runtime, monkeypatch, 
         runtime.queue.name_queue_returns(runtime.queue.PENDING, "planned_restart")
     else:
         monkeypatch.setattr(runtime.queue, "publish_queue_snapshot", lambda **k: False)
+        monkeypatch.setattr(runtime.restart, "agent_restart_draining", lambda: True)  # only the drain saves Main
     result = runtime.queue.enqueue_task({"id": "late", "type": "task", "text": "late", "chat_id": 0})
     assert result.get("_admission_blocked") == ("restart_intake_closed" if fault == "closed" else "restart_admission_unconfirmed")
     worker_chat_lane.handle_chat_direct(7, "late Main")
@@ -358,9 +412,10 @@ def test_refused_restart_releases_intent_without_reopening_other_doors(runtime, 
     assert runtime.queue.RETURNS_NAMED == {"door": "managed_update"}
 
 
-def test_main_preparation_is_not_permission_to_begin_after_intent(runtime, monkeypatch):
-    """The lane's admission and the Restart intake are one transaction (owner decision 1A): a Main turn
-    arriving once the intent is accepted is saved on the durable queue, never admitted to a carrier."""
+def test_main_starts_while_a_restart_is_only_requested_and_its_subagent_is_not_held(runtime, monkeypatch):
+    """BIBLE P5: another task's restart request never holds the owner's dialogue. The lane's admission and the
+    Restart intake stay one transaction: a Main turn after the ACK starts, joins the request's started work, and
+    its own subagent passes the hold while a new independent root still waits for the restart."""
     from supervisor import message_bus, worker_chat_lane as chat
     from tests.conversation_carrier_support import install_lane_spare, lane_rows
 
@@ -368,12 +423,16 @@ def test_main_preparation_is_not_permission_to_begin_after_intent(runtime, monke
     monkeypatch.setattr(runtime.workers, "_get_chat_agent", lambda: pytest.fail("the server constructed an agent"))
     monkeypatch.setattr(runtime.workers, "send_with_budget", lambda *a, **k: notices.append((a, k)))
     monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(send_chat_action=lambda *a, **k: None))
-    spare = install_lane_spare(runtime.workers)
+    install_lane_spare(runtime.workers)
     accept(runtime)
     chat.handle_chat_direct(7, "prepared Main")
-    assert not lane_rows(runtime.workers) and spare.in_q == []
-    assert any(row["text"] == "prepared Main" for row in runtime.queue.PENDING)
-    assert "task_terminal_status" not in notices[-1][1].get("progress_meta", {})
+    [main] = lane_rows(runtime.workers)
+    assert not any(row.get("text") == "prepared Main" for row in runtime.queue.PENDING)
+    assert runtime.restart._AGENT_RESTART["started"][main] == main
+    child = enqueue(runtime, "main-child", parent_task_id=main, root_task_id=main, delegation_role="subagent", depth=1)
+    assert not runtime.restart.agent_restart_holds(child)
+    assert runtime.restart.agent_restart_holds(enqueue(runtime, "independent-root"))
+    assert not any("Saved for execution" in str(args[1]) for args, _ in notices)
 
 
 def test_direct_requester_must_match_its_live_attempt(runtime):
