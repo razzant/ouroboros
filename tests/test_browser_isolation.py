@@ -403,13 +403,16 @@ class TestSetPlaywrightBrowsersPathIfBundled:
 
         assert installs == [operator] and not (tmp_path / "data" / "playwright-browsers").exists()
 
-    def test_a_slow_pin_install_runs_once_beside_the_calls_and_each_answers_within_its_window(self, monkeypatch, tmp_path):
+    def test_a_slow_pin_install_runs_once_beside_the_calls_and_each_answers_within_its_window(self, monkeypatch, tmp_path,
+                                                                                               caplog):
+        import logging
         import threading
 
         import ouroboros.tools.browser as bmod
         from ouroboros import tool_custody
         from ouroboros.model_wait import execution_deadline_scope, monotonic_now
         from ouroboros.runtime_limits import NESTED_SETTLEMENT_MARGIN_SEC
+        from ouroboros.tools.tool_result import LegacyTextResultAdapter
 
         monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "0")
         monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path / "data"))
@@ -430,9 +433,11 @@ class TestSetPlaywrightBrowsersPathIfBundled:
             return _pinned_layout(pathlib.Path(root))
 
         monkeypatch.setattr(chromium_runtime, "install", install)
-        with pytest.raises(RuntimeError, match="download failed"):
+        with caplog.at_level(logging.WARNING, logger="ouroboros.tools.browser"), pytest.raises(
+                RuntimeError, match="download failed"):
             bmod._ensure_playwright_installed()
         assert holds == ["held", "released"]
+        assert any("download failed" in row.getMessage() for row in caplog.records)  # traced with or without waiters
 
         def call():  # today each call downloads inside itself until the outer timeout
             with execution_deadline_scope(monotonic_now() + NESTED_SETTLEMENT_MARGIN_SEC + 0.3):
@@ -447,6 +452,8 @@ class TestSetPlaywrightBrowsersPathIfBundled:
             caller.join(5)
         assert len(installs) == 2 and len(refusals) == 2  # one download for both calls
         assert all(r.code == chromium_runtime.PREPARING and "1234 of" in str(r) for r in refusals)
+        typed = LegacyTextResultAdapter.from_text("browse_page", refusals[0].tool_text())  # the refusal it is
+        assert (typed.status, typed.code) == ("unavailable", "LEGACY_UNAVAILABLE")
         assert holds == ["held", "released", "held"]  # the starter's call ends with the install, not before
         release.set()
         with execution_deadline_scope(monotonic_now() + NESTED_SETTLEMENT_MARGIN_SEC + 10):

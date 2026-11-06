@@ -336,6 +336,7 @@ def _run_install(key: str, entry: Tuple[concurrent.futures.Future, Dict[str, Any
         outcome = install(progress)
     except BaseException as exc:  # noqa: BLE001 - every waiter receives the install's own failure
         failure = exc
+        log.warning("Browser install %s failed: %s", key, exc)  # its callers may have answered already
     with _installs_lock:  # settled before any waiter wakes: its next call starts afresh or finds the result
         if _installs.get(key) is entry:
             del _installs[key]
