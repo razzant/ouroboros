@@ -350,11 +350,12 @@ def admit_owner_turn(
     """Admit one owner turn to the lane; the RUNNING meta, or None when refused or deferred.
 
     One transaction with the update owner (Q + the repo-writer gate lock): the gate,
-    the restart intake, the row. A Restart accepted meanwhile finds started work; a
-    pending Restart saves the turn on the ordinary durable queue instead. The row's
+    the restart intake, the row. A Restart accepted meanwhile finds started work; while
+    another task's restart is only requested the turn starts and joins that request's
+    started work; only the physical drain saves it on the ordinary durable queue. The row's
     barrier and its carrier follow outside that transaction (``dispatch_admitted_turn``).
     """
-    from ouroboros.server_restart import agent_restart_pending
+    from ouroboros.server_restart import agent_restart_draining, agent_restart_pending, note_started_restart_work
     from supervisor import queue
     from supervisor.active_activity import reply_expected
     from supervisor.conversation_lane import admit_turn, dispatch_admitted_turn, replenish_after_claim
@@ -369,11 +370,13 @@ def admit_owner_turn(
                 _pool().send_with_budget(chat_id, "Restart intake is closed. This turn was not accepted; send it after Restart.",
                     **_host_operation_failure(task_metadata), role="system", system_type="task_not_started")
                 return None
-            deferred = agent_restart_pending()
+            deferred = agent_restart_draining()
             meta = None if deferred else admit_turn(
                 task, chat_id=chat_id, client_message_id=client_msg_id, quiet=False,
                 reply_expected=reply_expected({"metadata": task_metadata or {}}),
             )
+            if meta is not None:
+                note_started_restart_work(task)
         if deferred:
             _defer_chat_for_restart(task, chat_id, task_metadata)
             return None

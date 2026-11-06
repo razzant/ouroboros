@@ -1268,9 +1268,10 @@ class ToolRegistry:
                 return ToolResult(status="error", code="TOOL_ARG_ERROR", text=_route_note)
             from ouroboros import body_candidate
 
-            if (candidate_refusal := body_candidate.authoring_seam(self._ctx, name, args)) is not None:
-                return ToolResult(status="blocked", code=candidate_refusal.code,
-                                  text=f"⚠️ {candidate_refusal.code}: {candidate_refusal.text}")
+            seam = body_candidate.authoring_seam(self._ctx, name, args)  # a refusal, or a fresh bind's neighbour note
+            if isinstance(seam, body_candidate.CandidateRefused):
+                return ToolResult(status="blocked", code=seam.code, text=f"⚠️ {seam.code}: {seam.text}")
+            _route_note = "\n\n".join(part for part in (_route_note, seam) if part)
         selected_skill = bool(task_constraint and task_constraint.has_selected_skill)
         workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)())
         effective_constraint = task_constraint

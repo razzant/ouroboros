@@ -457,7 +457,8 @@ below every floor.
 Refusal never degrades into metered native execution on a PIN. An explicit `executor="harness"`
 request that cannot be served becomes `blocked` — `agent.executor_blocked_outcome` ends the
 child unrun — because silently spending API money is the one outcome an explicit pin must
-never produce. An `auto` request becomes an ordinary native subagent with a visible marker.
+never produce. A child without a configured subagent row runs natively with no marker; `auto` is not a request
+(owner decision D23).
 
 ## 7. What this does NOT cover
 

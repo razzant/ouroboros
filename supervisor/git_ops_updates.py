@@ -356,6 +356,14 @@ def compute_managed_update_status(fetch: bool = False) -> Dict[str, Any]:
                 # Recomputed for the captured HEAD, like the counts: never the cached verdict.
                 state.update(local_changes_since_shared_base(state["current_sha"], cached_sha, cached_ahead))
                 state["safe_to_apply"] = not state["dirty"] and state["local_changes"] == "absent"
+            elif identity_matches and cached_sha and counts_rc == 0:
+                # Nothing incoming (e.g. a commit of its own adopted on top of the tip): this HEAD's relation to the
+                # last checked tip stays a fact. Content of its own is the check's when it described this HEAD.
+                state.update({"behind": cached_behind, "ahead": cached_ahead})
+                if str(cache.get("checked_head_sha") or "") == state["current_sha"] and cache.get("local_changes"):
+                    state.update({key: str(cache.get(key) or "") for key in ("local_changes", "local_changes_base")})
+                else:
+                    state.update(local_changes_since_shared_base(state["current_sha"], cached_sha, cached_ahead))
         except Exception:
             log.debug("managed update status cache overlay failed", exc_info=True)
         return state

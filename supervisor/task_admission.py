@@ -369,6 +369,61 @@ def restored_handoff_unproven(task: dict, existing: Optional[dict], *, ancestor_
 
 
 PRESTART_PROOF = "returned_before_body"  # the carried copy of a pre-body return, in a later hold or Resume record
+SEED_RETURN = "_seed_return"  # D5: a returning stop gave back a turn cut before its first save; carried by value
+
+
+def seed_returnable(root: Any, task: dict, attempt: int) -> bool:
+    """An owner text turn of the conversation lane cut before its first model call (D5). Every tool batch and answer
+    follows a model call, which the usage ledger records apart from the working file: zero recorded calls is the positive
+    proof that nothing took effect, a lost file included. No working file (a saved turn returns from it), park, owed or
+    delivered final or Stop, and a non-terminal result complete it; a later attempt, continuation, wake, call, Presence,
+    child or any unreadable fact keeps the interrupted path."""
+    from ouroboros.consciousness_authority import wake_cause
+    from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, STATUS_CANCEL_REQUESTED
+    from ouroboros.working_checkpoint import checkpoint_path, final_answer_registered, live_park
+    from supervisor.restart_retention import _cancel_intent_active, presence_turn
+
+    task_id, root = str(task.get("id") or ""), pathlib.Path(root)
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    if (not task_id or not task.get("_is_direct_chat") or attempt != 1 or governing_continuation(task)
+            or wake_cause(metadata) or presence_turn(task, root) or metadata.get("execution_transport") is not None
+            or task.get("configured_subagent") or task.get("parent_task_id") not in (None, "", task_id)):
+        return False
+    try:
+        stored = load_task_result(root, task_id, strict=True) or {}
+        if not stored or stored.get("status") in _TRULY_TERMINAL_STATUSES | {STATUS_CANCEL_REQUESTED} or (
+                checkpoint_path(root, task_id, attempt).is_file() or live_park(root, task_id, attempt)
+                or final_answer_registered(root, task_id) or _cancel_intent_active(root, task_id)):
+            return False
+        from supervisor import queue
+        cost = queue.reconstruct_task_cost(task_id, fields=True, drive_root=root)
+        return (cost.get("cost_accounting_status") == "available" and not cost.get("ledger_integrity_degraded")
+                and int(cost.get("total_rounds") or 0) == 0)
+    except Exception:
+        log.warning("Return of %s before its first model call is unprovable; interrupted path", task_id, exc_info=True)
+        return False
+
+
+def _seed_unsent(task: dict, seed: dict, stored: Optional[dict]) -> dict:
+    """The D5 proof holds until the attempt it gave back launches (a launch marks or records that attempt)."""
+    from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, STATUS_CANCEL_REQUESTED
+
+    attempt = task.get("_attempt")
+    if (not task.get("_is_direct_chat") or governing_continuation(task) or type(attempt) is not int
+            or seed.get("from_attempt") != attempt - 1):
+        return {}
+    if stored is None:
+        from supervisor import queue
+
+        stored = load_task_result(pathlib.Path(task.get("budget_drive_root") or queue.DRIVE_ROOT),
+                                  str(task.get("id") or ""), strict=True) or {}
+    marked, recorded = stored.get("admitted_dispatch_attempt"), stored.get("task_attempt")
+    if (not stored or stored.get("status") in _TRULY_TERMINAL_STATUSES | {STATUS_CANCEL_REQUESTED}
+            or stored.get("admission_outcome") == "never_admitted"
+            or "admitted_dispatch_attempt" in stored and (type(marked) is not int or marked >= attempt)
+            or type(recorded) is int and recorded >= attempt):
+        return {}
+    return {"seed_return": True, "from_attempt": attempt - 1, "cause": str(seed.get("cause") or "")}
 
 
 def prestart_returned_unsent(task: dict, stored: Optional[dict] = None) -> dict:
@@ -382,9 +437,13 @@ def prestart_returned_unsent(task: dict, stored: Optional[dict] = None) -> dict:
     ``admitted_dispatch='none'``: the lane did put the turn on its carrier. ``{}`` when
     unproven; an unreadable result raises and the caller keeps its hold. Restore,
     hold revalidation and Resume read the same evidence; readability grants no Resume.
+    A turn a returning stop gave back before its first working save carries its own
+    proof on the row (``SEED_RETURN``, D5), valid until the attempt it gave back launches.
     """
     from ouroboros.project_admission import host_unscoped
 
+    if isinstance(task.get(SEED_RETURN), dict):  # D5: a turn given back before its first save; its own proof
+        return _seed_unsent(task, task[SEED_RETURN], stored)
     if (not task.get("_is_direct_chat") or not host_unscoped(task) or governing_continuation(task)
             or type(task.get("_attempt")) is not int or task["_attempt"] != 1 or "admitted_dispatch" in task
             or task.get("original_task_id") or task.get("timeout_retry_from")):

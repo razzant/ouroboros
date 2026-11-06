@@ -422,7 +422,7 @@ def pending_member_replay_safe(q: Any, member: Dict[str, Any]) -> Tuple[bool, st
     if cost_fields.get("cost_accounting_status") != "available":
         return False, "accounting_unavailable"
     retry_lineage = bool(
-        int(member.get("_attempt") or 1) > 1
+        int(member.get("_attempt") or 1) > 1 and not (returned_before_body(member) or {}).get("seed_return")  # D5
         or member.get("original_task_id") or member.get("timeout_retry_from")
     )
     return bool(

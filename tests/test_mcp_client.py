@@ -419,13 +419,15 @@ def test_parse_servers_refuses_ambiguous_ids_and_drops_invalid():
 def test_stdio_transport_passes_exact_argv_without_env_or_cwd(monkeypatch, stdio_scope_env):
     params_seen = []
     sessions = []
+    errlogs = []
 
     class Params:
         def __init__(self, *, command, args, **options):
             params_seen.append({"command": command, "args": list(args), **options})
 
     @asynccontextmanager
-    async def fake_stdio(params):
+    async def fake_stdio(params, errlog=None):
+        errlogs.append(errlog)  # every stdio server's stderr is captured for a failure it may explain
         yield "read-stream", "write-stream"
 
     class Session:
@@ -486,6 +488,7 @@ def test_stdio_transport_passes_exact_argv_without_env_or_cwd(monkeypatch, stdio
     if stdio_scope_env:
         expected_params["env"] = stdio_scope_env
     assert params_seen == [expected_params, expected_params]
+    assert len(errlogs) == 2 and all(errlog is not None for errlog in errlogs)
     assert sessions == [("read-stream", "write-stream"), ("read-stream", "write-stream")]
 
 

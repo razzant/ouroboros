@@ -248,12 +248,6 @@ def test_selected_session_visibility_failure_blocks_without_native_substitution(
         ),
     )
     monkeypatch.setattr(agent_module, "envelope_from_task", lambda *_a, **_k: {})
-    monkeypatch.setattr(
-        subagents, "preflight_native_fallback_dispatch",
-        lambda *_a, **_k: (_ for _ in ()).throw(
-            AssertionError("a selected row must never host-fallback to native")
-        ),
-    )
     task = {"id": "child1", "configured_subagent": {"schema": 1}}
     amended, changed = agent_module.preflight_delegate_visibility(
         SimpleNamespace(available_tools=lambda: []), task, dispatch,

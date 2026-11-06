@@ -431,8 +431,8 @@ def _enforce_plan_gate(
     ``messages`` — the hold reminder and the release note — so it records what
     entered the MIND's context, not what this gate observed. Every other gate
     transition already reaches the mind by its own route and must not buy a round:
-    a settled ask arrives as a ``[System task message]`` through the task mailbox
-    (``plan_ask.settle_released_reply`` -> ``loop_round_limits`` drain), a rail
+    each settled answer arrives as typed review history at the next tool boundary or round,
+    or before delivery (``loop_delivery._unread_review_updates``), a rail
     release rides the forced prompt's typed facts, and objections and withdrawals
     are the mind's own ``plan_task`` results. The one residual is the owner's hurry, which the HQ1
     no-chat contract forbids putting into ``messages``
