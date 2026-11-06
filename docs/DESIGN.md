@@ -995,8 +995,8 @@ this Project" came to be drawn six ways. The rule is therefore about intents.
   the glyph and the arrow say in pixels (`Open project <name>`); nothing depends
   on hover.
 - **Two forms, one recipe.** The reference is a capsule: it leads a Project-bound work card's action
-  row at that row's 28px height and meta size, and sits everywhere else: under a mirrored answer or a
-  System lifecycle row (in the shared `createSystemMessageActions` row, token spacing, wrapping,
+  row at that row's 28px height and meta size, and sits everywhere else: under a mirrored answer, a
+  Main notice of a Project's work or a System lifecycle row (in the shared `createSystemMessageActions` row, token spacing, wrapping,
   focus-ring clearance), ending an owner message's one receipt line ("Passed on to «work…» in": the
   owner asked for it compact on 27.10, the name stays stored whole; "Started as a task in"), and in a
   Main question copy's voice line beside `Ouroboros`, at that line's 28px height and meta size

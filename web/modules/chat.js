@@ -3439,7 +3439,7 @@ export function createChatInstance({
                 systemType: msg.system_type || '', narration: msg.narration,
                 source: msg.source || '',
                 initiator: msg.initiator || '',
-                taskId: explicitTaskId, reply: msg,
+                taskId: explicitTaskId, reply: msg, projectId: msg.project_id, projectName: msg.project_name,
                 // The saved row's own name, as history keys it; this frame's client_message_id is the owner's.
                 clientMessageId: msg.row_client_message_id || '',
                 // A placed row whose card is not in this chat keeps its record link.
