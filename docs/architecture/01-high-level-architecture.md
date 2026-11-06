@@ -417,12 +417,12 @@ ouroboros/ — agent core and shared runtime (§6)
     claudexor_run_events.py, claudexor_observation.py — Catalog-negotiated, bounded run-journal SSE frames and durable seq cursors, no polling owner; the run observation adapter (§6 Delegated subagents)
     claudexor_routing.py — Catalog-negotiated passive read of the engine's account/model marks (§3 Agent accounts)
     claudexor_route_health.py — Catalog-negotiated passive read of the engine's per-route failure shares (§9)
-    claudexor_live_runs.py — Passive read of the engine's queued and running runs (§3 Agent accounts)
+    claudexor_live_runs.py — Passive read of the engine's live runs (§3)
   claudexor_runtime.py, claudexor_runtime_retention.py, claudexor_node_seed.py — Reviewed next-spawn pin in `data/state/cx`: seed/fetch, verify/probe, atomic promote; no mutable current; override `OUROBOROS_CLAUDEXOR_BIN` (§6); unpinned non-serving copies retire (§5)
   claudexor_exit_facts.py — Bounded saved exits; live memory/loop/store/admission facts, dated capacity snapshots, route-health rows and the newest one's file, without lifecycle policy (§9)
   claudexor_daemon.py, claudexor_harness_install.py — Owned `data/claudexor`: lazy start, authenticated attach, `stop_outcome`, failed-start latch; vendor-CLI repair by the pinned installer (§9)
   claudexor_startup_failure.py — Stdlib `ExitFact`; `failed_without_control` drives spawn latch; diagnostic-only log labels and latch record (§9)
-  claudexor_restart.py — Restart Claudexor: runs by owner (own custody records), pin warning, then `stop_outcome` and the ordinary start (§3 Agent accounts)
+  claudexor_restart.py — Restart Claudexor: runs by owner, then `stop_outcome` and the ordinary start (§3)
   gateway/ — Gateway Boundary v1 (below): browser-facing route ownership and the frontend contract SSOT
     contracts.py — Active WS/HTTP envelope contract owner
     reference_contracts.py — stored-row identity (`row_address`, `reply_to`) shared by live chat and attachment frames

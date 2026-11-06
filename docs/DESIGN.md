@@ -2555,6 +2555,13 @@ from Main remains visibly inherited while its account can be pinned
 independently. Fallbacks use the same row in their saved order, with adjacent
 move/remove controls and the group's Add action.
 
+Restart Claudexor (Accounts toolbar, after Refresh) asks first in the shared confirm
+dialog: its body is one sentence of fact, `Restarting Claudexor ends N runs: X of
+Ouroboros, Y of other programs.`, plus any pin warning; the serving and pinned engines,
+model calls in flight and the runs open under "Engine and runs". A count that could not
+be read is said as unknown, never zero; a preview that changed while the dialog was open
+asks again with the new facts. The outcome note says the stop and the start apart.
+
 Context details show the server-built sourced window line: "set in Settings"
 labels a manual value; the Clear confirmation button removes the route acknowledgement.
 Account changes withdraw old metadata during pending or failed catalog reads.
