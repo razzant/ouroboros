@@ -230,8 +230,10 @@ test('async actions expose the same busy and status semantics', () => {
     assert.match(settingsJs, /refreshModelCatalog\(\{ button: byId\('btn-refresh-model-catalog'\) \}\)/);
     assert.match(connectionsJs, /setInlineStatus\(row\.querySelector\('\[data-connection-test-status\]'\), '', 'muted'\)/);
     assert.match(primitivesJs, /if \(el\.textContent !== next\) el\.textContent = next/);
-    assert.match(catalogJs, /import \{ setInlineStatus \} from '\.\/ui_helpers\.js'/);
-    assert.match(catalogJs, /setInlineStatus\(statusEl, text, tone\)/);
+    // The catalog's result is the shared result line: its count ends by itself, a read gap stays.
+    assert.match(catalogJs, /import \{ setResult \} from '\.\/ui_primitives\.js'/);
+    assert.match(catalogJs, /setResult\(statusEl, \{ text, tone, ends: tone === 'ok' \}\)/);
+    assert.doesNotMatch(catalogJs, /setInlineStatus/);
     assert.match(catalogJs, /refreshModelCatalog\(\{ button \} = \{\}\)/);
     assert.match(catalogJs, /buttonRefreshes\.get\(button\) === refreshSeq/);
 });
