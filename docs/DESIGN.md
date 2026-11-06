@@ -1192,7 +1192,7 @@ preference when it opens and on every reconnect; there is no file watcher.
     table`) whose sides that still hide columns fade. No stacked row cards,
     no guessing a table's purpose from its words, no smaller text to make it
     fit.
-  - A thematic break is a `--surface-border` hairline with section spacing.
+  - A thematic break is a `--divider` hairline with section spacing.
     Inline code keeps the ink of the text around it on its neutral pill.
   - Code is the author's literal text: a fence or code span shows and
     copies exactly what was written (`&amp;`, `<div>`, `**stars**`
@@ -1982,7 +1982,7 @@ skill's label verbatim, one glyph from the host set, the host's capsule or
 icon control, never the skill's markup. Connector icons may supply reviewed SVG geometry, painted by the host in monochrome currentColor with a fallback glyph and an adjacent visible label. In "+", after Attach file, each skill
 has a section under its name with its items in the owner's order; the host's
 own items close the menu under Ouroboros's name: Add dictation… while no
-engine can dictate here, and Make a button with Ouroboros…, which starts a request in
+engine can dictate here, and Make a button…, which starts a request in
 the draft for the owner to finish and send. A chip is one of the row's
 capsules: the skill's name, then the value its source answers in the meta ink
 (24 characters; the rest and its description on the chip's title), with a dot
