@@ -228,7 +228,6 @@ def acting_tool_names_for_context(ctx: object, registered_names: Iterable[str]) 
     return ACTING_SUBAGENT_TOOL_NAMES | schema_selection_tools_for_context(ctx)
 
 
-# Also the known pure reads whose failure stays in a card's details (_outcome_tool_errors.warns_without_review).
 READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
     "inspect_harness",
     "inspect_subagent",
@@ -237,6 +236,13 @@ READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
     "web_search", "chat_history",
     "vcs_read", "service_status", "service_logs",
     "get_task_result", "list_projects", "memory_read", "search_ui_translations",
+})
+
+# The known pure reads: a failed one stays in a card's details instead of warning that no review checked the result
+# (owner 06.11, A; _outcome_tool_errors.warns_without_review). Every parallel-safe read, plus reads that cannot run in
+# parallel. A tool not named here (an effect, a command, MCP, an extension) stays loud.
+PURE_READ_TOOLS: frozenset[str] = READ_ONLY_PARALLEL_TOOLS | frozenset({
+    "browse_page", "view_image", "github_read", "knowledge_read", "youtube_transcript",
 })
 
 # Enqueue-only tools safe to emit in parallel within one tool-call round.
