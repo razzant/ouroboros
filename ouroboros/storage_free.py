@@ -640,12 +640,11 @@ class FreeSpace:
             self._finish_request(root, {"state": "done", "preview": summary})
             return
         items = sorted(ordinary_ids(plan))
+        with self._lock:
+            request["preview"] = summary  # before the run starts: it may finish and write the receipt first
         started = self.start(root, repo_dir, plan["id"], None, items=items) if items else {"started": False, "reason": "nothing_selected"}
         if not started["started"]:
-            self._finish_request(root, {"state": "done", "preview": summary, "refusal": started["reason"]})
-        else:
-            with self._lock:
-                self._request["preview"] = summary
+            self._finish_request(root, {"state": "done", "refusal": started["reason"]})
 
     def _finish_request(self, root: pathlib.Path, facts: Dict[str, Any]) -> None:
         """Record the request's receipt once, then tell Main (the mind's run is the owner's to see)."""

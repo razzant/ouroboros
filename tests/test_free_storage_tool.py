@@ -32,7 +32,9 @@ def _request(owner: FreeSpace, root: Path, repo: Path, **kwargs):
     return answer, said
 
 
-def test_the_minds_request_frees_what_the_owners_press_would_and_keeps_the_rest_with_reasons(tmp_path, monkeypatch):
+@pytest.mark.parametrize("run_first", [False, True])
+def test_the_minds_request_frees_what_the_owners_press_would_and_keeps_the_rest_with_reasons(tmp_path, monkeypatch, run_first):
+    """Whichever ends first, the run or the preview thread that started it, the receipt carries the preview."""
     root = tmp_path / "data"
     probes = _drives(root, [("done", "direct", "completed", OLD), ("live", "direct", "completed", OLD, True),
                             ("kept", "headless", "completed", OLD)])
@@ -40,6 +42,15 @@ def test_the_minds_request_frees_what_the_owners_press_would_and_keeps_the_rest_
     monkeypatch.setattr("ouroboros.server_maintenance.DATA_DIR", root)
     _fake_sizer(monkeypatch)
     owner = FreeSpace(live=lambda task_id: probes.get(task_id, False), guard=_guard)
+    if run_first:  # the run finishes and writes the receipt before the preview thread goes on
+        real_start = owner.start
+
+        def start_and_finish(*args, **kwargs):
+            answer = real_start(*args, **kwargs)
+            owner._thread.join(timeout=60)
+            return answer
+
+        monkeypatch.setattr(owner, "start", start_and_finish)
     answer, said = _request(owner, root, tmp_path)
     assert answer == {"started": True, "reason": ""}
     assert not (root / "task_drives" / "done").exists()
