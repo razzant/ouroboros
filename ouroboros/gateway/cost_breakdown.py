@@ -11,12 +11,50 @@ from __future__ import annotations
 import asyncio
 import logging
 import pathlib
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional, TypedDict
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from ouroboros.cost_projection import CostPresentation
+from ouroboros.delegate_custody_usage import CostCustody
+
 log = logging.getLogger(__name__)
+
+
+class TaskCostSlice(TypedDict):
+    """One recorded value of an axis inside a root's tree (a usage category, or the route that served
+    the rows): its money as the card's own carrier (``build_cost_presentation``, so every surface words it
+    alike) and its volume. ``tokens`` is None when no row of the slice reported tokens."""
+
+    key: str
+    cost_presentation: Optional[CostPresentation]
+    model_calls: int
+    sessions: int
+    tokens: Optional[int]
+
+
+class TaskCostBreakdown(TypedDict):
+    """Root-only task-detail ledger projection, computed on read, never persisted.
+    All keys appear together; ``own + children + unattributed == subtree``. Omit
+    the object for non-roots, unavailable accounting or no attributable subtree rows; never invent $0.
+    ``own_usd`` is None when the root's own rows exist but none has a price. ``by_purpose`` (usage
+    categories) and ``by_route`` (the routes that served the rows) each partition the same subtree."""
+
+    own_usd: Optional[float]
+    children_usd: float
+    unattributed_usd: float
+    delegated_disclosed_usd: float
+    # C2: own + children + unattributed is an accounted UPPER BOUND, not a receipt.
+    accounted_upper_bound_usd: float
+    subscription_sessions: int
+    unknown_unmetered: int
+    non_final_rows: int
+    cost_final: bool
+    cost_custody: Optional[CostCustody]
+    by_purpose: List[TaskCostSlice]
+    by_route: List[TaskCostSlice]
+    authority: Literal["physical_attempt_ledger"]
 
 _ACCOUNTING_SUMMARY_FIELDS = (
     "settled_usd",
@@ -170,6 +208,26 @@ def make_cost_breakdown_endpoint(data_dir: pathlib.Path):
     return api_cost_breakdown
 
 
+def _cost_slices(groups: Any, unattributed: Any) -> List[TaskCostSlice]:
+    """One slice per recorded value of an axis (the rows naming none as key ""), ordered by tracked money,
+    then volume. A slice of disclosed $0 sessions stays; a value with no row at all is no slice."""
+    from ouroboros.cost_projection import COST_SCOPE_ROOT_TREE, build_cost_presentation
+
+    pairs = list(groups.items()) if isinstance(groups, dict) else []
+    slices: List[TaskCostSlice] = []
+    for key, bucket in [*pairs, ("", unattributed)]:
+        counts = ("priced_rows", "unknown_unmetered", "physical_calls", "subscription_sessions")
+        if not isinstance(bucket, dict) or not any(int(bucket.get(name) or 0) for name in counts):
+            continue
+        tokens = bucket.get("total_tokens")
+        slices.append({"key": str(key), "cost_presentation": build_cost_presentation(bucket, scope=COST_SCOPE_ROOT_TREE),
+                       "model_calls": int(bucket.get("physical_calls") or 0),
+                       "sessions": int(bucket.get("subscription_sessions") or 0),
+                       "tokens": int(tokens) if isinstance(tokens, (int, float)) and not isinstance(tokens, bool) else None})
+    return sorted(slices, key=lambda item: (-float((item["cost_presentation"] or {}).get("tracked_amount") or 0.0),
+                                            -(item["tokens"] or 0), item["key"]))
+
+
 def _task_cost_breakdown_view(drive_root: pathlib.Path, result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Read-side "where did the money go" projection for a ROOT task's detail.
 
@@ -214,8 +272,10 @@ def _task_cost_breakdown_view(drive_root: pathlib.Path, result: Dict[str, Any]) 
         return None
     own_bucket = (breakdown.get("by_task") or {}).get(task_id)
     # No rows attributed to the root itself is a MEASURED zero (all spend was
-    # children's), not an unknown — unknowns ride `unknown_unmetered` below.
+    # children's), not an unknown — unknowns ride `unknown_unmetered` below. Own
+    # rows that exist with no price are unknown, never a confident $0 (11.08).
     own = float(own_bucket.get("accounted_usd") or 0.0) if isinstance(own_bucket, dict) else 0.0
+    own_shown = honest_accounted_amount(own_bucket) if isinstance(own_bucket, dict) else 0.0
     # Money inside this subtree that no task id claims (legacy/blank-task rows)
     # is DISCLOSED on its own axis instead of being silently folded into the
     # children's share: own + children + unattributed == subtree.
@@ -225,8 +285,9 @@ def _task_cost_breakdown_view(drive_root: pathlib.Path, result: Dict[str, Any]) 
         if isinstance(unattributed_bucket, dict) else 0.0
     )
     delegated = breakdown.get("delegated") if isinstance(breakdown.get("delegated"), dict) else {}
+    axis_unattributed = breakdown.get("unattributed") if isinstance(breakdown.get("unattributed"), dict) else {}
     return {
-        "own_usd": round(own, 6),
+        "own_usd": round(own_shown, 6) if own_shown is not None else None,
         "children_usd": round(max(0.0, float(subtree) - own - unattributed), 6),
         "unattributed_usd": round(unattributed, 6),
         "delegated_disclosed_usd": round(float(delegated.get("settled_usd") or 0.0), 6),
@@ -238,5 +299,8 @@ def _task_cost_breakdown_view(drive_root: pathlib.Path, result: Dict[str, Any]) 
         "non_final_rows": breakdown.get("non_final_rows"),
         "cost_final": bool(breakdown.get("cost_final")),
         "cost_custody": breakdown.get("cost_custody"),
+        # The same read's two partitions of the subtree: what it was for, and which route served it.
+        "by_purpose": _cost_slices(breakdown.get("by_category"), axis_unattributed.get("category")),
+        "by_route": _cost_slices(breakdown.get("by_provider"), axis_unattributed.get("provider")),
         "authority": "physical_attempt_ledger",
     }

@@ -429,6 +429,41 @@ def test_task_detail_cost_breakdown_view_for_root(tmp_path, monkeypatch):
     assert view["unknown_unmetered"] == 1
     assert view["cost_final"] is False  # the undisclosed session keeps finality honest
     assert view["authority"] == "physical_attempt_ledger"
+    # Two partitions of the same subtree in the card's own money words: what it was for, and which route.
+    purposes = {item["key"]: item for item in view["by_purpose"]}
+    assert set(purposes) == {"task", "subagent"} and purposes["task"]["cost_presentation"]["tracked_amount"] == 0.8
+    assert purposes["subagent"]["sessions"] == 2 and purposes["subagent"]["model_calls"] == 0, \
+        "a slice of sessions stays, $0-disclosed ones included"
+    routes = {item["key"]: item for item in view["by_route"]}
+    assert routes["openai"]["cost_presentation"]["tracked_amount"] == 0.8 and routes["openai"]["model_calls"] == 2
+    sessions = [item for key, item in routes.items() if key != "openai"]
+    assert sum(item["sessions"] for item in sessions) == view["subscription_sessions"] == 2
+    assert all(item["model_calls"] == 0 for item in sessions), "a session is no provider send"
+
+
+def test_task_detail_cost_breakdown_slices_say_unknown_never_a_confident_zero(tmp_path, monkeypatch):
+    """A root whose own rows have no price shows own_usd None and an unknown slice, never $0;
+    a root with no own rows keeps its measured 0.0 (the other direction)."""
+    from ouroboros.gateway.tasks import _task_cost_breakdown_view
+
+    root = _data_root(tmp_path, monkeypatch)
+    unpriced = ua.reserve_attempt(ua.AttemptRequest(
+        model="claudexor::codex=gpt-6-astra", provider="claudexor", reservation_usd=None, global_limit_usd=7.5,
+        drive_root=root, task_id="root-1", root_task_id="root-1", category="task", source="test.gateway"))
+    ua.mark_dispatched(unpriced)
+    ua.settle_attempt(unpriced, {"prompt_tokens": 1000, "completion_tokens": 50}, cost_usd=None, cost_final=False)
+    _settled_attempt(root, task_id="child-1", cost=0.25, category="plan_review_review")
+    view = _task_cost_breakdown_view(root, {"task_id": "root-1", "root_task_id": "root-1"})
+    assert view is not None and view["own_usd"] is None, "own rows exist, none priced: unknown, not $0"
+    purposes = {item["key"]: item for item in view["by_purpose"]}
+    assert purposes["task"]["cost_presentation"]["tracked_amount"] is None and purposes["task"]["tokens"] == 1050
+    assert purposes["plan_review_review"]["cost_presentation"]["tracked_amount"] == 0.25
+    assert [item["key"] for item in view["by_purpose"]] == ["plan_review_review", "task"], "money first"
+    assert {item["key"] for item in view["by_route"]} == {"claudexor", "openai"}
+    paid_only = _data_root(tmp_path / "paid", monkeypatch)
+    _settled_attempt(paid_only, task_id="child-1", cost=0.4)
+    measured = _task_cost_breakdown_view(paid_only, {"task_id": "root-1", "root_task_id": "root-1"})
+    assert measured["own_usd"] == 0.0 and [item["key"] for item in measured["by_route"]] == ["openai"]
 
 
 def test_task_detail_cost_breakdown_view_only_for_roots_and_fails_soft(tmp_path, monkeypatch):
