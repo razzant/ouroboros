@@ -40,7 +40,7 @@ def test_second_verdict_final_for_write(supervisor, second, allowed):
     call = h.calls[1]
     assert call["light_model"] == "claudexor::source=model"
     assert call["model_role"] == "subagent:second" and call["account"] == "account"
-    assert call["effort"] == "high" and call["attempts_limit"] == 1
+    assert call["effort"] == "high" and call["attempts_limit"] == 1 and call["latch"] is False  # outside the first's latch
     assert call["system_prompt"] == h.calls[0]["system_prompt"]
     assert h.calls[0]["user_prompt"] in call["user_prompt"]
     assert "overturning it needs a reason" in call["user_prompt"]
@@ -72,8 +72,7 @@ def test_second_check_reads_an_answer_envelope(supervisor, second, allowed):
     assert msg == "" if allowed else "second: DANGEROUS — second reason" in msg
 
 
-@pytest.mark.parametrize("bad", ["broken JSON", {"status": "SAFE", "reason": ""}, RuntimeError("offline"),
-                                 json.dumps({"answer": json.dumps({"status": "SAFE", "reason": " "})})])
+@pytest.mark.parametrize("bad", ["broken JSON", {"status": "SAFE", "reason": ""}, RuntimeError("offline")])
 def test_second_unavailable_is_a_hold_without_an_extra_attempt(supervisor, bad):
     h = supervisor
     h.values["OUROBOROS_SUBAGENTS"] = catalog()

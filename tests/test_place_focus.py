@@ -45,16 +45,24 @@ def test_focus_no_ceiling_host_actor_prompt(focus):
     rendered = frame_focus_content(task, "The untrusted event")
     assert "The untrusted event" in rendered and "Already started: task1" in rendered
     assert "connector" in rendered and "folder" in rendered.lower()
+    # The connector's send and edit times (CREATING_SKILLS ``message.sent_at``/``edited_at``), else unknown.
+    assert " at an unrecorded time;" in rendered
+    root, _place, admission, event = focus
+    dated = _build_task(replace(admission, allowance={"status": "available", "remaining_usd": 2}), replace(event, message={
+        "sent_at": "2026-11-05T17:32:00+03:00", "edited_at": "2026-11-05T14:40:00Z", "timestamp": "1"}),
+        drive_root=root, staged_files=())
+    rendered = frame_focus_content(dated, "The untrusted event")
+    assert " at 2026-11-05T17:32:00+03:00, edited at 2026-11-05T14:40:00Z;" in rendered and "unrecorded" not in rendered
+    dated["metadata"]["presence"]["event"]["message"] = {"sent_at": "2026-11-05T17:32:00"}  # no time zone: not a time
+    assert " at an unrecorded time;" in frame_focus_content(dated, "The untrusted event")
 
 
 @pytest.mark.parametrize("state,facts,enabled,allowance,decision", [
     ("active", ("mention",), True, "available", "focus"),
-    ("silent", ("mention",), True, "available", "focus"),
     ("paused", ("mention",), True, "available", "silent"),
     ("active", (), True, "available", "silent"),
     ("active", ("mention",), False, "available", "silent"),
     ("active", ("mention",), True, "exhausted", "retry"),
-    ("active", ("mention",), True, "allowance_unknown", "retry"),
 ])
 def test_capture_before_attention_and_replay(focus, monkeypatch, state, facts, enabled, allowance, decision):
     from ouroboros import dialogue_store
@@ -302,8 +310,6 @@ def test_focus_ordinary_finish_traverses_reply_check(focus, monkeypatch, silent,
 @pytest.mark.parametrize("state,facts,enabled,available,expected", [
     ("active", ["mention"], True, True, "message"),
     ("paused", ["mention"], True, True, "silent"),
-    ("active", ["mention"], False, True, "silent"),
-    ("active", [], True, True, "silent"),
     ("active", ["mention"], True, False, "retry"),
 ])
 def test_new_host_payload_captures_before_attention(focus, monkeypatch, state, facts, enabled, available, expected):

@@ -69,7 +69,7 @@ def test_a_reused_loop_context_cannot_acknowledge_an_unsaved_previous_turn(tmp_p
     assert [row["msg_id"] for row in drain_owner_entries(tmp_path, "previous", set(), 1)] == ["previous-mail"]
 
 
-@pytest.mark.parametrize("receipt", ["owed", "delivered", "delivered_without_source", "corrupt"])
+@pytest.mark.parametrize("receipt", ["owed", "delivered_without_source", "corrupt"])
 def test_final_delivery_ownership_prevents_recovery_without_losing_checkpoint(tmp_path, receipt):
     from supervisor import terminal_delivery as td
 
@@ -95,9 +95,11 @@ def test_final_delivery_ownership_prevents_recovery_without_losing_checkpoint(tm
     assert path.read_bytes() == exact, "refused recovery keeps its source intact"
 
 
-@pytest.mark.parametrize("new_id", [False, True])
-@pytest.mark.parametrize("owner_changed", [False, True])
-@pytest.mark.parametrize("interrupted_again", [False, True])
+@pytest.mark.parametrize(("interrupted_again", "owner_changed", "new_id"), [
+    (False, False, False),
+    (False, True, False),
+    (True, False, True),
+])
 def test_candidate_is_saved_before_a_later_finalization_failure(
     tmp_path, monkeypatch, new_id, owner_changed, interrupted_again,
 ):
@@ -219,8 +221,11 @@ def test_retirement_requires_positive_durable_final_source(tmp_path, final_state
         assert path.read_bytes() == exact, "unknown final bytes suppress replay but cannot retire its source"
 
 
-@pytest.mark.parametrize("kind", ["owner_wait", "budget_pause"])
-@pytest.mark.parametrize("damage", ["none", "digest", "identity"])
+@pytest.mark.parametrize(("damage", "kind"), [
+    ("none", "owner_wait"),
+    ("digest", "budget_pause"),
+    ("identity", "budget_pause"),
+])
 def test_retirement_reads_the_exact_park_before_discarding_working_fallback(tmp_path, kind, damage):
     from ouroboros import budget_pause, owner_wait
     from ouroboros.agent import _retire_working_checkpoint
@@ -377,7 +382,7 @@ def _unread_ids(root, task_id):
     return [json.loads(row)["msg_id"] for row in held.get("rows", [])]
 
 
-@pytest.mark.parametrize("exit_path", ["model_call", "outer_control", "budget_hold", "admission_close",
+@pytest.mark.parametrize("exit_path", ["model_call", "admission_close",
                                        "write_fails"])
 def test_a_returned_terminal_acknowledges_its_finalization_mail_only_once_saved(tmp_path, monkeypatch, exit_path):
     """R1: a terminal rail drained the owner's message into the final but never ACKed

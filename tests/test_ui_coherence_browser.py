@@ -14,7 +14,7 @@ from tests import test_subscription_setup_browser as setup_browser
 from tests._shared import answer_projects
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def open_app(ui, path="/"):

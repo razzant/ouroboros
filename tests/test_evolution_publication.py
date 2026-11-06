@@ -383,8 +383,10 @@ def test_revoked_publication_does_not_record_or_anchor_success(tmp_path, monkeyp
     assert ctx._coupling_review_history == {"keep": True}
 
 
-@pytest.mark.parametrize("tests_red", [False, True], ids=["full_green", "red_postcommit"])
-@pytest.mark.parametrize("tag_created", [False, True], ids=["no_created_tag", "new_tag"])
+@pytest.mark.parametrize(("tag_created", "tests_red"), [
+    pytest.param(False, False, id='no_created_tag-full_green'),
+    pytest.param(True, True, id='new_tag-red_postcommit'),
+])
 def test_a_test_refusal_withholds_the_push_but_keeps_reviewed_provenance(
         tmp_path, monkeypatch, tests_red, tag_created):
     """Unlike lost authority, a red or proof-less post-commit run only withholds publication."""

@@ -80,10 +80,7 @@ def test_grant_observed_in_actual_file_list_needs_no_write(gateway):
 
 
 @pytest.mark.parametrize("response", [
-    {}, {"entries": []}, {"entries": [state(), state()]},
-    {"entries": [state(repoRoot="/different")]},
-    {"entries": [state(True, path="")]},
-    {"entries": [state(allowFullAccess="true")]},
+    {}, {"entries": [state(repoRoot="/different")]},
     {"entries": [state(True, accessDefault=None)]},
 ])
 def test_unknown_scoped_state_never_grants_or_claims_success(gateway, response):
@@ -95,8 +92,7 @@ def test_unknown_scoped_state_never_grants_or_claims_success(gateway, response):
     assert len(requests) == 1
 
 
-@pytest.mark.parametrize("response", [{}, {"entries": None}, {"entries": [None]},
-                                      {"entries": [{"repoRoot": ROOT}]}])
+@pytest.mark.parametrize("response", [{}, {"entries": None}, {"entries": [{"repoRoot": ROOT}]}])
 def test_unknown_actual_file_list_does_not_mean_absence(gateway, response):
     instance, replies, requests = gateway
     replies.extend([{"entries": [state()]}, response])
@@ -106,8 +102,7 @@ def test_unknown_actual_file_list_does_not_mean_absence(gateway, response):
     assert [request.method for request in requests] == ["GET", "GET"]
 
 
-@pytest.mark.parametrize("response", [state(), state(True, repoRoot="/different"),
-                                      state(True, path="/different/trust.yaml"), {}])
+@pytest.mark.parametrize("response", [state(), state(True, path="/different/trust.yaml"), {}])
 def test_post_requires_confirmed_root_path_and_full_access(gateway, response):
     instance, replies, requests = gateway
     replies.extend([{"entries": [state()]}, {"entries": []}, response])

@@ -11,7 +11,6 @@ from types import SimpleNamespace
 import pytest
 from tests._store_shared import read_result
 
-pytestmark = pytest.mark.serial
 
 from ouroboros import usage_accounting as ua
 from ouroboros.llm_claudexor import ClaudexorModelError, ClaudexorModelNotDispatched
@@ -143,6 +142,8 @@ def child_fixture(tmp_path, monkeypatch):
     events = tmp_path / "events.jsonl"
     original = shell._tracked_subprocess_run
     state = {"mode": "success", "paths": [], "timeouts": []}
+    # The registry is the worker's: an earlier test of the same worker may have left its own entries there.
+    earlier = set(shell._active_subprocesses)
 
     def run(argv, **kwargs):
         payload = Path(argv[-1])
@@ -173,7 +174,7 @@ def child_fixture(tmp_path, monkeypatch):
     with ua.usage_scope(ua.UsageScope(drive_root=tmp_path / "data", task_id="image-task", root_task_id="image-task")):
         yield state, events, tmp_path / "data"
     assert all(not path.exists() for path in state["paths"])
-    assert not shell._active_subprocesses
+    assert not set(shell._active_subprocesses) - earlier  # the vision run tracks no subprocess past its end
 
 
 def _events(path):

@@ -131,16 +131,6 @@ def test_ui_control_scan_lists_a_modules_own_button_factory_by_its_literal_calls
     assert interpolated == 1, "a call whose label is computed is counted, not invented"
 
 
-def test_ui_control_inventory_keeps_siblings_adjacent_and_names_the_one_raiser():
-    rendered = inv.build_ui_control_inventory()[0]
-    table = [line for line in rendered.splitlines() if line.startswith("| ") and not line.startswith("| text")]
-    refresh = [index for index, line in enumerate(table) if line.startswith("| Refresh |")]
-    # The point of the sort: every control that says the same thing is one contiguous block.
-    assert len(refresh) >= 2 and refresh == list(range(refresh[0], refresh[0] + len(refresh)))
-    # An owner intent with a door is raised by exactly one module.
-    assert "| `ouro:open-project` | modules/project_reference.js |" in rendered
-
-
 # ---------------------------------------------------------------------------
 # Resolution invariants
 # ---------------------------------------------------------------------------

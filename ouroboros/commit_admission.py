@@ -517,7 +517,7 @@ def preflight_test_workload(
 ) -> tuple:
     """Effective runner inputs, with generated paths and probe names normalized."""
     import sys
-    from ouroboros import preflight_runner as pr
+    from ouroboros import preflight_probe, preflight_runner as pr
     from ouroboros.preflight_node import candidate_node_tests, resolve_node
     from ouroboros.process_containment import CONTAINMENT_ENV_PREFIX
     from ouroboros.test_environment import OUTPUT_LOCATION_KEYS, default_temp_parent
@@ -540,13 +540,13 @@ def preflight_test_workload(
     specs = passes if passes is not None else (selection_passes(selection) if selection else pr._preflight_pass_specs(pytest_args))
     node_tests = tuple(candidate_node_tests(repo))
     return (
-        tuple((p.label, tuple(pr._WORKER_PROBE_MODULE if probe_module and arg == probe_module else
+        tuple((p.label, tuple(preflight_probe.WORKER_PROBE_MODULE if probe_module and arg == probe_module else
                              MODULE if arg.startswith(MODULE + "_") else arg
                              for arg in p.args), p.parallel) for p in specs),
-        pr._resolve_preflight_timeout(pr._DEFAULT_PREFLIGHT_TIMEOUT_SEC if timeout is None else timeout),
+        pr._resolve_preflight_timeout(timeout, full=pr._full_tier(selection, pytest_args)),
         environment, _executable_identity(python),
         (_executable_identity(resolve_node()), node_tests) if node_tests else (),
-        pr._WORKER_PROBE_SOURCE,
+        preflight_probe.WORKER_PROBE_SOURCE,
     )
 
 

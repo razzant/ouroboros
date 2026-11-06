@@ -154,8 +154,11 @@ def test_explicit_switch_model_is_not_host_handover(episode, monkeypatch):
     assert usage.get("reason_code") != "authoring_handover_incomplete"
 
 
-@pytest.mark.parametrize("targets", [(PRIMARY,), (SUCCESSOR,), (SUCCESSOR, SUCCESSOR)])
-@pytest.mark.parametrize("prior_tools", [False, True])
+@pytest.mark.parametrize(("prior_tools", "targets"), [
+    pytest.param(False, (PRIMARY,), id='False-targets0'),
+    pytest.param(True, (SUCCESSOR,), id='True-targets1'),
+    pytest.param(True, (SUCCESSOR, SUCCESSOR), id='True-targets2'),
+])
 def test_model_wait_reprepare_preserves_original_author_and_tool_baseline(episode, targets, prior_tools):
     target = targets[-1]
     def switch(_state, _usage, kwargs):

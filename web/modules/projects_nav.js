@@ -7,10 +7,11 @@
  * Projects are reached by name in Find a project or by Show more, from the registry's complete list
  * (`GET /api/projects?all=1`): read as a find or a browse starts and again, while one is open, when the registry
  * announces a change (`refresh`); never on a timer. Nothing here acknowledges a read. A row opens through app.js: one
- * the feed carries at once, as it shows; one older than the feed names its id and app.js reads its room first. What
- * is held also feeds the unread app.js shows for all Projects (`unreadRows`, `onListRead`). Whether rooms lie beyond
- * the feed before that list is read comes from the state's complete set of Project rooms (`reserved`), never from a
- * guessed cap.
+ * the feed carries at once, as it shows; one older than the feed names its id and app.js reads its room first. The
+ * unread app.js shows for the Projects is what this list shows: the feed's rooms, hidden or not, and the older rooms
+ * an open find or browse lists, never one only a held list names (`unreadRows`; `onShown` and `onListRead` say when it
+ * may have changed). Whether rooms lie beyond the feed before that list is read comes from the state's complete set of
+ * Project rooms (`reserved`), never from a guessed cap.
  *
  * A read is as fresh as its request. Requests are ordered by the state reads' own generation (state_snapshots.js):
  * a feed carries the generation it was read under, and a list read or a confirmed change takes the next one, so two
@@ -59,7 +60,7 @@ const newestFirst = (a, b) => {
 };
 
 export function createProjectsNav({ section, header, list, toggle, feed, feedOrder, nextOrder, reserved, listableCount, activeId,
-    expanded, isUnread, readList, onListRead, open, openMenu }) {
+    expanded, isUnread, readList, onListRead, onShown, open, openMenu }) {
     // `browse`: the ids a browse shows and the rows Show more still owes; `found`: the ids a find shows (null: the
     // owner's new words, laid out anew) and how many rows besides the pins it may show.
     const state = { query: '', browse: null, found: null, budget: PAGE, resume: null, collapsed: null, handoff: null };
@@ -67,6 +68,7 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
     let held = null;       // { rows: Map id → { row, at }, at: the list's order, time: its clock time, folded }
     let reading = null;    // the read in flight: { controller }
     let failure = '';      // why the last read failed; '' once one answered
+    let listed = new Set();  // the rooms an open find or browse showed at the last paint; none at rest
     let activity = { byChat: new Map() };  // the census index the last patch painted from
     let destroyed = false;
     const folded = new Map();  // name → its folded form
@@ -124,10 +126,12 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
         observeFeed();
         return new Map([...held.rows].map(([id, seen]) => [id, seen.row]));
     }
-    const unreadRows = () => [...facts().values()].filter((row) => listable(row) && unreadOf(row));
-    const unreadBeyondFeed = () => {
-        const feedIds = new Set(feedRows().map((row) => row.id));
-        return unreadRows().some((row) => !feedIds.has(row.id));
+    // What this sidebar shows unread: the feed's rooms, hidden or not (collapsed, the header speaks for them), and the
+    // rooms an open find or browse lists. A room only the held list names is shown nowhere here, so it counts nowhere.
+    const unreadRows = () => {
+        const rows = facts();
+        return [...new Set([...feedRows().map((row) => row.id), ...listed])].map((id) => rows.get(id))
+            .filter((row) => listable(row) && unreadOf(row));
     };
     // The resting list: the feed's rooms, each as its newest observation tells it, pins, unread, then recency.
     const resting = (rows) => feedRows().map((row) => rows.get(row.id)).filter(listable).sort(listOrder);
@@ -384,6 +388,10 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
         const anchor = beyond ? anchorRow() : null;
         const anchorTop = anchor?.getBoundingClientRect().top;
         const { shown, after, waiting } = view();
+        // The rooms an open find or browse lists count toward the unread app.js shows, so a change of them is said.
+        const showing = new Set(beyond ? shown.map((row) => row.id) : []);
+        const relisted = showing.size !== listed.size || [...showing].some((id) => !listed.has(id));
+        listed = showing;
         const keyed = new Map([...list.children].filter((el) => el.dataset.navProjectId)
             .map((el) => [el.dataset.navProjectId, el]));
         const focused = document.activeElement;
@@ -399,6 +407,7 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
         // Moving an existing node can blur it even though its identity survives.
         if (focused?.isConnected && list.contains(focused) && focused !== document.activeElement) focused.focus({ preventScroll: true });
         if (state.handoff && !waiting) handOff(state.handoff, nodes);
+        if (relisted) onShown();  // app.js says its number, header and ☰ again, marks in place: no read, no render
     }
 
     // A key's Show more or Show all hands the keyboard on once, when its rows have settled (read, or the read
@@ -501,12 +510,10 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
         });
     }
 
-    /** The registry changed (or may have, across a reconnect): a find or browse that goes on reads its list again. */
+    /** The registry changed (or may have, across a reconnect): a find or browse that goes on reads its list again. A
+     *  list kept after both ended counts no unread and is read again only as the next one starts. */
     function refresh() {
-        // A held catalogue can still feed the header/drawer unread projection after Find or Browse closes. Reconcile it
-        // on the existing registry-change event so a room deleted elsewhere cannot leave a ghost dot; this is event-led,
-        // not a new polling loop. With no held unread facts, the compact feed remains the cheap resting path.
-        if (destroyed || (!beyondFeed() && !(held && unreadBeyondFeed()))) return;
+        if (destroyed || !beyondFeed()) return;
         reading?.controller.abort();
         reading = null;
         load();
@@ -624,8 +631,8 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
             const seen = held?.rows.get(id);
             if (seen) held.rows.set(id, { row: { ...seen.row, ...fields }, at: nextOrder() });
         },
-        /** Every Project read so far that shows unread, beyond the feed too once a complete list is held: what the
-         *  header's number, ☰ and the re-read of the shared cursors go by. */
+        /** Every Project this list shows unread, the feed's hidden or not and those an open find or browse lists: what
+         *  the header's number, ☰ and the re-read of the shared cursors go by. */
         unreadRows,
         /** The row shown for an id as its freshest read tells it, with its unread said; null when no read names it. */
         row(id) {

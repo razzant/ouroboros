@@ -8,7 +8,7 @@ import pytest
 from tests._extension_loader_shared import _clear_loader_state  # noqa: F401
 from tests._live_stack import stack
 from tests._live_stack_page import jpeg as synthetic_frame
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 @pytest.mark.parametrize('engine,thinking', [('openai', False), ('grok', False), ('gemini', False), ('gemini', True)])

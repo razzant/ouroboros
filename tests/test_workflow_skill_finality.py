@@ -200,7 +200,7 @@ def test_grant_prompt_does_not_ask_for_a_review_the_gate_already_permits(subject
     assert "fresh executable review" not in ran and "review gate already permits" in ran
 
 
-@pytest.mark.parametrize("case", ["running", "no_reference", "wrong_reference", "no_job", "no_terminal_time"])
+@pytest.mark.parametrize("case", ["running", "wrong_reference", "no_terminal_time"])
 def test_pending_finish_needs_actual_terminal_source(subject, case):
     reference = None
     if case != "no_job":

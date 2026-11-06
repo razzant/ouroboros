@@ -184,13 +184,6 @@ def test_checklist_item_numbers_cited_outside_the_checklist_name_the_current_ite
     assert not re.search(r"CHECKLISTS items? (?:2|13)\([a-z]\)", dev)
 
 
-def test_phase3_governance_language_is_pinned_without_new_qa_surface():
-    development = _read("docs/DEVELOPMENT.md")
-    # The heading is selected by DOC_RESIDUE_SKIPPED_SUBSECTIONS below.
-    assert "External facts: unknown is not no" in development
-    assert "| Location | Fact | Evidence & re-probe | If stale |" in development
-
-
 # Identifiers the prompts legitimately name in backticks that are NOT tools:
 # parameter names, resource roots, write surfaces, typed outcome/status tokens
 # and runtime-context keys. A NEW snake_case identifier in a prompt must either

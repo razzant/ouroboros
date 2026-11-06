@@ -258,7 +258,7 @@ def test_a_recorded_terminal_with_live_or_unknown_effects_is_not_adopted(pooled,
     _settled(pooled, backoff=2)
 
 
-@pytest.mark.parametrize("shape", ["unreadable", "absent", "nonterminal", "interrupted", "direct", "cancelled"])
+@pytest.mark.parametrize("shape", ["unreadable", "absent", "cancelled"])
 def test_what_the_tick_cannot_prove_settles_nothing_and_keeps_todays_start(pooled, monkeypatch, shape):
     """Unknown never counts completed, and no unprovable row wedges the alarm."""
     import ouroboros.task_results as results

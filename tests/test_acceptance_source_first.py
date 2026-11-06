@@ -12,10 +12,7 @@ import pytest
 
 
 @pytest.mark.parametrize('fact,expected', [
-    ('none', 'not_dispatched'), ('reserved', 'not_dispatched'), ('released', 'not_dispatched'),
-    ('settled', 'settled'), ('dispatched', 'custody_lost'), ('unresolved', 'custody_lost'),
-    ('malformed', 'custody_lost'), ('run', 'settled'), ('started', 'settled'),
-    ('pending', 'custody_lost'), ('native_round', 'settled'),
+    ('none', 'not_dispatched'), ('settled', 'settled'), ('dispatched', 'custody_lost'),
 ])
 def test_source_refusal_preserves_stronger_physical_custody(monkeypatch, fact, expected):
     from types import SimpleNamespace

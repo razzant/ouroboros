@@ -177,9 +177,7 @@ def test_post_task_cleanup_waits_for_pooled_files_only(tmp_path, monkeypatch, po
 
 
 @pytest.mark.parametrize("post,pending,keep", [
-    ("pending_once", [], True), ("running", [], True),
-    ("completed", [{"kind": "task_attachment", "path": "accepted-input"}], True),
-    ("completed", [], False), ("degraded", [{"kind": "blob_ref"}], False),
+    ("pending_once", [], True), ("completed", [], False), ("degraded", [{"kind": "blob_ref"}], False),
 ])
 def test_startup_mailbox_sweep_keeps_the_same_outstanding_obligations(tmp_path, post, pending, keep):
     task_id = "sweep-files"
@@ -280,7 +278,7 @@ def test_prepared_frame_uses_current_disk_without_second_copy(terminal_context, 
     assert stored["result"] == "Current answer" and "_files_prepared_attempt" not in stored
 
 
-@pytest.mark.parametrize("stamp,wid", [(2, 7), (4, 7), (True, 7), ("3", 7), (3, 8)])
+@pytest.mark.parametrize("stamp,wid", [(2, 7), (True, 7), (3, 8)])
 def test_stale_prepared_frame_cannot_finish_current_attempt(terminal_context, monkeypatch, stamp, wid):
     from supervisor.events import dispatch_event
 

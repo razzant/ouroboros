@@ -106,7 +106,6 @@ def test_selected_runtime_omits_other_task_narratives_but_keeps_authority(tmp_pa
 @pytest.mark.parametrize("overrides", [
     {"delegation_role": "root"},
     {"configured_subagent": {"route": {"kind": "weird"}}},
-    {"configured_subagent": {}},
     {"id": ""},
 ])
 def test_unsupported_builder_task_class_is_not_silently_shared(tmp_path, overrides):

@@ -276,8 +276,7 @@ def test_upload_parse_error_returns_400(client, monkeypatch):
     assert "Unexpected disconnect" in resp.json()["error"]
 
 
-@pytest.mark.parametrize("copy_fails", [False, True])
-@pytest.mark.parametrize("cancel_mode", ["asyncio", "anyio"])
+@pytest.mark.parametrize(("cancel_mode", "copy_fails"), [("asyncio", False), ("anyio", True)])
 def test_cancelled_upload_waits_for_its_copy_before_closing_spool(tmp_path, monkeypatch, copy_fails, cancel_mode):
     import anyio
     import asyncio

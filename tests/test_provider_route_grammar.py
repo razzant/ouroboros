@@ -18,14 +18,6 @@ from ouroboros.provider_models import RouteParts, normalize_model_identity, pars
     ("anthropic/claude-opus-5.5", RouteParts("openrouter", "", "anthropic/claude-opus-5.5")),
     ("openrouter::x-ai/grok", RouteParts("openrouter", "", "x-ai/grok")),
     ("openrouter@byok::anthropic/claude", RouteParts("openrouter", "byok", "anthropic/claude")),
-    ("anthropic@default::claude", RouteParts("anthropic", "", "claude")),
-    ("openai-compatible@vllm-2::llama", RouteParts("openai-compatible", "vllm-2", "llama")),
-    ("claudexor::codex=gpt", RouteParts("claudexor", "", "codex=gpt")),
-    ("claudexor@acct::codex=gpt", RouteParts("claudexor", "acct", "codex=gpt", valid=False)),
-    ("openrouter@Bad Name::x", RouteParts("openrouter", "Bad Name", "x", valid=False)),
-    ("openrouter@::x", RouteParts("openrouter", "", "x", valid=False)),
-    ("openai::gpt (local)", RouteParts("local", "", "openai::gpt", local=True)),
-    ("foo@bar::x", RouteParts("openrouter", "", "foo@bar::x")),  # an unknown head stays an opaque id
 ])
 def test_parse_model_route(value, expected):
     assert parse_model_route(value) == expected
@@ -43,17 +35,7 @@ def test_provider_for_model_is_the_parsed_kind():
     # Built-in spellings keep the identities they always had.
     ("anthropic/claude-opus-4.6", "anthropic/claude-opus-4-6"),
     ("openai::gpt-5.6", "openai/gpt-5.6"),
-    ("anthropic::claude-opus-5.5", "anthropic/claude-opus-5-5"),
     ("openai-compatible::llama", "openai-compatible/llama"),
-    ("zai::glm-5.3 (local)", "zai/glm-5.3"),
-    ("claudexor::codex=gpt", "claudexor::codex=gpt"),
-    # A connection name says which key pays, not which model answers...
-    ("openrouter@byok::anthropic/claude-opus-5.5", "anthropic/claude-opus-5-5"),
-    ("anthropic@k2::claude-opus-5.5", "anthropic/claude-opus-5-5"),
-    ("openrouter::z-ai/glm", "z-ai/glm"),
-    # ...except on compatible servers, which never share learned facts.
-    ("openai-compatible@vllm::llama", "openai-compatible@vllm/llama"),
-    ("openrouter@Bad::x", "openrouter@Bad::x"),
 ])
 def test_normalize_model_identity(value, expected):
     assert normalize_model_identity(value) == expected

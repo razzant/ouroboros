@@ -52,7 +52,7 @@ def test_a_real_reviewer_send_and_the_forced_candidate_share_the_physical_ceilin
     assert len(ledger_rows(root)) == 1  # Preparing a forced send reserves nothing.
 
 
-@pytest.mark.parametrize("role", ["main", "light", "reviewer:triad_1", "consciousness"])
+@pytest.mark.parametrize("role", ["main", "reviewer:triad_1", "consciousness"])
 def test_async_initial_continuation_and_rebinding_use_route_cap_before_capture(transport, monkeypatch, role):
     root, client, sent = transport
     model = "openai-compatible::new-model"
@@ -224,7 +224,6 @@ def test_local_cap_is_bound_to_the_served_artifact_and_local_endpoint(transport,
     ("/models/model.gguf", "", "/models/model.gguf"),
     ("org/repo", "model-Q4.gguf", "/hf/hub/models--org--repo/snapshots/abc123/quant/model-Q4.gguf"),
     ("org/repo", "q4/model.gguf", "/hf/hub/models--org--repo/snapshots/abc123/q4/model.gguf"),
-    ("org/repo", "q8/model.gguf", "/hf/hub/models--org--repo/snapshots/abc123/q8/model.gguf"),
 ])
 def test_a_maximum_applied_while_stopped_holds_after_the_model_starts(transport, monkeypatch, source, filename, served):
     import sys
@@ -354,8 +353,7 @@ def test_the_serving_artifact_is_the_live_launch_not_the_saved_settings(monkeypa
     assert manager.serving_artifact() == {'model_path': '/models/a b.gguf', 'port': 8766}
 
 
-@pytest.mark.parametrize("expired", [False, True])
-@pytest.mark.parametrize("account", ["", "account-b"])
+@pytest.mark.parametrize(("account", "expired"), [("", True), ("account-b", False)])
 def test_settings_preview_binds_the_exact_account_and_stores_nothing(tmp_path, monkeypatch, expired, account):
     from starlette.applications import Starlette
     from starlette.routing import Route

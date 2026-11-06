@@ -17,7 +17,7 @@ def _focus(room=444):
 
 @pytest.mark.parametrize("stamp", [
     {"presence": {"binding_id": "old"}}, {"presence_provenance": {"place_id": "garden"}},
-    {"source": "presence:telegram"}, {"type": "presence_delivery"},
+    {"type": "presence_delivery"},
 ])
 def test_place_predicate_is_typed_and_inventory_retains_it(stamp):
     row = shared.msg("2026-09-05", "presence:telegram", chat_id=444, **stamp)

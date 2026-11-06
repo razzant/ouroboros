@@ -504,21 +504,22 @@ def _handle_reads(tree: ast.AST, handle: str) -> set[str]:
     return reads
 
 
-@pytest.mark.parametrize("leaf", sorted(LEAVES))
-def test_each_leaf_reaches_its_parent_only_through_a_call_time_handle(leaf: str) -> None:
-    parent, handle, _declared = LEAVES[leaf]
-    parent_module = parent[:-3].replace("/", ".")
-    tree = _tree(leaf)
-    for node in tree.body:  # module scope only: a lazy import inside the handle is the point
-        if isinstance(node, ast.ImportFrom):
-            assert node.module != parent_module, f"{leaf} imports its parent at module scope"
-        if isinstance(node, ast.Import):
-            assert all(a.name != parent_module for a in node.names), leaf
-    handles = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == handle]
-    assert len(handles) == 1, f"{leaf}: expected exactly one {handle}() definition"
-    assert [n for n in ast.walk(handles[0]) if isinstance(n, (ast.Import, ast.ImportFrom))], (
-        f"{leaf}: {handle}() must import the parent at call time"
-    )
+def test_each_leaf_reaches_its_parent_only_through_a_call_time_handle(subtests) -> None:
+    for leaf in sorted(LEAVES):
+        with subtests.test(leaf=leaf):
+            parent, handle, _declared = LEAVES[leaf]
+            parent_module = parent[:-3].replace("/", ".")
+            tree = _tree(leaf)
+            for node in tree.body:  # module scope only: a lazy import inside the handle is the point
+                if isinstance(node, ast.ImportFrom):
+                    assert node.module != parent_module, f"{leaf} imports its parent at module scope"
+                if isinstance(node, ast.Import):
+                    assert all(a.name != parent_module for a in node.names), leaf
+            handles = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == handle]
+            assert len(handles) == 1, f"{leaf}: expected exactly one {handle}() definition"
+            assert [n for n in ast.walk(handles[0]) if isinstance(n, (ast.Import, ast.ImportFrom))], (
+                f"{leaf}: {handle}() must import the parent at call time"
+            )
 
 
 @pytest.mark.parametrize("leaf", sorted(LEAVES))
@@ -533,37 +534,38 @@ def test_the_declared_set_is_exactly_what_the_leaf_reads_through_the_handle(leaf
     assert missing == [], f"{leaf}: declared names absent from {parent}: {missing}"
 
 
-@pytest.mark.parametrize("leaf", sorted(LEAVES))
-def test_no_leaf_reads_a_parent_owned_name_directly(leaf: str) -> None:
+def test_no_leaf_reads_a_parent_owned_name_directly(subtests) -> None:
     """The bug the handle exists to prevent: a direct read freezes the binding the
     leaf saw at import time, so `init` rebinding the parent's name — or a test doing
     the same — would leave this module looking at the old object forever."""
-    parent, _handle, _declared = LEAVES[leaf]
-    leaf_tree = _tree(leaf)
-    parent_defs: set[str] = set()
-    for node in _tree(parent).body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            parent_defs.add(node.name)
-        elif isinstance(node, ast.Assign):
-            # Same recursive unfold as _module_bindings (wave-5 conformance:
-            # the shallow variant here let git_ops' tuple-bound aliases
-            # escape the direct-read guard).
-            stack = list(node.targets)
-            while stack:
-                t = stack.pop()
-                if isinstance(t, ast.Name):
-                    parent_defs.add(t.id)
-                elif isinstance(t, (ast.Tuple, ast.List)):
-                    stack.extend(t.elts)
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            parent_defs.add(node.target.id)
-    own = _module_bindings(leaf_tree)
-    direct = {
-        node.id for node in ast.walk(leaf_tree)
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
-        and node.id in parent_defs and node.id not in own
-    }
-    assert direct == set(), f"{leaf} reads {sorted(direct)} directly instead of through the handle"
+    for leaf in sorted(LEAVES):
+        with subtests.test(leaf=leaf):
+            parent, _handle, _declared = LEAVES[leaf]
+            leaf_tree = _tree(leaf)
+            parent_defs: set[str] = set()
+            for node in _tree(parent).body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    parent_defs.add(node.name)
+                elif isinstance(node, ast.Assign):
+                    # Same recursive unfold as _module_bindings (wave-5 conformance:
+                    # the shallow variant here let git_ops' tuple-bound aliases
+                    # escape the direct-read guard).
+                    stack = list(node.targets)
+                    while stack:
+                        t = stack.pop()
+                        if isinstance(t, ast.Name):
+                            parent_defs.add(t.id)
+                        elif isinstance(t, (ast.Tuple, ast.List)):
+                            stack.extend(t.elts)
+                elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                    parent_defs.add(node.target.id)
+            own = _module_bindings(leaf_tree)
+            direct = {
+                node.id for node in ast.walk(leaf_tree)
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+                and node.id in parent_defs and node.id not in own
+            }
+            assert direct == set(), f"{leaf} reads {sorted(direct)} directly instead of through the handle"
 
 
 def test_queue_snapshot_path_has_a_single_authority():

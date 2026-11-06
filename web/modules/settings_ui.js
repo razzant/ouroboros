@@ -23,6 +23,10 @@ const SETTINGS_TABS = [
 ];
 // Guard markers: renderTabStrip emits behavior/advanced tabs at runtime.
 
+// The setup contract replaces this after the settings read. Keep the accessible
+// description useful while that read is pending or unavailable.
+const BUDGET_NOTE_FALLBACK = 'Budget limits use known spend: Total Budget applies globally, while Per-task Cost Cap applies to one root task tree. Unpriced calls remain unknown and are not counted as $0; reservations and unresolved charges are not counted as spending.';
+
 // Runtime mode is one axis of the owner policy contract. Keep the Settings
 // presentation in the same vocabulary as the onboarding setup contract; the
 // saved value is still handled by settings.js and the owner endpoint.
@@ -630,12 +634,15 @@ export function renderSettingsPage() {
                         <div class="form-grid two">
                             <div class="form-field ui-field">
                                 <label for="s-total-budget">Total Budget (USD)</label>
-                                <input id="s-total-budget" type="number" min="0.01" step="any" value="200.0" class="ui-control" name="s-total-budget">
+                                <input id="s-total-budget" type="number" min="0.01" step="any" value="200.0" class="ui-control" name="s-total-budget" aria-describedby="s-budget-help">
                             </div>
                             <div class="form-field ui-field">
                                 <label for="s-settings-per-task-cost">Per-Task Cost Cap (USD)</label>
-                                <input id="s-settings-per-task-cost" type="number" min="0.01" step="any" value="50.0" class="ui-control" name="s-settings-per-task-cost">
+                                <input id="s-settings-per-task-cost" type="number" min="0.01" step="any" value="50.0" class="ui-control" name="s-settings-per-task-cost" aria-describedby="s-budget-help">
                             </div>
+                        </div>
+                        <div class="settings-inline-note ui-field-help" id="s-budget-help" role="note">${BUDGET_NOTE_FALLBACK}</div>
+                        <div class="form-grid two">
                             <div class="form-field ui-field">
                                 <label for="s-workers">Max Workers</label>
                                 <input id="s-workers" type="number" min="1" max="50" value="10" class="ui-control" name="s-workers">

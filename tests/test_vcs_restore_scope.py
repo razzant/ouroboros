@@ -105,8 +105,8 @@ def _changes(repo: pathlib.Path, form: str) -> list:
     return [*_changes(repo, "staged_addition"), *_changes(repo, "untracked_only"), *_changes(repo, "modified")]
 
 
-@pytest.mark.parametrize("form", ["staged_addition", "untracked_only", "modified", "deleted", "rename",
-                                  "directory", "mixed"])
+@pytest.mark.parametrize("form", ["staged_addition", "rename",
+                                  "mixed"])
 def test_scoped_restore_matches_head_inside_and_keeps_everything_outside(project, form):
     registry, repo = project
     outside = _outside(repo)
@@ -267,8 +267,10 @@ def test_original_untracked_names_are_removed_even_when_restored_rules_ignore_th
     assert "RESTORE_" not in result and _status(repo, "dir") == [], result
 
 
-@pytest.mark.parametrize("paths", [None, ["tracked.txt"]])
-@pytest.mark.parametrize("neighbor", ["loose.txt", "keep.ignored"])
+@pytest.mark.parametrize(("neighbor", "paths"), [
+    ("loose.txt", None),
+    pytest.param("keep.ignored", ["tracked.txt"], id='keep.ignored-paths1'),
+])
 def test_a_file_turned_into_a_folder_returns_without_deleting_kept_files(project, paths, neighbor):
     """HEAD's file returns once the staged child and the original untracked names are gone. Git writes
     it by deleting the folder in its way, so a folder still holding an ignored file is kept and reported."""

@@ -16,7 +16,7 @@ from tests import test_room_work_browser as rw
 
 room_ui = rw.room_ui
 subscription_ui = rw.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 class Transport(rw.Transport):

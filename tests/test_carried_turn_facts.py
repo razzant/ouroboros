@@ -15,7 +15,6 @@ import pytest
 from supervisor import workers
 from tests.conversation_carrier_support import carry, isolate_lane_pool, lane_rows
 
-pytestmark = pytest.mark.serial
 
 ORIGIN = {"chat_id": 1, "client_message_id": "owner-msg-1", "ts": "2026-11-02T10:00:00+00:00"}
 

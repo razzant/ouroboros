@@ -470,7 +470,6 @@ def renamed_linux_payload(tmp_path):
     return payload
 
 
-@pytest.mark.serial
 def test_release_archive_digest_and_ci_extraction_keep_the_shared_entry(tmp_path, renamed_linux_payload, monkeypatch):
     import argparse
     import json
@@ -510,7 +509,6 @@ def test_release_archive_digest_and_ci_extraction_keep_the_shared_entry(tmp_path
     assert refused.returncode != 0 and not output.exists()
 
 
-@pytest.mark.serial
 def test_ci_runtime_root_uses_the_live_renamed_executable(tmp_path):
     import yaml
 
@@ -534,7 +532,6 @@ def test_ci_runtime_root_uses_the_live_renamed_executable(tmp_path):
     assert 'if [ "$APPIMAGE_RUNTIME_EXE" != "$APPIMAGE" ]; then' in lines
 
 
-@pytest.mark.serial
 def test_cli_and_signin_resolve_public_entry_and_refuse_only_internal_binary(tmp_path, renamed_linux_payload, monkeypatch):
     import json
     from types import SimpleNamespace
@@ -584,7 +581,6 @@ def test_cli_and_signin_resolve_public_entry_and_refuse_only_internal_binary(tmp
     assert len(children) == 1  # no fallback to the internal ELF, and no registration was changed
 
 
-@pytest.mark.serial
 def test_package_builder_stages_renamed_payload_and_public_desktop_unit(tmp_path, renamed_linux_payload):
     """Actual builder staging/spec; package encoders are recording fixtures, not native installs."""
     import json

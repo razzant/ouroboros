@@ -1384,12 +1384,14 @@ def _with_dialogue_facts(project: Dict[str, Any], room: Optional[dict]) -> Dict[
 
 def projects_summary(drive_root: Any, *, limit: Optional[int] = 50, chat_id: Any = None,
                      project_id: Any = None, include_pinned: bool = False, closed: Optional[bool] = None,
-                     oldest_first: bool = False, start: int = 0) -> List[Dict[str, Any]]:
+                     oldest_first: bool = False, start: int = 0,
+                     sidebar_rows: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
     """Sidebar, its whole list (``limit=None``) or a strict addressed room, with unread/activity from room facts.
 
     ``chat_id`` addresses an active room, ``project_id`` an active or deleting one; registry reads retain lifecycle
     and binding authority. An unproved inactive room requires complete import; a pending, failed or invalid
-    interval is never inactivity.
+    interval is never inactivity. ``sidebar_rows``, for the unaddressed list only, is the caller's own
+    ``list_sidebar_projects`` read: this list and what the caller counts of it are then one registry observation.
     """
     from ouroboros import dialogue_store as ds
 
@@ -1411,7 +1413,7 @@ def projects_summary(drive_root: Any, *, limit: Optional[int] = 50, chat_id: Any
         projects = [row] if row and row.get("lifecycle") in {PROJECT_ACTIVE, PROJECT_DELETING} else []
         facts = {row["chat_id"]: ds.room(drive_root, row["chat_id"])} if projects else {}
     else:
-        projects = [p for p in list_sidebar_projects(drive_root)
+        projects = [p for p in (list_sidebar_projects(drive_root) if sidebar_rows is None else sidebar_rows)
                     if closed is None or p.get("lifecycle") == PROJECT_ACTIVE]
         facts = {room["chat_id"]: room for room in ds.rooms(drive_root)} if projects else {}
     projects = [_with_dialogue_facts(project, facts.get(project["chat_id"])) for project in projects]

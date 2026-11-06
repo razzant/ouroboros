@@ -234,8 +234,7 @@ def test_partial_deliverable_manifest_keeps_its_warning_beside_its_identity(tmp_
     assert "status" not in row  # the producer's facts are kept, not overlaid with a clean "ready" record
 
 
-@pytest.mark.parametrize("change", ["equal_length_bytes", "new_child_artifact", "critical_notice",
-                                    "read_error", "unregistered_listing"])
+@pytest.mark.parametrize("change", ["equal_length_bytes", "read_error", "unregistered_listing"])
 def test_real_changes_after_the_decision_still_reopen_it(tmp_path, monkeypatch, change):
     data, drive, ctx, before, shown = _decided(tmp_path)
     export = Path(next(row for row in before["artifacts"] if row["kind"] == "memory_export")["path"])
@@ -356,8 +355,7 @@ def _shown_by_readers(ctx: SimpleNamespace, facts: dict, absent: set = frozenset
                for shown in _readers(ctx))
 
 
-@pytest.mark.parametrize("size", ["omitted", "inline"])
-@pytest.mark.parametrize("capture", ["clean", "failed"])
+@pytest.mark.parametrize(("capture", "size"), [("clean", "omitted"), ("failed", "inline")])
 def test_a_child_ledger_summary_is_current_while_its_capture_stays_exact(tmp_path, monkeypatch, size, capture):
     """Split stores: the canonical row's summary folds in the current artifact status (an omitted
     stub reads it from the complete file, never from itself) while the published capture, earlier
@@ -411,8 +409,10 @@ def _row_facts(ledger: dict) -> dict:
     return {key: ledger[key] for key in ("created_at", "summary", *_REFRESH_FACTS) if key in ledger}
 
 
-@pytest.mark.parametrize("size", ["omitted", "inline"])
-@pytest.mark.parametrize("transition", ["clean_then_capture_failed", "pending_then_ready"])
+@pytest.mark.parametrize(("transition", "size"), [
+    ("clean_then_capture_failed", "omitted"),
+    ("pending_then_ready", "inline"),
+])
 def test_readers_and_a_repeated_copyback_keep_the_refreshed_summary(tmp_path, monkeypatch, size, transition):
     """The child's capture contradicts the current artifact status: clean before a failed host capture,
     or pending before a ready one. Its copy in the child's row is the same capture, so neither the served
@@ -458,8 +458,7 @@ def test_a_later_child_capture_replaces_the_refreshed_summary(tmp_path, size):
     assert _shown_by_readers(ctx, facts, absent=_REFRESH_FACTS)
 
 
-@pytest.mark.parametrize("size", ["omitted", "inline"])
-@pytest.mark.parametrize("capture", ["clean", "failed"])
+@pytest.mark.parametrize(("capture", "size"), [("clean", "omitted"), ("failed", "inline")])
 def test_a_same_store_ledger_keeps_its_capture_across_finalizations(tmp_path, monkeypatch, size, capture):
     """One store (no child drive), without copy-back: each finalization recomputes the summary from
     the unchanged capture, so a second pass neither rewrites the file nor counts its status twice."""

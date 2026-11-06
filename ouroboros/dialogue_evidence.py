@@ -62,8 +62,9 @@ def _row_projection(row: dict, stream: str, ordinal: int, root: Any = None, *, p
         result["author"] = "host"  # a secret request's outcome frame, never the owner's words
     elif stream == "mailbox" and row.get("type") != "quiz_answer":
         result["author"] = str(row.get("provenance") or "Owner")
-    else:
-        result["author"] = row_author(row, pos=pos, **(lineage if pos is not None and lineage else {}))["label"]
+    else:  # the epoch's rule needs the row's stream position; the places' owner snapshot never does
+        keywords = dict(lineage or {}) if pos is not None else {"owner_accounts": (lineage or {}).get("owner_accounts")}
+        result["author"] = row_author(row, pos=pos, **keywords)["label"]
     # Payload bytes are never interpreted as dialogue. Existing attachment
     # manifests carry the owner-visible file names alongside custody handles.
     attachments = row.get("attachment_manifest")
@@ -125,7 +126,7 @@ def read_room_source(drive_root: Any, chat_id: int, *, task_id: str = "",
     # An activated chronicle records the lineage epoch: an outgoing row before it is signed by
     # its task result, never assumed mine. That rule needs each room row's stream position.
     lineage, positions = row_lineage(root), {}
-    if lineage and coverage["snapshot_stable"]:
+    if lineage.get("lineage_epoch") and coverage["snapshot_stable"]:
         for address, _row, pos in iter_room_rows(root, chat_id):
             positions.setdefault(address["row_sha256"], pos)
     source_rows = []

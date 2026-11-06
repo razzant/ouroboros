@@ -32,8 +32,16 @@ def is_cursors(response):
 
 
 def changed(control, pid):
-    """The registry's `projects_changed` on the page's socket: a forced state read, then a complete list read."""
+    """The registry's `projects_changed` on the page's socket: a forced state read, and a complete list read while a
+    find or a browse is open."""
     control["sockets"][-1].send(json.dumps({"type": "projects_changed", "project_id": pid}))
+
+
+def reopen(page, control):
+    """The page's socket closes and ws.js opens another a second later, as across a network change."""
+    opened = len(control["sockets"])
+    control["sockets"][-1].close()
+    until(page, lambda: page.clock.run_for(500) or len(control["sockets"]) > opened, rounds=60)
 
 
 def test_reads_meet_in_either_order_by_request_time_and_a_deleted_room_stays_gone(pins_ui):
@@ -510,11 +518,11 @@ def test_a_reference_opens_what_its_read_answers_over_an_older_feed_row_and_a_cl
     until(page, lambda: bool(reads_of(reads, "/api/chat/history", chat_id=str(closed["chat_id"]))))
 
 
-def test_an_unread_room_beyond_the_feed_counts_and_another_clients_read_clears_it(pins_ui):
+def test_an_unread_room_beyond_the_feed_counts_while_a_find_shows_it_and_another_clients_read_clears_it(pins_ui):
     """Main and every recent room are read and one old room holds a stored message past the shared cursor: nothing in
-    the compact feed says so. Once a complete list shows the room, the Projects number and ☰ count it, and they keep
-    it when the find ends. Another client reads the room: the next ordinary state read clears it, and no read here was
-    acknowledged."""
+    the compact feed says so. While a find shows the room, the Projects number and ☰ count it. Another client reads the
+    room: the next ordinary state read asks after the shared cursors, since a row shown here is unread, and clears its
+    mark, the number and ☰ while the find still shows it. No read here was acknowledged."""
     ui, page, root, control = pins_ui, pins_ui["page"], pins_ui["root"], pins_ui["control"]
     seed_archive(root)
     # The stored row is older than the room's own activity, so the room stays far beyond the feed.
@@ -540,47 +548,83 @@ def test_an_unread_room_beyond_the_feed_counts_and_another_clients_read_clears_i
     expect()(nav).to_have_attribute("aria-label", "Open navigation · new messages")
     assert "in Projects" in page.locator('#nav-projects-toggle').get_attribute("title")
     assert page.locator('#nav-projects-list [data-unread]').count() == 1  # the old room alone
-    find.fill("")
-    expect()(row(page, "archive-200")).to_have_count(0)
-    expect()(count).to_have_text(str(revision))  # the number does not depend on a find being open
     ui["client"].post('/api/ui/preferences', json={"project_seen_revision": {"archive-200": revision}}).raise_for_status()
     with page.expect_response(is_cursors):
-        refresh(page)  # an ordinary state read: Main and the feed show nothing unread
+        refresh(page)  # an ordinary state read: Main and the feed show nothing unread, the old room shown here does
+    expect()(mark).not_to_have_attribute("data-unread", "")
     expect()(count).to_have_text("")
     expect()(nav).to_have_attribute("aria-label", "Open navigation")
-    find.fill("archive 200")
-    expect()(mark).to_have_count(1)
-    expect()(mark).not_to_have_attribute("data-unread", "")
+    assert "in Projects" not in (page.locator('#nav-projects-toggle').get_attribute("title") or "")
+    find.fill("")
+    expect()(row(page, "archive-200")).to_have_count(0)
     expect()(count).to_have_text("")
     assert not [body for body in posts if "project_seen_revision" in body]
 
 
-def test_held_off_feed_unread_is_retired_after_registry_deletion_without_reopening_find(pins_ui):
-    """A held unread catalogue is refreshed by the existing registry-change event after Find closes; deletion clears
-    its header/drawer contribution without a visit or an acknowledgement write."""
+def test_an_old_unread_room_no_find_shows_counts_nowhere_and_no_complete_list_is_read_for_it(pins_ui):
+    """The number counts what this sidebar shows: the feed's rooms and those an open find or browse lists, never one a
+    complete list only holds. A find for another old room reads a list that holds an unread room no row shows: the
+    number and ☰ stay as the feed says. While the find is open a registry change reads the list again. A find that
+    shows the room ends by a collapse or by clearing it: the number drops at once, and then neither a registry change
+    nor a reopened socket reads the list for the unread it holds. The next find or browse reads it again, as does a
+    socket reopened while that browse is open. Nothing is acknowledged."""
     page, root, control = pins_ui["page"], pins_ui["root"], pins_ui["control"]
     seed_archive(root)
     dialogue_store.append(root, "chat", {"ts": "2025-01-03T00:00:00Z", "direction": "out", "chat_id": 40200,
-                                         "text": "An old reply for retirement"})
+                                         "text": "An old reply this sidebar does not show"})
     revision = advance_room_revision(root, project_id="archive-200")["visible_revision"]
-    control["unread"].add("archive-200")
     control["shared_cursors"] = True
-    posts = []
+    reads, posts = [], []
+    page.on("request", lambda request: reads.append(request.url))
     page.on("request", lambda request: posts.append(request.post_data or "")
             if request.method == "POST" and urlparse(request.url).path == "/api/ui/preferences" else None)
-    find = page.locator(".nav-find-input")
+    lists = lambda: len(reads_of(reads, "/api/projects", all="1"))  # noqa: E731
+    count, nav = page.locator('#nav-projects-count'), page.locator('#page-chat [data-mobile-nav-toggle]')
+    find, status = page.locator('.nav-find-input'), page.locator('.nav-find-status')
     refresh(page)
+    expect()(page.locator('.nav-project-item')).to_have_count(51)
+    # A find that does not match the unread room: its list holds that room, which no row here shows.
+    find.fill("archive 201")
+    expect()(status).to_have_text("1 project found")  # that list is applied, and the number said after it
+    expect()(row(page, "archive-201")).to_be_visible()
+    expect()(count).to_have_text("")
+    expect()(nav).to_have_attribute("aria-label", "Open navigation")
+    with page.expect_response(is_list):  # while a find is open, a registry change reads its list again
+        changed(control, "archive-201")
     find.fill("archive 200")
-    expect()(row(page, "archive-200").locator(".nav-project-row")).to_have_attribute("data-unread", "")
-    find.fill("")
+    expect()(row(page, "archive-200").locator('.nav-project-row')).to_have_attribute("data-unread", "")
+    expect()(count).to_have_text(str(revision))
+    expect()(nav).to_have_attribute("aria-label", "Open navigation · new messages")
+    toggle = page.locator('#nav-projects-toggle')
+    toggle.click()  # a collapse ends the find: the number and ☰ say the feed's rooms again, at once
+    expect()(count).to_have_text("")
+    expect()(nav).to_have_attribute("aria-label", "Open navigation")
+    toggle.click()
+    expect()(find).to_have_value("")
+    with page.expect_response(is_list):  # the next find reads the list as it starts
+        find.fill("archive 200")
+    expect()(count).to_have_text(str(revision))
+    find.fill("")  # clearing it ends it the same way
     expect()(row(page, "archive-200")).to_have_count(0)
-    expect()(page.locator("#nav-projects-count")).to_have_text(str(revision))
-    registry.begin_project_deletion(root, "archive-200")
-    registry.complete_project_deletion(root, "archive-200")
-    with page.expect_response(is_list):
+    expect()(count).to_have_text("")
+    expect()(nav).to_have_attribute("aria-label", "Open navigation")
+    before = lists()
+    with page.expect_response(lambda response: is_state(response.request)):
         changed(control, "archive-200")
-    expect()(page.locator("#nav-projects-count")).to_have_text("")
-    expect()(page.locator("#page-chat [data-mobile-nav-toggle]")).to_have_attribute("aria-label", "Open navigation")
+    with page.expect_response(lambda response: is_state(response.request)):
+        reopen(page, control)
+    settle(page)
+    assert lists() == before, "a list was read again for unread no row shows"
+    expect()(count).to_have_text("")
+    more = page.locator('#nav-projects-list > .nav-projects-more')
+    expect()(more).to_have_text("Show 50 more")
+    with page.expect_request(is_list):  # the next browse reads the list as it starts
+        more.click()
+    expect()(page.locator('#nav-projects-list > .nav-project-item')).to_have_count(101)
+    with page.expect_request(is_list):  # and a socket reopened while it is open reads it again
+        reopen(page, control)
+    expect()(row(page, "archive-200")).to_have_count(0)
+    expect()(count).to_have_text("")
     assert not [body for body in posts if "project_seen_revision" in body]
 
 

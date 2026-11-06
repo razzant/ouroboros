@@ -9,8 +9,13 @@ from ouroboros.contracts.live_conversation import LiveOptions, Respond
 from tests.test_grok_openai_protocol import providers as providers, deny_network as deny_network, Wire, selected
 
 
-@pytest.mark.parametrize("role", ["system", "user", "assistant"])
-@pytest.mark.parametrize("length", [0, 255999, 256000, 256001, 512001])
+@pytest.mark.parametrize(("length", "role"), [
+    (0, "system"),
+    (255999, "user"),
+    (256000, "assistant"),
+    (256001, "system"),
+    (512001, "user"),
+])
 def test_item_text_fragments_keep_every_character_role_and_order(providers, role, length):
     text = ("Я🐍\n" * ((length + 2) // 3))[:length]
     parts = ["BEFORE\n", text, "\nAFTER", ""]

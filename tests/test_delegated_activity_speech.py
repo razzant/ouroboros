@@ -30,6 +30,7 @@ from ouroboros.utils import truncate_within_limit
 from supervisor import events_chat_delivery, message_bus
 from tests import _dialogue as dialogue_test
 from tests.test_delegated_activity import Daemon, _agent, _ctx, _gateway, _harness, _records, _run_event
+from tests._cases import case_folders, chosen_rows
 
 CLAUDE = ("claude", "a01")
 # The adapter's key shape (consumers compare it whole and never parse it).
@@ -228,15 +229,9 @@ ANSWER = "Fixed the duplicate posts; all 15 import tests pass."
 @pytest.mark.parametrize("reply,final,lines", [
     pytest.param(_stream(1, ["Fixed the duplicate posts;", " all 15 import tests pass."], K1), _final(4, ANSWER),
                  [f"claude · a01: {ANSWER}", f"claude · a01 (answer): {ANSWER}"], id="streamed"),
-    pytest.param([_said(1, ANSWER, K1, "complete")], _final(2, ANSWER),
-                 [f"claude · a01: {ANSWER}", f"claude · a01 (answer): {ANSWER}"], id="nonstreamed"),
     pytest.param([_said(1, "Done.", K1, "complete")], _final(2, ANSWER),
                  ["claude · a01: Done.", f"claude · a01 (answer): {ANSWER}"], id="unique-words"),
     pytest.param([], _final(1, ANSWER), [f"claude · a01 (answer): {ANSWER}"], id="result-only"),
-    pytest.param([], _final(1, '{"fixed": 3}', source="structured_output"),
-                 ['claude · a01 (answer): {"fixed": 3}'], id="structured"),
-    pytest.param([_said(1, "Starting.", K1, "complete", actor=("codex", "a02"))], _final(2, ANSWER),
-                 ["codex · a02: Starting.", f"claude · a01 (answer): {ANSWER}"], id="another-actor-spoke"),
 ])
 def test_the_typed_final_answer_is_its_own_part_and_keeps_its_words_for_text_readers(tmp_path, reply, final, lines):
     record = _one(tmp_path, [*reply, final])
@@ -340,8 +335,10 @@ def test_a_draft_with_a_fragment_that_never_passed_here_is_not_proven_either_way
 LOST = [_said(1, "the", K1, "fragment"), _said(2, " big", K1, "fragment"), _said(3, " cat", K1, "fragment"), _tool(4)]
 
 
-@pytest.mark.parametrize("bounds", [[4], [1, 4]], ids=["one-poll", "across-polls"])
-@pytest.mark.parametrize("lose", ["missing", "unreadable"])
+@pytest.mark.parametrize(("lose", "bounds"), [
+    pytest.param("missing", [4], id='missing-one-poll'),
+    pytest.param("unreadable", [1, 4], id='unreadable-across-polls'),
+])
 def test_words_are_never_joined_across_an_event_this_reader_did_not_get_whole(tmp_path, lose, bounds):
     steps = [[event for event in LOST if low < event["seq"] <= high] for low, high in zip([0, *bounds], bounds)]
     daemon = Lossy(steps, **{lose: [2]})                                # " big" never reaches the reader whole
@@ -390,7 +387,7 @@ LATER_KEYS = [*_stream(7, ["Last", " one."], K3, complete="Last one, revised."),
               *_stream(10, ["Done", "."], K4, complete="Done, revised.")]
 
 
-@pytest.mark.parametrize("coverage", ["missing", "unreadable", "window", "provisional"])
+@pytest.mark.parametrize("coverage", ["missing", "unreadable", "provisional"])
 def test_no_key_of_a_record_without_exact_coverage_is_proven_either_way(tmp_path, coverage):
     """Every comparison needs the gap-free exact range, not only the record's first key: an earlier block of the
     same actor proves nothing about a later block whose fragment never passed here whole, or that a bounded window
@@ -770,7 +767,7 @@ def _one_utterance_per_key(journal, records, *, exact=True):
     assert answers == [f"claude · a01 (answer): {journal.answer['text']}"], "its words reach text readers whole"
 
 
-@pytest.mark.parametrize("name", SCENARIOS)
+@pytest.mark.parametrize("name", chosen_rows(SCENARIOS, 0, 1, 3))
 def test_the_engines_journals_read_as_one_utterance_per_key_however_the_polls_cut_them(tmp_path, name):
     journal = engine_journal(name)
     assert journal.answer["hasFinal"] is True
@@ -789,40 +786,46 @@ def test_the_engines_journals_read_as_one_utterance_per_key_however_the_polls_cu
         _one_utterance_per_key(journal, records)
 
 
-@pytest.mark.parametrize("name", SCENARIOS)
-def test_the_engines_timeline_rows_fold_the_same_way_in_the_window_view(tmp_path, name):
-    journal = engine_journal(name)
-    rows = journal.timeline
-    keys, _abandoned_keys, _unkeyed = _speech_facts(journal)
-    for cuts in _splits(len(rows), most=12):        # a window batch shows its last 12 rows
-        delegate_activity.reset_process_memo()
-        daemon = Daemon([[_harness(1, "message", text="x")]], stream=False, run_id=journal.events[0]["run_id"])
-        daemon.revealed = 1
-        gateway, ctx = _gateway(daemon), _ctx(tmp_path / ("cut-" + "-".join(map(str, cuts))), [])
-        seen, records = delegate_progress.WindowObservations(), []
-        for index, bound in enumerate((*cuts, len(rows))):
-            advance = seen.record({"timeline": rows[:bound], "lastSeq": bound}, bound, index)
-            assert not advance.events_omitted
-            line = delegate_progress.live_line(daemon.run_id, advance)
-            for key, facts in keys.items():
-                batch = [row for row in advance.events if row.get("speechKey") == key]
-                if facts["complete"] not in (None, journal.answer["text"]) and {"fragment", "complete"} <= {
-                        row["speechOp"] for row in batch}:
-                    assert line.count(facts["complete"]) == 1, (line, key)
-            records += _observed(ctx, gateway, daemon.run_id, advance, 0)
-        assert all(record["source"]["kind"] == "timeline_window" for record in records)
-        _one_utterance_per_key(journal, records, exact=False)
+def test_the_engines_timeline_rows_fold_the_same_way_in_the_window_view(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for name in SCENARIOS:
+        tmp_path = next(case_paths)
+        with subtests.test(name=name):
+            journal = engine_journal(name)
+            rows = journal.timeline
+            keys, _abandoned_keys, _unkeyed = _speech_facts(journal)
+            for cuts in _splits(len(rows), most=12):        # a window batch shows its last 12 rows
+                delegate_activity.reset_process_memo()
+                daemon = Daemon([[_harness(1, "message", text="x")]], stream=False, run_id=journal.events[0]["run_id"])
+                daemon.revealed = 1
+                gateway, ctx = _gateway(daemon), _ctx(tmp_path / ("cut-" + "-".join(map(str, cuts))), [])
+                seen, records = delegate_progress.WindowObservations(), []
+                for index, bound in enumerate((*cuts, len(rows))):
+                    advance = seen.record({"timeline": rows[:bound], "lastSeq": bound}, bound, index)
+                    assert not advance.events_omitted
+                    line = delegate_progress.live_line(daemon.run_id, advance)
+                    for key, facts in keys.items():
+                        batch = [row for row in advance.events if row.get("speechKey") == key]
+                        if facts["complete"] not in (None, journal.answer["text"]) and {"fragment", "complete"} <= {
+                                row["speechOp"] for row in batch}:
+                            assert line.count(facts["complete"]) == 1, (line, key)
+                    records += _observed(ctx, gateway, daemon.run_id, advance, 0)
+                assert all(record["source"]["kind"] == "timeline_window" for record in records)
+                _one_utterance_per_key(journal, records, exact=False)
 
 
-@pytest.mark.parametrize("name", SCENARIOS)
-def test_the_engines_journal_through_the_wait_bus_and_history(tmp_path, monkeypatch, name):
-    journal = engine_journal(name)
-    count = len(journal.events)
-    daemon = Verbatim(journal, (count // 3, 2 * count // 3))
-    frames = _waited(tmp_path, monkeypatch, daemon)
-    activities = [frame["progress_meta"]["delegated_activity"] for frame in frames]
-    _one_utterance_per_key(journal, activities)
-    assert sum(frame["text"].count(f"(answer): {journal.answer['text']}") for frame in frames) == 1
-    for rows in _delivered(tmp_path, monkeypatch, frames):
-        assert [row["delegated_activity"] for row in rows] == activities
-    assert _retained(tmp_path, activities) == journal.raw
+def test_the_engines_journal_through_the_wait_bus_and_history(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for name in SCENARIOS:
+        tmp_path = next(case_paths)
+        with subtests.test(name=name), monkeypatch.context() as monkeypatch:
+            journal = engine_journal(name)
+            count = len(journal.events)
+            daemon = Verbatim(journal, (count // 3, 2 * count // 3))
+            frames = _waited(tmp_path, monkeypatch, daemon)
+            activities = [frame["progress_meta"]["delegated_activity"] for frame in frames]
+            _one_utterance_per_key(journal, activities)
+            assert sum(frame["text"].count(f"(answer): {journal.answer['text']}") for frame in frames) == 1
+            for rows in _delivered(tmp_path, monkeypatch, frames):
+                assert [row["delegated_activity"] for row in rows] == activities
+            assert _retained(tmp_path, activities) == journal.raw

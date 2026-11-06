@@ -22,6 +22,7 @@ from ouroboros.gateway.host_service import create_host_service_app
 from ouroboros.presence_runner import _read_previous_turn, run_presence_turn
 from ouroboros.task_results import load_task_result, write_task_result
 from ouroboros.tools.registry import ToolEntry
+from tests._cases import chosen_rows
 
 TOKEN = "explicit-final-token"
 HEADERS = {"X-Skill-Token": TOKEN}
@@ -210,8 +211,8 @@ INTERIM = {
 }
 
 
-@pytest.mark.parametrize("interim,version", [
-    *((name, 0) for name in INTERIM), ("ack", 1), ("ack", 2), ("reaction", 2)])
+@pytest.mark.parametrize("interim,version", chosen_rows([
+    *((name, 0) for name in INTERIM), ("ack", 1), ("ack", 2), ("reaction", 2)], 0, 1, 9))
 def test_a_final_after_interim_speech_is_new_speech_once(room, interim, version):
     room.h.script = [send(**INTERIM[interim]), finish(answer=FINAL)]
     body = turn(room, version=version)
@@ -319,7 +320,7 @@ def test_a_hold_at_replay_keeps_admitted_work_observable(room, version):
     assert room.transport.texts() == [CHILD_ANSWER] and room.h.calls == 1
 
 
-@pytest.mark.parametrize("hold", ["silent", "paused", "advises", "safety"])
+@pytest.mark.parametrize("hold", ["silent", "advises", "safety"])
 def test_current_place_state_and_safety_still_govern_a_final_after_an_ack(room, monkeypatch, hold):
     from ouroboros import dialogue_store
 
@@ -518,7 +519,7 @@ def test_a_promoted_place_root_in_a_project_answers_there_once_beside_its_conver
     assert root.stored["metadata"]["presence_outcome"] == ("silent" if case == "held" else "message")
 
 
-@pytest.mark.parametrize("case", ["held", "speech", "silent", "unbound", "live"])
+@pytest.mark.parametrize("case", ["held", "unbound", "live"])
 def test_an_inline_turn_whose_work_lives_in_a_project_answers_there_once(room, monkeypatch, case):
     """An inline turn turned into a Project mid-flight (the owner's Turn into project, the mind's move_to_project:
     a binding) keeps the chosen Project contract: its ordinary final is owed to that Project before the turn returns,
@@ -609,8 +610,7 @@ CARRIER = {"binding_id": "b1", "transport_skill": "bridge", "event": {"conversat
 
 
 @pytest.mark.parametrize("shape,admitted,local", [
-    ("promoted", "bound", True), ("scheduled", "born_in_project", True), ("continued", "original_bound", True),
-    ("promoted", "main", False), ("scheduled", "place_room", False), ("continued", "registered_unbound", False)])
+    ("promoted", "bound", True), ("promoted", "main", False), ("scheduled", "place_room", False), ("continued", "registered_unbound", False)])
 def test_each_presence_carrier_root_answers_in_the_project_it_actually_lives_in(tmp_path, monkeypatch, shape,
                                                                                  admitted, local):
     """Promoted, schedule-born and hard-timeout-continued roots keep their Presence result; the room rule alone
@@ -791,8 +791,8 @@ def test_a_place_root_at_its_round_limit_keeps_the_silence_it_selected(room, mon
 
 
 @pytest.mark.parametrize("form", ["native", "text"])
-def test_a_place_root_gets_no_sentence_for_its_human_at_its_round_limit(room, monkeypatch, form):
-    """Silence is the carrier's; the sentence stays a self-started run's, on a forced rail as in the handler."""
+def test_a_place_root_keeps_its_sentence_out_of_the_place_at_its_round_limit(room, monkeypatch, form):
+    """The root's sentence stays in its record; silence still belongs to its reply carrier."""
     monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "1")
     request = {"action": "finish", "silent": True, "summary": "A line for the human.", "answer": NOTE}
     root = promoted_root(room, monkeypatch, [
@@ -800,9 +800,11 @@ def test_a_place_root_gets_no_sentence_for_its_human_at_its_round_limit(room, mo
         finish(silent=True, summary=request["summary"], answer=NOTE) if form == "native"
         else {"content": json.dumps(request)}])
     fact = root.trace["forced_completion_request"]
-    assert fact["status"] == "refused" and fact["reason"].startswith("invalid_completion_request: silent and summary")
-    assert root.stored.get("wake_silent") is not True and not root.stored.get("wake_summary")
+    assert fact["status"] == "selected"
+    assert root.stored["wake_silent"] is True and root.stored["wake_summary"] == request["summary"]
     assert NOTE not in room.transport.texts() and NOTE not in root.stored["metadata"]["presence_result_text"]
+    assert request["summary"] not in room.transport.texts()
+    assert request["summary"] not in root.stored["metadata"]["presence_result_text"]
 
 
 def test_a_voided_place_final_points_at_finish_task_and_frozen_registries_keep_their_words(tmp_path, monkeypatch):

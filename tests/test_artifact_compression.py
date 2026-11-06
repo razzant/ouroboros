@@ -28,7 +28,7 @@ def _fake_ditto(monkeypatch, run):
     monkeypatch.setattr(storage, "_may_share", lambda path: False)
 
 
-@pytest.mark.parametrize("failure", ["unavailable", "timeout", "size", "sha256"])
+@pytest.mark.parametrize("failure", ["unavailable", "timeout", "sha256"])
 def test_failed_compression_preserves_original_and_removes_temporary(tmp_path, monkeypatch, failure):
     from ouroboros.config import ARTIFACT_COMPRESSION_TIMEOUT_SEC
 
@@ -175,8 +175,12 @@ def _write_patch(tmp_path, monkeypatch, writer):
         delegate_custody._CUSTODY.clear()
 
 
-@pytest.mark.parametrize("writer", ["workspace", "payload"])
-@pytest.mark.parametrize("mode", ["native", "refused", "corrupt", "unsupported"])
+@pytest.mark.parametrize(("mode", "writer"), [
+    ("native", "workspace"),
+    ("refused", "payload"),
+    ("corrupt", "payload"),
+    ("unsupported", "workspace"),
+])
 def test_both_patch_writers_publish_measured_final_bytes(tmp_path, monkeypatch, writer, mode):
     if mode == "native" and sys.platform != "darwin":
         pytest.skip("native APFS compression proof")

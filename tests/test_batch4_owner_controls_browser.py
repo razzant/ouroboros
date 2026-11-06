@@ -66,7 +66,7 @@ from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
 
 direct_server_with_data = smoke.direct_server_with_data
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 ALPHA, BRAVO, CHARLIE, DELTA = "b4-alpha", "b4-bravo", "b4-charlie", "b4-delta"
 _TEXT = {ALPHA: "ALPHA-7Q: inventory the available tools, then report.",

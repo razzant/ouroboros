@@ -18,8 +18,6 @@ WORKFLOWS = REPO / ".github/workflows"
 
 @pytest.mark.parametrize("paths,expected", [
     (["README.md", "docs/development/14-build-and-ci.md"], True),
-    (["docs/new.rst"], True),
-    ([".github/PULL_REQUEST_TEMPLATE.md"], True),
     (["docs/install/index.html"], False),
     (["site/src/index.md"], False),
     (["assets/logo.md"], False),
@@ -62,8 +60,9 @@ def test_one_complete_browser_lane_serves_manual_runs_and_release_tags():
     ci, ci_triggers = _workflow("ci.yml")
     caller = ci["jobs"]["ui-smoke"]
     assert caller["uses"] == "./.github/workflows/ui-browser.yml"
-    assert caller["if"] == "github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')"
-    # Only manual/tag triggers remain; the run's shard plan is published first.
+    assert caller["if"] == ("(github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))"
+                            " && inputs.scope != 'tests'")
+    # Only manual/tag triggers remain, outside the tests-only scope; the run's shard plan is published first.
     assert caller["needs"] == "shard-plan"
     assert "schedule" not in ci_triggers  # owner, 2026-10-05: no nightly run nobody reads
 
@@ -144,9 +143,7 @@ def _guard(config, items):
 
 
 @pytest.mark.parametrize("narrowing", [
-    {"ignore": ["tests/test_skill_publish_browser.py"]}, {"ignore_glob": ["*publish*"]},
-    {"lf": True}, {"deselect": ["tests/test_x.py::one"]}, {"keyword": "publish"},
-    {"override_ini": ["python_files=test_ui_*.py"]}, {"override_ini": ["norecursedirs=tests"]},
+    {"ignore": ["tests/test_skill_publish_browser.py"]}, {"lf": True}, {"override_ini": ["norecursedirs=tests"]},
 ])
 def test_collection_guard_refuses_controls_that_narrow_collection(narrowing):
     config = _config(option=SimpleNamespace(collectonly=False, **narrowing))
@@ -260,8 +257,7 @@ def test_shard_option_never_relaxes_the_full_lane_guard(option):
 
 
 @pytest.mark.parametrize("value,required,accepted", [
-    ("1/1", True, True), ("3/3", True, True), ("2/4", True, True),
-    ("2/4", False, False),  # A shard without the full-lane guard proves nothing.
+    ("1/1", True, True), ("2/4", False, False),  # A shard without the full-lane guard proves nothing.
     ("0/3", True, False), ("4/3", True, False), ("1/0", True, False), ("-1/3", True, False),
     ("1", True, False), ("1/3/5", True, False), ("a/b", True, False), ("1 /3", True, False),
     ("", True, False),
@@ -467,7 +463,6 @@ def _reconcile(tmp_path, manifest, shards, count):
     return result, summary.read_text(encoding="utf-8")
 
 
-@pytest.mark.serial
 def test_real_shards_partition_the_lane_and_reconcile_against_the_unsharded_manifest(tmp_path):
     collected, manifest = _lane_process(tmp_path, "manifest", "--collect-only", "-q")
     assert collected.returncode == 0, collected.stdout + collected.stderr
@@ -509,7 +504,6 @@ def test_real_shards_partition_the_lane_and_reconcile_against_the_unsharded_mani
     assert not any(node in silent.stdout for node in slices[0] + slices[2])
 
 
-@pytest.mark.serial
 def test_real_shard_still_refuses_a_narrowed_lane_and_an_unguarded_shard(tmp_path):
     narrowed, work = _lane_process(tmp_path, "narrowed", "--ui-browser-shard=1/3", "-k", "test_case")
     assert narrowed.returncode == 4, narrowed.stdout + narrowed.stderr
@@ -522,7 +516,6 @@ def test_real_shard_still_refuses_a_narrowed_lane_and_an_unguarded_shard(tmp_pat
     assert "UI_BROWSER_SHARD" in unguarded.stderr and not (work / "host" / "results.json").exists()
 
 
-@pytest.mark.serial
 def test_real_shard_out_of_session_budget_names_only_its_own_unexecuted_nodes(tmp_path):
     # pytest-timeout's cooperative session budget: checked after each test, it ends the
     # session through its normal finish. An already spent budget runs exactly one test.

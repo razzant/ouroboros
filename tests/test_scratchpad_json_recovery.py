@@ -11,10 +11,10 @@ file also pinned belongs to the remaining fallback draft stage (``test_budget_tr
 """
 import json
 
-import pytest
 
 from ouroboros.memory import Memory, scratchpad_block_sha256
 from ouroboros.tools.registry import ToolContext, ToolRegistry
+from tests._cases import case_folders
 
 FINAL = {"knowledge_entries": [], "compressed_block": "Actual consolidated memory."}  # older answer shape
 NOMINATING = json.dumps({"knowledge_entries": [{"topic": "lessons/new", "content": "# Lesson\nNominated."},
@@ -61,34 +61,40 @@ def _knowledge(files):
     return {key: value for key, value in files.items() if key.startswith("memory/knowledge")}
 
 
-@pytest.mark.parametrize("label,text", CASES, ids=[row[0] for row in CASES])
-def test_a_fold_stores_any_text_verbatim_and_writes_no_note(tmp_path, label, text):
-    memory, registry = _install(tmp_path)
-    before = memory.load_scratchpad_blocks()
-    files_before = _memory_bytes(tmp_path)
+def test_a_fold_stores_any_text_verbatim_and_writes_no_note(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for label, text in CASES:
+        tmp_path = next(case_paths)
+        with subtests.test(label=label, text=text):
+            memory, registry = _install(tmp_path)
+            before = memory.load_scratchpad_blocks()
+            files_before = _memory_bytes(tmp_path)
 
-    result = registry.execute_result("update_scratchpad", {
-        "content": text, "replaces": [scratchpad_block_sha256(block) for block in before[:2]]})
+            result = registry.execute_result("update_scratchpad", {
+                "content": text, "replaces": [scratchpad_block_sha256(block) for block in before[:2]]})
 
-    assert result.status == "ok", result.text
-    after = memory.load_scratchpad_blocks()
-    assert after[0]["content"] == text and after[1:] == before[2:]
-    assert _knowledge(_memory_bytes(tmp_path)) == _knowledge(files_before)
-    assert not (tmp_path / "memory" / "knowledge_history.jsonl").exists()
-    journal = [json.loads(row) for row in memory.journal_path().read_text(encoding="utf-8").splitlines()]
-    [preserved] = [row for row in journal if row.get("type") == "fold_sources_preserved"]
-    assert preserved["source_blocks"] == before[:2] and "knowledge_entries" not in preserved
-    assert preserved["fold_block"]["content"] == text
+            assert result.status == "ok", result.text
+            after = memory.load_scratchpad_blocks()
+            assert after[0]["content"] == text and after[1:] == before[2:]
+            assert _knowledge(_memory_bytes(tmp_path)) == _knowledge(files_before)
+            assert not (tmp_path / "memory" / "knowledge_history.jsonl").exists()
+            journal = [json.loads(row) for row in memory.journal_path().read_text(encoding="utf-8").splitlines()]
+            [preserved] = [row for row in journal if row.get("type") == "fold_sources_preserved"]
+            assert preserved["source_blocks"] == before[:2] and "knowledge_entries" not in preserved
+            assert preserved["fold_block"]["content"] == text
 
 
-@pytest.mark.parametrize("label,text", EMPTY, ids=[row[0] for row in EMPTY])
-def test_an_empty_fold_text_changes_nothing(tmp_path, label, text):
-    memory, registry = _install(tmp_path)
-    before = memory.load_scratchpad_blocks()
-    files_before = _memory_bytes(tmp_path)
+def test_an_empty_fold_text_changes_nothing(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for label, text in EMPTY:
+        tmp_path = next(case_paths)
+        with subtests.test(label=label, text=text):
+            memory, registry = _install(tmp_path)
+            before = memory.load_scratchpad_blocks()
+            files_before = _memory_bytes(tmp_path)
 
-    result = registry.execute_result("update_scratchpad", {
-        "content": text, "replaces": [scratchpad_block_sha256(block) for block in before[:2]]})
+            result = registry.execute_result("update_scratchpad", {
+                "content": text, "replaces": [scratchpad_block_sha256(block) for block in before[:2]]})
 
-    assert result.status != "ok" and result.code == "TOOL_ARG_ERROR"
-    assert memory.load_scratchpad_blocks() == before and _memory_bytes(tmp_path) == files_before
+            assert result.status != "ok" and result.code == "TOOL_ARG_ERROR"
+            assert memory.load_scratchpad_blocks() == before and _memory_bytes(tmp_path) == files_before

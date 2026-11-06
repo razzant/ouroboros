@@ -27,7 +27,6 @@ from tests.test_workspace_preparation import _WAIT_SEC
 from tests.test_workspace_preparation import env as env
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 # Storage opened while Q is owned by paths this change does not move, each its own owner's: the
 # pre-assignment cancel consult and the Project hold revalidation read task rows under Q at zero

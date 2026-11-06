@@ -23,7 +23,7 @@ from tests.test_presence_continuation_process import tmp_path as _short_socket_t
 
 tmp_path = _short_socket_tmp_path  # the child Host's macOS-safe short AF_UNIX root
 
-pytestmark = [pytest.mark.serial, pytest.mark.skipif(
+pytestmark = [pytest.mark.skipif(
     os.name != "posix", reason="The child Host fixture qualifies POSIX process-group custody only")]
 
 

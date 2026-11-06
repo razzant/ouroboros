@@ -40,8 +40,7 @@ def test_trace_environment_is_not_missing_inventory(author, tmp_path, monkeypatc
     assert result["status"] == "retained" and not result["listing_warning"]
 
 
-@pytest.mark.parametrize("kind", ["git", "directory"])
-@pytest.mark.parametrize("output", ["file", "fifo"])
+@pytest.mark.parametrize(("output", "kind"), [("file", "git"), ("fifo", "directory")])
 def test_named_root_or_special_is_one_gap_and_releases_the_copy(author, tmp_path, kind, output):  # noqa: F811
     if output == "fifo" and not hasattr(os, "mkfifo"):
         pytest.skip("FIFO requires POSIX")

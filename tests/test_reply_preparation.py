@@ -24,7 +24,6 @@ from ouroboros.gateway.reply_preparation import reply_preparation
 from ouroboros.task_results import STATUS_COMPLETED, STATUS_RUNNING, write_task_result
 from tests._budget_pause_exact_helpers import _install_queue
 
-pytestmark = pytest.mark.serial
 
 ORIGIN = {"origin_message_ref": {"chat_id": 1, "client_message_id": "m-1", "ts": "2026-10-17T00:00:00+00:00"}}
 

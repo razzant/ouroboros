@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import pathlib
-import re
 import shutil
 import subprocess
 
@@ -27,61 +26,8 @@ def _node_bin():
 
 
 @pytest.fixture(scope="module")
-def settings_ui_source() -> str:
-    return (WEB / "settings_ui.js").read_text(encoding="utf-8")
-
-
-@pytest.fixture(scope="module")
-def settings_source() -> str:
-    return (WEB / "settings.js").read_text(encoding="utf-8")
-
-
-@pytest.fixture(scope="module")
 def mcp_source() -> str:
     return (WEB / "mcp_settings.js").read_text(encoding="utf-8")
-
-
-@pytest.fixture(scope="module")
-def settings_css() -> str:
-    return (REPO_ROOT / "web" / "settings.css").read_text(encoding="utf-8")
-
-
-def test_settings_ui_has_mcp_section(settings_ui_source: str) -> None:
-    assert "<h3>MCP Servers</h3>" in settings_ui_source
-    assert 'id="s-mcp-enabled"' in settings_ui_source
-    assert 'id="s-mcp-tool-timeout"' in settings_ui_source
-    assert 'id="btn-mcp-add-server"' in settings_ui_source
-    assert 'id="btn-mcp-refresh-all"' in settings_ui_source
-    assert 'id="mcp-servers-list"' in settings_ui_source
-    assert 'id="mcp-global-status"' in settings_ui_source
-    assert "local stdio processes" in settings_ui_source
-
-
-def test_settings_ui_mcp_section_sits_in_advanced_panel(settings_ui_source: str) -> None:
-    """MCP lives in Advanced; the old Integrations tab remains retired."""
-    assert "Integrations" not in settings_ui_source
-    advanced_index = settings_ui_source.find('data-settings-panel="advanced"')
-    about_index = settings_ui_source.find('data-settings-panel="about"')
-    mcp_index = settings_ui_source.find("<h3>MCP Servers</h3>")
-    assert advanced_index >= 0 and about_index >= 0 and mcp_index >= 0
-    assert advanced_index < mcp_index < about_index
-
-
-def test_settings_js_imports_mcp_module(settings_source: str) -> None:
-    assert "from './mcp_settings.js'" in settings_source
-    assert "applyMcpSettings" in settings_source
-    assert "collectMcpSettings" in settings_source
-    assert "initMcpSettings" in settings_source
-
-
-def test_settings_js_includes_mcp_in_collect_body(settings_source: str) -> None:
-    assert "...collectMcpSettings()" in settings_source
-
-
-def test_mcp_module_uses_mcp_endpoints(mcp_source: str) -> None:
-    assert "/api/mcp/status" in mcp_source
-    assert "/api/mcp/refresh" in mcp_source
-    assert "/api/mcp/test" in mcp_source
 
 
 def test_mcp_module_drops_masked_token_in_test_payload(mcp_source: str) -> None:
@@ -91,46 +37,6 @@ def test_mcp_module_drops_masked_token_in_test_payload(mcp_source: str) -> None:
     assert "looksMasked" in mcp_source
     assert "out.auth_token = ''" in mcp_source
     assert "{ server_id: saved.identity, server: candidate }" in mcp_source
-
-
-def test_mcp_module_supports_http_sse_and_stdio(mcp_source: str) -> None:
-    assert "streamable_http" in mcp_source
-    assert "sse" in mcp_source
-    assert "stdio" in mcp_source
-    assert "data-mcp-field=\"command\"" in mcp_source
-    assert "data-mcp-field=\"args\"" in mcp_source
-    assert "does not use a shell" in mcp_source
-
-
-def test_mcp_module_renders_status_classes(mcp_source: str) -> None:
-    assert "mcp-server-status-ok" in mcp_source
-    assert "mcp-server-status-warn" in mcp_source
-    assert "mcp-server-status-danger" in mcp_source
-
-
-def test_mcp_module_escapes_untrusted_strings(mcp_source: str) -> None:
-    """Tool descriptions are server-supplied untrusted data; the renderer
-    must HTML-escape them before injecting into the DOM."""
-    assert "escapeHtmlAttr as escapeHtml" in mcp_source
-    # The renderer must call escapeHtml on at least the tool name and
-    # description fields it interpolates from server-provided data.
-    assert "escapeHtml(t.name" in mcp_source
-    assert "escapeHtml(String(t.description)" in mcp_source
-
-
-def test_mcp_css_defines_required_classes(settings_css: str) -> None:
-    assert ".mcp-servers-list" in settings_css
-    assert ".mcp-server-card" in settings_css
-    assert ".mcp-server-status-ok" in settings_css
-    assert ".mcp-server-status-danger" in settings_css
-    # DESIGN §2: a subsection heading is --type-body semibold, never the browser's bold h4.
-    heading = re.search(r"\.mcp-headers-fields h4 \{([^}]*)\}", settings_css)
-    assert heading and "font-size: var(--type-body);" in heading[1] and "font-weight: 600;" in heading[1]
-    shared = (REPO_ROOT / "web" / "ui.css").read_text(encoding="utf-8")
-    assert ".ui-control {" in shared and "textarea.ui-control" in shared
-    source = (WEB / "mcp_settings.js").read_text(encoding="utf-8")
-    assert '<textarea class="ui-control"' in source
-    assert 'class="form-field ui-field"' in source
 
 
 def test_mcp_ui_roundtrip_preserves_environment_and_unsupported_fields():

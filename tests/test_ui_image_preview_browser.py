@@ -26,7 +26,7 @@ from tests.test_ui_document_reader_browser import (
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 - pytest fixture import
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, set_viewport
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def _png(width, height, cell=200):
@@ -165,7 +165,6 @@ def _deliver(page, monkeypatch, paths, calls, *, tool, captions=None, replies):
 
 
 @pytest.mark.ui_browser
-@pytest.mark.serial
 def test_image_preview_in_main_live_and_after_reload(direct_server_with_data, monkeypatch, tmp_path):  # noqa: F811
     from playwright.sync_api import sync_playwright
 
@@ -360,7 +359,6 @@ def _half_visible(page, opener, feed="#chat-messages"):
 
 
 @pytest.mark.ui_browser
-@pytest.mark.serial
 def test_owner_upload_preview_in_a_project_room_closes_with_back_and_navigation(direct_server_with_data, tmp_path):  # noqa: F811
     """The owner's uploaded screenshot in a Project room previews from its upload route; Back closes
     the preview and keeps the room; leaving the room closes it and leaves no modal behind."""

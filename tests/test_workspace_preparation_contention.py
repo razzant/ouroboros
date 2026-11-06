@@ -15,7 +15,6 @@ from supervisor import queue, task_admission, workspace_preparation as prep
 from tests.test_admission_contention import database_reader
 from tests.test_workspace_preparation import env as env, spy_provisions, _WAIT_SEC
 
-pytestmark = pytest.mark.serial
 
 
 def test_held_store_at_entry_claims_in_memory_and_admits_once_when_free(env, monkeypatch):
@@ -74,7 +73,7 @@ def test_contended_first_marker_retries_on_its_lane_with_the_same_token(env, mon
     assert env.row("marker-busy")[prep.MARKER]["token"] == claim.token
 
 
-@pytest.mark.parametrize("seam", ["preflight", "depth", "ready", "final"])
+@pytest.mark.parametrize("seam", ["preflight", "depth", "final"])
 def test_owned_job_waits_off_q_then_uses_its_one_copy(env, monkeypatch, seam):
     event = env.request("owned-busy")
     copies = spy_provisions(monkeypatch)

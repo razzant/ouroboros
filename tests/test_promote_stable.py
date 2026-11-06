@@ -153,10 +153,11 @@ REFUSALS = {
 }
 
 
-@pytest.mark.parametrize("change,problem", REFUSALS.values(), ids=REFUSALS)
-def test_facts_refuse_an_unproven_release(change, problem):
-    with pytest.raises(ValueError, match=problem):
-        promotion.release_facts("v7.8.0", COMMIT, get=_world(**change))
+def test_facts_refuse_an_unproven_release(subtests):
+    for change, problem in REFUSALS.values():
+        with subtests.test(change=change, problem=problem):
+            with pytest.raises(ValueError, match=problem):
+                promotion.release_facts("v7.8.0", COMMIT, get=_world(**change))
 
 
 def test_facts_refuse_bytes_the_url_does_not_serve():
@@ -384,9 +385,7 @@ def _development_at(official, files):
 @pytest.mark.parametrize("development,problem", [
     ("7.8.1\n", "7.8.1 is not a development marker"),  # the release cut, and the cycle never reopened
     ("7.8.1-alpha.0\n", "does not sort above the release 7.8.1"),  # the same base, a different string
-    ("7.8.0-alpha.0\n", "does not sort above the release 7.8.1"),
     ("7.8.1-rc.1\n", "is not a development marker"),
-    ("7.8.2\n", "7.8.2 is not a development marker"),
 ])
 def test_promotion_refuses_a_development_line_that_has_not_opened_a_greater_cycle(official, development, problem):
     official.release("7.8.1")

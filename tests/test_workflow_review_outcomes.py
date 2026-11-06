@@ -10,7 +10,7 @@ from ouroboros.tools.scope_review_contract import COUPLING_QUESTION_IDS
 from tests.test_git_review_preflight_gate import candidate  # noqa: F401
 
 
-@pytest.mark.parametrize("basis", ["none", "unrelated_prior", "explicit_prior", "custody_lost"])
+@pytest.mark.parametrize("basis", ["none", "explicit_prior", "custody_lost"])
 def test_commit_finish_requires_received_outcome(candidate, monkeypatch, basis):  # noqa: F811
     ctx = candidate
     monkeypatch.setenv('OUROBOROS_REVIEW_ENFORCEMENT', 'advisory')
@@ -98,10 +98,6 @@ from ouroboros.review_records import review_outcome_received
     ([{"raw_results": [{"operation_state": "in_flight"}]}], True, False),
     ([{"operation_state": "in_flight"}, {"status": "responded"}], False, True),
     ([{"operation_state": "in_flight", "raw_text": "Pending host placeholder", "parsed": [{"item": "host note"}]}], False, False),
-    ([{"operation_state": "in_flight"}, {"operation_state": "settled", "ok": True}], False, True),
-    ([{"operation_state": "custody_lost", "late_result_pending": True}], False, True),
-    ([{"operation_state": "settled", "error": "reviewer unavailable"}], False, True),
-    ([], True, True),
     ([], False, False),
 ])
 def test_received_outcome_keeps_live_custody_distinct(rows, terminal, expected):

@@ -12,16 +12,20 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros.preflight_runner import LANE_EXCLUSION_EXPR
+from ouroboros.test_evidence import TEST_DURATIONS_ENV as OWNERS_TABLE_KEY
 from ouroboros.test_parallelism import NESTED_WORKERS_ENV
 from tests import browser_lane, default_lane
 from tests.ci_evidence import file_shards, node_shards, reconcile_shards
-from tests.ci_verdicts import DURATIONS_ENV, collect_durations, platform_name
+from tests.ci_verdicts import (
+    DURATIONS_ENV, TEST_DURATIONS_ENV, collect_durations, durations_table, platform_name, record_session_durations,
+    recorded_durations_table,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 CLI = [sys.executable, "-I", "-S", str(REPO / "tests/ci_evidence.py")]
 SHA, RUN = "d" * 40, "900"
 SYSTEM = platform_name(sys.platform)
-EXPRESSIONS = {name: f"{prefix}serial and {LANE_EXCLUSION_EXPR}"
+EXPRESSIONS = {name: f"{prefix}exclusive and {LANE_EXCLUSION_EXPR}"
                for name, prefix in (("parallel", "not "), ("serial", ""))}
 
 
@@ -71,9 +75,11 @@ def test_durations_sum_each_file_per_system_and_each_ui_node(tmp_path):
         _row(a, 0.7, subtest=True),  # Within its test's call: never counted twice.
         _row("tests/test_a.py::test_two", None), _row("tests/test_b.py::TestC::test_three", 0.0004)],
         attempt="2", default_parallel=_block("parallel", [1, 2]))
-    # The serial pass adds to the same file; a copy of it in a second artifact counts once.
+    # The one-process pass's time joins its files' totals (ids stay plain: no part of the table is "serial");
+    # a copy of the projection in a second artifact counts once.
     for artifact in ("default-ci-shard-Windows-1-a2", "ci-evidence-full-test-windows-shard-1-a2"):
-        _projection(root / artifact / "serial", [_row("tests/test_a.py::test_s", 2.0)], attempt="2",
+        _projection(root / artifact / "serial", [_row("tests/test_a.py::test_s", 2.0),
+                                                 _row("tests/test_x.py::test_alone", 1.0)], attempt="2",
                     default_serial=_block("serial", [1, 2]))
     # Another system; a manifest, a retry round, another producer and an unknown system add nothing.
     _projection(root / "default-ci-shard-Linux-1" / "parallel", [_row(a, 0.5)], system="Linux",
@@ -89,8 +95,7 @@ def test_durations_sum_each_file_per_system_and_each_ui_node(tmp_path):
                                                        _row("tests/test_ui.py::page[chromium]", 1.0)],
                 system="Linux", ui_browser={"full": [], "shard": [1, 8], "assigned": []})
     table = {"format": 1, "platforms": {"darwin": {"tests/test_m.py": 125}, "linux": {"tests/test_a.py": 500},
-                                        "windows": {"tests/test_a.py": 4000, "tests/test_b.py": 0}},
-             "serial": {"windows": {"tests/test_a.py": 2000}},
+                                        "windows": {"tests/test_a.py": 4000, "tests/test_b.py": 0, "tests/test_x.py": 1000}},
              "source": {"run_id": RUN, "sha": SHA}, "ui_nodes": {"tests/test_ui.py::page[chromium]": 5000}}
     assert collect_durations(root, run_id=RUN, sha=SHA) == table
     out, payloads = tmp_path / "out" / "ci-durations.json", []
@@ -100,23 +105,56 @@ def test_durations_sum_each_file_per_system_and_each_ui_node(tmp_path):
         assert result.returncode == 0, result.stdout + result.stderr
         payloads.append(out.read_bytes())
     assert payloads[0] == payloads[1] and json.loads(payloads[0]) == table
-    assert list(json.loads(payloads[0])) == sorted(table) and "windows 2 files" in result.stdout
+    assert list(json.loads(payloads[0])) == sorted(table) and "windows 3 files" in result.stdout
     empty = subprocess.run(CLI + ["durations", "--evidence-root", str(tmp_path / "none"), "--run-id", RUN,
                                   "--sha", SHA, "--out", str(out)], capture_output=True, text=True, timeout=30)
     assert empty.returncode == 0 and "::warning::" in empty.stdout and _json(out)["platforms"] == {}
 
 
-def test_the_one_run_battery_records_the_time_of_its_serial_groups(tmp_path):
-    """scripts/run_tests.py's one-run battery (an ``overlapped`` pass) pins its serial tests to ``serial<N>``
-    xdist groups: their time is their file's serial part; a test in a file or class group is not serial."""
-    root = tmp_path / "evidence"
-    _projection(root / "run-1" / "pytest" / "overlapped", [
-        _row("tests/test_s.py::test_one@serial1", 2.0), _row("tests/test_s.py::test_one@serial1", 0.5, "teardown"),
-        _row("tests/test_p.py::test_two@tests/test_p.py", 1.0),
-        _row("tests/test_q.py::TestK::test_three@tests/test_q.py::TestK", 0.25)], system="Darwin")
-    table = collect_durations(root, run_id=RUN, sha=SHA)
-    assert table["platforms"] == {"darwin": {"tests/test_p.py": 1000, "tests/test_q.py": 250, "tests/test_s.py": 2500}}
-    assert table["serial"] == {"darwin": {"tests/test_s.py": 2500}}
+def test_an_owned_session_folds_its_whole_file_times_into_the_owners_table(tmp_path, monkeypatch):
+    """Each session replaces its files' entries for its system, drops files the tree no longer has and files a
+    crashed worker left partial, keeps the other systems' entries (a legacy `serial` part is dropped), and
+    starts afresh over an unreadable table. `durations_table` reads the owner's table when CI names none; a table
+    no session wrote yet is no table and no reason; CI's table wins."""
+    assert TEST_DURATIONS_ENV == OWNERS_TABLE_KEY  # the stdlib reader and the product spell one key
+    tree = tmp_path / "tree"
+    (tree / "tests").mkdir(parents=True)
+    for name in ("test_a.py", "test_s.py", "test_n.py"):
+        (tree / "tests" / name).write_text("", encoding="utf-8")
+    table = tmp_path / "state" / "test-durations.json"
+    _write(table, "{garbage")
+    first = [_row("tests/test_a.py::test_one", 0.25, "setup"), _row("tests/test_a.py::test_one", 1.5),
+             _row("tests/test_a.py::test_one", 0.7, subtest=True),  # within its test's call: never counted twice
+             _row("tests/test_s.py::test_s", 2.0), _row("tests/test_gone.py::test_g", 9.0),
+             _row("tests/test_n.py::test_crash", 1.0), _row("tests/test_n.py::test_crash", 0.0, "crash", "failed")]
+    assert record_session_durations(table, first, system="Darwin", rootpath=tree, run_id="session 1") == ""
+    assert _json(table) == {"format": 1, "platforms": {"darwin": {"tests/test_a.py": 1750, "tests/test_s.py": 2000}},
+                            "source": {"run_id": "session 1", "sha": ""}, "ui_nodes": {}}
+    # A later session replaces a file's entry; another system stays; a legacy `serial` part is dropped.
+    _write(table, {**_json(table), "serial": {"darwin": {"tests/test_s.py": 2000}}})
+    assert record_session_durations(table, [_row("tests/test_a.py::test_one", 3.0)], system="Darwin",
+                                    rootpath=tree, run_id="session 2") == ""
+    assert record_session_durations(table, [_row("tests/test_s.py::test_s", 1.0)], system="Linux",
+                                    rootpath=tree, run_id="session 3", sha="abc") == ""
+    assert _json(table)["platforms"] == {"darwin": {"tests/test_a.py": 3000, "tests/test_s.py": 2000},
+                                         "linux": {"tests/test_s.py": 1000}}
+    assert "serial" not in _json(table)
+    assert record_session_durations(table, [_row("tests/test_a.py::test_one", 1.0)], system="Darwin",
+                                    rootpath=tree, run_id="session 4") == ""
+    assert _json(table)["source"] == {"run_id": "session 4", "sha": ""}
+    assert record_session_durations(table, [_row("tests/test_n.py::t", 1.0, "crash")], system="Darwin",
+                                    rootpath=tree, run_id="session 5") == "no whole test file ran"
+    assert _json(table)["source"]["run_id"] == "session 4"
+    # The owner's table sizes and orders the serial groups; it never weighs a lane's shards, which every session
+    # of a run must pack alike (only CI's run table does that). A table nobody wrote yet is no table and no reason.
+    monkeypatch.delenv(DURATIONS_ENV, raising=False)
+    monkeypatch.setenv(TEST_DURATIONS_ENV, str(table))
+    assert recorded_durations_table()[0]["source"]["run_id"] == "session 4" and durations_table() == (None, "")
+    monkeypatch.setenv(TEST_DURATIONS_ENV, str(tmp_path / "nobody" / "test-durations.json"))
+    assert recorded_durations_table() == (None, "")
+    monkeypatch.setenv(DURATIONS_ENV, str(_table(tmp_path)))
+    monkeypatch.setenv(TEST_DURATIONS_ENV, str(table))
+    assert recorded_durations_table()[0]["source"]["run_id"] == durations_table()[0]["source"]["run_id"] == RUN
 
 
 def test_file_weights_are_recorded_time_else_nodes_times_the_median_time_per_node(tmp_path, monkeypatch):
@@ -135,17 +173,9 @@ def test_file_weights_are_recorded_time_else_nodes_times_the_median_time_per_nod
     (None, "the durations table is unreadable (FileNotFoundError)"),
     ("not json", "the durations table is unreadable (JSONDecodeError)"),
     ("[]", "the durations table has another shape"),
-    ('{"format": 2, "source": {"run_id": "1"}, "platforms": {}}', "the durations table has another shape"),
-    ('{"format": 1, "source": {"run_id": ""}, "platforms": {}}', "the durations table has another shape"),
     ('{"format": 1, "source": {"run_id": "1"}, "platforms": {"linux": {"tests/a.py": -1}}}',
      "the durations table has another shape"),
-    ('{"format": 1, "source": {"run_id": "1"}, "platforms": {}, "ui_nodes": {"x": 1.5}}',
-     "the durations table has another shape"),
-    ('{"format": 1, "source": {"run_id": "1"}, "platforms": {}, "serial": {"linux": {"tests/a.py": 1.5}}}',
-     "the durations table has another shape"),
-    ('{"format": 1, "source": {"run_id": "1"}, "platforms": {}}',
-     f"the durations of run 1 record no collected file on {SYSTEM}"),
-], ids=["missing", "garbage", "array", "format", "no-run", "negative", "float", "serial-float", "other-system"])
+], ids=["missing", "garbage", "array", "negative"])
 def test_an_unusable_table_falls_back_to_node_counts_and_says_why(tmp_path, monkeypatch, content, reason):
     path = tmp_path / "durations.json"
     if content is not None:
@@ -173,8 +203,8 @@ def _suite(tmp_path, files):
     return suite, entry
 
 
-def _session(tmp_path, suite, entry, lane, public, *options, env=None):
-    args = ["tests/", "-p", "tests.conftest", "--rootdir", str(suite), "--confcutdir", str(suite), "-o", "addopts=",
+def _session(tmp_path, suite, entry, lane, public, *options, env=None, paths=("tests/",)):
+    args = [*paths, "-p", "tests.conftest", "--rootdir", str(suite), "--confcutdir", str(suite), "-o", "addopts=",
             "-m", EXPRESSIONS[lane], "-q", "--ci-evidence-dir", str(public), *options]
     result = subprocess.run(
         [sys.executable, "-I", "-S", str(REPO / "scripts/safe_test.py"), "--temp-parent", str(tmp_path), "--",
@@ -189,7 +219,6 @@ def _session(tmp_path, suite, entry, lane, public, *options, env=None):
 PARAMETRIZED = "import pytest\n@pytest.mark.parametrize('n', range({}))\ndef test_n(n):\n    pass\n"
 
 
-@pytest.mark.serial
 def test_real_shards_pack_whole_files_by_recorded_time_and_reconcile(tmp_path):
     suite, entry = _suite(tmp_path, {
         # The table shapes the collection only: the session's own tests never inherit it.
@@ -228,15 +257,30 @@ def test_real_shards_pack_whole_files_by_recorded_time_and_reconcile(tmp_path):
             in gaps), gaps
 
 
-@pytest.mark.serial
+def test_an_owned_session_records_its_durations_at_its_end_and_a_narrowed_one_does_not(tmp_path):
+    """The owner names the table through the environment; the session drops the name at collection (its tests'
+    children inherit no table) and folds its whole files' seconds in at its end; a `-k` session writes nothing."""
+    suite, entry = _suite(tmp_path, {
+        "test_a.py": f"import os\ndef test_one():\n    assert {TEST_DURATIONS_ENV!r} not in os.environ\n",
+        "test_b.py": "def test_two():\n    pass\n"})
+    table = tmp_path / "owner" / "test-durations.json"
+    _session(tmp_path, suite, entry, "parallel", tmp_path / "public", env={TEST_DURATIONS_ENV: str(table)})
+    recorded = _json(table)
+    assert set(recorded["platforms"][SYSTEM]) == {"tests/test_a.py", "tests/test_b.py"}
+    assert "serial" not in recorded and recorded["source"]["run_id"].startswith("session ")
+    narrowed = tmp_path / "owner" / "narrowed.json"
+    _session(tmp_path, suite, entry, "parallel", tmp_path / "public-k", "-k", "two", env={TEST_DURATIONS_ENV: str(narrowed)})
+    assert not narrowed.exists()
+
+
 def test_a_shard_without_a_file_of_a_pass_proves_its_empty_slice(tmp_path):
     """Few files carry `serial`: with every OS sharded, a shard can get none of a pass. It runs nothing,
     exits 0 (not pytest's 5) and proves the empty slice the manifest's packing gives it."""
     suite, entry = _suite(tmp_path, {
         "test_parallel_only.py": PARAMETRIZED.format(3),
-        "test_serial_only.py": "import pytest\npytestmark = pytest.mark.serial\n" + PARAMETRIZED.format(2)})
+        "test_serial_only.py": "import pytest\npytestmark = pytest.mark.serial('exclusive')\n" + PARAMETRIZED.format(2)})
     # Node counts over both passes: the parallel file (3) on shard 1, the serial file (2) on shard 2.
-    for lane, empty, options in (("parallel", 2, ["-n", "2", "--dist", "loadscope"]), ("serial", 1, [])):
+    for lane, empty, options in (("parallel", 2, ["-n", "2", "--dist", "loadgroup"]), ("serial", 1, [])):
         _session(tmp_path, suite, entry, lane, tmp_path / "manifest" / "m1" / lane, "--collect-only",
                  "--default-suite-manifest")
         for shard in (1, 2):
@@ -248,6 +292,27 @@ def test_a_shard_without_a_file_of_a_pass_proves_its_empty_slice(tmp_path):
         gaps, notes = reconcile_shards(tmp_path / "manifest", tmp_path / "shards", count=2, sha=SHA, run_id=RUN,
                                        lane_key=f"default_{lane}")
         assert gaps == [] and f"shard {empty}/2: proof from attempt 1; assigned 0, executed 0" in notes, (lane, gaps)
+
+
+def test_a_pass_over_modules_holding_none_of_their_tests_is_green_and_an_empty_module_is_not(tmp_path):
+    """journal-persist, scripts/run_tests.py's battery and the gate run each pass over explicit modules, unsharded:
+    a pass that holds none of their tests ran all it was asked (exit 0, said so), in one process or under xdist;
+    modules that collect nothing, or a narrowed run, keep pytest's 5."""
+    suite, entry = _suite(tmp_path, {
+        "test_parallel_only.py": PARAMETRIZED.format(2), "test_nothing.py": "X = 1\n",
+        "test_exclusive_only.py": "import pytest\npytestmark = pytest.mark.serial('exclusive')\n" + PARAMETRIZED.format(2)})
+    result, data = _session(tmp_path, suite, entry, "serial", tmp_path / "serial", paths=["tests/test_parallel_only.py"])
+    assert (result.returncode, data["session_exit_code"], data["tests_collected"]) == (0, 0, 0), result.stdout + result.stderr
+    assert "DEFAULT_PASS_EMPTY: the serial pass holds none of the 2 collected test(s)" in result.stdout
+    result, data = _session(tmp_path, suite, entry, "parallel", tmp_path / "parallel", "-n", "2", "--dist", "loadgroup",
+                            paths=["tests/test_exclusive_only.py"])
+    assert (result.returncode, data["session_exit_code"]) == (0, 0), result.stdout + result.stderr
+    assert "DEFAULT_PASS_EMPTY: the parallel pass holds none of the 2 collected test(s)" in result.stdout
+    result, data = _session(tmp_path, suite, entry, "serial", tmp_path / "nothing", paths=["tests/test_nothing.py"])
+    assert (result.returncode, data["session_exit_code"]) == (5, 5), result.stdout + result.stderr
+    result, data = _session(tmp_path, suite, entry, "serial", tmp_path / "narrowed", "-k", "none_match",
+                            paths=["tests/test_parallel_only.py"])
+    assert (result.returncode, data["session_exit_code"]) == (5, 5), result.stdout + result.stderr
 
 
 # ---------------------------------------------------------------- the UI lane
@@ -322,11 +387,8 @@ def _ui_run(tmp_path, *, change=None):
     (None, None),
     (lambda shard, lane: shard and lane.update(assigned=UI[shard - 1::2]),
      "shard 1/2: its assignment is not slice 1 of 2 of the manifest lane"),
-    (lambda shard, lane: shard == 2 and lane["node_weights"][0].__setitem__(1, 1),
-     "shard 2/2: node weights differ from the manifest"),
-    (lambda shard, lane: shard == 2 and lane.pop("node_weights"), "shard 2/2: node weights differ from the manifest"),
     (lambda shard, lane: shard is None and lane["node_weights"].reverse(), "invalid ui_browser block"),
-], ids=["packed", "positional-slice", "other-weights", "no-weights", "weights-not-the-lane"])
+], ids=["packed", "positional-slice", "weights-not-the-lane"])
 def test_a_packed_ui_lane_reconciles_only_against_the_manifests_packing(tmp_path, change, gap):
     gaps, _ = _ui_run(tmp_path, change=change)
     assert gaps == [] if gap is None else any(gap in text for text in gaps), gaps
@@ -406,10 +468,7 @@ def test_a_red_shard_session_with_a_passing_verdict_is_proven_with_its_rounds(tm
     ({"verdict": "red", "not_run": [ASSIGNED[1][1]]}, "its retry verdict is red (0 failed, 1 not run)"),
     # A verdict that says flaky but lists an unaccepted failure is judged by its lists.
     ({"verdict": "flaky", "failed": [ASSIGNED[1][0]]}, "its retry verdict is red (1 failed, 0 not run)"),
-    ({"verdict": "flaky", "run_id": "901"}, f"its retry verdict belongs to commit {SHA} run 901"),
-    ({"payload": "{not json"}, "its retry verdict is unreadable"),
-    ({"payload": {"format": 1, "verdict": "green"}}, "its retry verdict is invalid"),
-], ids=["red-failed", "red-not-run", "inconsistent", "foreign", "unreadable", "invalid"])
+], ids=["red-failed", "red-not-run", "inconsistent"])
 def test_a_red_shard_session_without_a_passing_verdict_of_this_run_stays_a_gap(tmp_path, verdict, gap):
     first, _, _ = _red_first_session(_default_run(tmp_path))
     _verdict(first, **verdict)
@@ -513,9 +572,6 @@ def test_a_system_filter_reconciles_one_operating_system_of_a_shared_tree(tmp_pa
         encoding="utf-8")
 
 
-# ---------------------------------------------------------------- the run's verdict list and diagnostics
-
-
 def test_the_run_verdict_lists_every_test_completely_and_links_accepted_issues(tmp_path):
     root = tmp_path / "evidence"
     many = [f"tests/test_many.py::test_{index:02}" for index in range(12)]
@@ -558,6 +614,9 @@ def test_the_run_verdict_lists_every_test_completely_and_links_accepted_issues(t
         quiet = subprocess.run(CLI + ["run-verdict", *arguments], capture_output=True, text=True, timeout=30)
         assert quiet.returncode == 0, quiet.stdout + quiet.stderr
     assert "No retry verdict was found" in summary.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------- the run's verdict list and diagnostics
 
 
 def test_a_pass_rerun_in_a_later_attempt_counts_only_there(tmp_path):

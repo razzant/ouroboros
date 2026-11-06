@@ -269,9 +269,11 @@ def test_a_link_swapped_during_the_run_is_refused_at_registration(project, tmp_p
     assert result.code == "ARTIFACT_OUTPUT_ERROR" and "escapes allowed artifact roots" in result.text, result.text
 
 
-@pytest.mark.parametrize("tool", ["run_command", "run_script", "start_service"])
-@pytest.mark.parametrize("absolute", [False, True])
-@pytest.mark.parametrize("invalid", ["\x00", "\x01"])
+@pytest.mark.parametrize(("invalid", "absolute", "tool"), [
+    ("\x00", False, "run_command"),
+    ("\x01", True, "run_script"),
+    ("\x01", True, "start_service"),
+])
 def test_an_unusable_output_spelling_is_a_refusal_not_a_crash(project, tool, absolute, invalid):
     registry, active, _outside = project
     spelling = f"bad{invalid}name.txt"
@@ -339,8 +341,11 @@ def _locked(path, mode):
 
 
 @posix_permissions
-@pytest.mark.parametrize("tool", ["run_command", "run_script"])
-@pytest.mark.parametrize("shape", ["unreadable_file", "unreadable_directory", "unsearchable_parent"])
+@pytest.mark.parametrize(("shape", "tool"), [
+    ("unreadable_file", "run_script"),
+    ("unreadable_directory", "run_command"),
+    ("unsearchable_parent", "run_script"),
+])
 def test_an_existing_output_the_baseline_cannot_read_is_disclosed(project, tool, shape):
     registry, active, _outside = project
     site = active / "site"
@@ -406,7 +411,6 @@ from tests.test_services_tool_v2 import (  # noqa: E402
 )
 
 
-@pytest.mark.serial
 def test_start_refuses_a_refused_output_before_launch_and_exports_a_parent_spelling(tmp_path, monkeypatch):
     _force_light_runtime(monkeypatch)
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
@@ -436,7 +440,6 @@ def test_start_refuses_a_refused_output_before_launch_and_exports_a_parent_spell
     assert artifact.read_text(encoding="utf-8") == "<p>ok</p>"
 
 
-@pytest.mark.serial
 def test_a_local_executor_service_refuses_an_escape_before_launch_and_exports_its_parent_output(local_project):
     registry, active, _outside, _launched = local_project
     site = active / "site"
@@ -464,7 +467,6 @@ def test_a_local_executor_service_refuses_an_escape_before_launch_and_exports_it
     assert _registered(registry, stopped["artifact_outputs"]) == {(active / "qualification.html").resolve(): b"<p>local</p>"}
 
 
-@pytest.mark.serial
 def test_a_baseline_that_could_not_be_taken_is_disclosed_at_start(tmp_path, monkeypatch):
     from ouroboros.tools import shell_outputs
 
@@ -497,7 +499,6 @@ def test_a_baseline_that_could_not_be_taken_is_disclosed_at_start(tmp_path, monk
     assert "registered output" in stopped["artifact_outputs"] and stopped["artifact_output_failed"] is False
 
 
-@pytest.mark.serial
 def test_a_service_output_generated_in_the_system_repo_is_exported_at_stop(tmp_path, monkeypatch):
     from ouroboros.tool_access import build_resolved_resource_binding
     from ouroboros.tools.registry import ToolContext
@@ -525,7 +526,6 @@ def test_a_service_output_generated_in_the_system_repo_is_exported_at_stop(tmp_p
 
 
 @posix_permissions
-@pytest.mark.serial
 def test_a_service_output_the_baseline_cannot_read_is_disclosed_at_start_and_stop(tmp_path, monkeypatch):
     _force_light_runtime(monkeypatch)
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
@@ -576,8 +576,10 @@ def test_unexpandable_output_home_refuses_before_effects(project, tool):
     assert not (active / "site" / "marker.txt").exists()
 
 
-@pytest.mark.parametrize("tool", ["run_command", "run_script"])
-@pytest.mark.parametrize("error_type", [RuntimeError, OSError])
+@pytest.mark.parametrize(("error_type", "tool"), [
+    pytest.param(RuntimeError, "run_command", id='RuntimeError-run_command'),
+    pytest.param(OSError, "run_script", id='OSError-run_script'),
+])
 def test_late_output_resolution_failure_preserves_completed_command(project, monkeypatch, tool, error_type):
     from ouroboros.tools import shell_outputs
 

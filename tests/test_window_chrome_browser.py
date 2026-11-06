@@ -25,7 +25,7 @@ from tests.test_subscription_setup_browser import subscription_ui as _subscripti
 
 subscription_ui = _subscription_ui  # re-exported pytest fixture (requested by name below)
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 TOP, START = 52, 73  # a unified bar and its traffic lights, as one native run measured them
 LIGHTS = {"left": 19, "right": START, "top": 18, "bottom": 34}

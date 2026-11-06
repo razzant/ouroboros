@@ -19,7 +19,7 @@ from tests.test_onboarding_complete_endpoint import (
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
 from tests.ui_console_errors import PageErrors
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 WEB = Path(__file__).resolve().parents[1] / "web"
 
 

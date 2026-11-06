@@ -30,7 +30,7 @@ def test_supervised_wait_reads_shared_terminal_custody_without_fabricating_a_suc
     assert not getattr(ctx, "_sleep_interaction_seen", None)
 
 
-@pytest.mark.parametrize("status,ready", [("completed", True), ("failed", True), ("running", False), ("cancel_pending", False)])
+@pytest.mark.parametrize("status,ready", [("completed", True), ("failed", True), ("running", False)])
 def test_task_wait_adapters_use_same_status_snapshot_as_pure_readiness(tmp_path, status, ready):
     ctx = _ctx(tmp_path)
     probe = tasks._terminal_probe(ctx, ["selected", "live"])

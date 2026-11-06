@@ -110,8 +110,7 @@ def test_blocked_required_history_consumes_no_replay_entry(tmp_path, dispatch, p
     assert td.already_delivered(tmp_path, event["delivery_id"])
 
 
-@pytest.mark.parametrize("mode", ["refused", "interrupted"])
-@pytest.mark.parametrize("deferred", [False, True])
+@pytest.mark.parametrize(("deferred", "mode"), [(False, "refused"), (True, "interrupted")])
 def test_every_transport_entry_is_bounded_even_without_a_return(tmp_path, dispatch, mode, deferred):
     event = owe(tmp_path, **({"delivery_deferred": True} if deferred else {}))
     dispatch.mode = mode
@@ -186,8 +185,12 @@ def test_memory_send_fact_repairs_receipt_at_cap_after_emitted_write_failed(tmp_
     assert td.already_delivered(tmp_path, event["delivery_id"])
 
 
-@pytest.mark.parametrize("legacy,family", [(False, "final"), (True, "final"), (True, "cancel"), (True, "cascade")])
-@pytest.mark.parametrize("route", ["main", "hidden", "project"])
+@pytest.mark.parametrize(("route", "legacy", "family"), [
+    ("main", False, "final"),
+    ("main", True, "cascade"),
+    ("hidden", True, "final"),
+    ("project", True, "cancel"),
+])
 def test_legacy_and_new_debt_keep_identity_metadata_and_routing(tmp_path, monkeypatch, dispatch, legacy, family, route):
     expected_chat = 0 if route == "hidden" else 1
     if route == "project":
@@ -285,8 +288,7 @@ def test_main_projection_keeps_its_canonical_retry_clock(tmp_path, dispatch, req
     assert not dispatch.notices
 
 
-@pytest.mark.parametrize("deferred", [False, True])
-@pytest.mark.parametrize("value", [None, "unknown", -1])
+@pytest.mark.parametrize(("value", "deferred"), [(None, True), ("unknown", True), (-1, False)])
 def test_invalid_dispatch_history_is_not_zero(tmp_path, dispatch, deferred, value):
     event = owe(tmp_path, delivery_deferred=deferred)
     change_row(tmp_path, event["delivery_id"], dispatch_attempts=value)

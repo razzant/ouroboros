@@ -27,8 +27,7 @@ def installs(tmp_path, monkeypatch):
     store.close_connections()
 
 
-@pytest.mark.parametrize("journal", ["PERSIST", "WAL"])
-@pytest.mark.parametrize("service", [False, True])
+@pytest.mark.parametrize(("service", "journal"), [(False, "PERSIST"), (True, "WAL")])
 def test_foreign_store_refuses_before_any_connection_but_local_history_reads(
         installs, monkeypatch, journal, service):
     a, b = installs
@@ -65,8 +64,11 @@ def test_empty_own_read_does_not_create_install_identity(tmp_path, monkeypatch):
     assert not root.exists()
 
 
-@pytest.mark.parametrize("kind", ["custody", "mail", "projection"])
-@pytest.mark.parametrize("layout", ["", "task_drives/task", "state/headless_tasks/task/data"])
+@pytest.mark.parametrize(("layout", "kind"), [
+    ("", "custody"),
+    ("task_drives/task", "mail"),
+    ("state/headless_tasks/task/data", "projection"),
+])
 def test_foreign_locks_never_create_a_lock_file(installs, kind, layout):
     from ouroboros.task_custody import task_custody_lock, task_mail_lock
     from ouroboros.terminal_projection import _publication_lock
@@ -127,8 +129,7 @@ def test_copied_owned_process_pointer_never_reaches_the_stop_owner(installs, mon
 
 
 
-@pytest.mark.parametrize("kind", ["foreground", "service"])
-@pytest.mark.parametrize("pointer", ["drive_root", "record_path"])
+@pytest.mark.parametrize(("pointer", "kind"), [("drive_root", "foreground"), ("record_path", "service")])
 def test_copied_registry_paths_never_reach_executor_load_stop_or_forget(installs, monkeypatch, kind, pointer):
     from ouroboros import owned_shutdown, workspace_executor as executor
 

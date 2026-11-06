@@ -4,7 +4,7 @@
 import { META_PART_SEPARATOR, executorIdentityMarkup, executorModelText, formatCoordinatorProvenance, harnessPresentation } from './harness_presentation.js';
 import { effortChipMarkup } from './effort_chip.js';
 import { resultFilesItemHtml } from './result_files.js';
-import { taskSourceDownloadUrl, readState } from './api_client.js';
+import { taskSourceDownloadUrl, taskReviewSourceUrl, readState } from './api_client.js';
 import { compactModel, formatLogDuration, modelExecutionView } from './log_events.js';
 import { connectionLabel, routeConnectionId } from './connection_labels.js';
 import { fitText, fullText } from './text_fit.js';
@@ -79,18 +79,17 @@ export function isLiveLineExpandable(item) {
     );
 }
 
-// A late-review row links its exact applied review record through the task artifact
-// route (#1369) — an absent or unsupported `late_evidence.source_ref` offers no link
-// rather than a guessed one. The card's timeline and a card-less System row share it.
+// Exact record (#1369) or reviewer report: timeline and card-less System rows share readers; absent selectors offer no link.
 export function cardRowEvidenceRef(msg) {
+    const source = msg?.late_evidence?.kind === 'merge_review' && msg.late_evidence.review_source;
+    if (source?.task_id && source.record_id && source.seat_id && /^[0-9a-f]{64}$/.test(source.sha256 || ''))
+        return { href: taskReviewSourceUrl(source.task_id, source.record_id, source.seat_id, source), label: 'Download the reviewer’s report' };
     const evidence = msg?.late_evidence && typeof msg.late_evidence === 'object'
         ? taskSourceDownloadUrl(String(msg.task_id || '').trim(), msg.late_evidence.source_ref) : '';
     return evidence ? { href: evidence, label: 'Download the review record' } : null;
 }
 
-// The stored record link as one download anchor, or nothing. A value restored from
-// the session snapshot is held to the task artifact route it was minted on. It wears
-// the chat link ink (`md-link`), as the result-file downloads beside it do.
+// A restored snapshot keeps its task reader; the download wears chat link ink (md-link), like result-file downloads.
 export function evidenceLinkHtml(evidenceRef) {
     const href = typeof evidenceRef?.href === 'string' && evidenceRef.href.startsWith('/api/tasks/') ? evidenceRef.href : '';
     return href
@@ -107,6 +106,7 @@ export function cardRowSummary(msg, phase, rawTs = '') {
     return {
         phase, headline: lines[0].trim(), body: lines.slice(1).join('\n').trim(), dedupeKey: `cardrow|${rowId}`,
         cardRowRevision: msg.card_row_revision, evidenceRef: cardRowEvidenceRef(msg),
+        cardReview: msg?.late_evidence?.kind === 'merge_review' ? msg.late_evidence : null,
     };
 }
 
@@ -128,7 +128,8 @@ export function buildTimelineItemHtml(item, record) {
     const loadingFull = expanded && Boolean(item.truncated && item.fullRef && !item.fetchedFull && !item.fullReadError);
     // A late-review row offers its exact applied review record (`cardRowSummary`).
     const evidenceHtml = evidenceLinkHtml(item.evidenceRef);
-    const bodyHtml = !displayBody ? '' : item.bodyFormat === 'text'
+    const plainBody = item.bodyFormat === 'text' || item.cardReview?.kind === 'merge_review';
+    const bodyHtml = !displayBody ? '' : plainBody
         ? escapeHtml(displayBody) : renderMarkdown(displayBody, { inlineHeadingBreaks: true });
     const isProgressLine = item.phase === 'working' || item.phase === 'thinking';
     const bodyId = `chat-live-line-body-${String(record.groupId || 'task').replace(/[^A-Za-z0-9_-]/g, '-')}-${String(item.lineKey || '').replace(/[^A-Za-z0-9_-]/g, '-')}`;
@@ -161,7 +162,7 @@ export function buildTimelineItemHtml(item, record) {
         >
             ${headHtml}
             ${delegated ? `<div class="chat-live-line-body chat-delegated-activity" id="${escapeHtmlAttr(bodyId)}">${delegatedActivityBodyHtml(delegated, { expanded })}</div>`
-        : displayBody || evidenceHtml ? `<div class="chat-live-line-body${showingFetched ? ' chat-live-line-body-full' : ''}"${item.bodyFormat === 'text' ? ' data-body-format="text"' : ''} id="${escapeHtmlAttr(bodyId)}">${bodyHtml}${evidenceHtml}${loadingFull ? '<div class="chat-live-line-loading">Loading full output…</div>' : ''}</div>` : ''}
+        : displayBody || evidenceHtml ? `<div class="chat-live-line-body${showingFetched ? ' chat-live-line-body-full' : ''}"${plainBody ? ' data-body-format="text"' : ''} id="${escapeHtmlAttr(bodyId)}">${bodyHtml}${evidenceHtml}${loadingFull ? '<div class="chat-live-line-loading">Loading full output…</div>' : ''}</div>` : ''}
         </div>
     `;
 }
@@ -676,14 +677,28 @@ export function headerBudgetPresentation(data) {
  *
  * `null` means "no carrier here, use the legacy derivation below".
  */
-export function costPresentationMeta(presentation) {
+export function costPresentationMeta(presentation, context = null) {
     if (!presentation || typeof presentation !== 'object') return null;
-    if (!presentation.has_rows) return presentation.accounting_open ? ['Cost unknown'] : [];
     const amount = presentation.tracked_amount;
-    if (amount === null || amount === undefined || !Number.isFinite(Number(amount))) {
+    const known = presentation.has_rows === true && amount !== null && amount !== undefined
+        && Number.isFinite(Number(amount));
+    // An unreadable custody view or quarantined ledger is not an in-flight
+    // accounting state: without a known subtotal it reads unknown, never pending.
+    // A known subtotal keeps the qualification its producer gave it below.
+    if (!known && (context?.ledger_integrity_degraded === true
+        || context?.cost_custody?.status === 'unavailable')) return ['Cost unknown'];
+    if (!presentation.has_rows) {
+        if (!presentation.accounting_open) return [];
+        // Pending delegated custody has an unpriced row even before a priced
+        // row arrives; an empty open carrier is instead an integrity gap.
+        return presentation.has_unpriced ? ['Cost pending'] : ['Cost unknown'];
+    }
+    if (!known) {
         // No priced or bounded row evidenced anything: an empty ledger and a
         // ledger of exclusively unpriced calls both sum to 0.0, and neither is a
         // measured zero. The card says so instead of inventing a free result.
+        if (presentation.accounting_open === true) return ['Cost pending'];
+        if (presentation.has_unpriced) return ['Cost not priced'];
         return ['Cost unknown'];
     }
     const money = `$${Number(amount).toFixed(2)}`;
@@ -692,8 +707,14 @@ export function costPresentationMeta(presentation) {
 }
 
 /** Why a mixed subtotal reads `Tracked:`: said in the card's details, never a hover-only title. */
-export const costPresentationDetail = (presentation) => (costPresentationMeta(presentation)?.[0]?.startsWith('Tracked: ')
-    ? 'Cost: some steps have no price, so Tracked counts only the priced steps.' : '');
+export const costPresentationDetail = (presentation, context = null) => {
+    const meta = costPresentationMeta(presentation, context);
+    const first = meta?.[0] || '';
+    if (first === 'Cost pending') return 'Cost: accounting is still open; no amount is counted as $0.';
+    if (first === 'Cost not priced') return 'Cost: settled usage has no price, so it is not counted as known spend or as $0.';
+    if (!first.startsWith('Tracked: ')) return '';
+    return 'Cost: some steps have no price, so Tracked counts only the priced steps.';
+};
 
 export function taskCostMeta(payload = {}) {
     // Presence means a VALUE, exactly as in `resolveCostPair`: a browser
@@ -729,7 +750,7 @@ export function taskCostMeta(payload = {}) {
     // #498: the producer's own carrier wins, because it was built from the exact
     // ledger bucket it describes. The derivation below stays for legacy frames
     // and is deliberately conservative: it may not know a zero is unevidenced.
-    const presented = costPresentationMeta(payload.cost_presentation);
+    const presented = costPresentationMeta(payload.cost_presentation, payload);
     if (presented) return presented;
 
     // C2/F12: ONE precedence resolver, shared with the Python seams and with
@@ -766,7 +787,7 @@ export function taskCostMeta(payload = {}) {
 export function taskCostProjection(payload = {}, rawTs = '') {
     const meta = taskCostMeta(payload);
     if (!meta.length) return null;
-    const detail = costPresentationDetail(payload.cost_presentation);
+    const detail = costPresentationDetail(payload.cost_presentation, payload);
     const unavailable = payload.cost_accounting_status === 'unavailable' || payload.cost_presentation === null;
     const presentation = payload.cost_presentation;
     const legacyRollup = payload.cost_presentation === null && (
@@ -1354,13 +1375,14 @@ export function syncCandidateRemainderItem(record, detail) {
     return true;
 }
 
-// The 13 cost-meta keys shared by both subagent whitelists (the delegation
+// The 15 cost-meta keys shared by both subagent whitelists (the delegation
 // trio stays inline in each literal — the wire test scans those literals).
 const COST_META_KEYS = [
     'cost_usd', 'accounted_upper_bound_usd', 'accounted_upper_bound_usd_with_children',
     'cost_accounting_status', 'cost_accounting_error', 'cost_final', 'cost_usd_with_children',
     'cost_with_children_partial', 'reserved_usd', 'unresolved_upper_bound_usd',
-    'unknown_unmetered', 'non_final_rows', 'cost_presentation',
+    'unknown_unmetered', 'non_final_rows', 'cost_presentation', 'cost_custody',
+    'ledger_integrity_degraded',
 ];
 export function costMetaKeys(src) {
     return Object.fromEntries(COST_META_KEYS.map((key) => [key, src?.[key]]));
@@ -1427,7 +1449,7 @@ function metaLineHtml(parts) {
 function paintLiveFacts(record, rows) {
     const el = ownLiveDetail(record, 'liveFacts');
     if (!el) return false;
-    if (record.wakeSummary) rows.unshift([tr('task.fact.wake_summary', 'In its words'), `<span data-i18n-authored>${escapeHtml(record.wakeSummary)}</span>`]);
+    if (record.wakeSummary && (record.initiator === 'consciousness' || record.scheduleName || record.causeHeld)) rows.unshift([tr('task.fact.wake_summary', 'In its words'), `<span data-i18n-authored>${escapeHtml(record.wakeSummary)}</span>`]);
     const html = rows.filter(([, value]) => value).map(([label, value]) =>
         `<div class="chat-live-fact"><dt>${escapeHtml(label)}</dt><dd>${value}</dd></div>`).join('');
     if (el.innerHTML === html && el.hidden === !html) return false;

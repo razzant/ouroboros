@@ -133,9 +133,7 @@ def test_chat_activities_snapshot_projects_queue_roots_with_phases(tmp_path, mon
     assert "running-child" not in rows
 
 
-@pytest.mark.serial
-@pytest.mark.parametrize("kind", ["direct_chat", "managed_task"])
-@pytest.mark.parametrize("bound", [False, True])
+@pytest.mark.parametrize(("bound", "kind"), [(False, "direct_chat"), (True, "managed_task")])
 def test_snapshot_rehomes_activity_without_changing_sources(tmp_path, monkeypatch, kind, bound):
     """Both live owners follow their Project binding without rewriting ingress."""
     import supervisor.queue as queue_mod
@@ -175,7 +173,6 @@ def test_snapshot_rehomes_activity_without_changing_sources(tmp_path, monkeypatc
         assert rows[0] is not direct_rows[0]
 
 
-@pytest.mark.serial
 def test_bound_direct_activity_question_uses_project_without_mutating_raw_snapshot(tmp_path, monkeypatch):
     from ouroboros.gateway import state as gateway_state
     from ouroboros.owner_quiz import record_asked

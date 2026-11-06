@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 
 import httpx
-import pytest
 
 from ouroboros.gateways.claudexor import ClaudexorGateway, DaemonEndpoint
 from ouroboros.subagents import _exhausted_window
@@ -18,24 +17,25 @@ WINDOW_FACTS = json.loads((
 ).read_text(encoding="utf-8"))
 
 
-@pytest.mark.parametrize("case", WINDOW_FACTS["cases"], ids=lambda case: case["name"])
-def test_legacy_partial_window_ratios_cannot_certify_scope(monkeypatch, case):
-    # A legacy raw-ratio response cannot establish exact engine availability.
-    requests = []
+def test_legacy_partial_window_ratios_cannot_certify_scope(subtests, monkeypatch):
+    for case in WINDOW_FACTS["cases"]:
+        with subtests.test(case=case), monkeypatch.context() as monkeypatch:
+            # A legacy raw-ratio response cannot establish exact engine availability.
+            requests = []
 
-    def handler(request):
-        requests.append((request.method, request.url.path))
-        return httpx.Response(200, json={"snapshots": [{
-            "subject": {"harness": "claude", "subject_id": "chosen"},
-            "freshness": "fresh", "constraints": [case["constraint"]],
-        }], "absences": []})
+            def handler(request):
+                requests.append((request.method, request.url.path))
+                return httpx.Response(200, json={"snapshots": [{
+                    "subject": {"harness": "claude", "subject_id": "chosen"},
+                    "freshness": "fresh", "constraints": [case["constraint"]],
+                }], "absences": []})
 
-    with ClaudexorGateway(DaemonEndpoint("127.0.0.1", 1, "test-token")) as gateway:
-        gateway._client.close()
-        gateway._client = httpx.Client(base_url="http://127.0.0.1:1", transport=httpx.MockTransport(handler))
-        assert _exhausted_window(gateway, "claude", pinned_profile="chosen") == (
-            False, "")
-    assert requests == [("GET", "/v2/quota")]
+            with ClaudexorGateway(DaemonEndpoint("127.0.0.1", 1, "test-token")) as gateway:
+                gateway._client.close()
+                gateway._client = httpx.Client(base_url="http://127.0.0.1:1", transport=httpx.MockTransport(handler))
+                assert _exhausted_window(gateway, "claude", pinned_profile="chosen") == (
+                    False, "")
+            assert requests == [("GET", "/v2/quota")]
 
 
 def test_partial_sibling_preserves_rotation_but_never_rescues_a_spent_pin():

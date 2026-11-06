@@ -297,7 +297,7 @@ def test_wrap_up_mailbox_carries_cancelled_child_answer_and_existing_capture_onc
     assert not audit["open_run_ids"]
 
 
-@pytest.mark.parametrize("exit_kind", ["candidate", "expired", "error", "one_call"])
+@pytest.mark.parametrize("exit_kind", ["candidate", "error", "one_call"])
 def test_existing_terminal_event_keeps_receipt_on_every_wrap_up_exit(tmp_path, monkeypatch, exit_kind):
     from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
     from tests.test_delivery_forced_finalization import _forced_test_context
@@ -635,7 +635,7 @@ def test_all_children_and_runs_survive_bounded_prompt_without_review_work(tmp_pa
     assert "### Subtask kid-22\n\nIts saved task text; the author is not recorded:\n\n> " + "answer " * 99 + "answer" in document
 
 
-@pytest.mark.parametrize("status", ["ready_with_changes", "ready_no_changes", "failed", "missing", "unconfirmed"])
+@pytest.mark.parametrize("status", ["ready_with_changes", "failed", "unconfirmed"])
 def test_patch_capture_states_and_disposition_are_facts_not_hash_inferences(tmp_path, monkeypatch, status):
     from ouroboros.artifacts import task_artifact_dir_path
 

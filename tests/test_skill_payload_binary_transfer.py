@@ -5,7 +5,6 @@ from pathlib import Path
 import struct
 import zlib
 
-import pytest
 
 from ouroboros import delegate_custody as custody
 from ouroboros.subagent_worktrees import find_execution_snapshot
@@ -13,7 +12,6 @@ from ouroboros.tools.delegate import _capture_terminal_patch
 from ouroboros.tools.subagent_integration import _integrate_delegated_patch
 from tests.test_delegated_skill_payload import _payload_entry, _provisioned
 
-pytestmark = pytest.mark.serial
 
 
 def test_binary_resource_capture_apply_preserves_exact_bytes_and_control_state(tmp_path, monkeypatch):

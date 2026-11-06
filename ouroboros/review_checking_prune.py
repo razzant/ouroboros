@@ -4,7 +4,8 @@ A copy goes only on positive evidence that its run ended: a receipt of its opera
 custody, read fresh for that seat, showing that a run started in this copy is terminal and none
 still runs or is pending there. Each seat is decided under its cross-process lock, which
 workers also take to prepare, refresh and capture it, so a review that starts or ends during
-a pass is never deleted under itself. A thread's copy lives while its task is live. Failed
+a pass is never deleted under itself. Threads live with their task. A held one-shot copy
+stays for a live author or the Skills continuation door, within recorded run limits. Failed
 captures retry; marked copies without a complete receipt stay regardless of age. Only
 unmarked materialization leftovers expire; a refresh's staging goes once its seat's lock
 is free, and an older body's staging inside a seat at once (a pristine copy). Evidence,
@@ -38,7 +39,7 @@ import json
 import pathlib
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, Mapping, Optional
 
 from ouroboros.owner_keep import OWNER_KEEP, gate, is_kept
@@ -55,6 +56,14 @@ from ouroboros.review_checking import (
 from ouroboros.unindexed import unindexed
 
 _PASS_LOCK = threading.Lock()
+
+
+def seat_scratch_released(data_root: Any, key: str) -> bool:
+    """Declared-disposable scratch follows the checking copy, not its evidence receipt.
+    A missing home means no copy; an unreadable path is present, so it retains.
+    Existing homes are checked under their seat lock by the caller."""
+    home = pathlib.Path(data_root) / "state" / "review_checkouts" / "seats" / key[5:]
+    return not _checking_area_present(unindexed(home, "area"))
 
 
 def _last_use(path: pathlib.Path) -> float:
@@ -80,12 +89,13 @@ def _started_after(started: Any, since: Any) -> bool:
         return False  # an unknown start proves nothing about this copy
 
 
-def _copy_runs_over(data_root: Any, task_id: str, area: pathlib.Path, created_at: Any) -> Optional[bool]:
-    """From one custody read: False while a run may still execute in ``area`` (unknown or
-    pending), True when a run started in this copy (after ``created_at``) is terminal, None when no
-    run proves anything. A thread's earlier turns ran in the same folder and prove nothing."""
+def _copy_run_state(data_root: Any, task_id: str, area: pathlib.Path, created_at: Any) -> tuple:
+    """One custody read: (runs over, continuation window open). False/None terminality
+    retains; only runs born in this copy prove completion. Their recorded start/cap
+    bound continuation; no new deadline is invented for unbounded or unknown timing."""
     from ouroboros import delegate_custody_current as current
     from ouroboros.delegate_custody import TERMINAL_STATES
+    from ouroboros.deadline_utils import parse_deadline_ts, utc_now
 
     snapshot = current.task_snapshot(data_root, task_id)
     target = str(area.resolve(strict=False))
@@ -96,8 +106,14 @@ def _copy_runs_over(data_root: Any, task_id: str, area: pathlib.Path, created_at
     runs = [entry for entry in snapshot["runs"].values() if names(entry.execution_root)]
     if any(names(row.get("execution_root")) for row in snapshot["pending"]) or not all(
             entry.terminal_state in TERMINAL_STATES for entry in runs):
-        return False
-    return True if any(_started_after(entry.started_ts, created_at) for entry in runs) else None
+        return False, True
+    own = [entry for entry in runs if _started_after(entry.started_ts, created_at)]
+    ends = []
+    for entry in own:
+        start, cap = parse_deadline_ts(entry.started_ts), int(getattr(entry, "max_seconds", 0) or 0)
+        if start is not None and cap > 0:
+            ends.append(start + timedelta(seconds=cap))
+    return (True if own else None), (not ends or min(ends) > utc_now())
 
 
 def _checkout_entries(base: pathlib.Path) -> list:
@@ -129,9 +145,10 @@ def _review_rounds(data_root: Any) -> tuple:
 
 
 def _checkout_hold(data_root: Any, entry: pathlib.Path, *, rounds: tuple, sources: set,
-                   live: Callable[[], Any], cutoff: float) -> str:
+                   live: Callable[[str], Optional[bool]], cutoff: float) -> str:
     """Why the isolated checkout ENTRY stays, or ``""`` when no review can still read it."""
     from ouroboros.review_operation import task_has_live_review_operation
+    from ouroboros.store import StoreBusy
     from ouroboros.task_results import load_task_result
     from ouroboros.task_status import SETTLED_STATUSES
     from ouroboros.tools.review_subject import CHECKOUT_MARKER
@@ -141,6 +158,8 @@ def _checkout_hold(data_root: Any, entry: pathlib.Path, *, rounds: tuple, source
         marker = json.loads((entry / CHECKOUT_MARKER).read_text(encoding="utf-8"))
     except FileNotFoundError:
         marker = None  # made before the marker: owned only through a recorded round, and only past the wait
+    except (OSError, ValueError):
+        return "marker_unreadable"
     if marker is not None and (not isinstance(marker, dict) or marker.get("schema_version") != 1):
         return "marker_unreadable"
     task_id = str(marker.get("task_id") or "") if marker is not None else owners.get(entry.name, "")
@@ -155,14 +174,30 @@ def _checkout_hold(data_root: Any, entry: pathlib.Path, *, rounds: tuple, source
         return "seat_checking"
     if marker is None and _last_use(entry) >= cutoff:
         return "younger_than_retention"
-    row = load_task_result(data_root, task_id, strict=True) or {}
+    try:
+        row = load_task_result(data_root, task_id, strict=True) or {}
+    except StoreBusy:
+        return "store_busy"
+    except (OSError, ValueError, KeyError, TypeError):
+        return "task_result_unreadable"
     if str(row.get("status") or "") not in SETTLED_STATUSES:
         return "task_not_terminal"
-    if task_id in live():
+    try:
+        alive = live(task_id)
+    except StoreBusy:
+        return "store_busy"
+    if alive is None:
+        return "liveness_unknown"
+    if alive:
         return "task_live"
-    if task_has_live_review_operation(data_root, task_id, result_loader=lambda tid: row if tid == task_id else (
-            load_task_result(data_root, tid, strict=True) or {})):
-        return "operation_live"
+    try:
+        if task_has_live_review_operation(data_root, task_id, result_loader=lambda tid: row if tid == task_id else (
+                load_task_result(data_root, tid, strict=True) or {})):
+            return "operation_live"
+    except StoreBusy:
+        return "store_busy"
+    except (OSError, ValueError, KeyError, TypeError):
+        return "task_result_unreadable"
     return ""
 
 
@@ -225,7 +260,8 @@ def _retire_checkouts(data_root: Any, entries: list, live: Callable[[], Any], cu
         if stopped():
             return
         try:
-            hold = _checkout_hold(data_root, entry, rounds=rounds, sources=sources, live=live, cutoff=cutoff)
+            hold = _checkout_hold(data_root, entry, rounds=rounds, sources=sources,
+                                  live=lambda task: task in live(), cutoff=cutoff)
             error = "" if hold else _remove_unless_kept(data_root, entry, rounds)
         except Exception as exc:  # an unreadable marker, row or tree keeps the checkout
             hold, error = "", f"{entry.name}: {type(exc).__name__}: {exc}"
@@ -233,18 +269,10 @@ def _retire_checkouts(data_root: Any, entries: list, live: Callable[[], Any], cu
             report["errors"].append(error)
         elif hold:
             report["checkouts_kept"] += 1
+            holds = report.setdefault("checkout_holds", {})
+            holds[hold] = holds.get(hold, 0) + 1
         else:
             report["checkouts_removed"] += 1
-
-
-class _Probed:
-    """``task_id in live()`` over the supervisor's probe: live or unknown counts as live."""
-
-    def __init__(self, probe: Callable[[str], Any]) -> None:
-        self._probe = probe
-
-    def __contains__(self, task_id: object) -> bool:
-        return self._probe(str(task_id)) is not False
 
 
 def finished_seat_homes(data_root: Any, live: Callable[[str], Any], stopped: Callable[[], bool],
@@ -299,7 +327,8 @@ def retire_seat_home(data_root: Any, home: pathlib.Path, live: Callable[[str], A
     from ouroboros.body_candidate import _recorded_terminal
     from ouroboros.subagent_worktrees import _task_proven_over
 
-    task_id = str(json.loads((home / "checking.json").read_text(encoding="utf-8")).get("task_id") or "")
+    marker = json.loads((home / "checking.json").read_text(encoding="utf-8"))
+    task_id = str(marker.get("task_id") or "")
     if task_id not in proven:
         proven[task_id] = _task_proven_over(task_id, data_root, live)
     with gate(data_root, task_id, timeout_sec=0) as kept:  # outside the seat lock's file: it covers the move too
@@ -316,16 +345,21 @@ def retire_seat_home(data_root: Any, home: pathlib.Path, live: Callable[[str], A
     return ""
 
 
-def orphan_review_checkouts(data_root: Any, live: Callable[[str], Any], homes: Optional[list] = None) -> list:
+def orphan_review_checkouts(data_root: Any, live: Callable[[str], Any], homes: Optional[list] = None,
+                            *, causes: Optional[dict] = None) -> list:
     """For the owner's Storage -> Free: ``(checkout, verdict)`` per isolated review checkout, ``offer``
     when no task owns it (made before the marker, named by no recorded round) or the background pass
     would retire it now, else ``owner_keep``, ``in_use`` or ``unreadable``. Pure, like ``finished_seat_homes``."""
+    from ouroboros.store import StoreBusy
+
     entries = _checkout_entries(pathlib.Path(data_root) / "state" / "review_checkouts")
     if not entries:
         return []
     try:
         rounds = _review_rounds(data_root)
     except Exception:  # unknown custody: every checkout is shown, never offered
+        if causes is not None:
+            causes.update((entry, "review_state_unreadable") for entry in entries)
         return [(entry, "unreadable") for entry in entries]
     sources = set()
     for home, verdict, _task in finished_seat_homes(data_root, live, lambda: False) if homes is None else homes:
@@ -339,11 +373,15 @@ def orphan_review_checkouts(data_root: Any, live: Callable[[str], Any], homes: O
     for entry in entries:
         try:  # an active round first: its marker may name no task yet
             hold = "review_custody_active" if entry.name in rounds[0] else _checkout_hold(
-                data_root, entry, rounds=rounds, sources=sources, live=lambda: _Probed(live), cutoff=float("inf"))
+                data_root, entry, rounds=rounds, sources=sources, live=live, cutoff=float("inf"))
+        except StoreBusy:
+            hold = "store_busy"
         except Exception:
-            hold = "marker_unreadable"
+            hold = "review_state_unreadable"
+        if causes is not None and hold:
+            causes[entry] = hold
         found.append((entry, "offer" if hold in ("", "owner_unknown") else OWNER_KEEP if hold == OWNER_KEEP else
-                      "unreadable" if hold == "marker_unreadable" else "in_use"))
+                      "unreadable" if hold in {"marker_unreadable", "review_state_unreadable", "task_result_unreadable"} else "in_use"))
     return found
 
 
@@ -354,7 +392,8 @@ def retire_orphan_checkouts(data_root: Any, chosen: list, live: Callable[[str], 
     if not _PASS_LOCK.acquire(blocking=False):
         return {entry: "busy" for entry in chosen}
     try:
-        verdicts, outcome = dict(orphan_review_checkouts(data_root, live)), {}
+        causes: dict = {}
+        verdicts, outcome = dict(orphan_review_checkouts(data_root, live, causes=causes)), {}
         rounds: Optional[tuple] = None
         for entry in chosen:
             if stop():
@@ -365,8 +404,10 @@ def retire_orphan_checkouts(data_root: Any, chosen: list, live: Callable[[str], 
                     rounds = _review_rounds(data_root)
                 except Exception:
                     rounds = ()
-            verdict = "unreadable" if verdict == "offer" and not rounds else verdict
-            outcome[entry] = verdict if verdict != "offer" else "other" if _remove_unless_kept(data_root, entry, rounds) else ""
+            if verdict == "offer" and not rounds:
+                outcome[entry] = "review_state_unreadable"
+                continue
+            outcome[entry] = causes.get(entry, verdict) if verdict != "offer" else "other" if _remove_unless_kept(data_root, entry, rounds) else ""
         return outcome
     finally:
         _PASS_LOCK.release()
@@ -397,6 +438,9 @@ def prune_review_checkouts(data_root: Any, live_task_ids: Any, *, views_since: O
             return {**report, "skipped": "custody_unreadable"}
         live = live_task_ids if callable(live_task_ids) else (lambda: live_task_ids)
         stopped = stop or (lambda: False)
+        if views:  # existing once-per-process recovery pass; no periodic historical scan
+            from ouroboros.workspace_preflight import restore_seat_scratch_notes
+            restore_seat_scratch_notes(data_root, stop=stopped)
         cutoff = age_cutoff(get_gc_retention_days() if retention_days is None else retention_days, now)
         named, kept_views, unread, busy, sources = set(), set(), [], [], set()
 
@@ -418,8 +462,12 @@ def prune_review_checkouts(data_root: Any, live_task_ids: Any, *, views_since: O
             thread = str(marker.get("thread_seat") or "")
             thread_home = bool(thread) and seat_dir(data_root, task_id, f"thread:{thread}").resolve(
                 strict=False) == home
-            over = _copy_runs_over(data_root, task_id, area, marker.get("created_at"))
-            if over is False or (thread_home or marker.get("held_for_continuation")) and task_id in live():
+            over, window_open = _copy_run_state(data_root, task_id, area, marker.get("created_at"))
+            # Finished managed authors cannot continue this seat. The canonical Skills
+            # endpoint can; its explicit continuation still enforces the original limits.
+            continuation = bool(marker.get("held_for_continuation")) and window_open and (
+                task_id == "api_skill_review" or task_id in live())
+            if over is False or continuation or thread_home and task_id in live():
                 report["kept"] += 1
                 return True
             receipt = _receipt(data_root, task_id, operation) if operation else {}

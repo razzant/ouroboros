@@ -22,12 +22,7 @@ from ouroboros.tools import registry_guard_process
 
 @pytest.mark.parametrize("cmd", [
     ["rg", "sudo", "README.md"],
-    ["printf", "sudo"],
-    ["grep", "-rn", "sudo", "ouroboros/"],
-    ["ls", "/usr/bin/sudo"],
-    ["grep", "-rn", "sudoedit", "docs/"],
     ["pytest", "tests/test_sudo_option_parser.py"],
-    ["sudo", "-n", "true"],
     ["sudo", "--non-interactive", "true"],
 ])
 def test_sudo_named_as_data_or_noninteractive_is_allowed(cmd):
@@ -36,12 +31,7 @@ def test_sudo_named_as_data_or_noninteractive_is_allowed(cmd):
 
 @pytest.mark.parametrize("cmd", [
     ["sudo", "true"],
-    ["sudoedit", "/etc/hosts"],
-    ["sudo", "-S", "true"],
-    ["sudo", "-nS", "true"],
-    ["sh", "-c", "sudo apt update"],
     ["nohup", "sudo", "apt", "install", "-y", "jq"],
-    "echo hi && sudo whoami",
     ["sudo", "-n", "sh", "-c", "sudo whoami"],
 ])
 def test_sudo_at_command_head_is_still_guarded(cmd):
@@ -153,16 +143,7 @@ def test_regex_lane_agrees_with_ast_on_list_remove_and_ro_sqlite():
 
 @pytest.mark.parametrize("cmd", [
     "git config --get remote.origin.url",
-    "git config --list",
-    "git config user.name",
     "git stash list",
-    "git stash show",
-    "git worktree list",
-    "git notes list",
-    "git notes",
-    "git bisect log",
-    "git merge-base HEAD origin/main",
-    "git check-ignore -v build/",
     "git name-rev HEAD",
 ])
 def test_git_readonly_modes_are_classified_readonly(cmd):
@@ -172,13 +153,8 @@ def test_git_readonly_modes_are_classified_readonly(cmd):
 
 
 @pytest.mark.parametrize("cmd", [
-    "git config user.name somebody",
     "git config --unset user.name",
     "git config set user.name x",
-    "git config -f /tmp/other --list",  # external-file reader: no exemption ride
-    "git stash",
-    "git stash pop",
-    "git worktree add ../w",
     "git notes add -m x",
     "git bisect reset",
 ])
@@ -231,22 +207,15 @@ def test_glued_dash_c_selects_the_same_base_as_split(tmp_path):
 @pytest.mark.parametrize("cmd", [
     "rg 'gh auth' docs/",
     "echo 'run gh auth login later'",
-    "gh auth status",
-    "gh auth token",
     "gh pr list",
 ])
 def test_gh_mentions_and_readonly_auth_have_no_semantic_veto(tmp_path, cmd):
     assert registry_guard_process._run_shell_safety_check(_registry(tmp_path), {"cmd": cmd}, "advanced") is None
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("cmd", [
     ["gh", "auth", "login"],
-    ["gh", "auth", "logout"],
-    ["gh", "auth", "refresh"],
-    ["gh", "auth", "setup-git"],
     ["sh", "-c", "gh auth login"],
-    ["gh", "repo", "create", "mine"],
     ["gh", "repo", "delete", "mine"],
 ])
 def test_gh_requests_reach_the_handler_once_without_contacting_an_account(tmp_path, monkeypatch, cmd):

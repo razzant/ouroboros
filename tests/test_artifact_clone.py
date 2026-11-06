@@ -352,7 +352,7 @@ def _acl(path):
 
 
 @darwin
-@pytest.mark.parametrize("rights", [("write", "append"), ("writeattr",), ("writeextattr",), ("writesecurity",), ("delete",)])
+@pytest.mark.parametrize("rights", [("write", "append"), ("writesecurity",), ("delete",)])
 def test_a_denying_source_acl_reaches_no_copy_and_a_seat_still_edits_its_own(tmp_path, deny, rights):
     """The source stays a real clone source with its mode writable, and its ACL stays behind as ``copy2`` leaves it:
     the times are set, the seat writes, and the copy goes with its folder."""

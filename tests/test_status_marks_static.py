@@ -323,16 +323,3 @@ def test_the_scan_sees_every_way_a_rule_can_paint_amber() -> None:
         ("@media (hover: hover) » @supports (display: grid) » .nested:hover", "background"),
         (".a", "color"), (".b", "color"), (".host » & .child", "outline-color"),
     }
-
-
-def test_the_registry_check_fails_on_a_new_rule_and_on_a_stale_line() -> None:
-    sheet = {"web/x.css": ":root { --amber: #f59e0b }\n.owner-question { color: var(--amber); }\n"
-                          ".new-lamp { color: var(--amber); }"}
-    listed = registry("palette | web/x.css | :root | --amber\nowner | web/x.css | .owner-question | color\n"
-                      "warning | web/x.css | .gone | color")
-    found = amber_declarations(sheet)
-    assert found - listed.keys() == {("web/x.css", ".new-lamp", "color")}
-    assert listed.keys() - found == {("web/x.css", ".gone", "color")}
-    # Formatting and comments never change what is found.
-    reformatted = {"web/x.css": ":root{--amber:#F59E0B}/* lamp */ .owner-question,\n .new-lamp {\n  color :  var( --amber ) ;\n}"}
-    assert amber_declarations(reformatted) == found

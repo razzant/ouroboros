@@ -8,7 +8,6 @@ pytest_plugins = ('tests.test_ui_smoke_playwright',)
 
 
 @pytest.mark.ui_browser
-@pytest.mark.serial
 def test_engine_facts_status_line_at_both_widths(direct_server_with_data, tmp_path):
     from playwright.sync_api import sync_playwright
 

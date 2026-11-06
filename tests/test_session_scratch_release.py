@@ -345,3 +345,142 @@ def test_a_retained_scratch_stays_in_place_and_holds_no_trash(tmp_path):
     assert (scratch / "env" / "pyvenv.cfg").is_file() and (nested / test_environment.RETENTION_MARKER).is_file()
     assert not list((data / "state" / "custody_trash").iterdir())
     assert retire_synthetic_retention(nested, reason)
+
+
+@pytest.mark.parametrize("task,missing_note", [("long-parent", False), ("api_skill_review", True), ("marketplace_install", False)])
+def test_review_scratch_follows_finished_seat_not_parent_task(tmp_path, monkeypatch, task, missing_note):
+    from types import SimpleNamespace
+    from ouroboros import review_checking as rc, review_checking_prune as rp
+    from ouroboros.review_session_preparation import seat_service_directories
+    from tests.test_review_checkout_lifecycle import _frozen, _seat
+    root, source = _frozen(tmp_path)
+    if task == "long-parent":
+        seed_result(root, task, {"status": "running"})
+    areas = [_seat(root, source, op, task=task) for op in ("done", "working")]
+    services = [seat_service_directories(_Catalog(GRANTED), "route", SimpleNamespace(access="full", mode="agent"),
+                root, task, op, str(area)) for op, area in zip(("done", "working"), areas)]
+    for service in services:
+        (pathlib.Path(service.scratch) / 'unique-env').write_bytes(b'ENVIRONMENT')
+    if missing_note:
+        for note in (root / OPEN_SCRATCH_DIR / task).glob('*.json'):
+            note.unlink()
+        import time
+        rp.prune_review_checkouts(root, {task}, views_since=time.time())
+    assert rc.capture_seat_evidence(root, task, "done")["status"] == "retained"
+    report = release_finished_scratch(root, lambda _: True)
+    assert len(report['released']) == 1 and report['errors'] == []
+    task_custody.remove_custody_trash(root)
+    assert not pathlib.Path(services[0].scratch).exists()
+    assert (pathlib.Path(services[1].scratch) / 'unique-env').read_bytes() == b'ENVIRONMENT'
+    receipt = rc._receipt(root, task, "done")
+    assert (pathlib.Path(receipt['evidence_dir']) / 'files' / 'check.py').read_bytes() == b'# reviewer reproduction\n'
+
+
+def test_continuation_keeps_original_environment_through_maintenance_then_releases(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from ouroboros import review_checking as rc, review_checking_prune as rp, review_continuation as continuation
+    from ouroboros.review_session_preparation import seat_service_directories
+    from tests.test_review_checkout_lifecycle import _frozen, _seat
+    from tests.test_review_checking_prune import _custody
+    root, source = _frozen(tmp_path)
+    task = 'api_skill_review'  # the Skills page can continue without a live managed parent
+    area = _seat(root, source, 'stopped', task=task)
+    service = seat_service_directories(_Catalog(GRANTED), 'route', SimpleNamespace(access='full', mode='agent'), root, task, 'stopped', str(area))
+    env = pathlib.Path(service.scratch) / 'environment'
+    env.write_bytes(b'CONTINUABLE-ENV')
+    first = rc.capture_seat_evidence(root, task, 'stopped', hold=True)
+    _custody(monkeypatch, settled=[area])
+    assert rp.prune_review_checkouts(root, set())['released'] == 0
+    assert release_finished_scratch(root, OVER)['released'] == []
+    assert env.read_bytes() == b'CONTINUABLE-ENV'
+    continuation.transfer_checking_copy(root, task, 'stopped', 'successor')
+    assert continuation.checking_copy_holder(root, task, 'successor') == (True, '')
+    (area / 'check.py').write_bytes(b'AFTER-CONTINUATION')
+    second = rc.capture_seat_evidence(root, task, 'successor')
+    assert second['status'] == 'retained' and not area.exists()
+    assert (pathlib.Path(first['evidence_dir']) / 'files' / 'check.py').read_bytes() == b'# reviewer reproduction\n'
+    assert (pathlib.Path(second['evidence_dir']) / 'files' / 'check.py').read_bytes() == b'AFTER-CONTINUATION'
+    assert release_finished_scratch(root, OVER)['released']
+    task_custody.remove_custody_trash(root)
+    assert not env.exists()
+
+
+@pytest.mark.parametrize("order", ["release_first", "retire_first", "cached_drive_first"])
+def test_finished_seat_scratch_release_survives_either_cleanup_order(tmp_path, monkeypatch, order):
+    """Seat-home retirement and the task-drive scratch pass are independent; neither may strand the other."""
+    from types import SimpleNamespace
+    from ouroboros import review_checking as rc, review_checking_prune as rp
+    from ouroboros.review_session_preparation import seat_service_directories
+    from tests.test_review_checkout_lifecycle import _frozen, _seat
+    from tests.test_review_checking_prune import _custody
+
+    root, source = _frozen(tmp_path)
+    task, operation = "finished-parent", "review-operation"
+    seed_result(root, task, {"status": "completed", "finished_at": "2020-01-01T00:00:00+00:00"})
+    area = _seat(root, source, operation, task=task)
+    service = seat_service_directories(None, "unused-full-route", SimpleNamespace(access="full", mode="agent"),
+                                       root, task, operation, str(area))
+    scratch = pathlib.Path(service.scratch)
+    (scratch / "environment").write_bytes(b"DISPOSABLE-ENV")
+    if order == "cached_drive_first":
+        from ouroboros import headless
+        drive, rested = root / "task_drives" / task, {}
+        first = headless.prune_task_drives(root, retention_days=1, now=2100000000, live=OVER, rested=rested)
+        assert first["skipped"] == [{"task_id": task, "reason": "review_environment_held"}]
+        basis = task_custody.settlement_basis(root, task, drive, drive)
+    assert rc.capture_seat_evidence(root, task, operation)["status"] == "retained"
+    _custody(monkeypatch, settled=[area])
+
+    if order == "release_first":
+        assert release_finished_scratch(root, OVER)["released"]
+        assert rp.retire_seat_home(root, area.parent, OVER, {}) == ""
+    elif order == "cached_drive_first":
+        assert release_finished_scratch(root, OVER)["released"]
+        assert task_custody.remove_custody_trash(root)["removed"]
+        assert task_custody.settlement_basis(root, task, drive, drive) == basis
+        second = headless.prune_task_drives(root, retention_days=1, now=2100000000, live=OVER, rested=rested)
+        assert second["pruned"] and not drive.exists(), second
+        assert rp.retire_seat_home(root, area.parent, OVER, {}) == ""
+    elif order == "whole_drive_first":
+        result = task_custody.settle_child_drive(root, task, root / "task_drives" / task, live=OVER)
+        assert result["status"] == "removed", result
+        assert rp.retire_seat_home(root, area.parent, OVER, {}) == ""
+    else:
+        assert rp.retire_seat_home(root, area.parent, OVER, {}) == ""
+        assert release_finished_scratch(root, OVER)["released"]
+    assert task_custody.remove_custody_trash(root)["removed"] >= 1
+    assert not scratch.exists()
+
+
+@pytest.mark.parametrize('fault', ['keep', 'capture_failed', 'drive_settlement'])
+def test_seat_environment_survives_negative_proofs_and_drive_retirement(tmp_path, monkeypatch, fault):
+    from types import SimpleNamespace
+    from ouroboros import review_checking as rc
+    from ouroboros.review_session_preparation import seat_service_directories
+    from tests.test_review_checkout_lifecycle import _frozen, _seat
+    root, source = _frozen(tmp_path)
+    task = 'parent'
+    seed_result(root, task, {'status': 'completed'})
+    area = _seat(root, source, 'op', task=task)
+    service = seat_service_directories(_Catalog(GRANTED), 'route', SimpleNamespace(access='full', mode='agent'), root, task, 'op', str(area))
+    env = pathlib.Path(service.scratch) / 'environment'
+    env.write_bytes(b'KEEP-ENV')
+    if fault == 'keep':
+        owner_keep.set_owner_keep(root, task, keep=True, source={'basis':'test'})
+        assert rc.capture_seat_evidence(root, task, 'op')['status'] == 'retained'
+    elif fault == 'capture_failed':
+        monkeypatch.setattr(rc, '_directory_delta', lambda *_: (_ for _ in ()).throw(OSError('capture refused')))
+        assert rc.capture_seat_evidence(root, task, 'op')['status'] == 'capture_failed'
+    elif fault == 'unreadable_marker':
+        (area.parent / 'checking.json').write_text('{torn')
+    elif fault == 'drive_settlement':
+        result = task_custody.settle_child_drive(root, task, root / 'task_drives' / task, live=OVER)
+        assert result['status'] == 'retained' and result['reason'] == 'review_environment_held', result
+        assert (root / 'task_drives' / task).is_dir()
+    else:
+        trash = root / 'state' / 'custody_trash' / 'parent-0123456789ab'
+        trash.parent.mkdir(parents=True)
+        (root / 'task_drives' / task).rename(trash)
+        assert task_custody.remove_custody_trash(root)['stuck']
+    assert release_finished_scratch(root, OVER)['released'] == []
+    assert env.read_bytes() == b'KEEP-ENV' and area.is_dir()

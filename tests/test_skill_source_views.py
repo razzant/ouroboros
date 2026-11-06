@@ -311,4 +311,3 @@ def test_listing_serves_check_and_update_outcomes_without_private_details(tmp_pa
         "release": {"version": "1", "digest": digest}, "base_digest": digest})
     plain = catalog.install_listing(drive, find_skill(drive, "notes"), {})["install"]
     assert not {"check", "pending_update", "update_rejected"} & set(plain)
-

@@ -106,12 +106,23 @@ def test_the_answer_keeps_the_client_shape_and_names_its_generation(serving):
     assert payload["boot"]["phase"] in {"starting", "serving", "ready", "failed"}
 
 
-def test_state_keeps_the_sidebar_feed_capped_and_reports_the_full_listable_count(serving):
+def test_state_keeps_the_sidebar_feed_capped_and_reports_the_full_listable_count(serving, monkeypatch):
+    """The feed and its count come from one registry read: a later read here would see one more room, as when another
+    writer adds one between two reads, and the count would then claim a room the feed's own read never saw."""
     from ouroboros import projects_registry as registry
 
     for index in range(60):
         registry.create_project(serving.root, f"project-{index:03d}", name=f"Project {index:03d}", origin="owner_ui")
+    reads, real = [], registry.list_sidebar_projects
+
+    def spliced(drive_root):
+        rows = real(drive_root)
+        reads.append(len(rows))
+        return rows if len(reads) == 1 else [*rows, {**rows[0], "id": "created-between-reads", "chat_id": 99_999}]
+
+    monkeypatch.setattr(registry, "list_sidebar_projects", spliced)
     payload = _payload(_get(serving.app))
+    assert reads == [60], "the state production read the registry's listable rows more than once"
     assert len(payload["projects"]) == 50
     assert payload["project_listable_count"] == 60
 

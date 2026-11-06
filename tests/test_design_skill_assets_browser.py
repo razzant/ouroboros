@@ -22,7 +22,7 @@ import pytest
 
 from tests.test_design_skill_assets import FREEZE, MEASURE, compare_data, fill_compare
 
-pytestmark = [pytest.mark.browser, pytest.mark.serial]
+pytestmark = [pytest.mark.browser]
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "design_skills"
 ENGINES = ["webkit", "chromium"]
 LONG_NOTE = ("Two lines instead of four: who asks and from which project, then the state. The answer field takes "

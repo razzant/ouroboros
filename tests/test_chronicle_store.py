@@ -161,7 +161,6 @@ def test_page_rows_use_the_canonical_source_identity_of_the_raw_row(tmp_path):
     assert page(store, source_row_id({**row, "text": "Привет!"}), at=6).ok
 
 
-@pytest.mark.serial
 def test_two_processes_publish_without_losing_frontiers(tmp_path):
     import subprocess
     import sys

@@ -105,8 +105,7 @@ def test_batch_verdict_matches_git_for_every_path_class(tmp_path):
     assert objects.startswith("5 objects"), objects
 
 
-@pytest.mark.parametrize("extra_files", [0, 24])
-@pytest.mark.parametrize("empty_files", [False, True])
+@pytest.mark.parametrize(("empty_files", "extra_files"), [(False, 0), (True, 24)])
 def test_capture_asks_one_process_and_never_one_per_file(tmp_path, monkeypatch, extra_files, empty_files):
     repo, rels = _fixture_repo(tmp_path)
     if not empty_files:

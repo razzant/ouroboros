@@ -21,7 +21,7 @@ import { statusMarkHtml } from './status_mark.js';
 import { createMainWaiting } from './main_waiting.js';
 import { createHostStart } from './host_starting_status.js';
 import { createModelWaitController, isModelWaitReference } from './model_wait.js';
-import { syncSettledItems } from './settled_card.js';
+import { closingLine, syncClosingSentence, syncSettledItems } from './settled_card.js';
 import { createChatReadingPosition } from './chat_reading_position.js';
 import { createRowSleep } from './chat_row_sleep.js';
 import { onRefit } from './text_fit.js';
@@ -792,8 +792,7 @@ export function createChatInstance({
     // or its sole head (owner 01.11, A); a held cause stays.
     function syncCardHeadline(record) {
         const title = cardTitle(record);
-        const own = record.finished && !record.isSubagent && !record.causeHeld && record.wakeSummary;
-        const line = own ? (own !== title ? own : '') : record.collapsedActivity;
+        const line = record.finished && !record.isSubagent && record.wakeSummary ? closingLine(record, title) : record.collapsedActivity;
         if (record.titleEl.textContent !== title) { record.titleEl.textContent = title; portals.relabel(record); }
         return renderCollapsedActivity(record, projectCollapsedActivity({ record, suggestedName: title, headline: line, body: line }));
     }
@@ -1104,8 +1103,8 @@ export function createChatInstance({
     // Refresh files/history and a Swarm root's receipt line; retain lifecycle.
     function noteTaskDetails(record, detail) {
         const files = syncSettledItems(record, detail, { write: withStableViewport });
-        const words = record && detail && 'wake_summary' in detail && record.wakeSummary !== detail.wake_summary;
-        if (words) { record.wakeSummary = detail.wake_summary; syncCardHeadline(record); }  // live and replay meet here: the sentence is also the finished card's line
+        const words = syncClosingSentence(record, detail);
+        if (words) syncCardHeadline(record);
         const origin = record && detail?.schedule_name && record.scheduleName !== detail.schedule_name;
         if (origin) record.scheduleName = detail.schedule_name;
         const history = syncHistoryRetentionItem(record, detail);
@@ -1490,6 +1489,7 @@ export function createChatInstance({
 
     function resetLiveCardRecord(record) {
         record.updates = 0;
+        record.wakeSummary = '';
         record.finished = false;
         record.items = [];
         record.lastHumanHeadline = '';

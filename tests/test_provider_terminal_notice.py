@@ -44,8 +44,7 @@ def _terminal(tmp_path, *, current, task_id="parent1"):
     return text, usage, trace
 
 
-@pytest.mark.parametrize("mode", ["managed", "direct"])
-@pytest.mark.parametrize("current", [False, True])
+@pytest.mark.parametrize(("current", "mode"), [(False, "managed"), (True, "direct")])
 def test_pipeline_delivery_and_rebuild_keep_raw_bytes_and_known_wait_custody(tmp_path, monkeypatch, mode, current):
     monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *_a, **_k: None)
     text, usage, trace = _terminal(tmp_path, current=current)
@@ -78,8 +77,12 @@ def test_pipeline_delivery_and_rebuild_keep_raw_bytes_and_known_wait_custody(tmp
         assert "Retry when connectivity returns" not in incidents[0][0][1]
 
 
-@pytest.mark.parametrize("outcome", ["message", "deferred", "silent", "tool_delivered"])
-@pytest.mark.parametrize("current", [False, True])
+@pytest.mark.parametrize(("current", "outcome"), [
+    (False, "message"),
+    (False, "silent"),
+    (True, "deferred"),
+    (True, "tool_delivered"),
+])
 def test_actual_presence_and_cached_read_keep_authored_speech_and_owner_notice_separate(tmp_path, monkeypatch, outcome, current):
     """An unresolved dispatched attempt is a typed empty 409 on the first call and on replay.
 

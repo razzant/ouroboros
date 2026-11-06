@@ -163,6 +163,7 @@
  * @typedef {Object} StorageFreeKept
  * @property {string} reason  // results_pending | in_use | busy | unreadable_record | restart | capture_unproven | unproven_excluded_inputs | retained_evidence | undeclared_environment | owner_keep | changed | other; and, only for what a pool leaves out, advanced_group (offered as a whole saved-work group)
  * @property {number} count
+ * @property {{cause: string, count: number}[]=} causes  // run: exact retirer codes, beside compatible reason
  * @property {number=} manual_count  // a pool's row only, when above zero: how many of `count` can be discarded by hand (view=manual). Never subtract the pool's global manual count from a row: each row says its own.
  */
 
@@ -202,6 +203,7 @@
  * @property {boolean} bytes_complete
  * @property {string|null} eligible_after  // the earliest the background may consider it, not a promised deletion; null = never
  * @property {string|null} reason  // view=excluded and kept outcomes
+ * @property {string=} cause  // exact retirer code; unknown codes remain visible
  * @property {string|null} outcome  // view=outcomes only: failed | stuck | kept | not_started | deleting | removed
  * @property {'ordinary'|'saved_group'|'manual_discard'|'none'} availability  // how it can go: the pool, only a saved group, by hand (listed in view=excluded with its reason AND in view=manual), or not now. On view=outcomes it describes the preview, not the result: read `outcome`
  * @property {StorageFreeManual=} manual  // view=manual only

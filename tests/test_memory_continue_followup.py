@@ -34,7 +34,6 @@ from tests.test_review_local_accounts import (
 from tests.test_review_view_integration import _capture, harness as _harness
 
 harness = _harness
-pytestmark = pytest.mark.serial  # Continue installs the supervisor's module globals.
 
 
 OWNER = "Finish the authorized chart export without deploying a service."

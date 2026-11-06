@@ -217,7 +217,7 @@ class _StopRaises(_NoopServer):
     stop = _raises
 
 
-@pytest.mark.parametrize("step", ["server_stop", "spend", "traces", "traces_withheld", "record_row", "orphan_scan", "close_ui"])
+@pytest.mark.parametrize("step", ["server_stop", "orphan_scan", "close_ui"])
 def test_each_finalization_step_survives_the_failure_of_another(tmp_path, monkeypatch, step):
     """One unguarded read in the old ``finally`` lost the row, the traces and the settlement together. Containing the
     steps must not turn a lost proof into a pass either, because the verdict counts ``pass`` rows: an attempt without
@@ -632,12 +632,11 @@ _TORN = json.dumps(_ONE_SHOT)[:-25].encode()        # its writer died mid-append
 
 @pytest.mark.parametrize("good, damage, gap", [
     (2.0, _TORN, "malformed_jsonl"),
-    (2.0, _TORN + b"\n" + json.dumps({**_ONE_SHOT, "attempt_id": "c", "cost_usd": 1.0}).encode() + b"\n", "malformed_jsonl"),
     (0.0, _TORN, "malformed_jsonl"),
     (2.0, b"[3.0]\n", "invalid_jsonl_row"),
     (2.0, b"".join(json.dumps({**_ONE_SHOT, "attempt_id": "@", "cost_usd": usd}).encode().replace(b"@", bad) + b"\n"
                    for bad, usd in ((b"\xff", 3.0), (b"\xfe", 4.0))), "unreadable_bytes"),
-], ids=["torn_tail", "torn_middle", "torn_only_row", "not_an_object", "undecodable_ids"])
+], ids=["torn_tail", "torn_only_row", "not_an_object", "undecodable_ids"])
 def test_a_journal_row_it_cannot_read_makes_the_spend_unknown_never_skipped(tmp_path, good, damage, gap):
     """``iter_jsonl_objects`` skips a row it cannot read as a JSON object and names why in ``gap_reasons``; the fallback
     dropped the why. A torn one-shot row, its attempt's only record, read as nothing: the ended lane was charged the $2

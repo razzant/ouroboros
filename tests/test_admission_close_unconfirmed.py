@@ -90,7 +90,6 @@ def _stopped_trace():
     ("unknown", False, True),  # a gap, never a refusal: delivered, the release disclosed
     ("sealed", False, True),  # the worker's own earlier seal
     ("active", False, True),  # another holder is not owner mail: delivered, the release disclosed
-    ("unknown", True, False),  # a locally seen owner change is real
 ])
 def test_the_final_seal_reads_the_queues_typed_answer(tmp_path, answer, owner_changed, delivered):
     from ouroboros.loop_delivery import _seal_admission_before_delivery

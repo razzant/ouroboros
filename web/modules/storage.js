@@ -1,4 +1,4 @@
-// Dashboard -> Storage: the disk's free space first, with the one ordinary action beside it, then the last
+// Dashboard -> Storage: the whole footprint and coloured bar first, then Cleanup and every folder. The last
 // finished count of everything Ouroboros owns (the data folder with the engine home, working copies, project
 // folders, Deliverables, the installed program), its date and the growth since the count before it.
 // `POST /api/storage/measure` starts one complete count in a server child; `GET /api/storage` is its passive
@@ -255,7 +255,7 @@ export function announceSentence(response, { readFailed = false, now = new Date(
         const free = freeOf(response);
         const state = trayState(free, tray?.dismissed);
         parts.push(...attemptSentences(tray));  // what happened to the owner's attempt, before the phase it stands beside
-        if (state === 'listing') parts.push(fmt('Checking what can go. Nothing is removed.'));
+        if (state === 'listing') parts.push(fmt('Checking for files to remove. Nothing is removed.'));
         else if (state === 'ready' && free.pool?.count > 0) parts.push(fmt('{items} ready to remove.', { items: plural(free.pool.count, '{n} item', '{count} items') }));
         else if (state === 'running') parts.push(fmt('Removing. You can leave this tab.'));
         else if (state === 'done') {
@@ -266,22 +266,23 @@ export function announceSentence(response, { readFailed = false, now = new Date(
     return parts.filter(Boolean).join(' ');
 }
 
-/** The first card: the disk's free space as last read, what else that reading says, and a read that failed. */
+/** The disk's free space: one reading, drawn under the total before a first count and under the folders after it. */
+function diskHtml(response, now) {
+    const volume = response?.volume;
+    if (!response) return '';
+    const disk = isSize(volume?.free_bytes) ? fmt('This disk: {free} free of {total} · read {when}', { free: formatBytes(volume.free_bytes), total: isSize(volume.total_bytes) ? formatBytes(volume.total_bytes) : fmt('unknown'), when: whenLabel(volume.observed_at, now) }) : fmt('Free space on this disk could not be read');
+    return `<p class="storage-meta storage-disk" data-i18n-fmt="storage.disk">${text(disk)}</p>`;
+}
+
+/** Whole footprint; the free space of the disk stands under it only while there is no count yet. */
 function summaryHtml(response, { readFailed, now }) {
-    const kicker = '<div class="storage-kicker">Free on this disk</div>';
-    if (!response) {
-        return `${kicker}<div class="storage-total is-unknown">${readFailed ? 'Could not be read' : 'Loading…'}</div>`;
-    }
-    const { count, volume } = response;
-    const known = isSize(volume?.free_bytes);
-    const facts = [
-        isSize(volume?.total_bytes) ? fmt('of {total}', { total: formatBytes(volume.total_bytes) }) : '',
-        known && whenLabel(volume?.observed_at, now) ? fmt('read {when}', { when: whenLabel(volume.observed_at, now) }) : '',
-        count ? fmt('Ouroboros uses {size}', { size: formatBytes(count.bytes) }) : fmt('Ouroboros not counted yet'),
-    ].filter(Boolean).join(' · ');
-    const lines = [`<div class="storage-meta" data-i18n-fmt="storage.free">${text(facts)}</div>`];
-    if (readFailed) lines.push('<p class="ui-status storage-status" data-tone="warn">Storage status could not be read. Showing the last answer.</p>');
-    return `${kicker}<div class="storage-total${known ? '' : ' is-unknown'}" data-i18n-fmt="storage.total">${text(known ? formatBytes(volume.free_bytes) : fmt('Could not be read'))}</div>${lines.join('')}`;
+    const count = response?.count;
+    const value = count ? formatBytes(count.bytes) : readFailed ? fmt('Could not be read') : !response ? fmt('Loading…') : fmt('Not measured yet');
+    const facts = count ? factsLine(count, now) + (count.unreadable > 0 ? ` · ${plural(count.unreadable, '{n} item could not be read', '{count} items could not be read')}` : '') : '';
+    return `<div class="storage-kicker">Space used by Ouroboros</div><div class="storage-total${count ? '' : ' is-unknown'}" data-i18n-fmt="storage.total">${text(value)}</div>
+        ${facts ? `<div class="storage-meta" data-i18n-fmt="storage.facts">${text(facts)}</div>` : ''}
+        ${count ? '' : diskHtml(response, now)}
+        ${readFailed ? '<p class="ui-status storage-status" data-tone="warn">Storage status could not be read. Showing the last answer.</p>' : ''}`;
 }
 
 /** The second card's head: how the saved count stands, or why there is none yet. */
@@ -289,14 +290,6 @@ function countStatusHtml(response, now) {
     if (!response) return '';
     const { count, counting, error } = response;
     const lines = [];
-    if (count) {
-        const unreadable = count.unreadable > 0 ? ` · ${plural(count.unreadable, '{n} item could not be read', '{count} items could not be read')}` : '';
-        lines.push(`<div class="storage-meta" data-i18n-fmt="storage.facts">${text(factsLine(count, now) + unreadable)}</div>`);
-    } else if (error && !error.stopped && !counting) {
-        lines.push(`<div class="storage-meta" data-i18n-fmt="storage.total">${text(fmt('Could not be counted'))}</div>`);
-    } else {
-        lines.push('<div class="storage-meta">Not counted yet</div>');
-    }
     if (counting) {
         lines.push(progressHtml(counting));
         if (!count) lines.push(firstCountHtml(counting));
@@ -309,9 +302,9 @@ function countStatusHtml(response, now) {
 }
 
 function sizeCells(row) {
-    const size = row.bytes === null ? '' : formatBytes(row.bytes);
+    const size = row.bytes === null ? fmt('unknown') : formatBytes(row.bytes);
     const growth = row.growth === null || row.growth === 0 ? '' : signed(row.growth);
-    return `<span class="storage-place-size${size ? '' : ' is-unknown'}" data-i18n-fmt="storage.size">${text(size)}</span>
+    return `<span class="storage-place-size${row.bytes === null ? ' is-unknown' : ''}" data-i18n-fmt="storage.size">${text(size)}</span>
         <span class="storage-place-delta" data-i18n-fmt="storage.growth">${text(growth)}</span>`;
 }
 
@@ -331,51 +324,30 @@ const removerHtml = (row) => (row.remover
     ? `<span class="storage-place-remover" data-i18n-fmt="storage.remover">${text(row.remover)}</span>` : '');
 
 function memberHtml(row) {
-    return `<li class="storage-place is-member" data-storage-place="${attr(row.id)}">
-            <span class="storage-place-label">${text(row.label)}</span>${sizeCells(row)}
-            ${whyLine(row)}
-            ${row.split ? `<span class="storage-place-split" data-i18n-fmt="storage.split">${text(row.split)}</span>` : ''}
-            ${removerHtml(row)}${partsHtml(row)}
-        </li>`;
+    return `<li class="storage-folder" data-storage-place="${attr(row.id)}"><details class="storage-folder-fold" data-key="place-${attr(row.id)}">
+        <summary data-key="place-${attr(row.id)}-open"><span class="storage-key" data-group="${attr(row.group)}"></span><span class="storage-place-label">${text(row.label)}</span>${sizeCells(row)}</summary>
+        <div class="storage-folder-open">${whyLine(row)}${row.split ? `<span class="storage-place-split">${text(row.split)}</span>` : ''}${removerHtml(row)}${partsHtml(row)}</div>
+    </details></li>`;
 }
 
-/** What one group holds, in a line, before anyone opens it. */
-const GROUP_SAID = {
-    records: 'The exact prompts and answers behind every decision. Kept.',
-    engine: 'Run history, accounts and engine files. Kept by the engine.',
-    work: 'Your projects, results, files, memory and archives. Kept.',
-    temporary: 'Copies and work folders of tasks. Cleared by the app’s own cleanup.',
-    other: 'The installed app, its state and logs.',
-};
-
-/** A group folds under its head and one line; opening it shows the places, sizes and removers in full. */
-function groupHtml(group) {
-    const single = group.members.length === 1 ? group.members[0] : null;
-    // A group of one place carries that place's words under its heading; a larger group lists its places.
-    const body = single
-        ? `<div class="storage-group-body">${whyLine(single)}
-            ${single.split ? `<span class="storage-place-split" data-i18n-fmt="storage.split">${text(single.split)}</span>` : ''}
-            ${removerHtml(single)}${partsHtml(single)}</div>`
-        : `<ul class="storage-group-places">${group.members.map(memberHtml).join('')}</ul>`;
-    return `<li class="storage-group" data-storage-group="${attr(group.id)}"${single ? ` data-storage-place="${attr(single.id)}"` : ''}>
-        <details class="storage-group-fold" data-key="group-${attr(group.id)}">
-            <summary data-key="group-${attr(group.id)}-open"><span class="storage-group-head"><span class="storage-key" data-group="${attr(group.id)}"></span>
-                <span class="storage-group-label">${text(group.label)}</span>${sizeCells(group)}</span>
-                <span class="storage-group-said">${text(fmt(GROUP_SAID[group.id] || ''))}</span></summary>
-            <div class="storage-group-open">${body}</div>
-        </details></li>`;
+function barHtml(response, now) {
+    const count = response?.count;
+    if (!count) return '';
+    const days = response.retention_days ?? 7;
+    const segments = barSegments(count, days).map((segment) => `<span class="storage-bar-seg" data-group="${attr(segment.group)}" data-share="${segment.share}"></span>`);
+    const groups = groupRows(placeRows(count, days, response.removers, now));
+    return `${segments.length ? `<div class="storage-bar" role="img" aria-label="Share of each group; sizes are listed below">${segments.join('')}</div>` : ''}
+        <ul class="storage-legend" aria-label="Groups of the bar">${groups.map((group) => `<li><span class="storage-key" data-group="${attr(group.id)}"></span><span data-i18n-fmt="storage.group">${text(group.label)}</span><b data-i18n-fmt="storage.size">${text(group.bytes === null ? fmt('unknown') : formatBytes(group.bytes))}</b></li>`).join('')}</ul>`;
 }
 
 function placesHtml(response, now, deletedShown = {}) {
     const count = response?.count;
     if (!count) return '';
-    const days = response.retention_days ?? 7;
-    // The bar pictures the last finished count only; its label is fixed chrome, the list carries the names
-    // and sizes (the language overlay translates an aria-label by its English text).
-    const segments = barSegments(count, days).map((segment) => `<span class="storage-bar-seg" data-group="${attr(segment.group)}" data-share="${segment.share}"></span>`);
-    const bar = segments.length ? `<div class="storage-bar" role="img" aria-label="Share of each group; sizes are listed below">${segments.join('')}</div>` : '';
+    const groups = groupRows(placeRows(count, response.retention_days ?? 7, response.removers, now));
+    const rows = groups.flatMap((group) => [...group.members].sort((a, b) => (b.bytes ?? -1) - (a.bytes ?? -1)));
+    const middle = Math.ceil(rows.length / 2);
     const deleted = deletedProjectsHtml(count, { placeLabel: (id) => fmt(words({ id }).label), shown: deletedShown, now });
-    return `${bar}<ul class="storage-groups">${groupRows(placeRows(count, days, response.removers, now)).map(groupHtml).join('')}</ul>${deleted}`;
+    return `<div class="storage-folders">${[rows.slice(0, middle), rows.slice(middle)].map((half) => `<ul>${half.map(memberHtml).join('')}</ul>`).join('')}</div>${deleted}${diskHtml(response, now)}`;
 }
 
 export const freeOf = (response) => response?.free || { state: 'idle', groups: [], run: null, error: null, done: 0, total: 0, pool: null };
@@ -386,11 +358,12 @@ export function renderStorage(response, { pending = false, readFailed = false, n
     const state = storageState(response);
     const counting = state === 'counting' || (pending && !response?.count);
     const busy = Boolean(pending || response?.counting);
-    const label = counting ? 'Measuring…' : response?.count ? 'Measure again' : state === 'failed' ? 'Try again' : 'Measure now';
+    const label = counting ? 'Measuring…' : response?.count ? 'Refresh sizes' : state === 'failed' ? 'Try again' : 'Measure sizes';
     return {
         state,
         summary: summaryHtml(response, { readFailed, now }),
-        auto: response ? fmt('Leftovers of finished one-off work clear by themselves after {days} days (Settings › Advanced › Cleanup), a project task’s scratch and copies too. Project folders stay.', { days: response.retention_days ?? 7 }) : '',
+        bar: barHtml(response, now),
+        auto: response ? fmt('Files of finished tasks are also removed by the app {days} days after the task ends. Project folders stay.', { days: response.retention_days ?? 7 }) : '',
         status: countStatusHtml(response, now),
         announce: announceSentence(response, { readFailed, now, tray }),
         places: placesHtml(response, now, deletedShown),
@@ -426,26 +399,25 @@ export function initStorage({ state, mount } = {}) {
     page.innerHTML = `
         <div class="costs-scroll">
             <div class="storage-root">
-                <section class="storage-summary ui-card" aria-label="Storage summary">
+                <section class="storage-summary ui-card" aria-label="Space used by Ouroboros">
                     <p class="storage-announce" data-storage-live role="status" aria-live="polite"></p>
                     <div class="storage-summary-head">
                         <div class="storage-summary-text" data-storage-summary></div>
                         <div class="storage-actions storage-summary-actions">
-                            <button type="button" class="btn btn-default btn-sm" data-free-preview data-key="data-free-preview" data-storage-door hidden>Free temporary space…</button>
-                        </div>
-                    </div>
-                    <p class="storage-auto" data-storage-auto data-i18n-fmt="storage.auto"></p>
-                    <div class="storage-tray" data-storage-tray></div>
-                </section>
-                <section class="storage-panel ui-card" aria-label="Where it is" data-storage-panel hidden>
-                    <div class="storage-tray-head">
-                        <h3 class="storage-card-title">Where it is</h3>
-                        <div class="storage-actions storage-panel-actions">
-                            <button type="button" class="btn btn-ghost btn-sm storage-refresh" data-storage-action="measure">Measure now</button>
+                            <button type="button" class="btn btn-ghost btn-sm storage-refresh" data-storage-action="measure">Measure sizes</button>
                             <button type="button" class="btn btn-default btn-sm" data-storage-action="stop" hidden>Stop</button>
                         </div>
                     </div>
-                    <div data-storage-status></div>
+                    <div data-storage-status></div><div data-storage-bar></div>
+                </section>
+                <section class="storage-panel storage-cleanup ui-card" aria-label="Cleanup">
+                    <h3 class="storage-card-title">Cleanup</h3>
+                    <div class="storage-tray" data-storage-tray></div>
+                    <div class="storage-actions storage-cleanup-door"><button type="button" class="btn btn-primary btn-sm" data-free-preview data-key="data-free-preview" data-storage-door hidden>Check for files to remove</button></div>
+                    <p class="storage-auto" data-storage-auto data-i18n-fmt="storage.auto"></p>
+                </section>
+                <section class="storage-panel ui-card" aria-label="Folders" data-storage-panel hidden>
+                    <div class="storage-tray-head"><h3 class="storage-card-title">Folders</h3></div>
                     <div data-storage-places></div>
                 </section>
             </div>
@@ -455,6 +427,7 @@ export function initStorage({ state, mount } = {}) {
     const regions = {
         summary: page.querySelector('[data-storage-summary]'),
         status: page.querySelector('[data-storage-status]'),
+        bar: page.querySelector('[data-storage-bar]'),
         places: page.querySelector('[data-storage-places]'),
         tray: page.querySelector('[data-storage-tray]'),
     };
@@ -519,10 +492,13 @@ export function initStorage({ state, mount } = {}) {
         if (live.textContent !== view.announce) live.textContent = view.announce;
         if (auto.textContent !== view.auto) auto.textContent = view.auto;
         patch(regions.status, view.status, painted);
+        patch(regions.bar, view.bar, painted);
         patch(regions.places, view.places, painted);
         patch(regions.tray, view.tray, painted);
-        panel.hidden = !response;
+        panel.hidden = !response?.count;
         door.hidden = !view.door;
+        door.parentElement.parentElement.classList.toggle('has-door', view.door);
+        door.textContent = freeOf(response).run ? fmt('Check again') : fmt('Check for files to remove');
         door.parentElement.hidden = !view.door;  // the empty row takes no room on a phone
         door.setAttribute('aria-disabled', pending ? 'true' : 'false');
         if (measureButton.textContent !== view.measure.label) measureButton.textContent = view.measure.label;

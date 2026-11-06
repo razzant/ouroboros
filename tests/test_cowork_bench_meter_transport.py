@@ -13,7 +13,6 @@ import pytest
 
 from devtools.benchmarks.cowork_bench import campaign
 
-pytestmark = pytest.mark.serial
 
 
 @contextmanager

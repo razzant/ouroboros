@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import ast
+import collections
 import contextlib
 import hashlib
+import json
+import math
 import os
 import pathlib
 import subprocess
@@ -23,6 +26,7 @@ TARGET_FUNCTION_LINES = 150
 MAX_FUNCTION_LINES = 300
 
 SIZE_RATCHET_MANIFEST_PATH = "ouroboros/size_ratchet_manifest.py"
+TEST_DURATIONS_PATH = "state/test-durations.json"  # under the data root
 
 
 class SizeRatchetRefUnavailable(ValueError):
@@ -36,8 +40,9 @@ class SizeRatchetRefUnavailable(ValueError):
     """
 
 
-# Module inventory covers tests/devtools. Only generated, vendored, or environment
-# directories remain outside the source ratchet.
+# Module inventory covers product, runtime and devtools code. Generated, vendored and
+# environment directories remain outside the source ratchet, and so do test modules:
+# one home per behaviour makes some of them long, and the diff pulse states their lines.
 _MODULE_SKIP_DIR_NAMES = frozenset(
     {
         ".git",
@@ -50,11 +55,12 @@ _MODULE_SKIP_DIR_NAMES = frozenset(
         "dist",
         "node_modules",
         "python-standalone",
+        "tests",
         "venv",
     }
 )
 # Function inventory intentionally preserves the pre-v7 runtime-health scope.
-_FUNCTION_SKIP_DIR_NAMES = _MODULE_SKIP_DIR_NAMES | frozenset({"devtools", "tests"})
+_FUNCTION_SKIP_DIR_NAMES = _MODULE_SKIP_DIR_NAMES | frozenset({"devtools"})
 FUNCTION_COUNT_EXCLUDED_FILES = frozenset({"app.py", "demo_app.py", "launcher.py"})
 
 
@@ -1123,6 +1129,128 @@ def _untracked_lines(path: pathlib.Path) -> int:
         return 0
 
 
+def _declared_tests(source: str, path: str) -> tuple[int, collections.Counter]:
+    """A test module's items and its ``serial`` marks by resource, read from the text.
+
+    A test function counts once per row of its literal ``parametrize`` lists; a computed
+    list counts as one row and a bare mark under ``""``: what the source declares, not a
+    collection.
+    """
+    nodes = list(ast.walk(ast.parse(source, filename=path)))
+    calls = {id(node.func): node for node in nodes if isinstance(node, ast.Call)}
+    items, marks = 0, collections.Counter()
+    for node in nodes:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
+            items += math.prod(len(call.args[1].elts) for call in node.decorator_list
+                               if isinstance(call, ast.Call) and getattr(call.func, "attr", "") == "parametrize"
+                               and len(call.args) > 1 and isinstance(call.args[1], (ast.List, ast.Tuple)))
+        elif isinstance(node, ast.Attribute) and node.attr == "serial" and getattr(node.value, "attr", "") == "mark":
+            args = calls[id(node)].args if id(node) in calls else ()
+            marks[str(args[0].value) if args and isinstance(args[0], ast.Constant) else ""] += 1
+    return items, marks
+
+
+def _recorded_test_seconds(paths: list[str]) -> tuple[float, int] | None:
+    """What the last complete battery recorded for these test modules, on the slowest of
+    its systems, and how many it did not record; ``None`` without a readable table."""
+    from ouroboros import config
+
+    try:
+        table = json.loads((pathlib.Path(config.DATA_DIR) / TEST_DURATIONS_PATH).read_text(encoding="utf-8"))
+        systems = list(table["platforms"].values())
+        recorded = [max(files.get(path, 0) for files in systems) for path in paths
+                    if any(path in files for files in systems)]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+    return sum(recorded) / 1000, len(paths) - len(recorded)
+
+
+def _blob_texts(root: pathlib.Path, specs: list[str]) -> dict[str, str | None]:
+    """The text of every git object spec (`rev:path`, `:path`), None where it is missing: one
+    `git cat-file --batch` for all of them (a spec holding whitespace is read with its own `git show`)."""
+    from ouroboros.reference_books import _git_bytes
+
+    texts: dict[str, str | None] = {}
+    batched = [spec for spec in specs if not any(char.isspace() for char in spec)]
+    for spec in specs:
+        if spec not in batched:
+            raw = _git_bytes(root, "--no-optional-locks", "show", spec)
+            texts[spec] = None if raw is None else raw.decode("utf-8", "replace")
+    if not batched:
+        return texts
+    try:
+        done = subprocess.run(["git", "--no-optional-locks", "cat-file", "--batch"], cwd=str(root), timeout=120,
+                              input="".join(spec + "\n" for spec in batched).encode("utf-8"), capture_output=True)
+        out = done.stdout if done.returncode == 0 else b""
+    except (OSError, subprocess.SubprocessError):
+        out = b""
+    position = 0
+    for spec in batched:  # `<oid> <type> <size>\n<bytes>\n`, or `<spec> missing\n`, in input order
+        end = out.find(b"\n", position)
+        if end < 0:
+            texts[spec] = None
+            continue
+        header = out[position:end].split()
+        position = end + 1
+        if len(header) == 3 and header[2].isdigit():
+            size = int(header[2])
+            texts[spec] = out[position:position + size].decode("utf-8", "replace")
+            position += size + 1
+        else:
+            texts[spec] = None
+    return texts
+
+
+def _suite_facts(
+    root: pathlib.Path, base: str, staged: bool, rows: Mapping[str, tuple[int, int]], new: Iterable[str],
+) -> tuple[str, list[str]]:
+    """The fact line's text on the suite and the sizes of ``rows``, the changed test sources
+    with their added and removed lines: test modules left the module band, not the pulse."""
+    from ouroboros.test_selection import is_test_module
+
+    tests = [path for path in rows if is_test_module(path)]
+    # One `git cat-file --batch` per side: a `git show` per changed test module cost a large PR's commit
+    # fifty seconds of pulse. A spec with whitespace would split in batch input; it is read alone.
+    at_base = _blob_texts(root, [f"{base}:{path}" for path in tests])
+    in_index = _blob_texts(root, [f":{path}" for path in tests]) if staged else {}
+
+    def current(path: str) -> str | None:
+        if staged:
+            return in_index.get(f":{path}")
+        try:
+            return (root / path).read_bytes().decode("utf-8", "replace")
+        except OSError:
+            return None
+
+    added = removed = unreadable = 0
+    marks: collections.Counter = collections.Counter()
+    sized: list[tuple[int, int, str, str]] = []
+    for path, (plus, minus) in rows.items():
+        text = current(path)
+        if text is not None:
+            lines = len(text.splitlines())
+            sized.append((minus - plus, -lines, path, f"{path} {lines} (+{plus}/-{minus})"))
+        if not is_test_module(path):
+            continue
+        try:
+            items, had = _declared_tests(at_base.get(f"{base}:{path}") or "", path)
+            count, has = _declared_tests(text or "", path)
+        except (SyntaxError, ValueError):  # mid-edit text: unread, never counted as none
+            unreadable += 1
+            continue
+        added, removed = added + max(count - items, 0), removed + max(items - count, 0)
+        marks.update(has - had)
+    items_fact = f"items +{added}/-{removed}" + (f" ({unreadable} unreadable)" if unreadable else "")
+    resources = ", ".join(sorted(name or "bare" for name in marks))
+    serial_fact = f"serial marks +{sum(marks.values())}" + (f" ({resources})" if marks else "")
+    created = sum(1 for path in new if path in rows and (is_test_module(path) or path.endswith(".test.js")))
+    recorded = _recorded_test_seconds([path for path in rows if is_test_module(path)])
+    seconds_fact = ("recorded test-seconds unknown" if recorded is None
+                    else f"{recorded[0]:.0f} recorded test-seconds of changed modules"
+                    + (f" ({recorded[1]} not recorded)" if recorded[1] else ""))
+    return f"tests: {items_fact}, new modules {created}, {serial_fact}, {seconds_fact}", [row[3] for row in sorted(sized)]
+
+
 def diff_pulse(
     repo_dir: pathlib.Path, paths: Iterable[str] | None = None, *, staged: bool = False, limit: int = 5,
 ) -> str:
@@ -1134,8 +1262,10 @@ def diff_pulse(
     without a cached official ref the line says so and measures from HEAD. ``staged``
     reads the index (what a commit or a review subject holds), otherwise the worktree and
     its untracked files. ``paths`` names the modules and books shown (an edit's files);
-    omitted, every changed path is. A fact for the mind, never a gate: one shape and one
-    question for any size, and the list bounds are presentation only, counting the rest.
+    omitted, every changed path is. A shown test source adds the suite's facts (declared
+    items, new test modules, ``serial`` marks, recorded test-seconds, its lines). A fact
+    for the mind, never a gate: one shape and one question for any size, and the list
+    bounds are presentation only, counting the rest.
     """
     from ouroboros.reference_books import _git_bytes, book_balance_note, contribution_base
 
@@ -1177,13 +1307,20 @@ def diff_pulse(
         more = f" (+{len(items) - limit} more)" if len(items) > limit else ""
         return ", ".join(items[:limit]) + more if items else "none"
 
+    suite = ""
+    rows = {path: changed[path] for path in shown if path in changed and path.endswith((".py", ".js"))
+            and "tests" in pathlib.PurePosixPath(path).parts[:-1]}
+    if rows:
+        facts, test_sizes = _suite_facts(root, merge_base or "HEAD", staged, rows, new)
+        suite = f"; {facts}, test module lines: {listed(test_sizes)}"
+
     added, deleted = sum(plus for plus, _ in changed.values()), sum(minus for _, minus in changed.values())
     since = (f"{upstream.removeprefix('refs/remotes/')} merge-base {merge_base[:12]}" if merge_base
              else "HEAD (contribution base unavailable)")
     sizes = [f"{module.path} {module.line_count} (+{plus}/-{minus})" for module, plus, minus in modules]
     fact = (f"Diff pulse since {since}: files {len(changed)}, lines +{added}/-{deleted} (net {added - deleted:+d}); "
             f"new files: {listed(new)}; module lines (target {TARGET_MODULE_LINES}, cap {MAX_MODULE_LINES}): "
-            f"{listed(sizes)}.")
+            f"{listed(sizes)}{suite}.")
     return "\n".join(part for part in (fact, book_balance_note(root, shown), DIFF_PULSE_QUESTION) if part)
 
 

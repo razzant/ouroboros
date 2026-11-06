@@ -5,7 +5,7 @@ import pytest
 
 from ouroboros.contracts.live_conversation import ContextUpdate, ToolOutputs
 from tests.test_grok_openai_protocol import providers as providers, deny_network as deny_network, make, drain
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 @pytest.mark.parametrize("sources", [("arguments",), ("arguments", "response"), ("response", "arguments")])

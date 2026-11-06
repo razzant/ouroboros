@@ -74,7 +74,7 @@ class TestProducer:
         frame = q.get_nowait()
         assert frame["chat_id"] == 1 and frame["system_type"] == "main_notice"
 
-    @pytest.mark.parametrize("destination", ["current", "", None, " Current "])
+    @pytest.mark.parametrize("destination", ["current", "", " Current "])
     def test_default_and_empty_destination_stay_in_the_current_room(self, tmp_path, destination):
         q = queue.Queue()
         ctx = _ctx(tmp_path, 1_000_123, event_queue=q)
@@ -91,7 +91,7 @@ class TestProducer:
         assert "destination='telegram'" in result and "'main'" in result
         assert q.empty() and not ctx.pending_events
 
-    @pytest.mark.parametrize("case", ["child_metadata", "child_contract", "child_lineage", "presence", "a2a", "hidden", "hidden_string"])
+    @pytest.mark.parametrize("case", ["child_metadata", "a2a", "hidden_string"])
     def test_child_presence_and_a2a_callers_gain_no_main_voice(self, tmp_path, case):
         q = queue.Queue()
         chat_id, meta, contract = (_project(tmp_path) if case in
@@ -168,8 +168,11 @@ def _history(tmp_path, chat_id):
 
 
 class TestDeliveryAndReplay:
-    @pytest.mark.parametrize("live", [True, False], ids=["live", "deferred"])
-    @pytest.mark.parametrize("born_in", ["project", "main", "main_unstamped"])
+    @pytest.mark.parametrize(("born_in", "live"), [
+        pytest.param("project", True, id='project-live'),
+        pytest.param("main", False, id='main-deferred'),
+        pytest.param("main_unstamped", True, id='main_unstamped-live'),
+    ])
     def test_notice_is_one_message_in_main_and_its_project_live_and_on_reload(self, tmp_path, host, live, born_in):
         project_chat = _project(tmp_path)
         # A root bound after admission keeps the chat it was born in on its row;

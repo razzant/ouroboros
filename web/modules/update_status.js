@@ -73,10 +73,25 @@ export function preflightDescription(preflight) {
     return letter?.description_current && letter.text ? String(letter.text) : '';
 }
 
+// The receipt's review keys this reader words; any other key is shown verbatim, never dropped.
+const REVIEW_KEYS = new Set(['observed', 'declared', 'state', 'relation']);
+
+/** One commit's review line: its observed verdict beside its record state and the subject relation its merge
+ *  request saw, bound to this commit; a receipt that predates them says they were not recorded. */
+function reviewLine(review) {
+    const seen = 'state' in review || 'relation' in review
+        ? `record ${review.state || 'not recorded'}, subject relation at the merge request ${review.relation || 'not recorded'}`
+        : 'record state and subject relation at the merge request not recorded';
+    const other = Object.entries(review).filter(([key]) => !REVIEW_KEYS.has(key))
+        .map(([key, value]) => `; ${key} ${typeof value === 'string' ? value : JSON.stringify(value)}`).join('');
+    return `Review observed ${review.observed || 'unknown'}, author declared ${review.declared || 'unknown'}; ${seen}${other}.`;
+}
+
 /**
  * The exact range's evidence as the confirmation's detail rows: every first-parent commit's receipt
- * (declarations stay labelled as such), the post-merge read and each observed run. Missing, unread and
- * non-green stay distinct; nothing here becomes a verdict.
+ * (declarations stay labelled as such; each observed verdict keeps its own record state and request-time
+ * relation), the post-merge read and each observed run. Missing, unread and non-green stay distinct;
+ * nothing here becomes a verdict.
  * @returns {Array<{label: string, value: string}>}
  */
 export function preflightEvidenceRows(preflight) {
@@ -99,8 +114,7 @@ export function preflightEvidenceRows(preflight) {
             const line = `${check.name} ${check.status} (${check.source || 'unknown source'})${check.detail ? `; ${check.detail}` : ''}`;
             lines.push(/[.!?]$/.test(line) ? line : `${line}.`);
         }
-        const review = commit.receipt.review || {};
-        lines.push(`Review observed ${review.observed || 'unknown'}, author declared ${review.declared || 'unknown'}.`);
+        lines.push(reviewLine(commit.receipt.review || {}));
         rows.push({ label, value: lines.join('\n') });
     }
     const github = facts.github || {};

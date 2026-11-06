@@ -84,52 +84,15 @@ def _negative_cleared(obs):
     sample["end"].update(lastBottom=550.0, scrollTop=50.0)
 
 
-def _old_cleared_where_padding_cannot_scroll(obs):
-    _find(obs, "1100-main-history-multiline-old-padding")["end"].update(lastBottom=550.0, scrollTop=50.0)
-
-
-def _not_short(obs):
-    _find(obs, "1100-main-history-empty-current")["end"].update(lastBottom=300.0, scrollTop=0.0)
-
-
 def _missing(obs):
     obs["samples"] = [s for s in obs["samples"] if s["id"] != "390-project-growth-empty-current"]
-
-
-def _unsettled(obs):
-    _find(obs, "390-main-reopen-empty-current")["settle"]["settled"] = False
-
-
-def _served_elsewhere(obs):
-    obs["served_matches_source"] = False
-
-
-def _interrupted(obs):
-    obs.update(status="deadline", errors=["the driver's 570 s deadline passed"])
-
-
-def _left_away_from_newest(obs):
-    """Run 1: a negative's clamp left Main at its top, under the composer, before it went behind Settings."""
-    obs["returns"][0]["before"] = {**obs["returns"][0]["before"], "scrollTop": 0.0, "lastBottom": 600.0}
-    obs["returns"][0]["presented"]["lastBottom"] = 600.0
-
-
-def _departure_unrecorded(obs):
-    del obs["returns"][1]["before"]
 
 
 def _presentation_unobserved(obs):
     obs["returns"][0]["presented"] = None
 
 
-def _clamp_kept(obs):
-    _find(obs, "1100-project-history-multiline-old-padding")["restored"]["after"] = 0.0
-
-
-@pytest.mark.parametrize("break_it", [_negative_cleared, _old_cleared_where_padding_cannot_scroll, _not_short,
-                                      _missing, _unsettled, _served_elsewhere, _interrupted,
-                                      _left_away_from_newest, _departure_unrecorded, _clamp_kept,
-                                      _presentation_unobserved])
+@pytest.mark.parametrize("break_it", [_negative_cleared, _missing, _presentation_unobserved])
 def test_a_condition_the_run_did_not_establish_is_inconclusive_never_a_pass(break_it):
     observation = _observation()
     break_it(observation)

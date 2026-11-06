@@ -9,12 +9,216 @@ $0.00 and finality is never fabricated.
 
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from tests._usage_store_testing import root as root
 from ouroboros.cost_projection import (
     cost_display,
     cost_projection,
     honest_accounted_amount,
     with_cost_aliases,
 )
+
+
+@pytest.mark.parametrize("status", ["running", "cancel_requested", "completed"])
+def test_current_cost_refreshes_live_totals_without_rewriting_terminal_receipts(root, status):
+    from ouroboros import usage_accounting as ua
+    from ouroboros.cost_projection import current_cost
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.join_ledger import _child_result_sha256
+
+    write_task_result(root, "parent", "running", root_task_id="parent")
+    ua.record_subscription_session(session_id="run-cost", route="test", spend_usd=3.5,
+        task_id="child", root_task_id="parent", drive_root=root)
+    data = {"task_id": "child", "status": status, "result": "answer", "cost_usd": 0.1,
+            "accounted_upper_bound_usd": 0.1, "cost_final": True}
+    projected = current_cost(data, root)
+    if status == "completed":
+        assert projected == data
+    else:
+        assert projected["accounted_upper_bound_usd"] == 3.5 and projected["cost_final"] is False
+        assert "cost_usd" not in projected
+    assert data["cost_usd"] == 0.1 and data["cost_final"] is True
+    assert _child_result_sha256(projected) == _child_result_sha256(data)
+
+
+@pytest.mark.parametrize("accounting", ["priced", "empty", "unavailable"])
+def test_live_cost_readers_refresh_the_effective_task_and_batch_once(root, monkeypatch, accounting):
+    from ouroboros import task_status, usage_accounting as ua
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools import control_task_results as results, join_ledger
+
+    write_task_result(root, "parent", "running", root_task_id="parent")
+    amount = {"priced": 3.5, "free": 0.0}.get(accounting)
+    rows = [{"task_id": tid, "parent_task_id": "parent", "root_task_id": "parent",
+             "status": "running", "result": "answer", "accounted_upper_bound_usd": 0.1, "cost_final": True}
+            for tid in ("successor", "second", "third")]
+    for row in rows if accounting != "empty" else []:
+        ua.record_subscription_session(session_id="run-" + row["task_id"], route="test", spend_usd=amount,
+            task_id=row["task_id"], root_task_id="parent", drive_root=root)
+    ctx = SimpleNamespace(drive_root=root / "mirror", budget_drive_root=root, task_id="parent",
+                          task_metadata={"root_task_id": "parent"})
+    def effective(drive, tid):
+        assert drive == root and tid == "predecessor"
+        return dict(rows[0])
+    monkeypatch.setattr(results, "load_effective_task_result", effective)
+    monkeypatch.setattr(join_ledger, "load_effective_task_result", effective)
+    monkeypatch.setattr(task_status, "find_child_tasks", lambda *_a, **_k: rows)
+    reads, real_read = [], ua.usage_breakdown
+    def counted(drive, **kwargs):
+        reads.append((drive, kwargs))
+        if accounting == "unavailable":
+            raise OSError("ledger unreadable")
+        return real_read(drive, **kwargs)
+    monkeypatch.setattr(ua, "usage_breakdown", counted)
+
+    authority = json.loads(results._get_task_result(ctx, "predecessor", include_authority=True))["authority"]
+    assert authority["accounted_upper_bound_usd"] == 0.1 and authority["cost_final"] is True
+    assert reads == []
+    summary = json.loads(results._get_task_result(ctx, "predecessor", view="summary"))["cost"]
+    assert summary["accounted_upper_bound_usd"] == amount and summary["cost_final"] is False
+    assert reads[-1][1]["task_id"] == "successor"
+    peek = join_ledger._peek_task(ctx, "predecessor")
+    assert (f"cost=${amount:.2f} (upper bound, not final)" if amount is not None else "cost=unknown") in peek
+    single = results._unsettled_wait_body(root, "successor", rows[0], "")
+    compact = json.loads(single.split("[CHILD_PROJECTION]\n", 1)[1].split("\n[/CHILD_PROJECTION]", 1)[0])
+    assert compact["accounted_upper_bound_usd"] == amount and compact["cost_final"] is False
+
+    reads.clear()
+    batch = results._batch_wait_payload(ctx, {"tasks": {row["task_id"]: row for row in rows}},
+                                       [row["task_id"] for row in rows], {}, [])
+    assert len(reads) == 1 and reads[0][1]["root_task_id"] == "parent"
+    assert all(row["accounted_upper_bound_usd"] == amount and row["cost_final"] is False
+               for row in batch["tasks"].values())
+    reads.clear()
+    roster = results._children_roster_projection(ctx, root)["children_roster"]
+    assert len(reads) == 1 and len(roster) == 3
+    assert all(row["accounted_upper_bound_usd"] == amount for row in roster)
+    assert all(row["accounted_upper_bound_usd"] == 0.1 and row["cost_final"] for row in rows)
+
+
+def test_terminal_batches_keep_the_receipt_without_reading_current_accounting(root, monkeypatch):
+    from ouroboros import usage_accounting as ua
+    from ouroboros.cost_projection import current_costs
+
+    monkeypatch.setattr(ua, "usage_breakdown", lambda *_a, **_k: pytest.fail("terminal batch read accounting"))
+    rows = [{"task_id": "done", "status": "completed", "accounted_upper_bound_usd": 0.1, "cost_final": True}]
+    assert current_costs(rows, root) == rows
+
+
+@pytest.mark.parametrize(("lineage_carrier", "same_tree"), [("top_level", True), ("metadata", False)])
+def test_wait_cost_batch_reads_each_actual_root_once(root, monkeypatch, same_tree, lineage_carrier):
+    from ouroboros import usage_accounting as ua
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools import control_task_results as results
+
+    observer = "observer"
+    roots = [observer] if same_tree else ["root-a", "root-b"]
+    for tid in [observer, *roots]:
+        write_task_result(root, tid, "running", root_task_id=tid)
+    expected = {}
+    for index, owner in enumerate(roots):
+        for suffix in ("1", "2"):
+            tid = owner + "-child-" + suffix
+            lineage = {"root_task_id": owner} if lineage_carrier == "top_level" else {"metadata": {"root_task_id": owner}}
+            write_task_result(root, tid, "scheduled", parent_task_id=owner, **lineage)
+            expected[tid] = index + 3.5
+            ua.record_subscription_session("run-" + tid, drive_root=root, task_id=tid,
+                                           root_task_id=owner, route="test", spend_usd=expected[tid])
+    reads, real_read = [], ua.usage_breakdown
+
+    def counted(drive, **kwargs):
+        reads.append(kwargs)
+        return real_read(drive, **kwargs)
+
+    monkeypatch.setattr(ua, "usage_breakdown", counted)
+    ctx = SimpleNamespace(drive_root=root, budget_drive_root=root, task_id=observer,
+                          task_metadata={"root_task_id": observer})
+    waited = json.loads(results._wait_for_tasks(ctx, list(expected), timeout_sec=0))["tasks"]
+    assert {tid: row["accounted_upper_bound_usd"] for tid, row in waited.items()} == expected
+    assert all(row["cost_final"] is False for row in waited.values())
+    assert sorted(row["root_task_id"] for row in reads) == sorted(roots)
+
+
+def test_batch_unavailable_accounting_warns_once_with_the_original_cause(root, monkeypatch, caplog):
+    import logging
+    from ouroboros import usage_accounting as ua
+    from ouroboros.cost_projection import current_costs
+
+    reads = []
+
+    def unavailable(*args, **kwargs):
+        reads.append(kwargs)
+        raise OSError("ledger unreadable")
+
+    monkeypatch.setattr(ua, "usage_breakdown", unavailable)
+    rows = [{"task_id": f"child-{i}", "root_task_id": "parent", "status": "running",
+             "accounted_upper_bound_usd": 0.1, "cost_final": True} for i in range(5)]
+    with caplog.at_level(logging.WARNING):
+        result = current_costs(rows, root)
+    assert len(reads) == 1
+    assert all(row["accounted_upper_bound_usd"] is None and row["cost_final"] is False
+               and row["cost_accounting_status"] == "unavailable" for row in result)
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1 and warnings[0].levelno == logging.WARNING
+    assert "ledger unreadable" in warnings[0].getMessage()
+    assert "KeyError" not in caplog.text
+
+
+def test_live_authority_pages_survive_new_usage_rows(root):
+    from ouroboros import usage_accounting as ua
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.control_task_results import _get_task_result
+
+    write_task_result(root, "parent", "running", root_task_id="parent")
+    write_task_result(root, "child", "scheduled", parent_task_id="parent", root_task_id="parent",
+                      task_contract={"objective": "a stable contract"})
+    ctx = SimpleNamespace(drive_root=root, budget_drive_root=root, task_id="parent",
+                          task_metadata={"root_task_id": "parent"})
+    args = {"authority_fields": ["task_contract"], "source_only": True}
+    metadata = json.loads(_get_task_result(ctx, "child", **args))
+    args["authority_projection_sha256"] = metadata["authority_projection_sha256"]
+    first = json.loads(_get_task_result(ctx, "child", **args, source_start_char=0, source_end_char=10))
+    ua.record_subscription_session("new-run", drive_root=root, task_id="child", root_task_id="parent",
+                                   route="test", spend_usd=3.5)
+    last = json.loads(_get_task_result(ctx, "child", **args, source_start_char=10,
+                                     source_end_char=metadata["authority_source"]["complete_chars"]))
+    assert last.get("reason") != "authority_identity_mismatch", last
+    assert first["authority_projection_sha256"] == last["authority_projection_sha256"]
+    text = first["authority_source"]["text"] + last["authority_source"]["text"]
+    assert json.loads(text) == {"task_contract": {"objective": "a stable contract"}}
+    assert json.loads(_get_task_result(ctx, "child", view="summary"))["cost"]["accounted_upper_bound_usd"] == 3.5
+
+
+@pytest.mark.parametrize("selector", [
+    {"call_id": "missing", "manifest_sha256": "a" * 64}, {"include_completion_source": True},
+    {"view": "full"},
+])
+def test_source_and_non_cost_views_do_not_read_live_accounting(root, monkeypatch, selector):
+    from ouroboros import usage_accounting as ua
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.control_task_results import _get_task_result
+
+    write_task_result(root, "parent", "running", root_task_id="parent")
+    write_task_result(root, "child", "scheduled", parent_task_id="parent", root_task_id="parent")
+    ctx = SimpleNamespace(drive_root=root, budget_drive_root=root, task_id="parent",
+                          task_metadata={"root_task_id": "parent"})
+    reads, real_read = [], ua.usage_breakdown
+
+    def counted(*args, **kwargs):
+        reads.append(kwargs)
+        return real_read(*args, **kwargs)
+
+    monkeypatch.setattr(ua, "usage_breakdown", counted)
+    _get_task_result(ctx, "child", **selector)
+    assert reads == []
+    for view in ("summary", "evidence"):
+        reads.clear()
+        _get_task_result(ctx, "child", view=view)
+        assert len(reads) == 1
 
 
 class TestAliases:

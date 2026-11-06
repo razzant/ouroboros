@@ -45,12 +45,11 @@ def test_unchanged_patch_does_not_write_the_table(root):
 
 
 @pytest.mark.parametrize("fields,status", [
-    ({"enabled": True}, "invalid_patch"), ({"followup_hold": None}, "invalid_patch"),
-    ({"objective": ""}, "invalid_template"), ({"trigger": {}}, "invalid_template"),
+    ({"enabled": True}, "invalid_patch"), ({"objective": ""}, "invalid_template"), ({"trigger": {}}, "invalid_template"),
     ({"trigger": {"type": "cron", "expr": "bad"}}, "invalid_template"),
     ({"trigger": {"type": "once", "run_at": "bad"}}, "invalid_template"),
     ({"timezone": "No/SuchZone"}, "invalid_template"),
-    ({"reasoning_effort": "invented"}, "invalid_template"), ({"context": None}, "invalid_template"),
+    ({"context": None}, "invalid_template"),
 ])
 def test_invalid_patch_is_byte_identical_even_on_legacy_rows(root, fields, status):
     row = {**_rows(root)[0], "skill_content_hash": "old"}

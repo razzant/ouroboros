@@ -9,7 +9,7 @@ from dataclasses import replace
 
 import pytest
 
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 from tests.test_grok_openai_protocol import providers as providers, deny_network as deny_network, Wire
 from tests.test_gemini_live_boundaries import gemini as gemini, Wire as GeminiWire
 

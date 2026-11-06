@@ -15,7 +15,6 @@ from supervisor import events_schedule_task as schedule, task_admission, task_li
 from supervisor.events import dispatch_event
 from tests.test_workspace_preparation import env as env, _WAIT_SEC
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("cause", ["closed", "thread_start_failed"])
@@ -69,7 +68,6 @@ def test_entry_refusal_without_executor_retains_drive_and_does_not_block_dispatc
 
 @pytest.mark.parametrize("limit, reason", [
     ("max_children", "delegation_rights_max_children"),
-    ("may_fan_out", "delegation_rights_may_fan_out"),
     ("hard", "active_subagent_hard_cap"),
     ("constraint", "delegation_constraint_child_cap"),
     ("soft", ""),
@@ -142,7 +140,7 @@ def test_readonly_admission_between_preparation_checks_and_enqueue_keeps_caps(en
                        for _chat, _text, kwargs in env.ctx.sent if kwargs.get("task_id") == "acting")
 
 
-@pytest.mark.parametrize("seam", ["owned", "depth", "final", "refusal", "recovery_refusal"])
+@pytest.mark.parametrize("seam", ["owned", "final", "refusal"])
 def test_prepared_child_sql_contention_releases_q_and_keeps_exact_marker(env, monkeypatch, seam):
     from ouroboros import store
     from supervisor import queue

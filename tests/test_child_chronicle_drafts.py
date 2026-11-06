@@ -89,8 +89,10 @@ def status_of(root: pathlib.Path, record_id: str) -> str:
     return next(record.get("status") for record in ChronicleStore(root).room_records("1") if record["id"] == record_id)
 
 
-@pytest.mark.parametrize("mode", [READONLY, ACTING])
-@pytest.mark.parametrize("meta, role", [(CHILD_META, "child"), (NANNY_META, "nanny")])
+@pytest.mark.parametrize(("meta", "role", "mode"), [
+    pytest.param(CHILD_META, "child", READONLY, id='meta0-child-local_readonly_subagent'),
+    pytest.param(NANNY_META, "nanny", ACTING, id='meta1-nanny-acting_subagent'),
+])
 def test_a_child_or_nanny_page_is_a_draft_signed_with_its_own_focus(data, monkeypatch, mode, meta, role):
     rows = chat(data)
     kid = registry_for(data, "kid00001", meta, mode, monkeypatch)

@@ -9,7 +9,7 @@ from tests._skills_page_harness import (
 from tests.test_skill_install_checks import registry_release as registry_release
 from tests.ui_console_errors import PageErrors
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 MATRIX = [(engine, width, theme) for engine in ("chromium", "webkit")
           for width in (1280, 390) for theme in ("light", "dark")]
 

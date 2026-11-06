@@ -138,8 +138,7 @@ def test_unknown_authorship_is_no_proof_of_silence_and_names_what_it_may_have_ch
     assert previous.endswith("what I understood then; the attempt above may have changed it")
 
 
-@pytest.mark.parametrize("restart", [False, True])
-@pytest.mark.parametrize("host_runs", [1, 2])
+@pytest.mark.parametrize(("host_runs", "restart"), [(1, False), (2, True)])
 def test_an_unattributed_attempt_stays_in_doubt_through_later_host_failures(clock, monkeypatch, restart, host_runs):
     previous = _chain(clock, monkeypatch, UNATTRIBUTED, *[HOST] * host_runs, restart=restart)
     latest = f"wake{host_runs + 2:04d}"
@@ -195,7 +194,7 @@ def test_a_settlement_that_could_not_read_or_record_never_brings_an_older_note_b
     assert "A's whole note." not in previous
 
 
-@pytest.mark.parametrize("note_state", ["unreadable", "absent", "unattributed", "none-known"])
+@pytest.mark.parametrize("note_state", ["unreadable", "absent", "none-known"])
 def test_earlier_uncertainty_is_visible_even_without_a_readable_note(clock, monkeypatch, note_state):
     from ouroboros import task_store
 

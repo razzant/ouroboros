@@ -24,12 +24,13 @@ from tests.test_retry_pause_identity import _assign, _fresh_plan, _loop_once
 from tests.test_retry_pause_identity import reaper as reaper  # pytest fixture export
 from tests.test_swarm_host_admission import host as host  # pytest fixture export
 
-pytestmark = pytest.mark.serial
 
 
-@pytest.mark.parametrize("transition", ["saved_restart", "owner_wait"])
-@pytest.mark.parametrize("read_fails", [False, True, "persistent"],
-                         ids=["readable-control", "temporary-read-failure", "persistent-read-failure"])
+@pytest.mark.parametrize(("read_fails", "transition"), [
+    pytest.param(False, "saved_restart", id='readable-control-saved_restart'),
+    pytest.param(True, "owner_wait", id='temporary-read-failure-owner_wait'),
+    pytest.param("persistent", "saved_restart", id='persistent-read-failure-saved_restart'),
+])
 def test_consumed_retry_selection_survives_projection_read_failure(
         host, monkeypatch, clock, reaper, transition, read_fails):
     running = _running_actor(host, monkeypatch, clock, reaper, "retry")

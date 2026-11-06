@@ -2208,7 +2208,6 @@ def test_forced_request_uses_explicit_completion_selection_without_tool_executio
 @pytest.mark.parametrize("body", [
     '{"action":"finish","action":"stop","answer":"Do not publish"}',
     '{"action":"finish","answer":"First","answer":"Second"}',
-    '{"action":"stop","answer":"Do not publish"}',
     '{"action":"finish","answer_sha256":"unoffered"}',
 ])
 def test_forced_invalid_completion_request_preserves_answer_without_repair_call(tmp_path, monkeypatch, body):

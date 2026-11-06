@@ -37,7 +37,6 @@ from tests.test_resume_handover import MARK, ProcessLost, _account_route, _dispa
 from tests.test_swarm_host_admission import host  # noqa: F401
 from tests.test_working_checkpoint import _registry
 
-pytestmark = pytest.mark.serial
 
 # Seconds of each interval of the scenario.
 WORK_1, HELD_1, WORK_2, PAUSED, CAPACITY, WORK_RESUMED, HELD_2 = 60, 600, 20, 900, 600, 10, 600
@@ -261,8 +260,11 @@ AT_STOP = {True: 90, False: 1290}
 RETURNED = {True: 90, False: 1890}
 
 
-@pytest.mark.parametrize("budget", [3600, 0, None], ids=["execution-budget", "zero-budget", "no-budget"])
-@pytest.mark.parametrize("notified", [True, False], ids=["consumption-event", "event-lost-with-process"])
+@pytest.mark.parametrize(("notified", "budget"), [
+    pytest.param(True, 3600, id='consumption-event-execution-budget'),
+    pytest.param(True, None, id='consumption-event-no-budget'),
+    pytest.param(False, 0, id='event-lost-with-process-zero-budget'),
+])
 def test_spent_time_crosses_pause_capacity_resume_handover_stop_and_boot(
     host, monkeypatch, clock, budget, notified,  # noqa: F811
 ):

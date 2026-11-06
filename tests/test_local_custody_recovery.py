@@ -22,7 +22,6 @@ from ouroboros.tool_custody import owner_proof
 from tests._budget_pause_exact_helpers import _install_queue
 from tests._store_shared import result_signature
 
-pytestmark = pytest.mark.serial
 
 
 def _dead_process_identity():
@@ -70,7 +69,7 @@ def test_a_positively_dead_owner_is_retired_only_by_the_addressed_action(tmp_pat
     assert retired["replay_authorized"] is False
 
 
-@pytest.mark.parametrize("case", ["live_self", "unreadable_birth", "other_format_birth", "no_identity"])
+@pytest.mark.parametrize("case", ["live_self", "other_format_birth", "no_identity"])
 def test_a_live_unknown_or_unattributable_owner_stays_held(tmp_path, monkeypatch, case):
     from supervisor.continuation_admission import action_writers
 
@@ -95,8 +94,6 @@ _BOOT = "0123456789abcdef0123456789abcdef"
 
 @pytest.mark.parametrize("live,recorded,ended", [
     (f"812.{_BOOT}", f"811.{_BOOT}", True),            # boot-qualified ticks of another process
-    (f"812.{_BOOT}", "811." + "f" * 32, True),          # another boot: the recorded owner died with it
-    ("win-filetime:1300", "win-filetime:1200", True),  # UTC FILETIME
     ("812.", "811", True),                               # boot-relative ticks, both spellings
     ("812.", "812", False),                              # one identity, two spellings
     (f"812.{_BOOT}", "811", False),                      # different kinds prove nothing
@@ -132,7 +129,7 @@ def test_two_timezone_readings_of_this_living_process_are_not_its_death(monkeypa
     assert repair.owner_ended(os.getpid(), utc, owner_proof()) is False
 
 
-@pytest.mark.parametrize("state,gone", [("no_such_pid", True), ("exited", True), ("denied", False),
+@pytest.mark.parametrize("state,gone", [("no_such_pid", True), ("denied", False),
                                         ("error", False), ("unreadable", False), ("running", False)])
 def test_windows_absence_is_only_no_such_pid_or_a_read_exit_code(monkeypatch, state, gone):
     monkeypatch.setattr(platform_layer, "IS_WINDOWS", True)

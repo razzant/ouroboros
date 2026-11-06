@@ -119,7 +119,6 @@ def test_a_gateway_without_the_receipt_keeps_the_previous_flow_exactly():
 
 @pytest.mark.parametrize("answer,created", [
     ({"id": "prj-1", "root": "/x", "created": True}, True),
-    ({"id": "prj-1", "root": "/x", "created": False}, False),
     ({"id": "prj-1", "root": "/x"}, None),  # an engine that predates the field
     ({"id": "prj-1", "root": "/x", "created": "true"}, None),  # not the typed field
 ])

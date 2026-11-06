@@ -6,7 +6,7 @@ import pytest
 
 from ouroboros.contracts.live_conversation import LiveOptions, ToolOutputs
 from ouroboros.contracts.realtime import RealtimeSetupError
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 @pytest.mark.parametrize('large,failed,reader_loaded,annotated', [

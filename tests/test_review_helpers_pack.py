@@ -376,28 +376,29 @@ class TestGitWiring:
         assert [item["item"] for item in coupling_items] == ["architecture_fit"]
         assert coupling_items[0]["severity"] == "advisory" and coupling_items[0]["tag"] == "coupling"
 
-    @pytest.mark.parametrize("crit_item", sorted(_get_module("ouroboros.tools.scope_review_contract").SCOPE_REQUIRED_ITEMS))
-    def test_projection_never_blocks_on_its_own(self, crit_item):
+    def test_projection_never_blocks_on_its_own(self, subtests):
         """NW-2 guardrail (projection seam): the wave's verdict is reduced ONCE
         (``review_ledger.reduce_verdict``) and projected here; with no gate
         verdict (``review_err`` None) the projection must NOT flip to blocked
         for ANY coupling item it merely carries — a 58a52c4-class per-item
         always-block hardcode would fail here."""
-        import types
-        from ouroboros.review_ledger import CouplingOutcome
-        pr_mod = _get_module("ouroboros.tools.parallel_review")
+        for crit_item in sorted(_get_module("ouroboros.tools.scope_review_contract").SCOPE_REQUIRED_ITEMS):
+            with subtests.test(crit_item=crit_item):
+                import types
+                from ouroboros.review_ledger import CouplingOutcome
+                pr_mod = _get_module("ouroboros.tools.parallel_review")
 
-        coupling = CouplingOutcome(
-            verdict="FAIL", blocked=False, status="responded",
-            critical_findings=[{"verdict": "FAIL", "item": crit_item,
-                                "severity": "critical", "reason": "advisory-only note", "model": "test"}],
-        )
-        ctx = types.SimpleNamespace(
-            repo_dir=None, _last_review_critical_findings=[], _review_advisory=[])
-        blocked, combined_msg, _reason, _findings, coupling_items = pr_mod.aggregate_review_verdict(
-            None, coupling, "", [], ctx, "test commit", 0.0, ctx.repo_dir)
-        assert not blocked and combined_msg is None
-        assert coupling_items[0]["item"] == crit_item
+                coupling = CouplingOutcome(
+                    verdict="FAIL", blocked=False, status="responded",
+                    critical_findings=[{"verdict": "FAIL", "item": crit_item,
+                                        "severity": "critical", "reason": "advisory-only note", "model": "test"}],
+                )
+                ctx = types.SimpleNamespace(
+                    repo_dir=None, _last_review_critical_findings=[], _review_advisory=[])
+                blocked, combined_msg, _reason, _findings, coupling_items = pr_mod.aggregate_review_verdict(
+                    None, coupling, "", [], ctx, "test commit", 0.0, ctx.repo_dir)
+                assert not blocked and combined_msg is None
+                assert coupling_items[0]["item"] == crit_item
 
     def test_assembly_crash_resets_stale_findings(self):
         """If the wave's assembly crashes, stale ctx findings from a prior attempt

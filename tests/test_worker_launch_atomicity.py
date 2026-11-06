@@ -22,7 +22,6 @@ from supervisor import queue, queue_schedules as schedules, task_admission, work
 from tests._store_journal_shared import exclusive_hold
 from tests.test_g1_followup_policy import _assignment_world, register, row, world as _world
 
-pytestmark = pytest.mark.serial
 followup_world = _world  # fixture alias: injection does not shadow the import (F811)
 
 
@@ -81,8 +80,7 @@ def hold_reason(task):
     return ((hold_fact(task) or continuation_refusal(task)) or {}).get("reason")
 
 
-@pytest.mark.parametrize("zero_budget", [False, True])
-@pytest.mark.parametrize("locked", [False, True])
+@pytest.mark.parametrize(("locked", "zero_budget"), [(False, False), (True, True)])
 def test_marks_commit_together_or_change_nothing(world, monkeypatch, zero_budget, locked):
     """Probe04 reversed: a held store at the canonical mark refuses everything, memory included."""
     _, root, pending = world

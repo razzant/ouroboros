@@ -16,7 +16,7 @@ from PIL import Image, ImageChops
 
 from tests._skills_page_harness import URL, fixture, open_skills, skills_browser as _skills_browser
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 skills_browser = _skills_browser
 
 CONFIRMED_SOURCES = fixture("skill_sources.json")

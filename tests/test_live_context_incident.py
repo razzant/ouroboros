@@ -11,7 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_live_conversation import VoiceWire, host_world as host_world, packages as packages
+from tests._live_world import host_world as host_world
+from tests.test_live_conversation import VoiceWire, packages as packages
 
 
 @pytest.mark.parametrize('owner_mode,minimum,maximum,pixels', [('max', 74000, 77000, 5), ('nano', 71000, 72000, 2)])

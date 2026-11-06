@@ -201,9 +201,11 @@ def policy_turn(tmp_path, monkeypatch):
     assert not h.executions.live()
 
 
-@pytest.mark.parametrize("mode", ["auto", "required", "off"])
-@pytest.mark.parametrize("contract", [False, True])
-@pytest.mark.parametrize("material", ["none", "review_request", "registered_output"])
+@pytest.mark.parametrize(("material", "contract", "mode"), [
+    ("none", False, "auto"),
+    ("review_request", True, "required"),
+    ("registered_output", False, "off"),
+])
 def test_presence_parks_only_at_a_review_its_author_left(policy_turn, monkeypatch, mode, contract, material):
     h = policy_turn
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", mode)

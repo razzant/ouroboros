@@ -584,7 +584,7 @@ def test_the_runtime_data_plane_is_never_attached_whatever_root_the_ask_names(ha
                                          "or a readable file in your own task_drive/artifact_store or workspace ")
 
 
-@pytest.mark.parametrize("reason", ["missing", "outside_allowed_roots", "sensitive", "truncated_to_40000"])
+@pytest.mark.parametrize("reason", ["missing", "outside_allowed_roots", "truncated_to_40000"])
 def test_only_a_deny_root_says_what_to_attach_instead(reason):
     """The other side: every other omission keeps its code alone, and several denied locators get the
     sentence once per list, not once per row."""

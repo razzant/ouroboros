@@ -309,7 +309,6 @@ S6_FIXTURE = {
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s6_subagent_tree_lineage_quiescence_and_child_result_handoff(
         e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)
@@ -424,7 +423,6 @@ def test_s6_subagent_tree_lineage_quiescence_and_child_result_handoff(
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 @pytest.mark.skipif(sys.platform != "linux", reason="/proc no-orphans scan is Linux-only")
 def test_s7_cancel_live_task_typed_terminal_owed_answer_and_no_strays(
         e2e_clone, tmp_path_factory):
@@ -487,7 +485,6 @@ S8_SCHEDULE_STEP = {"tool": "schedule_subagent", "arguments": {
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 @pytest.mark.skipif(sys.platform != "linux", reason="/proc no-orphans scan is Linux-only")
 def test_s8_cascade_cancel_tears_down_subtree_without_orphans(
         e2e_clone, tmp_path_factory):
@@ -613,7 +610,6 @@ def _managed_install(root: pathlib.Path):
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s9_managed_ff_update_applies_with_dirty_stash_and_honest_boot_finalize(
         tmp_path_factory, monkeypatch):
     require_lane(LANE_MOCK)
@@ -826,7 +822,6 @@ print(json.dumps(report))
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s10_rollback_typed_refusals_and_byte_for_byte_restore(tmp_path_factory):
     require_lane(LANE_MOCK)
     root = tmp_path_factory.mktemp("s10")

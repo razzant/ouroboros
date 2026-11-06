@@ -6,10 +6,11 @@ projections, the source-complete decision pipeline, continuation authority, live
 notifications, UI disposers and embedded-surface geometry. Each rule bounds reading cost
 and names its enforcement or its absence.
 
-P7 makes context fit a maintenance constraint, not a line-count aesthetic. Python
-modules everywhere (`tests/` and `devtools/` included) and first-party `web/**/*.js`
-(`web/tests/` included; vendored and minified excluded) target roughly 1000 lines. The
-gates read exact-path debt from `ouroboros/size_ratchet_manifest.py`, the same for
+P7 makes context fit a maintenance constraint, not a line-count aesthetic. Product and
+runtime Python (`devtools/` included) and first-party `web/**/*.js` (vendored and minified
+excluded) target roughly 1000 lines; test modules are outside the module band (their
+function cap stays; the diff pulse states lines per changed test module). The gates read
+exact-path debt from `ouroboros/size_ratchet_manifest.py`, the same for
 Python and JavaScript: 1600 lines per module (`GIANT_PATHS`), 200,000 canonical
 UTF-8/LF bytes (`BYTE_DEBT`, shrink-only), the 1001–1500 band (`BAND_PATHS`; a new
 entry needs a nonblank rationale), and 300 lines per non-grandfathered runtime-Python
@@ -146,8 +147,7 @@ attention or enforcement changes, no requested-as-observed execution. Incomplete
 rows remain gaps. Existing chat/task/attempt readers supply the view;
 `gateway/task_reviews.py` adds passive paged history and owned saved-text exports
 through ledger/Plan/skill readers. No second ledger, persisted UI state or cost
-copy (ARCHITECTURE §3). Enforcement: `web/tests/review_presentation.test.js`,
-`web/tests/harness_presentation.test.js`, `tests/test_task_review_sources.py`.
+copy (ARCHITECTURE §3). Enforcement: `web/tests/review_presentation.test.js`.
 
 #### Context and growth matrix
 
@@ -176,8 +176,7 @@ serialized budget; previews carry `full_chars` and a `source_ref`). Durable `tas
 bodies stay the SSOT; the brief names each omitted field and size and never stands in for
 it. No hop cap, no chain walk: a successor reads its predecessor through the exact read
 above, and the predecessor mind's notes follow the assignment as one foldable row.
-Enforcement: `tests/test_continuation_context_authority.py`,
-`tests/test_helper_predecessor_history.py`.
+Enforcement: `tests/test_continuation_context_authority.py`.
 
 ### Invariant: notifications ring for live events only
 
@@ -198,7 +197,6 @@ without DOM or socket. Preferences stay client-local, outside `s-`, settings-dir
 tracking and `/api/settings`. Delivery degrades rather than disappearing and never
 requests OS permission. Importance adds no host field, text heuristic or model call
 (mechanism: `web/modules/notifications.js` header). Enforcement:
-`tests/test_notifications_static.py`, `tests/test_notification_destination.py`,
 `web/tests/notifications.test.js`.
 
 ### Invariant: UI resources carry a disposer
@@ -244,5 +242,4 @@ behavior in the refresh contract, where missing or malformed job status is an im
 protocol error and an unknown in-progress label is a bounded pending state.
 
 Enforcement: CHECKLISTS item 9 `perf_lifecycle` points lifecycle changes here; the
-widget geometry/refresh contracts are pinned in `tests/test_widgets_ui_static.py` and
-`tests/test_extension_surfaces.py`.
+widget geometry/refresh contracts live in `tests/test_widgets_ui_static.py`.

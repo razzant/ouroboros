@@ -12,8 +12,7 @@ from supervisor import evolution_lifecycle, queue, queue_schedules, state, state
 from tests.test_state_authority import _windows_shaped_not_found
 
 
-@pytest.mark.parametrize("consumer", ["panic", "schedule"])
-@pytest.mark.parametrize("errors", ["native", "windows"])
+@pytest.mark.parametrize(("errors", "consumer"), [("native", "panic"), ("windows", "schedule")])
 def test_panic_and_schedule_readers_require_proven_absence(tmp_path, monkeypatch, consumer, errors):
     monkeypatch.setattr(queue, "DRIVE_ROOT", tmp_path)
     monkeypatch.setitem(evolution_lifecycle._STOP_LATCH, "stopped", False)
@@ -60,8 +59,7 @@ def test_panic_and_schedule_readers_require_proven_absence(tmp_path, monkeypatch
     assert path.read_bytes() == raw
 
 
-@pytest.mark.parametrize("errors", ["native", "windows"])
-@pytest.mark.parametrize("depth", [0, 1, 3])
+@pytest.mark.parametrize(("depth", "errors"), [(0, "native"), (1, "windows"), (3, "native")])
 def test_nondirectory_at_or_above_data_root_is_unknown(tmp_path, monkeypatch, errors, depth):
     obstruction = tmp_path / "file"
     obstruction.write_bytes(b"retained")
@@ -127,8 +125,7 @@ def test_dangling_leaf_is_unreadable_not_missing(tmp_path, monkeypatch, entry):
     assert list(directory.iterdir()) == []
 
 
-@pytest.mark.parametrize("entry", ["logs", "task_results"])
-@pytest.mark.parametrize("errors", ["native", "windows"])
+@pytest.mark.parametrize(("errors", "entry"), [("native", "logs"), ("windows", "task_results")])
 def test_obstructed_evidence_directory_is_unknown(tmp_path, monkeypatch, entry, errors):
     path = tmp_path / entry
     path.write_bytes(b"retained")

@@ -14,7 +14,7 @@ from tests.test_emoji_free_browser import _browser, _open, _server
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
 
 direct_server_with_data = _server
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 AVOIDED = ("At least", "Excluded", "System data", "Junk", "Clean ", "Prune", "%")
 
@@ -62,14 +62,15 @@ def test_storage_dashboard_real_server_consumer(direct_server_with_data, request
     with _browser(server, request, engine) as (page, evidence, errors):
         page.on("request", lambda req: posts.append(req.url.rsplit("/", 1)[-1])
                 if "/api/storage/" in req.url and req.method == "POST" else None)
+        page.set_viewport_size({"width": 1100, "height": 750})
         _open(page, server["url"])
         page.locator('[data-nav-page="dashboard"]').click()
         page.wait_for_selector("#page-dashboard")
         with page.expect_response(storage_get, timeout=10_000) as first_read:
             page.locator('[data-dashboard-tab="storage"]').click()
-        expect(page.get_by_role("region", name="Where it is", exact=True)).to_contain_text("Not counted yet", timeout=10_000)
-        expect(page.get_by_role("region", name="Storage summary", exact=True)).to_contain_text("Free on this disk")
-        expect(page.get_by_role("region", name="Storage summary", exact=True)).to_contain_text("Ouroboros not counted yet")
+        expect(page.get_by_role("region", name="Space used by Ouroboros", exact=True)).to_contain_text("Not measured yet", timeout=10_000)
+        expect(page.get_by_role("region", name="Space used by Ouroboros", exact=True)).to_contain_text("Space used by Ouroboros")
+        expect(page.get_by_role("region", name="Space used by Ouroboros", exact=True)).to_contain_text("Not measured yet")
         assert posts == [], "opening the tab must not start a count"
         first = first_read.value.json()
         assert first["count"] is None and first["counting"] is None and first["error"] is None
@@ -77,7 +78,7 @@ def test_storage_dashboard_real_server_consumer(direct_server_with_data, request
         assert page.locator(".storage-bar").count() == 0, "no bar before a finished count"
 
         measure = page.locator('[data-storage-action="measure"]')
-        expect(measure).to_have_text("Measure now")
+        expect(measure).to_have_text("Measure sizes")
         with page.expect_response(lambda response: response.url.endswith("/api/storage/measure"),
                                   timeout=10_000) as posted:
             measure.click()
@@ -86,8 +87,8 @@ def test_storage_dashboard_real_server_consumer(direct_server_with_data, request
         # The child counts a folder this small in moments; the finished count or the running one are
         # both legitimate answers to the POST, and the gauge settles on the finished one.
         assert started["counting"] or started["count"], started
-        page.wait_for_selector('[data-storage-group="records"]', timeout=60_000)
-        expect(measure).to_have_text("Measure again", timeout=60_000)
+        page.wait_for_selector('[data-storage-place="model_calls"]', timeout=60_000)
+        expect(measure).to_have_text("Refresh sizes", timeout=60_000)
         expect(measure).to_have_attribute("aria-disabled", "false")
         expect(page.locator('[data-storage-action="stop"]')).to_be_hidden()
 
@@ -103,14 +104,14 @@ def test_storage_dashboard_real_server_consumer(direct_server_with_data, request
 
         # Every group with a present place, a bar of their shares, the places with their words.
         for group in ("records", "work", "temporary", "other"):
-            expect(page.locator(f'[data-storage-group="{group}"]')).to_be_visible()
-        expect(page.get_by_role("region", name="Storage summary", exact=True)).to_contain_text("Ouroboros uses")
-        expect(page.get_by_role("region", name="Where it is", exact=True)).to_contain_text("Last count:")
+            expect(page.locator(f'.storage-legend [data-group="{group}"]')).to_be_visible()
+        expect(page.get_by_role("region", name="Space used by Ouroboros", exact=True)).to_contain_text("Space used by Ouroboros")
+        expect(page.get_by_role("region", name="Space used by Ouroboros", exact=True)).to_contain_text("Last count:")
         expect(page.locator('[data-storage-place="model_calls"]')).to_contain_text("Model call records")
         # Each group folds under its head; opening one shows its places with their words.
-        expect(page.locator('[data-storage-place="data_other"]')).to_be_hidden()
-        for group in ("records", "other"):
-            page.locator(f'[data-storage-group="{group}"] > .storage-group-fold > summary').click()
+        expect(page.locator('[data-storage-place="data_other"]')).to_be_visible()
+        for place in ("model_calls", "data_other"):
+            page.locator(f'[data-storage-place="{place}"] > .storage-folder-fold > summary').click()
         expect(page.locator('[data-storage-place="data_other"]')).to_contain_text("Everything else in the data folder")
         expect(page.locator('[data-storage-place="program"]')).to_contain_text("Ouroboros program")
         rendered = page.locator("#page-storage").inner_text()
@@ -133,7 +134,7 @@ def test_storage_dashboard_real_server_consumer(direct_server_with_data, request
         with page.expect_response(lambda response: response.url.endswith("/api/storage/free/preview"), timeout=10_000) as previewed:
             page.locator("[data-storage-door]").click()
         assert previewed.value.status == 202 and previewed.value.json()["started"] is True
-        expect(tray).to_contain_text("Nothing temporary is waiting", timeout=30_000)
+        expect(tray).to_contain_text("Nothing right now", timeout=30_000)
         expect(page.locator("[data-storage-door]")).to_be_visible()
         after = _file_snapshots(protected)
         assert after == before, "the preview changed no task data or saved count"
@@ -156,10 +157,13 @@ def test_storage_dashboard_real_server_consumer(direct_server_with_data, request
         page.locator('[data-dashboard-tab="logs"]').click()
         page.locator('[data-dashboard-tab="storage"]').click()
         expect(page.locator(".storage-status")).to_contain_text("could not be read", timeout=10_000)
-        expect(page.get_by_role("region", name="Where it is", exact=True)).to_contain_text("Last count:")
-        expect(page.locator('[data-storage-group="records"]')).to_be_visible()
+        expect(page.get_by_role("region", name="Space used by Ouroboros", exact=True)).to_contain_text("Last count:")
+        expect(page.locator('[data-storage-place="model_calls"]')).to_be_visible()
         page.unroute("**/api/storage*", fail_one_read)
-        page.screenshot(path=str(evidence / "storage-desktop.png"), full_page=True)
+        for theme in ("dark", "light"):
+            page.emulate_media(color_scheme=theme)
+            page.wait_for_function("theme => document.documentElement.dataset.theme === theme", arg=theme)
+            page.screenshot(path=str(evidence / f"storage-desktop-{theme}.png"))
 
         page.set_viewport_size({"width": 390, "height": 844})
         if page.locator("body").evaluate("node => node.classList.contains('nav-drawer-open')"):
@@ -167,7 +171,10 @@ def test_storage_dashboard_real_server_consumer(direct_server_with_data, request
                 page.locator("#nav-drawer-backdrop").click()  # the room's quarter, all the scrim covers
             page.wait_for_timeout(300)
         wait_drawer_closed(page)
-        page.screenshot(path=str(evidence / "storage-narrow.png"), full_page=True)
+        for theme in ("dark", "light"):
+            page.emulate_media(color_scheme=theme)
+            page.wait_for_function("theme => document.documentElement.dataset.theme === theme", arg=theme)
+            page.screenshot(path=str(evidence / f"storage-narrow-{theme}.png"))
         body = page.locator("#page-storage .costs-scroll")
         overflow = body.evaluate("node => node.scrollWidth - node.clientWidth")
         assert overflow <= 2, f"storage dashboard overflows the narrow viewport by {overflow}px"
@@ -193,7 +200,7 @@ def test_storage_dashboard_real_server_consumer(direct_server_with_data, request
         page.set_viewport_size({"width": 360, "height": 780})
         page.locator('[data-dashboard-tab="logs"]').click()
         page.locator('[data-dashboard-tab="storage"]').click()
-        page.locator('[data-storage-group="temporary"] > .storage-group-fold > summary').click()
+        page.locator('[data-storage-place="working_copies"] > .storage-folder-fold > summary').click()
         why = page.locator('[data-storage-place="working_copies"] .storage-place-why')
         expect(why).to_contain_text(f"Not counted: {reason[:40]}", timeout=10_000)
         why.scroll_into_view_if_needed()

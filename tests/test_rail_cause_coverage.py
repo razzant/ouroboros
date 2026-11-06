@@ -22,7 +22,6 @@ import time
 import types
 from types import SimpleNamespace
 
-import pytest
 
 from ouroboros import outcomes
 from ouroboros.owner_continue import TECHNICAL_REASON_CODES
@@ -114,12 +113,13 @@ def _reaped(reason: str) -> dict:
                 reason_code=reason, review_trigger="supervisor_terminal")}
 
 
-@pytest.mark.parametrize("reason", TIMEOUT_TERMINAL_REASONS)
-def test_a_reaped_row_states_the_rail_in_owner_words(reason):
-    record = _reaped(reason)
-    assert outcome_phase(record, {}) == "error"
-    expected = f"{TASK_CAUSE_PHRASES[reason]}."
-    assert _completion_verdict(record, {}) == _completion_verdict({}, record) == expected
+def test_a_reaped_row_states_the_rail_in_owner_words(subtests):
+    for reason in TIMEOUT_TERMINAL_REASONS:
+        with subtests.test(reason=reason):
+            record = _reaped(reason)
+            assert outcome_phase(record, {}) == "error"
+            expected = f"{TASK_CAUSE_PHRASES[reason]}."
+            assert _completion_verdict(record, {}) == _completion_verdict({}, record) == expected
 
 
 def test_a_railed_best_effort_row_states_the_rail_in_owner_words():

@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 REPO = Path(__file__).resolve().parents[1]
 SERVED = ("modules/subagents_settings.js", "modules/settings.js")

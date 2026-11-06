@@ -18,7 +18,6 @@ from tests._extension_loader_shared import (
 
 REPO = Path(__file__).resolve().parents[1]
 EXAMPLE = REPO / "docs/examples/author_ui_kit"
-pytestmark = pytest.mark.serial
 
 
 def _copy_installed_runtime(installed):

@@ -286,9 +286,9 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
     try:
         from ouroboros.projects_registry import list_sidebar_projects, projects_summary
 
-        root = request_drive_root(request)
-        projects = projects_summary(root, include_pinned=True)
-        project_listable_count = len(list_sidebar_projects(root))
+        listable = list_sidebar_projects(root := request_drive_root(request))  # one read: the feed and its count
+        projects = projects_summary(root, include_pinned=True, sidebar_rows=listable)
+        project_listable_count = len(listable)
     except Exception:
         projects = []
         project_listable_count = None

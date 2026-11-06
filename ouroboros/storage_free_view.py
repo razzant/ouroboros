@@ -40,6 +40,7 @@ class StorageFreeEntry(TypedDict):
     bytes_complete: bool
     eligible_after: Optional[str]
     reason: Optional[str]
+    cause: NotRequired[str]  # exact retirer code; reason remains the compatible category
     outcome: Optional[str]
     availability: Literal["ordinary", "saved_group", "manual_discard", "none"]  # how the owner can remove it, whatever ``reason`` says
     manual: NotRequired[StorageFreeManual]  # ``view=manual`` only
@@ -48,8 +49,11 @@ class StorageFreeEntry(TypedDict):
 class StorageFreeKept(TypedDict):
     reason: str  # results_pending | in_use | busy | unreadable_record | capture_unproven | unproven_excluded_inputs
     # | owner_keep | changed | retained_evidence | undeclared_environment | advanced_group | restart | other
+    # ``results_pending`` also carries raw_evidence_uncustodied and artifact_source_missing;
+    # their exact causes remain in each outcome's ``cause`` field.
     count: int
     manual_count: NotRequired[int]  # ``pool.excluded`` only: how many of ``count`` the owner can discard by hand (``view=manual``)
+    causes: NotRequired[List[Dict[str, Any]]]  # run summary: exact codes and their counts
 
 
 class StorageFreePool(TypedDict):
@@ -78,6 +82,7 @@ def entry(item: Any, *, reason: Optional[str] = None, outcome: Optional[str] = N
         "id": item.key, "group": item.group, "kind": item.kind, "name": item.name, "path": str(item.path),
         "task_id": item.task or None, "bytes": item.bytes, "bytes_complete": item.bytes is not None and not item.unreadable,
         "eligible_after": item.eligible_after, "reason": reason, "outcome": outcome, "availability": _availability(item),
+        **({"cause": item.cause} if getattr(item, "cause", None) else {}),
     }
 
 

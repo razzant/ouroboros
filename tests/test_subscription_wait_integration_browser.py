@@ -30,7 +30,7 @@ from tests import test_subscription_setup_browser as browser_fixture
 subscription_ui = browser_fixture.subscription_ui
 setup = llm_fixture.setup
 live_wait = wait_fixture.live_wait
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 TASK = "task-one"
 MODEL = llm_fixture.MODEL
 

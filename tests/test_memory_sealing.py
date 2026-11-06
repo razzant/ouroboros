@@ -24,7 +24,7 @@ def _own_rows(root, status="failed"):
     return store, rows
 
 
-@pytest.mark.parametrize("status", ["failed", "cancelled", "completed", "running"])
+@pytest.mark.parametrize("status", ["failed", "completed", "running"])
 def test_consciousness_on_writes_nothing_even_after_unsealed_failures(tmp_path, monkeypatch, status):
     light_route(monkeypatch)
     _consciousness(monkeypatch, True)

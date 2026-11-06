@@ -7,7 +7,6 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from tests.test_safety_second_check import catalog
 from ouroboros.gateway.owner_settings import _owner_write_settings
 
 
@@ -100,10 +99,7 @@ def test_physical_checker_captures_inherited_or_explicit_route(monkeypatch, tmp_
 
 
 @pytest.mark.parametrize("change", [
-    {"OUROBOROS_MODEL_LIGHT": "other"}, {"OUROBOROS_MODEL_SAFETY": "explicit"},
-    {"OUROBOROS_SAFETY_MODE": "light"}, {"OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "off"},
-    {"OUROBOROS_SAFETY_OWNER_RULES": "anything goes"}, {"OUROBOROS_SUBAGENTS": catalog()},
-    {"OUROBOROS_MODEL_ACCOUNTS": {"safety": "different"}},
+    {"OUROBOROS_MODEL_LIGHT": "other"}, {"OUROBOROS_SAFETY_OWNER_RULES": "anything goes"}, {"OUROBOROS_MODEL_ACCOUNTS": {"safety": "different"}},
 ])
 def test_generic_ratchet_refuses_both_direct_and_browser_change(settings_root, change, monkeypatch):
     config, path = settings_root

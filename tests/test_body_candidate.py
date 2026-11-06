@@ -92,7 +92,6 @@ def test_candidate_starts_from_the_accepted_commit_not_from_serving_dirt(body):
     assert (serving / "owner-untracked.txt").read_text() == "mine\n"
 
 
-@pytest.mark.serial  # real child process
 def test_explicit_prepare_gives_processes_the_candidate_cwd_and_an_isolated_environment(body):
     serving, data = body
     before = _tree_bytes(serving)
@@ -373,7 +372,6 @@ def test_protected_path_policy_applies_to_the_candidate_as_to_the_body(body, mon
     assert (candidate / "BIBLE.md").read_text() == "# Constitution\n"
 
 
-@pytest.mark.serial  # real child process
 def test_bound_task_cannot_reach_the_serving_checkout_through_another_root(body, monkeypatch, tmp_path):
     serving, data = body
     monkeypatch.setenv("HOME", str(tmp_path))  # the serving checkout sits under the owner's home, as installed
@@ -789,7 +787,6 @@ def test_commit_seams_use_the_candidate_branch_and_never_the_serving_push(body, 
     assert body_candidate.publication_note(plain) == ""
 
 
-@pytest.mark.serial  # real child process
 def test_candidate_start_service_uses_isolated_environment(body):
     """An ordinary (non-executor) service launched inside a candidate must not inherit live data."""
     import json

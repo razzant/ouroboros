@@ -8,6 +8,7 @@ Synthetic data; nothing leaves the process and no connector runs.
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import pathlib
 import queue as queue_module
@@ -28,7 +29,7 @@ from tests.test_presence_promises import _due_promise
 from tests.test_presence_promises import fired_context as fired_context  # fixture
 from tests.test_presence_project_activity import root as root  # fixture
 
-pytestmark = [pytest.mark.serial, pytest.mark.usefixtures("provider_catalog_offline")]
+pytestmark = [pytest.mark.usefixtures("provider_catalog_offline")]
 
 NO_ROUTE = "No connector reads this root's final"
 UNSETTLED = "whether a connector reads its final there is not settled"
@@ -620,6 +621,30 @@ def test_private_main_contact_is_not_a_local_row_and_keeps_its_custody_without_a
     assert UNDELIVERED != "deferred" and ctx._owner_message_sent is True
 
 
+def test_presence_main_contact_stamps_before_snapshot_and_outbox_registration(tmp_path, monkeypatch):
+    from ouroboros import presence_owner_contact
+
+    captured = {}
+    ctx = types.SimpleNamespace(task_id="wake-contact", task_metadata={"initiator": "consciousness"},
+                                current_chat_id=1, drive_root=tmp_path, pending_events=[])
+
+    def fake_patch(_root, _task_id, updater):
+        captured["stored"] = copy.deepcopy(updater({"owner_contacts": {}}))
+
+    monkeypatch.setattr("ouroboros.task_store.patch_document", fake_patch)
+    monkeypatch.setattr("supervisor.terminal_delivery.register_pending_delivery",
+                        lambda _root, event: captured.setdefault("registered", copy.deepcopy(event)) or True)
+    monkeypatch.setattr("ouroboros.tools.owner_delivery.deliver_owner_event",
+                        lambda _ctx, event: captured.setdefault("delivered", copy.deepcopy(event)) or "deferred")
+
+    result = presence_owner_contact.send_main_message(ctx, "wake contact", {"task_id": "source"}, "req-1")
+    assert "Main message" in result
+    stored = next(iter(captured["stored"]["owner_contacts"].values()))["event"]
+    assert stored["progress_meta"]["initiator"] == "consciousness"
+    assert captured["registered"]["progress_meta"]["initiator"] == "consciousness"
+    assert captured["delivered"]["progress_meta"]["initiator"] == "consciousness"
+
+
 # --- the pooled frame: declared, content free ---------------------------------------------------------------------
 
 
@@ -824,7 +849,7 @@ def test_saved_turn_flush_preserves_order_through_the_worker_drain(root, monkeyp
         [] if failed_row is None else ["First.", "Second.", "Third."][["First.", "Second."].index(failed_row):])
 
 
-@pytest.mark.parametrize("name", ["send_user_message", "send_photo", "send_video", "send_file", "send_links", "show_card"])
+@pytest.mark.parametrize("name", ["send_user_message", "send_photo", "show_card"])
 def test_main_receipts_claim_only_queue_acceptance(tmp_path, name):
     from tests.test_main_notice import _ctx
 

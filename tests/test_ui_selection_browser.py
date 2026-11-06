@@ -24,7 +24,7 @@ import pytest
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 from tests.ui_console_errors import PageErrors
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 CUSTOM_TITLE = "Ouroboros custom interface"
 
 

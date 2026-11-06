@@ -24,7 +24,7 @@ import pytest
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data  # noqa: F401
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, wait_drawer_closed
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 QUESTION = ("Which database should the new billing service use for its write-heavy event log and the nightly "
             "reports?\nIt writes a lot and reads little.")

@@ -249,7 +249,6 @@ def _seals(episode, model):
     return joined
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("selection", ["shared", "declared"])
 def test_native_loop_retains_first_position_then_cooperates_over_http(tmp_path, monkeypatch, selection):
     evidence = tmp_path / "wire-evidence"
@@ -325,7 +324,6 @@ def test_native_loop_retains_first_position_then_cooperates_over_http(tmp_path, 
         print(f"HOST_WIRE_EVIDENCE {evidence / 'qualification.json'}")
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("channel", ["tool", "mailbox"])
 def test_pre_position_reads_and_mail_are_visible_broader_inputs(tmp_path, monkeypatch, channel):
     """Selection omits automatic biography; ordinary tools/mail can add sources."""

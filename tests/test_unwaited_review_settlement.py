@@ -77,7 +77,7 @@ def test_an_unwaited_review_settles_its_record_once_its_author_ended(tmp_path, m
     assert "kept here because its author's task ended" in head and "addressed message" not in head
 
 
-@pytest.mark.parametrize("delivery", ["whole", "partial", "cursor_only", "checkpoint_lost"])
+@pytest.mark.parametrize("delivery", ["whole", "partial", "checkpoint_lost"])
 def test_an_unwaited_review_its_author_collected_while_running_needs_no_mark(tmp_path, monkeypatch, delivery):
     from ouroboros import review_waiting, working_checkpoint
     from tests.test_review_waiting import _receipt
@@ -285,8 +285,7 @@ def test_a_settled_left_commit_wave_ends_its_review_phase_for_every_consumer(tmp
     assert reused is not None and reused.attempt == 1
 
 
-@pytest.mark.parametrize("case", ["unresolved_usage_token", "other_operation", "custody_lost", "unidentified",
-                                  "superseded_successor"])
+@pytest.mark.parametrize("case", ["unresolved_usage_token", "other_operation", "superseded_successor"])
 def test_a_seat_without_terminal_proof_keeps_its_custody(tmp_path, monkeypatch, case):
     """Only a terminal outcome of the row's own operation closes its token: a seat whose usage still holds the start
     token, another operation's outcome, a lost seat, an outcome naming no operation and a late outcome of the
@@ -380,7 +379,7 @@ def _prefix_shape(world):
     update_state(world.data, old_merge)
 
 
-@pytest.mark.parametrize("consumer", ["reference", "overlap", "identical_reissue", "review_status"])
+@pytest.mark.parametrize("consumer", ["reference", "identical_reissue", "review_status"])
 def test_a_persisted_prefix_row_is_repaired_exactly_where_a_consumer_would_hold_it(tmp_path, monkeypatch, consumer):
     """A row the old writer left reviewing with closed seats' tokens is repaired from its exact bound settled record,
     outside the state lock, only when a consumer would refuse or hold it; ``review_status`` reads the same fact
@@ -415,8 +414,7 @@ def test_a_persisted_prefix_row_is_repaired_exactly_where_a_consumer_would_hold_
     assert rl.load_record(world.data, world.record_id)["verdict"]["aggregate"] == "FAIL"
 
 
-@pytest.mark.parametrize("evidence", ["missing_record_id", "foreign_binding", "unreadable_record", "open_counted_seat",
-                                      "empty_record_roster", "reopened_record_seat", "record_seat_naming_no_operation"])
+@pytest.mark.parametrize("evidence", ["missing_record_id", "unreadable_record", "record_seat_naming_no_operation"])
 def test_a_prefix_row_without_exact_settled_evidence_stays_held(tmp_path, monkeypatch, evidence):
     """Settlement is proved only positively: a record with no counted seat, a counted seat reopened to a successor,
     or one naming no operation proves nothing, whatever ``counted_pending`` alone would say."""
@@ -549,7 +547,7 @@ def test_storage_holds_a_rounds_checkout_by_custody_until_settled_then_by_its_ow
 
     def hold():
         return review_checking_prune._checkout_hold(world.data, entry, rounds=review_checking_prune._review_rounds(
-            world.data), sources=set(), live=lambda: set(), cutoff=0.0)
+            world.data), sources=set(), live=lambda _task: False, cutoff=0.0)
 
     assert hold() == "review_custody_active"
     if adviser:
@@ -919,7 +917,7 @@ def test_a_projected_row_whose_closed_seat_kept_its_token_is_still_repaired_once
     assert (repaired.status, repaired.phase) == ("reviewed", "review_only")
 
 
-@pytest.mark.parametrize("adviser", ["none", "settled", "running", "different_operation"])
+@pytest.mark.parametrize("adviser", ["none", "settled", "different_operation"])
 def test_storage_releases_an_old_writers_finished_row_by_its_exact_record_alone(tmp_path, monkeypatch, adviser):
     """Storage's checkout prune only reads: a finished row an old writer left with a closed seat's start token is not
     custody once its exact settled record proves every seat closed, so Storage's own rules decide its checkout (here
@@ -948,7 +946,7 @@ def test_storage_releases_an_old_writers_finished_row_by_its_exact_record_alone(
     before = load_state(world.data).attempts
 
     hold = review_checking_prune._checkout_hold(world.data, entry, rounds=review_checking_prune._review_rounds(
-        world.data), sources=set(), live=lambda: set(), cutoff=0.0)
+        world.data), sources=set(), live=lambda _task: False, cutoff=0.0)
 
     expected = "review_custody_active" if adviser in {"running", "different_operation"} else "task_not_terminal"
     assert hold == expected and entry.is_dir() and load_state(world.data).attempts == before

@@ -17,7 +17,7 @@ from tests.test_design_system_gate_browser import seed_page
 from tests.test_shell_interactions_browser import boot, chromium_ui, evidence, shell_ui
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 __all__ = ['chromium_ui', 'shell_ui', 'subscription_ui']
 
 SEED = """() => { const f = document.querySelector('#chat-messages');

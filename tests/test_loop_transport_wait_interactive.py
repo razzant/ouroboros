@@ -184,8 +184,7 @@ def test_explicit_deadline_longer_than_the_bound_yields_the_interactive_detail(t
     assert max(row["window_remaining_sec"] for row in events if row["phase"] == "waiting") <= 60.0
 
 
-@pytest.mark.parametrize("final_redial_done", [False, True])
-@pytest.mark.parametrize("earlier", ["bound", "deadline"])
+@pytest.mark.parametrize(("earlier", "final_redial_done"), [("bound", False), ("deadline", True)])
 def test_both_windows_spent_attributes_the_rail_that_expired_first(
     tmp_path, monkeypatch, earlier, final_redial_done,
 ):

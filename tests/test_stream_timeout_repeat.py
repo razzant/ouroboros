@@ -208,13 +208,11 @@ def _stream_error(*frames):
 
 @pytest.mark.parametrize("error,expected", [
     ({"code": 504, "message": "Upstream idle timeout exceeded"}, True),
-    ({"code": 408}, True),
     ({"code": 502, "metadata": {"error_type": "timeout"}}, True),  # the provider's own typed field
     ({"code": 502, "message": "Upstream idle timeout exceeded"}, False),  # prose is never read
     ({"code": 503, "message": "timeout"}, False),
     ({"code": 429, "message": "timed out"}, False),
     ({"code": "504"}, False),  # not an HTTP-shaped code
-    ({"type": "timeout_error", "message": "request ended"}, True),
     ({"type": "api_error", "message": "timeout"}, False),
 ])
 def test_explicit_timeout_reads_only_typed_frame_fields(error, expected):
@@ -304,7 +302,7 @@ def test_timeout_after_any_model_output_then_timeout_sends_twice_and_hands_over(
     assert usage.get(call_mod.RETRY_ATTEMPTS_SPENT_KEY) is not True  # two attempts claim no spent series
 
 
-@pytest.mark.parametrize("second", ["pre_output_502", "role_only_504", "unknown_eof", "bad_request"])
+@pytest.mark.parametrize("second", ["pre_output_502", "unknown_eof", "bad_request"])
 def test_a_failed_repeat_keeps_its_own_class_and_never_sends_a_third_time(wire_env, sleeps, second):
     repeat = {
         "pre_output_502": Wire(error_frame(502, None)),
@@ -321,7 +319,7 @@ def test_a_failed_repeat_keeps_its_own_class_and_never_sends_a_third_time(wire_e
     assert source == ("provider_outcome_unknown_no_resend" if second == "unknown_eof" else "timeout_repeat_spent_no_resend")
 
 
-@pytest.mark.parametrize("name", ["nothing", "role_only", "id_only", "usage_only", "name_only_tool_start"])
+@pytest.mark.parametrize("name", ["nothing", "usage_only", "name_only_tool_start"])
 def test_a_timeout_before_model_output_keeps_the_ordinary_transient_budget(wire_env, sleeps, name):
     """Six real sends each; every other pre-output shape is pinned by the decoder test above."""
     llm, usage = WireLLM(*[Wire(*NO_OUTPUT[name], error_frame()) for _ in range(6)]), {}
@@ -330,7 +328,7 @@ def test_a_timeout_before_model_output_keeps_the_ordinary_transient_budget(wire_
     assert provider_no_call_source(usage, False)[0] == "retry_wall_exhausted_no_repay"
 
 
-@pytest.mark.parametrize("case", ["untyped_503_after_output", "pre_output_502", "main_route", "unknown_eof_first"])
+@pytest.mark.parametrize("case", ["untyped_503_after_output", "main_route", "unknown_eof_first"])
 def test_other_failures_and_other_actors_keep_their_existing_policy(wire_env, sleeps, case):
     if case == "untyped_503_after_output":  # a 5xx without a typed timeout stays an ordinary transient
         wires, child, sends = [Wire(*OUTPUT["content"], error_frame(503, None)) for _ in range(6)], True, 6

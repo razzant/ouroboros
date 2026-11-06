@@ -180,7 +180,7 @@ ANCHOR_ROWS: tuple[AnchorRow, ...] = (
         _fields("ts type task_id execution_id round_id llm_call_id round attempt model error error_kind "
                 "status_code ledger_attempt_ids"),
         nullable=_fields("status_code"),
-        optional=_fields("retry_same_request provider_code provider_message requested_profile observed_route "
+        optional=_fields("root_task_id parent_task_id retry_same_request provider_code provider_message requested_profile observed_route "
                          "request_ref operation_id physical_attempt_id attempt_custody_state provider_error_type "
                          "transport_cause_type stream_incomplete generation_id explicit_timeout model_output_received " + _CONTEXT_FIT),
         content=_fields("error provider_message"), natural_key=("llm_call_id",),

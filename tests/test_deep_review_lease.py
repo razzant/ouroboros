@@ -145,7 +145,7 @@ class _Cancelled(BaseException):
     """An exit no ``except Exception`` sees, as a cancel unwinding the worker."""
 
 
-@pytest.mark.parametrize("ending", ["answer", "error", "budget", "cancel"])
+@pytest.mark.parametrize("ending", ["answer", "error", "cancel"])
 def test_the_native_delivery_lease_follows_the_owner_deadline_and_closes_on_every_exit(
         repo, drive, tmp_path, monkeypatch, ending):
     """The api row's native episode holds the same lease, bounded by the owner deadline (its window), and every

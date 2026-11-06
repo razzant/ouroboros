@@ -17,6 +17,7 @@ def supervisor(monkeypatch, tmp_path):
                           task_contract={"unbounded": "MUST NOT BE INCLUDED"})
     safety._PRIOR_VERDICTS.clear()
     monkeypatch.setattr(safety, "_SAFETY_STORM_UNTIL", 0)
+    monkeypatch.setattr(safety, "_CHAIN_STORMS", {})
     monkeypatch.setattr(safety, "runtime_setting", lambda key, default=None: values.get(key, default))
     monkeypatch.setattr(safety, "get_safety_mode", lambda kind="owner": modes[kind])
     monkeypatch.setattr(safety, "get_runtime_mode", lambda: "advanced")

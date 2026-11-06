@@ -26,7 +26,7 @@ from tests.test_design_system_gate_browser import rest, save_evidence, seed_page
 from tests.test_header_question_a_browser import SETTLED
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 FRAMES = "async n => { for (let i = 0; i < n; i += 1) await new Promise(r => requestAnimationFrame(r)); }"
 # The answered question's row: the height it keeps, the height it has once woken for a moment, whether it sleeps.

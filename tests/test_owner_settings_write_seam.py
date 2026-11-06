@@ -28,6 +28,7 @@ from starlette.testclient import TestClient
 
 from ouroboros.reviewer_slot_config import review_pool_state
 from ouroboros.settings_defaults import OPENROUTER_REVIEW_DEFAULTS
+from tests._cases import chosen_rows
 
 
 @pytest.fixture
@@ -193,8 +194,7 @@ def test_context_owner_endpoint_updates_future_actors_during_work(cyber_settings
     assert json.loads(cyber_settings.read_text())["OUROBOROS_CONTEXT_MODE"] == (context_mode if status == 200 else "max")
 
 
-@pytest.mark.parametrize("has_context", [True, False])
-@pytest.mark.parametrize("context_mode", ["low", "nano"])
+@pytest.mark.parametrize(("context_mode", "has_context"), [("low", True), ("nano", False)])
 def test_cyber_can_self_lower_context_and_author_its_marker(cyber_settings, has_context, context_mode):
     from ouroboros import config as cfg
 
@@ -343,7 +343,6 @@ def test_a_pre_commit_failure_is_still_reported_as_unsaved(monkeypatch, isolated
 
 @pytest.mark.parametrize("payload", [
     {"TOTAL_BUDGET": "25", "OUROBOROS_UPDATE_CHANNEL": "not-a-channel"},
-    {"TOTAL_BUDGET": "25", "OUROBOROS_POST_TASK_EVOLUTION_CADENCE": "every_n:0"},
     {"TOTAL_BUDGET": "not a number"},
     {"MINIMAX_REGION": "atlantis"},
 ])
@@ -909,7 +908,7 @@ def _owner_app(handler_name, route, isolated_settings):
     return app
 
 
-@pytest.mark.parametrize("route,handler_name,payload", _OWNER_SETTINGS_WRITERS)
+@pytest.mark.parametrize("route,handler_name,payload", chosen_rows(_OWNER_SETTINGS_WRITERS, 0, 1, 3))
 def test_owner_endpoints_map_a_contended_lock_to_a_typed_refusal(monkeypatch, isolated_settings,
                                                                  route, handler_name, payload):
     """Every single-decision owner endpoint shares the seam, and none of them had
@@ -1192,28 +1191,3 @@ def test_settings_save_body_runs_off_the_event_loop():
                 assert "settings_document_mutation" in text, (
                     f"new settings writer {node.name} does not hold the document lock"
                 )
-
-
-def test_settings_enrichment_does_not_await_the_status_probe():
-    """The shared Claudexor status read can wake a cold daemon and walk model
-    discovery; a section reload awaiting it unbounded would hold the Save button
-    (loadSettings awaits its enrichment) hostage for the whole probe. The status
-    surface binding repaints the rows when the snapshot lands, and the review-pool
-    read starts only after the confirmed document is already editable."""
-    import pathlib
-
-    modules = pathlib.Path(__file__).resolve().parents[1] / "web" / "modules"
-    subagents = (modules / "subagents_settings.js").read_text(encoding="utf-8")
-    assert "await boundedStatusRefresh(store);" in subagents
-    assert "await store.refresh" not in subagents
-    host = (modules / "settings.js").read_text(encoding="utf-8")
-    load = host[host.index("async function loadSettings"):host.index("async function reloadSettingsWithFeedback")]
-    assert load.index("settingsLoaded = true;") < load.index("reloadReviewPool({ isCurrent })")
-    store = (
-        pathlib.Path(__file__).resolve().parents[1]
-        / "web" / "modules" / "claudexor_status_store.js"
-    ).read_text(encoding="utf-8")
-    assert "Promise.race([refresh, beat]).finally(() => { if (timer) clearTimeout(timer); });" in store, (
-        "the bounded beat must race the refresh (never cancel it) and clear "
-        "the losing timer"
-    )

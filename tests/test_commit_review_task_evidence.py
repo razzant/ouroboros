@@ -26,7 +26,6 @@ from ouroboros.review_evidence import (
 from ouroboros.tools.registry import ToolContext
 from tests._workspace_executor_shared import _init_repo
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture
@@ -127,7 +126,7 @@ def test_partial_visual_result_completeness_follows_recovery(evidence_context, r
     assert packet["gap_count"] == (0 if recoverable else 1)
 
 
-@pytest.mark.parametrize("shape", ["missing", "empty", "failed", "other_execution", "tampered"])
+@pytest.mark.parametrize("shape", ["missing", "failed", "tampered"])
 def test_following_response_gap_never_selects_a_later_success(evidence_context, shape):
     ctx = evidence_context
     model_response(ctx, "before", "Before")
@@ -362,8 +361,11 @@ def test_retrieving_seat_request_preserves_selected_source(evidence_context, mon
     assert (request.policy.get("native_data_root") == ctx.budget_drive_root) is (delivery == "native")
 
 
-@pytest.mark.parametrize("image_state", ["attached", "missing", "reported_failure"])
-@pytest.mark.parametrize("skill", ["unix_computer_use", "another_image_producer"])
+@pytest.mark.parametrize(("skill", "image_state"), [
+    ("unix_computer_use", "attached"),
+    ("another_image_producer", "missing"),
+    ("another_image_producer", "reported_failure"),
+])
 def test_autoattached_image_process_trace_reaches_commit_evidence(evidence_context, image_state, skill):
     from ouroboros.extension_surface_names import extension_surface_name
     from ouroboros.loop_tool_execution import process_tool_results

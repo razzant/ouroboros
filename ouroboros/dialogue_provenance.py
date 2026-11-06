@@ -459,7 +459,7 @@ def dialogue_speaker(entry: Mapping[str, Any]) -> str:
         or actor.get("username")
         or actor.get("platform_actor_id")
         or actor.get("id")
-        or "User"
+        or ("author not recorded" if row_provenance(entry) == "place" else "User")  # "User" is my human's own door
     )
 
 
@@ -651,8 +651,10 @@ def relation_text(entry: Mapping[str, Any]) -> str:
     def reference(ref: Mapping[str, Any]) -> str:
         if ref.get("unresolved"):
             return f"[Reply to {_text(ref.get('address'))}: not resolved]"
+        chars = ref.get("chars")  # a cut preview's whole length: the model reads how much the address holds
+        size = f" [{chars} chars in full]" if isinstance(chars, int) and not isinstance(chars, bool) and chars else ""
         return (f"[Reply to {_text(ref.get('author_label')) or 'a message'} {_text(ref.get('address'))}"
-                f" ({_text(ref.get('kind')) or 'message'}): {_text(ref.get('snippet'))}]")
+                f" ({_text(ref.get('kind')) or 'message'}): {_text(ref.get('snippet'))}{size}]")
 
     lines = []
     if _mapping(entry.get("reply_to")):
@@ -725,8 +727,26 @@ def _pre_epoch_author(row: Mapping[str, Any], lineage_lookup: Any) -> dict[str, 
     return {"kind": "unattributed", "label": "outgoing, author not recorded", "lineage": "unrecorded"}
 
 
+def _place_speaker(row: Mapping[str, Any], owner_accounts: Mapping[str, Any] | None) -> str:
+    """The host fact a place row's author label leads with: ``my human`` (``places.owner_confirmed_row`` over the
+    current snapshot), else ``the account I send as`` (a bot or service account of mine wrote it), else ``a bot``
+    when the connector marked its actor one (owner 4 Nov, Q2=A: bots come whole with an author fact), else none."""
+    if owner_accounts is not None:
+        from ouroboros.places import owner_confirmed_row  # D15->D20 is lazy-only
+
+        if owner_confirmed_row(row, owner_accounts):
+            return "my human"
+    transport = _mapping(row.get("transport"))
+    actor = _mapping(transport.get("actor"))
+    actor_id = _text(actor.get("platform_actor_id") or actor.get("id"))
+    sends_as = _text(_mapping(_mapping(transport.get("identity")).get("sends_as")).get("id"))
+    if actor_id and actor_id == sends_as:
+        return "the account I send as"
+    return "a bot" if actor.get("is_bot") is True else ""
+
+
 def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch: Mapping[str, Any] | None = None,
-               lineage_lookup: Any = None) -> dict[str, Any]:
+               lineage_lookup: Any = None, owner_accounts: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Who wrote one canonical chat row, as ``{"kind", "label", ...}``, read from its fields alone.
 
     ``kind`` is ``human`` (``in`` rows and an owner's quiz answer), ``child`` (an
@@ -742,6 +762,9 @@ def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch:
     "Ouroboros". That rule needs the row's stream ``pos``: with an epoch and no
     ``pos`` such a row raises ``TypeError``. Without an epoch (the chain was
     empty at activation, or the chronicle is not active) ``pos`` is not needed.
+    ``owner_accounts`` (``places.place_owner_accounts``, one read per pass) lets a
+    place row from an account its place confirms now read as my human's
+    (``owner_confirmed``), a present-tense label; without it no place row does.
     """
     if _mapping(row.get("host_fact")).get("kind") == "call_open":
         return {"kind": "host", "label": "host", "type": "call_open"}
@@ -755,7 +778,10 @@ def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch:
         if wordless_reaction(row):  # the actor's act, in the host's words: never quotable as theirs
             return {"kind": "place_fact", "label": dialogue_author(row),
                     "actor_kind": _text(_mapping(_mapping(row.get("transport")).get("actor")).get("kind"))}
-        return {"kind": "human", "label": dialogue_author(row)}
+        fact = _place_speaker(row, owner_accounts) if row_provenance(row) == "place" else ""
+        label = dialogue_author(row)
+        return {"kind": "human", "label": f"{fact}: {label}" if fact else label,
+                **({"owner_confirmed": True} if fact == "my human" else {})}
     if direction == "system":
         if row.get("summary_kind") == LEGACY_RETELLING_SUMMARY_KIND:
             return {"kind": "helper", "label": "Light (legacy retelling)"}

@@ -125,7 +125,6 @@ def _shoot_both_widths(page, evidence, name, target=None):
     _settle(page)
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_empty_main_greeting_contract(direct_server_with_data, engine):

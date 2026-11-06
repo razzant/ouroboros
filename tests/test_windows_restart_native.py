@@ -18,10 +18,10 @@ import time
 import venv
 
 import pytest
+from tests._cases import chosen_rows
 
 
 pytestmark = [
-    pytest.mark.serial,
     pytest.mark.skipif(sys.platform != "win32", reason="native Win32 handle inheritance"),
 ]
 
@@ -120,11 +120,11 @@ def _make_venv(venv_dir: Path, tool: str) -> Path:
     return venv_dir / "Scripts" / "python.exe"
 
 
-@pytest.mark.parametrize("parent_exit,stdio_mode,body_bootstrap,venv_tool", [
+@pytest.mark.parametrize("parent_exit,stdio_mode,body_bootstrap,venv_tool", chosen_rows([
     *[(code, stdio, body, "stdlib") for code in (42, 99) for stdio in ("redirected", "absent")
       for body in (False, True)],
     (42, "redirected", False, "uv"), (42, "redirected", True, "uv"),
-])
+], 0, 7, 9))
 def test_native_restart_inherits_exact_parent_venv_and_streams(tmp_path, parent_exit, stdio_mode, body_bootstrap,
                                                                 venv_tool):
     from ouroboros.process_containment import ProcessContainer

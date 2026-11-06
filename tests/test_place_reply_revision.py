@@ -25,9 +25,11 @@ def promoted(parent):
     return task
 
 
-@pytest.mark.parametrize("state", ["silent", "paused", "disconnected"])
-@pytest.mark.parametrize("continuing", [False, True])
-@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize(("legacy", "continuing", "state"), [
+    (False, True, "disconnected"),
+    (True, False, "silent"),
+    (True, True, "paused"),
+])
 def test_cached_reply_uses_current_state_without_changing_answer(focus, monkeypatch, state, continuing, legacy):
     root, place, admission, event = focus
     task = runner.capture_presence_event(admission, event, drive_root=root)
@@ -81,8 +83,7 @@ def test_cached_reply_uses_current_state_without_changing_answer(focus, monkeypa
     assert notices[0]["held"] is True and notices[0]["checked"] is False
 
 
-@pytest.mark.parametrize("as_root", [False, True])
-@pytest.mark.parametrize("level", ["observe", "act"])
+@pytest.mark.parametrize(("level", "as_root"), [("observe", False), ("act", True)])
 def test_reply_advises_hold_and_acts_check_follow_the_carrier(focus, monkeypatch, as_root, level):
     root, place, _, _ = focus
     parent = task_for(focus)

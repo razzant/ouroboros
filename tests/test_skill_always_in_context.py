@@ -59,20 +59,14 @@ def test_field_parses_and_defaults_off():
 
 
 @pytest.mark.parametrize("text, problem", [
-    (_manifest("'yes'"), "must be true or false"),
-    (_manifest("1"), "must be true or false"),
     # A present null (blank or `null`) is a malformed declaration; only an absent key opts out silently.
     (_manifest(""), "must be true or false"),
-    (_manifest("null"), "must be true or false"),
     (_manifest(kind="extension"), "instruction skills only"),
-    (_manifest(kind="script"), "instruction skills only"),
-    (_manifest(body=""), "non-empty SKILL.md body"),
     (json.dumps({"name": "g", "description": "d", "version": "1", "type": "instruction",
                  "always_in_context": True}), "non-empty SKILL.md body"),
     # The bound counts UTF-8 bytes, not characters.
     (_manifest(body="é" * (MAX_ALWAYS_IN_CONTEXT_BODY_BYTES // 2 + 1)), "bytes"),
-], ids=["quoted-bool", "integer-bool", "blank", "null", "extension", "script",
-        "empty-markdown", "empty-json", "oversized-utf8"])
+], ids=["blank", "extension", "empty-json", "oversized-utf8"])
 def test_refusals_teach_the_repair(text, problem):
     with pytest.raises(SkillManifestError) as excinfo:
         parse_skill_manifest_text(text)

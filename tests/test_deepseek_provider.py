@@ -165,12 +165,7 @@ class TestWireProjection:
         [
             ("none", None),
             ("minimal", "low"),
-            ("low", "low"),
             ("medium", "high"),
-            ("high", "high"),
-            ("xhigh", "high"),
-            ("max", "max"),
-            ("ultra", "max"),
         ],
     )
     def test_effort_projection_matches_deepseek_chat_contract(

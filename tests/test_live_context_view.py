@@ -3,7 +3,7 @@ import asyncio
 import copy
 import json
 
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 def invocation(ident, **arguments):

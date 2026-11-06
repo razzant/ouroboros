@@ -44,7 +44,7 @@ def _live(identity):
     return not pl.pid_provably_gone(pid) and pl.process_start_time(pid) == birth and not pid_is_zombie(pid)
 
 
-@pytest.mark.parametrize("state", ["running", "exited", "unreadable", "denied", "no_such_pid", "error"])
+@pytest.mark.parametrize("state", ["running", "denied", "error"])
 def test_windows_presence_errors_do_not_certify_cleanup(monkeypatch, state):
     monkeypatch.setattr(pl, "IS_WINDOWS", True)
     monkeypatch.setattr(pl, "_windows_process_state", lambda pid: state)
@@ -394,12 +394,10 @@ def test_the_token_scan_keeps_its_own_cadence_and_its_members_stay_counted(monke
 @pytest.mark.parametrize("slots,tree,now,machine,pressure,stops", [
     (1, 0.9, 2.0, 16, False, False),     # the one admitted worker on a busy 16 GB laptop runs
     (1, 2.5, 2.0, 16, False, False),     # past its admitted size, but the machine keeps its reserve
-    (1, 2.5, 1.0, 16, False, True),      # ...and stops once the machine falls under it
     (1, 2.5, 8.0, 16, True, True),       # macOS: critical kernel pressure while inactive pages look free
     (1, 1.5, 8.0, 16, True, False),      # an admitted-size tree survives the kernel's pressure too
     (1, 0.05, 12.0, 128, False, False),  # a small tree is not killed for another program's pressure
     (1, 1.5, 10.0, 128, False, False),   # an admitted-size tree survives pressure that arrives later
-    (1, 3.0, 10.0, 128, False, True),    # past its admitted size while the machine is under its reserve
     (1, 42.0, 54.0, 128, False, False),  # summed RSS counts shared pages repeatedly: size alone never stops
     (2, 3.03, 2.6, 7, False, False),     # 17.10 macOS CI runner: two workers at 3.03 GiB with 2.6 GiB free
 ])

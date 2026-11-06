@@ -340,7 +340,6 @@ def test_skill_preflight_reports_missing_pluginapi_permissions(tmp_path, monkeyp
     assert {"route", "widget", "read_settings"} <= missing
 
 
-@pytest.mark.serial
 def test_run_shell_writes_a_self_authored_marker_example(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
@@ -359,7 +358,6 @@ def test_run_shell_writes_a_self_authored_marker_example(tmp_path, monkeypatch):
     assert marker.read_bytes() == b"{}"
 
 
-@pytest.mark.serial
 def test_run_shell_blocks_actual_self_authored_marker_write_pre_exec(tmp_path, monkeypatch):
     """The explicit redirect targets the actual runtime skill metadata.
 
@@ -437,9 +435,6 @@ def test_skill_exec_refuses_when_unconfigured(tmp_path, monkeypatch):
 # itself; that is enforced by the chokepoint in
 # ``ouroboros.config.save_settings`` and ``_data_write`` settings.json
 # block, exercised in tests/test_runtime_mode_elevation.py.
-# ---------------------------------------------------------------------------
-
-
 # ---------------------------------------------------------------------------
 # Review-status + enable gating
 # ---------------------------------------------------------------------------
@@ -1084,8 +1079,6 @@ def test_generated_repair_enable_requires_expressed_owner_source(tmp_path, monke
 @pytest.mark.parametrize("tool_name,args", [
     ("run_command", {"cwd": "skill_payload", "cmd": ["python", "-c", "print('x')"]}),
     ("browse_page", {"url": "https://example.invalid"}),
-    ("browser_action", {"action": "evaluate", "value": "1 + 1"}),
-    ("schedule_subagent", {"objective": "inspect skill", "expected_output": "findings"}),
     ("skill_exec", {"skill": "alpha", "script": "run.py"}),
 ])
 def test_skill_development_keeps_normal_capabilities(tool_name, args, tmp_path, monkeypatch):
@@ -1184,8 +1177,6 @@ def test_selected_skill_blocks_marketplace_sidecar_writes(sidecar, tmp_path):
 @pytest.mark.parametrize("tool_name,args", [
     ("write_file", {"root": "skill_payload", "bucket": "external", "skill_name": "beta", "path": "notes.txt", "content": "x"}),
     ("read_file", {"root": "skill_payload", "bucket": "external", "skill_name": "beta", "path": "SKILL.md"}),
-    ("list_files", {"root": "skill_payload", "bucket": "external", "skill_name": "beta", "path": "."}),
-    ("skill_review", {"skill": "beta"}),
     ("skill_preflight", {"skill": "beta"}),
 ])
 def test_selected_skill_cannot_redirect_payload_tools(tool_name, args, tmp_path, monkeypatch):

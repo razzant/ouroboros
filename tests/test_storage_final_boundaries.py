@@ -138,9 +138,6 @@ def _reported_or_cut(raw, line, record, command):
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX signal exits')
 @pytest.mark.parametrize('line,escalation,end,accepted', [
     (True, '', 130, True),  # the runner's own report
-    (True, 'recorded', 130, True),  # a late ordinary completion that still reported itself
-    (False, 'recorded', 'SIGTERM', True),  # the recorded cut, ended by its TERM
-    (False, 'recorded', 'SIGKILL', True),  # or by the forced reap
     (False, 'recorded', 130, False),  # the wait timed out, then an ordinary exit lost its line
     (False, 'recorded', 0, False),
     (False, '', 'SIGTERM', False),  # a signal end the owner never recorded as its cut

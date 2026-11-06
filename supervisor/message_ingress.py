@@ -276,7 +276,7 @@ def _chat_record(
         if "narration" in meta:
             record["narration"] = bool(meta["narration"])
         if record_type in ("project_started", "project_handoff", "project_completion_summary"):
-            for key in ("project_id", "project_name", "task_name", "target_label", "status", "completion_answer", "completion_reason", "completion_notice", "handoff_id", "terminal_time", "outcome_axes"):
+            for key in ("project_id", "project_name", "task_name", "target_label", "status", "completion_answer", "completion_reason", "completion_notice", "handoff_id", "terminal_time", "outcome_axes", "wake_summary"):
                 if key in meta:
                     record[key] = meta[key]
         if meta.get("delivery_id"):

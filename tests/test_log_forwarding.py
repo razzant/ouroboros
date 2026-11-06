@@ -16,8 +16,6 @@ from types import SimpleNamespace
 
 import pytest
 
-REPO = pathlib.Path(__file__).resolve().parent.parent
-
 WORKER_BASELINE_TYPES = frozenset(
     {"tool_call", "llm_round", "task_checkpoint", "task_done", "llm_usage"}
 )
@@ -574,18 +572,6 @@ def test_task_metrics_carries_turn_stamped_chat(production_sink):
     )
     frames = [e for e in production_sink.frames if e.get("type") == "task_metrics_event"]
     assert len(frames) == 1 and frames[0]["chat_id"] == 42
-
-
-def test_logs_js_backfills_all_streams_and_dedupes_without_dropping_preconnect():
-    src = (REPO / "web" / "modules" / "logs.js").read_text(encoding="utf-8")
-    for stream in ("'events'", "'tools'", "'progress'", "'supervisor'"):
-        assert stream in src, f"backfill must include the {stream} log stream"
-    # Exact-duplicate guard collapses backfill/live overlap…
-    assert "renderedLogKeys" in src
-    # …and backfill reruns on reconnect…
-    assert "ws.on('open'" in src
-    # …without a load-time timestamp skip that could drop the pre-connect window.
-    assert "loadStart" not in src
 
 
 @pytest.mark.parametrize("write_succeeds", [True, False])

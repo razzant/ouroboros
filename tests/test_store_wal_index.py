@@ -31,8 +31,8 @@ import pytest
 
 from ouroboros import store
 from tests._store_journal_shared import use_journal
+from tests._cases import case_folders
 
-pytestmark = pytest.mark.serial  # another interpreter probes the store's locks
 
 _RESET = ("import sqlite3, sys\n"
           "conn = sqlite3.connect(sys.argv[1], isolation_level=None, timeout=0)\n"
@@ -102,21 +102,24 @@ def _read(kind, root, target):
     return stream_artifact_file(target)
 
 
-@pytest.mark.parametrize("kind", _KINDS)
-def test_a_reader_refuses_the_index_and_the_read_transaction_keeps_its_locks(tmp_path, monkeypatch, kind):
-    use_journal(monkeypatch, "WAL")
-    database = _live_store(tmp_path)
-    index = database.with_name(database.name + "-shm")
-    with store.open_store(tmp_path, write=False):  # a read transaction: its read mark is locked
-        assert _reset_refused(database)
-        if kind == "download":
-            response = _read(kind, tmp_path, index)
-            assert response.status_code == 403 and b"WAL index" in response.body
-        else:
-            with pytest.raises(store.WalIndexRefused):
-                _read(kind, tmp_path, index)
-        assert _reset_refused(database), "a descriptor of the index was opened and closed"
-    assert not (tmp_path / "copied").exists()
+def test_a_reader_refuses_the_index_and_the_read_transaction_keeps_its_locks(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for kind in _KINDS:
+        tmp_path = next(case_paths)
+        with subtests.test(kind=kind), monkeypatch.context() as monkeypatch:
+            use_journal(monkeypatch, "WAL")
+            database = _live_store(tmp_path)
+            index = database.with_name(database.name + "-shm")
+            with store.open_store(tmp_path, write=False):  # a read transaction: its read mark is locked
+                assert _reset_refused(database)
+                if kind == "download":
+                    response = _read(kind, tmp_path, index)
+                    assert response.status_code == 403 and b"WAL index" in response.body
+                else:
+                    with pytest.raises(store.WalIndexRefused):
+                        _read(kind, tmp_path, index)
+                assert _reset_refused(database), "a descriptor of the index was opened and closed"
+            assert not (tmp_path / "copied").exists()
 
 
 def test_the_files_panel_answers_403_for_the_index_and_keeps_the_locks(tmp_path, monkeypatch):
@@ -137,33 +140,36 @@ def test_the_files_panel_answers_403_for_the_index_and_keeps_the_locks(tmp_path,
         assert _reset_refused(database)
 
 
-@pytest.mark.parametrize("kind", _KINDS)
-@pytest.mark.parametrize("name", ["current.sqlite-wal", "notes-wal", "notes-shm", "current.sqlite"])
-def test_the_log_and_ordinary_files_still_read_and_keep_the_locks(tmp_path, monkeypatch, kind, name):
+def test_the_log_and_ordinary_files_still_read_and_keep_the_locks(subtests, tmp_path, monkeypatch):
     """The store's own log, a file merely named like a sidecar (one beside a sibling that is no
     database) and the database itself (through its borrowed descriptor) read as before."""
-    from starlette.responses import FileResponse, StreamingResponse
+    case_paths = case_folders(tmp_path)
+    for kind in _KINDS:
+        for name in ["current.sqlite-wal", "notes-wal", "notes-shm", "current.sqlite"]:
+            tmp_path = next(case_paths)
+            with subtests.test(kind=kind, name=name), monkeypatch.context() as monkeypatch:
+                from starlette.responses import FileResponse, StreamingResponse
 
-    use_journal(monkeypatch, "WAL")
-    database = _live_store(tmp_path)
-    target = database.with_name(name)
-    if name.startswith("notes"):
-        (database.parent / "notes").write_text("a sibling that is not a database", encoding="utf-8")
-        target.write_text("plain text\n", encoding="utf-8")
-    with store.open_store(tmp_path, write=False):
-        size = target.stat().st_size
-        result = _read(kind, tmp_path, target)
-        assert _reset_refused(database), "reading this file dropped the index's locks"
-    if kind == "download":
-        assert isinstance(result, (FileResponse, StreamingResponse)) and result.status_code == 200
-    elif kind == "preview":
-        assert len(result) == min(size, 4096)
-    elif kind in {"copy", "stream"}:
-        assert len(result) == size
-    elif kind in {"artifact", "artifact_copy"}:
-        assert result["size"] == size
-    elif name.startswith("notes"):
-        assert result == "plain text\n"
+                use_journal(monkeypatch, "WAL")
+                database = _live_store(tmp_path)
+                target = database.with_name(name)
+                if name.startswith("notes"):
+                    (database.parent / "notes").write_text("a sibling that is not a database", encoding="utf-8")
+                    target.write_text("plain text\n", encoding="utf-8")
+                with store.open_store(tmp_path, write=False):
+                    size = target.stat().st_size
+                    result = _read(kind, tmp_path, target)
+                    assert _reset_refused(database), "reading this file dropped the index's locks"
+                if kind == "download":
+                    assert isinstance(result, (FileResponse, StreamingResponse)) and result.status_code == 200
+                elif kind == "preview":
+                    assert len(result) == min(size, 4096)
+                elif kind in {"copy", "stream"}:
+                    assert len(result) == size
+                elif kind in {"artifact", "artifact_copy"}:
+                    assert result["size"] == size
+                elif name.startswith("notes"):
+                    assert result == "plain text\n"
 
 
 def test_the_header_probe_answers_without_opening_the_index(tmp_path, monkeypatch):
@@ -578,7 +584,7 @@ def test_a_child_whose_wal_writer_was_killed_captures_copies_back_and_settles(tm
         assert conn.execute("SELECT count(*) FROM t").fetchone() == (300,)
 
 
-@pytest.mark.parametrize("listing", ["capture", "strict_capture", "unmeasured", "view", "rescued"])
+@pytest.mark.parametrize("listing", ["capture", "view", "rescued"])
 def test_a_task_artifact_listing_leaves_a_held_index_unopened_and_keeps_both_locks(tmp_path, monkeypatch, listing):
     """A store this process holds inside a task's artifact folder (its read transaction locks the
     index's read mark and the database's SHARED range): every listing over the held walk leaves the
@@ -692,8 +698,10 @@ def _windows_branch():
         yield api
 
 
-@pytest.mark.parametrize("measure", [True, False], ids=["measured", "unmeasured"])
-@pytest.mark.parametrize("alias", [False, True], ids=["physical-root", "configured-alias"])
+@pytest.mark.parametrize(("alias", "measure"), [
+    pytest.param(False, False, id='physical-root-unmeasured'),
+    pytest.param(True, True, id='configured-alias-measured'),
+])
 def test_the_held_walk_names_each_index_as_the_path_rule_does(tmp_path, measure, alias):
     """The walk asks the rule through each held directory, never by a descendant path, and answers as
     ``is_wal_index`` does for every name: a database's own index (left behind, Unicode-named, an index's

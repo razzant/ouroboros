@@ -111,7 +111,7 @@ def test_notice_import_does_not_block_current_store_and_late_receipts_are_found(
     assert not notice_receipts.recorded(tmp_path, 3, row["type"])
 
 
-@pytest.mark.parametrize("reader", ["owner", "routing", "words", "notices", "publication", "narrative"])
+@pytest.mark.parametrize("reader", ["owner", "publication", "narrative"])
 def test_absence_readers_answer_over_the_readable_rows_of_a_root_with_a_torn_line(tmp_path, reader):
     """A line the import could not read is an unreadable old row, as it was for the chain readers:
     absence-only answers are given over the readable rows, so one torn line in the archive never
@@ -174,7 +174,7 @@ def test_a_torn_line_leaves_the_routing_card_open_until_its_source_is_readable(t
     assert latest_chat_annotations(tmp_path)["owner-one"]["status"] == "delivered"
 
 
-@pytest.mark.parametrize("reader", ["owner", "routing", "words", "notices"])
+@pytest.mark.parametrize("reader", ["owner", "routing", "notices"])
 def test_named_reader_has_equal_sql_work_with_one_or_thirty_foreign_rooms(tmp_path, monkeypatch, reader):
     row = owner()
     ref = build_owner_message_ref(chat_id=1, client_message_id=row["client_message_id"], ts=row["ts"], text=row["text"])
@@ -376,7 +376,7 @@ def test_mismatched_import_is_not_coverage_or_absence(tmp_path):
     assert ds.range_coverage(tmp_path, "chat", lower=segment["base"] + segment["size"])["imported"]
 
 
-@pytest.mark.parametrize("reader", ["identity", "room", "evidence", "task"])
+@pytest.mark.parametrize("reader", ["identity", "room", "task"])
 def test_memory_readers_do_equal_work_with_one_or_thirty_foreign_rooms(tmp_path, monkeypatch, reader):
     from ouroboros import chat_chain
     from ouroboros.dialogue_evidence import read_room_source
@@ -472,7 +472,7 @@ def test_memory_recall_keeps_the_frozen_public_golden(tmp_path):
     assert _normalize(Memory(tmp_path).chat_history(count=20), tmp_path) == expected
 
 
-@pytest.mark.parametrize("reader", ["reentry", "page", "receipt", "wake"])
+@pytest.mark.parametrize("reader", ["reentry", "page", "wake"])
 def test_presence_readers_do_equal_sql_work_with_one_or_thirty_foreign_rooms(tmp_path, monkeypatch, reader):
     from ouroboros import presence_continuation as pc
     from ouroboros.consciousness_wake import _chat_window

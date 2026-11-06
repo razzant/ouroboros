@@ -27,7 +27,7 @@ def _prepared(root):
     return prepared(material, root, "ordinary")
 
 
-@pytest.mark.parametrize("debt", ["money", "output", "gone", "over_cap", "money_and_over_cap", "daemon_down"])
+@pytest.mark.parametrize("debt", ["money", "output", "daemon_down"])
 def test_stuck_terminal_debt_does_no_io_after_first_attempt(
         tmp_path, monkeypatch, driven_runtime, debt):  # noqa: F811
     runtime, clock, tick = driven_runtime

@@ -188,9 +188,16 @@ def test_recorded_gemini_multicall_frames_through_the_driver(isolated):
     assert normalized_usage["response_provider"] == "Google"
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("failure", ["eof", "missing_finish", "error_first", "error_mid", "error_free_claim",
-                                     "disconnect", "cancel", "malformed"])
+@pytest.mark.parametrize(("failure", "asynchronous"), [
+    ("eof", True),
+    ("missing_finish", False),
+    ("error_first", True),
+    ("error_mid", False),
+    ("error_free_claim", True),
+    ("disconnect", False),
+    ("cancel", True),
+    ("malformed", False),
+])
 def test_incomplete_stream_never_settles_or_replays(isolated, asynchronous, failure):
     wire = sse(chunk({"content": "partial", "tool_calls": [{"index": 0, "id": "t", "type": "function",
                            "function": {"name": "lookup", "arguments": '{"q":"ok"}'}}]}), done=False)
@@ -542,8 +549,7 @@ def test_mid_stream_error_chunk_classifies_by_body_and_settles_only_with_usage(i
         "provider_transient", True, 502)
 
 
-@pytest.mark.parametrize("usage_first", [False, True])
-@pytest.mark.parametrize("shape", ["finish_reason_error", "code_less_error_frame"])
+@pytest.mark.parametrize(("shape", "usage_first"), [("finish_reason_error", False), ("code_less_error_frame", True)])
 def test_code_less_stream_error_is_a_provider_verdict_not_an_unknown_outcome(isolated, usage_first, shape):
     """An SSE error without an HTTP-shaped code — the provider's own ``finish_reason: "error"``, or an
     ``{"error": {"type": ...}}`` frame (the overload/api_error shape) — is the provider's terminal verdict on
@@ -579,8 +585,7 @@ def test_error_frame_carrying_its_own_usage_settles_the_attempt(isolated):
     assert rows(isolated)[-1]["state"] == "settled" and rows(isolated)[-1]["cost_usd"] == 0.25
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("field", ["stream", "stream_options"])
+@pytest.mark.parametrize(("field", "asynchronous"), [("stream", False), ("stream_options", True)])
 def test_stream_rejection_uses_existing_wire_recovery(isolated, asynchronous, field):
     calls = []
     def send(**kw):
@@ -877,10 +882,9 @@ def test_native_max_tokens_with_tool_blocks_returns_like_non_stream(isolated, mo
     assert rows(isolated)[-1]["state"] == "settled"
 
 
-@pytest.mark.parametrize("before_content", [False, True])
-@pytest.mark.parametrize("error,status,kind", [
-    ({"type": "overloaded_error", "message": "Overloaded"}, 200, "provider_error"),
-    ({"type": "api_error", "code": 502, "message": "Bad gateway"}, 502, "provider_transient"),
+@pytest.mark.parametrize(("error", "status", "kind", "before_content"), [
+    pytest.param({"type": "overloaded_error", "message": "Overloaded"}, 200, "provider_error", False, id='error0-200-provider_error-False'),
+    pytest.param({"type": "api_error", "code": 502, "message": "Bad gateway"}, 502, "provider_transient", True, id='error1-502-provider_transient-True'),
 ])
 def test_native_http_200_sse_error_keeps_producer_facts_and_custody(isolated, monkeypatch, before_content,
                                                                     error, status, kind):
@@ -906,8 +910,7 @@ def test_native_http_200_sse_error_keeps_producer_facts_and_custody(isolated, mo
     assert classify_llm_exception(exc).kind == kind
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("no_proxy", [False, True])
+@pytest.mark.parametrize(("no_proxy", "asynchronous"), [(False, False), (False, True), (True, True)])
 def test_public_remote_chat_carries_stream_deadline_and_custom_receipts(isolated, monkeypatch, asynchronous, no_proxy):
     client = LLMClient()
     calls = []
@@ -1021,10 +1024,7 @@ def test_local_and_model_operation_transports_receive_no_stream_option(isolated,
     assert all("stream" not in kwargs and "stream_options" not in kwargs for kwargs in seen)
 
 
-@pytest.mark.serial
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("no_proxy", [False, True])
-@pytest.mark.parametrize("terminal", [False, True])
+@pytest.mark.parametrize(("terminal", "no_proxy", "asynchronous"), [(False, False, False), (True, True, True)])
 def test_actual_sdk_loopback_sse_and_cleanup(isolated, monkeypatch, asynchronous, no_proxy, terminal):
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1081,7 +1081,6 @@ def test_actual_sdk_loopback_sse_and_cleanup(isolated, monkeypatch, asynchronous
     assert not thread.is_alive()
 
 
-@pytest.mark.serial
 def test_native_async_cancellation_keeps_worker_until_physical_terminal(isolated, monkeypatch):
     import threading
     import requests

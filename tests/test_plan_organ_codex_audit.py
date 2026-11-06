@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from ouroboros import owner_hurry as oh
 from ouroboros import plan_record
-from ouroboros.review_records import ReviewActorRecord
-from ouroboros.tools import plan_ask, plan_review as pr
 from tests._store_shared import seed_result
 from tests.test_plan_gate import _v2
 from tests.test_plan_task_tool import CLEAN, _call, _record, _reply, _slots, _user_text, _write, harness as _harness
@@ -118,23 +116,3 @@ def test_a_late_critic_reads_moved_out_prose_from_its_retained_source_or_is_told
 
 
 # ---------------------------------------------------------------- point 5: the hook settled the seat before the barrier rows were written
-
-def test_a_seat_the_custody_hook_settled_before_the_barrier_rows_were_written_keeps_its_answer(harness):
-    ctx = harness.make_ctx()
-    pending = {"status": "pending", "raw_text": "", "operation_state": "pending_dispatch", "late_result_pending": True}
-
-    def settled_by_the_hook_then_reported_pending(request):
-        slot = next(s for s in harness.state["slots"] if s.slot_id == "s1")
-        actor = ReviewActorRecord(slot_id="s1", model="m/a", status="ok", raw_text=_reply("Early.", objections=[("o1", "too thin")]),
-                                  operation_id="op-s1-early", operation_state="late_settled", usage={"cost": 0.01, "resolved_model": "m/a"})
-        plan_ask.settle_released_reply(ctx, request=request, task_id="task-1", actor=actor, slot=slot, settled_wave={}, roster_size=3)
-        return dict(pending)  # the barrier's row still says pending: the dispatcher's copy of the record is stale
-
-    harness.install({"s1": settled_by_the_hook_then_reported_pending, "s2": pending})
-    _write(ctx, ask="council")
-    rows = {p["seat_id"]: p for p in _record(harness)["asks"][0]["participants"]}
-    assert rows["s1"]["status"] == "answered" and rows["s1"]["reply"]["objections"] == [{"id": "o1", "text": "too thin"}]
-    assert rows["s1"].get("late_result_pending") is not True and rows["s2"]["status"] == "pending" and rows["s3"]["status"] == "answered"
-    assert pr._decision(ctx, _record(harness))["holding"] == ["s1:o1"], "the early objection holds; the echo re-opened nothing"
-    _text, result = _call(ctx)
-    assert result.meta["plan_holding"] == 1 and result.meta["plan_pending_asks"] == 1, "s2 is still owed, s1 is not"

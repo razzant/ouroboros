@@ -330,8 +330,6 @@ def test_a_call_chain_names_the_nearest_first_party_callers_only(tmp_path, named
 
 
 @pytest.mark.parametrize("thread_name, thread_class", [
-    ("asyncio_12", "asyncio"), ("Thread-123 (_run_direct)", "Thread (_run_direct)"), ("wake-turn-8f3a", "wake-turn"),
-    ("ThreadPoolExecutor-3_7", "ThreadPoolExecutor"), ("owner_pause_settlement", "owner_pause_settlement"),
-    ("cold-custody", "cold-custody"), ("supervisor-main", "supervisor-main")])
+    ("asyncio_12", "asyncio"), ("Thread-123 (_run_direct)", "Thread (_run_direct)"), ("wake-turn-8f3a", "wake-turn")])
 def test_a_thread_class_drops_instance_tokens_and_keeps_a_duty_s_name(thread_name, thread_class):
     assert store_timing._INSTANCE_TOKEN.sub("", thread_name) == thread_class

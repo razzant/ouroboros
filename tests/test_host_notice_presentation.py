@@ -548,7 +548,6 @@ def test_the_gateway_contract_names_the_pointer_in_both_mirrors():
     assert "@property {Object=} late_evidence" in text
 
 
-@pytest.mark.serial
 def test_the_record_route_serves_only_this_tasks_own_old_acceptance_record(tmp_path):
     """An old late notice keeps linking the applied record it was sent with after a newer
     publication replaced its panel's ref: the task artifact route resolves that record by

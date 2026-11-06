@@ -121,7 +121,6 @@ def _facts(oracle, data, origin: str, stub, **extra) -> dict:
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 @pytest.mark.parametrize("history", ["after_owner_resume", "ordinary"])
 def test_s40_the_owner_pause_resume_and_stop_hold_one_task_on_its_own_id(s33_candidate, tmp_path_factory,  # noqa: F811
                                                                            history):

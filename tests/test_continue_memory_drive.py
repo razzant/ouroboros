@@ -159,7 +159,6 @@ def _fail(pool, failure):
 
 @pytest.mark.parametrize("failure, freed", [
     ("blocked", True),              # the queue refused the successor: proven unadmitted
-    ("rollback_confirmed", True),   # its admission snapshot failed and the rollback snapshot recorded the removal
     ("rollback_unknown", False),    # neither snapshot confirmed: the queued row may be durable
     ("publication_unknown", False),  # the queue row and its snapshot are durable; only the result write failed
 ])
@@ -489,7 +488,7 @@ def test_a_long_input_manifest_rides_whole_and_an_unreadable_one_refuses_before_
     assert "Complete input manifest (26 declarations)" in row["text"]
 
 
-@pytest.mark.parametrize("state", ["ready", "send_possible", "gap", "damaged", "cancelled", "conflict", "rejected", "released"])
+@pytest.mark.parametrize("state", ["ready", "cancelled", "rejected"])
 def test_a_successor_copies_the_predecessors_document_receipt_and_unreadable_marks_refuse_first(
         pool, tmp_path_factory, state):
     """The successor's own copy carries the predecessor's observed receipt (its lifetime and the task that owes

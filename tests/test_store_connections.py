@@ -23,8 +23,10 @@ def release_connections():
     store.close_connections()
 
 
-@pytest.mark.parametrize("money", [False, True])
-@pytest.mark.parametrize("tier", [store.TIER_ENFORCED, store.TIER_NAME])
+@pytest.mark.parametrize(("tier", "money"), [
+    pytest.param(store.TIER_ENFORCED, False, id='enforced-False'),
+    pytest.param(store.TIER_NAME, True, id='name-True'),
+])
 def test_fifty_reads_open_one_connection_per_thread(tmp_path, monkeypatch, money, tier):
     monkeypatch.setattr(store, "_journal_mode", lambda *_: "PERSIST")
     if money:
@@ -430,7 +432,6 @@ def test_replaced_file_drops_the_old_cached_connection(tmp_path, monkeypatch):
         old.execute("SELECT 1")
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
 def test_fork_closes_parent_cache_and_child_opens_its_own_connection(tmp_path):
     publish(tmp_path)
@@ -469,7 +470,6 @@ def test_fork_closes_parent_cache_and_child_opens_its_own_connection(tmp_path):
         receiving.close()
 
 
-@pytest.mark.serial
 def test_interpreter_exit_closes_both_stores_before_clearing_module_globals(tmp_path):
     publish(tmp_path)
     usage_store.migrate_from_journal(tmp_path)

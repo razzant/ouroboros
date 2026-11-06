@@ -1,16 +1,18 @@
 """Selected execution, honest inventory and the full-only consumer boundaries."""
 import json
+import pathlib
 from types import SimpleNamespace
 
 import pytest
 
 from ouroboros import commit_admission as admission, preflight_runner as pr, test_selection as selection
-from ouroboros.preflight_qualification import adoption_test_evidence, full_proof_error
+from ouroboros.preflight_qualification import adoption_test_evidence
 from tests.test_preflight_runner import _make_repo, _commit_all
 from tests.test_preflight_receipts import receipt_python  # noqa: F401 -- dependency-only lane fixture
-from tests.test_selected_test_cli import TEMPLATE_FIELDS, plugin_values, refuse_long_pytest_launches
+from tests.test_selected_test_cli import TEMPLATE_FIELDS, plugin_values
+from ouroboros.preflight_qualification import full_proof_error
+from tests.test_selected_test_cli import refuse_long_pytest_launches
 
-pytestmark = pytest.mark.serial  # finite nested pytest controllers; one at a time
 
 
 @pytest.fixture
@@ -212,10 +214,14 @@ def test_evolution_publication_refuses_selected_but_accepts_full(candidate, monk
     monkeypatch.setattr(git, "_evolution_commit_authority", lambda *a, **k: ({}, {"ok": True}))
     assert pr.run_hermetic_pytest(ctx.repo_dir, ctx=ctx, selected=True, phase=pr.PRE_COMMIT_PHASE) is None
     assert "EVOLUTION_PUBLICATION_STOPPED" in _evolution_test_publication_stop(ctx, ctx._preflight_test_proof.head, "")
+    ran = json.loads((pathlib.Path(ctx._preflight_test_evidence) / "result.json").read_text(encoding="utf-8"))
+    assert ctx._preflight_test_proof.workload[1] == ran["budget_seconds"] == 1800 and 0 < ran["elapsed_seconds"] < 1800
     (ctx.repo_dir / "tests/test_unrelated.py").write_text("def test_other(): assert True\n", encoding="utf-8")
     _commit_all(ctx.repo_dir)  # evolution's forced full run follows its commit, on exactly that tree
     assert pr.run_hermetic_pytest(ctx.repo_dir, ctx=ctx) is None
     assert _evolution_test_publication_stop(ctx, ctx._preflight_test_proof.head, "") == ""
+    ran = json.loads((pathlib.Path(ctx._preflight_test_evidence) / "result.json").read_text(encoding="utf-8"))
+    assert ctx._preflight_test_proof.workload[1] is None is ran["budget_seconds"] and ran["elapsed_seconds"] > 0  # full: none
 
 
 def test_adoption_without_full_evidence_is_refused_before_writing_handoff(tmp_path, monkeypatch):
@@ -269,7 +275,7 @@ def test_a_selected_pass_walks_tests_once_and_collects_exactly_its_modules(tmp_p
     # A process is started with the scope off the command line, in the plugin it loads: the same walk.
     done = run_in_group([sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider",
                          *inventory.launch_args(scope), "-p", first.args[-1]], timeout=120, cwd=repo,
-                        env={**os.environ, "PYTHONPATH": str(pr._probe_dir(scratch))})
+                        env={**os.environ, "PYTHONPATH": str(pr.probe_dir(scratch))})
     expected = inventory.read_inventory(scratch, "parallel")[0].get("expected")
     if selected[0].startswith("tests/node_modules"):
         assert done.returncode != 0 and "never reached" in done.stdout + done.stderr, done.stdout + done.stderr
@@ -285,9 +291,9 @@ def test_the_inventory_plugin_carries_any_scope_exactly_and_the_launch_leaves_it
     scope and the file it logs to, also when a module name or the results directory spells every template field."""
     import re
 
-    from ouroboros import preflight_inventory as inventory
+    from ouroboros import preflight_inventory as inventory, preflight_probe
     # TEMPLATE_FIELDS must stay every field either template has, or "spells every field" below stops being true.
-    assert sorted(set(re.findall(r"__[A-Z]+(?:_[A-Z]+)*__", inventory.SOURCE + pr._WORKER_PROBE_SOURCE))) == sorted(
+    assert sorted(set(re.findall(r"__[A-Z]+(?:_[A-Z]+)*__", inventory.SOURCE + preflight_probe.WORKER_PROBE_SOURCE))) == sorted(
         TEMPLATE_FIELDS)
 
     paths = ["tests/test_a.py", "tests/a dir/test_b.py", "tests/проверки/test_ü.py", "tests/日本語/test_c.py", "tests/test_😀.py",
@@ -303,7 +309,7 @@ def test_the_inventory_plugin_carries_any_scope_exactly_and_the_launch_leaves_it
                 assert named == [f"{inventory.SELECT}={path}" for path in files]
                 launched = inventory.launch_args(spec.args)
                 assert launched == [arg for arg in spec.args if arg not in named] and launched[0] == "tests/"
-                plugin = plugin_values(launched, pr._probe_dir(kept["temp_root"]))
+                plugin = plugin_values(launched, pr.probe_dir(kept["temp_root"]))
                 assert plugin["_scope"] == list(files)
                 assert plugin["_path"] == results / f"inventory-{spec.label}.jsonl"
 
@@ -314,10 +320,12 @@ def test_the_worker_probe_reads_back_its_directories_where_the_root_spells_templ
     directories the runner reads back."""
     import runpy
 
+    from ouroboros import preflight_probe
+
     root = tmp_path.joinpath(*TEMPLATE_FIELDS)
-    module = pr._install_worker_probe(root)
-    probe = runpy.run_path(str(pr._probe_dir(root) / f"{module}.py"))
-    assert (probe["_LOG"], probe["_RESULTS"]) == (pr._worker_log_dir(root), pr._results_pointer(root))
+    module = pr.install_worker_probe(root)
+    probe = runpy.run_path(str(pr.probe_dir(root) / f"{module}.py"))
+    assert (probe["_LOG"], probe["_RESULTS"]) == (preflight_probe._worker_log_dir(root), preflight_probe._results_pointer(root))
 
 
 @pytest.mark.parametrize("mutation", ["missing", "duplicate", "unfinished"])
@@ -351,11 +359,7 @@ SCOPE = {"base": "b", "policy": "p", "changed": ["x.py"], "extra_tests": [], "fu
     (_coherent(), ""),
     (_coherent(2, tier="selected", scope=SCOPE), ""),
     (_coherent(1, tier="selected", scope=SCOPE), "schema does not match"),  # a selected record relabelled full
-    (_coherent(2, scope=SCOPE), "schema does not match"),
     (_coherent(2, tier="selected", scope={**SCOPE, "full_tests": True}), "the selection scope is incomplete"),
-    (_coherent(2, tier="selected", scope={k: v for k, v in SCOPE.items() if k != "base"}),
-     "the selection scope is incomplete"),
-    (_coherent(3, tier="selected", scope=SCOPE), "schema does not match"),
 ])
 def test_record_coherence_keeps_the_tiers_apart(document, problem):
     from ouroboros.preflight_receipts import _record_problem

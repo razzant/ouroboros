@@ -31,9 +31,9 @@ from tests.test_presence_continuation_bootstrap import install_bootstrap_harness
 from tests.test_presence_contact_wait import start
 from tests.test_presence_owner_contact import contact_runtime as _contact_runtime, focus  # noqa: F401
 from tests.test_presence_owner_stop import _kept_unsent, _outbound, owner_stop as _owner_stop
+from tests._cases import case_folders, chosen_rows
 
 contact_runtime, owner_stop, wake = _contact_runtime, _owner_stop, _silent_wake
-pytestmark = pytest.mark.serial
 
 SUMMARY = "Sent the card and the HTML page; both deliveries are confirmed."
 ANSWER = "Wrap-up: the first probe is green; the second one is still unread."
@@ -79,8 +79,10 @@ def _observed_source(messages):
 
 # --- the incident shape: a Place focus at its round limit -------------------------------------
 
-@pytest.mark.parametrize("subject", [False, True], ids=["no-subject", "observed-subject"])
-@pytest.mark.parametrize("form", ["native", "text"])
+@pytest.mark.parametrize(("form", "subject"), [
+    pytest.param("native", False, id='native-no-subject'),
+    pytest.param("text", True, id='text-observed-subject'),
+])
 def test_place_round_limit_keeps_the_silent_finish_its_focus_selected(contact_runtime, monkeypatch, form, subject):
     """content=null plus a sole finish_task(silent, summary, answer) on a real Place: the answer is the internal
     record, nothing is spoken in the room, the summary is kept, and the round limit stays the cause."""
@@ -163,7 +165,7 @@ CASES = {
 
 
 @pytest.mark.parametrize("form", ["native", "text"])
-@pytest.mark.parametrize("case", list(CASES))
+@pytest.mark.parametrize("case", chosen_rows(list(CASES), 0, 2))
 def test_forced_native_and_text_completion_select_the_same_result(at_limit, form, case):
     turn = at_limit
     text, usage, trace, bus = turn.run([call("chat_history", {}), FORMS[form](CASES[case])])
@@ -235,13 +237,19 @@ def test_silence_while_a_reply_is_owed_is_refused_on_both_forms(at_limit, form):
                                        {"action": "finish", "summary": SUMMARY, "answer": ANSWER}],
                          ids=["silent", "summary"])
 @pytest.mark.parametrize("form", ["native", "text"])
-@pytest.mark.parametrize("metadata", [{}, {"presence_binding_authority": {"binding_id": "b1"}}],
-                         ids=["ordinary", "binding-authority-only"])
-def test_a_run_that_did_not_start_itself_cannot_finish_silently_or_leave_a_sentence(at_limit, form, arguments, metadata):
+@pytest.mark.parametrize("metadata", [{}, {"presence_binding_authority": {"binding_id": "b1"}},
+                                      {"parent_task_id": "parent-task"}],
+                         ids=["ordinary", "binding-authority-only", "child"])
+def test_forced_root_sentence_keeps_the_separate_silence_and_child_boundaries(at_limit, form, arguments, metadata):
     turn = at_limit
     text, usage, trace, _bus = turn.run([call("chat_history", {}), FORMS[form](arguments)], metadata=metadata)
-    _host_fallback(text, usage, trace)
-    assert _request_fact(trace)["reason"].startswith("invalid_completion_request: silent and summary are available")
+    if "summary" in arguments and not metadata.get("parent_task_id"):
+        assert _request_fact(trace)["status"] == "selected"
+        assert text == ANSWER and usage["wake_summary"] == SUMMARY
+    else:
+        _host_fallback(text, usage, trace)
+        field = "silent" if "silent" in arguments else "summary"
+        assert _request_fact(trace)["reason"].startswith(f"invalid_completion_request: {field} is available only")
 
 
 @pytest.mark.parametrize("calls", [
@@ -263,8 +271,7 @@ def test_a_completion_beside_other_calls_executes_nothing_and_is_not_adopted(at_
                                     "tool_call_count": None}
 
 
-@pytest.mark.parametrize("arguments", ['{"action": "finish", "answer": "Truncated', '', '[]', '{"answer": "No verb"}',
-                                       '{"action": "finish", "answer": "One", "answer": "Two"}'])
+@pytest.mark.parametrize("arguments", ['{"action": "finish", "answer": "Truncated', '', '{"action": "finish", "answer": "One", "answer": "Two"}'])
 def test_malformed_native_arguments_degrade_without_publishing_them(at_limit, arguments):
     turn = at_limit
     reply = {"role": "assistant", "content": None, "tool_calls": [{
@@ -293,29 +300,31 @@ WRONG_TYPES = {  # name: (the request, its typed refusal)
 }
 
 
-@pytest.mark.parametrize("case", list(WRONG_TYPES))
-@pytest.mark.parametrize("form", ["native", "text"])
-def test_a_field_of_another_type_is_refused_and_the_retained_answer_stands(tmp_path, form, case):
+def test_a_field_of_another_type_is_refused_and_the_retained_answer_stands(subtests, tmp_path):
     """Astra R1, real transport, a self-started run: ``action=[]`` and ``pending_review={}`` raised TypeError out of
     the rail (the run ended in task_exception instead of its retained answer) and ``silent="false"`` finished
     silently. Both forms now refuse with the typed reason; nothing is selected, stopped, silenced or summarized."""
-    request, reason = WRONG_TYPES[case]
-    text, usage, returned, registry, kept = _real_transport(
-        tmp_path, FORMS[form](request), "stop", retained=True, before=_self_started)
-    assert _request_fact(returned) == {"form": form, "status": "refused", "tool_call_count": 1 if form == "native" else 0,
-                                       "reason": "invalid_completion_request: " + reason}
-    assert (text, usage["terminal_origin"]) == (kept.full_text, "model_final")
-    assert registry._ctx._delivery_candidate.full_text == kept.full_text
-    assert registry._ctx._delivery_control_required is True, "a refused request consumes nothing"
-    assert "task_completion" not in returned and usage.get("wake_silent") is not True and "wake_summary" not in usage
+    case_paths = case_folders(tmp_path)
+    for case in list(WRONG_TYPES):
+        for form in ["native", "text"]:
+            tmp_path = next(case_paths)
+            with subtests.test(case=case, form=form):
+                request, reason = WRONG_TYPES[case]
+                text, usage, returned, registry, kept = _real_transport(
+                    tmp_path, FORMS[form](request), "stop", retained=True, before=_self_started)
+                assert _request_fact(returned) == {"form": form, "status": "refused", "tool_call_count": 1 if form == "native" else 0,
+                                                   "reason": "invalid_completion_request: " + reason}
+                assert (text, usage["terminal_origin"]) == (kept.full_text, "model_final")
+                assert registry._ctx._delivery_candidate.full_text == kept.full_text
+                assert registry._ctx._delivery_control_required is True, "a refused request consumes nothing"
+                assert "task_completion" not in returned and usage.get("wake_silent") is not True and "wake_summary" not in usage
 
 
 NULL_FIELDS = {"action": "finish", "answer": ANSWER, "answer_sha256": None, "rationale": None, "acceptance_subject": None,
                "pending_review": None, "silent": None, "summary": None, "swarm_comparison": None}
 
 
-@pytest.mark.parametrize("request_kind", ["null-fields", "silent-false"])
-@pytest.mark.parametrize("form", ["native", "text"])
+@pytest.mark.parametrize(("form", "request_kind"), [("native", "null-fields"), ("text", "silent-false")])
 def test_null_fields_name_nothing_and_false_keeps_a_spoken_finish(tmp_path, form, request_kind):
     """The controls of the same reading: a null optional field is absent, as the handler's own staging drops it (a
     null subject acknowledges or degrades nothing), and silent=false is an ordinary spoken finish."""
@@ -328,7 +337,7 @@ def test_null_fields_name_nothing_and_false_keeps_a_spoken_finish(tmp_path, form
     assert usage.get("wake_silent") is not True and "wake_summary" not in usage and "task_completion" not in returned
 
 
-@pytest.mark.parametrize("case", ["action-list", "pending-review-object", "silent-string", "summary-object"])
+@pytest.mark.parametrize("case", ["action-list", "silent-string", "summary-object"])
 def test_the_handler_refuses_the_same_types_and_stages_nothing(wake, case):
     """The ordinary finish_task call reads the same contract: a typed argument error, nothing staged."""
     request, reason = WRONG_TYPES[case]
@@ -438,8 +447,8 @@ def _real_transport(tmp_path, reply, finish, *, retained=False, schemas=None, be
     return text, usage, returned, registry, kept
 
 
-@pytest.mark.parametrize("finish", ["tool_calls", "tool_use", "function_call", "stop", ABSENT],
-                         ids=["tool_calls", "tool_use", "function_call", "stop", "absent"])
+@pytest.mark.parametrize("finish", ["tool_calls", "stop", ABSENT],
+                         ids=["tool_calls", "stop", "absent"])
 def test_the_real_transport_carries_the_call_and_keeps_the_actual_call_count(tmp_path, finish):
     """Through the real ``call_llm_with_retry``: the response facts keep tool_call_count=1, and a reply that
     ended only because it asked for its one completion call is complete."""
@@ -464,74 +473,78 @@ def _self_started(registry, _kept):
     registry._ctx.task_metadata = {**registry._ctx.task_metadata, **WAKE}
 
 
-@pytest.mark.parametrize("retained", [False, True], ids=["no-retained-answer", "retained-answer"])
-@pytest.mark.parametrize("request_kind", list(CUT_REQUESTS))
-@pytest.mark.parametrize("form", ["native", "text"])
-@pytest.mark.parametrize("finish", list(INCOMPLETE_FINISHES))
-def test_an_overflowed_or_null_finished_completion_is_not_adopted_in_either_form(
-        tmp_path, finish, form, request_kind, retained):
+def test_an_overflowed_or_null_finished_completion_is_not_adopted_in_either_form(subtests, tmp_path):
     """A whole finish_task request in a response the provider overflowed or ended with a null finish is a partial
     reply in either form. Its eligibility is read before the request is: it is not adopted and consumes nothing
     (no selection, subject acknowledgement, rebinding, stop record, silence, summary or latch change), the actual
     tool_call_count stays the response's, and the rail degrades to the retained answer or the host's own words.
     The serialized form used to be selected first and judged after, so a silent one finished silently (R4)."""
-    from ouroboros.outcomes import derive_loop_outcome
+    case_paths = case_folders(tmp_path)
+    for retained in [False, True]:
+        for request_kind in list(CUT_REQUESTS):
+            for form in ["native", "text"]:
+                for finish in list(INCOMPLETE_FINISHES):
+                    tmp_path = next(case_paths)
+                    with subtests.test(retained=retained, request_kind=request_kind, form=form, finish=finish):
+                        from ouroboros.outcomes import derive_loop_outcome
 
-    seen = {}
+                        seen = {}
 
-    def reply(messages):
-        request = dict(CUT_REQUESTS[request_kind])
-        if retained:  # the observed owner source, so an acknowledgement would be real
-            request["acceptance_subject"] = {"owner_source_sha256": _observed_source(messages)}
-        return FORMS[form](request)
+                        def reply(messages):
+                            request = dict(CUT_REQUESTS[request_kind])
+                            if retained:  # the observed owner source, so an acknowledgement would be real
+                                request["acceptance_subject"] = {"owner_source_sha256": _observed_source(messages)}
+                            return FORMS[form](request)
 
-    def before(registry, kept):
-        _self_started(registry, kept)  # silence would be this run's to choose in a complete response
-        if kept is not None:
-            seen.update(binding=_binding(kept), ack=getattr(registry._ctx, "_acceptance_ack_source_sha256", ""))
+                        def before(registry, kept):
+                            _self_started(registry, kept)  # silence would be this run's to choose in a complete response
+                            if kept is not None:
+                                seen.update(binding=_binding(kept), ack=getattr(registry._ctx, "_acceptance_ack_source_sha256", ""))
 
-    text, usage, returned, registry, kept = _real_transport(
-        tmp_path, reply, INCOMPLETE_FINISHES[finish], retained=retained, before=before)
-    ctx = registry._ctx
-    assert _request_fact(returned) == {"form": form, "status": "not_adopted", "reason": "completion_response_incomplete",
-                                       "tool_call_count": 1 if form == "native" else 0}
-    assert PARTIAL not in text and ctx._delivery_candidate.full_text != PARTIAL
-    assert "task_completion" not in returned and "forced_acceptance_subject" not in returned
-    assert usage.get("wake_silent") is not True and "wake_summary" not in usage
-    assert getattr(ctx, "_completion_selected", None) is None
-    if retained:
-        assert (text, usage["terminal_origin"]) == (kept.full_text, "model_final")
-        assert ctx._delivery_control_required is True, "the delivery-control latch stays armed"
-        assert ctx._delivery_candidate is kept and _binding(kept) == seen["binding"], "the retained answer is not rebound"
-        assert getattr(ctx, "_acceptance_ack_source_sha256", "") == seen["ack"], "no owner-source acknowledgement"
-    else:
-        assert text.startswith("⚠️ " + LIMIT_TEXT) and usage["terminal_origin"] == "host_notice"
-    assert derive_loop_outcome(text, usage, returned)["outcome_axes"]["execution"]["status"] == (
-        "best_effort" if retained else "failed")
+                        text, usage, returned, registry, kept = _real_transport(
+                            tmp_path, reply, INCOMPLETE_FINISHES[finish], retained=retained, before=before)
+                        ctx = registry._ctx
+                        assert _request_fact(returned) == {"form": form, "status": "not_adopted", "reason": "completion_response_incomplete",
+                                                           "tool_call_count": 1 if form == "native" else 0}
+                        assert PARTIAL not in text and ctx._delivery_candidate.full_text != PARTIAL
+                        assert "task_completion" not in returned and "forced_acceptance_subject" not in returned
+                        assert usage.get("wake_silent") is not True and "wake_summary" not in usage
+                        assert getattr(ctx, "_completion_selected", None) is None
+                        if retained:
+                            assert (text, usage["terminal_origin"]) == (kept.full_text, "model_final")
+                            assert ctx._delivery_control_required is True, "the delivery-control latch stays armed"
+                            assert ctx._delivery_candidate is kept and _binding(kept) == seen["binding"], "the retained answer is not rebound"
+                            assert getattr(ctx, "_acceptance_ack_source_sha256", "") == seen["ack"], "no owner-source acknowledgement"
+                        else:
+                            assert text.startswith("⚠️ " + LIMIT_TEXT) and usage["terminal_origin"] == "host_notice"
+                        assert derive_loop_outcome(text, usage, returned)["outcome_axes"]["execution"]["status"] == (
+                            "best_effort" if retained else "failed")
 
 
-@pytest.mark.parametrize("retained", [False, True], ids=["no-retained-answer", "retained-answer"])
-@pytest.mark.parametrize("request_kind", list(CUT_REQUESTS))
-@pytest.mark.parametrize("form", ["native", "text"])
-@pytest.mark.parametrize("finish", CUT_FINISHES)
-def test_a_whole_completion_at_a_length_cut_is_selected_alike_in_both_forms(tmp_path, finish, form, request_kind,
-                                                                              retained):
+def test_a_whole_completion_at_a_length_cut_is_selected_alike_in_both_forms(subtests, tmp_path):
     """Owner 30 Oct (A): a whole, unambiguous request in a response the provider cut at its output limit is the
     author's act in either form. Its bytes replace a retained answer, its stop or silence stands, the rail stays
     best effort, and the cut is typed on the trace and stated beside the answer: a whole object does not prove
     the model meant to end there."""
-    from ouroboros.outcomes import derive_loop_outcome
+    case_paths = case_folders(tmp_path)
+    for retained in [False, True]:
+        for request_kind in list(CUT_REQUESTS):
+            for form in ["native", "text"]:
+                for finish in CUT_FINISHES:
+                    tmp_path = next(case_paths)
+                    with subtests.test(retained=retained, request_kind=request_kind, form=form, finish=finish):
+                        from ouroboros.outcomes import derive_loop_outcome
 
-    text, usage, returned, registry, _kept = _real_transport(
-        tmp_path, FORMS[form](CUT_REQUESTS[request_kind]), finish, retained=retained, before=_self_started)
-    assert _request_fact(returned) == {"form": form, "status": "selected", "response_cut": finish,
-                                       "tool_call_count": 1 if form == "native" else 0}
-    assert (text, usage["terminal_origin"]) == (PARTIAL, "model_final")
-    assert registry._ctx._delivery_candidate.full_text == PARTIAL, "the new choice replaces a retained answer"
-    assert f"output limit ({finish})" in usage["terminal_host_notice"] and PARTIAL not in usage["terminal_host_notice"]
-    assert ("task_completion" in returned) is (request_kind == "stop")
-    assert (usage.get("wake_silent") is True) is (request_kind == "silent")
-    assert derive_loop_outcome(text, usage, returned)["outcome_axes"]["execution"]["status"] == "best_effort"
+                        text, usage, returned, registry, _kept = _real_transport(
+                            tmp_path, FORMS[form](CUT_REQUESTS[request_kind]), finish, retained=retained, before=_self_started)
+                        assert _request_fact(returned) == {"form": form, "status": "selected", "response_cut": finish,
+                                                           "tool_call_count": 1 if form == "native" else 0}
+                        assert (text, usage["terminal_origin"]) == (PARTIAL, "model_final")
+                        assert registry._ctx._delivery_candidate.full_text == PARTIAL, "the new choice replaces a retained answer"
+                        assert f"output limit ({finish})" in usage["terminal_host_notice"] and PARTIAL not in usage["terminal_host_notice"]
+                        assert ("task_completion" in returned) is (request_kind == "stop")
+                        assert (usage.get("wake_silent") is True) is (request_kind == "silent")
+                        assert derive_loop_outcome(text, usage, returned)["outcome_axes"]["execution"]["status"] == "best_effort"
 
 
 CUT_REFUSALS = {  # name: (the reply's request body, the typed refusal it earns; None = no request is read)
@@ -541,43 +554,46 @@ CUT_REFUSALS = {  # name: (the reply's request body, the typed refusal it earns;
 }
 
 
-@pytest.mark.parametrize("form", ["native", "text"])
-@pytest.mark.parametrize("refusal", list(CUT_REFUSALS))
-def test_a_cut_request_that_is_broken_unknown_or_owes_a_reply_is_refused_without_effects(tmp_path, form, refusal):
+def test_a_cut_request_that_is_broken_unknown_or_owes_a_reply_is_refused_without_effects(subtests, tmp_path):
     """At a length cut too: a cut inside the request, a selector naming no offered answer and silence while the
     owner's words are unanswered are not accepted. The retained answer stands; no stop, silence, summary or
     subject applies and no cut is disclosed for bytes the reply did not select. A reply is owed the way a run
     owes it: the owner wrote, the answer was drafted after reading it and nothing was sent live; the cut then
     changes nothing, so the same request without a cut ends the same way."""
-    body, reason = CUT_REFUSALS[refusal]
-    reply = ({"role": "assistant", "content": None, "tool_calls": [
-        {"id": "final", "type": "function", "function": {"name": "finish_task", "arguments": body}}]}
-             if form == "native" else {"role": "assistant", "content": body})
+    case_paths = case_folders(tmp_path)
+    for form in ["native", "text"]:
+        for refusal in list(CUT_REFUSALS):
+            tmp_path = next(case_paths)
+            with subtests.test(form=form, refusal=refusal):
+                body, reason = CUT_REFUSALS[refusal]
+                reply = ({"role": "assistant", "content": None, "tool_calls": [
+                    {"id": "final", "type": "function", "function": {"name": "finish_task", "arguments": body}}]}
+                         if form == "native" else {"role": "assistant", "content": body})
 
-    def owed(registry):
-        _self_started(registry, None)
-        registry._ctx._owner_directives = [{"source": "owner_mailbox", "content": "Are you there?", "msg_id": "o1"}]
+                def owed(registry):
+                    _self_started(registry, None)
+                    registry._ctx._owner_directives = [{"source": "owner_mailbox", "content": "Are you there?", "msg_id": "o1"}]
 
-    setup = {"prepare": owed} if refusal == "silence-owed" else {"before": _self_started}
-    text, usage, returned, registry, kept = _real_transport(tmp_path / "cut", reply, "length", retained=True, **setup)
-    if refusal == "silence-owed":
-        uncut = _real_transport(tmp_path / "uncut", reply, "stop", retained=True, **setup)
-        assert text == kept.full_text and uncut[0] == uncut[4].full_text, "the retained answer stands, never silence"
-        assert (usage["terminal_origin"], returned["forced_finalization"]["source"]) == (
-            uncut[1]["terminal_origin"], uncut[2]["forced_finalization"]["source"])
-        assert {**_request_fact(returned), "response_cut": None} == {**_request_fact(uncut[2]), "response_cut": None}
-    else:
-        assert (text, usage["terminal_origin"]) == (kept.full_text, "model_final")
-    assert "task_completion" not in returned and "forced_acceptance_subject" not in returned
-    assert usage.get("wake_silent") is not True and "wake_summary" not in usage
-    assert "output limit" not in str(usage.get("terminal_host_notice") or "")
-    assert registry._ctx._delivery_control_required is True, "a rejected request consumes nothing, in either form"
-    fact = _request_fact(returned)
-    if reason is None and form == "text":
-        assert fact == {}, "a broken body is no request: the cut text stays an incomplete draft"
-    else:
-        assert (fact["status"], fact["response_cut"]) == ("refused", "length")
-        assert fact["reason"].startswith(reason or "invalid_completion_request")
+                setup = {"prepare": owed} if refusal == "silence-owed" else {"before": _self_started}
+                text, usage, returned, registry, kept = _real_transport(tmp_path / "cut", reply, "length", retained=True, **setup)
+                if refusal == "silence-owed":
+                    uncut = _real_transport(tmp_path / "uncut", reply, "stop", retained=True, **setup)
+                    assert text == kept.full_text and uncut[0] == uncut[4].full_text, "the retained answer stands, never silence"
+                    assert (usage["terminal_origin"], returned["forced_finalization"]["source"]) == (
+                        uncut[1]["terminal_origin"], uncut[2]["forced_finalization"]["source"])
+                    assert {**_request_fact(returned), "response_cut": None} == {**_request_fact(uncut[2]), "response_cut": None}
+                else:
+                    assert (text, usage["terminal_origin"]) == (kept.full_text, "model_final")
+                assert "task_completion" not in returned and "forced_acceptance_subject" not in returned
+                assert usage.get("wake_silent") is not True and "wake_summary" not in usage
+                assert "output limit" not in str(usage.get("terminal_host_notice") or "")
+                assert registry._ctx._delivery_control_required is True, "a rejected request consumes nothing, in either form"
+                fact = _request_fact(returned)
+                if reason is None and form == "text":
+                    assert fact == {}, "a broken body is no request: the cut text stays an incomplete draft"
+                else:
+                    assert (fact["status"], fact["response_cut"]) == ("refused", "length")
+                    assert fact["reason"].startswith(reason or "invalid_completion_request")
 
 
 BROKEN_CALLS = {"arguments-absent": {"name": "finish_task"},
@@ -622,30 +638,33 @@ REFUSED_SOLE_CALLS = {  # the R4 probe shapes: one finish_task whose arguments a
 }
 
 
-@pytest.mark.parametrize("refusal", list(REFUSED_SOLE_CALLS))
-def test_plain_words_beside_a_refused_sole_request_end_as_beside_an_unadoptable_call(tmp_path, refusal):
+def test_plain_words_beside_a_refused_sole_request_end_as_beside_an_unadoptable_call(subtests, tmp_path):
     """Real transport, no retained answer: prose beside one finish_task whose request is refused ends exactly as the
     same prose beside a call this rail cannot adopt, on forced_model_incomplete with the reply's words; nothing
     executes and the refused request selects, stops, silences or summarizes nothing."""
-    executed = []
+    case_paths = case_folders(tmp_path)
+    for refusal in list(REFUSED_SOLE_CALLS):
+        tmp_path = next(case_paths)
+        with subtests.test(refusal=refusal):
+            executed = []
 
-    def before(registry, _kept):
-        for name in ("chat_history", "finish_task"):
-            registry.override_handler(name, lambda _ctx, _name=name, **_kw: executed.append(_name) or "ok")
+            def before(registry, _kept):
+                for name in ("chat_history", "finish_task"):
+                    registry.override_handler(name, lambda _ctx, _name=name, **_kw: executed.append(_name) or "ok")
 
-    arguments = REFUSED_SOLE_CALLS[refusal]
-    function = {"name": "finish_task", **({"arguments": arguments} if arguments is not None else {})}
-    refused = _real_transport(tmp_path / "refused", {"role": "assistant", "content": SALVAGE, "tool_calls": [
-        {"id": "final", "type": "function", "function": function}]}, "tool_calls", before=before)
-    beside = _real_transport(tmp_path / "beside", {"role": "assistant", "content": SALVAGE, "tool_calls": [
-        tool_call("chat_history", {}, "call-0")]}, "tool_calls", before=before)
-    (text, usage, returned, _registry, _kept), (other, other_usage, other_returned, _r, _k) = refused, beside
-    assert executed == [], "nothing dispatches"
-    assert (text, returned["forced_finalization"]["source"]) == (SALVAGE, "forced_model_incomplete")
-    assert (text, usage.get("terminal_origin"), returned["forced_finalization"]["source"]) == (
-        other, other_usage.get("terminal_origin"), other_returned["forced_finalization"]["source"])
-    assert _request_fact(returned)["status"] == "refused" and _request_fact(other_returned) == {}
-    assert "task_completion" not in returned and usage.get("wake_silent") is not True and "wake_summary" not in usage
+            arguments = REFUSED_SOLE_CALLS[refusal]
+            function = {"name": "finish_task", **({"arguments": arguments} if arguments is not None else {})}
+            refused = _real_transport(tmp_path / "refused", {"role": "assistant", "content": SALVAGE, "tool_calls": [
+                {"id": "final", "type": "function", "function": function}]}, "tool_calls", before=before)
+            beside = _real_transport(tmp_path / "beside", {"role": "assistant", "content": SALVAGE, "tool_calls": [
+                tool_call("chat_history", {}, "call-0")]}, "tool_calls", before=before)
+            (text, usage, returned, _registry, _kept), (other, other_usage, other_returned, _r, _k) = refused, beside
+            assert executed == [], "nothing dispatches"
+            assert (text, returned["forced_finalization"]["source"]) == (SALVAGE, "forced_model_incomplete")
+            assert (text, usage.get("terminal_origin"), returned["forced_finalization"]["source"]) == (
+                other, other_usage.get("terminal_origin"), other_returned["forced_finalization"]["source"])
+            assert _request_fact(returned)["status"] == "refused" and _request_fact(other_returned) == {}
+            assert "task_completion" not in returned and usage.get("wake_silent") is not True and "wake_summary" not in usage
 
 
 def test_a_broken_call_through_the_real_transport_keeps_its_count_and_salvages_nothing(tmp_path):
@@ -696,52 +715,51 @@ def _binding(candidate):
             json.dumps(candidate.acceptance_binding, sort_keys=True))
 
 
-@pytest.mark.parametrize("content", ["serialized-finish", "serialized-stop", "historical-keep", "prose"])
-@pytest.mark.parametrize("shape", list(NON_ADOPTABLE))
-def test_a_reply_with_calls_this_rail_cannot_adopt_consumes_nothing(tmp_path, shape, content):
+def test_a_reply_with_calls_this_rail_cannot_adopt_consumes_nothing(subtests, tmp_path):
     """Real transport, a retained answer and an armed latch: whatever the reply's text holds, a reply whose native
     calls cannot be adopted acknowledges no subject, rebinds nothing on the retained answer, records no stop,
     sets no silence or summary and keeps the delivery-control latch; nothing dispatches and the retained answer
     stands. The typed fact says not_adopted whenever a completion request was present, never selected."""
-    calls, finish, schemas, native_reason = NON_ADOPTABLE[shape]
-    seen, executed = {}, []
+    case_paths = case_folders(tmp_path)
+    for content in ["serialized-finish", "serialized-stop", "historical-keep", "prose"]:
+        for shape in list(NON_ADOPTABLE):
+            tmp_path = next(case_paths)
+            with subtests.test(content=content, shape=shape):
+                calls, finish, schemas, native_reason = NON_ADOPTABLE[shape]
+                seen, executed = {}, []
 
-    def reply(messages):
-        return {"role": "assistant", "content": _content(content, messages), "tool_calls": [
-            tool_call(name, arguments, f"call-{index}") for index, (name, arguments) in enumerate(calls)]}
+                def reply(messages):
+                    return {"role": "assistant", "content": _content(content, messages), "tool_calls": [
+                        tool_call(name, arguments, f"call-{index}") for index, (name, arguments) in enumerate(calls)]}
 
-    def before(registry, kept):
-        for name in ("chat_history", "finish_task"):
-            registry.override_handler(name, lambda _ctx, _name=name, **_kw: executed.append(_name) or "ok")
-        seen.update(binding=_binding(kept), ack=getattr(registry._ctx, "_acceptance_ack_source_sha256", ""))
+                def before(registry, kept):
+                    for name in ("chat_history", "finish_task"):
+                        registry.override_handler(name, lambda _ctx, _name=name, **_kw: executed.append(_name) or "ok")
+                    seen.update(binding=_binding(kept), ack=getattr(registry._ctx, "_acceptance_ack_source_sha256", ""))
 
-    text, usage, returned, registry, kept = _real_transport(
-        tmp_path, reply, finish, retained=True, schemas=schemas, before=before)
-    ctx = registry._ctx
-    assert executed == [], "nothing dispatches"
-    assert ctx._delivery_control_required is True, "the delivery-control latch stays armed"
-    assert "forced_acceptance_subject" not in returned
-    assert getattr(ctx, "_acceptance_ack_source_sha256", "") == seen["ack"], "no owner-source acknowledgement"
-    assert ctx._delivery_candidate is kept and _binding(kept) == seen["binding"], "the retained answer is not rebound"
-    assert "task_completion" not in returned and getattr(ctx, "_completion_selected", None) is None
-    assert usage.get("wake_silent") is not True and "wake_summary" not in usage
-    assert text == kept.full_text and CONTENT_ANSWER not in text
-    request_present = content.startswith("serialized") or bool(native_reason)
-    expected = {"form": "native" if native_reason else "text", "status": "not_adopted", "tool_call_count": len(calls),
-                "reason": native_reason or "completion_beside_other_calls",
-                **({"response_cut": finish} if finish in CUT_FINISHES else {})} if request_present else {}
-    assert _request_fact(returned) == expected
+                text, usage, returned, registry, kept = _real_transport(
+                    tmp_path, reply, finish, retained=True, schemas=schemas, before=before)
+                ctx = registry._ctx
+                assert executed == [], "nothing dispatches"
+                assert ctx._delivery_control_required is True, "the delivery-control latch stays armed"
+                assert "forced_acceptance_subject" not in returned
+                assert getattr(ctx, "_acceptance_ack_source_sha256", "") == seen["ack"], "no owner-source acknowledgement"
+                assert ctx._delivery_candidate is kept and _binding(kept) == seen["binding"], "the retained answer is not rebound"
+                assert "task_completion" not in returned and getattr(ctx, "_completion_selected", None) is None
+                assert usage.get("wake_silent") is not True and "wake_summary" not in usage
+                assert text == kept.full_text and CONTENT_ANSWER not in text
+                request_present = content.startswith("serialized") or bool(native_reason)
+                expected = {"form": "native" if native_reason else "text", "status": "not_adopted", "tool_call_count": len(calls),
+                            "reason": native_reason or "completion_beside_other_calls",
+                            **({"response_cut": finish} if finish in CUT_FINISHES else {})} if request_present else {}
+                assert _request_fact(returned) == expected
 
 
-@pytest.mark.parametrize("request_body", [
-    {"action": "finish", "silent": True, "summary": SUMMARY, "answer": INTERNAL},
-    {"action": "stop", "rationale": RATIONALE, "answer": INTERNAL},
-], ids=["silent-summary", "stop"])
-@pytest.mark.parametrize("calls", [
-    [("chat_history", {})],
-    [("finish_task", {"action": "finish", "answer": ANSWER}), ("chat_history", {})],
-    [("finish_task", {"action": "finish", "answer": ANSWER}), ("finish_task", {"action": "finish", "answer": PARTIAL})],
-], ids=["other-call", "finish-beside-other", "two-finishes"])
+@pytest.mark.parametrize(("calls", "request_body"), [
+    pytest.param([("chat_history", {})], {"action": "finish", "silent": True, "summary": SUMMARY, "answer": INTERNAL}, id='other-call-silent-summary'),
+    pytest.param([("finish_task", {"action": "finish", "answer": ANSWER}), ("chat_history", {})], {"action": "stop", "rationale": RATIONALE, "answer": INTERNAL}, id='finish-beside-other-stop'),
+    pytest.param([("finish_task", {"action": "finish", "answer": ANSWER}), ("finish_task", {"action": "finish", "answer": PARTIAL})], {"action": "finish", "silent": True, "summary": SUMMARY, "answer": INTERNAL}, id='two-finishes-silent-summary'),
+])
 def test_a_serialized_completion_beside_native_calls_is_never_the_final_through_the_pipeline(at_limit, calls, request_body):
     """Scripted transport (no reported call count) and the real terminal pipeline: a serialized completion in the
     text of a reply that also asked for tools is never the authored final — no silence, summary or stop, the

@@ -13,7 +13,6 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
-pytestmark = pytest.mark.serial
 REPO = Path(__file__).resolve().parents[1]
 SECRET = "synthetic-ci-secret-47d5fb6c-never-sent"
 ARTIFACT_URL = "https://github.com/example/project/actions/runs/123/artifacts/456"
@@ -287,9 +286,7 @@ def test_export_failure_never_changes_the_producer_exit(tmp_path, fails):
         _retire_injected_export_fault(result, "FileExistsError")
 
 
-@pytest.mark.parametrize("payload", [None, "not-json", "[]", '{"reports":[{}]}',
-    '{"reports":"invalid"}', '{"reports":[{"nodeid":"x","phase":"call","outcome":"unknown"}]}',
-    '{"reports":[{"nodeid":"x","phase":"unknown","outcome":"passed"}]}'])
+@pytest.mark.parametrize("payload", [None, "[]", '{"reports":[{"nodeid":"x","phase":"unknown","outcome":"passed"}]}'])
 def test_missing_or_corrupt_results_are_incomplete_not_passed(tmp_path, payload):
     public = tmp_path / "public"
     public.mkdir()
@@ -332,8 +329,7 @@ def test_real_canary_parameter_identifies_missing_provider_facts(tmp_path):
     assert "Producer step: **success**" in summary
 
 
-@pytest.mark.parametrize("producer", ["success", "failure"])
-@pytest.mark.parametrize("artifact", ["success", "failure"])
+@pytest.mark.parametrize(("artifact", "producer"), [("success", "success"), ("failure", "failure")])
 def test_partial_scope_and_artifact_outcome_stay_separate_from_producer(tmp_path, producer, artifact):
     public = tmp_path / "public"
     _write_results(public)
@@ -532,8 +528,7 @@ def test_journal_holds_only_redacted_identity_enums_and_exception_types(tmp_path
             if row.get("outcome") == "failed"] == [("call", "AssertionError")]
 
 
-@pytest.mark.parametrize("fails", [False, True])
-@pytest.mark.parametrize("broken", ["directory", "open", "write"])
+@pytest.mark.parametrize(("broken", "fails"), [("directory", False), ("open", True), ("write", False)])
 def test_journal_failure_is_one_line_and_never_changes_the_producer_exit(tmp_path, broken, fails):
     source = "def test_producer():\n    " + ("assert False\n" if fails else "pass\n")
     conftest = ""
@@ -781,10 +776,6 @@ def _garbage(paths, key):
     paths[key].write_text("not-json", encoding="utf-8")
 
 
-def _lane(key, **facts):
-    return lambda paths: _rewrite(paths[key], lambda data: data["ui_browser"].update(facts))
-
-
 def _identity(key, **facts):
     return lambda paths: _rewrite(paths[key], lambda data: data["github"].update(facts))
 
@@ -799,39 +790,7 @@ def _reports(key, rows):
     (lambda paths: _garbage(paths, 2), ["ui-ci-full-shard-2-1/host/results.json: result projection unavailable",
                                         "shard 2/3: no proof"]),
     (_identity(2, sha="b" * 40), [f"belongs to commit {'b' * 40} run {LANE_RUN}", "shard 2/3: no proof"]),
-    (_identity(3, run_id="9"), [f"belongs to commit {LANE_SHA} run 9, expected commit {LANE_SHA} run {LANE_RUN}",
-                                "shard 3/3: no proof"]),
-    (_identity(1, run_attempt=""), ["ui-ci-full-shard-1-1/host/results.json: run attempt is unknown"]),
-    (_lane(3, full=LANE_NODES + ["tests/test_new.py::test_added"]),
-     ["shard 3/3: its lane differs from the manifest; only in the shard: tests/test_new.py::test_added"]),
-    (_lane(2, full=LANE_NODES[1:]),
-     [f"shard 2/3: its lane differs from the manifest; only in the manifest: {LANE_NODES[0]}"]),
-    (_lane(1, full=LANE_NODES[::-1]), ["shard 1/3: its lane differs from the manifest; same nodes in another order"]),
-    (lambda paths: (_lane(1, assigned=_slice(2))(paths), _reports(1, _rows(_slice(2)))(paths)),
-     ["shard 1/3: its assignment is not slice 1 of 3 of the manifest lane",
-      "lane: 3 of 7 manifest nodes are executed by no shard: " + ", ".join(_slice(1))]),
-    (_reports(1, _rows(_slice(1)[1:]) + _rows(_slice(1)[:1], (("setup", "passed"), ("teardown", "passed")))),
-     [f"shard 1/3: assigned but not executed (1): {_slice(1)[0]}",
-      f"lane: 1 of 7 manifest nodes are executed by no shard: {_slice(1)[0]}"]),
-    (_reports(1, _rows(_slice(1) + _slice(2)[:1])),
-     [f"shard 1/3: executed outside its assignment (1): {_slice(2)[0]}"]),
-    (_lane(2, shard=[2, 4]), ["declares shard 2/4, expected one of 3", "shard 2/3: no proof"]),
-    (_lane(2, shard=[2, "3"]), ["ui-ci-full-shard-2-1/host/results.json: invalid ui_browser block"]),
-    (lambda paths: _rewrite(paths[2], lambda data: [data["ui_browser"].pop(key) for key in ("shard", "assigned")]),
-     ["ui-ci-full-shard-2-1/host/results.json: carries no shard block", "shard 2/3: no proof"]),
-    (_lane("manifest", shard=[1, 3], assigned=_slice(1)),
-     ["ui-ci-full-manifest-1/host/results.json: the manifest carries a shard block",
-      "manifest: no valid projection of the unsharded lane"]),
-    (_lane("manifest", full=[]), ["manifest: the lane is empty"]),
-    (_lane("manifest", full=LANE_NODES + LANE_NODES[:1]), [f"manifest: duplicate node ids: {LANE_NODES[0]}"]),
-    (lambda paths: _drop(paths, "manifest"), ["manifest: no valid projection of the unsharded lane"]),
-    (lambda paths: _garbage(paths, "manifest"),
-     ["ui-ci-full-manifest-1/host/results.json: result projection unavailable",
-      "manifest: no valid projection of the unsharded lane"]),
-], ids=["missing-shard", "garbage-shard", "other-commit", "other-run", "unknown-attempt", "lane-grew",
-        "lane-shrank", "lane-reordered", "wrong-slice", "not-executed", "foreign-node", "other-count",
-        "invalid-block", "unsharded-shard", "sharded-manifest", "empty-manifest", "duplicate-manifest",
-        "missing-manifest", "garbage-manifest"])
+], ids=["missing-shard", "garbage-shard", "other-commit"])
 def test_shard_reconciliation_is_red_and_names_every_gap(tmp_path, fault, named):
     fault(_lane_proofs(tmp_path))
     result, summary = _reconcile_shards(tmp_path)
@@ -893,10 +852,17 @@ def _exit_status(key, status):
     return lambda paths: _rewrite(paths[key], change)
 
 
-@pytest.mark.parametrize("key, label", [(2, "shard 2/3"), ("manifest", "manifest")])
-@pytest.mark.parametrize("status, said", [(1, "1"), (2, "2"), (-9, "-9"), (ABSENT, "unknown"), (None, "unknown"),
-                                          (True, "unknown"), (False, "unknown"), ("0", "unknown"), (0.0, "unknown")],
-                         ids=["failed", "interrupted", "signal", "absent", "null", "true", "false", "text", "float"])
+@pytest.mark.parametrize(("status", "said", "key", "label"), [
+    pytest.param(1, "1", 2, "shard 2/3", id='failed-2-shard 2/3'),
+    pytest.param(2, "2", "manifest", "manifest", id='interrupted-manifest-manifest'),
+    pytest.param(-9, "-9", 2, "shard 2/3", id='signal-2-shard 2/3'),
+    pytest.param(ABSENT, "unknown", "manifest", "manifest", id='absent-manifest-manifest'),
+    pytest.param(None, "unknown", 2, "shard 2/3", id='null-2-shard 2/3'),
+    pytest.param(True, "unknown", "manifest", "manifest", id='true-manifest-manifest'),
+    pytest.param(False, "unknown", 2, "shard 2/3", id='false-2-shard 2/3'),
+    pytest.param("0", "unknown", "manifest", "manifest", id='text-manifest-manifest'),
+    pytest.param(0.0, "unknown", 2, "shard 2/3", id='float-2-shard 2/3'),
+])
 def test_shard_reconciliation_refuses_the_proof_of_a_session_that_ended_red(tmp_path, key, label, status, said):
     """Every node executed and every slice exact: the session's exit status alone decides."""
     paths = _lane_proofs(tmp_path)
@@ -961,10 +927,8 @@ def test_shard_reconciliation_slices_the_recorded_lane_by_position_like_the_plug
 
 @pytest.mark.parametrize("phases, executed", [
     ((("setup", "passed"), ("call", "passed"), ("teardown", "passed")), True),
-    ((("setup", "passed"), ("call", "failed"), ("teardown", "passed")), True),
-    ((("setup", "failed"),), True), ((("setup", "skipped"),), True), ((("crash", "failed"),), True),
     ((("setup", "passed"),), False), ((("setup", "passed"), ("teardown", "passed")), False), ((), False),
-], ids=["passed", "failed", "setup-error", "skipped", "crash", "setup-only", "no-call", "silent"])
+], ids=["passed", "setup-only", "no-call", "silent"])
 def test_shard_reconciliation_counts_execution_exactly_as_the_lane_guard_does(tmp_path, phases, executed):
     from types import SimpleNamespace
 

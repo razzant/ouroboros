@@ -147,8 +147,12 @@ def test_cancelled_create_settles_original_admission(tmp_path, monkeypatch, mode
         assert row is None and not snapshots
 
 
-@pytest.mark.parametrize("mode", ["asyncio", "anyio"])
-@pytest.mark.parametrize("surface", ["get", "legacy_initial", "legacy_final", "v2"])
+@pytest.mark.parametrize(("surface", "mode"), [
+    ("get", "asyncio"),
+    ("legacy_initial", "anyio"),
+    ("legacy_final", "anyio"),
+    ("v2", "asyncio"),
+])
 def test_cancelled_result_read_finishes_materialization(tmp_path, monkeypatch, mode, surface):
     data = tmp_path / "data"
     data.mkdir()

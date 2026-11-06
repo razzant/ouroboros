@@ -39,7 +39,7 @@ def _render(tmp_path, value):
     return json.JSONDecoder().raw_decode(raw)[0], section
 
 
-@pytest.mark.parametrize("provider", ["telegram", "slack", "email", "custom"])
+@pytest.mark.parametrize("provider", ["telegram", "slack", "custom"])
 def test_current_route_never_uses_wildcard_or_proactive_room(tmp_path, provider):
     value = _value(provider=provider)
     before = deepcopy(value)

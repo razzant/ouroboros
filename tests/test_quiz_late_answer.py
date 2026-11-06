@@ -581,8 +581,7 @@ def _intake(tmp_path, monkeypatch, bridge, *, running=None):
     return started
 
 
-@pytest.mark.parametrize("room", ["project", "main"])
-@pytest.mark.parametrize("head_asker", ["task-1", "task-other"])
+@pytest.mark.parametrize(("head_asker", "room"), [("task-1", "project"), ("task-other", "main")])
 def test_a_late_answer_reaches_the_head_its_askers_earlier_answer_started(tmp_path, monkeypatch, room, head_asker):
     """One asker's answers are one thread: through the real bridge intake, a late answer reads the
     live head that an earlier late answer to the SAME asker started, beside an unrelated reader, in

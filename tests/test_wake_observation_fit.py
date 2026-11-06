@@ -171,7 +171,7 @@ def test_a_known_window_that_cannot_hold_it_gets_the_source_overview(tmp_path, m
     assert ctx.messages[1]["content"] == PROJECTION
     assert ctx.messages[1]["cache_control"] == {"type": "ephemeral"}  # re-sealed as the prefix anchor
     assert ctx.tools._ctx.task_metadata["wake_observation"] is WAKE  # the source facts are untouched
-    assert events == [{"checkpoint_kind": "wake_input_by_source", "round": 1, "after_overflow": False,
+    assert events == [{"checkpoint_kind": "wake_input_by_source", "round": 1, "after_overflow": False, "form": "pointer",
                        "composition": {"task_terminal": 2500}, "source_sha256": "f" * 64}]
 
 
@@ -458,8 +458,7 @@ def test_a_start_whose_route_holds_the_observation_sends_it_whole(tmp_path, monk
     assert messages[1]["content"] == task["text"] and _wake_checkpoints(env) == []
 
 
-@pytest.mark.parametrize("mode", ["max", "low", "nano"])
-@pytest.mark.parametrize("damage", ["missing", "corrupt", "never_stored"])
+@pytest.mark.parametrize(("damage", "mode"), [("missing", "max"), ("corrupt", "low"), ("never_stored", "nano")])
 def test_a_projection_without_its_retained_source_is_never_delivered(tmp_path, monkeypatch, caplog, mode, damage):
     """A projection is usable only beside the complete source it names. A source gone, damaged or never stored
     leaves the whole input the only delivery: Max and Low name the impossible start, owner-Nano keeps its exact

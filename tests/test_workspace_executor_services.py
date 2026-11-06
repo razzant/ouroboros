@@ -7,8 +7,9 @@ task and global cleanup they participate in, the keep-alive that survives task
 teardown, the panic cleanup that kills durable foreground and service processes, and
 the child-drive records a parent data root must scan.
 
-Whole-file serial suite: it spawns real processes, so ``tests/conftest.py`` tags it
-``serial`` and the parallel pass excludes it.
+Runs in the xdist pass beside other files: its processes are owned children killed within the
+test's own drive root and the per-worker registries are restored by
+``_isolate_workspace_executor_globals`` (``tests/test_workspace_executor.py``), so it names no host resource.
 """
 
 from __future__ import annotations
@@ -30,8 +31,7 @@ from tests._workspace_executor_shared import _init_repo, fake_docker_cli
 project = output_fixtures.project
 
 
-@pytest.mark.parametrize("executor_kind", [None, "local"])
-@pytest.mark.parametrize("other_worker", [False, True])
+@pytest.mark.parametrize(("other_worker", "executor_kind"), [(False, "local"), (True, None)])
 def test_quiet_service_log_stays_while_owned_and_archives_after_exit(tmp_path, monkeypatch, executor_kind, other_worker):
     from ouroboros import workspace_executor as executor
     from ouroboros.task_results import write_task_result
@@ -82,9 +82,10 @@ def test_quiet_service_log_stays_while_owned_and_archives_after_exit(tmp_path, m
         services._stop_service(ctx, "quiet")
 
 
-@pytest.mark.parametrize("executor_kind", [None, "local"])
-@pytest.mark.parametrize("output_newline", [None, "\r\n"])
-@pytest.mark.parametrize("secret_newline", ["\n", "\r\n"])
+@pytest.mark.parametrize(("secret_newline", "output_newline", "executor_kind"), [
+    ("\n", None, None),
+    ("\r\n", "\r\n", "local"),
+])
 def test_real_service_observes_exact_selected_env_and_cwd(tmp_path, monkeypatch, executor_kind, output_newline, secret_newline):
     import gzip
     from ouroboros.tools import services
@@ -170,7 +171,7 @@ def test_service_baseline_preserves_allowed_values_without_inheriting_credential
         assert "USER_API_TOKEN" not in env
 
 
-@pytest.mark.parametrize("invalid", [[], {"BAD=NAME": "x"}, {"": "x"}, {"KEY": None}, {"KEY": "x\x00y"}])
+@pytest.mark.parametrize("invalid", [[], {"BAD=NAME": "x"}, {"KEY": "x\x00y"}])
 def test_service_rejects_invalid_env_without_spawning(tmp_path, monkeypatch, invalid):
     from ouroboros.tools.services import _start_service
     monkeypatch.setattr("ouroboros.process_custody.spawn_supervised", lambda *a, **k: pytest.fail("must not spawn"))

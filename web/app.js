@@ -134,8 +134,8 @@ const navMainRow = primarySidebar?.querySelector('.nav-row-main');
 // The Projects list (projects_nav.js): the feed's rows as renderProjectsNav decides them (with their state read's
 // generation and the state's complete set of Project rooms), and, when the owner asks, every older Project by its
 // name or by Show more; a row opens through openProjectPanel. Its own list reads and confirmed changes take their
-// order from the same sequencer (`begin()` only numbers; it starts no read). A list that answered may show unread
-// rooms the feed does not: the number and marks follow, and another client's read of them is asked after.
+// order from the same sequencer (`begin()` only numbers; it starts no read). An older room a find or browse shows is
+// counted while shown (number, ☰, marks; `onShown` reads nothing) and another client's read of it is asked after.
 const projectsNav = createProjectsNav({ section: navProjects, header: navProjectsHeader, list: navProjectsList,
     toggle: navProjectsToggle, feed: () => lastProjectRows, feedOrder: () => projectsFeedOrder,
     nextOrder: () => stateSnapshots.begin().generation,
@@ -144,6 +144,7 @@ const projectsNav = createProjectsNav({ section: navProjects, header: navProject
     expanded: () => navState.projectsExpanded, readList: (options) => apiClient.projectList(options),
     isUnread: (row) => unreadCount(row.visible_revision, state.projectSeenRevision?.[row.id], readAheadFor(row.chat_id)) > 0,
     onListRead: () => { mergeProjectSeenRevisions(); if (projectsNav.unreadRows().length) refreshSharedProjectSeen(); },
+    onShown: () => { paintProjectsCount(); patchProjectActivityMarkers(); },
     open: (project, { pointer }) => openProjectPanel(project, { openOnly: true, pointer }), openMenu: openProjectMenu });
 const projectInstances = new Map();
 const projectPaintRequests = new Map();
@@ -1041,7 +1042,7 @@ function mergeProjectSeenRevisions(cursors) {
 }
 
 // Another client may already have read what this one still shows unread. Each state snapshot
-// or complete list that shows unread, in any row held, re-reads the shared cursors, one read at a time.
+// or complete list that shows unread, in any row the list counts, re-reads the shared cursors, one read at a time.
 let sharedSeenRead = null;
 function refreshSharedProjectSeen() {
     sharedSeenRead ||= fetchJson('/api/ui/preferences', { cache: 'no-store' })
@@ -1050,8 +1051,8 @@ function refreshSharedProjectSeen() {
         .finally(() => { sharedSeenRead = null; });
 }
 
-// The Projects number counts what Main's does (owner Q1 = B): unread standalone messages, summed over the rows held
-// (projects_nav.js): the feed's, and every room a complete list has shown. A room beyond both is not known here.
+// The Projects number counts what Main's does (owner Q1 = B): unread standalone messages, summed over the rows the
+// list shows (projects_nav.js `unreadRows`): the feed's, hidden or not, and those an open find or browse lists.
 function paintProjectsCount() {
     if (!navProjectsCount) return;
     const seen = state.projectSeenRevision || {};

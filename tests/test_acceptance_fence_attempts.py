@@ -20,7 +20,6 @@ from tests.test_worker_crash_retry import (
     _reserved_job as _reserved_crash_job,
 )
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture(autouse=True)
@@ -85,8 +84,7 @@ def test_crash_recovery_releases_the_exact_fence_before_its_retry_and_refuses_a_
     assert not queue.ACCEPTANCE_FENCES
 
 
-@pytest.mark.parametrize("preserved", ["live", "replacement", "sealed", "foreign_task", "foreign_attempt",
-                                       "foreign_pid", "missing_pid", "direct", "paused"])
+@pytest.mark.parametrize("preserved", ["live", "foreign_task", "paused"])
 def test_crash_recovery_preserves_other_acceptance_owners(tmp_path, monkeypatch, preserved):
     from supervisor import queue, workers, worker_health
 

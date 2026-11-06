@@ -28,6 +28,7 @@ from ouroboros.review_state import (
     update_state,
 )
 from ouroboros.review_status_projection import build_review_projection
+from tests._cases import case_folders
 
 _HEADS = ("state", "review_ledger", "preflight_heads.json")
 _EVICTIONS = ("newer_foreign_looks", "hot_index_rotation")
@@ -118,56 +119,65 @@ def _assert_fresh(drive, repo, look_id):
     assert (projection["preflight"] or {}).get("record_id") == look_id
 
 
-@pytest.mark.parametrize("eviction", _EVICTIONS)
-def test_the_marker_of_a_real_look_survives_the_look_leaving_the_hot_window(tmp_path, monkeypatch, eviction):
-    drive, repo = _drive(tmp_path), _checkout(tmp_path, "repo")
-    _reviewed(drive, repo)
-    look_id = _look(drive, repo)
-    _edit(drive, repo, "task-a")
-    _assert_stale(drive, repo, look_id, "task-a")
+def test_the_marker_of_a_real_look_survives_the_look_leaving_the_hot_window(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for eviction in _EVICTIONS:
+        tmp_path = next(case_paths)
+        with subtests.test(eviction=eviction), monkeypatch.context() as monkeypatch:
+            drive, repo = _drive(tmp_path), _checkout(tmp_path, "repo")
+            _reviewed(drive, repo)
+            look_id = _look(drive, repo)
+            _edit(drive, repo, "task-a")
+            _assert_stale(drive, repo, look_id, "task-a")
 
-    _evict(eviction, drive, tmp_path, monkeypatch)
+            _evict(eviction, drive, tmp_path, monkeypatch)
 
-    assert not _in_hot_window(drive, look_id), "the scenario: the old bounded read no longer shows the look"
-    assert review_ledger.load_record(drive, look_id)["surface"] == "preflight", "its source record is kept"
-    _assert_stale(drive, repo, look_id, "task-a")
-    # A later mutation keeps the first one's attribution: the marker names the edit that staled the look.
-    _edit(drive, repo, "task-b")
-    _assert_stale(drive, repo, look_id, "task-a")
-
-
-@pytest.mark.parametrize("eviction", _EVICTIONS)
-def test_the_first_mutation_after_the_look_left_the_hot_window_marks_it_stale(tmp_path, monkeypatch, eviction):
-    drive, repo = _drive(tmp_path), _checkout(tmp_path, "repo")
-    _reviewed(drive, repo)
-    look_id = _look(drive, repo)
-    _evict(eviction, drive, tmp_path, monkeypatch)
-    assert not _in_hot_window(drive, look_id)
-    _assert_fresh(drive, repo, look_id)  # still the checkout's look, and nothing has moved since it
-
-    _edit(drive, repo, "task-a")
-
-    state = load_state(drive)
-    assert (state.last_stale_task_id, state.last_stale_repo_key) == ("task-a", make_repo_key(repo))
-    _assert_stale(drive, repo, look_id, "task-a")
+            assert not _in_hot_window(drive, look_id), "the scenario: the old bounded read no longer shows the look"
+            assert review_ledger.load_record(drive, look_id)["surface"] == "preflight", "its source record is kept"
+            _assert_stale(drive, repo, look_id, "task-a")
+            # A later mutation keeps the first one's attribution: the marker names the edit that staled the look.
+            _edit(drive, repo, "task-b")
+            _assert_stale(drive, repo, look_id, "task-a")
 
 
-@pytest.mark.parametrize("eviction", _EVICTIONS)
-def test_a_newer_look_retires_the_marker_even_once_it_left_the_hot_window(tmp_path, monkeypatch, eviction):
-    drive, repo = _drive(tmp_path), _checkout(tmp_path, "repo")
-    _reviewed(drive, repo)
-    _look(drive, repo)
-    _edit(drive, repo, "task-a")
-    newer = _look(drive, repo)  # the author looks again after the edit
-    _assert_fresh(drive, repo, newer)
+def test_the_first_mutation_after_the_look_left_the_hot_window_marks_it_stale(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for eviction in _EVICTIONS:
+        tmp_path = next(case_paths)
+        with subtests.test(eviction=eviction), monkeypatch.context() as monkeypatch:
+            drive, repo = _drive(tmp_path), _checkout(tmp_path, "repo")
+            _reviewed(drive, repo)
+            look_id = _look(drive, repo)
+            _evict(eviction, drive, tmp_path, monkeypatch)
+            assert not _in_hot_window(drive, look_id)
+            _assert_fresh(drive, repo, look_id)  # still the checkout's look, and nothing has moved since it
 
-    _evict(eviction, drive, tmp_path, monkeypatch)
+            _edit(drive, repo, "task-a")
 
-    assert not _in_hot_window(drive, newer)
-    _assert_fresh(drive, repo, newer)  # the older marker stays retired: it never resurfaces as current
-    assert load_state(drive).last_stale_task_id == "task-a", "the retired marker itself stays in the file"
-    _edit(drive, repo, "task-b")  # the first mutation after the newer look stales it, naming its editor
-    _assert_stale(drive, repo, newer, "task-b")
+            state = load_state(drive)
+            assert (state.last_stale_task_id, state.last_stale_repo_key) == ("task-a", make_repo_key(repo))
+            _assert_stale(drive, repo, look_id, "task-a")
+
+
+def test_a_newer_look_retires_the_marker_even_once_it_left_the_hot_window(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for eviction in _EVICTIONS:
+        tmp_path = next(case_paths)
+        with subtests.test(eviction=eviction), monkeypatch.context() as monkeypatch:
+            drive, repo = _drive(tmp_path), _checkout(tmp_path, "repo")
+            _reviewed(drive, repo)
+            _look(drive, repo)
+            _edit(drive, repo, "task-a")
+            newer = _look(drive, repo)  # the author looks again after the edit
+            _assert_fresh(drive, repo, newer)
+
+            _evict(eviction, drive, tmp_path, monkeypatch)
+
+            assert not _in_hot_window(drive, newer)
+            _assert_fresh(drive, repo, newer)  # the older marker stays retired: it never resurfaces as current
+            assert load_state(drive).last_stale_task_id == "task-a", "the retired marker itself stays in the file"
+            _edit(drive, repo, "task-b")  # the first mutation after the newer look stales it, naming its editor
+            _assert_stale(drive, repo, newer, "task-b")
 
 
 def test_a_marker_no_look_precedes_stays_archived_while_looks_come_and_leave(tmp_path, monkeypatch):
@@ -304,18 +314,21 @@ def test_incomplete_head_import_never_erases_an_archived_modern_marker(tmp_path,
         _assert_fresh(drive, repo, newer)  # an actual new look resolves this checkout
 
 
-@pytest.mark.parametrize("eviction", _EVICTIONS)
-def test_first_edit_after_incomplete_import_is_recorded_with_a_gap(tmp_path, monkeypatch, eviction):
-    drive, repo = _drive(tmp_path), _checkout(tmp_path, "repo")
-    _reviewed(drive, repo)
-    _look(drive, repo)
-    _evict(eviction, drive, tmp_path, monkeypatch)
-    drive.joinpath(*_HEADS).unlink()
-    _look(drive, _checkout(tmp_path, "new-writer"))
-    _edit(drive, repo, "task-a")
-    panel, context, projection = _surfaces(drive, repo)
-    assert panel["stale_task_id"] == "task-a" and panel["preflight_unreadable"]
-    assert "marker unverified" in context and projection["effective_status"] == "unknown"
+def test_first_edit_after_incomplete_import_is_recorded_with_a_gap(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for eviction in _EVICTIONS:
+        tmp_path = next(case_paths)
+        with subtests.test(eviction=eviction), monkeypatch.context() as monkeypatch:
+            drive, repo = _drive(tmp_path), _checkout(tmp_path, "repo")
+            _reviewed(drive, repo)
+            _look(drive, repo)
+            _evict(eviction, drive, tmp_path, monkeypatch)
+            drive.joinpath(*_HEADS).unlink()
+            _look(drive, _checkout(tmp_path, "new-writer"))
+            _edit(drive, repo, "task-a")
+            panel, context, projection = _surfaces(drive, repo)
+            assert panel["stale_task_id"] == "task-a" and panel["preflight_unreadable"]
+            assert "marker unverified" in context and projection["effective_status"] == "unknown"
 
 
 def test_current_head_read_does_not_replay_the_index(tmp_path, monkeypatch):

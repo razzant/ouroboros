@@ -24,7 +24,7 @@ from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
 from tests.test_reconnect_feed_browser import HISTORY_LANDED
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 # Midday UTC instants keep "Dec 31" / "Jan 1" stable in any server zone from UTC-11 to UTC+11.
 DUE = "Call mother about Sunday."

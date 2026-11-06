@@ -32,7 +32,7 @@ from tests.test_subscription_setup_browser import subscription_ui as subscriptio
 from tests.test_usage_lock_continuity import held_lock
 from tests._usage_store_testing import request, root as root
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def test_accounting_waits_fold_into_one_receipt_row_while_logs_keep_each_phase(subscription_ui, root, monkeypatch, tmp_path):

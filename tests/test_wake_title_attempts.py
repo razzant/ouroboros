@@ -57,7 +57,7 @@ def test_wake_cause_title_is_the_carriers_first_frame_and_finish_replaces_only_w
         seed_wake(clock.root, task_id=task_id, status="running", metadata=task["metadata"],
                   suggested_name=row["suggested_name"], title="", execution_owner=task["_execution_owner"])
         write_task_result(clock.root, task_id, "completed", result="Whole note.",
-                          **terminal_result_fields({"wake_summary": summary} if summary else {}))
+                          **terminal_result_fields({"wake_summary": summary} if summary else {}, metadata=task["metadata"]))
         return []
 
     actor = SimpleNamespace(handle_task=handle)
@@ -118,7 +118,8 @@ def test_owner_admission_leaves_title_empty_and_still_names_on_first_work(monkey
 
 
 @pytest.mark.parametrize("summary", ["Прочитал обсуждение и ответил.", ""])
-def test_focus_runner_names_its_place_then_its_accepted_summary(focus, monkeypatch, summary):
+@pytest.mark.parametrize("title", ["", "The owner's title"])
+def test_focus_runner_names_its_place_then_its_accepted_summary(focus, monkeypatch, summary, title):
     from ouroboros import presence_runner as runner
 
     root, place, admission, event = focus
@@ -131,16 +132,20 @@ def test_focus_runner_names_its_place_then_its_accepted_summary(focus, monkeypat
         assert row["suggested_name"] == place.label and not row.get("title")
         metadata = {**task["metadata"], "presence_outcome": "message", "presence_result_text": "Answer"}
         seed_wake(root, task_id=task_id, status="running", metadata=metadata,
-                  suggested_name=row["suggested_name"], title="")
+                  suggested_name=row["suggested_name"], title=title)
         write_task_result(root, task_id, "completed", result="Answer", terminal_origin="model_final",
-                          **terminal_result_fields({"wake_summary": summary} if summary else {}))
+                          **terminal_result_fields({"wake_summary": summary} if summary else {},
+                                                   metadata=task["metadata"], title=title))
         return [{"type": "presence_result", "task_id": task_id, "outcome": "message", "text": "Answer"}]
 
     result = runner.run_presence_turn(admission=admission, event=event, repo_dir=root, drive_root=root,
                                      agent_factory=lambda **_: SimpleNamespace(handle_task=handle))
     assert result.outcome == "message"
-    assert [frame["suggested_name"] for frame in frames] == [place.label] + ([summary] if summary else [])
+    assert [frame["suggested_name"] for frame in frames] == [place.label] + ([summary] if summary and not title else [])
     assert {frame["type"] for frame in frames} == {"task_named"}
+    stored = load_task_result(root, result.task_id)
+    assert stored["suggested_name"] == (summary if summary and not title else place.label)
+    assert stored.get("title", "") == title
 
 
 @pytest.mark.parametrize("metadata,expected", [

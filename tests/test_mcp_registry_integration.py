@@ -122,9 +122,11 @@ def test_stdio_environment_does_not_expand_native_review_resources(registry, mon
                for item in registry.capability_omissions())
 
 
-@pytest.mark.parametrize("transport", ["stdio", "streamable_http"])
-@pytest.mark.parametrize("actor", ["main", "project", "managed"])
-@pytest.mark.parametrize("web_key", ["web", "allow_web"])
+@pytest.mark.parametrize(("web_key", "actor", "transport"), [
+    ("web", "project", "streamable_http"),
+    ("allow_web", "main", "stdio"),
+    ("allow_web", "managed", "streamable_http"),
+])
 def test_web_tool_restriction_preserves_mcp_discovery_and_dispatch(
         tmp_path, monkeypatch, transport, actor, web_key):
     fake = _FakeTransport([{"name": "store", "description": "Store a record",

@@ -240,7 +240,9 @@ export function wakeCheckText(check) {
 /** Keep the card's scoped cost projection; word openness and unknown without a false zero. */
 export function wakeCostText(wake) {
     const meta = taskCostMeta(wake.cost)[0];
-    if (!meta || meta === 'Cost unknown' || meta === 'cost unavailable') return tr('consciousness.spend_unknown', 'spend unknown');
+    if (!meta || meta === 'Cost unknown' || meta === 'Cost pending' || meta === 'Cost not priced' || meta === 'cost unavailable') {
+        return tr('consciousness.spend_unknown', 'spend unknown');
+    }
     // These are the card's closed presentation templates, never authored text.
     const words = meta.startsWith('Tracked: up to ') ? fmt('Tracked: up to {amount}', { amount: meta.slice(15) })
         : meta.startsWith('Tracked: ') ? fmt('Tracked: {amount}', { amount: meta.slice(9) })

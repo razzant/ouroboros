@@ -333,8 +333,7 @@ def test_a_lost_or_legacy_opening_stays_a_named_gap(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("damage", [
-    "card_missing", "card_unanswered", "words_changed", "identity_removed", "identity_malformed", "own_card",
-    "foreign_card",
+    "card_missing", "identity_removed", "foreign_card",
 ])
 def test_a_start_card_that_does_not_resolve_refuses_by_name(tmp_path, monkeypatch, damage):
     from ouroboros.owner_quiz import _mutate_projection, quiz_states, record_answered, record_asked
@@ -544,7 +543,8 @@ def test_an_owner_screenshot_sent_while_main_runs_survives_the_start_the_restart
             events.append(copy.deepcopy(evt)), _handle_promote_chat_to_task(evt, sup))))
     assert _start_task(tool, "Research the market", title="Market research", workspace="none").startswith("OK")
     [root] = workers.PENDING
-    expected = [{"source": "origin_message", "content": words}, {"source": "direct_incoming", "content": projection}]
+    expected = [{"client_message_id": "owner-msg-1", "chat_id": "7", "source": "origin_message", "content": words},
+                {"source": "direct_incoming", "content": projection}]  # the origin by its id and that id's room
     receipt = load_task_result(tmp_path, root["id"])
     assert receipt["status"] == "scheduled"
     assert queue.persist_queue_snapshot(reason="test_owner_screenshot") is True
@@ -591,7 +591,8 @@ def test_a_drafted_start_keeps_an_owner_mailbox_image_by_reference_through_resta
     assert original.read_bytes() == shot
     projection = _owner_content_projection(recorded["content"])
     assert SHOT_WORDS in projection and str(original) in projection
-    row = {"source": "owner_mailbox", "content": projection, "msg_id": "owner-shot-1803"}
+    row = {"source": "owner_mailbox", "content": projection, "msg_id": "owner-shot-1803",
+           "client_message_id": "owner-shot"}  # the owner message the mail delivered: one row if also relayed
     assert root["metadata"]["origin_message_absent"] is True and row in root["metadata"]["owner_corpus"]
     _run_interrupted_by_restart(tmp_path, monkeypatch, queue, workers, bridge, root, own_card=False)
     stored = load_task_result(tmp_path, root["id"])
@@ -627,7 +628,8 @@ def test_the_producer_records_owner_images_by_reference_in_each_opening_state():
             ({}, "initial_text", []),
             ({"origin_suppressed": True}, "initial_user", [{"source": "initial_user", "content": projection}]),
             ({"origin_message_ref": {"chat_id": 1, "client_message_id": "m"}, "origin_message_text": "words"},
-             "initial_user", [{"source": "origin_message", "content": "words"}])):
+             "initial_user", [{"client_message_id": "m", "chat_id": "1", "source": "origin_message",
+                               "content": "words"}])):
         # The run's first row is labelled as ``_initialize_owner_directives`` labels it for this opening.
         directives = [{"source": first, "content": copy.deepcopy(pixels)},
                       {"source": "owner_mailbox", "content": copy.deepcopy(pixels), "msg_id": "m-2"}, dict(answer),

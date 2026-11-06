@@ -15,6 +15,7 @@ import pytest
 
 from ouroboros import chat_chain, dialogue_import as di, dialogue_store as ds, store
 from tests import _dialogue as dialogue_test
+from tests._cases import case_folders
 
 
 def _whole_digest(row):
@@ -123,34 +124,37 @@ def _shared_count(root):
 
 # ---- the writer: each element once, the row whole on every read --------------------------------
 
-@pytest.mark.parametrize("shape", sorted(SHAPES))
-def test_a_thread_row_holds_each_element_once_and_reads_back_as_its_exact_line(tmp_path, shape):
-    row = presence_row(SHAPES[shape](12))
-    receipt = ds.append(tmp_path, "chat", row)
-    line = ds.encode(row)
-    assert receipt.row == row and not receipt.duplicate and receipt.length == len(line.encode("utf-8")) + 1
-    body = _stored(tmp_path, receipt.seq)
-    stored = ds.decode(body)
-    with ds.transaction(tmp_path, write=False) as conn:
-        assert ds.whole_line(conn, body) == line  # byte for byte: the line the chain held
-        assert ds.whole_body(conn, body) == row
-    elements = list(_elements(row["transport"]["conversation"]))
-    assert len(body) < len(line) and _shared_count(tmp_path) == len({ds.encode(e) for e in elements})
-    references = ds.thread_references(stored["transport"]["conversation"])
-    assert references == [hashlib.sha256(ds.encode(e).encode("utf-8")).hexdigest() for e in elements]
-    # Nothing outside the thread's elements changes, and the identity is the whole row's, last.
-    assert list(stored)[-1] == ds.ROW_SHA_KEY
-    assert stored[ds.ROW_SHA_KEY] == chat_chain.source_row_id(row) == chat_chain.source_row_id(stored)
-    assert {k: v for k, v in stored.items() if k not in ("transport", ds.ROW_SHA_KEY)} == {
-        k: v for k, v in row.items() if k != "transport"}
-    assert {k: v for k, v in stored["transport"].items() if k != "conversation"} == {
-        k: v for k, v in row["transport"].items() if k != "conversation"}
-    assert stored["transport"]["conversation"]["title"] == row["transport"]["conversation"]["title"]
-    # Every address of the row is its whole row's, read from the small stored form.
-    address = chat_chain.format_address(chat_chain.row_address(row))
-    found, resolution = chat_chain.resolve_row(tmp_path, address)
-    assert resolution["status"] == "ok" and chat_chain.source_row_id(found) == chat_chain.source_row_id(row)
-    assert dialogue_test.chat_rows(tmp_path) == [row] and dialogue_test.lines(tmp_path) == [line]
+def test_a_thread_row_holds_each_element_once_and_reads_back_as_its_exact_line(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for shape in sorted(SHAPES):
+        tmp_path = next(case_paths)
+        with subtests.test(shape=shape):
+            row = presence_row(SHAPES[shape](12))
+            receipt = ds.append(tmp_path, "chat", row)
+            line = ds.encode(row)
+            assert receipt.row == row and not receipt.duplicate and receipt.length == len(line.encode("utf-8")) + 1
+            body = _stored(tmp_path, receipt.seq)
+            stored = ds.decode(body)
+            with ds.transaction(tmp_path, write=False) as conn:
+                assert ds.whole_line(conn, body) == line  # byte for byte: the line the chain held
+                assert ds.whole_body(conn, body) == row
+            elements = list(_elements(row["transport"]["conversation"]))
+            assert len(body) < len(line) and _shared_count(tmp_path) == len({ds.encode(e) for e in elements})
+            references = ds.thread_references(stored["transport"]["conversation"])
+            assert references == [hashlib.sha256(ds.encode(e).encode("utf-8")).hexdigest() for e in elements]
+            # Nothing outside the thread's elements changes, and the identity is the whole row's, last.
+            assert list(stored)[-1] == ds.ROW_SHA_KEY
+            assert stored[ds.ROW_SHA_KEY] == chat_chain.source_row_id(row) == chat_chain.source_row_id(stored)
+            assert {k: v for k, v in stored.items() if k not in ("transport", ds.ROW_SHA_KEY)} == {
+                k: v for k, v in row.items() if k != "transport"}
+            assert {k: v for k, v in stored["transport"].items() if k != "conversation"} == {
+                k: v for k, v in row["transport"].items() if k != "conversation"}
+            assert stored["transport"]["conversation"]["title"] == row["transport"]["conversation"]["title"]
+            # Every address of the row is its whole row's, read from the small stored form.
+            address = chat_chain.format_address(chat_chain.row_address(row))
+            found, resolution = chat_chain.resolve_row(tmp_path, address)
+            assert resolution["status"] == "ok" and chat_chain.source_row_id(found) == chat_chain.source_row_id(row)
+            assert dialogue_test.chat_rows(tmp_path) == [row] and dialogue_test.lines(tmp_path) == [line]
 
 
 def test_a_hundred_message_thread_row_shrinks_by_an_order_of_magnitude_and_each_message_is_held_once(tmp_path):
@@ -363,6 +367,7 @@ def _functions():
     """``{"<path>::<qualified name>": (source, node)}`` of every runtime function, nested ones by their path."""
     import ast
     import pathlib
+    from tests._source_scan import parse
 
     root = pathlib.Path(__file__).resolve().parents[1]
     found = {}
@@ -376,7 +381,7 @@ def _functions():
                     if not isinstance(child, ast.ClassDef):
                         found[f"{path.relative_to(root).as_posix()}::{name}"] = (ast.get_source_segment(text, child), child)
                     visit(child, scope + [child.name])
-        visit(ast.parse(text), [])
+        visit(parse(text), [])
     return found
 
 

@@ -56,6 +56,10 @@ _SPAWN_ALLOWLIST = {
     # killed on any early exit (stage_raw_payload_inventory).
     "ouroboros/subagent_worktrees.py",
     "ouroboros/preflight_runner.py",      # waited hermetic pytest child
+    # The warm root (test_bytecode.run) is itself a ProcessContainer child of the gate or of
+    # scripts/run_tests.py; its one compileall and its collect-only walkers are waited children
+    # of that root, reaped with it at the lane's teardown. Custody is the container's.
+    "ouroboros/test_bytecode.py",
     "ouroboros/tools/shell_process.py",   # bounded foreground commands (waited + tracked)
     # GitHub's exact-byte capture starts one bounded foreground CLI: a timer
     # kills it at the deadline, cap overflow kills it, and the call waits in

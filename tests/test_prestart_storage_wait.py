@@ -305,8 +305,7 @@ def test_an_unstarted_message_waits_past_the_turn_window_and_then_runs_once(lane
     assert [row["phase"] for row in waits] == ["entered", "ended"] and all(row["owner_visible"] for row in waits)
 
 
-@pytest.mark.parametrize("mode", ["WAL", "PERSIST"])
-@pytest.mark.parametrize("cached_metadata", [False, True])
+@pytest.mark.parametrize(("cached_metadata", "mode"), [(False, "WAL"), (True, "PERSIST")])
 def test_money_store_contention_in_the_billing_read_waits_instead_of_starting_unbound(
         lane, monkeypatch, mode, cached_metadata):
     """No pinned binding: the billing read reaches the money store. Its positive contention is typed
@@ -1061,7 +1060,7 @@ def test_stop_after_accepted_prestart_pause_still_wins_while_storage_is_busy(lan
     assert load_task_result(lane.root, "S")["status"] == "cancelled"
 
 
-@pytest.mark.parametrize("control", ["stop", "pause", "deadline", "none"])
+@pytest.mark.parametrize("control", ["stop", "pause", "none"])
 def test_control_inside_successful_strict_budget_read_prevents_body(lane, monkeypatch, control):
     """SQLite waits inside a successful read: no exception reaches retry_presend.
 

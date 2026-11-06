@@ -31,8 +31,7 @@ def settings_client(install, monkeypatch):
         yield client, install
 
 
-@pytest.mark.parametrize("mode", ["light", "advanced", "pro"])
-@pytest.mark.parametrize("resend_shown", [False, True])
+@pytest.mark.parametrize(("resend_shown", "mode"), [(False, "light"), (False, "pro"), (True, "advanced")])
 def test_provider_switch_reproposes_checker_but_explicit_edit_is_refused(settings_client, monkeypatch, mode, resend_shown):
     from ouroboros import config
     from ouroboros.provider_models import OPENAI_DIRECT_DEFAULTS

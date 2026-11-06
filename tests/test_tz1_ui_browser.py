@@ -7,7 +7,7 @@ import pytest
 
 from tests.test_subscription_setup_browser import subscription_ui as subscription_ui, capture
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def test_saved_input_and_starting_survive_reload(subscription_ui):

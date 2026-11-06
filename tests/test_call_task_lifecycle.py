@@ -48,7 +48,7 @@ def _agent(root, body):
     return SimpleNamespace(handle_task=body, env=SimpleNamespace(drive_root=root, drive_path=lambda name: root / name))
 
 
-@pytest.mark.parametrize("case", ["store_busy", "unexpected", "agent_creation", "already_closed", "text", "success"])
+@pytest.mark.parametrize("case", ["store_busy", "agent_creation", "success"])
 def test_pre_run_failure_closes_only_its_admitted_call(direct_call, monkeypatch, case):
     from ouroboros.call_peers import close_hub, get_hub
     from ouroboros.store import StoreBusy

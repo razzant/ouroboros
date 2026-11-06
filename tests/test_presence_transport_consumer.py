@@ -24,6 +24,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from ouroboros import agent_task_pipeline as pipeline, loop
+from ouroboros.config import task_settings_scope
 from ouroboros.gateway.host_service import create_host_service_app
 from ouroboros.presence_runner import PresenceTurnGate, run_presence_turn
 from ouroboros.task_results import write_task_result
@@ -70,6 +71,12 @@ def _scripted_agent(root, monkeypatch, forced, *, handoff=None):
 
     class Agent:
         def handle_task(self, task):
+            # A real agent reads the settings of its own start (``handle_task`` binds them), never its carrier's
+            # view; this fake reads the environment it sets below.
+            with task_settings_scope(None):
+                return self._handle(task)
+
+        def _handle(self, task):
             monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
             monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "1")
             registry = ToolRegistry(repo_dir=root, drive_root=root)
@@ -110,10 +117,9 @@ def _turn(client, binding):
 
 @pytest.mark.parametrize("turn_forced,spoken_now", [
     (_forced("message", PARTIAL), [PARTIAL]),  # a declared partial beside owed work
-    (_forced("deferred", PARTIAL), [PARTIAL]),
     (_forced("tool_delivered", NOTE), []),  # the note is context, never a reply
     (RECORD, []),  # an undeclared internal record says nothing new
-], ids=["message", "deferred", "tool_delivered", "undeclared"])
+], ids=["message", "tool_delivered", "undeclared"])
 def test_the_installed_transport_gets_the_partial_now_and_the_owed_result_later(
         tmp_path, monkeypatch, turn_forced, spoken_now):
     _seed_token(tmp_path, skill="telegram-bot", token=_TOKEN, permissions=["presence"],

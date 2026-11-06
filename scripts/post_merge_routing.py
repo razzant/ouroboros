@@ -265,7 +265,7 @@ def _close_green(call, github, issues, failed, node_green, head, run_url, rechec
             return lint_checked and nodeid not in failed
         if nodeid.startswith(SIZE_PREFIX):  # a growth inside a later base is invisible to that check
             return nodeid not in failed and (size_status.get(size_base(block)) or {}).get(nodeid) in ("passed", "absent")
-        return nodeid not in failed and status.get(nodeid) in ("passed", "skipped", "absent")
+        return nodeid not in failed and status.get(nodeid) in ("passed", "absent")
 
     for issue in issues:
         if not all(green(issue["block"], nodeid) for nodeid in issue["block"]["ids"]):

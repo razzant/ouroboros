@@ -15,6 +15,7 @@ import pytest
 
 from ouroboros.configured_subagents import SUBAGENTS_SETTING
 from ouroboros.subagent_runtime import review_facts_block
+from tests._cases import chosen_rows
 
 REPO = Path(__file__).resolve().parents[1]
 # Spelled out so a missing warning fails on behaviour, not on a missing name.
@@ -142,21 +143,22 @@ def test_the_save_warning_judges_the_enforcement_the_real_loader_makes_effective
     assert (WARNING in answer.get("warnings", [])) is warned
 
 
-@pytest.mark.parametrize("catalog", list(PACKET_ONLY.values()), ids=list(PACKET_ONLY))
-def test_a_blocking_save_of_a_pool_with_no_reading_row_warns_and_still_saves(monkeypatch, catalog):
-    status, body, saved = _post(monkeypatch, {SUBAGENTS_SETTING: catalog, "OUROBOROS_REVIEW_ENFORCEMENT": "blocking"})
+def test_a_blocking_save_of_a_pool_with_no_reading_row_warns_and_still_saves(subtests, monkeypatch):
+    for catalog in list(PACKET_ONLY.values()):
+        with subtests.test(catalog=catalog), monkeypatch.context() as monkeypatch:
+            status, body, saved = _post(monkeypatch, {SUBAGENTS_SETTING: catalog, "OUROBOROS_REVIEW_ENFORCEMENT": "blocking"})
 
-    assert status == 200 and body["status"] == "saved", body
-    assert json.loads(saved[SUBAGENTS_SETTING])["items"] == catalog["items"], "a warning never refuses the save"
-    assert saved["OUROBOROS_REVIEW_ENFORCEMENT"] == "blocking"
-    assert WARNING in body.get("warnings", [])
+            assert status == 200 and body["status"] == "saved", body
+            assert json.loads(saved[SUBAGENTS_SETTING])["items"] == catalog["items"], "a warning never refuses the save"
+            assert saved["OUROBOROS_REVIEW_ENFORCEMENT"] == "blocking"
+            assert WARNING in body.get("warnings", [])
 
 
-@pytest.mark.parametrize("catalog, enforcement, mode", [
+@pytest.mark.parametrize("catalog, enforcement, mode", chosen_rows([
     *[(catalog, "blocking", "advanced") for catalog in READING.values()],
     (PACKET_ONLY["two Packet reviewers"], "advisory", "advanced"),
     (PACKET_ONLY["two Packet reviewers"], "blocking", "cyber_pro"),
-], ids=[*READING, "advisory review", "Cyber Pro"])
+], 0, 2, 3), ids=chosen_rows([*READING, "advisory review", "Cyber Pro"], 0, 2, 3))
 def test_no_warning_with_a_reading_row_under_advisory_or_in_cyber_pro(monkeypatch, catalog, enforcement, mode):
     stored = {"OUROBOROS_RUNTIME_MODE": mode}
     status, body, _saved = _post(

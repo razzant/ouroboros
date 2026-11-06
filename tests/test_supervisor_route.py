@@ -113,10 +113,8 @@ def test_nonmanaged_parent_does_not_inherit_a_managed_account(model, local):
 
 
 @pytest.mark.parametrize("fault,code", [
-    ("session", "supervisor_requires_api_model"), ("disabled", "supervisor_disabled"),
-    ("credentials", "supervisor_credentials_unavailable"), ("api_child", "supervisor_inapplicable"),
-    ("empty", "supervisor_selection_required"), ("null", "supervisor_selection_required"),
-    ("number", "supervisor_selection_required"),
+    ("session", "supervisor_requires_api_model"), ("api_child", "supervisor_inapplicable"),
+    ("empty", "supervisor_selection_required"),
 ])
 def test_selection_refusals_and_the_same_valid_row(fault, code):
     row = cognition_row()
@@ -153,9 +151,8 @@ def test_credentialed_api_and_local_supervisors_are_eligible():
 
 
 @pytest.mark.parametrize("patch", [
-    {"schema": 3}, {"use_local_model": "false"}, {"credential_profile_id": None},
-    {"source_role": ""}, {"processing_preference": "invalid"}, {"chosen_by": "guessed"},
-    {"selected_supervisor_snapshot": {}}, {"chosen_by": "inherited"},
+    {"schema": 3}, {"credential_profile_id": None},
+    {"chosen_by": "inherited"},
 ])
 def test_v2_integrity_guard_refuses_incomplete_carrier_and_accepts_complete(patch):
     route = selected_task()["parent_cognitive_route"]

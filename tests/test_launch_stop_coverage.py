@@ -34,7 +34,7 @@ from tests._launch_stop_shared import (
 )
 from tests.test_launch_stop_contract import BACKENDS, HIDDEN, _block_registration, _leader_gone, _roots_unknown
 
-pytestmark = [pytest.mark.serial,
+pytestmark = [
               pytest.mark.skipif(os.name == "nt", reason="the measured stop is POSIX; Windows keeps its native kill")]
 
 

@@ -668,7 +668,6 @@ def _consumer_facts_survive(api, settings, facts: dict) -> None:
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 @pytest.mark.usefixtures("_lane")
 def test_s39_the_immutable_image_serves_a_keyless_consumer_from_onboarding_through_restart():
     recipe = _recipe("image")
@@ -715,7 +714,6 @@ def test_s39_the_immutable_image_serves_a_keyless_consumer_from_onboarding_throu
 # ---------------------------------------------------------------------------
 
 @pytest.mark.integration
-@pytest.mark.serial
 @pytest.mark.usefixtures("_lane")
 def test_s39_managed_parent_volume_survives_recreation_and_panic_needs_the_owner():
     volume = _volume("parent")
@@ -765,7 +763,6 @@ def test_s39_managed_parent_volume_survives_recreation_and_panic_needs_the_owner
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 @pytest.mark.usefixtures("_lane")
 def test_s39_managed_split_volumes_boot_and_a_mounted_repository_is_refused_untouched():
     mounts = [(_volume(kind), f"/ouroboros/{kind}") for kind in ("body", "data", "work", "home")]
@@ -789,7 +786,6 @@ def test_s39_managed_split_volumes_boot_and_a_mounted_repository_is_refused_unto
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 @pytest.mark.usefixtures("_lane")
 def test_s39_a_second_container_on_shared_data_is_refused():
     volume = _volume("shared")
@@ -898,7 +894,6 @@ def _import_marker(name: str) -> str:
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 @pytest.mark.usefixtures("_lane")
 def test_s39_an_update_adding_a_local_wheel_survives_offline_recreation_and_rolls_back(tmp_path):
     candidate = os.environ.get("OUROBOROS_CONTAINER_CANDIDATE_GIT", "").strip()

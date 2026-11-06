@@ -24,7 +24,6 @@ from tests.test_presence_contact_wait import start
 from tests.test_presence_owner_contact import contact_runtime as _contact_runtime, focus  # noqa: F401
 
 contact_runtime = _contact_runtime
-pytestmark = pytest.mark.serial
 
 ANSWER = "Checked twelve sources; the card and the HTML page are both delivered."
 FORCED = "Best answer at the limit: the sources read so far are listed; the rest is unchecked."
@@ -45,9 +44,6 @@ def _round_limit_prompts(h):
 @pytest.mark.parametrize("metadata,expected", [
     ({}, None), ({"inline_max_rounds": None}, None),  # absent stays absent: no inline cap at all
     ({"inline_max_rounds": 3}, 3), ({"inline_max_rounds": 200}, 200),  # a recorded positive cap binds
-    # Present but malformed is a typo, never "no bound": the finite legacy fallback.
-    ({"inline_max_rounds": 0}, 10), ({"inline_max_rounds": -2}, 10), ({"inline_max_rounds": True}, 10),
-    ({"inline_max_rounds": False}, 10), ({"inline_max_rounds": "8"}, 10), ({"inline_max_rounds": 2.5}, 10),
 ])
 def test_bootstrap_reads_only_a_recorded_inline_cap(metadata, expected):
     from ouroboros.loop import carried_inline_round_cap

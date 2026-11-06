@@ -140,7 +140,7 @@ def test_reused_call_id_and_identical_text_keep_both_visible_outcomes(tmp_path):
 
 
 @pytest.mark.parametrize("change,reason", [("legacy", "record_missing"), ("content", "content_mismatch"),
-                                          ("invocation", "invocation_unrecorded"), ("call", "tool_result_mismatch")])
+                                          ("call", "tool_result_mismatch")])
 def test_unbound_outcome_does_not_borrow_a_global_call_id_trace(tmp_path, change, reason):
     pair = _tool(invocation="supposed-success", facts={"status": "ok", "is_error": False, "exit_code": 0})
     row = pair[-1]

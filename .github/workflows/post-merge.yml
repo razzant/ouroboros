@@ -132,7 +132,7 @@ jobs:
         env:
           BASE: ${{ steps.base.outputs.base }}
           DEFER_FULL: ${{ runner.os == 'Windows' && '--defer-full' || '' }}
-        run: python scripts/run_tests.py --selected --base "$BASE" --sequential --keep-going $DEFER_FULL --evidence-dir "$RUNNER_TEMP/post-merge"
+        run: python scripts/run_tests.py --selected --base "$BASE" --keep-going $DEFER_FULL --evidence-dir "$RUNNER_TEMP/post-merge"
       - name: Run each red once more (FAILED or FLAKY)
         id: classify
         if: ${{ !cancelled() && steps.base.outcome == 'success' }}
@@ -173,7 +173,12 @@ jobs:
           path: ${{ runner.temp }}/post-merge/
           retention-days: 14
           if-no-files-found: ignore
-      # The leg is red when a test failed again on its retry or the check could not finish.
+      # The leg is red when a selected test/check/stage fails or its evidence is incomplete.
       - name: Publish the result
         if: ${{ !cancelled() }}
+        env:
+          COST_CONTRACT_OUTCOME: ${{ steps.cost_contract.outcome }}
+          POST_MERGE_CLASSIFY_OUTCOME: ${{ steps.classify.outcome }}
+          POST_MERGE_ATTRIBUTE_OUTCOME: ${{ steps.attribute.outcome }}
+          POST_MERGE_ROUTE_OUTCOME: ${{ steps.route.outcome }}
         run: python scripts/post_merge_check.py summary --evidence-dir "$RUNNER_TEMP/post-merge" --os ${{ matrix.leg }}

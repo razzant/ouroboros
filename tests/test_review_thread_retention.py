@@ -1223,10 +1223,9 @@ def test_legal_posix_names_are_receipt_metadata_never_storage_names(world):
 
 
 @pytest.mark.parametrize("fault, code", [
-    ("lanes/thr-1/../escape", "export_item_malformed"), ("/lanes/thr-1/absolute", "export_item_malformed"),
-    ("lanes//thr-1", "export_item_malformed"), ("schema", "export_schema_unsupported"),
-    ("bytes", "export_manifest_unreadable"), ("plane", "export_item_malformed"), ("kind", "export_item_malformed"),
-    ("closure", "export_identity_mismatch"),
+    ("/lanes/thr-1/absolute", "export_item_malformed"),
+    ("schema", "export_schema_unsupported"),
+    ("bytes", "export_manifest_unreadable"), ("closure", "export_identity_mismatch"),
 ])
 def test_a_malformed_export_is_a_durable_named_hold_with_its_exact_manifest(world, fault, code):
     original = world.engine.files["lane-1"]

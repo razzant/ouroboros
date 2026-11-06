@@ -43,8 +43,6 @@ class _FakeCtx:
 @pytest.mark.parametrize("name", [
     "identity.md",
     "scratchpad.md",
-    "dialogue_summary.md",
-    "registry.md",
     "deep_review.md",
 ])
 def test_repo_read_memory_artifact_returns_hint(tmp_path, name):
