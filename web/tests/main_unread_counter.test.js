@@ -138,7 +138,7 @@ test('the app start lands an unread Main once; later arrivals never move it', ()
 });
 
 test("the reader's own first move in Main ends the start's opening; Main is still offered its read", () => {
-    for (const move of ['wheel', 'touchstart', 'pointerdown']) {
+    for (const move of ['wheel', 'touchstart', 'pointerdown', 'keydown']) {
         const moved = harness({ revision: 3, seen: null, loaded: false, page: 'chat' });
         moved.api.observeMainRevision(5);  // a slow cursor read: the opening still waits
         moved.feed.moves[move]();
@@ -377,4 +377,7 @@ test("Main pressed again while shown (its row, a notification) lands what came; 
     Object.assign(covered.context, { state: { activePage: 'chat' }, navState: { activeProjectId: 'p1' } });
     await covered.context.show('chat');
     assert.deepEqual(covered.claims, ['closed'], 'the Project closes and lands Main: one claim, not two');
+    const task = pageHarness({ unread: 2 });
+    await task.context.show('chat', { reveal: true });
+    assert.deepEqual(task.claims, [false], "a task's place (ouro:open-task) is its own destination: Main's news waits");
 });

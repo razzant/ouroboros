@@ -269,19 +269,21 @@ def project_row(room, kind: str, minute: int, project_id: str = "racer") -> str:
 
 @pytest.mark.parametrize("kind", ["project_started", "project_handoff"])
 def test_a_started_or_handed_over_project_main_shows_as_its_portal_is_never_mains_arrival(room, kind):
-    """Main draws such a row as the work's portal (work_portal.js ``row``), never a node of its own: named, Main would
-    stay unread for good (DESIGN "Unread"). The same row with no Project id is drawn as text and is named; a
-    completion summary is the author's final bubble and is named too."""
+    """Main draws such a row as the work's portal (work_portal.js ``row``), never a node of its own: it never makes
+    Main unread (the producer), and named, Main would stay unread for good (DESIGN "Unread"). The same row with no
+    Project id is drawn as text, counts and is named; a completion summary is the author's final bubble, the same."""
     from ouroboros.gateway.ui_preferences import main_room_revision
 
     deliver_main(room, "main reply", 10)
     counted = main_room_revision(room.root)
     project_row(room, kind, 11)
-    assert main_room_revision(room.root) == counted + 1, "the row counts in Main: only its drawing rules it out"
+    assert main_room_revision(room.root) == counted, "a portal is a card: Main is not made unread by it"
     assert main_window(room)["latest_message"]["history_id"] == room.row_id("main reply")
     legacy = project_row(room, kind, 12, project_id="")
+    assert main_room_revision(room.root) == counted + 1, "drawn as text, it is a message"
     assert main_window(room)["latest_message"] == {"history_id": room.row_id(legacy), "out_of_order": False}
     final = project_row(room, "project_completion_summary", 13)
+    assert main_room_revision(room.root) == counted + 2
     assert main_window(room)["latest_message"] == {"history_id": room.row_id(final), "out_of_order": False}
 
 
@@ -327,6 +329,28 @@ def test_a_project_question_main_mirrors_is_never_its_arrival_open_or_answered(r
                      {"request_id": "answer-1", "decision_id": f"quiz:task-1:{quiz_id}", "option_index": 1})
     assert answered.status_code == 200, answered.text
     assert main_window(room)["latest_message"]["history_id"] == room.row_id("main reply"), "answered, still not it"
+
+
+def test_mains_own_question_is_its_arrival_in_the_recent_read_and_the_bounded_search(room, narrow_recent, monkeypatch):
+    """The other direction: only a Project's copy is passed over; a question Main's own work asks is Main's message."""
+    from ouroboros.task_results import STATUS_RUNNING, write_task_result
+    from tests.test_quiz_answer import _escalate, _tool_ctx
+
+    deliver_main(room, "main reply", None)
+    write_task_result(room.root, "main-task", STATUS_RUNNING, chat_id=1)
+    ctx = _tool_ctx(room.root, task_id="main-task", chat_id=1)
+    ctx.owner_wait_callback = lambda *_: None
+    assert _escalate(ctx, question="Which storage, Main?", wait_for_answer=True,
+                     options=[{"label": "Local"}, {"label": "Shared"}]).startswith("OK:")
+    event = ctx.pending_events[0]
+    assert room.host.bridge.send_quiz(1, **{key: event[key] for key in (
+        "quiz_id", "question", "options", "stake", "assumption", "state", "task_id", "wait_for_answer")})[0]
+    question = next(s.history_id for s in ds.newest(room.root, "chat", limit=1 << 40) if s.row.get("type") == "quiz")
+    assert main_window(room)["latest_message"]["history_id"] == question
+    for index in range(6):
+        deliver_main(room, f"child note {index}", None, task_id="kid-1")
+    message_bus.log_chat("in", 1, 7, "owner asks")
+    assert main_window(room, n_human="2")["latest_message"] == {"history_id": question, "out_of_order": True}
 
 
 def test_the_bounded_search_passes_a_project_question_on_to_mains_own_reply(room, narrow_recent, monkeypatch):

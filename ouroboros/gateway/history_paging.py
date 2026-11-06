@@ -898,14 +898,15 @@ def latest_arrival(rows, page, data_dir, row_matches_thread, stored_chat_id, pro
     offset = lambda row: row["history_position"]["offset"]  # noqa: E731
     words = lambda row: _card_content(row, str(row.get("system_type") or ""), child)  # noqa: E731
     arrived = _arrived_unread(data_dir, page["chat_id"])
-    question_chat, main = getattr(row_matches_thread, "question_project_chat", lambda _row: 0), page["chat_id"] == 1
+    question_chat = getattr(row_matches_thread, "question_project_chat", lambda _row: 0)
 
     def elsewhere(row):
         # Main draws a Project's question only as a copy of that room's (it never counted here), and a started or
-        # handed-over Project as its work's portal (work_portal.js ``row``): no node of their own to read.
+        # handed-over Project as its work's portal (work_portal.js ``row``): no message of their own to read. Both are
+        # Main's rows alone (room_membership pins the one; ``question_project_chat`` names nothing off Main).
         kind = str(row.get("system_type") or row.get("type") or "")
-        return main and (kind == "project_question_pointer" or bool(question_chat(row)) or (
-            kind in ("project_started", "project_handoff") and bool(row.get("task_id") and row.get("project_id"))))
+        return kind == "project_question_pointer" or bool(question_chat(row)) or (
+            kind in ("project_started", "project_handoff") and bool(row.get("task_id") and row.get("project_id")))
     feed = [row for row in rows if _feed_message(row) and not elsewhere(row)]
     spoken = sorted((row for row in feed if row.get("role") != "user" and arrived(row) and (
         str(row.get("text") or "").strip() not in ("", "\u200b") or row.get("msg_type"))), key=offset)

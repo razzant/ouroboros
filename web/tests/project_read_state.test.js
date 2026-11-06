@@ -322,9 +322,16 @@ test('the distance to the named message is the feed\'s own, also while the room 
         delivered: () => true, nodes: () => [el(-200 * scale, -180 * scale)], viewport: el(0, 300 * scale, 300) });
     assert.equal(offset(1), -200, 'at full size the distance on screen is the scroll');
     assert.equal(Math.round(offset(0.9312)), -200, 'scaled, it still takes the feed\'s own 200 px');
-    const fractional = newestMessageOffset({ history_id: 'chat:9', out_of_order: false }, {
-        delivered: () => true, nodes: () => [el(-200, -180)], viewport: el(0, 300.4, 300) });
-    assert.equal(fractional, -200, 'a fractional height at full size is no scale: the distance stays exact');
+    // A real feed reports its own fractional height (getComputedStyle, border-box): offsetHeight rounds it to whole
+    // pixels, which would read a fractional feed as scaled, and a scale near 1 as none.
+    const styled = (top, bottom, own) => ({ ...el(top, bottom, Math.round(own)),
+        ownerDocument: { defaultView: { getComputedStyle: () => ({ height: `${own}px` }) } } });
+    const exact = (scale, own, distance) => newestMessageOffset({ history_id: 'chat:9', out_of_order: false }, {
+        delivered: () => true, nodes: () => [el(-distance * scale, (20 - distance) * scale)],
+        viewport: styled(0, own * scale, own) });
+    assert.equal(exact(1, 300.4, 200), -200, 'a fractional height at full size is no scale');
+    assert.ok(Math.abs(exact(0.9312, 300.4, 5000) + 5000) < 1e-6, 'a fractional height mid-motion: the feed\'s own 5000 px');
+    assert.ok(Math.abs(exact(0.999, 300, 99720) + 99720) < 1e-6, 'a scale near 1 is a scale');
 });
 
 // A page loaded while the reader stays put (a short room, `Load older`) can bring

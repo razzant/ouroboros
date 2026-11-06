@@ -199,9 +199,9 @@ async function showPage(name, options = {}) {
         window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: pageName } }));
         updateUnreadBadge();  // Main's number shows only away from Main
     }
-    // Main shown or pressed again (its row, a notification) is an opening; a Project over Main lands it as it closes.
-    if (pageName === 'chat' && options.closeProject !== false) landMain();
-    if (options.closeProject !== false) closeProjectPanel({ sync: false });
+    // Main shown or pressed again (its row, a notification) is an opening; a reveal (a task's place) brings its own.
+    if (pageName === 'chat' && options.closeProject !== false && !options.reveal) landMain();
+    if (options.closeProject !== false) closeProjectPanel({ sync: false, reveal: options.reveal });
     if (options.closeDrawer !== false) navState.mobileDrawerOpen = false;
     if (options.sync !== false) syncNavigationState();
     return true;
@@ -607,8 +607,8 @@ function closeNotificationReaders() {
 }
 
 mainChat = initChat(ctx);
-// The start's opening, like any, ends at the reader's own first move in Main (DESIGN "Unread").
-for (const type of ['wheel', 'touchstart', 'pointerdown']) document.getElementById('chat-messages')?.addEventListener(type, () => { mainOpening = false; }, { passive: true });
+// The start's opening ends at the reader's own first move in Main's feed: a key, wheel, touch or press (DESIGN "Unread").
+for (const type of ['wheel', 'touchstart', 'pointerdown', 'keydown']) document.getElementById('chat-messages')?.addEventListener(type, () => { mainOpening = false; }, { passive: true });
 initFiles({ ...ctx, layers });
 
 // Skills' contributions (CLIENT_CONTRACT §11): one store, read now and on every lifecycle change; their message
@@ -831,7 +831,7 @@ async function revealQuotedSource(address, chatId, isCurrent) {
 }
 
 window.addEventListener('ouro:open-task', async ({ detail }) => {
-    if (!detail?.task_id || detail.chat_id !== 1 || !await showPage('chat')) return;
+    if (!detail?.task_id || detail.chat_id !== 1 || !await showPage('chat', { reveal: true })) return;
     try {
         const result = await revealQuotedSource(`task:${detail.task_id}`, detail.chat_id, () => state.activePage === 'chat');
         if (result && result.state !== 'found') showToast(tr('consciousness.task_unavailable', 'This task is unavailable.'), 'warn');
