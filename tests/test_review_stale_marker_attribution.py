@@ -292,7 +292,6 @@ def test_attribution_never_changes_freshness_obligations_or_debt(tmp_path):
     assert observed[""][2] == {"stale_from_edit": True, "effective_status": "stale"}
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("writer", ["builtin", "generic", "generic_error"])
 def test_registered_writer_persists_identity_without_changing_shared_freshness(tmp_path, monkeypatch, writer):
     """Real Git, registry dispatch and durable readers; only the generic handler is a fake."""

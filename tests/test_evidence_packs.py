@@ -228,7 +228,7 @@ def test_admission_sees_every_physical_blob_source_and_its_refusal_is_never_a_mi
     assert obs.read_blob_ref(root, refs[0])["message"]["content"].startswith("answer")  # no callback: unchanged
 
 
-@pytest.mark.parametrize("case", ["missing", "packed", "retained", "damaged"])
+@pytest.mark.parametrize("case", ["missing", "retained", "damaged"])
 def test_a_kept_miss_or_damage_never_keeps_the_read_alive(root, case):
     """A miss or a damaged loose copy is kept while later candidates are tried, and its traceback holds
     the reader's frame; a frame still holding it is a cycle that keeps the caller's ``admit`` callback

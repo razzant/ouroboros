@@ -22,7 +22,6 @@ from tests.test_main_authored_context import main_loop as _main_loop
 main_loop = _main_loop
 
 
-pytestmark = pytest.mark.serial
 TOOL = "fixture_ingress_result"
 
 

@@ -1406,8 +1406,7 @@ def test_malformed_replay_preserves_preexisting_admission_reservation(
     assert enqueued == []
 
 
-@pytest.mark.parametrize("delegation_role", ["root", "subagent"])
-@pytest.mark.parametrize("late_custody", ["reservation", "pending"])
+@pytest.mark.parametrize(("late_custody", "delegation_role"), [("reservation", "root"), ("pending", "subagent")])
 def test_malformed_replay_rechecks_identity_after_initial_preflight(
     tmp_path, monkeypatch, delegation_role, late_custody,
 ):

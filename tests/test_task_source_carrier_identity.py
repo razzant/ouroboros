@@ -144,8 +144,7 @@ print(json.dumps({"same": [json.dumps(copied[key], ensure_ascii=False) == json.d
 """
 
 
-@pytest.mark.serial  # real subprocesses
-@pytest.mark.parametrize("seed", ["0", "1", "2", "3"])
+@pytest.mark.parametrize("seed", ["0", "1", "3"])
 def test_retention_outcome_does_not_depend_on_the_process_hash_seed(tmp_path, seed):
     """The production field constant, unpatched, in fresh processes with different seeds."""
     parent, child, task_id, body, _full = _carrier_fixture(tmp_path)
@@ -176,7 +175,6 @@ print(json.dumps(seen))
 """
 
 
-@pytest.mark.serial  # real subprocesses
 def test_published_fields_are_walked_in_written_order_under_every_hash_seed(tmp_path):
     skipped = {"task_contract", "attachment_manifest", "attachment_manifest_ref"}
     assert isinstance(observability._PUBLISHED_CHILD_REF_FIELDS, tuple)

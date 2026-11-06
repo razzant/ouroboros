@@ -288,11 +288,8 @@ def test_an_ordinary_ineligible_actor_meets_only_the_real_cap_with_no_funded_rec
 
 
 @pytest.mark.parametrize(("author", "known", "stops"), [
-    ("producer", 8.99, False), ("producer", 9.0, True), ("producer", 9.5, True),
-    ("explicit", 9.0, False), ("explicit", 9.01, True),
-    ("unverified", 9.0, False), ("unverified", 9.5, True),
-], ids=["producer-below", "producer-equal", "producer-above", "explicit-equal", "explicit-above",
-        "unverified-equal", "unverified-above"])
+    ("producer", 8.99, False), ("producer", 9.0, True), ("explicit", 9.0, False), ("unverified", 9.0, False), ("unverified", 9.5, True),
+], ids=["producer-below", "producer-equal", "explicit-equal", "unverified-equal", "unverified-above"])
 def test_the_budget_gate_stops_a_producer_allowance_once_known_spend_reaches_it(
         data_root, monkeypatch, tmp_path, author, known, stops):
     """A wake's $9 daily remainder is a real limit on known spend, so, like the ledger

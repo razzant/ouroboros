@@ -19,7 +19,7 @@ import pytest
 from tests.test_subscription_setup_browser import subscription_ui as subscription_ui  # noqa: F401  (fixture)
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 NOW = "2026-10-27T12:00:00Z"
 UNSUPPORTED_TEXT = ("Claudexor 3.5.2 keeps accounts in an older format that this version of Ouroboros "

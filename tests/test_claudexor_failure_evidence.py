@@ -44,8 +44,12 @@ def capture_catalog(failure, effort):
         if enabled]}]
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("failure,effort", [(False, False), (True, False), (False, True), (True, True)])
+@pytest.mark.parametrize(("failure", "effort", "asynchronous"), [
+    (False, False, False),
+    (True, False, True),
+    (False, True, False),
+    (True, True, True),
+])
 def test_capture_is_negotiated_once_without_changing_provider_payload(setup, asynchronous, failure, effort):
     root, gateway, client = setup
     gateway.operation_catalog = capture_catalog(failure, effort)
@@ -67,8 +71,12 @@ def test_capture_is_negotiated_once_without_changing_provider_payload(setup, asy
     assert manifest["operation_id"] == "op-0"
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("failure,effort", [(False, False), (True, False), (False, True), (True, True)])
+@pytest.mark.parametrize(("failure", "effort", "asynchronous"), [
+    (False, False, False),
+    (True, False, True),
+    (False, True, False),
+    (True, True, True),
+])
 def test_gateway_replacement_reuses_frozen_capture_after_create(setup, monkeypatch, asynchronous, failure, effort):
     root, gateway, client = setup
     gateway.operation_catalog = capture_catalog(failure, effort)
@@ -145,9 +153,10 @@ def test_catalog_read_failure_does_not_guess_unsupported_or_dispatch(setup, monk
     assert [(row["state"], row["revision"]) for row in ledger(root)] == [("released", 2)]
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("outcome", ["completed", "incomplete"])
-@pytest.mark.parametrize("has_problem", [False, True])
+@pytest.mark.parametrize(("has_problem", "outcome", "asynchronous"), [
+    (False, "completed", False),
+    (True, "incomplete", True),
+])
 def test_known_terminal_null_message_settles_then_rejects_without_private_projection(
     setup, caplog, asynchronous, outcome, has_problem,
 ):

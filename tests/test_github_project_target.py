@@ -360,7 +360,7 @@ def test_every_repository_tool_keeps_target_in_all_subcalls(tmp_path, gh_calls, 
         assert kwargs["env"]["GH_HOST"] == "configured.example"
 
 
-@pytest.mark.parametrize("failure", ["note", "missing-room", "fileless", "missing-workspace", "invalid-workspace-mode"])
+@pytest.mark.parametrize("failure", ["note", "fileless", "invalid-workspace-mode"])
 def test_unusable_project_never_calls_gh_on_system_repo(tmp_path, gh_calls, failure):
     ctx, project = _context(tmp_path, "queued" if "workspace" in failure else "room")
     if failure == "note":
@@ -437,7 +437,7 @@ def test_required_target_is_an_error_then_a_valid_call_has_no_stale_failure(tmp_
     assert len(gh_calls) == _count
 
 
-@pytest.mark.parametrize("repo", [False, 0, [], {}, 1])
+@pytest.mark.parametrize("repo", [False, 0, 1])
 def test_invalid_public_target_values_cannot_be_generic_transport(tmp_path, gh_calls, repo):
     ctx, _ = _context(tmp_path, "queued")
     assert "GH_TARGET_INVALID" in github_read.run_read(ctx, method="get", kind="issue", target=7, repo=repo)

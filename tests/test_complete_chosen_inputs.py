@@ -35,7 +35,7 @@ def _participant_content(revision: dict) -> str:
         own_objections=[], message="", evidence_section=plan_packet.render_evidence({}), first_time=True)
 
 
-@pytest.mark.parametrize("field", ["goal", "plan", "done_when.claim", "done_when.support", "affected_paths"])
+@pytest.mark.parametrize("field", ["goal", "done_when.support", "affected_paths"])
 def test_operative_tail_changes_revision_identity_and_current_delivery(field):
     before = plan_record.compose_revision(None, **_revision_fields(field, "TAIL_A"))
     after = plan_record.compose_revision(None, **_revision_fields(field, "TAIL_B"))

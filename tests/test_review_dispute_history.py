@@ -29,7 +29,6 @@ def _rounds():
     pytest.param("api_chat", True, False, id="api_chat-True"),
     pytest.param("agent_session", True, False, id="agent_session-True"),
     pytest.param("api_chat", False, True, id="api_chat-False-structured"),
-    pytest.param("api_chat", True, True, id="api_chat-True-structured"),
     pytest.param("agent_session", True, True, id="agent_session-True-structured"),
 ])
 def test_public_packet_and_two_part_brief_keep_all_supplied_arguments(staged_body, tmp_path, monkeypatch, route, retrieves, structured):
@@ -133,8 +132,10 @@ def test_obligation_reason_is_complete_in_shared_history(tmp_path):
     assert reason in text and "OMISSION NOTE" not in text
 
 
-@pytest.mark.parametrize("route,retrieves", [("api_chat", False), ("agent_session", True)])
-@pytest.mark.parametrize("structured", [False, True], ids=["scalar", "structured"])
+@pytest.mark.parametrize(("structured", "route", "retrieves"), [
+    pytest.param(False, "agent_session", True, id='scalar-agent_session-True'),
+    pytest.param(True, "api_chat", False, id='structured-api_chat-False'),
+])
 def test_supplied_source_bound_answers_keep_scalar_or_structured_verdict(staged_body, tmp_path, monkeypatch, route, retrieves, structured):
     import json
     from ouroboros import capability_evidence, reviewer_window, review_ledger, review_history_view

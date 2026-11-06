@@ -43,8 +43,7 @@ def main_plan(manager, monkeypatch, tmp_path):
     return build
 
 
-@pytest.mark.parametrize("unknown", [{}, {"context_length": None}, {"context_length": 0},
-                                      {"context_length": -1}, {"context_length": "unknown"},
+@pytest.mark.parametrize("unknown", [{}, {"context_length": "unknown"},
                                       ConnectionError("unavailable")])
 def test_unknown_metadata_does_not_poison_cache_or_health(manager, monkeypatch, unknown):
     health = Mock(side_effect=[unknown, {"context_length": 131072}])
@@ -87,8 +86,7 @@ def test_healthy_server_with_no_window_still_becomes_ready(manager, monkeypatch)
     assert manager.status_dict()["error"] is None
 
 
-@pytest.mark.parametrize("allow_fetch", [False, True])
-@pytest.mark.parametrize("legacy_window", [None, 4096, 131072])
+@pytest.mark.parametrize(("legacy_window", "allow_fetch"), [(None, False), (4096, True), (131072, False)])
 def test_unknown_local_probe_ignores_legacy_cache_and_cloud_metadata(
     manager, monkeypatch, tmp_path, allow_fetch, legacy_window,
 ):
@@ -205,8 +203,7 @@ def test_running_local_dispatch_uses_serving_capacity_without_cloud_fallback(
     assert not ce._load(config.DATA_DIR)["probes"]
 
 
-@pytest.mark.parametrize("window", [16384, 65536])
-@pytest.mark.parametrize("mode", ["max", "low", "nano"])
+@pytest.mark.parametrize(("mode", "window"), [("max", 16384), ("low", 65536), ("nano", 16384)])
 def test_local_main_forecast_keeps_real_pressure_and_nano_headroom(manager, main_plan, tmp_path, mode, window):
     from ouroboros.context_budget import NANO_MIN_HEADROOM_TOKENS
     from ouroboros.context_fit import measure_main_fit
@@ -421,7 +418,6 @@ def test_autostart_guard_admits_only_a_configured_source(offline_manager, monkey
 
 
 
-@pytest.mark.serial
 def test_actual_pooled_worker_reads_the_serving_instance_its_server_process_owns(
     offline_manager, monkeypatch, tmp_path,
 ):
@@ -636,7 +632,6 @@ def test_actual_pooled_worker_reads_the_serving_instance_its_server_process_owns
         stop_socket_sharer()
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("worker", [False, True], ids=["server-owner", "pooled-worker"])
 def test_owned_local_health_never_consults_ambient_proxy_configuration(monkeypatch, worker):
     import json

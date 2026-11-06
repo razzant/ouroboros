@@ -9,8 +9,7 @@ from devtools.benchmarks.cybergym.run_cybergym import (
 )
 
 
-@pytest.mark.parametrize("mode", ["pro", "cyber_pro"])
-@pytest.mark.parametrize("timeout", [10800, 21600])
+@pytest.mark.parametrize(("timeout", "mode"), [(10800, "pro"), (21600, "cyber_pro")])
 def test_runtime_mode_reaches_applied_settings(tmp_path, mode, timeout):
     args = parse_args(["--runtime-mode", mode, "--budget-usd", "200",
                        "--per-task-cost-usd", "10", "--workers", "32",

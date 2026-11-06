@@ -95,7 +95,6 @@ try {
     return json.loads(result.stdout)
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("kind", ["direct_chat", "managed_task"])
 def test_warm_owner_pause_registry_and_fence_reach_the_rendered_card(tmp_path, monkeypatch, kind):
     from ouroboros import owner_pause
@@ -205,7 +204,6 @@ def test_direct_model_wait_owner_gap_keeps_static_row_and_discloses_partial():
         registry.clear()
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize(
     ("refusal_code", "wait_reason"),
     [("subscription_window_exhausted", "quota"), ("auth_required", "auth")],

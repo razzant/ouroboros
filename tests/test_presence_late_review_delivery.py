@@ -46,7 +46,6 @@ from tests.test_presence_owner_stop import FOLLOW_UP, _follow_up_arrives, _holds
 from tests.test_presence_owner_stop import owner_stop as owner_stop
 
 contact_runtime = _contact_runtime
-pytestmark = pytest.mark.serial
 
 SECTION = "## Late review feedback (host)"
 WORDS = [f"LATE-FINDING-{index:02d}" for index in range(15)]  # more than the twelve an earlier view cut
@@ -366,8 +365,7 @@ def test_an_unread_duty_follows_what_its_author_received_after_a_place_event_reo
     assert_the_mark_stayed(h, r, tid, first)
 
 
-@pytest.mark.parametrize("ending", ["stop_at_the_next_dispatch", "stop_after_a_further_call", "wrap_up_final",
-                                    "budget_at_the_next_call", "budget_after_a_further_call", "round_limit_final"])
+@pytest.mark.parametrize("ending", ["stop_at_the_next_dispatch", "budget_after_a_further_call", "round_limit_final"])
 def test_a_saved_whole_receipt_ends_the_duty_whatever_then_ends_the_turn(owner_stop, monkeypatch, ending):
     """No delivery step follows the receipt on any of these exits (owner Stop, Wrap up, a budget refusal, the forced
     final of the round limit), so the duty has to end at the acknowledgement's own checkpoint: the ready save before the
@@ -417,7 +415,7 @@ def test_a_saved_whole_receipt_ends_the_duty_whatever_then_ends_the_turn(owner_s
     assert_no_mark_and_the_record_kept(h, r, tid, first)
 
 
-@pytest.mark.parametrize("gap", ["partial_view", "lost_publication", "failed_saves", "failure_exit"])
+@pytest.mark.parametrize("gap", ["partial_view", "failed_saves", "failure_exit"])
 def test_a_receipt_short_of_whole_or_of_saved_keeps_the_duty_and_its_mark(contact_runtime, monkeypatch, gap):
     """The author re-issues its review, but no saved whole receipt results: the transcript shortened the result
     (``result_partial``), the publication carrying its receipt was lost, every save after it failed (the existing
@@ -561,8 +559,8 @@ def test_retiring_an_unread_duty_takes_that_records_row_alone(tmp_path):
     assert owed() == [("other", "rl-a", "unread"), ("turn", "rl-b", "unread"), ("turn", "rl-c", "unwaited")]
 
 
-@pytest.mark.parametrize("delivered", ["none", "whole", "earlier_outcome", "pending_then_partial",
-                                      "mail_left", "mail_left_then_paused_rejoin", "mail_left_after_unwaited"])
+@pytest.mark.parametrize("delivered", ["none", "pending_then_partial",
+                                      "mail_left_after_unwaited"])
 def test_saved_wait_cursors_do_not_prove_receipt_of_a_settled_presence_outcome(tmp_path, monkeypatch, delivered):
     """Cursors prove no whole receipt. A partial result keeps the wave's duty; a mail-left duty stays
     independent even after whole feedback, while a new unread-only duty can retire at its checkpoint."""

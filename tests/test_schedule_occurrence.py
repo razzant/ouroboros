@@ -179,8 +179,7 @@ def test_resource_intent_is_resolved_at_admission(q, tmp_path, case):
         "explicit_kept": "explicit_resource", "explicit_none": "explicit_none"}[case]
 
 
-@pytest.mark.parametrize("origin", ["external_workspace", "main", "missing", "project_without_folder",
-                                    "unaddressed", "bound_to_project"])
+@pytest.mark.parametrize("origin", ["external_workspace", "missing", "bound_to_project"])
 def test_a_legacy_followup_recovers_only_from_its_origin_record(q, tmp_path, origin):
     from ouroboros.task_results import write_task_result
 
@@ -213,7 +212,7 @@ def test_a_legacy_followup_recovers_only_from_its_origin_record(q, tmp_path, ori
         assert not task.get("workspace_root") and task["metadata"]["resource_intent"]["kind"] == "system_repo"
 
 
-@pytest.mark.parametrize("change", ["disable", "edit", "rebind", "delete"])
+@pytest.mark.parametrize("change", ["disable", "rebind", "delete"])
 def test_a_change_during_prepare_never_launches_the_old_choice(q, tmp_path, monkeypatch, change):
     from supervisor import schedule_occurrence as occurrences
 

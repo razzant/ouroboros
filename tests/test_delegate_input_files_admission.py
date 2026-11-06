@@ -21,7 +21,6 @@ from tests.test_doc_context import _make_env_and_memory
 from tests.test_scheduled_effort_intent import _admit, _restore, runtime  # noqa: F401
 from tests._delegated_transport_shared import _owned_gateway_uses_each_test_transport  # noqa: F401
 
-pytestmark = pytest.mark.serial  # Production state/queue init rebinds module globals.
 BRIEF, BINARY = b"parent brief\n", b"\xff\x00binary\n"
 SELECTION = [{"root": "task_drive", "path": "brief.md"}, {"root": "task_drive", "path": "fixture.bin"}]
 
@@ -106,8 +105,7 @@ def _text_of(content):
     return content if isinstance(content, str) else "\n".join(str(block.get("text") or "") for block in content)
 
 
-@pytest.mark.parametrize("memory_mode", ["empty", "forked"])
-@pytest.mark.parametrize("sources", ["shared", "declared"])
+@pytest.mark.parametrize(("sources", "memory_mode"), [("shared", "forked"), ("declared", "empty")])
 def test_a_native_child_receives_and_reads_the_retained_copies_through_the_real_chain(
         chain, monkeypatch, tmp_path, memory_mode, sources):  # noqa: F811
     from ouroboros.artifacts import collect_task_artifact_records

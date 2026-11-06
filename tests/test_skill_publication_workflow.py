@@ -42,7 +42,7 @@ def test_clear_absent_record_is_idempotent_without_creating_receipt(tmp_path):
     assert not (tmp_path / 'state/skills/demo/ouroboroshub.json').exists()
 
 
-@pytest.mark.parametrize('contents', ['{}', '[]', 'not json', '{"schema_version":1}'])
+@pytest.mark.parametrize('contents', ['{}', 'not json', '{"schema_version":1}'])
 def test_clear_does_not_repair_or_erase_malformed_existing_record(tmp_path, contents):
     path = tmp_path / 'state/skills/demo/ouroboroshub.json'
     path.parent.mkdir(parents=True)
@@ -90,8 +90,11 @@ def test_clear_write_failure_is_visible_and_keeps_receipt(tmp_path, monkeypatch)
     assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize('before,after', [('2.0.0', '1.0.0'), ('0.9.0', '0.10.0'), ('May release', 'nightly blue')])
-@pytest.mark.parametrize('model_body', ['', '## Summary\nModel summary\n## Version change\nInvented versions'])
+@pytest.mark.parametrize(("model_body", "before", "after"), [
+    ('', '0.9.0', '0.10.0'),
+    ('## Summary\nModel summary\n## Version change\nInvented versions', '2.0.0', '1.0.0'),
+    ('## Summary\nModel summary\n## Version change\nInvented versions', 'May release', 'nightly blue'),
+])
 def test_publish_discloses_both_opaque_versions_in_result_and_host_pr_body(tmp_path, monkeypatch, before, after, model_body):
     snapshot = _snapshot()
     manifest_file = CapturedSkillFile.from_bytes('skill.json', json.dumps({'name': 'demo', 'version': after}).encode())

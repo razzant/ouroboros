@@ -18,7 +18,7 @@ from tests.test_design_system_gate_browser import seed_page, settle
 from tests.test_shell_interactions_browser import boot, evidence, shell_ui
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 __all__ = ['shell_ui', 'subscription_ui']
 
 # A staged reply as chat_reply.js keeps it for the room (Main's key), restored when the room opens.

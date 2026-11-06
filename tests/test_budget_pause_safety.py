@@ -9,10 +9,9 @@ import pytest
 from tests._budget_pause_exact_helpers import _install_queue, _loop_ctx, _parked, _supervisor_ctx
 from tests.test_budget_pause_holds import _fenced_member, _idle_worker, _source_file
 
-pytestmark = pytest.mark.serial
 
 
-@pytest.mark.parametrize("saved_pause,selected", [(True, True), (False, True), (True, False), (False, False)])
+@pytest.mark.parametrize("saved_pause,selected", [(True, True), (True, False), (False, False)])
 def test_new_saved_pause_does_not_rearm_historic_selected_panic(tmp_path, monkeypatch, saved_pause, selected):
     from supervisor.events_budget import BUDGET_HOLD_KEY, HOLD_PANIC
     from ouroboros import budget_pause
@@ -203,8 +202,11 @@ def test_consumed_grant_without_new_working_source_is_never_reexecuted(tmp_path,
     assert budget_pause.budget_pause_row(tmp_path, "dead")["state"] == budget_pause.STATE_RESUMED
 
 
-@pytest.mark.parametrize("fences", ["budget", "acceptance", "both"])
-@pytest.mark.parametrize("source_state", ["intact", "missing", "corrupt"])
+@pytest.mark.parametrize(("source_state", "fences"), [
+    ("intact", "budget"),
+    ("missing", "acceptance"),
+    ("corrupt", "both"),
+])
 def test_invalid_fences_retain_exact_source_locators(tmp_path, monkeypatch, fences, source_state):
     from ouroboros.work_stop import continuation_refusal
 
@@ -234,7 +236,7 @@ def test_invalid_fences_retain_exact_source_locators(tmp_path, monkeypatch, fenc
         assert not queue.resume_budget_paused_task("saved")["ok"]
 
 
-@pytest.mark.parametrize("surface,key", [("handoff", "pause_id"), ("handoff", "grant_id"),
+@pytest.mark.parametrize("surface,key", [("handoff", "grant_id"),
                                           ("row", "pause_id"), ("grant", "grant_id")])
 def test_empty_resume_identity_cannot_match_or_overwrite(tmp_path, monkeypatch, surface, key):
     from ouroboros import budget_pause

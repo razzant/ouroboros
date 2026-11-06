@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros.contracts.live_conversation import LiveOptions, Video
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 def test_exposure_hashing_is_off_loop_and_snapshot_owned(host_world, monkeypatch):

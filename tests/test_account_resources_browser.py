@@ -12,7 +12,7 @@ from tests import test_subscription_setup_browser as setup_browser
 
 subscription_ui = setup_browser.subscription_ui
 capture = setup_browser.capture
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 TARGET = {"harness": "claude", "profile_id": "claude-default"}
 ROW = '.harness-account-row[data-harness="claude"][data-profile="claude-default"]'
 

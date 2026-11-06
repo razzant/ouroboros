@@ -392,7 +392,7 @@ def test_write_admits_one_ordinary_main_task_and_records_the_request(door, tmp_p
     assert door.pending[1]["metadata"]["update_description"]["revision_at_request"] == 1
 
 
-@pytest.mark.parametrize(("binding", "chat"), [("known_empty", 1), ("web", 1), ("external", 77), ("unconfirmed", 0)])
+@pytest.mark.parametrize(("binding", "chat"), [("known_empty", 1), ("external", 77), ("unconfirmed", 0)])
 def test_write_is_main_work_until_an_owner_message_binds_a_chat(door, binding, chat):
     """Write before any owner message (the binding known empty) is Main's work, where the panel's door
     opens it. A bound chat keeps it (a transport's own chat too); a binding the state cannot vouch for

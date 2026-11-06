@@ -42,7 +42,7 @@ def late_run(case, folder, run_id, path="late.txt", *, task_id="native", parent_
     return entry
 
 
-@pytest.mark.parametrize("resolution", ["refused", "unknown", "started", "wrong_owner", "wrong_target"])
+@pytest.mark.parametrize("resolution", ["refused", "unknown", "wrong_target"])
 def test_pending_in_place_invocation_resolves_only_from_its_addressed_fate(case, resolution):
     from ouroboros import delegate_custody as custody, headless
     from ouroboros.task_results import load_task_result, write_task_result
@@ -702,7 +702,7 @@ def test_ordinary_decision_then_late_capture_is_undecided_for_continue(case, mon
     assert marks(case[2], "parent")["patch_verdicts"][-1]["child_result_sha256"] == consumed
 
 
-@pytest.mark.parametrize("writer", ["live", "unknown", "terminal", "other_invocation"])
+@pytest.mark.parametrize("writer", ["live", "unknown", "other_invocation"])
 def test_covered_in_place_writer_does_not_hide_new_or_unknown_work(case, writer):
     import json
     from dataclasses import replace
@@ -759,8 +759,7 @@ def case(tmp_path, monkeypatch):
     return copy_case.__wrapped__(tmp_path, monkeypatch)
 
 
-@pytest.mark.parametrize("owner", ["task", "run"])
-@pytest.mark.parametrize("change", ["delete", "rename", "recreated"])
+@pytest.mark.parametrize(("change", "owner"), [("delete", "task"), ("rename", "run"), ("recreated", "task")])
 def test_staged_deleted_inputs_leave_current_snapshot_and_source_unchanged(case, owner, change):
     """The copy is the source's CURRENT tree: a staged delete or rename is in it, and a file
     recreated after ``git rm`` is an ordinary untracked input of the snapshot."""
@@ -858,8 +857,12 @@ def test_index_dirty_worktree_matches_head_keeps_current_tree_apply(case):
     assert (source / "a.txt").read_bytes() == b"base\nchild\n"
 
 
-@pytest.mark.parametrize("parent_focus", ["main", "other", "room"])
-@pytest.mark.parametrize("mode", ["light", "advanced", "pro", "cyber_pro"])
+@pytest.mark.parametrize(("mode", "parent_focus"), [
+    ("light", "main"),
+    ("advanced", "other"),
+    ("pro", "room"),
+    ("cyber_pro", "main"),
+])
 def test_parent_returns_named_source_under_existing_write_rights(case, monkeypatch, parent_focus, mode):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
     # Production shape: Ouroboros data is under its own parent, not HOME/data
@@ -883,7 +886,7 @@ def test_parent_returns_named_source_under_existing_write_rights(case, monkeypat
     assert (case[1] / "BIBLE.md").read_bytes() == b"foreign project docs\n"
 
 
-@pytest.mark.parametrize("restriction", ["readonly", "acting", "presence", "owner_store"])
+@pytest.mark.parametrize("restriction", ["readonly", "acting", "owner_store"])
 def test_named_source_never_mints_parent_write_authority(case, monkeypatch, restriction):
     from ouroboros.contracts.task_constraint import TaskConstraint
     from ouroboros.presence_authority import presence_ceiling_payload

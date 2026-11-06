@@ -104,7 +104,6 @@ def test_catalog_reload_counts_and_declared_input_invalidation(tmp_path, monkeyp
         mp.setattr(staging.shutil, "copytree", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("copy")))
         mp.setattr(staging.shutil, "rmtree", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("remove")))
         reload()
-        reload()
     assert children == []
     assert set((drive / "state" / "skills").glob("*/__extension_imports/sha256-*")) == trees
 

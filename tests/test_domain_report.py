@@ -11,7 +11,6 @@ import sys
 import pytest
 
 
-pytestmark = pytest.mark.serial  # Real Git and Python subprocesses.
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 

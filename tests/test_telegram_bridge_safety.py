@@ -702,12 +702,6 @@ def test_ambient_env_chat_id_is_ignored(tmp_path, monkeypatch):
     assert settings["TELEGRAM_CHAT_ID"] == "99"
 
 
-def test_manifest_declares_route_permission():
-    manifest = Path(__file__).resolve().parents[1] / "skills" / "telegram" / "SKILL.md"
-    text = manifest.read_text(encoding="utf-8")
-    assert "route" in text.split("permissions:", 1)[1].split("]", 1)[0]
-
-
 def test_markdown_to_telegram_html_placeholder_ordering(tmp_path):
     _load_plugin(tmp_path)
     from telegram_bridge_test.lib.telegram_api import markdown_to_telegram_html

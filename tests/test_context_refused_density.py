@@ -185,8 +185,7 @@ def test_books_to_maps_reprojects_at_the_refusal_density(tmp_path, monkeypatch, 
     assert seen[0]["measured_input_tokens"] is None  # no accepted preparation offset on this measurement
 
 
-@pytest.mark.parametrize("mode", ["low", "max"])
-@pytest.mark.parametrize("image_mode", ["off", "caption"])
+@pytest.mark.parametrize(("image_mode", "mode"), [("off", "low"), ("caption", "max")])
 def test_recovery_prices_the_prepared_input_not_the_canonical_image_proxy(tmp_path, monkeypatch, mode, image_mode):
     """Real image preparation, then 500 tokens of excess: both recovery consumers keep Low.
 

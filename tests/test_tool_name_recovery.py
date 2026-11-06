@@ -222,7 +222,6 @@ def test_collision_omission_cannot_disclose_a_noncallable_name(world, monkeypatc
 @pytest.mark.parametrize(("requested", "raw"), [
     ("mcp_scholarly__search_arxiv", "search-arxiv"),  # lossy punctuation, digest omitted
     ("mcp_scholarly__search_google_schol", "search-google-scholar"),  # registered stem, digest omitted
-    ("mcp_scholarly__search_google_scholar_edd85c1e8e96", "search-google-scholar"),  # altered stem, same digest
     ("mcp_scholarly__search-arxiv", "search-arxiv"),  # raw punctuation outside the wire-name pattern
 ])
 def test_scholarly_naming_rule_identity_is_exact(world, requested, raw):

@@ -31,7 +31,7 @@ from tests.separate_ui_support import (
     wait_until,
 )
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 EXAMPLE = REPO_ROOT / "docs/examples/client_views"
 BROWSERS = ["chromium", "webkit"]
 

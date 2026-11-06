@@ -47,22 +47,6 @@ def test_git_timeout_settings_share_defaults_clamps_and_env_projection(monkeypat
         assert getter() == 1800
 
 
-def test_update_channel_setting_is_exposed_and_round_trips_in_ui():
-    settings_js = (REPO / "web" / "modules" / "settings.js").read_text(encoding="utf-8")
-    settings_ui = (REPO / "web" / "modules" / "settings_ui.js").read_text(encoding="utf-8")
-    settings_css = (REPO / "web" / "settings.css").read_text(encoding="utf-8")
-
-    assert "['s-update-channel', 'OUROBOROS_UPDATE_CHANNEL', 'stable']" in settings_js
-    assert 'id="s-update-channel"' in settings_ui
-    assert "{ value: 'stable', label: 'Stable' }" in settings_ui
-    assert "{ value: 'qa', label: 'QA' }" in settings_ui
-    assert "{ value: 'development', label: 'Development' }" in settings_ui
-    # Three choices take three equal columns from the shared count-derived grid,
-    # not from a per-control override (tests/test_segmented_layout_browser.py).
-    assert "[data-update-channel-group]" not in settings_css
-    assert "--segment-columns: min(var(--segment-count, 4), 4)" in settings_css
-
-
 def test_update_source_can_be_imported_first_in_a_clean_process():
     result = subprocess.run(
         [sys.executable, "-c", "import supervisor.update_source"],

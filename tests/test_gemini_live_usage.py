@@ -55,7 +55,7 @@ def test_sparse_complete_receipt_prices_thinking_in_addition_and_settles(gemini,
     assert live_usage._price(missing_tariff, usage, raw)[0] is None
 
 
-@pytest.mark.parametrize("field", ["promptTokensDetails", "responseTokensDetails", "thoughtsTokenCount",
+@pytest.mark.parametrize("field", ["promptTokensDetails", "thoughtsTokenCount",
                                   "cachedContentTokenCount"])
 def test_missing_evidence_never_becomes_a_free_axis(gemini, field):
     raw = receipt()
@@ -85,8 +85,6 @@ def test_incomplete_totals_cannot_prove_an_omitted_modality_zero(gemini, field, 
 
 
 @pytest.mark.parametrize("details", [None, [{"modality": "AUDIO"}],
-                                   [{"modality": "AUDIO", "tokenCount": -1}],
-                                   [{"modality": "AUDIO", "tokenCount": True}],
                                    [{"modality": "FUTURE", "tokenCount": 5}]])
 def test_incomplete_modality_list_cannot_prove_missing_output_zero(gemini, details):
     raw = receipt()

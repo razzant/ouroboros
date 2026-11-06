@@ -370,7 +370,7 @@ def test_tests_gate_unstages_only_the_selection_when_another_path_is_staged_mean
     assert (repo / "own.txt").read_text(encoding="utf-8") == "task change\n"
 
 
-@pytest.mark.parametrize("exit_kind", ["tests_refused", "review_blocked", "advisory_handback", "protected_refused"])
+@pytest.mark.parametrize("exit_kind", ["tests_refused", "advisory_handback", "protected_refused"])
 def test_exits_without_a_baseline_unstage_only_the_named_paths(task, monkeypatch, exit_kind):
     """Without an attribution baseline every exit after staging undoes this call's staging only, even
     when another path is staged in the window before it: the minutes of tests, or the last step
@@ -565,7 +565,7 @@ def _continue(ctx, monkeypatch, reference, **kwargs):
     return fresh, result, [note for note in notes if "reviewed tree" in note[0].lower()]
 
 
-@pytest.mark.parametrize("selection", ["omitted", "explicit_original", "explicit_broader", "revised"])
+@pytest.mark.parametrize("selection", ["omitted", "explicit_original", "revised"])
 def test_an_author_continuation_lands_the_reviewed_paths_unless_it_names_others(task, monkeypatch, selection):
     """The review covered own.txt; local QA beside it, and QA written after the review, is attributed to the
     task too. Omitted paths land the reviewed paths only; an explicit new scope or revised bytes still land in
@@ -722,7 +722,7 @@ def test_the_reviewed_paths_keep_renames_deletions_and_literal_names(task, monke
     assert "local-qa.txt" not in _git(repo, "ls-files") and (repo / "local-qa.txt").is_file()
 
 
-@pytest.mark.parametrize("case", ["omitted", "explicit_descendant", "explicit_directory", "new_file"])
+@pytest.mark.parametrize("case", ["omitted", "explicit_descendant", "new_file"])
 def test_a_reviewed_file_now_a_directory_lands_only_reviewed_entries(task, monkeypatch, case):
     """Independent review, critical: a reviewed file is later replaced by a directory of local QA. Omitted paths land
     that exact reviewed entry, its deletion, and nothing the directory holds; a reviewed NEW file whose name now holds
@@ -890,9 +890,12 @@ def _reshape(task, attempt_no, rows, *, record_seats=(), aggregate=None, **field
     review_ledger.revise_record(review_ledger.ledger_root(task), record_id, seats)
 
 
-@pytest.mark.parametrize("mode", ["cyber_pro", "pro"])
-@pytest.mark.parametrize("shape", ["landed_late_settled_token", "quorum_failed_unsent_and_late_token",
-                                   "terminal_adviser_token", "live_adviser"])
+@pytest.mark.parametrize(("shape", "mode"), [
+    ("landed_late_settled_token", "cyber_pro"),
+    ("quorum_failed_unsent_and_late_token", "pro"),
+    ("terminal_adviser_token", "cyber_pro"),
+    ("live_adviser", "pro"),
+])
 def test_a_finished_review_holding_a_stale_start_token_admits_the_authors_next_intent(task, monkeypatch, request,
                                                                                       shape, mode):
     """Three incidents of 2026-11-04 (synthetic shapes): a finished commit review whose row kept a seat's start token

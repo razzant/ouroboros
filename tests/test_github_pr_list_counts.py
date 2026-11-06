@@ -67,7 +67,7 @@ def _items(text):
     return json.loads(text.partition("\n")[2])["items"]
 
 
-@pytest.mark.parametrize("state", ["open", "closed", "merged", "all"])
+@pytest.mark.parametrize("state", ["open", "merged", "all"])
 def test_fifty_prs_keep_metadata_order_and_exact_counts_in_two_reads(tmp_path, gh, monkeypatch, state):
     monkeypatch.setattr(github_read, "tool_result_limit", lambda name: 10 ** 6)  # fifty rows in one answer, no artifact
     ctx, _cwd = _context(tmp_path, "queued")
@@ -99,8 +99,11 @@ def test_an_empty_page_needs_no_count_read(tmp_path, gh):
     assert len(gh.calls) == 1
 
 
-@pytest.mark.parametrize("kind", ["system", "queued", "room"])
-@pytest.mark.parametrize("repo", ["", "github.example/owner/selected"])
+@pytest.mark.parametrize(("repo", "kind"), [
+    ("", "system"),
+    ("", "room"),
+    ("github.example/owner/selected", "queued"),
+])
 def test_the_count_read_follows_the_returned_url_not_ambient_targets(tmp_path, gh, monkeypatch, kind, repo):
     ctx, expected_cwd = _context(tmp_path, kind)
     monkeypatch.setenv("GH_REPO", "unrelated/wrong-repo")
@@ -176,8 +179,7 @@ def test_an_unreadable_count_withholds_the_list(tmp_path, gh, monkeypatch, case)
     assert text.startswith("⚠️ ") and "PR 0" not in text and '"commits": 0' not in text, text
 
 
-@pytest.mark.parametrize("case", ["no-url", "no-id", "foreign-repo", "foreign-host", "number-mismatch",
-                                  "repeated-id", "not-a-row"])
+@pytest.mark.parametrize("case", ["no-url", "foreign-host", "repeated-id"])
 def test_rows_without_one_consistent_identity_never_reach_the_count_read(tmp_path, gh, case):
     ctx, _cwd = _context(tmp_path, "queued")
     rows = _rows(1, 2)

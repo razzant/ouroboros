@@ -22,7 +22,6 @@ from tests.test_scheduled_receipt_contention import install_worker
 from tests.test_workspace_preparation import _WAIT_SEC
 from tests.test_workspace_preparation import env as env
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

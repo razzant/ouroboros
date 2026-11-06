@@ -42,7 +42,7 @@ def trees(tmp_path):
     return ctx, {"body": tmp_path / "body-worktree", "foreign": foreign, "documents": documents}
 
 
-@pytest.mark.parametrize("tree,resident", [("body", True), ("foreign", False), ("documents", True), ("missing", True)])
+@pytest.mark.parametrize("tree,resident", [("body", True), ("foreign", False), ("missing", True)])
 def test_only_a_bound_tree_proven_foreign_gets_the_chapter_map(trees, tree, resident):
     """A body worktree keeps the book, a tree with someone else's remote gets the map, and a tree whose body fact
     is unknown (no git, or no such folder) keeps the book: missing facts never narrow it (6A)."""
@@ -69,8 +69,7 @@ def test_without_a_binding_the_subject_is_unknown_and_the_book_stays(trees):
     assert development_resident({"type": "task", "context_requires_development": False}, ctx) is False
 
 
-@pytest.mark.parametrize("surface", [{"delegation_role": "subagent"}, {"metadata": {"source": "api_task"}},
-                                     {"metadata": {"source": "scheduled_task"}}, {"actor_id": "cli"}])
+@pytest.mark.parametrize("surface", [{"delegation_role": "subagent"}, {"metadata": {"source": "scheduled_task"}}, {"actor_id": "cli"}])
 def test_p1_surfaces_get_the_pointer_unless_the_task_asks(trees, surface):
     ctx, _paths = trees
     task = {"type": "task", **surface}

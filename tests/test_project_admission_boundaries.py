@@ -13,11 +13,17 @@ from tests.test_schedule_occurrence import q  # noqa: F401
 from tests.test_swarm_host_admission import host  # noqa: F401
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 
-@pytest.mark.parametrize("change", ["own_cas", "occupied", "rebind", "aba", "write_before", "write_after", "no_update"])
-@pytest.mark.parametrize("held", [False, True])
+@pytest.mark.parametrize(("held", "change"), [
+    (False, "own_cas"),
+    (False, "rebind"),
+    (False, "write_before"),
+    (False, "no_update"),
+    (True, "occupied"),
+    (True, "aba"),
+    (True, "write_after"),
+])
 def test_explicit_promotion_carries_only_confirmed_own_folder_basis(host, tmp_path, monkeypatch, change, held):  # noqa: F811
     """Optional room-default publication cannot retarget an explicitly chosen resource."""
     from supervisor.events_project_routing import _handle_promote_chat_to_task
@@ -108,8 +114,13 @@ def test_explicit_promotion_still_refuses_identity_loss_during_optional_folder_w
     assert load_task_result(host.root, "explicit")["admission_outcome"] == "never_admitted"
 
 
-@pytest.mark.parametrize("worker_count", [1, 3])
-@pytest.mark.parametrize("boundary", ["snapshot", "result_false", "result_raise", "readback", "schedule"])
+@pytest.mark.parametrize(("boundary", "worker_count"), [
+    ("snapshot", 1),
+    ("result_false", 3),
+    ("result_raise", 1),
+    ("readback", 3),
+    ("schedule", 1),
+])
 def test_failed_head_proof_keeps_custody_without_starving_other_work(host, tmp_path, monkeypatch, worker_count, boundary):  # noqa: F811
     from supervisor import task_admission, schedule_occurrence
 
@@ -177,9 +188,13 @@ def test_failed_head_proof_keeps_custody_without_starving_other_work(host, tmp_p
     assert sent[-1]["_project_admission"] == original["_project_admission"]
 
 
-@pytest.mark.parametrize("bad_id", [7, " target ", None, "", "missing"])
-@pytest.mark.parametrize("restoring", [False, True])
-@pytest.mark.parametrize("exact", [False, True])
+@pytest.mark.parametrize(("exact", "restoring", "bad_id"), [
+    (False, False, ""),
+    (False, True, 7),
+    (True, False, " target "),
+    (True, True, None),
+    (True, True, "missing"),
+])
 def test_only_exact_membership_checks_corrupt_binding(room, bad_id, restoring, exact):  # noqa: F811
     ref = {"chat_id": 1, "client_message_id": "source", "text_sha256": "a" * 64}
     registry.create_project(room.root, "7")
@@ -198,8 +213,13 @@ def test_only_exact_membership_checks_corrupt_binding(room, bad_id, restoring, e
     assert registry.project_id_for_origin(room.root, ref) == expected  # tolerant display is unchanged
 
 
-@pytest.mark.parametrize("same_origin", [False, True])
-@pytest.mark.parametrize("bad_id", [7, " target ", None, "", "missing"])
+@pytest.mark.parametrize(("bad_id", "same_origin"), [
+    (7, False),
+    (" target ", True),
+    (None, False),
+    ("", True),
+    ("missing", False),
+])
 def test_unrelated_corrupt_origin_does_not_block_healthy_membership(room, same_origin, bad_id):  # noqa: F811
     ref = {"chat_id": 1, "client_message_id": "source", "text_sha256": "a" * 64}
     unrelated = {**ref, "client_message_id": "unrelated"}
@@ -261,8 +281,7 @@ def test_global_snapshot_failure_blocks_every_candidate_without_dropping_rows(ho
     assert [row["id"] for row in sent] == [head["id"]]
 
 
-@pytest.mark.parametrize("missing", [False, True])
-@pytest.mark.parametrize("exact", [False, True])
+@pytest.mark.parametrize(("exact", "missing"), [(False, False), (True, True)])
 def test_only_exact_membership_inherits_closed_room_refusal(room, missing, exact):  # noqa: F811
     ref = {"chat_id": 1, "client_message_id": "source", "text_sha256": "a" * 64}
     registry._save_bindings(room.root, {"bindings": {

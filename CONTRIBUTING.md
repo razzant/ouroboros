@@ -147,9 +147,10 @@ reason — and deliver the focused evidence; never report it as green.
 Record exact commands, outcomes, and producer exit codes. If a check could not
 run, record `NOT_RUN` and the reason instead of claiming it passed.
 
-Tests that spawn a real process, bind a real port, or mutate module-level
-global state must be marked `@pytest.mark.serial`. A merely slow test must be
-made faster or split: the serial pass has the same 300 s per-test timeout.
+A test that owns its child, its private root and port 0 marks nothing;
+`@pytest.mark.serial("<resource>")` names the one host resource a test cannot
+isolate, such as a fixed port or a real daemon. A merely slow test must be made
+faster or split.
 See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for the CI split and isolation
 rules.
 

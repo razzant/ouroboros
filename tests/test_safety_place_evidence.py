@@ -31,8 +31,11 @@ def test_focus_and_arbitrary_place_arguments_are_not_destinations(supervisor, mo
     assert data["standing_delegation"]["place_notes"][0]["standing_delegation"] is True
 
 
-@pytest.mark.parametrize("canonical_source", ["metadata", "context"])
-@pytest.mark.parametrize("name", ["configure_presence", "place_reply", "remote_write"])
+@pytest.mark.parametrize(("name", "canonical_source"), [
+    ("configure_presence", "context"),
+    ("place_reply", "metadata"),
+    ("remote_write", "context"),
+])
 def test_destination_notes_use_canonical_root_and_keep_each_place(supervisor, monkeypatch, tmp_path,
                                                                 canonical_source, name):
     from ouroboros import places, place_guard

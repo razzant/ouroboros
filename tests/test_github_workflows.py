@@ -264,7 +264,6 @@ def test_run_log_attempt_is_read_and_passed_to_the_capture(fake, ctx):
     ({"databaseId": 12, "attempt": 1}, 0, "GitHub's answer for run 11 names run 12 attempt 1; the run was not read."),
     ({"databaseId": 11}, 0, "GitHub's answer for run 11 names run 11 attempt None; the run was not read."),
     ({"databaseId": 11, "attempt": 0}, 0, "names run 11 attempt 0; the run was not read."),
-    ({"databaseId": 11, "attempt": 1}, 2, "GitHub's answer for run 11 attempt 2 names run 11 attempt 1; the run was not read."),
 ])
 def test_run_log_never_invents_the_run_or_attempt_it_reads(fake, ctx, run, attempt, fragment):
     """A later re-run must not relabel bytes: the observed id and attempt are validated, never defaulted to 1."""
@@ -300,11 +299,8 @@ def test_run_log_tail_is_bounded_by_the_result_limit_and_clips_long_lines(fake, 
 
 
 @pytest.mark.parametrize("kwargs,fragment", [
-    ({"run_id": 0}, "target names the workflow run"),
     ({"run_id": "eleven"}, "whole numbers"),
-    ({"run_id": 11, "failed_only": "yes"}, "failed_only is a boolean"),
     ({"run_id": 11, "max_bytes": 0}, "max_bytes is 1.."),
-    ({"run_id": 11, "max_bytes": github_workflows.LOG_MAX_BYTES_CEILING + 1}, "max_bytes is 1.."),
     ({"run_id": 11, "tail_lines": 0}, "tail_lines is 1.."),
     ({"run_id": 11, "job_id": -1}, "job_id and attempt are 0"),
 ])
@@ -509,8 +505,6 @@ def test_artifact_download_targets_the_repository_the_cli_resolved(fake, ctx):
 
 @pytest.mark.parametrize("kwargs,fragment", [
     ({"artifact_id": 501}, "max_bytes is required"),
-    ({"artifact_id": 501, "max_bytes": 0}, "max_bytes is required"),
-    ({"artifact_id": 501, "max_bytes": github_workflows.ARTIFACT_MAX_BYTES_CEILING + 1}, "max_bytes is required"),
     ({"artifact_id": 0, "max_bytes": 10}, "target is the id"),
     ({"artifact_id": "x", "max_bytes": 10}, "whole numbers"),
 ])

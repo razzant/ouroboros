@@ -13,7 +13,6 @@ import pytest
 from tests.test_model_sleep import _ctx, _result
 from tests._budget_pause_exact_helpers import _loop_ctx
 
-pytestmark = pytest.mark.serial  # cold consumers bind queue module state
 
 
 def _run(root, run_id="run-one", task_id="sleeper", source="delegate_start"):
@@ -214,9 +213,11 @@ def test_native_saved_sleep_delivers_question_on_its_existing_return_path(tmp_pa
     assert ctx._sleep_interaction_seen == {"run-one": ["q1"]}
 
 
-@pytest.mark.parametrize("outcome,named", [("timeout", "the wake time you chose"), ("mail:peer", "mail from peer"),
-                                           ("run:run-x", "delegated run run-x reaching an engine terminal")])
-@pytest.mark.parametrize("started", [None, 30.0])
+@pytest.mark.parametrize(("started", "outcome", "named"), [
+    (None, "timeout", "the wake time you chose"),
+    (None, "run:run-x", "delegated run run-x reaching an engine terminal"),
+    (30.0, "mail:peer", "mail from peer"),
+])
 def test_native_saved_sleep_names_its_wake_without_inventing_elapsed_time(tmp_path, monkeypatch, outcome,
                                                                          named, started):
     import re

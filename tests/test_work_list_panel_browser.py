@@ -30,7 +30,7 @@ from tests.test_room_work_browser import (
     room_ui, settle_frames, settle_unfold, subscription_ui, trigger, wait_facts,
 )
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 __all__ = ["room_ui", "subscription_ui"]
 
 # One read of the open sheet, its bar and the capsules it hangs from, in CSS pixels.

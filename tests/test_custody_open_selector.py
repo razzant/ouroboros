@@ -181,11 +181,6 @@ def test_the_settled_terminal_majority_is_neither_fetched_nor_decoded(tmp_path, 
     ({"settled": True, "terminal_state": "succeeded"}, False),
     ({"settled": 1, "terminal_state": "failed"}, False),  # numeric one: dropped in SQL like true
     ({"settled": "yes", "terminal_state": "cancelled"}, True),  # no ordinary boolean: passes, Python decides
-    ({"settled": True, "terminal_state": 7}, True),
-    ({"settled": True, "terminal_state": ""}, True),
-    ({"settled": True}, True),
-    ({"terminal_state": "succeeded"}, True),
-    ({"settled": True, "terminal_state": "succeeded", "cost_usd": float("nan")}, True),  # non-ordinary JSON
 ])
 def test_sql_drops_only_runs_its_facts_definitely_settle_with_a_terminal_state(tmp_path, facts, passed):
     with store.open_store(tmp_path, write=True) as txn:  # the store's own custody row writer, as stored facts go

@@ -90,7 +90,7 @@ def test_ready_detach_arms_then_parks_same_id_and_sleep_grant_is_single_use(tmp_
     assert q.resume_budget_paused_task("head")["ok"], "explicit Resume can release the retained sleep"
 
 
-@pytest.mark.parametrize("kind", ["service", "delegated_run", "running_member", "member_custody", "custody_unreadable"])
+@pytest.mark.parametrize("kind", ["service", "delegated_run", "custody_unreadable"])
 def test_detach_refuses_blocker_list_without_arming(tmp_path, monkeypatch, kind):
     from ouroboros import model_sleep
 

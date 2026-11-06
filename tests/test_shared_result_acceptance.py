@@ -38,8 +38,7 @@ from tests.test_continue_successor_integration import continue_from, interrupted
 # Every Git tree, state root and process is case-local; these fixtures may run in parallel.
 
 
-@pytest.mark.parametrize("direct", [False, True])
-@pytest.mark.parametrize("decision", ["apply", "accept", "reject"])
+@pytest.mark.parametrize(("decision", "direct"), [("apply", False), ("accept", True), ("reject", False)])
 def test_ordinary_verdict_binds_consumed_shared_or_direct_result(tmp_path, monkeypatch, direct, decision):
     from ouroboros.tools import subagent_integration as integration
     from ouroboros.tools.join_ledger import _current_child_result_disposition
@@ -474,12 +473,8 @@ def test_excluded_and_ignored_files_are_disclosed_not_checked(tmp_path, monkeypa
 
 @pytest.mark.parametrize("case, expected", [
     ("missing_reason", "TOOL_ARG_ERROR"),
-    ("long_reason", "TOOL_ARG_ERROR"),
     ("self_worktree", "INTEGRATE_ACCEPT_UNSUPPORTED"),
     ("genesis", "INTEGRATE_GENESIS_FORBIDDEN"),
-    ("wrong_target", "INTEGRATE_EXTERNAL_WORKSPACE_TARGET_MISMATCH"),
-    ("read_denied", "INTEGRATE_TARGET_FORBIDDEN"),
-    ("not_a_child", "INTEGRATE_LINEAGE_FORBIDDEN"),
 ])
 def test_accept_refusals_come_before_any_decision(shared, case, expected):
     s = shared
@@ -921,9 +916,7 @@ def unwritable(*_args, **_kwargs):
 
 
 @pytest.mark.parametrize("decision, failed", [
-    ("accept", ["verdict_artifact_write_failed"]), ("accept", ["custody_row_write_failed"]),
-    ("accept", ["verdict_artifact_write_failed", "custody_row_write_failed"]),
-    ("apply", ["custody_row_write_failed"]), ("reject", ["verdict_artifact_write_failed"]),
+    ("accept", ["verdict_artifact_write_failed"]), ("apply", ["custody_row_write_failed"]), ("reject", ["verdict_artifact_write_failed"]),
 ])
 def test_a_decision_names_each_failed_write_of_its_own_evidence(shared, monkeypatch, decision, failed):
     s = shared

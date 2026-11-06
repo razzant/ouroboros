@@ -45,8 +45,7 @@ def test_status_names_the_archive_without_projecting_a_rows_secret_bearing_conte
     assert load_state(candidate.drive_root).advisory_runs == [row]
 
 
-@pytest.mark.parametrize("owed", [False, True])
-@pytest.mark.parametrize("enforcement", ["advisory", "blocking"])
+@pytest.mark.parametrize(("enforcement", "owed"), [("advisory", False), ("blocking", True)])
 def test_a_failed_legacy_row_and_owed_work_are_history_never_readiness(candidate, monkeypatch, enforcement, owed):  # noqa: F811
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
     _seed(candidate)

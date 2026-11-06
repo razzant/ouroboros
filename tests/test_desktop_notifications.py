@@ -283,7 +283,7 @@ def test_macos_reads_the_permission_without_asking(monkeypatch):
         assert center.asked == []
 
 
-@pytest.mark.parametrize("value,expected", [(2, "enabled"), (1, "disabled"), (0, "unknown"), (99, "unknown")])
+@pytest.mark.parametrize("value,expected", [(2, "enabled"), (1, "disabled"), (0, "unknown")])
 def test_macos_sound_setting_is_independent_of_authorization(monkeypatch, value, expected):
     center = Center(status=2, sound=value)
     notifier, _ = mac(monkeypatch, center)

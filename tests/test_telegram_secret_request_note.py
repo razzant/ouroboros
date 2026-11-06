@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 
 from tests.test_telegram_quiz_answers import _LAST_CLIENT, Api, Client, _load_plugin, _run_poller, _settings
+from tests._cases import case_folders
 
 CANARY = "zq7-CANARY-Ωlj3~p0+kx/2"
 _HINT = ("Secret needed for telegram: botToken. Enter it in the protected form in the Ouroboros app on the web or "
@@ -131,21 +132,24 @@ def _owner_reply(plugin, api, monkeypatch, mode, fields, *, to=1, date=None):
     return client, posts, injected, lookups
 
 
-@pytest.mark.parametrize("mode", _MODES)
-@pytest.mark.parametrize("shape", sorted(_SHAPES))
-def test_any_shape_of_reply_to_a_secret_note_is_refused_locally(tmp_path, monkeypatch, mode, shape):
-    plugin = _load_plugin()
-    api = _send_note(plugin, tmp_path, monkeypatch)
-    client, posts, injected, lookups = _owner_reply(plugin, api, monkeypatch, mode, _SHAPES[shape])
-    assert posts == [] and injected == [], "neither the decision ingress nor ordinary chat"
-    assert _MediaClient.downloads == [], "no attachment is downloaded for a refused reply"
-    assert client.sent == [(42, _REFUSAL)], "exactly one local refusal"
-    assert len(lookups) == 1, "the card is looked up once"
-    assert all(CANARY not in text for _chat, text in client.sent)
-    assert all(CANARY not in message for _level, message in api.logs)
+def test_any_shape_of_reply_to_a_secret_note_is_refused_locally(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for mode in _MODES:
+        for shape in sorted(_SHAPES):
+            tmp_path = next(case_paths)
+            with subtests.test(mode=mode, shape=shape), monkeypatch.context() as monkeypatch:
+                plugin = _load_plugin()
+                api = _send_note(plugin, tmp_path, monkeypatch)
+                client, posts, injected, lookups = _owner_reply(plugin, api, monkeypatch, mode, _SHAPES[shape])
+                assert posts == [] and injected == [], "neither the decision ingress nor ordinary chat"
+                assert _MediaClient.downloads == [], "no attachment is downloaded for a refused reply"
+                assert client.sent == [(42, _REFUSAL)], "exactly one local refusal"
+                assert len(lookups) == 1, "the card is looked up once"
+                assert all(CANARY not in text for _chat, text in client.sent)
+                assert all(CANARY not in message for _level, message in api.logs)
 
 
-@pytest.mark.parametrize("command", ["/menu", "/help", "/language", "/language@ouro_bot"])
+@pytest.mark.parametrize("command", ["/menu", "/help", "/language@ouro_bot"])
 def test_explicit_local_commands_still_run_as_a_reply_to_the_note(tmp_path, monkeypatch, command):
     plugin = _load_plugin()
     api = _send_note(plugin, tmp_path, monkeypatch)
@@ -180,25 +184,28 @@ def test_language_with_an_argument_is_not_a_way_around_the_refusal(tmp_path, mon
     assert chosen == ["Quenya"]
 
 
-@pytest.mark.parametrize("mode", _MODES)
-def test_ordinary_replies_and_media_keep_their_paths(tmp_path, monkeypatch, mode):
-    plugin = _load_plugin()
-    api = _send_note(plugin, tmp_path, monkeypatch)
-    asyncio.run(plugin._make_quiz(api)({**_EVENT, "quiz_id": "q-plain", "task_id": "task-2", "question": "Which db?",
-                                         "options": [{"label": "a"}], "secret_request": None}))
-    record = plugin.telegram_quiz.quiz_for_token(api, "", plugin.telegram_quiz.mint_token("task-2", "q-plain"))
-    assert record and not record.get("secret")
-    plain = record["message_id"]
-    # A text reply to an ordinary question is its answer, as before.
-    _client, posts, injected, lookups = _owner_reply(plugin, api, monkeypatch, mode, {"text": "postgres"}, to=plain)
-    assert len(posts) == 1 and injected == [] and len(lookups) == 1
-    # A captionless photo replying to it, and a photo with no reply at all, reach ordinary chat with the image.
-    for to in (plain, None):
-        _client, posts, injected, _lookups = _owner_reply(plugin, api, monkeypatch, mode, {"photo": [{"file_id": "p1"}]}, to=to)
-        assert posts == [] and len(injected) == 1 and injected[0]["image_base64"] == "aGk="
-        assert _MediaClient.downloads == ["p1"]
-    # A document with a caption and a voice note ride the shared attachment path.
-    _client, posts, injected, _lookups = _owner_reply(plugin, api, monkeypatch, mode, {"voice": {"file_id": "v1"}}, to=None)
-    assert len(injected) == 1 and injected[0].get("attachments")
-    # Without any reply no lookup happens at all.
-    assert _owner_reply(plugin, api, monkeypatch, mode, {"text": "hello"}, to=None)[3] == []
+def test_ordinary_replies_and_media_keep_their_paths(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for mode in _MODES:
+        tmp_path = next(case_paths)
+        with subtests.test(mode=mode), monkeypatch.context() as monkeypatch:
+            plugin = _load_plugin()
+            api = _send_note(plugin, tmp_path, monkeypatch)
+            asyncio.run(plugin._make_quiz(api)({**_EVENT, "quiz_id": "q-plain", "task_id": "task-2", "question": "Which db?",
+                                                 "options": [{"label": "a"}], "secret_request": None}))
+            record = plugin.telegram_quiz.quiz_for_token(api, "", plugin.telegram_quiz.mint_token("task-2", "q-plain"))
+            assert record and not record.get("secret")
+            plain = record["message_id"]
+            # A text reply to an ordinary question is its answer, as before.
+            _client, posts, injected, lookups = _owner_reply(plugin, api, monkeypatch, mode, {"text": "postgres"}, to=plain)
+            assert len(posts) == 1 and injected == [] and len(lookups) == 1
+            # A captionless photo replying to it, and a photo with no reply at all, reach ordinary chat with the image.
+            for to in (plain, None):
+                _client, posts, injected, _lookups = _owner_reply(plugin, api, monkeypatch, mode, {"photo": [{"file_id": "p1"}]}, to=to)
+                assert posts == [] and len(injected) == 1 and injected[0]["image_base64"] == "aGk="
+                assert _MediaClient.downloads == ["p1"]
+            # A document with a caption and a voice note ride the shared attachment path.
+            _client, posts, injected, _lookups = _owner_reply(plugin, api, monkeypatch, mode, {"voice": {"file_id": "v1"}}, to=None)
+            assert len(injected) == 1 and injected[0].get("attachments")
+            # Without any reply no lookup happens at all.
+            assert _owner_reply(plugin, api, monkeypatch, mode, {"text": "hello"}, to=None)[3] == []

@@ -38,7 +38,6 @@ from supervisor import events_chat_delivery as delivery
 from supervisor import message_bus
 from tests.group_run import run_in_group
 
-pytestmark = pytest.mark.serial  # Access is read from the process environment
 
 LINEAGE = {"delegation_role": "subagent", "parent_task_id": "root-1", "root_task_id": "root-1",
            "subagent_role": "researcher"}

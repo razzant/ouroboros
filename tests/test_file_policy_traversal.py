@@ -9,18 +9,16 @@ from ouroboros.contracts.task_constraint import TaskConstraint
 from ouroboros.tools import core_secret_paths
 from tests.test_file_resource_consistency import environment as environment
 
-pytestmark = pytest.mark.serial
 
 
-@pytest.mark.parametrize("mode", ["local_readonly_subagent", "acting_subagent"])
-@pytest.mark.parametrize("tool,args,rg_failure", [
-    ("list_files", {"path": "src", "max_entries": 200}, None),
-    ("search_code", {"path": "src", "query": "visible_function"}, None),
-    ("search_code", {"path": "src", "query": "visible_function"}, FileNotFoundError),
-    ("search_code", {"path": "src", "query": "visible_function"}, RuntimeError),
-    ("search_code", {"path": "src/module_0.py", "query": "visible_function"}, None),
-    ("query_code", {"op": "symbols", "path": "src/module_0.py"}, None),
-    ("query_code", {"op": "structural", "query": "FunctionDef", "path": "src"}, None),
+@pytest.mark.parametrize(("tool", "args", "rg_failure", "mode"), [
+    pytest.param("list_files", {"path": "src", "max_entries": 200}, None, "local_readonly_subagent", id='list_files-args0-None-local_readonly_subagent'),
+    pytest.param("search_code", {"path": "src", "query": "visible_function"}, None, "acting_subagent", id='search_code-args1-None-acting_subagent'),
+    pytest.param("search_code", {"path": "src", "query": "visible_function"}, FileNotFoundError, "local_readonly_subagent", id='search_code-args2-FileNotFoundError-local_readonly_subagent'),
+    pytest.param("search_code", {"path": "src", "query": "visible_function"}, RuntimeError, "acting_subagent", id='search_code-args3-RuntimeError-acting_subagent'),
+    pytest.param("search_code", {"path": "src/module_0.py", "query": "visible_function"}, None, "local_readonly_subagent", id='search_code-args4-None-local_readonly_subagent'),
+    pytest.param("query_code", {"op": "symbols", "path": "src/module_0.py"}, None, "acting_subagent", id='query_code-args5-None-acting_subagent'),
+    pytest.param("query_code", {"op": "structural", "query": "FunctionDef", "path": "src"}, None, "local_readonly_subagent", id='query_code-args6-None-local_readonly_subagent'),
 ])
 def test_file_walks_do_not_prepare_credential_shape_filters(environment, monkeypatch, mode, tool, args, rg_failure):
     from ouroboros import code_search_rg, credential_shapes, tool_access

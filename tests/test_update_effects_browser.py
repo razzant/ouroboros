@@ -14,7 +14,7 @@ from ouroboros.test_evidence import diagnostic_directory
 from tests.test_update_letter_browser import BOOT, WEB
 from tests.ui_console_errors import PageErrors
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.mark.parametrize("engine,width", [("chromium", 1360), ("chromium", 390), ("webkit", 390)])

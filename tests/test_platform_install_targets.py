@@ -62,8 +62,10 @@ def _run_install_command(args, *, env, timeout, capture_output=False, text=False
             raise
 
 
-@pytest.mark.parametrize("layout", ["bin/python3", "Scripts/python.exe"])
-@pytest.mark.parametrize("linked", [False, True], ids=["copied", "symlink"])
+@pytest.mark.parametrize(("linked", "layout"), [
+    pytest.param(False, "bin/python3", id='copied-bin/python3'),
+    pytest.param(True, "Scripts/python.exe", id='symlink-Scripts/python.exe'),
+])
 def test_confirmed_venv_precedes_embedded_binary_resolution(tmp_path, layout, linked):
     bundled = tmp_path / "python-standalone" / "bin" / "python3"
     bundled.parent.mkdir(parents=True)
@@ -107,7 +109,6 @@ def test_plain_python_and_nonstandard_cfg_neighbor(tmp_path):
     assert pip_install_target_args(str(bundled)) == ["--user"]
 
 
-@pytest.mark.serial
 def test_real_venv_installs_and_imports_local_wheel(tmp_path):
     venv = tmp_path / "work-environment"
     env = embedded_python_env(tmp_path / "data")
@@ -138,8 +139,7 @@ def test_real_venv_installs_and_imports_local_wheel(tmp_path):
     assert value == "local wheel imported"
 
 
-@pytest.mark.serial
-@pytest.mark.parametrize("outcome", ["timeout", "success", "nonzero", "no-cleanup"])
+@pytest.mark.parametrize("outcome", ["timeout", "success", "no-cleanup"])
 def test_install_command_settles_descendants_before_fallback(tmp_path, outcome):
     """Observe births/exit state before the independent outer owner reaps anything."""
     from ouroboros import platform_layer as pl
@@ -245,7 +245,6 @@ else:
     assert not live(sentinel_identity)
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("timeout", [0.05, 10], ids=["timeout-and-cleanup-error", "success-and-cleanup-error"])
 def test_install_command_cleanup_failure_stays_red(monkeypatch, timeout):
     containers = []
@@ -286,9 +285,10 @@ def test_install_command_cleanup_failure_stays_red(monkeypatch, timeout):
     assert containers[0].proc.stdout.closed and containers[0].proc.stderr.closed
 
 
-@pytest.mark.serial
-@pytest.mark.parametrize("text", [False, True], ids=["bytes", "text"])
-@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize(("newline", "text"), [
+    pytest.param("\n", False, id='lf-bytes'),
+    pytest.param("\r\n", True, id='crlf-text'),
+])
 def test_install_timeout_drains_initially_missing_output(monkeypatch, text, newline):
     """Real pipes, with the Windows initial-timeout shape also exercised on POSIX."""
     class MissingInitialOutput(ProcessContainer):

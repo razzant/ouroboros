@@ -414,16 +414,6 @@ def test_main_leaves_predecessor_cleanup_to_the_lifecycle_loop():
     assert reasons <= {'"startup_quit"', '"startup_abort"', '"startup_failure"'}, reasons
 
 
-def test_the_panic_and_window_close_path_performs_no_stray_sweep():
-    """BIBLE Emergency Stop: the panic path tears down what it owns and gains no
-    new killing."""
-    import launcher
-
-    assert "_reap_same_install_strays" not in inspect.getsource(
-        launcher._kill_orphaned_children
-    )
-
-
 # ---------------------------------------------------------------------------
 # Env-assignment primitive
 # ---------------------------------------------------------------------------

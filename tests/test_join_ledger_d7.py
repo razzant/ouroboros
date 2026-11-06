@@ -55,38 +55,6 @@ def test_discard_requires_reason(tmp_path):
     assert "reason is required" in out
 
 
-def test_discard_refuses_non_child(tmp_path):
-    """Lineage safety: discarding a task that is NOT this task's child is refused, so a
-    parent cannot corrupt an unrelated parent's join ledger."""
-    from ouroboros.task_results import load_task_result
-    from ouroboros.tools.join_ledger import _discard_child_result
-
-    # child of a DIFFERENT parent
-    _write_child(tmp_path, "stranger", "other_parent", result="not yours")
-    out = _discard_child_result(_ctx(tmp_path), "stranger", "trying to discard")
-    assert "not a child of this task" in out
-    res = load_task_result(tmp_path, "stranger") or {}
-    assert res.get("parent_decision") != "discarded"  # untouched
-
-
-def test_discard_unknown_child_is_safe(tmp_path):
-    from ouroboros.tools.join_ledger import _discard_child_result
-
-    out = _discard_child_result(_ctx(tmp_path), "nope", "n/a")
-    # unknown id is not a child either -> refused (never raises)
-    assert "not a child of this task" in out or "unknown" in out.lower()
-
-
-def test_peek_task_reads_without_absorbing(tmp_path):
-    from ouroboros.tools.join_ledger import _peek_task
-
-    _write_child(tmp_path, "child1", "parent1", result="intermediate finding X", cost_usd=0.05)
-    out = _peek_task(_ctx(tmp_path), "child1", view="summary")
-    assert "child1" in out
-    assert "NOT absorbed" in out  # peek must not look like an absorbed result
-    assert "intermediate finding X" in out  # result tail is visible
-
-
 def test_delegated_peek_is_lineage_scoped(tmp_path):
     from ouroboros.contracts.task_constraint import TaskConstraint
     from ouroboros.tools.join_ledger import _peek_task

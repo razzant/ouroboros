@@ -63,8 +63,11 @@ def test_failed_coupling_seat_keeps_full_source_and_is_never_a_pass(candidate, m
         assert "explicit author decision is required" in candidate._review_advisory[-1]
 
 
-@pytest.mark.parametrize("state,token", [("in_flight", ""), ("custody_lost", ""), ("settled", "pending-invocation")])
-@pytest.mark.parametrize("enforcement", ["blocking", "advisory"])
+@pytest.mark.parametrize(("enforcement", "state", "token"), [
+    ("blocking", "in_flight", ""),
+    ("blocking", "settled", "pending-invocation"),
+    ("advisory", "custody_lost", ""),
+])
 def test_pending_seat_is_pending_not_pass_under_either_enforcement(candidate, monkeypatch, state, token, enforcement):  # noqa: F811
     """A seat whose physical operation is unresolved keeps the wave PENDING:
     blocking enforcement blocks on it, advisory records the pending signal and

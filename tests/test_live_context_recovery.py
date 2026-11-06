@@ -7,7 +7,8 @@ from dataclasses import replace
 import pytest
 
 from ouroboros.contracts.live_conversation import LiveOptions
-from tests.test_live_conversation import host_world as host_world, packages as packages
+from tests._live_world import host_world as host_world
+from tests.test_live_conversation import packages as packages
 
 
 def test_wire_projection_is_recursive_and_leaves_strings_and_canonical_sources_exact():

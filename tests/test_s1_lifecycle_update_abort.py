@@ -26,7 +26,7 @@ from tests.test_s1_lifecycle_process import (
     _initial_read, _money_preserved, _restored_read, _rows, _usage, _worker_owner,
 )
 
-pytestmark = [pytest.mark.serial, pytest.mark.integration, pytest.mark.skipif(
+pytestmark = [pytest.mark.integration, pytest.mark.skipif(
     os.name != "posix", reason="This harness qualifies local POSIX process facts; Windows remains separate")]
 
 

@@ -17,7 +17,7 @@ setup = subscription_transport
 live_wait = wait_fixture
 subscription_ui = ui_fixture
 waiting_ui = waiting_fixture
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def test_real_mailbox_refusal_retries_exact_request_and_applies_once(subscription_ui, live_wait, monkeypatch):

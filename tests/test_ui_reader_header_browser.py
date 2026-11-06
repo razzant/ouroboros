@@ -15,7 +15,7 @@ from threading import Thread
 
 import pytest
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 ROOT = Path(__file__).resolve().parents[1]
 CAPTION = ("A detailed image caption with context and explanation. " * 35).replace(". ", ".\n", 2)
 ORDINARY = "owner-portrait-screenshot-of-the-settings-page-with-a-long-descriptive-name.png"

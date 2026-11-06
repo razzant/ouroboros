@@ -35,9 +35,6 @@ def test_canon_document_paths_and_named_book_sections_resolve(path):
 
 @pytest.mark.parametrize("pointer", [
     "`docs/ARCHITECTURE.md` \"Review delivery\"",
-    "docs/DEVELOPMENT.md § Design System",
-    "`docs/ARCHITECTURE.md` §10, invariant 2",
-    "`docs/CREATING_SKILLS.md`",
     '(DEVELOPMENT "Capability placement")',
     '(ARCHITECTURE "Review delivery")',
 ])

@@ -28,7 +28,7 @@ from tests.test_effort_range_browser import _evidence_dir, _launch, _open_chat, 
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 - pytest fixture import
 from tests.ui_chat_viewport_smoke import set_viewport
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 CONTEXT = "#page-chat .chat-context-mode"
 EFFORT = "#page-chat .chat-effort-range"

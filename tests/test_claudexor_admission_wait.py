@@ -36,7 +36,6 @@ import pytest
 # Real loopback ports (ThreadingHTTPServer) and a real spawned child process:
 # not parallel-safe under the xdist lane (DEVELOPMENT.md "Parallel CI and the
 # serial marker") — the whole module runs in the serial pass.
-pytestmark = pytest.mark.serial
 
 from ouroboros import claudexor_daemon as owned
 from ouroboros.gateways.claudexor import ClaudexorUnavailable

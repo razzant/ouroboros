@@ -45,7 +45,6 @@ def test_resume_preserves_the_same_ordinary_refusal_as_the_mind(monkeypatch, ref
         assert response.json()["blockers"] == outcome["blockers"]
 
 
-@pytest.mark.serial
 def test_actual_authority_resume_success_matches_python_and_browser_contract(tmp_path, monkeypatch):
     import pathlib
     from typing import get_type_hints

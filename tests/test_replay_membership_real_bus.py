@@ -13,14 +13,12 @@ from __future__ import annotations
 
 import multiprocessing
 
-import pytest
 
 from supervisor import terminal_delivery as td
 from supervisor.event_observation import EventQueueManager
 from tests.test_delivery_replay_membership import _age, _attempts, _owed
 
 
-@pytest.mark.serial
 def test_a_queued_or_handled_answer_is_not_copied_until_the_consumer_releases_it(tmp_path):
     context = multiprocessing.get_context("spawn")
     with EventQueueManager(ctx=context) as manager:
@@ -47,7 +45,6 @@ def test_a_queued_or_handled_answer_is_not_copied_until_the_consumer_releases_it
         assert copy["delivery_id"] == event["delivery_id"] and copy["text"] == event["text"]
 
 
-@pytest.mark.serial
 def test_the_same_sweep_without_the_membership_methods_admits_nothing(tmp_path):
     """Control: an endpoint that cannot answer membership is unknown, never 'absent'."""
 
@@ -68,7 +65,6 @@ def test_the_same_sweep_without_the_membership_methods_admits_nothing(tmp_path):
     assert plain.items == [] and _attempts(tmp_path, event["delivery_id"]) == 0
 
 
-@pytest.mark.serial
 def test_the_last_replay_copy_is_not_exhausted_while_it_is_still_outstanding(tmp_path, monkeypatch):
     """The replay cap gives a delivery up only once the bus says its last copy left the handler."""
     from supervisor.event_observation import ObservedEventQueue

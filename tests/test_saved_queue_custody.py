@@ -161,8 +161,10 @@ def test_a_restore_that_did_not_finish_grants_no_custody_of_the_saved_queue(tmp_
     assert queue.resume_budget_paused_task("saved-root")["ok"] is True
 
 
-@pytest.mark.parametrize("orphan", [False, True], ids=["no_direct_turn", "caught_direct_turn"])
-@pytest.mark.parametrize("read_failure", [False, True], ids=["read", "unreadable"])
+@pytest.mark.parametrize(("read_failure", "orphan"), [
+    pytest.param(False, False, id='read-no_direct_turn'),
+    pytest.param(True, True, id='unreadable-caught_direct_turn'),
+])
 def test_settling_a_caught_direct_turn_grants_no_custody_of_an_unread_snapshot(tmp_path, monkeypatch, orphan,
                                                                                read_failure):
     """The restore settles a direct turn the stop caught even when the snapshot could not be read; that

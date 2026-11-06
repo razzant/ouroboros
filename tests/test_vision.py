@@ -28,7 +28,6 @@ def _hang_in_provider_call(ready):
     LLMClient.chat = chat
 
 
-@pytest.mark.serial
 def test_vision_query_with_timeout_returns_without_waiting_for_hung_worker(monkeypatch, tmp_path):
     """The real wrapper, child entry, tracked runner, timeout and kill. The child's start-up is not the window
     (#1895): the real ``communicate`` timeout runs once the child is inside a provider call that never returns,

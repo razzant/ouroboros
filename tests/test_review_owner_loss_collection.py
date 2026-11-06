@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 
 from ouroboros import review_ledger
 from ouroboros.review_continuation import continuable_seats
@@ -24,7 +23,6 @@ from tests.test_receptive_commit_review import _git, _join, _commit
 from tests.test_receptive_commit_review import author as _author
 
 author = _author
-pytestmark = pytest.mark.serial
 DEAD_OWNER = 4_194_301
 
 

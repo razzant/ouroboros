@@ -16,7 +16,6 @@ from tests._delegated_transport_shared import (
 )
 
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize('selected,expected', [(None, 'workspace_write'), ('workspace_write', 'workspace_write'), ('full', 'full')])

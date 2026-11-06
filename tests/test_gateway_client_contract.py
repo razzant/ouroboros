@@ -30,6 +30,7 @@ from ouroboros.gateway.schema import (
     json_schema_for,
     validate_ingress,
 )
+from tests._source_scan import parse
 from tests.test_gateway_parity import _js_typedef_fields
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -144,7 +145,7 @@ def test_every_literal_ws_broadcast_type_is_published():
     sites = [REPO / "server.py", *sorted((REPO / "ouroboros").rglob("*.py")), *sorted((REPO / "supervisor").rglob("*.py"))]
     produced: dict[str, str] = {}
     for path in sites:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        tree = parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue

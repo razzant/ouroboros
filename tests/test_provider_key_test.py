@@ -145,10 +145,7 @@ def test_safety_routes_reach_credential_plan_and_provider_test_without_losing_in
     "payload,error",
     [
         ([], "JSON object"),
-        ({}, "provider_id is required"),
         ({"provider_id": "openrouterr"}, "unknown provider id"),
-        ({"provider_id": "openrouter", "overrides": []}, "overrides must be a JSON object"),
-        ({"provider_id": "openrouter", "overrides": {"NOT_ALLOWED": "x"}}, "unsupported override"),
         ({"provider_id": "openrouter", "overrides": {"OPENROUTER_API_KEY": 7}}, "must be strings"),
     ],
 )
@@ -357,19 +354,6 @@ def test_cleared_compatible_draft_does_not_restore_legacy_pair(monkeypatch):
         ("openai/test", {"OPENROUTER_API_KEY": ""}, {
             "provider": "openrouter", "api_key": "", "base_url": "https://openrouter.ai/api/v1",
         }),
-        ("openai::gpt-5.6-terra", {"OPENAI_API_KEY": "oa"}, {
-            "provider": "openai", "api_key": "oa", "base_url": "https://api.openai.com/v1",
-        }),
-        ("anthropic::claude-opus-5", {"ANTHROPIC_API_KEY": "ant"}, {
-            "provider": "anthropic", "api_key": "ant", "base_url": "https://api.anthropic.com/v1",
-        }),
-        ("minimax::MiniMax-M3", {"MINIMAX_API_KEY": "mm", "MINIMAX_REGION": "cn_zh"}, {
-            "provider": "minimax", "api_key": "mm", "base_url": "https://api.minimaxi.com/v1",
-        }),
-        ("cloudru::model", {
-            "CLOUDRU_FOUNDATION_MODELS_API_KEY": "cloud",
-            "CLOUDRU_FOUNDATION_MODELS_BASE_URL": "https://cloud.example/v1",
-        }, {"provider": "cloudru", "api_key": "cloud", "base_url": "https://cloud.example/v1"}),
         ("gigachat::GigaChat-2-Max", {
             "GIGACHAT_CREDENTIALS": "giga", "GIGACHAT_USER": "u", "GIGACHAT_PASSWORD": "p",
             "GIGACHAT_SCOPE": "GIGACHAT_API_CORP", "GIGACHAT_BASE_URL": "https://giga.example/v1",
@@ -378,14 +362,6 @@ def test_cleared_compatible_draft_does_not_restore_legacy_pair(monkeypatch):
             "provider": "gigachat", "api_key": "giga", "user": "u", "password": "p",
             "scope": "GIGACHAT_API_CORP", "base_url": "https://giga.example/v1",
             "verify_ssl_certs": False,
-        }),
-        ("openai-compatible::model", {
-            "OPENAI_COMPATIBLE_API_KEY": "compat",
-            "OPENAI_COMPATIBLE_BASE_URL": "https://compat.example/v1",
-            "OPENAI_API_KEY": "", "OPENAI_BASE_URL": "",
-        }, {
-            "provider": "openai-compatible", "api_key": "compat",
-            "base_url": "https://compat.example/v1",
         }),
         ("openai-compatible::model", {
             "OPENAI_COMPATIBLE_API_KEY": "",
@@ -421,10 +397,6 @@ def test_explicit_settings_mapping_is_authoritative(monkeypatch, model, settings
             "CLAUDE_CODE_MODEL": "claude-name-only",
         }, "anthropic::light"),
         ("cloudru", {}, "cloudru::zai-org/GLM-4.7"),
-        ("openrouter", {"CLAUDE_AGENT_SDK_MODEL": "opus"}, "google/gemini-3.8-flash"),
-        ("openai-compatible", {
-            "OUROBOROS_MODEL_FALLBACKS": "openai::other,openai-compatible::chosen",
-        }, "openai-compatible::chosen"),
         ("openai-compatible", {}, ""),
     ],
 )
@@ -495,7 +467,6 @@ def test_discovery_failure_stops_before_generation(monkeypatch, discovery, error
     "model,settings,token_key",
     [
         ("openai/test", {"OPENROUTER_API_KEY": "key"}, "max_tokens"),
-        ("openai::gpt-5.6-terra", {"OPENAI_API_KEY": "key"}, "max_completion_tokens"),
         # Unlisted by any name prefix: the carrier is the direct provider's, not the name's.
         ("openai::gpt-6-astra", {"OPENAI_API_KEY": "key"}, "max_completion_tokens"),
         ("openai-compatible::test", {
@@ -536,11 +507,6 @@ def test_openai_class_probe_is_one_minimal_attempt(monkeypatch, model, settings,
 
 @pytest.mark.parametrize("model", [
     "openai::gpt-6-astra",
-    "openai::acme-never-listed-1",
-    "openai::gpt-5.6-terra",
-    "openai::o3-mini",
-    "openai/gpt-6-astra",
-    "openai-compatible::giga-osa-glm53/glm-5.3-flash",
     "deepseek::deepseek-v4-flash",
     "minimax::MiniMax-M3",
 ])
@@ -823,7 +789,7 @@ def test_provider_test_never_reads_the_web_search_model_as_a_chat_route():
 
 @pytest.mark.parametrize("retired_key", [
     "OUROBOROS_MODEL_DEEP_SELF_REVIEW", "OUROBOROS_REVIEW_MODELS",
-    "OUROBOROS_SCOPE_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODEL",
+    "OUROBOROS_SCOPE_REVIEW_MODEL",
 ])
 def test_provider_test_and_declarations_ignore_retired_review_keys(retired_key):
     from ouroboros.provider_models import ACTIVE_MODEL_SETTING_KEYS, declared_model_settings

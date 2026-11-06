@@ -22,7 +22,6 @@ from ouroboros.openrouter_attribution import OPENROUTER_APP_HEADERS
 from ouroboros.review_run_isolation import ATTACH_HOME_ENV, REVIEW_RUN_CAP_ENV
 from ouroboros.settings_integrity import SETTINGS_INTEGRITY_ENV
 
-pytestmark = pytest.mark.serial  # real child processes
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 _ONE, _TWO = "openai/probe-one", "openai/probe-two"

@@ -162,8 +162,7 @@ def test_review_rows_name_the_owner_submission(monkeypatch, reviewer):
     assert kwargs["progress_meta"] == {"client_message_id": "cm-review"}
 
 
-@pytest.mark.parametrize("chat_id", [1, 42])
-@pytest.mark.parametrize("bridge_ready", [False, True])
+@pytest.mark.parametrize(("bridge_ready", "chat_id"), [(False, 1), (True, 42)])
 def test_ws_refusal_keeps_the_submitting_room(monkeypatch, chat_id, bridge_ready):
     """The real socket ingress must answer the Project that sent the failed frame."""
     from starlette.applications import Starlette

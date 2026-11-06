@@ -27,7 +27,7 @@ from tests import test_subscription_setup_browser as setup_browser
 from tests._work_projection_shared import work_fields
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 # The facts one room's control and list expose to the owner, read in one frame.
 ROOM_FACTS = """(scope) => {

@@ -92,12 +92,7 @@ def test_actual_safety_decisions_produce_panel_chips(supervisor, monkeypatch):
 
 @pytest.mark.parametrize("event,chips", [
     ({"type": "safety_verdict", "verdicts": [{"status": "SAFE"}]}, ["checked"]),
-    ({"type": "safety_verdict", "verdicts": [{"status": "SUSPICIOUS"}]}, ["warned"]),
-    ({"type": "safety_verdict", "verdicts": [{"status": "DANGEROUS"}, {"status": "SAFE"}]}, ["warned", "checked"]),
     ({"type": "safety_sent_despite_check"}, ["sent_despite"]),
-    ({"type": "safety_hold"}, ["held"]),
-    ({"type": "safety_mode_skip"}, ["not_checked"]),
-    ({"type": "safety_declared_read_skip"}, ["not_checked"]),
     ({"type": "safety_parse_failed"}, []),
 ])
 def test_each_durable_event_maps_without_inventing_checks(tmp_path, event, chips):

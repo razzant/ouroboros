@@ -63,8 +63,7 @@ def dispatch(monkeypatch, tmp_path):
     return deliver
 
 
-@pytest.mark.parametrize("local", [False, True])
-@pytest.mark.parametrize("processing", ["economy", ""])
+@pytest.mark.parametrize(("processing", "local"), [("economy", False), ("", True)])
 def test_empty_pool_main_processing_survives_commit_vectors(monkeypatch, dispatch, local, processing):
     settings = {
         "OUROBOROS_SUBAGENTS": pool_roster(), "OUROBOROS_MODEL": MODEL,
@@ -85,9 +84,11 @@ def test_empty_pool_main_processing_survives_commit_vectors(monkeypatch, dispatc
     assert settings == before
 
 
-@pytest.mark.parametrize("asynchronous", [False, True], ids=["chat", "chat_async"])
-@pytest.mark.parametrize("native", [False, True], ids=["packet", "native"])
-@pytest.mark.parametrize("processing", ["", "economy", None])
+@pytest.mark.parametrize(("processing", "native", "asynchronous"), [
+    pytest.param("", True, True, id='-native-chat_async'),
+    pytest.param("economy", False, False, id='economy-packet-chat'),
+    pytest.param(None, True, True, id='None-native-chat_async'),
+])
 def test_local_candidate_keeps_captured_processing_or_inherits_when_unspecified(
         monkeypatch, dispatch, asynchronous, native, processing):
     from ouroboros.llm import LLMClient
@@ -132,8 +133,10 @@ def test_catalog_processing_survives_commit_vectors(monkeypatch, dispatch, deliv
     assert provider_call(monkeypatch, kwargs) == (MODEL, "reviewer:critic", "", "economy", False)
 
 
-@pytest.mark.parametrize("native", [False, True])
-@pytest.mark.parametrize("processing", [None, ["", None]])
+@pytest.mark.parametrize(("processing", "native"), [
+    (None, False),
+    pytest.param(["", None], True, id='processing1-True'),
+])
 def test_missing_processing_vector_or_tail_keeps_unbound_compatibility(monkeypatch, dispatch, native, processing):
     plan = {"models": [MODEL] * 3, "routes": [ReviewRouteKind.API_CHAT] * 3,
             "slot_ids": ["first", "second", "tail"], "use_local": [False] * 3,

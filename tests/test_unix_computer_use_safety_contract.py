@@ -43,7 +43,6 @@ def _save_observation(root, observation_id, started, saved, read=None, release=N
     saved.set()
 
 
-@pytest.mark.serial
 def test_concurrent_observations_survive_in_the_bounded_ring(tmp_path):
     impl = plugin._ComputerUse(_API(tmp_path))
     for index in range(6):
@@ -83,7 +82,6 @@ def test_concurrent_observations_survive_in_the_bounded_ring(tmp_path):
     assert impl._load_transform()["transforms"][1]["refreshed"] is True
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("opt_in", [None, "1"])
 def test_safe_test_preserves_only_explicit_macos_desktop_opt_in(tmp_path, opt_in):
     """Only print the child environment: even the opt-in case runs no desktop code."""

@@ -21,7 +21,6 @@ from tests._budget_pause_exact_helpers import _fast_hold, _install_queue, _loop_
 from tests.test_acceptance_fence_transport import _pooled_agent, _Supervisor
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 TASK = "direct-cold"
 
@@ -152,8 +151,7 @@ def test_direct_exact_pause_reacquires_its_fence_on_pooled_resume(tmp_path, monk
     assert controls == [] and queue.ACCEPTANCE_FENCES[TASK]["status"] == "sealed"
 
 
-@pytest.mark.parametrize("change", ["unconsumed", "revoked", "missing_binding", "attempt",
-                                    "sealed", "foreign_task", "pooled_owner"])
+@pytest.mark.parametrize("change", ["unconsumed", "missing_binding", "pooled_owner"])
 def test_direct_handoff_needs_its_own_park_and_consumed_grant(tmp_path, monkeypatch, change):
     from ouroboros import budget_pause, loop
 

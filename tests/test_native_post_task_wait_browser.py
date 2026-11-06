@@ -21,7 +21,7 @@ from tests.test_subscription_setup_browser import capture, subscription_ui as ui
 
 phase = post_phase_fixture
 subscription_ui = ui_fixture
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def test_browser_stops_native_post_task_wait_without_losing_answer(subscription_ui, phase, monkeypatch):

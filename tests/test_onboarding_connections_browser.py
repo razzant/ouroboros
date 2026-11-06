@@ -12,7 +12,7 @@ from ouroboros.test_evidence import diagnostic_directory
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 from tests.ui_console_errors import record_console_errors, record_failed_loads, unexpected_console_errors
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @contextmanager

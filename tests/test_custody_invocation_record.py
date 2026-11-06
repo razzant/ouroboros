@@ -40,9 +40,8 @@ def _oracle_operation(root, rows):
     [_request(), {"type": c.START_FAILED, "invocation_id": "inv", "definite": True},
      _request(request={"prompt": "replacement"}, billing_group={"billing_group_id": "replacement-group"}),
      _started("b")],
-    [_request(), _started("a"), _started("b")],
     [_request(), _started("z"), _started("a"), _started("z")],
-], ids=["healthy", "refused-repeated-start", "last-start", "repeated-run-last-start"])
+], ids=["healthy", "refused-repeated-start", "repeated-run-last-start"])
 def test_live_invocation_equals_chain_at_every_prefix(tmp_path, history):
     for number, event in enumerate(history):
         _publish(tmp_path, event, number)

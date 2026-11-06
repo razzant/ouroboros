@@ -30,7 +30,6 @@ from tests.test_swarm_host_admission import host as host_fixture
 
 q = queue_fixture
 host = host_fixture
-pytestmark = pytest.mark.serial
 FACT_AUTO = "Subagents: Auto — scheduled work"
 FACT_OFF = "Subagents: Off — set by my human for this chat"
 FACT_SETTINGS_OFF = "Subagents: Off — off in Settings"
@@ -271,8 +270,11 @@ def _catalog_settings(monkeypatch, mode):
     return values
 
 
-@pytest.mark.parametrize("door", ["followup", "writer"])
-@pytest.mark.parametrize("mode,mode_seen,fact", [("swarm", "auto", FACT_AUTO), ("auto", "auto", FACT_AUTO), ("off", "off", FACT_OFF)])
+@pytest.mark.parametrize(("mode", "mode_seen", "fact", "door"), [
+    pytest.param("swarm", "auto", FACT_AUTO, "followup", id='swarm-auto-Subagents: Auto — scheduled work-followup'),
+    pytest.param("auto", "auto", FACT_AUTO, "writer", id='auto-auto-Subagents: Auto — scheduled work-writer'),
+    pytest.param("off", "off", FACT_OFF, "followup", id='off-off-Subagents: Off — set by my human for this chat-followup'),
+])
 def test_a_schedule_consciousness_wrote_follows_its_room_like_any_scheduled_work(q, monkeypatch, door, mode, mode_seen, fact):
     """At every consumption point: the queue's admission fact, the live mode, the round's fact, the catalog the model
     sees and the tool's refusal."""
@@ -403,8 +405,7 @@ def test_negative_control_a_wake_and_what_it_starts_off_the_clock_keep_conscious
         "id": "wake-1", "root_task_id": "wake-1", "metadata": child_origin}) == ("auto", None)
 
 
-@pytest.mark.parametrize("main,project_mode,seen", [("off", None, "off"), ("swarm", None, "auto"),
-                                                  ("swarm", "off", "off"), ("off", "swarm", "auto")])
+@pytest.mark.parametrize("main,project_mode,seen", [("off", None, "off"), ("swarm", "off", "off"), ("off", "swarm", "auto")])
 def test_presence_scheduled_work_uses_its_bound_room_or_main_and_keeps_off(q, monkeypatch, main, project_mode, seen):
     """A real due Presence promise obeys its room, regardless of the schedule author's autonomy."""
     from ouroboros.dialogue_provenance import PRESENCE_BINDING_AUTHORITY_KEY

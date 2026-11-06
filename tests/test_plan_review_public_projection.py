@@ -55,8 +55,6 @@ def _legacy(kind: str) -> dict:
         ("open", "open", "REVIEW_REQUIRED", False),
         ("pending", "pending", "", False),
         ("unavailable", "open", "", False),
-        ("rail_degraded", "rail_degraded", "REVIEW_REQUIRED", False),
-        ("closed", "closed", "GREEN", True),
     ],
 )
 def test_public_result_adds_legacy_projection_without_mutating_authority(

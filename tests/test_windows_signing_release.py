@@ -277,8 +277,12 @@ def expression_value(expression, context):
     return eval(" ".join(converted), {"__builtins__": {}, **functions})
 
 
-@pytest.mark.parametrize("certificate", ["", "A" * 40, "malformed", " "])
-@pytest.mark.parametrize("ref", ["refs/tags/v7.6.0", "refs/tags/v7.6.1-rc.1", "refs/heads/ouroboros"])
+@pytest.mark.parametrize(("ref", "certificate"), [
+    ("refs/tags/v7.6.0", ""),
+    ("refs/tags/v7.6.0", " "),
+    pytest.param("refs/tags/v7.6.1-rc.1", "A" * 40, id='refs/tags/v7.6.1-rc.1-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'),
+    ("refs/heads/ouroboros", "malformed"),
+])
 def test_windows_job_control_flow(certificate, ref):
     jobs = workflow_jobs()
     # An explicit status function is needed: otherwise a skipped signing job

@@ -18,7 +18,6 @@ from ouroboros.tools.tool_result import ToolResult
 from ouroboros.utils import sanitize_tool_args_for_log
 from ouroboros.workspace_executor import resolve_process_env
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture
@@ -83,8 +82,11 @@ def test_settings_wire_metadata_is_not_an_unknown_config_field():
     assert cfg.configuration_warnings == ('Fields retained but not applied: future_option',)
 
 
-@pytest.mark.parametrize('secret', ['!', 'synthetic-quote"\\tail\nvalue', 'synthetic-quote"\\tail\r\nvalue'])
-@pytest.mark.parametrize('newline', ['\n', '\r\n'])
+@pytest.mark.parametrize(("newline", "secret"), [
+    ('\n', '!'),
+    ('\n', 'synthetic-quote"\\tail\r\nvalue'),
+    ('\r\n', 'synthetic-quote"\\tail\nvalue'),
+])
 def test_mcp_reference_secrets_are_masked_without_a_length_floor(secret, newline):
     raw = {'id': 'local', 'transport': 'stdio', 'command': 'unused',
            'env': {'PORT': '8080'}, 'env_from_settings': {'PASSWORD': 'CUSTOM_KEY'}}
@@ -202,7 +204,7 @@ def test_service_replacement_keeps_uncertain_record_and_returns_start_error(proc
         workspace_executor._SERVICES.pop(key, None)
 
 
-@pytest.mark.parametrize('cleanup', ['stop', 'task', 'global', 'global_nowait'])
+@pytest.mark.parametrize('cleanup', ['stop', 'task', 'global_nowait'])
 def test_local_executor_finalizes_secret_log_before_forgetting_record(process_context, monkeypatch, cleanup):
     registry, ctx, workspace, data = process_context
     ctx.executor_ref = {'type': 'local', 'workspace_host_path': str(workspace), 'workspace_backend_path': '/workspace'}

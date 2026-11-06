@@ -7,7 +7,7 @@ import pytest
 from ouroboros import usage_accounting as ua
 from ouroboros.contracts.live_conversation import LiveOptions
 from ouroboros.contracts.realtime import RealtimeSetupError
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 from tests.test_live_host_settlement import tariff
 
 

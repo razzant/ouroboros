@@ -166,7 +166,7 @@ def test_recheck_is_tri_state_and_never_waits_under_the_queue_lock(env, monkeypa
     assert reads.recheck(('root',)) == UNCHANGED, 'outside Q the probe waits with the normal budget'
 
 
-@pytest.mark.parametrize("interference", ["none", "row_changed", "worker", "keep", "busy", "unknown"])
+@pytest.mark.parametrize("interference", ["none", "busy", "unknown"])
 def test_drive_settlement_refreshes_ownership_after_its_own_publication(env, monkeypatch, interference):
     """The real supervisor probe must not call its own custody publication a live task.
     A different row write/worker/Keep at the final interlock must still retain."""

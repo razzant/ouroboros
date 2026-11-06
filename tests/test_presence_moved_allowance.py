@@ -13,6 +13,7 @@ import pytest
 
 from tests._budget_pause_exact_helpers import _parked
 from tests.test_presence_moved_lifecycle import CEILING, PROJECT, _seed_and_built, root as root
+from tests._cases import case_folders
 
 
 def _moved_paused(root, monkeypatch, built, task_id, *, metadata_extra=None, move=True):
@@ -735,62 +736,65 @@ def _warm_parked_saved_record(tmp_path, monkeypatch, *, saved_record=True):
     return queue, workers, built, tid
 
 
-@pytest.mark.parametrize("record", ["saved_record", "lane_seed"])
-@pytest.mark.parametrize("actor", _ACTORS)
-def test_a_crash_between_the_warm_release_and_its_snapshot_restores_the_durable_decision(tmp_path, monkeypatch, actor, record):
+def test_a_crash_between_the_warm_release_and_its_snapshot_restores_the_durable_decision(subtests, tmp_path, monkeypatch):
     """Real warm door, real restore over the snapshot the crash left. A complete record is no rebuild's input, so it takes the
     owner's decision from the durable row before any gate reads it; a lane's seed rebuilds from that row. A mind's or an
     automatic Resume left none, and the number stands. The next restart, start, Stop and Continue read the same."""
-    from ouroboros import owner_pause, task_pacing
-    from ouroboros.control_actor import owner_door
-    from ouroboros.presence_carrier import _saved_record
-    from ouroboros.task_results import load_task_result
+    case_paths = case_folders(tmp_path)
+    for record in ["saved_record", "lane_seed"]:
+        for actor in _ACTORS:
+            tmp_path = next(case_paths)
+            with subtests.test(record=record, actor=actor), monkeypatch.context() as monkeypatch:
+                from ouroboros import owner_pause, task_pacing
+                from ouroboros.control_actor import owner_door
+                from ouroboros.presence_carrier import _saved_record
+                from ouroboros.task_results import load_task_result
 
-    queue, workers, built, tid = _warm_parked_saved_record(tmp_path, monkeypatch, saved_record=record == "saved_record")
-    owner = actor == "owner"
+                queue, workers, built, tid = _warm_parked_saved_record(tmp_path, monkeypatch, saved_record=record == "saved_record")
+                owner = actor == "owner"
 
-    def dies(**_k):
-        raise _Crash()
+                def dies(**_k):
+                    raise _Crash()
 
-    with monkeypatch.context() as patched, pytest.raises(_Crash):
-        patched.setattr(queue, "publish_queue_snapshot", dies)
-        if owner:
-            with owner_door("api_task_resume"):
-                queue.resume_budget_paused_task(tid)
-        else:
-            _resume_as(actor, tid)
-    durable = load_task_result(tmp_path, tid)
-    assert owner_pause.read_fence(tmp_path, tid)["state"] == owner_pause.FENCE_RELEASED
-    assert (task_pacing.recorded_producer_ceiling(durable) is None) is owner
+                with monkeypatch.context() as patched, pytest.raises(_Crash):
+                    patched.setattr(queue, "publish_queue_snapshot", dies)
+                    if owner:
+                        with owner_door("api_task_resume"):
+                            queue.resume_budget_paused_task(tid)
+                    else:
+                        _resume_as(actor, tid)
+                durable = load_task_result(tmp_path, tid)
+                assert owner_pause.read_fence(tmp_path, tid)["state"] == owner_pause.FENCE_RELEASED
+                assert (task_pacing.recorded_producer_ceiling(durable) is None) is owner
 
-    admission = queue.enqueue_task
-    gated = []
+                admission = queue.enqueue_task
+                gated = []
 
-    def admitted(task, **kwargs):  # what the restore's own admission gate reads
-        gated.append(task_pacing.recorded_producer_ceiling(task))
-        return admission(task, **kwargs)
+                def admitted(task, **kwargs):  # what the restore's own admission gate reads
+                    gated.append(task_pacing.recorded_producer_ceiling(task))
+                    return admission(task, **kwargs)
 
-    with monkeypatch.context() as patched:
-        patched.setattr(queue, "enqueue_task", admitted)
-        [row] = [task for task in _boot_from_disk(queue, workers) if task["id"] == tid]
-    assert gated == [None if owner else CEILING], "reconciled before the gate, not after it"
-    assert _saved_record(row)
-    assert row["task_contract"]["objective"] == built["task_contract"]["objective"]
-    assert task_pacing.recorded_producer_ceiling(row) == (None if owner else CEILING)
-    if owner:
-        assert row["metadata"]["producer_allowance_lifted"] == durable["metadata"]["producer_allowance_lifted"]
-    else:
-        assert "producer_allowance_lifted" not in row["metadata"]
-    expected = task_pacing.COST_STOP_NONE if owner else task_pacing.COST_STOP_PRODUCER
-    assert _start_authority(tmp_path, row) == expected
-    assert queue.persist_queue_snapshot(reason="after_the_restore")
-    [again] = [task for task in _boot_from_disk(queue, workers) if task["id"] == tid]
-    assert task_pacing.recorded_producer_ceiling(again) == (None if owner else CEILING)
+                with monkeypatch.context() as patched:
+                    patched.setattr(queue, "enqueue_task", admitted)
+                    [row] = [task for task in _boot_from_disk(queue, workers) if task["id"] == tid]
+                assert gated == [None if owner else CEILING], "reconciled before the gate, not after it"
+                assert _saved_record(row)
+                assert row["task_contract"]["objective"] == built["task_contract"]["objective"]
+                assert task_pacing.recorded_producer_ceiling(row) == (None if owner else CEILING)
+                if owner:
+                    assert row["metadata"]["producer_allowance_lifted"] == durable["metadata"]["producer_allowance_lifted"]
+                else:
+                    assert "producer_allowance_lifted" not in row["metadata"]
+                expected = task_pacing.COST_STOP_NONE if owner else task_pacing.COST_STOP_PRODUCER
+                assert _start_authority(tmp_path, row) == expected
+                assert queue.persist_queue_snapshot(reason="after_the_restore")
+                [again] = [task for task in _boot_from_disk(queue, workers) if task["id"] == tid]
+                assert task_pacing.recorded_producer_ceiling(again) == (None if owner else CEILING)
 
-    _technical_stop(tmp_path, tid)
-    successor = _continue(tid)
-    assert task_pacing.recorded_producer_ceiling(successor) == (None if owner else CEILING)
-    assert _start_authority(tmp_path, successor) == expected
+                _technical_stop(tmp_path, tid)
+                successor = _continue(tid)
+                assert task_pacing.recorded_producer_ceiling(successor) == (None if owner else CEILING)
+                assert _start_authority(tmp_path, successor) == expected
 
 
 def test_a_crash_between_the_exact_grant_and_its_snapshot_leaves_the_decision_and_a_minds_next_resume_runs_on_it(root, monkeypatch):

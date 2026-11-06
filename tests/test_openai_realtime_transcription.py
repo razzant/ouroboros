@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 
 from tests.test_grok_openai_protocol import providers as providers, deny_network as deny_network, make
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 @pytest.mark.parametrize("outcome", ["failed", "completed"])
@@ -49,7 +49,7 @@ def test_input_transcription_finishes_only_its_item_and_speech_continues(provide
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('missing', [None, 'tariff', 'audio_split', 'usage', 'duration'])
+@pytest.mark.parametrize('missing', [None, 'audio_split', 'duration'])
 def test_transcription_usage_reaches_shared_ledger_with_its_own_model(providers, host_world, monkeypatch, missing):
     from ouroboros import live_usage, pricing_catalog, usage_accounting as ua
 

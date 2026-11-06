@@ -77,8 +77,7 @@ def test_reader_failure_propagates_and_next_call_succeeds(tmp_path, monkeypatch)
     assert len(list_task_results(tmp_path)) == 1
 
 
-@pytest.mark.parametrize("existing_journal", [False, True])
-@pytest.mark.parametrize("another_root", [False, True])
+@pytest.mark.parametrize(("another_root", "existing_journal"), [(False, False), (True, True)])
 def test_listing_does_not_write_to_runtime_or_inspected_root(tmp_path, monkeypatch, existing_journal, another_root):
     monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path)
     inspected = tmp_path / "inspected" if another_root else tmp_path

@@ -10,7 +10,7 @@ import pytest
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 - pytest fixture
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def test_activity_relationship_hold_and_stale_restore(direct_server_with_data, monkeypatch):  # noqa: F811 - pytest fixture

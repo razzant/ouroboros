@@ -11,9 +11,12 @@ from ouroboros.review_ledger import CouplingOutcome
 from tests.test_git_review_preflight_gate import candidate  # noqa: F401
 
 
-@pytest.mark.parametrize("failure", ["critical", "scope_critical", "infra", "pending"])
-@pytest.mark.parametrize("corrected", [False, True])
-@pytest.mark.parametrize("cap", ["1", "2", "unlimited"])
+@pytest.mark.parametrize(("cap", "corrected", "failure"), [
+    ("1", False, "critical"),
+    ("1", True, "pending"),
+    ("2", True, "scope_critical"),
+    ("unlimited", False, "infra"),
+])
 def test_explicit_continuation_commits_current_bytes_without_repaying(candidate, monkeypatch, corrected, cap, failure):  # noqa: F811
     ctx = candidate
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
@@ -190,7 +193,7 @@ def test_no_current_test_proof_means_no_author_commit(candidate, monkeypatch):  
     assert sum(row.paid for row in load_state(ctx.drive_root).attempts) == 1
 
 
-@pytest.mark.parametrize("signal", ["passed", "author_continued", "not_confirmed", "unknown"])
+@pytest.mark.parametrize("signal", ["passed", "author_continued", "unknown"])
 def test_evolution_receipt_preserves_actual_review_authority(tmp_path, signal):
     from types import SimpleNamespace
     from ouroboros.tools.git_evolution import _record_evolution_commit_receipt

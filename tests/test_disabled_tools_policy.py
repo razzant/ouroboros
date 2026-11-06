@@ -10,7 +10,6 @@ and subagent inheritance via the parent-contract spread.
 """
 from __future__ import annotations
 
-import pytest
 
 
 from starlette.applications import Starlette
@@ -23,6 +22,7 @@ from ouroboros.contracts.task_contract import (
 )
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from tests._store_shared import read_result
+from tests._cases import case_folders
 
 WEB_TOOLS = ["web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query"]
 
@@ -329,43 +329,46 @@ _RETIRED_GITHUB_CASES = [
 ]
 
 
-@pytest.mark.parametrize("retired,successor,blocked_call,allowed_call", _RETIRED_GITHUB_CASES)
-def test_a_retired_github_name_withholds_its_successor_methods(tmp_path, monkeypatch, retired, successor, blocked_call, allowed_call):
+def test_a_retired_github_name_withholds_its_successor_methods(subtests, tmp_path, monkeypatch):
     """The narrow GitHub tools became methods of github_read / github_write; a saved contract that
     withheld one keeps withholding the method(s) it covered, plus the api hatch, and nothing else."""
-    from ouroboros.tools import github
-    from ouroboros.tools.registry_guards import _GITHUB_TOKEN_TOOLS, _RETIRED_GITHUB_TOOLS
+    case_paths = case_folders(tmp_path)
+    for retired, successor, blocked_call, allowed_call in _RETIRED_GITHUB_CASES:
+        tmp_path = next(case_paths)
+        with subtests.test(retired=retired, successor=successor, blocked_call=blocked_call, allowed_call=allowed_call), monkeypatch.context() as monkeypatch:
+            from ouroboros.tools import github
+            from ouroboros.tools.registry_guards import _GITHUB_TOKEN_TOOLS, _RETIRED_GITHUB_TOOLS
 
-    monkeypatch.setattr(github, "github_token_from_env_or_settings", lambda: "fixture-token")
-    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_k: (True, ""))
-    repo, data = tmp_path / "repo", tmp_path / "data"
-    repo.mkdir()
-    data.mkdir()
-    reg = ToolRegistry(repo_dir=repo, drive_root=data)
-    assert retired not in _GITHUB_TOKEN_TOOLS and _RETIRED_GITHUB_TOOLS[retired][0] == successor
-    contract = build_task_contract({"description": "x", "disabled_tools": [retired]})
-    reg.set_context(ToolContext(repo_dir=repo, drive_root=data, task_id="task-compat", task_metadata={"task_contract": contract}))
+            monkeypatch.setattr(github, "github_token_from_env_or_settings", lambda: "fixture-token")
+            monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_k: (True, ""))
+            repo, data = tmp_path / "repo", tmp_path / "data"
+            repo.mkdir()
+            data.mkdir()
+            reg = ToolRegistry(repo_dir=repo, drive_root=data)
+            assert retired not in _GITHUB_TOKEN_TOOLS and _RETIRED_GITHUB_TOOLS[retired][0] == successor
+            contract = build_task_contract({"description": "x", "disabled_tools": [retired]})
+            reg.set_context(ToolContext(repo_dir=repo, drive_root=data, task_id="task-compat", task_metadata={"task_contract": contract}))
 
-    # The successor stays advertised: only the covered method(s) are withheld, by name of the retired tool.
-    assert successor in set(reg.available_tools()) and reg.get_schema_by_name(successor) is not None
-    blocked = reg.execute(successor, blocked_call)
-    assert blocked.startswith("⚠️ RESOURCE_CONSTRAINT_BLOCKED") and retired in blocked and successor in blocked, blocked
-    hatch = reg.execute(successor, {"method": "api", "route": "repos/{owner}/{repo}/issues"} if successor == "github_read"
-                        else {"method": "api", "route": "repos/{owner}/{repo}/issues", "input": {"title": "T"}})
-    assert hatch.startswith("⚠️ RESOURCE_CONSTRAINT_BLOCKED") and retired in hatch, hatch
-    allowed = reg.execute(successor, allowed_call)
-    assert allowed.startswith("⚠️ TOOL_ARG_ERROR"), allowed  # the handler itself answered: the guard let it through
-    dead = reg.execute(retired, {})
-    assert "RESOURCE_CONSTRAINT_BLOCKED" in dead and "disabled_tools" in dead
+            # The successor stays advertised: only the covered method(s) are withheld, by name of the retired tool.
+            assert successor in set(reg.available_tools()) and reg.get_schema_by_name(successor) is not None
+            blocked = reg.execute(successor, blocked_call)
+            assert blocked.startswith("⚠️ RESOURCE_CONSTRAINT_BLOCKED") and retired in blocked and successor in blocked, blocked
+            hatch = reg.execute(successor, {"method": "api", "route": "repos/{owner}/{repo}/issues"} if successor == "github_read"
+                                else {"method": "api", "route": "repos/{owner}/{repo}/issues", "input": {"title": "T"}})
+            assert hatch.startswith("⚠️ RESOURCE_CONSTRAINT_BLOCKED") and retired in hatch, hatch
+            allowed = reg.execute(successor, allowed_call)
+            assert allowed.startswith("⚠️ TOOL_ARG_ERROR"), allowed  # the handler itself answered: the guard let it through
+            dead = reg.execute(retired, {})
+            assert "RESOURCE_CONSTRAINT_BLOCKED" in dead and "disabled_tools" in dead
 
-    # The other direction: naming the successor withholds the whole tool; no contract leaves the dead name unknown.
-    contract = build_task_contract({"description": "x", "disabled_tools": [successor]})
-    reg.set_context(ToolContext(repo_dir=repo, drive_root=data, task_metadata={"task_contract": contract}))
-    assert successor not in set(reg.available_tools()) and reg.get_schema_by_name(successor) is None
-    assert reg.execute_result(successor, allowed_call).status == "blocked"
-    reg.set_context(ToolContext(repo_dir=repo, drive_root=data))
-    assert reg.execute(retired, {}).startswith("⚠️ Unknown tool")
-    assert successor in set(reg.available_tools())
+            # The other direction: naming the successor withholds the whole tool; no contract leaves the dead name unknown.
+            contract = build_task_contract({"description": "x", "disabled_tools": [successor]})
+            reg.set_context(ToolContext(repo_dir=repo, drive_root=data, task_metadata={"task_contract": contract}))
+            assert successor not in set(reg.available_tools()) and reg.get_schema_by_name(successor) is None
+            assert reg.execute_result(successor, allowed_call).status == "blocked"
+            reg.set_context(ToolContext(repo_dir=repo, drive_root=data))
+            assert reg.execute(retired, {}).startswith("⚠️ Unknown tool")
+            assert successor in set(reg.available_tools())
 
 
 def test_subagent_inherits_disabled_tools():

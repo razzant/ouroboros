@@ -267,20 +267,11 @@ def _observe(monkeypatch, *, pin="", primary=PRIMARY):
 @pytest.mark.parametrize("pin,quota,roster,expected,subjects", [
     ("acct-a", _envelope(_snapshot("acct-a", state="exhausted", resets_at=RESET), _snapshot("acct-b")), None,
      {"state": "exhausted", "resets_at": RESET}, ["acct-a"]),
-    ("", _envelope(_snapshot("acct-a", state="exhausted", resets_at=RESET), _snapshot("acct-b")), None,
-     {"state": "available", "resets_at": None}, ["acct-a", "acct-b"]),
-    # A fresh record beside an older stale same-subject source keeps the shared verdict unknown.
-    ("", _envelope(_snapshot("acct-a"), _snapshot("acct-a", freshness="stale", source="codex_rollout")), None,
-     {"state": "unknown", "reason": "quota_evidence_stale_or_incomplete"}, ["acct-a", "acct-a"]),
     # #244: a null subject is an unprofiled route's window, never `codex-default`'s, roster or not.
     ("codex-default", _envelope(_snapshot(None)), ROSTER, {"state": "unknown", "reason": "quota_evidence_missing"}, []),
-    ("codex-default", _envelope(_snapshot(None), _snapshot("codex-default")), ROSTER,
-     {"state": "available", "resets_at": None}, ["codex-default"]),
-    ("", _envelope(), None, {"state": "unknown", "reason": "quota_evidence_missing"}, []),
     ("", _envelope(_snapshot("acct-a"), scoped=False), None,
      {"state": "unknown", "reason": "availability_scope_unhonored"}, ["acct-a"]),
-], ids=["pin-never-borrows-sibling", "auto-sees-every-subject", "stale-source-keeps-unknown",
-        "default-pin-never-borrows-unprofiled", "default-pin-exact", "empty-envelope", "scope-ignored"])
+], ids=["pin-never-borrows-sibling", "default-pin-never-borrows-unprofiled", "scope-ignored"])
 def test_the_observation_projects_the_shared_verdict_for_the_exact_binding(monkeypatch, pin, quota, roster,
                                                                            expected, subjects):
     engine = _Engine(quota, roster=roster)

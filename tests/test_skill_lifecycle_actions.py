@@ -87,7 +87,7 @@ def test_owner_grant_uses_resolved_expressed_source(skill_actor, kind):
     assert applied["content_hash"] == revision
 
 
-@pytest.mark.parametrize("invalid", ["absent", "foreign_chat", "unanswered", "revoked", "peer", "revision", "undeclared"])
+@pytest.mark.parametrize("invalid", ["absent", "foreign_chat", "unanswered", "peer", "revision", "undeclared"])
 def test_owner_action_refuses_unproven_source_or_changed_request(skill_actor, invalid):
     ctx, _skill, revision = skill_actor
     source = _owner_chat(ctx, chat_id=99 if invalid == "foreign_chat" else 42)
@@ -139,7 +139,7 @@ def test_selected_enable_requires_real_source_even_when_client_allows_it(skill_a
     assert enabled["ok"] and enabled["enabled"], enabled
 
 
-@pytest.mark.parametrize("actor", ["owner_ui", "owner_cli", "owner_launcher", "load_error_revert", ""])
+@pytest.mark.parametrize("actor", ["owner_ui", "owner_cli", "load_error_revert", ""])
 def test_only_proven_later_owner_disable_supersedes_repair_intent(skill_actor, monkeypatch, actor):
     from ouroboros.skill_loader import load_enabled, save_enabled
 

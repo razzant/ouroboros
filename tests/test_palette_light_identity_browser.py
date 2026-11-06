@@ -15,7 +15,7 @@ from tests import test_dark_voice_material_contrast_browser as dv
 
 room_ui = dv.room_ui
 subscription_ui = dv.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 COLOUR = ("color", "backgroundColor")
 CAPSULE = ("color", "backgroundColor", "boxShadow", "opacity")

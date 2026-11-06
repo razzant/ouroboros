@@ -18,7 +18,6 @@ import pytest
 import supervisor.git_ops as git_ops
 from supervisor.git_ops_updates import compute_managed_update_status, local_changes_since_shared_base
 
-pytestmark = pytest.mark.serial  # real Git processes against the module-global REPO_DIR
 
 
 def _git(repo, *args):

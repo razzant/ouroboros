@@ -27,7 +27,7 @@ from tests.test_late_phase_pause_cut import late as late  # noqa: F401 — fixtu
 from tests.test_subscription_setup_browser import subscription_ui as subscription_ui  # noqa: F401 — fixture
 from tests._work_projection_shared import state_fields
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def _capture(page, root: pathlib.Path, name: str) -> None:

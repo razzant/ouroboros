@@ -29,7 +29,6 @@ from tests.test_plan_task_tool import harness as _harness
 from tests.test_review_thread_retention import KEEP, Engine, _publish_queue, _route_keep, _row, _tool_keep
 
 harness, fake_route = _harness, _fake_route
-pytestmark = pytest.mark.serial
 RESUMABLE = {"cause": "vendor_limit", "carriers": ["native"], "resetsAt": None, "session": None,
              "workspace": {"kind": "none", "root": None}}
 OFFER = "Continuable stopped participants (plan_task(continue_seats=[{seat_id, operation_id}])): "

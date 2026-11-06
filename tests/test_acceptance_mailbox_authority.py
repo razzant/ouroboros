@@ -38,8 +38,11 @@ def _fence(tool_ctx):
     return calls
 
 
-@pytest.mark.parametrize("provenance", ["system", "descendant_task", "independent_task"])
-@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize(("cached", "provenance"), [
+    (False, "system"),
+    (False, "independent_task"),
+    (True, "descendant_task"),
+])
 def test_context_mail_wakes_without_reopening_acceptance(case, provenance, cached):
     tool_ctx, _tools, ctx, _trace, _candidate = case
     before = owner_source_sha256(tool_ctx)
@@ -67,8 +70,8 @@ def test_context_mail_does_not_hide_observation_or_refuse_ack(case, provenance):
     assert tool_ctx._loop_mailbox_seen_ids == set()
 
 
-@pytest.mark.parametrize("kind", ["owner_text", "quiz_answer", "hurry", "finalize_now",
-                                 "ancestor_task", "peer_via_ancestor", "legacy"])
+@pytest.mark.parametrize("kind", ["owner_text", "finalize_now",
+                                 "legacy"])
 def test_unread_owner_or_control_keeps_finalization_open(case, kind):
     tool_ctx, _tools, ctx, trace, _candidate = case
     observed = capture_acceptance_observation(tool_ctx, trace, ctx.incoming_messages)

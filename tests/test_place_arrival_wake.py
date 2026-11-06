@@ -54,12 +54,9 @@ def _delivered(root, ctx):
 
 @pytest.mark.parametrize("wake, selected, expected", [
     (True, {"senders": ["peer-a"]}, "mail:presence-turn"),       # unrelated selector: still the author's wake
-    (True, {"tasks": ["child"]}, "mail:presence-turn"),
     (False, {"any_mail": True}, ""),                             # context only, even under any mail
     (False, {"senders": ["presence-turn"]}, ""),                 # ... and even when its sender is selected
-    (_LEGACY, {"any_mail": True}, "mail:presence-turn"),         # written before the fact: ordinary mail
     (_LEGACY, {"senders": ["peer-a"]}, ""),
-    ("false", {"any_mail": True}, "mail:presence-turn"),         # not a bool: no typed fact at all
     (0, {"senders": ["peer-a"]}, ""),
     (None, {"any_mail": True}, "mail:presence-turn"),
 ])

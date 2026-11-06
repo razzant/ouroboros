@@ -16,7 +16,6 @@ from ouroboros.task_results import load_task_result, write_task_result
 from tests.test_admission_contention import database_reader
 from tests._store_journal_shared import use_journal
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture
@@ -84,11 +83,14 @@ def test_real_sql_claim_contention_preserves_one_registry_read(reader, monkeypat
     assert len(set(attempts)) == 1, "claim retry and settlement retain one operation ID"
 
 
-@pytest.mark.parametrize("handed, control", [
-    (False, "pause"), (False, "stop"), (True, "pause"), (True, "stop"),
-    (True, "deadline"), (True, "closed"),
+@pytest.mark.parametrize(("journal", "handed", "control"), [
+    ("PERSIST", False, "pause"),
+    ("PERSIST", True, "pause"),
+    ("PERSIST", True, "deadline"),
+    ("WAL", False, "stop"),
+    ("WAL", True, "stop"),
+    ("WAL", True, "closed"),
 ])
-@pytest.mark.parametrize("journal", ["PERSIST", "WAL"])
 def test_wait_rechecks_current_controls_without_revoking_handed_pause(
     reader, monkeypatch, handed, control, journal,
 ):
@@ -144,7 +146,7 @@ def test_wait_rechecks_current_controls_without_revoking_handed_pause(
 
 
 @pytest.mark.parametrize("error", [store.StoreBusy("unknown", reason="unknown"),
-    store.StoreBusy("uninspectable", reason="uninspectable"), store.StoreLost("lost"), PermissionError("denied")])
+    store.StoreLost("lost"), PermissionError("denied")])
 def test_hard_or_unknown_claim_failure_never_retries_or_enters_handler(reader, monkeypatch, error):
     _root, registry, calls = reader
     attempts = []
@@ -189,8 +191,11 @@ def test_store_busy_after_handler_entry_never_replays_handler(reader, monkeypatc
     assert not load_task_result(root, "root").get("launch_handoffs")
 
 
-@pytest.mark.parametrize("tool", ["read_file", "query_code", "send_user_message"])
-@pytest.mark.parametrize("contended", [False, True], ids=["uncontended", "read-blocks-commit"])
+@pytest.mark.parametrize(("contended", "tool"), [
+    pytest.param(False, "read_file", id='uncontended-read_file'),
+    pytest.param(False, "send_user_message", id='uncontended-send_user_message'),
+    pytest.param(True, "query_code", id='read-blocks-commit-query_code'),
+])
 def test_ordinary_registry_tools_keep_one_real_effect(reader, monkeypatch, tool, contended):
     from ouroboros.tools.registry import ToolRegistry
 

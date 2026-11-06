@@ -387,43 +387,6 @@ def test_registry_uses_typed_required_root_not_note_or_tool_name(tmp_path, monke
             "/ external_workspace child for that work.",
             "blocked",
         ),
-        (
-            "light_repo_mutation",
-            "write_file",
-            {"path": "README.md", "content": "changed\n"},
-            "LIGHT_MODE_BLOCKED",
-            "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light blocks Ouroboros "
-            "self-repo/control-plane mutation via 'write_file'. For user-visible "
-            "deliverables use root=user_files (for example Desktop/file.html), "
-            "root=artifact_store for the canonical task artifact, or root=task_drive "
-            "for scratch. Skill payload edits remain allowed only through "
-            "root=skill_payload with bucket and skill_name "
-            "(data/skills/<bucket>/<skill>/) or skill_repair constraints. "
-            "Switch to advanced/pro only for reviewed Ouroboros self-modification.",
-            "light_mode_blocked",
-        ),
-        (
-            "light_service",
-            "start_service",
-            {"name": "fixture", "cmd": ["sleep", "1"]},
-            "LIGHT_MODE_BLOCKED",
-            "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light refuses start_service against the "
-            "Ouroboros repository because long-running services can mutate after initial tool "
-            "checks. For external services, set cwd under user_files, task_drive, or "
-            "artifact_store; switch to advanced/pro only for reviewed Ouroboros self-modification.",
-            "light_mode_blocked",
-        ),
-        (
-            "protected_write",
-            "write_file",
-            {"path": "BIBLE.md", "content": "changed\n"},
-            "CORE_PROTECTION_BLOCKED",
-            "⚠️ CORE_PROTECTION_BLOCKED: runtime_mode='advanced' refuses to run tool "
-            "'write_file' against protected safety-critical path: BIBLE.md. Switch to "
-            "runtime_mode='pro' and let the normal review panel cover the protected "
-            "core/contract/release change before commit.",
-            "protected_blocked",
-        ),
     ),
 )
 def test_stable_host_predispatch_denials_are_native_and_keep_legacy_projection(

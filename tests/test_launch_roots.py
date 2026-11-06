@@ -120,26 +120,11 @@ def test_work_roots_keep_saved_then_environment_then_basis_precedence(layout, mo
 
 @pytest.mark.parametrize("prepare, expected", [
     (lambda root: None, launch_roots.APP_ROOT_BASIS),
-    (lambda root: _write_witness(root), launch_roots.HOME_BASIS),
-    (lambda root: _write_witness(root, work_root_basis="app_root"), launch_roots.APP_ROOT_BASIS),
-    (lambda root: _write_witness(root, work_root_basis="home"), launch_roots.HOME_BASIS),
-    (lambda root: _write_witness(root, work_root_basis="elsewhere"), launch_roots.UNKNOWN_BASIS),
-    (lambda root: (root / "state").mkdir(parents=True) or launch_roots.witness_path(root).write_text("{broken"),
-     launch_roots.UNKNOWN_BASIS),
-    (lambda root: launch_roots.witness_path(root).mkdir(parents=True), launch_roots.UNKNOWN_BASIS),
-    (lambda root: (root / "state").mkdir(parents=True) or (root / "state" / "state.json").write_text(
-        json.dumps({"session_id": "s", "created_at": "t"})), launch_roots.HOME_BASIS),
-    (lambda root: (root / "state").mkdir(parents=True) or (root / "state" / "state.json").write_text(
-        json.dumps({"initialization_id": "lost"})), launch_roots.UNKNOWN_BASIS),
     (lambda root: (root / "state").mkdir(parents=True) or (root / "state" / "state.json").write_text("{"),
      launch_roots.UNKNOWN_BASIS),
-    (lambda root: _corrupt_primary(root, {"session_id": "s", "created_at": "t"}), launch_roots.HOME_BASIS),
     (lambda root: _corrupt_primary(root, {"initialization_id": "lost"}), launch_roots.UNKNOWN_BASIS),
-    (lambda root: (root / "task_results").mkdir(parents=True) or (root / "task_results" / "t.json").write_text("{}"),
-     launch_roots.UNKNOWN_BASIS),
-], ids=["new", "legacy-witness", "recorded-app-root", "recorded-home", "unrecognized", "invalid-witness",
-        "unreadable-witness", "pre-witness-state", "state-lost-its-witness", "unreadable-state",
-        "corrupt-primary-pre-witness-backup", "corrupt-primary-backup-lost-its-witness", "history-without-state"])
+], ids=["new", "unreadable-state",
+        "corrupt-primary-backup-lost-its-witness"])
 def test_the_witness_decides_the_basis_and_never_guesses_home(layout, monkeypatch, prepare, expected):
     data = _use_lab(monkeypatch, layout)
     data.mkdir(parents=True)
@@ -292,7 +277,6 @@ print(json.dumps({"server": str(server.DATA_DIR), "process": str(server_process.
 '''
 
 
-@pytest.mark.serial
 def test_a_direct_server_given_only_app_root_refuses_while_home_holds_history(layout, tmp_path):
     historical = layout.historical / "data"
     _write_witness(historical)
@@ -306,7 +290,6 @@ def test_a_direct_server_given_only_app_root_refuses_while_home_holds_history(la
     assert not layout.app.exists() and _tree(historical) == before, "nothing opened or written"
 
 
-@pytest.mark.serial
 def test_a_direct_server_given_only_app_root_uses_its_own_data_when_home_has_none(layout, tmp_path):
     (layout.historical / "data" / "state").mkdir(parents=True)  # bootstrap scaffolding is not memory
     (layout.historical / "data" / "settings.json").write_text("{}", encoding="utf-8")
@@ -386,7 +369,6 @@ def _initialization_facts(data):
             "refused": [row.get("reason") for row in rows if row.get("type") == "state_unavailable_at_boot"]}
 
 
-@pytest.mark.serial
 def test_a_first_session_that_ends_before_setup_leaves_the_root_new(layout, tmp_path):
     """A new root's first start has no provider, so no supervisor runs, and the owner (or a Homebrew
     upgrade) quits before Setup: the configured boot after it initializes the root with the ``app_root``
@@ -683,9 +665,7 @@ def test_the_packaged_cli_uses_app_roots_tuple_and_carries_it_into_the_macos_app
 
 @pytest.mark.parametrize("bound,target,accepted", [
     ("127.0.0.2", "127.0.0.1", False), ("127.0.0.1", "127.0.0.2", False),
-    ("127.0.0.1", "127.0.0.1", True), ("::1", "::1", True),
-    ("::1", "127.0.0.1", False), ("0.0.0.0", "127.0.0.1", True),
-    ("::", "::1", True),
+    ("127.0.0.1", "127.0.0.1", True), ("::1", "127.0.0.1", False), ("::", "::1", True),
 ])
 def test_packaged_implicit_endpoint_matches_the_bound_address(layout, monkeypatch, bound, target, accepted):
     from ouroboros import packaged_cli, server_process

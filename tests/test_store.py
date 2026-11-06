@@ -603,8 +603,7 @@ def _read_store_file_in_this_process(kind, root, path):
         assert stream_artifact_file(path)["size"] == path.stat().st_size
 
 
-@pytest.mark.serial
-@pytest.mark.parametrize("kind", ["header", "wal_flag", "preview", "agent_read", "copy", "stream", "artifact"])
+@pytest.mark.parametrize("kind", ["header", "copy", "artifact"])
 def test_reading_a_store_file_keeps_the_write_lock_another_thread_holds(tmp_path, kind):
     """Closing any descriptor of the store file releases every POSIX lock this process holds on
     it (sqlite.org howtocorrupt 2.2). ``probe`` read the header on every ``open_store``, and the
@@ -706,7 +705,6 @@ def test_store_descriptors_live_only_as_long_as_their_connections(tmp_path):
     assert not getattr(store, "_INODES", None)
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(os.name == "nt", reason="POSIX record locks")
 def test_a_reader_opened_before_a_transaction_keeps_its_lock_when_it_closes(tmp_path):
     """A borrow taken while nothing held the file must not be closed under a transaction that

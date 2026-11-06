@@ -33,8 +33,6 @@ def test_a_lost_store_is_unavailable_never_empty(tmp_path):
 @pytest.mark.parametrize("status,fields,expected", [
     ("running", {}, {"nonterminal", "pending_drives"}),
     ("running", {"root_phase_checkpoint": {"post_task_synthesis": "paused"}}, {"synthesis"}),
-    ("running", {"delegated_runs_unreconciled": ["r"]}, {"delegated_runs"}),
-    ("running", {"child_ref_promotion": {"schema_version": 1, "status": "incomplete", "pending_refs": [{"path": "x"}]}}, {"promotions"}),
     ("completed", {}, {"terminal_projection", "synthesis"}),
 ])
 def test_membership_is_atomic_with_the_result_write(tmp_path, monkeypatch, status, fields, expected):

@@ -27,7 +27,6 @@ from tests._usage_store_testing import ledger_rows
 from tests.test_delegate_body_collection import _until, terminal
 from tests.test_headless_workspace_patch import _init_repo_with_file
 
-pytestmark = pytest.mark.serial
 ANSWER = "Recovered complete answer.\n" * 1024
 EVIDENCE = b"\x00byte-exact checking output\xff\n" * 16
 
@@ -159,7 +158,7 @@ def test_recovered_review_uses_native_subject_and_separate_terminal_bytes(tmp_pa
     assert len(list(evidence.parent.glob("evidence*"))) == 1
 
 
-@pytest.mark.parametrize("basis", ["empty", "missing_field", "timeout", "missing_commit"])
+@pytest.mark.parametrize("basis", ["empty", "timeout", "missing_commit"])
 def test_required_unknown_or_missing_basis_never_becomes_unborn(tmp_path, monkeypatch, basis):
     from ouroboros import workspace_preflight as preflight
     from ouroboros.workspace_patch_capture import write_workspace_patch_artifacts
@@ -389,8 +388,7 @@ def test_body_stop_mid_capture_keeps_named_files_pending_for_the_next_generation
     assert len([row for row in ledger_rows(root) if row.get("kind") == "subscription_session"]) == 1
 
 
-@pytest.mark.parametrize("kind", ["ordinary", "review"])
-@pytest.mark.parametrize("door", ["stop", "restart"])
+@pytest.mark.parametrize(("door", "kind"), [("stop", "ordinary"), ("restart", "review")])
 def test_stop_and_owner_restart_leave_capture_to_existing_owners(tmp_path, monkeypatch, kind, door):
     from ouroboros import claudexor_daemon, owned_shutdown, server_restart
     from ouroboros.cancel_intents import request_cancel

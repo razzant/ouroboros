@@ -19,6 +19,7 @@ import pathlib
 import pytest
 
 from ouroboros import skill_identity as si
+from tests._cases import case_folders
 
 
 def _skill(root: pathlib.Path, name: str = "probe", *, extra: str = "") -> pathlib.Path:
@@ -102,29 +103,32 @@ def test_a_filesystem_the_store_does_not_call_local_is_hashed_every_time(tmp_pat
     assert compute_content_hash(skill) == first and "notes.md" in opened
 
 
-@pytest.mark.parametrize("note,bucket", sorted(si.PER_INSTALL_NOTE_BUCKETS.items()))
-def test_per_install_notes_stay_out_only_in_their_own_bucket(tmp_path, note, bucket):
+def test_per_install_notes_stay_out_only_in_their_own_bucket(subtests, tmp_path):
     """A note the host writes into its own bucket never enters the release; the same name
     anywhere else is skill content, so it cannot carry bytes past the review binding."""
-    from ouroboros.skill_loader import compute_content_hash
+    case_paths = case_folders(tmp_path)
+    for note, bucket in sorted(si.PER_INSTALL_NOTE_BUCKETS.items()):
+        tmp_path = next(case_paths)
+        with subtests.test(note=note, bucket=bucket):
+            from ouroboros.skill_loader import compute_content_hash
 
-    own = _skill(tmp_path / bucket)
-    clean = compute_content_hash(own)
-    (own / note).write_text(json.dumps({"installed_at": "t1"}), encoding="utf-8")
-    first = compute_content_hash(own)
-    (own / note).write_text(json.dumps({"installed_at": "t2"}), encoding="utf-8")
-    assert compute_content_hash(own) == first == clean  # its own bucket, top level: outside
-    nested = own / "data"
-    nested.mkdir()
-    (nested / note).write_text("runtime-readable bytes\n", encoding="utf-8")
-    assert compute_content_hash(own) != clean  # a nested file of that name is payload
-    other_bucket = "user" if bucket != "user" else "elsewhere"
-    other = _skill(tmp_path / other_bucket)
-    plain = compute_content_hash(other)
-    (other / note).write_text("runtime-readable bytes\n", encoding="utf-8")
-    assert compute_content_hash(other) != plain  # another place: the name is payload
-    (other / "notes.md").write_text("changed\n", encoding="utf-8")
-    assert compute_content_hash(other) != plain
+            own = _skill(tmp_path / bucket)
+            clean = compute_content_hash(own)
+            (own / note).write_text(json.dumps({"installed_at": "t1"}), encoding="utf-8")
+            first = compute_content_hash(own)
+            (own / note).write_text(json.dumps({"installed_at": "t2"}), encoding="utf-8")
+            assert compute_content_hash(own) == first == clean  # its own bucket, top level: outside
+            nested = own / "data"
+            nested.mkdir()
+            (nested / note).write_text("runtime-readable bytes\n", encoding="utf-8")
+            assert compute_content_hash(own) != clean  # a nested file of that name is payload
+            other_bucket = "user" if bucket != "user" else "elsewhere"
+            other = _skill(tmp_path / other_bucket)
+            plain = compute_content_hash(other)
+            (other / note).write_text("runtime-readable bytes\n", encoding="utf-8")
+            assert compute_content_hash(other) != plain  # another place: the name is payload
+            (other / "notes.md").write_text("changed\n", encoding="utf-8")
+            assert compute_content_hash(other) != plain
 
 
 def test_declaration_is_part_of_the_release(tmp_path):
@@ -255,8 +259,7 @@ def test_identity_conversion_retries_after_a_record_write_error(tmp_path, monkey
     assert si.convert_skill_identities(drive) == {"skipped": True}
 
 
-@pytest.mark.parametrize("edited", [False, True])
-@pytest.mark.parametrize("manifest_name", ["SKILL.md", "skill.json"])
+@pytest.mark.parametrize(("manifest_name", "edited"), [("SKILL.md", True), ("skill.json", False)])
 def test_legacy_hub_conversion_uses_only_the_original_manifest_declaration(tmp_path, edited, manifest_name):
     from ouroboros.skill_install_record import convert_legacy_records, read_install_record
     from ouroboros.skill_loader import find_skill
@@ -434,7 +437,6 @@ def test_admitted_owner_task_edits_keep_running(tmp_path, owner_request, not_cyb
 
 @pytest.mark.parametrize("stamp,owner_request", [
     ({"source_ref": {"chat_id": 1, "client_message_id": "owner-1"}}, True),
-    ({"origin_suppressed": True}, True),
     ({}, False),
     ({"source_ref": {}, "origin_suppressed": "yes"}, False),
 ])

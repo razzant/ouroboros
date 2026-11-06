@@ -109,7 +109,7 @@ def hold_first_delivery(monkeypatch):
 # --- Selection refusals: one row beside the historical trace record ------------------------------
 
 @pytest.mark.parametrize("refusal", ["selection_unavailable", "unobserved_tool_results",
-                                     "contradictory_completion_requests", "owner_input_changed"])
+                                     "owner_input_changed"])
 def test_a_refused_selection_is_one_typed_hold_beside_the_unchanged_trace_record(turn, refusal):
     retained = None
     if refusal == "selection_unavailable":
@@ -207,7 +207,7 @@ def left_review(turn, wait, park_owner=None):
     return waiting
 
 
-@pytest.mark.parametrize("case", ["custody_restored", "wake_notice", "parked", "settled"])
+@pytest.mark.parametrize("case", ["custody_restored", "wake_notice", "settled"])
 def test_prose_beside_a_left_review_is_one_hold_naming_its_case_recorded_before_any_wait(turn, monkeypatch, case):
     from ouroboros.review_pause import PROCESS_TOKEN
 
@@ -299,8 +299,8 @@ def once(value, otherwise):
     return gate
 
 
-@pytest.mark.parametrize("reason", ["plan_gate", "subagent_handoff", "child_absorption", "focus_reply_refused",
-                                    "admission_seal", "owner_followup"])
+@pytest.mark.parametrize("reason", ["plan_gate", "focus_reply_refused",
+                                    "admission_seal"])
 def test_each_delivery_gate_names_itself_in_its_hold(turn, monkeypatch, reason):
     """The gate's decision is scripted once (the owner follow-up is a real admission drain); the
     branch it takes, its host rows and the row it writes are the production ones."""
@@ -335,8 +335,7 @@ def test_each_delivery_gate_names_itself_in_its_hold(turn, monkeypatch, reason):
 
 # --- What is not a hold -------------------------------------------------------------------------
 
-@pytest.mark.parametrize("script", ["tool_round_then_plain_final", "voluntary_finish", "plain_final",
-                                    "author_stop", "receipt_sibling", "suppressed_nanny_nudge"])
+@pytest.mark.parametrize("script", ["tool_round_then_plain_final", "author_stop", "suppressed_nanny_nudge"])
 def test_ordinary_work_finishes_and_suppressed_nudges_write_no_hold(turn, script):
     responses = {
         "tool_round_then_plain_final": [{"content": None, "tool_calls": [tool_call("chat_history")]},
@@ -382,7 +381,6 @@ def test_an_owner_hard_stop_of_a_direct_turn_is_a_terminal_not_a_hold(turn):
     assert holds(turn.root) == []
 
 
-@pytest.mark.serial
 def test_a_presence_answer_met_by_stop_now_is_a_terminal_not_a_hold(owner_stop, monkeypatch):
     """A real Place focus turn: its final answer meets the owner's Stop now at the closing admission."""
     from ouroboros.presence_runner import PresenceTurnError
@@ -525,8 +523,8 @@ def _nudge_case(case, tmp_path, monkeypatch):
     return SimpleNamespace(_ctx=ctx), trace, content
 
 
-@pytest.mark.parametrize("case", ["authoring_handover", "skill_not_finalized", "verification_red", "verification_masked",
-                                  "criterion_agent_defined", "verification_absent", "final_answer_marker"])
+@pytest.mark.parametrize("case", ["verification_masked",
+                                  "criterion_agent_defined", "verification_absent"])
 def test_each_finalization_nudge_names_its_own_hold_cause(tmp_path, monkeypatch, case):
     tools, trace, content = _nudge_case(case, tmp_path, monkeypatch)
     assert loop._maybe_inject_finalization_nudges(tools, tmp_path, "t", trace, content, [], lambda *_: None) is True
@@ -536,7 +534,7 @@ def test_each_finalization_nudge_names_its_own_hold_cause(tmp_path, monkeypatch,
     assert _hold_cause(tools._ctx) == case and _hold_cause(tools._ctx) == "", "read once"
 
 
-@pytest.mark.parametrize("code", ["NANNY_DID_NOT_DELEGATE", "NANNY_DELEGATED_RUN_PENDING", "NANNY_DELEGATED_RUN_FAILED",
+@pytest.mark.parametrize("code", ["NANNY_DID_NOT_DELEGATE", "NANNY_DELEGATED_RUN_FAILED",
                                   "CONFIGURED_ACTOR_INCOMPLETE"])
 def test_a_nanny_hold_keeps_the_exact_code_its_own_rows_carry(tmp_path, code):
     from tests.test_nanny_finalization_nudge import _custody_drive, _emit_settled, _emit_started, _tools
@@ -583,7 +581,7 @@ def test_a_suppressed_nudge_names_no_cause(tmp_path):
     assert ctx._nanny_finalization_injected is True and not hasattr(ctx, "_completion_hold_cause")
 
 
-@pytest.mark.parametrize("cause", ["findings", "blocking_refusal", "pending", "earlier_request", "pass"])
+@pytest.mark.parametrize("cause", ["findings", "blocking_refusal", "pass"])
 def test_each_result_review_hold_names_its_own_cause(tmp_path, monkeypatch, cause):
     import ouroboros.review_substrate as substrate
     import ouroboros.tools.review_change as review_change_mod

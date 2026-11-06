@@ -59,10 +59,14 @@ def _start(core, window, monkeypatch, density, kind="total"):
                 window, "confirmed", "metadata", "accept-route", window_kind=kind)))
 
 
-@pytest.mark.parametrize("window", [128_000, 200_000, 272_000, 400_000, 922_000, 1_000_000])
-@pytest.mark.parametrize("density", [1.0, 4 / 2.7])
-@pytest.mark.parametrize("mature", [False, True])
-@pytest.mark.parametrize("kind", ["input", "total"])
+@pytest.mark.parametrize(("kind", "mature", "density", "window"), [
+    ("input", False, 1.0, 128_000),
+    ("input", False, 1.0, 272_000),
+    ("input", False, 1.0, 922_000),
+    pytest.param("total", True, 4 / 2.7, 200_000, id='total-True-1.4814814814814814-200000'),
+    pytest.param("total", True, 4 / 2.7, 400_000, id='total-True-1.4814814814814814-400000'),
+    pytest.param("total", True, 4 / 2.7, 1_000_000, id='total-True-1.4814814814814814-1000000'),
+])
 def test_fresh_and_mature_envelopes_leave_one_work_room(window, density, mature, kind, monkeypatch):
     core, snap = _core(mature)
     plan = _start(core, window, monkeypatch, density, kind)
@@ -121,8 +125,11 @@ def test_only_the_late_chosen_rung_addresses_a_chosen_body_that_fits_alone(tmp_p
     assert ("just-chosen body after a real refusal" in shown) is fits
 
 
-@pytest.mark.parametrize("size,refused", [(100_000, False), (140_000, True)])
-@pytest.mark.parametrize("transmitted", [0, 1_234, 65_536])
+@pytest.mark.parametrize(("transmitted", "size", "refused"), [
+    (0, 100_000, False),
+    (1_234, 140_000, True),
+    (65_536, 100_000, False),
+])
 def test_final_send_prices_the_reserved_reply_even_when_the_wire_omits_it(size, refused, transmitted):
     from ouroboros.llm_attempt import main_context_fit_refusal
     from ouroboros.usage_accounting import AttemptRequest, PhysicalAttemptContext

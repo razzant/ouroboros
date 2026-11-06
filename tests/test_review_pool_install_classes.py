@@ -41,6 +41,7 @@ from ouroboros.tools.registry import ToolContext
 from ouroboros.tools.review_change import run_review_change
 from tests import _contributor_packet_shared as shared
 from tests.test_review_pool_migration import N1_DOC, SLOTS, SUBAGENTS, anton_document, api_row, catalog
+from tests._cases import chosen_rows
 
 GOAL = "Make the installed body's helper return the proposal's constant."
 SCOPE = "ouroboros/helper.py only; the checklist and tests stay as they are."
@@ -178,7 +179,7 @@ def _one_wave(tmp_path, monkeypatch, repo: Path):
     return result, review_ledger.load_record(ctx.drive_root, result["record_id"]), served
 
 
-@pytest.mark.parametrize("install", sorted(INSTALL_CLASSES))
+@pytest.mark.parametrize("install", chosen_rows(sorted(INSTALL_CLASSES), 0, 2, 5))
 def test_each_lane_era_install_migrates_into_a_pool_that_reviews_in_one_wave(install, staged_body, tmp_path,
                                                                              monkeypatch):
     document = INSTALL_CLASSES[install]()

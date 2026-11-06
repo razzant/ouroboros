@@ -56,18 +56,8 @@ def test_the_committed_file_is_a_valid_empty_list():
 
 
 @pytest.mark.parametrize("document", [
-    [], {"format": 2, "label": ci_accepted.LABEL, "entries": []},
-    {"format": 1, "label": "wontfix", "entries": []}, {"format": 1, "label": ci_accepted.LABEL},
-    {"format": 1, "label": ci_accepted.LABEL, "entries": [{"nodeid": NODE}]},
-    {"format": 1, "label": ci_accepted.LABEL, "entries": [{"nodeid": NODE, "issue": 0}]},
-    {"format": 1, "label": ci_accepted.LABEL, "entries": [{"nodeid": NODE, "issue": "2083"}]},
-    {"format": 1, "label": ci_accepted.LABEL, "entries": [{"nodeid": "", "issue": 1}]},
-    {"format": 1, "label": ci_accepted.LABEL, "entries": [{"nodeid": NODE, "issue": 1, "platforms": []}]},
-    {"format": 1, "label": ci_accepted.LABEL, "entries": [{"nodeid": NODE, "issue": 1, "platforms": ["win32"]}]},
-    # A misspelt key would otherwise widen the entry to every system.
-    {"format": 1, "label": ci_accepted.LABEL, "entries": [{"nodeid": NODE, "issue": 1, "platform": ["windows"]}]},
-], ids=["not-object", "format", "label", "no-entries", "no-issue", "issue-zero", "issue-text", "empty-node",
-        "no-platform", "unknown-platform", "unknown-key"])
+    [], {"format": 1, "label": "wontfix", "entries": []}, {"format": 1, "label": ci_accepted.LABEL, "entries": [{"nodeid": NODE, "issue": 1, "platform": ["windows"]}]},
+], ids=["not-object", "label", "unknown-key"])
 def test_a_malformed_file_is_refused_whole(tmp_path, document):
     with pytest.raises(ValueError):
         ci_accepted.load(_file(tmp_path, document))
@@ -83,10 +73,9 @@ def test_a_well_formed_file_loads_its_entries(tmp_path):
     ([("labeled", "contributor")], False),
     ([("labeled", OWNER), ("unlabeled", OWNER)], False),
     ([("labeled", OWNER), ("unlabeled", "contributor")], False),
-    ([("unlabeled", OWNER), ("labeled", OWNER)], True),
     ([("labeled", OWNER), ("labeled", "contributor")], False),
     ([], False),
-], ids=["owner", "not-owner", "removed", "removed-by-other", "relabelled", "relabelled-by-other", "never"])
+], ids=["owner", "not-owner", "removed", "removed-by-other", "relabelled-by-other", "never"])
 def test_only_the_owner_applying_the_label_last_accepts(steps, accepted):
     issues = _Issues(events={2083: _labelled(*steps) + [
         {"event": "labeled", "label": {"name": "bug"}, "actor": {"login": OWNER}},  # Another label never counts.

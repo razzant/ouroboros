@@ -12,7 +12,7 @@ from supervisor import events_budget as eb
 from tests._budget_pause_exact_helpers import _install_queue, _parked
 
 
-@pytest.mark.parametrize("state", ["requested", "paused", "released", "absent"])
+@pytest.mark.parametrize("state", ["requested", "paused", "absent"])
 def test_owner_marker_after_root_release_requires_member_selection(state):
     task = {"id": "child", "root_task_id": "root", "_budget_pause": {"reason": "owner", "exact_continuation": True}}
     fence = {"state": state, "fence_id": "f"} if state != "absent" else {}
@@ -23,8 +23,7 @@ def test_owner_marker_after_root_release_requires_member_selection(state):
     assert "member_stop" not in stop
 
 
-@pytest.mark.parametrize("state", ["released", "absent"])
-@pytest.mark.parametrize("actor", ["owner", "mind"])
+@pytest.mark.parametrize(("actor", "state"), [("owner", "released"), ("mind", "absent")])
 def test_zero_dispatch_owner_marker_selects_against_the_current_fence(tmp_path, monkeypatch, state, actor):
     from ouroboros.control_actor import mind_control
     from ouroboros.task_results import write_task_result

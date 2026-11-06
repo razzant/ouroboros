@@ -16,6 +16,7 @@ import pathlib
 import subprocess
 
 from ouroboros.tools.scope_review_contract import COUPLING_QUESTION_IDS
+from tests._worlds import clone_repository, world
 
 GIT_ENV = {
     "GIT_AUTHOR_NAME": "Fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
@@ -117,10 +118,9 @@ def _write(repo: pathlib.Path, files: dict[str, str]) -> None:
         path.write_bytes(text.encode("utf-8"))
 
 
-def init_installed_body(root: pathlib.Path) -> dict[str, str]:
-    """The installed checkout, detached at the base, with the proposal on branch ``proposal``."""
-    repo = (root / "installed").resolve()
-    repo.mkdir(parents=True)
+def _lay_installed_body(folder: pathlib.Path) -> None:
+    repo = folder / "installed"
+    repo.mkdir()
     git(repo, "init", "-q")
     # The golden describes these LF fixture bytes, including after checkout.
     # Per-command -c in git() does not configure production helper invocations.
@@ -140,11 +140,17 @@ def init_installed_body(root: pathlib.Path) -> dict[str, str]:
         ["git", "diff", "--binary", "--no-ext-diff", f"{base}..{head}"],
         cwd=str(repo), capture_output=True, check=True,
     ).stdout
-    return {
-        "repo": str(repo), "base_sha": base, "head_sha": head,
-        "head_tree_sha": git(repo, "rev-parse", f"{head}^{{tree}}"),
+    (folder / "facts.json").write_text(json.dumps({
+        "base_sha": base, "head_sha": head, "head_tree_sha": git(repo, "rev-parse", f"{head}^{{tree}}"),
         "diff_sha256": hashlib.sha256(patch).hexdigest(),
-    }
+    }), encoding="utf-8")
+
+
+def init_installed_body(root: pathlib.Path) -> dict[str, str]:
+    """The installed checkout, detached at the base, with the proposal on branch ``proposal``: this test's copy."""
+    template = world("installed-body", _lay_installed_body)
+    repo = clone_repository(template / "installed", (root / "installed").resolve())
+    return {"repo": str(repo), **json.loads((template / "facts.json").read_text(encoding="utf-8"))}
 
 
 def isolation_record(drive: pathlib.Path) -> dict:

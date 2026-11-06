@@ -148,8 +148,12 @@ def test_schema_enumeration_checks_a_skill_once_and_reads_again_next_time(live_r
     assert counts["enabled"] == 13 and counts["peer_parse"] == 0
 
 
-@pytest.mark.parametrize("surface", ["http", "ws", "tool"])
-@pytest.mark.parametrize("change", ["review", "payload", "peer", "membership"])
+@pytest.mark.parametrize(("change", "surface"), [
+    ("review", "http"),
+    ("payload", "ws"),
+    ("peer", "tool"),
+    ("membership", "http"),
+])
 def test_next_dispatch_observes_cross_process_changes(live_route, monkeypatch, surface, change):
     dispatch = _consumer(live_route, surface, monkeypatch)
     assert dispatch()

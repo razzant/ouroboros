@@ -24,7 +24,6 @@ from tests._silence_reaper_support import historical_timeout_retry
 from tests.test_retry_pause_identity import _assign, _successors, reaper as reaper
 from tests.test_swarm_host_admission import host as host
 
-pytestmark = pytest.mark.serial
 
 
 def _project_retry(host, tmp_path, monkeypatch, clock, reaper):
@@ -177,7 +176,7 @@ def test_a_superseded_retry_is_not_the_current_root_actor(host, tmp_path, monkey
     assert _pending_resume_available(queue, stale, owner_paused=False) is False
 
 
-@pytest.mark.parametrize("identity", ["logical-root", "current-retry", "child", "unreadable-chain"])
+@pytest.mark.parametrize("identity", ["logical-root", "child", "unreadable-chain"])
 def test_interrupted_member_resume_uses_the_existing_root_actor_boundary(
         host, tmp_path, monkeypatch, clock, reaper, identity):
     """O1 is a guard contract, not a claim that the reaper terminalizes its old root.

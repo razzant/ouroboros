@@ -30,13 +30,13 @@ The context-delivery registry:
 
 `plan_ask.planning_roots` gives planning its subject and governance roots, `read_admission` admits attachments (of data roots only own task stores); external plans never fall back to reviewing Ouroboros. Exact user-managed installed-skill paths only classify: never self-modification or attachable evidence (`denied_path`).
 
-Review history keeps the operative contract, current author/critic statuses and open/deferred/pending facts explicit. Actor `review_notes` may shorten individual reasons or group exact historical decisions, retaining membership and lineage in the existing selected view. No grouping by age or terminal status. Producers project decisions once with mirror references; unknown legacy content stays full. Recheck versions through publication, cold context, new packets and Continue; source gaps preserve recoverable bodies. Invalid optional transfers leave their own attachments full. Unchanged views retain their prefix; all surviving accounts cross continuations. Notes grant no verdict and rewrite no paid replay. Enforcement: `tests/test_review_local_accounts.py`, `tests/test_review_cold_history.py`, `tests/test_review_view_integration.py`. Plan objections: ARCHITECTURE §6 "Plan construction and review".
+Review history keeps the operative contract, current author/critic statuses and open/deferred/pending facts explicit. Actor `review_notes` may shorten individual reasons or group exact historical decisions, retaining membership and lineage in the existing selected view. No grouping by age or terminal status. Producers project decisions once with mirror references; unknown legacy content stays full. Recheck versions through publication, cold context, new packets and Continue; source gaps preserve recoverable bodies. Invalid optional transfers leave their own attachments full. Unchanged views retain their prefix; all surviving accounts cross continuations. Notes grant no verdict and rewrite no paid replay. Enforcement: `ouroboros/review_history_view.py`. Plan objections: ARCHITECTURE §6 "Plan construction and review".
 
 **Context mode (Nano / Low / Max).** Use the Main row. Max binds Development to the active repository, keeping books until recovery's earlier steps fall short. Known-window no-result-room predictions and provider refusals share recovery; unknown windows send full. Preserve owner Low/Nano sizing, lower starts, tier-0 and P3. Targets cut no chosen read or owner words; rebinds re-cut no fitting sent view (`tests/test_context_economy_window.py`). Mechanism: ARCHITECTURE §6 “Context fitting, retry, and compaction”.
 
 ### Invariant: Exact premises with explicit source ownership
 
-Plan from the complete retained room — both speakers, options and answers exact (`dialogue_evidence.py`, `plan_dialogue.py`) — with no independent dialogue byte cap, never from the bounded post-consolidation reader or the owner-directive ledger (`review_evidence._accept_owner_directives`). JSONL records and chat line selectors split on physical LF only, never inside valid Unicode of a message. Enforcement: `tests/test_plan_dialogue_review_regressions.py`.
+Plan from the complete retained room — both speakers, options and answers exact (`dialogue_evidence.py`, `plan_dialogue.py`) — with no independent dialogue byte cap, never from the bounded post-consolidation reader or the owner-directive ledger (`review_evidence._accept_owner_directives`). JSONL records and chat line selectors split on physical LF only, never inside valid Unicode of a message. Enforcement: `ouroboros/plan_dialogue.py`.
 
 ### Invariant: Compaction must earn its rewrite
 
@@ -54,7 +54,7 @@ When a core governance artifact does not fit the available budget:
 - Bound strings through `utils.truncate_review_artifact` (display previews) or `utils.truncate_within_limit` (a strict wire/prompt bound), never a hand-rolled `text[:cap] + marker`, which loses the anti-waste floor and can return a value longer than its input.
 - A list obeys the same rule: a `[:N]` slice carries the omitted count and, where downstream compares an identity, a durable hash or reference for the full set (`_outcome_receipts.receipt_identity_projection`). Bounding a set is allowed; hiding that it was bounded is the P1 violation.
 
-Enforcement: `tests/test_tool_result_delivery.py`, `tests/test_delegated_result_delivery.py` and `tests/test_owner_facing_honesty.py`.
+Enforcement: `tests/test_tool_result_delivery.py`, `tests/test_owner_facing_honesty.py`.
 
 ### Invariant: What a person reads whole stays whole
 

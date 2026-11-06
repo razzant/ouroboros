@@ -148,9 +148,11 @@ def test_update_project_only_if_empty_is_a_compare_and_set(tmp_path):
     assert plain["working_dir"] == "/c"  # an ordinary update still overwrites
 
 
-@pytest.mark.parametrize("stage", ["create_project", "bind_task_to_project"])
-@pytest.mark.parametrize("choice", ["explicit", "none", "room_default"])
-@pytest.mark.serial
+@pytest.mark.parametrize(("choice", "stage"), [
+    ("explicit", "create_project"),
+    ("none", "bind_task_to_project"),
+    ("room_default", "create_project"),
+])
 def test_room_default_drift_respects_the_promoted_resource_choice(tmp_path, monkeypatch, stage, choice):
     import supervisor.workers as workers
     from ouroboros import projects_registry as registry

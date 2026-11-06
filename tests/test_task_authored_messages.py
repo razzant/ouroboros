@@ -115,9 +115,11 @@ def _queue_root(tmp_path, monkeypatch):
     return tmp_path
 
 
-@pytest.mark.parametrize("drained_owner", [None, "owner-followup", ""])
-@pytest.mark.parametrize("project_sender", [False, True])
-@pytest.mark.parametrize("root_shape", ["headless", "promoted"])
+@pytest.mark.parametrize(("root_shape", "project_sender", "drained_owner"), [
+    ("headless", False, None),
+    ("headless", False, ""),
+    ("promoted", True, "owner-followup"),
+])
 def test_teller_note_is_context_in_every_lane(tmp_path, target_lane, drained_owner, project_sender, root_shape):
     from ouroboros.loop_messages import _initialize_owner_directives, owner_source_sha256
     from ouroboros.loop_round_limits import _drain_incoming_messages

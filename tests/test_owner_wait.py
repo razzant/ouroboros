@@ -74,7 +74,6 @@ def test_failed_checkpoint_does_not_release_capacity(tmp_path, monkeypatch):
         wait_after_tools(ctx, [], {}, {}, 1, [], set())
 
 
-@pytest.mark.serial
 def test_deferred_question_flush_and_resume_requires_pool_grant(tmp_path):
     from ouroboros.owner_mailbox import write_owner_message
 
@@ -104,7 +103,6 @@ def test_deferred_question_flush_and_resume_requires_pool_grant(tmp_path):
         thread.join(timeout=2)
 
 
-@pytest.mark.serial
 def test_a_spent_bound_asks_the_pool_for_the_same_resume(tmp_path):
     """The pooled lane needs no second scheduler: a spent bound is another
     reason to send the SAME resume request the mailbox already sends, and only

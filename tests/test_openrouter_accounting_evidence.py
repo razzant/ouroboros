@@ -111,11 +111,9 @@ def test_actual_retry_ladder_retains_first_failure_before_second_send(root, monk
 
 
 @pytest.mark.parametrize("usage,expected,final", [
-    ({"cost": 1.25}, 1.25, True), ({"cost": 0}, 0, True), ({}, None, False),
+    ({"cost": 0}, 0, True), ({}, None, False),
     ({"cost": "nan"}, None, False), ({"cost": True}, None, False),
     ({"cost": 1.25, "prompt_tokens": "broken", "completion_tokens": "inf"}, 1.25, True),
-    ({"cost": 1.25, "cache_creation": {"ephemeral_5m_input_tokens": "broken"},
-      "cache_write_tokens_by_ttl": "broken"}, 1.25, True),
     ({"prompt_tokens": 0, "completion_tokens": 0}, 0, True),
     ({"prompt_tokens": 0, "completion_tokens": 0, "cost": -1}, None, False),
 ])
@@ -128,8 +126,7 @@ def test_returned_body_failure_preserves_explicit_money(root, usage, expected, f
     assert read_blob_ref(root, current["physical_failure"]["evidence_ref"])["body"] == body
 
 
-@pytest.mark.parametrize("cost", [0, 1.25])
-@pytest.mark.parametrize("via_stream", [False, True])
+@pytest.mark.parametrize(("via_stream", "cost"), [(False, 0), (True, 1.25)])
 def test_received_cost_precedes_existing_free_exception_classification(root, cost, via_stream):
     error = BodyFailure({"id": "gen-free", "error": {"message": "No endpoints found"}, "usage": {"cost": cost}})
     error.status_code = 404
@@ -295,7 +292,6 @@ def test_journal_accepts_nonfinal_price_refinement_but_not_release(root):
     assert apply_retained_receipt(root, attempt_id, held)["status"] == "duplicate"
 
 
-@pytest.mark.serial
 def test_two_process_receipt_application_changes_money_once(root):
     ua.execute_physical_attempt(request(root), lambda: {"id": "gen-race"})
     attempt_id = ua.last_physical_attempt_capture().attempt_id

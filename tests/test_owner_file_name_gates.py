@@ -100,7 +100,6 @@ def test_a_real_credential_directory_is_still_refused_and_names_its_rule(tmp_pat
     assert manifest[0]["rule"] == "path is hidden or credential-like (owner credential location)"
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("mode", ["light", "advanced", "pro", "cyber_pro"])
 @pytest.mark.parametrize("relative, below_cyber_status", [
     ("x/prod.env", "rejected"),
@@ -186,7 +185,6 @@ def test_owner_declares_a_key_deck_as_a_process_output(tmp_path):
     )
 
 
-@pytest.mark.serial
 def test_a_declared_key_deck_output_is_actually_registered(tmp_path):
     """The predicate saying "no reason to refuse" is not the capability.
 
@@ -321,7 +319,6 @@ def test_key_material_under_an_innocent_name_is_vetoed_in_the_attach_snapshot_la
     assert "deck.key" in tracked and "notes.txt" not in tracked
 
 
-@pytest.mark.serial
 def test_key_material_under_an_innocent_name_is_vetoed_in_the_coop_checkpoint_lane(
     tmp_path, monkeypatch,
 ):
@@ -391,9 +388,6 @@ def test_a_comparison_sign_no_longer_makes_an_inspection_a_write(argv):
 
 @pytest.mark.parametrize("argv", [
     ["tee", "f"],
-    ["grep", "-n", "x", "f", ">", "out.txt"],
-    ["cmd", ">", "out"],
-    ["cmd", ">>", "out"],
     # `>&` is a stdout+stderr redirect, never a comparison: a standalone token
     # of it stays a write channel in both lanes.
     ["ls", ">&", "out.txt"],

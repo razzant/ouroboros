@@ -60,10 +60,10 @@ from tests.system_e2e.test_presence_resilience import (
     _Turn,
 )
 from tests.system_e2e.test_system_scenarios_w6 import _WsFrames
-from tests.test_cost_contract import _child
+from tests._stand_cache import child
 
 _TIMEOUT_METHOD = "signal" if hasattr(signal, "SIGALRM") else "thread"
-pytestmark = [pytest.mark.integration, pytest.mark.serial, pytest.mark.timeout(3600, method=_TIMEOUT_METHOD)]
+pytestmark = [pytest.mark.integration, pytest.mark.timeout(3600, method=_TIMEOUT_METHOD)]
 
 LANE_FULL = "stand_full"  # the full shape's own lane: 50 real workers
 HOOK = pathlib.Path(__file__).resolve().parents[1] / "_stand_hook.py"
@@ -189,7 +189,7 @@ class _Run:
                "OUROBOROS_REPO_DIR": str(self.home / "repo"), "OUROBOROS_HOST_SERVICE_PORT": "0",
                "OUROBOROS_SUBAGENT_WORKTREE_ROOT": str(self.home / "worktrees"), "COST_STORE_JOURNAL": self.journal}
         started = time.monotonic()
-        _child("tests._stand", [str(self.data_root), self.shape_name, str(self.home / "built.json")], env, self.home / "build.log")
+        child("tests._stand", [str(self.data_root), self.shape_name, str(self.home / "built.json")], env, self.home / "build.log")
         self.facts["timings"]["build_sec"] = round(time.monotonic() - started, 1)
         self.facts["built"] = json.loads((self.home / "built.json").read_text(encoding="utf-8"))["laid"]
 

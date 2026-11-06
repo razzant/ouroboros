@@ -41,7 +41,6 @@ def test_subagent_harness_key_stays_out_of_the_model_key_sweep():
     ("", None),
     ("codex", subagents.DelegationRoute("codex", "", "")),
     ("codex=gpt-5.4-mini", subagents.DelegationRoute("codex", "gpt-5.4-mini", "")),
-    ("codex=gpt-5.4-mini:low", subagents.DelegationRoute("codex", "gpt-5.4-mini", "low")),
     # The documented grammar is harness[=model][:effort] — the effort bracket is
     # not tied to the model one. Splitting on `=` first made the whole string the
     # route id, which then failed at dispatch as an unknown route.

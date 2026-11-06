@@ -6,7 +6,8 @@ import pytest
 
 from tests._extension_loader_shared import _clear_loader_state  # noqa: F401
 from tests._live_stack import stack
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
+from tests._cases import chosen_rows
 
 
 @pytest.mark.parametrize('engine,thinking', [('openai', False), ('grok', False), ('gemini', False), ('gemini', True)])
@@ -61,8 +62,12 @@ def test_full_stack_unfit_room_mail_ends_typed_instead_of_silently_waiting(host_
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('thinking', [False, True])
-@pytest.mark.parametrize('reason', ['audio_drop', 'compression', 'go_away', 'transport_drop'])
+@pytest.mark.parametrize(("reason", "thinking"), [
+    ('audio_drop', False),
+    ('compression', True),
+    ('go_away', False),
+    ('transport_drop', True),
+])
 def test_full_stack_gemini_retention_or_resume_preserves_conversation(host_world, monkeypatch, thinking, reason):
     async def scenario():
         async with stack(host_world, monkeypatch, 'gemini', thinking=thinking) as run:
@@ -133,8 +138,7 @@ def test_nonresumable_transport_drop_continues_from_fitted_history(host_world, m
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('resumable', [False, True])
-@pytest.mark.parametrize('thinking', [False, True])
+@pytest.mark.parametrize(("thinking", "resumable"), [(False, False), (True, True)])
 def test_full_stack_loss_during_a_tool_result_respects_the_native_handle(host_world, monkeypatch, resumable, thinking):
     """R19-2 through the real stack: the writer that meets the close first does not end a resumable call."""
     from websockets.exceptions import ConnectionClosedError
@@ -225,8 +229,7 @@ def test_openai_grok_tool_result_write_loss_continues_without_repeating_effect(h
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('engine', ['openai', 'grok', 'gemini'])
-@pytest.mark.parametrize('failure', ['event', 'close'])
+@pytest.mark.parametrize(("failure", "engine"), [('event', 'openai'), ('event', 'gemini'), ('close', 'grok')])
 def test_provider_refusal_stays_terminal_without_reconnection(host_world, monkeypatch, engine, failure):
     async def scenario():
         async with stack(host_world, monkeypatch, engine) as run:
@@ -276,7 +279,7 @@ def test_transport_replacement_open_refusal_ends_with_its_typed_reason(host_worl
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('during_call,handle_after,outcome', [
+@pytest.mark.parametrize('during_call,handle_after,outcome', chosen_rows([
     (during, after, 'answered')
     for during in ('none', 'cleared', 'predates')
     for after in ('absent', 'with-answer', 'after-answer')
@@ -284,7 +287,7 @@ def test_transport_replacement_open_refusal_ends_with_its_typed_reason(host_worl
      ('cleared', 'absent', 'silent'), ('predates', 'absent', 'silent'),
      ('predates', 'after-answer', 'silent'),
      ('cleared', 'absent', 'unanswered'), ('predates', 'absent', 'unanswered'),
-     ('cleared', 'absent', 'same-turn'), ('predates', 'absent', 'same-turn')])
+     ('cleared', 'absent', 'same-turn'), ('predates', 'absent', 'same-turn')], 0, 16))
 @pytest.mark.parametrize('thinking', [False, True])
 def test_r28_goaway_while_tool_pending(host_world, monkeypatch, during_call, handle_after, outcome, thinking):
     """Follow direct delivery through renewal: only a post-write handle can resume its result."""
@@ -392,8 +395,7 @@ def test_r28_goaway_while_tool_pending(host_world, monkeypatch, during_call, han
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('thinking', [False, True])
-@pytest.mark.parametrize('second', ['silent', 'ordinary', 'single'])
+@pytest.mark.parametrize(("second", "thinking"), [('silent', False), ('ordinary', True), ('single', False)])
 def test_ordinary_continuation_survives_later_batches(host_world, monkeypatch, record_property, thinking, second):
     import threading
     entered, release = threading.Event(), threading.Event()

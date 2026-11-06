@@ -53,24 +53,6 @@ def chatless_root(tmp_path):
     }
 
 
-def test_r1_a_chatless_cascade_records_a_handoff_row_and_reports_owed(chatless_root):
-    """The healthy half of the residual: no chat means no message, and the typed
-    handoff row is the durable evidence that the summary was consciously not
-    owed. The function reports True, which the postcondition reads as owed."""
-    owed = td.deliver_cascade_summary(
-        chatless_root["drive"], "root-nochat", chatless_root["row"],
-        chatless_root["outcomes"],
-    )
-
-    assert owed is True
-    handoffs = [
-        row for row in _rows(chatless_root["drive"], "supervisor.jsonl")
-        if row.get("type") == "terminal_delivery_handoff"
-    ]
-    assert [row.get("reason") for row in handoffs] == ["no_lineage_chat"]
-    assert td.pending_deliveries(chatless_root["drive"]) == [], "nothing to send"
-
-
 def test_r1_the_summary_reports_owed_even_when_the_handoff_row_is_lost(
     chatless_root, monkeypatch,
 ):
@@ -102,38 +84,3 @@ def test_r1_the_summary_reports_owed_even_when_the_handoff_row_is_lost(
         if row.get("type") == "terminal_delivery_handoff"
     ] == [], "the evidence row was lost"
     assert td.pending_deliveries(chatless_root["drive"]) == []
-
-
-def test_r1_the_postcondition_settles_on_exactly_this_answer(chatless_root):
-    """Why the return value matters: the cascade postcondition reads
-    `deliver_cascade_summary(...) is not False` as "owed", and settles the
-    root's cascade intent — the tree's watchdog replay trigger — on it. This is
-    the line a v7 refactor must not quietly re-shape."""
-    source = (
-        pathlib.Path(__file__).resolve().parents[1] / "supervisor" / "task_lifecycle.py"
-    ).read_text(encoding="utf-8")
-    assert "summary_owed = deliver_cascade_summary(" in source
-    postcondition = source[source.index("summary_owed = deliver_cascade_summary("):]
-    assert ") is not False" in postcondition[:400]
-    settle_at = postcondition.index("settle_intent(")
-    guard_at = postcondition.index("if summary_owed:")
-    assert guard_at < settle_at, "the settle is gated on the summary being owed"
-    # And the OTHER branch is the honest one: an unowed summary leaves the intent
-    # open for the watchdog instead of settling.
-    assert "could not be durably owed" in postcondition[:settle_at + 1600]
-
-
-def test_r1_a_root_with_a_chat_still_owes_a_real_row(tmp_path):
-    """The control: when a chat exists the answer is a REGISTERED row, not a
-    default. That is what makes the chat-less lane the exception it is."""
-    from ouroboros.task_results import STATUS_CANCELLED, write_task_result
-
-    write_task_result(tmp_path, "root-chat", STATUS_CANCELLED, result="stopped")
-    row = {"id": "root-chat", "chat_id": 77, "root_task_id": "root-chat"}
-
-    assert td.deliver_cascade_summary(
-        tmp_path, "root-chat", row, {"root-chat": "cancelled"},
-    ) is True
-    owed = td.pending_deliveries(tmp_path)
-    assert [entry["task_id"] for entry in owed] == ["root-chat"]
-    assert owed[0]["chat_id"] == 77

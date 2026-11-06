@@ -390,7 +390,6 @@ def test_a_member_swapped_for_a_fifo_is_refused_without_blocking(tmp_path, monke
     assert stat.S_ISFIFO(os.lstat(target).st_mode)
 
 
-@pytest.mark.serial
 @confined
 def test_real_http_consumer_downloads_a_nested_file_and_a_directory_zip_off_the_loop(tmp_path):
     """The real server path (uvicorn + the HTTP client) for the two V12 addresses the UI builds."""

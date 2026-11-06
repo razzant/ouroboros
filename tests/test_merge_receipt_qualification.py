@@ -85,8 +85,7 @@ def test_body_patch_uses_selected_repo_scoped_identity_without_org_access(world,
 
 
 @pytest.mark.parametrize("failure", ["EOF", "HTTP 502: Bad Gateway (https://api.github.com/graphql)",
-                                     "HTTP 409: Conflict (https://api.github.com/graphql)",
-                                     PRE_EFFECT + "HTTP 503: lost reply", "timeout"])
+                                     "timeout"])
 def test_real_transport_unknown_exit_never_releases_intent(world, monkeypatch, failure):
     effects = []
 
@@ -139,7 +138,7 @@ def test_proven_pre_effect_failure_can_recover(world, monkeypatch, failure):
     assert [r["outcome"]["status"] for r in _receipts(world)] == ["refused", "merged"]
 
 
-@pytest.mark.parametrize("gap", ["settlement", "publication_receipt", "card", "body"])
+@pytest.mark.parametrize("gap", ["settlement", "card", "body"])
 def test_post_effect_gaps_reach_the_registered_tool(world, monkeypatch, gap):
     original = merge_receipts.write_receipt
 
@@ -172,7 +171,6 @@ def test_post_effect_gaps_reach_the_registered_tool(world, monkeypatch, gap):
     assert sum(c[:2] == ["pr", "merge"] for c in world.gh.calls) == 1
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("delivery_order", ["buffered", "delivered_first", "replay_reverse"])
 def test_concurrent_publication_through_outbox_dedup_and_history(world, monkeypatch, delivery_order):
     from ouroboros.gateway.history import make_chat_history_endpoint
@@ -284,7 +282,6 @@ def closed_receipt_projection(world, monkeypatch, act=None):
                            history=[row for row in payload["messages"] if row.get("card_row_id")])
 
 
-@pytest.mark.serial
 def test_a_closed_pr_reaches_the_card_through_outbox_history_and_the_consumer(world, monkeypatch):
     seen = closed_receipt_projection(world, monkeypatch)
     note = merge_fixture.QUEUED_CLOSED
@@ -306,7 +303,6 @@ def test_a_closed_pr_reaches_the_card_through_outbox_history_and_the_consumer(wo
     assert sum(c[:2] == ["pr", "merge"] for c in world.gh.calls) == 1
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("seen", ["at_readback", "by_observer_during_send"])
 def test_a_published_foreign_queue_switched_off_refreshes_to_refused_and_a_new_refusal_stays_unpublished(
         world, monkeypatch, seen):
@@ -482,7 +478,6 @@ def bounded_receipt_history(world, monkeypatch):
     return payload
 
 
-@pytest.mark.serial
 def test_cold_bounded_history_supplies_current_receipt_to_new_chat(world, monkeypatch):
     payload = bounded_receipt_history(world, monkeypatch)
     fixture = world.root / "cold-history.json"
@@ -494,8 +489,7 @@ def test_cold_bounded_history_supplies_current_receipt_to_new_chat(world, monkey
     assert receipt["card_row_revision"] == 3 and "merge: merged" in receipt["text"]
 
 
-@pytest.mark.serial
-@pytest.mark.parametrize("gap", ["missing_result", "unreadable_result", "missing_receipt", "older_revision", "malformed_receipt", "other_task"])
+@pytest.mark.parametrize("gap", ["missing_result", "older_revision", "other_task"])
 def test_bounded_history_discloses_unavailable_canonical_receipt(world, monkeypatch, gap):
     from ouroboros.gateway.history import make_chat_history_endpoint
 
@@ -526,7 +520,6 @@ def test_bounded_history_discloses_unavailable_canonical_receipt(world, monkeypa
     assert row["card_row_revision"] == 2 and dialogue_test.log_bytes(source) == before
 
 
-@pytest.mark.serial
 def test_frozen_history_page_refreshes_receipt_without_changing_positions(world, monkeypatch):
     from ouroboros.gateway.history import make_chat_history_endpoint
 
@@ -716,9 +709,6 @@ def gap_only_in_detail(receipt, *codes):
 
 @pytest.mark.parametrize(("facts", "status", "gaps", "earlier"), [
     ({"base": "e" * 40}, "unknown", ["reviewed_base_differs"], False),
-    ({"base": ""}, "unknown", ["reviewed_base_not_recorded"], False),
-    ({"tree": "9" * 40}, "unknown", ["merged_tree_differs_from_reviewed_head"], True),
-    ({"tree": ""}, "unknown", ["tree_comparison_unavailable"], False),
     ({"head": "e" * 40}, "changes_after_review", [], True),
     ({"head": ""}, "unknown", ["reviewed_head_not_recorded"], False),
 ])

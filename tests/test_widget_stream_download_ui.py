@@ -19,7 +19,7 @@ import urllib.request
 
 import pytest
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 REPO = Path(__file__).resolve().parents[1]
 
 _WIDGET = r'''

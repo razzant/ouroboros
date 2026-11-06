@@ -170,9 +170,10 @@ That default has no early cost stop for an ordinary root (owner decision of
 `budget_profile.cost_hard_stop_pct` and no producer allowance
 (`root_cost_ceiling_usd`, set only for consciousness wakes and Presence),
 `task_pacing.resolve_cost_ceiling` answers `disabled` (`no_default_cost_stop`),
-and paid calls are refused only when known spend reaches the per-root fence
-(`OUROBOROS_PER_TASK_COST_USD`) or the lane's `TOTAL_BUDGET`, its own
-reservation. SW1's UI root and the evolution root are ordinary roots too.
+and new model calls are refused only when known spend reaches the per-root fence
+(`OUROBOROS_PER_TASK_COST_USD`); the lane's `TOTAL_BUDGET`, its own
+reservation, refuses new paid calls only. SW1's UI root and the evolution root are
+ordinary roots too.
 
 Read settled spend and unknown-cost counts through `budget.lane_spend` (also
 reachable as `run_live_lanes.lane_spend`) from `state/usage.sqlite`, with journal

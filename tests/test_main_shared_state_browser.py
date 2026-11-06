@@ -16,7 +16,7 @@ from tests.ui_chat_viewport_smoke import (
     _wait_state_reads_quiescent, state_reads,
 )
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 _PILL = '#page-chat .chat-toolbar-row > button.chat-question-nav'
 _ACTION = '#chat-messages .chat-bubble.owner-action[data-owner-action="paused-task"]'

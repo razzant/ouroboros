@@ -36,7 +36,7 @@ from tests.test_owner_wait_integration import wait_clone as clone_fixture
 direct_server_with_data = smoke.direct_server_with_data
 wait_clone = clone_fixture
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 MARKER = "CHECK-1585"
 CRITERION = "report-final"

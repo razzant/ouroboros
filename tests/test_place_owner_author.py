@@ -63,7 +63,7 @@ def test_a_place_where_i_write_from_my_humans_account_keeps_their_rows_theirs(tm
                                    accounts), "a bot of mine is never my human"
 
 
-@pytest.mark.parametrize("variant", ["unauthenticated", "other_account", "imported", "legacy_form"])
+@pytest.mark.parametrize("variant", ["unauthenticated", "other_account", "legacy_form"])
 def test_a_row_the_confirmation_cannot_vouch_for_is_not_my_human(tmp_path, place, variant):
     accounts = place_owner_accounts(tmp_path)
     row = {

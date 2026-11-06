@@ -27,7 +27,6 @@ from tests.test_owner_wait_pool import InputQueue, Process, pool as pool  # noqa
 from tests.test_presence_runner import _admission, _event
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 _REAL_LANE_RECONCILE = conversation_lane.reconcile_conversation_lane
 

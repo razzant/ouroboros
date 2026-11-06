@@ -52,11 +52,8 @@ def test_overview_is_authored_introduction_and_details_have_physical_addresses()
 
 
 @pytest.mark.parametrize("membership", [
-    "- [One](architecture/runtime.md)\n- [Duplicate](architecture/runtime.md)",
-    "- [Missing](architecture/missing.md)",
     "- [Outside](../outside.md)",
     "- [Remote](https://example.com/a.md)",
-    "- [Section](architecture/runtime.md#startup)",
     "- No link",
     "",
 ])

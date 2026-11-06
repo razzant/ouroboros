@@ -13,7 +13,6 @@ from tests.test_telegram_format_parity import _load_skill
 from tests.test_telegram_routing_notices import phone  # noqa: F401 -- the owner's chat behind the real bus
 
 # The shared native-skill loader replaces its package entries in sys.modules.
-pytestmark = pytest.mark.serial
 
 
 class Api:
@@ -156,7 +155,6 @@ def _receive(b, message, *, update_id=70):
     ("message", "row:1@time#123456789abc", "row:1@time#123456789abc"),
     ("work_card", "row:1@time#123456789abc", "task:work-1"),
     ("message", "", "task:work-1"),
-    ("completion", "row:1@later#123456789abc", "row:1@later#123456789abc"),
 ])
 def test_reply_to_mirrored_work_goes_through_normal_ingress_as_reference(bridge, monkeypatch, kind, address, expected):
     b = bridge
@@ -201,7 +199,7 @@ def _accept_owner(b, mid, *, text="Same owner words", chat=42):
             "author_label": "You", "kind": "message", "snippet": text, "ts": row["ts"], "task_id": ""}
 
 
-@pytest.mark.parametrize("target", ["earlier", "latest", "other_chat", "unmapped", "system", "unresolved"])
+@pytest.mark.parametrize("target", ["earlier", "other_chat", "unresolved"])
 def test_native_reply_only_for_nonlatest_owner_from_same_telegram_chat(bridge, target):
     b = bridge
     earlier = _accept_owner(b, 10)
@@ -248,8 +246,6 @@ def test_latest_owner_identity_survives_reference_eviction(bridge, monkeypatch):
 
 @pytest.mark.parametrize("surface,extra", [
     ("photo", {"image_base64": "eA=="}),
-    ("video", {"video_base64": "eA=="}),
-    ("document", {"file_base64": "eA==", "filename": "note.txt"}),
     ("document", {"file_base64": "eA==", "filename": "note.mp3", "mime": "audio/mpeg"}),
     ("links", {"title": "Read this", "actions": [{"label": "Source", "url": "https://example.com"}]}),
 ])

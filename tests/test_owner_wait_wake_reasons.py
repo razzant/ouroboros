@@ -118,7 +118,6 @@ def test_a_hurry_wakes_the_direct_wait_but_never_reads_as_an_answer(tmp_path, mo
     assert [entry["kind"] for entry in drain_owner_entries(tmp_path, ctx.task_id, set())] == [KIND_HURRY]
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("order", ["answer_before_parked", "answer_after_parked",
                                    "answer_before_parked_with_spent_bound"])
 def test_an_answer_racing_the_park_is_reported_as_the_answer(tmp_path, order):

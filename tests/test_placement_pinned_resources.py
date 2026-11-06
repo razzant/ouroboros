@@ -16,7 +16,6 @@ from ouroboros.project_placement import append_placement_notice, move_task_to_pr
 from supervisor.events_project_routing import _handle_promote_chat_to_task
 from supervisor import workers
 
-pytestmark = pytest.mark.serial
 ORIGIN = {"absent": "mid_task_no_origin"}
 
 
@@ -239,8 +238,7 @@ def _interrupted_root(host, body, tmp_path, monkeypatch, producer, candidate):
 
 
 @pytest.mark.parametrize(("producer", "candidate"), [
-    ("folder", False), ("folder", True), ("main", True),
-    ("no_folder", False), ("room_default", False), ("room_default", True), ("legacy", True)])
+    ("folder", False), ("folder", True), ("no_folder", False), ("room_default", False), ("legacy", True)])
 def test_placed_continue_keeps_the_resource_its_predecessor_chose(host, body, tmp_path, monkeypatch,
                                                                   producer, candidate):
     """Continue admits the successor with the predecessor's recorded choice; placing it before

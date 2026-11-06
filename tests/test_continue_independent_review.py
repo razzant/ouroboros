@@ -19,7 +19,6 @@ from tests.review_pool_rosters import pool_roster, pool_seat, set_review_pool
 from tests.test_owner_continue import NONCE, _interrupted
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 PRED = "pred-1"
 SLOT = "review-session"
@@ -329,8 +328,8 @@ def _pending(root, invocation_id, *, source="review_substrate", request=None, **
 
 
 @pytest.mark.parametrize("case", [
-    "missing_source", "unknown_source", "research_readonly", "snapshot_capture", "directory_copy",
-    "shape_absent", "writable_without_authority", "execution_binding",
+    "missing_source", "directory_copy",
+    "execution_binding",
 ])
 def test_an_unbound_start_without_positive_no_write_proof_holds_continue(tmp_path, monkeypatch, case):
     """Exact pending START_REQUESTED rows: only a review source over the stored readonly

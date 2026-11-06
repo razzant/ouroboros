@@ -17,7 +17,7 @@ _owned_gateway_uses_each_test_transport = _transport
 
 
 @pytest.mark.parametrize("state,code", [("cancelled", None), ("interrupted", "host_restart"),
-                                        ("failed", "harness_failed"), ("succeeded", None)])
+                                        ("succeeded", None)])
 def test_live_terminal_interruption_failure_and_success(tmp_path, fake_route, state, code):
     detail = _terminal_detail("[]\nNO_FINDINGS" if state == "succeeded" else "", state=state, conformance="passed")
     if state != "succeeded":

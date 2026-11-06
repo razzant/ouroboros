@@ -77,7 +77,6 @@ def test_dependency_cannot_extract_a_link_outside_installation(monkeypatch, tmp_
         module.extract(source, module.APP / "vendor/include")
 
 
-@pytest.mark.serial
 def test_browser_cli_reads_exact_cached_input_and_local_server_is_closed(monkeypatch, tmp_path):
     module = runtime(monkeypatch, tmp_path)
     cached = tmp_path / "browser.zip"

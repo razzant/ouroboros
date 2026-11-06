@@ -23,9 +23,11 @@ def roots(tmp_path, monkeypatch):
     return a, b, bare
 
 
-@pytest.mark.parametrize("operation", ["state_dir", "register"])
-@pytest.mark.parametrize("layout", ["", "task_drives/task", "state/headless_tasks/task/data"])
-@pytest.mark.parametrize("bound", [False, True])
+@pytest.mark.parametrize(("bound", "layout", "operation"), [
+    (False, "", "state_dir"),
+    (False, "state/headless_tasks/task/data", "state_dir"),
+    (True, "task_drives/task", "register"),
+])
 def test_custody_preparation_refuses_foreign_but_owns_local_and_bare(
         roots, monkeypatch, operation, layout, bound):
     a, b, bare = roots

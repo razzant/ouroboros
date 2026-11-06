@@ -62,26 +62,27 @@ def test_every_shipped_builtin_schema_is_generally_valid_and_portable():
     assert_portable_tool_schemas(shipped_builtin_tool_schemas())
 
 
-@pytest.mark.parametrize("keyword", ROOT_SCHEMA_COMBINATORS)
-def test_root_combinator_failure_names_tool_and_keyword(keyword):
-    bad = [{
-        "type": "function",
-        "function": {
-            "name": "bad_contract_tool",
-            "description": "bad",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                keyword: [{"required": ["selector"]}],
-            },
-        },
-    }]
+def test_root_combinator_failure_names_tool_and_keyword(subtests):
+    for keyword in ROOT_SCHEMA_COMBINATORS:
+        with subtests.test(keyword=keyword):
+            bad = [{
+                "type": "function",
+                "function": {
+                    "name": "bad_contract_tool",
+                    "description": "bad",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        keyword: [{"required": ["selector"]}],
+                    },
+                },
+            }]
 
-    with pytest.raises(
-        AssertionError,
-        match=rf"bad_contract_tool: root schema keyword '{keyword}'",
-    ):
-        assert_portable_tool_schemas(bad)
+            with pytest.raises(
+                AssertionError,
+                match=rf"bad_contract_tool: root schema keyword '{keyword}'",
+            ):
+                assert_portable_tool_schemas(bad)
 
 
 def test_every_physical_provider_projection_preserves_the_complete_name_set():

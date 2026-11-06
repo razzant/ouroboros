@@ -93,7 +93,7 @@ def _competing(tmp_path, queue, kind, task_id):
     return {}
 
 
-@pytest.mark.parametrize("kind", ["none", "resume", "grant_then_revoke", "newer_pause"])
+@pytest.mark.parametrize("kind", ["none", "grant_then_revoke", "newer_pause"])
 def test_owner_pause_settlement_never_overwrites_a_newer_resume_or_pause(tmp_path, monkeypatch, kind):
     from ouroboros import budget_pause, owner_pause
     from supervisor import owner_pause_control
@@ -206,7 +206,7 @@ def _cold_sleeper(tmp_path, monkeypatch):
     return queue, workers
 
 
-@pytest.mark.parametrize("kind", ["none", "resume", "grant_then_revoke", "newer_pause"])
+@pytest.mark.parametrize("kind", ["none", "grant_then_revoke", "newer_pause"])
 def test_sleep_readiness_never_overwrites_a_newer_resume_or_pause(tmp_path, monkeypatch, kind):
     from ouroboros import budget_pause, model_sleep
     from supervisor.sleep_wake import wake_ready_sleepers

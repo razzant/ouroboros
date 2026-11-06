@@ -3,10 +3,8 @@
 import os
 import subprocess
 
-import pytest
 
 
-@pytest.mark.serial
 def test_passive_update_status_does_not_refresh_the_git_index(tmp_path, monkeypatch):
     from supervisor import git_ops
     from supervisor.git_ops_updates import compute_managed_update_status

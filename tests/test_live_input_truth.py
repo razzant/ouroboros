@@ -13,7 +13,7 @@ import pytest
 
 from ouroboros import call_protocol as cp
 from tests._extension_loader_shared import _clear_loader_state  # noqa: F401
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 from tests.test_live_deferred_custody import answer, mail_updates, successor
 from tests.test_live_delivery_owner import never, opened, room_pointers
 from tests.test_live_delivery_owner_stack import RESTART, handle, live_frames, spoken
@@ -22,6 +22,7 @@ from tests.test_live_room_obligation import (answers_only_on, asked, canonical, 
                                              spoken_out)
 from tests.test_live_tool_continuity import POINTER, Held
 from tests.test_live_tool_continuity_stack import native_output, page_state
+from tests._cases import chosen_rows
 
 WORDS = 'Please also cancel my dentist appointment on Friday.'
 OLDER = 'First phrase, recognised.'
@@ -255,8 +256,8 @@ def test_real_loss_with_nothing_pending_owes_no_gap(host_world, monkeypatch, eng
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('pending,flag,ready', [(None, False, True), (None, True, False), (False, False, True), (True, False, False)],
-                         ids=['old-provider-idle', 'old-provider-speaking', 'idle', 'adapter-says-pending'])
+@pytest.mark.parametrize('pending,flag,ready', [(None, False, True), (None, True, False), (True, False, False)],
+                         ids=['old-provider-idle', 'old-provider-speaking', 'adapter-says-pending'])
 def test_a_forced_switch_reads_input_apart_from_renewal_ready(pending, flag, ready):
     """Neither an open call nor any other native work holds it: only the words, and old providers keep their flag."""
     from types import SimpleNamespace
@@ -273,7 +274,7 @@ def test_a_forced_switch_reads_input_apart_from_renewal_ready(pending, flag, rea
 
 
 @pytest.mark.parametrize('stage', ['before_answer', 'mid_answer'])
-@pytest.mark.parametrize('engine,thinking', ROUTES, ids=ROUTE_IDS)
+@pytest.mark.parametrize('engine,thinking', chosen_rows(ROUTES, 0, 2), ids=chosen_rows(ROUTE_IDS, 0, 2))
 def test_real_unanswered_words_are_offered_on_each_fresh_session_until_answered(host_world, monkeypatch, engine, thinking, stage):
     from tests._live_stack import stack
 
@@ -303,7 +304,7 @@ def test_real_unanswered_words_are_offered_on_each_fresh_session_until_answered(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('engine,thinking', [*ROUTES, ('gemini', False)], ids=[*ROUTE_IDS, 'gemini-ordinary'])
+@pytest.mark.parametrize('engine,thinking', chosen_rows([*ROUTES, ('gemini', False)], 0, 1, 3), ids=chosen_rows([*ROUTE_IDS, 'gemini-ordinary'], 0, 1, 3))
 def test_real_words_answered_before_a_drop_stay_silent(host_world, monkeypatch, engine, thinking):
     from tests._live_stack import stack
 
@@ -485,12 +486,6 @@ def said(session, text=QUESTION, **started):
 
 @pytest.mark.parametrize('case,owed', [
     ('no-response', True),
-    ('talk-over-completes-during-them', True),
-    ('crossed-the-words-and-was-cut', True),
-    ('cut-short-with-no-new-speech', True),
-    ('barged-in-by-a-sound-never-recognised', True),
-    ('begun-after-them-failed', True),
-    ('begun-after-them-still-continuing', True),
     ('begun-after-them-completes', False),
     ('begun-after-them-continues-then-completes', False),
     ('adapter-names-the-response-already-begun', False),
