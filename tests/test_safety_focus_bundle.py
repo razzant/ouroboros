@@ -106,14 +106,22 @@ def test_an_owner_answer_reaches_the_supervisor_with_the_card_it_answers(focus, 
 
 def test_a_helper_reads_the_words_carried_to_its_work_and_never_a_siblings(checker, tmp_path):
     """A helper's Supervisor reads my human's later words the host carried to its work, shaped as the corpus rows it
-    already reads and with the card they answer; a row held as context because it went to a sibling stays out."""
+    already reads and with the card they answer; a row held as context because it went to a sibling stays out. A
+    helper scheduled after those words arrived holds them only in its inherited field, and its Supervisor reads
+    them from there, with the same card; a quote its corpus already holds is not listed twice."""
     import queue
 
     from ouroboros import dialogue_store, safety
     from ouroboros.chat_chain import format_address, row_address
     from ouroboros.loop_round_limits import _drain_incoming_messages
     from ouroboros.owner_relay import owner_quote, write_relay
+    from ouroboros.owner_words import FIELD, governing_words_for_schedule
     from ouroboros.tools.registry import ToolContext
+
+    def sources_of(ctx):
+        prompt = safety._build_check_prompt("run_command", {"cmd": ["echo", "hello"]}, ctx=ctx)
+        return prompt, json.loads(prompt.split("Host evidence (provenance is not consent):\n", 1)[1]
+                                  .split("\nProposed tool call:", 1)[0])["occasion"]["sources"]
 
     card = {"quiz_id": "q7", "question": "Publish exactly this reply?", "state": "answered", "answered_index": 0,
             "options": ["Publish it", "Not now"], "answered_after_terminal": True}
@@ -136,13 +144,24 @@ def test_a_helper_reads_the_words_carried_to_its_work_and_never_a_siblings(check
     assert not helper._owner_directives  # carried words stay outside the helper's corpus
     assert {key: row["carried"]["went_to"] for key, row in helper._held_owner_messages.items()} == {
         addresses[""]: "", addresses["sibling"]: "sibling"}
-    prompt = safety._build_check_prompt("run_command", {"cmd": ["echo", "hello"]}, ctx=helper)
-    sources = json.loads(prompt.split("Host evidence (provenance is not consent):\n", 1)[1]
-                         .split("\nProposed tool call:", 1)[0])["occasion"]["sources"]
-    assert sources == [{"source": "owner_mailbox", "content": "1. Publish it", "msg_id": addresses[""], "reply_to": {
-        "address": "quiz q7 of task asker", "author": "Ouroboros, task asker",
-        "text": "Publish exactly this reply?\n1. Publish it\n2. Not now\n(host record: my human pressed option 1)"}}]
+    prompt, sources = sources_of(helper)
+    card_reply = {"address": "quiz q7 of task asker", "author": "Ouroboros, task asker",
+                  "text": "Publish exactly this reply?\n1. Publish it\n2. Not now\n(host record: my human pressed option 1)"}
+    assert sources == [{"source": "owner_mailbox", "content": "1. Publish it", "msg_id": addresses[""], "reply_to": card_reply}]
     assert addresses["sibling"] not in prompt and "March figures" not in prompt
+    # The helper schedules a helper of its own: the answer rides in that helper's field, and its Supervisor reads it.
+    later = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, current_task_type="task")
+    later.task_id, later._owner_directives = "later", [{"source": "initial_text", "content": "Ship the release notes."}]
+    later.task_metadata = {"delegation_role": "subagent", "root_task_id": "root", "parent_task_id": "helper",
+                           **governing_words_for_schedule(helper)}
+    assert [row["ref"] for row in later.task_metadata[FIELD]] == ["chat 1 / owner-answer", "quiz q7 of task asker"]
+    prompt, sources = sources_of(later)
+    assert sources == [{"source": "initial_text", "content": "Ship the release notes."}, {
+        "source": "owner_mailbox", "content": "1. Publish it", "msg_id": "chat 1 / owner-answer", "reply_to": card_reply}]
+    assert addresses["sibling"] not in prompt and "March figures" not in prompt
+    later._owner_directives.append({"source": "owner_mailbox", "content": "1. Publish it", "msg_id": addresses[""],
+                                    "chat_id": "1", "client_message_id": "owner-answer", "carried": True})
+    assert [row.get("msg_id") for row in sources_of(later)[1]] == [None, addresses[""]]  # the corpus row, once
 
 
 def test_each_source_projection_appears_once_and_the_event_is_typed(focus, monkeypatch, checker):
