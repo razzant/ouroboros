@@ -109,17 +109,19 @@ def _initial_forecast() -> Dict[str, Any]:
             "observed_since": "", "revision": 0, "passes": 0}
 
 
-#: The growth forecast the last assignment pass computed (``reconcile_worker_capacity``), process-local.
+#: The growth forecast the last assignment pass computed (``reconcile_worker_capacity``), process-local;
+#: a pool generation's stop or start makes it unknown again (``workers.spawn_workers``/``kill_workers``).
 _DEMAND_FORECAST: Dict[str, Any] = _initial_forecast()
 _DEMAND_FORECAST_LOCK = threading.Lock()
 
 
-def record_demand_forecast(demand: Optional[int], *, reason: str = "") -> None:
+def record_demand_forecast(demand: Optional[int], *, reason: str = "", assignment_pass: bool = True) -> None:
     """Record what one assignment pass knew about admissible demand; ``None`` with a reason when it computed none.
 
     The value is the one ``reconcile_worker_capacity`` already grows on, never recomputed for a
     reader. ``observed_since`` and ``revision`` move only when the observation changes, so a
     steady pool publishes no new queue document; its currency is the document's own certificate.
+    A generation's stop or start records unknown outside any pass (``assignment_pass=False``).
     """
     ceiling = max(1, int(_pool().MAX_WORKERS))
     if demand is None:
@@ -129,7 +131,8 @@ def record_demand_forecast(demand: Optional[int], *, reason: str = "") -> None:
         observed = {"status": "computed", "admissible_pending": min(max(0, int(demand)), ceiling),
                     "ceiling": ceiling, "reason": ""}
     with _DEMAND_FORECAST_LOCK:
-        _DEMAND_FORECAST["passes"] = int(_DEMAND_FORECAST.get("passes") or 0) + 1
+        if assignment_pass:
+            _DEMAND_FORECAST["passes"] = int(_DEMAND_FORECAST.get("passes") or 0) + 1
         if any(_DEMAND_FORECAST.get(key) != value for key, value in observed.items()):
             _DEMAND_FORECAST.update(observed, observed_since=utc_now_iso(),
                                     revision=int(_DEMAND_FORECAST.get("revision") or 0) + 1)

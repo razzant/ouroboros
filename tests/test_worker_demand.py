@@ -1089,9 +1089,38 @@ def test_a_forty_ceiling_with_fewer_slots_and_a_held_queue_publishes_what_each_c
     assert (fact["recorded_max_workers"], fact["worker_total"], fact["busy_worker_count"], fact["pending_count"],
             fact["pending_paused_or_held_count"], fact["project_demand"]["admissible_pending"],
             fact["free_worker_slots"]) == (40, 4, 1, 5, 2, 3, 0)
-    assert ("ceiling 40, total 4, dispatch-enabled 4, with a task 1, booting 3, reaping 3, assignable idle 0, "
-            "admissible pending 3 (last assignment pass, unchanged since ") in line
+    assert ("ceiling 40, total 4, dispatch-enabled 4, with a task 1, booting 3, reaping (incl. booting) 3, "
+            "assignable idle 0, admissible pending 3 (last assignment pass, unchanged since ") in line
     assert "pending rows 5; conversation carriers 0, outside the ceiling" in line
+
+
+def test_a_new_pool_generation_never_republishes_the_stopped_pools_forecast(assigning, monkeypatch):
+    """An in-process stop and spawn keep this module: the forecast is unknown until the new pool's own pass."""
+    import supervisor.worker_process as wp
+    from supervisor.queue_publication import _pool_counts
+
+    monkeypatch.setattr(workers, "MAX_WORKERS", 3)
+    workers.PENDING.append(task("runnable"))
+    workers.assign_tasks()
+    computed, passes = lifecycle.demand_forecast(), lifecycle.demand_forecast_passes()
+    assert computed["status"] == "computed" and computed["admissible_pending"] == 1
+    with workers._queue_lock:
+        workers._partition_slots_for_stop(frozenset({workers.LANE_PROJECT}))  # the crash-storm fence's stop
+    stopped = lifecycle.demand_forecast()
+    assert (stopped["status"], stopped["admissible_pending"], stopped["reason"]) == ("unknown", None, "pool_stopped")
+    assert _pool_counts()["project_demand"]["status"] == "unknown"
+    workers.WORKERS.clear()
+    monkeypatch.setattr(workers, "_record_worker_processes", lambda *a, **k: None)
+    monkeypatch.setattr(workers.threading, "Thread", lambda **kw: type("T", (), {"start": lambda self: None})())
+    monkeypatch.setattr(workers, "events_log_cursor", lambda: (0, 0, 0))
+    monkeypatch.setattr(workers, "event_queue_generation", lambda: "gen")
+    monkeypatch.setattr(workers, "append_jsonl", lambda *a, **k: True)
+    monkeypatch.setattr(wp, "spawn_worker_process", lambda ctx, wid, in_q, out_q, repo, drive: Process(900 + wid))
+    lifecycle.record_demand_forecast(2)  # a stale value left behind must not survive the next start
+    workers.spawn_workers()
+    fresh = lifecycle.demand_forecast()
+    assert (fresh["status"], fresh["admissible_pending"], fresh["reason"]) == ("unknown", None, "new_pool_generation")
+    assert lifecycle.demand_forecast_passes() == passes + 1  # only the explicit pass above counted
 
 
 def test_a_steady_forecast_keeps_its_clock_so_the_census_does_not_move(assigning, monkeypatch):
