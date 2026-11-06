@@ -36,6 +36,7 @@ export function languageBlockHtml({ onboarding = false } = {}) {
     return settingsSection({
         title: 'Language',
         attrs: 'data-i18n-settings',
+        card: !onboarding,  // setup's step is the card already
         lead: onboarding ? lead : 'The language of this installation\'s interface, on every device.',
         details: onboarding ? '' : lead,
         body: `<div class="settings-effort-card">
