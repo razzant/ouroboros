@@ -30,6 +30,7 @@ import {
     workRowView,
 } from './work_status.js';
 import { showToast } from './toast.js';
+import { errorWords } from './ui_primitives.js';
 import { motionMs, reducedMotion } from './motion.js';
 import { isStackLayout } from './layout.js';
 import { closingLine } from './settled_card.js';
@@ -659,9 +660,10 @@ export function createRoomWork({
         if (!loaded(row.episode)) {
             let stored = null;
             try { stored = await fetchTaskDetailStrict(row.episode); } catch (exc) {
+                // The shared failure words (U131); the raw text is the log's.
                 if (exc?.status !== 404) {
-                    showToast(`Could not refresh task state: ${exc?.message || exc}`, 'error');
-                    return;
+                    console.warn('task state read failed', exc);
+                    return void showToast(`Task state did not refresh. ${errorWords(exc).text}`, 'error');
                 }
             }
             if (intent !== menuIntent || !anchor.isConnected || !currentControls(row)) return;

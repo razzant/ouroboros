@@ -143,7 +143,9 @@ test('a card that cannot be read keeps its words: Retry after a failure, a plain
         const broken = cards.buildCard(identity('card_f1', 'components'));
         await flush();
         assert.equal(broken.querySelector('.chat-card-fallback').textContent, 'Basic 9 · Pro 19');
-        assert.match(broken.querySelector('.chat-card-status').textContent, /^The card could not be loaded: store migrating/);
+        // The shared failure words (a 503: Ouroboros could not do it), never the server's raw text (U131).
+        assert.match(broken.querySelector('.chat-card-status').textContent, /^The card could not be loaded\. Ouroboros couldn't do this\./);
+        assert.doesNotMatch(broken.querySelector('.chat-card-status').textContent, /store migrating/);
         assert.equal(broken.querySelector('.chat-card-status').dataset.tone, 'danger');
         failing = false;
         broken.querySelector('[data-card-retry]').click();
