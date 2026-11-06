@@ -119,6 +119,24 @@ def test_adoption_authorization_refuses_an_update_that_already_owns_the_checkout
         update_merge.release_update_lock(lock)
 
 
+def test_the_restart_carrying_an_authorized_adoption_is_serialized_while_an_update_is_refused(scene, monkeypatch):
+    """An ``authorized`` handoff holds nothing (``holds_checkout``): the restart that binds it passes the one
+    update/restart serialization, as ``_perform_supervisor_restart`` sends it; an update is still refused."""
+    from ouroboros import server_restart
+    from supervisor import update_merge
+
+    monkeypatch.setattr(update_merge._g, "DRIVE_ROOT", scene.data)
+    monkeypatch.setattr(update_merge._g, "REPO_DIR", scene.serving)
+    body_adoption.authorize(scene.ctx, scene.cand, reason="adopt it")
+    restart_receipt(scene.data, scene.cand, "adopt it")
+    assert server_restart._safe_restart_serialized(
+        body_adoption.bind_restart(lambda **_kw: (True, "ok"), scene.data, "adopt it"),
+        reason="agent_restart_request", unsynced_policy="rescue_and_block") == (True, "ok")
+    assert body_adoption.read(scene.data)["restart_bound"] is True
+    with pytest.raises(RuntimeError, match="body adoption owns the checkout"):
+        update_merge.acquire_update_lock()
+
+
 def test_adoption_arm_does_not_wait_or_drop_authorized_handoff_when_transition_is_busy(scene):
     """A shutdown arm busy refusal preserves the authorized handoff for explicit recovery."""
     from supervisor import git_ops

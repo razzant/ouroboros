@@ -263,7 +263,7 @@ def test_ordinary_restart_disarms_orphan_update_intent(monkeypatch):
     import supervisor.update_merge as update_merge
 
     calls = []
-    monkeypatch.setattr(update_merge, "acquire_update_lock", lambda: object())
+    monkeypatch.setattr(update_merge, "acquire_update_lock", lambda **_kw: object())
     monkeypatch.setattr(update_merge, "release_update_lock", lambda _lock: None)
     monkeypatch.setattr(update_merge, "read_update_tx_strict", lambda: ("absent", {}))
     monkeypatch.setattr(git_ops, "_clear_update_intent", lambda: calls.append("clear") or True)
@@ -285,7 +285,7 @@ def test_restart_deferred_while_assisted_merge_is_being_resolved(monkeypatch):
     import server
     import supervisor.update_merge as update_merge
 
-    monkeypatch.setattr(update_merge, "acquire_update_lock", lambda: object())
+    monkeypatch.setattr(update_merge, "acquire_update_lock", lambda **_kw: object())
     monkeypatch.setattr(update_merge, "release_update_lock", lambda _lock: None)
     for phase in ("materializing_assisted", "assisted_resolution", "committing_assisted"):
         monkeypatch.setattr(

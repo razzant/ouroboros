@@ -172,7 +172,7 @@ def test_a_restart_whose_flag_cannot_be_written_reopens_admission(owners, restar
 def test_assisted_update_refusal_still_refuses_before_any_stop(owners, restart_root, monkeypatch):
     from supervisor import update_merge
 
-    monkeypatch.setattr(update_merge, "acquire_update_lock", lambda: object())
+    monkeypatch.setattr(update_merge, "acquire_update_lock", lambda **_kw: object())
     monkeypatch.setattr(update_merge, "release_update_lock", lambda _lock: None)
     monkeypatch.setattr(update_merge, "read_update_tx_strict",
                         lambda: ("valid", {"phase": "assisted_resolution", "task_id": "resolver"}))

@@ -597,7 +597,7 @@ def _safe_restart_serialized(safe_restart_fn, *, reason: str, unsynced_policy: s
     )
 
     try:
-        lock_fh = acquire_update_lock()
+        lock_fh = acquire_update_lock(restart=True)
     except RuntimeError:
         return False, "Managed update is changing the checkout; restart was deferred."
     except OSError as exc:
