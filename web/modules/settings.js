@@ -152,9 +152,13 @@ function isTruthySetting(value) {
 // A loading, validation or editor owner may update its own status. A later
 // message from anyone else drops that ownership, protecting the newer result.
 // The footer's one result line (ui.css .ui-result): an acknowledgement ends by itself, a warning stays.
-function setStatus(text, tone = 'ok', owner = '', subject = '', details = '') {
+// The footer's one line. The save result is a retained record (DESIGN "Status and chips"): no timer, it stays until
+// the next result, or the draft word of the next edit, replaces it; only a load's plain acknowledgement ends by itself
+// (U105: at rest the line says nothing). `owner` names what holds the line: 'save' gives way to the draft word, a
+// load, a validation or the draft itself keep it.
+function setStatus(text, tone = 'ok', owner = '', subject = '', details = '', { ends = false } = {}) {
     const status = byId('settings-status');
-    setResult(status, { text, tone, details, ends: !owner && tone === 'ok' });
+    setResult(status, { text, tone, details, ends });
     if (owner) status.dataset.owner = owner;
     else delete status.dataset.owner;
     if (subject) status.dataset.subject = subject;
@@ -656,7 +660,8 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         if (!status) return;
         const owner = status.dataset.owner || '';
         if (settingsDirty) {
-            if (owner || ['warn', 'danger'].includes(status.dataset.tone || '')) return;
+            // The last save's result gives way to the draft word; a load, a validation, an unknown outcome keep the line.
+            if ((owner && owner !== 'save') || (!owner && ['warn', 'danger'].includes(status.dataset.tone || ''))) return;
             setStatus('Unsaved changes', 'warn', 'draft');
         } else if (owner === 'draft') setStatus('', 'ok');
     }
@@ -898,7 +903,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             }
             try {
                 await refreshModelCatalog({ button: byId('btn-refresh-model-catalog') });
-                if (applied && byId('settings-status').dataset.owner === 'load' && !settingsDirty && !settingsSaving && !saveOutcomeUnknown) setStatus('Settings loaded', 'ok');
+                if (applied && byId('settings-status').dataset.owner === 'load' && !settingsDirty && !settingsSaving && !saveOutcomeUnknown) setStatus('Settings loaded', 'ok', '', '', '', { ends: true });
             } catch (error) {
                 if (applied && byId('settings-status').dataset.owner === 'load' && !settingsDirty && !settingsSaving && !saveOutcomeUnknown) {
                     const words = errorWords(error);
@@ -928,7 +933,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         extensionRefreshPending = true;
         try {
             if (!(await loadSettings())) return;
-            setStatus('Settings refreshed', 'ok');
+            setStatus('Settings refreshed', 'ok', '', '', '', { ends: true });
         } catch (error) {
             const words = errorWords(error);
             setStatus(`Settings did not refresh. ${words.text}`, 'warn', '', '', words.details);
@@ -1376,7 +1381,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
                 statusMsg += saveOutcomeUnknown ? '. Your draft is kept. Reload settings to check before saving again.' : '. Your current draft is kept.';
                 statusType = 'warn';
             }
-            setStatus(statusMsg, statusType);
+            setStatus(statusMsg, statusType, 'save');
             syncRestartState(data.restart_state);
             await refreshRestartState();
             window.dispatchEvent(new CustomEvent('ouro:settings-updated', { detail: { reason: 'settings saved', source: 'settings' } }));
@@ -1392,7 +1397,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             setStatus(confirmedSaved ? 'Settings were saved, but a later step failed. Your draft is kept.'
                 : saveOutcomeUnknown ? 'Save outcome unknown. Your draft is kept; reload settings to check before saving again.'
                     : `${checkerSaved ? `Changes in ${checkerTabsText(ownerDraft.safety)} were saved; the other settings were not` : 'Settings were not saved'}. ${words.text} Your draft is kept.`,
-            'warn', '', '', words.details);
+            'warn', saveOutcomeUnknown ? '' : 'save', '', words.details);
         } finally {
             settingsSaving = false;
             setButtonBusy(saveButton, false);
