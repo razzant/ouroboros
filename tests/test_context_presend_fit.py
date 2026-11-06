@@ -141,11 +141,12 @@ def _counted_provider(gateway, monkeypatch, admitted):
 
     read, admission = gateway.get_model_result, llm_attempt.main_context_fit_refusal
 
-    def counted(operation_id, *, expected_ref, timeout_sec=None, raw_bytes=False):
+    def counted(operation_id, *, expected_ref, timeout_sec=None, raw_bytes=False, include_raw_bytes=False):
         value = read(operation_id, expected_ref=expected_ref, timeout_sec=timeout_sec)
         value["usage"] = {"input_tokens": bounded_prompt_tokens_for_payload(gateway.uploads[-1][0], 0), "output_tokens": 7,
                           "cached_input_tokens": 0, "cache_write_tokens": None, "reasoning_tokens": 3}
-        return json.dumps(value, ensure_ascii=False).encode() if raw_bytes else value
+        data = json.dumps(value, ensure_ascii=False).encode()
+        return (data, value) if include_raw_bytes else data if raw_bytes else value
 
     def measured(request):
         admitted.append(request.prompt_tokens_bounded_estimate)
