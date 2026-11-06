@@ -46,15 +46,18 @@ function optionalFiniteNumber(value) {
  *  positive amount as $0.00. `{ text, open, note }`. */
 export function costBucketPresentation(info) {
     const cost = optionalFiniteNumber(info?.cost);
-    if (cost === null) return { text: 'unknown', open: false, note: '' };
+    if (cost === null) return { text: 'unknown', open: false, detail: '' };
     const unknown = Math.trunc(optionalFiniteNumber(info?.unknown_unmetered) || 0);
     const nonFinal = optionalFiniteNumber(info?.non_final_rows) || 0;
     // Rows that can still settle; an older payload without the count has its non-final rows past the unpriced ones.
     const open = (optionalFiniteNumber(info?.accounting_open_rows) ?? nonFinal - unknown) > 0;
     const word = cost === 0 && (open || unknown > 0);
     const text = word ? (open ? 'Cost pending' : 'Cost not priced') : `${unknown > 0 ? 'Tracked: ' : ''}${formatUsd(cost)}`;
-    const said = `${text}${open && !word ? ' (pending)' : ''}${unknown > 0 ? ` · ${number(unknown)} without a price` : ''}`;
-    return { text, open, note: said === text ? '' : said };
+    // What the amount leaves out is said on the face under it, never in a tooltip alone (DESIGN principle 7): more may
+    // still join an open amount, and the calls that ended without a price are counted.
+    const detail = [open && !word ? 'pending' : '', unknown > 0 ? `${number(unknown)} without a price` : '']
+        .filter(Boolean).join(' · ');
+    return { text, open, detail };
 }
 
 /** What one budget save says and whether that saying may end by itself: `{ text, tone, transient }`. */
@@ -202,12 +205,9 @@ export function initCosts({ state, mount }) {
             const nameCell = cell('cost-cell-name', name);
             nameCell.setAttribute('title', name);
             const cost = costBucketPresentation(info);
-            const costCell = cell('cost-cell-right', cost.text);
-            if (cost.open) costCell.innerHTML = `${escapeHtmlAttr(cost.text)}${statusMarkHtml('cost-open', { shape: 'ring', hue: 'ink' })}`;
-            if (cost.note) {
-                costCell.setAttribute('title', cost.note);
-                costCell.setAttribute('aria-label', cost.note);
-            }
+            const costCell = cell('cost-cell-right', '');
+            costCell.innerHTML = `${escapeHtmlAttr(cost.text)}${cost.open ? statusMarkHtml('cost-open', { shape: 'ring', hue: 'ink' }) : ''}`
+                + (cost.detail ? `<span class="cost-cell-note">${escapeHtmlAttr(cost.detail)}</span>` : '');
             tr.append(nameCell, cell('cost-cell-right', number(info?.calls)), costCell);
             tbody.appendChild(tr);
         }

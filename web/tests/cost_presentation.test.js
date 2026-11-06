@@ -340,38 +340,39 @@ test('the known spend leads grouped like money, says what is left, and a reached
     assert.deepEqual([unlimited.figure, unlimited.left, unlimited.share], ['$12.50', 'No limit set', null]);
 });
 
-test('a breakdown cell is its amount in the card\'s words: an open bucket is marked, the whole sentence is its note, never a free zero', () => {
+test('a breakdown cell is its amount in the card\'s words, what it leaves out on the face under it, never a free zero', () => {
     // Subscription calls settle without a price: none will arrive, so not pending; a session row may have no call.
     assert.deepEqual(costBucketPresentation({
         cost: 0, calls: 0, unknown_unmetered: 3, non_final_rows: 3, accounting_open_rows: 0, cost_final: false,
-    }), { text: 'Cost not priced', open: false, note: 'Cost not priced · 3 without a price' });
+    }), { text: 'Cost not priced', open: false, detail: '3 without a price' });
     assert.deepEqual(costBucketPresentation({
         cost: 0, calls: 1, unknown_unmetered: 1, non_final_rows: 1, accounting_open_rows: 1, cost_final: false,
-    }), { text: 'Cost pending', open: true, note: 'Cost pending · 1 without a price' });
+    }), { text: 'Cost pending', open: true, detail: '1 without a price' });
     assert.deepEqual(costBucketPresentation({
         cost: 0, calls: 1, unknown_unmetered: 0, non_final_rows: 1, accounting_open_rows: 1, cost_final: false,
-    }), { text: 'Cost pending', open: true, note: '' });
+    }), { text: 'Cost pending', open: true, detail: '' });
     assert.deepEqual(costBucketPresentation({
         cost: 0.25, calls: 2, unknown_unmetered: 1, non_final_rows: 1, accounting_open_rows: 0, cost_final: false,
-    }), { text: 'Tracked: $0.25', open: false, note: 'Tracked: $0.25 · 1 without a price' });
+    }), { text: 'Tracked: $0.25', open: false, detail: '1 without a price' });
     assert.deepEqual(costBucketPresentation({
         cost: 0.0004, calls: 1, unknown_unmetered: 0, non_final_rows: 0, accounting_open_rows: 0, cost_final: true,
-    }), { text: '$0.0004', open: false, note: '' }, 'a positive sub-cent amount is never $0.00');
+    }), { text: '$0.0004', open: false, detail: '' }, 'a positive sub-cent amount is never $0.00');
     assert.deepEqual(costBucketPresentation({
         cost: 0.25, calls: 2, unknown_unmetered: 0, non_final_rows: 1, accounting_open_rows: 1, cost_final: false,
-    }), { text: '$0.25', open: true, note: '$0.25 (pending)' });
+    }), { text: '$0.25', open: true, detail: 'pending' });
     assert.deepEqual(costBucketPresentation({
         cost: 5623.32, calls: 2, unknown_unmetered: 764, non_final_rows: 765, accounting_open_rows: 1, cost_final: false,
-    }), { text: 'Tracked: $5,623.32', open: true, note: 'Tracked: $5,623.32 (pending) · 764 without a price' });
+    }), { text: 'Tracked: $5,623.32', open: true, detail: 'pending · 764 without a price' });
     // An older payload without the open count: its non-final rows past the unpriced ones are the open ones.
     assert.deepEqual(costBucketPresentation({ cost: 0, calls: 1, unknown_unmetered: 1, non_final_rows: 1, cost_final: false }),
-        { text: 'Cost not priced', open: false, note: 'Cost not priced · 1 without a price' });
+        { text: 'Cost not priced', open: false, detail: '1 without a price' });
     assert.deepEqual(costBucketPresentation({
         cost: 0, calls: 1, unknown_unmetered: 0, non_final_rows: 0, cost_final: true,
-    }), { text: '$0.00', open: false, note: '' }, 'a settled zero is a fact');
-    assert.deepEqual(costBucketPresentation({ cost: null, calls: 1 }), { text: 'unknown', open: false, note: '' });
+    }), { text: '$0.00', open: false, detail: '' }, 'a settled zero is a fact');
+    assert.deepEqual(costBucketPresentation({ cost: null, calls: 1 }), { text: 'unknown', open: false, detail: '' });
     for (const cell of [costBucketPresentation({ cost: 5623.32, cost_final: false, unknown_unmetered: 764 })]) {
-        assert.doesNotMatch(cell.text, /unmetered|pending|without a price|\(/, 'the counts leave the cell');
+        assert.doesNotMatch(cell.text, /unmetered|pending|without a price|\(/, 'the counts leave the amount');
+        assert.equal(cell.detail, '764 without a price', 'and are said under it');
     }
 });
 

@@ -5672,7 +5672,27 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .cost-cell-name { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cost-table .cost-cell-right { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .status-mark.cost-open { margin-inline-start: var(--space-1); vertical-align: middle; }
+/* What the amount leaves out (pending, the calls without a price), in the meta ink under it. */
+.cost-cell-note { display: block; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .cost-empty-cell { color: var(--text-muted); text-align: center; }
+/* A narrow card reads a row as its name on its own line, then its calls and its amount (the header reads the same
+   way): three columns there cut a name to its first letters and push the tab sideways. A name longer than its line
+   still ends in an ellipsis in place. */
+@container dashboard (max-width: 480px) {
+    .cost-table, .cost-table :is(thead, tbody, th, td) { display: block; }
+    .cost-table tr {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        column-gap: var(--space-3);
+        border-bottom: 1px solid rgba(var(--neutral-rgb), 0.04);
+    }
+    .cost-table thead tr { border-bottom-color: var(--divider); }
+    .cost-table :is(th, td) { border-bottom: 0; }
+    .cost-table tr > :first-child { grid-column: 1 / -1; }
+    .cost-table tr > :nth-child(2) { text-align: left; }
+    .cost-table .cost-cell-name { width: auto; max-width: none; padding-bottom: 0; }
+    .cost-table .cost-cell-note { white-space: normal; }
+}
 
 /* Dashboard Storage (the owner-started count and the free-space tray): shared card, type, spacing
    and tone tokens; only the bar's measured share arrives at runtime (--storage-share). */
