@@ -87,6 +87,7 @@ MCP_BROWSER_GUARD_LINE_BYTES = 32 * 1024 * 1024
 MCP_BROWSER_GUARD_WORKERS = 16
 MCP_BROWSER_GUARD_PENDING = 64
 MCP_STDIO_STDERR_TAIL_BYTES = 64 * 1024
+MCP_STDIO_STDERR_NOTE_BYTES = 2 * 1024  # the last words a failure shows; the log keeps the longer tail
 
 
 # Worker-pool spawn bounds (structural constants, not env knobs). Grace after a full-pool spawn before the crash
