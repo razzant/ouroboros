@@ -296,6 +296,16 @@ def test_a_long_running_servers_stderr_is_logged_as_a_bounded_tail_with_every_se
         assert note.startswith(f"[{len(text)} bytes of stderr;") and len(body.encode()) <= 1000, note[:120]
         assert body.endswith("password=***REDACTED***\n" if cfg_case is cfg else "Authentication required.\n" + "T\n" * 200)
         assert "abcdefghijkl" not in body and "K" * 20 not in body
+    token, plain = "Q9" * 20, dataclasses.replace(cfg, secret_values=())  # no configured secret to read ahead for
+    rest = "arer\n" + token + "\nAuthentication required.\n"
+    for text, end in (("P" * 999 + "\nBe" + rest + "T" * (999 - len(rest)) + "\n", "Authentication required.\n"),
+                      ("Z\n" * 600 + "Y" * 999 + "\n", "Y" * 999 + "\n")):  # the window opens inside "Bearer"; a whole line
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stderr:
+            stderr.write(text)
+            stderr.flush()
+            note = mcp_schema._stderr_diagnostic(stderr, plain, 1000)
+        body = note.split("follow]\n", 1)[1]
+        assert token not in note and end in body and len(body.encode()) <= 1000, note[:160]
     for at in range(0, 3000, 7):  # the secret before, across and after every cut point
         text = "Z" * at + secret + "\n" + "Y\n" * ((3500 - at) // 2) + "END\n"
         record = logged(text)

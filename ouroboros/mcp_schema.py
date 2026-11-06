@@ -165,16 +165,18 @@ def _stderr_diagnostic(stderr: Any, cfg: Any, limit: int) -> str:
     """A stdio server's stderr file as one log record, redacted like every server text.
 
     A task session keeps one such file for its whole task loop, so it is never read whole: past ``limit``
-    bytes the record names the file's size and keeps its last whole lines. The read starts one longest
-    masked echo early (12 bytes per character bounds a JSON escape) and is masked whole, so every rule sees
-    each echo whole; the kept lines start at a raw line break that no mask spans (masked alone, they end the
-    whole masked text), so a mask shorter or longer than its secret never moves the cut or the bound."""
+    bytes the record names the file's size and keeps its last whole lines. The read starts a window or one
+    longest masked echo early (12 bytes per character bounds a JSON escape), whichever is more, and is masked
+    whole, so every rule sees each echo whole, and a match begun before the kept lines (a token on the line
+    under its keyword, a key block) is masked when it begins within that reach; the kept lines start at a raw
+    line break that no mask spans (masked alone, they end the whole masked text), so a mask shorter or longer
+    than its secret never moves the cut or the bound."""
     import os
 
     with open(stderr.fileno(), "rb", closefd=False) as raw:
         size = raw.seek(0, os.SEEK_END)
-        reach = 0 if size <= limit else 12 * max(map(len, filter(None, (*cfg.secret_values, cfg.auth_token))),
-                                                 default=0)
+        reach = 0 if size <= limit else max(limit, 12 * max(
+            map(len, filter(None, (*cfg.secret_values, cfg.auth_token))), default=0))
         start = max(0, size - limit - reach)
         raw.seek(start)
         blob = raw.read()
@@ -185,12 +187,12 @@ def _stderr_diagnostic(stderr: Any, cfg: Any, limit: int) -> str:
     whole = masked(blob)
     if not start and len(whole) <= limit:
         return whole.decode("utf-8")
-    at, body = blob.find(b"\n", max(0, len(blob) - limit)), b""
+    at, body = blob.find(b"\n", max(0, len(blob) - limit - 1)), b""  # a last line of exactly `limit` bytes fits
     while at >= 0 and not whole.endswith(body := masked(blob[at + 1:])):
         at = blob.find(b"\n", at + 1)  # a mask spans this break (a multi-line secret or key block)
     body = body if at >= 0 else b""
     if len(body) > limit:  # masks may outgrow their secrets
-        cut = body.find(b"\n", len(body) - limit)
+        cut = body.find(b"\n", len(body) - limit - 1)
         body = body[cut + 1:] if cut >= 0 else b""
     return f"[{size} bytes of stderr; only its last whole lines, within {limit} bytes, follow]\n" + body.decode(
         "utf-8", errors="replace")

@@ -77,7 +77,7 @@ WS_RELAY_REFILL_PER_SEC = 1.0
 # GUARD_READ of its acceptance and fit GUARD_LINE_BYTES (the asker sends a larger body as unavailable);
 # GUARD_WORKERS decide at once and GUARD_PENDING questions (deciding or waiting) are held, more are refused.
 # A stdio server's stderr is logged at its transport's end as at most STDERR_TAIL_BYTES of whole last lines. That
-# bounds only the read and the log record, not the file: the server writes its temporary stderr file directly, so
+# bounds only the read and the record's lines, not the file: the server writes its temporary stderr file directly, so
 # a task session's file grows on disk with whatever its server writes until the loop ends (no ring buffer).
 MCP_TASK_SESSION_CLOSE_WAIT_SEC = 2.0
 MCP_TASK_SESSION_RETURN_WAIT_SEC = 1.0
