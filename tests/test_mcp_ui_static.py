@@ -201,6 +201,54 @@ console.log(JSON.stringify(snaps));
     assert loaded["unknown-field-kept"][0].configuration_warnings  # kept with the loader's warning, never refused
 
 
+def test_mcp_ui_locks_the_transport_of_a_skill_bound_row_and_refuses_one_off_stdio():
+    """A Connect-tools row is stdio by the loader's rule: its card shows that transport without offering
+    another, while an ordinary row keeps every choice; a bound row saved on another transport is refused
+    by Save exactly as the loader refuses it."""
+    script = r'''
+import assert from 'node:assert/strict';
+import { applyMcpSettings, collectMcpSettings, validateMcpSettings } from './web/modules/mcp_settings.js';
+const transport = { dataset: { mcpField: 'transport' }, value: 'sse', addEventListener: () => {} };
+const card = { dataset: { mcpIndex: '0' }, querySelectorAll: () => [],
+    querySelector: (s) => s === '[data-mcp-field="transport"]' ? transport : null };
+const host = { innerHTML: '', querySelectorAll: () => [] };
+globalThis.document = { getElementById: (id) => id === 'mcp-servers-list' ? host : null,
+    querySelector: () => card, querySelectorAll: (s) => s === '[data-mcp-card]' ? [card] : [] };
+globalThis.fetch = async () => ({ ok: false });
+const BOUND = { id: 'chrome_browser', name: 'Chrome (shared tab)', enabled: true, transport: 'stdio', skill: 'chrome',
+    task_session: true, browser_policy: true };
+const select = (html) => html.match(/<select[^>]*data-mcp-field="transport"[^>]*>[\s\S]*?<\/select>/)[0];
+applyMcpSettings({ MCP_SERVERS: [BOUND, { id: 'plain', enabled: true, transport: 'stdio', command: 'node' }] });
+const [bound, plain] = host.innerHTML.split('<article').slice(1).map(select);
+assert.match(bound, / disabled aria-describedby="mcp-0-endpoint">/);
+assert.match(host.innerHTML, /data-mcp-field="id" value="[^"]+" readonly/);
+assert.deepEqual([...bound.matchAll(/<option value="([^"]+)"( selected)?/g)].map((m) => m[1] + (m[2] || '')), ['stdio selected']);
+assert.doesNotMatch(plain, /disabled/);
+assert.deepEqual([...plain.matchAll(/<option value="([^"]+)"/g)].map((m) => m[1]), ['streamable_http', 'sse', 'stdio']);
+assert.match(host.innerHTML, /id="mcp-0-endpoint">The server the skill chrome declares\./);
+applyMcpSettings({ MCP_SERVERS: [BOUND] });
+assert.equal(validateMcpSettings().length, 0);
+const snaps = [{ label: 'bound-stdio', refused: [], server: collectMcpSettings().MCP_SERVERS[0] }];
+applyMcpSettings({ MCP_SERVERS: [{ ...BOUND, transport: 'sse', url: 'https://example.test/mcp', task_session: false, browser_policy: false }] });
+assert.match(host.innerHTML, /Fields retained but not applied: skill</);
+const errors = validateMcpSettings();
+assert.equal(errors.length, 1);
+assert.equal(errors[0].input, transport);
+assert.match(errors[0].message, /^skill is not used by SSE \(Server-Sent Events\) servers, so the server would not load with it\. /);
+snaps.push({ label: 'bound-sse', refused: errors.map((error) => error.message), server: collectMcpSettings().MCP_SERVERS[0] });
+console.log(JSON.stringify(snaps));
+'''
+    result = subprocess.run([_node_bin(), "--input-type=module", "-e", script], cwd=REPO_ROOT,
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    from ouroboros import mcp_client
+
+    for snap in json.loads(result.stdout.strip().splitlines()[-1]):  # what the real writer would send, as loaded
+        errors = []
+        loaded = mcp_client.normalize_server_config(snap["server"], errors=errors)
+        assert (loaded is None) == bool(snap["refused"]), (snap, errors)  # Save refuses exactly the drops
+
+
 def test_mcp_test_button_preserves_saved_url_only_credentials():
     """Exercise the registered click handler, not a copy of its payload expression."""
     node = _node_bin()

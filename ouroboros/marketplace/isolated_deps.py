@@ -140,10 +140,10 @@ def _installer_env(env_root: pathlib.Path, *, ecosystem: str = "", cache_root: p
     })
     if ecosystem == "node":
         # npm's `#!/usr/bin/env node` shebang must resolve a working runtime.
-        # node_runtime owns the emergency verdict, the byte-identical healthy
-        # case, and the disclosed residuals (npm itself is not bundled: an
-        # absent npm still fails honestly upstream, and an npm launcher with an
-        # ABSOLUTE node shebang ignores PATH).
+        # node_runtime owns the fallback verdict and byte-identical healthy
+        # case for an existing npm launcher. A missing npm gets the reviewed
+        # managed Node/npm pair in _install_node_package; the same prepared
+        # runtime remains available to skill execution afterwards.
         from ouroboros.platform_layer import prepend_skill_node_emergency_path
 
         prepend_skill_node_emergency_path(env)
@@ -260,11 +260,30 @@ def _install_node_package(package: str, env_root: pathlib.Path, timeout_sec: int
     # same way the process tools do BEFORE deciding npm is absent (T13).
     bootstrap_process_path()
     npm = shutil.which("npm")
+    managed_node = None
     if not npm:
-        raise RuntimeError("npm is not available on PATH")
+        # The runtime manager provisions only the pinned Node/npm toolchain;
+        # it does not install or start the Claudexor engine.
+        from ouroboros.claudexor_runtime import get_runtime_manager
+
+        try:
+            manager = get_runtime_manager()
+            managed_node = pathlib.Path(manager.prepare_node_toolchain())
+            npm_cli = manager._managed_npm_cli(managed_node)
+            if not npm_cli.is_file():
+                raise RuntimeError("prepared npm CLI is missing")
+        except RuntimeError as exc:
+            raise RuntimeError(f"npm is not available on PATH; managed Node/npm preparation failed: {exc}") from exc
+        npm_command = [str(managed_node), str(npm_cli)]
+    else:
+        npm_command = [npm]
     node_root = env_root / "node"
     node_root.mkdir(parents=True, exist_ok=True)
     env = _installer_env(env_root, ecosystem="node", cache_root=cache_root)
+    if managed_node is not None:
+        # npm's child processes and lifecycle scripts must see this same Node.
+        current_path = env.get("PATH", "")
+        env["PATH"] = os.pathsep.join([str(managed_node.parent), current_path]) if current_path else str(managed_node.parent)
     env["npm_config_prefix"] = str(node_root)
     name = package.rsplit("@", 1)[0] if "@" in package[1:] else package
     package_manifest = node_root / "node_modules" / name / "package.json"
@@ -272,7 +291,7 @@ def _install_node_package(package: str, env_root: pathlib.Path, timeout_sec: int
     if review_check is not None:
         review_check()
     flags = [] if allow_install_scripts else ["--ignore-scripts"]
-    result = _run([npm, "install", *flags, "--prefix", str(node_root), package], cwd=env_root, env=env, timeout_sec=timeout_sec)
+    result = _run([*npm_command, "install", *flags, "--prefix", str(node_root), package], cwd=env_root, env=env, timeout_sec=timeout_sec)
     if result["returncode"] != 0:
         detail = result.get("stderr_tail") or ""
         raise RuntimeError(f"npm install {package!r} failed" + (f": {detail}" if detail else ""))
@@ -283,7 +302,7 @@ def _install_node_package(package: str, env_root: pathlib.Path, timeout_sec: int
         # authorized package, never every package sharing this environment.
         if review_check is not None:
             review_check()
-        rebuilt = _run([npm, "rebuild", "--prefix", str(node_root), package], cwd=env_root, env=env, timeout_sec=timeout_sec)
+        rebuilt = _run([*npm_command, "rebuild", "--prefix", str(node_root), package], cwd=env_root, env=env, timeout_sec=timeout_sec)
         results.append(rebuilt)
         if rebuilt["returncode"] != 0:
             raise RuntimeError(f"npm rebuild {package!r} failed: {rebuilt.get('stderr_tail', '')}")

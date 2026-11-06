@@ -216,7 +216,7 @@ CONTRACT_MODULES = (
     "ouroboros.gateway.management_contracts", "ouroboros.gateway.history_contracts",
     "ouroboros.gateway.ui_i18n_contracts", "ouroboros.gateway.mcp_import_contracts",
     "ouroboros.gateway.model_route_contracts", "ouroboros.gateway.card_contracts",
-    "ouroboros.gateway.skill_source_contracts",
+    "ouroboros.gateway.skill_source_contracts", "ouroboros.gateway.skill_mcp_contracts",
     "ouroboros.gateway.call_contracts",
 )
 _CONTRACT_CACHE: Dict[str, Any] = {}

@@ -215,6 +215,9 @@ def preview_import(text: str, draft: List[Any]) -> Dict[str, Any]:
         if len(targets) > 1:
             problems.append(f"several draft servers already use server ID {server_id!r}; make their IDs distinct first")
         target = draft[targets[0]] if len(targets) == 1 else None
+        if target is not None and not problems and target.get("skill"):  # its launch is the skill's, not a file's
+            problems.append(f"the draft server runs the server skill {target['skill']!r} declares; import does not "
+                            "change it — remove that server first, then import it again")
         current = str((target or {}).get("transport") or "streamable_http").strip().lower()
         if target is not None and not problems and current != entry["transport"]:
             problems.append("the draft server uses a different transport; a transport is not changed by import — "

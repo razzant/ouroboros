@@ -356,3 +356,36 @@ test('a stopped Skills-page reviewer of these bytes is continued by its own acti
         assert.doesNotMatch(renderInstalledSkillCard(stopped([other])), /continue_review/);
     }
 });
+
+test('declared MCP servers: Connect tools once the skill is ready, then the configured and listed facts', () => {
+    const server = { id: 'chrome_browser', title: 'Chrome (shared tab)', conflict: false, configured: false, tool_count: 0, listed: false, error: '' };
+    const ready = skill({ type: 'script', enabled: true, mcp_servers: [server] });
+    assert.match(traysOf(renderInstalledSkillCard(ready)), /data-skill-action="connect_tools"[^>]*>Connect tools</);
+    assert.match(renderInstalledSkillCard(ready), /Chrome \(shared tab\): not connected/);
+    for (const blocked of [skill({ type: 'script', enabled: false, mcp_servers: [server] }),
+        skill({ type: 'script', enabled: true, grants: { all_granted: false, missing_permissions: ['net'] }, mcp_servers: [server] })]) {
+        assert.doesNotMatch(renderInstalledSkillCard(blocked), /connect_tools/);
+    }
+    const listed = renderInstalledSkillCard(skill({ type: 'script', enabled: true, mcp_servers: [{ ...server, configured: true, listed: true, tool_count: 25 }] }));
+    assert.doesNotMatch(traysOf(listed), /connect_tools/);
+    assert.match(listed, /Chrome \(shared tab\): configured · 25 tools listed\. The skill’s own instructions say what else its tools need\./);
+    // The tray says the outcome in words; the host's refusal (code, ids, readiness tokens) is a Details fact, escaped.
+    const refusal = 'MCP_SKILL_UNAVAILABLE: server \'chrome_browser\' runs from skill \'demo\', which cannot run it now (review_stale). <b>x</b>';
+    const failedCard = renderInstalledSkillCard(skill({ type: 'script', enabled: true, mcp_servers: [{ ...server, configured: true, error: refusal }] }));
+    const failed = traysOf(failedCard);
+    assert.match(failed, /data-tone="danger"/);
+    assert.match(failed, /Its tools are configured but can’t be used now\.<div class="skills-tray-note">Details say why\.<\/div>/);
+    assert.doesNotMatch(failed, /MCP_SKILL_UNAVAILABLE|review_stale|chrome_browser/);
+    assert.match(failedCard, /<span class="skills-detail-label">Why unavailable<\/span><span class="skills-detail-value">MCP_SKILL_UNAVAILABLE: server &#39;chrome_browser&#39;[^<]*\(review_stale\)\. &lt;b&gt;x&lt;\/b&gt;<\/span>/);
+    const pair = renderInstalledSkillCard(skill({ type: 'script', enabled: true, mcp_servers: [{ ...server, configured: true, listed: true, tool_count: 25, error: 'x' },
+        { ...server, id: 'second', title: 'Second', configured: true, listed: true, tool_count: 2 }] }));
+    assert.match(pair, /Chrome \(shared tab\): configured · unavailable now; Second: configured · 2 tools listed\./);
+    assert.match(pair, /Why unavailable<\/span><span class="skills-detail-value">Chrome \(shared tab\): x<\/span>/);
+    const longReason = 'diagnostic '.repeat(100) + 'last detail';
+    assert.ok(renderInstalledSkillCard(skill({ type: 'script', enabled: true,
+        mcp_servers: [{ ...server, configured: true, error: longReason }] })).includes(longReason));
+    assert.doesNotMatch(renderInstalledSkillCard(ready), /Why unavailable/);
+    const conflict = traysOf(renderInstalledSkillCard(skill({ type: 'script', enabled: true, mcp_servers: [{ ...server, conflict: true }] })));
+    assert.match(conflict, /already has an MCP server named chrome_browser that isn’t this skill’s/);
+    assert.doesNotMatch(conflict, /connect_tools/);
+});

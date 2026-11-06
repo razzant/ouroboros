@@ -297,6 +297,7 @@ from supervisor.events_worker_reports import (  # noqa: E402, F401 -- intentiona
     _handle_acceptance_fence,
     _handle_external_wait_lease,
     _handle_log_event,
+    _handle_mcp_configuration_changed,
     _handle_skill_lifecycle,
     _handle_task_dispatch_resolved,
     _handle_task_focus_updated,
@@ -378,6 +379,7 @@ EVENT_HANDLERS = {
     "skill_exec_finished": _handle_skill_lifecycle,
     "skill_exec_failed": _handle_skill_lifecycle,
     "acceptance_fence": _handle_acceptance_fence,
+    "mcp_configuration_changed": _handle_mcp_configuration_changed,
 }
 
 

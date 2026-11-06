@@ -167,6 +167,9 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
              "the live quiz_state frame is a separate transport discriminator"),
     "send_video": _handled(
         "supervisor.events_chat_delivery", "ouroboros/tools/core_artifacts.py"),
+    "mcp_configuration_changed": _handled(
+        "supervisor.events_worker_reports", "ouroboros/skill_mcp.py", "ouroboros/mcp_client.py",
+        note="content-free: the server lister re-reads settings and lists a changed or moved MCP server"),
     "skill_exec_failed": _handled(
         "supervisor.events_worker_reports", "ouroboros/tools/skill_exec.py"),
     "skill_exec_finished": _handled(

@@ -587,6 +587,7 @@ Files produced by tasks are covered in §6.
 
 **What is installed:**
 - `GET /api/extensions` (`ExtensionsIndexResponse`) lists every installed skill (`InstalledSkill`) and what is live. It makes no network call.
+- An installed skill row's `mcp_servers` lists its declared servers as `{id, title, conflict, configured, tool_count, listed, error}`. It is `[]` when none are declared and absent on identity-collision rows. `conflict` means the server id is claimed elsewhere; `configured` means this skill owns an enabled binding while MCP is enabled. `listed` and `tool_count` reflect the last listing, and `error` is the current skill or server error.
 - `GET /api/extensions/{skill}/manifest` and `/settings_section` read one skill.
 - `GET /api/skills/daemons` lists companion processes.
 
@@ -811,7 +812,7 @@ Connected coding subscriptions use Claudexor. Its API v2 objects (`job`, mainten
 - `POST /api/local-model/test` runs two real completions; a failed probe is still 200. `POST /api/local-model/stop` stops it (and an install in progress) and is safe to repeat.
 
 **MCP servers:**
-- `GET /api/mcp/status` lists the configured servers and their last listed tools; it makes no network call.
+- `GET /api/mcp/status` lists the configured servers and their last listed tools; it makes no network call. A normal server row includes `skill` (the owning skill name, or `""` for a directly configured server) and `skill_error` (why its skill binding is unavailable, or `""`). Configuration-error rows omit both.
 - `POST /api/mcp/refresh` lists one server's tools (`{server_id}`) or every server's (`{}`); it is safe to repeat.
 - `POST /api/mcp/test` connects once to a draft server (`{server}`, with `server_id` to fill masked secrets from that saved server) and saves nothing. A failed test is 200 with `ok: false`.
 - `POST /api/mcp/import/preview` requires `{text, servers}` and turns pasted configuration into draft rows without saving. `servers` is the editor's current draft matching metadata; send `[]` for an empty editor. An invalid request shape answers `400`; syntactically invalid pasted configuration answers `200` with `ok:false`, `error` and no entries. HTTP success alone is not a usable preview.

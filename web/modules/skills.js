@@ -17,7 +17,8 @@ import { createSkillBrowse } from './skill_browse.js';
 import { createSkillSources, unconfirmedHubRows } from './skill_sources_view.js';
 import { openSkillDetailSheet } from './skill_detail_sheet.js';
 import {
-    openCompareDialog, openOfficialExplanation, openPublishDestinationDialog, openSkipReviewDialog, openUpdateDialog, updateWithoutReview,
+    connectSkillTools, openCompareDialog, openOfficialExplanation, openPublishDestinationDialog, openSkipReviewDialog, openUpdateDialog,
+    updateWithoutReview,
 } from './skill_dialogs.js';
 import { plural, popularityText, repoLabel, routeExternalLink, versionText } from './skill_presentation.js';
 import { runSkillPublishFlow } from './skill_publish_flow.js';
@@ -470,17 +471,19 @@ export function initSkills(ctx = {}) {
         showReads();
     }
 
-    // Local lifecycle progress only (never GitHub): the queue while work runs, the
-    // listing now and then while a review runs outside the lane.
+    // Local progress only (never GitHub): lifecycle work and pending MCP listings,
+    // plus the listing now and then while a review runs outside the lane.
     function schedulePoll() {
         clearTimeout(pollTimer);
-        if (destroyed || !visible || !snapshot) return;
+        if (destroyed || !visible || document.hidden || !snapshot) return;
         const working = inFlightCount(lifecycleEventsFromQueue(snapshot.queue)) > 0;
+        const listingTools = snapshot.rawSkills?.some((skill) => (skill.mcp_servers || [])
+            .some((server) => server.configured && !server.listed && !server.error));
         const reviewing = reviewingSkills.size > 0 || projected().some((skill) => /Reviewing/.test(installedSkillModel(skill).chip));
-        if (!working && !reviewing) return;
+        if (!working && !reviewing && !listingTools) return;
         pollTimer = setTimeout(async () => {
-            if (destroyed || !visible) return;
-            if (Date.now() - lastListingRead >= REVIEW_POLL_MS || working) await readInstalled({ quiet: true });
+            if (destroyed || !visible || document.hidden) return;
+            if (Date.now() - lastListingRead >= REVIEW_POLL_MS || working || listingTools) await readInstalled({ quiet: true });
             else schedulePoll();
         }, WORK_POLL_MS);
     }
@@ -808,6 +811,11 @@ export function initSkills(ctx = {}) {
         if (action === 'submit_hub') return publish(name);
         if (action === 'forget_publication') return forgetPublication(name);
         if (action === 'turn_on') return turnOn(name);
+        if (action === 'connect_tools') {
+            const result = await connectSkillTools(await currentSkill(name));
+            if (result?.ok) showToast(`${name}: ${result.changed === false ? 'tools already configured' : 'tools configured'}. Its own instructions say what else they need.`, 'ok');
+            return Boolean(result);
+        }
         if (action === 'grant') {
             const skill = await currentSkill(name);
             const keys = String(options.keys || '').split(',').map((k) => k.trim()).filter(Boolean);
@@ -1017,6 +1025,7 @@ export function initSkills(ctx = {}) {
     container.addEventListener('change', onChange);
     container.addEventListener('toggle', onToggle, true);
     window.addEventListener('ouro:page-shown', onPageShown);
+    document.addEventListener('visibilitychange', schedulePoll);
 
     // Another surface asks for one installed skill's entry ({skill}), a Browse search ({query}) or a Browse category
     // ({category}): the dictation chooser's engines (dictation_chooser.js), a place's connector (place_sheet.js).
@@ -1059,6 +1068,7 @@ export function initSkills(ctx = {}) {
         container.removeEventListener('change', onChange);
         container.removeEventListener('toggle', onToggle, true);
         window.removeEventListener('ouro:page-shown', onPageShown);
+        document.removeEventListener('visibilitychange', schedulePoll);
         window.removeEventListener('ouro:open-skills', onOpenSkills);
     } };
 }

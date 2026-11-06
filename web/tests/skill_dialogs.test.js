@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-    createMySkillsDestination, firstStartTrustHtml, sourceProbeWarning, sourceProblemsHtml, sourceTarget, sourceViewSentence, updateWithoutReview,
+    connectSkillTools, createMySkillsDestination, firstStartTrustHtml, sourceProbeWarning, sourceProblemsHtml, sourceTarget, sourceViewSentence,
+    updateWithoutReview,
 } from '../modules/skill_dialogs.js';
 import { skillSourcesApi } from '../modules/api_client.js';
+import { renderConfirmDialogDetails } from '../modules/confirm_dialog.js';
 
 test('rejected update confirms its exact version and sends only that release after literal confirmation', async () => {
     const skill = { name: 'demo', install: { update_rejected: { version: '2.0', digest: 'd'.repeat(64), reason: 'review_blockers' },
@@ -144,4 +146,63 @@ test('owner skip and My skills API calls use the shared HTTP contract', async ()
             ['/api/skills/demo/update', { mode: 'replace', digest: 'b'.repeat(64) }],
         ]);
     } finally { globalThis.fetch = before; }
+});
+
+test('Connect tools: one confirmation names what runs and the servers MCP starts, then sends the preview identities', async () => {
+    const server = { id: 'chrome_browser', title: 'Chrome (shared tab)', change: 'add', conflict: '', task_session: true, browser_policy: true,
+        executable: { command: '/opt/node', args: ['/skills/chrome/scripts/server.mjs'], cwd: '/skills/chrome' } };
+    const preview = { ok: true, ready: true, changed: true, enables_mcp: true, content_hash: 'h', settings_digest: 'd', servers: [server],
+        other_servers: [{ id: 'github', name: 'GitHub' }] };
+    for (const decision of [false, null, true]) {
+        const sent = [];
+        const result = await connectSkillTools({ name: 'chrome' }, {
+            api: { skillMcpConnectPreview: async () => preview, skillMcpConnect: async (...args) => { sent.push(args); return { ok: true, saved: true }; } },
+            dialog: async (model) => {
+                assert.equal(model.title, 'Connect the tools of chrome?');
+                assert.equal(model.body, 'Ouroboros adds Chrome (shared tab) to MCP Servers. It turns MCP on. Ouroboros starts the server to list its tools, then uses it for tool calls. '
+                    + 'Turning MCP on also starts 1 server previously enabled in Settings: GitHub.');
+                assert.deepEqual(model.details.rows.map((row) => row.value), ['/opt/node /skills/chrome/scripts/server.mjs', '/skills/chrome',
+                    'one process per task; Ouroboros checks its browser requests']);
+                assert.equal(model.confirmLabel, 'Connect tools');
+                return decision;
+            },
+        });
+        assert.deepEqual(sent, decision === true ? [['chrome', { expected_content_hash: 'h', settings_digest: 'd', confirm_other_servers: true }]] : []);
+        assert.deepEqual(result, decision === true ? { ok: true, saved: true } : null);
+    }
+    const alerts = [];
+    for (const blocked of [{ ...preview, ready: false, blockers: ['review_stale', "server 'chrome_browser': no usable node runtime was found"],
+        next_action: 'Finish setup.' }, { ...preview, ready: false, blockers: ['skill_disabled'], next_action: '' },
+    { ...preview, servers: [{ ...server, change: 'conflict', conflict: 'Settings already has server id chrome_browser added by hand' }] }]) {
+        const result = await connectSkillTools({ name: 'chrome' }, {
+            api: { skillMcpConnectPreview: async () => blocked, skillMcpConnect: () => assert.fail('nothing is confirmed') },
+            dialog: async (model) => { alerts.push(model); return true; },
+        });
+        assert.equal(result, null);
+    }
+    assert.ok(alerts.every((model) => model.alert === true && model.title === 'chrome can’t connect its tools yet'));
+    // Not ready: the outcome in words; the host's readiness tokens and launch diagnostics, whole, under Details.
+    assert.equal(alerts[0].body, 'It can’t run them now, so nothing was changed.');
+    assert.doesNotMatch(alerts[0].body + alerts[1].body, /review_stale|skill_disabled|chrome_browser|Finish setup/);
+    assert.deepEqual(alerts[0].details, { summary: 'What stops it', rows: [
+        { label: 'Reasons', value: "review_stale; server 'chrome_browser': no usable node runtime was found" },
+        { label: 'Next step', value: 'Finish setup.' }] });
+    assert.deepEqual(alerts[1].details.rows, [{ label: 'Reason', value: 'skill_disabled' }]);
+    assert.match(renderConfirmDialogDetails(alerts[0].details), /<summary>What stops it<\/summary>[\s\S]*<dd>review_stale; server &#39;chrome_browser&#39;: no usable node runtime was found<\/dd>/);
+    assert.match(alerts[2].body, /added by hand\. Remove or rename that server/);
+    assert.equal(alerts[2].details, null);
+    const unchanged = await connectSkillTools({ name: 'chrome' }, {
+        api: { skillMcpConnectPreview: async () => ({ ...preview, changed: false }), skillMcpConnect: () => assert.fail('no write') },
+        dialog: () => assert.fail('nothing to confirm'),
+    });
+    assert.deepEqual(unchanged, { ok: true, saved: false, changed: false });
+    await connectSkillTools({ name: 'chrome', title: 'Chrome' }, {
+        api: { skillMcpConnectPreview: async () => ({ ...preview, enables_mcp: false, other_servers: [], servers: [{ ...server, change: 'enable' }] }),
+            skillMcpConnect: async () => ({ ok: true }) },
+        dialog: async (model) => {
+            assert.equal(model.title, 'Connect the tools of Chrome?');
+            assert.equal(model.body, 'Ouroboros turns Chrome (shared tab) on again in MCP Servers. Ouroboros starts the server to list its tools, then uses it for tool calls.');
+            return false;
+        },
+    });
 });

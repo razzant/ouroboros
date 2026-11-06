@@ -37,6 +37,8 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | GET | `/api/skills/{skill}/review-history/{job_id}` | the skill's ledger record, else a legacy `review_history.jsonl` tail |
 | POST | `/api/owner/skills/{skill}/attest-review` | owner-only skip of the LLM review; deterministic preflight still runs |
 | POST | `/api/skills/{skill}/grants` | |
+| GET | `/api/skills/{skill}/mcp-connect` | |
+| POST | `/api/skills/{skill}/mcp-connect` | |
 | POST | `/api/skills/{skill}/reconcile` | |
 | GET | `/api/marketplace/clawhub/search` | |
 | GET | `/api/marketplace/clawhub/installed` | |

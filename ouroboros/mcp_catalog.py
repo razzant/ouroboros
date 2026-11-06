@@ -2,7 +2,8 @@
 
 The server publishes one envelope per configured identity. Readers stat before
 loading and retain parsed bytes until atomic replacement. Policy and provider
-schema presentation belong to the client, not this store.
+schema presentation belong to the client, not this store; the typed fact one
+name lookup yields (``MCPNameResolution``) and its refusal text live here.
 """
 from __future__ import annotations
 
@@ -10,12 +11,13 @@ import copy
 import hashlib
 import json
 import logging
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 from ouroboros import config
 from ouroboros.mcp_schema import redact_metadata, wrap_schema_text
+from ouroboros.tools.tool_result import ToolResult
 from ouroboros.utils import atomic_write_json
 
 log = logging.getLogger(__name__)
@@ -30,10 +32,14 @@ def identity(cfg: Any) -> str:
     """Digest credentials too, but never persist their plaintext configuration.
 
     Call-lifetime choices (``task_session``, ``browser_policy``) never change a listing:
-    discovery starts its own process either way, so toggling them keeps the catalog."""
+    discovery starts its own process either way, so toggling them keeps the catalog. A
+    skill-bound server is identified by its skill and payload revision
+    (``skill_mcp.bind_config``): an accepted update is listed anew, while a relocated
+    runtime binary, the derived command and the refusal text are not part of it."""
     fields = asdict(cfg)
+    derived = ("command", "args", "cwd") if fields.get("skill") else ("skill", "skill_revision")  # unbound: as before
     for key in ("enabled", "allowed_tools", "name", "configuration_warnings", "secret_values", "schemas_at_start",
-                "task_session", "browser_policy"):
+                "task_session", "browser_policy", "skill_error", *derived):
         fields.pop(key, None)
     return hashlib.sha256(json.dumps(fields, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
@@ -138,6 +144,8 @@ def prune_catalogs(configs: list) -> None:
 
 def catalog_notice(runtime: Any) -> str:
     """Absolute listing provenance, outside the cached tool schema prefix."""
+    if getattr(runtime.config, "skill_error", ""):
+        return runtime.config.skill_error
     envelope = runtime.catalog or {}
     listed = envelope.get("listed_at")
     attempt = envelope.get("latest_attempt") or {}
@@ -160,3 +168,43 @@ def catalog_notice(runtime: Any) -> str:
                                        *getattr(runtime, "schema_omissions", [])])):
         text += "; " + "; ".join(omissions)
     return text
+
+
+@dataclass(frozen=True)
+class MCPNameResolution:
+    """What this process's current MCP catalog says about one requested name.
+
+    A pure lookup under the manager lock: no transport, refresh or settings
+    write. Only ``callable`` may proceed to the paid safety check and the call;
+    every other status is its own typed fact, kept distinct from a catalog miss.
+    """
+
+    status: str  # callable | not_found | disallowed | server_disabled | catalog_unavailable | mcp_disabled
+    server_id: str = ""
+    raw_name: str = ""
+    detail: str = ""
+
+    def refusal(self, requested: str) -> ToolResult:
+        """The reason alone; the registry composes the caller's callable view beside it."""
+        name, server = str(requested or ""), self.server_id
+        if self.status == "disallowed":
+            text = (
+                f"⚠️ MCP_TOOL_DISALLOWED: {self.raw_name!r} is not on the "
+                f"allowed_tools list for server {server!r}."
+            )
+            return ToolResult(status="blocked", code="ACCESS_BLOCKED", text=text)
+        if self.status == "not_found":
+            where = (f"the current tool catalog of MCP server {server!r}" if server
+                     else "the tool catalog of any configured MCP server")
+            text = f"⚠️ MCP_TOOL_NOT_FOUND: {name!r} is {self.detail or 'not in ' + where}. Nothing was executed."
+            return ToolResult(status="error", code="UNKNOWN_TOOL", text=text)
+        if self.status == "mcp_disabled":
+            text = "⚠️ MCP_DISABLED: enable MCP in Settings → Advanced to use this tool."
+        elif self.status == "server_disabled":
+            text = (f"⚠️ MCP_DISABLED: MCP server {server!r} is disabled in Settings → "
+                    f"Advanced; {name!r} was not executed.")
+        else:
+            text = (f"⚠️ MCP_CATALOG_UNAVAILABLE: MCP server {server!r} has incomplete discovery evidence "
+                    f"({self.detail}); whether {name!r} exists is "
+                    "unknown. Nothing was executed.")
+        return ToolResult(status="unavailable", code="MCP_CATALOG_UNAVAILABLE" if self.status == "catalog_unavailable" else "MCP_UNAVAILABLE", text=text)

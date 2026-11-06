@@ -66,14 +66,136 @@ def test_installer_env_node_healthy_system_is_byte_identical(monkeypatch, tmp_pa
     assert node_env["PATH"] == "/usr/bin"
 
 
-def test_install_node_package_missing_npm_fails_honestly(monkeypatch, tmp_path):
-    """npm itself is not bundled: its absence stays a typed RuntimeError."""
-    import pytest
-
+def test_install_node_package_prepares_managed_npm_when_path_has_none(monkeypatch, tmp_path):
     from ouroboros.marketplace import isolated_deps
+    from ouroboros import claudexor_runtime
+
+    node = tmp_path / "managed" / "bin" / "node"
+    npm_cli = tmp_path / "managed" / "lib" / "node_modules" / "npm" / "bin" / "npm-cli.js"
+    node.parent.mkdir(parents=True)
+    npm_cli.parent.mkdir(parents=True)
+    node.touch()
+    npm_cli.touch()
+    prepared = []
+    commands = []
+
+    class Manager:
+        pin = object()
+
+        def prepare_node_toolchain(self):
+            prepared.append(True)
+            return str(node)
+
+        def _resolve_node_toolchain(self, pin):
+            assert pin is self.pin
+            return str(node)
+
+        def _managed_npm_cli(self, selected_node):
+            assert selected_node == node
+            return npm_cli
+
+    def fake_run(cmd, **kwargs):
+        commands.append((cmd, kwargs))
+        return {"returncode": 0}
 
     monkeypatch.setattr(isolated_deps.shutil, "which", lambda name: None)
-    with pytest.raises(RuntimeError, match="npm is not available on PATH"):
+    monkeypatch.setattr(claudexor_runtime, "get_runtime_manager", lambda: Manager())
+    monkeypatch.setattr(isolated_deps, "_run", fake_run)
+    isolated_deps._install_node_package("left-pad", tmp_path / ".ouroboros_env", 1)
+
+    assert prepared == [True]
+    cmd, kwargs = commands[0]
+    assert cmd[:3] == [str(node), str(npm_cli), "install"]
+    assert "--ignore-scripts" in cmd
+    assert kwargs["env"]["PATH"].split(os.pathsep)[0] == str(node.parent)
+    assert kwargs["env"]["npm_config_cache"].startswith(str(tmp_path))
+    assert kwargs["env"]["npm_config_prefix"].startswith(str(tmp_path))
+
+
+def test_prepared_managed_node_serves_skill_readiness_and_child_path(monkeypatch, tmp_path):
+    from ouroboros import claudexor_runtime, node_runtime
+    from ouroboros.marketplace import isolated_deps
+    from ouroboros.tools.skill_exec import _resolve_runtime_binary
+    from ouroboros.tools.skill_preflight import _resolve_runtime
+
+    node = tmp_path / "managed" / "bin" / "node"
+    npm_cli = tmp_path / "managed" / "lib" / "node_modules" / "npm" / "bin" / "npm-cli.js"
+    node.parent.mkdir(parents=True)
+    npm_cli.parent.mkdir(parents=True)
+    node.touch()
+    npm_cli.touch()
+    prepared = []
+
+    class Manager:
+        pin = object()
+
+        def prepare_node_toolchain(self):
+            prepared.append(True)
+            return str(node)
+
+        def _managed_npm_cli(self, selected_node):
+            assert selected_node == node
+            return npm_cli
+
+        def _resolve_node_toolchain(self, pin):
+            assert pin is self.pin
+            return str(node) if prepared else ""
+
+    monkeypatch.setattr(node_runtime._platform, "resolve_bundled_node", lambda: None)
+    monkeypatch.setattr(node_runtime._platform, "bootstrap_process_path", lambda: [])
+    monkeypatch.setattr(node_runtime, "node_runtime_health", lambda path, timeout_sec=10: node_runtime.NodeRuntimeHealth(
+        status="healthy", version="24.16.0", path=str(path)))
+    monkeypatch.setattr(isolated_deps.shutil, "which", lambda name: None)
+    monkeypatch.setattr(claudexor_runtime, "get_runtime_manager", lambda: Manager())
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    assert node_runtime.select_skill_node_runtime()[0] == ""
+    assert prepared == []  # a passive readiness lookup cannot download
+
+    monkeypatch.setattr(isolated_deps, "_run", lambda cmd, **kwargs: {"returncode": 0})
+    isolated_deps._install_node_package("left-pad", tmp_path / ".ouroboros_env", 1)
+    assert prepared == [True]
+    assert node_runtime.select_skill_node_runtime() == (str(node), "managed")
+    assert _resolve_runtime_binary("node") == (str(node), "")
+    assert _resolve_runtime("node") == (str(node), "")
+    assert node_runtime.skill_node_emergency_path_dir() == str(node.parent)
+    child_env = {"PATH": str(tmp_path / "empty")}
+    node_runtime.prepend_skill_node_emergency_path(child_env)
+    assert child_env["PATH"].split(os.pathsep)[0] == str(node.parent)
+    assert prepared == [True]
+
+
+def test_install_node_package_reports_managed_npm_preparation_failure(monkeypatch, tmp_path):
+    import pytest
+
+    from ouroboros import claudexor_runtime
+    from ouroboros.marketplace import isolated_deps
+
+    class Manager:
+        def prepare_node_toolchain(self):
+            raise RuntimeError("reviewed Node archive unavailable")
+
+    monkeypatch.setattr(isolated_deps.shutil, "which", lambda name: None)
+    monkeypatch.setattr(claudexor_runtime, "get_runtime_manager", lambda: Manager())
+    with pytest.raises(RuntimeError, match="managed Node/npm preparation failed: reviewed Node archive unavailable"):
+        isolated_deps._install_node_package("left-pad", tmp_path / ".ouroboros_env", 1)
+
+
+def test_install_node_package_rejects_incomplete_managed_npm(monkeypatch, tmp_path):
+    import pytest
+
+    from ouroboros import claudexor_runtime
+    from ouroboros.marketplace import isolated_deps
+
+    class Manager:
+        def prepare_node_toolchain(self):
+            return str(tmp_path / "managed" / "bin" / "node")
+
+        def _managed_npm_cli(self, selected_node):
+            return tmp_path / "managed" / "lib" / "node_modules" / "npm" / "bin" / "npm-cli.js"
+
+    monkeypatch.setattr(isolated_deps.shutil, "which", lambda name: None)
+    monkeypatch.setattr(claudexor_runtime, "get_runtime_manager", lambda: Manager())
+    with pytest.raises(RuntimeError, match="prepared npm CLI is missing"):
         isolated_deps._install_node_package("left-pad", tmp_path / ".ouroboros_env", 1)
 
 
@@ -119,6 +241,9 @@ def test_read_deps_state_verifies_live_env_fingerprint(tmp_path):
 
 
 def test_run_discards_unbounded_installer_output(monkeypatch, tmp_path):
+    # Load process subclasses before replacing Popen with a function.
+    from tests.test_tracked_tree_containment import fake_tree_read
+
     captured = {}
 
     class Proc:
@@ -132,7 +257,6 @@ def test_run_discards_unbounded_installer_output(monkeypatch, tmp_path):
     def fake_popen(*args, **kwargs):
         captured.update(kwargs)
         proc = Proc()
-        from tests.test_tracked_tree_containment import fake_tree_read
         fake_tree_read(monkeypatch, proc, remains=False)
         return proc
 
@@ -178,6 +302,7 @@ def test_failed_python_install_persists_stderr_tail(monkeypatch, tmp_path):
 
 def test_python_and_npm_install_commands_disable_build_scripts(monkeypatch, tmp_path):
     from ouroboros.marketplace import isolated_deps
+    from ouroboros import claudexor_runtime, node_runtime
 
     calls = []
 
@@ -189,12 +314,26 @@ def test_python_and_npm_install_commands_disable_build_scripts(monkeypatch, tmp_
             (bin_dir / ("python.exe" if os.name == "nt" else "python")).write_text("", encoding="utf-8")
         return {"returncode": 0}
 
+    class Manager:
+        pin = object()
+
+        def _resolve_node_toolchain(self, pin):
+            assert pin is self.pin
+            return ""  # a passive lookup is allowed, including in a source install
+
+        def prepare_node_toolchain(self):
+            raise AssertionError("managed Node must not be prepared when npm is on PATH")
+
     monkeypatch.setattr(isolated_deps, "_run", fake_run)
+    # Source installations need not have a bundled Node.
+    monkeypatch.setattr(node_runtime._platform, "resolve_bundled_node", lambda: None)
     monkeypatch.setattr(isolated_deps.shutil, "which", lambda name: "/usr/bin/npm" if name == "npm" else None)
+    monkeypatch.setattr(claudexor_runtime, "get_runtime_manager", lambda: Manager())
     isolated_deps._install_python_packages(["wheelpkg"], tmp_path / ".ouroboros_env", 1)
     isolated_deps._install_node_package("left-pad", tmp_path / ".ouroboros_env", 1)
     assert any("--only-binary=:all:" in cmd for cmd in calls)
     assert any("--ignore-scripts" in cmd for cmd in calls)
+    assert any(cmd[:2] == ["/usr/bin/npm", "install"] for cmd in calls)
     assert not any("freeze" in cmd for cmd in calls)
 
 

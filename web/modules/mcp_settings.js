@@ -17,9 +17,12 @@ const TRANSPORTS = [
 // task_session/browser_policy: set by Import and kept as saved, with no control of their own. A held stdio card
 // says what they do; off stdio they are unsupported fields that Save refuses until they are removed.
 const LIFETIME_FLAGS = ['task_session', 'browser_policy'];
+// `skill`: written by a skill's Connect tools and kept as saved; such a stdio row runs that skill's declared server,
+// whose command, arguments and folder the host derives each time it starts (no fields of their own here), so its
+// transport is locked; on any other transport the loader refuses the row, and Save does too.
 const SERVER_FIELDS = new Set(['id', 'slug', 'name', 'label', 'enabled', 'transport', 'url',
     'command', 'args', 'auth_header', 'auth_token', 'headers', 'allowed_tools', 'cwd', 'env', 'env_from_settings',
-    'schemas_at_start', ...LIFETIME_FLAGS]);
+    'schemas_at_start', 'skill', ...LIFETIME_FLAGS]);
 
 let mcpServers = [];
 let mcpStatusByServer = {};
@@ -180,7 +183,7 @@ function weightLabel(server) {
 
 function unsupportedFields(server) {
     const unused = server.transport === 'stdio' ? ['url', 'auth_token', 'headers']
-        : ['command', 'args', 'cwd', 'env', 'env_from_settings'];
+        : ['command', 'args', 'cwd', 'env', 'env_from_settings', 'skill'];
     // Edited header rows live in the draft even when server.headers is absent.
     const draft = { ...server, ...credentialPayload(server) };
     const fields = Object.keys(draft).filter((key) => !SERVER_FIELDS.has(key)
@@ -196,7 +199,7 @@ function unsupportedFields(server) {
 function statusParts(server) {
     const status = mcpStatusByServer[String(server.id ?? '')] || null;
     const toolCount = status ? Number(status.tool_count || 0) : 0;
-    const lastError = status ? String(status.last_error || '') : '';
+    const lastError = status ? String(status.skill_error || status.last_error || '') : '';
     const listedAt = status ? String(status.listed_at || '') : '';
     const attempt = status?.latest_attempt;
     const tools = status && Array.isArray(status.tools) ? status.tools : [];
@@ -261,6 +264,7 @@ function renderServerCard(server, index) {
     const command = String(server.command ?? '');
     const args = Array.isArray(server.args) ? server.args.map(String) : [];
     const isStdio = transport === 'stdio';
+    const skill = isStdio ? String(server.skill || '') : '';
     const unsupported = unsupportedFields(server);
     const envRefs = typeof server.env_from_settings === 'string'
         ? server.env_from_settings : JSON.stringify(server.env_from_settings ?? {}, null, 2);
@@ -268,7 +272,8 @@ function renderServerCard(server, index) {
     const enabled = server.enabled === true || server.enabled === 'True' || server.enabled === 'true';
     const weight = weightLabel(server);
     const allowedTools = Array.isArray(server.allowed_tools) ? server.allowed_tools.join(', ') : '';
-    const transportOptions = TRANSPORTS.map((opt) => {
+    // A skill-bound row is stdio by the loader's rule: its transport is shown, never offered as a choice.
+    const transportOptions = TRANSPORTS.filter((opt) => !skill || opt.value === 'stdio').map((opt) => {
         const selected = opt.value === transport ? ' selected' : '';
         return `<option value="${escapeHtml(opt.value)}"${selected}>${escapeHtml(opt.label)}</option>`;
     }).join('');
@@ -304,7 +309,7 @@ function renderServerCard(server, index) {
             <div class="form-grid two">
                 <div class="form-field ui-field">
                     <label for="mcp-${index}-id">Server ID</label>
-                    <input type="text" class="ui-control" id="mcp-${index}-id" aria-label="MCP server ${index + 1}: Server ID" data-mcp-field="id" value="${escapeHtml(id)}" placeholder="github" autocomplete="off" spellcheck="false">
+                    <input type="text" class="ui-control" id="mcp-${index}-id" aria-label="MCP server ${index + 1}: Server ID" data-mcp-field="id" value="${escapeHtml(id)}"${skill ? ' readonly' : ''} placeholder="github" autocomplete="off" spellcheck="false">
                 </div>
                 <div class="form-field ui-field">
                     <label for="mcp-${index}-name">Display name</label>
@@ -314,17 +319,18 @@ function renderServerCard(server, index) {
             <div class="form-grid two">
                 <div class="form-field ui-field">
                     <label for="mcp-${index}-transport">Transport</label>
-                    <select class="ui-control" id="mcp-${index}-transport" aria-label="MCP server ${index + 1}: Transport" data-mcp-field="transport">${transportOptions}</select>
+                    <select class="ui-control" id="mcp-${index}-transport" aria-label="MCP server ${index + 1}: Transport" data-mcp-field="transport"${skill ? ` disabled aria-describedby="mcp-${index}-endpoint"` : ''}>${transportOptions}</select>
                 </div>
                 <div class="form-field ui-field">
-                    <label for="mcp-${index}-endpoint">${isStdio ? 'Command' : 'Server URL'}</label>
-                    ${isStdio
+                    <label for="mcp-${index}-endpoint">${skill ? 'Runs' : isStdio ? 'Command' : 'Server URL'}</label>
+                    ${skill ? `<span class="ui-field-help" id="mcp-${index}-endpoint">The server the skill ${escapeHtml(skill)} declares. Its command, arguments and folder come from the installed skill each time it starts; while the skill can’t run, this server stays unavailable.</span>`
+                        : isStdio
                         ? `<input type="text" class="ui-control" id="mcp-${index}-endpoint" aria-label="MCP server ${index + 1}: Command" data-mcp-field="command" value="${escapeHtml(command)}" placeholder="npx" autocomplete="off" spellcheck="false">`
                         : `<input type="text" class="ui-control" id="mcp-${index}-endpoint" aria-label="MCP server ${index + 1}: Server URL" data-mcp-field="url" value="${escapeHtml(url)}" placeholder="https://example.com/mcp" autocomplete="off" spellcheck="false">
                     <span class="ui-field-help" data-mcp-endpoint-notice ${notice ? '' : 'hidden'}>${escapeHtml(notice)}</span>`}
                 </div>
             </div>
-            ${isStdio ? `
+            ${isStdio && !skill ? `
             <div class="form-row">
                 <div class="form-field ui-field">
                     <label for="mcp-${index}-args">Arguments (one per line)</label>
@@ -350,7 +356,7 @@ function renderServerCard(server, index) {
                     <textarea class="ui-control" id="mcp-${index}-env" aria-label="MCP server ${index + 1}: Environment (JSON, optional)" data-mcp-field="env" rows="3" placeholder='{"PORT": "8080", "DEBUG": "1"}' autocomplete="off" spellcheck="false">${escapeHtml(literalEnv)}</textarea>
                     <span class="muted">Ordinary values passed directly to the process. Settings references override matching names; use Custom keys for secrets.</span>
                 </div>
-            </div>` : renderHeaderFields(server, index)}
+            </div>` : isStdio ? '' : renderHeaderFields(server, index)}
             <div class="form-row">
                 <div class="form-field ui-field">
                     <label for="mcp-${index}-allowed_tools">Allowed tools (optional, comma-separated)</label>
@@ -613,7 +619,7 @@ export function initMcpSettings({ onChange } = {}) {
         const applied = await openMcpImportDialog({
             draftServers: () => mcpServers.map((server) => isServer(server) ? {
                 ...(server.id ? { id: String(server.id) } : {}), ...(server.slug ? { slug: String(server.slug) } : {}),
-                ...(server.name ? { name: String(server.name) } : {}),
+                ...(server.name ? { name: String(server.name) } : {}), ...(server.skill ? { skill: String(server.skill) } : {}),
                 transport: String(server.transport || 'streamable_http'), ...headerImportFacts(server),
             } : null),
             draftFreshness,

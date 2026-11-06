@@ -3,6 +3,18 @@
  *  catalog, updates and core control. `UpdateLetter` sits in ./api_types.js. */
 
 /**
+ * One declared server's passive state in an installed skill's `mcp_servers` list.
+ * @typedef {Object} SkillMcpServerFact
+ * @property {string} id
+ * @property {string} title
+ * @property {boolean} conflict
+ * @property {boolean} configured
+ * @property {number} tool_count
+ * @property {boolean} listed
+ * @property {string} error
+ */
+
+/**
  * One `GET /api/extensions` `skills` row; a name collision gives one row per occupant (`identity_collision`).
  * @typedef {Object} InstalledSkill
  * @property {string} name
@@ -41,6 +53,7 @@
  * @property {Object[]=} review_findings
  * @property {{current: Object, history: Object[], history_omitted: (number|undefined)}|Object=} skill_review  // a history row of a Skills-page review may carry `continuable_seats`
  * @property {Object=} grants
+ * @property {SkillMcpServerFact[]=} mcp_servers  // absent on identity-collision rows
  * @property {?{slug: string, version: string, content_hash: string, repository: string, pr_number: number, pr_url: string, published_at: string}=} published
  * @property {boolean=} published_malformed
  * @property {Object=} presence_runtime
@@ -620,6 +633,8 @@
  * @property {boolean=} schemas_at_start
  * @property {boolean=} task_session
  * @property {boolean=} browser_policy
+ * @property {string=} skill
+ * @property {string=} skill_error
  * @property {string=} instructions
  * @property {number=} map_tokens
  * @property {number=} schema_tokens
