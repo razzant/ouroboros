@@ -463,6 +463,15 @@ def dialogue_speaker(entry: Mapping[str, Any]) -> str:
     )
 
 
+def recorded_speaker(entry: Mapping[str, Any]) -> str:
+    """Who a row records as its speaker: its actor's platform id, else a name it carries; ``""`` when it records
+    none (a connector event without an actor: ``dialogue_speaker``'s "author not recorded")."""
+    transport = entry.get("transport") if isinstance(entry.get("transport"), Mapping) else {}
+    actor = transport.get("actor") if isinstance(transport.get("actor"), Mapping) else {}
+    return str(actor.get("platform_actor_id") or actor.get("id") or entry.get("sender_label") or entry.get("username")
+               or entry.get("author") or actor.get("display_name") or actor.get("username") or "")
+
+
 def dialogue_provenance(entry: Mapping[str, Any]) -> str:
     transport = entry.get("transport") if isinstance(entry.get("transport"), Mapping) else {}
     facts = []
@@ -1213,6 +1222,7 @@ __all__ = [
     "private_contact",
     "private_contact_text",
     "recorded_finality",
+    "recorded_speaker",
     "render_memory_row",
     "render_row_text",
     "row_author",

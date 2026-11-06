@@ -237,3 +237,50 @@ def test_my_accounts_arrival_considers_nothing_and_my_delivery_there_does(tmp_pa
     shared.append(tmp_path / "logs" / "chat.jsonl", answer)
     assert _rank(_view(tmp_path, MAIN_TASK)[0], str(room), asked) == 1  # my delivery there considers it
 
+
+def test_a_later_delivery_of_the_same_words_is_one_line_naming_the_earlier_copy(tmp_path, monkeypatch):
+    """The first remedy for a crowded view (BIBLE P1): a room's later delivery of words it already holds (the same
+    text, whitespace aside) is one line, its own head, «delivered again», the earlier copy's address and reader, and
+    its text is never read. Edited words, the same words in another room or from two different recorded speakers,
+    wordless rows and my human's words stay as they are."""
+    from ouroboros import chat_chain, memory_view as mv
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_runner import presence_chat_id
+
+    rooms, _rows = _install(tmp_path)
+    beta = str(rooms["beta"])
+    room = {thread: presence_chat_id(conversation_key("github", "me", "repo.1", thread)) for thread in ("i1", "i2")}
+    base = {"provider": "github", "account_id": "me", "conversation_id": "repo.1"}
+
+    def said(thread, minute, text, actor="u7"):
+        who = {"platform_actor_id": actor} if actor else {"platform": "github", "attribution": "unknown"}
+        return shared.msg(_ts(minute), text, chat_id=room[thread], source="presence:github",
+                          transport={**base, "thread_id": thread, "actor": who})
+
+    def reply(thread, minute):  # my delivery there: both threads are rooms where I spoke
+        return shared.msg(_ts(minute), "Looking.", chat_id=room[thread], direction="out", type="presence_delivery",
+                          task_id=f"p-{thread}", source="presence:github",
+                          transport={**base, "thread_id": thread, "delivery": {"state": "delivered"}})
+
+    body = "## Summary\nKeep the old parser; the migration costs too much."
+    first, again = said("i1", 40, body), said("i1", 41, " ".join(body.split()), actor="")  # GitHub re-sends it
+    edited, other = said("i1", 42, body + "\n\nMerged."), said("i1", 43, body, actor="u8")
+    elsewhere, empty, empty_again = said("i2", 44, body), said("i1", 45, ""), said("i1", 46, "")
+    ship, ship_again = (shared.msg(_ts(minute), "ship it", chat_id=int(beta)) for minute in (47, 48))  # my human's
+    shared.append(tmp_path / "logs" / "chat.jsonl", first, again, edited, other, elsewhere, empty, empty_again,
+                  reply("i1", 49), reply("i2", 50), ship, ship_again)
+    asked, read = [], mv._row_texts
+    monkeypatch.setattr(mv, "_row_texts", lambda root, entries: (
+        asked.extend(entry[0]["row_sha256"] for entry in entries), read(root, entries))[1])
+    snapshot, _text = _view(tmp_path, MAIN_TASK)
+    words = {word["address"]: word["line"] for group in snapshot.conversations for item in group["rooms"]
+             for word in item["words"]}
+    earlier = _addr(first)
+    assert words[_addr(again)].startswith(f"[{again['ts']}; author not recorded [provider=github")
+    assert words[_addr(again)].endswith(f"] delivered again: the same words as {earlier}; memory_read(room_id="
+                                        f"'{room['i1']}', rows=true, from='{earlier}', to='{earlier}')")
+    assert chat_chain.row_address(again)["row_sha256"] not in asked  # its text is never read
+    for row in (first, edited, other, elsewhere, empty, empty_again, ship, ship_again):  # each as it is
+        assert "delivered again" not in words[_addr(row)] and chat_chain.row_address(row)["row_sha256"] in asked
+    assert "Keep the old parser" in words[_addr(first)] and "ship it" in words[_addr(ship_again)]
+
