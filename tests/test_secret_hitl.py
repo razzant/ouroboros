@@ -220,10 +220,11 @@ def test_secret_fields_is_appended_so_positional_manifest_construction_keeps_eve
 
     from ouroboros.contracts.skill_manifest import SkillManifest
 
-    assert [item.name for item in dataclasses.fields(SkillManifest)][-1] == "secret_fields"
+    # Later additions append after it (mcp_servers), never before it.
+    assert [item.name for item in dataclasses.fields(SkillManifest)][-2:] == ["secret_fields", "mcp_servers"]
     positional = SkillManifest("n", "d", "1", "script", "", [], "any", "python3", 30, ["K"], [{"name": "run.py"}])
     assert positional.env_from_settings == ["K"] and positional.scripts == [{"name": "run.py"}]
-    assert positional.secret_fields == {}
+    assert positional.secret_fields == {} and positional.mcp_servers == []
 
 
 # ------------------------------------------------------------------ the tool

@@ -114,6 +114,8 @@ companion_processes:                # optional; PLURAL, and needs the companion_
   - name: demo_worker               # see "Declaring a companion process"
     command: [python3, scripts/worker.py]
     runtime: python3
+mcp_servers:                        # optional; see "Declaring MCP servers (Connect tools)"
+  - {id: weather, entry: scripts/mcp_server.py}
 scheduled_tasks:                    # optional cron suggestions; nothing runs until adopted
   - name: refresh-cache
     cron: "0 * * * *"                # 5-field cron, host-local timezone by default
@@ -545,6 +547,10 @@ Python `allow_source_build: true` and npm `allow_install_scripts: true` opt in
 per entry, each with a declared `check`. Without those flags pip remains
 wheel-only and npm keeps `--ignore-scripts`. An already installed npm package
 can be rebuilt explicitly on retry without rebuilding unrelated packages.
+When no `npm` is on PATH, npm specs use the pinned Node/npm pair the host's
+runtime manager prepares (it installs and starts no Claudexor engine): npm runs as
+that Node with its own CLI, that Node's folder comes first on the install's PATH,
+and the flags, cache and isolated prefix stay as above.
 `deps.json` records resource digests, actual resolved package metadata,
 output hashes and build diagnostics. `installed` records delivery;
 `executable_ready` is unknown without a declared check and true only after
@@ -689,6 +695,45 @@ written: the host drops `HOST_SERVICE_TOKEN`, `HOST_SERVICE_URL`,
 first three itself; the last is the server's PID, telling a container's PID-1
 server from an init adoption. `ports` keeps only all-digit entries; a negative
 or non-numeric one is silently dropped.
+
+### Declaring MCP servers (Connect tools)
+
+A `script` or `extension` skill that ships an MCP stdio server declares it, and the
+owner connects it with one confirmation instead of copying settings by hand:
+
+```yaml
+mcp_servers: [{"id": "chrome_browser", "title": "Chrome (shared tab)", "entry": "scripts/server.mjs", "task_session": true, "browser_policy": true}]
+```
+
+Each item takes only these keys (anything else is a manifest error):
+
+- `id` (required): the MCP server id, lowercase letters and digits joined by single `_`,
+  at most 24 characters. Every tool is named `mcp_<id>__<tool>`, so keep it stable.
+- `entry` (required): a relative path of a file in the skill (no `..`, absolute path or
+  cache/dependency folder such as `node_modules` or `.ouroboros_env`); it is part of the
+  reviewed, hashed payload.
+- `runtime`: one of the skill runtimes; defaults to the manifest's `runtime`.
+- `title`: the Settings display name; defaults to `id`.
+- `task_session`, `browser_policy`: the MCP call-lifetime choices (DEVELOPMENT §12);
+  `browser_policy` needs `task_session: true`.
+
+Once the skill is accepted for its current bytes, on, granted and its packages are
+installed, its Skills card offers **Connect tools**. The confirmation names what will run
+and, when MCP is off, every other server that turning MCP on starts. Confirming writes one
+MCP server row (`id`, `name`, `enabled`, `transport: stdio`, `skill`, the two flags) and turns
+MCP on; nothing else in settings changes, an identical state writes nothing, and a row of
+the same id that this skill did not write is never overwritten. An agent carries the same
+step with `skill_owner_action(action="connect_mcp")`: `preview: true` first, then the
+owner's answer as `owner_source` with the preview's `settings_digest`.
+
+The row stores no command. Every listing, Settings Test and call derives the runtime binary,
+`<skill folder>/<entry>` and the skill folder as working directory from the installed skill,
+so a moved app or updated runtime needs no reconnect. While the skill is off, missing,
+edited and not accepted again, short of grants or packages, or no longer declares the
+server, only that server is unavailable (`MCP_SKILL_UNAVAILABLE`) and nothing starts; the
+row stays. An accepted update is listed anew and running task sessions restart on it; a
+row the owner switched off stays off. Steps outside Ouroboros (a browser extension, a sign-in)
+belong in the skill's own instructions.
 
 ## The `skill_preflight` tool
 

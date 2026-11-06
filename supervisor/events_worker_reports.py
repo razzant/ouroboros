@@ -284,6 +284,13 @@ def _handle_skill_lifecycle(evt: Dict[str, Any], ctx: Any) -> None:
         log.debug("Failed to publish skill lifecycle event", exc_info=True)
 
 
+def _handle_mcp_configuration_changed(evt: Dict[str, Any], ctx: Any) -> None:
+    """A worker changed MCP settings or the skill behind a bound MCP server: the server's lister answers."""
+    from ouroboros.skill_mcp import lifecycle_settled
+
+    lifecycle_settled(str(evt.get("skill") or "")[:128], reason=str(evt.get("reason") or "worker")[:64])
+
+
 def _handle_acceptance_fence(evt: Dict[str, Any], ctx: Any) -> None:
     """Apply a worker's acceptance fence under the supervisor queue lock, then ack.
 

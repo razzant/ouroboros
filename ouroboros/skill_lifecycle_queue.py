@@ -19,6 +19,7 @@ import re
 import threading
 import uuid
 from collections import deque
+import dataclasses
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Deque, Dict, Optional
@@ -119,6 +120,8 @@ class LifecycleJobOptions:
     on_started: Callable[[LifecycleJob], None] | None = None
     on_finished: Callable[[LifecycleJob, Any, BaseException | None], None] | None = None
     presentation: Dict[str, Any] | None = None
+    # A worker's supervisor event queue: the settled job reports MCP-relevant changes to the server there.
+    event_queue: Any = None
 
 
 _lock: Optional[threading.Lock] = None
@@ -501,6 +504,11 @@ async def run_lifecycle_job(
                     opts.progress_target.release()
                 _notify_chat(job)
                 terminal_notified = True
+                from ouroboros.skill_mcp import lifecycle_settled  # the server lists a bound MCP server anew
+
+                # Off this loop: binding reads skill files; the report never delays the lane or owner input.
+                threading.Thread(target=lifecycle_settled, args=(job.target,), name="mcp-skill-settled", daemon=True,
+                                 kwargs={"event_queue": opts.event_queue, "reason": f"skill_{job.kind}"}).start()
     except asyncio.CancelledError:
         job.status = "cancelled"
         job.error = job.error or "CancelledError"
@@ -584,6 +592,12 @@ def run_lifecycle_job_blocking(
             runner,
             log_label=f"blocking {kind} lifecycle operation",
         )
+
+    from ouroboros.model_wait import current_model_wait
+
+    owner = current_model_wait()  # the job's thread starts in a clean context: carry the task loop's queue
+    if owner is not None and owner.event_queue is not None and (options is None or options.event_queue is None):
+        options = dataclasses.replace(options or LifecycleJobOptions(), event_queue=owner.event_queue)
 
     async def _main() -> Any:
         return await run_lifecycle_job(

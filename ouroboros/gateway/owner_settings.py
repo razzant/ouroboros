@@ -436,18 +436,37 @@ class _SavedDocumentFields:
         if refusal:
             raise SettingsPreconditionFailed(refusal)
         if _settings_document_present():
-            return {**document, **self.changes}
+            return {**_as_saved(document), **self.changes}
         effective = _config.load_settings_lock_held()
         return {**{key: effective[key] for key in OPTIONAL_BOUND_LEGACY}, **self.changes}
+
+
+def _as_saved(document: Dict[str, Any]) -> Dict[str, Any]:
+    """``document`` as saved, read again under the same lock: a value the read only re-typed
+    (``config.coerce_settings_raw``) keeps its exact saved form (a saved ``false`` stays ``false`` where the key's
+    default is text), and a key absent on disk whose value is what the read derives from an empty document (a
+    default or a seed of one) is not authored. A value a migration changed or derived from saved keys stays."""
+    from ouroboros import config as _config
+
+    try:
+        saved = read_settings_json_verified(_config.SETTINGS_PATH)
+    except Exception:  # the writer's strict read just succeeded; without a second one the translation stands
+        log.debug("Saved settings spelling could not be re-read; keeping the read's translation", exc_info=True)
+        return document
+    if not isinstance(saved, dict):
+        return document
+    blank = _config.normalize_settings_raw({})
+    return {key: saved[key] if key in saved and _config.coerce_settings_raw({key: saved[key]})[key] == value else value
+            for key, value in document.items() if key in saved or blank.get(key, _ABSENT) != value}
 
 
 def fields_on_saved_document(changes: Dict[str, Any],
                              check: Optional[Callable[[Dict[str, Any]], str]] = None) -> _SavedDocumentFields:
     """The ``_owner_update_settings`` transform of an incidental writer: exactly ``changes`` land on
     the document as it is on disk inside that lock. Nothing the merged read shows is authored beside
-    them (a default, an environment value, an unauthored proposal) and every saved value stays as the
-    read translates it, a pending next-boot runtime mode included, so the ratchets meet only unchanged
-    values. A document this creates carries the optional bounds as they resolve now, because a
+    them (a default, an environment value, an unauthored proposal). Every other saved value keeps its exact
+    saved form where the read only re-typed it (``_as_saved``) and otherwise stays as the read translates it,
+    a pending next-boot runtime mode included, so the ratchets meet only unchanged values. A document this creates carries the optional bounds as they resolve now, because a
     document's presence turns their absence into the legacy finite value
     (``settings_scales.defaults_for_settings_document``). ``check`` (optional) judges that same document
     first; a non-empty reason refuses with ``SettingsPreconditionFailed`` and writes nothing."""

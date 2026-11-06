@@ -918,6 +918,7 @@ _EXACT_IDENTIFIER_CODES = MappingProxyType(
         "SAFETY_VIOLATION": "SAFETY_VIOLATION",
         "CAPABILITY_UNAVAILABLE": "CAPABILITY_UNAVAILABLE",
         "MCP_DISABLED": "MCP_UNAVAILABLE",
+        "MCP_SKILL_UNAVAILABLE": "MCP_UNAVAILABLE",  # a skill-bound server whose skill cannot run it now
         # Catalog gaps differ from proven absence and disabled providers.
         "MCP_CATALOG_UNAVAILABLE": "MCP_CATALOG_UNAVAILABLE",
         "MCP_TOOL_NOT_FOUND": "UNKNOWN_TOOL",

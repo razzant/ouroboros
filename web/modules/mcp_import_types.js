@@ -11,6 +11,7 @@
  * @property {string[]=} header_names The editor's current header list, the legacy row included.
  * @property {?string=} legacy_header Which of those names is the stored legacy pair.
  * @property {boolean=} unreadable_headers A malformed saved map that a file's headers would replace.
+ * @property {string=} skill A row Connect tools bound to a skill: import never rewrites it.
  */
 
 /**

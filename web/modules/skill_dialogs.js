@@ -5,12 +5,12 @@
 // dialog never confirm. Add source is the one two-step flow (address, then what
 // was found with the one-time trust choice).
 import { openConfirmDialog } from './confirm_dialog.js';
-import { skillSourcesApi } from './api_client.js';
+import { apiClient, skillSourcesApi } from './api_client.js';
 import { bindDialogFocus, bindMenu } from './ui_interactions.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import {
     canUpdateWithoutReview, displayAddress, officialPromise, permissionWords, plural, publicationDisclosure, sourceAddressText, statusHtml,
-    updateRejectionSentence, versionText,
+    skillTitle, updateRejectionSentence, versionText,
 } from './skill_presentation.js';
 
 let activeClose = null;
@@ -175,6 +175,42 @@ export async function updateWithoutReview(skill, { dialog = openConfirmDialog, u
     });
     if (confirmed !== true) return null;
     return update(skill.name, 'replace', release.digest, '', { skipReview: true });
+}
+
+/**
+ * Connect tools (owner decision): the host's passive preview, one shared confirmation naming what will run and
+ * every other server turning MCP on starts, then the confirm with the preview's settings digest and payload revision.
+ * Resolves the confirm's answer, or null when nothing was asked or the owner cancelled.
+ */
+export async function connectSkillTools(skill, { dialog = openConfirmDialog, api = apiClient } = {}) {
+    const preview = await api.skillMcpConnectPreview(skill.name);
+    const servers = preview.servers || [];
+    const conflict = servers.find((server) => server.change === 'conflict');
+    if (!preview.ready || conflict) {
+        await dialog({ title: `${skillTitle(skill)} can’t connect its tools yet`, alert: true,
+            body: conflict ? `${conflict.conflict}. Remove or rename that server in Settings → Advanced → MCP Servers.`
+                : `${(preview.blockers || []).join('; ')}. ${preview.next_action || ''}`.trim() });
+        return null;
+    }
+    if (!preview.changed) return { ok: true, saved: false, changed: false };
+    const others = preview.other_servers || [];
+    const names = (changes) => servers.filter((server) => changes.includes(server.change)).map((server) => server.title || server.id).join(', ');
+    const added = names(['add']), again = names(['enable', 'repair']);
+    const confirmed = await dialog({
+        title: `Connect the tools of ${skillTitle(skill)}?`,
+        body: [added && `Ouroboros adds ${added} to MCP Servers.`, again && `Ouroboros turns ${again} on again in MCP Servers.`,
+            preview.enables_mcp && 'It turns MCP on.', 'Ouroboros starts the server to list its tools, then uses it for tool calls.'].filter(Boolean).join(' ')
+            + (others.length ? ` Turning MCP on also starts ${plural(others.length, 'server')} previously enabled in Settings: ${others.map((item) => item.name || item.id).join(', ')}.` : ''),
+        details: { summary: 'What will run', rows: servers.flatMap((server) => [
+            { label: server.title || server.id, value: [server.executable?.command, ...(server.executable?.args || [])].filter(Boolean).join(' ') },
+            { label: 'Folder', value: server.executable?.cwd || '' },
+            { label: 'Lifetime', value: `${server.task_session ? 'one process per task' : 'one process per call'}${server.browser_policy ? '; Ouroboros checks its browser requests' : ''}` },
+        ]) },
+        confirmLabel: 'Connect tools',
+    });
+    if (confirmed !== true) return null;
+    return api.skillMcpConnect(skill.name, { expected_content_hash: preview.content_hash, settings_digest: preview.settings_digest,
+        confirm_other_servers: others.length > 0 });
 }
 
 /** Two skills with one name (B5b): keep mine or use the other. Resolves 'keep' | 'replace' | null. */

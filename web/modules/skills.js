@@ -17,7 +17,8 @@ import { createSkillBrowse } from './skill_browse.js';
 import { createSkillSources, unconfirmedHubRows } from './skill_sources_view.js';
 import { openSkillDetailSheet } from './skill_detail_sheet.js';
 import {
-    openCompareDialog, openOfficialExplanation, openPublishDestinationDialog, openSkipReviewDialog, openUpdateDialog, updateWithoutReview,
+    connectSkillTools, openCompareDialog, openOfficialExplanation, openPublishDestinationDialog, openSkipReviewDialog, openUpdateDialog,
+    updateWithoutReview,
 } from './skill_dialogs.js';
 import { plural, popularityText, repoLabel, routeExternalLink, versionText } from './skill_presentation.js';
 import { runSkillPublishFlow } from './skill_publish_flow.js';
@@ -808,6 +809,11 @@ export function initSkills(ctx = {}) {
         if (action === 'submit_hub') return publish(name);
         if (action === 'forget_publication') return forgetPublication(name);
         if (action === 'turn_on') return turnOn(name);
+        if (action === 'connect_tools') {
+            const result = await connectSkillTools(await currentSkill(name));
+            if (result?.ok) showToast(`${name}: ${result.changed === false ? 'tools already configured' : 'tools configured'}. Its own instructions say what else they need.`, 'ok');
+            return Boolean(result);
+        }
         if (action === 'grant') {
             const skill = await currentSkill(name);
             const keys = String(options.keys || '').split(',').map((k) => k.trim()).filter(Boolean);

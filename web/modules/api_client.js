@@ -630,6 +630,14 @@ export const apiClient = {
         payload_root: payloadRoot,
         ...(expectedContentHash ? { expected_content_hash: expectedContentHash } : {}),
     }, { headers: { Prefer: 'respond-async' } }),
+    /** @returns {Promise<import('./skill_mcp_types.js').SkillMcpConnectPreviewResponse>} */
+    skillMcpConnectPreview: (skill) => fetchJson(`/api/skills/${encodeURIComponent(skill)}/mcp-connect`, { cache: 'no-store' }),
+    /**
+     * @param {string} skill
+     * @param {import('./skill_mcp_types.js').SkillMcpConnectRequest} body
+     * @returns {Promise<import('./skill_mcp_types.js').SkillMcpConnectResponse>}
+     */
+    skillMcpConnect: (skill, body) => jsonPost(`/api/skills/${encodeURIComponent(skill)}/mcp-connect`, body),
     skillGrants: (skill, items, expectedContentHash = '', enableAfterGrant = false) => jsonPost(`/api/skills/${encodeURIComponent(skill)}/grants`, {
         items, ...(expectedContentHash ? { expected_content_hash: expectedContentHash } : {}),
         ...(enableAfterGrant ? { enable_after_grant: true } : {}),

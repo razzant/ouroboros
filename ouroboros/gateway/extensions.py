@@ -207,6 +207,22 @@ async def api_skill_daemons(_request: Request) -> JSONResponse:
         return json_exception(exc)
 
 
+def _skill_mcp_card_facts(skills: list) -> Any:
+    """``skill -> [declared server facts]`` (``skill_mcp.card_facts``); reads nothing without a declaring skill.
+    Bound servers are re-derived in memory first (``MCPManager.rebind``), so an edited, unreviewed or switched-off
+    skill reads as unavailable here exactly as its next call would; nothing durable is written or listed."""
+    if not any(skill.manifest.mcp_servers for skill in skills):
+        return lambda _skill: []
+    from ouroboros.config import load_settings
+    from ouroboros.mcp_client import get_manager
+    from ouroboros.skill_mcp import card_facts
+
+    settings, manager = load_settings(), get_manager()
+    manager.rebind()
+    rows = {row["id"]: row for row in manager.status_payload()["servers"] if row.get("id")}
+    return lambda skill: card_facts(skill, settings, rows) if skill.manifest.mcp_servers else []
+
+
 def _build_extensions_index(drive_root, repo_path):
     """Threaded, request-scope-free body for ``GET /api/extensions``."""
     from ouroboros.extension_loader import extension_name_prefix, runtime_state_for_loaded_skill
@@ -275,6 +291,8 @@ def _build_extensions_index(drive_root, repo_path):
         if unique_skills
         else False
     )
+    # Request-invariant too: one settings read and one in-memory MCP status for every skill declaring servers.
+    mcp_facts = _skill_mcp_card_facts(skills)
 
     for s in skills:
         payload_root = ""
@@ -367,6 +385,7 @@ def _build_extensions_index(drive_root, repo_path):
                 if s.name in runtime_states
                 else grant_status_for_skill(drive_root, s)
             ),
+            "mcp_servers": mcp_facts(s),
         })
         # Durable OuroborosHub publication receipt (state-plane, survives bucket
         # moves). Collision rows above deliberately never read state, so these
@@ -697,7 +716,9 @@ async def _run_owner_skill_action(request: Request, skill_name: str, action: str
             items=_grant_items_from_body(body) if action == "grant" else None,
             payload_root=str(body.get("payload_root") or ""), repo_path=get_skills_repo_path(),
             _owner_actor="owner_ui", _progress=handle,
-            _enable_after_grant=action == "grant" and body.get("enable_after_grant") is True)
+            _enable_after_grant=action == "grant" and body.get("enable_after_grant") is True,
+            settings_digest=str(body.get("settings_digest") or ""),
+            confirm_other_servers=body.get("confirm_other_servers") is True)
 
     def after(payload):
         if not payload.get("error"):
@@ -816,6 +837,27 @@ async def api_skill_grants(request: Request) -> JSONResponse:
     if "enable_after_grant" in body and not isinstance(body["enable_after_grant"], bool):
         return json_error("'enable_after_grant' must be a boolean", 400)
     payload = await _run_owner_skill_action(request, skill_name, "grant", body)
+    return JSONResponse(payload, status_code=int(payload.get("status_code") or 200))
+
+
+async def api_skill_mcp_connect(request: Request) -> JSONResponse:
+    """GET: the passive Connect tools preview. POST: its one confirm through the shared skill action owner."""
+    from ouroboros.gateway.schema import validate_ingress
+    from ouroboros.gateway.skill_mcp_contracts import SkillMcpConnectRequest
+    from ouroboros.skill_lifecycle_actions import preview_connect_mcp
+
+    skill_name = str(request.path_params.get("skill") or "").strip()
+    if not skill_name:
+        return json_error("missing skill name", 400)
+    if request.method == "GET":
+        ctx = _ApiReviewCtx(_request_drive_root(request), _request_repo_dir(request))
+        payload = await asyncio.to_thread(preview_connect_mcp, ctx, skill_name, _owner_actor="owner_ui")
+        return JSONResponse(payload, status_code=int(payload.pop("status_code", 0) or 200),
+                            headers={"Cache-Control": "no-store"})
+    body = await request_json_or(request, None)
+    if errors := validate_ingress(body, SkillMcpConnectRequest):
+        return JSONResponse({"ok": False, "saved": False, "code": "bad_request", "error": errors[0]}, status_code=400)
+    payload = await _run_owner_skill_action(request, skill_name, "connect_mcp", body)
     return JSONResponse(payload, status_code=int(payload.get("status_code") or 200))
 
 
