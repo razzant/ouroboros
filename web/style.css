@@ -6130,6 +6130,53 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     flex-direction: column;
 }
 
+/* === The Dashboard tab body (U140, U062, U065-gutter) ==================================================================
+   Every Dashboard tab mounts ONE root, <div class="dashboard-body">, into its panel and places .ui-card objects in it.
+   The body owns what used to differ per tab: the inset (16 px top, the page gutter at the sides), the stable scrollbar
+   gutter (switching tabs never moves a card's edge), and the one gap between cards. A tab that opens with a headline
+   number puts .dashboard-hero first in a .ui-card: kicker, figure, one meta line, and its actions beside them (under
+   them when the body is narrow). Tab modules keep no scroller, inset or card padding of their own. */
+.dashboard-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+    padding: var(--space-4) 20px var(--space-5);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    container: dashboard / inline-size;
+}
+.dashboard-hero {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    column-gap: var(--space-4);
+    row-gap: var(--space-1);
+    align-items: start;
+}
+.dashboard-hero > :not(.dashboard-hero-actions) { grid-column: 1; min-width: 0; margin: 0; }
+.dashboard-hero-kicker,
+.dashboard-hero-meta { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.dashboard-hero-figure {
+    color: var(--text-primary);
+    font-size: var(--type-page);
+    line-height: var(--line-title);
+    font-weight: 650;
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+}
+.dashboard-hero-actions {
+    grid-column: 2;
+    grid-row: 1 / span 3;
+    align-self: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+}
+@container dashboard (max-width: 480px) {
+    .dashboard-hero-actions { grid-column: 1; grid-row: auto; align-self: start; }
+}
+
 /* P4: Activity subtab — cron schedules, running/queued tasks, background status. */
 .activity-scroll {
     flex: 1;
@@ -7724,6 +7771,8 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     .costs-scroll {
         padding: 12px 12px;
     }
+
+    .dashboard-body { padding: var(--space-3); }
 
 }
 
