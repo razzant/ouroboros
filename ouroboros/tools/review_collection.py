@@ -238,14 +238,21 @@ def collect_commit_reference(ctx, reference, **request):
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=str(exc)))
 
 
+_PAID_FIELDS = ("review_rebuttal", "goal", "scope", "reviewers", "reason", "preflight_reviewer", "since_review",
+                "author_disposition")  # the order of ``commit_reviewed``'s ``mutations``
+
+
 def prepare_commit_collection(ctx, reference, *, commit_message="", mutations=(), continue_seats=None):
     """Separate from Advisory author continuation: resume the paid gate itself (``continue_seats``: and its
     chosen stopped seats, armed only after the staged bytes match, ``bind_commit_collection``)."""
     from ouroboros.review_continuation import parse_selections
 
     _root, attempt, record = resolve_reference(ctx, reference, commit=True)
-    if any(mutations) or (commit_message and commit_message != attempt.commit_message):
-        raise ValueError("a paid reference cannot change its commit message, brief, panel or author disposition")
+    changed = [name for name, value in zip(_PAID_FIELDS, mutations) if value]
+    changed += ["commit_message"] if commit_message and commit_message != attempt.commit_message else []
+    if changed:  # the fields named (06.11), so the next call can omit exactly them
+        raise ValueError(f"a paid reference cannot change its commit message, brief, panel or author disposition "
+                         f"(changed: {', '.join(changed)}); omit them to collect the paid review as recorded")
     ctx._collect_commit_continue_seats = None if continue_seats is None else (parse_selections(continue_seats) and continue_seats)
     if attempt.status == "succeeded":
         raise ValueError("this paid attempt already committed; collection cannot commit it again")
@@ -572,6 +579,69 @@ def bind_commit_collection(ctx, fingerprint, retry_key):
 def publish_commit_delivery(ctx, text):
     from ouroboros.review_waiting import publish_delivery
     from ouroboros.review_ledger import ledger_root, load_record
+    from ouroboros.tools.tool_result import append_published_text
+    if notes := getattr(ctx, "_commit_call_notes", None):  # fields this call set aside or filled (06.11)
+        text, ctx._commit_call_notes = append_published_text(ctx, text, "\nNote: " + " ".join(notes)), []
     record_id = str(getattr(ctx, "_current_review_record_id", "") or "")
     record = load_record(ledger_root(ctx), record_id) if record_id else None
     return publish_delivery(ctx, text, record) if record else text
+
+
+def note_commit_call(ctx, text):
+    """One sentence the commit call's result ends with: a field this call set aside or filled (06.11)."""
+    notes = getattr(ctx, "_commit_call_notes", None)
+    if isinstance(notes, list) and text not in notes:
+        notes.append(text)
+
+
+def default_commit_continuation(ctx, review_reference, author_disposition, continue_seats):
+    """``(review_reference, author_disposition)`` of a commit call: a decision without a reference decides on the
+    latest outcome returned for this copy, as ``skill_review`` reads its own; with none returned yet the call asks
+    for the review the decision follows (the review comes first, owner 11.10)."""
+    if author_disposition is None or review_reference is not None or continue_seats is not None:
+        return review_reference, author_disposition
+    from ouroboros.review_state import _load_state_unlocked, make_repo_key
+
+    repo_key, task_id = make_repo_key(pathlib.Path(ctx.repo_dir)), str(getattr(ctx, "task_id", "") or "")
+    try:
+        state = _load_state_unlocked(pathlib.Path(ctx.drive_root), strict_attempt_authority=True)
+        returned = [attempt for attempt in state.filter_attempts(repo_key=repo_key, task_id=task_id)
+                    if attempt.tool_name in {"commit_reviewed", "vcs_commit_reviewed"}
+                    and attempt.phase in {"review_only", "late_wait"} and attempt.pre_review_fingerprint]
+    except (OSError, ValueError):
+        returned = []
+    if not returned:
+        note_commit_call(ctx, "author_disposition was set aside: no review of this copy was returned yet, so this "
+                         "call asks for it; decide after its outcome.")
+        return None, None
+    latest = returned[-1]
+    note_commit_call(ctx, f"review_reference: the latest outcome returned for this copy (attempt {latest.attempt}).")
+    return {"surface": "commit", "repo_key": repo_key, "task_id": task_id, "tool_name": latest.tool_name,
+            "attempt": latest.attempt, "pre_review_fingerprint": latest.pre_review_fingerprint}, author_disposition
+
+
+def set_aside_wrong_step_fields(ctx, continuation, wake_on):
+    """A continuation's fields of another step are set aside with a note, never a refusal (06.11): it keeps the
+    saved wake selection, and it dispatches no critic for ``since_review`` to brief. Returns the wake to use."""
+    if continuation and wake_on is not None:
+        wake_on = None
+        note_commit_call(ctx, "wake_on was set aside: it shapes a new ask, and a continuation keeps the saved selection.")
+    if continuation and getattr(ctx, "_review_since", ""):
+        ctx._review_since = ""
+        note_commit_call(ctx, "since_review was set aside: it shapes a new wave's brief, and a continuation "
+                         "dispatches no critic.")
+    return wake_on
+
+
+def without_broken_subagent_check(ctx, disposition):
+    """A malformed optional ``subagent_check`` is a recorded gap, never the refusal of the decision it rides with."""
+    from ouroboros.review_doctrine import parse_subagent_check
+
+    if not isinstance(disposition, dict) or disposition.get("subagent_check") is None:
+        return disposition
+    try:
+        parse_subagent_check(disposition["subagent_check"])
+    except ValueError as exc:
+        note_commit_call(ctx, f"subagent_check was set aside ({exc}); the decision records no helper check.")
+        return {key: value for key, value in disposition.items() if key != "subagent_check"}
+    return disposition

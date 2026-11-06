@@ -1061,7 +1061,9 @@ def _commit_reviewed(ctx: ToolContext, commit_message: str = "", *args: Any, **k
     """The public commit handler: an outcome of a call that wrote a review record names it."""
     if error := bind_commit_test_request(ctx, kwargs):
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=error))
-    from ouroboros.tools.review_collection import publish_commit_delivery
+    from ouroboros.tools.review_collection import default_commit_continuation, publish_commit_delivery
+    kwargs["review_reference"], kwargs["author_disposition"] = default_commit_continuation(  # the review comes first
+        ctx, kwargs.get("review_reference"), kwargs.get("author_disposition"), kwargs.get("continue_seats"))
     return publish_commit_delivery(ctx, name_review_record(ctx, _repo_commit_push(ctx, commit_message, *args, **kwargs)))
 
 
@@ -1077,13 +1079,11 @@ def _commit_request_refusals(ctx: ToolContext, *, root: str, preflight_reviewer:
                              wake_on: Any = None) -> tuple:
     """Validate before staging; a paid wave keeps its recorded panel."""
     from ouroboros.tools.commit_gate import compose_commit_panel, bind_commit_wake
+    from ouroboros.tools.review_collection import set_aside_wrong_step_fields
 
     if str(root or "system_repo") != "system_repo":  # no id to name
         return None, _COMMIT_ROOT_REFUSAL
-    if continuation and wake_on is not None:
-        return None, "TOOL_ARG_ERROR: wake_on belongs to a new ask; collection retains its saved selection"
-    if continuation and getattr(ctx, "_review_since", ""):
-        return None, "⚠️ TOOL_ARG_ERROR: since_review shapes a new wave's brief; an author continuation dispatches no critic."
+    wake_on = set_aside_wrong_step_fields(ctx, continuation, wake_on)  # never a refusal (06.11)
     selector = "" if collecting and not (skipped or continuation) else preflight_reviewer
     error = _commit_preflight_choice_error(selector, skipped=skipped, continuation=continuation,
                                          ctx=ctx, goal=goal, scope=scope, review_rebuttal=review_rebuttal)
@@ -1149,8 +1149,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
     _reset_commit_review_state(ctx)
     ctx._review_since = str(since_review or "").strip()  # read when the wave prepares its history
     ctx._left_review_wait = None  # a new commit act is the author's explicit next choice
-    continuation = review_reference is not None or author_disposition is not None
-    collecting_reference = review_reference is not None and author_disposition is None
+    continuation, collecting_reference = review_reference is not None or author_disposition is not None, review_reference is not None and author_disposition is None
     from ouroboros.tools.review_collection import collect_commit_reference, collected_open_peer
     if collecting_reference or continue_seats is not None:
         source = collect_commit_reference(ctx, review_reference, commit_message=commit_message, continue_seats=continue_seats,
@@ -1163,13 +1162,14 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
     _managed_tx, _managed_block = managed_assisted_tx_for(getattr(ctx, "task_id", ""), getattr(ctx, "task_metadata", None))
     managed_resume = bool(_managed_tx and _managed_tx.get("postcommit_resume"))
     overlap_err, collecting = None, collecting_reference
-    # An empty message is refused below as an argument error before any state read.
-    if (commit_message.strip() and str(root or "system_repo") == "system_repo"
+    # An empty message is refused below as an argument error before any state read; a continuation takes its review's.
+    if ((commit_message.strip() or (continuation and not collecting_reference)) and str(root or "system_repo") == "system_repo"
             and not (preflight_reviewer and (skip_advisory_pre_review or continuation))):
         error = None if collecting_reference else prepare_author_commit_request(  # a managed merge keeps its whole index
             ctx, review_reference, author_disposition, review_rebuttal, paths_omitted=paths is None and not _managed_tx)
         if error:
             return error
+        commit_message = commit_message if commit_message.strip() else str(getattr(ctx._author_commit_source, "commit_message", "") or "")
         if not managed_resume and not collecting_reference:
             overlap_err = _check_overlapping_review_attempt(ctx)
             collecting = bool(getattr(ctx, "_review_resume_pending", False))

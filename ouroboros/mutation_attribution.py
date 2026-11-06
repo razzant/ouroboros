@@ -760,14 +760,21 @@ def resolve_attributed_git_paths(
         except RuntimeError:
             pass  # unreadable: the fresh rules below answer
     copy = evidence.get("copy") if isinstance(evidence.get("copy"), dict) else None
-    gaps = blockers if copy is not None and blockers == ["baseline_stale"] else []
+    if candidate_root and blockers == ["baseline_surface_missing"]:  # a body copy younger than the task's baseline:
+        try:  # its own changes are this continued work, each uncertain, as on a moved base (06.11)
+            evidence["uncertain"] = sorted(_git_status_paths(_canonical_root(repo_root)))
+        except Exception:
+            evidence["uncertain"] = []
+        copy = evidence.setdefault("copy", {"basis": {"kind": "unrecorded"}})
+    gaps = blockers if copy is not None and set(blockers) <= {"baseline_stale", "baseline_surface_missing"} else []
     if blockers and not (gaps and explicit_paths is not None):
+        named = f": paths={json.dumps(evidence.get('uncertain') or [], ensure_ascii=False)}" if evidence.get("uncertain") else ""
         return [], evidence, (
             "⚠️ GIT_ATTRIBUTION_BLOCKED: clean task attribution is unavailable "
             f"({', '.join(blockers)}). Automatic staging is disabled; preserve the "
             "unattributed changes and resolve the evidence conflict before review."
             + (" To send this body candidate's composition to review with the moved base "
-               "disclosed, name its paths explicitly." if gaps else "")
+               f"disclosed, name its paths explicitly{named}." if gaps else "")
         )
     candidates = [str(item) for item in evidence.get("candidates") or [] if str(item)]
     uncertain = [str(item) for item in evidence.get("uncertain") or [] if str(item)]

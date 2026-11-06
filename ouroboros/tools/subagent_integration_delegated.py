@@ -461,7 +461,7 @@ def _locked_apply(
     prepared = None
     temporary = ExitStack()
     try:
-        _git_lock = _acquire_git_lock(ctx)
+        _git_lock = _acquire_git_lock(ctx, repo_dir=target)
     except Exception as exc:
         result["lock_error"] = f"{type(exc).__name__}: {exc}"
         return result
