@@ -106,3 +106,102 @@ export function setInlineStatus(el, text, tone = 'muted') {
     if (el.textContent !== next) el.textContent = next;
     el.dataset.tone = normalizeTone(tone);
 }
+
+/* ---- The result of an action (DESIGN "Status and chips"; ui.css .ui-action-row / .ui-result) -----------------------
+   The caller runs the action and owns its words; these helpers only write the result line and hold its lifetime. A
+   plain acknowledgement may end by itself after SAVE_ACK_MS; a warning, a needed restart or a failure stays until the
+   next result or an edit in the same subject replaces it, so `ends` is honoured only for an ok or neutral tone. One
+   timer owner per node: an older acknowledgement never erases a newer result. Nothing here runs a click. */
+
+export const SAVE_ACK_MS = 4000;
+const RESULT_TIMERS = new WeakMap();
+const ENDING_TONES = new Set(['ok', 'muted']);
+
+function stopResultTimer(node) {
+    const timer = RESULT_TIMERS.get(node);
+    if (timer !== undefined) {
+        clearTimeout(timer);
+        RESULT_TIMERS.delete(node);
+    }
+}
+
+/** Write a result into `node`: its words, its tone, the raw text behind one Details disclosure; `ends` lets a plain
+ * acknowledgement clear itself after SAVE_ACK_MS. An empty result clears the node. */
+export function setResult(node, { text = '', tone = 'muted', details = '', ends = false } = {}) {
+    if (!node) return;
+    stopResultTimer(node);
+    const words = String(text ?? '');
+    const raw = String(details ?? '');
+    node.textContent = words;
+    if (raw) {
+        const doc = node.ownerDocument;
+        const disclosure = doc.createElement('details');
+        disclosure.className = 'ui-disclosure';
+        const summary = doc.createElement('summary');
+        summary.textContent = 'Details';
+        const body = doc.createElement('pre');
+        body.className = 'ui-result-details';
+        body.textContent = raw;
+        disclosure.append(summary, body);
+        node.append(disclosure);
+    }
+    if (!words && !raw) {
+        delete node.dataset.tone;
+        return;
+    }
+    const normalized = normalizeTone(tone);
+    node.dataset.tone = normalized;
+    if (ends && ENDING_TONES.has(normalized)) {
+        const timer = setTimeout(() => {
+            if (RESULT_TIMERS.get(node) !== timer) return;
+            RESULT_TIMERS.delete(node);
+            node.textContent = '';
+            delete node.dataset.tone;
+        }, SAVE_ACK_MS);
+        RESULT_TIMERS.set(node, timer);
+    }
+}
+
+/** An edit in the same subject (the form or section the action belongs to) clears its result; returns the disposer. */
+export function clearResultOnEdit(subject, node) {
+    if (!subject?.addEventListener || !node) return () => {};
+    const clear = (event) => {
+        const target = event?.target;
+        if (target && (target === node || node.contains?.(target))) return;
+        setResult(node, {});
+    };
+    subject.addEventListener('input', clear);
+    subject.addEventListener('change', clear);
+    return () => {
+        subject.removeEventListener('input', clear);
+        subject.removeEventListener('change', clear);
+    };
+}
+
+function rawErrorText(err) {
+    const body = err?.body;
+    if (body && typeof body === 'object') {
+        const line = [body.reason_code, body.error ?? body.detail ?? body.message].filter(Boolean).join(': ');
+        if (line) return line;
+        try { return JSON.stringify(body); } catch { /* an unserializable body is just an error */ }
+    }
+    if (typeof body === 'string' && body) return body;
+    return String(err?.message || err || '');
+}
+
+/** Owner words for a failed action, keyed on typed fields only (a TypeError without a response, `err.status`,
+ * `err.body.reason_code`); never on the message's text. The raw text comes back as `details`. */
+export function errorWords(err) {
+    const status = Number(err?.status);
+    const code = err?.body?.reason_code;
+    let text;
+    if (code) text = 'Ouroboros refused this.';
+    else if (status >= 500) text = "Ouroboros couldn't do this.";
+    else if (status === 401 || status === 403) text = 'Not allowed here.';
+    else if (status === 404) text = "Ouroboros couldn't find this.";
+    else if (status === 409) text = 'Changed elsewhere first.';
+    else if (status >= 400) text = "Ouroboros didn't accept this.";
+    else if (err instanceof TypeError && err.response === undefined) text = "Couldn't reach Ouroboros.";
+    else text = "Didn't work.";
+    return { text, tone: 'danger', details: rawErrorText(err) };
+}
