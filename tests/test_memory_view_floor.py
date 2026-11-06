@@ -332,23 +332,37 @@ def test_retold_words_fold_before_considered_ones_and_other_rooms_owner_words_be
     assert not set(theirs) & {ident for step, ident in order if step == "F6w"}  # my human's words never fold early
 
 
-def test_my_humans_words_of_other_conversations_fold_on_their_saving_without_a_render_each():
-    """At the physical bound my human's words of my other conversations fold oldest first on their own saving; the
-    walk measures once the estimate says the view fits, never once a row (240 rows here, ~1,700 on a real install)."""
-    owner = [syn.conversation(i, words=4, word_chars=1_500, owner=True) for i in range(60)]
-    room = syn.room(lane1=[syn.spoken(0, "human", 300)])
-    snapshot = syn.snapshot(room_facts=room, conversations=owner)
+def test_my_humans_words_of_other_conversations_keep_the_work_room_while_this_rooms_uncovered_words_spend_it():
+    """My human's words of my other conversations are ordinary F7 elements of the walk: oldest first, after every rung
+    but the last, they fold to keep the work room the start reserves (the margin) and to pay a requested saving, with
+    few measures however many there are (240 rows here, ~1,700 on a real install). This room's uncovered owner words
+    keep their right to the work room: whole above the margin, folded only at physical pressure."""
+    owner = [syn.conversation(i, notes=1, words=4, word_chars=1_500, owner=True) for i in range(60)]
+    here = {**syn.spoken(0, "human", 300), "owner_side": True}
+    snapshot = syn.snapshot(room_facts=syn.room(lane1=[here]), story=syn.pages(3, 4_000), conversations=owner)
     calls = []
 
     def measure(level):
         calls.append(level)
-        return mf.view_tokens(mv.render_story(snapshot, level)) + mf.view_tokens(mv.render_room(snapshot, level))
+        return tokens(snapshot, level)
 
     full = measure(mv.FULL_VIEW)
-    level = mf.fit_memory_view(snapshot, {"margin": 1, "physical": full // 3, "budget": None}, measure=measure)
+    level = mf.fit_memory_view(snapshot, {"margin": full // 3, "physical": full + 10, "budget": None}, measure=measure)
     theirs = [word["id"] for group in owner for word in group["rooms"][0]["words"]]
     folded = dict(level.addressed).get("F7", ())
-    assert folded and tuple(theirs[:len(folded)]) == folded  # oldest first, my other conversations' before this room's
-    assert room["lane1"][0]["address"] not in folded and measure(level) <= full // 3
+    assert folded and tuple(theirs[:len(folded)]) == folded and tokens(snapshot, level) <= full // 3  # oldest first
+    assert here["address"] not in folded and "F6a" not in dict(level.steps)  # the last rung stays last
     assert len(calls) < 30, len(calls)
+    words = tuple(word["id"] for word in owner[0]["rooms"][0]["words"])  # a group's line still saves once its owner
+    lined = mv.FloorLevel((("F6g", (owner[0]["key"],)), ("F7", words)))  # words are addresses: the savings add
+    assert tokens(snapshot, lined) < tokens(snapshot, mv.FloorLevel((("F7", words),)))
+    paid = mf.fit_memory_view(snapshot, {"margin": None, "physical": full + 10, "budget": None}, saving=full // 2)
+    assert dict(paid.addressed).get("F7") and tokens(snapshot, paid) <= full - full // 2  # a refusal's saving
+    rows = [{**syn.spoken(i, "human", 4_000), "owner_side": True} for i in range(3)]
+    alone = syn.snapshot(room_facts=syn.room(lane1=rows))
+    whole = tokens(alone)
+    kept = mf.fit_memory_view(alone, {"margin": whole // 2, "physical": whole + 10, "budget": None})
+    assert "F7" not in dict(kept.steps) and tokens(alone, kept) > whole // 2  # this room's: the work room is theirs
+    pressed = mf.fit_memory_view(alone, {"margin": whole // 2, "physical": whole - 100, "budget": None})
+    assert dict(pressed.addressed)["F7"] == (rows[0]["address"],)  # and physics folds them, oldest first
 

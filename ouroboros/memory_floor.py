@@ -1,7 +1,7 @@
 """One start allowance and an ordered walk over an immutable memory snapshot.
 
-After the start, only a physical deficit narrows the selected forms. Owner rows
-without carried commitments may spend the work room, but never silently disappear.
+After the start, only a physical deficit narrows the selected forms. This room's owner
+rows without carried commitments may spend the work room, but never silently disappear.
 """
 from __future__ import annotations
 
@@ -339,10 +339,7 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
         if step in {"F5l", "F5"} and (step, ident) in taken:
             story_blocked.add(step)
     # People's words last: uncovered owner rows become addresses, oldest first, only while the view does not fit.
-    # A row of my other conversations folds on its own saving, measured once the estimate fits; only this room's rows
-    # can share a range form (F7a), which a measured level prices, so only they measure each step.
     physical = allowances.get("physical")
-    others = set(conversations.owner_items(snapshot.conversations))
     for step, ident, whole, short in uncovered:
         if physical is None or current <= physical:
             break
@@ -353,7 +350,7 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
                 current = measure(level(taken))
             # Uncovered words still go oldest first after every carried/story rung.
             # Their new addresses can use the same range form, without taking another row.
-            if current > physical and ident not in others:
+            if current > physical:
                 form = ('F7a', str((snapshot.room or {})['room_id']))
                 current = measure(level(taken))
                 if form not in taken:
@@ -371,11 +368,11 @@ def owner_rows(snapshot: mv.MemoryViewSnapshot) -> Dict[str, Mapping[str, Any]]:
 
 
 def uncovered_owner_rows(snapshot: mv.MemoryViewSnapshot, elements=None) -> List[Tuple[str, str, int, int]]:
-    """Owner rows no page or note carries yet, other conversations' first, then this room's, oldest first;
-    governing and unanswered rows of this room have no address."""
-    owner = owner_rows(snapshot)
+    """This room's owner rows no page or note carries yet, oldest first; governing and unanswered rows have no
+    address. My human's words of my other conversations are ordinary F7 elements: they keep the work room."""
+    owner = {i["address"]: i for i in (snapshot.room or {}).get("lane1", ())}
     return [e for e in (degradable_elements(snapshot) if elements is None else elements)
-            if e[0] == "F7" and not owner[e[1]].get("carried")]
+            if e[0] == "F7" and e[1] in owner and not owner[e[1]].get("carried")]
 
 
 def kept_level(snapshot: mv.MemoryViewSnapshot, facts: Mapping[str, Any]) -> mv.FloorLevel:

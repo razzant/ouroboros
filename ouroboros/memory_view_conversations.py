@@ -310,7 +310,8 @@ def identity_line(group: Mapping[str, Any]) -> str:
 
 
 def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str], as_line: bool) -> str:
-    """One group whole (its words in ``gone`` by address), or as its line with my human's words still whole."""
+    """One group whole (its words in ``gone`` by address), or as its line with my human's words still whole; in
+    either form my human's words in ``owners_gone`` are their own addresses, so F6g's saving adds to F7's."""
     from ouroboros.memory_view import _facts_text, _note_lines, _row_pointer
 
     owner = [word for room in group["rooms"] for word in room["words"] if word["owner_side"]]
@@ -334,10 +335,11 @@ def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str]
             lines.append(f"«{fold['sentence']}» ({fold['ts'][:10]}): {fold['count']} words up to it read and folded into "
                          f"that sentence; memory_read(room_id='{room['room_id']}', rows=true, from='{fold['from']}', "
                          f"to='{fold['to']}')")
-        addressed = [word for word in room["words"] if word["id"] in gone or word["id"] in owners_gone]
+        addressed = [word for word in room["words"] if word["id"] in gone]
         if addressed:
             lines.append(_words_line(room, addressed))
-        lines += [word["line"] for word in room["words"] if word["id"] not in gone and word["id"] not in owners_gone]
+        lines += [_row_pointer(word, "words") if word["id"] in owners_gone else word["line"]
+                  for word in room["words"] if word["id"] not in gone]
         lines += [task["line"] for task in room["tasks"]]
     return "\n".join(lines)
 
