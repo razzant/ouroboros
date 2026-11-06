@@ -129,13 +129,14 @@ def test_the_pool_is_the_marked_rows_named_by_their_catalog_handle(tmp_path, mon
     # The price and the last review are each seat's changing facts, beside the pool, never inside it.
     activity = _activity()
     assert list(activity) == ["critic-key", "packet-key", "session-key"]
-    assert activity["session-key"] == {"cost_hint": SESSION_SEAT_COST_HINT, "cost_usd": None,
+    assert activity["session-key"] == {"cost_hint": SESSION_SEAT_COST_HINT, "cost_usd": None, "measured": "unknown",
                                        "cost_kind": "subscription", "last_review": "unknown"}
     # An api seat's hint is the wave's own estimate or an honest unknown — never a price table.
     for seat in ("critic-key", "packet-key"):
         row = activity[seat]
         assert (row["cost_usd"], row["cost_kind"], row["last_review"]) == (None, "unknown", "unknown")
         assert row["cost_hint"] == COST_UNKNOWN_HINT or row["cost_hint"].startswith("≈$")
+        assert row["plan_cost_hint"] == COST_UNKNOWN_HINT and row["measured"] == "unknown"
     # The preflight and /review seat whichever enabled catalog row is named per call
     # (decision 3A): the block names that rule, not a second panel.
     assert "catalog row" in block["surfaces"]["preflight"] and "Main" in block["surfaces"]["system_review"]
@@ -143,6 +144,30 @@ def test_the_pool_is_the_marked_rows_named_by_their_catalog_handle(tmp_path, mon
     assert block["full_source"] == {"pool": "GET /api/review-pool", "activity": REVIEW_ACTIVITY_HEADER,
                                     "records": "## Review records"}
     assert _records(tmp_path) == {"recent_records": [], "omitted": {"records": 0}, "full_source": "state/review_ledger/"}
+
+
+def test_each_seat_shows_how_often_it_answered_and_how_long_on_its_current_target(tmp_path, monkeypatch):
+    """Owner 21.10 F6 A: beside the pool, measured facts per seat and surface; unknown stays unknown, never 0."""
+    from ouroboros import config, maintenance, subagent_metrics
+
+    def publish(target, purpose, *, answered, seconds, n):
+        subagent_metrics.publish(tmp_path, {
+            "row_id": "critic-key", "row_identity": {"kind": "api_model", "target_id": target}, "purpose": purpose,
+            "producer_id": f"review:{n}", "task_id": "t", "ts": f"2026-11-05T10:0{n}:00Z", "dispatched": True,
+            "terminal": True, "answer_received": answered, "duration_sec": seconds})
+
+    publish("openai/gpt-5.6-terra", "review", answered=True, seconds=120, n=1)
+    publish("openai/gpt-5.6-terra", "plan", answered=False, seconds=None, n=2)
+    publish("openai/gpt-5.5", "review", answered=True, seconds=9, n=3)  # the row's previous model
+    maintenance.run_job(tmp_path, "subagent_metrics")
+    monkeypatch.setattr(config, "resolve_data_dir", lambda: tmp_path)
+    monkeypatch.setenv(SUBAGENTS_SETTING, _POOL)
+
+    activity = _activity()
+    assert activity["critic-key"]["measured"] == {"review": {"answered": 1, "no_answer": 0, "mean_sec": 120},
+                                                  "plan": {"answered": 0, "no_answer": 1, "mean_sec": None}}
+    # A seat never observed reads unknown, not zero answers.
+    assert activity["packet-key"]["measured"] == activity["session-key"]["measured"] == "unknown"
 
 
 def test_the_cost_hint_of_a_cold_seat_never_waits_on_the_provider_catalog(tmp_path, monkeypatch):
@@ -315,7 +340,7 @@ def test_a_settled_review_changes_no_cached_block(tmp_path, monkeypatch):
     sends = []
     for last, measured in (({}, None), (settled, price)):
         monkeypatch.setattr(reviewer_slot_config, "reviewer_slot_last_executions", lambda last=last: last)
-        monkeypatch.setattr(review_price, "review_price", lambda *_a, measured=measured: measured)
+        monkeypatch.setattr(review_price, "review_price", lambda *_a, measured=measured, **_kw: measured)
         messages, _ = context.build_llm_messages(env=env, memory=memory, task={"id": "root", "type": "task", "text": "w"})
         marked = [block["text"] for block in messages[0]["content"] if block.get("cache_control")]
         wire, moved = split_leading_system_prefix(messages)

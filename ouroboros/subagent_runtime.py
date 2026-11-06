@@ -230,13 +230,13 @@ COST_UNKNOWN_HINT = "cost unknown"
 LOCAL_ROUTE_COST_HINT = "no API cost per review"
 
 
-def _api_review_cost_hint(slot: Any) -> str:
+def _api_review_cost_hint(slot: Any, category: str = "", unit: str = "review") -> str:
     """One api seat's price: what one review by its row actually cost (``review_price``, read from
     this process's table, so context assembly never waits on the ledger). A model call through a
     subscription uses a seat and a local route costs no API money, as Settings → Agents says."""
     from ouroboros.config import resolve_data_dir
     from ouroboros.provider_models import provider_for_model, review_model_uses_local
-    from ouroboros.review_price import review_price, review_price_text
+    from ouroboros.review_price import REVIEW_USAGE_CATEGORY, review_price, review_price_text
 
     model = str(getattr(slot, "model", "") or "")
     if provider_for_model(model) == "claudexor":
@@ -244,7 +244,7 @@ def _api_review_cost_hint(slot: Any) -> str:
     if review_model_uses_local(model):
         return LOCAL_ROUTE_COST_HINT
     row_id = str(getattr(slot, "subagent_id", "") or getattr(slot, "slot_id", "") or "")
-    return review_price_text(review_price(resolve_data_dir(), row_id, model))
+    return review_price_text(review_price(resolve_data_dir(), row_id, model, category=category or REVIEW_USAGE_CATEGORY), unit)
 
 
 # The wizard's summary prints the same sentence (``subagents_settings.js`` ``PACKET_ONLY_POOL_WARNING``).
@@ -331,10 +331,12 @@ def review_facts_block(snapshot: Optional[TaskSettingsSnapshot] = None, *,
     the task's recent ledger records (:func:`review_records_block`). These facts never rank seats or
     change routing; a pool without seats appends nothing."""
     from ouroboros import reviewer_slot_config as rs
-    from ouroboros.config import get_review_enforcement, get_runtime_mode, runtime_settings, task_settings_scope
+    from ouroboros.config import get_review_enforcement, get_runtime_mode, resolve_data_dir, runtime_settings, task_settings_scope
     from ouroboros.configured_subagents import SUBAGENTS_SETTING, parse_configured_subagents
     from ouroboros.provider_models import model_has_credentials_in_settings
     from ouroboros.review_execution import ReviewRouteKind
+    from ouroboros.review_price import PLAN_USAGE_CATEGORY
+    from ouroboros.subagent_metrics import seat_facts
     from ouroboros.runtime_mode_policy import runtime_mode_at_least
     from ouroboros.tools.review_helpers import review_enforcement_blocks
 
@@ -364,9 +366,12 @@ def review_facts_block(snapshot: Optional[TaskSettingsSnapshot] = None, *,
                     "model": slot.model, "effort": slot.effort,
                     "delivery": "session" if session else ("native" if slot.native_retrieval else "packet"),
                 })
+                hint = SESSION_SEAT_COST_HINT if session else _api_review_cost_hint(slot)
                 activity.append({
-                    "seat_id": slot.slot_id,
-                    "cost_hint": SESSION_SEAT_COST_HINT if session else _api_review_cost_hint(slot),
+                    "seat_id": slot.slot_id, "cost_hint": hint,
+                    # A seat paid in money also prices a plan ask; owner 21.10 F6 A: how often it answers, how long.
+                    **({"plan_cost_hint": _api_review_cost_hint(slot, PLAN_USAGE_CATEGORY, "plan ask")}
+                       if hint not in (SESSION_SEAT_COST_HINT, LOCAL_ROUTE_COST_HINT) else {}),
                     **rs.review_cost_facts(last.get("cost_usd"), route=str(slot.route.value), model=slot.model),
                     "last_review": {key: last[key] for key in ("ts", "status", "failure_code", "cost_kind", "cost_usd") if key in last}
                                    if last else "unknown",
@@ -374,6 +379,8 @@ def review_facts_block(snapshot: Optional[TaskSettingsSnapshot] = None, *,
                 # A session seat logs in itself; an api seat answers only with its provider's key.
                 if not session and not model_has_credentials_in_settings(slot.model, dict(settings)):
                     without_credentials.append(pool[-1]["subagent_id"])
+            for seat, measured in zip(activity, seat_facts(resolve_data_dir(), [(s.subagent_id or s.slot_id, s.session_target or s.model) for s in slots])):
+                seat["measured"] = measured
         # No marked row: the seats built are the one Main seat (``review_pool_slots``).
         main_alone = state["state"] == "empty" and bool(slots)
         migration = _review_migration_facts(settings)
