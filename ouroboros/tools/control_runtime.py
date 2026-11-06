@@ -151,8 +151,9 @@ def _request_restart(ctx: ToolContext, reason: str, adopt_commit: str = "") -> s
             adopt_commit = run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir).strip()
         if str(adopt_commit or "").strip():
             handoff = body_adoption.authorize(ctx, adopt_commit, reason=restart_reason)
+            relation = body_adoption.official_relation_text(handoff.get("official_relation") or {})
             adoption_note = (f" It adopts candidate commit {handoff['cand'][:12]} onto {handoff['branch']} "
-                             "once this generation's readers have stopped.")
+                             "once this generation's readers have stopped." + (f" {relation}" if relation else ""))
     except body_adoption.AdoptionRefused as exc:
         return f"⚠️ RESTART_BLOCKED: {exc.code}: {exc.text}"
     if not adoption_note and body_candidate.is_bound(ctx):
