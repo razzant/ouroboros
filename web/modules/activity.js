@@ -7,6 +7,7 @@
 
 import { fetchJson, isStoreMigrating, readStateJson } from './api_client.js';
 import { setInlineStatus } from './ui_helpers.js';
+import { errorWords } from './ui_primitives.js';
 import { fmt, tr } from './i18n.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { taskCancelPending } from './log_events.js';
@@ -639,7 +640,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             try {
                 stored = await getJson(`/api/tasks/${encodeURIComponent(id)}`);
             } catch (exc) {
-                if (exc?.status !== 404) showToast(`Could not refresh task state: ${exc?.message || exc}`, 'error');
+                if (exc?.status !== 404) showToast(`Could not refresh task state. ${errorWords(exc).text}`, 'error');
             }
             // A work's current episode offers that work's controls: Stop reaches every episode root still
             // running, Stop earlier attempt the earlier ones, each at the server's exact target. It offers

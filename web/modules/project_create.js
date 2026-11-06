@@ -192,7 +192,7 @@ export function openNewProjectDialog({ apiClient, onCreated }) {
             btn.textContent = source === 'clone' ? 'Cloning…' : 'Creating…';
             try {
                 const data = await apiClient.projectCreate(payload);
-                if (data?.error) throw new Error(data.error);
+                if (data?.error) throw Object.assign(new Error(data.error), { body: data });
                 finish(data?.project || null);
                 onCreated?.(data?.project || null);
             } catch (e) {

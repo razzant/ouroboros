@@ -129,8 +129,8 @@ def test_plain_acknowledgement_ends_while_restart_warning_and_error_stay(costs_u
     # An error is never an acknowledgement.
     _save(page)
     page.clock.fast_forward(ACK_MS + 500)  # past any acknowledgement time, short of the socket watchdog's 45 s
-    assert _words(page) == ["Not saved. Ouroboros couldn't do this.", "danger"]
-    assert _raw(page) == "Settings file is read-only.", "the server's words stay one disclosure away"
+    assert _words(page) == ["Not saved. Settings file is read-only.", "danger"], "the server's own reason is its words"
+    assert _raw(page) == "Settings file is read-only.", "the raw text stays one disclosure away"
     assert _beside_save(page)
     _shot(page, costs_ui, f"error-{tag}")
     assert len(saves) == 5 and all(save == {"TOTAL_BUDGET": 200, "OUROBOROS_PER_TASK_COST_USD": 50} for save in saves), saves
@@ -148,7 +148,7 @@ def test_an_older_acknowledgement_never_erases_a_newer_save_or_a_validation_mess
     page.clock.fast_forward(ACK_MS - 1000)  # the first acknowledgement is one second from ending
     _save(page)                              # a failing save inside that second
     page.clock.fast_forward(ACK_MS)          # past the first timer's deadline: the error is still the answer
-    assert _words(page) == ["Not saved. Ouroboros couldn't do this.", "danger"]
+    assert _words(page) == ["Not saved. Offline.", "danger"]
     assert _raw(page) == "Offline."
     # An invalid value after an acknowledgement is answered at once and is not erased by that acknowledgement's timer.
     _save(page)

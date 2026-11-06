@@ -34,7 +34,7 @@ import { claudexorStatus } from './claudexor_status_store.js';
 import { createModelRolesEditor } from './model_roles.js';
 import { PROCESSING_PREFERENCE_KEY } from './route_editor_primitives.js';
 import { collectSafeFieldValues, normalizeTone, renderSafeField, setInlineStatus, revealNewRow, copyTextWithToast } from './ui_helpers.js';
-import { clearResultOnEdit, setResult } from './ui_primitives.js';
+import { clearResultOnEdit, errorWords, setResult } from './ui_primitives.js';
 import { extensionActionStatus } from './extension_status_text.js';
 import { bindLanguageSettings } from './settings_language.js';
 import { mountInterfaceSize } from './interface_size.js';
@@ -410,14 +410,16 @@ export async function renderExtensionSettingsSections(root, sections, { isCurren
                     body: JSON.stringify(values),
                 });
                 const data = await resp.json().catch(() => ({}));
-                if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
+                if (!resp.ok || data.error) {
+                    throw Object.assign(new Error(data.error || `HTTP ${resp.status}`), { status: resp.ok ? undefined : resp.status, body: data });
+                }
                 const outcome = extensionActionStatus(data);
                 setResult(status, { ...outcome, ends: outcome.tone === 'ok' });
                 if (data.ok !== false) globalThis.window?.dispatchEvent(new CustomEvent('ouro:settings-updated', {
                     detail: { reason: 'extension settings saved', source: 'settings', skill, route },
                 }));
             } catch (err) {
-                setResult(status, { text: err.message || String(err), tone: 'danger' });
+                setResult(status, errorWords(err));
             } finally {
                 pendingExtensionSettings.delete(requestKey);
                 if (button) {
@@ -898,10 +900,10 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
                 await refreshModelCatalog({ button: byId('btn-refresh-model-catalog') });
                 if (applied && byId('settings-status').dataset.owner === 'load' && !settingsDirty && !settingsSaving && !saveOutcomeUnknown) setStatus('Settings loaded', 'ok');
             } catch (error) {
-                if (applied && byId('settings-status').dataset.owner === 'load' && !settingsDirty && !settingsSaving && !saveOutcomeUnknown) setStatus(
-                    `Settings loaded. Model catalog refresh failed: ${error.message || error}`,
-                    'warn'
-                );
+                if (applied && byId('settings-status').dataset.owner === 'load' && !settingsDirty && !settingsSaving && !saveOutcomeUnknown) {
+                    const words = errorWords(error);
+                    setStatus(`Settings loaded. The model catalog did not refresh. ${words.text}`, 'warn', '', '', words.details);
+                }
             }
             // Catalog readiness is independent of Settings GET completion:
             // a superseding page-show load may still be waiting for its document.
@@ -911,10 +913,8 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             if (reloadSequence !== loadSequence) return;
             settingsLoaded = false;
             syncSettingsLoadState();
-            setStatus(
-                `Failed to load current settings. Save is disabled until reload succeeds: ${error.message || error}`,
-                'warn'
-            );
+            const words = errorWords(error);
+            setStatus(`Failed to load current settings. ${words.text} Save is disabled until reload succeeds.`, 'warn', '', '', words.details);
         }
     }
 
@@ -930,7 +930,8 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             if (!(await loadSettings())) return;
             setStatus('Settings refreshed', 'ok');
         } catch (error) {
-            setStatus(`Settings refresh failed: ${error.message || error}`, 'warn');
+            const words = errorWords(error);
+            setStatus(`Settings did not refresh. ${words.text}`, 'warn', '', '', words.details);
         } finally {
             extensionRefreshPending = false;
         }
@@ -1385,11 +1386,13 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             saveOutcomeUnknown = !confirmedSaved && receipt?.saved !== false;
             // The checker's keys are saved already: the next Save compares against them, never re-sends them.
             if (checkerSaved && !confirmedSaved) Object.assign(currentSettings, ownerDraft.safety.checker.settings);
-            // The line says what happened and what to do; the error's own text is the result's Details.
+            // The line says what happened and what to do: a refusal says the server's own reason (errorWords), the
+            // error's raw text is the result's Details.
+            const words = errorWords(e);
             setStatus(confirmedSaved ? 'Settings were saved, but a later step failed. Your draft is kept.'
                 : saveOutcomeUnknown ? 'Save outcome unknown. Your draft is kept; reload settings to check before saving again.'
-                    : `${checkerSaved ? `Changes in ${checkerTabsText(ownerDraft.safety)} were saved; the other settings were not` : 'Settings were not saved'}. Your draft is kept.`,
-            'warn', '', '', String(e?.message || e || ''));
+                    : `${checkerSaved ? `Changes in ${checkerTabsText(ownerDraft.safety)} were saved; the other settings were not` : 'Settings were not saved'}. ${words.text} Your draft is kept.`,
+            'warn', '', '', words.details);
         } finally {
             settingsSaving = false;
             setButtonBusy(saveButton, false);

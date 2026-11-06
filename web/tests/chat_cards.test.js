@@ -136,16 +136,17 @@ test('a card that cannot be read keeps its words: Retry after a failure, a plain
     const dom = installCardDom();
     let failing = true;
     const server = serve({
-        'GET /api/cards/card_f1': () => (failing ? json(503, { error: 'store migrating' }) : json(200, componentsBody('card_f1'))),
+        'GET /api/cards/card_f1': () => (failing ? json(503, { error: 'the task store is importing; retry shortly', reason_code: 'migrating' })
+            : json(200, componentsBody('card_f1'))),
     });
     try {
         const cards = feed();
         const broken = cards.buildCard(identity('card_f1', 'components'));
         await flush();
         assert.equal(broken.querySelector('.chat-card-fallback').textContent, 'Basic 9 · Pro 19');
-        // The shared failure words (a 503: Ouroboros could not do it), never the server's raw text (U131).
-        assert.match(broken.querySelector('.chat-card-status').textContent, /^The card could not be loaded\. Ouroboros couldn't do this\./);
-        assert.doesNotMatch(broken.querySelector('.chat-card-status').textContent, /store migrating/);
+        // The shared failure words: the server's own reason for a person, never its code (U131).
+        assert.match(broken.querySelector('.chat-card-status').textContent, /^The card could not be loaded\. The task store is importing; retry shortly\./);
+        assert.doesNotMatch(broken.querySelector('.chat-card-status').textContent, /migrating/);
         assert.equal(broken.querySelector('.chat-card-status').dataset.tone, 'danger');
         failing = false;
         broken.querySelector('[data-card-retry]').click();

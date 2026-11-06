@@ -181,7 +181,8 @@ export function clearResultOnEdit(subject, node) {
 function rawErrorText(err) {
     const body = err?.body;
     if (body && typeof body === 'object') {
-        const line = [body.reason_code, body.error ?? body.detail ?? body.message].filter(Boolean).join(': ');
+        const said = body.error ?? body.detail ?? body.message;
+        const line = [body.reason_code, said && typeof said === 'object' ? JSON.stringify(said) : said].filter(Boolean).join(': ');
         if (line) return line;
         try { return JSON.stringify(body); } catch { /* an unserializable body is just an error */ }
     }
@@ -189,19 +190,42 @@ function rawErrorText(err) {
     return String(err?.message || err || '');
 }
 
-/** Owner words for a failed action, keyed on typed fields only (a TypeError without a response, `err.status`,
- * `err.body.reason_code`); never on the message's text. The raw text comes back as `details`. */
+// The sentence the server wrote for a person in its answer, read where fetchJson (api_client.js) reads an error's
+// text: the body's `error` (a string, or a structured `{message|detail}`), then its `message`. A bare code
+// (`card_stale`), a line that only repeats the answer's own code (`continue refused: queue_not_restored`) and the
+// placeholder fetchJson writes for a body it could not read are not that sentence. Shown on its own, the sentence
+// starts with a capital and ends with one stop.
+const BARE_CODE = /^[a-z][a-z0-9]*(?:[_.:-][a-z0-9]+)*$/;
+function serverSentence(body) {
+    if (!body || typeof body !== 'object') return '';
+    const codes = [body.reason_code, body.error_code, body.code].filter((code) => typeof code === 'string' && code.length > 2);
+    const said = body.error && typeof body.error === 'object' ? [body.error.message, body.error.detail] : [body.error];
+    for (const value of [...said, body.message]) {
+        const text = typeof value === 'string' ? value.trim() : '';
+        if (!text || BARE_CODE.test(text) || codes.some((code) => text.includes(code))
+            || /^non-json response \(HTTP \d+\)$/.test(text)) continue;
+        const capital = text.charAt(0).toUpperCase() + text.slice(1);
+        return /[.!?…]$/.test(capital) ? capital : `${capital}.`;
+    }
+    return '';
+}
+
+/** Owner words for a failed action: when Ouroboros answered with a reason for a person (its body's sentence), that
+ * reason; generic words, keyed on typed fields only (a TypeError without a response, `err.status`,
+ * `err.body.reason_code`), when it could not be reached or answered without one; never words read out of an error's
+ * own message. The raw text comes back as `details`. */
 export function errorWords(err) {
     const status = Number(err?.status);
     const code = err?.body?.reason_code;
+    const said = serverSentence(err?.body);
     let text;
-    if (code) text = 'Ouroboros refused this.';
+    if (err instanceof TypeError && err.response === undefined) text = "Couldn't reach Ouroboros.";
+    else if (said) text = said;
     else if (status >= 500) text = "Ouroboros couldn't do this.";
+    else if (code) text = 'Ouroboros refused this.';
     else if (status === 401 || status === 403) text = 'Not allowed here.';
     else if (status === 404) text = "Ouroboros couldn't find this.";
-    else if (status === 409) text = 'Changed elsewhere first.';
     else if (status >= 400) text = "Ouroboros didn't accept this.";
-    else if (err instanceof TypeError && err.response === undefined) text = "Couldn't reach Ouroboros.";
     else text = "Didn't work.";
     return { text, tone: 'danger', details: rawErrorText(err) };
 }

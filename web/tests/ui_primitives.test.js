@@ -168,21 +168,41 @@ test('an edit in the same subject clears the result; an edit inside the result o
     assert.equal(typeof portable.clearResultOnEdit(null, node), 'function', 'no subject: a no-op disposer');
 });
 
-test('errorWords keys on typed fields only and returns the raw text as details', () => {
+test('errorWords says the server\'s own reason when it gave one, generic words otherwise, the raw text as details', () => {
     const network = new TypeError('Failed to fetch');
     assert.deepEqual(portable.errorWords(network), { text: "Couldn't reach Ouroboros.", tone: 'danger', details: 'Failed to fetch' });
     const typedWithResponse = Object.assign(new TypeError('Failed to fetch'), { response: {} });
     assert.equal(portable.errorWords(typedWithResponse).text, "Didn't work.", 'a TypeError with a response is not a network failure');
+    // An answer with a reason for a person: those are the words (a 409 is not guessed to be "changed elsewhere").
+    const exists = { status: 409, body: { error: "project 'x' already exists — pick another name/id", error_code: 'project_exists' } };
+    assert.deepEqual(portable.errorWords(exists), { text: "Project 'x' already exists — pick another name/id.", tone: 'danger',
+        details: "project 'x' already exists — pick another name/id" });
+    assert.equal(portable.errorWords({ status: 422, body: { error: 'Budget values must be at least 0.01.' } }).text,
+        'Budget values must be at least 0.01.', 'one stop, never two');
+    const refused = portable.errorWords({ status: 400, body: { reason_code: 'runtime_mode_protected', error: 'Protected path.' } });
+    assert.deepEqual(refused, { text: 'Protected path.', tone: 'danger', details: 'runtime_mode_protected: Protected path.' });
+    const importing = { status: 503, body: { error: 'the task store is importing; retry shortly', reason_code: 'migrating' } };
+    assert.equal(portable.errorWords(importing).text, 'The task store is importing; retry shortly.', 'a "not yet" is not a refusal');
+    assert.equal(portable.errorWords({ status: 503, body: { error: 'Offline.' } }).text, 'Offline.');
+    const structured = { status: 400, body: { error: { code: 'bad_path', message: 'That folder does not exist' } } };
+    assert.deepEqual(portable.errorWords(structured), { text: 'That folder does not exist.', tone: 'danger',
+        details: '{"code":"bad_path","message":"That folder does not exist"}' });
+    // An answer without a reason for a person: the generic words of its status (a code is not a sentence, nor is the
+    // reader's placeholder for a body it could not read).
     assert.equal(portable.errorWords(Object.assign(new Error('x'), { status: 503 })).text, "Ouroboros couldn't do this.");
+    assert.equal(portable.errorWords({ status: 503, body: { reason_code: 'migrating' } }).text, "Ouroboros couldn't do this.");
+    assert.equal(portable.errorWords({ status: 502, body: { error: 'non-json response (HTTP 502)' } }).text, "Ouroboros couldn't do this.");
+    assert.equal(portable.errorWords({ status: 409, body: { error: 'card_stale', reason_code: 'card_stale' } }).text, 'Ouroboros refused this.');
+    const echo = { status: 503, body: { error: 'continue refused: queue_not_restored', reason_code: 'queue_not_restored' } };
+    assert.equal(portable.errorWords(echo).text, "Ouroboros couldn't do this.", 'a line that repeats its code is not a reason');
+    assert.equal(portable.errorWords({ ...echo, status: 409 }).text, 'Ouroboros refused this.');
     assert.equal(portable.errorWords({ status: 403 }).text, 'Not allowed here.');
     assert.equal(portable.errorWords({ status: 404 }).text, "Ouroboros couldn't find this.");
-    assert.equal(portable.errorWords({ status: 409 }).text, 'Changed elsewhere first.');
-    assert.equal(portable.errorWords({ status: 422, body: { error: 'Budget values must be at least 0.01.' } }).text, "Ouroboros didn't accept this.");
-    const refused = portable.errorWords({ status: 400, body: { reason_code: 'runtime_mode_protected', error: 'Protected path.' } });
-    assert.deepEqual(refused, { text: 'Ouroboros refused this.', tone: 'danger', details: 'runtime_mode_protected: Protected path.' });
-    // The words never come from the message's text: a message that talks of a network or a 404 changes nothing.
+    assert.equal(portable.errorWords({ status: 409 }).text, "Ouroboros didn't accept this.");
+    // The words never come from an error's own message: a message that talks of a network or a 404 changes nothing.
     assert.equal(portable.errorWords(new Error('network error: 404 not found')).text, "Didn't work.");
     assert.equal(portable.errorWords(new Error('network error: 404 not found')).details, 'network error: 404 not found');
+    assert.equal(portable.errorWords({ status: 500, body: 'Internal Server Error' }).text, "Ouroboros couldn't do this.");
     assert.equal(portable.errorWords({ status: 500, body: 'Internal Server Error' }).details, 'Internal Server Error');
     assert.equal(portable.errorWords({ status: 500, body: { code: 7 } }).details, '{"code":7}');
     assert.equal(portable.errorWords(undefined).text, "Didn't work.");
@@ -330,8 +350,9 @@ test('a restart the save requires, a warning and an error are never erased by ti
     assert.deepEqual(panel.words(), ['Saved. Took effect immediately. Warnings: Limit is below known spend.', 'warn']);
     await panel.press();
     panel.tick(10 * ACK);
-    assert.deepEqual(panel.words(), ["Not saved. Ouroboros couldn't do this.", 'danger'], 'a failed save is not an acknowledgement');
-    assert.equal(panel.raw(), 'Settings file is read-only.', "the server's own words stay one disclosure away");
+    assert.deepEqual(panel.words(), ['Not saved. Settings file is read-only.', 'danger'],
+        "a failed save is not an acknowledgement, and the server's own reason is its words");
+    assert.equal(panel.raw(), 'Settings file is read-only.', 'the raw text stays one disclosure away');
 });
 
 test('an edit of the budget fields clears the result that time never clears; a failed reach is owner words', async (t) => {
@@ -362,7 +383,7 @@ test('one timer owner: an older acknowledgement never erases what a newer save s
     panel.tick(ACK - 1000);
     await panel.press();  // a failing save inside the window: the first timer must not take it away
     panel.tick(ACK);
-    assert.deepEqual(panel.words(), ["Not saved. Ouroboros couldn't do this.", 'danger']);
+    assert.deepEqual(panel.words(), ['Not saved. Offline.', 'danger']);
     assert.equal(panel.raw(), 'Offline.');
     // Two plain saves: the second one's own full time counts, and the first one's timer is gone.
     await panel.press();
