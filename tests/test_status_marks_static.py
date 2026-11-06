@@ -71,7 +71,6 @@ warning | web/style.css | .new-project-trust-note | border, color
 warning | web/style.css | .settings-lan-hint[data-tone="warn"] | color
 warning | web/style.css | .skills-skip-glyph | color
 warning | web/style.css | .toast-warn | border-color, color
-warning | web/style.css | .updates-status-dot[data-tone="warn"] | color
 warning | web/style.css | .widget-callout[data-tone="warn"] | border-left-color
 warning | web/style.css | .widget-metric[data-tone="warn"] | border-left-color
 warning | web/style.css | .widget-table-status[data-tone="warn"] | color

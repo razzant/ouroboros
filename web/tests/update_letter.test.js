@@ -332,9 +332,9 @@ test('failed check preserves the visible prior description', () => {
 // --- Source pins: the DOM contract a pure projector cannot see --------------
 
 test('the description section keeps Check and Write as two compact actions outside its authored body', () => {
-    const actionRow = SOURCE.indexOf('class="settings-action-row updates-action-row"');
+    const actionRow = SOURCE.indexOf('<div class="dashboard-hero-actions"><button type="button" class="btn btn-primary" id="btn-update-primary" hidden>');
     const section = SOURCE.indexOf('<section class="updates-letter" id="updates-letter" aria-labelledby="updates-letter-label" hidden>');
-    const recovery = SOURCE.indexOf('<details class="updates-recovery">');
+    const recovery = SOURCE.indexOf('<details class="ui-disclosure updates-recovery">');
     assert.ok(actionRow > -1 && section > -1 && recovery > -1, 'the card template moved');
     assert.ok(actionRow < section, 'the letter belongs BELOW the single primary action');
     assert.ok(section < recovery, 'the letter belongs ABOVE the Recovery disclosure');
@@ -353,7 +353,10 @@ test('the description section keeps Check and Write as two compact actions outsi
     assert.match(card, /class="btn btn-ghost btn-sm updates-letter-refresh"/);
     assert.match(card, /aria-label="Check for updates"/);
     assert.match(card, /class="btn btn-default btn-sm updates-letter-write" id="updates-letter-write"/);
-    assert.equal((card.match(/<button/g) || []).length, 2);
+    const head = card.slice(card.indexOf('class="updates-letter-actions"'), card.indexOf('class="updates-letter-note"'));
+    assert.equal((head.match(/<button/g) || []).length, 2, 'Check and Write are the head\'s two actions');
+    // The body's one length control sits under it: the first part reads at once, Read all opens the rest.
+    assert.match(card, /<button type="button" class="btn btn-ghost btn-sm ui-list-more" id="updates-letter-more" hidden>Read all<\/button>/);
     // The note's words are the live region; the door to the running task's card sits beside it, outside it.
     assert.match(card, /<div class="updates-letter-note" id="updates-letter-note-line" hidden><span id="updates-letter-note" role="status" aria-live="polite"><\/span> <span id="updates-letter-task"><\/span><\/div>/);
     // Which notes draw it and where a press lands: tests/test_update_description_browser.py, through app.js.
@@ -365,7 +368,7 @@ test('the description section keeps Check and Write as two compact actions outsi
     const write = SOURCE.slice(SOURCE.indexOf("letterWrite.addEventListener('click'"));
     assert.match(write.slice(0, 1200), /apiClient\.updateDescription\(view\.write\.mode, view\.write\.key\)/);
     assert.doesNotMatch(write.slice(0, 1200), /fetchRemote: true/);
-    assert.match(card, /<details class="updates-letter-details"/);
+    assert.match(card, /<details class="ui-disclosure updates-letter-details"/);
 });
 
 
