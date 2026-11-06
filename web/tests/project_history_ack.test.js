@@ -296,7 +296,7 @@ function pollHarness({ read = true, hidden = false, failures = 1 } = {}) {
         ...readAhead,  // app.js imports these (DESIGN "Unread": a message read in another room)
         state: { projectSeenRevision: {} }, navState: { activeProjectId: 'p1' },
         projectInstances: new Map([['p1', inst]]), projectPaintRequests: new Map(), projectReveals: new Map(),
-        projectActivityIndex: null, knownProjectsJson: '', lastProjectRows: [],
+        projectActivityIndex: null, knownProjectsJson: '', lastProjectRows: [], projectsNav: { unreadRows: () => [] },
         closeProjectPanel() {}, paintProjectsNav() {}, syncNavigationState() {}, patchProjectActivityMarkers() {},
         refreshSharedProjectSeen() {},
         fetchJson: async (_url, init = {}) => {
@@ -382,10 +382,11 @@ function navigationHarness({ pendingWork, exitAtOnce = true }) {
     });
     vm.runInContext(`let projectNavigationGeneration = 0, projectPanelOpeningSince = 0;
         ${['cancelProjectPaint', 'destroyProjectInstance',
-        'closeProjectPanel', 'openProjectPanel', 'freshProjectRow', 'revealProjectQuestion'].map(lift).join('\n')}\n${ackSource}
+        'closeProjectPanel', 'openProjectPanel', 'resolveProjectRoom', 'freshProjectRow', 'revealProjectQuestion'].map(lift).join('\n')}\n${ackSource}
         const rooms = createRoomRetirement({ instances: projectInstances, cancelPaint: cancelProjectPaint, destroy: destroyProjectInstance });
         Object.assign(globalThis, { rooms });
-        globalThis.api = { open: (options) => openProjectPanel(lastProjectRows[0], options), close: () => closeProjectPanel() };`,
+        globalThis.api = { open: (options) => openProjectPanel(lastProjectRows[0], options), close: () => closeProjectPanel(),
+            openAs: (project, options) => openProjectPanel(project, options) };`,
     context);
     return { acked, built, held, project, context, api: context.api };
 }
@@ -416,6 +417,46 @@ for (const pendingWork of [true, false]) {
         assert.equal(main.transientCloses, 2);
     });
 }
+
+// Who may say which room opens (CLIENT_CONTRACT §6): the caller's own answer, or the registry asked by the id.
+test('a row that names its room opens as it stands; a newer answer is never replaced by the older feed row', async () => {
+    const h = navigationHarness({ pendingWork: false });
+    await h.api.openAs({ ...h.project, name: 'Renamed since that feed' });
+    assert.equal(h.context.projectPanelTitle.textContent, 'Renamed since that feed');
+    assert.equal(h.built.length, 1);
+});
+
+for (const [answer, says] of [[{ projects: [] }, 'gone'], [{ projects: [{ id: 'p1', name: 'P', chat_id: 9, lifecycle: 'deleting' }] }, 'deleting'],
+    [{}, 'unreadable']]) {
+    test(`a reference reads its room by its id: an older feed row opens nothing the registry answers ${says}`, async () => {
+        const h = navigationHarness({ pendingWork: false });
+        const reads = [], toasts = [];
+        Object.assign(h.context, { fmt: (text) => text, showToast: (text) => toasts.push(text),
+            apiClient: { projectById: async (id) => { reads.push(id); return answer; } } });
+        await h.api.openAs({ id: 'p1', name: 'P' }, { openOnly: true });
+        assert.deepEqual(reads, ['p1'], 'the feed names p1 active, and the registry is asked all the same');
+        assert.equal(h.built.length, 0, 'no room is built');
+        assert.equal(h.context.navState.activeProjectId, null, 'the view stays');
+        assert.equal(toasts.length, 1, 'and says why');
+    });
+}
+
+test('a reference opens what the registry answers for its id, a superseded read nothing', async () => {
+    const h = navigationHarness({ pendingWork: false });
+    const held = [];
+    Object.assign(h.context, { apiClient: { projectById: () => new Promise((resolve) => held.push(resolve)) } });
+    const first = h.api.openAs({ id: 'p1', name: 'Name the reference was drawn with' }, { openOnly: true });
+    h.api.close();
+    held.shift()({ projects: [{ ...h.project, name: 'Late' }] });
+    await first;
+    assert.equal(h.built.length, 0, 'a close supersedes the read');
+    const second = h.api.openAs({ id: 'p1', name: 'Name the reference was drawn with' }, { openOnly: true });
+    await flush();
+    held.shift()({ projects: [{ ...h.project, name: 'The name it has now' }] });
+    await second;
+    assert.equal(h.context.projectPanelTitle.textContent, 'The name it has now');
+    assert.equal(h.built.length, 1);
+});
 
 test('leaving a Project for Main returns Main to its newest message', async () => {
     const h = navigationHarness({ pendingWork: false });

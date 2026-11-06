@@ -67,7 +67,10 @@ def payload_continuation(ctx, run_id) -> bool:
 
 
 def bind_thread(gateway, request, route, invocation_id, *, workspace_root="", prior=None) -> dict:
-    """Bind before START_REQUESTED; recovery already holds these exact local routing keys."""
+    """Bind before START_REQUESTED; recovery already holds these exact local routing keys.
+    A host-minted root (the start's ``scope.ephemeral``) stays one-shot on the thread too
+    where the engine sweeps such threads' lanes (``ephemeral_scope``)."""
+    from ouroboros.delegate_registration_policy import ephemeral_scope
     from ouroboros.review_thread_continuity import ensure_execution_thread
 
     thread_id = str((prior or {}).get("thread_id") or "")
@@ -75,7 +78,8 @@ def bind_thread(gateway, request, route, invocation_id, *, workspace_root="", pr
         thread_id = ensure_execution_thread(
             gateway, route=route, root=request["scope"]["root"], mode=request["mode"],
             access=request["access"], workspace_root=workspace_root,
-            title="Ouroboros delegated plan", idempotency_key=f"delegate-thread:{invocation_id}")
+            title="Ouroboros delegated plan", idempotency_key=f"delegate-thread:{invocation_id}",
+            ephemeral=bool(request["scope"].get("ephemeral")) and ephemeral_scope(gateway, thread=True))
     request["_thread_id"] = thread_id
     return {"thread_id": thread_id}
 

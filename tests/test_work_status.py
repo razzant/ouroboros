@@ -262,7 +262,10 @@ def test_model_wait_is_the_owners_turn_only_when_it_requires_him():
 def test_project_hold_queue_finalizing_and_unknown():
     held = ws.classify_member(row("t", "queued", project_admission_hold={"label": "Waiting for Project verification"}))
     assert held["activity"] == "waiting" and held["reasons"][0]["text"] == "Waiting for Project verification"
-    assert ws.classify_member(row("t", "queued"))["activity"] == "queued"
+    queued = ws.classify_member(row("t", "queued"))
+    # A queued row records no cause and therefore has no secondary reason line.
+    assert queued["activity"] == "queued" and queued["reasons"] == [
+        {"code": "queued", "text": ""}]
     final = ws.classify_member(row("t", "finalizing"))
     assert (final["activity"], final["transition"]) == ("working", "finalizing")
     unknown = ws.classify_member(row("t", "unknown"))

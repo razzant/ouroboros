@@ -48,7 +48,9 @@ delegate capture arrived) leaves the rest waiting for that next run. Each candid
 through the same pass (``delegate_documents.release_owed_imports``, holds named ``document_<why>``); a task waits
 while either still does. Why the engine could not be asked at all
 (``engine_hold``) stands on the job row beside the tasks it leaves waiting, written when it changes. A pass reports what
-it newly saved of the engine's answers as ``observed``, which its caller logs.
+it newly saved of the engine's answers as ``observed``, which its caller logs. Each candidate also owes the engine one
+``taken`` decision per finished delegated result it holds whole, under the same tree proof (``delegate_result_taken``);
+the task waits while either duty does.
 """
 from __future__ import annotations
 
@@ -937,6 +939,7 @@ def retire_finished_review_threads(root: Any, *, engine: Any = None, live: Optio
     keeps the rest waiting (reported ``stopped``), which the maintenance child's next run takes up (``owed``). A pass
     that changed neither the cursor, the waiting tasks nor the engine's hold writes nothing."""
     from ouroboros import maintenance_jobs, store
+    from ouroboros.delegate_result_taken import tell_engine
     from ouroboros.maintenance_retirement import JOB
     from ouroboros.task_status import task_has_live_queue_ownership
     from ouroboros.task_store import terminal_writes_since
@@ -968,8 +971,9 @@ def retire_finished_review_threads(root: Any, *, engine: Any = None, live: Optio
                 run.stopped = True
                 break
             run.report["tasks"] += 1
-            wait = False  # the task waits while its threads or its managed documents do, each asked on its own
-            for step in (lambda: run.task(task_id) == WAIT, lambda: run.documents(task_id)):
+            wait = False  # the task waits while its threads, managed documents or engine decisions do, each asked on its own
+            for step in (lambda: run.task(task_id) == WAIT, lambda: run.documents(task_id),
+                         lambda: tell_engine(run, task_id) == WAIT):
                 try:
                     wait = run.stopped or step() or wait
                 except Exception as exc:  # one unreadable task never stops the pass; it is asked again
