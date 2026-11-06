@@ -468,13 +468,14 @@ def test_project_sources_keep_selected_target(direct_server_with_data, engine): 
                 opener = page.locator("#nav-projects-add")
                 opener.focus()
                 page.evaluate("window.openTestProject(); undefined")
-                expect(page.locator("[data-np-name]")).to_be_focused()
-                close = page.locator('.new-project-dialog [aria-label="Close"]')
-                close.focus()
+                name = page.locator("[data-np-name]")
+                expect(name).to_be_focused()
+                # The foot's Cancel is the one way out (no head Close, U024); the focus still wraps inside the dialog.
+                expect(page.locator('.new-project-dialog [aria-label="Close"]')).to_have_count(0)
                 page.keyboard.press("Shift+Tab")
                 expect(page.locator("[data-np-create]")).to_be_focused()
                 page.keyboard.press("Tab")
-                expect(close).to_be_focused()
+                expect(name).to_be_focused()
                 page.locator("[data-np-name]").fill("Scoped project")
                 page.locator(f'input[name="np-source"][value="{source}"]').check()
                 expected = {"name": "Scoped project"}

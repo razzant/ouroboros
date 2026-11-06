@@ -942,7 +942,8 @@ def test_short_question_and_routing_cards_keep_their_width_floor(subscription_ui
 
 @pytest.mark.parametrize('width', [1440, 390])
 def test_shared_dialog_head_wraps_a_long_title_and_keeps_close_inside(subscription_ui, width):
-    """A long unbroken skill name wraps in the shared modal head; Close keeps its size inside the dialog."""
+    """A long unbroken skill name wraps in the shared modal head; the confirmation's one way out is its foot's Cancel,
+    and the dialog stands in the middle of the window (U024)."""
     page = subscription_ui['page']
     page.set_viewport_size({'width': width, 'height': 844})
     open_app(subscription_ui)
@@ -951,11 +952,14 @@ def test_shared_dialog_head_wraps_a_long_title_and_keeps_close_inside(subscripti
             .openConfirmDialog({ title, body: 'Grant access?', confirmLabel: 'Grant access' }); }""", title)
         box = page.locator('.confirm-dialog').evaluate("""dialog => {
             const d = dialog.getBoundingClientRect(), h = dialog.querySelector('h3').getBoundingClientRect();
-            const c = dialog.querySelector('.marketplace-modal-head [data-confirm-cancel]').getBoundingClientRect();
-            return {inside: h.left >= d.left && h.right <= c.left && c.right <= d.right + 0.5,
-                close: c.width, overflow: document.documentElement.scrollWidth - innerWidth};
+            const c = dialog.querySelector('.marketplace-modal-actions [data-confirm-cancel]').getBoundingClientRect();
+            return {inside: h.left >= d.left && h.right <= d.right + 0.5 && c.right <= d.right + 0.5,
+                headClose: dialog.querySelectorAll('.marketplace-modal-head button').length,
+                centred: Math.abs((d.top + d.bottom) / 2 - innerHeight / 2) <= 1,
+                cancel: c.width, overflow: document.documentElement.scrollWidth - innerWidth};
         }""")
-        assert box['inside'] and box['close'] > 50 and box['overflow'] <= 0, (title, box)
+        assert box['inside'] and box['headClose'] == 0 and box['centred'] and box['cancel'] > 50, (title, box)
+        assert box['overflow'] <= 0, (title, box)
         setup_browser.capture(page, f'dialog-head-{width}-{len(title)}')
         page.keyboard.press('Escape')
         page.wait_for_selector('.confirm-dialog', state='detached')

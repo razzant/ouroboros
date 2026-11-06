@@ -108,6 +108,10 @@ html[data-layout="stack"] .shell-icon-control {
     display: none;
 }
 
+/* A layer's root (the phone drawer, the Project panel) takes the focus as it opens: a landing point, never a control,
+   so it draws no ring, the engine's blue one included (layers.js, U122); the controls inside keep theirs. */
+[data-layer-landing]:focus { outline: none; }
+
 /* The sidebar's zones (docs/DESIGN.md "Shell"): a pinned head (Main Chat), the Projects list as the ONE scroller, the
    tools right after it, and the foot (the version and the update) at the bottom edge; free room lies between the
    tools and the foot, never between the list and the tools. Row
@@ -5260,6 +5264,9 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 
+/* Every layer over the room lies over one veil, the theme's (U020): the dialogs here, the Project panel's scrim, the
+   file dialog's and the document reader's. foundation-request: name ui.css's --row-lift-dim (dark black .45, light
+   ink .24, today the feed under a long-pressed row) --scrim, the one veil token of every layer. */
 .ui-modal-backdrop,
 :where(.marketplace-modal-backdrop) {
     position: fixed;
@@ -5268,12 +5275,15 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     display: flex;
     justify-content: center;
     overflow-y: auto;
-    background: rgba(0, 0, 0, 0.55);
+    background: var(--row-lift-dim);
 }
 
+/* A dialog stands in the middle of the window, clear of the bars (U024); one taller than the window starts at its top
+   and scrolls (the auto margins centre only while there is room). */
 .ui-modal,
 :where(.marketplace-modal) {
     width: 100%;
+    margin-block: auto;
     display: flex;
     flex-direction: column;
     border: 1px solid transparent;
@@ -6977,26 +6987,19 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     color: var(--text-primary);
 }
 
-.confirm-dialog-details {
-    border-top: 1px solid var(--divider);
-    padding-top: 10px;
-}
-
-.confirm-dialog-details > summary {
-    cursor: pointer;
-    user-select: none;
-}
-
+/* The facts behind a dialog's one line open from the one disclosure (ui.css details.ui-disclosure). */
 .confirm-dialog-detail-list {
     display: grid;
-    gap: 8px;
-    margin: 10px 0 0;
+    gap: var(--space-2);
+    margin: 0;
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
 }
 
 .confirm-dialog-detail-row {
     display: grid;
     grid-template-columns: minmax(110px, 0.35fr) minmax(0, 1fr);
-    gap: 10px;
+    gap: var(--space-3);
 }
 
 .confirm-dialog-detail-row dt {
@@ -8252,43 +8255,22 @@ body.keyboard-open .chat-instance-panel .chat-input-area {
     width: min(560px, 94vw);
 }
 
+/* The dialog body's gap parts its fields; none adds a margin of its own. */
 .new-project-field {
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    margin-bottom: var(--space-3);
+    gap: var(--space-1);
     font-size: var(--type-body);
 }
 
-.new-project-sources {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    margin: 0 0 var(--space-3);
-    padding: var(--space-2) var(--space-3);
-    border: 1px solid var(--divider);
-    border-radius: var(--radius-inner);
-    font-size: var(--type-body);
-}
-
-.new-project-sources legend {
-    padding: 0 6px;
-    color: var(--text-muted);
-    font-size: 12px;
-}
-
-.new-project-sources label {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    cursor: pointer;
-}
+/* The working folder is a field like the name (U023): its label, its options as one wrapping row of the shared
+   crimson-accent radios (ui.css .ui-checkbox), no outlined box, and one line under them for the chosen option. */
+.new-project-sources { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
+.new-project-sources > legend { padding: 0; margin-bottom: var(--space-1); color: var(--text-meta); font-size: var(--type-body); }
+.new-project-source-choices { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); color: var(--text-primary); }
+.new-project-source-choices > label { display: inline-flex; align-items: center; gap: var(--space-2); cursor: pointer; }
 
 .new-project-selected-target { overflow-wrap: anywhere; }
-
-.new-project-source-detail {
-    margin-bottom: var(--space-3);
-}
 
 .new-project-browser {
     border: 1px solid var(--divider);
@@ -8339,20 +8321,15 @@ body.keyboard-open .chat-instance-panel .chat-input-area {
     font-size: 12px;
 }
 
+/* A warning on a row whose body cannot show it (DESIGN principle 3): the warning's tint in light, a neutral body with
+   the warning's words on dark; no outline. */
 .new-project-trust-note {
-    padding: 8px 10px;
-    border: 1px solid var(--status-warn-border);
+    padding: var(--space-2) var(--space-3);
     border-radius: var(--radius-inner);
+    background: var(--status-warn-bg);
     color: var(--status-warn-word, var(--text-primary));
-    font-size: 12.5px;
-    margin: 0 0 var(--space-2);
-}
-
-.new-project-error {
-    color: var(--status-error-fg);
-    font-size: 12.5px;
-    margin: 0 0 var(--space-2);
-    white-space: pre-wrap;
+    font-size: var(--type-meta);
+    margin: 0;
 }
 
 .project-panel {
@@ -8426,7 +8403,7 @@ body.keyboard-open .chat-instance-panel .chat-input-area {
     inset: 0;
     z-index: var(--z-project-scrim);
     cursor: default;
-    background: rgba(0, 0, 0, 0.18);
+    background: var(--row-lift-dim);
     backdrop-filter: blur(1.5px);
     -webkit-backdrop-filter: blur(1.5px);
     opacity: 0;
@@ -9570,8 +9547,9 @@ body.keyboard-open .project-panel {
 
 .chat-file-dialog { width: min(420px, calc(100vw - 32px)); }
 
+/* An engine whose ::backdrop does not inherit custom properties yet (WebKit before 17.4) keeps the dark veil. */
 .chat-file-dialog::backdrop,
-.document-reader::backdrop { background: rgba(0, 0, 0, 0.64); }
+.document-reader::backdrop { background: var(--row-lift-dim, rgba(0, 0, 0, 0.45)); }
 
 .chat-file-dialog-panel { padding: 18px; }
 

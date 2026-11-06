@@ -417,11 +417,8 @@ const PAUSING_PHASES = new Set(['budget_pausing', 'pausing']);
  * @returns {string}
  */
 export function restartConfirmBody(activities) {
-    const lines = [
-        'Running tasks stop, then eligible saved work resumes after the restart. Tasks already paused stay paused.',
-        'Runnable queued tasks return to the queue. Existing holds and limits still apply.',
-        'Saved settings apply after the restart: work that follows a model setting resumes on the current setting; task-specific choices stay.',
-    ];
+    // One line says what happens; the policy is the dialog's Details (RESTART_FACTS); a gap that changes the choice stays.
+    const lines = ['Running tasks stop and continue after the restart.'];
     if (!Array.isArray(activities) || activities.some((row) => row?.phase === 'unknown')) {
         lines.push('Pause status could not be read: a task that is still pausing would be interrupted instead of staying paused.');
         if (!Array.isArray(activities)) return lines.join('\n');
@@ -439,6 +436,12 @@ export function restartConfirmBody(activities) {
     }
     return lines.join('\n');
 }
+
+export const RESTART_FACTS = { summary: 'Details', rows: [
+    { label: 'Running tasks', value: 'They stop, then eligible saved work resumes after the restart. Tasks already paused stay paused.' },
+    { label: 'Queued tasks', value: 'Runnable ones return to the queue. Existing holds and limits still apply.' },
+    { label: 'Settings', value: 'Saved settings apply: work that follows a model setting resumes on the current setting; task-specific choices stay.' },
+] };
 
 async function readLiveActivities() {
     const { state: data } = await readState();  // a refusal, an unparsable body or no answer is unknown, never "none"
@@ -473,10 +476,7 @@ export async function confirmAndSendRestart({ openConfirmDialog, ws, readActivit
         activities = null;
     }
     const confirmed = await openConfirmDialog({
-        title: 'Restart agent',
-        body: restartConfirmBody(activities),
-        confirmLabel: 'Restart',
-        danger: true,
+        title: 'Restart agent', body: restartConfirmBody(activities), details: RESTART_FACTS, confirmLabel: 'Restart', danger: true,
     });
     if (!confirmed) return 'cancelled';
     const result = ws?.send?.({ type: 'command', cmd: '/restart' }, { queue: false });

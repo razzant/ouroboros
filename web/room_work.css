@@ -392,7 +392,7 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
 .rw-failure { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3) var(--space-4); }
 .rw-failure[hidden], .rw-failure details[hidden] { display: none; }
 .rw-failure-lead { margin: 0; color: var(--status-error-fg); font-size: var(--type-body); font-weight: 500; }
-.rw-shade:has(> .rw-failure:not([hidden])) .rw-extras > [data-chat-command="restart"] { display: none; }
+.rw-failure:not([hidden]) ~ .rw-extras > [data-chat-command="restart"] { display: none; }
 
 /* ---- Back to reading: the same baseline as ↓ "Scroll to latest message", both quiet navigation -------- */
 .rw-back {
