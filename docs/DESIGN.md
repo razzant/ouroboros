@@ -1298,10 +1298,21 @@ reader; composer files stay.
   controls translate. Titles preserve line breaks and wrap whole in a bounded
   keyboard scroller; actions wrap before squeezing the name. On a phone sheet
   the name keeps its row beside Close and every action stays in sight under it
-  in two groups, the view (`Formatted`/`Source`, `Fit`/`Actual size`), then the
+  in two groups, the view (`Formatted`/`Source`) or image-scene zoom controls
+  (`−`/`Reset`/`+`), then the
   file's (Copy, Open, Download): one row when both fit, else a row each; nothing
-  goes under a menu (audit №5, owner 2026-10-28T22:09Z).
-- Images open at `Fit` (whole, never enlarged); `Actual size` scrolls their pixels.
+  goes under a menu (audit №5, owner 2026-10-28T22:09Z). Image-only A Scene is
+  the scoped exception chosen by the owner on 2026-11-05: on a coarse phone its
+  existing chrome is visible when opened and a tap on the image stage toggles it;
+  keyboard focus, Escape and the existing actions remain available. Text readers
+  and non-image sheets keep the always-visible rule. This change does not add
+  swipe or sibling navigation between images.
+- Images open as an image scene fitted to the stage. The scene owns a bounded
+  focal zoom with visible minus/reset/plus controls, double click/tap zoom,
+  pinch zoom and pan; keyboard arrows pan while zoomed and `0`/Home resets.
+  Phone/coarse-pointer chrome is visible when opened and can be toggled by a
+  stage tap; keyboard focus, Escape and the existing file actions remain
+  available. There is no gallery or sibling-image swipe in this change.
 - Markdown follows the reading size and heading ladder of a rich answer (§1).
   Single newlines inside a paragraph are soft; explicit hard breaks stay.
   Raw HTML and SVG stay literal, images stay references and never load, and

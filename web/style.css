@@ -9870,6 +9870,7 @@ body.keyboard-open .project-panel {
    them, never inside one while it fits. */
 .document-reader-actions,
 .document-reader-views,
+.document-reader-zoom,
 .document-reader-file {
     display: flex;
     flex-wrap: wrap;
@@ -9961,8 +9962,7 @@ body.keyboard-open .project-panel {
 
 /* An image: Fit shows it whole and never enlarges it; Actual size scrolls its own pixels. */
 .document-reader-body.is-image {
-    display: grid;
-    grid-template: minmax(0, 1fr) / minmax(0, 1fr);
+    display: block;
 }
 
 .document-reader-image {
@@ -9970,9 +9970,62 @@ body.keyboard-open .project-panel {
     max-height: 100%;
     margin: auto;
     object-fit: contain;
+    user-select: none;
+    -webkit-user-drag: none;
 }
 
 .document-reader-body.is-actual .document-reader-image { max-width: none; max-height: none; }
+
+/* Image scenes reuse the reader's existing chrome and actions, but let the
+   picture occupy the stage. Text, Place and Skill sheets never receive this
+   modifier. */
+.document-reader.is-image-scene .document-reader-panel { position: relative; }
+.document-reader.is-image-scene .document-reader-head {
+    position: absolute;
+    z-index: 2;
+    inset: 0 0 auto;
+    border-bottom: 0;
+    background: linear-gradient(to bottom, var(--bg-primary), transparent);
+}
+
+.document-reader.is-image-scene .document-reader-body.is-image {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding: var(--space-3) var(--space-4) var(--space-4);
+    background: var(--bg-primary);
+    overflow: hidden;
+}
+
+.document-reader-image-stage {
+    position: relative;
+    display: grid;
+    place-items: center;
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    touch-action: none;
+    user-select: none;
+}
+
+.document-reader-image-stage .document-reader-image {
+    transform: translate3d(var(--image-x, 0px), var(--image-y, 0px), 0)
+        scale(var(--image-scale, 1));
+    transform-origin: center center;
+    cursor: grab;
+    will-change: transform;
+}
+
+.document-reader-image-stage.is-image-panned .document-reader-image { cursor: grabbing; }
+
+.document-reader-zoom .btn {
+    min-width: var(--button-min-height);
+}
+
+/* [hidden] also removes the scene controls from the dialog focus cycle. */
+.document-reader.is-image-scene.is-scene-chrome-hidden .document-reader-head { display: none; }
 
 /* A phone reads the document on a full sheet; Close returns to the same place in the chat. */
 @media (max-width: 620px) {
@@ -10002,6 +10055,12 @@ body.keyboard-open .project-panel {
 
     .document-reader-body {
         padding: var(--space-4) var(--space-3) calc(var(--space-5) + env(safe-area-inset-bottom, 0px));
+    }
+
+    .document-reader.is-image-scene .document-reader-body.is-image {
+        padding: calc(var(--space-3) + env(safe-area-inset-top, 0px))
+            var(--space-3)
+            calc(var(--space-4) + env(safe-area-inset-bottom, 0px));
     }
 }
 
