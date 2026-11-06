@@ -534,7 +534,7 @@ def test_each_finalization_nudge_names_its_own_hold_cause(tmp_path, monkeypatch,
     assert _hold_cause(tools._ctx) == case and _hold_cause(tools._ctx) == "", "read once"
 
 
-@pytest.mark.parametrize("code", ["NANNY_DID_NOT_DELEGATE", "NANNY_DELEGATED_RUN_FAILED",
+@pytest.mark.parametrize("code", ["NANNY_DELEGATED_RUN_PENDING", "NANNY_DELEGATED_RUN_FAILED",
                                   "CONFIGURED_ACTOR_INCOMPLETE"])
 def test_a_nanny_hold_keeps_the_exact_code_its_own_rows_carry(tmp_path, code):
     from tests.test_nanny_finalization_nudge import _custody_drive, _emit_settled, _emit_started, _tools
@@ -542,7 +542,7 @@ def test_a_nanny_hold_keeps_the_exact_code_its_own_rows_carry(tmp_path, code):
     drive, task_id = _custody_drive(tmp_path), "child-1"
     ctx = SimpleNamespace(_nanny_route_dispatched=True, _nanny_finalization_injected=False, drive_root=drive,
                           event_queue=None, drive_logs=drive / "logs", task_contract={}, task_metadata={})
-    if code != "NANNY_DID_NOT_DELEGATE" and code != "CONFIGURED_ACTOR_INCOMPLETE":
+    if code != "CONFIGURED_ACTOR_INCOMPLETE":
         _emit_started(drive, "run-1", task_id)
     if code == "NANNY_DELEGATED_RUN_FAILED":
         _emit_settled(drive, "run-1", task_id, "failed")
@@ -562,14 +562,18 @@ def test_a_nanny_hold_keeps_the_exact_code_its_own_rows_carry(tmp_path, code):
 
 
 def test_a_real_nanny_hold_names_its_code_through_the_loop(turn):
-    turn.registry._ctx._nanny_route_dispatched = True  # dispatched onto the delegated substrate, no delegate_start
+    # A configured session actor finalizing by its own calls, with no leaf run and no typed zero-run decision.
+    turn.registry._ctx._nanny_route_dispatched = True
+    turn.registry._ctx._configured_actor_bootstrap = {
+        "route_available": True, "exact_start_pending": True, "physical_started": False,
+        "zero_run_receipt_recorded": False, "selected_subagent_id": "session-a"}
     answer = "Done by my own calls."
     text, _usage, _trace = turn.run([{"content": answer}, finish(answer)])
 
     assert text == answer and len(turn.calls) == 2
     assert [facts(row) for row in holds(turn.root)] == [
-        (1, "prose", "finalization_nudge", "NANNY_DID_NOT_DELEGATE", sha(answer))]
-    assert any(str(row.get("content")).startswith("[SYSTEM REMINDER]\n⚠️ NANNY_DID_NOT_DELEGATE:")
+        (1, "prose", "finalization_nudge", "CONFIGURED_ACTOR_INCOMPLETE", sha(answer))]
+    assert any(str(row.get("content")).startswith("[SYSTEM REMINDER]\n⚠️ CONFIGURED_ACTOR_INCOMPLETE:")
                for row in turn.calls[-1])
 
 

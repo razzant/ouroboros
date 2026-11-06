@@ -17,15 +17,14 @@ One normative shared suite over the two seams every install crosses:
    (reuse, not a copy): nothing touches the network and no fixture carries a
    real credential.
 
-2. **The executor axis (native | harness)** — every value of the axis
-   vocabulary (``subagents.SUBAGENT_EXECUTORS``) must pass the same typed
-   rule-table contract across every route state (launch semantics), leave the
-   durable delegation artifact when a run starts (artifact semantics), and
-   refuse typed — never silently — when its substrate is missing (refusal
-   semantics). A new axis point added to the vocabulary without a conformance
-   row turns this suite red. Native-side task artifacts (task results,
-   outcome receipts) are pinned by their own suites; here the native point
-   pins the resolution row and the no-daemon-contact guarantee.
+2. **The executor axis (native | harness)** — every request the rule table
+   accepts must pass the same typed contract across every route state (launch
+   semantics), leave the durable delegation artifact when a run starts
+   (artifact semantics), and refuse typed — never silently — when its substrate
+   is missing (refusal semantics); anything else, `auto` included, is refused.
+   Native-side task artifacts (task results, outcome receipts) are pinned by
+   their own suites; here the native point pins the resolution row and the
+   no-daemon-contact guarantee.
 """
 
 from __future__ import annotations
@@ -40,7 +39,6 @@ from tests.test_llm_provider_golden import _observe
 
 from tests._delegated_transport_shared import (  # noqa: F401  (autouse fixture applies on import)
     _HealthStub,
-    _dispatch,
     _owned_gateway_uses_each_test_transport,
     _started_request,
 )
@@ -434,12 +432,6 @@ EXECUTOR_MATRIX: Dict[str, Dict[str, tuple]] = {
         "unavailable": ("native", "requested_native", False),
         "spent": ("native", "requested_native", False),
     },
-    "auto": {
-        "not_configured": ("native", "harness_not_configured", False),
-        "ready": ("harness", "harness_ready", False),
-        "unavailable": ("native", "daemon_unreachable", False),
-        "spent": ("native", SUBSCRIPTION_WINDOW_EXHAUSTED, False),
-    },
     "harness": {
         "not_configured": ("blocked", "harness_not_configured", True),
         "ready": ("harness", "harness_ready", False),
@@ -456,15 +448,14 @@ _ROUTE_STATES: Dict[str, Dict[str, Any]] = {
 }
 
 
-def test_executor_axis_conformance_derives_from_the_vocabulary():
-    """Structural completeness: a new executor value added to the axis
-    vocabulary without a conformance row here is RED."""
-    assert set(EXECUTOR_MATRIX) == set(subagents.SUBAGENT_EXECUTORS), (
-        "SUBAGENT_EXECUTORS and EXECUTOR_MATRIX drifted apart — a new axis "
-        "point must ship with its conformance outcome row"
-    )
+def test_executor_axis_conformance_covers_every_accepted_request():
+    """Structural completeness: the table accepts exactly the matrix's requests;
+    the retired `auto` and the `blocked` outcome are refused, typed."""
     for requested, rows in EXECUTOR_MATRIX.items():
         assert set(rows) == set(_ROUTE_STATES), requested
+    for refused in ("auto", "blocked", "magic"):
+        with pytest.raises(ValueError, match="harness, native"):
+            subagents.resolve_subagent_executor(refused)
 
 
 def test_rule_table_outcome_is_typed_and_closed(subtests):
@@ -483,35 +474,20 @@ def test_rule_table_outcome_is_typed_and_closed(subtests):
                     assert resolution.reset_at == "2030-01-01T00:00:00Z"
 
 
-def test_unknown_executor_is_refused_typed_at_both_seams():
-    with pytest.raises(ValueError, match="auto, harness, native"):
-        subagents.normalize_subagent_executor("magic")
-    with pytest.raises(ValueError):
-        subagents.resolve_subagent_executor("magic")
+@pytest.mark.parametrize("stored", ["native", "warp-drive", None])
+def test_dispatch_rowless_point_runs_native_and_never_contacts_the_daemon(monkeypatch, stored):
+    """A row-less child, whatever its stored executor (stale values included), is
+    the native point: no gateway is constructed even with a legacy route set."""
+    from ouroboros.gateways import claudexor as gw
 
+    def _boom(*_a, **_k):
+        raise AssertionError("the native point must not construct a gateway")
 
-def test_schema_vocabulary_and_rule_table_cover_the_same_axis():
-    for value in subagents.SUBAGENT_EXECUTORS:
-        assert subagents.normalize_subagent_executor(value) == value
-
-
-def test_dispatch_native_point_never_contacts_the_daemon(monkeypatch):
-    res = _dispatch(
-        "native", monkeypatch=monkeypatch,
-        raises=AssertionError("the native point must not construct a gateway"),
-    )
-    assert (res.executor, res.reason) == ("native", "requested_native")
-
-
-def test_dispatch_stale_unknown_executor_degrades_to_auto_not_a_crash(monkeypatch):
-    res = _dispatch("warp-drive", monkeypatch=monkeypatch)
-    assert res.executor in ("native", "harness") and not res.blocked
-
-
-def test_dispatch_plain_task_is_not_subject_to_the_axis(monkeypatch):
     monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "some-route=weak:low")
-    res = subagents.dispatch_executor_resolution({})
-    assert res.executor in ("native", "harness")
+    monkeypatch.setattr(gw, "ClaudexorGateway", _boom)
+    task = {"delegation_role": "subagent", **({"requested_executor": stored} if stored else {})}
+    res = subagents.resolve_subagent_dispatch(task).executor_resolution
+    assert (res.executor, res.reason, res.blocked) == ("native", "requested_native", False)
 
 
 def test_harness_point_refusal_without_a_route_is_typed(tmp_path, monkeypatch):
