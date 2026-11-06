@@ -94,8 +94,9 @@ _TRANSPORT_NESTED = {
                      "workspace_name"),
 }
 # Bumped when ``row_meta``'s facts change (5: a transport keeps only what its readers read; 6: and the author
-# fact's; 7: the sending work, the conversation's name and audience, a finish's sentence and its fold): a stored
-# prefix of another version is another source, read live until the maintenance job ``memory_tail`` refills it.
+# fact's; 7: the sending work, the conversation's name and audience, a finish's sentence and its fold, a project
+# closure notice's delivery): a stored prefix of another version is another source, read live until the
+# maintenance job ``memory_tail`` refills it.
 _META_VERSION = 7
 
 Entry = Tuple[Dict[str, Any], Dict[str, Any], int]
@@ -119,6 +120,8 @@ def row_meta(row: Mapping[str, Any]) -> Dict[str, Any]:
 
         # Canonical terminal projections already carry the verdict before they drop delivery fields.
         meta["quiet_finish"] = (row["quiet_effective"] is True if "quiet_effective" in row else quiet_finish(dict(row)))
+    if row.get("type") == "project_closure" and row.get("delivery_id"):  # the closing page that names it links it
+        meta["delivery_id"] = str(row["delivery_id"])  # (``memory_sealing.closure_notices``)
     quiz = row.get("quiz") if isinstance(row.get("quiz"), dict) else {}
     if isinstance(contact := row.get("presence_contact") or quiz.get("presence_contact"), dict):
         meta["presence_contact"] = dict(contact)  # ``presence_owner_contact.private_main_row`` reads it

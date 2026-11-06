@@ -73,18 +73,39 @@ def linked_rows(root, store, by_room):
         pages, by_room)
 
 
+def _closures(pages):
+    """``{room: the closure deliveries its closing pages name}`` (``metadata.closure_delivery``)."""
+    named = {}
+    for page in pages:
+        if (page.get("metadata") or {}).get("closure_delivery"):
+            named.setdefault(str(page["room_id"]), set()).add(page["metadata"]["closure_delivery"])
+    return named
+
+
 def closure_notices(pages, by_room):
-    """``close_project`` writes the room's page from its closing note, then the host posts that closure's System row
-    there (``project_closure``, delivered after the page): the first such open row after a closing page is the same
-    act's, linked below it; a later reopening notice is not."""
-    found = set()
-    for page in sorted((page for page in pages if (page.get("metadata") or {}).get("closes_project")), key=_terminal_after):
-        notice = next((address for address, meta, pos in by_room.get(str(page["room_id"]), ())
-                       if meta.get("type") == "project_closure" and pos > _terminal_after(page)
-                       and address["row_sha256"] not in found), None)
-        if notice is not None:
-            found.add(notice["row_sha256"])
-    return found
+    """``close_project`` writes the room's page from its closing note, naming the delivery of the System row it then
+    posts there (``project_closure``): that one row, wherever it lands, is linked below the page; a reopening's notice
+    is its own delivery. No position or text decides it."""
+    return {address["row_sha256"] for room, ids in _closures(pages).items()
+            for address, meta, _pos in by_room.get(room, ()) if meta.get("delivery_id") in ids}
+
+
+def closure_link(root, record):
+    """A closing page's own closure notice (``closure_notices``) as one line with its exact address and reader, or
+    that it is not in the room yet; nothing for any other record."""
+    delivery, project = ((record.get("metadata") or {}).get(key) for key in ("closure_delivery", "closes_project"))
+    if not delivery or record.get("kind") != "page":
+        return []
+    try:  # read from the page's first row on; a first address that no longer resolves reads the room whole
+        rows = chat_chain.iter_room_rows(root, record["room_id"], from_addr=(record.get("covers") or {}).get("first"))
+    except (chat_chain.RowAddressError, ValueError):
+        rows = chat_chain.iter_room_rows(root, record["room_id"])
+    found = next((address for address, row, _pos in rows if row.get("delivery_id") == delivery), None)
+    if found is None:
+        return [f"- The closure notice of project {project} (delivery {delivery}) is not in the room yet."]
+    at = chat_chain.format_address(found)
+    return [f"- The closure notice of project {project}: memory_read(room_id='{record['room_id']}', rows=true, "
+            f"from='{at}', to='{at}')"]
 
 
 def terminal_links(root, record, cache=None):

@@ -404,11 +404,12 @@ def check_quotes(root: Any, quotes: Any) -> Tuple[bool, Optional[int]]:
 
 def publish_covered_page(root: Path, store: ChronicleStore, author: Dict[str, Any], room: str, text: str,
                          covers_arg: Dict[str, Any], *, quotes: Iterable[Any] = (), expected_sequence: Optional[int] = None,
-                         closes_project: str = "") -> Tuple[PublishResult, Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+                         closes_project: str = "", closure_delivery: str = "",
+                         ) -> Tuple[PublishResult, Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     """Expand a page's covers (``_expand``) and publish it: ``(result, covers, coverage facts, host stamp)``, as
-    ``chronicle_write(kind='page')`` and ``close_project`` (its closing note, ``closes_project``: its notice, posted
-    after the page, is linked below it) write one. An unresolved bound raises ``chat_chain.RowAddressError``; covers
-    that name nothing open raise ``ValueError``."""
+    ``chronicle_write(kind='page')`` and ``close_project`` (its closing note, ``closes_project``: the notice it posts
+    after the page, ``closure_delivery``, is linked below it) write one. An unresolved bound raises
+    ``chat_chain.RowAddressError``; covers that name nothing open raise ``ValueError``."""
     lineage = row_lineage(root)
     covers, facts, rows = _expand(root, room, lineage, from_addr=covers_arg.get("from"), to_addr=covers_arg.get("to"),
                                   task_ids=covers_arg.get("task_ids"), note_ids=covers_arg.get("note_ids"),
@@ -426,7 +427,8 @@ def publish_covered_page(root: Path, store: ChronicleStore, author: Dict[str, An
     result = store.publish_page(room_id=room, text=text, covers=covers, author=author, quotes=quotes or (), host_stamp=stamp,
                                 metadata={"coverage_facts": facts, "room_label": label,
                                           "terminal_after_pos": max((pos for _a, _r, pos in chat_chain.iter_room_rows(root, room)), default=-1),
-                                          **({"closes_project": closes_project} if closes_project else {})},
+                                          **({"closes_project": closes_project, "closure_delivery": closure_delivery}
+                                             if closes_project else {})},
                                 quote_resolver=resolver, expected_sequence=expected_sequence)
     return result, covers, facts, stamp
 
@@ -1005,8 +1007,8 @@ def _read_node(root: Path, node_id: str, start: int, limit: int, revision: str =
     if record is None:
         raise ValueError(f"memory node {node_id} not found")
     shown, document = _node_document(store, record, revision)
-    from ouroboros.memory_sealing import terminal_links
-    links = terminal_links(root, shown)
+    from ouroboros.memory_sealing import closure_link, terminal_links
+    links = terminal_links(root, shown) + closure_link(root, shown)
     if links:
         document += "\n\nHost-linked terminal facts (outside page coverage):\n" + "\n".join(links)
     told = told_by(store, [shown["id"]]).get(shown["id"]) if shown.get("kind") in STORY_KINDS else None

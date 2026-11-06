@@ -472,7 +472,7 @@ def _list_projects(ctx: ToolContext, limit: int = 50, closed: Optional[bool] = N
 
 
 def _close_project(ctx: ToolContext, project_id: str, note: str, reopen: bool = False) -> str:
-    """Record a project decision and owe its owner one System row in that room."""
+    """Record a project decision and owe its owner one System row in that room, after a closing page that names it."""
     meta = getattr(ctx, "task_metadata", {}) or {}
     lineage = (getattr(ctx, "task_contract", {}) or {}).get("lineage") or {}
     if str(meta.get("delegation_role") or lineage.get("delegation_role") or "") == "subagent":
@@ -502,25 +502,26 @@ def _close_project(ctx: ToolContext, project_id: str, note: str, reopen: bool = 
     text = f"Ouroboros ({task_id}) {action} this project. {note.strip()}"
     if not reopen:
         text += " A message from you in this room or a new task will reopen it."
+    notice = f"project-closure:{uuid.uuid4().hex}"  # the page names it first; the notice is posted after the page
+    page = "" if reopen else _closing_page(ctx, root, project, note.strip(), notice)
     try:
         delivery = outbox.enqueue_terminal_delivery_outcome(root, {
             "type": "send_message", "chat_id": project["chat_id"],
-            "role": "system", "system_type": "project_closure",
-            "text": text, "delivery_id": f"project-closure:{uuid.uuid4().hex}",
+            "role": "system", "system_type": "project_closure", "text": text, "delivery_id": notice,
         }, event_queue=getattr(ctx, "event_queue", None))
     except Exception:
         log.warning("Project closure committed but room notice failed", exc_info=True)
         delivery = outbox.ENQUEUE_UNAVAILABLE
     suffix = ("Room notice queued." if delivery in {outbox.ENQUEUE_QUEUED, outbox.ENQUEUE_ALREADY_DELIVERED}
               else f"Room notice delivery is {delivery}; the project change is saved.")
-    page = "" if reopen else _closing_page(ctx, root, project, note.strip())
     return f"OK: project {project['id']} is {state}. {suffix}{page}"
 
 
-def _closing_page(ctx: ToolContext, root: Any, project: Dict[str, Any], note: str) -> str:
+def _closing_page(ctx: ToolContext, root: Any, project: Dict[str, Any], note: str, notice: str) -> str:
     """S2: closing a project writes its room's last page from the closing note, over the room's open rows, as
-    ``chronicle_write(kind='page', covers={'to': …})`` writes one (``tools.chronicle.publish_covered_page``). Nothing
-    open writes none; a page the store refuses, or memory not yet active, leaves the closure standing and says why."""
+    ``chronicle_write(kind='page', covers={'to': …})`` writes one (``tools.chronicle.publish_covered_page``), naming
+    the delivery of the closure's System notice (``notice``, posted after it). Nothing open writes none; a page the
+    store refuses, or memory not yet active, leaves the closure standing and says why."""
     from ouroboros import chat_chain, memory_inventory
     from ouroboros.tools.chronicle import _activated, _NotActivated, _signed_author, publish_covered_page
 
@@ -534,7 +535,7 @@ def _closing_page(ctx: ToolContext, root: Any, project: Dict[str, Any], note: st
             return f" No page: a {role} drafts no project's last page."
         newest = chat_chain.format_address(max(entries, key=lambda entry: entry[2])[0])
         result, covers, _facts, _stamp = publish_covered_page(root, _activated(root), author, room, note, {"to": newest},
-                                                              closes_project=str(project["id"]))
+                                                              closes_project=str(project["id"]), closure_delivery=notice)
     except _NotActivated:
         return " No page: my memory is not active yet; the closure stands."
     except Exception as exc:  # a store refusal path or an unreadable room never undoes the closure
