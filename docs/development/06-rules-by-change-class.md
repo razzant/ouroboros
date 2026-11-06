@@ -107,7 +107,7 @@ Run roots are append-only outside `repo/` and live `data/`; the focused contract
 - Outside Cyber Pro the default shell lane carries target-aware git policy (`git_shell_policy.py`): `commit_reviewed` remedies self-repo changes; `git init`/`commit`/`push` in an external project tree is ordinary task work.
 - Renames stay callable but hidden (`ToolEntry.alias_for`) or retire into `TOOL_NAME_ALIASES` (saved names resolve, uncallable). `registry_guards._disabled_tools` pairs aliases and splits narrow forms; Presence grants of consolidated names never migrate (`tests/test_tool_facade_boundaries.py`). `claude_code_edit` disables `delegate_start` one-way; payloads use `root="skill_payload"`, `bucket`, `skill_name`. `_RETIRED_GITHUB_TOOLS` preserves disabled GitHub names as method restrictions: PR create/update/draft in `github_write`; run logs/artifacts in `github_read`; api too. No old handler remains; `run_ci_tests` has no alias. Golden tests must prove each supported target through final outcome; tombstones prove removal only; dropping a class needs owner acceptance naming the lost outcome. Uploads, skill payloads and owner state are not artifact transport.
 
-Enforcement: `ouroboros/tools/shell.py` (cwd selection and what light refuses), `tests/test_deliverables_layout.py` (placement and output manifest), `tests/test_git_shell_policy.py`; successor parity and artifact transport are review-only.
+Enforcement: `ouroboros/tools/shell.py` (cwd selection and what light refuses), `tests/test_deliverables_layout.py` (placement, output manifest), `tests/test_git_shell_policy.py`; successor parity and artifact transport are review-only.
 
 ### Own-body candidates and adoption
 
@@ -126,12 +126,12 @@ Enforcement: `tests/test_body_adoption.py` with `tests/test_body_candidate.py`. 
 
 ### Runtime cleanup and retention
 
-- Age-based GC of disposable runtime artifacts shares one owner knob, `OUROBOROS_GC_RETENTION_DAYS` (default and clamp: ARCHITECTURE §7), and the `ouroboros/retention.py` helpers (`age_cutoff`, `clamp_retention_days`, `get_gc_retention_days`); no hand-rolled cutoff math. Prune functions keep an explicit `retention_days=` parameter whose default alone reads the knob; `server_maintenance.py` schedules them.
-- A subsystem needing its own lifetime passes explicit `retention_days=`; an owner-settable one is an ordinary `OUROBOROS_<SUBSYSTEM>_RETENTION_DAYS` in `SETTINGS_DEFAULTS` clamped by `clamp_retention_days`. Never restore the consolidated keys or keep a knob that deletes nothing.
+- Age-based GC of disposable runtime artifacts shares one owner knob, `OUROBOROS_GC_RETENTION_DAYS` (default and clamp: ARCHITECTURE §7), and the `ouroboros/retention.py` helpers (`age_cutoff`, `clamp_retention_days`, `get_gc_retention_days`); no hand-rolled cutoff math. Prune functions take `retention_days=` (default: the knob); `server_maintenance.py` schedules them.
+- A subsystem with its own lifetime passes `retention_days=`; an owner-settable one is an ordinary `OUROBOROS_<SUBSYSTEM>_RETENTION_DAYS` in `SETTINGS_DEFAULTS` clamped by `clamp_retention_days`. Never restore the consolidated keys or keep a knob that deletes nothing.
 - Each disposable plane's retirer (`storage_removers.PLACE_REMOVERS`) reports through `maintenance_jobs.pass_report`/`record_pass` (ARCHITECTURE §10 invariant 32), classing holds by its own reason words: an unreadable row or busy lock is a hold, never a pass error; the term's wait is no hold.
-- Durable artifacts are not age-pruned: genesis projects (`OUROBOROS_SUBAGENT_PROJECTS_ROOT`) and forensic observability blobs (packed, never deleted or counted).
+- Durable artifacts are never age-pruned: genesis projects (`OUROBOROS_SUBAGENT_PROJECTS_ROOT`) and forensic observability blobs (packed, never deleted or counted).
 - Test scratch lasts while needed: a test's folder goes only on its processes' proof, never on its exit alone, and one marker never holds a whole root (ARCHITECTURE §9 "Test runs").
-- Review continuations are recovery state, not disposable GC: archive a record (collision-safe move, never delete) only when its owner task is settled, it stayed un-resumed past `task_continuation.RETIRE_SETTLED_CONTINUATION_AFTER_DAYS` and no recorded obligation is open; any uncertainty or move error keeps the live record.
+- Review continuations are recovery state, not disposable GC: archive a record (collision-safe move, never delete) only when its owner task is settled, it stayed un-resumed past `task_continuation.RETIRE_SETTLED_CONTINUATION_AFTER_DAYS` and no recorded obligation is open; uncertainty or a move error keeps the live record.
 
 Enforcement: `ouroboros/retention.py` (knob and cutoff math), `tests/test_observability_retention.py` (preserve indefinitely), `tests/test_test_environment.py` and `tests/test_test_storage.py` (test scratch), `tests/test_retirer_holds.py` with `test_persistence_lifetimes.py::SERVER_RETIRERS` (each retirer both ways), cost contract B7 (rest law); the continuation archive rule is review-only.
 
