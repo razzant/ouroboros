@@ -3849,6 +3849,7 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     text-decoration: underline;
     text-underline-offset: 2px;
 }
+.md-link:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 
 /* Prevent wide tables from breaking bubble layout. */
 .md-table-wrap {

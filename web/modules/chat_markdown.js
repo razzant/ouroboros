@@ -1,6 +1,6 @@
-/** Rich, sanitized markdown rendering for assistant and system chat messages. */
+/** Rich, sanitized markdown rendering for assistant and system chat messages; linked plain text for the owner's. */
 
-import { safeExternalUrl } from './utils.js';
+import { safeExternalHrefAttr, safeExternalUrl } from './utils.js';
 import { copyTextToClipboard } from './ui_helpers.js';
 import { tr } from './i18n.js';
 import { applyChartTheme, onThemeChange } from './theme_palette.js';
@@ -259,6 +259,48 @@ export function chatMarkdownUrl(value) {
     }
     const safe = safeExternalUrl(text);
     return safe === '#' ? '' : safe;
+}
+
+// An explicit http(s) address in plain text: it follows no letter, digit or underscore and runs to a
+// blank, quote, angle bracket, backtick, backslash or an invisible control or format character.
+const PLAIN_TEXT_ADDRESS = /(?<![\p{L}\p{N}_])https?:\/\/(?![/\\])[^\s<>"`\\\p{Cc}\p{Cf}]+/giu;
+// Punctuation that ends a sentence or closes a quotation is not part of the address before it; a
+// closing bracket is, while it closes one opened inside the address (`wiki/Foo_(bar)`).
+const ADDRESS_TRAIL = new Set([...'.,:;!?…\'’”»›*_~。、，；：！？']);
+const ADDRESS_CLOSERS = { ')': '(', ']': '[', '}': '{' };
+
+function addressEnd(candidate) {
+    const count = { '(': 0, '[': 0, '{': 0, ')': 0, ']': 0, '}': 0 };
+    for (const char of candidate) if (char in count) count[char] += 1;
+    let end = candidate.length;
+    while (end) {
+        const char = candidate[end - 1];
+        const opener = ADDRESS_CLOSERS[char];
+        if (opener && count[char] > count[opener]) count[char] -= 1;
+        else if (!ADDRESS_TRAIL.has(char)) break;
+        end -= 1;
+    }
+    return end;
+}
+
+/**
+ * The owner's words exactly as written, every character literal (Markdown, HTML and code marks
+ * included), with each explicit http(s) address a chat link to its parsed destination. Nothing
+ * else is read as structure, and the shown text is never rewritten: only the href is normalized.
+ */
+export function renderLinkedPlainText(text) {
+    const source = String(text ?? '');
+    let html = '';
+    let from = 0;
+    for (const match of source.matchAll(PLAIN_TEXT_ADDRESS)) {
+        const address = match[0].slice(0, addressEnd(match[0]));
+        const href = safeExternalHrefAttr(address);
+        if (!href) continue;
+        html += `${escapeText(source.slice(from, match.index))}<a class="md-link" href="${href}"`
+            + ` target="_blank" rel="noopener noreferrer">${escapeText(address)}</a>`;
+        from = match.index + address.length;
+    }
+    return html + escapeText(source.slice(from));
 }
 
 /** Parse and bound an untrusted JSON chart configuration. */
