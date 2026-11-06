@@ -918,7 +918,10 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # 452 -> 453 (test diet): the install's test durations table ``state/test-durations.json``
 # (``ouroboros/test_evidence.py`` names it, the evidence plugin of the gate's sessions writes it);
 # its own section-2 row.
-EXPECTED_SCAN_PATHS = 453
+# 453 -> 454 (#2841): ``state/body_adoption/arm-deferred.json`` (a deferred exit arm), ``handoff.json`` now spelled
+# by the detached-HEAD repair guard and ``locks/git-bootstrap.lock`` (the ``locks/**`` row) join; ``switch.py`` and
+# ``installation_stop.py`` leave the scan, now copied into a staging sibling (all on the body adoption row).
+EXPECTED_SCAN_PATHS = 454
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
