@@ -10,7 +10,6 @@ import json
 
 import pytest
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture(autouse=True)

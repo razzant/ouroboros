@@ -17,11 +17,15 @@ function lift(name) {
     return source.slice(from + 1, until + 2);
 }
 
-function harness({ revision = null, seen = null, loaded = true, page = 'files', answer = () => ({}) } = {}) {
+// What the Projects list says of the rows it holds (projects_nav.js `unreadRows`): here the feed's, or those a case adds.
+const heldRows = (feed, beyond = []) => ({ unreadRows: () => [...(feed() || []).filter((row) => row._unread), ...beyond] });
+
+function harness({ revision = null, seen = null, loaded = true, page = 'files', project = null, answer = () => ({}) } = {}) {
     const posts = [], badges = [], acks = [];
     const context = vm.createContext({
         ...readAhead,  // app.js imports these: a message read in full elsewhere (DESIGN "Unread")
         state: { mainVisibleRevision: revision, mainSeenRevision: seen, mainSeenLoaded: loaded, activePage: page },
+        navState: { activeProjectId: project },  // a Project open over Main (owner 06.11)
         updateUnreadBadge: () => badges.push(context.mainUnreadCount()),
         refreshSharedProjectSeen: () => posts.push(['shared']),
         acknowledgeMainAfterPaint: () => acks.push(context.state.mainVisibleRevision),
@@ -30,7 +34,7 @@ function harness({ revision = null, seen = null, loaded = true, page = 'files', 
             return answer(JSON.parse(init.body || '{}'));
         },
     });
-    vm.runInContext(['mainUnreadCount', 'observeMainRevision', 'mergeMainSeenRevision', 'markMainViewed']
+    vm.runInContext(['mainOnScreen', 'mainUnreadCount', 'observeMainRevision', 'mergeMainSeenRevision', 'markMainViewed']
         .map(lift).join('\n') + '\nglobalThis.mainUnreadCount = mainUnreadCount; globalThis.api = { observeMainRevision,'
         + ' mergeMainSeenRevision, markMainViewed, mainUnreadCount };', context);
     return { context, posts, badges, acks, api: context.api };
@@ -94,6 +98,54 @@ test('a newer revision re-reads the shared cursors, and offers the read decision
     const shown = harness({ revision: 3, seen: 3, page: 'chat' });
     shown.api.observeMainRevision(5);
     assert.deepEqual(shown.acks, [5]);
+    // A Project open over Main (a finger's column, the desk's drawer, the phone's card): Main is not the room on screen,
+    // so its new message counts and nothing reads it until Main is back (owner 06.11; DESIGN "Unread").
+    const covered = harness({ revision: 3, seen: 3, page: 'chat', project: 'p1' });
+    covered.api.observeMainRevision(5);
+    assert.deepEqual(covered.acks, []);
+    assert.equal(covered.api.mainUnreadCount(), 2);
+});
+
+// The read itself: a revision is written only after a paint made while Main is the room on screen. Main's reader
+// reaching its newest message calls it as well, so the gate is the read's own, not only its callers'.
+function paintHarness({ project = null, hold = false } = {}) {
+    const paints = [], writes = [];
+    let release = () => {};
+    const context = vm.createContext({
+        ...readAhead,
+        console,
+        state: { mainVisibleRevision: 5, mainSeenRevision: 3, mainSeenLoaded: true, activePage: 'chat' },
+        navState: { activeProjectId: project },
+        updateUnreadBadge: () => {},
+        mainChat: { refreshHistory: ({ revision }) => {
+            paints.push(revision);
+            const painted = { read: true, revision };
+            return hold ? new Promise((resolve) => { release = () => resolve(painted); }) : Promise.resolve(painted);
+        } },
+        fetchJson: async (url, init = {}) => {
+            const body = JSON.parse(init.body || '{}');
+            writes.push(body.main_seen_revision);
+            return body;
+        },
+    });
+    vm.runInContext(`let mainPaintRequest = null;\n${['mainOnScreen', 'mergeMainSeenRevision', 'markMainViewed',
+        'acknowledgeMainAfterPaint'].map(lift).join('\n')}\nglobalThis.read = acknowledgeMainAfterPaint;`, context);
+    return { context, paints, writes, release: () => release() };
+}
+
+test('Main is read only by a paint made while it is on screen; a Project over it, or opened meanwhile, takes none', async () => {
+    const shown = paintHarness();
+    await shown.context.read();
+    assert.deepEqual([shown.paints, shown.writes], [[5], [5]], 'Main on screen: its newest revision is read');
+    const covered = paintHarness({ project: 'p1' });
+    await covered.context.read();
+    assert.deepEqual([covered.paints, covered.writes], [[], []], 'a Project over Main: no paint for a read, no write');
+    const opened = paintHarness({ hold: true });
+    const reading = opened.context.read();
+    opened.context.navState.activeProjectId = 'p1';  // a Project opens while Main's paint is under way
+    opened.release();
+    await reading;
+    assert.deepEqual([opened.paints, opened.writes], [[5], []], 'the paint ends under the Project: the read is withheld');
 });
 
 test('the shared cursor only moves forward, and a write keeps what the server answers', async () => {
@@ -117,6 +169,7 @@ test('the Projects number sums the unread messages of the unread rows', () => {
     const context = vm.createContext({
         ...readAhead,
         navProjectsCount: count,
+        projectsNav: heldRows(() => context.lastProjectRows),
         state: { projectSeenRevision: { a: 1, b: 4, c: 0 } },
         lastProjectRows: [{ id: 'a', visible_revision: 4, _unread: true }, { id: 'b', visible_revision: 4, _unread: false },
             { id: 'c', visible_revision: 2, _unread: true }, { id: 'd', visible_revision: 3, _unread: false }],
@@ -139,6 +192,7 @@ test('a message read in full in another room leaves the counts without moving a 
         assert.equal(main.context.state.mainSeenRevision, 40);
         const count = { textContent: '', title: '', attrs: {}, setAttribute() {}, removeAttribute() {} };
         const context = vm.createContext({ ...readAhead, navProjectsCount: count, state: { projectSeenRevision: { nova: 1 } },
+            projectsNav: heldRows(() => context.lastProjectRows),
             lastProjectRows: [{ id: 'nova', chat_id: 5551, visible_revision: 4, _unread: true }] });
         vm.runInContext(`${lift('paintProjectsCount')}\nglobalThis.paint = paintProjectsCount;`, context);
         context.paint();
@@ -156,8 +210,10 @@ test("another client's read reaches this one at its next state snapshot, a late 
     const context = vm.createContext({
         ...readAhead,
         navProjectsCount: count,
+        projectsNav: heldRows(() => context.lastProjectRows),
         state: { mainVisibleRevision: 72, mainSeenRevision: 70, mainSeenLoaded: true, activePage: 'files',
             projectSeenRevision: { nova: 1 } },
+        navState: { activeProjectId: null },
         lastProjectRows: [{ id: 'nova', chat_id: 7302, visible_revision: 4, _unread: true }],
         updateUnreadBadge() {}, paintProjectsNav() {}, patchProjectActivityMarkers() {}, acknowledgeMainAfterPaint() {},
         fetchJson: (url, init = {}) => new Promise((resolve) => {
@@ -166,7 +222,7 @@ test("another client's read reaches this one at its next state snapshot, a late 
             answers.push(() => resolve(JSON.parse(JSON.stringify(host))));  // the host's state when it answers
         }),
     });
-    vm.runInContext(['mainUnreadCount', 'observeMainRevision', 'mergeMainSeenRevision', 'mergeProjectSeenRevisions',
+    vm.runInContext(['mainOnScreen', 'mainUnreadCount', 'observeMainRevision', 'mergeMainSeenRevision', 'mergeProjectSeenRevisions',
         'refreshSharedProjectSeen', 'paintProjectsCount'].map(lift).join('\n')
         + '\nlet sharedSeenRead = null;\nglobalThis.api = { observeMainRevision, mainUnreadCount, paintProjectsCount };', context);
     context.api.paintProjectsCount();
@@ -183,16 +239,16 @@ test("another client's read reaches this one at its next state snapshot, a late 
     assert.deepEqual([context.api.mainUnreadCount(), count.textContent], [1, '2']);
 });
 
-test("a snapshot showing only a Project unread reads another client's record as well", async () => {
-    const host = { main_seen_revision: 90, project_seen_revision: { vega: 2 }, read_ahead_revisions: { 7303: [[5, 5]] } };
+function snapshotHarness({ host, beyond = [], seen }) {
     const answers = [];
     const count = { textContent: '', title: '', attrs: {}, setAttribute() {}, removeAttribute() {} };
     const context = vm.createContext({
         ...readAhead,
         navProjectsCount: count,
+        heldRows, beyond,
         navState: { activeProjectId: null },
         state: { mainVisibleRevision: 90, mainSeenRevision: 90, mainSeenLoaded: true, activePage: 'files',
-            projectSeenRevision: { vega: 2 } },
+            projectSeenRevision: seen },
         closeProjectPanel() {}, patchProjectActivityMarkers() {}, syncNavigationState() {}, acknowledgeProjectAfterPaint() {},
         updateUnreadBadge() {},
         fetchJson: () => new Promise((resolve) => { answers.push(() => resolve(JSON.parse(JSON.stringify(host)))); }),
@@ -200,11 +256,31 @@ test("a snapshot showing only a Project unread reads another client's record as 
     vm.runInContext(['renderProjectsNav', 'mergeMainSeenRevision', 'mergeProjectSeenRevisions', 'refreshSharedProjectSeen',
         'paintProjectsCount'].map(lift).join('\n')
         + '\nlet sharedSeenRead = null, knownProjectsJson = null, lastProjectRows = null, projectActivityIndex = {};'
+        + '\nconst projectsNav = heldRows(() => lastProjectRows, beyond);'
         + '\nfunction paintProjectsNav() { paintProjectsCount(); }\nglobalThis.api = { renderProjectsNav };', context);
+    return { context, count, answers };
+}
+
+test("a snapshot showing only a Project unread reads another client's record as well", async () => {
+    const host = { main_seen_revision: 90, project_seen_revision: { vega: 2 }, read_ahead_revisions: { 7303: [[5, 5]] } };
+    const { context, count, answers } = snapshotHarness({ host, seen: { vega: 2 } });
     context.api.renderProjectsNav([{ id: 'vega', chat_id: 7303, visible_revision: 5, lifecycle: 'active' }], [7303]);
     assert.equal(count.textContent, '3');  // 3, 4 and 5: the other client read 5 in Main, this one does not know yet
     assert.equal(answers.length, 1, 'Main shows nothing unread: the Project row alone reads the shared cursors again');
     answers.shift()();
     await flush();
     assert.equal(count.textContent, '2');
+});
+
+test("a room beyond the feed counts and asks after another client's read though the feed shows nothing unread", async () => {
+    const host = { main_seen_revision: 90, project_seen_revision: { old: 3 }, read_ahead_revisions: {} };
+    const old = { id: 'old', chat_id: 7304, visible_revision: 3 };
+    const { context, count, answers } = snapshotHarness({ host, beyond: [old], seen: { old: 1 } });
+    context.api.renderProjectsNav([{ id: 'vega', chat_id: 7303, visible_revision: 0, lifecycle: 'active' }], [7303, 7304]);
+    assert.equal(count.textContent, '2', 'revisions 2 and 3 of the room a complete list showed');
+    assert.equal(answers.length, 1, 'that room alone reads the shared cursors again');
+    context.beyond.length = 0;  // the room reads as read once its cursor has moved, as the list module would say
+    answers.shift()();
+    await flush();
+    assert.equal(count.textContent, '');
 });

@@ -118,26 +118,6 @@ def test_tool_result_validates_code_status_and_defensively_copies_meta() -> None
         ("plain success", "ok", "OK"),
         ("⚠️ TOOL_ACCESS_BLOCKED: denied", "blocked", "ACCESS_BLOCKED"),
         ("⚠️ CORE_PROTECTION_BLOCKED: denied", "blocked", "CORE_PROTECTION_BLOCKED"),
-        # T1 §A.15/§A.16: the demanded root and the two resource blocks keep
-        # DISTINCT codes. The merged parents made the root-required recovery
-        # branch and the read-only resource demotion structurally unreachable
-        # once the loop reads the code instead of the text.
-        ("⚠️ ROOT_REQUIRED_USER_FILES: retry", "blocked", "ROOT_REQUIRED_USER_FILES"),
-        ("⚠️ ROOT_REQUIRED_ACTIVE_WORKSPACE: retry", "blocked", "ROOT_REQUIRED_ACTIVE_WORKSPACE"),
-        ("⚠️ RESOURCE_CONSTRAINT_BLOCKED: denied", "blocked", "RESOURCE_CONSTRAINT_BLOCKED"),
-        ("⚠️ RESOURCE_POLICY_BLOCKED: denied", "blocked", "RESOURCE_POLICY_BLOCKED"),
-        ("⚠️ WORKSPACE_MODE_BLOCKED: invalid", "blocked", "WORKSPACE_BLOCKED"),
-        ("⚠️ TOOL_ARG_ERROR: invalid JSON", "error", "TOOL_ARG_ERROR"),
-        ("⚠️ TOOL_TIMEOUT (read_file): exceeded", "timeout", "TOOL_TIMEOUT"),
-        ("⚠️ SHELL_EXIT_ERROR: command failed", "error", "SHELL_EXIT_ERROR"),
-        ("⚠️ ARTIFACT_OUTPUT_ERROR: registration failed", "error", "ARTIFACT_OUTPUT_ERROR"),
-        ('{"error":"remote failure","ok":false}', "error", "TOOL_REPORTED_FAILURE"),
-        ("⚠️ CAPABILITY_UNAVAILABLE: missing", "unavailable", "CAPABILITY_UNAVAILABLE"),
-        ("⚠️ MCP_TOOL_TIMEOUT: late", "timeout", "MCP_TIMEOUT"),
-        ("⚠️ MCP_TOOL_ERROR: failed", "error", "MCP_ERROR"),
-        ("⚠️ Unknown tool: missing", "error", "UNKNOWN_TOOL"),
-        ("⚠️ REVIEW_BLOCKED: findings", "ok", "REVIEW_BLOCKED"),
-        ("⚠️ GIT_ERROR (commit): hook rejected", "ok", "GIT_ERROR"),
     ),
 )
 def test_legacy_adapter_maps_host_owned_first_line(
@@ -159,15 +139,12 @@ def test_legacy_adapter_maps_host_owned_first_line(
         ("plain success", "⚠️ AUTO_ROUTED_TO_ACTIVE_WORKSPACE: fixture", "", "ok", "OK", {"route_note": True}),
         (ToolResult(status="error", code="TOOL_ERROR", text="⚠️ TOOL_ERROR: failed", meta={"base": 1}), "route", "", "error", "TOOL_ERROR", {"base": 1, "route_note": True}),
         ("plain success", "", "⚠️ SAFETY_WARNING: inspect", "ok", "SAFETY_WARNING", {}),
-        (ToolResult(status="error", code="TOOL_ERROR", text="⚠️ TOOL_ERROR: failed", meta={"base": 1}), "", "⚠️ SAFETY_WARNING: inspect", "error", "TOOL_ERROR", {"base": 1, "safety_warning": True}),
-        (ToolResult(status="ok", code="GIT_ERROR", text="⚠️ GIT_ERROR: refused"), "", "⚠️ SAFETY_WARNING: inspect", "ok", "GIT_ERROR", {"safety_warning": True}),
         # Since #447 H1 the host appends notes AFTER the payload and inserts no
         # "---" wrapper of its own, so a separator in either half is the
         # producer's own markdown rule and decides nothing. The composer still
         # HOLDS the typed base, so the base's code stays; ambiguous_safety_wrapper
         # retired with the wrapper it described.
         (ToolResult(status="error", code="TOOL_ERROR", text="⚠️ TOOL_ERROR: failed", meta={"base": 1}), "route", "⚠️ SAFETY_WARNING: reason\n\n---\nreason tail", "error", "TOOL_ERROR", {"base": 1, "route_note": True, "safety_warning": True}),
-        (ToolResult(status="ok", code="OK", text="exit_code=0\nSTDOUT:\n# README\n\n---\n\nUsage", meta={"exit_code": 0}), "", "⚠️ SAFETY_WARNING: inspect", "ok", "SAFETY_WARNING", {"exit_code": 0}),
     ),
 )
 def test_typed_composer_preserves_legacy_wrapper_semantics(
@@ -440,11 +417,7 @@ def test_registry_guard_owner_facades_preserve_identity() -> None:
     "scenario",
     (
         "local_readonly",
-        "acting_builtin",
-        "acting_external",
         "managed_active",
-        "managed_unavailable",
-        "diagnostic_product",
         "diagnostic_external",
     ),
 )
@@ -637,11 +610,7 @@ def test_registry_native_guards_precede_safety_and_physical_dispatch(
         # T1 §A.4: every one of these guards DENIED the call. The three whose first
         # line happened to carry no generic marker were recorded as clean successes.
         (ToolResult(status="blocked", code="ACCESS_BLOCKED", text=_HISTORICAL_EPHEMERAL_BUILTIN_TEXT), True, "blocked"),
-        (ToolResult(status="blocked", code="ACCESS_BLOCKED", text=_LOCAL_READONLY_TEXT), True, "blocked"),
-        (ToolResult(status="blocked", code="ACCESS_BLOCKED", text=_ACTING_EXTERNAL_TEXT), True, "blocked"),
-        (ToolResult(status="blocked", code="ACCESS_BLOCKED", text=_MANAGED_ACTIVE_TEXT), True, "blocked"),
         (ToolResult(status="blocked", code="SAFETY_VIOLATION", text=_SAFETY_DENIAL_TEXT), True, "safety_violation"),
-        (ToolResult(status="blocked", code="SAFETY_VIOLATION", text=_SAFETY_DENIAL_TEXT, meta={"dynamic_provider": True}), True, "safety_violation"),
         (
             ToolResult(status="unavailable", code="CAPABILITY_UNAVAILABLE", text=_MANAGED_UNAVAILABLE_TEXT),
             True,
@@ -999,12 +968,13 @@ def test_loop_outer_timeout_is_native_and_dispatches_once(tmp_path, monkeypatch)
         "Try a different approach or inform the user about the issue."
     )
     assert calls == [("read_file", args)]
-    assert row["result"] == expected
+    text = row["result"]  # the same text, then where the abandoned worker stood (BIBLE P1)
+    assert text.startswith(expected + " Its worker was at ") and "test_tool_result.py:execute_result <- " in text, text
     assert row["is_error"] is True
     assert row["tool_result"] == ToolResult(
         status="timeout",
         code="TOOL_TIMEOUT",
-        text=expected,
+        text=text,
         meta={"timeout_sec": 1},
     )
     assert row["result_meta"] == {

@@ -866,7 +866,6 @@ def s33_candidate(tmp_path_factory):
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s33_presence_waits_leave_state_receipts_and_stop_answering(s33_candidate, tmp_path):
     """Mechanism 1 alone: 12 waiting events on a 12-thread default executor."""
     require_lane(LANE_MOCK)
@@ -874,7 +873,6 @@ def test_s33_presence_waits_leave_state_receipts_and_stop_answering(s33_candidat
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s33_held_host_authentication_leaves_the_event_loop_serving(s33_candidate, tmp_path):
     """Mechanism 2 alone: one authentication held, nothing else waiting."""
     require_lane(LANE_MOCK)
@@ -882,14 +880,12 @@ def test_s33_held_host_authentication_leaves_the_event_loop_serving(s33_candidat
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s33_presence_waits_and_held_authentication_together(s33_candidate, tmp_path):
     require_lane(LANE_MOCK)
     _run_s33(s33_candidate, tmp_path / "both", held_turns=True, slow_auth=True)
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 @pytest.mark.skipif(sys.platform == "win32", reason="the survivor scan is POSIX-only")
 def test_s33_owner_panic_tears_down_under_held_presence_load(s33_candidate, tmp_path):
     require_lane(LANE_MOCK)

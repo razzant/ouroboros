@@ -28,7 +28,6 @@ def _breakdown(value: float, marker: int) -> dict:
     }
 
 
-@pytest.mark.serial
 def test_budget_projection_reads_ledger_before_state_lock(tmp_path, monkeypatch):
     from supervisor import state
     import ouroboros.usage_accounting as accounting
@@ -78,7 +77,6 @@ def assert_not_holding(value):
     assert value, "state load/mutate/save must stay inside STATE_LOCK"
 
 
-@pytest.mark.serial
 def test_older_budget_snapshot_cannot_regress_state(tmp_path, monkeypatch):
     from supervisor import state
     import ouroboros.usage_accounting as accounting
@@ -117,7 +115,6 @@ def test_older_budget_snapshot_cannot_regress_state(tmp_path, monkeypatch):
     assert state.load_state()["usage_ledger_high_water_seq"] == [0, 2]
 
 
-@pytest.mark.serial
 def test_limited_projection_uses_breakdown_snapshot(tmp_path, monkeypatch):
     from supervisor import state
     import ouroboros.usage_accounting as accounting
@@ -140,7 +137,6 @@ def test_limited_projection_uses_breakdown_snapshot(tmp_path, monkeypatch):
     assert stored["usage_accounting"]["accounted_usd"] == 1.0
 
 
-@pytest.mark.serial
 def test_migration_continues_the_high_water_marker(tmp_path, monkeypatch):
     """The store's marker continues the retired journal's ``[epoch, seq]``: the
     first projection after the upgrade is accepted, never published lower."""
@@ -178,7 +174,6 @@ def test_migration_continues_the_high_water_marker(tmp_path, monkeypatch):
     assert stored["usage_ledger_high_water_seq"] == after
 
 
-@pytest.mark.serial
 def test_reordered_real_writers_never_regress_the_projection(tmp_path, monkeypatch):
     from supervisor import state
     import ouroboros.usage_accounting as accounting
@@ -227,7 +222,6 @@ def test_reordered_real_writers_never_regress_the_projection(tmp_path, monkeypat
     assert stored["usage_ledger_high_water_seq"] == final_marker
 
 
-@pytest.mark.serial
 def test_stale_snapshot_is_rejected_without_state_lock(tmp_path, monkeypatch, caplog):
     """No-lock comparison rejects proven staleness, without claiming atomicity."""
     from supervisor import state
@@ -248,7 +242,6 @@ def test_stale_snapshot_is_rejected_without_state_lock(tmp_path, monkeypatch, ca
     assert "state lock timeout" in caplog.text
 
 
-@pytest.mark.serial
 def test_equal_marker_writes_newer_projection_even_when_spend_decreases(tmp_path, monkeypatch):
     from supervisor import state
     import ouroboros.usage_accounting as accounting
@@ -267,7 +260,6 @@ def test_equal_marker_writes_newer_projection_even_when_spend_decreases(tmp_path
     assert state.load_state()["usage_ledger_high_water_seq"] == [2, 4]
 
 
-@pytest.mark.serial
 def test_lower_epoch_is_rejected_and_preserves_money(tmp_path, monkeypatch, caplog):
     from supervisor import state
     import ouroboros.usage_accounting as accounting
@@ -287,7 +279,6 @@ def test_lower_epoch_is_rejected_and_preserves_money(tmp_path, monkeypatch, capl
     assert "STALE SNAPSHOT REJECTED" in caplog.text
 
 
-@pytest.mark.serial
 def test_missing_marker_fails_safe_without_fabricating_zero(tmp_path, monkeypatch, caplog):
     from supervisor import state
     import ouroboros.usage_accounting as accounting
@@ -308,7 +299,6 @@ def test_missing_marker_fails_safe_without_fabricating_zero(tmp_path, monkeypatc
     assert state.load_state()["spent_usd"] == 7.0
 
 
-@pytest.mark.serial
 def test_malformed_current_marker_is_unknown(tmp_path, monkeypatch):
     from supervisor import state
     import ouroboros.usage_accounting as accounting
@@ -327,7 +317,6 @@ def test_malformed_current_marker_is_unknown(tmp_path, monkeypatch):
     assert state.load_state()["usage_ledger_high_water_seq"] == [1, 3]
 
 
-@pytest.mark.serial
 def test_corrupt_ledger_header_is_unknown_not_zero(tmp_path):
     from supervisor import state
     from ouroboros.usage_ledger import LEDGER_REL
@@ -355,7 +344,6 @@ def _settle_root(root, root_task_id: str, cost: float = 0.5) -> None:
     accounting.settle_attempt(hold, {"prompt_tokens": 1}, cost_usd=cost, cost_final=True)
 
 
-@pytest.mark.serial
 def test_state_projection_omits_by_root_and_its_size_does_not_scale_with_roots(tmp_path, monkeypatch):
     """(issue #1002) state.json persists totals only; per-root money never lands there."""
     from supervisor import state
@@ -380,7 +368,6 @@ def test_state_projection_omits_by_root_and_its_size_does_not_scale_with_roots(t
     assert abs(len(bytes_many) - len(bytes_one)) < 512, (len(bytes_one), len(bytes_many))
 
 
-@pytest.mark.serial
 def test_per_root_money_is_still_served_from_the_ledger_after_the_slim_write(tmp_path, monkeypatch):
     from supervisor import state
     import ouroboros.usage_accounting as accounting
@@ -401,7 +388,6 @@ def test_per_root_money_is_still_served_from_the_ledger_after_the_slim_write(tmp
         assert by_root[root]["accounted_usd"] == expected == round(0.01 + roots.index(root) * 0.001, 6)
 
 
-@pytest.mark.serial
 def test_fallback_projection_branch_is_slim(tmp_path, monkeypatch):
     """A snapshot without ``_usage_projection`` renders the projection itself, still totals only."""
     from supervisor import state
@@ -453,7 +439,6 @@ def _seed_mixed_ledger(root) -> None:
     accounting.mark_unresolved(unresolved, "provider outcome unknown")
 
 
-@pytest.mark.serial
 def test_writer_snapshot_matches_the_full_breakdown_on_every_key_the_writer_reads(tmp_path, monkeypatch):
     """Same rows, same marker, same money and the writer never pays the full render."""
     from supervisor import state
@@ -486,7 +471,6 @@ def test_writer_snapshot_matches_the_full_breakdown_on_every_key_the_writer_read
     assert stored["openrouter_ledger_settled_usd"] == 0.625
 
 
-@pytest.mark.serial
 def test_state_json_is_byte_identical_whether_written_from_the_full_or_the_slim_render(tmp_path, monkeypatch):
     """Money exactness. Every persisted key is the same from either render."""
     from supervisor import state
@@ -511,7 +495,6 @@ def test_state_json_is_byte_identical_whether_written_from_the_full_or_the_slim_
     assert stored["usage_accounting"]["limit_usd"] == 100.0 and "by_root" not in stored["usage_accounting"]
 
 
-@pytest.mark.serial
 def test_openrouter_drift_check_fires_on_crossing_a_multiple_of_fifty(tmp_path, monkeypatch):
     """A coalesced write may jump 49 -> 51 and must still trigger the 50-call check, once."""
     from supervisor import state

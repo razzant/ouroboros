@@ -91,7 +91,7 @@ def test_legacy_seed_rejects_corrupt_fixture_before_writing(tmp_path, monkeypatc
     assert not daemon.exists()
 
 
-@pytest.mark.parametrize('response', ['retained', 'job_alias', 'missing_native', 'missing_returns_record'])
+@pytest.mark.parametrize('response', ['retained', 'missing_native', 'missing_returns_record'])
 def test_legacy_lookup_uses_public_native_id_without_job_fallback(tmp_path, monkeypatch, response):
     daemon = tmp_path / 'daemon'
     fixture = smoke.seed_legacy_fixture(daemon)

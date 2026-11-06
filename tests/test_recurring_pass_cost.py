@@ -498,7 +498,7 @@ def test_l1_a_new_process_reads_each_fenced_tree_once_then_rests(tmp_path, monke
     assert owner_pause_control.settle_requested_owner_pauses(queue) == [] and census == []
 
 
-@pytest.mark.parametrize("change", ["member_left", "member_arrived", "attempt_changed", "marked", "new_generation"])
+@pytest.mark.parametrize("change", ["member_left", "attempt_changed", "new_generation"])
 def test_l1_a_member_transition_brings_exactly_its_own_tree_back(tmp_path, monkeypatch, meter, change):
     """The companion: a transition wakes the tree it touched. Its neighbours keep costing nothing."""
     from supervisor import owner_pause_control

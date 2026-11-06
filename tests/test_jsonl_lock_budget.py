@@ -4,6 +4,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from tests._source_scan import parse
 
 
 @pytest.mark.parametrize("required", [False, True])
@@ -103,7 +104,7 @@ def test_every_byte_append_asks_for_a_binary_descriptor():
     offenders = []
     for path in sorted([*repo.joinpath("ouroboros").rglob("*.py"), *repo.joinpath("supervisor").rglob("*.py")]):
         source = path.read_text(encoding="utf-8")
-        for node in ast.walk(ast.parse(source)):
+        for node in ast.walk(parse(source)):
             func = getattr(node, "func", None)
             if (isinstance(node, ast.Call) and isinstance(func, ast.Attribute) and func.attr == "open"
                     and getattr(func.value, "id", None) == "os"):

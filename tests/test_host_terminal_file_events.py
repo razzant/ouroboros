@@ -31,7 +31,6 @@ def terminal_host(tmp_path, monkeypatch):
     monkeypatch.setattr(workers, "PENDING", ctx.PENDING)
     monkeypatch.setattr(tasks, "PENDING", ctx.PENDING)
     monkeypatch.setattr(workers, "REPO_DIR", tmp_path / "repo")
-    monkeypatch.setattr(workers, "CRASH_TS", [])
     monkeypatch.setattr(workers, "_LAST_SPAWN_TIME", 0)
     monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "")
     monkeypatch.setattr(workers, "_reconcile_confirmed_dead_review_owner", lambda *_a: None)
@@ -56,14 +55,14 @@ def terminal_host(tmp_path, monkeypatch):
                            pushed=pushed, respawned=respawned, root=tmp_path)
 
 
-@pytest.mark.parametrize("task_type,exitcode,status", [
-    ("task", -11, "failed"), ("deep_self_review", -11, "failed"),
-    ("evolution", 1, "cancelled"),
+@pytest.mark.parametrize(("split", "task_type", "exitcode", "attempt", "status"), [
+    (False, "task", -11, 2, "failed"),  # a signal death at the last attempt: the retry bound, not the signal, is terminal
+    (True, "deep_self_review", -11, 2, "failed"),
+    (True, "evolution", 1, 1, "cancelled"),
 ])
-@pytest.mark.parametrize("split", [False, True])
-def test_crash_terminal_reaches_durable_and_live_consumers(terminal_host, task_type, exitcode, status, split):
+def test_crash_terminal_reaches_durable_and_live_consumers(terminal_host, task_type, exitcode, attempt, status, split):
     host = terminal_host
-    task = {"id": "host-terminal", "type": task_type, "chat_id": 0, "_attempt": 1}
+    task = {"id": "host-terminal", "type": task_type, "chat_id": 0, "_attempt": attempt}
     if split:
         child = host.root / "state/headless_tasks/host-terminal/data"
         task["drive_root"] = str(child)
@@ -71,7 +70,7 @@ def test_crash_terminal_reaches_durable_and_live_consumers(terminal_host, task_t
     write_task_result(host.root, task["id"], "running", chat_id=0,
                       **({"child_drive_root": str(child)} if split else {}))
     host.worker.proc.exitcode = exitcode
-    host.ctx.RUNNING[task["id"]] = {"task": task, "worker_id": 0, "attempt": 1}
+    host.ctx.RUNNING[task["id"]] = {"task": task, "worker_id": 0, "attempt": attempt}
     workers.ensure_workers_healthy()
     job = host.jobs.get_nowait()
     assert job["kind"] == "confirmed_dead_worker"
@@ -106,9 +105,9 @@ def test_crash_terminal_write_failure_keeps_the_same_recovery_owner(terminal_hos
     from supervisor.task_reaper import TerminalFileRecoveryPending
 
     host = terminal_host
-    task = {"id": "host-terminal", "type": "task", "chat_id": 0, "_attempt": 1}
+    task = {"id": "host-terminal", "type": "task", "chat_id": 0, "_attempt": 2}  # its one retry spent: terminal
     write_task_result(host.root, task["id"], "running")
-    meta = {"task": task, "worker_id": 0, "attempt": 1}
+    meta = {"task": task, "worker_id": 0, "attempt": 2}
     host.ctx.RUNNING[task["id"]] = meta
     workers.ensure_workers_healthy()
     job = host.jobs.get_nowait()

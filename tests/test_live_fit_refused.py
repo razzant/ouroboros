@@ -15,7 +15,7 @@ from ouroboros import call_protocol as cp, realtime_session
 from ouroboros.contracts.live_conversation import ContextUpdate, ToolOutputs
 from ouroboros.contracts.realtime import RealtimeSetupError
 from tests._extension_loader_shared import _clear_loader_state  # noqa: F401
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 from tests.test_live_conversation_driver import Host, Session, started, until
 from tests.test_live_delivery_owner_stack import RESTART, handle
 from tests.test_live_tool_continuity import POINTER, Held, held_batch
@@ -171,8 +171,7 @@ def test_a_native_resume_before_the_fit_keeps_waiting_for_it():
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('serving', ['has-room', 'full'])
-@pytest.mark.parametrize('engine', ['openai', 'gemini'])
+@pytest.mark.parametrize(("engine", "serving"), [('openai', 'has-room'), ('gemini', 'full')])
 def test_real_refused_fit_after_a_reconnection_ends_typed_with_the_result_whole(host_world, monkeypatch, engine, serving):
     """Under the forced refusal existing tests use. ``has-room`` is the order that used to send the false pointer."""
     from tests._live_stack import stack
@@ -282,58 +281,59 @@ def test_real_replacement_open_failure_ends_with_its_typed_reason(host_world, mo
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('failure', sorted(OPEN_FAILURES))
-def test_only_a_replacement_opening_takes_that_reason(failure):
+def test_only_a_replacement_opening_takes_that_reason(subtests):
     """A first open keeps its ending, and so does the same error raised inside a connection's own lifetime."""
-    from skills.live_conversation.driver import run
-    error = OPEN_FAILURES[failure]
+    for failure in sorted(OPEN_FAILURES):
+        with subtests.test(failure=failure):
+            from skills.live_conversation.driver import run
+            error = OPEN_FAILURES[failure]
 
-    def kept(exc):
-        assert type(exc) is type(error()), repr(exc)
+            def kept(exc):
+                assert type(exc) is type(error()), repr(exc)
 
-    async def first_open():
-        host = Host()
+            async def first_open():
+                host = Host()
 
-        async def session(consume, options):
-            raise error()
-        host.session = session
-        kept(await ended_with(asyncio.create_task(run(host))))
+                async def session(consume, options):
+                    raise error()
+                host.session = session
+                kept(await ended_with(asyncio.create_task(run(host))))
 
-    async def lifetime():
-        host = Host()
-        task = asyncio.create_task(run(host))
-        await until(lambda: host.sessions)
-        first = host.sessions[0]
-        first.emit('closed', resumable=False, transport_loss=True, reason='transport_lost')
-        await until(lambda: len(host.sessions) == 2)
-        second = host.sessions[1]
+            async def lifetime():
+                host = Host()
+                task = asyncio.create_task(run(host))
+                await until(lambda: host.sessions)
+                first = host.sessions[0]
+                first.emit('closed', resumable=False, transport_loss=True, reason='transport_lost')
+                await until(lambda: len(host.sessions) == 2)
+                second = host.sessions[1]
 
-        async def send(command):
-            raise error()
-        second.send = send
-        second.emit('ready', **READY)
-        second.emit('input_started')
-        kept(await ended_with(task))
+                async def send(command):
+                    raise error()
+                second.send = send
+                second.emit('ready', **READY)
+                second.emit('input_started')
+                kept(await ended_with(task))
 
-    async def replacement():
-        host = Host()
-        opened = []
+            async def replacement():
+                host = Host()
+                opened = []
 
-        async def session(consume, options):
-            opened.append(options)
-            if len(opened) == 2:
-                raise error()
-            made = type(host).session
-            return await made(host, consume, options)
-        host.session = session
-        task = asyncio.create_task(run(host))
-        await until(lambda: host.sessions)
-        host.sessions[0].emit('closed', resumable=False, transport_loss=True, reason='transport_lost')
-        exc = await ended_with(task)
-        assert isinstance(exc, RealtimeSetupError) and exc.code == 'reconnect_failed', repr(exc)
-    asyncio.run(first_open())
-    asyncio.run(lifetime())
-    asyncio.run(replacement())
+                async def session(consume, options):
+                    opened.append(options)
+                    if len(opened) == 2:
+                        raise error()
+                    made = type(host).session
+                    return await made(host, consume, options)
+                host.session = session
+                task = asyncio.create_task(run(host))
+                await until(lambda: host.sessions)
+                host.sessions[0].emit('closed', resumable=False, transport_loss=True, reason='transport_lost')
+                exc = await ended_with(task)
+                assert isinstance(exc, RealtimeSetupError) and exc.code == 'reconnect_failed', repr(exc)
+            asyncio.run(first_open())
+            asyncio.run(lifetime())
+            asyncio.run(replacement())
 
 
 @pytest.mark.parametrize('failure', ['none', 'no-route', 'handshake-timeout'])

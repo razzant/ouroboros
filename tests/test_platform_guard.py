@@ -24,6 +24,7 @@ import sys
 from typing import List, Set
 
 import pytest
+from tests._source_scan import parse
 
 IS_WINDOWS_PLATFORM = sys.platform == "win32"
 
@@ -91,7 +92,7 @@ def _scan_file(filepath: pathlib.Path) -> List[str]:
     violations = []
     try:
         source = filepath.read_text(encoding="utf-8")
-        tree = ast.parse(source, filename=str(filepath))
+        tree = parse(source, filename=str(filepath))
     except (SyntaxError, UnicodeDecodeError):
         return violations
 
@@ -205,7 +206,7 @@ def test_launcher_process_spawns_open_no_console_window():
     offenders = []
     for path in LAUNCHER_PROCESS_FILES:
         rel = path.relative_to(REPO_ROOT).as_posix()
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        tree = parse(path.read_text(encoding="utf-8"))
         replacing = {id(node) for function in ast.walk(tree) if isinstance(function, ast.FunctionDef)
                      and (rel, function.name) in _IMAGE_REPLACEMENT for node in ast.walk(function)}
         for node in ast.walk(tree):
@@ -229,7 +230,7 @@ def test_no_product_code_detaches_a_process_from_its_console():
         rel = path.relative_to(REPO_ROOT).as_posix()
         if rel in CONSOLE_DETACHING_ALLOWLIST:
             continue
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        for node in ast.walk(parse(path.read_text(encoding="utf-8"))):
             name = (node.id if isinstance(node, ast.Name) else node.attr if isinstance(node, ast.Attribute)
                     else node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None)
             if name in _CONSOLE_DETACHING:
@@ -254,7 +255,7 @@ def test_platform_layer_exports_core_symbols():
 
 def test_win32_declarations_are_private_to_the_platform_layer():
     for path in _collect_python_files():
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        tree = parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             modules = ([alias.name for alias in node.names] if isinstance(node, ast.Import)
                        else [node.module or "", *(alias.name for alias in node.names)]

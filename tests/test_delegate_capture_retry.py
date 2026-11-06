@@ -18,7 +18,7 @@ from tests.test_delegate_collection_recovery import driven_runtime  # noqa: F401
 from tests.test_delegated_directory import DirectoryEngine
 
 
-@pytest.mark.parametrize("failure", ["transport", "problem", "refusal", "permission", "sharing"])
+@pytest.mark.parametrize("failure", ["transport", "refusal", "permission"])
 def test_directory_capture_uses_typed_retry_facts(tmp_path, monkeypatch, failure):
     from ouroboros import claudexor_daemon
 

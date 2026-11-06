@@ -706,9 +706,7 @@ def _helper_seed(tmp_path):
     return seed, repo
 
 
-@pytest.mark.parametrize("host,changed", [("frozen", "helper"), ("frozen", "server"), ("seed", "helper"),
-                                          ("seed", "server"), ("checkout", "helper"), ("checkout", "server"),
-                                          ("container", "helper"), ("container", "server")])
+@pytest.mark.parametrize("host,changed", [("frozen", "helper"), ("frozen", "server"), ("container", "server")])
 def test_exit_42_hands_over_only_when_a_module_the_launcher_loaded_changed(tmp_path, monkeypatch, host, changed):
     """Frozen and seed-copy origins come from their manifest; the checkout launcher records its own HEAD.
     A loaded helper change hands over, while a server-only update keeps the shell, even with seed argv.

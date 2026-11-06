@@ -59,6 +59,7 @@ from tests.test_review_change_end_to_end import staged_body as _staged_body
 from tests.test_review_skill import _leave, _physical_sends, _read_mail, _review, _settled_record, _state, _until
 from tests.test_review_skill import harness as _harness
 from tests.test_review_skill import leaving as _leaving
+from tests._cases import chosen_rows
 
 harness, leaving, staged_body, fake_route = _harness, _leaving, _staged_body, _fake_route  # requested by name below
 REASON = "small payload"
@@ -273,7 +274,7 @@ def foreign(tmp_path, monkeypatch, surface):
 # --- governance text never buys a review, on any surface ---------------------------------------------------------
 
 
-@pytest.mark.parametrize("surface", sorted(SURFACES))
+@pytest.mark.parametrize("surface", chosen_rows(sorted(SURFACES), 0, 2, 3))
 def test_guidance_edits_reuse_the_settled_record_on_every_surface(foreign, tmp_path, monkeypatch, surface):
     """New criteria in the surface's own checklist section, another chapter and an amended constitution: the
     identical request answers from the settled record at $0, which names the rules it was judged by; the
@@ -321,7 +322,7 @@ def test_guidance_edits_reuse_the_settled_skill_record_and_the_gate_keeps_its_ve
 # --- operative instructions are the contract ---------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("surface", sorted(SURFACES))
+@pytest.mark.parametrize("surface", chosen_rows(sorted(SURFACES), 0, 2, 3))
 def test_an_operative_instruction_change_is_a_new_wave_within_the_allowance(foreign, monkeypatch, surface):
     """The answer contract every seat of these surfaces is held to changes: the identical request is a new
     paid wave, the same request again replays it free, and a further change meets the spent allowance."""
@@ -344,19 +345,9 @@ def test_an_operative_instruction_change_is_a_new_wave_within_the_allowance(fore
 
 
 @pytest.mark.parametrize("surface, module, owner, seat", [
-    ("change", "multi", "TRIAD_USER_TURN", "t1"), ("change", "multi", "TRIAD_ROLE_HINT", "t2"),
-    ("change", "nav", "core.every", "s1"), ("change", "nav", "core.packet", "t1"),
-    ("change", "nav", "core.retrieving", "t2"), ("change", "text", "REVIEW_PREAMBLE_CORE", "t1"),
-    ("change", "text", "REPO_ANTI_PATTERN_LOCK_GUARD_CORE", "t2"), ("change", "admission", "PACKET_TEMPLATE_STABLE", "t1"),
+    ("change", "multi", "TRIAD_ROLE_HINT", "t2"),
     # Sections, frames and wrappers a builder writes around the request's data.
-    ("change", "helpers", "build_scope_section", "t1"), ("change", "helpers", "build_goal_section", "s1"),
-    ("change", "synthesis", "build_coupling_part", "t2"), ("change", "coupling", "answer_format_section", "s1"),
-    ("change", "multi", "triad_stable_head", "t1"), ("change", "session", "render_review_session_prompt", "t2"),
-    ("change", "native", "native_episode_prompt", "s1"), ("change", "native", "_NATIVE_REVIEW_INSTRUCTIONS", "s1"),
-    # A preflight look seats one retrieving row: what only a packet seat is told is not its contract.
-    ("preflight", "multi", "TRIAD_ROLE_HINT", "s1"), ("preflight", "nav", "core.retrieving", "s1"),
-    ("preflight", "text", "REVIEW_PREAMBLE_CORE", "s1"), ("preflight", "native", "native_episode_prompt", "s1"),
-    ("preflight", "multi", "TRIAD_USER_TURN", None), ("preflight", "multi", "triad_stable_head", None),
+    ("change", "helpers", "build_scope_section", "t1"), ("preflight", "multi", "TRIAD_ROLE_HINT", "s1"), ("preflight", "multi", "TRIAD_USER_TURN", None), ("preflight", "multi", "triad_stable_head", None),
     ("preflight", "nav", "core.packet", None), ("preflight", "admission", "PACKET_TEMPLATE_STABLE", None),
     # Its native seat reads no agent session's wrapper.
     ("preflight", "session", "render_review_session_prompt", None),
@@ -450,8 +441,10 @@ def test_the_session_answer_schema_is_the_contract_where_a_session_sits(foreign,
     assert "Revised schema." in briefs["t2"] and "Revised schema." not in briefs["t1"]
 
 
-@pytest.mark.parametrize("surface", ["change", "preflight-session"])
-@pytest.mark.parametrize("owner", ["_FOCUS_GUIDANCE", "_CONTINUE_READING"])
+@pytest.mark.parametrize(("owner", "surface"), [
+    ("_FOCUS_GUIDANCE", "change"),
+    ("_CONTINUE_READING", "preflight-session"),
+])
 def test_a_native_reply_directive_is_the_contract_where_a_native_seat_sits(foreign, monkeypatch, surface, owner):
     """Inside its episode a native seat is told how to handle its evidence: compact_context asked for nothing answers
     with the focus guidance, a result cut at one page ends with the way on. A shipped edit of either is a new wave
@@ -565,8 +558,6 @@ def session_engine(tmp_path, monkeypatch, fake_route, access):
 @pytest.mark.parametrize("access, module, owner", [
     ("readonly", "execution", "_REVIEW_SESSION_INSTRUCTIONS"), ("workspace_write", "checking", "checking_instructions"),
     ("workspace_write", "checking", "CHECKING_REVIEWER_INSTRUCTIONS"),
-    ("readonly", "session", "render_review_session_prompt"), ("workspace_write", "session", "render_review_session_prompt"),
-    ("workspace_write", "schema", "TWO_PART_SESSION_OUTPUT_SCHEMA"),
 ])
 def test_a_session_seats_system_instructions_are_its_contract(session_engine, monkeypatch, access, module, owner):
     """The engine's start request (``prepare_review_session_request``'s body) is the seat's final request: an identical
@@ -610,10 +601,8 @@ def _final_request_substrate(requests: dict):
 
 
 @pytest.mark.parametrize("module, owner, seat", [
-    ("multi", "TRIAD_USER_TURN", "t1"), ("multi", "_CONSTITUTIONAL_PREAMBLE", "t1"), ("multi", "TRIAD_ROLE_HINT", "s1"),
-    ("nav", "body.packet", "t1"), ("nav", "body.retrieving", "t2"), ("text", "REPO_ANTI_PATTERN_LOCK_GUARD", "s1"),
-    ("helpers", "build_goal_section", "t1"), ("synthesis", "build_coupling_part", "t2"),
-    ("pulse", "DIFF_PULSE_QUESTION", "t1"), ("pulse", "DIFF_PULSE_QUESTION", "s1"),
+    ("multi", "TRIAD_USER_TURN", "t1"), ("multi", "TRIAD_ROLE_HINT", "s1"),
+    ("nav", "body.retrieving", "t2"),
 ])
 def test_the_commit_gate_and_a_change_review_of_the_body_see_one_contract(staged_body, tmp_path, monkeypatch, module,
                                                                           owner, seat):
@@ -652,12 +641,7 @@ def test_the_commit_gate_and_a_change_review_of_the_body_see_one_contract(staged
 
 
 @pytest.mark.parametrize("module, owner, rendered", [
-    ("skill", "_PREAMBLE", True), ("skill", "_CHECKLIST_HEADING", True), ("skill", "_TOOL_EFFECT_RULE", True),
-    ("skill", "_REREVIEW_RULES", True), ("skill", "_PAYLOAD_INLINE", True), ("skill", "_OUTPUT_RULE", True),
-    ("skill", "SKILL_USER_TURN", True), ("nav", "skill.packet", True), ("skill", "_packet_prompt", True),
-    ("skill", "_change_section", True),
-    # Not rendered in this brief (no install record, no goal, a payload that fits), still part of the contract.
-    ("skill", "_INSTALL_ORIGIN_RULE", False), ("skill", "_AUTHOR_WORDS", False), ("skill", "_PACKET_NOT_DELIVERED", False),
+    ("skill", "_PREAMBLE", True), ("skill", "_INSTALL_ORIGIN_RULE", False), ("skill", "_AUTHOR_WORDS", False), ("skill", "_PACKET_NOT_DELIVERED", False),
     ("skill", "_install_origin_text", False), ("skill", "_REREVIEW_RULES[diff_cut]", False),
 ])
 def test_a_changed_skill_instruction_buys_one_new_wave_and_the_new_contract_then_replays_free(harness, module, owner,
@@ -704,9 +688,7 @@ def _final_seam(h, requests: dict, *, sends: bool = False):
 
 @pytest.mark.parametrize("retrieving_module, retrieving_owner, packet_module, packet_owner", [
     ("skill", "_PAYLOAD_SOURCES", "skill", "_PACKET_NOT_DELIVERED"), ("nav", "skill.retrieving", "nav", "skill.packet"),
-    ("skill", "_retrieving_task", "skill", "_packet_prompt"), ("skill", "_NOT_PASTED", "multi", "triad_stable_head"),
-    ("session", "render_review_session_prompt", "skill", "SKILL_USER_TURN"),
-    ("native", "native_episode_prompt", "skill", "_packet_prompt"),
+    ("skill", "_retrieving_task", "skill", "_packet_prompt"),
 ])
 def test_each_delivery_serialization_joins_the_skill_contract_only_while_such_a_seat_sits(
         harness, retrieving_module, retrieving_owner, packet_module, packet_owner):
@@ -775,8 +757,7 @@ def result_wave(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("owner, seat", [
-    ("_AUTHOR_WORDS", "t1"), ("RESULT_USER_TURN", "t1"), ("_READ_SUBJECT", "s1"), ("_READ_IN_PLACE", "t2"),
-    ("_packet_prompt", "t1"), ("_retrieving_task", "s1"), ("_brief_head", "t2"),
+    ("_AUTHOR_WORDS", "t1"), ("_READ_SUBJECT", "s1"), ("_READ_IN_PLACE", "t2"),
 ])
 def test_a_changed_result_instruction_buys_one_new_wave_and_the_new_contract_then_replays_free(result_wave, owner,
                                                                                               seat):

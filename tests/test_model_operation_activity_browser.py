@@ -9,7 +9,7 @@ from tests._work_projection_shared import with_work_fields
 from tests.test_project_work_card_browser import project_chat as project_chat, _evidence_dir
 from tests.ui_chat_viewport_smoke import set_viewport
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.mark.parametrize("chat_id", [1, 7], ids=["main", "project"])

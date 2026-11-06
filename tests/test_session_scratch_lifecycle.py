@@ -18,6 +18,7 @@ import hashlib
 import os
 import subprocess
 import sys
+import venv
 import zipfile
 from pathlib import Path
 
@@ -71,6 +72,22 @@ def _imports(scratch: Path) -> str:
     return done.stdout.strip() if done.returncode == 0 else ""
 
 
+def _seed_installed(scratch: Path) -> Path:
+    """Prepare an already installed package without paying pip for every lifecycle row.
+
+    The fresh-session branch below keeps the one real venv/pip witness.  The two
+    finished tasks only need an installed import while the test exercises custody
+    and retirement, so their tiny environment is built through Python's in-process
+    venv API and the package is written into its site-packages directory.
+    """
+    venv.EnvBuilder(with_pip=False, symlinks=os.name != "nt").create(scratch / "env")  # as `python -m venv` does
+    site = next((scratch / "env").rglob("site-packages"))
+    package = site / "tinypkg"
+    package.mkdir()
+    (package / "__init__.py").write_text('VALUE = "installed"\n', encoding="utf-8")
+    return package
+
+
 @pytest.fixture
 def world(tmp_path, monkeypatch):
     data, copy, cache = tmp_path / "data", tmp_path / "copy", tmp_path / "downloads"
@@ -99,7 +116,7 @@ def test_install_finish_retire_both_ways_then_an_explicit_reinstall_from_the_sur
     scratches = {}
     for task_id in ("manual", "auto"):
         scratches[task_id] = _scratch(world, task_id, access)
-        assert _install(scratches[task_id], copy / "requirements.txt", cache).returncode == 0
+        assert (_seed_installed(scratches[task_id]) / "__init__.py").is_file()
         assert _imports(scratches[task_id]) == "installed"
     legacy = scratches["auto"].parent / "ob-review-legacy-venv"  # made before the declaration: no record names it
     legacy.mkdir()
@@ -142,11 +159,15 @@ def test_a_scratch_its_producer_retained_is_never_destroyed(world):
     test_environment.retain_tree(scratch, reason)
     assert task_custody.settle_child_drive(data, "held", data / "task_drives" / "held",
                                            live=lambda _t: False)["status"] == "removed"
-    # The custodied drive goes at once (#2586); the retained scratch stays, owned by no one from then on.
-    assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}, "retained": [str(scratch)]}
-    assert task_custody.remove_custody_trash(data) == {"removed": 0, "stuck": {}, "retained": []}
+    # The custodied drive goes at once (#2586); the retained scratch keeps its record as a visible hold (#2708).
+    report = task_custody.remove_custody_trash(data)
+    assert (report["removed"], report["stuck"]) == (1, {})
+    assert [(hold["class"], hold["count"], hold["example"]) for hold in report["holds"]] == [
+        ("producer_retained", 1, f"{scratch}: {reason}")]
+    assert task_custody.remove_custody_trash(data)["holds"] == report["holds"]  # the hold stands, unchanged
     assert (scratch / "only-here.txt").read_text(encoding="utf-8") == "unique input\n"
     assert retire_synthetic_retention(scratch, reason)
+    assert task_custody.remove_custody_trash(data)["removed"] == 1 and not scratch.exists()
 
 
 @pytest.mark.parametrize("access", ACCESSES)

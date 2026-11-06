@@ -29,7 +29,6 @@ from tests.test_continue_blocker_diagnostics import _held, _http
 from tests.test_continue_independent_review import PRED, _current_pool  # noqa: F401 - pytest fixture
 from tests.test_owner_continue import NONCE
 
-pytestmark = pytest.mark.serial
 
 LEAF = "delegated run run-leaf is running"
 UNKNOWN_START = "a delegated start has an unknown outcome (no run was recorded)"
@@ -531,9 +530,7 @@ def _refused(control=SAVED_CONTROL, at="2026-10-17T15:05:00Z", **extra):
 
 @pytest.mark.parametrize("attempt, said", [
     # About this very hold, whenever it was answered: dated history beside it.
-    (_refused(), True), (_refused(at="2026-10-17T13:00:00Z"), True),
-    # About another control (an earlier Pause, the same hold's other reason): never said beside this one.
-    (_refused({"cause": "pause", "scope": "tree", "ui_code": "owner_paused", "release": "resume",
+    (_refused(), True), (_refused({"cause": "pause", "scope": "tree", "ui_code": "owner_paused", "release": "resume",
                "fence_id": "fence-earlier"}), False),
     (_refused({**SAVED_CONTROL, "reason": "owner_restart_hold", "ui_code": "owner_restart_hold"}), False),
     # An earlier stop in the very same words (a stop declared anew, after a release, records its own occurrence).

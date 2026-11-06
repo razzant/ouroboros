@@ -44,10 +44,6 @@ def _read(root, name):
     return json.loads((root / "state" / name).read_text(encoding="utf-8"))
 
 
-def _task(task_id, **extra):
-    return {"id": task_id, "type": "task", "chat_id": 1, "root_task_id": task_id, "text": f"task {task_id}", **extra}
-
-
 def _slot(wid, lane, busy=None):
     return types.SimpleNamespace(wid=wid, lane=lane, busy_task_id=busy, active_capacity=True, resume_hold="",
                                  reaping=False, readiness_exhausted=False, process_birth="b",
@@ -91,97 +87,65 @@ def test_an_idle_pool_with_the_lanes_spare_is_available_and_a_disabled_pool_refu
     assert _promotion_pool_disabled_from_snapshot(ctx) == "no_workers"
 
 
-def test_the_telegram_health_line_counts_every_started_process(published, monkeypatch):
-    from skills.telegram.lib import telegram_health
+# ---- a failed pool measurement is published as unknown, never as an empty pool -------------------
+
+def test_a_failed_pool_measurement_publishes_unknown_and_every_reader_keeps_it_unknown(published, monkeypatch):
+    from ouroboros import config, utils
+    from ouroboros.context_runtime_facts import _queue_context_fact
+    from ouroboros.engine_facts import engine_pool_line
+    from ouroboros.model_detach import pool_available
+    from ouroboros.tools.control_events import _promotion_pool_disabled_from_snapshot
+    from supervisor import worker_pool_lifecycle
 
     root, _now = published
     _idle_pool(monkeypatch)
-    assert queue.persist_queue_snapshot("boot") is True
-    snap = json.loads((root / "state" / "queue_snapshot.json").read_text(encoding="utf-8"))
-    assert telegram_health._started_processes(snap) == 1
+
+    def broken(*_a, **_kw):
+        raise RuntimeError("pool table mid-rebind")
+
+    with monkeypatch.context() as failing:
+        failing.setattr(worker_pool_lifecycle, "pool_slot_counts", broken)
+        assert queue.persist_queue_snapshot("introspection_failed") is True
+    document = _read(root, "queue_snapshot.json")
+    assert document["pool_observation_status"] == "unknown"
+    assert all(document[key] is None for key in queue_publication._POOL_COUNT_KEYS), "never zeros"
+    assert document["project_demand"]["status"] == "unknown"
+    # The control projections refuse as the old zero-count form did, under the honest reason.
+    ctx = types.SimpleNamespace(drive_root=root, budget_drive_root="")
+    assert _promotion_pool_disabled_from_snapshot(ctx) == "unknown"
+    with monkeypatch.context() as carrier:  # a conversation carrier reads the published document
+        carrier.setattr(utils, "in_worker_process", lambda: True)
+        carrier.setattr(config, "DATA_DIR", root)
+        state = pool_available()
+    assert (state["available"], state["disabled_reason"], state["worker_count"]) == (False, "unknown", None)
+    fact = _queue_context_fact({"budget_drive_root": str(root)})
+    assert (fact["pool_observation_status"], fact["free_worker_slots"], fact["free_worker_slots_basis"],
+            fact["worker_total"]) == ("unknown", None, "unknown_pool_observation", None)
+    assert ": unknown (introspection failed)" in engine_pool_line(root)
+    # The measurement back: an observed idle pool again.
+    assert queue.persist_queue_snapshot("measured") is True
+    assert _read(root, "queue_snapshot.json")["pool_observation_status"] == "observed"
+    assert _promotion_pool_disabled_from_snapshot(ctx) == ""
 
 
-# ---- N9: a failed publication is retried; the stale document is never re-certified ---------------
+def test_a_document_from_before_the_status_reads_its_failed_measurement_as_unknown(tmp_path):
+    """The earlier publisher's failure form: zeros with ``worker_pool_disabled_reason: unknown``."""
+    from ouroboros.context_runtime_facts import _queue_context_fact
+    from ouroboros.queue_observation import pool_observation_status
+    from ouroboros.tools.control_events import _promotion_pool_disabled_from_snapshot
 
-def test_a_failed_census_publication_is_retried_and_never_recertified_meanwhile(published, monkeypatch):
-    root, now = published
-    queue.RUNNING["r"] = {"task": _task("r"), "attempt": 1, "worker_id": 3, "started_at": now[0] - 100,
-                          "last_heartbeat_at": now[0] - 1, "budget_paused_sec": 0.0, "soft_sent": False}
-    assert queue.persist_queue_snapshot("start") is True
-    generation = _read(root, "queue.alive")["generation"]
-    queue_publication.tick_publisher_started()
-    with queue._queue_lock:  # an unmarked change of a published fact (the census's business)
-        queue.RUNNING["r"]["silence_attention"] = {"episode_id": "e1", "state": "pending_attention", "last_progress_at": now[0] - 50}
-    with monkeypatch.context() as broken:
-        broken.setattr(queue, "atomic_write_text", lambda *_a: False)  # the disk is full
-        assert queue_publication.publish_queue_changes() is False
-    assert not (root / "state/queue.alive").exists(), "the old certificate was revoked before the failed write"
-    # Quiet ticks inside the refresh cadence and past it: the stale document is never certified again.
-    now[0] += queue_publication.QUEUE_ALIVE_REFRESH_SEC * 2
-    with monkeypatch.context() as broken:
-        broken.setattr(queue, "atomic_write_text", lambda *_a: False)
-        assert queue_publication.publish_queue_changes() is False, "the change is retried, not forgotten"
-    assert not (root / "state/queue.alive").exists()
-    assert "silence_attention" not in _read(root, "queue_snapshot.json")["running"][0]
-    # The disk is back: the next tick publishes the change and certifies the new document.
-    assert queue_publication.publish_queue_changes() is True
-    assert _read(root, "queue_snapshot.json")["running"][0]["silence_attention"]["episode_id"] == "e1"
-    alive = _read(root, "queue.alive")
-    assert alive["generation"] != generation and alive["generation"] == _read(root, "queue_snapshot.json")["generation"]
-    assert queue_publication.publish_queue_changes() is True, "and the quiet tick that follows refreshes as before"
-
-
-# ---- N10: a newer capture always wins -------------------------------------------------------------
-
-def test_a_newer_capture_is_never_overwritten_by_an_older_one_at_the_same_revision(published):
-    root, now = published
-    queue.PENDING.append(_task("a"))
-    assert queue.persist_queue_snapshot("seed") is True
-    queue_publication.tick_publisher_started()
-    with queue._queue_lock:
-        older = queue_publication._capture("barrier")  # a barrier's capture, not yet written
-    queue.PENDING.append(_task("b"))
-    with queue._queue_lock:
-        newer = queue_publication._capture("main_loop", census=queue_publication._census())  # the tick's capture
-    assert newer["revision"] == older["revision"], "the tick captured without a bump: the same revision"
-    assert queue_publication._publish(newer) is True
-    assert [row["id"] for row in _read(root, "queue_snapshot.json")["pending"]] == ["a", "b"]
-    assert queue_publication._publish(older) is True, "the older capture is subsumed, never written"
-    assert [row["id"] for row in _read(root, "queue_snapshot.json")["pending"]] == ["a", "b"], "the newer facts stay on disk"
-
-
-# ---- N11: the retry-custody publication repeats only when the claim's facts change ---------------
-
-def test_the_retry_custody_publication_repeats_only_when_the_claims_facts_change(tmp_path, monkeypatch):
-    from supervisor import workers
-
-    pending = [{"id": "held", "type": "task", "_terminalization_retry": {"status": "cancelled", "trigger": "x", "reason": "pending"}}]
-    monkeypatch.setattr(workers, "PENDING", pending)
-    monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
-    (tmp_path / "logs").mkdir()
-    publications = []
-    monkeypatch.setattr(queue, "publish_queue_snapshot", lambda **kw: publications.append(kw["reason"]) or True)
-    workers._PUBLISHED_RETRY_CUSTODY.clear()
-    for _ in range(3):  # three assignment passes with the same unresolved claim
-        workers._persist_pending_terminalization_retries(["held"])
-    assert publications == ["pending_terminal_event_retry"], "one publication for one set of facts"
-    pending[0]["_terminalization_retry"]["reason"] = "still pending, new detail"
-    workers._persist_pending_terminalization_retries(["held"])
-    assert len(publications) == 2, "a changed claim fact publishes again"
-    workers._persist_pending_terminalization_retries([])
-    workers._persist_pending_terminalization_retries(["held"])
-    assert len(publications) == 3, "a claim that left and returned is a change"
+    legacy = {"running": [], "pending": [], "pending_count": 0, "running_count": 0, "worker_total": 0,
+              "active_worker_count": 0, "assignable_idle_workers": 0, "lane_carrier_total": 0,
+              "worker_pool_disabled_reason": "unknown"}
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "queue_snapshot.json").write_text(json.dumps(legacy), encoding="utf-8")
+    assert pool_observation_status(legacy) == "unknown"
+    assert pool_observation_status({**legacy, "worker_pool_disabled_reason": ""}) == "observed"
+    assert _promotion_pool_disabled_from_snapshot(types.SimpleNamespace(drive_root=tmp_path, budget_drive_root="")) \
+        == "unknown"
+    fact = _queue_context_fact({"budget_drive_root": str(tmp_path)})
+    assert fact["free_worker_slots"] is None
+    assert all(fact[key] is None for key in ("worker_total", "active_worker_count", "reaping_count", "lane_carrier_total"))
 
 
 # ---- NIT: the census carries only the waits that still wait ---------------------------------------
-
-def test_the_census_prunes_resolved_model_waits(published):
-    _root, now = published
-    task = _task("r", model_waits={"w1": {"state": "resolved", "revision": 2, "task_attempt": 1}})
-    queue.RUNNING["r"] = {"task": task, "attempt": 1, "started_at": now[0]}
-    with queue._queue_lock:
-        before = queue_publication._census()
-        task["model_waits"]["w2"] = {"state": "resolved", "revision": 1, "task_attempt": 1}
-        assert queue_publication._census() == before, "a resolved wait is history, not a published change"
-        task["model_waits"]["w3"] = {"state": "waiting", "revision": 1, "task_attempt": 1}
-        assert queue_publication._census() != before, "a wait that waits is published"

@@ -20,7 +20,7 @@ from tests.ui_console_errors import PageErrors
 from tests.ui_failure_evidence import FailureEvidence
 
 wait_clone = clone_fixture
-pytestmark = [pytest.mark.serial, pytest.mark.ui_browser]
+pytestmark = [pytest.mark.ui_browser]
 _ENGINES = [("chromium", 1440), ("webkit", 390)]
 _STOP_REASON = "The requested verification is unfinished; this is the selected partial answer."
 _OBSERVE = f"({_CAPTURE_TEST_SOCKET})();({_OBSERVE_CARDS.replace('document.documentElement', 'document')})();" + """

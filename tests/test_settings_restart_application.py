@@ -53,7 +53,6 @@ def test_missing_component_facts_stay_unknown(applied, monkeypatch):
     assert "not reported" in state["summary"]
 
 
-@pytest.mark.serial
 def test_socket_owners_publish_only_successfully_bound_inputs(tmp_path, monkeypatch):
     monkeypatch.setattr(server_process, "_applied_restart_settings", {})
     with bound_service_socket(tmp_path, "host_service", "127.0.0.1", 0) as sock:
@@ -152,7 +151,6 @@ def healthy_model_process(tmp_path, monkeypatch):
         manager.stop_server()
 
 
-@pytest.mark.serial
 def test_actual_local_start_health_and_restart_clear_saved_mismatch(healthy_model_process, monkeypatch, free_tcp_port):
     manager, settled, commands = healthy_model_process
     saved = {**config.SETTINGS_DEFAULTS, "LOCAL_MODEL_SOURCE": "fixture/model",

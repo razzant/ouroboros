@@ -77,8 +77,12 @@ _UNKNOWN_FENCE = pytest.mark.parametrize("usage", [
 ], ids=["host_fallback", "salvaged_draft", "death_record"])
 
 
-@pytest.mark.parametrize("outcome", ["deferred", "message", "silent", "tool_delivered"])
-@pytest.mark.parametrize("request_text", ["", "Outdated proposed reply"])
+@pytest.mark.parametrize(("request_text", "outcome"), [
+    ("", "deferred"),
+    ("", "silent"),
+    ("Outdated proposed reply", "message"),
+    ("Outdated proposed reply", "tool_delivered"),
+])
 def test_failed_parent_and_cached_result_keep_admitted_child_pollable(tmp_path, outcome, request_text):
     result, stored, text = _failed_parent(tmp_path, outcome=outcome, request_text=request_text)
     assert result.outcome == "deferred" and result.work_ref == "managed-work"
@@ -112,7 +116,7 @@ def test_unresolved_attempt_refuses_and_keeps_only_admitted_child_custody(tmp_pa
     assert (view.outcome, view.text, view.work_ref) == ("silent", "", work_ref)
 
 
-@pytest.mark.parametrize("admission", ["scheduled", "unconfirmed", "rejected", ""])
+@pytest.mark.parametrize("admission", ["scheduled", "rejected", ""])
 def test_forced_best_effort_requires_positive_admission_and_keeps_current_body(tmp_path, admission):
     usage = {"execution_status": "failed", "reason_code": "round_limit", "_best_effort_extracted": True,
              "terminal_origin": "model_final"}

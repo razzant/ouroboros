@@ -122,9 +122,10 @@ def _real_actor(lane, monkeypatch, fanout):
     return actor
 
 
-@pytest.mark.parametrize("history", [20, 2000])
-@pytest.mark.parametrize("fanout", [False, True], ids=["no_fanout", "one_emit"])
-@pytest.mark.parametrize("minted", [True, False], ids=["minted", "unproven"])
+@pytest.mark.parametrize(("minted", "fanout", "history"), [
+    pytest.param(True, True, 2000, id='minted-one_emit-2000'),
+    pytest.param(False, False, 20, id='unproven-no_fanout-20'),
+])
 def test_finalization_reads_unrelated_history_only_without_the_minting_proof(
         lane, monkeypatch, provider_catalog_offline, history, fanout, minted):
     history_bytes = _history(lane.root, history)

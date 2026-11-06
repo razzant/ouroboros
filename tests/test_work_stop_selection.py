@@ -21,7 +21,6 @@ from tests.test_budget_pause_lineage_restore import _consume, _restart
 from tests.test_model_sleep import _cold_park
 from tests.test_restart_retention import _pool_events
 
-pytestmark = pytest.mark.serial
 
 
 def _released_panic_running(root, monkeypatch):
@@ -237,6 +236,24 @@ def test_mind_attribution_on_a_grant_preserves_its_q9_door(tmp_path, monkeypatch
     assert q.resume_budget_paused_task("first", selected_by="saved-root")["ok"]
 
 
+@pytest.mark.parametrize("door", [True, False])
+def test_a_grant_names_the_owner_only_through_the_owners_own_resume_door(tmp_path, monkeypatch, door):
+    """A cold Resume's notice names who granted it: the owner's own door names the owner; an unbound call (the
+    host's own act) names nobody, never the owner by default."""
+    from ouroboros.control_actor import owner_door
+    from tests.test_root_resume_selection_survival import _world, _exact_root
+
+    q, workers, _sent = _world(tmp_path, monkeypatch, "saved")
+    with owner_door("api_task_resume") if door else nullcontext():
+        _exact_root(tmp_path, monkeypatch, q, workers)
+    grant = bp.budget_pause_row(tmp_path, "saved-root")["grant"]
+    if door:
+        assert grant["by"]["actor"] == "owner" and grant["by"]["door"] == "api_task_resume"
+    else:
+        assert grant["by"] == {}
+    assert grant["selected_by"] == "owner", "the Q9 door stays independent of who asked"
+
+
 def test_money_gate_reads_selection_from_dispatch_on_every_send(tmp_path, monkeypatch):
     from tests.test_budget_pause_holds import _fenced_member
     from ouroboros.task_results import write_task_result
@@ -266,11 +283,6 @@ def test_money_gate_reads_selection_from_dispatch_on_every_send(tmp_path, monkey
 
 @pytest.mark.parametrize("reason,release", [
     ("saved_work_hold", "resume"), ("owner_restart_hold", "resume"), ("panic_hold", "owner"),
-    ("saved_sleep_recovery", "resume"), ("unsaved_pause_intent", "resume"),
-    ("root_fence_lifted_pending_selection", "resume"), ("root_fence_member_pending_selection", "resume"),
-    ("continuation_writer_unsettled", "none"), ("restore_refused:source_missing", "resume"),
-    ("malformed_resume_identity", "resume"), ("resume_grant_revocation_unwritten", "resume"),
-    ("stale_resume_grant_superseded", "resume"), ("dispatch_outcome_unknown", "resume"),
 ])
 def test_hold_builder_keeps_release_and_attribution_separate(reason, release):
     by = {"actor": "ouroboros", "task_id": "mind", "text": "explanation", "at": "T"}

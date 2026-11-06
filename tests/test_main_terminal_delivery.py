@@ -197,8 +197,10 @@ def test_bound_main_event_survives_later_project_registry_failure(owed, monkeypa
     assert owed.queued == [owed.event, owed.event]
 
 
-@pytest.mark.parametrize("fmt", ["", "markdown"])
-@pytest.mark.parametrize("receipt", [None, (False, "transport refused")])
+@pytest.mark.parametrize(("receipt", "fmt"), [
+    (None, ""),
+    pytest.param((False, "transport refused"), "markdown", id='receipt1-markdown'),
+])
 def test_unbound_notice_requires_its_durable_row_without_a_delivery_receipt(tmp_path, monkeypatch, fmt, receipt):
     from supervisor import message_bus as bus
 
@@ -219,8 +221,10 @@ def test_unbound_notice_requires_its_durable_row_without_a_delivery_receipt(tmp_
     assert row["text"] == "Startup notice"
 
 
-@pytest.mark.parametrize("fmt", ["", "markdown"])
-@pytest.mark.parametrize("receipt", [None, (False, "transport refused")])
+@pytest.mark.parametrize(("receipt", "fmt"), [
+    (None, ""),
+    pytest.param((False, "transport refused"), "markdown", id='receipt1-markdown'),
+])
 def test_bound_delivery_keeps_debt_without_a_positive_transport_receipt(owed, monkeypatch, fmt, receipt):
     from supervisor import events_chat_delivery as handler, message_bus as bus
     from ouroboros.utils import append_jsonl

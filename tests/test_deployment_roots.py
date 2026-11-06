@@ -99,7 +99,6 @@ print(json.dumps({"env": os.environ.get("OUROBOROS_REPO_DIR"), "server": str(ser
 '''
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("explicit", [False, True])
 def test_a_direct_server_names_its_executing_checkout_before_imports(tmp_path, explicit):
     data = tmp_path / "data"
@@ -177,7 +176,6 @@ def _consecutive_free_ports(count: int) -> int:
     pytest.skip("no run of consecutive free loopback ports")
 
 
-@pytest.mark.serial
 def test_a_fallback_port_skips_this_installations_service_ports():
     from ouroboros.server_entrypoint import find_free_port
 

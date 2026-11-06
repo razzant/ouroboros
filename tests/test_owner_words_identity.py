@@ -205,6 +205,42 @@ def test_legacy_held_rows_without_client_ids_keep_their_canonical_handles(tmp_pa
     ]
 
 
+@pytest.mark.parametrize("carrier", ["origin_text", "origin_ref", "binding", "annotation", "held", "mailbox"])
+def test_fallback_carriers_keep_the_whole_reply_target(tmp_path, monkeypatch, carrier):
+    """The same stored reply reaches the page writer through each supported fallback, not only its live corpus."""
+    from ouroboros.chat_references import reference_from_row
+    from ouroboros.owner_relay import owner_quote, write_relay
+    from ouroboros.project_dialogue import append_chat_annotation
+
+    proposal = {"chat_id": 1, "direction": "out", "ts": "2026-09-30T05:40:00Z",
+                "text": "A whole proposal. " * 100, "client_message_id": "proposal"}
+    ds.append(tmp_path, "chat", proposal)
+    owner = {"chat_id": 1, "direction": "in", "ts": TS, "text": "Yes, do that.",
+             "client_message_id": "reply", "reply_to": reference_from_row(proposal)}
+    ds.append(tmp_path, "chat", owner)
+    stored = next(item.row for item in ds.rows_by_client_id(tmp_path, "reply"))
+    ref = build_owner_message_ref(chat_id=1, client_message_id="reply", ts=TS, text=owner["text"])
+    record = {"id": ROOT}
+    if carrier.startswith("origin"):
+        record["origin_message_ref"] = ref
+        if carrier == "origin_text":
+            record["origin_message_text"] = owner["text"]
+    elif carrier == "binding":
+        monkeypatch.setattr("ouroboros.projects_registry.project_task_bindings", lambda _root: {
+            ROOT: {"source_text": owner["text"], "source_ref": ref}})
+    elif carrier == "annotation":
+        append_chat_annotation(tmp_path, "reply", action="steer_task", target=ROOT, status="read", routing_token="r")
+    elif carrier == "held":
+        record["held_owner_messages"] = {format_address(row_address(stored)): stored}
+    else:
+        write_relay(tmp_path, ROOT, relay_id="pending", note="context", quotes=[owner_quote(tmp_path, stored)],
+                    chat_id=1, teller_task_id="teller", canonical_root=tmp_path)
+    rows, absent = ow.task_owner_words(tmp_path, ROOT, task=record)
+    assert not absent and [row["text"] for row in rows if row["source"] != ow.REPLY_TARGET] == [owner["text"]]
+    [target] = [row for row in rows if row["source"] == ow.REPLY_TARGET]
+    assert target["text"] == proposal["text"] and target["author"] != "owner"
+
+
 def _drafted_corpus(tmp_path, stored):
     from ouroboros.tools.tool_context import ToolContext
 

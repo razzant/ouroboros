@@ -18,7 +18,6 @@ from supervisor import conversation_lane, inline_carrier, worker_chat_lane, work
 from tests.test_owner_wait_pool import InputQueue, Process, pool as pool  # noqa: F401 -- fixture
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 _REAL_THREAD = threading.Thread  # captured at collection: the pool fixture stubs the lifecycle's threads
 _REAL_LANE_RECONCILE = conversation_lane.reconcile_conversation_lane  # the shared pool fixture stubs it
 
@@ -108,12 +107,12 @@ def test_a_booting_spare_is_a_carrier_that_will_come(degraded, monkeypatch):
 
 
 def test_under_the_project_fence_the_tick_still_starts_a_waiting_turns_executor(degraded, monkeypatch):
-    """S43 defect 1: the lane is independent of the project pool's crash fuse. Under the fence the tick
+    """S43 defect 1: the lane is independent of the project pool's exhaustion fence. Under the fence the tick
     reconciles the lane all the same: the lane's refused spawn is noticed and the waiting turn's degraded
     executor starts, instead of the owner's hello waiting forever beside a fenced pool."""
     from supervisor import worker_pool_lifecycle
 
-    monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "worker_crash_storm")
+    monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "worker_readiness_exhausted")
     monkeypatch.setattr(workers, "load_state", lambda: {"owner_chat_id": 1})
     monkeypatch.setattr(conversation_lane, "reconcile_conversation_lane", _REAL_LANE_RECONCILE)
     busy = workers.Worker(5, Process(5005), InputQueue(), lane=LANE_CONVERSATION, busy_task_id="other")

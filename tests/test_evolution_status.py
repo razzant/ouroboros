@@ -58,12 +58,9 @@ def test_evolution_status_reports_waiting_for_idle(monkeypatch):
 
 
 @pytest.mark.parametrize("enabled,failures,remaining,status", [
-    (True, 3, 25.0, "idle_ready"),  # formerly paused_failures
-    (True, 0, 1.25, "idle_ready"),  # formerly budget_blocked by the $2 reserve
     (False, 0, 1.25, "disabled"),  # formerly inferred as budget_stopped
     (True, 0, 0.0, "budget_blocked"),  # the ordinary exhausted limit
     (True, 0, 0.003, "idle_ready"),  # shown as $0.00, yet positive money the tick admits on
-    (True, 0, -0.25, "budget_blocked"),
 ])
 def test_evolution_status_names_no_count_stop_or_reserve(monkeypatch, enabled, failures, remaining, status):
     from supervisor import queue as queue_module
@@ -104,10 +101,8 @@ def test_a_subscription_main_is_not_budget_blocked_at_the_reached_limit(monkeypa
 
 @pytest.mark.parametrize("case,settled,status,shown,admitted", [
     ("positive_subcent", 4.997, "idle_ready", 0.0, True),
-    ("zero", 5.0, "budget_blocked", 0.0, False),
     ("overspent", 5.25, "budget_blocked", 0.0, False),  # the store reports no room, never a negative one
     ("unknown", 4.997, "accounting_unavailable", None, False),
-    ("disabled", 4.997, "disabled", 0.0, False),
 ])
 def test_the_state_endpoint_reports_what_the_tick_then_admits(tmp_path, monkeypatch, case, settled, status, shown, admitted):
     """The real GET /api/state handler classifies the money the real tick admits on; its

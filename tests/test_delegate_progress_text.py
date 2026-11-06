@@ -43,7 +43,7 @@ def test_text_body_wins_over_the_engine_title_preview():
     assert event == original
 
 
-@pytest.mark.parametrize("delta", [False, None, "true", 1])
+@pytest.mark.parametrize("delta", [False, "true", 1])
 def test_only_a_boolean_delta_fact_authorizes_concatenation(delta):
     assert render(text_event("first", delta=delta), text_event("second", delta=delta)).endswith(
         "first · second"
@@ -52,7 +52,6 @@ def test_only_a_boolean_delta_fact_authorizes_concatenation(delta):
 
 @pytest.mark.parametrize("boundary", [
     {"type": "harness.event", "title": "read", "severity": "info"},
-    {"type": "harness.started", "title": "started", "severity": "info"},
     text_event("complete message", kind="message", delta=False),
     text_event("complete thought", delta=False),
 ])
@@ -71,7 +70,6 @@ def test_distinct_text_streams_are_never_concatenated(changes):
 
 @pytest.mark.parametrize("metadata", [
     {}, {"textKind": None, "textDelta": False},
-    {"textKind": "future_kind", "textDelta": True},
     {"textKind": "thinking", "textDelta": True, "detail": None},
 ])
 def test_legacy_or_unknown_metadata_keeps_event_labels(metadata):

@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from ouroboros.contracts.task_constraint import normalize_task_constraint  # noqa: F401
 from ouroboros.post_task_checkpoint import CANONICAL_CUSTODY_FIELDS, project_replica_task_result_fields
+from ouroboros.delegate_named_evidence import published_workspace_evidence
 from ouroboros.workspace_file_outputs import _directory_direct_artifacts
 from ouroboros.task_results import (
     cancellation_blocks_child_result, load_task_result, validate_task_id, write_task_result,
@@ -26,17 +27,9 @@ from ouroboros.task_results import (
 from ouroboros.utils import atomic_write_json, utc_now_iso
 from ouroboros.retention import task_result_timestamp as _timestamp_from_result
 from ouroboros.headless_status import (  # noqa: F401
-    ARTIFACT_STATUS_FAILED,
-    ARTIFACT_STATUS_FINALIZING,
-    ARTIFACT_STATUS_MISSING,
-    ARTIFACT_STATUS_PENDING,
-    ARTIFACT_STATUS_READY,
-    ARTIFACT_STATUS_READY_NO_CHANGES,
-    ARTIFACT_STATUS_READY_WITH_CHANGES,
-    ARTIFACT_TERMINAL_STATUSES,
-    _ARTIFACT_LIFECYCLE_FIELDS,
-    _FINAL_STATUSES,
-    _LOCAL_READONLY_SUBAGENT_MODE,
+    ARTIFACT_STATUS_FAILED, ARTIFACT_STATUS_FINALIZING, ARTIFACT_STATUS_MISSING, ARTIFACT_STATUS_PENDING,
+    ARTIFACT_STATUS_READY, ARTIFACT_STATUS_READY_NO_CHANGES, ARTIFACT_STATUS_READY_WITH_CHANGES,
+    ARTIFACT_TERMINAL_STATUSES, _ARTIFACT_LIFECYCLE_FIELDS, _FINAL_STATUSES, _LOCAL_READONLY_SUBAGENT_MODE,
 )
 from ouroboros.workspace_patch_capture import (  # noqa: F401
     SCRATCH_MANIFEST_NAME,
@@ -316,10 +309,11 @@ def _prune_drives(base: pathlib.Path, parent: pathlib.Path, *, drive_of: Any, no
     those were (``_changed_drives``) and at the drives published (``task_custody.arrived_drives``; the
     report's ``arrivals``, which the caller forgets in the transaction recording the pass): a completion
     elsewhere or a new drive leaves the rest standing under the moved inputs, still without a listing. A
-    whole pass that attempted nothing records the rest; any other pass clears it.
+    whole pass that attempted nothing and read no row busy (``store_busy``) records the rest; any other clears it.
     ``only`` restricts the pass to those task ids (the free action's previewed folders; every other drive is
     untouched, no rest is kept); ``progress`` is called with the report after each settlement attempt."""
     from ouroboros.retention import age_cutoff
+    from ouroboros.store import StoreBusy, StoreError
     from ouroboros.task_custody import (arrived_drives, forget_departed, layout_basis, record_rest, rested_verdict,
                                         settle_child_drive)
 
@@ -352,7 +346,7 @@ def _prune_drives(base: pathlib.Path, parent: pathlib.Path, *, drive_of: Any, no
 
     if names is None:
         forget_departed(verdicts(), base.name, _drive_names(base))
-    attempts, youngest = 0, (None if names is None else rest.get("youngest"))
+    attempts, busy, youngest = 0, False, (None if names is None else rest.get("youngest"))
     for task_id, status, retention_at, inside_wait, fact in drive_candidates(base, parent, cutoff, stop, after=after,
                                                                                names=names):
         if chosen is not None and task_id not in chosen:
@@ -377,7 +371,13 @@ def _prune_drives(base: pathlib.Path, parent: pathlib.Path, *, drive_of: Any, no
                 continue
             # A hint never authorizes removal. In particular a date changed after
             # selection must be checked here; settlement rechecks custody, not age.
-            result = load_task_result(parent, task_id, strict=True) or {}
+            try:
+                result = load_task_result(parent, task_id, strict=True) or {}
+            except (OSError, ValueError, StoreError) as exc:  # this drive's own hold, never the pass's error:
+                busy = busy or isinstance(exc, StoreBusy)  # contention says nothing of the row: no rest, read next pass
+                reason = "store_busy" if isinstance(exc, StoreBusy) else "task_result_unreadable"  # quarantined or torn
+                report["skipped"].append({"task_id": task_id, "reason": reason})
+                continue
             status = str(result.get("status") or "").lower()
             if status not in _FINAL_STATUSES:
                 report["skipped"].append({"task_id": task_id, "reason": not_terminal, "status": status})
@@ -403,7 +403,7 @@ def _prune_drives(base: pathlib.Path, parent: pathlib.Path, *, drive_of: Any, no
             report["errors"].append({"task_id": task_id, "error": f"{type(exc).__name__}: {exc}"})
     if basis is not None:
         rest.clear()
-        if not (attempts or report["deferred"] or report["errors"] or (stop is not None and stop())):
+        if not (attempts or busy or report["deferred"] or report["errors"] or (stop is not None and stop())):
             rest.update({"basis": basis, "youngest": youngest})  # a whole pass with nothing to do: its inputs stand
     return report
 
@@ -994,10 +994,19 @@ def _finalize_task_artifacts_locked(parent_drive_root: pathlib.Path, task: Dict[
                 atomic_write_json(manifest_path, manifest, trailing_newline=True)
                 patch_artifacts = [_file_artifact("workspace_patch_manifest", manifest_path)]
             else:
-                direct = _directory_direct_artifacts(workspace_root, artifact_dir, task, existing)
+                # The task's own copy or folder has no run to retain its evidence folder: this capture retains it
+                # once (reusing the last published generation while unchanged), held out of any patch (#2711).
+                evidence = {"retain_evidence_dir": artifact_dir / "named_evidence",
+                            "retained_evidence": published_workspace_evidence(existing)}
+                direct = _directory_direct_artifacts(workspace_root, artifact_dir, task, existing, **evidence)
                 patch_artifacts, manifest = direct if direct is not None else write_workspace_patch_artifacts(
-                    workspace_root, artifact_dir, task=task, scratch_dir=artifact_base,
-                )
+                    workspace_root, artifact_dir, task=task, scratch_dir=artifact_base, **evidence)
+                summary_path = (manifest.get("named_evidence") or {}).get("summary_path")
+                if summary_path and manifest["named_evidence"].get("status") == "retained":
+                    patch_artifacts.append(_file_artifact("named_evidence_manifest", pathlib.Path(summary_path),
+                                                          workspace_root=str(workspace_root),
+                                                          files=manifest["named_evidence"]["files"],
+                                                          evidence_dir=manifest["named_evidence"]["evidence_dir"]))
             if existing.get("native_capture_pending"):
                 from ouroboros.delegate_custody_current import run
                 sources = {key: dict(value) for key, value in existing["native_capture_pending"].items()}
@@ -1124,7 +1133,8 @@ def _finalize_task_artifacts_locked(parent_drive_root: pathlib.Path, task: Dict[
     return artifacts
 
 
-_CAPTURE_KINDS = {"workspace_patch", "workspace_patch_manifest", "workspace_file_outputs_manifest", "workspace_file_outputs"}
+_CAPTURE_KINDS = {"workspace_patch", "workspace_patch_manifest", "workspace_file_outputs_manifest", "workspace_file_outputs",
+                  "named_evidence_manifest"}
 
 
 def current_workspace_manifest(root: pathlib.Path, task_id: str, result: Dict[str, Any]) -> pathlib.Path:

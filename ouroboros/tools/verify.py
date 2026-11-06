@@ -220,6 +220,12 @@ def _check_has_exit_masking(argv: List[str]) -> tuple[bool, list[str]]:
 check_exit_masking = _check_has_exit_masking
 
 
+def exit_masking_note(reasons: List[str]) -> str:
+    """The one sentence a run tool and ``verify_and_record`` give, at call time, on an exit 0 the shape laundered."""
+    return (f"EXIT_MASKING_NOTE: exit_code=0 belongs to the last stage ({', '.join(reasons)}); an upstream "
+            "failure cannot change it — drop the filter, use `set -o pipefail`, or check each stage.")
+
+
 _OBSERVABLE_EXTRA_ROOTS = ("subagent_projects", "deliverables", "artifact_store", "task_drive")
 
 
@@ -883,10 +889,11 @@ def _verify_and_record(
             ) + f"\n\n{_bounded(out, _TOOL_OUTPUT_CAP)}"
         verdict = "PASS" if passed else "FAIL"
         exp_note = f" expected={expected_s!r}" if expected_s else ""
+        mask_note = f"\n\n{exit_masking_note(_mask_reasons)}" if _masked and rc == 0 else ""
         return _publish_verification(ctx, (
             f"verify_and_record [{kind}] {verdict}: exit={rc}{exp_note}; "
             f"root={binding.root}, cwd={binding.target_path}. Host-attested receipt recorded.\n\n"
-            f"{_bounded(out, _TOOL_OUTPUT_CAP)}"
+            f"{_bounded(out, _TOOL_OUTPUT_CAP)}{mask_note}"
         ), receipt, compared=compared, detail=_cmp_detail if match_mode == "bytes_equal" else "")
 
     if kind == "artifact_observation":

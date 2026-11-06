@@ -22,7 +22,7 @@ from tests.test_presence_project_activity_browser import (
     ACTOR_WORDS, FIRST_ANSWER, PROJECT, RESTART_INLINE, SECOND_ANSWER, Consumer, _actions, _row, _sent_to, _work, kind_of,
 )
 
-pytestmark = [pytest.mark.serial, pytest.mark.browser]
+pytestmark = [pytest.mark.browser]
 wait_clone = clone_fixture
 _MENU_ITEMS = "body > .task-control-menu .task-control-item"
 
@@ -134,7 +134,7 @@ def test_a_moved_turn_pauses_from_its_project_keeps_its_saved_work_and_resumes_i
                                               "lift_said": "off its $" in text}
                 problems.check(first_role == "system", f"4: the resumed request lost its system prompt: {first_role}")
                 problems.check(ACTOR_WORDS in text and "[PRESENCE CONVERSATION RESUMED]" in text
-                               and "While the owner's Pause kept your work parked" in text,
+                               and "While the Pause kept your work parked" in text,
                                f"4: the resumed request does not carry its saved turn and reentry facts: {stage['4-resumed-request']}")
                 problems.check("off its $" in text and "ordinary project budget" in text,
                                "4: the resumed author was not told the owner's Resume moved it off its allowance")

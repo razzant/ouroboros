@@ -931,8 +931,13 @@ def test_containment_disowns_the_commit_intent_so_boot_cannot_adopt_it(
     assert int(current.get("absorbed_cycles_done") or 0) == 0
 
 
-@pytest.mark.parametrize('has_marker', [False, True])
-@pytest.mark.parametrize('native_status', ['unconfigured', 'verified', 'failed', 'missing', 'stale'])
+@pytest.mark.parametrize(("native_status", "has_marker"), [
+    ('unconfigured', True),
+    ('verified', False),
+    ('failed', False),
+    ('missing', True),
+    ('stale', False),
+])
 def test_native_host_adoption_is_required_for_restart_success(
     tmp_path, monkeypatch, has_marker, native_status,
 ):

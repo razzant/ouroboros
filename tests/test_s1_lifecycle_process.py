@@ -3,7 +3,8 @@
 Run only via unchanged scripts/safe_test.py with OUROBOROS_E2E_DEEP=mock.
 No lifecycle function, ACK, queue, admission, clock or checkpoint is mocked.
 The model is an HTTP loopback peer. The non-signal worker fault exits a real
-worker(23); a separate SIGKILL case MUST stay terminal under existing policy.
+worker(23); the SIGKILL case takes the same one retry (ARCHITECTURE §5: only a
+recorded stop terminalizes; a signal death is an unrecorded death like an exit code).
 
 Managed update means current-candidate replace recovery through /api/update/apply:
 real quiesce, transaction, stop, smoke, direct exec, ACK and boot-finalize. It
@@ -30,7 +31,7 @@ from tests.s1_lifecycle_process_support import (
 )
 from tests.system_e2e.harness import ArtifactOracle, LANE_MOCK, message_text, require_lane
 
-pytestmark = [pytest.mark.serial, pytest.mark.integration, pytest.mark.skipif(
+pytestmark = [pytest.mark.integration, pytest.mark.skipif(
     os.name != "posix", reason="This harness qualifies local POSIX process facts; Windows remains separate")]
 
 
@@ -268,8 +269,10 @@ def _fault_worker(server, task_id, evidence, *, signal_kill=False, label="first"
     assert server.proc.poll() is None, "Worker death became whole-app death"
 
 
-@pytest.mark.parametrize("signal_kill", [False, True], ids=["exit23-existing-retry", "sigkill-no-retry"])
+@pytest.mark.parametrize("signal_kill", [False, True], ids=["exit23-existing-retry", "sigkill-same-retry"])
 def test_real_pool_worker_death_preserves_existing_retry_policy_and_saved_cognition(s1_root, signal_kill):
+    """An exit-code death and a SIGKILL are the same unrecorded death: one retry on the same id from saved
+    cognition, then ``worker_crash_retry_exhausted`` (the signal recorded on the row); never a third try."""
     require_lane(LANE_MOCK)
     with scenario(s1_root) as (server, model, workspace, evidence):
         task_id = submit(server, workspace, "root")
@@ -277,22 +280,18 @@ def test_real_pool_worker_death_preserves_existing_retry_policy_and_saved_cognit
         before = _usage(server, [task_id], evidence, "before")
         _fault_worker(server, task_id, evidence, signal_kill=signal_kill)
         oracle = ArtifactOracle(server.data_root)
+        _restored_read(server, model, "root", task_id, saved, evidence)
+        running = wait_for(lambda: _rows(server, "running").get(task_id), "same-ID retry in real pool")
+        assert running["_attempt"] == 2 and running["_working_recovery"]["cause"] == "worker_crash", running
+        # The candidate's existing QUEUE_MAX_RETRIES is 1. A second real loss,
+        # by the same means, must not buy a third try. No setting is changed.
+        _fault_worker(server, task_id, evidence, signal_kill=signal_kill, label="second")
+        result = wait_for(lambda: (r if (r := oracle.task_result(task_id)).get("status") == "failed" else None),
+                          "existing retry exhaustion")
+        assert result["reason_code"] == "worker_crash_retry_exhausted", result
         if signal_kill:
-            result = wait_for(lambda: (r if (r := oracle.task_result(task_id)).get("status") == "failed" else None),
-                              "signal crash remains terminal")
-            assert result["reason_code"] == "worker_crash_signal", result
-            watch_no_change(lambda: model.count("root"), 1, "SIGKILL must not gain retry eligibility")
-        else:
-            _restored_read(server, model, "root", task_id, saved, evidence)
-            running = wait_for(lambda: _rows(server, "running").get(task_id), "same-ID retry in real pool")
-            assert running["_attempt"] == 2 and running["_working_recovery"]["cause"] == "worker_crash", running
-            # The candidate's existing QUEUE_MAX_RETRIES is 1. A second real
-            # non-signal loss must not buy a third try. No setting is changed.
-            _fault_worker(server, task_id, evidence, label="second")
-            result = wait_for(lambda: (r if (r := oracle.task_result(task_id)).get("status") == "failed" else None),
-                              "existing retry exhaustion")
-            assert result["reason_code"] == "worker_crash_retry_exhausted", result
-            watch_no_change(lambda: model.count("root"), 2, "retry count must not expand")
+            assert result["crash_signal"] == int(signal.SIGKILL), result
+        watch_no_change(lambda: model.count("root"), 2, "retry count must not expand")
         assert len(read_calls(server, task_id)) == 1
         _money_preserved(before, _usage(server, [task_id], evidence, "after"))
         write_json(evidence / "terminal-result.json", result)

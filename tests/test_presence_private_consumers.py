@@ -35,7 +35,7 @@ from tests.test_place_conversation_work import host as host  # fixture
 from tests.test_presence_owner_contact import _run, contact_door
 from tests.test_presence_private_start import FOCUS_KEYS, SPEAKER_KEYS, _answered
 
-pytestmark = [pytest.mark.serial, pytest.mark.usefixtures("provider_catalog_offline")]
+pytestmark = pytest.mark.usefixtures("provider_catalog_offline")
 
 PRIVATE = {"objective": "Investigate the source", "title": "Source research", "destination": "owner"}
 OUTWARD = {"objective": "Answer them", "title": "Answer", "destination": "place"}

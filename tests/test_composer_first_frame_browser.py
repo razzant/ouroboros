@@ -15,7 +15,7 @@ from tests.test_composer_capsules_browser import LONG_VALUES, _record
 from tests.test_effort_range_browser import _launch, _open_chat, _shot
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 PROBE = """() => {
     const seen = new WeakSet(), rows = [], observers = [];

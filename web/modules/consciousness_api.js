@@ -5,6 +5,11 @@
 // send exactly the contract's request keys.
 import { extensionRoutePath, extensionRoutePrefix, fetchJson, jsonPost, readStateJson } from './api_client.js';
 import { tr } from './i18n.js';
+import { errorWords } from './ui_primitives.js';
+
+/** A read or write that never reached Ouroboros in owner words (errorWords); a server's answer keeps its own words. */
+export const failureText = (error) => (error instanceof TypeError && error.response === undefined
+    ? errorWords(error).text : error?.message || String(error));
 
 /** Raised on window after a place write the server confirmed: `{place}` or `{placeId, removed: true}`. */
 export const PLACES_CHANGED_EVENT = 'ouro:places-changed';
@@ -128,7 +133,7 @@ export function normalizePlacesResponse(raw) {
 const WAKE_COST_KEYS = ['accounted_upper_bound_usd', 'accounted_upper_bound_usd_with_children',
     'cost_presentation', 'cost_accounting_status', 'cost_accounting_error', 'cost_final',
     'cost_with_children_partial', 'unknown_unmetered', 'non_final_rows', 'reserved_usd',
-    'unresolved_upper_bound_usd', 'ledger_integrity_degraded'];
+    'unresolved_upper_bound_usd', 'ledger_integrity_degraded', 'cost_custody'];
 
 /** Frozen RecentWake: phases and terminality are server facts, never timestamp guesses. */
 export function normalizeWake(raw) {

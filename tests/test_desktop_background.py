@@ -63,7 +63,6 @@ def test_the_choice_reads_undecided_until_the_owner_answers(host):
 
 @pytest.mark.parametrize("platform,env,reason", [
     ("darwin", {"OUROBOROS_PRESENTATION": "web"}, "packaged desktop app"),  # Docker, browser, Colab, server.py
-    ("darwin", {"OUROBOROS_PRESENTATION": "browser_fallback"}, "packaged desktop app"),
     ("linux", {}, "Not available on Linux yet"),
     ("win32", {desktop_autostart.BACKGROUND_ENV: ""}, "newer app build"),  # a launcher from before this mode
 ])

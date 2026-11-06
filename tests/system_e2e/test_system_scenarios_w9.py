@@ -98,7 +98,6 @@ def _tool_rows(oracle: ArtifactOracle, name: str) -> list:
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s36_body_candidate_on_a_real_server_keeps_the_serving_clone_and_types_its_refusals(tmp_path_factory):
     require_lane(LANE_MOCK)
     root = tmp_path_factory.mktemp("s36")
@@ -401,7 +400,6 @@ def _s37_diagnostics(data_root: pathlib.Path, stub, fixture: dict) -> None:
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 @pytest.mark.skipif(os.name == "nt", reason="a direct server re-executes in place only on POSIX; Windows "
                                            "starts a replacement process this harness does not own")
 def test_s37_restart_adopts_the_reviewed_candidate_commit_on_one_real_server(tmp_path_factory):
@@ -506,7 +504,6 @@ def _sigkill_server_group(server) -> None:
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 @pytest.mark.skipif(os.name == "nt", reason="the crash is a POSIX process-group SIGKILL")
 def test_s38_boot_recovers_a_crashed_evolution_candidate_commit_without_absorbing_it(
         tmp_path_factory, monkeypatch):

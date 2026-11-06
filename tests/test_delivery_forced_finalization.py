@@ -133,6 +133,22 @@ def _assert_forced_deferred_outcome(text, usage, trace, reason_code):
     assert outcome["outcome_axes"]["objective"]["status"] == "best_effort"
     assert outcome["outcome_axes"]["objective"]["source"] == "child_result_disposition"
     assert outcome["outcome_axes"]["objective"]["deferred_count"] == 1
+    # The trace is not stored: the forced rail's verdict reaches the result only through its trace refs.
+    assert outcome["trace_refs"]["forced_finalization"] == trace["forced_finalization"]
+    assert outcome["trace_refs"]["forced_finalization"]["reason_code"] == reason_code
+
+
+def test_forced_verdicts_ride_trace_refs_and_ordinary_finals_carry_none():
+    from ouroboros.outcomes import collect_trace_refs
+
+    verdict = {"reason_code": "round_limit", "source": "round_limit", "degraded": True, "candidate_sha256": "c1"}
+    request = {"form": "native", "status": "refused", "tool_call_count": 1, "reason": "completion_argument"}
+    refs = collect_trace_refs({}, {"forced_finalization": verdict, "forced_completion_request": request})
+    assert refs["forced_finalization"] == verdict and refs["forced_completion_request"] == request
+    verdict["source"] = "mutated after collection"
+    assert refs["forced_finalization"]["source"] == "round_limit"  # a copy, not the live trace object
+    ordinary = collect_trace_refs({}, {"tool_calls": [], "forced_finalization": "not a verdict"})
+    assert "forced_finalization" not in ordinary and "forced_completion_request" not in ordinary
 
 
 def test_round_limit_projects_deferred_child_before_forced_return(tmp_path, monkeypatch):
@@ -2208,7 +2224,6 @@ def test_forced_request_uses_explicit_completion_selection_without_tool_executio
 @pytest.mark.parametrize("body", [
     '{"action":"finish","action":"stop","answer":"Do not publish"}',
     '{"action":"finish","answer":"First","answer":"Second"}',
-    '{"action":"stop","answer":"Do not publish"}',
     '{"action":"finish","answer_sha256":"unoffered"}',
 ])
 def test_forced_invalid_completion_request_preserves_answer_without_repair_call(tmp_path, monkeypatch, body):

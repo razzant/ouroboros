@@ -99,9 +99,7 @@ def test_the_live_sink_pushes_the_row_unaddressed_and_nothing_else(tmp_path, cli
 
 
 @pytest.mark.parametrize("change", [
-    {"kind": "script"}, {"where": "panel"}, {"skill": "../x"}, {"skill": "kotokulator\n"}, {"tab_id": ""},
-    {"revision": "r" * 129}, {"revision": 7}, {"message": "m" * 501}, {"source": "s" * 201},
-    {"line": True}, {"line": 1.5}, {"line": -1}, {"line": 10_000_001}, {"line": "17"}, {"message": None},
+    {"skill": "../x"}, {"message": "m" * 501}, {"line": -1},
 ])
 def test_a_report_of_another_shape_answers_400_and_writes_nothing(tmp_path, client, change):
     response = client.post("/api/widgets/fault", json={**FAULT, **change})

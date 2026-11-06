@@ -25,7 +25,7 @@ from tests.test_emoji_free_browser import _browser, _open, _server
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
 
 direct_server_with_data = _server
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial, pytest.mark.skipif(os.name == "nt", reason="drives the child with POSIX signals")]
+pytestmark = [pytest.mark.ui_browser, pytest.mark.skipif(os.name == "nt", reason="drives the child with POSIX signals")]
 
 MB = 1_000_000
 LONG_NAME = "Example: refactoring pass, fifty tasks for next sprints, second try after rollback"[:80]  # the longest a project takes
@@ -271,7 +271,7 @@ def test_kept(direct_server_with_data, request, engine):
         expect(export_row.locator(".storage-parts-list")).to_contain_text("(files)")
 
         # The longest name and path stay inside the card, at the widest and the narrowest shipped window.
-        body = page.locator("#page-storage .costs-scroll")
+        body = page.locator("#page-storage")  # the tab body is its own scroller
         long_row = opened.locator('[data-deleted-folder="measured"]', has_text=LONG_NAME)
         expect(long_row).to_contain_text(LONG_FOLDER)
         assert body.evaluate("node => node.scrollWidth - node.clientWidth") <= 2

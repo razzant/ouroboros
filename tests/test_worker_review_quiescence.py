@@ -11,7 +11,6 @@ from tests.test_owner_wait_pool import maintain_capacity, park, pool as pool
 from tests.test_review_operation_lifetime import TASK, env as env, _parent, _request, _slot, _rows, until
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("tail", ["wait_close", "final_pointer"])

@@ -11,7 +11,6 @@ from tests._usage_store_testing import ledger_rows
 from tests.test_authority_pause_contention import _contended_save
 from tests.test_billing_authority_unavailable import _loop_driver, _run
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("stage", ["seed", "checkpoint"])

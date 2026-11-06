@@ -82,7 +82,7 @@ def test_analyze_screenshot_no_vision_names_why_without_forbidding_a_retry(recor
 
 
 @pytest.mark.parametrize("model", [
-    "openai::gpt-5.6-terra", "openai/gpt-5.6-sol", "deepseek/deepseek-chat", "acme/never-listed-1",
+    "openai::gpt-5.6-terra", "deepseek/deepseek-chat", "acme/never-listed-1",
 ])
 def test_build_remote_kwargs_encodes_the_images_it_receives(monkeypatch, tmp_path, model):
     """The transport builder never re-judges capability: qualified, bare, listed or

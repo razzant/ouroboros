@@ -112,8 +112,10 @@ def test_subscription_and_api_layouts_keep_known_windows_and_unknown_budgets(mon
         assert rw.ReviewerWindow(model=model).sizing_window(750000) == (0 if unknown == 0 else 750000)
 
 
-@pytest.mark.parametrize("model,unknown", [("claudexor::fixture=model", 0), ("openai::fixture", rw.REVIEWER_FULL_WINDOW)])
-@pytest.mark.parametrize("recorded", [False, True])
+@pytest.mark.parametrize(("recorded", "model", "unknown"), [
+    (False, "claudexor::fixture=model", 0),
+    pytest.param(True, "openai::fixture", rw.REVIEWER_FULL_WINDOW, id='True-openai::fixture-1000000'),
+])
 def test_stale_reviewer_evidence_precedes_unknown_layouts_but_not_a_resolved_boundary(model, unknown, recorded):
     from ouroboros.context_window import WindowLimit, WindowRecord
 

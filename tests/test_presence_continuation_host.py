@@ -33,7 +33,6 @@ from tests.test_presence_continuation import (
 
 _TOKEN = "presence-token"
 _HEADERS = {"X-Skill-Token": _TOKEN}
-pytestmark = pytest.mark.serial
 
 
 def heard_by(h, number, author_ref):

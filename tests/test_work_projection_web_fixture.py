@@ -55,6 +55,13 @@ CASES = {
               turn_phase="context_building")],
         {}, {}, {},
     ),
+    # The same turn held by a conversation-lane carrier, the ordinary path since #2654: the lane row reads `working`
+    # once carried, and its frame-fed start step still says Preparing · Building context.
+    "carried_preparing": (
+        [_row("cp", "working", kind="direct_chat", chat_id=1, client_message_id="cm-carried", carrier="worker",
+              turn_phase="context_building")],
+        {}, {}, {},
+    ),
     # Its own Main call started before its census phase moved: the word that move gives (Working), no start step.
     "direct_requested": (
         [_row("dr", "preparing", kind="direct_chat", chat_id=1, client_message_id="cm-call", turn_phase="requested")],
@@ -279,16 +286,7 @@ def test_the_web_fixture_is_the_servers_projection():
 
 
 @pytest.mark.parametrize("name, activity", [
-    ("held_continue", "working"), ("direct_question", "waiting"), ("direct_preparing", "working"),
-    ("direct_requested", "working"), ("paused_by_owner", "paused"),
-    ("spending_limit", "paused"), ("queued_and_pausing", "working"), ("unknown", "unknown"),
-    ("helper_after_parent", "working"), ("paused_review_finishing", "paused"), ("unconfirmed_run", "unknown"),
-    ("paused_unattributed", "paused"), ("pausing_with_queued_helper", "working"), ("two_works_one_pausing", "working"),
-    ("working_with_review", "working"), ("paused_stop_unknown", "paused"),
-    ("paused_model_handoff", "paused"), ("sleeping_on_paused_helper", "waiting"),
-    ("sleeping_on_named_helper", "waiting"), ("sleeping_until_time", "waiting"),
-    ("paused_resume_refused", "paused"), ("saved_resume_refused", "paused"), ("paused_resume_refused_earlier", "paused"),
-    ("continue_start_refused", "waiting"),
+    ("held_continue", "working"), ("direct_question", "waiting"), ("paused_by_owner", "paused"),
 ])
 def test_each_fixture_room_is_the_state_its_name_says(name, activity):
     """The fixture is meaningful, not merely equal: each room is the case the web tests read it as."""

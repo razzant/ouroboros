@@ -21,7 +21,7 @@ from tests import test_room_work_browser as rw
 
 room_ui = rw.room_ui
 subscription_ui = rw.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 MAIN = feed.MAIN
 # A desktop app keeps its own version while the core inside it updates and restarts.
@@ -89,7 +89,7 @@ def facts(page, feed_selector=MAIN):
 
 
 def labels(core):
-    return f"v{core['runtime']}", f"app {core['app']} | rt {core['runtime']}"
+    return f"v{core['runtime']}", f"App {core['app']} · Runtime {core['runtime']}"
 
 
 class Transport(feed.Transport):

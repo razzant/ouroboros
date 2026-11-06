@@ -15,7 +15,7 @@ from tests._shared import producer_evidence_dir
 from tests._work_projection_shared import with_work_fields
 from tests.ui_console_errors import PageErrors
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 WEB = Path(__file__).resolve().parents[1] / "web"
 BOOT = """<script type="module">
 import {createChatInstance} from '/static/modules/chat.js';

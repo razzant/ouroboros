@@ -16,7 +16,7 @@ import pytest
 from tests.test_emoji_free_browser import _browser, _open, _server
 
 direct_server_with_data = _server
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 VOLUME = {"free_bytes": 170_000_000_000, "total_bytes": 4_000_000_000_000, "observed_at": "2026-10-30T10:00:00Z"}
 STORAGE_API = re.compile(r"/api/storage(/|\?|$)")
@@ -99,7 +99,7 @@ class Stub:
 
 def _no_overflow(page, label):
     """Nothing in the Storage page is wider than its scroll area and no sentence is clipped by its own box."""
-    over = page.locator("#page-storage .costs-scroll").evaluate("node => node.scrollWidth - node.clientWidth")
+    over = page.locator("#page-storage").evaluate("node => node.scrollWidth - node.clientWidth")
     assert over <= 2, f"{label}: the page overflows by {over}px"
     clipped = page.locator("[data-storage-tray]").evaluate(
         "tray => [...tray.querySelectorAll('.storage-free-why, .storage-free-label, .storage-tray-text, .storage-status, .storage-meta')]"

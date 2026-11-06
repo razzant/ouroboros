@@ -9,7 +9,7 @@ import pytest
 
 from tests import test_subscription_role_routes_browser as roles
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 subscription_ui = roles.subscription_ui
 role_ui = roles.role_ui
 # The API actor row is marked Reviewer: a reviewer is edited where its catalog row is.
@@ -223,14 +223,14 @@ def test_models_auto_does_not_borrow_largest_context_or_processing_modes(account
     page, row, _, field, account = editor(ui, "Models")
     row.locator("summary").click()
     note = row.locator("[data-model-context-note]")
-    assert "272,000" not in note.inner_text()  # Window authority comes from the server preview, not this catalog.
+    assert "272k" not in note.inner_text()  # Window authority comes from the server preview, not this catalog.
     assert "Fast is not advertised" in row.locator("[data-processing-capability]").inner_text()
     account.select_option("")
     assert {"catalog-only-a", "catalog-only-b"} <= set(suggestions(page, field, {"catalog-shared", "catalog-only-a", "catalog-only-b"}))
     assert "unknown" in note.inner_text() or "not known" in note.inner_text()
-    assert "1,000,000" not in note.inner_text()
+    assert "1M" not in note.inner_text()
     account.select_option("work")
-    assert "1,000,000" not in note.inner_text()
+    assert "1M" not in note.inner_text()
     assert row.locator("[data-processing-capability]").inner_text() == ""
     assert field.input_value() == "catalog-shared"
     roles.capture(page, "account-catalog-exact-context-processing")

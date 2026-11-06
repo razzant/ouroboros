@@ -14,7 +14,6 @@ from ouroboros import model_concurrency as mc
 
 # Spawned processes race real file locks: run them outside xdist so host load cannot
 # starve a child past its bounded wait.
-pytestmark = pytest.mark.serial
 
 ROUTE = {"provider": "test", "base_url": "https://provider.invalid/v1", "api_key": "fake-secret"}
 

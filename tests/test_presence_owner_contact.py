@@ -36,7 +36,6 @@ from supervisor import queue as task_queue
 from tests.test_place_focus import focus as focus
 from tests.test_quiz_answer import _post
 
-pytestmark = pytest.mark.serial
 
 
 def contact_door(root, monkeypatch, bus):
@@ -245,6 +244,9 @@ def test_deferred_publication_late_answer_keeps_source_after_pause_and_restart(c
     ctx = SimpleNamespace(task_metadata=metadata)
     _initialize_owner_directives(ctx, [{"role": "user", "content": model_text}])
     assert [row["content"] for row in ctx._owner_directives] == [incoming["text"]]
+    asked = late["answer_snapshot"]["quiz"]["question"]  # the card it answers rides beside it, the asker's words
+    assert [(row["reply_to"]["author"], row["reply_to"]["text"].split("\n")[0]) for row in ctx._owner_directives] == [
+        (f"Ouroboros, task {tid}", asked.split("\n")[0])]
     assert _answer(r, tid, qid).status_code == 200 and fresh._inbox.empty()
     # Consume the real accepted owner row through the normal supervisor door and the real
     # carrier body (the conversation lane). Only the model is a double; the carrier's first
@@ -279,6 +281,7 @@ def test_deferred_publication_late_answer_keeps_source_after_pause_and_restart(c
     owner_ctx = SimpleNamespace(task_metadata=owner_task["metadata"])
     _initialize_owner_directives(owner_ctx, [{"role": "user", "content": content}])
     assert [row["content"] for row in owner_ctx._owner_directives] == [incoming["text"]]
+    assert [row["reply_to"]["author"] for row in owner_ctx._owner_directives] == [f"Ouroboros, task {tid}"]
     _exercise_late_owner(r, owner_task, monkeypatch)
     assert fresh.get_updates(offset=0, timeout=0) == []
     r.event = replace(r.event, source_event_id="after-pause")

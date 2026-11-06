@@ -18,11 +18,11 @@ import textwrap
 import pytest
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 UNAVAILABLE = "Current values are unavailable. These are defaults. Sending this form may change saved settings."
 EDITING = "You chose to edit without reading the saved values. Review every field before sending."
-UNREADABLE = "Current values could not be read; Save is disabled so it does not overwrite them. Use Reload Settings to retry."
+UNREADABLE = "Current values could not be read; Save is disabled so it does not overwrite them. Use Reload to retry."
 FIELDS = [
     {"name": "collection", "label": "Reminder collection", "type": "text", "default": "Default collection"},
     {"name": "hour", "label": "Daily reminder hour", "type": "number", "default": "9", "min": 0, "max": 23},

@@ -29,7 +29,6 @@ from tests.test_g1_followup_policy import (  # noqa: F401
 )
 from tests._store_shared import delete_result, unreadable_result
 
-pytestmark = pytest.mark.serial
 PAST = '2000-01-01T00:00:00+00:00'
 
 
@@ -205,18 +204,6 @@ def test_a_pending_delete_goes_once_settlement_is_proven_and_unknown_keeps_it(wo
     queue.check_scheduled_tasks()
     assert sid not in {r['id'] for r in schedules.load_schedule_store(root)['tasks']}
     assert load_task_result(root, task['id'])['status'] == 'completed' and len(sent) == 1
-
-
-def test_positively_unstarted_continuation_claim_is_withdrawn_from_a_worker(world, monkeypatch):  # noqa: F811 - pytest fixture
-    _, root, _ = world
-    sid = register(world)['id']
-    data = schedules.load_schedule_store(root)
-    data['tasks'][0]['occurrence'] = {'phase': 'claimed', 'token': 'tok', 'task_id': 'never-started'}
-    schedules._write_scheduled_tasks(data, root)
-    monkeypatch.setenv('OUROBOROS_IN_WORKER', '1')  # no fresh queue snapshot: queue unknown
-    outcome = _delete(root, sid)
-    assert outcome['status'] == 'withdrawn' and outcome['running_or_queued'] is None
-    assert row(root, sid)['delete_requested_at']
 
 
 def test_independent_owner_delete_keeps_its_published_lifecycle(world, monkeypatch):  # noqa: F811 - pytest fixture

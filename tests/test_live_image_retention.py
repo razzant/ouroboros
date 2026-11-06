@@ -11,7 +11,7 @@ import pytest
 from ouroboros.artifacts import task_artifact_dir_path
 from ouroboros.context_images import image_positions
 from ouroboros.contracts.live_conversation import LiveOptions
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 def look(host, i, *, readable=True):

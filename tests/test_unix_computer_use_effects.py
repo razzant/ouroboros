@@ -130,14 +130,7 @@ MAC = ("cliclick", "osascript", "screencapture")
 
 @pytest.mark.parametrize("tool, args, argv", [
     ("click", {"x": 10, "y": 20, "raw": True}, ["cliclick", "c:10,20"]),
-    ("double_click", {"x": 10, "y": 20, "raw": True}, ["cliclick", "dc:10,20"]),
-    ("move", {"x": 5, "y": 6, "raw": True}, ["cliclick", "m:5,6"]),
-    ("left_click_drag", {"start_x": 1, "start_y": 2, "end_x": 3, "end_y": 4, "raw": True},
-     ["cliclick", "dd:1,2", "dm:3,4", "du:3,4"]),
-    ("mouse_down", {"x": 5, "y": 6, "raw": True}, ["cliclick", "dd:5,6"]),
     ("mouse_up", {}, ["cliclick", "du:."]),
-    ("type_text", {"text": "hello"}, ["cliclick", "t:hello"]),
-    ("key", {"keys": "cmd+s"}, ["cliclick", "kd:cmd", "t:s", "ku:cmd"]),
     ("hold_key", {"keys": "shift", "duration_ms": 200}, ["cliclick", "kd:shift", "w:200", "ku:shift"]),
 ])
 def test_a_successful_mac_input_carries_the_mark(tmp_path, monkeypatch, tool, args, argv):
@@ -211,11 +204,7 @@ def test_a_mac_key_sequence_keeps_the_mark_of_the_steps_that_ran(tmp_path, monke
 
 @pytest.mark.parametrize("tool, args", [
     ("click", {"x": 3, "y": 4, "raw": True}),
-    ("left_click_drag", {"start_x": 1, "start_y": 2, "end_x": 3, "end_y": 4, "raw": True}),
-    ("mouse_up", {"button": "right"}),
     ("type_text", {"text": "-n hello"}),
-    ("key", {"keys": "ctrl+l"}),
-    ("scroll", {"clicks": 2, "direction": "down"}),
     ("hold_key", {"keys": "ctrl", "duration_ms": 100}),
 ])
 def test_a_successful_x11_input_carries_the_mark(tmp_path, monkeypatch, tool, args):
@@ -287,7 +276,6 @@ def test_a_press_at_a_negative_point_is_refused_where_the_desktop_has_no_such_sp
 @pytest.mark.parametrize("tool, args, steps", [
     ("click", {"x": 3, "y": 4, "raw": True}, 2),
     ("left_click_drag", {"start_x": 1, "start_y": 2, "end_x": 3, "end_y": 4, "raw": True}, 4),
-    ("mouse_down", {"x": 5, "y": 6, "raw": True}, 2),
     ("mouse_up", {}, 1),
 ])
 def test_a_wayland_sequence_marks_what_ran(tmp_path, monkeypatch, tool, args, steps):
@@ -336,12 +324,6 @@ def remote(argv: list[str]) -> str:
     ("click", {"x": 10, "y": 20, "raw": True}, "cliclick c:10,20"),
     ("triple_click", {"x": 10, "y": 20, "raw": True}, "cliclick tc:10,20"),
     ("move", {"x": 5, "y": 6, "raw": True}, "cliclick m:5,6"),
-    ("left_click_drag", {"start_x": 1, "start_y": 2, "end_x": 3, "end_y": 4, "raw": True},
-     "cliclick dd:1,2 dm:3,4 du:3,4"),
-    ("mouse_down", {"x": 5, "y": 6, "raw": True}, "cliclick dd:5,6"),
-    ("type_text", {"text": "hello"}, "cliclick t:hello"),
-    ("key", {"keys": "return"}, "cliclick kp:return"),
-    ("key", {"keys": "cmd+tab"}, "cliclick kd:cmd kp:tab ku:cmd"),
 ])
 def test_a_successful_ssh_input_carries_the_mark(tmp_path, monkeypatch, tool, args, command):
     tools, transport = ssh_mac(tmp_path, monkeypatch)

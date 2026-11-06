@@ -49,7 +49,6 @@ def pool(tmp_path, monkeypatch):
     monkeypatch.setattr(queue, "_reap_queue", stdqueue.Queue())
     monkeypatch.setattr(workers, "WORKERS", slots)
     monkeypatch.setattr(workers, "MAX_WORKERS", 1)
-    monkeypatch.setattr(workers, "CRASH_TS", [])
     monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "")
     monkeypatch.setattr(workers, "repo_writer_task_allowed", lambda task: True)
     monkeypatch.setattr(workers, "load_state", lambda: {})
@@ -428,7 +427,7 @@ def test_stopped_last_sleeper_preserves_enabled_capacity_only(pool, monkeypatch,
     if replacement_exists:
         maintain_capacity(demand=1)
     if disabled:
-        monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "worker_crash_storm")
+        monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "worker_readiness_exhausted")
     workers.RUNNING.pop("owner")
     pool.original.busy_task_id = None
     pool.original.proc.alive = False  # The Stop/reaper owner already proved death.
@@ -565,7 +564,7 @@ def test_failed_grant_rolls_back_marker_and_wait_together(pool, monkeypatch):
     assert load_task_result(pool.root, "owner")["owner_wait"]["state"] == "waiting"
 
 
-@pytest.mark.parametrize("stage", ["resumed", "cold_loading", "ordinary", "other_attempt"])
+@pytest.mark.parametrize("stage", ["resumed", "cold_loading", "other_attempt"])
 def test_idle_timeout_never_clones_a_checkpointed_attempt(pool, monkeypatch, stage):
     from supervisor import evolution_lifecycle, state
 

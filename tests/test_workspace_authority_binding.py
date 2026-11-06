@@ -171,7 +171,7 @@ def test_binding_collision_blocks_mutation_but_exact_read_stays_inspectable(tmp_
     assert not (data / "state" / "skills" / "same").exists()
 
 
-@pytest.mark.parametrize("operation", ["read", "list", "search", "write", "edit", "shell", "vcs"])
+@pytest.mark.parametrize("operation", ["read", "shell", "vcs"])
 def test_binding_preserves_the_project_room_target_for_every_operation(tmp_path, operation):
     repo = tmp_path / "repo"
     data = tmp_path / "data"

@@ -417,7 +417,6 @@ def test_readable_question_detail_carries_no_unavailable_flag(tmp_path, monkeypa
     assert "required_question_unavailable" not in rows[0]
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("project_bound", [False, True])
 @pytest.mark.parametrize("registry_unavailable", [False, True])
 def test_census_wait_facts_survive_optional_project_detail_and_resume(
@@ -446,7 +445,6 @@ def test_census_wait_facts_survive_optional_project_detail_and_resume(
     assert resumed["owner_wait_state"] == "resumed" and resumed["quiz_state"] == "answered"
 
 
-@pytest.mark.serial
 def test_census_does_not_turn_a_non_quiz_wait_into_an_owner_question(tmp_path, monkeypatch):
     gs = _census_row_with_quiz_wait(tmp_path, monkeypatch, chat_id=1)
     write_task_result(tmp_path, "t1", STATUS_RUNNING, owner_wait={"state": "waiting", "wake_at": "later"})

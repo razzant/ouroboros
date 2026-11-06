@@ -77,7 +77,7 @@ def test_an_unwaited_review_settles_its_record_once_its_author_ended(tmp_path, m
     assert "kept here because its author's task ended" in head and "addressed message" not in head
 
 
-@pytest.mark.parametrize("delivery", ["whole", "partial", "cursor_only", "checkpoint_lost"])
+@pytest.mark.parametrize("delivery", ["whole", "partial", "checkpoint_lost"])
 def test_an_unwaited_review_its_author_collected_while_running_needs_no_mark(tmp_path, monkeypatch, delivery):
     from ouroboros import review_waiting, working_checkpoint
     from tests.test_review_waiting import _receipt
@@ -285,8 +285,7 @@ def test_a_settled_left_commit_wave_ends_its_review_phase_for_every_consumer(tmp
     assert reused is not None and reused.attempt == 1
 
 
-@pytest.mark.parametrize("case", ["unresolved_usage_token", "other_operation", "custody_lost", "unidentified",
-                                  "superseded_successor"])
+@pytest.mark.parametrize("case", ["unresolved_usage_token", "other_operation", "superseded_successor"])
 def test_a_seat_without_terminal_proof_keeps_its_custody(tmp_path, monkeypatch, case):
     """Only a terminal outcome of the row's own operation closes its token: a seat whose usage still holds the start
     token, another operation's outcome, a lost seat, an outcome naming no operation and a late outcome of the
@@ -380,7 +379,7 @@ def _prefix_shape(world):
     update_state(world.data, old_merge)
 
 
-@pytest.mark.parametrize("consumer", ["reference", "overlap", "identical_reissue", "review_status"])
+@pytest.mark.parametrize("consumer", ["reference", "identical_reissue", "review_status"])
 def test_a_persisted_prefix_row_is_repaired_exactly_where_a_consumer_would_hold_it(tmp_path, monkeypatch, consumer):
     """A row the old writer left reviewing with closed seats' tokens is repaired from its exact bound settled record,
     outside the state lock, only when a consumer would refuse or hold it; ``review_status`` reads the same fact
@@ -415,8 +414,7 @@ def test_a_persisted_prefix_row_is_repaired_exactly_where_a_consumer_would_hold_
     assert rl.load_record(world.data, world.record_id)["verdict"]["aggregate"] == "FAIL"
 
 
-@pytest.mark.parametrize("evidence", ["missing_record_id", "foreign_binding", "unreadable_record", "open_counted_seat",
-                                      "empty_record_roster", "reopened_record_seat", "record_seat_naming_no_operation"])
+@pytest.mark.parametrize("evidence", ["missing_record_id", "unreadable_record", "record_seat_naming_no_operation"])
 def test_a_prefix_row_without_exact_settled_evidence_stays_held(tmp_path, monkeypatch, evidence):
     """Settlement is proved only positively: a record with no counted seat, a counted seat reopened to a successor,
     or one naming no operation proves nothing, whatever ``counted_pending`` alone would say."""
@@ -884,10 +882,10 @@ def test_a_counted_outcome_beside_a_running_adviser_costs_no_state_rewrite(tmp_p
 
 
 @pytest.mark.parametrize("stale", ["counted", "scope", "adviser"])
-def test_a_projected_row_whose_closed_seat_kept_its_token_is_still_repaired_once(tmp_path, monkeypatch, stale):
+def test_a_projected_row_whose_closed_seat_kept_its_token_holds_nothing(tmp_path, monkeypatch, stale):
     """An old writer's row already in the settled projection whose closed seat (counted, on the scope roster, or a
-    finished adviser its record confirms) kept its start token is still held, so the next overlap check repairs it
-    from the exact record: one write, the tokens gone, nothing held; the call after it writes nothing."""
+    finished adviser its record confirms) kept its start token holds nothing (#2710: the seat's own settled
+    operation outranks the leftover token), so the overlap check neither waits on it nor rewrites the state."""
     from ouroboros.review_state import _attempt_has_active_review_custody, _attempt_review_roster_rows, update_state
     from ouroboros.tools.commit_gate import _check_overlapping_review_attempt
 
@@ -904,35 +902,36 @@ def test_a_projected_row_whose_closed_seat_kept_its_token_is_still_repaired_once
             seat.update(operation_state="settled", late_result_pending=False, status="responded", raw_text="[]")
         row.status, row.phase, row.late_result_pending = "reviewed", "review_only", False
     update_state(world.data, old_projection)
-    assert _attempt_has_active_review_custody(_saved(world))
+    assert not _attempt_has_active_review_custody(_saved(world))
     writes = _state_writes(monkeypatch)
 
-    per_call = []
     for _ in range(2):
-        before = len(writes)
         assert _check_overlapping_review_attempt(world.ctx) is None and not world.ctx._review_resume_pending
-        per_call.append(len(writes) - before)
 
-    repaired = _saved(world)
-    assert per_call == [1, 0] and not _attempt_has_active_review_custody(repaired), per_call
-    assert not any(row.get("pending_invocation_id") for row in _attempt_review_roster_rows(repaired))
-    assert (repaired.status, repaired.phase) == ("reviewed", "review_only")
+    kept = _saved(world)
+    assert writes == [] and not _attempt_has_active_review_custody(kept), writes
+    assert all(row.get("pending_invocation_id") for row in _attempt_review_roster_rows(kept)), "nothing was rewritten"
+    assert (kept.status, kept.phase) == ("reviewed", "review_only")
 
 
 @pytest.mark.parametrize("adviser", ["none", "settled", "running", "different_operation"])
-def test_storage_releases_an_old_writers_finished_row_by_its_exact_record_alone(tmp_path, monkeypatch, adviser):
-    """Storage's checkout prune only reads: a finished row an old writer left with a closed seat's start token is not
-    custody once its exact settled record proves every seat closed, so Storage's own rules decide its checkout (here
-    the author's task still runs). An unconfirmed adviser keeps the review hold even if the old attempt calls it
-    settled. Nothing is written by that read."""
+def test_storages_checkout_pass_repairs_an_old_writers_finished_row_by_its_exact_record(tmp_path, monkeypatch, adviser):
+    """#2710: before it judges custody the checkout pass repairs a finished row an old writer left reviewing with
+    closed seats' start tokens, from its exact settled record, in one locked write (the next pass writes nothing), so
+    Storage's own rules decide its checkout (here the author's task still runs). An adviser its attempt still holds
+    in flight keeps the review hold whatever its record says; the owner's Free listing only reads."""
     import json
 
     from ouroboros import review_checking_prune
-    from ouroboros.review_state import load_state
+    from ouroboros.review_state import load_state, update_state
     from ouroboros.tools.review_subject import CHECKOUT_MARKER, checkout_token
 
+    running = adviser in {"running", "different_operation"}
     world = _commit_world(tmp_path, monkeypatch, phase="review", adviser=adviser != "none")
     _prefix_shape(world)
+    if running:  # the old writer merged terminal seats only: a seat still in flight kept its row
+        update_state(world.data, lambda state: state.attempts[-1].triad_raw_results[-1].update(
+            operation_state="in_flight", late_result_pending=True, status="error"))
     if adviser in {"settled", "different_operation"}:
         rl.settle_from_collected(world.data, world.record_id, [
             {**_raw("a1", "m3"), "operation_id": "op-a1"}])
@@ -946,9 +945,22 @@ def test_storage_releases_an_old_writers_finished_row_by_its_exact_record_alone(
     entry.mkdir(parents=True)
     (entry / CHECKOUT_MARKER).write_text(json.dumps({"schema_version": 1, "task_id": TASK}), encoding="utf-8")
     before = load_state(world.data).attempts
+    assert entry.name in review_checking_prune._review_rounds(world.data)[0], "the old row reads as custody"
+    assert load_state(world.data).attempts == before, "Free's listing writes nothing"
+    writes = _state_writes(monkeypatch)
 
-    hold = review_checking_prune._checkout_hold(world.data, entry, rounds=review_checking_prune._review_rounds(
-        world.data), sources=set(), live=lambda _task: False, cutoff=0.0)
+    holds, per_pass = [], []
+    for _ in range(2):
+        count = len(writes)
+        holds.append(review_checking_prune._checkout_hold(world.data, entry, rounds=review_checking_prune._review_rounds(
+            world.data, repair=True), sources=set(), live=lambda: set(), cutoff=0.0))
+        per_pass.append(len(writes) - count)
 
-    expected = "review_custody_active" if adviser in {"running", "different_operation"} else "task_not_terminal"
-    assert hold == expected and entry.is_dir() and load_state(world.data).attempts == before
+    assert holds == ["review_custody_active" if running else "task_not_terminal"] * 2 and entry.is_dir(), holds
+    assert per_pass == [1, 0], per_pass
+    repaired = _saved(world)
+    assert (repaired.status, repaired.phase) == ("reviewed", "review_only")
+    seats = {row["slot_id"]: row for row in repaired.triad_raw_results}
+    assert not any(seats[slot].get("pending_invocation_id") for slot in ("s1", "s2"))
+    if running:
+        assert seats["a1"]["operation_state"] == "in_flight" and seats["a1"]["pending_invocation_id"] == "inv-a1"

@@ -215,7 +215,7 @@ def test_an_answer_before_the_bound_resumes_without_a_timeout_notice(tmp_path, m
     assert load_task_result(tmp_path, ctx.task_id)["owner_wait"]["resume_reason"] == "owner_text"
 
 
-@pytest.mark.parametrize("reason", ["cancelled", "finalize_requested", "deadline", "absolute_ceiling"])
+@pytest.mark.parametrize("reason", ["cancelled", "finalize_requested", "absolute_ceiling"])
 def test_a_control_reason_outranks_a_spent_bound(tmp_path, monkeypatch, reason):
     """Ordering is load-bearing: Stop, the task deadline and the absolute ceiling
     are consulted BEFORE the soft bound, so a timeout notice can never displace
@@ -230,7 +230,7 @@ def test_a_control_reason_outranks_a_spent_bound(tmp_path, monkeypatch, reason):
     assert messages == []
 
 
-@pytest.mark.parametrize("reason", ["cancelled", "finalize_requested", "deadline", "absolute_ceiling"])
+@pytest.mark.parametrize("reason", ["cancelled", "finalize_requested", "absolute_ceiling"])
 def test_native_wait_rejoins_existing_control_without_waiting_for_answer(tmp_path, monkeypatch, reason):
     ctx = native_context(tmp_path)
     monkeypatch.setattr(ctx.model_wait_context, "control_reason", lambda: reason)

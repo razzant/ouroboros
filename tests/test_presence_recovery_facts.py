@@ -41,7 +41,7 @@ def _rows(root):
     return dialogue_test.log_rows(path)
 
 
-@pytest.mark.parametrize("carrier", ["metadata", "continuation", "initial", "absent"])
+@pytest.mark.parametrize("carrier", ["metadata", "continuation", "absent"])
 def test_projection_keeps_only_a_real_child_and_no_authored_answer(tmp_path, carrier):
     task, stored = _stored(tmp_path)
     if carrier == "metadata":

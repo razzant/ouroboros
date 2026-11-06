@@ -11,12 +11,10 @@ from __future__ import annotations
 import json
 import types
 
-import pytest
 
 from tests.test_presence_final_audience import THREAD, _section, _source_turn
 from tests.test_presence_promises import fired_context as fired_context
 
-pytestmark = pytest.mark.serial
 
 
 def test_a_root_promoted_from_a_carried_turn_names_its_conversation_and_keeps_it_cold(fired_context, monkeypatch):

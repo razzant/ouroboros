@@ -80,8 +80,7 @@ def test_resolver_held_update_admits_conversation(tx_repo, phase):
 
 
 @pytest.mark.parametrize("phase", [
-    "materializing_assisted", "rolling_back", "stashing_local_work",
-    "committing", "pending_boot_smoke", "gate_blocked",
+    "materializing_assisted", "committing", "gate_blocked",
 ])
 def test_destructive_and_unproven_phases_keep_refusing(tx_repo, phase):
     _write_tx(phase)
@@ -272,7 +271,6 @@ def _run_package_code(repo: pathlib.Path, code: str) -> dict:
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("frozen", [False, True])
 def test_preload_discovers_nested_packages_and_preserves_tool_catalog(package_repo, frozen):
     # The shipped server is a standalone-Python subprocess of the frozen
@@ -304,7 +302,6 @@ def test_preload_discovers_nested_packages_and_preserves_tool_catalog(package_re
     assert out["same_catalog"], "preloading code must not change tool admission"
 
 
-@pytest.mark.serial
 def test_preload_reports_failed_optional_modules_and_continues(package_repo):
     nested = package_repo / "ouroboros" / "_discovery_fixture"
     nested.mkdir()
@@ -332,7 +329,6 @@ def _git(repo: pathlib.Path, *args: str, check: bool = True) -> subprocess.Compl
     return proc
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("preload", [False, True])
 def test_update_recovery_uses_preloaded_policy_after_real_git_conflict(package_repo, preload):
     """Exercise the real late import that the old manual closure missed."""

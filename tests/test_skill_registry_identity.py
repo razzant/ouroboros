@@ -12,6 +12,7 @@ from ouroboros.skill_install_record import read_install_record
 from ouroboros.skill_loader import find_skill, load_skill
 from ouroboros.skill_publish_snapshot import capture_skill_publish_candidate
 from ouroboros.skill_review_packs import frozen_payload_files, payload_pack
+from tests._cases import case_folders
 
 
 def _registry(tmp_path, monkeypatch, dependencies, files=None):
@@ -112,16 +113,19 @@ def test_registry_owner_skip_accepts_the_confirmed_real_payload(tmp_path, monkey
     assert result['acceptance']['accepted'], result
 
 
-@pytest.mark.parametrize('note,bucket', sorted(PER_INSTALL_NOTE_BUCKETS.items()))
-@pytest.mark.parametrize('own_bucket', [False, True])
-def test_loader_review_and_publication_agree_for_bucket_notes(tmp_path, note, bucket, own_bucket):
-    directory = tmp_path / 'data' / 'skills' / (bucket if own_bucket else 'user') / 'demo'
-    directory.mkdir(parents=True)
-    (directory / 'SKILL.md').write_text('---\nname: demo\ndescription: Probe\ntype: instruction\n---\nDemo.\n', encoding='utf-8')
-    (directory / note).write_text(json.dumps({'installed_at': 'synthetic',
-        'install_specs': {'raw': [{'kind': 'pip', 'package': 'requests'}]}}), encoding='utf-8')
-    loaded = load_skill(directory, tmp_path / 'data')
-    assert loaded and not loaded.load_error
-    assert capture_skill_publish_candidate(loaded).content_hash == loaded.content_hash
-    assert payload_pack(frozen_payload_files(directory, manifest_entry=loaded.manifest.entry,
-                                             manifest_scripts=loaded.manifest.scripts))
+def test_loader_review_and_publication_agree_for_bucket_notes(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for note, bucket in sorted(PER_INSTALL_NOTE_BUCKETS.items()):
+        for own_bucket in [False, True]:
+            tmp_path = next(case_paths)
+            with subtests.test(note=note, bucket=bucket, own_bucket=own_bucket):
+                directory = tmp_path / 'data' / 'skills' / (bucket if own_bucket else 'user') / 'demo'
+                directory.mkdir(parents=True)
+                (directory / 'SKILL.md').write_text('---\nname: demo\ndescription: Probe\ntype: instruction\n---\nDemo.\n', encoding='utf-8')
+                (directory / note).write_text(json.dumps({'installed_at': 'synthetic',
+                    'install_specs': {'raw': [{'kind': 'pip', 'package': 'requests'}]}}), encoding='utf-8')
+                loaded = load_skill(directory, tmp_path / 'data')
+                assert loaded and not loaded.load_error
+                assert capture_skill_publish_candidate(loaded).content_hash == loaded.content_hash
+                assert payload_pack(frozen_payload_files(directory, manifest_entry=loaded.manifest.entry,
+                                                         manifest_scripts=loaded.manifest.scripts))

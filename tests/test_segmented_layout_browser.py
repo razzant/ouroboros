@@ -88,7 +88,6 @@ def _check_layout(groups: dict, *, narrow: bool) -> list[str]:
     return problems
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_every_segmented_group_lays_out_from_its_own_choices(direct_server_with_data, engine):
@@ -112,7 +111,6 @@ def test_every_segmented_group_lays_out_from_its_own_choices(direct_server_with_
     assert not problems, "\n".join(problems)
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_keyboard_choice_focus_ring_and_the_chosen_value_survive_save(direct_server_with_data, engine):
@@ -144,7 +142,7 @@ def test_keyboard_choice_focus_ring_and_the_chosen_value_survive_save(direct_ser
             open_behavior()
             press("required", "Enter")
             assert page.locator("#s-task-review-mode").input_value() == "required"
-            expect(page.locator("#settings-unsaved-indicator")).to_have_class(__import__("re").compile("is-visible"))
+            expect(page.locator("#settings-status")).to_have_text("Unsaved changes")
             ring = page.evaluate("""(selector) => {
                 const focused = document.activeElement;
                 const probe = document.createElement('span');

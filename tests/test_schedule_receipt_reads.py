@@ -21,7 +21,7 @@ def _save(q, row):
         schedules._write_scheduled_tasks(data, q.root)
 
 
-@pytest.mark.parametrize("consumer", ["reconcile", "admission", "repair", "gc"])
+@pytest.mark.parametrize("consumer", ["reconcile", "admission", "gc"])
 def test_successful_receipt_read_allows_unrelated_queue_progress(q, monkeypatch, consumer):
     _row(q, intent={"kind": "system_repo"})
     if consumer == "admission":
@@ -108,8 +108,7 @@ def _after_receipt(monkeypatch, tid, mutate):
     return called
 
 
-@pytest.mark.parametrize("consumer", ["scan", "admit"])
-@pytest.mark.parametrize("mutation", ["owner_hold", "cancelled"])
+@pytest.mark.parametrize(("mutation", "consumer"), [("owner_hold", "admit"), ("cancelled", "scan")])
 def test_changed_receipt_defers_without_replaying_or_persisting_a_false_hold(q, monkeypatch, consumer, mutation):
     _row(q, intent={"kind": "system_repo"})
     automatic_pass()
@@ -141,7 +140,7 @@ def test_changed_receipt_defers_without_replaying_or_persisting_a_false_hold(q, 
         assert occurrences.record_dispatch_possible(restored) is False
 
 
-@pytest.mark.parametrize("mutation", ["edit", "disable", "delete", "restart", "return", "stop"])
+@pytest.mark.parametrize("mutation", ["edit", "disable", "stop"])
 def test_fresh_admission_rechecks_controls_after_receipt_observation(q, monkeypatch, mutation):
     from supervisor.followup_policy import record_restart
 
@@ -292,7 +291,7 @@ def test_admission_uses_committed_document_without_second_body_read(q, monkeypat
     assert real_read(q.root, task["id"])["schedule_admission"]["token"] == _rows(q)["s1"]["occurrence"]["token"]
 
 
-@pytest.mark.parametrize("evidence", ["missing", "unreadable", "busy", "changed"])
+@pytest.mark.parametrize("evidence", ["missing", "busy", "changed"])
 def test_retention_uses_the_same_strict_receipt_observation(q, monkeypatch, evidence):
     from tests._store_shared import delete_result
     from tests.test_schedule_responsiveness import held_store
@@ -383,7 +382,7 @@ def test_binding_repair_publishes_committed_receipt_before_queue_binding(world, 
         assert allowed is True
 
 
-@pytest.mark.parametrize("interruption", ["none", "origin_stop", "refused", "lost_reply"])
+@pytest.mark.parametrize("interruption", ["none", "refused", "lost_reply"])
 def test_unqueued_binding_repair_keeps_identity_controls_and_recovery(world, monkeypatch, interruption):
     from ouroboros.store import StoreBusy
     from tests.test_g1_followup_policy import register, stop

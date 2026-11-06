@@ -7,7 +7,6 @@ import pytest
 
 from ouroboros.tools import git as git_tools
 
-pytestmark = pytest.mark.serial
 
 
 def _git(repo, *args):

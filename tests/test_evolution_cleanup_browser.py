@@ -23,7 +23,7 @@ from tests.test_evolution_cleanup_disclosure import (  # noqa: F401
 )
 from tests.test_subscription_setup_browser import subscription_ui  # noqa: F401
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 MEASURE = Path(__file__).resolve().parents[1] / "skills" / "ui_design" / "references" / "measure.js"
 PAGE = """<!doctype html><html class="ouro-ui" data-theme="{theme}"><head><meta charset="utf-8">

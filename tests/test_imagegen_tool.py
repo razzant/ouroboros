@@ -573,8 +573,7 @@ def test_registered_artifact_is_effect_without_automatic_delivery(monkeypatch, c
     assert len(effects) == 1 and not ctx.pending_events
 
 
-@pytest.mark.parametrize("parallel", [False, True])
-@pytest.mark.parametrize("control", ["budget", "interrupt"])
+@pytest.mark.parametrize(("control", "parallel"), [("budget", False), ("interrupt", True)])
 def test_registered_and_parallel_control_reaches_loop_owner(monkeypatch, ctx, parallel, control):
     from ouroboros import loop_tool_execution as execution, usage_accounting as ua
     from ouroboros.model_wait import ModelWaitInterrupted

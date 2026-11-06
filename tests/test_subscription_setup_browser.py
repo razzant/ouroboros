@@ -19,7 +19,7 @@ from tests.test_onboarding_complete_endpoint import (
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
 from tests.ui_console_errors import PageErrors
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 WEB = Path(__file__).resolve().parents[1] / "web"
 
 
@@ -390,10 +390,10 @@ def test_model_roles_pin_context_fallback_and_manual_draft_survive_preview(subsc
     for route in held_preview:
         release_preview(route)
     page.unroute(preview_pattern)
-    page.wait_for_function("() => document.querySelector('[data-model-role=light] [data-model-context-note]').textContent.includes('500,000')")
-    page.wait_for_function("() => document.querySelector('[data-model-role=main] [data-model-context-note]').textContent.includes('872,000')")
-    assert '872,000' not in light.locator('[data-model-context-note]').inner_text()
-    assert '500,000' not in main.locator('[data-model-context-note]').inner_text()
+    page.wait_for_function("() => document.querySelector('[data-model-role=light] [data-model-context-note]').textContent.includes('Window 500k')")
+    page.wait_for_function("() => document.querySelector('[data-model-role=main] [data-model-context-note]').textContent.includes('Window 872k')")
+    assert '872k' not in light.locator('[data-model-context-note]').inner_text()
+    assert '500k' not in main.locator('[data-model-context-note]').inner_text()
     main.locator('[data-model-role-context]').fill('1000000')
     page.wait_for_function("() => document.querySelector('[data-model-role=main] [data-model-context-note]').textContent.includes('set in Settings')")
     page.locator('[data-model-role="vision"] [data-model-role-account]').select_option('work')

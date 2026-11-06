@@ -27,6 +27,7 @@ from __future__ import annotations
 import ast
 import functools
 import pathlib
+from tests._source_scan import parse
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 SCAN_DIRS = ("ouroboros", "supervisor")
@@ -98,7 +99,7 @@ def _assigned_names(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> list[str]
 
 def truthiness_hits(source: str) -> list[tuple[int, str, str]]:
     """``(line, what, context)`` for every truthiness use of a tri-state reader."""
-    tree = ast.parse(source)
+    tree = parse(source)
     parents = _parents(tree)
     reader_names = set(TRISTATE_READERS)
     for node in ast.walk(tree):

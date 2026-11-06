@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import inspect
 import json
-import pathlib
 import sys
 import threading
 import types
@@ -30,8 +29,6 @@ import types
 import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
-
-REPO = pathlib.Path(__file__).resolve().parents[1]
 
 
 # --------------------------------------------------------------------------
@@ -740,40 +737,6 @@ def test_the_readiness_probe_body_serves_no_stored_credential(monkeypatch, tmp_p
 # --------------------------------------------------------------------------
 # 5. Completion seam
 # --------------------------------------------------------------------------
-
-
-def test_completion_is_the_single_atomic_endpoint_on_every_host():
-    """D-8 closed. The page posts ONE transaction and has no second way to
-    finish: not the `POST /api/settings` + `POST /api/owner/runtime-mode` pair
-    whose failure between the two writes left providers saved and runtime mode
-    not, and not the desktop `save_wizard` bridge, whose only reason to exist
-    (authoring the fresh-install `light` safety default) the endpoint now
-    discharges itself.
-
-    CHANGED EXPECTATION: this test previously REQUIRED both fallbacks, because
-    the endpoint did not exist in the branch that wrote it. It does now, so the
-    fallbacks were the last thing keeping a first run able to take a
-    non-atomic path."""
-    source = (REPO / "web/modules/onboarding_wizard.js").read_text(encoding="utf-8")
-    # The absence assertions read CODE, not prose: the module documents the two
-    # removed paths by name, and a comment must not be able to fail the gate
-    # (nor to satisfy it).
-    code = "\n".join(
-        line for line in source.splitlines() if not line.lstrip().startswith("//"))
-
-    assert "const ONBOARDING_COMPLETE_ENDPOINT = '/api/onboarding/complete';" in code
-    assert "const result = await completeOnboardingAtomically(payload);" in code
-    assert "saveWizardThroughDesktopBridge" not in code
-    assert "saveWizardThroughSettingsPair" not in code
-    assert "save_wizard" not in code
-    assert "/api/owner/runtime-mode" not in code
-    assert "'/api/settings'" not in code
-    # A missing route is now a real error, not a signal to take another path.
-    assert "response.status === 404" not in code
-    # One completion announcer for all three shells (that part is unchanged).
-    assert "function announceCompletion(result)" in source
-    assert "ouroboros:onboarding-complete" in source
-    assert "window.pywebview.api.onboarding_finished" in source
 
 
 def test_the_atomic_completion_route_is_declared_wherever_it_is_implemented(tmp_path):

@@ -64,26 +64,28 @@ def _duplicate_of(config, settings):
     return None
 
 
-@pytest.mark.parametrize("roster", PARITY, ids=[item["case"] for item in PARITY])
-def test_the_shared_table_pins_handles_roster_labels_and_refused_twins(roster):
-    config = _config(*roster["items"])
-    settings = {"OUROBOROS_PROCESSING_PREFERENCE": roster["global_processing"]}
-    labels = roster_handles(config, settings)
-    first_twin = next(
-        ((index, want["same_engine_as"]) for index, want in enumerate(roster["expected"])
-         if want["same_engine_as"] is not None), None)
-    assert _duplicate_of(config, settings) == first_twin
-    for row, want in zip(config.items, roster["expected"]):
-        assert subagent_handle(row, settings) == want["handle"]
-        assert labels[row.subagent_id] == want["roster"]
+def test_the_shared_table_pins_handles_roster_labels_and_refused_twins(subtests):
+    for roster in PARITY:
+        with subtests.test(roster=roster):
+            config = _config(*roster["items"])
+            settings = {"OUROBOROS_PROCESSING_PREFERENCE": roster["global_processing"]}
+            labels = roster_handles(config, settings)
+            first_twin = next(
+                ((index, want["same_engine_as"]) for index, want in enumerate(roster["expected"])
+                 if want["same_engine_as"] is not None), None)
+            assert _duplicate_of(config, settings) == first_twin
+            for row, want in zip(config.items, roster["expected"]):
+                assert subagent_handle(row, settings) == want["handle"]
+                assert labels[row.subagent_id] == want["roster"]
 
 
-@pytest.mark.parametrize("record", SNAPSHOTS, ids=[item["case"] for item in SNAPSHOTS])
-def test_a_frozen_record_is_named_from_its_own_facts(record):
-    from ouroboros.subagent_history import execution_identity, recorded_handle, snapshot_handle
+def test_a_frozen_record_is_named_from_its_own_facts(subtests):
+    for record in SNAPSHOTS:
+        with subtests.test(record=record):
+            from ouroboros.subagent_history import execution_identity, recorded_handle, snapshot_handle
 
-    assert snapshot_handle(record["snapshot"]) == record["handle"]
-    assert recorded_handle({"identity": execution_identity(record["snapshot"])}) == record["handle"]
+            assert snapshot_handle(record["snapshot"]) == record["handle"]
+            assert recorded_handle({"identity": execution_identity(record["snapshot"])}) == record["handle"]
 
 
 @pytest.mark.parametrize("global_processing", ["", "standard", "fast"])
@@ -558,4 +560,3 @@ def test_a_processing_only_save_may_create_effective_twins_by_decision(monkeypat
     reworded = {"enabled": True, "items": [{**rows[0], "recommended_use": "new words"}, rows[1]]}
     refused, _ = _post_settings(monkeypatch, {"OUROBOROS_SUBAGENTS": reworded}, saved)
     assert refused.status_code == 400 and b"same engine" in refused.body
-

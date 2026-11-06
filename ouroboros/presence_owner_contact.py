@@ -117,16 +117,15 @@ def private_answer_row(root, ref) -> dict:
 
 def _private_start_source_fields(row: dict) -> dict:
     """The private answer's event projection, shared by its producer and admission reader."""
-    from ouroboros.chat_chain import format_address, row_address
     from ouroboros.dialogue_provenance import PRESENCE_BINDING_RELATION_KEY, private_contact
-    from ouroboros.owner_relay import owner_text
+    from ouroboros.owner_relay import owner_row_address, owner_text
     from ouroboros.project_dialogue import build_owner_message_ref
 
     words = owner_text(row)
     ref = build_owner_message_ref(chat_id=row["chat_id"], client_message_id=row.get("client_message_id"),
                                   ts=row.get("ts"), text=words)
     return {"chat_id": ref["chat_id"], "client_message_id": ref["client_message_id"], "attachment_uploads": [],
-            "source_ref": ref, "source_text": words, "work_kind": "owner", "owner_quote": format_address(row_address(row)),
+            "source_ref": ref, "source_text": words, "work_kind": "owner", "owner_quote": owner_row_address(row),
             PRESENCE_BINDING_RELATION_KEY: {"binding_id": private_contact(row)["binding_id"]}}
 
 
@@ -205,7 +204,7 @@ def send_main_message(ctx, text: str, origin: dict, request_id: str = "") -> str
     from ouroboros.project_dialogue import MAIN_NOTICE_TYPE
     from ouroboros.task_store import patch_document
     from ouroboros.tool_access import canonical_data_root
-    from ouroboros.tools.owner_delivery import deliver_owner_event
+    from ouroboros.tools.owner_delivery import deliver_owner_event, stamp_lineage
     from ouroboros.utils import utc_now_iso
     from supervisor.terminal_delivery import register_pending_delivery
 
@@ -217,6 +216,9 @@ def send_main_message(ctx, text: str, origin: dict, request_id: str = "") -> str
              "system_type": MAIN_NOTICE_TYPE, "ts": utc_now_iso(),
              "delivery_id": f"presence-owner:{ctx.task_id}:{key}",
              "progress_meta": {"presence_contact": origin}}
+    # The owner-contact event is frozen and registered before its live/deferred
+    # delivery. Stamp origin before either durable copy is written.
+    stamp_lineage(ctx, event)
 
     def freeze(row):
         nonlocal event, rejoined
@@ -228,6 +230,7 @@ def send_main_message(ctx, text: str, origin: dict, request_id: str = "") -> str
             if prior.get("fingerprint") != fingerprint:
                 raise ContactRequestConflict("request_id already names different message bytes")
             event = copy.deepcopy(prior["event"])
+            stamp_lineage(ctx, event)
             rejoined = True
             return None
         contacts[key] = {"fingerprint": fingerprint, "event": event}

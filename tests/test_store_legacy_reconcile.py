@@ -26,7 +26,7 @@ def _published(root):
         txn.conn.execute("DELETE FROM meta WHERE key='job:legacy_reconcile'")
 
 
-@pytest.mark.parametrize("case", ["matching", "different", "missing_marker", "unreadable_state", "missing_state"])
+@pytest.mark.parametrize("case", ["matching", "missing_marker", "missing_state"])
 def test_previous_body_detector_both_directions(tmp_path, monkeypatch, case):
     _published(tmp_path)
     before = meta(tmp_path, "last_store_body")

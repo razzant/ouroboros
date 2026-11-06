@@ -26,7 +26,7 @@ import pytest
 from tests._budget_pause_exact_helpers import _install_queue
 from tests._work_projection_shared import state_fields, with_work_fields
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 WEB = Path(__file__).resolve().parents[1] / "web"
 HTML = """<!doctype html><html lang="en" class="ouro-ui"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -180,7 +180,7 @@ def test_activity_outcome_rows_and_their_controls_in_a_real_browser(tmp_path, mo
                             .querySelector('[data-activity-phase]');
                         const mark = chip.querySelector(':scope > .status-mark');
                         const stop = document.querySelector('[data-act="task-control"][data-id="failed-root"]');
-                        const scroll = document.querySelector('.activity-scroll');
+                        const scroll = document.querySelector('#activity .dashboard-body');
                         const out = {chip: getComputedStyle(chip).color, chipBg: getComputedStyle(chip).backgroundColor,
                             second: getComputedStyle(chip.nextElementSibling).color, error: ink('var(--status-error-fg)'),
                             errorBg: ink('var(--status-error-bg)'), meta: ink('var(--text-meta)'),
@@ -193,7 +193,7 @@ def test_activity_outcome_rows_and_their_controls_in_a_real_browser(tmp_path, mo
                     assert colours["chip"] == colours["error"] and colours["second"] == colours["meta"], colours
                     assert colours["chipBg"] == colours["errorBg"], colours
                     assert (colours["mark"], colours["markInk"]) == ("dot/failed", colours["red"]), colours
-                    assert colours["stop"] == "btn btn-xs btn-default", colours
+                    assert colours["stop"] == "btn btn-sm btn-default", colours
                     assert colours["overflow"] <= 0, colours
                     page.close()
 

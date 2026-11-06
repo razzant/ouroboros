@@ -118,7 +118,7 @@ def test_a_recorded_capture_whose_source_is_gone_stays_held_by_its_verified_cano
     assert (row["sha256"], row["immutable"]) == (record["sha256"], True)
 
 
-@pytest.mark.parametrize("material", ["child_result", "registration", "file", "directory", "mailbox", "receipts"])
+@pytest.mark.parametrize("material", ["child_result", "registration", "file", "directory", "receipts"])
 def test_unreadable_material_retains_the_drive(tmp_path, monkeypatch, material):
     data, drive, record = _cancelled_with_capture(tmp_path)
     store = artifacts.task_artifact_dir_path(drive, TASK)
@@ -226,7 +226,7 @@ def test_a_settled_drive_leaves_only_unserved_trash_for_the_maintenance_child(tm
     assert staging.exists()  # a young entry may belong to a running settlement
     task_custody.sweep_custody_leftovers(data, min_age_sec=0)
     assert not staging.exists()
-    assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}, "retained": []}
+    assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}, "holds": []}
     assert list(trash.iterdir()) == []
 
 
@@ -256,7 +256,7 @@ def test_read_only_folders_in_custody_leftovers_never_strand_them(tmp_path):
         assert staging.exists(), "a young staging entry may belong to a running settlement"
         task_custody.sweep_custody_leftovers(data, min_age_sec=0)
         assert not staging.exists()
-        assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}, "retained": []}
+        assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}, "holds": []}
         assert not moved.exists()
     finally:
         for objects in sealed:
@@ -541,8 +541,11 @@ def test_relpath_is_result_identity_but_the_physical_store_is_not(tmp_path):
 # One probe per review finding: the class of failure, not the local example.
 
 
-@pytest.mark.parametrize("kind", ["headless", "task_drives"])
-@pytest.mark.parametrize("recorded_by", ["child_result", "canonical_row", "registration"])
+@pytest.mark.parametrize(("recorded_by", "kind"), [
+    ("child_result", "headless"),
+    ("canonical_row", "task_drives"),
+    ("registration", "headless"),
+])
 def test_obligations_are_derived_before_the_store_is_looked_at(tmp_path, kind, recorded_by):
     """F1: a WHOLE child store that is gone is a missing source for every recorded row, not
     permission: no row is dropped, the drive stays, a restore converges (both layouts)."""

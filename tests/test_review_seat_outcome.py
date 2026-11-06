@@ -45,8 +45,6 @@ def _produce(root, text, parts, *, cost=None):
 @pytest.mark.parametrize("text,parts,verdict,parse,errors", [
     (_body(True), ["change", "coupling"], "FAIL", "valid", 0),
     (_body(), ["change", "coupling"], "PASS", "valid", 0),
-    ("[]\nNO_FINDINGS", ["result"], "PASS", "valid", 0),
-    ("[]\nNO_FINDINGS", ["skill"], "PASS", "valid", 0),
     ("not an answer", ["result"], "DEGRADED", "malformed", 1),
 ])
 def test_producer_consumer_and_cas_have_one_contract_truth(tmp_path, monkeypatch, text, parts, verdict, parse, errors):

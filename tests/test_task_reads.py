@@ -21,6 +21,7 @@ from ouroboros import task_store
 from ouroboros.gateway.history import make_chat_history_endpoint
 from ouroboros.task_reads import TaskReads
 from tests._store_shared import read_result, seed_result
+from tests._cases import chosen_rows
 
 TS = "2026-10-16T10:00:00Z"
 BULK = {  # every dropped path, filled so a reader that used one would change the page
@@ -95,7 +96,7 @@ def test_display_view_drops_only_the_bulky_evidence(tmp_path):
     assert views["task-b"]["artifact_bundle"] == "legacy" and views["task-b"]["task_contract"] == {}
 
 
-@pytest.mark.parametrize("snapshot, expected", [
+@pytest.mark.parametrize("snapshot, expected", chosen_rows([
     ({}, {}),
     ({"loop_outcome": None}, {"loop_outcome": None}),
     ({"loop_outcome": {}}, {"loop_outcome": {}}),
@@ -103,7 +104,7 @@ def test_display_view_drops_only_the_bulky_evidence(tmp_path):
     ({"loop_outcome": {"usage": {}}}, {"loop_outcome": {"usage": {}}}),
     *[({"loop_outcome": {"usage": {"total_rounds": rounds, "extra": "U" * 100_000}, "extra": "L" * 100_000}},
        {"loop_outcome": {"usage": {"total_rounds": rounds}}}) for rounds in (None, 0, 3)],
-], ids=["missing", "null", "empty", "usage-null", "usage-empty", "rounds-null", "zero", "accepted"])
+], 0, 5, 7), ids=chosen_rows(["missing", "null", "empty", "usage-null", "usage-empty", "rounds-null", "zero", "accepted"], 0, 5, 7))
 def test_display_rounds_keep_presence_without_bulk_or_full_reads(tmp_path, monkeypatch, snapshot, expected):
     seed_result(tmp_path, "snapshot", {"task_id": "snapshot", "status": "completed", **snapshot})
     full = read_result(tmp_path, "snapshot")

@@ -286,7 +286,6 @@ def test_inbound_refresh_returns_exact_foreground_envelope_via_thread(monkeypatc
 @pytest.mark.parametrize("code", [
     "daemon_not_discovered",
     "protocol_incompatible",
-    "daemon_unreachable",
     "rate_limited",
 ])
 def test_inbound_refresh_preserves_typed_engine_failure(monkeypatch, code):

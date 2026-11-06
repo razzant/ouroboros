@@ -54,8 +54,7 @@ def test_a_reader_reads_exact_previous_source_after_restore(tmp_path, scope):
     assert '"state": "active"' in current and "Later corrected facts." in current
 
 
-@pytest.mark.parametrize("scope", ["global", "project:reader-check"])
-@pytest.mark.parametrize("mode", ["archive", "restore"])
+@pytest.mark.parametrize(("mode", "scope"), [("archive", "global"), ("restore", "project:reader-check")])
 def test_a_canonical_reader_reads_previous_source_before_copyback(tmp_path, scope, mode):
     from ouroboros.artifacts import read_actor_source_bytes
     from tests.test_knowledge_archive import setup, transition
@@ -90,8 +89,7 @@ def test_a_canonical_reader_reads_previous_source_before_copyback(tmp_path, scop
     assert read_actor_source_bytes(tmp_path, ctx.task_id, ref) == exact
 
 
-@pytest.mark.parametrize("scope", ["global", "project:reader-check"])
-@pytest.mark.parametrize("failing_root", ["canonical", "execution"])
+@pytest.mark.parametrize(("failing_root", "scope"), [("canonical", "global"), ("execution", "project:reader-check")])
 def test_archive_requires_previous_source_in_both_reader_roots(tmp_path, monkeypatch, scope, failing_root):
     from ouroboros import artifacts
     from tests.test_knowledge_archive import setup, transition

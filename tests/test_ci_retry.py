@@ -20,7 +20,7 @@ from tests.ci_verdicts import render_run_verdict
 
 REPO = Path(__file__).resolve().parents[1]
 SHA, RUN = "c" * 40, "777"
-PARALLEL = f"not serial and {LANE_EXCLUSION_EXPR}"
+PARALLEL = f"not exclusive and {LANE_EXCLUSION_EXPR}"
 A, B, C, D = (f"tests/test_{name}.py::test_case" for name in "abcd")
 
 
@@ -40,7 +40,7 @@ def _round(evidence, k=1):
 
 
 @pytest.mark.parametrize("pass_flags", [
-    ["-n", "auto", "--dist", "loadscope", "--max-worker-restart=0", "--timeout=300"], ["--timeout=300"],
+    ["-n", "auto", "--dist", "loadgroup", "--max-worker-restart=0", "--timeout=300"], ["--timeout=300"],
 ], ids=["parallel", "serial"])
 def test_the_ci_run_tests_form_keeps_every_option_but_the_lane_proof(ci_retry, tmp_path, pass_flags):
     """Exactly what ci.yml wraps; --timeout stays, the shard goes, the evidence moves into the round."""
@@ -242,7 +242,7 @@ def test_a_stopped_session_is_continued_and_its_crash_retried(ci_retry, monkeypa
         _session({A: "passed", B: "crash"}, exit=1, assigned=lane, collected=4),
         _session({B: "passed", C: "failed", D: "passed"}, exit=1),
         _session({C: "passed"}, exit=0))
-    assert code == 0 and requested == [[], [B, C, D], [C]]
+    assert code == 0 and requested == [[], [B, "tests/test_c.py", "tests/test_d.py"], [C]]
     assert verdict["verdict"] == "flaky" and verdict["continued"] == 2 and verdict["not_run"] == []
     assert verdict["flaky"] == [{"nodeid": B, "first": {"phase": "crash", "error_type": "WorkerCrash"}},
                                 {"nodeid": C, "first": {"phase": "call", "error_type": "AssertionError"}}]
@@ -262,12 +262,28 @@ def test_without_a_lane_block_a_dead_workers_crash_record_names_the_rest(ci_retr
         return code
     code, verdict, requested = _wrapped(ci_retry, monkeypatch, tmp_path, crashed,
                                         _session({B: "passed", C: "passed", D: "passed"}, exit=0))
-    assert code == 0 and requested == [[], [B, C, D]] and verdict["continued"] == 2
+    assert code == 0 and requested == [[], [B, "tests/test_c.py", "tests/test_d.py"]] and verdict["continued"] == 2
     # Without that record the rest stays unknown.
     code, verdict, requested = _wrapped(ci_retry, monkeypatch, tmp_path / "unknown",
                                         _session({A: "passed", B: "crash"}, exit=1, collected=4))
     assert code == 1 and requested == [[]]
     assert verdict["reason"] == "2 collected test(s) never ran, and no lane block or crash record names them"
+
+
+def test_a_continuation_asks_for_unrun_files_by_path_and_everything_else_by_id(ci_retry, monkeypatch, tmp_path):
+    """The unrun rest of a crashed shard is thousands of tests, and pytest matches each node id against every
+    entry of its directory (on Windows with a file-identity check per entry: run 42061846211, Windows shard 7,
+    collected nothing after 34 minutes). A round names a file none of whose tests has an attempt by its path,
+    and a file's remaining tests by id once one of them ran; the crashed test keeps its id."""
+    x1, x2, y1, y2 = ("tests/test_x.py::test_one", "tests/test_x.py::test_two",
+                      "tests/test_y.py::test_one", "tests/test_y.py::test_two")
+    code, verdict, requested = _wrapped(
+        ci_retry, monkeypatch, tmp_path,
+        _session({x1: "passed", A: "crash"}, exit=1, assigned=[A, x1, x2, y1, y2], collected=5),
+        _session({A: "passed", x2: "passed", y1: "passed", y2: "passed"}, exit=0))
+    assert code == 0 and requested == [[], [A, x2, "tests/test_y.py"]]
+    assert verdict["verdict"] == "flaky" and verdict["not_run"] == [] and verdict["continued"] == 3
+    assert ci_retry.round_arguments([y2, y1, x2], {x1: []}) == ["tests/test_y.py", x2]
 
 
 def test_a_test_that_never_runs_blocks(ci_retry, monkeypatch, tmp_path):
@@ -278,7 +294,7 @@ def test_a_test_that_never_runs_blocks(ci_retry, monkeypatch, tmp_path):
         _session({A: "failed"}, exit=1, assigned=[A, B, C], collected=3),
         _session({A: "passed", B: "passed"}, exit=2),
         _session({}, exit=4, export=False))
-    assert code == 1 and requested == [[], [A, B, C], [C]]
+    assert code == 1 and requested == [[], [A, "tests/test_b.py", "tests/test_c.py"], ["tests/test_c.py"]]
     assert verdict["verdict"] == "red" and verdict["not_run"] == [C] and verdict["flaky"][0]["nodeid"] == A
     assert verdict["reason"] == "retry-2 ran none of its 1 test(s) (exit status 4)"
     assert verdict["rounds"][-1] == {"dir": "retry-2", "exit": 4, "ran": 0}
@@ -322,25 +338,19 @@ def test_an_accepted_failure_does_not_block_and_the_command_never_sees_the_token
     assert code == 1 and verdict["verdict"] == "red" and verdict["accepted"] == [] and reads == []
 
 
-def test_the_wrapped_command_inherits_everything_but_the_api_token(ci_retry, monkeypatch, tmp_path):
+def test_the_program_is_found_on_path_as_the_calling_shell_finds_it(ci_retry, monkeypatch):
+    """Windows' own lookup tries the interpreter's directory first, where a venv's python.exe runs
+    as the base interpreter, so a bare `python` started the hosted Python without the venv's pytest.
+    The command inherits the environment less the repository's API token (scripts/ci_retry.py `_run`)."""
+    started = []
     monkeypatch.setenv("GH_TOKEN", "test-token-a")
     monkeypatch.setenv("GITHUB_TOKEN", "test-token-b")
     monkeypatch.setenv("CI_RETRY_PROBE", "kept")
-    out = tmp_path / "env.json"
-    code = ci_retry._run([sys.executable, "-c", "import json, os, sys; json.dump(dict(os.environ), "
-                          "open(sys.argv[1], 'w', encoding='utf-8')); sys.exit(3)", str(out)])
-    seen = json.loads(out.read_text(encoding="utf-8"))
-    assert code == 3 and seen["CI_RETRY_PROBE"] == "kept"
-    assert "GH_TOKEN" not in seen and "GITHUB_TOKEN" not in seen
-
-
-def test_the_program_is_found_on_path_as_the_calling_shell_finds_it(ci_retry, monkeypatch):
-    """Windows' own lookup tries the interpreter's directory first, where a venv's python.exe runs
-    as the base interpreter, so a bare `python` started the hosted Python without the venv's pytest."""
-    started = []
 
     class Process:
         def __init__(self, command, env):
+            assert "GH_TOKEN" not in env and "GITHUB_TOKEN" not in env
+            assert env["CI_RETRY_PROBE"] == "kept"
             started.append(command)
 
         def wait(self):
@@ -408,7 +418,7 @@ def test_a_killed_session_is_continued_from_the_lane_it_journaled(ci_retry, monk
     code, verdict, requested = _wrapped(ci_retry, monkeypatch, tmp_path,
                                         _session({}, exit=1, export=False, journal=journal),
                                         _session({B: "passed", C: "passed"}, exit=0))
-    assert code == 0 and requested == [[], [B, C]]
+    assert code == 0 and requested == [[], [B, "tests/test_c.py"]]  # B ran once (by id); test_c.py never ran (by path)
     assert verdict["verdict"] == "flaky" and verdict["not_run"] == [] and verdict["continued"] == 1
     assert verdict["flaky"] == [{"nodeid": B, "first": {"phase": "crash", "error_type": "InFlight"}}]
     assert verdict["rounds"][0] == {"dir": ".", "exit": 1, "ran": 2}
@@ -428,7 +438,7 @@ def test_beside_a_dead_worker_a_test_in_flight_runs_again_without_spending_its_r
                                         _session({B: "crash"}, exit=1, assigned=[A, B, C], journal=journal),
                                         _session({A: "failed", B: "passed", C: "passed"}, exit=1),
                                         _session({A: "passed"}, exit=0))
-    assert code == 0 and requested == [[], [A, B, C], [A]]
+    assert code == 0 and requested == [[], ["tests/test_a.py", B, "tests/test_c.py"], [A]]  # unrun files by path
     assert verdict["flaky"] == [{"nodeid": A, "first": {"phase": "call", "error_type": "AssertionError"}},
                                 {"nodeid": B, "first": {"phase": "crash", "error_type": "WorkerCrash"}}]
     assert verdict["continued"] == 2
@@ -443,7 +453,7 @@ def test_an_internal_error_leaves_the_tests_in_flight_unblamed(ci_retry, monkeyp
     code, verdict, requested = _wrapped(ci_retry, monkeypatch, tmp_path,
                                         _session({B: "passed"}, exit=3, assigned=[A, B, C], journal=journal),
                                         _session({A: "passed", C: "passed"}, exit=0))
-    assert code == 0 and requested == [[], [A, C]]
+    assert code == 0 and requested == [[], ["tests/test_a.py", "tests/test_c.py"]]  # both never ran: by path
     assert verdict["verdict"] == "green" and verdict["flaky"] == [] and verdict["continued"] == 2
 
 
@@ -523,7 +533,6 @@ def _json(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("always", [False, True], ids=["fails-once", "fails-twice"])
 def test_a_real_session_retries_its_failure_once(tmp_path, always):
     suite = tmp_path / "suite"
@@ -568,7 +577,6 @@ def _reconciled(tmp_path, suite, expression, lane_key):
                             lane_key=lane_key)
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("death, seconds", [("os._exit(3)", None), ("time.sleep(60)", 2.0)],
                          ids=["exit", "thread-timeout"])
 def test_a_dead_worker_is_continued_and_the_shard_still_reconciles(tmp_path, death, seconds):
@@ -635,14 +643,13 @@ def test_a_dead_worker_is_continued_and_the_shard_still_reconciles(tmp_path, dea
     assert any("assigned but not executed" in gap for gap in gaps)
 
 
-@pytest.mark.serial
 def test_a_killed_session_is_continued_from_its_journal_and_proven_by_its_verdict(tmp_path):
     """pytest-timeout's thread method ends a whole serial session on Windows: no final export at all.
     The lane block journaled at collection lets the rounds retry the test in flight and run the rest,
     and the journal with that verdict proves the shard."""
     suite = tmp_path / "suite"
     (suite / "tests").mkdir(parents=True)
-    serial = "import pytest\npytestmark = pytest.mark.serial\n"
+    serial = "import pytest\npytestmark = pytest.mark.serial('exclusive')\n"
     (suite / "tests" / "test_a.py").write_text(serial + "@pytest.mark.parametrize('n', range(2))\n"
                                                "def test_quick(n):\n    pass\n", encoding="utf-8")
     (suite / "tests" / "test_b_killed.py").write_text(serial + textwrap.dedent(f"""
@@ -656,7 +663,7 @@ def test_a_killed_session_is_continued_from_its_journal_and_proven_by_its_verdic
     """), encoding="utf-8")
     (suite / "tests" / "test_c.py").write_text(serial + "@pytest.mark.parametrize('n', range(2))\n"
                                                "def test_later(n):\n    pass\n", encoding="utf-8")
-    expression = f"serial and {LANE_EXCLUSION_EXPR}"
+    expression = f"exclusive and {LANE_EXCLUSION_EXPR}"
     evidence = tmp_path / "shards" / "default-ci-shard-1-attempt1" / "serial"
     result = _wrapper(tmp_path, evidence, _command(tmp_path, suite, "-m", expression,
                                                    f"--ci-evidence-dir={evidence}", "--default-suite-shard=1/1"))
@@ -667,7 +674,7 @@ def test_a_killed_session_is_continued_from_its_journal_and_proven_by_its_verdic
     assert verdict["verdict"] == "flaky" and verdict["not_run"] == [] and verdict["continued"] == 2
     assert verdict["flaky"] == [{"nodeid": killed, "first": {"phase": "crash", "error_type": "InFlight"}}]
     assert (evidence / "retry-1" / "argsfile.txt").read_text(encoding="ascii").split() == [
-        killed, "tests/test_c.py::test_later[0]", "tests/test_c.py::test_later[1]"]
+        killed, "tests/test_c.py"]  # the killed test by id; test_c.py, which never ran, by path
     gaps, notes = _reconciled(tmp_path, suite, expression, "default_serial")
     assert gaps == [], gaps
     assert any("proof from attempt 1; assigned 5, executed 5; retry verdict flaky" in note for note in notes)

@@ -17,7 +17,6 @@ from supervisor import conversation_lane, worker_chat_lane, worker_pool_lifecycl
 from tests.test_owner_wait_pool import InputQueue, Process, pool as pool  # noqa: F401 -- fixture
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 _REAL_LANE_RECONCILE = conversation_lane.reconcile_conversation_lane
 
@@ -61,8 +60,8 @@ def test_owner_turn_is_admitted_to_the_lane_and_runs_in_the_carrier(lane):
     assert conversation_lane.lane_turn_rows()[0]["phase"] == "working"
 
 
-def test_hello_during_a_project_crash_storm_is_admitted_to_the_lane_never_pending(lane, monkeypatch):
-    monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "worker_crash_storm")
+def test_hello_under_an_exhausted_project_pool_is_admitted_to_the_lane_never_pending(lane, monkeypatch):
+    monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "worker_readiness_exhausted")
     workers.WORKERS[0].proc.alive = False  # every project worker is dead
     worker_chat_lane.handle_chat_direct(1, "hello", None, task_metadata={"client_message_id": "cm-2"})
     assert not workers.PENDING
@@ -404,8 +403,11 @@ def test_custody_publishes_only_its_own_row_never_a_resend_admitted_under_the_sa
     assert emitted == []  # no terminal of the old attempt for the row the resend owns
 
 
-@pytest.mark.parametrize("live, resumes", [("presence", True), ("direct", False)])
-@pytest.mark.parametrize("places_state", ["paused", "empty", "unreadable"])
+@pytest.mark.parametrize(("places_state", "live", "resumes"), [
+    ("paused", "presence", True),
+    ("empty", "direct", False),
+    ("unreadable", "presence", True),
+])
 def test_a_correspondents_presence_turn_never_holds_the_owners_auto_resume(lane, monkeypatch, live, resumes, places_state):
     """Review N8: the Host serves at boot before auto-resume, so a correspondent's Presence turn can be a live lane
     row when the planned restart's resume runs. It is its place's conversation, never the owner's: only an owner

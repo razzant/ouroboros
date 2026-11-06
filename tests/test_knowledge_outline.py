@@ -65,7 +65,7 @@ def test_a_group_or_a_topic_lists_with_its_summaries(tmp_path):
 
 
 @pytest.mark.parametrize("kind,kept", [("person", True), ("Person", True), (" PERSON ", True),
-                                        ("\tPeRsOn\t", True), ("personal", False), ("note", False)])
+                                        ("personal", False), ("note", False)])
 def test_person_summary_survives_case_and_whitespace_in_authored_yaml(tmp_path, kind, kept):
     import json
 

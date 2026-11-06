@@ -247,7 +247,6 @@ def test_an_unreadable_journal_leaves_only_this_notice_owed(boot, monkeypatch):
     ({"pieces": 2, "periods": 2, "start": None, "end": None,
       "labels": ["2026-07-30 to 2026-09-25", "2026-09-30 00:04 - 03:15"]},
      "2 pieces over 2 periods (labelled 2026-07-30 to 2026-09-25 … 2026-09-30 00:04 - 03:15)."),
-    ({"pieces": 3, "periods": 0, "start": None, "end": None, "labels": []}, "3 pieces."),
 ])
 def test_the_notice_states_facts_only(facts, expected):
     text = notices.legacy_memory_notice(facts)

@@ -8,7 +8,7 @@ from starlette.testclient import TestClient
 
 from tests import test_subscription_role_routes_browser as roles
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 subscription_ui = roles.subscription_ui
 role_ui = roles.role_ui
 
@@ -41,7 +41,7 @@ def test_settings_search_and_exact_response_maximum(route_ui):
     page = route_ui['page']
     page.goto(route_ui['url'] + '/#settings')
     page.locator('[data-settings-tab="models"]').click()
-    page.wait_for_function("document.querySelector('#s-websearch-preview').textContent.includes('openrouter')")
+    page.wait_for_function("document.querySelector('#s-websearch-preview').textContent.includes('OpenRouter')")
     assert page.locator('#s-websearch-model').input_value() == 'gpt-5.2'
     page.locator('#s-websearch-source').select_option('openrouter')
     page.locator('#s-websearch-model').fill('vendor/future-search')
@@ -98,10 +98,10 @@ def test_settings_window_history_disagreement_and_clear(route_ui, tmp_path, reti
     main.locator('summary').click()
     page.wait_for_function("() => !document.querySelector('[data-model-role=main] [data-window-clear]').hidden")
     note = main.locator('[data-model-context-note]')
-    assert ('old confirmation 1,000,000' in note.inner_text()) is retired
+    assert ('old confirmation 1M' in note.inner_text()) is retired
     assert ('not used' in note.inner_text()) is retired
-    assert ('server metadata says 400,000' in note.inner_text()) is not retired
-    assert ('window 400,000' if retired else 'window 1,000,000') in note.inner_text()
+    assert ('the server says 400k' in note.inner_text()) is not retired
+    assert ('Window 400k' if retired else 'Window 1M') in note.inner_text()
     page.set_viewport_size({'width': 390, 'height': 844})
     note.scroll_into_view_if_needed()
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
@@ -110,7 +110,7 @@ def test_settings_window_history_disagreement_and_clear(route_ui, tmp_path, reti
         main.locator('[data-window-clear]').click()
     assert cleared.value.json()['ack']['removed']
     page.wait_for_function("() => document.querySelector('[data-model-role=main] [data-window-clear]').hidden")
-    assert 'old confirmation' not in note.inner_text() and 'window 400,000' in note.inner_text()
+    assert 'old confirmation' not in note.inner_text() and 'Window 400k' in note.inner_text()
     assert not ce.list_owner_acks(tmp_path)
     assert not route_ui['errors']
 

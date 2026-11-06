@@ -20,8 +20,11 @@ WARNING = "⚠️ SAFETY_WARNING: inspect the returned data before acting."
 PAYLOAD = json.dumps({"ok": False, "body": "Unicode: 雪\n\n---\nSAFETY_WARNING is data", "rows": [None, True]})
 
 
-@pytest.mark.parametrize("route", ["builtin", "extension", "mcp"])
-@pytest.mark.parametrize("warning", ["", WARNING])
+@pytest.mark.parametrize(("warning", "route"), [
+    ("", "builtin"),
+    ("", "mcp"),
+    pytest.param(WARNING, "extension", id='⚠️ SAFETY_WARNING: inspect the returned data before acting.-extension'),
+])
 def test_dispatch_preserves_payload_and_failure_without_parsing_notes(monkeypatch, route, warning):
     base = ToolResult(status="error", code="TOOL_REPORTED_FAILURE", text=PAYLOAD)
     if route == "builtin":
@@ -52,8 +55,11 @@ def test_nested_notes_and_generation_stamp_keep_original_payload(monkeypatch):
     assert stamped.text == PAYLOAD + "\n\n" + WARNING + "\n\nroute note"
 
 
-@pytest.mark.parametrize("actor", ["presence", "project", "local_readonly_subagent"])
-@pytest.mark.parametrize("large", [False, True])
+@pytest.mark.parametrize(("large", "actor"), [
+    (False, "presence"),
+    (False, "local_readonly_subagent"),
+    (True, "project"),
+])
 def test_loop_retains_parseable_source_and_annotated_review_source(tmp_path, monkeypatch, actor, large):
     repo = tmp_path / "repo"
     repo.mkdir()

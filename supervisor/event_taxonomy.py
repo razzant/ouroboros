@@ -140,6 +140,9 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
     "rollback_request": _handled("supervisor.events_runtime_controls", "ouroboros/tools/git_rollback.py"),
     "promote_to_stable": _handled(
         "supervisor.events_runtime_controls", "ouroboros/tools/control_runtime.py"),
+    "free_storage": _handled(
+        "supervisor.events_runtime_controls", "ouroboros/tools/control_storage.py",
+        note="the mind's Storage -> Free (owner Q3 = A): the server's one Free owner runs it with the supervisor's probes"),
     "review_late_result": _handled(
         "supervisor.cognitive_operations", "ouroboros/review_custody.py"),
     "schedule_subagent": _handled(
@@ -216,6 +219,9 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
     "ui_i18n_updated": _handled(
         "supervisor.events_worker_reports", "ouroboros/tools/control_ui_translation.py",
         note="the memory file is already written; the host broadcasts the same-named frame to its windows"),
+    "mcp_signed_in": _handled(
+        "supervisor.events_worker_reports", "ouroboros/tools/mcp_sign_in.py",
+        note="the sign-in file is already written; the host lists that server again, as only it publishes catalogs"),
     "update_progress_changed": _handled(
         "supervisor.events_worker_reports", "ouroboros/tools/control_update_description.py",
         note="the update description is already saved; the host broadcasts the same-named frame to its windows"),

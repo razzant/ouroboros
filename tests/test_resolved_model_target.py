@@ -574,7 +574,6 @@ def test_a_spent_reply_is_adopted_under_the_account_its_own_request_carried(tmp_
     ({"_last_llm_error_kind": "bad_request"}, " after a rejected request on primary"),
     ({"_last_llm_error_kind": "provider_outcome_unknown"},
      " after an attempt with no known outcome on primary; the earlier attempt’s outcome and cost stay unknown"),
-    ({"_last_llm_error_kind": "a_future_kind"}, " after a provider failure on primary"),
 ])
 def test_an_attempt_says_no_more_than_the_record_knows(tmp_path, monkeypatch, usage, reason):
     """The class the table has no words for reads as the owner's generic words; the

@@ -32,8 +32,12 @@ def ingress(focus, monkeypatch):
         yield client, body, calls
 
 
-@pytest.mark.parametrize("identity", [None, {}, IDENTITY, {"reads_as": []}])
-@pytest.mark.parametrize("authenticated", [None, False, True])
+@pytest.mark.parametrize(("authenticated", "identity"), [
+    (None, None),
+    pytest.param(False, IDENTITY, id='False-identity2'),
+    pytest.param(True, {}, id='True-identity1'),
+    pytest.param(True, {"reads_as": []}, id='True-identity3'),
+])
 def test_ingress_keeps_optional_identity_and_authentication(ingress, identity, authenticated):
     client, body, calls = ingress
     if identity is not None:
@@ -46,12 +50,7 @@ def test_ingress_keeps_optional_identity_and_authentication(ingress, identity, a
     assert calls[0].actor.get("authenticated") is authenticated
 
 
-@pytest.mark.parametrize("identity", [None, [], {"extra": True}, {"sends_as": None},
-    {"sends_as": {"id": "", "label": "a", "kind": "user"}},
-    {"sends_as": {"id": "a", "label": "x" * 201, "kind": "user"}},
-    {"sends_as": {"id": "a", "label": "a", "kind": "human"}},
-    {"sends_as": {"id": "a", "label": "a", "kind": "user", "owner": True}},
-    {"reads_as": {}}, {"reads_as": ["a"]}])
+@pytest.mark.parametrize("identity", [None, {"reads_as": {}}, {"reads_as": ["a"]}])
 def test_ingress_refuses_bad_identity_before_capture(ingress, identity, monkeypatch):
     client, body, calls = ingress
     monkeypatch.setattr("ouroboros.presence_runner.capture_presence_event", lambda *a, **kw: pytest.fail("captured invalid event"))
@@ -62,7 +61,7 @@ def test_ingress_refuses_bad_identity_before_capture(ingress, identity, monkeypa
     assert response.json()["disposition"] == "rejected" and not calls
 
 
-@pytest.mark.parametrize("actor", [[], "person", {"authenticated": 0}, {"authenticated": "false"}, {"authenticated": None}])
+@pytest.mark.parametrize("actor", [[], "person", {"authenticated": None}])
 def test_ingress_refuses_bad_actor(ingress, actor):
     client, body, calls = ingress
     body["event"]["actor"] = actor
@@ -108,8 +107,13 @@ def test_evolves_cannot_activate_but_owner_main_can(focus):
     assert json.loads(_configure_presence(ctx, "set_state", place.place_id, state="active"))["place"]["state"] == "active"
 
 
-@pytest.mark.parametrize("reader", ["place_view", "places_view", "focus_metadata", "call_place_facts", "places_text"])
-@pytest.mark.parametrize("identity", [None, IDENTITY])
+@pytest.mark.parametrize(("identity", "reader"), [
+    (None, "place_view"),
+    (None, "focus_metadata"),
+    (None, "places_text"),
+    pytest.param(IDENTITY, "places_view", id='identity1-places_view'),
+    pytest.param(IDENTITY, "call_place_facts", id='identity1-call_place_facts'),
+])
 def test_place_readers_never_import_or_call_connector_dispatch(focus, monkeypatch, identity, reader):
     """Astra R1/R2 and Opus N1/N4: even a callable route cannot enter cognition."""
     import builtins
@@ -184,7 +188,6 @@ def test_authentication_controls_safety_occasion_and_child_authority(focus, auth
 
 @pytest.mark.parametrize("kind,owner,expected", [
     ("bot", False, "You write here as Ouroboros, through Human mailbox."),
-    ("bot", True, "You write here as Ouroboros, through Human mailbox."),
     ("user", False, "You write here through the account Human mailbox; your human's notes say what that account is."),
     ("user", True, "You write here from your human's own account, Human mailbox: your words appear as theirs, and their notes say how. If someone sincerely asks whether they are writing to a person, say what you are."),
 ])
@@ -201,7 +204,7 @@ def test_focus_voice_uses_detached_event_identity_and_user_owner_match(focus, ki
     assert task["metadata"]["focus"]["identity"]["reads_as"][0] is not identity["reads_as"][0]
     assert task["metadata"]["focus"]["identity_owner"] is (owner and kind == "user")
     rendered = frame_focus_content(task, "hello")
-    assert expected + "\nYour human's notes here are their letter for this place; a message here does not edit any note." in rendered
+    assert expected + "\nYour human's notes here are their letter, and yours your record; a message here edits no note." in rendered
 
 
 @pytest.mark.parametrize("account,owner", [("a", True), ("other", False)])

@@ -17,14 +17,15 @@ from __future__ import annotations
 import json
 import os
 import pathlib
-from typing import Any, Dict
+from typing import Any, Dict, Iterator
 
 import pytest
 
 from tests._live_set import STAGES
 from tests._stand import CHARS_PER_TOKEN, SHAPES
+from tests._stand_cache import STAND_MARKS, measuring
 from tests._turn_law import readers_of
-from tests.test_cost_contract import COUNT_JITTER, ROUND, measure
+from tests.test_cost_contract import COUNT_JITTER, ROUND
 from tests.test_cost_live_set import (
     ALLOWED_AT_REST,
     BYTE_JITTER,
@@ -41,7 +42,7 @@ from tests.test_cost_live_set import (
     live_set_breaches,
 )
 
-pytestmark = pytest.mark.scale
+pytestmark = [pytest.mark.scale, *STAND_MARKS]
 
 K = 1
 # The owner's turn beside others: two read transactions per other live turn, whichever store is asked.
@@ -56,11 +57,11 @@ FLAT_GAPS = {name: "; ".join(reason for (_axis, gap_name), reason in GAPS.items(
     pytest.param(("WAL", "reduced"), id="wal-reduced"), pytest.param(("PERSIST", "reduced"), id="persist-reduced"),
     pytest.param(("WAL", "full"), id="wal-full", marks=pytest.mark.integration),
     pytest.param(("PERSIST", "full"), id="persist-full", marks=pytest.mark.integration)])
-def stand(request, tmp_path_factory) -> Dict[str, Any]:
+def stand(request) -> Iterator[Dict[str, Any]]:
     journal, shape = request.param
-    measured = measure(tmp_path_factory.mktemp("stand"), K, plan="stand", stand=shape, journal=journal)
-    measured["shape_name"], measured["journal"] = shape, journal
-    return measured
+    with measuring(K, plan="stand", stand=shape, journal=journal) as measured:
+        measured["shape_name"], measured["journal"] = shape, journal
+        yield measured
 
 
 def _pass(stand: Dict[str, Any], stage: str, name: str, phase: str = "rest") -> Dict[str, Any]:

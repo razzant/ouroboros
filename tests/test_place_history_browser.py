@@ -15,7 +15,7 @@ import pytest
 from tests._skills_page_harness import URL, _document, fixture, open_skills, skills_browser as skills_browser
 from tests.place_history_scenario import scenario
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 MATRIX = [(engine, width, theme) for engine in ('chromium', 'webkit') for width in (1280, 390) for theme in ('light', 'dark')]
 
 

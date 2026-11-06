@@ -63,9 +63,11 @@ export function renderSkillIcon(spec, { size = 16, className = '' } = {}) {
     return svg.replace('<svg ', `<svg aria-hidden="true"${css ? ` class="${css}"` : ''} `);
 }
 
-// The shell's control glyphs, each once: the menu (☰), back (‹), the one close (×), the one more (⋯) and the
-// chevron. Same stroke family as the page icons; a control's accessible name says what the glyph does.
+// The shell's control glyphs, each once: the menu (☰), back (‹), the one close (×), the one more (⋯), the
+// chevron and the magnifier of Find a project. Same stroke family as the page icons; a control's accessible name
+// says what the glyph does.
 export const SHELL_ICONS = {
+    search: strokeIcon('<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>', 18),
     menu: strokeIcon('<path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/>'),
     back: strokeIcon('<path d="m15 18-6-6 6-6"/>'),
     close: strokeIcon('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>'),

@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import pathlib
 import queue
+from types import SimpleNamespace
 
 import pytest
 
@@ -136,7 +137,6 @@ def no_model_client(monkeypatch):
     ({"kind": "import_pending", "reason": "legacy_memory_lock_busy"}, "legacy_memory_lock_busy"),
     ({"kind": "import_refused", "reason": "invalid"}, "invalid"),
     (OSError("journal io"), "OSError: journal io"),
-    (ValueError("chronicle authority shortened"), "ValueError: chronicle authority shortened"),
 ])
 def test_a_child_starts_with_a_visible_gap_when_its_chronicle_cannot_be_read(tmp_path, monkeypatch, no_model_client,
                                                                             failure, reason):
@@ -220,6 +220,7 @@ def test_a_declared_child_starts_with_the_owner_words_and_nothing_of_shared_memo
 
     env, memory, _rooms = world(tmp_path)
     monkeypatch.setattr("ouroboros.context.utc_now_iso", lambda: "2026-10-04T06:00:00+00:00")
+    monkeypatch.setattr("shutil.disk_usage", lambda _path: SimpleNamespace(free=1, total=2))  # a dated fact as well
     root = _root(env, memory, "bound", 1, ASKED)
     declared = _schedule(root, "Count shelf one", input_sources="declared", context="Shelf one holds forty boxes")
     assert declared["metadata"]["governing_owner_words"] and declared["metadata"][DECLARED_WORDS_FACT] is True

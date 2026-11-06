@@ -6,7 +6,7 @@ import threading
 
 import pytest
 
-pytestmark = [pytest.mark.browser, pytest.mark.serial]
+pytestmark = [pytest.mark.browser]
 
 
 @pytest.mark.parametrize("outcome", ["success", "rejected", "unavailable"])

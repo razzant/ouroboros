@@ -85,7 +85,6 @@ def test_a_model_the_record_lacks_is_unknown_until_a_fetch_is_allowed(catalogue)
     ({"OPENROUTER_API_KEY": "key"}, True, True),
     ({}, True, False),  # no OpenRouter route on this install: nothing to observe
     ({"OPENROUTER_API_KEY": "key"}, False, False),  # not a provisioned home: no real-data side effect
-    ({"OUROBOROS_CONNECTIONS": [{"kind": "openrouter", "name": "credits", "api_key": "key"}]}, True, True),  # added key
     ({"OPENROUTER_API_KEY": "key", "OUROBOROS_CONNECTIONS": [{"kind": "openrouter", "name": "default", "enabled": False}]},
      True, False),  # the only OpenRouter key turned off
 ])

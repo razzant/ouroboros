@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from tests.test_subscription_setup_browser import subscription_ui  # noqa: F401
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 FAILURE = 'Panic was not confirmed. Check Ouroboros on the host computer.'
 DESKTOP_FAILURE = 'Panic was not confirmed. Use Panic in the tray or menu bar.'
 

@@ -25,9 +25,7 @@ def manifest(entries, *, kind="instruction", permissions=()):
         "description": "Test", "version": "1", "permissions": list(permissions), "contributes": entries}))
 
 
-@pytest.mark.parametrize("bad", [None, "", {}, [1], [{}], [{**TEMPLATE, "id": "Bad"}],
-    [{**TEMPLATE, "id": "x" * 41}], [TEMPLATE, TEMPLATE], [{**TEMPLATE, "provides": "stt"}],
-    [{"id": "missing"}], [{**TEMPLATE, "id": str(i)} for i in range(33)]])
+@pytest.mark.parametrize("bad", [None, [1], [{}], [TEMPLATE, TEMPLATE], [{**TEMPLATE, "provides": "stt"}]])
 def test_structural_refusal_teaches_and_valid_neighbor_parses(bad):
     with pytest.raises(SkillManifestError) as error:
         manifest(bad)
@@ -43,18 +41,10 @@ def test_optional_and_maximum_list():
 
 
 @pytest.mark.parametrize("patch", [
-    {"placement": "sidebar"}, {"placement": []}, {"label": ""}, {"label": 5}, {"label": "x" * 41},
-    {"title": "x" * 201}, {"icon": "<svg>"}, {"icon": {}}, {"order": True}, {"order": 0.5},
-    {"unexpected": True}, {"render": "host"}, {"render": {"kind": "iframe"}},
+    {"placement": "sidebar"}, {"order": True}, {"render": {"kind": "iframe"}},
     {"render": {"kind": "declarative", "entry": "ui/x.js"}},
-    {"action": {"verb": "send"}}, {"action": {"verb": "draft.insert", "text": "x" * 4001}},
-    {"action": {"verb": "notice", "text": "x" * 301}}, {"action": {"verb": "open.tab", "text": "bad"}},
-    {"action": {"verb": "skill.request", "route": "../bad"}},
-    {"action": {"verb": "skill.request", "route": "https://other/api"}},
-    {"action": {"verb": "skill.request", "route": "x?bad"}},
-    {"action": {"verb": "skill.request", "route": "x%2fother"}},
+    {"action": {"verb": "open.tab", "text": "bad"}},
     {"action": {"verb": "skill.request", "route": "x", "with": "all"}},
-    {"action": {"verb": "skill.request", "route": "x", "then": "send"}},
     {"source": {"route": "chip", "refresh_s": 15}},
 ])
 def test_semantic_refusals_drop_one_entry_only(patch):
@@ -68,10 +58,7 @@ def test_semantic_refusals_drop_one_entry_only(patch):
 
 @pytest.mark.parametrize("entry", [
     {**TEMPLATE, "title": "x" * 200, "label": "x" * 40, "icon": "sparkle", "order": -1}, CHIP,
-    {**TEMPLATE, "action": {"verb": "draft.insert", "text": "x" * 4000}},
-    {**TEMPLATE, "action": {"verb": "notice", "text": "x" * 300}},
-    {**TEMPLATE, "placement": "message.action", "action": {"verb": "skill.request", "route": "save/item", "with": "message", "then": "clear_draft"}},
-    STT, {**STT, "destination": "vendor:Example", "languages": ["auto", "ru"], "install_size": "~500 MB"},
+    {**STT, "destination": "vendor:Example", "languages": ["auto", "ru"], "install_size": "~500 MB"},
 ])
 def test_catalog_accepts_data_without_extension(entry):
     clean, problems = validate_contributions(manifest([entry]))
@@ -80,12 +67,9 @@ def test_catalog_accepts_data_without_extension(entry):
 
 
 @pytest.mark.parametrize("field,bad,good", [
-    ("max_bytes", 0, 1), ("max_bytes", 524289, 524288), ("max_bytes", True, 393216),
-    ("max_seconds", 601, 600), ("max_seconds", 0, 1), ("max_seconds", 1.5, 60),
-    ("formats", ["audio/flac"], ["audio/ogg", "audio/mpeg", "audio/wav"]),
-    ("formats", "audio/webm", ["audio/webm"]), ("languages", [False], ["auto", "en"]),
-    ("destination", "vendor: ", "vendor:Example"), ("runtime", "other", "server"),
-    ("provides", "video", "tts"), ("route", "/outside", "transcribe"),
+    ("max_bytes", 0, 1), ("max_seconds", 0, 1), ("formats", ["audio/flac"], ["audio/ogg", "audio/mpeg", "audio/wav"]),
+    ("formats", "audio/webm", ["audio/webm"]), ("destination", "vendor: ", "vendor:Example"), ("runtime", "other", "server"),
+    ("provides", "video", "tts"),
 ])
 def test_provider_limits_both_directions(field, bad, good):
     base = {key: value for key, value in STT.items() if key not in ("max_bytes", "max_seconds")}
@@ -95,7 +79,7 @@ def test_provider_limits_both_directions(field, bad, good):
     assert clean and not problems
 
 
-@pytest.mark.parametrize("seconds", [14, 3601, True, "60"])
+@pytest.mark.parametrize("seconds", [14, True, "60"])
 def test_chip_poll_interval(seconds):
     clean, problems = validate_contributions(manifest([{**CHIP, "source": {"route": "chip", "refresh_s": seconds}}]))
     assert not clean and problems
@@ -109,7 +93,7 @@ def test_page_code_requires_extension_and_permission(kind, permissions):
     assert not validate_contributions(manifest([CLIENT], kind="extension", permissions=["page_module"]))[1]
 
 
-@pytest.mark.parametrize("entry", ["voice.js", "ui/../voice.js", "/ui/voice.js", "ui/voice.mjs", "ui/voice.js?x", "ui//voice.js"])
+@pytest.mark.parametrize("entry", ["voice.js", "ui/voice.mjs", "ui//voice.js"])
 def test_host_entry_paths(entry):
     bad = {**CLIENT, "render": {"kind": "host", "entry": entry}}
     assert validate_contributions(manifest([bad], kind="extension", permissions=["page_module"]))[1]

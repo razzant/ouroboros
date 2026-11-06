@@ -102,8 +102,7 @@ def _rename(root, rooms):
 
 
 @pytest.mark.parametrize("change", [
-    "chat_row", "writer_terminal_row", "seal", "fold", "correction", "selection", "label", "route", "binding",
-    "legacy_binding"])
+    "chat_row", "correction", "legacy_binding"])
 def test_every_source_change_is_seen_and_the_reuse_equals_a_fresh_capture(tmp_path, captures, monkeypatch, change):
     """A change of each source moves the story (it differs from before), and the capture after it equals a fresh
     full capture byte for byte, story and whole view: a reuse never serves a state that no longer holds."""

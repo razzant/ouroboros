@@ -22,7 +22,6 @@ import time
 import types
 from types import SimpleNamespace
 
-import pytest
 
 from ouroboros import outcomes
 from ouroboros.owner_continue import TECHNICAL_REASON_CODES
@@ -77,6 +76,25 @@ def test_every_imported_reason_code_has_one_sentence_in_both_twins():
         assert f'{code}: "{TASK_CAUSE_PHRASES[code]}",' in twin, f"the browser twin lacks {code!r}"
 
 
+def test_a_helper_the_host_could_not_start_says_why_in_words_on_its_card():
+    """The refused-start terminal mints its codes beside its notice (agent_dispatch), outside the registries above:
+    each one it stamps has one sentence in both twins and in the browser's unstarted set, and the helper's row reads
+    the sentence, never the code."""
+    from ouroboros.agent_dispatch import executor_blocked_outcome
+    from ouroboros.subagents import SubagentExecutorResolution
+
+    stamped = {executor_blocked_outcome(SubagentExecutorResolution("harness", "blocked", reason=reason))[1]["reason_code"]
+               for reason in ("daemon_unreachable", "delegate_tools_invisible", "delegate_visibility_unverified")}
+    stamped.add(executor_blocked_outcome(SubagentExecutorResolution("native", "blocked", reason="credentials_unavailable"),
+                                         availability={"route_kind": "api_model"})[1]["reason_code"])
+    assert stamped == {"subagent_executor_unavailable", "delegate_tools_invisible", "delegate_visibility_unverified"}
+    twin = TWIN.read_text(encoding="utf-8")
+    unstarted = twin.split("export const UNSTARTED_REASONS = new Set([", 1)[1].split("]", 1)[0]
+    for code in sorted(stamped):
+        assert f'{code}: "{TASK_CAUSE_PHRASES[code]}",' in twin and f"'{code}'" in unstarted, code
+        assert _completion_verdict(_reaped(code), {}) == f"{TASK_CAUSE_PHRASES[code]}.", code
+
+
 def test_the_twins_carry_byte_identical_sentences_for_every_key():
     twin = TWIN.read_text(encoding="utf-8")
     for code, sentence in TASK_CAUSE_PHRASES.items():
@@ -114,12 +132,13 @@ def _reaped(reason: str) -> dict:
                 reason_code=reason, review_trigger="supervisor_terminal")}
 
 
-@pytest.mark.parametrize("reason", TIMEOUT_TERMINAL_REASONS)
-def test_a_reaped_row_states_the_rail_in_owner_words(reason):
-    record = _reaped(reason)
-    assert outcome_phase(record, {}) == "error"
-    expected = f"{TASK_CAUSE_PHRASES[reason]}."
-    assert _completion_verdict(record, {}) == _completion_verdict({}, record) == expected
+def test_a_reaped_row_states_the_rail_in_owner_words(subtests):
+    for reason in TIMEOUT_TERMINAL_REASONS:
+        with subtests.test(reason=reason):
+            record = _reaped(reason)
+            assert outcome_phase(record, {}) == "error"
+            expected = f"{TASK_CAUSE_PHRASES[reason]}."
+            assert _completion_verdict(record, {}) == _completion_verdict({}, record) == expected
 
 
 def test_a_railed_best_effort_row_states_the_rail_in_owner_words():

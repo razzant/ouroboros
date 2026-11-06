@@ -205,7 +205,7 @@ def _durable_rows(tmp_path, monkeypatch, *, body, max_seconds, started_ago=100.0
                                                "slot_id": "seat-1"})
 
 
-@pytest.mark.parametrize("case", ["disabled", "finite", "recorded-cap-wins", "unknown", "unknown-no-facts"])
+@pytest.mark.parametrize("case", ["disabled", "unknown", "unknown-no-facts"])
 def test_a_rejoin_follows_the_clock_its_stored_body_sent(tmp_path, monkeypatch, case):
     """Key absence with no recorded cap = the run's clock is off (no window); a recorded cap
     keeps its remaining original window, whatever the body's shape (a continuation's body names

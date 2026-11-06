@@ -61,10 +61,10 @@ def test_exact_pause_event_parks_same_task_id_and_confirms_row(tmp_path, monkeyp
     if reason == "sleep":
         assert pushed[0]["pause_reason"] == "sleep" and pushed[0]["rail"] == "model_sleep"
         assert "sleeping" in result["result"] and "selected wake condition" in result["result"]
-        assert "budget" not in result["result"] and "owner Resume" not in result["result"]
+        assert "budget" not in result["result"] and "explicit Resume" not in result["result"]
     else:
-        assert "owner Resume" in result["result"]
-        assert ("budget" if reason == "budget" else "owner Pause") in result["result"]
+        assert "an explicit Resume continues the same task" in result["result"]
+        assert ("(budget)" if reason == "budget" else "(Pause)") in result["result"]
     # The queue predicate already reads the marker: no false "queued".
     from supervisor.queue_transitions import budget_pause_fact
 

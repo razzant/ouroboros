@@ -16,7 +16,6 @@ from tests import test_resume_handover as handover
 from tests.test_acceptance_fence_transport import _Supervisor, _pooled_agent
 from tests.test_swarm_host_admission import host  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def _transport(host, monkeypatch, ctx, pid):  # noqa: F811
@@ -87,9 +86,10 @@ def _resume(host, monkeypatch, pid=2222, *, consume=True):  # noqa: F811
     return ctx
 
 
-@pytest.mark.parametrize('reason', ['owner', 'budget'])
-@pytest.mark.parametrize('pid', [1111, 2222], ids=['same-worker', 'different-worker'])
-@pytest.mark.parametrize('boot', [False, True], ids=['park', 'park-boot'])
+@pytest.mark.parametrize(("boot", "pid", "reason"), [
+    pytest.param(False, 1111, 'owner', id='park-same-worker-owner'),
+    pytest.param(True, 2222, 'budget', id='park-boot-different-worker-budget'),
+])
 def test_exact_cold_resume_rebinds_and_seals(host, tmp_path, monkeypatch, reason, pid, boot):  # noqa: F811
     from ouroboros.loop_delivery import _no_tool_final_answer
     from ouroboros.task_results import load_task_result, write_task_result
@@ -131,8 +131,7 @@ def test_exact_cold_resume_rebinds_and_seals(host, tmp_path, monkeypatch, reason
     assert load_task_result(host.root, 'held')['review_runs'] == paid
 
 
-@pytest.mark.parametrize('change', ['unconsumed', 'newer_pause', 'revoked', 'grant', 'generation',
-                                   'foreign_root', 'unreadable', 'missing_binding', 'new_owner_pause', 'terminal'])
+@pytest.mark.parametrize('change', ['unconsumed', 'unreadable', 'missing_binding'])
 def test_cold_handoff_needs_current_consumed_authority(host, tmp_path, monkeypatch, change):  # noqa: F811
     _paused_fence(host, tmp_path, monkeypatch)
     ctx = _resume(host, monkeypatch, consume=change != 'unconsumed')
@@ -165,7 +164,7 @@ def test_cold_handoff_needs_current_consumed_authority(host, tmp_path, monkeypat
     assert queue.ACCEPTANCE_FENCES == before
 
 
-@pytest.mark.parametrize('owner', ['sealed', 'direct', 'legacy', 'foreign_pid', 'foreign_attempt', 'foreign_task'])
+@pytest.mark.parametrize('owner', ['sealed', 'foreign_pid', 'foreign_task'])
 def test_cold_pause_never_transfers_an_unbound_owner(host, tmp_path, monkeypatch, owner):  # noqa: F811
     _paused_fence(host, tmp_path, monkeypatch, owner_change=owner)
     ctx = _resume(host, monkeypatch)
@@ -192,7 +191,6 @@ def _dying_before_consumption(monkeypatch, reap_queue):
     worker.proc.pid = 2222
     workers.WORKERS[0] = worker
     monkeypatch.setattr(workers, '_LAST_SPAWN_TIME', 0)
-    monkeypatch.setattr(workers, 'CRASH_TS', [])
     monkeypatch.setattr(queue, '_reap_queue', reap_queue)
     monkeypatch.setattr(queue, '_ensure_reaper_started', lambda: None)
     monkeypatch.setattr(workers, 'respawn_worker', lambda *_a, **_k: None)

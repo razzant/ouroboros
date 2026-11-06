@@ -85,9 +85,10 @@ def transition(registry, note, mode="archive", **extra):
         **({"reason": "Meaning retained in an ordinary overview."} if mode == "archive" else {}), **extra})
 
 
-@pytest.mark.parametrize("scope", ["global", "project:demo"])
-@pytest.mark.parametrize("overview", [False, True])
-@pytest.mark.parametrize("index_exists", [False, True])
+@pytest.mark.parametrize(("index_exists", "overview", "scope"), [
+    (False, False, "global"),
+    (True, True, "project:demo"),
+])
 def test_archive_reaches_next_context_list_and_index_without_mutating_a_capture(
         tmp_path, monkeypatch, scope, overview, index_exists):
     monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path / "data")
@@ -244,9 +245,13 @@ def test_the_former_register_and_backlog_archive_like_any_note(tmp_path, topic):
     assert store.read_knowledge_note(address).state == "active"
 
 
-@pytest.mark.parametrize("metadata", ["archive: null", "archive: []", "archive: old",
-                                     "archive: {at: yesterday, reason: 7}", "archive: {reason: old}"])
-@pytest.mark.parametrize("scope", ["global", "project:demo"])
+@pytest.mark.parametrize(("scope", "metadata"), [
+    ("global", "archive: []"),
+    ("global", "archive: {at: yesterday, reason: 7}"),
+    ("project:demo", "archive: null"),
+    ("project:demo", "archive: old"),
+    ("project:demo", "archive: {reason: old}"),
+])
 def test_malformed_archive_metadata_is_visible_and_revision_checked_restore_repairs_it(tmp_path, metadata, scope):
     _, registry, address, _ = setup(tmp_path, scope)
     raw = (f"---\r\n{metadata}\r\ncustom: {{unknown: [α, β]}}\r\n"

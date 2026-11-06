@@ -19,7 +19,7 @@ from tests.system_e2e.harness import (
     start_server, wait_durable_result, wait_until, ws_url,
 )
 
-pytestmark = [pytest.mark.serial, pytest.mark.browser]
+pytestmark = [pytest.mark.browser]
 local_form = form_fixture
 wait_clone = clone_fixture
 

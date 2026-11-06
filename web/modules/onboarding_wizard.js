@@ -585,10 +585,9 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
                 : profileLabel(activeProviderProfile())],
             ['Review mode', reviewLabel(state.reviewEnforcement)],
             ['Runtime mode', runtimeModeLabel(state.runtimeMode)],
-            ...((hasApiAccess() || !hasModelSubscription()) ? [
-                ['Total API budget', formatUsd(state.totalBudget)],
-                ['Per-task API cap', formatUsd(state.perTaskCostUsd)],
-            ] : [['Budget', 'Subscription quota · wait and auto-continue on reset']]),
+            ...((hasApiAccess() || !hasModelSubscription()) ? [['Total API budget', formatUsd(state.totalBudget)],
+                ['Per-task API cap', formatUsd(state.perTaskCostUsd)]] : []),
+            ...(MODEL_SLOTS.some((slot) => trim(state[slot.stateKey]).split(',').some((value) => parseModelSource(value.trim()).source.startsWith('subscription:'))) ? [['When quota runs out', trim(state.fallbackModel) ? 'Tries the Fallback, then waits for the reset' : 'Waits for the reset, then continues']] : []),  // a subscription serves a slot
             // The Consciousness offer above already uses that word alone (#1603); its model row says what it is.
             ...MODEL_SLOTS.map((slot) => [slot.slot === 'consciousness' ? 'Consciousness model' : slot.label.replace(/ Model$/, ''), modelSummary(slot)]),
         ];
@@ -617,13 +616,14 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         const inherited = !values.length && slot.slot !== 'fallback';
         const from = MODEL_SLOTS.find((entry) => entry.slot === inheritTargetOf(slot)) || { stateKey: 'mainModel', label: 'Main' };
         if (inherited) values.push(trim(state[from.stateKey] || '') || trim(state.mainModel));  // Safety: Light, then Main
+        const local = hasLocalModel() && LOCAL_ROUTING_MODES.find((mode) => mode.value === state.localRoutingMode)?.flags?.[['main', 'light', 'consciousness', 'fallback'].indexOf(inherited ? from.slot || 'main' : slot.slot)] === true;  // the local runtime serves it: say so, not the cloud source its id implies
         return values.map((value, index) => {
             const { source, model } = parseModelSource(value);
             const account = slot.slot === 'fallback' ? state.modelAccounts.fallback?.[index] : state.modelAccounts[slot.slot];
             const context = slot.slot === 'fallback' ? state.modelContextWindows.fallback?.[index] : state.modelContextWindows[slot.slot];
             const processing = slot.slot === 'fallback' ? state.modelProcessingPreferences?.fallback?.[index] : state.modelProcessingPreferences?.[slot.slot];
-            const assignment = source.startsWith('subscription:')
-                ? `${source.slice(13)} · ${model} · ${account ? `Account: ${account}` : 'Auto rotation'}` : value;
+            const assignment = source.startsWith('subscription:') ? `${modelSources.find((entry) => entry.id === source.slice(13))?.label || source.slice(13)} · ${model} · ${account ? `Account: ${account}` : 'Auto rotation'}`
+                : `${local ? 'Local' : apiProviderLabel(source, PROVIDER_PROFILES)} · ${model}`;  // a source in words, never its id
             return `${inherited ? `Uses ${from.label.replace(/ Model$/, '')} · ` : ''}${assignment} · Processing: ${processingIntentLabel(processing, state.processingPreference)}${Number(context) > 0 ? ` · ${Number(context).toLocaleString('en-US')} tokens, set by you` : ''}`;
         }).join(' → ') || 'None';
     }
@@ -824,7 +824,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
                 <span>${escapeHtml(facts.quota.label)}</span></div>`;
         }).join('');
         return `<div class="panel-card"><h3>Subscription quota</h3>${lines}
-            <p class="field-note">Compatible accounts rotate automatically. If the pool is exhausted, Ouroboros waits and continues when quota resets. You can switch the waiting role yourself.</p>
+            <p class="field-note">Compatible accounts rotate automatically. If the pool is exhausted, ${trim(state.fallbackModel) ? 'the Fallback models go first, then ' : ''}Ouroboros waits for the reset.</p>
             </div>
         `;
     }
@@ -843,7 +843,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
                         <select class="ui-control" id="compatible-model-source">${compatibleSources().map((entry) =>
                             `<option value="${escapeHtml(entry.id)}">${escapeHtml(entry.label)}</option>`).join('')}</select>
                     </label>
-                    <button type="button" class="btn btn-secondary" id="load-compatible-models">Load models</button>
+                    <button type="button" class="btn btn-default" id="load-compatible-models">Load models</button>
                 </div>
                 <div id="compatible-load-status" class="field-note compatible-load-status" role="status">Choose a source for each role below. You can also type any model ID.</div>
             </div>`;
@@ -920,6 +920,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
     }
 
         function renderBudgetStep() {
+            const budgetNote = BUDGET_FIELDS.map((field) => String(field.note || '').trim()).find(Boolean) || '';
             return `
             <div class="step-header">
                 <div>
@@ -936,12 +937,13 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
                             <h3>${escapeHtml(field.title)}</h3>
                             <div class="field ui-field">
                                 <label for="${escapeHtml(field.inputId)}">${escapeHtml(field.label)}</label>
-                                <input id="${escapeHtml(field.inputId)}" class="ui-control" type="number" aria-describedby="${escapeHtml(field.inputId)}-help" min="${escapeHtml(field.min || '0.01')}" step="${escapeHtml(field.step || 'any')}" value="${escapeHtml(state[field.stateKey])}">
-                                <div id="${escapeHtml(field.inputId)}-help" class="field-note ui-field-help">${escapeHtml(field.note)}</div>
+                                <input id="${escapeHtml(field.inputId)}" class="ui-control" type="number" aria-describedby="budget-fields-help" min="${escapeHtml(field.min || '0.01')}" step="${escapeHtml(field.step || 'any')}" value="${escapeHtml(state[field.stateKey])}">
                             </div>
                         </div>
                     `).join('')}
-                </div></details>
+                </div>
+                ${budgetNote ? `<div id="budget-fields-help" class="field-note ui-field-help budget-shared-note">${escapeHtml(budgetNote)}</div>` : ''}
+                </details>
             `;
         }
 
@@ -1045,12 +1047,12 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
                         <div class="wizard-error" role="status">${escapeHtml(state.error)}</div>
                         <div class="footer-copy">${escapeHtml(saveUnknown ? 'The last save did not return a confirmed result.' : meta.footer)}</div>
                         <div class="footer-actions">
-                            <button class="btn btn-secondary" id="back-btn" type="button" ${index === 0 || state.saving || state.preparingRecovery ? 'disabled' : ''}>Back</button>
-                            ${state.currentStep === 'accounts' ? `<button class="btn btn-secondary" id="quick-start-btn" type="button" ${hasModelSubscription() ? '' : 'hidden'}>Review &amp; start</button>` : ''}
+                            <button class="btn btn-default" id="back-btn" type="button" ${index === 0 || state.saving || state.preparingRecovery ? 'disabled' : ''}>Back</button>
+                            ${state.currentStep === 'accounts' ? `<button class="btn btn-default" id="quick-start-btn" type="button" ${hasModelSubscription() ? '' : 'hidden'}>Review &amp; start</button>` : ''}
                             ${state.currentStep === 'summary' ? `
-                                <button class="btn btn-secondary" id="skip-presets-btn" type="button" ${shouldOfferPresetSkip() ? '' : 'hidden'} ${state.saving || state.preparingRecovery ? 'disabled' : ''}>Use Main for reviewers</button>
+                                <button class="btn btn-default" id="skip-presets-btn" type="button" ${shouldOfferPresetSkip() ? '' : 'hidden'} ${state.saving || state.preparingRecovery ? 'disabled' : ''}>Use Main for reviewers</button>
                             ` : ''}
-                            <button class="btn ${saveUnknown ? 'btn-secondary' : 'btn-primary'}" id="next-btn" type="button" ${nextButtonShouldBeDisabled() ? 'disabled' : ''}>${escapeHtml(nextLabel)}</button>
+                            <button class="btn ${saveUnknown ? 'btn-default' : 'btn-primary'}" id="next-btn" type="button" ${nextButtonShouldBeDisabled() ? 'disabled' : ''}>${escapeHtml(nextLabel)}</button>
                             ${saveUnknown ? `
                                 <button class="btn btn-primary" id="check-save-btn" type="button" ${state.saving ? 'disabled' : ''}>Check status</button>
                             ` : ''}

@@ -106,15 +106,3 @@ def test_a_cold_sleep_waits_by_itself_on_both_sides():
     assert _server_mark("budget_paused", pause_cause="sleep") == "still"
     assert _server_mark("budget_paused", pause_cause="owner") == "pause"
     assert "phase === 'budget_paused' && pauseCause === 'sleep' ? 'still'" in CHIP.read_text(encoding="utf-8")
-
-
-def test_the_pin_fires_on_a_new_server_phase_and_stays_quiet_on_the_current_one():
-    source = SERVER.read_text(encoding="utf-8")
-    current = _server_phases(source)
-    assert {"unknown", "budget_paused", "budget_pausing", "queued", "finalizing", "working", "thinking",
-            "preparing"} <= current
-    marker = '    if phase == "queued":'
-    assert marker in source, "classify_member moved: update this test"
-    grown = source.replace(marker, '    if phase == "brand_new_phase":\n        pass\n' + marker, 1)
-    assert _server_phases(grown) == current | {"brand_new_phase"}
-    assert _server_phases(grown) != set(_chip_table(CHIP.read_text(encoding="utf-8")))

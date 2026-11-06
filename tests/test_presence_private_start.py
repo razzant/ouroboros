@@ -25,8 +25,6 @@ from tests.test_place_focus import focus as focus  # fixture
 from tests.test_presence_owner_contact import _answer, _ask, _exercise_related_root, _pooled_metadata, _run
 from tests.test_presence_owner_contact import contact_runtime as contact_runtime  # fixture
 
-pytestmark = pytest.mark.serial
-
 PRIVATE_START = {"objective": "Investigate the source", "title": "Source research"}
 SPEAKER_KEYS = {"presence", "presence_final_route", "presence_binding_authority"}
 FOCUS_KEYS = {"initiator", "usage_category", "consciousness_autonomy", "consciousness_cause", "focus", "wake_cause",

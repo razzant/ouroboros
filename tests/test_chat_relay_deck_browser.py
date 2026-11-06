@@ -23,7 +23,7 @@ from tests._shared import producer_evidence_dir
 from tests.test_chat_history_paging_browser import _FRAMES, _open, _open_project, MAIN
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 QUOTE = "\n".join([
     "Please keep the existing environment and check the dependency versions before changing the setup.",
@@ -298,7 +298,7 @@ def test_relay_notes_stack_fans_out_and_folds(direct_server_with_data, browser_e
             page.evaluate(_FRAMES)
             page.wait_for_timeout(300)
             shadow = eight.locator(':scope > .chat-relay-face').evaluate('n => getComputedStyle(n).boxShadow')
-            assert '0.45' in shadow or '0.24' in shadow, shadow  # the dim colour (--row-lift-dim) in the face's shadow
+            assert '0.45' in shadow or '0.24' in shadow, shadow  # the dim colour (--scrim) in the face's shadow
             feed_box = page.locator(feed).bounding_box()
             dimmed = _pixel(page, feed_box['x'] + 4, feed_box['y'] + 4)
             assert dimmed != (15, 15, 17), dimmed  # the room under the feed is dimmed, not bare

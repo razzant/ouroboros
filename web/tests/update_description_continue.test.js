@@ -9,7 +9,7 @@ import { bindUpdateRefreshEvents, updateLetterView } from '../modules/updates.js
 
 const source = readFileSync(new URL('../modules/updates.js', import.meta.url), 'utf8');
 const start = source.indexOf('    let statusRefreshPromise = null;');
-const end = source.indexOf('    function renderRestoreRow(', start);
+const end = source.indexOf('    // The Recovery list of earlier versions', start);
 assert.ok(start >= 0 && end > start, 'the production status-loader boundaries must exist');
 const loader = source.slice(start, end);
 const loaderSha256 = createHash('sha256').update(loader).digest('hex');
@@ -40,7 +40,7 @@ function client(name) {
         let restartNeeded = false;
         let letterRefreshError = null;
         const officialTagsDiv = { childElementCount: 1 };
-        const renderOfficialTags = () => {};
+        const versions = { renderReleases: () => {} };
         const render = () => {};
         const setPhase = (next) => { phase = next; };
         const bindPreflightDescription = () => { throw new Error('unexpected preflight'); };

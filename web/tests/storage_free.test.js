@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { EMPTY_LIST, KEPT_REASONS, MANUAL_ROWS, OUTDATES_PLAN, acceptPage, confirmCopy, doneSentences, doorOffered, freeSum, goLabel, manualConfirmCopy, manualFacts, manualKnown, manualOf, notStarted, resultSentences, savedGroups, sumComplete, trayHtml, trayState } from '../modules/storage_free.js';
+import { CAUSES, EMPTY_LIST, KEPT_REASONS, MANUAL_ROWS, OUTDATES_PLAN, acceptPage, confirmCopy, doneSentences, doorOffered, freeSum, goLabel, holdsPhrase, manualConfirmCopy, manualFacts, manualKnown, manualOf, notStarted, resultSentences, savedGroups, sumComplete, trayHtml, trayState } from '../modules/storage_free.js';
 
 // Text is escaped through document.createElement, as a browser's innerHTML does.
 globalThis.document = globalThis.document || {
@@ -45,7 +45,8 @@ const read = (items = rows(), { chosen = items.map((item) => item.id), ...rest }
 const AVOIDED = /At least|Excluded|System data|Junk|Clean\b|Prune|%|[Pp]ackage/;
 
 test('at rest the flow is empty and the door stands alone; every phase up to Done holds the door back', () => {
-    assert.match(trayHtml(free('idle', { plan: null, pool: null }), read()), /Can be removed[\s\S]*Not checked yet/);
+    assert.equal(trayHtml(free('idle', { plan: null, pool: null }), read()), '<p class="storage-tray-text">See what finished work can be removed.</p>',
+        'before a check a sentence, never a figure (U070)');
     assert.equal(trayState(free('idle')), 'rest');
     assert.deepEqual(['rest', 'empty', 'listing', 'ready', 'running', 'done', 'failed'].filter(doorOffered), ['rest', 'empty']);
     const listing = trayHtml(free('listing', { done: 1240, total: 1661, pool: pool({ bytes: 5.1 * GB, bytes_complete: false }) }), read());
@@ -191,9 +192,9 @@ test('a page that would leave an item missing or counted twice is refused, a mov
 
 test('counts of one read as one: in use, kept, deleting, stuck, failed and not started', () => {
     const one = trayHtml(free('ready', { groups: [group('review_evidence', { count: 2, inside_wait: 0, in_use: 1, unreadable: 1 })] }), { ...read(), saved: true });
-    assert.match(one, /1 is in use and stays\. 1 stays: its task record could not be read\./);
+    assert.match(one, /1 stays; each item names its reason below\. 1 stays: its task record could not be read\./);
     const many = trayHtml(free('ready', { groups: [group('review_evidence', { count: 5, inside_wait: 0, in_use: 2, unreadable: 3 })] }), { ...read(), saved: true });
-    assert.match(many, /2 are in use and stay\. 3 stay: their task record could not be read\./);
+    assert.match(many, /2 stay; each item names its reason below\. 3 stay: their task record could not be read\./);
     assert.deepEqual(doneSentences(free('done', { run: run({ removed: 1, removed_bytes: 1e9, deleting: 1, deleting_bytes: 1e6, stuck: 1, failed: 1, not_started: 1,
         kept: [{ reason: 'in_use', count: 1 }] }) })), [
         '1 could not be deleted.', '1 could not be deleted yet; the app retries at its next maintenance run.',
@@ -208,7 +209,7 @@ test('an empty preview says so and the door stays; a pool of nothing still shows
     const emptyPool = pool({ count: 0, bytes: 0, kinds: {}, excluded: [] });
     const empty = free('ready', { pool: emptyPool, groups: [group('work_folders', { count: 0, inside_wait: 0, in_use: 0, bytes: 0, items: [] })] });
     assert.equal(trayState(empty), 'empty');
-    assert.match(trayHtml(empty, read([])), /Can be removed[\s\S]*Nothing right now[\s\S]*No files of finished work are waiting\./);
+    assert.equal(trayHtml(empty, read([])), '<p class="storage-tray-text">No files of finished work are waiting.</p>', 'an empty answer is a sentence, not a figure');
     const staysOnly = free('ready', { pool: pool({ count: 0, bytes: 0, kinds: {}, excluded: [{ reason: 'in_use', count: 2 }] }) });
     assert.equal(trayState(staysOnly), 'ready');
     const html = trayHtml(staysOnly, read([]));
@@ -377,6 +378,36 @@ test('every reason the server can send has its own words; none falls through to 
     assert.deepEqual(Object.keys(KEPT_REASONS).sort(), [...CONTRACT_REASONS].sort(), 'the words name exactly the contract\'s reasons');
 });
 
+// The exact codes beside a group: a Free item's `cause` (and a kept row's `causes`), which the server's listers and
+// retirers send (`storage_free._KEPT_REASONS`, the seat and checkout listers), and the hold classes the five server
+// retirers report on a place's remover line.
+const CONTRACT_CAUSES = ['child_result_unadopted', 'child_refs_pending', 'call_inventory_pending', 'call_inventory_changed',
+    'inputs_uncustodied', 'unread_mailbox_uncustodied', 'verification_receipts_uncustodied', 'raw_evidence_uncustodied',
+    'artifact_source_missing', 'canonical_changed', 'drive_occupant_changed', 'canonical_not_settled', 'post_work_open',
+    'artifacts_not_terminal', 'child_drive_mismatch', 'task_live', 'liveness_unknown', 'owner_processes_live', 'owner_not_terminal',
+    'task_not_terminal', 'parent_not_terminal', 'not_proven_over', 'custody_held', 'owner_paused', 'review_custody_active',
+    'seat_checking', 'operation_live', 'review_environment_held', 'custody_busy', 'mailbox_busy', 'store_busy', 'record_busy',
+    'task_result_unreadable', 'unread_mailbox_unreadable', 'record_unreadable', 'review_state_unreadable', 'marker_unreadable',
+    'capture_unproven', 'capture_incomplete', 'retained_process_environment', 'undeclared_environment', 'producer_retained',
+    'changed', 'nothing_unsaved', 'nested_repository', 'commits_unprotected', 'unproven_excluded_inputs', 'owner_keep',
+    'generation_closed', 'in_use', 'run_open', 'seat_open', 'seat_busy', 'custody_unreadable', 'capture_failed', 'removal_failed',
+    'younger_than_retention'];
+
+test('every exact cause reads its own words from the one map, the same in the Free tray and on the Storage line', () => {
+    const escape = (said) => said.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    for (const cause of CONTRACT_CAUSES) {
+        const said = CAUSES[cause] || KEPT_REASONS[cause];
+        assert.ok(said && said !== KEPT_REASONS.other, cause);
+        const tray = resultSentences(free('done', { run: run({ kept: [{ reason: 'other', count: 1, causes: [{ cause, count: 1 }] }] }) })).rest.join(' ');
+        assert.match(tray, new RegExp(`1 was kept: 1 ${escape(said)}\\.`), cause);
+        assert.equal(holdsPhrase({ holds: [{ class: cause, count: 1 }] }, NOW), `holding 1: 1 ${said}`, cause);
+    }
+    // A code without words stays visible by its name on both surfaces, never as "another reason" alone.
+    const tray = resultSentences(free('done', { run: run({ kept: [{ reason: 'in_use', count: 1, causes: [{ cause: 'some_new_hold', count: 1 }] }] }) })).rest.join(' ');
+    assert.match(tray, /1 was kept: 1 still in use \(some_new_hold\)\./);
+    assert.equal(holdsPhrase({ holds: [{ class: 'some_new_hold', count: 1 }] }, NOW), 'holding 1: 1 some new hold');
+});
+
 test('saved-group items the pool leaves out are counted by the saved groups, not under what cannot go', () => {
     const html = trayHtml(free('ready', { groups: saved(), pool: pool({ excluded: [{ reason: 'advanced_group', count: 43 }, { reason: 'in_use', count: 1 }] }) }), {
         ...read(), excluded: { ...EMPTY_LIST(), total: 44, complete: false, next: 1, want: 100, items: [entry('s', { group: 'review_evidence', kind: 'other', reason: 'advanced_group', bytes: null })] },
@@ -419,8 +450,8 @@ test('what happened to the owner\'s attempt is said beside whatever the server h
     assert.match(trayHtml(free('listing', { plan: null }), { notice: 'lostFree' }), /The answer to Free was lost and the list has changed since/);
     assert.match(trayHtml(free('listing', { plan: null }), { notice: 'lost' }), /The answer to Remove was lost and the list has changed since; whether it removed anything is not known here\. Nothing is sent again\.[\s\S]*Checking for files to remove/);
     assert.match(trayHtml(free('ready', { plan: 'p2' }), read(rows(), { notice: 'refused' })), /Nothing was removed: the list you reviewed had changed\.[\s\S]*Remove 3 selected items/);
-    assert.match(trayHtml(idle, { notice: 'refused', dismissed: true }), /Not checked yet/);
-    assert.match(trayHtml(idle, {}), /Not checked yet/);
+    assert.match(trayHtml(idle, { notice: 'refused', dismissed: true }), /See what finished work can be removed\./);
+    assert.match(trayHtml(idle, {}), /See what finished work can be removed\./);
 });
 
 // ---------------------------------------------------------------------------
@@ -585,6 +616,41 @@ test('the dialog says the whole copy goes with what is not verified saved in it,
     const single = manualConfirmCopy(byHand([copy('a', { manual: unsaved({ not_proven_saved_count: 0, not_proven_saved_bytes: 0, not_proven_saved: [], keeps_commits: true }) })]).manual, new Set(['a']));
     assert.equal(single.body, 'This deletes 1 copy whole. No file in them is unsaved. Task results, history and commits on a branch that stays are kept.');
     assert.equal(single.confirmLabel, 'Discard 1 copy');
+});
+
+const MARKER = 'retention marker or unreadable subtree: /var/tmp/obs-1/held/OUROBOROS_RETAINED.txt';
+const marked = (id, overrides = {}) => entry(id, { group: 'service_folders', kind: 'scratch', bytes: 5e6, eligible_after: null, reason: 'retained_evidence',
+    cause: 'producer_retained', path: `/data/state/custody_trash/${id}+scratch-1`, availability: 'manual_discard',
+    manual: { not_proven_saved_count: 0, not_proven_saved_bytes: 0, not_proven_saved: [], omitted_count: 0, keeps_commits: false,
+        producer_retained: true, loss: MARKER, paths: [`/var/tmp/obs-${id}`] }, ...overrides });
+
+test('marked session scratch reads as scratch its run kept, never as a copy; copies beside it keep their own words', () => {
+    const scratchPool = pool({ manual: { count: 1, bytes: 5e6, bytes_complete: true, retained: 1 }, excluded: [{ reason: 'retained_evidence', count: 1, manual_count: 1 }] });
+    const door = trayHtml(free('ready', { pool: scratchPool }), read());
+    assert.match(door, /1 session scratch its run marked to keep[\s\S]*5\.0 MB[\s\S]*>Choose scratch…</);
+    assert.doesNotMatch(door, /finished cop(?:y|ies)|Choose copies/);
+    const left = trayHtml(free('ready', { pool: scratchPool }), { ...read(), excluded: { ...EMPTY_LIST(), total: 1, complete: true, want: 100, items: [marked('s')] } });
+    assert.match(left, /data-free-excluded="retained_evidence"[\s\S]*Session scratch · its producer marked it to keep · can be discarded by hand/);
+    const html = trayHtml(free('ready', { pool: scratchPool }), byHand([marked('s')], { chosen: ['s'] }));
+    assert.match(html, /<h3[^>]*>Session scratch marked to keep<\/h3>/);
+    assert.doesNotMatch(html, /[Cc]op(?:y|ies)|commits on a branch/, 'nothing on the screen calls it a copy');
+    assert.match(html, /Task s[\s\S]*5\.0 MB[\s\S]*Session scratch its run marked to keep · the whole folder goes[\s\S]*\/var\/tmp\/obs-s</);
+    assert.equal((html.match(/retention marker or unreadable subtree/g) || []).length, 1, 'the marker is said once');
+    assert.match(html, /Discarding deletes it and what it holds for good\. Its marker says: retention marker/, 'its words end the line, whatever their punctuation');
+    assert.match(html, />Discard 1 scratch folder</);
+    const dialog = manualConfirmCopy(byHand([marked('s')]).manual, new Set(['s']));
+    assert.equal(dialog.title, 'Discard the marked scratch?');
+    assert.equal(dialog.body, 'This deletes 1 scratch folder its run marked to keep, and the evidence in it. Task results and history are kept.');
+    assert.deepEqual(dialog.details.rows, [{ label: 'Task s', value: `5.0 MB · marked to keep: ${MARKER}` }]);
+    assert.equal(dialog.confirmLabel, 'Discard 1 scratch folder');
+    // Both kinds at once: each says its own words, and the door and the dialog name both.
+    const mixed = pool({ manual: { count: 3, bytes: 4e9, bytes_complete: true, retained: 1 }, excluded: [{ reason: 'capture_unproven', count: 2, manual_count: 2 }] });
+    assert.match(trayHtml(free('ready', { pool: mixed }), read()), /2 finished copies not verified saved · 1 session scratch its run marked to keep[\s\S]*>Choose…</);
+    const both = manualConfirmCopy(byHand([copy('a'), marked('s')]).manual, new Set(['a', 's']));
+    assert.equal(both.title, 'Discard these copies and marked scratch?');
+    assert.equal(both.body, 'This deletes 1 copy whole. 3 files in them are not verified saved (4.2 MB) and can be lost for good. '
+        + 'This deletes 1 scratch folder its run marked to keep, and the evidence in it. Task results, history and commits on a branch that stays are kept.');
+    assert.equal(both.confirmLabel, 'Discard 2 items');
 });
 
 test('a manual run reports in the existing outcome words; a copy whose work could not be saved first says it stayed whole', () => {

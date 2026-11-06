@@ -15,7 +15,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union  # noqa: F401
 
-from supervisor.state import load_state, append_jsonl, reconstruct_task_cost
+from supervisor.state import append_jsonl, reconstruct_task_cost
+from supervisor.state import load_state  # noqa: F401 -- the assignment, health and lifecycle leaves read it via _pool()
 from supervisor.message_bus import send_with_budget
 from supervisor.message_bus import coerce_chat_identity  # noqa: F401 -- worker_health leaf reads it via the _pool() handle
 from ouroboros.config import DATA_DIR, REPO_DIR as CONFIG_REPO_DIR, WORKER_SPAWN_GRACE_SEC
@@ -100,7 +101,7 @@ class Worker:
     retiring: bool = False  # intentional, charged until observed dead; never crash recovery
     resume_hold: str = ""  # this tick's authorized warm Resume: held idle slot, or the parked author
     # The pool slots this worker serves: ``project`` (queued work, counted against MAX_WORKERS,
-    # fenced by the crash storm and readiness exhaustion) or ``conversation`` (the lane that carries
+    # fenced by readiness exhaustion) or ``conversation`` (the lane that carries
     # owner turns, wakes and Presence bodies; outside every project fence and count).
     lane: str = LANE_PROJECT
     # ``worker``: a custodied child process. The disclosed inline executors (``inline_degraded``,
@@ -117,6 +118,39 @@ _EVENT_Q_SHUTDOWN = False
 _WORKER_POOL_DISABLED_REASON = ""
 
 
+class EventBusLost(RuntimeError):
+    """The process-lifetime event bus is gone: its manager process ended (``exitcode``, a ``waitpid`` fact).
+
+    Every ``get_event_q`` call raises it, the cached return included, so no producer is handed a dead
+    proxy and no spawner starts a worker onto a dead bus; the supervisor tick reads the fact before it
+    hands any dead worker to the reaper and ends the generation (``server_process.end_generation_on_fault``).
+    A proxy error alone proves nothing: ``event_bus_exitcode`` confirms the fact before it counts.
+    """
+
+    def __init__(self, exitcode: Any) -> None:
+        super().__init__(f"supervisor event bus lost: its manager process exited with code {exitcode}")
+        self.exitcode = exitcode
+
+
+def _ignore_stop_signals() -> None:
+    """The manager's initializer: a SIGINT/SIGTERM aimed at the server's group never ends the bus (the
+    launcher's group stop reached it before the teardown's terminal emissions, #1142); the RPC
+    ``shutdown()`` or SIGKILL does. Windows ``TerminateProcess`` cannot be ignored: no effect there."""
+    import signal
+
+    for name in ("SIGINT", "SIGTERM"):
+        try:
+            signal.signal(getattr(signal, name), signal.SIG_IGN)
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
+def event_bus_exitcode() -> Optional[int]:
+    """The exit code of the bus's manager process once it ended; None while it lives or before one exists."""
+    proc = getattr(_EVENT_Q_MANAGER, "_process", None)
+    return getattr(proc, "exitcode", None) if proc is not None else None
+
+
 def get_event_q(*, create: bool = True):
     """Return the process-lifetime supervisor event bus, creating it lazily.
 
@@ -126,71 +160,99 @@ def get_event_q(*, create: bool = True):
     undrained queue, so only a new server process creates a new bus.
     Producers without an injected endpoint may read the existing server bus
     with ``create=False``; they never create an undrained child-local bus.
+    Every call, the cached return included, reads the manager process's exit
+    code first and raises ``EventBusLost`` once it is set: the bus is whole or
+    it is over, and nothing is respawned onto a dead one.
     """
     global _EVENT_Q, _EVENT_Q_MANAGER, _EVENT_Q_GENERATION
     with _EVENT_Q_LOCK:
         if _EVENT_Q_SHUTDOWN:
             raise RuntimeError("supervisor event bus is shutting down")
-        if _EVENT_Q is None:
-            if not create:
-                raise RuntimeError("supervisor event bus is not attached")
-            # A raw multiprocessing.Queue has an asynchronous feeder and its
-            # pipe can be corrupted when a worker is force-killed mid-frame.
-            # A manager-backed queue serializes synchronously in the producer
-            # and isolates each producer connection, so replacing/killing a
-            # worker generation cannot wedge the process-lifetime bus.
-            from supervisor.event_observation import EventQueueManager
+        if _EVENT_Q is not None:
+            exitcode = event_bus_exitcode()
+            if exitcode is not None:
+                raise EventBusLost(exitcode)
+            return _EVENT_Q
+        if not create:
+            raise RuntimeError("supervisor event bus is not attached")
+        # A raw multiprocessing.Queue has an asynchronous feeder and its
+        # pipe can be corrupted when a worker is force-killed mid-frame.
+        # A manager-backed queue serializes synchronously in the producer
+        # and isolates each producer connection, so replacing/killing a
+        # worker generation cannot wedge the process-lifetime bus.
+        # ``spawn`` on every platform: the exit code is then a plain ``waitpid``
+        # fact (a forkserver child's ``poll`` answers 255 once the forkserver died).
+        from supervisor.event_observation import EventQueueManager
 
-            _EVENT_Q_MANAGER = EventQueueManager(ctx=_get_ctx())
-            _EVENT_Q_MANAGER.start()
-            _EVENT_Q = _EVENT_Q_MANAGER.Queue()
-            _EVENT_Q_GENERATION = f"{os.getpid()}:{uuid.uuid4().hex[:12]}"
-            try:
-                from ouroboros.process_custody import record_process
+        _EVENT_Q_MANAGER = EventQueueManager(ctx=mp.get_context("spawn"))
+        _EVENT_Q_MANAGER.start(initializer=_ignore_stop_signals)
+        _EVENT_Q = _EVENT_Q_MANAGER.Queue()
+        _EVENT_Q_GENERATION = f"{os.getpid()}:{uuid.uuid4().hex[:12]}"
+        try:
+            from ouroboros.process_custody import record_process
 
-                manager_proc = getattr(_EVENT_Q_MANAGER, "_process", None)
-                manager_pid = int(getattr(manager_proc, "pid", 0) or 0)
-                if manager_pid:
-                    record_process(
-                        DRIVE_ROOT,
-                        pid=manager_pid,
-                        cmd="multiprocessing SyncManager",
-                        purpose="supervisor_event_queue_manager",
-                        scope="session",
-                        reap_process_group=False,
-                    )
-            except Exception:
-                log.warning("Failed to custody-track event queue manager", exc_info=True)
-            try:
-                append_jsonl(
-                    DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                    {
-                        "ts": utc_now_iso(),
-                        "type": "event_queue_generation_started",
-                        "generation": _EVENT_Q_GENERATION,
-                        "server_pid": os.getpid(),
-                        "start_method": _WORKER_START_METHOD,
-                    },
+            manager_proc = getattr(_EVENT_Q_MANAGER, "_process", None)
+            manager_pid = int(getattr(manager_proc, "pid", 0) or 0)
+            if manager_pid:
+                record_process(
+                    DRIVE_ROOT,
+                    pid=manager_pid,
+                    cmd="multiprocessing SyncManager",
+                    purpose="supervisor_event_queue_manager",
+                    scope="session",
+                    reap_process_group=False,
                 )
-            except Exception:
-                log.debug("Failed to record event queue generation", exc_info=True)
+        except Exception:
+            log.warning("Failed to custody-track event queue manager", exc_info=True)
+        try:
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": utc_now_iso(),
+                    "type": "event_queue_generation_started",
+                    "generation": _EVENT_Q_GENERATION,
+                    "server_pid": os.getpid(),
+                    "start_method": "spawn",
+                },
+            )
+        except Exception:
+            log.debug("Failed to record event queue generation", exc_info=True)
     return _EVENT_Q
 
 
 def shutdown_event_q() -> None:
-    """Stop the manager on graceful exit; custody reaps it after a hard exit."""
+    """Stop the manager on graceful exit; custody reaps it after a hard exit.
+
+    The RPC ``shutdown()`` ends a live manager; one still alive after it (the RPC failed, and
+    ``SIG_IGN`` defeats the stdlib finalizer's ``terminate()``) is killed and joined here, so a
+    bare Quit leaves no orphan bus. The journal row records whether the manager was already
+    gone when the teardown reached it: the fact of who ended the bus, for the next incident."""
     global _EVENT_Q, _EVENT_Q_MANAGER, _EVENT_Q_GENERATION, _EVENT_Q_SHUTDOWN
     with _EVENT_Q_LOCK:
         _EVENT_Q_SHUTDOWN = True
-        manager = _EVENT_Q_MANAGER
+        manager, generation = _EVENT_Q_MANAGER, _EVENT_Q_GENERATION
         _EVENT_Q = None
         _EVENT_Q_MANAGER = None
         _EVENT_Q_GENERATION = ""
-    if manager is not None:
-        try:
-            manager.shutdown()
-        except Exception:
-            log.debug("Event queue manager shutdown failed", exc_info=True)
+    if manager is None:
+        return
+    proc = getattr(manager, "_process", None)
+    exitcode_before = getattr(proc, "exitcode", None) if proc is not None else None
+    try:
+        manager.shutdown()
+    except Exception:
+        log.debug("Event queue manager shutdown failed", exc_info=True)
+    killed = False
+    if proc is not None and proc.is_alive():
+        proc.kill()
+        proc.join(5)
+        killed = True
+    try:
+        append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
+            "ts": utc_now_iso(), "type": "event_queue_generation_stopped", "generation": generation,
+            "exitcode_before_shutdown": exitcode_before, "killed": killed})
+    except Exception:
+        log.debug("Failed to record the event queue generation's end", exc_info=True)
 
 
 def event_queue_generation() -> str:
@@ -202,7 +264,6 @@ def event_queue_generation() -> str:
 WORKERS: Dict[int, Worker] = {}
 PENDING: List[Dict[str, Any]] = []
 RUNNING: Dict[str, Dict[str, Any]] = {}
-CRASH_TS: List[float] = []
 QUEUE_SEQ_COUNTER_REF: Dict[str, int] = {"value": 0}
 
 # Shared queue lock; queue.py owns the canonical definition.
@@ -1172,6 +1233,10 @@ def spawn_workers(n: int = 0) -> None:
                 "spawn_workers requires an empty pool; stop the current workers "
                 "or use respawn_worker for one slot"
             )
+    from supervisor.worker_pool_lifecycle import record_demand_forecast
+
+    # A new generation: no pass of it has computed demand yet (an in-process restart keeps the module).
+    record_demand_forecast(None, reason="new_pool_generation", assignment_pass=False)
     # Never hold the queue's process-local threading.RLock across fork: a child
     # would inherit it owned by a vanished thread.  The dedicated lifecycle lock
     # is not used by worker code and serializes competing full-pool starts/kills.
@@ -1245,12 +1310,17 @@ def _partition_slots_for_stop(lanes: Optional[frozenset]) -> List[Worker]:
     """Under the lifecycle serializer, then Q (``kill_workers``' order): the slots a stop owns, marked ``reaping``.
 
     ``lanes`` None owns every slot and ends the generation (no carrier grows behind the stop).
+    A stop owning the project slots also leaves the growth forecast unknown: it described them.
     """
     doomed = [w for w in WORKERS.values() if lanes is None or getattr(w, "lane", LANE_PROJECT) in lanes]
     if lanes is None:
         from supervisor import conversation_lane
 
         conversation_lane.arm(None)
+    if lanes is None or LANE_PROJECT in lanes:
+        from supervisor.worker_pool_lifecycle import record_demand_forecast
+
+        record_demand_forecast(None, reason="pool_stopped", assignment_pass=False)
     for w in doomed:
         # The timeout reaper's ownership mark: assignment, the health check
         # and the crash detector skip the slot while it is torn down.
@@ -1312,7 +1382,7 @@ def _confirm_dead_slots(doomed: List[Worker]) -> tuple:
 def kill_workers(
     force: bool = True,
     *,
-    result_reason: str = "Worker process crashed (crash storm). Task was not completed.",
+    result_reason: str = "Worker process was stopped before this task finished. Task was not completed.",
     terminal_status: str = "",
     archive_service_logs: bool = True,
     disable_reason: str = "",
@@ -1327,7 +1397,7 @@ def kill_workers(
 ) -> bool:
     """Stop the pool's workers and settle the rows they carried.
 
-    ``lanes`` scopes a PROJECT fence (the crash storm, readiness exhaustion) to the
+    ``lanes`` scopes a PROJECT fence (readiness exhaustion) to the
     project slots: conversation carriers, and the rows they or an awaited carrier
     own, are partitioned out of the sweep under Q and restored at its end, so a
     project-pool fence never terminalises an owner's turn (owner decision 1A).
@@ -1348,7 +1418,7 @@ def kill_workers(
                 log.warning("Failed to persist worker-pool disable fence", exc_info=True)
             if not fence_persisted:
                 # No worker or queue mutation happened yet: restore the prior fence (an aborted
-                # update reopens an enabled pool; a crash-storm latch keeps its membership frozen).
+                # update reopens an enabled pool; a prior fence keeps its membership frozen).
                 _WORKER_POOL_DISABLED_REASON = previous_disable_reason
                 log.error("Worker shutdown blocked: disable fence was not durable")
                 return False
@@ -2291,49 +2361,6 @@ def _assignment_depth_reservation_admits(candidate: dict, running=None) -> bool:
         and str(meta["task"].get("parent_task_id") or "").strip() == parent_id
     )
     return direct_running_children < 1
-
-
-def _worker_crash_storm_detected(
-    *, busy_crashes: int, dead_detections: int, crashed_tasks: List[Dict[str, Any]]
-) -> bool:
-    now = time.time()
-    alive_now = sum(1 for worker in WORKERS.values()
-                    if getattr(worker, "lane", LANE_PROJECT) != LANE_CONVERSATION and worker.proc.is_alive())
-    if dead_detections:
-        # Only count busy crashes or all-workers-dead as storm signals.
-        if busy_crashes > 0 or alive_now == 0:
-            CRASH_TS.extend([now] * max(1, dead_detections))
-        else:
-            CRASH_TS.clear()
-
-    CRASH_TS[:] = [stamp for stamp in CRASH_TS if (now - stamp) < 60.0]
-    if len(CRASH_TS) < 3:
-        return False
-
-    # Do not execv on crash storms; the conversation lane stays open on its own slots.
-    st = load_state()
-    append_jsonl(
-        DRIVE_ROOT / "logs" / "supervisor.jsonl",
-        {
-            "ts": utc_now_iso(),
-            "type": "crash_storm_detected",
-            "crash_count": len(CRASH_TS),
-            "worker_count": len(WORKERS),
-            "crashed_tasks": crashed_tasks,
-        },
-    )
-    if st.get("owner_chat_id"):
-        send_with_budget(
-            int(st["owner_chat_id"]),
-            "⚠️ Frequent worker crashes. Project workers are disabled until Restart; "
-            "the conversation keeps its own lane.",
-            is_progress=True,
-            progress_meta={
-                "task_incident": "worker_crash_storm",
-                "toast_once": f"worker-crash-storm:{int(min(CRASH_TS) if CRASH_TS else now)}",
-            },
-            role="system", system_type="worker_failure")
-    return True
 
 
 # v7next F1 (D08): moved spans live in their owner leaves; re-exported here

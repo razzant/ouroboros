@@ -25,6 +25,23 @@ test('the exact return constructs one same-origin completion, retaining deployme
         { state: state(), error: 'access_denied', error_description: 'No' });
 });
 
+const mcpState = (server = 'superset', extra = {}) => Buffer.from(JSON.stringify({ v: 1, mcp: server, nonce: 'nonce', ...extra })).toString('base64url');
+
+test('a remote MCP server return completes on the core sign-in route, and every return forwards the issuer it names', () => {
+    const iss = 'iss=https%3A%2F%2Fauth.example.test';
+    const request = completionRequest(href(mcpState(), `code=synthetic&${iss}`));
+    assert.equal(request.url, 'https://example.test/instance/api/mcp/sign-in');
+    assert.deepEqual(JSON.parse(request.init.body),
+        { action: 'complete', state: mcpState(), code: 'synthetic', iss: 'https://auth.example.test' });
+    assert.deepEqual(JSON.parse(completionRequest(href(state(), `code=synthetic&${iss}`)).init.body),
+        { state: state(), code: 'synthetic', iss: 'https://auth.example.test' });
+    assert.deepEqual(JSON.parse(completionRequest(href(mcpState(), 'error=access_denied')).init.body),
+        { action: 'complete', state: mcpState(), error: 'access_denied', error_description: '' });
+    for (const value of [mcpState('../settings'), mcpState('superset', { skill: 'calendar' }), mcpState('')]) {
+        assert.throws(() => completionRequest(href(value)));
+    }
+});
+
 test('unrelated destinations, malformed envelopes and ambiguous results never become a request', () => {
     for (const skill of ['../settings', '.', 'calendar/complete', 'https://other.test', 'a%2fb']) {
         assert.throws(() => completionRequest(href(state(skill))));

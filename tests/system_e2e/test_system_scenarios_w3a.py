@@ -274,7 +274,6 @@ S12_SCRIPT = [
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s15_advisory_class_red_verdict_recorded_and_commit_lands(e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)
     root = tmp_path_factory.mktemp("s12")
@@ -385,7 +384,6 @@ S13_SCRIPT = [
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s16_blocking_class_red_blocks_identical_refused_free_then_green_lands(
         e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)
@@ -480,7 +478,6 @@ S13B_SCRIPT = [
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s16_rejects_post_verdict_mutation(tmp_path_factory):
     require_lane(LANE_MOCK)
     root = tmp_path_factory.mktemp("s13b")

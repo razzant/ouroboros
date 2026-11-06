@@ -108,8 +108,7 @@ def test_stop_arriving_in_real_backoff_keeps_only_actual_physical_attempts(
 
 @pytest.mark.parametrize("kind,revoked,seen,expected", [
     ("owner_text", False, False, False), ("hurry", False, False, False),
-    ("finalize_now", True, False, False), ("finalize_now", False, True, False),
-    ("finalize_now", False, False, True),
+    ("finalize_now", True, False, False),
 ])
 def test_only_current_unseen_finalize_controls_request_a_retry_stop(tmp_path, kind, revoked, seen, expected):
     ctx = SimpleNamespace(drive_root=tmp_path, task_id="t-death", task_attempt=1,

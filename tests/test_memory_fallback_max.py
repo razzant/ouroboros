@@ -42,7 +42,7 @@ def test_a_start_memory_crowded_folds_one_rooms_oldest_pages_mine_included(tmp_p
     assert not [r for r in ChronicleStore(tmp_path).records(kinds=("account",))]  # never an account across rooms
 
 
-@pytest.mark.parametrize("start", [{"zero_need": 1_100_000}, {"cause": "held"}, {"cause": "route"}, None])
+@pytest.mark.parametrize("start", [{"zero_need": 1_100_000}, {"cause": "route"}, None])
 def test_no_trigger_when_schemas_tip_it_the_start_held_or_no_fact_exists(tmp_path, monkeypatch, light, start):
     shared.world(tmp_path)
     _consciousness(monkeypatch, False)

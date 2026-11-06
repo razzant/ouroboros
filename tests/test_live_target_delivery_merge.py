@@ -1,37 +1,32 @@
 """Live carriers and room handoff retain the ordinary restart/delivery gates."""
-import json
 
-import pytest
 
 from tests.test_agent_restart_intent import runtime as runtime, accept
 from tests.test_call_task_lifecycle import direct_call as direct_call
 from tests.test_delivery_contention import sender as sender, owed
 from tests.test_live_review_r9_relay import actor
 
-pytestmark = pytest.mark.serial
 
 
-def test_restart_defers_live_intent_without_constructing_an_actor(direct_call, runtime, monkeypatch):
+def test_restart_never_saves_a_live_call_turn(direct_call, runtime, monkeypatch):
     # ``direct_call`` first: ``runtime`` then installs the queue tables the restart's census reads.
-    from ouroboros.realtime_turn import recovery_refusal
+    """A call utterance is dialogue: neither a requested restart nor its drain saves it as a queued root (a saved call
+    is refused after the restart, ``realtime_turn.recovery_refusal``); it runs while the process lives."""
     from supervisor import worker_chat_lane
+    from tests.test_call_task_lifecycle import _agent
 
     accept(runtime)
-    starts = []
-    monkeypatch.setattr(runtime.workers, "_get_chat_agent", lambda: starts.append(True))
+    runtime.restart._AGENT_RESTART["status"] = "ready"  # the physical drain: a text turn would be saved here
+    seen = []
+    agent = _agent(direct_call.root, lambda task=None: seen.append(task["id"]) or [])
+    monkeypatch.setattr(runtime.workers, "_get_chat_agent", lambda: agent)
     turn = direct_call.turn
     worker_chat_lane.handle_chat_direct(1, "Open the admitted call", realtime_turn=turn,
-        task_metadata={"client_message_id": "deferred-call", "execution_transport": turn.request})
-    assert starts == []
-    [saved] = [task for task in runtime.queue.PENDING if task.get("text") == "Open the admitted call"]
-    assert saved["model"] == turn.model and saved["use_local_model"] is False
-    assert saved["metadata"]["execution_transport"] == turn.request
-    snapshot = json.loads(runtime.queue.QUEUE_SNAPSHOT_PATH.read_text())
-    [retained] = [task for task in snapshot["pending"] if task["id"] == saved["id"]]
-    assert retained["task"]["metadata"] == saved["metadata"]
-    assert recovery_refusal(retained["task"], None) == "realtime_restart_required"
-    assert "Saved for execution" in direct_call.notices[-1][0][1]
-    assert not any("Error:" in args[1] for args, _ in direct_call.notices)
+        task_metadata={"client_message_id": "drain-call", "execution_transport": turn.request})
+    assert [task for task in runtime.queue.PENDING if task.get("text") == "Open the admitted call"] == []
+    assert len(seen) == 1 and runtime.restart._AGENT_RESTART["started"][seen[0]] == seen[0]
+    assert not any("Saved for execution" in str(args[1]) for args, _ in direct_call.notices)
+    assert not any("Error:" in str(args[1]) for args, _ in direct_call.notices)
 
 
 def test_replay_dispatch_refusal_never_hands_an_unsent_answer_to_a_live_turn(tmp_path, monkeypatch, sender):

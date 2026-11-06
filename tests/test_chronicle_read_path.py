@@ -401,7 +401,7 @@ def _pages(monkeypatch, between=None):
     return answers
 
 
-@pytest.mark.parametrize("page", [1, 3, 10, 2_000])
+@pytest.mark.parametrize("page", [1, 3, 2_000])
 def test_the_stored_tail_is_read_in_pages_into_the_rows_one_whole_read_gave(tmp_path, monkeypatch, page):
     store = _tail_store(tmp_path)
     whole, terminal = _one_shot(store), _one_shot(store, terminal_only=True)

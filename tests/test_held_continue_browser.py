@@ -20,7 +20,7 @@ from tests.test_continue_independent_review import _current_pool, _pending, _row
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 - pytest fixture
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 UNBOUND = "a delegated start has an unknown outcome (no run was recorded)"
 # Where the cause text sits against its row and the row's one control: the cause must be laid out whole
 # (a clipped or ellipsized line still has its full innerText) and never under the control.
@@ -126,13 +126,15 @@ def test_held_continue_toast_activity_reason_and_no_resume(direct_server_with_da
                                     full_page=True)
             page.emulate_media(color_scheme="dark")
 
-            # At phone width and from the keyboard: the row's one control opens its menu, with Stop and no Resume.
+            # At phone width and from the keyboard: a held Continue offers neither Pause nor Resume, so the row's one
+            # control is Stop now itself (no menu of one item); its press asks first and Escape keeps the run.
+            items = [control.inner_text().strip()]
+            assert items == ["Stop now"], "a held Continue offers neither Pause nor Resume: " + str(items)
             control.focus()
             page.keyboard.press("Enter")
-            menu = page.locator("body > .task-control-menu")
+            menu = page.locator(".confirm-dialog")
             menu.wait_for()
-            items = menu.evaluate("n => [...n.querySelectorAll('.task-control-item')].map(i => i.dataset.taskControl)")
-            assert items == ["stop_now"], "a held Continue offers neither Pause nor Resume: " + str(items)
+            assert page.locator("body > .task-control-menu").count() == 0, "no menu of one item"
             page.screenshot(path=str(evidence / f"{engine}-3-held-row-menu-390.png"), full_page=True)
             page.keyboard.press("Escape")
             menu.wait_for(state="detached")

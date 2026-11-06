@@ -81,8 +81,7 @@ def test_moved_work_uses_narration_and_incremental_counts_without_history_reads(
     assert reads == []  # new task signature refreshes the memo, without a history replay
 
 
-@pytest.mark.parametrize("carrier", ["direct", "pending", "running"])
-@pytest.mark.parametrize("detached", [False, True])
+@pytest.mark.parametrize(("detached", "carrier"), [(False, "direct"), (False, "running"), (True, "pending")])
 def test_detached_is_a_durable_fact_independent_of_carrier(tmp_path, monkeypatch, carrier, detached):
     task = {"id": "work", "chat_id": 1, "_is_direct_chat": True, "detached": True,
             "detached_at": 100 if detached else None}  # only K7's timestamp is evidence

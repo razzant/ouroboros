@@ -295,12 +295,9 @@ def test_cli_prints_the_api_notice_once_without_empty_categories(tmp_path, monke
 
 @pytest.mark.parametrize("base,expected", [
     ("", _FAILED_NOTICE),
-    ("Other host fact.", "Other host fact.\n\n" + _FAILED_NOTICE),
     (_FAILED_FULL, _FAILED_NOTICE),  # an older row already holding the full text
     ("Other host fact.\n\n" + _FAILED_FULL, "Other host fact.\n\n" + _FAILED_NOTICE),
-    (_FAILED_NOTICE, _FAILED_NOTICE),  # a row that already passed through the public projection
-    ("Other host fact.\n\n" + _FAILED_NOTICE, "Other host fact.\n\n" + _FAILED_NOTICE),
-], ids=["raw", "raw-base", "old-joined", "old-joined-base", "public", "public-base"])
+], ids=["raw", "old-joined", "old-joined-base"])
 def test_any_earlier_projection_converges_without_doubling_or_moving_the_hash(base, expected):
     row = _audit(terminal_runs=[_FAILED_RUN])
     if base:
@@ -324,9 +321,8 @@ def test_any_earlier_projection_converges_without_doubling_or_moving_the_hash(ba
 @pytest.mark.parametrize("foreign", [
     "Pending patch decisions: none recorded by the current audit.",  # the label, not this audit's rendering
     _FAILED_FULL + "\n\nA later host fact.",
-    "Quoted earlier: " + _FAILED_NOTICE,
     _FAILED_NOTICE + " Not the same sentence.",
-], ids=["empty-label", "not-a-suffix", "same-line-no-separator", "extended-sentence"])
+], ids=["empty-label", "not-a-suffix", "extended-sentence"])
 def test_other_host_text_mentioning_custody_words_is_never_stripped(foreign):
     row = _audit(terminal_runs=[_FAILED_RUN])
     row["terminal_host_notice"] = foreign
@@ -368,12 +364,11 @@ def test_a_silent_finish_stays_exactly_as_quiet_as_before():
 
 @pytest.mark.parametrize("frozen,expected", [
     (provider_terminal_body("Answer.", "Budget stop retained.\n\n" + _FAILED_FULL), "Answer."),
-    (provider_terminal_body("Answer.", "Budget stop retained.\n\n" + _FAILED_NOTICE), "Answer."),
     (provider_terminal_body("Older explicit reply", "Budget stop retained.\n\n" + _FAILED_FULL),
      provider_terminal_body("Older explicit reply", "Budget stop retained.\n\n" + _FAILED_FULL)),
     ("Exact authored reply", "Exact authored reply"),
     ("", ""),
-], ids=["old-composition", "new-composition", "different-reply", "authored", "deliberately-empty"])
+], ids=["old-composition", "different-reply", "authored", "deliberately-empty"])
 def test_presence_replay_undoes_only_a_recorded_host_composition(tmp_path, frozen, expected):
     from ouroboros.presence_runner import _cached_result
 

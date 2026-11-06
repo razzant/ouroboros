@@ -253,6 +253,31 @@ def carried_owner_corpus(ctx: Any, source_text: Any = "") -> List[Dict[str, Any]
     return [row for row in rows if row["content"].strip()]
 
 
+def place_owner_words(focus: Any, text: Any, message: Any) -> str:
+    """A place event's words when they are my human's: addressed to me from an account its place confirmed, the
+    same rule at a turn's opening and mid-turn. A forwarded message carries another author's words: context."""
+    focus, words = _mapping(focus), str(text or "")
+    confirmed = focus.get("addressed") is True and _mapping(focus.get("actor")).get("owner_confirmed") is True
+    return words if confirmed and words.strip() and not _mapping(message).get("forward_origin") else ""
+
+
+def place_reply_target(message: Any) -> Dict[str, str] | None:
+    """The platform message a place event replies to, by address (a connector gives no words for it), else None."""
+    replied = str(_mapping(message).get("reply_to_message_id") or "")
+    return {"address": f"platform message {replied} in this room", "author": "", "text": ""} if replied else None
+
+
+def owner_words_contain(ctx: Any, text: Any) -> bool:
+    """``text`` is my human's own words that reached this run: exact, as a quote is (``chronicle_quotes.quote_in``),
+    inside one owner row of the run, never a reply target (another author's words beside theirs). Provenance of
+    bytes, never their meaning."""
+    from ouroboros.chronicle_quotes import quote_in
+
+    wanted = str(text or "").strip()
+    return bool(wanted) and any(quote_in(wanted, row["text"])
+                                for row in directive_owner_rows(ctx) if row["source"] in OWNER_SOURCES)
+
+
 def _corpus_keys(row: Mapping[str, Any]) -> set:
     """One carried row's identities: client ids are scoped by chat when a carrier names one."""
     keys = set()
@@ -282,6 +307,77 @@ def merged_corpus(kept: Any, added: Any) -> List[Dict[str, Any]]:
         if isinstance(row, Mapping) and not any(_same_corpus_source(row, prior) for prior in merged):
             merged.append(dict(row))
     return merged
+
+
+# What a successor reads of an answered card beside the owner's words (``answered_card``).
+CARD_FIELDS = ("quiz_id", "question", "options", "option_details", "stake", "assumption", "host_facts", "materials",
+               "answered_index", "comment", "asked_at", "answered_at")
+
+
+def answered_card(block: Any, words: str) -> Dict[str, Any] | None:
+    """What a successor reads of the card an owner answer replies to, or None.
+
+    ``block`` must be an answered card whose recorded owner words are exactly ``words``.
+    The question and options are the asking task's words; they ride beside the answer
+    and never enter the owner corpus.
+    """
+    import copy
+
+    from ouroboros.owner_quiz import STATE_ANSWERED, late_answer_owner_text
+
+    if not (isinstance(block, dict) and block.get("state") == STATE_ANSWERED
+            and late_answer_owner_text(block) == words):
+        return None
+    return {key: copy.deepcopy(block[key]) for key in CARD_FIELDS if key in block}
+
+
+def carded(row: Dict[str, Any], source: Any) -> Dict[str, Any]:
+    """``row`` with the card its words answer beside them (``answered_card_source(source)``) when that card records
+    exactly these words: the asking task, the card's id and the card a Continue successor reads."""
+    block, asker = answered_card_source(source)
+    card = answered_card(block, row["content"])
+    if card and all(isinstance(value, str) and value for value in (asker, card.get("quiz_id"))):
+        row.update(source_task_id=asker, quiz_id=card["quiz_id"], card=card)
+    return row
+
+
+def answered_card_source(row: Any) -> tuple:
+    """``(block, asking task)`` of the card a row of my human's words answers, else ``(None, None)``: a relayed quiz row's
+    ``quiz``, a live delivery's ``quiz_delivery`` snapshot, or a late answer's typed snapshot (``late_answer_ref``)."""
+    row = _mapping(row)
+    if row.get("type") == "quiz_answer":
+        return row.get("quiz"), row.get("task_id")
+    if delivery := _mapping(row.get("quiz_delivery")):
+        return delivery.get("answer_snapshot"), delivery.get("task_id")
+    from ouroboros.owner_quiz import late_answer_ref
+
+    late = late_answer_ref(row.get("late_answer")) or {}
+    return _mapping(late.get("answer_snapshot")).get("quiz"), late.get("task_id")
+
+
+def answered_card_reply(block: Any, task_id: Any) -> Dict[str, str]:
+    """The card my human answered, as the message their answer replies to (a corpus row's ``reply_to``), or {}.
+
+    The whole subject the card showed (question, options with details, stake, assumption, materials) is the asking
+    task's words: it rides beside the owner's answer for every reader of the corpus (Safety, reviewers, children,
+    Continue), never as the owner's words; the host's record of the pressed option closes it, so a choice survives
+    beside a comment. A secret request's form has none."""
+    block = _mapping(block)
+    if block.get("secret_request") or not str(block.get("question") or "").strip():
+        return {}
+    options = block.get("options") if isinstance(block.get("options"), list) else []
+    details = block.get("option_details") if isinstance(block.get("option_details"), list) else []
+    lines = [str(block["question"]), *(f"{n}. {label}" + (f" ({details[n - 1]})" if n <= len(details) and str(
+        details[n - 1]).strip() else "") for n, label in enumerate(options, 1))]
+    lines += [f"{name}: {block[key]}" for key, name in (("stake", "Stake"), ("assumption", "If unanswered"),
+                                                        ("host_facts", "Host facts")) if str(block.get(key) or "").strip()]
+    materials = [f"{m.get('name')} (task {m.get('task_id') or task_id})" for m in block.get("materials") or []
+                 if isinstance(m, Mapping) and m.get("name")]
+    lines += [f"Materials: {', '.join(materials)}"] * bool(materials)
+    if type(block.get("answered_index")) is int:
+        lines.append(f"(host record: my human pressed option {block['answered_index'] + 1})")
+    return {"address": f"quiz {block.get('quiz_id')} of task {task_id}", "author": f"Ouroboros, task {task_id}",
+            "text": "\n".join(lines)}
 
 
 def reply_target(drive_root: Any, reference: Any) -> Dict[str, str]:
@@ -373,17 +469,17 @@ def owner_row(row: Mapping[str, Any] | None, drive_root: Any = None, *, accounts
 def _message_rows(drive_root: Any, task_id: str, text: Any, ref: Any, carrier: str,
                   accounts: Any = None) -> List[Dict[str, str]]:
     ref = _mapping(ref)
-    if isinstance(text, str) and text.strip():
-        return [_row(text, source="origin_message", carrier=carrier, task_id=task_id, ts=ref.get("ts"),
-                     ref=_chat_ref(ref) if ref else "")]
-    if not ref:
-        return []
     from ouroboros.project_dialogue import resolve_owner_message_source
 
-    row = resolve_owner_message_source(drive_root, dict(ref))
+    row = resolve_owner_message_source(drive_root, dict(ref)) if ref else None
+    if isinstance(text, str) and text.strip():
+        target = reply_target(drive_root, _mapping(row).get("reply_to"))
+        return _words_rows({"source": "origin_message", "content": text, "reply_to": target}, carrier=carrier,
+                           task_id=task_id, ts=ref.get("ts"), ref=_chat_ref(ref) if ref else "")
     if not owner_row(row, drive_root, accounts=accounts):
         return []
-    return _words_rows({**row, "source": "origin_message", "content": row["text"]}, carrier=carrier,
+    return _words_rows({**row, "source": "origin_message", "content": row["text"],
+                        "reply_to": reply_target(drive_root, row.get("reply_to"))}, carrier=carrier,
                        task_id=task_id, ts=row.get("ts"), ref=_chat_ref(row))
 
 
@@ -426,7 +522,8 @@ def _annotation_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any]
             acts.setdefault(client_id, str(row["action"]))
     rows = []
     for row in (_inbound_rows(drive_root, acts, accounts) if acts else []):
-        rows.extend(_words_rows({**row, "source": acts[str(row["client_message_id"])], "content": row["text"]},
+        rows.extend(_words_rows({**row, "source": acts[str(row["client_message_id"])], "content": row["text"],
+                                 "reply_to": reply_target(drive_root, row.get("reply_to"))},
                                 carrier="annotation", task_id=task_id, ts=row.get("ts"), ref=_chat_ref(row)))
     return rows
 
@@ -440,6 +537,7 @@ def _mailbox_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any], a
     except (OSError, ValueError):
         return []
     rows: List[Dict[str, str]] = []
+    accounts_by_root = {str(drive_root): accounts}
     for entry in entries:
         if entry.get("kind") != KIND_OWNER_TEXT:
             continue
@@ -451,13 +549,14 @@ def _mailbox_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any], a
     for entry in entries:
         if entry.get("kind") != "relay_entry":
             continue
-        source_root = entry.get("relay_canonical_root") or drive_root
-        source_key = str(source_root)
-        source_accounts = accounts_by_root.get(source_key)
-        if source_accounts is None:
-            source_accounts = accounts_by_root[source_key] = owner_place_accounts(source_root)
+        fallback_root = entry.get("relay_canonical_root") or drive_root
         quotes = entry.get("relay", {}).get("quotes") if isinstance(entry.get("relay"), Mapping) else []
         for index, row in enumerate(entry.get("owner_rows") or []):
+            source_root = row.get("_owner_source_root") or fallback_root
+            source_key = str(source_root)
+            source_accounts = accounts_by_root.get(source_key)
+            if source_accounts is None:
+                source_accounts = accounts_by_root[source_key] = owner_place_accounts(source_root)
             if not quotable_owner_row(row, source_root, accounts=source_accounts):
                 continue
             quote = quotes[index] if isinstance(quotes, list) and index < len(quotes) else {}

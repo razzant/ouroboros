@@ -17,7 +17,7 @@ from ouroboros.platform_layer import force_kill_pid, pid_provably_gone
 from tests.group_run import kill_survivors, run_in_group
 
 NODE = shutil.which("node")
-pytestmark = [pytest.mark.serial,  # real processes, killed by PID
+pytestmark = [# real processes, killed by PID
               pytest.mark.skipif(not NODE, reason="node is not installed")]
 
 SPIN = """\

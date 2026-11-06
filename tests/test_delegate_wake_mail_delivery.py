@@ -8,7 +8,6 @@ import pytest
 from tests._stub_delegate_engines import stub_delegate_engines as stub_delegate_engines
 from tests.test_configured_session_restore import InputReached
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("origin", ["owner", "parent", "relay"])

@@ -88,20 +88,23 @@ def test_the_paid_lane_fires_only_on_an_opted_in_dispatch():
     # the secret. A plain `gh workflow run CI --ref <branch>` (the pre-tag 3-OS
     # matrix) therefore never runs the paid lane.
     inputs = triggers["workflow_dispatch"]["inputs"]
-    assert list(inputs) == [DISPATCH_INPUT], inputs
+    # Besides the opt-in, a dispatch carries only the tests-only scope's own inputs
+    # (`scope`, `macos`; tests/test_platform_ci_events.py evaluates them per event).
+    assert set(inputs) == {DISPATCH_INPUT, "scope", "macos"}, inputs
     spec = inputs[DISPATCH_INPUT]
     assert spec["type"] == "boolean" and spec["default"] is False, spec
     assert "$30" in spec["description"] and SECRET in spec["description"], spec
     condition = " ".join(str(_job()["if"]).split())
     assert condition == (
         f"github.event_name == 'workflow_dispatch' && github.event.inputs.{DISPATCH_INPUT} == 'true'"
+        " && inputs.scope != 'tests'"
     )
-    # The input gates THIS job only: no other job reads dispatch inputs, so the
+    # The opt-in gates THIS job only: no other job reads it, so the
     # `github.event_name == 'workflow_dispatch'` gates elsewhere keep firing on
     # every dispatch exactly as before the block gained inputs.
     for name, job in workflow["jobs"].items():
         if name != JOB:
-            assert "inputs" not in str(job.get("if", "")), (name, job.get("if"))
+            assert DISPATCH_INPUT not in str(job.get("if", "")), (name, job.get("if"))
     assert _job()["runs-on"] == "ubuntu-latest"
     # One SM1 lane with --self-mod: the task, the evolution cycle, the absorb
     # wait and two hermetic preflight suites on a 4-vCPU runner; the bound

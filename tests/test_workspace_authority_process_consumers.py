@@ -433,7 +433,6 @@ def test_explicit_system_output_keeps_binding_relative_protected_policy(tmp_path
     assert "protected" in reason.lower()
 
 
-@pytest.mark.serial
 def test_system_service_record_discloses_target_and_stays_task_scoped(
     tmp_path, monkeypatch,
 ):

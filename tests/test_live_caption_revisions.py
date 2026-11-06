@@ -7,7 +7,7 @@ import pytest
 from skills.live_conversation.driver import _Call
 from tests.test_gemini_live_boundaries import deny_network as deny_network, gemini as gemini, make_session, receive
 from tests.test_gemini_live_captions import THINKING, GREETING, replay_greeting, finals
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 @pytest.mark.parametrize('already_persisted', [False, True])

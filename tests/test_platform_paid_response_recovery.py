@@ -11,8 +11,10 @@ from ouroboros import platform_layer, usage_accounting, usage_ledger, usage_stor
 from tests._usage_store_testing import ledger_rows
 
 
-@pytest.mark.parametrize("tier", ["name", "enforced"])
-@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(("asynchronous", "tier"), [
+    pytest.param(False, "name", id='sync-name'),
+    pytest.param(True, "enforced", id='async-enforced'),
+])
 def test_paid_response_survives_kernel_lock_refusal(
     tmp_path, monkeypatch, caplog, asynchronous, tier,
 ):

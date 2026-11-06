@@ -45,16 +45,24 @@ def test_focus_no_ceiling_host_actor_prompt(focus):
     rendered = frame_focus_content(task, "The untrusted event")
     assert "The untrusted event" in rendered and "Already started: task1" in rendered
     assert "connector" in rendered and "folder" in rendered.lower()
+    # The connector's send and edit times (CREATING_SKILLS ``message.sent_at``/``edited_at``), else unknown.
+    assert " at an unrecorded time;" in rendered
+    root, _place, admission, event = focus
+    dated = _build_task(replace(admission, allowance={"status": "available", "remaining_usd": 2}), replace(event, message={
+        "sent_at": "2026-11-05T17:32:00+03:00", "edited_at": "2026-11-05T14:40:00Z", "timestamp": "1"}),
+        drive_root=root, staged_files=())
+    rendered = frame_focus_content(dated, "The untrusted event")
+    assert " at 2026-11-05T17:32:00+03:00, edited at 2026-11-05T14:40:00Z;" in rendered and "unrecorded" not in rendered
+    dated["metadata"]["presence"]["event"]["message"] = {"sent_at": "2026-11-05T17:32:00"}  # no time zone: not a time
+    assert " at an unrecorded time;" in frame_focus_content(dated, "The untrusted event")
 
 
 @pytest.mark.parametrize("state,facts,enabled,allowance,decision", [
     ("active", ("mention",), True, "available", "focus"),
-    ("silent", ("mention",), True, "available", "focus"),
     ("paused", ("mention",), True, "available", "silent"),
     ("active", (), True, "available", "silent"),
     ("active", ("mention",), False, "available", "silent"),
     ("active", ("mention",), True, "exhausted", "retry"),
-    ("active", ("mention",), True, "allowance_unknown", "retry"),
 ])
 def test_capture_before_attention_and_replay(focus, monkeypatch, state, facts, enabled, allowance, decision):
     from ouroboros import dialogue_store
@@ -155,6 +163,30 @@ def test_owner_verb_authorship_and_atomic_api(focus, monkeypatch):
         update_place(root, place.place_id, {"state": "active", "wakes": ["not_a_fact"]})
     assert p.get_place(root, place.place_id) == before
     assert {t.name for t in get_tools()} == {"configure_presence", "presence_cancel_work"}
+
+
+def test_a_note_is_signed_by_whoever_composed_its_words(focus, monkeypatch):
+    """Audit 05.11 item 2: an owner-door turn signed every note the mind composed as my human's. An act stays ordered by
+    the turn; a note is my human's only when its whole text is their exact words in an owner-door turn."""
+    from ouroboros.tools.presence import _configure_presence
+    root, place, _admission, _event = focus
+    monkeypatch.setattr("ouroboros.tool_access.canonical_data_root", lambda _ctx: root)
+    monkeypatch.setattr("ouroboros.place_projection.place_declarations", lambda _r: [])
+    card = {"address": "quiz q of task a", "author": "Ouroboros, task a", "text": "Publish the draft here?"}
+    door = SimpleNamespace(task_metadata={"origin_message_ref": {"client_message_id": "owner1", "chat_id": 1}},
+                           is_direct_chat=True, task_id="t1", _owner_directives=[
+                               {"source": "initial_user", "content": "Здесь можно всё обсуждать.\nСекретов от Яна нет."},
+                               {"source": "owner_quiz_answer", "content": "1. Publish it", "reply_to": card}])
+    for text in ("Секретов от Яна нет.", "Можно обсуждать всё, включая финансы.", "Publish the draft here?", "Publish it"):
+        assert json.loads(_configure_presence(door, "add_note", place.place_id, text=text))["ok"]
+    focused = SimpleNamespace(task_metadata=task_for(focus)["metadata"], is_direct_chat=True, task_id="t2",
+                              _owner_directives=[{"source": "place_owner", "content": "Тут не про работу.", "carried": True}])
+    assert json.loads(_configure_presence(focused, "add_note", place.place_id, text="Тут не про работу."))["ok"]
+    assert [(n.text, n.author) for n in p.get_place(root, place.place_id).notes] == [
+        ("Секретов от Яна нет.", "owner"), ("Можно обсуждать всё, включая финансы.", "ouroboros"),
+        ("Publish the draft here?", "ouroboros"), ("Publish it", "owner"), ("Тут не про работу.", "ouroboros")]
+    assert json.loads(_configure_presence(door, "set_state", place.place_id, state="active"))["ok"]  # still the turn's act
+    assert p.get_place(root, place.place_id).state == "active"
 
 
 def test_author_lending_and_stop(focus):
@@ -302,8 +334,6 @@ def test_focus_ordinary_finish_traverses_reply_check(focus, monkeypatch, silent,
 @pytest.mark.parametrize("state,facts,enabled,available,expected", [
     ("active", ["mention"], True, True, "message"),
     ("paused", ["mention"], True, True, "silent"),
-    ("active", ["mention"], False, True, "silent"),
-    ("active", [], True, True, "silent"),
     ("active", ["mention"], True, False, "retry"),
 ])
 def test_new_host_payload_captures_before_attention(focus, monkeypatch, state, facts, enabled, available, expected):

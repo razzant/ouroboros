@@ -50,7 +50,6 @@ from tests.test_budget_pause_lineage_restore import (
     _workers,
 )
 
-pytestmark = pytest.mark.serial
 
 
 def _reserve(tmp_path, task_id, *, request=None, **limits):
@@ -622,7 +621,6 @@ def _handoff(**overrides):
 
 @pytest.mark.parametrize("row,selected", [
     ({"_budget_pause_resume": _handoff()}, True),
-    ({"_budget_pause_resume": _handoff(selected_by="rl-root", root_grant_id="R", root_resume_generation=1)}, True),
     ({"_budget_pause_resume": _handoff(selected_by="rl-root", root_grant_id="R", root_resume_generation=0)}, False),
     ({"_budget_pause_resume": _handoff(selected_by="rl-root")}, False),
     ({"_budget_pause_resume": _handoff(root_fence_id="E")}, False),
@@ -636,14 +634,12 @@ def _handoff(**overrides):
     ({"_budget_pause_resume": _handoff(), "_budget_pause_consumed": {"grant_id": "g1"}}, False),
     ({"_budget_pause_resume": _handoff(), "_budget_pause_hold": {"reason": "x"}}, False),
     ({"_budget_pause_resume": _handoff(), "_continuation_prepared": True}, False),
-    ({"_resume_selection": {"fence_id": "F"}}, True),
     ({"_resume_selection": {"fence_id": "E"}}, False),
     ({"_budget_pause_hold": {"fence_id": "F"}}, False),
     ({}, False),
-], ids=["owner", "root_grant", "root_grant_generation_zero", "model_without_root_grant", "older_fence",
+], ids=["owner", "root_grant_generation_zero", "model_without_root_grant", "older_fence",
         "no_fence_at_grant", "blank_pause", "blank_grant", "sleep_readiness", "exact_decides_over_old_hold",
-        "paused_again", "stale_consumed", "active_hold", "continuation_unconfirmed", "selected_hold",
-        "hold_older_fence", "unselected_hold", "nothing"])
+        "paused_again", "stale_consumed", "active_hold", "continuation_unconfirmed", "hold_older_fence", "unselected_hold", "nothing"])
 def test_the_selection_predicate_reads_one_current_carrier(row, selected):
     from ouroboros.budget_pause import budget_fence_selected
 

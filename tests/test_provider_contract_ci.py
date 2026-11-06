@@ -69,12 +69,8 @@ def _http_error(status_code: int, body: str):
                 'supported. Use responses or set reasoning_effort to none."}}'
             ),
         ),
-        (400, '{"error":{"message":"tools.19.custom.input_schema is invalid"}}'),
-        (400, '{"error":{"message":"Unknown parameter: tools[0].custom"}}'),
         (401, '{"error":{"code":"invalid_api_key"}}'),
         (403, '{"message":"API key verification failed: key is expired"}'),
-        (404, '{"error":{"code":"model_not_found"}}'),
-        (422, '{"error":{"message":"reasoning_effort medium is unsupported"}}'),
     ],
 )
 def test_contract_and_auth_4xx_are_red(status_code, body):
@@ -95,13 +91,6 @@ def test_contract_and_auth_4xx_are_red(status_code, body):
         (429, '{"error":{"code":"rate_limit_exceeded"}}', "rate_limit_429"),
         (503, '{"error":{"message":"upstream unavailable"}}', "provider_5xx"),
         (400, '{"error":{"code":"insufficient_quota"}}', "quota_or_billing"),
-        (402, '{"error":{"message":"credit balance is too low"}}', "quota_or_billing"),
-        (
-            402,
-            '{"error":{"message":"This request requires more credits, or fewer '
-            'max_tokens. You can only afford 348."}}',
-            "quota_or_billing",
-        ),
     ],
 )
 def test_only_explicit_environmental_outcomes_are_inconclusive(

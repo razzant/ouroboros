@@ -81,7 +81,6 @@ def _policy_entry(*args):
     worker_main(*args)
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("method", ["spawn", "forkserver"])
 def test_a_spawned_or_forkserver_carrier_keeps_the_servers_proxy_policy(tmp_path, monkeypatch, method):
     """Trap 1 in the child itself: a carrier started by the default start methods (spawn on macOS/Windows,
@@ -239,7 +238,7 @@ def test_a_carried_turn_detaches_against_the_servers_published_pool(tmp_path, mo
     publish(worker_total=0, lane_carrier_total=1, worker_pool_disabled_reason="")
     accepted = model_detach.arm_detach(ctx, "long work")
     assert accepted.get("ok") is True and accepted.get("status") == "detach_armed" and len(armed) == 1
-    publish(worker_total=2, lane_carrier_total=1, worker_pool_disabled_reason="worker_crash_storm")
+    publish(worker_total=2, lane_carrier_total=1, worker_pool_disabled_reason="worker_readiness_exhausted")
     refused = model_detach.arm_detach(ctx, "long work")
-    assert refused["error"] == "worker_pool_unavailable" and refused["pool"]["disabled_reason"] == "worker_crash_storm"
+    assert refused["error"] == "worker_pool_unavailable" and refused["pool"]["disabled_reason"] == "worker_readiness_exhausted"
     assert len(armed) == 1

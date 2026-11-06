@@ -19,7 +19,6 @@ from tests.test_resume_handover import _stop_boot
 from tests.test_swarm_host_admission import host as host  # pytest fixture export
 from tests.test_worker_crash_retry import _make_worker
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("return_first", [False, True],
@@ -86,7 +85,6 @@ def test_consumed_g1_selection_after_recovery(
     monkeypatch.setattr(queue, "_reap_queue", jobs)
     monkeypatch.setattr(queue, "_ensure_reaper_started", lambda: None)
     monkeypatch.setattr(workers, "_LAST_SPAWN_TIME", 0)
-    monkeypatch.setattr(workers, "CRASH_TS", [])
     monkeypatch.setattr(workers, "_reconcile_confirmed_dead_review_owner", lambda *_a: None)
     monkeypatch.setattr(workers, "respawn_worker", lambda *_a, **_k: None)
     monkeypatch.setattr(workers, "reconstruct_task_cost", lambda *_a, **_k: {

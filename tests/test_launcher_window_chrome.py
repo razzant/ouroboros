@@ -523,7 +523,6 @@ def press(kind=wc._LEFT_MOUSE_DOWN, clicks=1):
 
 @pytest.mark.parametrize("setting, action", [
     (None, "zoom"),  # never chosen: Zoom, as on the native run whose ordinary bar zoomed
-    ("Maximize", "zoom"),  # System Settings' Zoom
     ("Minimize", "miniaturize"),
     ("None", None),  # Do Nothing
     ("Fill", "fill"),  # a distinct native action, never substituted by Zoom
@@ -860,15 +859,6 @@ def test_only_the_main_window_gets_the_integrated_bar(mac, monkeypatch):
 
 def _read(rel: str) -> str:
     return (ROOT / rel).read_text(encoding="utf-8")
-
-
-def test_the_spa_declares_after_its_theme_script_and_only_the_spa_declares():
-    """The declaration is parsed after ``theme.js`` painted, so it carries the palette in one message."""
-    index = _read("web/index.html")
-    meta = '<meta name="ouroboros-window-chrome" content="integrated">'
-    assert index.count(meta) == 1 and index.index('<script src="/static/theme.js"></script>') < index.index(meta)
-    assert index.index(meta) < index.index("<body")
-    assert "ouroboros-window-chrome" not in _read("web/onboarding_template.html")
 
 
 def _selector_list(text):

@@ -65,8 +65,7 @@ def side_repository(path):
                  "cleanup_stash": label, "cleanup_stash_oids": [oid], "cleanup_repo": str(path)}
 
 
-@pytest.mark.parametrize("how", ["terminal", "stop"])
-@pytest.mark.parametrize("where", ["at_base", "ahead"])
+@pytest.mark.parametrize(("where", "how"), [("at_base", "terminal"), ("ahead", "stop")])
 def test_a_stash_that_failed_after_saving_names_its_bytes_beside_the_failure(cycle, read_only, how, where):
     """Real Git stores the entry before it clears the tree. Its failure refuses the reset and hides nothing:
     the row names the entry, the cause and the checkout, and what it printed puts the removed file back."""

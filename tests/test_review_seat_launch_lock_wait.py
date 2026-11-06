@@ -66,7 +66,6 @@ def _bound(ctx, arguments):
         operation_id=arguments["operation_id"], invocation_id=invocation_id)
 
 
-@pytest.mark.serial  # the session fixture mutates its shared transport registry
 def test_a_delegated_seat_waits_out_a_busy_review_state_lock_and_starts_once(tmp_path, fake_route):
     from ouroboros.review_substrate import ReviewCoordinator
 

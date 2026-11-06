@@ -349,7 +349,6 @@ def _read_receipts(drive):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(os.name != "posix", reason="signal-death semantics are POSIX-only (declared residual)")
 def test_verify_receipt_records_duration_and_signal_for_killed_check(tmp_path):
     from ouroboros.tools.verify import _verify_and_record
@@ -369,7 +368,6 @@ def test_verify_receipt_records_duration_and_signal_for_killed_check(tmp_path):
     assert "duration_ms" not in out_text and "SIGKILL" not in out_text
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(os.name != "posix", reason="uses sh")
 def test_verify_receipt_healthy_default_has_duration_and_no_other_new_keys(tmp_path):
     from ouroboros.tools.verify import _verify_and_record
@@ -386,7 +384,6 @@ def test_verify_receipt_healthy_default_has_duration_and_no_other_new_keys(tmp_p
     assert "PASS: exit=0" in out_text and "duration_ms" not in out_text
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(os.name != "posix", reason="uses sh")
 def test_verify_receipt_stores_resolved_runtime_when_attested(tmp_path):
     """The receipt writer accepts and stores the Stream-A attested runtime; the
@@ -604,7 +601,6 @@ def test_freshness_audit_receives_epoch_not_monotonic(tmp_path, fake_subprocess,
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(os.name != "posix", reason="uses sh")
 def test_verify_check_publishes_typed_exit_and_signal(tmp_path):
     """verify_and_record renders ``exit=`` for the agent but never stamped the
@@ -620,7 +616,6 @@ def test_verify_check_publishes_typed_exit_and_signal(tmp_path):
     assert isinstance(facts["duration_ms"], int)
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(os.name != "posix", reason="uses sh")
 def test_verify_killed_check_publishes_signal_fact(tmp_path):
     from ouroboros.tools.verify import _verify_and_record
@@ -632,7 +627,6 @@ def test_verify_killed_check_publishes_signal_fact(tmp_path):
     assert facts["signal"] == "SIGKILL"
 
 
-@pytest.mark.serial
 @pytest.mark.skipif(os.name != "posix", reason="uses sh")
 def test_verify_timeout_publishes_typed_kill_facts(tmp_path, monkeypatch):
     from ouroboros.tools import verify as verify_mod

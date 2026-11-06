@@ -81,7 +81,6 @@ def test_observed_navigation_chain_keeps_actions_refused_until_a_new_document(re
 
 
 @pytest.mark.browser
-@pytest.mark.serial
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_real_redirect_through_a_control_endpoint_withholds_content(tmp_path, engine):
     """An allowed dev page redirects through the actual Ouroboros main endpoint and back.

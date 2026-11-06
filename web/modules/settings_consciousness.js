@@ -13,13 +13,16 @@ import { skillIconHtml } from './skill_presentation.js';
 import { openPlaceSheet } from './place_sheet.js';
 import { connectPlaceButtonHtml, openConnectPlace } from './place_connect.js';
 import { settingsLinkHtml } from './settings_safety.js';
+import { settingsSection } from './settings_controls.js';
 import { tr, fmt } from './i18n.js';
 
-/** The section body under its title (settings_ui.js keeps the `<h3>`). */
+/** The whole Behavior › Consciousness section (settings_controls.js settingsSection). */
 export function consciousnessSectionHtml() {
-    return `
-        <div class="settings-section-copy">What Ouroboros does when nobody asked: on its own clock, and in the places you connected.</div>
-        <div class="settings-effort-card">
+    return settingsSection({
+        title: 'Consciousness',
+        id: 'settings-consciousness',
+        lead: 'What Ouroboros does when nobody asked: on its own clock, and in the places you connected.',
+        body: `<div class="settings-effort-card">
             <label>Autonomy</label>
             <input id="s-consciousness-autonomy" type="hidden" value="act">
             ${renderSegmentedField({ target: 's-consciousness-autonomy', options: AUTONOMY_LEVELS.map(({ value, label }) => ({ value, label })) })}
@@ -71,7 +74,8 @@ export function consciousnessSectionHtml() {
                     </div>
                 </div>
             </div>
-        </details>`;
+        </details>`,
+    });
 }
 
 /** One row of the places list: icon, authored label, state word, open turns and connector readiness; the row's text is its accessible name. */

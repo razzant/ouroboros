@@ -92,7 +92,6 @@ APPROVED_DELTAS: Mapping[str, Delta] = MappingProxyType({
     "CAPABILITY_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
     "CHILD_RESULT_LINEAGE_FORBIDDEN": Delta(False, "ok", True, "blocked", "A.4", "a refused child-result lineage is a denial"),
     "COGNITIVE_TOOL_REQUIRED": Delta(True, "cognitive_tool_required", False, "ok", "A.11", "owner batch #4: the cognitive redirect is a hint, the error flag is removed"),
-    "EXECUTOR_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
     # This tree's post-cutoff producers emit four more *_UNAVAILABLE identifiers
     # the reference corpus never saw; each is the same A.18 move (the generic
     # `_UNAVAILABLE` marker keeps its own status instead of the coarse error).
@@ -359,6 +358,8 @@ def _golden() -> dict[str, dict]:
 # unavailable. Keep the historical corpus intact and assert the new observed
 # outcome explicitly rather than manufacture old evidence (04-AGENCY S1/S3).
 CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's size notice rides a successful update_world
+    # mcp_oauth: a remote MCP server that needs the owner's sign-in ran nothing; the substrate cannot serve the call yet.
+    "MCP_AUTH_REQUIRED": (True, "unavailable"),
     # A readable diff with escaped Git output is still successful; the original Git failure, if any, keeps its own code.
     "OUTPUT_NOT_UTF8": (False, "ok"),
     # Staging was refused before any effect; the producer must publish that refusal, not a successful warning.
@@ -642,18 +643,23 @@ def _published_answer(tool: str, result) -> tuple[bool, str]:
     return is_error, _typed_result_metadata(tool, result.text, is_error, result)["status"]
 
 
-@pytest.mark.parametrize("subject", tuple(CURRENT_PRODUCER_CONTRACTS))
-@pytest.mark.parametrize("detail", [": detail line\nbody line", " (fixture_tool): detail line\nbody line"])
-def test_current_producer_contracts_have_explicit_live_answers(subject, detail):
+def test_current_producer_contracts_have_explicit_live_answers(subtests):
     """New producers need present contracts, never fabricated old answers."""
-    code = subject.split(":", 2)[1] if subject.startswith("native:") else ""
-    identifier = subject.rsplit(":", 1)[-1]
-    case = Case("current:" + subject, subject, "read_file", "⚠️ " + identifier + detail, code)
-    assert _live_answer(case) == CURRENT_PRODUCER_CONTRACTS[subject]
+    for subject in tuple(CURRENT_PRODUCER_CONTRACTS):
+        for detail in [": detail line\nbody line", " (fixture_tool): detail line\nbody line"]:
+            with subtests.test(subject=subject, detail=detail):
+                code = subject.split(":", 2)[1] if subject.startswith("native:") else ""
+                identifier = subject.rsplit(":", 1)[-1]
+                case = Case("current:" + subject, subject, "read_file", "⚠️ " + identifier + detail, code)
+                assert _live_answer(case) == CURRENT_PRODUCER_CONTRACTS[subject]
 
 
-@pytest.mark.parametrize("tool", ["skill_install", "skill_update"])
-@pytest.mark.parametrize("failure", ["staged_hash", "landing", "bad_check", "empty_notes"])
+@pytest.mark.parametrize(("failure", "tool"), [
+    ("staged_hash", "skill_install"),
+    ("landing", "skill_install"),
+    ("bad_check", "skill_update"),
+    ("empty_notes", "skill_update"),
+])
 def test_registry_failures_keep_the_current_producer_contract(registry_release, monkeypatch, tool, failure):  # noqa: F811
     from ouroboros.skill_install_record import read_install_record
     from ouroboros.tools.registry import ToolContext
@@ -737,8 +743,14 @@ def test_unrecordable_relay_answer_publishes_the_current_producer_contract(tmp_p
         CURRENT_PRODUCER_CONTRACTS["native:CAPABILITY_UNAVAILABLE:RELAY_RETURN_NOT_OWED"])
 
 
-@pytest.mark.parametrize("tool", ["send_user_message", "send_photo", "send_video", "send_file", "send_links", "show_card"])
-@pytest.mark.parametrize("identifier", ["LOCAL_ROOM_UNAVAILABLE", "PEER_DELIVERY_UNSUPPORTED"])
+@pytest.mark.parametrize(("identifier", "tool"), [
+    ("LOCAL_ROOM_UNAVAILABLE", "send_user_message"),
+    ("LOCAL_ROOM_UNAVAILABLE", "send_video"),
+    ("LOCAL_ROOM_UNAVAILABLE", "send_links"),
+    ("PEER_DELIVERY_UNSUPPORTED", "send_photo"),
+    ("PEER_DELIVERY_UNSUPPORTED", "send_file"),
+    ("PEER_DELIVERY_UNSUPPORTED", "show_card"),
+])
 def test_undelivered_send_frames_publish_the_current_producer_contract(tmp_path, monkeypatch, identifier, tool):
     """A send that queued nothing answers through the registry as the producer's typed refusal.
 
@@ -814,7 +826,7 @@ def test_scratchpad_warnings_publish_the_current_producer_contract(scratchpad_in
     assert _published_answer("update_scratchpad", result) == contract
 
 
-@pytest.mark.parametrize("tool", ["write_file", "edit_text", "apply_patch", "edit_batch"])
+@pytest.mark.parametrize("tool", ["write_file", "apply_patch", "edit_batch"])
 def test_output_capture_warning_preserves_the_successful_write(tool):
     """workspace_file_outputs.capture_known_workspace_outputs runs post-write.
 

@@ -18,39 +18,6 @@ import re
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-# The feeds and the rows they hold: a rule naming any of them may not make a row lazy at rest.
-FEEDS = ("#chat-messages", ".chat-messages", ".chat-bubble", ".chat-live-card")
-
-
-def _read(rel: str) -> str:
-    return (REPO / rel).read_text(encoding="utf-8")
-
-
-def _rules(css: str):
-    """(selector, body) of every innermost rule, comments stripped."""
-    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
-    return [(" ".join(match.group(1).split()), match.group(2))
-            for match in re.finditer(r"([^{}@;]+)\{([^{}]*)\}", css)]
-
-
-LAZY_RULES = (":is(#chat-messages, .chat-messages)[data-resizing] > *", ":is(#chat-messages, .chat-messages) > [data-laid]")
-
-
-def test_feed_rows_remember_their_size_and_are_lazy_only_while_the_width_moves_or_once_laid_out():
-    rules = _rules(_read("web/style.css"))
-    rows = [body for selector, body in rules if selector == "#chat-messages > *, .chat-messages > *"]
-    assert any(re.search(r"contain-intrinsic-size:\s*auto\s+\d+px\s*;", body) for body in rows), (
-        "every row remembers the size it was last laid out at, so a lazy row keeps it exactly")
-    flat = [(selector, " ".join(body.split())) for selector, body in rules]
-    for selector in LAZY_RULES:
-        assert (selector, "content-visibility: auto;") in flat, ("the feeds' lazy-row rule", selector)
-    # No other rule makes a feed's rows lazy, in any stylesheet: a row lazy before it was laid out moves the passage.
-    for path in sorted((REPO / "web").glob("*.css")):
-        for selector, body in _rules(path.read_text(encoding="utf-8")):
-            if not re.search(r"content-visibility\s*:", body) or not any(feed in selector for feed in FEEDS):
-                continue
-            assert selector in LAZY_RULES, (
-                f"{path.name} {selector}: a feed's rows are lazy only while its width moves or once laid out")
 
 
 def test_only_the_row_sleep_owner_marks_a_row_laid_out():

@@ -17,7 +17,6 @@ from tests.test_swarm_host_admission import host  # noqa: F401
 from tests._store_shared import result_signature, seed_result, unreadable_result
 
 
-pytestmark = pytest.mark.serial
 
 
 def _owner_stamp(client_message_id, text="owner text"):
@@ -202,7 +201,7 @@ def test_worker_pool_respawn_reuses_process_event_bus_and_refuses_live_pool(monk
     monkeypatch.setattr(workers.mp, "get_context", lambda _method: fake_ctx)
     monkeypatch.setattr(workers, "_EVENT_Q", event_q)
     monkeypatch.setattr(workers, "_EVENT_Q_GENERATION", "test-generation")
-    monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "worker_crash_storm")
+    monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "worker_readiness_exhausted")
     monkeypatch.setattr(workers, "WORKERS", {})
     monkeypatch.setattr(workers, "_record_worker_processes", lambda: None)
     monkeypatch.setattr(workers.threading, "Thread", MagicMock())
@@ -270,7 +269,7 @@ def test_tool_snapshot_precheck_skips_source_side_effects(monkeypatch, tmp_path)
     state = tmp_path / "state"
     state.mkdir(parents=True)
     (state / "queue_snapshot.json").write_text(
-        json.dumps({"worker_pool_disabled_reason": "worker_crash_storm"}),
+        json.dumps({"worker_pool_disabled_reason": "worker_readiness_exhausted"}),
         encoding="utf-8",
     )
     ctx = types.SimpleNamespace(
@@ -287,7 +286,7 @@ def test_tool_snapshot_precheck_skips_source_side_effects(monkeypatch, tmp_path)
         source="/tmp/must-not-attach",
     )
     assert out.startswith("⚠️ PROMOTE_REJECTED:")
-    assert "worker_crash_storm" in out
+    assert "worker_readiness_exhausted" in out
     assert ctx.pending_events == []
 
 
@@ -612,12 +611,12 @@ def test_gateway_refuses_explicitly_disabled_pool_before_task_side_effects(
         )
     )
     monkeypatch.setattr(workers, "WORKERS", {})
-    monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "worker_crash_storm")
+    monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "worker_readiness_exhausted")
     response = _supervisor_ready_error(request)
     payload = json.loads(response.body)
     assert response.status_code == 503
     assert payload["reason_code"] == "worker_pool_unavailable"
-    assert payload["worker_pool_disabled_reason"] == "worker_crash_storm"
+    assert payload["worker_pool_disabled_reason"] == "worker_readiness_exhausted"
     assert not (tmp_path / "task_results").exists()
 
 

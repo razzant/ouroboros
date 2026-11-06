@@ -260,7 +260,6 @@ def _configured_managed_install(root: pathlib.Path):
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s18_carrier_conflict_resolves_to_official_version_and_transfers_carriers(
         tmp_path_factory, monkeypatch):
     require_lane(LANE_MOCK)
@@ -379,7 +378,6 @@ def _seed_exhausted_budget(data_root: pathlib.Path, limit_usd: float) -> None:
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s19_conflicting_update_refused_typed_with_tree_intact(
         tmp_path_factory, monkeypatch):
     require_lane(LANE_MOCK)
@@ -615,7 +613,6 @@ print(json.dumps(report))
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s20_crash_mid_apply_boot_finalize_and_rollback_are_honest(tmp_path_factory):
     require_lane(LANE_MOCK)
     root = tmp_path_factory.mktemp("s20")
@@ -680,7 +677,6 @@ S21_PROJECT_NAME = "s21 lineage"  # a file-less project: its thread IS the linea
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s21_chat_lineage_cancel_delivers_receipt_to_outbox_and_chat(
         e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)
@@ -882,7 +878,6 @@ def _sigkill_server_tree(server) -> None:
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 @pytest.mark.skipif(sys.platform != "linux",
                     reason="process-group SIGKILL + /proc scans are Linux-only")
 def test_s22_absorb_kill_recovery_absorbs_once_and_never_twice(
@@ -1099,7 +1094,6 @@ S23_SCRIPT = [
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s23_interactive_delegated_run_pauses_answers_and_resumes(
         e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)

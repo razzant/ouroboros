@@ -147,7 +147,6 @@ def test_boot_settles_an_adoption_as_unready_when_the_bootstrap_failed(body, mon
     assert seen == [True, False, False]
 
 
-@pytest.mark.serial  # real cold entries
 @pytest.mark.parametrize("fails", ["pointer", "armed_record"])
 def test_arming_interrupted_on_either_side_of_the_pointer_settles_unapplied_and_never_holds_the_checkout(
         body, monkeypatch, fails):

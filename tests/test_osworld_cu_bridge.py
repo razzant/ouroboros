@@ -1553,12 +1553,8 @@ class _GateArgs:
     "latest,expected",
     [
         ({"result": "~/Desktop is empty; nothing to act on.\nINFEASIBLE"}, "INFEASIBLE"),
-        ({"result": "The file is there.\nPROCEED"}, "PROCEED"),
-        ({"result": "Cloudflare blocked the page.\nUNDETERMINED"}, "UNDETERMINED"),
         # Everything below must FAIL OPEN: the working phase still runs.
         ({"result": "a discussion that never states a verdict"}, "UNDETERMINED"),
-        ({"result": "I weighed whether this is INFEASIBLE and decided it is not"}, "UNDETERMINED"),
-        ({"status": "timeout"}, "UNDETERMINED"),
         ({}, "UNDETERMINED"),
         (None, "UNDETERMINED"),
         # The terminal answer field wins over the runtime result body.

@@ -39,7 +39,6 @@ from tests.test_delegate_retry_output import (
     reader_coverage as reader_coverage,
 )
 
-pytestmark = pytest.mark.serial
 
 
 def _receipts(row):

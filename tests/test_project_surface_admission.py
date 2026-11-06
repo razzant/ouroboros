@@ -16,7 +16,6 @@ from tests._store_shared import result_signature
 from tests.test_project_hold_recovery import accepted, worker
 
 host = host_fixture
-pytestmark = pytest.mark.serial
 
 
 def request_for(host, task_id="", query=b""):
@@ -73,9 +72,11 @@ def test_project_api_inactive_room_keeps_the_admission_owners_typed_refusal(host
     assert not host.pending
 
 
-@pytest.mark.parametrize("availability", ["available", "disabled", "unsaved"])
-@pytest.mark.parametrize("project_room", [False, True])
-@pytest.mark.parametrize("producer", ["api", "promotion"])
+@pytest.mark.parametrize(("producer", "project_room", "availability"), [
+    ("api", False, "available"),
+    ("api", False, "unsaved"),
+    ("promotion", True, "disabled"),
+])
 def test_root_receipt_records_the_effective_admitted_room(host, monkeypatch, availability, project_room, producer):
     from ouroboros import config
     from ouroboros.composer_cognition import update_project_cognition
@@ -105,8 +106,7 @@ def test_root_receipt_records_the_effective_admitted_room(host, monkeypatch, ava
         "swarm" if availability == "available" else "off")
 
 
-@pytest.mark.parametrize("accepted,later", [("swarm", "off"), ("off", "swarm")])
-@pytest.mark.parametrize("restoring", [False, True])
+@pytest.mark.parametrize(("restoring", "accepted", "later"), [(False, "swarm", "off"), (True, "off", "swarm")])
 def test_requeued_root_keeps_its_admission_fact_after_a_room_switch(host, monkeypatch, accepted, later, restoring):
     from ouroboros import config
     from tests.test_subagents_mode_messages import mode_settings

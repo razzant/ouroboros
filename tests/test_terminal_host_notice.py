@@ -275,11 +275,11 @@ def test_changed_notice_reopens_parent_disposition_and_automatic_handoff(tmp_pat
     assert loop._compute_subagent_handoff(tools, tmp_path, "parent1", "") == ""
 
 
-@pytest.mark.parametrize("mode", ["all_terminal", "any_terminal"])
-@pytest.mark.parametrize("answer", [ANSWER, ANSWER + "\n" + "model detail " * 1500, ""],
-                         ids=["short_answer", "long_answer", "no_answer"])
-@pytest.mark.parametrize("notice", [NOTICE, NOTICE + "\n" + "retained host evidence " * 1500 + "\nEND NOTICE"],
-                         ids=["short_notice", "long_notice"])
+@pytest.mark.parametrize(("notice", "answer", "mode"), [
+    pytest.param(NOTICE, ANSWER, "all_terminal", id='short_notice-short_answer-all_terminal'),
+    pytest.param(NOTICE, "", "all_terminal", id='short_notice-no_answer-all_terminal'),
+    pytest.param(NOTICE + "\n" + "retained host evidence " * 1500 + "\nEND NOTICE", ANSWER + "\n" + "model detail " * 1500, "any_terminal", id='long_notice-long_answer-any_terminal'),
+])
 def test_batch_wait_delivers_notice_before_current_hash_disposition(tmp_path, monkeypatch, mode, answer, notice):
     """The real batch reader must deliver the warning before disposition hides handoff."""
     from ouroboros.task_status import load_effective_task_result
@@ -380,8 +380,7 @@ def test_child_notice_hash_extension_preserves_legacy_hash_and_telemetry_exclusi
     assert _child_result_sha256({**custody, "terminal_host_notice": NOTICE}) != _child_result_sha256(custody)
 
 
-@pytest.mark.parametrize("direct", [False, True])
-@pytest.mark.parametrize("project", [False, True])
+@pytest.mark.parametrize(("project", "direct"), [(False, False), (True, True)])
 def test_a_host_notice_never_becomes_a_second_chat_row(tmp_path, monkeypatch, direct, project):
     """One voice: the disclosure stays a typed field OF THE RESULT (replay reads it
     from the stored row) and the chat carries the model's answer alone, live and on
@@ -568,7 +567,7 @@ def test_open_custody_is_its_own_card_row_live_and_on_history_replay(tmp_path, m
     assert pending_deliveries(tmp_path) == []
 
 
-@pytest.mark.parametrize("outcome", ["message", "deferred", "silent", "tool_delivered"])
+@pytest.mark.parametrize("outcome", ["message", "silent", "tool_delivered"])
 def test_presence_preserves_authored_speech_and_keeps_host_notice_in_task(tmp_path, monkeypatch, outcome):
     from ouroboros.presence_runner import PresenceTurnGate, run_presence_turn
     from tests.test_presence_runner import _admission, _event

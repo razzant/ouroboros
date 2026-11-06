@@ -21,6 +21,7 @@ from ouroboros.memory import Memory
 from ouroboros.tools import knowledge as tools
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from tests import test_book_context_capture as book
+from tests._cases import case_folders
 
 OLD = "Prefers long written reports."
 NEW = "Prefers short answers first, detail on request."
@@ -81,7 +82,8 @@ def test_registry_summary_edit_reaches_the_next_context_and_not_a_captured_one(t
     assert receipt["knowledge_source"]["revision"] == current.revision
     row = _history(address)[-1]
     assert (row["mode"], row["writer"], row["task_id"], row["summary"]) == ("edit", "turn", "summary-edit", NEW)
-    assert (row["old_content"], row["new_content"], row["delta"]) == (original.text, current.text, delta)
+    from tests._knowledge_history_shared import replaced
+    assert (replaced(address.canonical_root, row), row["new_content"], row["delta"]) == (original.text, current.text, delta)
     assert "edits" not in row
     for inventory in ((address.shelf / store.INDEX_FILE).read_text(encoding="utf-8"),
                       registry.execute("knowledge_list", {"scope": scope})):
@@ -108,7 +110,8 @@ def test_one_body_replacement_and_its_summary_land_in_one_revision(tmp_path):
     assert (receipt["knowledge_delta"]["body_changed"], receipt["knowledge_delta"]["summary_changed"]) == (True, True)
     rows = _history(address)
     assert len(rows) == 2 and rows[-1]["summary"] == "Line one.\nLine two."
-    assert (rows[-1]["old_content"], rows[-1]["new_content"]) == (original.text, current.text)
+    from tests._knowledge_history_shared import replaced
+    assert (replaced(address.canonical_root, rows[-1]), rows[-1]["new_content"]) == (original.text, current.text)
     assert "  Line one.\n  Line two." in (address.shelf / store.INDEX_FILE).read_text(encoding="utf-8")
 
 
@@ -151,13 +154,16 @@ REFUSALS = [
 ]
 
 
-@pytest.mark.parametrize("args,message", REFUSALS)
-def test_ambiguous_or_invalid_calls_refuse_before_any_write(tmp_path, args, message):
-    ctx, _address, original = _setup(tmp_path)
-    before = _files(tmp_path)
-    reply = tools._knowledge_write(ctx, "people/ada", scope="global", expected_revision=original.revision, **args)
-    assert reply.startswith("⚠️ TOOL_ARG_ERROR") and message in reply
-    assert _files(tmp_path) == before
+def test_ambiguous_or_invalid_calls_refuse_before_any_write(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for args, message in REFUSALS:
+        tmp_path = next(case_paths)
+        with subtests.test(args=args, message=message):
+            ctx, _address, original = _setup(tmp_path)
+            before = _files(tmp_path)
+            reply = tools._knowledge_write(ctx, "people/ada", scope="global", expected_revision=original.revision, **args)
+            assert reply.startswith("⚠️ TOOL_ARG_ERROR") and message in reply
+            assert _files(tmp_path) == before
 
 
 @pytest.mark.parametrize("old_str", ["Absent line.", "e"])  # missing, then ambiguous

@@ -50,7 +50,7 @@ from tests.test_subscription_setup_browser import subscription_ui as subscriptio
 from tests.test_task_file_serving import _client
 
 MEASURE = Path(__file__).resolve().parents[1] / "skills" / "ui_design" / "references" / "measure.js"
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 AGAIN = "Re-running the import tests."
 SOLE = "The feed validates: 0 errors and 1 warning (no ttl element), which readers ignore."
 K3, K4, K5 = "claude:ses-1:3:0", "claude:ses-1:3:2", "claude:ses-1:4:0"

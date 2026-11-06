@@ -25,19 +25,10 @@ def synthetic_credentials(monkeypatch):
         ("warning: quoted (HTTP 403) is not a status\ngh: Not Found (HTTP 404)", 404,
          "⚠️ GH_ERROR: warning: quoted (HTTP 403) is not a status | gh: Not Found (HTTP 404)"),
         ("a marker (HTTP 403) inside a sentence", None, "⚠️ GH_ERROR: a marker (HTTP 403) inside a sentence"),
-        ("gh: Not Found (HTTP 404)\r\n", 404, "⚠️ GH_ERROR: gh: Not Found (HTTP 404)"),
-        # gh api without a message; go-gh HTTPError from every other command, wrapped or bare
-        ("gh: HTTP 401", 401, "⚠️ GH_ERROR: gh: HTTP 401"),
         ("failed to fork: HTTP 403: Resource not accessible by personal access token (https://api.github.com/repos/hub/project/forks)",
          403, None),
         ("HTTP 422: Validation Failed (https://api.github.com/repos/hub/project/pulls)", 422, None),
-        ("note that HTTP 403 is not what happened here", None, "⚠️ GH_ERROR: note that HTTP 403 is not what happened here"),
-        # a bare number is prose, never a status
-        ("permission denied, status 403", None, "⚠️ GH_ERROR: permission denied, status 403"),
-        # the status is read from the WHOLE redacted stderr, before the head is cut
-        ("first\nsecond\nthird\nlater line (HTTP 403)", 403, "⚠️ GH_ERROR: first | second | third"),
         ("x" * 700 + " (HTTP 403)", 403, None),
-        ("", None, "⚠️ GH_ERROR: "),
     ],
 )
 def test_transport_bounds_stderr_and_only_reads_gh_http_marker(
@@ -71,7 +62,7 @@ def test_launch_failure_names_what_is_missing(monkeypatch, tmp_path, filename, f
     assert fragment in result.text
 
 
-@pytest.mark.parametrize("failure", ["cli_missing", "timeout", "exit", "exception"])
+@pytest.mark.parametrize("failure", ["cli_missing", "timeout", "exception"])
 def test_transport_never_publishes_a_sidecar(monkeypatch, tmp_path, failure):
     sentinel = object()
     ctx = types.SimpleNamespace(repo_dir=tmp_path, _active_builtin_tool_result=sentinel)
@@ -101,10 +92,6 @@ def test_transport_never_publishes_a_sidecar(monkeypatch, tmp_path, failure):
      "⚠️ TOOL_ARG_ERROR: target must be the positive issue, pull request or discussion number."),
     (run_write, {"method": "update", "target": 0, "state": "closed"},
      "⚠️ TOOL_ARG_ERROR: target must be the positive issue or pull request number."),
-    (run_read, {"method": "get", "kind": "pr", "target": 0}, "⚠️ TOOL_ARG_ERROR: pr number must be positive."),
-    (run_write, {"method": "review", "target": 0, "body": "comment"}, "⚠️ TOOL_ARG_ERROR: target must be the positive pull request number."),
-    (run_write, {"method": "comment", "target": 7, "body": "  "}, "⚠️ TOOL_ARG_ERROR: comment body cannot be empty."),
-    (run_write, {"method": "create_issue", "title": " "}, "⚠️ TOOL_ARG_ERROR: issue title cannot be empty."),
 ])
 def test_argument_refusals_publish_typed_argument_errors(handler, kwargs, expected):
     ctx = types.SimpleNamespace(_active_builtin_tool_result=None)

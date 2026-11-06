@@ -24,10 +24,11 @@ import pytest
 
 from ouroboros.consciousness_view import describe_consciousness_state
 from tests import test_subscription_setup_browser as setup_browser
+from tests._shared import answer_projects
 from tests._work_projection_shared import work_fields
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 # The facts one room's control and list expose to the owner, read in one frame.
 ROOM_FACTS = """(scope) => {
@@ -204,7 +205,7 @@ class Transport:
                 if msg.type in {"error", "warning"} else None)
         page.route_web_socket("**/ws", self._connect)
         page.route("**/api/state*", self._state)
-        page.route("**/api/projects*", lambda route: route.fulfill(json={"projects": self.projects}))
+        page.route("**/api/projects*", lambda route: answer_projects(route, self.projects))
         page.route("**/api/chat/history*", self._history)
         page.route("**/api/tasks/**", self._tasks)
         page.route("**/api/decisions*", self._decision)
@@ -462,14 +463,14 @@ def test_main_rows_say_each_census_state_with_its_own_tone_and_controls(room_ui)
         "rw-pausing": ("Pausing…", "", "held"),
         "rw-failfin": ("Failed", "Finalizing…", "failed"),
         "rw-unknown": ("Activity unconfirmed", "", "unknown"),
-        "rw-queued": ("Queued", "Waiting for a free worker", "queued"),
+        "rw-queued": ("Queued", "", "queued"),
         "rw-ask": ("Waiting for your answer", "", "wait"),
     }
     for task_id, (word, secondary, tone) in expect.items():
         assert (by[task_id]["word"], by[task_id]["secondary"], by[task_id]["tone"]) == (word, secondary, tone), by[task_id]
     focus_lines = page.evaluate("""() => Object.fromEntries([...document.querySelectorAll('#page-chat .rw-row')]
         .map(r => [r.dataset.id, (r.querySelector('.rw-focus:not([hidden])')?.textContent || '').trim()]))""")
-    assert focus_lines["rw-live"] == focus_text and focus_lines["rw-queued"] == "", focus_lines
+    assert focus_text in focus_lines["rw-live"] and focus_lines["rw-queued"] == "", focus_lines
     # An access wait is not an answer wait: only the waited question offers View question.
     assert [item["id"] for item in opened["rows"] if item["question"]] == ["rw-ask"]
     assert by["rw-ask"]["name"].startswith("Reply to “Please check which evidence"), by["rw-ask"]

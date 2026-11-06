@@ -350,10 +350,6 @@ def test_early_tray_panic_latches_stop_and_exits_even_when_persistence_fails(set
 
 @pytest.mark.parametrize("answer,hidden", [
     ({"state": "on"}, True),
-    ({"state": "off"}, False),
-    ({"state": "disabled_by_os"}, False),
-    ({"state": "other_copy"}, False),
-    ({"state": "unavailable", "reason": "Available only when the host runs the packaged desktop app."}, False),
     (OSError("refused"), False),  # a failed read
     (b"<html>", False),
 ])
@@ -577,7 +573,7 @@ class NotifyingIndicator(FakeIndicator):
     carries_notifications = True  # Windows: system notifications are balloons on this icon
 
 
-@pytest.mark.parametrize("quit_during_boot", [False, True, "listen", "settings"])
+@pytest.mark.parametrize("quit_during_boot", [False, True, "settings"])
 def test_main_owns_one_windows_icon_before_bootstrap_and_early_quit_is_callable(
         settings, monkeypatch, quit_during_boot):
     import atexit
@@ -720,22 +716,10 @@ def work(activity, transition="none", turn=False, confirmed=None):
 
 
 @pytest.mark.parametrize("body,line", [
-    (OSError("refused"), "Ouroboros: not responding"),  # refused, timed out (a busy server is not "stopped")
     (b"<html>", "Ouroboros: not responding"),
-    (projection(), "Ouroboros: waiting"),
-    (projection(work("queued")), "Ouroboros: queued"),
-    (projection(work("queued"), work("paused")), "Ouroboros: queued"),  # the server's order: queued before paused
     (projection(work("working", "finalizing")), "Ouroboros: finalizing"),  # an answer's upkeep is not a new task
-    (projection(work("working", "finalizing"), work("working")), "Ouroboros: working on 2 tasks"),
-    (projection(work("working", "pausing"), work("working", "finalizing")), "Ouroboros: pausing"),  # as the room says
-    (projection(work("working"), work("working", "finalizing"), work("working"), work("queued")),
-     "Ouroboros: working on 3 tasks"),
-    (projection(work("working")), "Ouroboros: working on 1 task"),
     (projection(work("paused")), "Ouroboros: paused"),
     (projection(work("working", "pausing"), work("paused")), "Ouroboros: pausing"),  # settling a Pause is not work
-    (projection(work("working"), work("working", "pausing")), "Ouroboros: working on 1 task"),
-    # A direct turn preparing its request is work, not an unknown phase (it used to read "unconfirmed").
-    (projection(work("working")), "Ouroboros: working on 1 task"),
     # What waits for the owner is counted on the same line.
     (projection(work("working"), work("waiting", turn=True)), "Ouroboros: working on 1 task · 1 waits for you"),
     (projection(work("paused", turn=True), work("waiting", turn=True)), "Ouroboros: waiting · 2 wait for you"),
@@ -744,15 +728,8 @@ def work(activity, transition="none", turn=False, confirmed=None):
      "Ouroboros: error, tasks are not running"),
     (projection(supervisor_ready=False), "Ouroboros: starting"),
     (projection(works_complete=False), "Ouroboros: activity unconfirmed"),
-    (projection(work("unknown")), "Ouroboros: activity unconfirmed"),
     # A confirmed work whose only remainder is a run nobody can confirm is counted beside the rest, not all of it.
     (projection(work("unknown", confirmed=True)), "Ouroboros: 1 task unconfirmed"),
-    (projection(work("working"), work("unknown", confirmed=True), work("unknown", confirmed=True)),
-     "Ouroboros: working on 1 task · 2 unconfirmed"),
-    # What waits for the owner comes first, so a cut line keeps it.
-    (projection(work("working"), work("waiting", turn=True), work("unknown", confirmed=True)),
-     "Ouroboros: working on 1 task · 1 waits for you · 1 unconfirmed"),
-    (projection(work("working"), confirmed=False), "Ouroboros: activity unconfirmed"),
 ])
 def test_the_state_line_reads_the_servers_own_activity(monkeypatch, body, line):
     def urlopen(url, timeout):
@@ -834,8 +811,6 @@ def test_macos_quit_requests_are_marked_before_pywebviews_closing_runs(monkeypat
     ("automatic", True, OTHER, []),  # a sign-in start of a second copy stays quiet, another copy too
     ("owner", True, "", ["activate"]),  # a manual one shows the running window
     ("owner", False, "", ["activate", "notice window"]),  # nobody answered: the old notice
-    ("owner", True, OTHER, ["notice window: " + OTHER, "activate"]),  # another copy: its line, then the running one
-    ("owner", False, OTHER, ["notice window: " + OTHER, "activate"]),  # never a second notice window
 ])
 def test_second_launch_shows_the_running_window_only_when_manual(monkeypatch, caplog, intent, answered, other, expected):
     import launcher

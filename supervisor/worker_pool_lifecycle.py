@@ -48,7 +48,7 @@ def is_project_slot(slot: Any) -> bool:
 
 
 def is_lane_slot(slot: Any) -> bool:
-    """A conversation-lane carrier: outside MAX_WORKERS, the storm capture and the exhaustion fence."""
+    """A conversation-lane carrier: outside MAX_WORKERS and the exhaustion fence."""
     return getattr(slot, "lane", LANE_PROJECT) == LANE_CONVERSATION
 
 
@@ -65,6 +65,91 @@ def project_slots(pool: Any = None) -> list:
 def lane_slots(pool: Any = None) -> list:
     pool = _pool().WORKERS if pool is None else pool
     return [slot for slot in pool.values() if is_lane_slot(slot)]
+
+
+def pool_slot_counts(pool: Any = None) -> Dict[str, Any]:
+    """The one in-memory measurement of the pool's slots, published by ``queue_publication._pool_counts``.
+
+    ``max_workers`` is the configured ceiling of active project capacity; ``worker_total`` counts
+    the project slots that exist now (parked owner-wait slots can remain materialized after the
+    active ceiling is reached). ``active_worker_count`` is dispatch-enabled capacity (a parked owner-wait author
+    lends its slot), not work in progress: ``busy_worker_count`` counts slots holding a task.
+    The booting/reaping/retiring flags overlap (a fresh slot is booting and reaping until its
+    readiness row); ``assignable_idle_workers`` is what dispatch could use this instant.
+    Conversation carriers are another lane, outside the ceiling, counted apart. No queue,
+    filesystem or admission work; ``worker_ready`` asks each slot's ``Process`` whether it is alive.
+    """
+    slots = _pool().WORKERS if pool is None else pool
+    projects = project_slots(slots)
+    carriers = lane_slots(slots)
+
+    def idle(slot: Any) -> bool:
+        return (getattr(slot, "busy_task_id", None) is None and worker_ready(slot)
+                and getattr(slot, "active_capacity", True)
+                and not getattr(slot, "resume_hold", ""))
+
+    active = sum(1 for slot in projects if getattr(slot, "active_capacity", True))
+    return {
+        "max_workers": int(_pool().MAX_WORKERS),
+        "worker_total": len(projects),
+        "active_worker_count": active,
+        "parked_worker_count": len(projects) - active,
+        "busy_worker_count": sum(1 for slot in projects if getattr(slot, "busy_task_id", None) is not None),
+        "booting_count": sum(1 for slot in projects if getattr(slot, "booting", False)),
+        "reaping_count": sum(1 for slot in projects if getattr(slot, "reaping", False)),
+        "retiring_count": sum(1 for slot in projects if getattr(slot, "retiring", False)),
+        "assignable_idle_workers": sum(1 for slot in projects if idle(slot)),
+        "lane_carrier_total": len(carriers),
+        "lane_carrier_idle": sum(1 for slot in carriers if idle(slot)),
+    }
+
+
+def _initial_forecast() -> Dict[str, Any]:
+    return {"status": "unknown", "admissible_pending": None, "ceiling": None, "reason": "not_computed",
+            "observed_since": "", "revision": 0, "passes": 0}
+
+
+#: The growth forecast the last assignment pass computed (``reconcile_worker_capacity``), process-local;
+#: a pool generation's stop or start makes it unknown again (``workers.spawn_workers``/``kill_workers``).
+_DEMAND_FORECAST: Dict[str, Any] = _initial_forecast()
+_DEMAND_FORECAST_LOCK = threading.Lock()
+
+
+def record_demand_forecast(demand: Optional[int], *, reason: str = "", assignment_pass: bool = True) -> None:
+    """Record what one assignment pass knew about admissible demand; ``None`` with a reason when it computed none.
+
+    The value is the one ``reconcile_worker_capacity`` already grows on, never recomputed for a
+    reader. ``observed_since`` and ``revision`` move only when the observation changes, so a
+    steady pool publishes no new queue document; its currency is the document's own certificate.
+    A generation's stop or start records unknown outside any pass (``assignment_pass=False``).
+    """
+    ceiling = max(1, int(_pool().MAX_WORKERS))
+    if demand is None:
+        observed = {"status": "unknown", "admissible_pending": None, "ceiling": ceiling,
+                    "reason": str(reason or "not_computed")}
+    else:
+        observed = {"status": "computed", "admissible_pending": min(max(0, int(demand)), ceiling),
+                    "ceiling": ceiling, "reason": ""}
+    with _DEMAND_FORECAST_LOCK:
+        if assignment_pass:
+            _DEMAND_FORECAST["passes"] = int(_DEMAND_FORECAST.get("passes") or 0) + 1
+        if any(_DEMAND_FORECAST.get(key) != value for key, value in observed.items()):
+            _DEMAND_FORECAST.update(observed, observed_since=utc_now_iso(),
+                                    revision=int(_DEMAND_FORECAST.get("revision") or 0) + 1)
+
+
+def demand_forecast_passes() -> int:
+    with _DEMAND_FORECAST_LOCK:
+        return int(_DEMAND_FORECAST.get("passes") or 0)
+
+
+def demand_forecast() -> Dict[str, Any]:
+    """The published form: the last pass's admissible pending rows (capped by the ceiling), or unknown and why."""
+    with _DEMAND_FORECAST_LOCK:
+        forecast = {key: value for key, value in _DEMAND_FORECAST.items() if key != "passes"}
+    value = forecast["admissible_pending"]
+    return {**forecast, "scope": "last_assignment_pass",
+            "at_ceiling": value is not None and forecast["ceiling"] is not None and value >= forecast["ceiling"]}
 
 
 def project_fenced(slot: Any) -> bool:
@@ -123,7 +208,7 @@ def _recorded_cancel_fields(task_id: str, *, stop_source: str = "", reason: str 
 
 def _write_failure_result(
     task_id: str,
-    reason: str = "Worker process crashed (crash storm). Task was not completed.",
+    reason: str = "Worker process was stopped before this task finished. Task was not completed.",
     status: str = "",
     stop_source: str = "",
 ) -> str:
@@ -334,7 +419,7 @@ def _verify_worker_sha_after_spawn(
     ``WORKER_READY_CEILING_SEC`` from birth. Replacement still runs through ``respawn_worker`` — at
     most ``WORKER_READY_MAX_ATTEMPTS`` consecutive times for one slot, then the slot is parked and
     reported. A child that DIED during boot is released to the crash detector, which already owns
-    process death (``worker_dead_detected``, retry, the crash-storm fence). This is a contract
+    process death (``worker_dead_detected``, the one retry). This is a contract
     distinct from process liveness and from the task idle rail: a deadlocked child is alive and
     holds no task. ``spawned_at`` is the instant before ``proc.start()``: the window and the
     reported wait count from the child's birth, not from this thread's start.
@@ -812,8 +897,8 @@ def respawn_worker(wid: int, *, ready_attempt: int = 1) -> bool:
     prevents a replacement from being installed if the slot was removed while
     the queue lock was released.  The fresh slot is installed unassignable and
     handed to the readiness seam; ``ready_attempt`` is that seam's own
-    consecutive-failure count for this slot. A current pool stop fence (crash
-    storm, exhaustion, Stop, update) starts no child and forgets no slot: a
+    consecutive-failure count for this slot. A current pool stop fence
+    (exhaustion, Stop, update) starts no child and forgets no slot: a
     death or timeout captured earlier, a lent slot's included, leaves its dead
     slot to that fence's owner, whose stop needs the membership it captured.
     """
@@ -933,7 +1018,7 @@ def _idle_retirement_current(job: dict, slot: Any) -> bool:
         return (str(_pool().DRIVE_ROOT) == job["drive_root"]
                 and _pool().WORKERS.get(slot.wid) is slot and slot.retiring
                 and slot.busy_task_id is None and job["token"] == slot.quiescence_token
-                # A captured storm stop keeps membership stable; its owner tears down.
+                # A captured fence stop keeps membership stable; its owner tears down.
                 and not project_fenced(slot))
 
 
@@ -969,7 +1054,8 @@ def reap_idle_worker(job: dict) -> None:
 def reconcile_worker_capacity(residual_demand) -> None:
     """Demand-sized growth; one stable ready spare at quiescence, with no idle timer.
 
-    Forecast uses assignment's chooser under Q. Booting slots can satisfy future
+    Forecast uses assignment's chooser under Q, once; readers get that value
+    (``record_demand_forecast``), never a second run. Booting slots can satisfy future
     demand; exhausted or retiring slots cannot, but all keep charged reservations.
     Parked authors lend theirs only through the durable owner-wait protocol.
 
@@ -986,8 +1072,11 @@ def reconcile_worker_capacity(residual_demand) -> None:
     reconcile_conversation_lane()
     with _queue_lock:
         if not _pool().WORKERS or _pool()._WORKER_POOL_DISABLED_REASON:
+            record_demand_forecast(None, reason="pool_disabled" if _pool()._WORKER_POOL_DISABLED_REASON
+                                   else "pool_absent")
             return
         demand = residual_demand()
+        record_demand_forecast(demand, reason="assignment_blocked")  # the one forecast growth reads, as computed
         if demand is None or (_pool().repo_writer_admission_closed() and not demand):
             return
         active = [w for w in project_slots() if w.active_capacity]
@@ -1015,8 +1104,8 @@ def reconcile_worker_capacity(residual_demand) -> None:
                 retire_quiescent_worker(slot)
         next_id = max(_pool().WORKERS, default=-1) + 1
     for wid in range(next_id, next_id + missing):
-        # Starts run without Q. The serializer excludes Stop/update/storm teardown;
-        # the health owner can still fence a storm while this start is in flight.
+        # Starts run without Q. The serializer excludes Stop/update/exhaustion teardown;
+        # the readiness owner can still fence the pool while this start is in flight.
         from supervisor.worker_chat_lane import marker_window_closed
 
         with _queue_lock:
@@ -1094,7 +1183,7 @@ def _spawn_worker_slot(wid: int, old: Any = None, *, ready_attempt: int = 1, lan
         target=_pool()._verify_worker_sha_after_spawn,
         args=({wid: fresh}, events_cursor, int(ready_attempt), spawned_at), daemon=True,
     ).start()
-    # Do not reset _LAST_SPAWN_TIME here; respawn grace would hide crash storms.
+    # Do not reset _LAST_SPAWN_TIME here; respawn grace would hide a dying pool's deaths.
     return True
 
 

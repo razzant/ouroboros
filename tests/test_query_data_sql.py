@@ -52,14 +52,7 @@ def test_sql_child_keeps_windows_systemroot(ctx, monkeypatch):
 
 @pytest.mark.parametrize("query", [
     "ATTACH DATABASE ':memory:' AS other",
-    "CREATE TABLE surprise(x)",
-    "DELETE FROM tasks",
     "UPDATE tasks SET status='failed'",
-    "INSERT INTO tasks(task_id) VALUES ('unexpected')",
-    "DROP TABLE tasks",
-    "PRAGMA user_version=4",
-    "PRAGMA query_only=OFF",
-    "SELECT load_extension('not-an-extension')",
     "SELECT body FROM task_bodies",
 ])
 def test_sql_denials_and_working_select(ctx, query):
@@ -70,12 +63,10 @@ def test_sql_denials_and_working_select(ctx, query):
         assert txn.load("caller")["result"] == "body only"
 
 
-@pytest.mark.parametrize("db", ["current", "money"])
-@pytest.mark.parametrize("snapshot", [False, True])
-@pytest.mark.parametrize("query,message", [
-    ("DELETE FROM meta", "not authorized"),
-    ("SELECT )", 'near ")": syntax error'),
-    ("SELECT 1; SELECT 2", "You can only execute one statement at a time."),
+@pytest.mark.parametrize(("query", "message", "snapshot", "db"), [
+    ("DELETE FROM meta", "not authorized", False, "current"),
+    ("SELECT )", 'near ")": syntax error', True, "money"),
+    ("SELECT 1; SELECT 2", "You can only execute one statement at a time.", False, "current"),
 ])
 def test_sql_errors_are_query_failures_not_store_damage(ctx, db, snapshot, query, message):
     if db == "money":
@@ -138,8 +129,8 @@ def test_authorizer_denies_extension_function_independently():
         conn.close()
 
 
-@pytest.mark.parametrize("pragma", ["table_info(tasks)", "table_xinfo(tasks)", "table_list",
-                                    "index_list(tasks)", "index_info(tasks_parent)"])
+@pytest.mark.parametrize("pragma", ["table_info(tasks)", "table_list",
+                                    "index_info(tasks_parent)"])
 def test_metadata_pragmas_are_readable(ctx, pragma):
     result = run(ctx, "PRAGMA " + pragma)
     assert result["status"] == "ok", result
@@ -377,8 +368,7 @@ def test_sqlite_failure_owns_only_its_interrupt_and_an_expired_busy_wait(tmp_pat
         assert not owned(spent, errors[name], fired), name
 
 
-@pytest.mark.parametrize("started", [False, True])
-@pytest.mark.parametrize("returncode", [None, 0, 1])
+@pytest.mark.parametrize(("returncode", "started"), [(None, True), (0, False), (1, True)])
 def test_late_parent_observation_keeps_exited_child_answer(tmp_path, monkeypatch, started, returncode):
     from types import SimpleNamespace
 

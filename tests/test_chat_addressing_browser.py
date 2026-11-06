@@ -20,7 +20,7 @@ from tests._shared import producer_evidence_dir
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
 
 wait_clone = clone_fixture
-pytestmark = [pytest.mark.serial, pytest.mark.ui_browser]
+pytestmark = [pytest.mark.ui_browser]
 
 _OBSERVE_CARDS = """() => {
     window.__mountedCards = [];

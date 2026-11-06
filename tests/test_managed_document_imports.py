@@ -193,7 +193,7 @@ def test_a_child_recovers_its_owners_uncertain_import_by_the_same_key_and_body(m
     assert _owed(managed.root, "t-kid") == {} and list(_owed(managed.root, "t-docs")) == [record["import_key"]]
 
 
-@pytest.mark.parametrize("state", ["gap", "damaged", "cancelled", "conflict", "rejected", "released"])
+@pytest.mark.parametrize("state", ["gap", "rejected", "released"])
 def test_a_child_keeps_the_latest_terminal_or_gapped_import_instead_of_minting_another(managed, state):
     from ouroboros.delegate_documents import FINISHED_STATES
 

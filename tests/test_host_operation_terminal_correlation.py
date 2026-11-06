@@ -60,7 +60,6 @@ def test_actual_final_producer_preserves_named_reply_and_rejoin(tmp_path, monkey
 @pytest.mark.parametrize("case,chat,user,owner,expected", [
     ("missing_identity", -42, 0, {}, "failed"),
     ("registration", 42, 42, {}, "completed"),
-    ("status", 42, 42, {"owner_external_id": 42, "owner_external_chat_id": 42}, "completed"),
     ("wrong_owner", 43, 43, {"owner_external_id": 42, "owner_external_chat_id": 42}, "failed"),
 ])
 def test_server_inline_replies_settle_their_exact_ingress(tmp_path, monkeypatch, case, chat, user, owner, expected):

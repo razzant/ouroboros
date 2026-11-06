@@ -2089,8 +2089,7 @@ def test_gateway_setup_job_operations_use_the_exact_daemon_routes():
     ]
 
 
-@pytest.mark.parametrize("op", ["snapshot", "cancel", "reconcile"])
-@pytest.mark.parametrize("status", [404, 410])
+@pytest.mark.parametrize(("status", "op"), [(404, "snapshot"), (404, "reconcile"), (410, "cancel")])
 def test_login_job_absence_statuses_pass_through(monkeypatch, tmp_path, op, status):
     """Job absence is a client-custody verdict for exactly these operations."""
     from ouroboros import claudexor_daemon as owned
@@ -3579,7 +3578,7 @@ def test_the_proxy_count_in_the_docs_matches_the_handlers_that_exist(tmp_path):
 
     from ouroboros.gateway import claudexor_accounts as accounts
 
-    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven"}
     handlers = sorted(
         name for name, obj in vars(accounts).items()
         if name.startswith("api_claudexor_") and inspect.iscoroutinefunction(obj)

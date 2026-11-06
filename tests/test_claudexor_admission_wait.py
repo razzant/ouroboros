@@ -36,7 +36,6 @@ import pytest
 # Real loopback ports (ThreadingHTTPServer) and a real spawned child process:
 # not parallel-safe under the xdist lane (DEVELOPMENT.md "Parallel CI and the
 # serial marker") — the whole module runs in the serial pass.
-pytestmark = pytest.mark.serial
 
 from ouroboros import claudexor_daemon as owned
 from ouroboros.gateways.claudexor import ClaudexorUnavailable
@@ -383,22 +382,31 @@ def test_handshake_without_serving_mode_keeps_todays_path(monkeypatch, tmp_path)
 
 
 # ---------------------------------------------------------------------------
-# A6 (i)/(vii): the real executor probe resolves the harness when recovery
-# completes within the admission window — the incident's exact miss.
+# A6 (i)/(vii): the real dispatch health check of a configured session row
+# resolves the harness when recovery completes within the admission window —
+# the incident's exact miss.
 # ---------------------------------------------------------------------------
 
 
-def test_probe_resolves_harness_after_recovery_completes_in_window(monkeypatch, tmp_path):
-    from ouroboros.subagents import probe_subagent_executor
+def _session_resolution():
+    """The executor resolution of a configured `codex` session row at the real dispatch."""
+    from ouroboros.subagents import resolve_subagent_dispatch
 
+    snapshot = {"schema": 1, "selected_subagent_id": "codex-row", "config_fingerprint": "codex-row-v1",
+                "route": {"kind": "agent_session", "target_id": "codex"}, "access": "readonly"}
+    return resolve_subagent_dispatch(
+        {"delegation_role": "subagent", "configured_subagent": snapshot,
+         "parent_cognitive_route": {"model": "nanny-model"}}, task_type="task").executor_resolution
+
+
+def test_probe_resolves_harness_after_recovery_completes_in_window(monkeypatch, tmp_path):
     servers, states = [], []
     manager, _ = _fresh_manager(monkeypatch, tmp_path)
     _spawning_recovery_daemon(monkeypatch, servers, states, normal_after=3)
     _rotation_recorder(monkeypatch, manager, states)
-    monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "codex")
 
     try:
-        resolution = probe_subagent_executor("auto")
+        resolution = _session_resolution()
         assert resolution.executor == "harness"
         assert resolution.reason == "harness_ready"
         assert resolution.route is not None and resolution.route.route_id == "codex"
@@ -409,23 +417,18 @@ def test_probe_resolves_harness_after_recovery_completes_in_window(monkeypatch, 
 
 
 def test_probe_refuses_typed_when_recovery_outlives_the_window(monkeypatch, tmp_path):
-    """The bounded window expired: D28 lands at the dispatch table — `auto`
-    falls back native WITH the typed marker, a pin blocks. The recovering
-    daemon is not killed and the next probe attaches to it."""
-    from ouroboros.subagents import probe_subagent_executor
-
+    """The bounded window expired: the session row's pin blocks, typed. The
+    recovering daemon is not killed and the next probe attaches to it."""
     servers, states = [], []
     manager, _ = _fresh_manager(monkeypatch, tmp_path)
     monkeypatch.setattr(owned, "_ADMISSION_WAIT_SEC", 0.2)
     _spawning_recovery_daemon(monkeypatch, servers, states, normal_after=None)
     _rotation_recorder(monkeypatch, manager, states)
-    monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "codex")
 
     try:
-        auto = probe_subagent_executor("auto")
-        assert (auto.executor, auto.reason) == ("native", "daemon_recovery_only")
-        pinned = probe_subagent_executor("harness")
-        assert (pinned.executor, pinned.reason) == ("blocked", "daemon_recovery_only")
+        for _attempt in range(2):
+            pinned = _session_resolution()
+            assert (pinned.executor, pinned.reason) == ("blocked", "daemon_recovery_only")
         assert manager._proc is not None and manager._proc.poll() is None
         assert len(servers) == 1, "the second probe attached instead of respawning"
     finally:

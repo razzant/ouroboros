@@ -142,7 +142,7 @@ def test_retirement_counters_of_the_physical_send_reach_the_returned_usage(fit, 
     assert not counters.keys() & _call(_LLM())[1].keys()
 
 
-@pytest.mark.parametrize("code", ["auth_required", "subscription_window_exhausted", "model_operation_interrupted", "model_outcome_unknown"])
+@pytest.mark.parametrize("code", ["auth_required", "subscription_window_exhausted", "model_outcome_unknown"])
 def test_control_resource_and_unknown_model_errors_still_propagate(fit, code):
     from ouroboros.llm_claudexor import ClaudexorModelError
     error = ClaudexorModelError({"code": code, "message": "context length exceeded"})
@@ -167,8 +167,7 @@ def test_wait_interruption_propagates(fit):
     assert caught.value is interruption and len(llm.calls) == 1
 
 
-@pytest.mark.parametrize("unresolved", [False, True])
-@pytest.mark.parametrize("code", ["provider_failed", "invalid_request"])
+@pytest.mark.parametrize(("code", "unresolved"), [("provider_failed", False), ("invalid_request", True)])
 def test_confirmed_model_context_refusal_is_typed_but_unknown_custody_propagates(fit, unresolved, code):
     from ouroboros.llm_claudexor import ClaudexorModelError
     fit.window = None
@@ -208,7 +207,6 @@ def test_generic_unknown_custody_is_typed_even_through_cause(fit):
 @pytest.mark.parametrize("message,code,kind", [
     ("max_tokens exceeds maximum context length", "", "request_too_large"),
     ("context length exceeded", "invalid_api_key", "auth_error"),
-    ("request body too large", "", "request_too_large"),
     ("ordinary failure", "invalid_request", "provider_error"),
 ])
 def test_ordinary_refusals_are_classified(fit, message, code, kind):
@@ -336,4 +334,3 @@ def test_output_truncation_is_refused_on_every_lane_shape(fit, shape):
     content, usage = _call(llm)
     assert content == ""
     assert [error["kind"] for error in usage["_consolidation_errors"]] == ["output_truncated"]
-

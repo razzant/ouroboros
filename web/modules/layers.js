@@ -16,11 +16,12 @@
  * closes a layer before it leaves the app; `popstate` pops one layer; closing the last layer programmatically
  * consumes that entry (`history.back()`) and the popstate it causes is swallowed. The entry is reconciled once per
  * task, so "close the drawer, open the Project" never leaves a stray entry (the b2 mockup's finding). No URL is ever
- * written: the desktop shell and the Telegram mini app have no address bar (tests/test_navigation_shell_static.py).
+ * written: the desktop shell and the Telegram mini app have no address bar.
  *
  * Inert: a modal layer makes the rest of the shell inert (siblings along its ancestor path inside the shell's
  * container, never `<body>`'s other children, where dialogs, menus and toasts opened over the layer live; what the page
- * had already made inert is left alone); a non-modal layer (the docked Project panel) leaves the sidebar live. Focus goes
+ * had already made inert is left alone); a non-modal layer (the desk's Project panel beside Main) leaves the room live,
+ * and a modal one keeps its `live` elements usable (a finger's docked Project keeps the sidebar). Focus goes
  * into the layer on open and returns to the opener on close, unless it was moved out to something still live. Every
  * listener has a disposer.
  *
@@ -129,6 +130,8 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
         const el = layer.el;
         if (!el || typeof el.focus !== 'function') return;
         if (!el.hasAttribute?.('tabindex')) el.tabIndex = -1;
+        // The root is where the focus lands, never a control: it draws no ring (style.css [data-layer-landing], U122).
+        el.setAttribute?.('data-layer-landing', '');
         try { el.focus({ preventScroll: true }); } catch { /* detached */ }
     }
     // The opener takes back a focus the layer held or that is lost; one the person moved beside a live layer (Main's

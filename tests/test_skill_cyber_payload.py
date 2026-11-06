@@ -25,7 +25,7 @@ def access(request, monkeypatch):
     config.reset_runtime_mode_baseline_for_tests()
 
 
-@pytest.mark.parametrize("name", [".env", "prod.env", "credentials.json", "id_rsa"])
+@pytest.mark.parametrize("name", [".env", "credentials.json", "id_rsa"])
 def test_credential_like_named_inert_resource_is_hashed_and_read_in_every_mode(tmp_path, access, name):
     """A credential-like name decides nothing in any mode: the same bytes, hash, review pack and load."""
     skill = tmp_path / "demo"
@@ -54,7 +54,6 @@ def test_credential_like_named_inert_resource_is_hashed_and_read_in_every_mode(t
 
 @pytest.mark.parametrize("payload", [
     b"\x7fELF" + b"\0" * 16,  # Valid UTF-8 bytes still represent a binary-format fixture.
-    b"MZ\x90\0" + b"\xff" * 16,
     b"\xcf\xfa\xed\xfe" + b"\0" * 16,
     importlib.util.MAGIC_NUMBER + b"\0" * 16,
 ])

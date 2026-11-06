@@ -12,7 +12,7 @@ import { delegatedActivityBodyHtml, delegatedHeadline, delegatedLineView } from 
 import { REUSABLE_TASK_IDS } from './task_control_menu.js';
 import { ownLiveDetail, paintLiveDetail } from './task_phase_chip.js';
 import { fmt, tr } from './i18n.js';
-import { formatMsgTime } from './utils.js';
+import { formatMsgTime, formatUsdKnown } from './utils.js';
 import { placeIngressNote } from './chat_attachments.js';
 import { hostRowDisplayText, hostSentenceText } from './host_notice_text.js';
 export { bootPhase, startingStatus, supervisorReady } from './host_starting_status.js';
@@ -49,12 +49,10 @@ export function applyHistoricalModelExecution(record, historical) {
     return true;
 }
 
-export function senderLabel(role, isProgress = false, systemType = '', opts = {}, chatSessionId = '') {
+export function senderLabel(role, isProgress = false, systemType = '', opts = {}) {
     if (role === 'user') {
         if (opts.source === 'telegram') return opts.senderLabel || 'Telegram';
-        if (opts.senderSessionId && opts.senderSessionId !== chatSessionId) {
-            return `WebUI (${opts.senderSessionId.slice(0, 8)})`;
-        }
+        // The owner's words from another window or device are still the owner's: no session id.
         return opts.senderLabel || 'You';
     }
     if (role === 'system') {
@@ -417,11 +415,8 @@ const PAUSING_PHASES = new Set(['budget_pausing', 'pausing']);
  * @returns {string}
  */
 export function restartConfirmBody(activities) {
-    const lines = [
-        'Running tasks stop, then eligible saved work resumes after the restart. Tasks already paused stay paused.',
-        'Runnable queued tasks return to the queue. Existing holds and limits still apply.',
-        'Saved settings apply after the restart: work that follows a model setting resumes on the current setting; task-specific choices stay.',
-    ];
+    // One line says what happens; the policy is the dialog's Details (RESTART_FACTS); a gap that changes the choice stays.
+    const lines = ['Running tasks stop and continue after the restart.'];
     if (!Array.isArray(activities) || activities.some((row) => row?.phase === 'unknown')) {
         lines.push('Pause status could not be read: a task that is still pausing would be interrupted instead of staying paused.');
         if (!Array.isArray(activities)) return lines.join('\n');
@@ -439,6 +434,12 @@ export function restartConfirmBody(activities) {
     }
     return lines.join('\n');
 }
+
+export const RESTART_FACTS = { summary: 'Details', rows: [
+    { label: 'Running tasks', value: 'They stop, then eligible saved work resumes after the restart. Tasks already paused stay paused.' },
+    { label: 'Queued tasks', value: 'Runnable ones return to the queue. Existing holds and limits still apply.' },
+    { label: 'Settings', value: 'Saved settings apply: work that follows a model setting resumes on the current setting; task-specific choices stay.' },
+] };
 
 async function readLiveActivities() {
     const { state: data } = await readState();  // a refusal, an unparsable body or no answer is unknown, never "none"
@@ -473,10 +474,7 @@ export async function confirmAndSendRestart({ openConfirmDialog, ws, readActivit
         activities = null;
     }
     const confirmed = await openConfirmDialog({
-        title: 'Restart agent',
-        body: restartConfirmBody(activities),
-        confirmLabel: 'Restart',
-        danger: true,
+        title: 'Restart agent', body: restartConfirmBody(activities), details: RESTART_FACTS, confirmLabel: 'Restart', danger: true,
     });
     if (!confirmed) return 'cancelled';
     const result = ws?.send?.({ type: 'command', cmd: '/restart' }, { queue: false });
@@ -677,24 +675,44 @@ export function headerBudgetPresentation(data) {
  *
  * `null` means "no carrier here, use the legacy derivation below".
  */
-export function costPresentationMeta(presentation) {
+export function costPresentationMeta(presentation, context = null) {
     if (!presentation || typeof presentation !== 'object') return null;
-    if (!presentation.has_rows) return presentation.accounting_open ? ['Cost unknown'] : [];
     const amount = presentation.tracked_amount;
-    if (amount === null || amount === undefined || !Number.isFinite(Number(amount))) {
+    const known = presentation.has_rows === true && amount !== null && amount !== undefined
+        && Number.isFinite(Number(amount));
+    // An unreadable custody view or quarantined ledger is not an in-flight
+    // accounting state: without a known subtotal it reads unknown, never pending.
+    // A known subtotal keeps the qualification its producer gave it below.
+    if (!known && (context?.ledger_integrity_degraded === true
+        || context?.cost_custody?.status === 'unavailable')) return ['Cost unknown'];
+    if (!presentation.has_rows) {
+        if (!presentation.accounting_open) return [];
+        // Pending delegated custody has an unpriced row even before a priced
+        // row arrives; an empty open carrier is instead an integrity gap.
+        return presentation.has_unpriced ? ['Cost pending'] : ['Cost unknown'];
+    }
+    if (!known) {
         // No priced or bounded row evidenced anything: an empty ledger and a
         // ledger of exclusively unpriced calls both sum to 0.0, and neither is a
         // measured zero. The card says so instead of inventing a free result.
+        if (presentation.accounting_open === true) return ['Cost pending'];
+        if (presentation.has_unpriced) return ['Cost not priced'];
         return ['Cost unknown'];
     }
-    const money = `$${Number(amount).toFixed(2)}`;
+    const money = formatUsdKnown(Number(amount));  // never $0.00 for a positive amount
     if (presentation.has_unpriced) return [`Tracked: ${presentation.tracked_final ? money : `up to ${money}`}`];
     return [presentation.tracked_final ? money : `up to ${money}`];
 }
 
 /** Why a mixed subtotal reads `Tracked:`: said in the card's details, never a hover-only title. */
-export const costPresentationDetail = (presentation) => (costPresentationMeta(presentation)?.[0]?.startsWith('Tracked: ')
-    ? 'Cost: some steps have no price, so Tracked counts only the priced steps.' : '');
+export const costPresentationDetail = (presentation, context = null) => {
+    const meta = costPresentationMeta(presentation, context);
+    const first = meta?.[0] || '';
+    if (first === 'Cost pending') return 'Cost: accounting is still open; no amount is counted as $0.';
+    if (first === 'Cost not priced') return 'Cost: settled usage has no price, so it is not counted as known spend or as $0.';
+    if (!first.startsWith('Tracked: ')) return '';
+    return 'Cost: some steps have no price, so Tracked counts only the priced steps.';
+};
 
 export function taskCostMeta(payload = {}) {
     // Presence means a VALUE, exactly as in `resolveCostPair`: a browser
@@ -730,7 +748,7 @@ export function taskCostMeta(payload = {}) {
     // #498: the producer's own carrier wins, because it was built from the exact
     // ledger bucket it describes. The derivation below stays for legacy frames
     // and is deliberately conservative: it may not know a zero is unevidenced.
-    const presented = costPresentationMeta(payload.cost_presentation);
+    const presented = costPresentationMeta(payload.cost_presentation, payload);
     if (presented) return presented;
 
     // C2/F12: ONE precedence resolver, shared with the Python seams and with
@@ -754,7 +772,7 @@ export function taskCostMeta(payload = {}) {
     // breakdowns and unmetered counts stay on Costs, Logs and task detail.
     if (total === null) return ['Cost unknown'];
     if (!(finalKnown || pendingKnown || total !== 0)) return [];
-    const amount = `$${total.toFixed(2)}`;
+    const amount = formatUsdKnown(total);
     return [finalKnown ? amount : `up to ${amount}`];
 }
 
@@ -767,7 +785,7 @@ export function taskCostMeta(payload = {}) {
 export function taskCostProjection(payload = {}, rawTs = '') {
     const meta = taskCostMeta(payload);
     if (!meta.length) return null;
-    const detail = costPresentationDetail(payload.cost_presentation);
+    const detail = costPresentationDetail(payload.cost_presentation, payload);
     const unavailable = payload.cost_accounting_status === 'unavailable' || payload.cost_presentation === null;
     const presentation = payload.cost_presentation;
     const legacyRollup = payload.cost_presentation === null && (
@@ -1355,13 +1373,14 @@ export function syncCandidateRemainderItem(record, detail) {
     return true;
 }
 
-// The 13 cost-meta keys shared by both subagent whitelists (the delegation
+// The 15 cost-meta keys shared by both subagent whitelists (the delegation
 // trio stays inline in each literal — the wire test scans those literals).
 const COST_META_KEYS = [
     'cost_usd', 'accounted_upper_bound_usd', 'accounted_upper_bound_usd_with_children',
     'cost_accounting_status', 'cost_accounting_error', 'cost_final', 'cost_usd_with_children',
     'cost_with_children_partial', 'reserved_usd', 'unresolved_upper_bound_usd',
-    'unknown_unmetered', 'non_final_rows', 'cost_presentation',
+    'unknown_unmetered', 'non_final_rows', 'cost_presentation', 'cost_custody',
+    'ledger_integrity_degraded',
 ];
 export function costMetaKeys(src) {
     return Object.fromEntries(COST_META_KEYS.map((key) => [key, src?.[key]]));
@@ -1465,6 +1484,8 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
     ) : '';
     const model = chip ? executorModelText(chip, compactModel)
         : execution && !execution.observed ? execution.value : execution?.model || coordinator;
+    // The compact line names the model a Claudexor route ran on, not the route's spelling `codex=…` (Details keep it).
+    const lineModel = String(model || '').replace(/(^|\s)[a-z][\w.-]*=(?=\S)/i, '$1');
     // A key added under Accounts follows its model ("claude-opus-5.5 · Claude credits"); the built-in key adds nothing.
     const keyRoute = chip || (execution && !execution.observed) ? '' : execution ? record.modelExecution?.used_model : agentModel;
     const key = connectionLabel(routeConnectionId(keyRoute));
@@ -1480,13 +1501,15 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
         // final (with its own end time) arrives as a message.
         toolCalls, ...cost, clock,
     ].filter(Boolean).map(text)) : metaLineHtml([
-        chip ? executorIdentityMarkup(chip, { model }) : (model ? text(key ? `${model} · ${key}` : model) : ''),
+        chip ? executorIdentityMarkup(chip, { model }) : (lineModel ? text(key ? `${lineModel} · ${key}` : lineModel) : ''),
         effortChipMarkup(record.effort),
         ...[
             record.historicalUnavailable ? 'Outcome unavailable' : (record.historicalUnconfirmed ? 'Activity unconfirmed' : ''),
             !record.finished && record.projectHoldDetail || '',
             record.historyRetentionProblem || '',
-            record.toolErrors > 0 ? `${record.toolErrors} error${record.toolErrors === 1 ? '' : 's'}` : '',
+            // Under a Done chip the block's own rows name the errors; this line does not repeat them (DESIGN principle 7).
+            record.toolErrors > 0 && !(record.finished && record.phaseEl?.dataset?.phase === 'done')
+                ? `${record.toolErrors} error${record.toolErrors === 1 ? '' : 's'}` : '',
             Number.isFinite(record.durationSec) ? formatLogDuration(record.durationSec) : '',
             !supervision && record.toolCalls > 0 ? toolCalls : '',
             ...(Array.isArray(record._lastFrameMeta) ? record._lastFrameMeta : []),
@@ -1507,6 +1530,7 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
         ['Supervision', supervision && (rounds || toolCalls)
             ? `${[rounds, toolCalls].filter(Boolean).join(META_PART_SEPARATOR)} (supervising agent; executor session counts are not reported)` : ''],
         ['Updated', escapeHtml(updated)],
+        ...(record.costBreakdownRows || []),  // a root's detail: where its money and work went
     ]);
     const detailChanged = paintLiveDetail(record, 'liveCostDetail', String(record.costMeta?.detail || ''));
     if (record.metaEl.innerHTML === html) return (detailChanged || factsChanged || clockChanged) && Boolean(record.metaEl.isConnected);

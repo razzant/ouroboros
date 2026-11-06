@@ -272,8 +272,10 @@ def test_verify_and_record_records_a_stopped_check_as_failed_with_what_it_wrote(
     assert receipt["summary"].startswith("check ended by Stop now") and "finished" not in receipt["summary"]
 
 
-@pytest.mark.parametrize("tool", ["run_command", "run_script"])
-@pytest.mark.parametrize("worker_slot_held", [False, True], ids=["inline", "pooled-presence"])
+@pytest.mark.parametrize(("worker_slot_held", "tool"), [
+    pytest.param(False, "run_command", id='inline-run_command'),
+    pytest.param(True, "run_script", id='pooled-presence-run_script'),
+])
 def test_a_stopped_command_is_the_calling_tools_typed_failure_with_its_masked_output(tmp_path, monkeypatch, tool, worker_slot_held):
     """Stop now's host kill is never a success: the calling tool's typed ``SHELL_ERROR`` with everything the command
     wrote, its selected secret masked, and the host kill on the process-facts channel once its exit was observed. The

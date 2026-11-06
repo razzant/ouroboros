@@ -9,7 +9,7 @@ import pytest
 from ouroboros.test_evidence import diagnostic_directory
 from tests.test_subscription_setup_browser import subscription_ui as subscription_ui
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.mark.parametrize("viewport", [(980, 780), (900, 900), (390, 844), (1360, 900)])

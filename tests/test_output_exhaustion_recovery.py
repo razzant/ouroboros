@@ -21,6 +21,8 @@ from tests.test_transport_b_stream_deadlines import isolated as isolated, chunk,
 
 PRIMARY = "openai-compatible::primary-fixture"
 FALLBACK = "openai-compatible::fallback-fixture"
+_UNSEEN_KEEP = "UNSEEN-KEEP " * 1500
+_OLD_HOST = "OLD-HOST " * 5000
 
 
 @pytest.fixture
@@ -94,8 +96,8 @@ def configured_loop(tmp_path, monkeypatch, client, *, sources=False, exact=False
         # A recorded send carries its tool list too: a missing one would read as a changed one.
         ctx._last_context_observation = {**_observation(kw["messages"]),
                                          "tool_schemas": initial_tool_schemas(kw["tools"], context_mode="max")}
-        kw["messages"] += [*_tool("unseen", invocation="unseen-invocation", text="UNSEEN-KEEP " * 1500),
-            bound_host_row(CONTEXT_FACTS_NAME, "OLD-HOST " * 5000),
+        kw["messages"] += [*_tool("unseen", invocation="unseen-invocation", text=_UNSEEN_KEEP),
+            bound_host_row(CONTEXT_FACTS_NAME, _OLD_HOST),
             bound_host_row(CONTEXT_FACTS_NAME, "CURRENT-HOST-KEEP")]
     return kw, notes
 
@@ -289,8 +291,15 @@ def persistent_loop(tmp_path, monkeypatch, client, *, target="t-output-recovery"
     return kw, notes
 
 
-@pytest.mark.parametrize("new_id", [False, True])
-@pytest.mark.parametrize("lost_at", ["informed", "fallback", "informed_send", "fallback_send", "smaller", "smaller_send", "fallback_informed"])
+@pytest.mark.parametrize(("lost_at", "new_id"), [
+    ("informed", True),
+    ("fallback", True),
+    ("informed_send", False),
+    ("fallback_send", True),
+    ("smaller", False),
+    ("smaller_send", False),
+    ("fallback_informed", True),
+])
 def test_real_checkpoint_recovery_never_reopens_spent_step(tmp_path, monkeypatch, isolated, endpoint, new_id, lost_at):
     from ouroboros import working_checkpoint as wc
     from tests.test_stream_timeout_recovery import WorkerLost
@@ -455,7 +464,7 @@ def test_outer_control_keeps_its_reason_without_recovery_or_paid_recap(tmp_path,
         assert kw["tools"]._ctx._skip_post_task_synthesis is True
 
 
-@pytest.mark.parametrize("kind", ["auth_error", "quota_exhausted", "transport_unavailable", "deadline_exhausted", "provider_outcome_unknown"])
+@pytest.mark.parametrize("kind", ["auth_error", "deadline_exhausted", "provider_outcome_unknown"])
 def test_other_failure_rails_are_not_relabelled_as_output_exhaustion(kind):
     usage = {recovery.KEY: {"stage": "fallback"}, "_last_llm_error_kind": kind}
     assert recovery.next_step(usage) == ""

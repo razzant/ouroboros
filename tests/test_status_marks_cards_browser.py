@@ -17,7 +17,7 @@ from threading import Thread
 
 import pytest
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 WEB = Path(__file__).resolve().parents[1] / "web"
 
 HTML = """<!doctype html><html lang="en" class="ouro-ui"><head><meta charset="utf-8">
@@ -222,7 +222,7 @@ def test_cards_activity_logs_and_budget_speak_the_status_marks(tmp_path, engine)
                     expect(sub).to_contain_text("Thinking")
                     assert "thinking" not in sub.inner_text()
                     stop = page.locator('[data-act="task-control"][data-id="direct-1"]')
-                    assert stop.get_attribute("class") == "btn btn-xs btn-default"
+                    assert stop.get_attribute("class") == "btn btn-sm btn-default"
                     stop_paint = stop.evaluate("el => [getComputedStyle(el).backgroundColor, getComputedStyle(el).color]")
                     # Danger red is the red tone's body and the red ink. On dark that body is the same neutral veil as
                     # a neutral capsule's, so there the ink is what tells them apart.

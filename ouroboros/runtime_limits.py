@@ -77,7 +77,7 @@ WS_RELAY_REFILL_PER_SEC = 1.0
 # GUARD_READ of its acceptance and fit GUARD_LINE_BYTES (the asker sends a larger body as unavailable);
 # GUARD_WORKERS decide at once and GUARD_PENDING questions (deciding or waiting) are held, more are refused.
 # A stdio server's stderr is logged at its transport's end as at most STDERR_TAIL_BYTES of whole last lines. That
-# bounds only the read and the log record, not the file: the server writes its temporary stderr file directly, so
+# bounds only the read and the record's lines, not the file: the server writes its temporary stderr file directly, so
 # a task session's file grows on disk with whatever its server writes until the loop ends (no ring buffer).
 MCP_TASK_SESSION_CLOSE_WAIT_SEC = 2.0
 MCP_TASK_SESSION_RETURN_WAIT_SEC = 1.0
@@ -87,6 +87,11 @@ MCP_BROWSER_GUARD_LINE_BYTES = 32 * 1024 * 1024
 MCP_BROWSER_GUARD_WORKERS = 16
 MCP_BROWSER_GUARD_PENDING = 64
 MCP_STDIO_STDERR_TAIL_BYTES = 64 * 1024
+MCP_STDIO_STDERR_NOTE_BYTES = 2 * 1024  # the last words a failure shows; the log keeps the longer tail
+# A remote MCP sign-in (mcp_oauth): one authorization-server request is bounded by HTTP_TIMEOUT; a refresh holds
+# its server's lock for one such request, so a second process waits at most LOCK_WAIT before it is told.
+MCP_OAUTH_HTTP_TIMEOUT_SEC = 30.0
+MCP_OAUTH_LOCK_WAIT_SEC = 45.0
 
 
 # Worker-pool spawn bounds (structural constants, not env knobs). Grace after a full-pool spawn before the crash
@@ -98,7 +103,7 @@ WORKER_SPAWN_GRACE_SEC = 90.0
 # Readiness is a contract distinct from process liveness
 # (`proc.is_alive`, worker_health.py) and from the task idle rail (queue_timeouts.py): a deadlocked child is alive.
 WORKER_READY_WINDOW_SEC = 90.0
-# Consecutive readiness failures of one slot before it is parked and reported (three strikes, like the crash-storm fence).
+# Consecutive readiness failures of one slot before it is parked and reported (three strikes).
 WORKER_READY_MAX_ATTEMPTS = 3
 # One extension for a child that wrote its own entry progress, measured from birth, never from the last poll.
 WORKER_READY_CEILING_SEC = 300.0

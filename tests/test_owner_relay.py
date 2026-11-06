@@ -366,6 +366,32 @@ def test_a_relayed_owner_reply_keeps_what_it_replied_to(tmp_path):
     assert "reply_to" not in owner_quote(tmp_path, unrelated)  # nothing invented for an ordinary message
 
 
+@pytest.mark.parametrize("shape", ["quiz_row", "late_answer"])
+def test_a_relayed_answer_carries_the_card_it_answers(tmp_path, shape):
+    """Audit 05.11 item 37: a quoted answer (a quiz row, or the owner row a late answer's head holds) reaches the told
+    work with its card as the message it replies to, in the asker's name, beside my human's words."""
+    from ouroboros.owner_relay import inject_relay, owner_quote, relay_envelope
+    card = {"quiz_id": "q7", "question": "Publish exactly this reply?", "state": "answered", "answered_index": 0,
+            "options": ["Publish it", "Not now"]}
+    answer = {"chat_id": 1, "direction": "in", "ts": "2026-10-01T00:01:00Z", "client_message_id": "owner-answer",
+              "text": "1. Publish it", **({"type": "quiz_answer", "task_id": "asker", "quiz": card} if shape == "quiz_row"
+                                           else {"late_answer": {"task_id": "asker", "quiz_id": "q7", "answer_snapshot": {
+                                               "task_id": "asker", "quiz": {**card, "answered_after_terminal": True}}}})}
+    dialogue_store.append(tmp_path, "chat", answer)
+    receiver, messages = context(tmp_path), []
+    receiver.task_id = "receiver"
+    inject_relay(receiver, {"kind": "relay_entry", "text": "Please act on it.", "owner_rows": [answer],
+                            "relay": relay_envelope("quoted", [owner_quote(tmp_path, answer)], chat_id=1),
+                            "source_task_id": "teller"}, messages)
+    [row] = [row for row in receiver._owner_directives if row["source"] == "owner_mailbox"]
+    assert "Publish exactly this reply?" not in str(row["content"])
+    assert row["reply_to"] == {"address": "quiz q7 of task asker", "author": "Ouroboros, task asker",
+                               "text": "Publish exactly this reply?\n1. Publish it\n2. Not now\n"
+                                       "(host record: my human pressed option 1)"}
+    words = next(str(m["content"]) for m in messages if "Owner words quoted verbatim" in str(m["content"]))
+    assert "[Host question frame]" in words and "Publish exactly this reply?" in words  # the model reads it too
+
+
 def test_a_relay_answer_is_owed_before_the_queue_and_survives_a_failed_send(tmp_path, monkeypatch):
     """F4: the named return is owed in the terminal outbox under a stable id before the queue sees it; a
     send that fails after enqueue leaves it owed (deferred), and the receipt never claims it was sent."""
@@ -388,6 +414,36 @@ def test_a_relay_answer_is_owed_before_the_queue_and_survives_a_failed_send(tmp_
                               send_with_budget=lambda *a, **k: (_ for _ in ()).throw(OSError("injected sender outage")))
     assert delivery._handle_send_message(queued, failing) is False
     assert owed().get("delivery_deferred") is True and owed()["system_type"] == "relay_reply"
+
+
+def test_pending_text_replay_merges_late_consciousness_origin(tmp_path, monkeypatch):
+    from supervisor import terminal_delivery
+    from ouroboros import terminal_projection
+
+    monkeypatch.setattr(terminal_projection, "main_delivery_current", lambda *_a, **_k: True)
+    pending_deliveries = terminal_delivery.pending_deliveries
+    register_pending_delivery = terminal_delivery.register_pending_delivery
+
+    event = {"type": "send_message", "delivery_id": "late-origin", "task_id": "wake",
+             "chat_id": 1, "text": "wake", "terminal_projection_token": "token"}
+    assert register_pending_delivery(tmp_path, event)
+    stamped = {**event, "initiator": "consciousness",
+               "progress_meta": {"initiator": "consciousness"}}
+    assert register_pending_delivery(tmp_path, stamped)
+    row = next(row for row in pending_deliveries(tmp_path) if row["delivery_id"] == "late-origin")
+    assert row["initiator"] == "consciousness"
+    assert row["progress_meta"]["initiator"] == "consciousness"
+
+
+def test_pending_reregistration_without_deferral_keeps_original_timestamp(tmp_path, monkeypatch):
+    from supervisor.terminal_delivery import pending_deliveries, register_pending_delivery
+
+    first = {"type": "send_message", "delivery_id": "stable-ts", "task_id": "wake", "chat_id": 1,
+             "text": "wake", "ts": "2026-11-05T00:00:00+00:00"}
+    assert register_pending_delivery(tmp_path, first)
+    assert register_pending_delivery(tmp_path, {**first, "ts": None})
+    row = next(row for row in pending_deliveries(tmp_path) if row["delivery_id"] == "stable-ts")
+    assert row["ts"] == first["ts"]
 
 
 def test_an_unrecordable_relay_answer_sends_nothing_and_keeps_the_relay_open(tmp_path, monkeypatch):
@@ -417,3 +473,63 @@ def test_quoteless_relay_to_child_drive_labels_source_from_canonical_registry(tm
     assert entry["relay_canonical_root"] == str(canonical)
     assert write_relay(child, "receiver", **args) == (entry, False)
     assert len(drain_owner_entries(child, "receiver")) == 1
+
+
+@pytest.mark.parametrize("source_count", [1, 2])
+@pytest.mark.parametrize("revoked", [False, True])
+def test_forwarded_rows_keep_each_source_through_pending_read_delivery_and_continue(tmp_path, source_count, revoked):
+    """A→B→C may combine sources. Each row keeps its own authority, full reply and attached bytes at every hop."""
+    from ouroboros import places, owner_words
+    from ouroboros.chat_references import reference_from_row
+    from ouroboros.chat_uploads import store_upload, claim_refs
+    from ouroboros.owner_continue import owner_sources, owner_corpus_rows
+    from ouroboros.owner_relay import inject_relay, owner_row_address
+    from tests.test_place_owner_author import _place_row
+
+    middle_root, final_root = tmp_path / "middle", tmp_path / "final"
+    middle, rows, roots, handles, uploads = context(middle_root), [], [], [], []
+    for index in range(source_count):
+        root = tmp_path / f"source-{index}"
+        place = places.connect_place(root, connector="bridge", provider="chat", account_id="qa", label="Source")
+        places.edit_place(root, place.place_id, "confirm_owner_account", author="owner",
+                          platform_actor_id="anton", account_id="qa")
+        target = {"chat_id": 1, "direction": "out", "ts": "2026-09-30T05:40:00Z",
+                  "text": f"Proposal {index}. " * 100, "client_message_id": "proposal"}
+        dialogue_store.append(root, "chat", target)
+        _path, upload = store_upload(f"attachment {index}".encode(), "note.txt", data_dir=root)
+        claim_refs([upload], root)
+        row = _place_row(place.place_id, text=f"owner words {index}", client_message_id=f"owner-{index}",
+                         reply_to=reference_from_row(target), attachments=[upload])
+        dialogue_store.append(root, "chat", row)
+        stored = next(item.row for item in dialogue_store.rows_by_client_id(root, f"owner-{index}"))
+        handle = owner_row_address(stored)
+        quotes, error = quote_rows(context(root, stored), [handle])
+        assert not error
+        entry, _ = write_relay(middle_root, middle.task_id, relay_id=f"first-{index}", note="context", quotes=quotes,
+                                chat_id=1, teller_task_id="first", canonical_root=root)
+        inject_relay(middle, entry, [])
+        rows.append((stored, target)); roots.append((root, place)); handles.append(handle); uploads.append(upload)
+    quotes, error = quote_rows(middle, handles)
+    assert not error and len(quotes) == source_count
+    entry, _ = write_relay(final_root, "final", relay_id="forwarded", note="context", quotes=quotes,
+                            chat_id=1, teller_task_id=middle.task_id, canonical_root=middle_root)
+    if revoked:
+        root, place = roots[0]
+        places.edit_place(root, place.place_id, "revoke_owner_account", author="owner",
+                          platform_actor_id="anton", account_id="qa")
+    expected = rows[1:] if revoked else rows
+    pending, _ = owner_words.task_owner_words(final_root, "final", task={"id": "final"})
+    assert [r["text"] for r in pending if r["source"] != owner_words.REPLY_TARGET] == [r[0]["text"] for r in expected]
+    assert [r["text"] for r in pending if r["source"] == owner_words.REPLY_TARGET] == [r[1]["text"] for r in expected]
+    final = context(final_root); final.task_id = "final"
+    inject_relay(final, entry, [])
+    assert [r["content"] for r in getattr(final, "_owner_directives", [])] == [r[0]["text"] for r in expected]
+    for index in range(1 if revoked else 0, source_count):
+        delivered = final_root / "task_results/artifacts/final/attachments" / uploads[index]["upload"]
+        assert delivered.read_bytes() == f"attachment {index}".encode()
+    continued = owner_sources(final_root, {"origin_message_text": "Original work", "origin_message_ref": {},
+                                         "owner_mailbox": {"rows": [], "read_complete": True}}, "final")
+    assert not continued["gaps"]
+    assert [r["content"] for r in continued["later"]] == [r[0]["text"] for r in expected]
+    assert [r["reply_to"]["text"] for r in continued["later"]] == [r[1]["text"] for r in expected]
+    assert [r["content"] for r in owner_corpus_rows(continued)][1:] == [r[0]["text"] for r in expected]

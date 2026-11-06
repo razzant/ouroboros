@@ -209,7 +209,7 @@ def test_known_spend_at_the_fence_declines_the_wave_at_zero_dollars(gate, tmp_pa
     assert llm.calls == [] and _ledger(gate) == before
     assert review_err and "commit-gate review wave declined before dispatch ($0 spent)" in review_err
     assert "Known spend has reached the per-task budget fence $4.000000" in review_err
-    assert "known spend=$4.000000 (plus $0.000000 of open holds, not counted)" in review_err
+    assert "known spend=$4.000000, remaining=" in review_err, "nothing uncounted: no blended or zero hold"
     assert "remaining=$0.000000" in review_err
     assert "reservation upper bound would have been $5.000000" in review_err
     # The root axis binds; the global axis is disclosed beside it with its own remainder.
@@ -249,7 +249,7 @@ def test_global_known_spend_at_the_limit_declines_the_wave_before_any_seat_reser
     assert llm.calls == [] and len(_ledger(gate)) == 1  # the other root's attempt only (one current row)
     assert review_err and "commit-gate review wave declined before dispatch ($0 spent)" in review_err
     assert "Known spend has reached the global budget TOTAL_BUDGET $100.000000: known spend=$100.000000 across every task" in review_err
-    assert "(plus $0.000000 of open holds, not counted)" in review_err
+    assert "across every task, remaining=" in review_err
     assert "remaining=$0.000000" in review_err
     assert "the per-task budget fence $10.000000 alone would leave $10.000000" in review_err
     assert "raise TOTAL_BUDGET" in review_err and "OUROBOROS_PER_TASK_COST_USD" not in review_err
@@ -314,7 +314,8 @@ def test_review_wave_admission_binds_on_the_tighter_of_root_and_global_axes(gate
     assert (global_bound["fits"], global_bound["binding_axis"]) == (True, "global")
     assert (global_bound["remaining_usd"], global_bound["limit_usd"], global_bound["global_limit_usd"]) == (
         4.0, 10.0, 4.0)
-    assert (global_bound["global_known_usd"], global_bound["global_reserved_usd"]) == (0.0, 0.0)
+    assert (global_bound["global_known_usd"], global_bound["global_reserved_usd"],
+            global_bound["global_unresolved_upper_bound_usd"]) == (0.0, 0.0, 0.0)
     no_room = ua.review_wave_admission(gate, root_limit_usd=0.0, global_limit_usd=10.0, **wave)
     assert (no_room["fits"], no_room["binding_axis"], no_room["remaining_usd"]) == (False, "root", 0.0)
 
@@ -365,7 +366,8 @@ def test_refusal_names_open_holds_beside_known_spend(gate, tmp_path, monkeypatch
     _ctx, (review_err, _coupling, _reason, _adv) = _run(gate, tmp_path, monkeypatch, llm, fence=8.0)
 
     assert llm.calls == []
-    assert "known spend=$8.000000 (plus $1.000000 of open holds, not counted)" in review_err
+    # A dispatched call's bound is the ledger's unresolved upper bound, said by that name, never "reserved".
+    assert "known spend=$8.000000 (up to $1.000000 for calls without a known price; not counted)" in review_err
     assert "remaining=$0.000000" in review_err
     assert len(_ledger(gate)) == 2  # the two seeded attempts only (one current row each)
 

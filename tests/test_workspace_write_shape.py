@@ -10,7 +10,6 @@ import pytest
 
 # Shares the real-subprocess-adjacent registry harness with
 # test_external_workspace_access.py; keep it in the serial lane.
-pytestmark = pytest.mark.serial
 
 from ouroboros.contracts.task_constraint import TaskConstraint
 from ouroboros.tools.registry import ToolContext, ToolRegistry

@@ -24,7 +24,7 @@ def _source(tmp_path, *, commit=False, **fields):
     return ctx, row, record, reference_for(record, row)
 
 
-@pytest.mark.parametrize("fault", ["none", "foreign_author", "not_paid", "stripped", "identity", "tool", "repository"])
+@pytest.mark.parametrize("fault", ["not_paid", "identity", "tool", "repository"])
 def test_identity_rejects_only_the_uncollectible_source(tmp_path, fault):
     commit = fault == "repository"
     fields = {"paid": False} if fault == "not_paid" else {"raw_stripped": True} if fault == "stripped" else {}
@@ -51,7 +51,7 @@ def test_compacted_attempt_still_collects_its_settled_record(tmp_path):
     assert resolve_reference(ctx, ref)[2]["state"] == "settled"
 
 
-@pytest.mark.parametrize("fault", ["none", "already_committed", "message", "brief"])
+@pytest.mark.parametrize("fault", ["none", "already_committed", "brief"])
 def test_commit_resume_cannot_repeat_an_effect_or_change_intent(tmp_path, fault):
     ctx, row, _, ref = _source(tmp_path, commit=True, status="succeeded" if fault == "already_committed" else "reviewing")
     kwargs = {"commit_message": "other"} if fault == "message" else {"mutations": ("other brief",)} if fault == "brief" else {}

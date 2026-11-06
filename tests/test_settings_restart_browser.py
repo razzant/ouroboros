@@ -59,7 +59,6 @@ def settings_server(request, tmp_path, monkeypatch):
     return request.getfixturevalue("direct_server_with_data")
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine,width", [("chromium", 1400), ("webkit", 390)])
 def test_pending_survives_reconnect_draft_and_restart_request(settings_server, engine, width, free_tcp_port):

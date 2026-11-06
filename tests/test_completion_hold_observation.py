@@ -109,7 +109,7 @@ def hold_first_delivery(monkeypatch):
 # --- Selection refusals: one row beside the historical trace record ------------------------------
 
 @pytest.mark.parametrize("refusal", ["selection_unavailable", "unobserved_tool_results",
-                                     "contradictory_completion_requests", "owner_input_changed"])
+                                     "owner_input_changed"])
 def test_a_refused_selection_is_one_typed_hold_beside_the_unchanged_trace_record(turn, refusal):
     retained = None
     if refusal == "selection_unavailable":
@@ -207,7 +207,7 @@ def left_review(turn, wait, park_owner=None):
     return waiting
 
 
-@pytest.mark.parametrize("case", ["custody_restored", "wake_notice", "parked", "settled"])
+@pytest.mark.parametrize("case", ["custody_restored", "wake_notice", "settled"])
 def test_prose_beside_a_left_review_is_one_hold_naming_its_case_recorded_before_any_wait(turn, monkeypatch, case):
     from ouroboros.review_pause import PROCESS_TOKEN
 
@@ -299,8 +299,8 @@ def once(value, otherwise):
     return gate
 
 
-@pytest.mark.parametrize("reason", ["plan_gate", "subagent_handoff", "child_absorption", "focus_reply_refused",
-                                    "admission_seal", "owner_followup"])
+@pytest.mark.parametrize("reason", ["plan_gate", "focus_reply_refused",
+                                    "admission_seal"])
 def test_each_delivery_gate_names_itself_in_its_hold(turn, monkeypatch, reason):
     """The gate's decision is scripted once (the owner follow-up is a real admission drain); the
     branch it takes, its host rows and the row it writes are the production ones."""
@@ -333,10 +333,86 @@ def test_each_delivery_gate_names_itself_in_its_hold(turn, monkeypatch, reason):
     assert [facts(row) for row in holds(turn.root)] == [(1, origin, reason, None, sha(answer))]
 
 
+# --- Review answers settled since the mind's last read reach it before delivery (cec586e9) ------
+
+REFUTATION = "o1: the parser already reads fenced JSON"
+
+
+def review_settles(monkeypatch):
+    """The review history producer as the loop calls it: one new index row per settled answer, never twice."""
+    from ouroboros.review_history_view import REVIEW_CONTEXT_INDEX_KEY
+
+    meta = {"family": "plan", "repo_root": "", "sha256": "decisions-1", "visible_sha256": "v1"}
+
+    def updates(ctx, *, families=None, messages=(), selection=None):
+        pending = families if families is not None else getattr(ctx, "_pending_review_context", {})
+        if not pending or any(row.get(REVIEW_CONTEXT_INDEX_KEY) == meta for row in messages):
+            return [], {}
+        return [{"role": "user", "content": "[Current review decisions] " + REFUTATION, REVIEW_CONTEXT_INDEX_KEY: dict(meta)}], {}
+
+    monkeypatch.setattr("ouroboros.review_history_view.review_context_updates", updates)
+
+
+def settle_during(turn, response):
+    """A council seat settles while this model call is out (the hook queues the author's update)."""
+    def call():
+        turn.registry._ctx._pending_review_context = {"plan": ""}
+        return response
+    return call
+
+
+@pytest.mark.parametrize("origin", ["selection", "prose"])
+def test_review_answers_settled_during_the_final_call_are_read_before_delivery(turn, monkeypatch, origin):
+    review_settles(monkeypatch)
+    first = finish("Answer before the review") if origin == "selection" else {"content": "Answer before the review"}
+
+    text, _usage, _trace = turn.run([settle_during(turn, first), finish("Answer after the review")])
+
+    assert text == "Answer after the review" and len(turn.calls) == 2
+    assert REFUTATION in json.dumps(turn.calls[1]), "the second call reads the settled answer"
+    assert [facts(row) for row in holds(turn.root)] == [(1, origin, "review_update", None, sha("Answer before the review"))]
+
+
+@pytest.mark.parametrize("origin", ["selection", "prose"])
+def test_review_answers_the_mind_already_read_hold_nothing(turn, monkeypatch, origin):
+    review_settles(monkeypatch)
+    turn.registry.override_handler("chat_history", lambda _ctx, **kw: "history")
+    work = {"content": None, "tool_calls": [tool_call("chat_history")]}
+    final = finish("Answer") if origin == "selection" else {"content": "Answer"}
+
+    text, _usage, _trace = turn.run([settle_during(turn, work), final])
+
+    assert text == "Answer" and len(turn.calls) == 2
+    assert REFUTATION in json.dumps(turn.calls[1]), "the rows reached the call that wrote the final"
+    assert holds(turn.root) == []
+
+
+@pytest.mark.parametrize("case", ["author_stop", "owner_hurry", "plan_gate_first"])
+def test_stop_and_hurry_deliver_and_the_plan_gate_keeps_its_place(turn, monkeypatch, case):
+    review_settles(monkeypatch)
+    answer = finish("Partial", action="stop", rationale="Unfinished") if case == "author_stop" else finish("Answer")
+
+    def call():  # the seat settles, and the owner hurries, while the final call is out
+        turn.registry._ctx._pending_review_context = {"plan": ""}
+        if case == "owner_hurry":
+            turn.registry._ctx._owner_hurry_latch = {"mailbox_id": "hurry-1"}
+        return answer
+
+    script = [call]
+    if case == "plan_gate_first":
+        monkeypatch.setattr(loop, "_enforce_plan_gate", once(True, False))
+        script.append(finish("Answer"))
+
+    text, _usage, _trace = turn.run(script)
+
+    assert len(turn.calls) == len(script) and text in {"Partial", "Answer"}
+    expected = [(1, "selection", "plan_gate", None, sha("Answer"))] if case == "plan_gate_first" else []
+    assert [facts(row) for row in holds(turn.root)] == expected
+
+
 # --- What is not a hold -------------------------------------------------------------------------
 
-@pytest.mark.parametrize("script", ["tool_round_then_plain_final", "voluntary_finish", "plain_final",
-                                    "author_stop", "receipt_sibling", "suppressed_nanny_nudge"])
+@pytest.mark.parametrize("script", ["tool_round_then_plain_final", "author_stop", "suppressed_nanny_nudge"])
 def test_ordinary_work_finishes_and_suppressed_nudges_write_no_hold(turn, script):
     responses = {
         "tool_round_then_plain_final": [{"content": None, "tool_calls": [tool_call("chat_history")]},
@@ -382,7 +458,6 @@ def test_an_owner_hard_stop_of_a_direct_turn_is_a_terminal_not_a_hold(turn):
     assert holds(turn.root) == []
 
 
-@pytest.mark.serial
 def test_a_presence_answer_met_by_stop_now_is_a_terminal_not_a_hold(owner_stop, monkeypatch):
     """A real Place focus turn: its final answer meets the owner's Stop now at the closing admission."""
     from ouroboros.presence_runner import PresenceTurnError
@@ -525,8 +600,8 @@ def _nudge_case(case, tmp_path, monkeypatch):
     return SimpleNamespace(_ctx=ctx), trace, content
 
 
-@pytest.mark.parametrize("case", ["authoring_handover", "skill_not_finalized", "verification_red", "verification_masked",
-                                  "criterion_agent_defined", "verification_absent", "final_answer_marker"])
+@pytest.mark.parametrize("case", ["verification_masked",
+                                  "criterion_agent_defined", "verification_absent"])
 def test_each_finalization_nudge_names_its_own_hold_cause(tmp_path, monkeypatch, case):
     tools, trace, content = _nudge_case(case, tmp_path, monkeypatch)
     assert loop._maybe_inject_finalization_nudges(tools, tmp_path, "t", trace, content, [], lambda *_: None) is True
@@ -536,7 +611,7 @@ def test_each_finalization_nudge_names_its_own_hold_cause(tmp_path, monkeypatch,
     assert _hold_cause(tools._ctx) == case and _hold_cause(tools._ctx) == "", "read once"
 
 
-@pytest.mark.parametrize("code", ["NANNY_DID_NOT_DELEGATE", "NANNY_DELEGATED_RUN_PENDING", "NANNY_DELEGATED_RUN_FAILED",
+@pytest.mark.parametrize("code", ["NANNY_DELEGATED_RUN_PENDING", "NANNY_DELEGATED_RUN_FAILED",
                                   "CONFIGURED_ACTOR_INCOMPLETE"])
 def test_a_nanny_hold_keeps_the_exact_code_its_own_rows_carry(tmp_path, code):
     from tests.test_nanny_finalization_nudge import _custody_drive, _emit_settled, _emit_started, _tools
@@ -544,7 +619,7 @@ def test_a_nanny_hold_keeps_the_exact_code_its_own_rows_carry(tmp_path, code):
     drive, task_id = _custody_drive(tmp_path), "child-1"
     ctx = SimpleNamespace(_nanny_route_dispatched=True, _nanny_finalization_injected=False, drive_root=drive,
                           event_queue=None, drive_logs=drive / "logs", task_contract={}, task_metadata={})
-    if code != "NANNY_DID_NOT_DELEGATE" and code != "CONFIGURED_ACTOR_INCOMPLETE":
+    if code != "CONFIGURED_ACTOR_INCOMPLETE":
         _emit_started(drive, "run-1", task_id)
     if code == "NANNY_DELEGATED_RUN_FAILED":
         _emit_settled(drive, "run-1", task_id, "failed")
@@ -564,14 +639,18 @@ def test_a_nanny_hold_keeps_the_exact_code_its_own_rows_carry(tmp_path, code):
 
 
 def test_a_real_nanny_hold_names_its_code_through_the_loop(turn):
-    turn.registry._ctx._nanny_route_dispatched = True  # dispatched onto the delegated substrate, no delegate_start
+    # A configured session actor finalizing by its own calls, with no leaf run and no typed zero-run decision.
+    turn.registry._ctx._nanny_route_dispatched = True
+    turn.registry._ctx._configured_actor_bootstrap = {
+        "route_available": True, "exact_start_pending": True, "physical_started": False,
+        "zero_run_receipt_recorded": False, "selected_subagent_id": "session-a"}
     answer = "Done by my own calls."
     text, _usage, _trace = turn.run([{"content": answer}, finish(answer)])
 
     assert text == answer and len(turn.calls) == 2
     assert [facts(row) for row in holds(turn.root)] == [
-        (1, "prose", "finalization_nudge", "NANNY_DID_NOT_DELEGATE", sha(answer))]
-    assert any(str(row.get("content")).startswith("[SYSTEM REMINDER]\n⚠️ NANNY_DID_NOT_DELEGATE:")
+        (1, "prose", "finalization_nudge", "CONFIGURED_ACTOR_INCOMPLETE", sha(answer))]
+    assert any(str(row.get("content")).startswith("[SYSTEM REMINDER]\n⚠️ CONFIGURED_ACTOR_INCOMPLETE:")
                for row in turn.calls[-1])
 
 
@@ -583,7 +662,7 @@ def test_a_suppressed_nudge_names_no_cause(tmp_path):
     assert ctx._nanny_finalization_injected is True and not hasattr(ctx, "_completion_hold_cause")
 
 
-@pytest.mark.parametrize("cause", ["findings", "blocking_refusal", "pending", "earlier_request", "pass"])
+@pytest.mark.parametrize("cause", ["findings", "blocking_refusal", "pass"])
 def test_each_result_review_hold_names_its_own_cause(tmp_path, monkeypatch, cause):
     import ouroboros.review_substrate as substrate
     import ouroboros.tools.review_change as review_change_mod

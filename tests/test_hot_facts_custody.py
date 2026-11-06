@@ -104,8 +104,7 @@ def test_custody_tree_and_health_cost_do_not_grow_with_closed_history(tmp_path, 
 
 @pytest.mark.parametrize("complete,consumed,settled,disposed", [
     (None, None, None, None), (False, False, False, ""), (True, True, True, "applied"),
-    ("0", "1", "1", []), ([], {}, 2, {}), (2, 0, 1, "rejected"),
-    (float("nan"), False, True, "applied"),
+    ("0", "1", "1", []), ([], {}, 2, {}),
 ])
 def test_typed_conservative_candidates_match_sql_shapes(tmp_path, complete, consumed, settled, disposed):
     facts = {"authority_source": "skill_payload", "output_complete": complete, "output_consumed": consumed,

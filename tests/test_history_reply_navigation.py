@@ -85,7 +85,7 @@ def test_conversion_after_quote_moves_exact_history_id_not_earliest_task_row(tmp
     assert task["anchor"]["history_id"] != before, "task references deliberately keep task semantics"
 
 
-@pytest.mark.parametrize("chat_state", ["missing", "mismatch", "importing", "unreadable"])
+@pytest.mark.parametrize("chat_state", ["missing", "mismatch", "unreadable"])
 def test_available_progress_survives_every_chat_lookup_miss(tmp_path, chat_state, monkeypatch):
     if chat_state == "importing":
         from ouroboros import dialogue_import

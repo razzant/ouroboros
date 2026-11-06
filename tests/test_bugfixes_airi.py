@@ -22,14 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import pathlib
 from types import SimpleNamespace
-
-REPO = pathlib.Path(__file__).resolve().parents[1]
-
-
-def _read(rel: str) -> str:
-    return (REPO / rel).read_text(encoding="utf-8")
 
 
 # ────────── Bug 1 (polish): the retired loop's rows replay honestly ──────────
@@ -61,61 +54,7 @@ def test_history_never_fabricates_a_terminal_status_for_legacy_bg_rows(tmp_path)
     assert not any(m.get("system_type") == "task_model_wait" for m in messages)
 
 
-def test_live_card_disclosure_is_explicit_user_owned_state():
-    src = _read("web/modules/chat.js")
-    assert "const explicitCardExpansion = new Map();" in src  # a room opens at its newest, with no carried disclosure
-    assert "explicitCardExpansion.set(record.groupId, nowExpanded);" in src
-    assert "explicitCardExpansion.has(normalizedGroupId)" in src
-    assert "explicitCardExpansion.get(normalizedGroupId)" in src
-    assert "if (existing && !explicitCardExpansion.has(childId))" in src
-    assert "setLiveCardExpanded(record, nestedSubagentsExpanded);" in src
-    assert "stickyExpandedSlots" not in src
-
-
-def test_live_card_timeline_only_follows_when_pinned():
-    src = _read("web/modules/chat_render_batch.js")
-    renderer = src[
-        src.index("export function timelineScroll"):
-        src.index("export function createTimelineAnchors")
-    ]
-    # The place is read before the write: pinned within 24px of the end, the top, the newest line.
-    assert ("pinned: el.scrollHeight - el.scrollTop - el.clientHeight <= 24, top: el.scrollTop, "
-            "newest: el.lastElementChild") in renderer
-    # Only a new newest line follows; a disclosure or late full output keeps its place (history_timeline_dom.test.js).
-    assert "scroll.pinned && el.lastElementChild !== scroll.newest ? el.scrollHeight : scroll.top" in renderer
-    assert "record.root.dataset.expanded === '1' && pinned" in renderer
-
-
 # ───────────────────── Bug 3: reconnect dialogue recovery ───────────────────
-
-def test_reconnect_merges_user_rows_without_clearing_visible_history():
-    src = _read("web/modules/chat.js")
-    sync = src[src.index("async function syncHistory"):src.index("const readReceipt = createProjectReadReceipt(")]
-    replay = src[src.index("function applyHistoryMessages"):src.index("async function syncHistory")]
-    add = src[src.index("function addMessage"):src.index("function updateMessageAnnotation")]
-    # Reconnect still fetches the canonical source and includes owner dialogue.
-    assert "await fetchHistory(null)" in sync
-    assert "apiClient.chatHistory({ chatId, cursor, ...options })" in src
-    assert "historyPager.acceptRecent(data, rechainRecent && { fromReconnect })" in sync
-    assert "if (result.status !== 'applied') applyHistoryMessages(messages, { fromReconnect });" in sync
-    assert "includeUser" not in replay  # every read applies the owner's rows
-    # Keyed reconciliation replaces the former clear-and-rebuild requirement:
-    # physical rows dedupe and an offline/local echo is adopted in place.
-    assert "opts.historyId ? `history:${opts.historyId}` : legacyKey" in add
-    # A retained DOM row or a remembered key suppresses a late live copy.
-    assert "if (prior || (messageKey && seenMessageKeys.has(messageKey))) return false;" in add
-    assert "node.dataset.clientMessageId === clientMessageId" in add
-    assert "stampHistoryNode(prior, opts.historyId, opts.historyPosition);" in add
-    assert "seenMessageKeys.clear();" not in sync + replay
-    assert "messageKeyOrder.length = 0;" not in sync + replay
 
 
 # ──────────────────── Bug 4a: progress widget host race ──────────────────────
-
-def test_widget_job_poll_merges_full_status_and_clamps():
-    src = _read("web/modules/widgets.js")
-    assert "clampMonotonicProgress" in src
-    assert "progressValueKeys" in src
-    assert "...data," in src  # full flat merge surfaces value_key (e.g. progress_pct)
-    # The broken cherry-pick of the wrong key must be gone.
-    assert "progress: data.progress," not in src

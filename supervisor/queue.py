@@ -667,8 +667,8 @@ def _consciousness_admission_block(task: Dict[str, Any], window: Optional[Dict[s
                     "OUROBOROS_CONSCIOUSNESS_DAILY_USD=0: consciousness may not spend")
         at_least = " (at least)" if window.get("unknown_unmetered") else ""
         known = window.get("settled_usd")
-        open_holds = 0.0 if known is None else max(0.0, float(window.get("accounted_usd") or 0.0) - float(known))
-        holds = f" (plus ${open_holds:.2f} of open holds, not counted)" if open_holds > 0 else ""
+        from ouroboros.cost_projection import uncounted_money_text  # each uncounted part by its ledger name (P8)
+        holds = f" (plus {parts}, not counted)" if (parts := uncounted_money_text(window)) else ""
         spent = "unknown" if known is None else f"${float(known):.2f}{at_least}"
         return ("consciousness_allowance_exhausted", (
             f"{spent} of ${window['limit_usd']:.2f} "
@@ -910,7 +910,7 @@ def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]]
         detail = "Evolution task is running now."
     elif isinstance(queued_task, dict):
         status = "queued"
-        detail = "Evolution task is queued and waiting for a worker."
+        detail = "Evolution task is queued."
     elif not accounting_available:
         status = "accounting_unavailable"
         detail = "Cost accounting is unavailable; evolution dispatch is paused without changing the campaign."

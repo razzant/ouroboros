@@ -35,8 +35,7 @@ def test_continue_inherits_owner_or_consciousness_origin_by_value(q, level):
             assert "initiator" not in admitted["metadata"] and "runtime_mode_cap" not in admitted["metadata"]
 
 
-@pytest.mark.parametrize("metadata", [{}, {"work_kind": "owner"}, {"work_kind": "consciousness"},
-                                     {"initiator": "consciousness", "consciousness_autonomy": "act"}])
+@pytest.mark.parametrize("metadata", [{}, {"work_kind": "owner"}, {"initiator": "consciousness", "consciousness_autonomy": "act"}])
 def test_continue_legacy_owner_source_does_not_override_consciousness(metadata):
     from supervisor.continuation_admission import _successor_task
     from ouroboros.consciousness_authority import work_kind

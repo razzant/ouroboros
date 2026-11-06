@@ -12,10 +12,11 @@ from ouroboros.contracts.realtime import RealtimeSetupError
 from tests._extension_loader_shared import _clear_loader_state  # noqa: F401
 from tests._live_stack import stack
 from tests._live_stack_wire import NativeWire
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 from tests.test_live_host_settlement import tariff
 from tests.test_live_stack_preparation import request, ROUTES
 from tests.test_grok_openai_protocol import providers as providers, Wire
+from tests._cases import chosen_rows
 
 
 @pytest.mark.parametrize('engine,thinking', ROUTES)
@@ -39,7 +40,7 @@ def test_preparation_refusal_is_terminal_without_another_attempt(host_world, mon
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('engine,thinking', ROUTES)
+@pytest.mark.parametrize('engine,thinking', chosen_rows(ROUTES, 0, 1, 3))
 def test_legacy_provider_without_silent_catchup_keeps_sequential_calls(host_world, monkeypatch, engine, thinking):
     async def scenario():
         async with stack(host_world, monkeypatch, engine, thinking=thinking) as run:
@@ -70,7 +71,7 @@ def test_legacy_provider_without_silent_catchup_keeps_sequential_calls(host_worl
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('engine,thinking', ROUTES)
+@pytest.mark.parametrize('engine,thinking', chosen_rows(ROUTES, 0, 3))
 @pytest.mark.parametrize('mail_kind', ['room', 'task_result'])
 def test_mail_durable_before_switch_keeps_its_unanswered_obligation(host_world, monkeypatch, engine, thinking, mail_kind):
     async def scenario():
@@ -120,7 +121,7 @@ def test_mail_durable_before_switch_keeps_its_unanswered_obligation(host_world, 
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('engine,thinking', ROUTES)
+@pytest.mark.parametrize('engine,thinking', chosen_rows(ROUTES, 0, 1, 3))
 def test_waiting_socket_death_is_closed_and_settled_before_quiet(host_world, monkeypatch, engine, thinking):
     async def scenario():
         async with stack(host_world, monkeypatch, engine, thinking=thinking) as run:
@@ -207,7 +208,7 @@ def test_prepared_account_change_is_rechecked_at_adoption(host_world):
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('engine,thinking', ROUTES)
+@pytest.mark.parametrize('engine,thinking', chosen_rows(ROUTES, 0, 1, 3))
 def test_languages_recorded_after_preparation_reach_next_session(host_world, monkeypatch, engine, thinking):
     async def scenario():
         async with stack(host_world, monkeypatch, engine, thinking=thinking) as run:
@@ -227,7 +228,7 @@ def test_languages_recorded_after_preparation_reach_next_session(host_world, mon
 
 
 @pytest.mark.parametrize('field,value', [('voice', 'Kore'), ('instructions', 'New exact owner instruction.'),
-    ('pause', 'long'), ('interruptions', False), ('thinking', 'high'), ('search', True)])
+    ('pause', 'long'), ('interruptions', False)])
 def test_changed_live_option_discards_preparation_once(host_world, monkeypatch, field, value):
     async def scenario():
         async with stack(host_world, monkeypatch, 'gemini', thinking=True) as run:
@@ -288,8 +289,12 @@ def test_heard_but_interrupted_answers_prove_continuation(host_world, monkeypatc
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('engine,thinking', [('gemini', False), ('gemini', True), ('openai', False), ('grok', False)])
-@pytest.mark.parametrize('break_offer', [False, True])
+@pytest.mark.parametrize(("break_offer", "engine", "thinking"), [
+    (False, 'gemini', True),
+    (False, 'grok', False),
+    (True, 'gemini', False),
+    (True, 'openai', False),
+])
 def test_handoff_mail_offer_keeps_custody_until_its_write_succeeds(host_world, monkeypatch, engine, thinking, break_offer):
     from ouroboros.contracts.live_conversation import ContextUpdate
     from tests.test_live_stack_preparation import request

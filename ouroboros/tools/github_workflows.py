@@ -164,8 +164,13 @@ def get_run(read) -> str:
             listed = ", ".join(f"{_whole(item.get('databaseId'))} {_one_line(item.get('name'), 60)}" for item in jobs[:30])
             return _refuse(ctx, f"⚠️ TOOL_ARG_ERROR: job {job_id} is not a job of run {run_id} attempt {attempt_read} in "
                                 f"{owner}/{name}; its jobs: {listed or 'none listed'}.")
+        job_status = str(job.get("status") or "unknown").lower()
+        if job_status != "completed":
+            return _refuse(ctx, f"⚠️ TOOL_ERROR: job {job_id} {_one_line(job.get('name'), 80)} in run {run_id} "
+                                f"attempt {attempt_read} in {owner}/{name} is {job_status}; GitHub serves a job log "
+                                "only after that job is completed, so no log was requested.", "TOOL_ERROR")
     status = str(run.get("status") or "unknown")
-    if status != "completed":
+    if not job_id and status != "completed":
         return _refuse(ctx, f"⚠️ TOOL_ERROR: run {run_id} attempt {attempt_read} in {owner}/{name} is {status}; GitHub "
                             "serves the log of a completed run only, so no log was requested.", "TOOL_ERROR")
 
@@ -175,6 +180,9 @@ def get_run(read) -> str:
     with tempfile.TemporaryDirectory(prefix="gh-run-log-") as tmp:
         res = _gh_run(log_args, ctx, timeout=_LOG_TIMEOUT, repo=repo, capture_to=pathlib.Path(tmp) / "log.bin", max_bytes=cap)
         if not res.ok:
+            if failed_only:
+                return _refuse(ctx, f"⚠️ TOOL_ERROR: failed_only requires GitHub CLI --log-failed output; no REST "
+                                    f"fallback was used and the failed-step log was not captured: {res.text}", "TOOL_ERROR")
             return res.text
         capture = res.capture
         data = capture.path.read_bytes()
@@ -185,10 +193,15 @@ def get_run(read) -> str:
             _run_line(run),
             f"Source: {source}; captured {capture.size} bytes exactly" + (
                 f"; the {cap}-byte cap ended the capture: the log is longer and this is its first {capture.size} bytes"
-                if capture.truncated else "")]
+                if capture.truncated else ""),
+            "Format: gh CLI plain-text stdout; selection: "
+            + ("failed steps only (--log-failed)" if failed_only else "full run/job log (--log)")
+            + "; retained bytes are exact (the bounded preview decodes UTF-8 with replacement and normalizes CRLF)."]
     payload = {"item": item, "complete": not capture.truncated, "next_cursor": "",
                "capture": {"bytes": capture.size, "sha256": capture.sha256, "truncated": capture.truncated,
-                           "source": source, "run_id": run_id, "attempt": attempt_read, "job_id": job_id or None}}
+                           "source": source, "format": "plain_text_stdout", "failed_only": failed_only,
+                           "run_id": run_id, "attempt": attempt_read, "job_id": job_id or None,
+                           "job_status": (str(job.get("status") or "unknown").lower() if job else None)}}
     if capture.truncated:
         read.omitted.append(f"log exceeds max_bytes={cap}; retained only its first {capture.size} bytes")
     if not data:

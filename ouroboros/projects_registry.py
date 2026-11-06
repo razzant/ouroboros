@@ -825,11 +825,11 @@ def reserved_project_chat_ids(drive_root: Any, *, strict: bool = False) -> set:
 _THREAD_LENS_CACHE: Dict[str, tuple] = {}
 
 
-def _project_thread_lens(drive_root: Any) -> tuple[frozenset, dict]:
-    """Share membership and labels at one file identity, without sorting rooms.
+def _project_thread_lens(drive_root: Any) -> tuple[frozenset, dict, dict]:
+    """Share membership, labels and each room's reserving row at one file identity, without sorting rooms.
 
     Display's lenient row handling remains; read failures are never memoized.
-    The private label map stays inside this owner, not execution authority.
+    The private maps stay inside this owner, not execution authority.
     """
     path = _registry_path(drive_root)
     try:
@@ -837,19 +837,20 @@ def _project_thread_lens(drive_root: Any) -> tuple[frozenset, dict]:
     except FileNotFoundError:
         if _registry_witness_path(drive_root).exists():
             raise
-        return frozenset(), {}
+        return frozenset(), {}, {}
     key = str(path)
     cached = _THREAD_LENS_CACHE.get(key)
     if cached is not None and cached[0] == stamp:
-        return cached[1], cached[2]
-    names = {}
+        return cached[1], cached[2], cached[3]
+    names, rows = {}, {}
     for row in display_registry_snapshot(drive_root)["projects"]:
         chat = row["chat_id"]
         names[chat] = None if chat in names else str(row.get("name") or row["id"])
+        rows[chat] = None if chat in rows else row
     ids = frozenset(names)
     if utils.file_identity(path.stat()) == stamp:
-        _THREAD_LENS_CACHE[key] = (stamp, ids, names)
-    return ids, names
+        _THREAD_LENS_CACHE[key] = (stamp, ids, names, rows)
+    return ids, names, rows
 
 
 def project_thread_chat_ids(drive_root: Any) -> frozenset:
@@ -863,11 +864,18 @@ def project_thread_chat_ids(drive_root: Any) -> frozenset:
 
 def project_thread_name(drive_root: Any, chat_id: Any) -> Optional[str]:
     """Receipt label, None for a non-Project; unreadable/ambiguous sources raise."""
-    ids, names = _project_thread_lens(drive_root)
+    ids, names, _rows = _project_thread_lens(drive_root)
     name = names.get(chat_id)
     if chat_id in ids and name is None:
         raise ValueError("Project chat reservation is ambiguous")
     return name
+
+
+def project_of_room(drive_root: Any, chat_id: Any) -> Optional[Dict[str, Any]]:
+    """A copy of the registry row reserving this room (any lifecycle) at the registry's current identity; ``None`` for
+    a room no single Project reserves. Unreadable sources raise. One parse serves every row of a read."""
+    row = _project_thread_lens(drive_root)[2].get(chat_id)
+    return dict(row) if row else None
 
 
 def stamp_project_thread(drive_root: Any, payload: Dict[str, Any]) -> None:
@@ -976,7 +984,8 @@ def task_presentation_snapshot(drive_root: Any, task_id: str, *, task: Any = Non
         pname = _bounded_presentation_name(project_display_name(project.get("name"), pid))
     if pid and not pname:
         pname = "Project"
-    task_name = task_presentation_name(*sources)
+    # Nameless work of a Project is called by its Project: never a bare "Project › Task".
+    task_name = task_presentation_name(*sources, fallback=pname or "Task")
     label = f"{pname} › {task_name}" if pname else task_name
     # One name, said once: a task whose own name IS the project name renders
     # "Launch › Launch", which reads as two different things. Exact equality
@@ -1382,13 +1391,16 @@ def _with_dialogue_facts(project: Dict[str, Any], room: Optional[dict]) -> Dict[
             "last_active_at": max(str(project.get("last_active_at") or ""), str(facts.get("activity_at") or ""))}
 
 
-def projects_summary(drive_root: Any, *, limit: int = 50, chat_id: Any = None,
-                     include_pinned: bool = False, closed: Optional[bool] = None,
-                     oldest_first: bool = False, start: int = 0) -> List[Dict[str, Any]]:
-    """Sidebar or strict addressed room, with unread/activity from dialogue room facts.
+def projects_summary(drive_root: Any, *, limit: Optional[int] = 50, chat_id: Any = None,
+                     project_id: Any = None, include_pinned: bool = False, closed: Optional[bool] = None,
+                     oldest_first: bool = False, start: int = 0,
+                     sidebar_rows: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+    """Sidebar, its whole list (``limit=None``) or a strict addressed room, with unread/activity from room facts.
 
-    Registry reads retain lifecycle and binding authority. An unproved inactive room
-    requires complete import; a pending, failed or invalid interval is never inactivity.
+    ``chat_id`` addresses an active room, ``project_id`` an active or deleting one; registry reads retain lifecycle
+    and binding authority. An unproved inactive room requires complete import; a pending, failed or invalid
+    interval is never inactivity. ``sidebar_rows``, for the unaddressed list only, is the caller's own
+    ``list_sidebar_projects`` read: this list and what the caller counts of it are then one registry observation.
     """
     from ouroboros import dialogue_store as ds
 
@@ -1396,6 +1408,7 @@ def projects_summary(drive_root: Any, *, limit: int = 50, chat_id: Any = None,
     cognition = main_cognition()
     bound = {str(row.get("project_id") or "") for row in _load_bindings(drive_root)["bindings"].values()
              if isinstance(row, dict)}
+    addressed = chat_id is not None or project_id is not None
     if chat_id is not None:
         address = int(chat_id)
         projects = [row for row in list_reserved_projects(drive_root, strict=True)
@@ -1403,17 +1416,22 @@ def projects_summary(drive_root: Any, *, limit: int = 50, chat_id: Any = None,
         if len(projects) > 1:
             raise ValueError("Project chat identity is ambiguous")
         facts = {address: ds.room(drive_root, address)} if projects else {}
+    elif project_id is not None:
+        # One strict row: another room's malformed routing never hides this one; a tombstone answers none.
+        row = get_reserved_project(drive_root, project_id, strict=True)
+        projects = [row] if row and row.get("lifecycle") in {PROJECT_ACTIVE, PROJECT_DELETING} else []
+        facts = {row["chat_id"]: ds.room(drive_root, row["chat_id"])} if projects else {}
     else:
-        projects = [p for p in list_sidebar_projects(drive_root)
+        projects = [p for p in (list_sidebar_projects(drive_root) if sidebar_rows is None else sidebar_rows)
                     if closed is None or p.get("lifecycle") == PROJECT_ACTIVE]
         facts = {room["chat_id"]: room for room in ds.rooms(drive_root)} if projects else {}
     projects = [_with_dialogue_facts(project, facts.get(project["chat_id"])) for project in projects]
     projects = select_projects(projects, closed=closed, oldest_first=oldest_first)
-    if chat_id is None and include_pinned:
+    if not addressed and limit is not None and include_pinned:
         # Pins remain reachable without starving the ordinary recent-room slice.
         projects = ([p for p in projects if p.get("pinned") is True]
                     + [p for p in projects if p.get("pinned") is not True][:max(1, int(limit))])
-    elif chat_id is None:
+    elif not addressed and limit is not None:
         start = max(0, int(start))
         projects = projects[start:start + max(1, int(limit))]
     absence_covered = False
@@ -1434,7 +1452,7 @@ def projects_summary(drive_root: Any, *, limit: int = 50, chat_id: Any = None,
                         raise ds.StoreError("dialogue history has gaps; room activity is unknown")
                 absence_covered = True
             except (ds.StoreMigrating, ds.StoreError):
-                if chat_id is not None:
+                if addressed:
                     raise  # the addressed room answers its typed outcome
                 # The sidebar keeps every room while the archive imports: an unproved room reads as
                 # not yet active (as before the import found its rows), never as a missing project.

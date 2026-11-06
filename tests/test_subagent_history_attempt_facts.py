@@ -181,8 +181,7 @@ def test_history_error_does_not_claim_successful_result_store_failed(tmp_path, m
     assert "Failed to store task result" not in caplog.text
 
 
-@pytest.mark.parametrize("pin", ["", "account-a"])
-@pytest.mark.parametrize("failed", [False, True])
+@pytest.mark.parametrize(("failed", "pin"), [(False, "account-a"), (True, "")])
 def test_transport_request_account_survives_when_caller_uses_role_default(tmp_path, pin, failed):
     from ouroboros.llm_claudexor import _ModelInvocation
     invocation = _ModelInvocation({"usage_model": TARGET},

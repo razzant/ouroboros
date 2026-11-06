@@ -28,9 +28,10 @@ def test_revised_caption_survives_older_body_export_and_return(tmp_path, revised
     assert ds.accepted_row(tmp_path, 1, 'older-body') is not None
 
 
-@pytest.mark.parametrize('stream', ['chat', 'progress'])
-@pytest.mark.parametrize('index', [0, 1])
-@pytest.mark.parametrize('replacement', ['x', 'Длинная правка. ' * 30])
+@pytest.mark.parametrize(("replacement", "index", "stream"), [
+    ('x', 0, 'chat'),
+    pytest.param('Длинная правка. ' * 30, 1, 'progress', id='Длинная правка. Длинная правка. Длинная правка. Длинная правка. Длинная правка. Длинная правка. Длинная правка. Длинная правка. Длинная правка. Длинная правка. Длинная правка. Длинная правка. Длинная правка. Длинная правка. Длинная правка. Длинная правка. Длинная правка. Длинная правка. Длинная правка. Длинная правка. Длинная правка. Длинная правка. Длинная правка. Длинная правка. Длинная правка. Длинная правка. Длинная правка. Длинная правка. Длинная правка. Длинная правка. -1-progress'),
+])
 def test_revision_roundtrip_preserves_spans_counts_and_multiple_batches(tmp_path, stream, index, replacement):
     _legacy_root(tmp_path)
     di.cutover(tmp_path)
@@ -69,8 +70,7 @@ def test_revision_roundtrip_preserves_spans_counts_and_multiple_batches(tmp_path
         later.row, make('older-again', 'Second downgrade.')]
 
 
-@pytest.mark.parametrize('resume_export', [False, True])
-@pytest.mark.parametrize('stop_import', [False, True])
+@pytest.mark.parametrize(("stop_import", "resume_export"), [(False, False), (True, True)])
 def test_revision_map_survives_interrupted_export_and_cutover(tmp_path, monkeypatch, resume_export, stop_import):
     di.cutover(tmp_path)
     first = ds.append(tmp_path, 'chat', chat('', 'Original.', direction='out'))

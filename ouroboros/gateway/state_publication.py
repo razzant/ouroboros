@@ -328,7 +328,9 @@ def published_jobs(app_state: Any) -> Dict[str, Any]:
 # ---- the per-request process facts -----------------------------------------------------------
 
 def _worker_counts() -> Tuple[int, int]:
-    """(alive, total) of the worker pool, read from this process's table (no I/O)."""
+    """(alive, total) of every worker slot of both lanes, project pool and conversation carriers, from this
+    process's table (no I/O; a liveness check per process). Not the project ceiling or assignable capacity:
+    the queue snapshot publishes those (``queue_publication._pool_counts``)."""
     try:
         from supervisor.workers import WORKERS
 
@@ -428,6 +430,7 @@ def produced_fields(snap: Dict[str, Any]) -> Dict[str, Any]:
         "github_token_configured": snap["github_token_configured"],
         "accounting": _accounting_block(snap["accounting"], available, limit),
         "projects": snap["projects"],
+        "project_listable_count": snap.get("project_listable_count"),
         "project_chat_ids": snap["project_chat_ids"],
         "main_visible_revision": snap.get("main_visible_revision"),
         "task_bindings_revision": snap["task_bindings_revision"],

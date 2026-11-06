@@ -171,7 +171,6 @@ def _wheel(page, dy):
 
 
 @pytest.mark.ui_browser
-@pytest.mark.serial
 @pytest.mark.parametrize("width,height,owner", [(1280, 928, "list"), (1280, 700, "list"), (1280, 500, "sidebar"),
                                                 (640, 800, "list")], ids=["928", "700", "short-500", "drawer-640"])
 @pytest.mark.parametrize("shape", ["v7.7.0", "wrapped", "fresh"])

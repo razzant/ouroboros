@@ -70,6 +70,8 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "_origin_from_mapping", "_repo_writer_turn_allowed",
         "_report_binding_failure", "load_state",
         "repo_writer_admission_closed", "send_with_budget",
+        # The Fault boot's recovery turn names the rows the boot holds with saved work (owner 2A).
+        "PENDING",
     })),
     "supervisor/worker_pool_lifecycle.py": ("supervisor/workers.py", "_pool", frozenset({
         # Runtime676: execution reader/disable moved from the facade; RUNNING
@@ -134,19 +136,17 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "REPO_DIR",
     })),
     "supervisor/worker_health.py": ("supervisor/workers.py", "_pool", frozenset({
-        # Runtime707: health hands off recovery; the reaper owns storm/respawn.
+        # Runtime707: health hands off recovery; the reaper owns the respawn.
         "DRIVE_ROOT", "QUEUE_MAX_RETRIES", "RUNNING", "WORKERS",
         "_LAST_SPAWN_TIME", "_SPAWN_GRACE_SEC", "_emit_task_done_terminal",
         # #1196: completing a saved exact budget pause after a worker death re-parks
         # the row into the pool's PENDING through the same handle.
         "PENDING",
         "_ensure_workers_healthy_locked", "_reconcile_confirmed_dead_review_owner",
-        "_worker_crash_storm_detected", "append_jsonl", "coerce_chat_identity",
+        "append_jsonl", "coerce_chat_identity",
         "disable_exhausted_worker_pool", "get_event_q", "load_state", "reconstruct_task_cost",
         "send_with_budget", "terminal_task_metadata",
         "utc_now_iso",
-        # A crash storm latches the disable reason that freezes demand elasticity.
-        "_WORKER_POOL_DISABLED_REASON",
     })),
     # D10 lane rows (oracle ouroboros_v7_wip @ 9f691656). git_ops leaves carry
     # the reference's G1 `_go()` sets re-derived on tip bytes (safe_restart and
@@ -232,14 +232,14 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "rescue_git_capture", "utc_now_iso", "host_git_env",
     })),
     "supervisor/git_ops_reset.py": ("supervisor/git_ops.py", "_go", frozenset({
-        "BOOTSTRAP_PIN_MARKER_NAME", "BRANCH_DEV", "BRANCH_STABLE", "DRIVE_ROOT", "REPO_DIR",
-        "UPDATE_INTENT_MARKER_NAME", "_bootstrap_pin_marker_path", "_update_intent_marker_path",
+        "BRANCH_DEV", "BRANCH_STABLE", "DRIVE_ROOT", "REPO_DIR",
+        "_bootstrap_pin_marker_path", "_update_intent_marker_path",
         "_git_network_bounded",
         "_admission_gate_for_unsynced_tree",
         "_clear_bootstrap_pin_marker", "_clear_update_intent",
         "_collect_repo_sync_state", "_compute_ref_ahead_count",
         "_create_rescue_snapshot", "_git_dir", "_guard_live_repo_destructive_git",
-        "_has_remote", "_is_launcher_managed_repo", "_maybe_repair_git_index", "_pin_to_bundle_sha_on_bootstrap",
+        "_bootstrap_git_markers", "_has_remote", "_is_launcher_managed_repo", "_maybe_repair_git_index", "_pin_to_bundle_sha_on_bootstrap",
         "_preserve_branch_for_official_reset", "_read_managed_repo_meta",
         "_read_update_intent", "_ref_points_at_ref", "_rescue_untracked_incomplete",
         "_run_git_resilient", "_update_source", "append_jsonl", "git_capture",
@@ -504,21 +504,22 @@ def _handle_reads(tree: ast.AST, handle: str) -> set[str]:
     return reads
 
 
-@pytest.mark.parametrize("leaf", sorted(LEAVES))
-def test_each_leaf_reaches_its_parent_only_through_a_call_time_handle(leaf: str) -> None:
-    parent, handle, _declared = LEAVES[leaf]
-    parent_module = parent[:-3].replace("/", ".")
-    tree = _tree(leaf)
-    for node in tree.body:  # module scope only: a lazy import inside the handle is the point
-        if isinstance(node, ast.ImportFrom):
-            assert node.module != parent_module, f"{leaf} imports its parent at module scope"
-        if isinstance(node, ast.Import):
-            assert all(a.name != parent_module for a in node.names), leaf
-    handles = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == handle]
-    assert len(handles) == 1, f"{leaf}: expected exactly one {handle}() definition"
-    assert [n for n in ast.walk(handles[0]) if isinstance(n, (ast.Import, ast.ImportFrom))], (
-        f"{leaf}: {handle}() must import the parent at call time"
-    )
+def test_each_leaf_reaches_its_parent_only_through_a_call_time_handle(subtests) -> None:
+    for leaf in sorted(LEAVES):
+        with subtests.test(leaf=leaf):
+            parent, handle, _declared = LEAVES[leaf]
+            parent_module = parent[:-3].replace("/", ".")
+            tree = _tree(leaf)
+            for node in tree.body:  # module scope only: a lazy import inside the handle is the point
+                if isinstance(node, ast.ImportFrom):
+                    assert node.module != parent_module, f"{leaf} imports its parent at module scope"
+                if isinstance(node, ast.Import):
+                    assert all(a.name != parent_module for a in node.names), leaf
+            handles = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == handle]
+            assert len(handles) == 1, f"{leaf}: expected exactly one {handle}() definition"
+            assert [n for n in ast.walk(handles[0]) if isinstance(n, (ast.Import, ast.ImportFrom))], (
+                f"{leaf}: {handle}() must import the parent at call time"
+            )
 
 
 @pytest.mark.parametrize("leaf", sorted(LEAVES))
@@ -533,37 +534,38 @@ def test_the_declared_set_is_exactly_what_the_leaf_reads_through_the_handle(leaf
     assert missing == [], f"{leaf}: declared names absent from {parent}: {missing}"
 
 
-@pytest.mark.parametrize("leaf", sorted(LEAVES))
-def test_no_leaf_reads_a_parent_owned_name_directly(leaf: str) -> None:
+def test_no_leaf_reads_a_parent_owned_name_directly(subtests) -> None:
     """The bug the handle exists to prevent: a direct read freezes the binding the
     leaf saw at import time, so `init` rebinding the parent's name — or a test doing
     the same — would leave this module looking at the old object forever."""
-    parent, _handle, _declared = LEAVES[leaf]
-    leaf_tree = _tree(leaf)
-    parent_defs: set[str] = set()
-    for node in _tree(parent).body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            parent_defs.add(node.name)
-        elif isinstance(node, ast.Assign):
-            # Same recursive unfold as _module_bindings (wave-5 conformance:
-            # the shallow variant here let git_ops' tuple-bound aliases
-            # escape the direct-read guard).
-            stack = list(node.targets)
-            while stack:
-                t = stack.pop()
-                if isinstance(t, ast.Name):
-                    parent_defs.add(t.id)
-                elif isinstance(t, (ast.Tuple, ast.List)):
-                    stack.extend(t.elts)
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            parent_defs.add(node.target.id)
-    own = _module_bindings(leaf_tree)
-    direct = {
-        node.id for node in ast.walk(leaf_tree)
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
-        and node.id in parent_defs and node.id not in own
-    }
-    assert direct == set(), f"{leaf} reads {sorted(direct)} directly instead of through the handle"
+    for leaf in sorted(LEAVES):
+        with subtests.test(leaf=leaf):
+            parent, _handle, _declared = LEAVES[leaf]
+            leaf_tree = _tree(leaf)
+            parent_defs: set[str] = set()
+            for node in _tree(parent).body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    parent_defs.add(node.name)
+                elif isinstance(node, ast.Assign):
+                    # Same recursive unfold as _module_bindings (wave-5 conformance:
+                    # the shallow variant here let git_ops' tuple-bound aliases
+                    # escape the direct-read guard).
+                    stack = list(node.targets)
+                    while stack:
+                        t = stack.pop()
+                        if isinstance(t, ast.Name):
+                            parent_defs.add(t.id)
+                        elif isinstance(t, (ast.Tuple, ast.List)):
+                            stack.extend(t.elts)
+                elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                    parent_defs.add(node.target.id)
+            own = _module_bindings(leaf_tree)
+            direct = {
+                node.id for node in ast.walk(leaf_tree)
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+                and node.id in parent_defs and node.id not in own
+            }
+            assert direct == set(), f"{leaf} reads {sorted(direct)} directly instead of through the handle"
 
 
 def test_queue_snapshot_path_has_a_single_authority():

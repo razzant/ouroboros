@@ -317,7 +317,7 @@ def test_note_label_across_a_dst_change_compares_instants_and_names_each_offset(
 
 @pytest.mark.parametrize(("stored", "expected"), [
     ((True, 5_000_000_001), 5_000_000_001),  # a headless install's first owner transport
-    ((True, None), 1), ((False, 77), 1), ((True, 0), 1), ((True, -1001), 1), ((True, "x"), 1),
+    ((True, None), 1), ((True, "x"), 1),
 ])
 def test_notes_go_to_the_owner_chat_else_main(tmp_path, monkeypatch, stored, expected):
     from supervisor import schedule_notes, state

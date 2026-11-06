@@ -11,7 +11,6 @@ import pytest
 
 from supervisor import state
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture
@@ -201,7 +200,6 @@ def test_ground_truth_counts_the_keys_byok_consumption_like_the_ledger(monkeypat
 
 @pytest.mark.parametrize("changed", [
     {"session_total_snapshot": 2000.0},
-    {"session_openrouter_settled_snapshot": 30.0},
     {"session_id": "another-session"},
     {"openrouter_last_check_at": "newer-observation", "openrouter_total_usd": 3000.0},
 ])

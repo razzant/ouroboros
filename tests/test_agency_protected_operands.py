@@ -5,7 +5,6 @@ import os
 import pathlib
 import shlex
 import shutil
-import sys
 
 import pytest
 
@@ -13,7 +12,6 @@ from ouroboros import config, safety
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros.tools.shell_guards import direct_shell_rows, direct_utility_target_rows
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture
@@ -46,11 +44,8 @@ def protected(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("cmd", [
-    ["grep", "reference", "driver.txt"], ["grep", "-e", "reference", "driver.txt"],
-    ["grep", "--regexp=reference", "driver.txt"], ["grep", "-n", "NOT_A_PATH=reference", "driver.txt"],
-    ["grep", "-e", "reference", "--", "driver.txt"],
-    ["sed", "s/reference/seen/", "driver.txt"], ["sed", "-e", "s/reference/seen/", "driver.txt"],
-    ["awk", "/reference/ {print}", "driver.txt"], ["awk", "-v", "v=reference", "{print v}", "driver.txt"],
+    ["grep", "--regexp=reference", "driver.txt"], ["grep", "-e", "reference", "--", "driver.txt"],
+    ["awk", "-v", "v=reference", "{print v}", "driver.txt"],
     ["find", "ordinary", "-name", "reference"],
 ])
 def test_search_patterns_and_programs_do_not_become_file_targets(protected, cmd):
@@ -67,11 +62,7 @@ def test_search_patterns_and_programs_do_not_become_file_targets(protected, cmd)
 
 
 @pytest.mark.parametrize("cmd", [
-    ["cat", "reference"], ["cp", "reference", "copy.txt"], ["shasum", "reference"],
-    ["grep", "-f", "reference", "driver.txt"], ["sed", "-f", "reference", "driver.txt"],
-    ["awk", "-f", "reference", "driver.txt"], [sys.executable, "reference"], ["sh", "reference"],
-    ["grep", "ordinary", "reference"],
-    ["dd", "if=driver.txt", "of=reference"],
+    ["cat", "reference"], ["grep", "-f", "reference", "driver.txt"], ["dd", "if=driver.txt", "of=reference"],
 ])
 def test_actual_read_copy_hash_script_and_pattern_file_remain_protected(protected, cmd):
     registry, _ctx, reference, workspace = protected

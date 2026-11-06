@@ -427,7 +427,9 @@ test('saved unavailable session route and account remain selectable', () => {
         snapshot: { harnesses: [], profiles: { harnessAccounts: [], profiles: [] } },
     };
     const html = availableSubagentRowMarkup(sessionRow(), state);
-    assert.match(html, /codex \(not in discovery\)/);
+    // The saved harness keeps its display name (the catalog's table), never the raw id (U097).
+    assert.match(html, />Codex \(agent\) · not in discovery</);
+    assert.doesNotMatch(html, />codex \(/);
     assert.match(html, /gpt-5.6-sol-high \(not in discovery\)/);
     assert.match(html, />koshak \(not in discovery\)</);
     assert.match(html, /currently unavailable/);

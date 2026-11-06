@@ -70,8 +70,7 @@ def test_explicit_foreign_account_is_unbound_without_ignoring_its_own_scopes(tmp
     assert "Advises" in place_guard.dispatch_refusal(ctx, "send", {"account_id": "foreign", "to": "recipient"})
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-@pytest.mark.parametrize("no_folder", [False, True])
+@pytest.mark.parametrize(("no_folder", "legacy"), [(False, True), (True, False)])
 def test_promotion_preserves_requested_scope_unless_legacy_ceiling(focus, monkeypatch, legacy, no_folder):
     from ouroboros.tools import control_routing as routing
     from supervisor import worker_promotion, workers

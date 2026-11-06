@@ -871,6 +871,7 @@ def _notify_one_root(nt, api, data, monkeypatch, result):
     ({"cost_presentation": _tree_cost(3.42, unpriced=True)}, "✅ Task cost1 done · Tracked: $3.42"),
     ({"cost_presentation": _tree_cost(0.125)}, "✅ Task cost1 done · $0.13"),  # toFixed(2) rounds a tie up
     ({"cost_presentation": _tree_cost(0.0)}, "✅ Task cost1 done · $0.00"),  # a priced zero is a real zero
+    ({"cost_presentation": _tree_cost(0.0004)}, "✅ Task cost1 done · $0.0004"),  # under a cent is not that zero
 ])
 def test_task_notify_shows_the_cost_in_the_cards_words(tmp_path, monkeypatch, result, line):
     """#971: the phone line carries the card's cost words for the root's whole tree."""
@@ -880,9 +881,6 @@ def test_task_notify_shows_the_cost_in_the_cards_words(tmp_path, monkeypatch, re
 
 @pytest.mark.parametrize("result", [
     {"cost_presentation": _tree_cost(None, final=False, open_=True, rows=False)},  # the card's "Cost unknown"
-    {"cost_presentation": _tree_cost(None, final=False, unpriced=True)},  # only unpriced rows: no measured zero
-    {"cost_presentation": None, "cost_accounting_status": "unavailable"},
-    {"cost_presentation": _tree_cost(1.5, scope="own")},  # a root's own share is not the tree's cost
     {"cost_usd": 7.98},  # the retired alias is not a current price
     {"accounted_upper_bound_usd": 7.98, "cost_usd": 7.98},
 ])

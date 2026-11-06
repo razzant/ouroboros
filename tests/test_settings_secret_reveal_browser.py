@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from pathlib import Path
 
 import pytest
@@ -19,7 +18,6 @@ MCP = "synthetic-mcp-" + "fedcba9876543210" * 6 + "-END"
 ADDED = "sk-or-v1-SYNTHETIC-added-" + "13579bdf" * 8 + "-END"
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_saved_secret_show_preserves_settings_and_drafts(direct_server_with_data, engine):
@@ -102,7 +100,7 @@ def test_saved_secret_show_preserves_settings_and_drafts(direct_server_with_data
             assert shown_box["x"] + shown_box["width"] <= toggle.bounding_box()["x"], (masked_box, shown_box)
             expect(field).to_have_value(mask)
             expect(field).to_have_attribute("type", "password")
-            expect(page.locator("#settings-unsaved-indicator")).not_to_have_class(re.compile(r"\bis-visible\b"))
+            expect(page.locator(".settings-footer")).to_have_attribute("data-draft", "clean")
             assert saves == [] and reveals == [{"key": "ANTHROPIC_API_KEY"}]
             anthropic_card.locator('[data-provider-test="anthropic"]').click()
             expect(anthropic_card.locator("[data-provider-test-status]")).to_contain_text("Works")
@@ -132,7 +130,7 @@ def test_saved_secret_show_preserves_settings_and_drafts(direct_server_with_data
             added.locator(".secret-toggle").click()
             expect(added.locator(".settings-secret-value")).to_have_text(ADDED)
             assert reveals[-1] == {"connection": "openrouter@claude-credits", "field": "api_key"}
-            expect(page.locator("#settings-unsaved-indicator")).not_to_have_class(re.compile(r"\bis-visible\b"))
+            expect(page.locator(".settings-footer")).to_have_attribute("data-draft", "clean")
             added.locator(".secret-toggle").click()
             expect(added.locator(".settings-secret-value")).to_be_hidden()
 
@@ -152,7 +150,7 @@ def test_saved_secret_show_preserves_settings_and_drafts(direct_server_with_data
             requested = page.locator("#skill-requested-secrets")
             requested.locator("[data-row-secret-toggle]").click()
             expect(requested.locator(".settings-secret-value")).to_have_text(CUSTOM)
-            expect(page.locator("#settings-unsaved-indicator")).not_to_have_class(re.compile(r"\bis-visible\b"))
+            expect(page.locator(".settings-footer")).to_have_attribute("data-draft", "clean")
 
             page.click('[data-settings-tab="advanced"]')
             mcp = page.locator("[data-mcp-card]").first
@@ -215,14 +213,13 @@ def test_saved_secret_show_preserves_settings_and_drafts(direct_server_with_data
             behavior["reveal"] = "real"
             github.locator(".secret-toggle").click()
             expect(github.locator(".settings-secret-value")).to_have_text("synthetic-github-token")
-            expect(page.locator("#settings-unsaved-indicator")).not_to_have_class(re.compile(r"\bis-visible\b"))
+            expect(page.locator(".settings-footer")).to_have_attribute("data-draft", "clean")
             page.click("#btn-reload-settings")
             expect(github.locator(".settings-secret-value")).to_be_hidden()
         finally:
             browser.close()
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_settings_paints_and_saves_while_the_installed_skill_list_is_held(direct_server_with_data, engine):
@@ -278,10 +275,10 @@ def test_settings_paints_and_saves_while_the_installed_skill_list_is_held(direct
             expect(page.locator("#btn-save-settings")).to_be_enabled()
             page.click('[data-settings-tab="advanced"]')  # the repo field lives on Advanced
             page.locator("#s-gh-repo").fill("owner/held-proof")
-            expect(page.locator("#settings-unsaved-indicator")).to_have_class(re.compile(r"\bis-visible\b"))
+            expect(page.locator(".settings-footer")).to_have_attribute("data-draft", "dirty")
             held.pop().fulfill(json=listing)
             expect(page.locator("#s-gh-repo")).to_have_value("owner/held-proof")
-            expect(page.locator("#settings-unsaved-indicator")).to_have_class(re.compile(r"\bis-visible\b"))
+            expect(page.locator(".settings-footer")).to_have_attribute("data-draft", "dirty")
             # A confirmed Save waits for the settings document only: its reload's list read stays
             # held, yet the save completes, Save is usable again and the owner can leave the page.
             page.click("#btn-save-settings")
@@ -293,7 +290,7 @@ def test_settings_paints_and_saves_while_the_installed_skill_list_is_held(direct
                 page.wait_for_timeout(50)
             assert len(held) == 1, "the post-save reload reads the list once more, still held"
             expect(page.locator("#btn-save-settings")).to_be_enabled()
-            expect(page.locator("#settings-unsaved-indicator")).not_to_have_class(re.compile(r"\bis-visible\b"))
+            expect(page.locator(".settings-footer")).to_have_attribute("data-draft", "clean")
             page.click('[data-nav-page="chat"]')
             expect(page.locator("#page-chat")).to_be_visible(timeout=10_000)
             behavior["hold"] = False

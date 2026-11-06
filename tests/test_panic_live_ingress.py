@@ -7,7 +7,6 @@ import sys
 
 import pytest
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("surface", ["http", "ws", "ws_chat", "external", "external_correlated"])

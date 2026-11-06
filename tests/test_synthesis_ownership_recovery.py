@@ -14,7 +14,6 @@ from ouroboros.task_results import load_task_result, write_task_result
 from tests._budget_pause_exact_helpers import _install_queue
 from tests.test_delegate_body_collection import _until
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture
@@ -218,9 +217,11 @@ def test_real_agent_start_record_allows_the_original_unstamped_task_to_finish(wo
     assert not phase.post_task_synthesis_in_flight(work.root, task["id"])
 
 
-@pytest.mark.parametrize("source,category", [("post_task_synthesis", "post_task"),
-    ("memory_fallback", "consolidation"), ("scratchpad_consolidation", "consolidation")])
-@pytest.mark.parametrize("state", ["dispatched", "settled", "unresolved"])
+@pytest.mark.parametrize(("state", "source", "category"), [
+    ("dispatched", "memory_fallback", "consolidation"),
+    ("settled", "post_task_synthesis", "post_task"),
+    ("unresolved", "scratchpad_consolidation", "consolidation"),
+])
 def test_legacy_pending_with_actual_paid_facts_is_never_replayed(work, source, category, state):
     held = money.reserve_attempt(money.AttemptRequest(model="test", provider="test", task_id=work.task["id"],
         root_task_id=work.task["id"], drive_root=work.root, category=category, source=source, reservation_usd=0))

@@ -18,7 +18,7 @@ import pytest
 from tests.test_effort_range_browser import _evidence_dir, _launch, _open_chat
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 - pytest fixture import
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 PLUS = "#page-chat #chat-plus"
 MENU = ".chat-plus-menu:not([data-leaving])"
@@ -112,9 +112,9 @@ def test_plus_menu_attaches_by_pointer_and_keyboard_in_both_themes(direct_server
                         page.wait_for_selector(MENU, state="visible", timeout=5_000)
                         opened = _facts(page)
                         assert opened["focus"] == "input", (where, opened["focus"])
-                        # Attach file first; the host's own "Make a button with Ouroboros…" closes the list.
+                        # Attach file first; the host's own "Make a button…" closes the list.
                         assert opened["expanded"] == "true" and opened["items"][0] == "Attach file", (where, opened)
-                        assert opened["items"][-1] == "Make a button with Ouroboros…", (where, opened)
+                        assert opened["items"][-1] == "Make a button…", (where, opened)
                         menu = opened["menu"]
                         assert menu["bottom"] <= opened["plus"]["top"] + 0.5, (where, menu, opened["plus"])
                         assert menu["left"] >= 0 and menu["right"] <= opened["view"] + 0.5, (where, menu)

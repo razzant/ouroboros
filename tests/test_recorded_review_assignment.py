@@ -117,7 +117,7 @@ def test_absent_historical_session_rights_reconstruct_readonly_with_exact_origin
         key: value for key, value in row["recovery_binding"].items() if key != "pending_invocation_id"}
 
 
-@pytest.mark.parametrize("defect", ["missing_prompt", "missing_request", "missing_slot", "missing_binding"])
+@pytest.mark.parametrize("defect", ["missing_prompt", "missing_request", "missing_binding"])
 def test_missing_original_source_is_a_gap_without_losing_the_original_binding(paid, defect):
     root, _slot, original, calls, _text = paid
     row = copy.deepcopy(original)

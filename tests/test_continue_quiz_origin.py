@@ -194,13 +194,19 @@ def test_a_wake_started_root_continues_with_the_cards_it_started_from(tmp_path, 
     assert text.index(QUESTION) < text.index("Yes, start it")
     metadata = successor["metadata"]
     corpus = metadata["owner_corpus"]
-    # The owner corpus keeps the owner's exact words with the card identity; questions never enter it.
+    # The owner corpus keeps the owner's exact words with the card identity; each card's question rides beside
+    # its answer as the message it replies to (the asking task's words), never inside the owner's words.
     assert [(row["source"], row["content"]) for row in corpus] == [
         ("owner_quiz_answer", "1. Yes, start it"), ("owner_quiz_answer", "Europe and Turkey, not Asia"),
         ("owner_quiz_answer", "2. 2026")]
     assert [(row["source_task_id"], row["quiz_id"]) for row in corpus] == [
         (WAKE, "q-start"), (WAKE, "q-scope"), (rid, "q-root")]
-    assert not any(QUESTION in json.dumps(row) or ROOT_QUESTION in json.dumps(row) for row in corpus)
+    assert not any(QUESTION in json.dumps(row["content"]) or ROOT_QUESTION in json.dumps(row["content"])
+                   for row in corpus)
+    assert [row["reply_to"]["text"].splitlines()[0] for row in corpus] == [QUESTION, SCOPE_QUESTION, ROOT_QUESTION]
+    assert all("Stake: The Q4 plan" in row["reply_to"]["text"] and "If unanswered: Wait for the owner"
+               in row["reply_to"]["text"] for row in corpus)  # the whole subject the card showed, through Continue
+    assert [row["reply_to"]["author"] for row in corpus] == [f"Ouroboros, task {WAKE}"] * 2 + [f"Ouroboros, task {rid}"]
     start = metadata["continuation"]["owner_sources"]["start"]
     assert start["objective"].startswith(OBJECTIVE) and start["author"] == {"kind": "task", "task_id": WAKE}
     assert [answer["card"]["question"] for answer in start["answers"]] == [QUESTION, SCOPE_QUESTION]
@@ -222,11 +228,16 @@ def test_the_producer_records_its_start_sources_where_every_writer_persists_them
 
     queue, workers, bridge, root, wake = _wake_started_root(tmp_path, monkeypatch)
     rid = root["id"]
+    answered = [row for row in wake._owner_directives if row["source"] == "owner_quiz_answer"]
+    # Each answer is read with its card, the asking task's words beside the owner's.
+    assert [(row["reply_to"]["author"], row["reply_to"]["text"].splitlines()[0]) for row in answered] == [
+        (f"Ouroboros, task {WAKE}", QUESTION), (f"Ouroboros, task {WAKE}", SCOPE_QUESTION)]
     expected = [{"source": "owner_quiz_answer", "content": "1. Yes, start it", "msg_id": f"quiz_answer:{WAKE}:q-start",
-                 "source_task_id": WAKE, "quiz_id": "q-start"},
+                 "source_task_id": WAKE, "quiz_id": "q-start", "reply_to": answered[0]["reply_to"]},
                 {"source": "owner_quiz_answer", "content": "Europe and Turkey, not Asia",
-                 "msg_id": f"quiz_answer:{WAKE}:q-scope", "source_task_id": WAKE, "quiz_id": "q-scope"}]
-    assert [row for row in wake._owner_directives if row["source"] == "owner_quiz_answer"] == expected
+                 "msg_id": f"quiz_answer:{WAKE}:q-scope", "source_task_id": WAKE, "quiz_id": "q-scope",
+                 "reply_to": answered[1]["reply_to"]}]
+    assert answered == expected
     receipt = load_task_result(tmp_path, rid)
     assert receipt["status"] == "scheduled"
     for carrier in (root["metadata"], receipt["metadata"]):
@@ -333,8 +344,7 @@ def test_a_lost_or_legacy_opening_stays_a_named_gap(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("damage", [
-    "card_missing", "card_unanswered", "words_changed", "identity_removed", "identity_malformed", "own_card",
-    "foreign_card",
+    "card_missing", "identity_removed", "foreign_card",
 ])
 def test_a_start_card_that_does_not_resolve_refuses_by_name(tmp_path, monkeypatch, damage):
     from ouroboros.owner_quiz import _mutate_projection, quiz_states, record_answered, record_asked

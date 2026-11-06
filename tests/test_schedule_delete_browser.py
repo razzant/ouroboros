@@ -12,7 +12,7 @@ from ouroboros.test_evidence import diagnostic_directory
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def test_schedule_delete_withdraws_rows_that_stay_visible_and_restorable(direct_server_with_data):

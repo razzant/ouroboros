@@ -517,8 +517,13 @@ def prepare_worker_crash_handoff(
     worker_id: int,
     exitcode: Optional[int],
 ) -> dict[str, Any]:
-    """Reserve one same-generation successor and settle anything unprovable."""
+    """Reserve one same-generation successor and settle anything unprovable.
 
+    A signal death (``exitcode < 0``) reserves nothing (D24, ``worker_signal``): the leaf
+    settles as on abrupt loss and the retried attempt continues through ``continue_from``;
+    an exit-code death keeps its handoff."""
+    if isinstance(exitcode, int) and exitcode < 0:
+        return {}
     try:
         row = prepare_handoff(
             drive_root, task, cause=CAUSE_WORKER_CRASH,

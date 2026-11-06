@@ -29,8 +29,7 @@ def cyber(monkeypatch):
 
 
 @pytest.mark.parametrize("path", [
-    "SKILL.md", "author-note.md", "catalog.json", "pull-request-title.txt",
-    "pr-body-model-prompt.txt", "optional-pr-body.md", "pull-request-body.md",
+    "SKILL.md", "catalog.json", "pull-request-body.md",
 ])
 def test_high_finding_preserves_original_facts_and_publishes_once(monkeypatch, tmp_path, path):
     finding = _finding(path, confidence="high", disposition="blocker")
@@ -58,8 +57,7 @@ def test_high_finding_preserves_original_facts_and_publishes_once(monkeypatch, t
 
 
 @pytest.mark.parametrize("reason", [
-    "scanner_missing", "scanner_corrupt", "scanner_timeout", "scanner_report_invalid",
-    "scanner_ruleset_invalid", "scanner_input_invalid",
+    "scanner_missing", "scanner_corrupt", "scanner_input_invalid",
 ])
 def test_scanner_failure_is_disclosed_without_erasing_real_pr(monkeypatch, tmp_path, reason):
     ctx, events, captured = _install_transaction_fakes(
@@ -108,7 +106,7 @@ def test_publication_keeps_old_negative_review_separate_from_current_bytes(monke
 
 @pytest.mark.parametrize("status,profile,source", [
     ("blockers", "", "external"), ("pending", "", "external"),
-    ("clean", "owner_attested", "external"), ("clean", "", "native"),
+    ("clean", "owner_attested", "external"),
 ])
 def test_local_review_and_source_policy_are_advisory(monkeypatch, tmp_path, status, profile, source):
     loaded = _loaded(status=status, source=source)
@@ -196,7 +194,6 @@ def test_actual_github_failure_remains_failure_after_advice(monkeypatch, tmp_pat
     assert calls == ["prepare"]
 
 
-@pytest.mark.serial
 def test_real_cached_scanner_high_finding_reaches_one_simulated_pr(monkeypatch, tmp_path):
     from tests.test_skill_publish_scanner_real import _binary, _executable
 

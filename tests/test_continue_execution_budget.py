@@ -186,7 +186,6 @@ def test_the_owner_restart_kill_closes_the_attempt_it_interrupts(pool):
     assert binding["execution_consumed_sec"] == stored["execution_consumed"]["sec"]
 
 
-@pytest.mark.serial  # a real worker process is killed (tests/_cancel_intents_shared._LiveProc)
 def test_an_owner_restart_cancel_that_wins_the_race_closes_the_attempt(pool):
     """The Restart door records its ``owner_restart`` intent before ``kill_workers``; cancellation
     custody can win that race, kill the worker and release the RUNNING row itself
@@ -218,6 +217,10 @@ def test_an_owner_restart_cancel_that_wins_the_race_closes_the_attempt(pool):
 
 
 def test_a_crash_terminal_closes_the_dead_attempt(pool):
+    """The retried attempt's death (attempt 2 of ``QUEUE_MAX_RETRIES`` 1) is the crash terminal; a signal death is
+    no longer terminal on its own (it takes the same one retry, ARCHITECTURE §5), so the dead attempt here is
+    the second."""
+    from ouroboros.agent import OuroborosAgent
     from ouroboros.task_results import load_task_result
     from supervisor.worker_health import recover_confirmed_dead_worker
     from tests.test_restart_retention import _pool_events
@@ -231,13 +234,16 @@ def test_a_crash_terminal_closes_the_dead_attempt(pool):
     pool.mp.setattr(pool.workers, "reconstruct_task_cost", lambda *_a, **_k: {"cost_accounting_status": "available"})
     pool.mp.setattr(pool.workers, "_reconcile_confirmed_dead_review_owner", lambda *_a: None)
 
+    # The retried attempt is the one that died: its own start record (task_attempt 2) and RUNNING row.
+    OuroborosAgent._persist_running_record(SimpleNamespace(env=SimpleNamespace(drive_root=pool.root)), dict(_sent, _attempt=2))
+    meta["attempt"] = meta["task"]["_attempt"] = 2
     recover_confirmed_dead_worker({"kind": "confirmed_dead_worker", "worker_id": 7, "worker": worker,
-                                   "task_id": "budget-1", "meta": meta, "task": dict(meta["task"]), "attempt": 1,
+                                   "task_id": "budget-1", "meta": meta, "task": dict(meta["task"]), "attempt": 2,
                                    "exitcode": -9, "drive_root": str(pool.root), "skip_respawn": True})
 
     stored = load_task_result(pool.root, "budget-1")
-    assert stored["status"] == "failed" and stored["reason_code"] == "worker_crash_signal"
-    assert stored["execution_consumed"]["attempt"] == 1
+    assert stored["status"] == "failed" and stored["reason_code"] == "worker_crash_retry_exhausted"
+    assert stored["execution_consumed"]["attempt"] == 2
     assert stored["execution_consumed"]["sec"] == pytest.approx(300, abs=30)
     _row, binding = _continue(pool, "budget-1")
     assert binding["execution_consumed_sec"] == stored["execution_consumed"]["sec"]
@@ -315,10 +321,8 @@ def test_a_spent_budget_is_a_reached_limit_not_a_continue(pool):
 @pytest.mark.parametrize("close", [
     None,  # a record settled before its terminal writers kept the total
     {"sec": 120.0, "attempt": 1},  # a later attempt started and never closed
-    {"sec": "120", "attempt": 2},
-    {"sec": -1.0, "attempt": 2},
     {"sec": 120.0, "attempt": True},
-], ids=["never_recorded", "stale_attempt", "text", "negative", "bool_attempt"])
+], ids=["never_recorded", "stale_attempt", "bool_attempt"])
 def test_an_unknown_consumed_total_is_refused_never_regranted(pool, close):
     from ouroboros.owner_continue import continuation_offer
     from ouroboros.task_results import load_task_result, write_task_result

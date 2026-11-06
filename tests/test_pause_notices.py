@@ -20,7 +20,6 @@ from ouroboros.task_results import load_task_result, write_task_result
 from supervisor import message_bus, terminal_delivery as td
 from supervisor.event_observation import ObservedEventQueue
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture

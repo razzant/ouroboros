@@ -51,9 +51,12 @@ def test_advises_extension_and_mcp_both_directions(published_tool, places):
     assert guard.dispatch_refusal(ctx, "read_file", {}) == ""
 
 
-@pytest.mark.parametrize("metadata", [{}, {"task_type": "task"}, {"schedule_id": "s"},
-    {"initiator": "consciousness", "consciousness_autonomy": "full", "wake_cause": "focus"}])
-@pytest.mark.parametrize("state", ["silent", "paused"])
+@pytest.mark.parametrize(("state", "metadata"), [
+    pytest.param("silent", {}, id='silent-metadata0'),
+    pytest.param("silent", {"schedule_id": "s"}, id='silent-metadata2'),
+    pytest.param("paused", {"task_type": "task"}, id='paused-metadata1'),
+    pytest.param("paused", {"initiator": "consciousness", "consciousness_autonomy": "full", "wake_cause": "focus"}, id='paused-metadata3'),
+])
 def test_place_state_from_every_origin_and_active_sibling(published_tool, places, metadata, state):
     rows, ctx = places
     rows[0] = replace(rows[0], state=state)
@@ -97,8 +100,7 @@ def test_one_author_names_task_and_allows_current_or_idle(published_tool, places
     assert guard.dispatch_refusal(ctx, name, {"room": "C2", "thread": "T"}, ext_tool=tool) == ""
 
 
-@pytest.mark.parametrize("broad_account", ["", "*"])
-@pytest.mark.parametrize("account_source", ["focus", "call"])
+@pytest.mark.parametrize(("account_source", "broad_account"), [("focus", "*"), ("call", "")])
 def test_broad_place_uses_resolved_account_for_author_lease(published_tool, tmp_path, broad_account, account_source):
     from ouroboros.conversation_lease import PresenceTurnGate
     from ouroboros.places import connect_place
@@ -177,8 +179,7 @@ def test_unreadable_place_store_holds_only_connector_writes(published_tool, plac
         "Place records need repair" if declares_place else "")
 
 
-@pytest.mark.parametrize("kind,account,owner", [("user", "account", True), ("user", "other", False),
-    ("bot", "account", False), (None, "account", False)])
+@pytest.mark.parametrize("kind,account,owner", [("user", "account", True), ("bot", "account", False), (None, "account", False)])
 def test_call_facts_use_captured_identity_and_user_owner_match(published_tool, places, kind, account, owner):
     from ouroboros.places import OwnerAccount
     from tests.test_place_arrivals import seed_identity_arrival

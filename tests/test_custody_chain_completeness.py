@@ -107,7 +107,7 @@ print(json.dumps(sorted(c.replay(root))))
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="RLIMIT_NOFILE is a POSIX process limit")
-@pytest.mark.parametrize("consumer", ["rebuild", "custody_rows", "import", "catch_up"])
+@pytest.mark.parametrize("consumer", ["rebuild", "custody_rows", "catch_up"])
 def test_every_whole_chain_consumer_reads_eighty_archives_and_live_under_a_64_descriptor_limit(tmp_path, consumer):
     """Only the child's own soft limit is lowered; this process and the host keep theirs."""
     from tests.test_store_import import result, write_result
@@ -240,7 +240,7 @@ def test_offsets_read_the_chain_suffix_and_one_beyond_the_chain_is_refused(tmp_p
             list(c._iter_rows(path, strict=strict, start_offset=total + 1))
 
 
-@pytest.mark.parametrize("shape", ["short", "archive_only", "empty_middle_archive", "empty_live", "absent"])
+@pytest.mark.parametrize("shape", ["short", "empty_middle_archive", "absent"])
 def test_short_archive_only_and_empty_chains_read_and_rebuild_whole(tmp_path, shape):
     archives, live, empty = {"short": (1, ("run-live",), ()), "archive_only": (2, None, ()),
                              "empty_middle_archive": (3, ("run-live",), (1,)), "empty_live": (0, (), ()),

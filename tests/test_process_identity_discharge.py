@@ -32,7 +32,7 @@ from ouroboros import process_census as pc
 from ouroboros import process_scope as ps
 from ouroboros import task_results
 
-pytestmark = [pytest.mark.serial, pytest.mark.skipif(os.name == "nt", reason="the environment census is POSIX-only")]
+pytestmark = [pytest.mark.skipif(os.name == "nt", reason="the environment census is POSIX-only")]
 
 PID, OTHER, MEMBER = 120001, 120002, 120005
 BOOT, HZ, TICKS = 1_700_000_000, 100, 98_765
@@ -138,8 +138,7 @@ def _spelled(epoch: int, zone) -> str:
 
 # --------------------------------------------------------------------------- 1. boot time
 
-@pytest.mark.parametrize("btime", [PermissionError(13, "denied"), b"cpu 1 2 3\n", b"btime soon\n", b"btime 0\n",
-                                   b"btime \n"], ids=["unreadable", "missing", "malformed", "zero", "empty"])
+@pytest.mark.parametrize("btime", [PermissionError(13, "denied"), b"cpu 1 2 3\n", b"btime \n"], ids=["unreadable", "missing", "empty"])
 def test_no_boot_time_spells_no_birth_in_either_reader_and_a_later_read_recovers(tmp_path, monkeypatch, btime):
     kernel = _Kernel(monkeypatch, {PID: _stat(PID)}, btime=btime)
     sent = _signals(monkeypatch, kernel)
@@ -274,9 +273,6 @@ def _leader_group(birth: str) -> dict:
     ("unreadable", {"sent": [], "gone": [], "reused": [], "owed": True}),
     ("alive", {"sent": [PID], "gone": [], "reused": [], "owed": False}),
     ("moved", {"sent": [PID], "gone": [PID], "reused": [], "owed": False}),
-    ("absent", {"sent": [], "gone": [PID], "reused": [], "owed": False}),
-    ("zombie", {"sent": [], "gone": [], "reused": [], "owed": False}),
-    ("reborn", {"sent": [], "gone": [], "reused": [PID], "owed": False}),
 ])
 def test_a_recorded_leader_a_partial_table_omits_is_read_by_name(monkeypatch, answer, expected):
     """The census could not read the leader's stat (the row is missing from the table); the
@@ -386,9 +382,11 @@ def test_one_birth_has_one_spelling():
     assert pc.birth_epoch(HOST_BIRTH) == pc.birth_epoch(ENGINE_BIRTH) > 0
 
 
-@pytest.mark.parametrize("recorded, live", [(ENGINE_BIRTH, HOST_BIRTH), (HOST_BIRTH, ENGINE_BIRTH)],
-                         ids=["engine-record", "old-host-record"])
-@pytest.mark.parametrize("after", ["ends", "survives", "fails"])
+@pytest.mark.parametrize(("after", "recorded", "live"), [
+    pytest.param("ends", ENGINE_BIRTH, HOST_BIRTH, id='ends-engine-record'),
+    pytest.param("survives", HOST_BIRTH, ENGINE_BIRTH, id='survives-old-host-record'),
+    pytest.param("fails", ENGINE_BIRTH, HOST_BIRTH, id='fails-engine-record'),
+])
 def test_either_spelling_of_a_live_recorded_birth_is_that_process(monkeypatch, recorded, live, after):
     """The engine-shaped and the old padded record of one live process are that process: it
     is signalled, and a reading in the other spelling is never a false 'gone' or 'ended'; a
@@ -573,8 +571,12 @@ def _record_group_before_failed_panic(tmp_path, monkeypatch, origin, *, birth=HO
     return sent
 
 
-@pytest.mark.parametrize("origin", ["task", "engine"])
-@pytest.mark.parametrize("later", ["unreadable", "same", "reused", "absent"])
+@pytest.mark.parametrize(("later", "origin"), [
+    ("unreadable", "task"),
+    ("same", "engine"),
+    ("reused", "task"),
+    ("absent", "engine"),
+])
 def test_failed_broad_table_preserves_recorded_leader_for_known_only_recovery(tmp_path, monkeypatch, origin, later):
     sent = _record_group_before_failed_panic(tmp_path, monkeypatch, origin)
     first = ps.panic_scope_census(tmp_path, exclude={os.getpid(), 1})
@@ -611,8 +613,7 @@ def test_failed_broad_table_preserves_recorded_leader_for_known_only_recovery(tm
         assert recovered["captured_gone"] == ([PID] if later in ("reused", "absent") else [])
 
 
-@pytest.mark.parametrize("origin", ["task", "engine"])
-@pytest.mark.parametrize("case", ["excluded", "leaderless"])
+@pytest.mark.parametrize(("case", "origin"), [("excluded", "task"), ("leaderless", "engine")])
 def test_failed_broad_table_never_invents_an_excluded_or_unidentified_leader(tmp_path, monkeypatch, origin, case):
     sent = _record_group_before_failed_panic(tmp_path, monkeypatch, origin,
                                            birth="" if case == "leaderless" else HOST_BIRTH)

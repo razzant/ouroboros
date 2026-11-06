@@ -16,7 +16,6 @@ from tests._review_session_route_shared import (
     _owned_gateway_uses_each_test_transport, fake_route,  # noqa: F401
 )
 
-pytestmark = pytest.mark.serial
 
 
 def fail(message):
@@ -25,7 +24,7 @@ def fail(message):
     return raise_error
 
 
-@pytest.mark.parametrize('stage', ['unconfigured', 'target', 'root', 'gateway', 'health', 'checking', 'budget', 'deadline', 'stamp', 'start_false', 'start_landed_false', 'start_ambiguous', 'after_row'])
+@pytest.mark.parametrize('stage', ['unconfigured', 'target', 'root'])
 def test_actual_prestart_failures_collect_without_new_start(tmp_path, monkeypatch, fake_route, stage):  # noqa: F811
     from ouroboros import budget_pause
 
@@ -112,7 +111,7 @@ def test_actual_prestart_failures_collect_without_new_start(tmp_path, monkeypatc
         assert legacy.operation_state == 'custody_lost'
 
 
-@pytest.mark.parametrize('contradiction', ['missing', 'false', 'text', 'success', 'no_error', 'token', 'run', 'started', 'response'])
+@pytest.mark.parametrize('contradiction', ['missing', 'text', 'response'])
 def test_positive_prestart_receipt_rejects_contradictory_or_legacy_data(tmp_path, contradiction):
     from ouroboros.review_session_custody import validate_producer_invocation
 

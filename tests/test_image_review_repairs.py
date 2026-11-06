@@ -15,8 +15,11 @@ from tests.test_model_wait import live_wait as live_wait, setup as setup
 from tests.test_vision_model_wait import child_fixture as child_fixture
 
 
-@pytest.mark.parametrize("kind", ["image", "file", "mixed"])
-@pytest.mark.parametrize("delivery", ["named", "unnamed", "write_then_retry"])
+@pytest.mark.parametrize(("delivery", "kind"), [
+    ("named", "image"),
+    ("unnamed", "file"),
+    ("write_then_retry", "mixed"),
+])
 def test_host_attachment_only_accept_rejoin_and_real_server_dequeue(tmp_path, monkeypatch, kind, delivery):
     import server
     from supervisor import message_bus
@@ -101,7 +104,6 @@ def _registered_query(tmp_path, monkeypatch, client, tool, raw, model, *, real_c
     return registry.execute_result(tool, args)
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("tool", ["vlm_query", "analyze_screenshot"])
 def test_registered_vlm_common_note_survives_real_child_ipc(child_fixture, tmp_path, monkeypatch, tool):
     from ouroboros.llm import LLMClient
@@ -143,8 +145,7 @@ def test_registered_vlm_reprepare_removes_old_route_note(live_wait, monkeypatch,
         assert restored.size == (9000, 24)
 
 
-@pytest.mark.parametrize("tool", ["vlm_query", "analyze_screenshot"])
-@pytest.mark.parametrize("kind", ["bmp", "partial"])
+@pytest.mark.parametrize(("kind", "tool"), [("bmp", "vlm_query"), ("partial", "analyze_screenshot")])
 def test_registered_vlm_preserves_common_note_in_request_and_host_result(tmp_path, monkeypatch, tool, kind):
     from ouroboros.llm import LLMClient
 

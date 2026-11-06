@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
-pytestmark = [pytest.mark.serial, pytest.mark.ui_browser]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
@@ -43,9 +43,8 @@ def test_inspected_safety_event_window_zero_and_nonzero(direct_server_with_data,
                 expect(page.locator("#btn-save-settings")).to_be_enabled(timeout=30_000)
                 page.click('[data-settings-tab="behavior"]')
                 counter = page.locator("#s-safety-skip-counter")
-                expected = ("1 safety check(s) waved through" if count else
-                            "No waved-through safety checks found")
-                expect(counter).to_have_text(expected + " among inspected recent events dated within 24h.")
+                expected = "1 safety check let through" if count else "No safety checks let through"
+                expect(counter).to_have_text(expected + " in the last 24 h.")
                 counter.scroll_into_view_if_needed()
                 assert counter.is_visible()
                 assert all("limit=2000" in url for url in requests)

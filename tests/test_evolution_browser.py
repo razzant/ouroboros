@@ -14,7 +14,7 @@ import pytest
 from tests import test_subscription_setup_browser as setup_browser
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 ROOT = Path(__file__).resolve().parents[1]
 STATE = {"sha": "evolution-browser-fixture", "supervisor_ready": True, "active_chat_activities": [], "projects": [], "runtime_mode": "advanced",
@@ -86,7 +86,7 @@ def open_evolution(ui, answer, *, width=1100, height=750, scheme="dark", state=S
 
 def overflow(page):
     return page.evaluate("""() => {
-        const box = document.querySelector('#page-evolution .costs-scroll');
+        const box = document.querySelector('#page-evolution');  // the tab body is its own scroller
         return {page: document.documentElement.scrollWidth - innerWidth, panel: box.scrollWidth - box.clientWidth};
     }""")
 
@@ -114,14 +114,15 @@ def test_one_measure_milestones_and_the_chosen_version_beneath(subscription_ui, 
             for (const [b, text] of labels) if (p.x > b.x && p.x < b.x + b.width && p.y > b.y && p.y < b.y + b.height) out.push(text); }
         return [...new Set(out)]; }""")
     assert covered == [], f"the line runs through these milestone labels: {covered}"
-    assert page.locator(".evo-chart text", has_text="no tags").count() == (1 if width > 500 else 0), "the quiet months are a gap"
+    assert page.locator(".evo-chart text", has_text="no releases").count() == (1 if width > 500 else 0), "the quiet months are a gap"
     assert page.locator("#evo-campaign-chip").inner_text() == "Off"
-    assert page.locator("#evo-consciousness").inner_text().startswith("Consciousness sleeping")
-    assert page.locator("#evo-consciousness-allowance").inner_text() == "Allowance (24 h): $1.25 / $10.00"
+    # One quiet pointer to the Consciousness tab; its allowance is that tab's fact.
+    assert page.locator("#evo-consciousness").inner_text().startswith("Consciousness: sleeping")
+    assert page.locator("#evo-consciousness-allowance").count() == 0
     # The line and its area stop at the axis break; only the dashed bridge crosses the quiet months.
     runs = page.evaluate("""() => document.querySelector('.evo-ch-line').getAttribute('d').split('M').filter(Boolean)
         .map((run) => run.split('L').map((pair) => Number(pair.split(',')[0])))""")
-    gap = page.evaluate("""() => { const t = [...document.querySelectorAll('.evo-chart text')].find((n) => n.textContent === 'no tags');
+    gap = page.evaluate("""() => { const t = [...document.querySelectorAll('.evo-chart text')].find((n) => n.textContent === 'no releases');
         return t ? Number(t.getAttribute('x')) : null; }""")
     assert len(runs) == 2 and (gap is None or all(max(r) < gap or min(r) > gap for r in runs)), (runs, gap)
     assert overflow(page) == {"page": 0, "panel": 0}
@@ -148,7 +149,7 @@ def test_one_measure_milestones_and_the_chosen_version_beneath(subscription_ui, 
     assert page.locator('[data-measure="identity"]').get_attribute("aria-pressed") == "true"
     assert page.locator('[data-measure="code_lines"]').get_attribute("aria-pressed") == "false"
     assert page.locator(".evo-caption").inner_text().startswith("This installation · Identity: characters of identity.md")
-    assert page.locator(".evo-chart .evo-ch-strong").text_content() == "26.5K chars", "the newest journal record ends the line"
+    assert page.locator(".evo-chart .evo-ch-strong").text_content() == "26,500 characters", "the newest journal record ends the line"
     assert overflow(page) == {"page": 0, "panel": 0}
     setup_browser.capture(page, f"evolution-identity-{width}")
 
@@ -178,7 +179,7 @@ def test_campaign_keeps_readable_text_when_status_and_actions_grow(subscription_
     page.locator("#evo-start").focus()
     for width, slot in [(1100, None), (1100, 650), (1100, 480), (900, None), (1440, None), (390, None)]:
         page.set_viewport_size({"width": width, "height": 844 if width == 390 else 750})
-        page.locator(".evo-root").evaluate("(node, slot) => node.style.maxWidth = slot ? slot + 'px' : ''", slot)
+        page.locator("#page-evolution").evaluate("(node, slot) => node.style.maxWidth = slot ? slot + 'px' : ''", slot)
         page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
         sizes = page.evaluate("""() => {
             const card = document.querySelector('.evo-campaign'), main = card.querySelector('.evo-campaign-main');

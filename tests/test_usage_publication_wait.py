@@ -10,7 +10,6 @@ from ouroboros.llm_attempt import PhysicalDispatchInterrupted
 from ouroboros.usage_ledger import ControlAuthorityUnavailable, UsageLockUnavailable
 from tests.test_admission_contention import database_reader, publish, root as root
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture
@@ -114,8 +113,7 @@ def test_intervening_contention_does_not_renew_spent_publication_budget(tmp_path
     assert sleeps == pytest.approx([0.5, _usage_wait.ACQUISITION_SLICE_SEC, 0.3])
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
-@pytest.mark.parametrize("slow", ["probe", "sleep"])
+@pytest.mark.parametrize(("slow", "mode"), [("probe", "sync"), ("sleep", "async")])
 def test_real_elapsed_publication_work_keeps_the_existing_bound(tmp_path, monkeypatch, clock, mode, slow):
     now, _owner = clock
     _publication_gap(tmp_path, monkeypatch, now, 1.1 if slow == "probe" else 0.1)
@@ -136,8 +134,7 @@ def test_real_elapsed_publication_work_keeps_the_existing_bound(tmp_path, monkey
     assert len(calls) == 2 and sleeps == [0.5], "actual probe/sleep elapsed must count, not only requested delays"
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
-@pytest.mark.parametrize("bound", ["interactive", "unowned"])
+@pytest.mark.parametrize(("bound", "mode"), [("interactive", "async"), ("unowned", "sync")])
 def test_other_real_elapsed_bounds_still_apply_during_storage_contention(monkeypatch, clock, mode, bound):
     now, owner = clock
     if bound == "interactive":
@@ -162,8 +159,7 @@ def test_other_real_elapsed_bounds_still_apply_during_storage_contention(monkeyp
         assert caught.value is error
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
-@pytest.mark.parametrize("control", ["stop", "deadline"])
+@pytest.mark.parametrize(("control", "mode"), [("stop", "sync"), ("deadline", "async")])
 def test_controls_win_between_publication_and_busy_retries(monkeypatch, clock, mode, control):
     now, _owner = clock
     calls, sleeps = [], []

@@ -163,6 +163,19 @@ def test_issues_whose_tests_pass_at_the_head_are_closed_and_others_stay_open():
     assert record["closed"] == []  # a red Node lane in this run is not green
 
 
+@pytest.mark.parametrize("status,closed", [("passed", True), ("absent", True), ("skipped", False),
+                                          ("unknown", False), ("failed", False)])
+@pytest.mark.parametrize("kind", ["culprit", "pre-existing", "unattributed"])
+def test_a_recheck_closes_only_executed_passes_or_removed_tests(status, closed, kind):
+    nodeid = "tests/t.py::test_previous_failure"
+    github = FakeGitHub(label=True, issues=[_issue(5, {"kind": kind, "pr": 1, "ids": [nodeid]})])
+    record = _route(github, [], [], recheck=lambda ids: dict.fromkeys(ids, status))
+    assert record["rechecked"] == {nodeid: status}
+    assert record["closed"] == ([5] if closed else [])
+    assert github.issues[5]["state"] == ("closed" if closed else "open")
+    assert bool(github.comments) is closed
+
+
 def test_a_lint_issue_closes_only_once_a_linted_head_no_longer_has_its_finding():
     def run(lint_checked, failed=()):
         github = FakeGitHub(label=True, issues=[_issue(5, {"kind": "culprit", "pr": 1, "culprit": "c" * 40,

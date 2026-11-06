@@ -194,10 +194,10 @@ def test_preflight_worker_cap_reaches_every_lane_and_is_recorded(tmp_path, monke
     stand must set the runtime's own lever to ``max(2, 16 // lanes)`` in the process every lane
     server inherits, override an ambient value, and record the applied number in the manifest
     and in each lane row. The runtime reads exactly that key (pinned here, not modified)."""
-    from ouroboros import preflight_runner, test_parallelism
+    from ouroboros import preflight_probe, preflight_runner, test_parallelism
     _short_tmp(monkeypatch)
     assert run_live_lanes.PREFLIGHT_WORKERS_ENV == test_parallelism.WORKERS_ENV
-    assert run_live_lanes.PREFLIGHT_WORKERS_FLOOR == preflight_runner._MIN_PREFLIGHT_WORKERS
+    assert run_live_lanes.PREFLIGHT_WORKERS_FLOOR == preflight_runner.MIN_PREFLIGHT_WORKERS
     assert run_live_lanes.parse_args(["--stub", "--lanes", "1"]).preflight_test_workers == 16
     assert run_live_lanes.parse_args(["--stub", "--lanes", "4"]).preflight_test_workers == 4
     assert run_live_lanes.parse_args(["--stub", "--lanes", "6"]).preflight_test_workers == 2   # floor at MAX_LANES
@@ -211,7 +211,7 @@ def test_preflight_worker_cap_reaches_every_lane_and_is_recorded(tmp_path, monke
     def lane(job, args, out, template, stagger, states, seed, budget=None, *, key="", seed_sha=""):
         seen[job] = (os.environ.get(run_live_lanes.PREFLIGHT_WORKERS_ENV),
                      run_live_lanes._lane_row(job, args)["preflight_test_workers"],
-                     preflight_runner._preflight_worker_count())
+                     preflight_probe._preflight_worker_count())
         return _fake_lane(job, args, out, template, stagger, states, seed, budget, key=key, seed_sha=seed_sha)
 
     monkeypatch.setattr(run_live_lanes, "run_lane", lane)
@@ -1115,7 +1115,7 @@ def test_sm1_changes_the_shared_palette_for_both_documents():
     assert len(text.splitlines()) == len(original.splitlines())
     palette = scenarios.sm1_palette_tokens(text)
     assert scenarios.SM1_REQUIRED_PALETTE <= palette.keys() and all(palette.values())
-    assert all(f"--accent-{alpha}" in palette for alpha in ("04", "05", "08", "10", "12", "18", "22", "25", "35", "45", "55"))
+    assert all(f"--accent-{alpha}" in palette for alpha in ("08", "10", "12", "14", "18", "22", "25", "35", "45", "55"))
     for document, prefix in (("web/index.html", "/static"), ("web/onboarding_template.html", "/onboarding/static")):
         assert f'href="{prefix}/ui.css"' in (REPO_ROOT / document).read_text(encoding="utf-8")
 
@@ -1459,7 +1459,6 @@ def test_ui_client_prefers_the_suite_interface_when_it_has_this_surface(monkeypa
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_stub_sm1_end_to_end_on_a_real_isolated_server(tmp_path):
     """Real server, loopback stub model, no key: the commit lands through the review organ
     (the shared palette plus the release-carrier bump, no skip flags, through the same hermetic

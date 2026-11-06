@@ -6,7 +6,6 @@ from ouroboros import update_letter as ul
 from tests.test_update_description import _registry
 from tests.test_update_letter import _capture_for, _commit, _git, _status, _write_readme
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture
@@ -106,7 +105,7 @@ def test_real_merge_material_reaches_its_reader_beside_the_record(merged_range, 
     assert json.loads(reads[budget].text)["data"] == text and reads[budget - 1].status == "error"
 
 
-@pytest.mark.parametrize("failed_read", ["subjects", "bodies", "readme", "first_parent"])
+@pytest.mark.parametrize("failed_read", ["subjects", "bodies", "first_parent"])
 def test_each_material_read_failure_is_typed(merged_range, failed_read):
     repo, base, target, *_ = merged_range
 

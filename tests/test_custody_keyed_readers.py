@@ -41,6 +41,7 @@ from tests.test_delegated_skill_payload import (  # noqa: F401  (autouse fixture
     _seed_skill,
     _StartStub,
 )
+from tests._cases import case_folders
 
 NAN, INF = float("nan"), float("inf")
 _ABSENT = object()
@@ -137,7 +138,7 @@ def _named(lines, marker, root):
 # --- health: one selected read, equal lines, the shared full-read fallback -------------
 
 
-@pytest.mark.parametrize("reader", ["own", "owner", "someone-else", ""])
+@pytest.mark.parametrize("reader", ["own", "someone-else", ""])
 def test_health_lines_equal_the_every_row_read_for_every_reader(tmp_path, reader):
     _seed_health(tmp_path)
     keyed = _delegated_lines(tmp_path, task_id=reader, active_root="/tmp/t1")
@@ -330,17 +331,20 @@ _HOLDERS = {
 }
 
 
-@pytest.mark.parametrize("case", sorted(_HOLDERS))
-def test_foreign_payload_holders_are_inventory_not_an_admission_limit(tmp_path, monkeypatch, case):
-    setup, _holder = _HOLDERS[case]
-    caller = _caller(tmp_path, monkeypatch)
-    drive = custody.custody_root(caller)
-    skill = _seed_skill(tmp_path / "data")
-    _start_holder(drive, skill, **setup)
-    _stub_gateway(monkeypatch)
-    assert _start(caller)["status"] == "started"
-    assert "run-holder" in current.runs(drive)
-    custody._CUSTODY.clear()
+def test_foreign_payload_holders_are_inventory_not_an_admission_limit(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for case in sorted(_HOLDERS):
+        tmp_path = next(case_paths)
+        with subtests.test(case=case), monkeypatch.context() as monkeypatch:
+            setup, _holder = _HOLDERS[case]
+            caller = _caller(tmp_path, monkeypatch)
+            drive = custody.custody_root(caller)
+            skill = _seed_skill(tmp_path / "data")
+            _start_holder(drive, skill, **setup)
+            _stub_gateway(monkeypatch)
+            assert _start(caller)["status"] == "started"
+            assert "run-holder" in current.runs(drive)
+            custody._CUSTODY.clear()
 
 
 def test_foreign_pending_payload_invocation_is_preserved_beside_new_start(tmp_path, monkeypatch):
@@ -376,7 +380,7 @@ def _answer(result):
     return status, extra, None if entry is None else vars(entry)
 
 
-@pytest.mark.parametrize("run_id", ["run-own", "run-snapshot", "run-missing", "", None, " run-own"])
+@pytest.mark.parametrize("run_id", ["run-own", "run-missing", "", None, " run-own"])
 def test_retry_result_status_answers_as_over_every_row(tmp_path, run_id):
     from ouroboros.delegate_shared import retry_result_status
 

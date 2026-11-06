@@ -11,7 +11,6 @@ from tests.test_process_environment import process_context as _process_context
 
 process_context = _process_context
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("fallback", [False, True])

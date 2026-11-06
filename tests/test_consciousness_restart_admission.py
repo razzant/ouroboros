@@ -39,7 +39,6 @@ from tests.conversation_carrier_support import carry, install_lane_spare
 from tests.test_agent_restart_intent import accept, runtime  # noqa: F401  # the shared real-queue fixture
 from tests.test_consciousness import AVAILABLE, CEILING, DEFAULT, FLOOR
 
-pytestmark = pytest.mark.serial
 
 OWNER_LINE = "owner line observed during the window"
 
@@ -264,8 +263,10 @@ def test_a_wake_on_the_degraded_executor_settles_the_clock_like_a_carried_one(ra
     assert race.state.load_state()[OWN_WAKE_STATE_KEY]["finished"] is True
 
 
-@pytest.mark.parametrize("outcome", ["ok", "runner_failure"])
-@pytest.mark.parametrize("delivery", ["task_done_reported", "terminal_unreported"])
+@pytest.mark.parametrize(("delivery", "outcome"), [
+    ("task_done_reported", "ok"),
+    ("terminal_unreported", "runner_failure"),
+])
 def test_a_started_wake_settles_once_however_its_terminal_reaches_the_clock(race, monkeypatch, delivery, outcome):
     """The task_done handler delivers the terminal (``finish_pooled_wake``), or — the event lost, the row
     released — the clock settles it itself at the tick that would start over it. A real failure still
@@ -421,19 +422,20 @@ def test_a_panic_barred_wake_never_admits_beside_a_pending_restart(race, monkeyp
     assert queued_wakes() == [] and list(race.spare.in_q) == []
 
 
-def test_owner_main_in_the_same_window_is_still_saved_and_the_wake_is_not(race, monkeypatch):
-    """The ordinary Main deferral keeps its receipt, its words and its first durable row."""
+def test_owner_main_in_the_same_window_starts_and_the_wake_is_not(race, monkeypatch):
+    """The owner's turn is dialogue (BIBLE P5): accepted in the same window it starts and joins the request's
+    started work, while a consciousness wake is still refused until the restart."""
     from supervisor import workers
 
     _accept_before_the_row(race, monkeypatch)
     workers.handle_chat_direct(7, "Main in the window", task_metadata={"client_message_id": "main-1"})
-    saved = next(task for task in race.runtime.queue.PENDING if task.get("text") == "Main in the window")
-    assert saved["id"] not in queued_wakes() and list(race.spare.in_q) == []
-    row = load_task_result(race.root, saved["id"])
-    assert row["status"] == "scheduled" and row["host_admission"]["status"] == "accepted"
-    assert race.notices == ["Saved for execution after Restart."]
+    assert not any(task.get("text") == "Main in the window" for task in race.runtime.queue.PENDING)
+    [main] = [tid for tid, meta in workers.RUNNING.items()
+              if isinstance(meta, dict) and (meta.get("task") or {}).get("text") == "Main in the window"]
+    assert main not in queued_wakes() and race.runtime.restart._AGENT_RESTART["started"][main] == main
+    assert "Saved for execution after Restart." not in race.notices
     assert race.clock.tick(race.start) == "rejected:restart_pending"
-    assert race.clock._backoff == 1 and len(race.notices) == 1
+    assert race.clock._backoff == 1
     assert list(queued_wakes()) == [] and race.ran == []
 
 

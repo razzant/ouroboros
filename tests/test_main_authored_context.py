@@ -109,8 +109,7 @@ def test_main_records_and_applies_authored_view_without_manual_observation(main_
     assert next(m["content"] for m in latest if m.get("tool_call_id") == "reread") == first
 
 
-@pytest.mark.parametrize("role", ["root", "subagent"])
-@pytest.mark.parametrize("mode", ["nano", "low", "max"])
+@pytest.mark.parametrize(("mode", "role"), [("nano", "root"), ("low", "subagent"), ("max", "root")])
 def test_retelling_instructions_and_authored_account_reach_next_send(main_loop, tmp_path, monkeypatch, role, mode):
     """Mode-specific context assembly, then shared-loop delivery; not model adherence."""
     from ouroboros import context
