@@ -696,8 +696,9 @@ def _with_transport(label: str, row: Mapping[str, Any]) -> str:
 
 
 def _ouroboros_author(row: Mapping[str, Any], **extra: str) -> dict[str, Any]:
-    """My own row, under the work that sent it (its task, else its delivery's ``transport.origin``); private
-    Presence contact names its audience in the label every header prints."""
+    """My own outward row, under the work that sent it (its task, else its delivery's ``transport.origin``); private
+    Presence contact names its audience in the label every header prints. An arrival from my own account has no
+    recorded sending work (its ``task_id`` is the turn it woke) and never reaches here."""
     work = _text(row.get("task_id")) or _text(_mapping(_mapping(row.get("transport")).get("origin")).get("task_id"))
     label = _with_transport("Ouroboros" + (f" (task {work})" if work else ""), row) + (
         ", privately to the owner" if private_contact(row) else "")
@@ -769,7 +770,8 @@ def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch:
     place row from an account its place confirms now read as my human's
     (``owner_confirmed``), a present-tense label; without it no place row does. With it,
     a place row from the account I send as that my human did not confirm is mine
-    (``ouroboros``, ``via="own_account"``): an event of my own act, never a person.
+    (``ouroboros``, ``via="own_account"``): an event of my own account, never a person, and no work of mine is
+    recorded as its sender, so its label is that fact alone (the turn its arrival woke wrote nothing).
     """
     if _mapping(row.get("host_fact")).get("kind") == "call_open":
         return {"kind": "host", "label": "host", "type": "call_open"}
@@ -784,8 +786,8 @@ def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch:
             return {"kind": "place_fact", "label": dialogue_author(row),
                     "actor_kind": _text(_mapping(_mapping(row.get("transport")).get("actor")).get("kind"))}
         fact = _place_speaker(row, owner_accounts) if row_provenance(row) == "place" else ""
-        if fact == "the account I send as" and owner_accounts is not None:  # my own account's event is my word;
-            return _ouroboros_author(row, via="own_account")  # a shared one my human confirmed stays theirs (above)
+        if fact == "the account I send as" and owner_accounts is not None:  # my own account's event, no recorded
+            return {"kind": "ouroboros", "label": f"{fact}: {dialogue_author(row)}", "via": "own_account"}  # sender work
         label = dialogue_author(row)
         return {"kind": "human", "label": f"{fact}: {label}" if fact else label,
                 **({"owner_confirmed": True} if fact == "my human" else {})}
