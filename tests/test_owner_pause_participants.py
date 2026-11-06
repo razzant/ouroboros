@@ -150,7 +150,7 @@ def test_a_cold_resume_names_what_became_of_the_runs_the_pause_stopped(tmp_path,
     resumed = budget_pause.budget_pause_row(tmp_path, "solo")
     assert resumed["external_runs"]["runs"] == [], "the grant's fresh census: a settled run never blocks again"
     assert resumed["episode_runs"] == settled["episode_runs"]
-    notice = next(text for text in notices if "continued from its owner Pause" in text)
+    notice = next(text for text in notices if "continued from its Pause after an explicit Resume" in text)
     line = next(text for text in notice.splitlines() if text.startswith("- run run-own"))
     assert "(codex): this Pause requested its stop (stop outcome: confirmed)" in line
     assert "engine terminal: cancelled (host_cancelled)" in line
@@ -272,7 +272,7 @@ def test_a_warm_resume_names_the_runs_its_park_stopped_after_they_left_the_censu
     assert [run["state"] for run in recorded["external_runs"]["runs"]] == ["stop_confirmed"]
     assert [(row["run_id"], row["stop_outcome"]) for row in recorded["episode_runs"]] == [("run-own", "confirmed")]
     notice = next(str(message["content"]) for message in reversed(limit.messages)
-                  if "has now resumed it" in str(message.get("content") or ""))
+                  if "has now been resumed" in str(message.get("content") or ""))
     line = next(text for text in notice.splitlines() if text.startswith("- run run-own"))
     assert "this Pause requested its stop (stop outcome: confirmed)" in line
     assert "engine terminal: cancelled (host_cancelled)" in line and 'continue_from="run-own"' in line
@@ -378,6 +378,26 @@ def test_every_unknown_is_named_and_a_natural_completion_is_not_called_a_stop(tm
     assert "custody holds no row for it now: its fate is UNKNOWN" in lines["- run run-missing"]
 
 
+def test_a_terminal_whose_output_custody_still_owes_is_not_reported_as_having_none(tmp_path, monkeypatch):
+    """A stopped run whose retained output is still owed to collection says so; one that owes nothing does not."""
+    from ouroboros import delegate_custody_current as current, store
+    from ouroboros.external_runs import episode_disclosure
+
+    _engine_offline(monkeypatch)
+    _settled_run(tmp_path, "t", "run-owed")  # a retained terminal whose output was not collected yet
+    with store.open_store(tmp_path, write=True) as txn:  # no retained terminal source: nothing is owed
+        txn.put_custody("run-none", {"run_id": "run-none", "task_id": "t", "route_id": "codex", "settled": True,
+                                     "terminal_state": "cancelled"}, state=current.CLOSED)
+    stopped = {"stop_requested": True, "stop_outcome": "confirmed"}
+    lines = dict(line.split(":", 1) for line in episode_disclosure(
+        tmp_path, "t", [{"run_id": "run-owed", **stopped}, {"run_id": "run-none", **stopped}]).splitlines())
+    owed = lines["- run run-owed (codex)"]
+    assert 'output not collected yet: delegate_wait(run_id="run-owed") shows what remains' in owed
+    assert "no retained output recorded" not in owed
+    none = lines["- run run-none (codex)"]
+    assert "no retained output recorded" in none and "not collected yet" not in none
+
+
 def test_an_unreadable_store_a_record_without_a_list_and_a_long_list_are_disclosed(tmp_path, monkeypatch):
     from ouroboros import delegate_custody_current
     from ouroboros.external_runs import _DETAILED, episode_disclosure, paused_runs_notice
@@ -397,6 +417,27 @@ def test_an_unreadable_store_a_record_without_a_list_and_a_long_list_are_disclos
     assert episode_disclosure(tmp_path, "t", many[:1]) == (
         '- custody unreadable now (OSError): what became of run run-0 is UNKNOWN; '
         'delegate_wait(run_id="...") reads each run')
+
+
+@pytest.mark.parametrize(("by", "words", "woken"), [
+    ({"actor": "owner", "door": "api_task_resume"}, "after an explicit Resume by your human (paused",
+     "were woken by an explicit Resume by your human"),
+    ({}, "after an explicit Resume (paused", "were woken by an unconfirmed input")])
+def test_a_resume_notice_names_who_granted_it_and_no_one_it_does_not_know(tmp_path, by, words, woken):
+    """Both cold notices read the grant's ``by``: a Pause's Resume line and a cold sleep's wake line."""
+    from ouroboros import budget_pause
+
+    ctx, _limit = _loop_ctx(tmp_path, "money")
+    ctx._budget_paused_sec = 0.0
+    messages: list = []
+    budget_pause._resume_disclosure(ctx, {"reason": "owner", "rail": "owner_pause"}, {},
+                                    {"consumed_at": 1.0, "by": by}, {"reason": "hard_rail"}, messages)
+    text = messages[-1]["content"]
+    assert "This task continued from its Pause " + words in text and "owner Resume" not in text
+    slept: list = []
+    budget_pause._resume_disclosure(ctx, {"reason": "sleep", "rail": "model_sleep", "paused_at": 1.0}, {},
+                                    {"consumed_at": 6.0, "by": by}, {"reason": "hard_rail"}, slept)
+    assert any(woken in str(message.get("content")) for message in slept), slept
 
 
 def test_a_budget_pause_resume_keeps_its_own_census_disclosure(tmp_path, monkeypatch):
@@ -456,7 +497,7 @@ def test_a_tick_write_landing_while_the_direct_actor_resumes_is_kept(tmp_path, m
     assert [(row["run_id"], row["stop_outcome"]) for row in durable["owner_pause"]["episode_runs"]] == [
         ("run-own", "confirmed"), ("run-late", "confirmed")], "the racing tick's fact survives the transition"
     notice = next(str(message["content"]) for message in reversed(limit.messages)
-                  if "has now resumed it" in str(message.get("content") or ""))
+                  if "has now been resumed" in str(message.get("content") or ""))
     late = next(text for text in notice.splitlines() if text.startswith("- run run-late"))
     assert "this Pause requested its stop (stop outcome: confirmed)" in late
 

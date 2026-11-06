@@ -74,8 +74,8 @@ CLOSED_FENCE_STATES = frozenset({FENCE_REQUESTED, FENCE_PAUSED})
 SETTLEMENT_EXTERNAL_RUNNING = "external_writers_running"
 SETTLEMENT_SETTLED = "settled"
 
-NOT_STARTED_TEXT = ("⚠️ OWNER_PAUSE_NOT_STARTED: NOT STARTED — the owner paused this task tree before this "
-                    "operation was launched. Nothing ran; it may be issued again after Resume.")
+NOT_STARTED_TEXT = ("⚠️ OWNER_PAUSE_NOT_STARTED: NOT STARTED — a Pause of this task tree stopped this "
+                    "operation before it was launched. Nothing ran; it may be issued again after Resume.")
 
 
 class OwnerPauseRefused(Exception):

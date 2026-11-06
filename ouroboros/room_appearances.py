@@ -59,9 +59,10 @@ def write_facts(root: Any, row: Mapping[str, Any]) -> Tuple[Optional[List[str]],
         return None, []
 
 
-def frame_rooms(root: Any, row: Optional[Mapping[str, Any]]) -> Dict[str, List[int]]:
+def frame_rooms(root: Any, row: Optional[Mapping[str, Any]], *, stamped_only: bool = False) -> Dict[str, List[int]]:
     """``{"also_rooms": [...]}``: the other Projects a saved row's live frame also reaches, the rooms its
-    revision stamp names or else the rule's answer now; ``{}`` when none. A frame is not a second row."""
+    revision stamp names or else the rule's answer now (never with ``stamped_only``); ``{}`` when none.
+    A frame is not a second row."""
     if not row:
         return {}
     stamp = row.get("room_revisions")
@@ -72,8 +73,46 @@ def frame_rooms(root: Any, row: Optional[Mapping[str, Any]]) -> Dict[str, List[i
     if isinstance(stamp, dict):
         shown = sorted(int(chat) for chat in stamp if str(chat).lstrip("-").isdigit() and int(chat) != written)
     else:
-        shown = write_facts(root, row)[1]
+        shown = [] if stamped_only else write_facts(root, row)[1]
     return {"also_rooms": shown} if shown else {}
+
+
+def room_project(root: Any, chat_id: Any, *, strict: bool = False) -> Optional[Dict[str, Any]]:
+    """The registry row reserving one Project room (any lifecycle), or ``None``; one registry parse serves a whole read.
+    ``strict`` lets an unreadable registry raise (a history window that cannot place a row fails), else it is ``None``."""
+    from ouroboros.projects_registry import project_of_room
+
+    try:
+        return project_of_room(root, int(chat_id))
+    except Exception:
+        if strict:
+            raise
+        log.debug("Project room %r unreadable", chat_id, exc_info=True)
+        return None
+
+
+def frame_project(root: Any, row: Optional[Mapping[str, Any]], shown: Optional[List[int]] = None) -> Dict[str, Any]:
+    """``{project_id, project_name}``: the active Project whose work a row outside that room speaks of (a notice to
+    Main, a relay's answer, private Presence contact), read from the one room the row already stands in (``shown``,
+    else the row's room stamp: a row written before rooms were stamped names none), so the row carries that Project's
+    reference (DESIGN "References and actions"). ``{}`` for every other row. A projection, never a stored copy: a
+    renamed Project reads its new name."""
+    from ouroboros.presence_owner_contact import private_main_row
+    from ouroboros.project_dialogue import WORK_SPEECH_ELSEWHERE_TYPES
+    from ouroboros.project_facts import project_display_name
+    from ouroboros.projects_registry import PROJECT_ACTIVE
+
+    if not row or not (row.get("type") in WORK_SPEECH_ELSEWHERE_TYPES or private_main_row(dict(row))):
+        return {}
+    try:
+        rooms = frame_rooms(root, row, stamped_only=True).get("also_rooms", []) if shown is None else shown
+        project = room_project(root, rooms[0]) if len(rooms) == 1 else None
+    except Exception:
+        log.debug("Project of a %s row unreadable", row.get("type"), exc_info=True)
+        return {}
+    if not project or project.get("lifecycle") != PROJECT_ACTIVE:
+        return {}
+    return {"project_id": str(project["id"]), "project_name": project_display_name(project.get("name"), project["id"])}
 
 
 def mark(root: Any) -> Optional[int]:

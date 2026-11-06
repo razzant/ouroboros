@@ -738,7 +738,7 @@ def owner_pause_resume_notice(ctx: Any, checkpoint: dict, outcome: str, *, cold:
     pause = checkpoint.get("owner_pause") if isinstance(checkpoint.get("owner_pause"), dict) else {}
     if cold:
         return {"role": "user", "content": (
-            "[SYSTEM NOTICE]\nThe application stopped while this owner Pause was warm. "
+            "[SYSTEM NOTICE]\nThe application stopped while this Pause was warm. "
             "Detached review operations recorded at the pause: "
             + json.dumps(pause.get("detached_reviews") or [], ensure_ascii=False)
             + ". Their former process-local state is not current liveness or a verdict. "
@@ -760,7 +760,7 @@ def owner_pause_resume_notice(ctx: Any, checkpoint: dict, outcome: str, *, cold:
             "the provider may still have finished and charged them; any late answer was recorded but NOT used "
             "and its tools were not run. " if abandoned else "")
     return {"role": "user", "content": (
-        "[SYSTEM NOTICE]\nThe owner paused this task and has now resumed it. Reviewers you had already "
+        "[SYSTEM NOTICE]\nThis task was paused and has now been resumed. Reviewers you had already "
         f"launched kept running while you were paused:\n{reviews}\nWhat became of the delegated runs this Pause "
         f"stopped or observed (current custody; engine facts are evidence, never a grant):\n{runs}\n"
         "Your review tool returned a pending "

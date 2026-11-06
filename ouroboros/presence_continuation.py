@@ -615,7 +615,7 @@ def _arrivals_in_mail(binding: ReviewWaitBinding, ctx: Any) -> set | None:
     return {entry["msg_id"] for entry in mail if entry.get("provenance") == "place_event"} if status.get("complete") else None
 
 
-_PARKED_BY = {"review": "While you waited for the review", "pause": "While the owner's Pause kept your work parked",
+_PARKED_BY = {"review": "While you waited for the review", "pause": "While the Pause kept your work parked",
               "restart": "While your saved work waited through the application's restart"}
 
 

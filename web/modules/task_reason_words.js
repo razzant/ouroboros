@@ -80,7 +80,7 @@ export const TASK_CAUSE_PHRASES = {
     tool_failure: "A tool this task used failed and nothing recovered it",
     receipt_absent: "No host verification receipt was recorded; this does not establish whether other checks ran.",
     expected_output_ungrounded: "A retired check recorded no tool calls or structured answer; it does not assess the written result.",
-    residual_tool_errors_without_review: "Tool errors remain in the record; no review checked the result.",
+    residual_tool_errors_without_review: "Tool errors remain in the record.",
     artifacts_unavailable: "Some result files are missing or could not be preserved.",
     partial_result: "The result is partial; remaining work is described in task details.",
     task_exception: "The task stopped on an internal error",
@@ -129,11 +129,13 @@ const TOOL_NOUNS = {
 };
 const LISTED = 20;  // outcomes keeps at most this many errors per list
 
-/** The residual-warning clause naming the first recorded tool error in plain words (never a tool
- *  name, its result text or a path), or '' when the record names none. */
+/** The residual-warning clause naming the first recorded tool error that is not a failed read (owner 06.11, A) in
+ *  plain words (never a tool name, its result text or a path), or '' when the record names none. */
 export function residualToolErrorsPhrase(execution = {}) {
     const list = (key) => (Array.isArray(execution?.[key]) ? execution[key].filter((item) => item && typeof item === 'object') : []);
-    const unresolved = list('unresolved_tool_errors'), cosmetic = list('cosmetic_tool_errors');
+    const listed = [list('unresolved_tool_errors'), list('cosmetic_tool_errors')];
+    // A failed read stays in the details (owner 06.11, A): the sentence names effects and commands.
+    const [unresolved, cosmetic] = listed.map((errors) => errors.filter((item) => !item.read_only));
     const first = (unresolved.length ? unresolved : cosmetic)[0];
     if (!first) return '';
     const noun = tr(`task.tool_noun.${Object.hasOwn(TOOL_NOUNS, first.tool) ? first.tool : 'other'}`, TOOL_NOUNS[first.tool] || 'A tool step');
@@ -147,10 +149,10 @@ export function residualToolErrorsPhrase(execution = {}) {
                     : status === 'argument_error' ? fmt('{noun} was called with invalid arguments', { noun })
                         : fmt('{noun} failed', { noun });
     const more = unresolved.length + cosmetic.length - 1;
-    const tail = unresolved.length >= LISTED || cosmetic.length >= LISTED ? tr('task.tool_error.more_capped', ', plus more tool errors')
+    const tail = listed[0].length >= LISTED || listed[1].length >= LISTED ? tr('task.tool_error.more_capped', ', plus more tool errors')
         : more === 1 ? tr('task.tool_error.more_one', ', plus 1 more tool error')
             : more ? fmt(', plus {n} more tool errors', { n: more }) : '';
-    return fmt('{subject}{tail}; no review checked the result.', { subject, tail });
+    return fmt('{subject}{tail}.', { subject, tail });
 }
 
 // Details retain unknown codes once, in order; their visible cause never guesses. Twin: project_dialogue._cause_phrase.

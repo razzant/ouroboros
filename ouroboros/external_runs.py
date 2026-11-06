@@ -426,6 +426,8 @@ def _name(row: Dict[str, Any]) -> str:
 
 def _participant_line(root: Any, task_id: str, row: Dict[str, Any], runs: Dict[str, Any], pending: set,
                       reader: str) -> str:
+    from ouroboros.delegate_custody_current import collection_pending
+
     run_id, invocation = str(row.get("run_id") or ""), str(row.get("invocation_id") or "")
     run = runs.get(run_id) if run_id else next(
         (entry for entry in runs.values() if invocation and entry.invocation_id == invocation), None)
@@ -456,7 +458,8 @@ def _participant_line(root: Any, task_id: str, row: Dict[str, Any], runs: Dict[s
         facts += _retained_terminal(root, task_id, run, inspection)
         facts.append(f"output retained ({'complete' if run.output_complete else 'partial'}, "
                      f"{'read' if run.output_consumed else 'not read yet'})" if run.output_artifact
-                     else "no retained output recorded")
+                     else f"output not collected yet: {inspection} shows what remains"
+                     if collection_pending(run) else "no retained output recorded")
         if run.patch_captured or run.patch_disposed in ("applied", "rejected"):  # a lost result was never captured
             facts.append(("patch captured, " if run.patch_captured else "no patch captured, ")
                          + (str(run.patch_disposed) or "awaiting apply or reject") + _decided_by(run, reader))

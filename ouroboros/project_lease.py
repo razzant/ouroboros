@@ -9,12 +9,16 @@ BETWEEN projects and via subagent swarms WITHIN a task).
 against each other. Subagents carry their parent's stored ``project_id`` but
 hold no lease of their own — the parent task IS the project's writer and its
 swarm must not deadlock against itself, so only top-level (non-subagent)
-tasks count as lane occupants.
+tasks count as lane occupants. A conversation-lane turn (an owner's room turn,
+a wake, a Presence body) holds no lease either: it answers beside the room's
+work, so a Resume or Continue it grants starts at once.
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, Iterable, Set
+
+from ouroboros.task_carrier import LANE_CONVERSATION
 
 
 def _as_task(item: Any) -> Any:
@@ -46,11 +50,13 @@ def running_project_ids(running: Iterable[Any]) -> Set[str]:
     """Project ids currently holding a writer lease.
 
     ``running`` is the supervisor's RUNNING mapping values (or any iterable of
-    task dicts); read under the queue lock by the caller.
+    task dicts); read under the queue lock by the caller. A conversation-lane
+    turn is known by its RUNNING row's ``lane``: a bare task dict always counts.
     """
     out: Set[str] = set()
     for task in running or ():
-        if _is_lane_occupant(task):
+        conversation = isinstance(task, dict) and task.get("lane") == LANE_CONVERSATION  # its RUNNING row's carrier
+        if _is_lane_occupant(task) and not conversation:
             out.add(_task_project_id(task))
     return out
 

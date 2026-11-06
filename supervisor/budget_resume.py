@@ -22,7 +22,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-from ouroboros.control_actor import control_actor, observed_control_stop
+from ouroboros.control_actor import control_actor, observed_control_stop, resume_author
 from ouroboros.delegate_recovery import owner_restart_in_progress
 from ouroboros.work_stop import SELECTION_KEY, clear_refusal, continuation_refusal, release_refusal, retain_consumed_selection
 from ouroboros.utils import utc_now_iso
@@ -255,8 +255,9 @@ def resume_warm_owner_pause_root(task_id: str, *, selected_by: str = "",
     record = load_task_result(result_root, task_id) or {}
     lift = {} if selected_by or not actor else owner_allowance_lift(record, result_root)
     decision = lift or kept_allowance_lift(record)
-    grant = {"by": control_actor(), "grant_id": uuid.uuid4().hex, "granted_at": utc_now_iso(), "granted_at_ts": time.time(),
-             "single_use": True, "selected_by": str(selected_by or "owner"), "authority": "explicit_resume",
+    grant = {"by": resume_author(), "grant_id": uuid.uuid4().hex, "granted_at": utc_now_iso(),
+             "granted_at_ts": time.time(), "single_use": True, "selected_by": str(selected_by or "owner"),
+             "authority": "explicit_resume",
              'root_resume_basis': root_state['basis'], "generation": int(fence.get("generation") or 0), "warm": True,
              **({"producer_allowance_lifted": decision} if decision else {})}
     projected = None
@@ -584,7 +585,8 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
     from ouroboros.presence_carrier import lift_allowance, lifted_record, owner_allowance_lift
     lift = {} if selected_by or sleep_wake else owner_allowance_lift(task, result_root)  # decided once (#2566)
     grant = {
-        "by": control_actor(), **({"owner_pause_fence_id": owner_fence_id} if owner_fence_id else {}),
+        "by": resume_author(),
+        **({"owner_pause_fence_id": owner_fence_id} if owner_fence_id else {}),
         "grant_id": uuid.uuid4().hex, "granted_at": utc_now_iso(), "granted_at_ts": now,
         "single_use": True, "paused_duration_sec": prior_paused + max(0.0, now - paused_at),
         "executed_sec_before_pause": round(executed_sec, 3),
@@ -592,8 +594,7 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
         "selected_by": "sleep_wake" if sleep_wake else str(selected_by or "owner"),
         "authority": "sleep_readiness" if sleep_wake else "explicit_resume",
         "sleep_id": str((row.get("sleep") or {}).get("sleep_id") or "") if sleep_wake else "",
-        'root_resume_basis': root_state['basis'],
-        "root_grant_id": str(root_grant.get("grant_id") or ""),
+        'root_resume_basis': root_state['basis'], "root_grant_id": str(root_grant.get("grant_id") or ""),
         "root_resume_generation": int(root_grant.get("generation") or 0),
         "root_fence_id": (str((q.BUDGET_ROOT_FENCES.get(root_task_id) or {}).get("fence_id") or "")
                           if not actor else ""),
