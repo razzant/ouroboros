@@ -911,7 +911,8 @@ under one of the four categories above and fails on a new one;
 
 New messages are crimson, and only where the owner reads. The two sidebar numbers
 count the same thing, the standalone messages not read yet (below): Main's on its
-row, shown while another place is, and the Projects header's, summed over its rows
+row, shown while another place is (a Project open over Main included, which reads none of
+Main's messages meanwhile), and the Projects header's, summed over its rows
 (those it rests on, hidden or not, and the older ones an open find or browse shows),
 each a crimson pill in one column just before the marks (owner 19.10, Q1 = B). A
 Project row's mark takes the crimson tint (its work's shape, or a dot where nothing
@@ -2903,10 +2904,20 @@ narrower, where the column becomes a drawer. `html[data-layout]` carries the
 choice, set before first paint from the one constant `web/theme.js` exposes and
 `web/modules/layout.js` reads; shell rules key off the attribute, components adapt
 to their own box with container queries, and no page adds a width breakpoint of
-its own. The surface fact sent with a message reads the same switch. On docked,
-the Project panel lies beside Main at its own width over the dimmed room; its
-handle resizes it apart from the sidebar's, and it is never wider than the
-content area.
+its own. The surface fact sent with a message reads the same switch. On docked
+with a mouse or a trackpad, the Project panel lies beside Main at its own width
+over the dimmed room; its handle resizes it apart from the sidebar's, and it is
+never wider than the content area.
+
+**The primary input** is the switch's one other fact, written with it before
+first paint as `html[data-pointer="coarse"|"fine"]` from one `(pointer: coarse)`
+query; the shell reads it through the same door. It never moves the columns; it
+decides how a room over Main sits. Where the primary input is a finger (a tablet,
+a phone held sideways, a Mini App on a tablet) a docked Project takes the whole
+content column in Main's place, dressed as the phone's room: no scrim to tap by
+mistake, no shadow or edge over the sidebar, which stays beside it and live, no
+width handle of its own (it fills the column), and the same bar with its ×. A
+desk with a mouse or a trackpad keeps the panel beside Main.
 
 **Resizing.** A handle drag writes only the dragged box's width, once per
 displayed frame; the sidebar's column, the dimmed room and the panel's edge
@@ -3027,7 +3038,9 @@ Telegram, and nothing depends on a haptic (`web/modules/haptics.js`).
 alone on a narrow page are layers in one stack (`web/modules/layers.js`); the file is part of the page, so it lies
 under every overlay, also when its read lands after the drawer opened. Dialogs, menus and the work list keep their own
 Escape and outside-press dismissal. Escape, ×, a press on the scrim close the
-topmost layer and only it; the system or browser Back and Telegram's Back close
+topmost layer and only it; a Project that covers Main (the phone's card, a finger's
+docked column) is modal with the docked sidebar live, its covered room inert once it
+has arrived; the system or browser Back and Telegram's Back close
 what is on top: a dialog over a layer first, then the layer. While a layer is
 open the page holds exactly one same-address history entry, so Back closes it
 instead of leaving the app; navigation itself is still never written into the
@@ -3053,8 +3066,9 @@ A Project's name keeps one line inside its capsule, at the controls' size and we
 in an ellipsis, so its capsule keeps the bar's height (owner 2026-11-01, A·14; it replaces the second line of
 2026-10-28). The name keeps its own direction, so a right-to-left interface still shows a Latin name's start. The
 whole name stays reachable: it is the title's hover text and accessible name, and the room's work list, which the
-title opens even in an empty Project, starts with it, wrapped. On a phone a name still cut leaves the consciousness
-chip its brain and mark, its accessible name keeping the whole state; a desk keeps the chip's word. Panic and ×
+title opens even in an empty Project, starts with it, wrapped. Where the room covers Main (a phone, a finger's docked
+column) a name still cut leaves the consciousness chip its brain and mark, its accessible name keeping the whole
+state; a desk's panel beside Main keeps the chip's word. Panic and ×
 never yield (audit №2, owner 2026-10-28T22:09Z; sidebar names wait for the navigation decision).
 Navigation sharing a toolbar also returns below the bar when the
 content column is too narrow, including while the sidebar is resized; the toolbar wraps in its
@@ -3077,8 +3091,8 @@ Its word uses the viewer's zone and a short date when not today; passed explaine
 outcomes and passed allowance resets show no time.
 `Evolving` replaces the word during a campaign, even when off; Off is grey.
 Running shows moving dots, never a breathing glyph; held shows pause bars without time; unknown a ring,
-failure a red dot, amber only the owner's move (§4). The word stays visible at every width, except on a phone
-while a Project's one-line name is still cut, where the chip keeps its brain and mark (above).
+failure a red dot, amber only the owner's move (§4). The word stays visible at every width, except where the room covers Main (a phone, a
+finger's docked column) while a Project's one-line name is still cut, where the chip keeps its brain and mark (above).
 Its accessible name and the Shade state use the host sentence without adding a clock.
 A press opens its own sheet of the work list's material (the Shade), hung under the
 capsules, and switches nothing: state, Start/Stop, `$X of $Y in the last 24 hours`, “Its own wakes” then

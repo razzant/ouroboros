@@ -8496,6 +8496,21 @@ html[data-layout="docked"] .project-panel-backdrop {
 html[data-layout="docked"] .project-panel-backdrop.open {
     transition-duration: var(--motion-fade);
 }
+/* Where the primary input is a finger (html[data-pointer="coarse"]), the docked Project takes the whole content column in
+   Main's place, dressed as the phone's room: nothing dimmed to tap by mistake, no edge or shadow over the sidebar, which
+   stays beside it and live (its own handle too), and no width handle of the panel's own: the panel fills the column, so
+   a drag would move nothing and would store the column's width as the panel width every device of the install shares.
+   Its geometry and its slide from the window's right edge stay the docked ones (owner 20.10, Q2 A); a desk with a mouse
+   keeps the panel beside Main at its own width (owner 18.10, 4A; 06.11). Nothing here writes the stored width. */
+html[data-layout="docked"][data-pointer="coarse"] .project-panel {
+    width: 100%;
+    border-left: none;
+    box-shadow: none;
+}
+html[data-layout="docked"][data-pointer="coarse"] .project-panel-backdrop,
+html[data-layout="docked"][data-pointer="coarse"] .project-panel > .resize-handle {
+    display: none;
+}
 
 /* The stack layout: the project thread is a full-width layer over the room. It has no outside to tap and dims nothing:
    its scrim would lie over the drawer, which on a phone comes up from under the room it pushes aside. */

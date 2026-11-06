@@ -20,7 +20,8 @@
  *
  * Inert: a modal layer makes the rest of the shell inert (siblings along its ancestor path inside the shell's
  * container, never `<body>`'s other children, where dialogs, menus and toasts opened over the layer live; what the page
- * had already made inert is left alone); a non-modal layer (the docked Project panel) leaves the sidebar live. Focus goes
+ * had already made inert is left alone); a non-modal layer (the desk's Project panel beside Main) leaves the room live,
+ * and a modal one keeps its `live` elements usable (a finger's docked Project keeps the sidebar). Focus goes
  * into the layer on open and returns to the opener on close, unless it was moved out to something still live. Every
  * listener has a disposer.
  *

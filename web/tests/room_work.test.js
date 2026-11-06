@@ -458,10 +458,10 @@ function projectRoom(mount) {
     return { bar, titleRow, name, chip, page, badge, messages: node('div', 'chat-messages', page) };
 }
 
-// DESIGN "Shell": a Project's name keeps one line and wins its bar. On a phone a name that line still cuts makes the
-// consciousness chip show its brain alone (the chip's name keeps the whole state); a desk keeps the chip's word and
-// the name ends in an ellipsis; a name that fits leaves the chip whole.
-test('a Project bar gives its one-line name the chip\'s word on a phone only while the name is cut', () => {
+// DESIGN "Shell": a Project's name keeps one line and wins its bar. Where the room covers Main (a phone, a finger's docked
+// column) a name that line still cuts makes the consciousness chip show its brain alone (the chip's name keeps the whole
+// state); a desk keeps the chip's word and the name ends in an ellipsis; a name that fits leaves the chip whole.
+test('a Project bar gives its one-line name the chip\'s word where the room covers Main, only while the name is cut', () => {
     const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
     let work, resized = null, relayout = null;
     try {
@@ -492,6 +492,12 @@ test('a Project bar gives its one-line name the chip\'s word on a phone only whi
         root.dataset.layout = 'docked';
         relayout();
         assert.equal(fit(), 'whole', 'a desk keeps the chip\'s word beside a cut name');
+        root.dataset.pointer = 'coarse';
+        relayout();
+        assert.equal(fit(), 'mark', 'a finger\'s docked Project covers Main: the cut name takes the word');
+        root.dataset.pointer = 'fine';
+        relayout();
+        assert.equal(fit(), 'whole', 'a mouse again: the panel beside Main keeps the chip\'s word');
         root.dataset.layout = 'stack';
         relayout();
         assert.equal(fit(), 'mark', 'back on a phone the cut name takes the word again');
