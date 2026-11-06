@@ -31,8 +31,8 @@ from supervisor.state import control_is
 def _pool():
     """The parent module, read at call time.
 
-    The pool owns the repo/drive roots, its size, the worker table, the shared
-    PENDING/RUNNING refs and the crash clock, and ``init`` REBINDS them.
+    The pool owns the repo/drive roots, its size, the worker table and the shared
+    PENDING/RUNNING refs, and ``init`` REBINDS them.
     Reading them through the module is what keeps one binding: a from-import
     here would freeze the value this module saw at import time (the
     owner-approved D18/D33 mechanical exception).
@@ -73,8 +73,8 @@ def _emit_task_done_terminal(
     cost_fields: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Emit a task_done event so the UI resolves the live card when a task is
-    torn down outside the normal completion path (crash storm, kill, hard
-    timeout). Without this the spinner spins forever on these paths.
+    torn down outside the normal completion path (an exhausted crash retry, a
+    kill, a hard timeout). Without this the spinner spins forever on these paths.
 
     ``cost_fields`` is one whole ``reconstruct_task_cost(fields=True)`` projection,
     taken opaquely (as ``queue._emit_cancel_task_done`` already takes it) rather
@@ -244,11 +244,12 @@ def recover_confirmed_dead_worker(job: dict) -> None:
     """Recover exact saved terminal bytes before applying the old crash policy.
 
     Saved terminal bytes, including the ``task_exception`` terminal a worker writes after
-    ``handle_task`` failed, win over signal death; a live exact pause re-parks. Unknown or
+    ``handle_task`` failed, win over any death; a live exact pause re-parks. Unknown or
     incomplete publication raises ``TerminalFileRecoveryPending`` and the reaper keeps the
-    job. Only confirmed absence reaches crash policy: a signal is an infrastructure failure,
-    an eligible crash retries within ``QUEUE_MAX_RETRIES`` keeping its cost and wait
-    restrictions; an unconsumed budget continuation stays on its exact pause.
+    job. Only confirmed absence reaches crash policy: an eligible death, a signal's included,
+    retries within ``QUEUE_MAX_RETRIES`` keeping its cost and wait restrictions (a signal
+    death releases its delegated runs instead of handing them off); an unconsumed budget
+    continuation stays on its exact pause.
     """
     from ouroboros.headless import prepare_terminal_task_files, terminal_task_files_ready
     from ouroboros.task_results import load_task_result, _TRULY_TERMINAL_STATUSES
@@ -666,8 +667,19 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
             worker_id=wid,
             exitcode=exitcode if isinstance(exitcode, int) else None,
         )
+        from ouroboros.task_results import STATUS_INTERRUPTED, write_task_result
+        if crash_signal is not None:
+            # A signal death reserves no handoff: the dead attempt's open delegated runs end as an abrupt loss
+            # (their owner attempt is gone), the retried attempt continues through continue_from. The verdict
+            # passed is the status this caller writes next; review panels' runs stay theirs (#1006).
+            try:
+                from ouroboros.delegate_custody_reconcile import attach_only_gateway, reconcile_task_runs
+                reconcile_task_runs(root, task_id, gateway_factory=attach_only_gateway,
+                                    deliberate_terminal=STATUS_INTERRUPTED)
+            except Exception:
+                log.warning("Signal death of %s: its delegated runs were not released; the sweep re-judges them",
+                            task_id, exc_info=True)
         try:
-            from ouroboros.task_results import STATUS_INTERRUPTED, write_task_result
             write_task_result(
                 root, task_id, STATUS_INTERRUPTED,
                 result=(f"Worker process died mid-task (attempt {attempt}"

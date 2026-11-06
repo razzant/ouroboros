@@ -526,21 +526,27 @@ def test_non_completed_terminal_status_not_requeued(tmp_path):
 def test_a_signal_death_takes_the_same_one_retry_and_reserves_no_handoff(tmp_path, monkeypatch):
     """CANDIDATE_v2 §2(e): only a recorded stop terminalizes. A worker killed by a signal (-15 here, the
     05.11 pattern kill) is an unrecorded death like an exit code: attempt 1 is retried once on the same id
-    from its saved state (``interrupted``, the signal on the row), with NO delegated handoff reserved (D24:
-    the leaf settles as on abrupt loss) while an exit-code death keeps its handoff; the retried attempt that
-    dies again is terminal (``worker_crash_retry_exhausted``), as is a recorded cancel. ``worker_crash_signal``
-    stays a readable reason code for old rows."""
+    from its saved state (``interrupted``, the signal on the row), with NO delegated handoff reserved: the dead
+    attempt's still-running delegated runs are cancelled as an abrupt loss (RV1 native F4: ``reconcile_task_runs``
+    through the attach-only gateway, the verdict this caller writes next), while an exit-code death keeps its
+    handoff and leaves its runs to it; the retried attempt that dies again is terminal
+    (``worker_crash_retry_exhausted``), as is a recorded cancel. ``worker_crash_signal`` stays a readable reason
+    code for old rows."""
     import supervisor.queue as q
     import supervisor.workers as W
-    from ouroboros import delegate_recovery
+    from ouroboros import delegate_custody_reconcile, delegate_recovery
     from ouroboros.owner_continue import TECHNICAL_REASON_CODES
     from ouroboros.task_results import load_task_result, write_task_result
     from supervisor.worker_health import recover_confirmed_dead_worker
     from tests.test_retained_work_recovery import _saved
 
-    handoffs = []
+    handoffs, released = [], []
     monkeypatch.setattr(delegate_recovery, "prepare_handoff",
                         lambda root, task, **kw: handoffs.append(kw["exitcode"]) or {"reserved": kw["exitcode"]})
+    monkeypatch.setattr(delegate_custody_reconcile, "reconcile_task_runs",
+                        lambda root, task_id, **kw: released.append(
+                            (task_id, kw["deliberate_terminal"],
+                             kw["gateway_factory"] is delegate_custody_reconcile.attach_only_gateway)) or [])
     enqueued = []
     monkeypatch.setattr(q, "enqueue_task", lambda task, front=False: enqueued.append(dict(task)) or task)
     monkeypatch.setattr(W, "reconstruct_task_cost", lambda *_a, **_k: {"cost_accounting_status": "available"})
@@ -554,7 +560,8 @@ def test_a_signal_death_takes_the_same_one_retry_and_reserves_no_handoff(tmp_pat
     recover_confirmed_dead_worker(job)
     assert [t["id"] for t in enqueued] == [task_id] and enqueued[0]["_attempt"] == 2
     assert enqueued[0]["_working_recovery"]["cause"] == "worker_crash"
-    assert handoffs == [], "a signal death reserves no delegated handoff (D24)"
+    assert handoffs == [], "a signal death reserves no delegated handoff"
+    assert released == [(task_id, "interrupted", True)], "its open delegated runs end as an abrupt loss"
     row = load_task_result(tmp_path, task_id)
     assert row["status"] == "interrupted" and "signal 15" in row["result"]
     assert events.empty(), "no terminal was fabricated for a retried attempt"
@@ -564,7 +571,7 @@ def test_a_signal_death_takes_the_same_one_retry_and_reserves_no_handoff(tmp_pat
     job, _events = _reserved_job(tmp_path, monkeypatch, exitcode=1, attempt=1)
     write_task_result(tmp_path, job["task_id"], "running")
     recover_confirmed_dead_worker(job)
-    assert handoffs == [1] and len(enqueued) == 2
+    assert handoffs == [1] and len(enqueued) == 2 and len(released) == 1, "an exit-code death keeps its runs for the handoff"
 
     # The bound holds: the retried attempt's signal death is terminal, with the signal recorded.
     W.WORKERS.clear(); W.RUNNING.clear(); q.RUNNING = W.RUNNING

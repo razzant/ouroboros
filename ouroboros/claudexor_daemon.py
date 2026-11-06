@@ -33,9 +33,9 @@ Lifecycle belongs to the installation, not the process that first needed it:
   fallback. Never stop a live responder known only by name or by
   the descriptor port (a foreign daemon on a recycled port stays disclosed, not
   killed). A runtime pin is never hot-swapped: the live engine keeps serving
-  until a planned restart onto another pin, not a lower release, ends it
-  (``server_restart._stop_owned_daemon_for_new_pin``), the owner's Restart or
-  Panic stops it, or it exits; the next start selects the pin (PERSISTENCE.md).
+  until a restart onto another pin, not a lower release, ends it
+  (``server_restart._stop_owned_daemon_for_new_pin``), Panic or the owner's
+  Restart Claudexor stops it, or it exits; the next start selects the pin (PERSISTENCE.md).
 
 Zero auth logic lives here or anywhere in Ouroboros: login jobs, device-code
 custody, verification and rotation are the daemon's own product surface,
@@ -1077,7 +1077,7 @@ class OwnedClaudexorDaemon:
         ``"nothing_to_stop"`` is the quiet empty case; ``"unconfirmed"`` has
         already been disclosed by ``_report_stop_unconfirmed`` (critical log
         plus the supervisor row) with custody retained, so a caller that must
-        proceed anyway — the owner's manual Restart — needs no private state
+        proceed anyway — a pin-changing restart's teardown — needs no private state
         to tell the two non-stops apart. Lock acquisition is bounded separately
         from HTTP connect/read phases and each root's exit wait; there is no
         promised absolute wall-clock deadline for the whole teardown. A

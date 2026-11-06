@@ -660,11 +660,11 @@ def _shutdown_task_cleanup_args(restart_requested: bool) -> tuple[str, str]:
     graceful server shutdown.
 
     A graceful shutdown — a requested restart (exit 42) or an external
-    stop/restart signal (SIGTERM/SIGINT) — is not a worker crash storm, so a
+    stop/restart signal (SIGTERM/SIGINT) — is not a worker death, so a
     still-running task is finalized as ``cancelled`` with an honest reason
-    instead of the default crash-storm text the supervisor uses for real
-    worker deaths; its callers pass ``stop_source="server_shutdown"``, the
-    typed cause that makes it a technical interruption the owner may Continue.
+    instead of the stopped-worker text the pool writes for a death it recovers;
+    its callers pass ``stop_source="server_shutdown"``, the typed cause that
+    makes it a technical interruption the owner may Continue.
     """
     if restart_requested:
         reason = (

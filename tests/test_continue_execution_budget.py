@@ -217,6 +217,10 @@ def test_an_owner_restart_cancel_that_wins_the_race_closes_the_attempt(pool):
 
 
 def test_a_crash_terminal_closes_the_dead_attempt(pool):
+    """The retried attempt's death (attempt 2 of ``QUEUE_MAX_RETRIES`` 1) is the crash terminal; a signal death is
+    no longer terminal on its own (CANDIDATE_v2 §2(e): it takes the same one retry), so the dead attempt here is
+    the second."""
+    from ouroboros.agent import OuroborosAgent
     from ouroboros.task_results import load_task_result
     from supervisor.worker_health import recover_confirmed_dead_worker
     from tests.test_restart_retention import _pool_events
@@ -230,13 +234,16 @@ def test_a_crash_terminal_closes_the_dead_attempt(pool):
     pool.mp.setattr(pool.workers, "reconstruct_task_cost", lambda *_a, **_k: {"cost_accounting_status": "available"})
     pool.mp.setattr(pool.workers, "_reconcile_confirmed_dead_review_owner", lambda *_a: None)
 
+    # The retried attempt is the one that died: its own start record (task_attempt 2) and RUNNING row.
+    OuroborosAgent._persist_running_record(SimpleNamespace(env=SimpleNamespace(drive_root=pool.root)), dict(_sent, _attempt=2))
+    meta["attempt"] = meta["task"]["_attempt"] = 2
     recover_confirmed_dead_worker({"kind": "confirmed_dead_worker", "worker_id": 7, "worker": worker,
-                                   "task_id": "budget-1", "meta": meta, "task": dict(meta["task"]), "attempt": 1,
+                                   "task_id": "budget-1", "meta": meta, "task": dict(meta["task"]), "attempt": 2,
                                    "exitcode": -9, "drive_root": str(pool.root), "skip_respawn": True})
 
     stored = load_task_result(pool.root, "budget-1")
-    assert stored["status"] == "failed" and stored["reason_code"] == "worker_crash_signal"
-    assert stored["execution_consumed"]["attempt"] == 1
+    assert stored["status"] == "failed" and stored["reason_code"] == "worker_crash_retry_exhausted"
+    assert stored["execution_consumed"]["attempt"] == 2
     assert stored["execution_consumed"]["sec"] == pytest.approx(300, abs=30)
     _row, binding = _continue(pool, "budget-1")
     assert binding["execution_consumed_sec"] == stored["execution_consumed"]["sec"]

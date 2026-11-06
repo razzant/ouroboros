@@ -524,6 +524,27 @@ def test_the_kill_boundary_states_its_own_verdict_before_it_writes_it(tmp_path):
     dc._CUSTODY.clear()
 
 
+def test_a_signal_deaths_verdict_ends_the_dead_attempts_run_as_an_abrupt_loss(tmp_path):
+    """RV1 native F4. A worker killed by a signal reserves no handoff for its delegated runs (the leaf settles as
+    on abrupt loss), so the kill boundary states the verdict it writes next, ``interrupted``, and the still-running
+    run is cancelled as ``owner_task_gone``; a death that keeps its handoff passes no verdict and the run is left to
+    the handoff (``tests/test_worker_crash_retry.py`` holds the two callers)."""
+    import ouroboros.delegate_custody as dc
+    from ouroboros.task_results import STATUS_INTERRUPTED
+
+    dc._CUSTODY.clear()
+    dc.record_started(tmp_path, dc.RunCustody(
+        run_id="run-signal-dead", task_id="t-signal", route_id="r", model="m",
+        project_id="p", project_owned=False, root_task_id="t-signal", ledger_root=str(tmp_path)))
+    dc._CUSTODY.clear()
+    live = _LiveRunStub(run_id="run-signal-dead")
+    outcomes = dc.reconcile_task_runs(tmp_path, "t-signal", gateway_factory=lambda: live,
+                                      deliberate_terminal=STATUS_INTERRUPTED)
+    assert [row["action"] for row in outcomes] == ["cancelled"]
+    assert live.cancels == [("run-signal-dead", "owner_task_gone")]
+    dc._CUSTODY.clear()
+
+
 def test_the_supervisor_kill_path_carries_the_cancellation_verdict(tmp_path, monkeypatch):
     """End to end over the supervisor seam the finder probed: the cancel kill
     path passes its own terminal into the audit, a reap passes nothing."""
