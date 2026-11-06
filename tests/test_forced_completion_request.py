@@ -243,13 +243,14 @@ def test_silence_while_a_reply_is_owed_is_refused_on_both_forms(at_limit, form):
 def test_forced_root_sentence_keeps_the_separate_silence_and_child_boundaries(at_limit, form, arguments, metadata):
     turn = at_limit
     text, usage, trace, _bus = turn.run([call("chat_history", {}), FORMS[form](arguments)], metadata=metadata)
-    if "summary" in arguments and not metadata.get("parent_task_id"):
-        assert _request_fact(trace)["status"] == "selected"
-        assert text == ANSWER and usage["wake_summary"] == SUMMARY
+    if "summary" in arguments:
+        child = bool(metadata.get("parent_task_id"))
+        assert _request_fact(trace)["status"] == "selected" and text == ANSWER
+        assert usage.get("wake_summary") == (None if child else SUMMARY)
+        assert _request_fact(trace).get("ignored") == (["summary"] if child else None), "a child's sentence is named, never a veto"
     else:
         _host_fallback(text, usage, trace)
-        field = "silent" if "silent" in arguments else "summary"
-        assert _request_fact(trace)["reason"].startswith(f"invalid_completion_request: {field} is available only")
+        assert _request_fact(trace)["reason"].startswith("invalid_completion_request: silent is available only")
 
 
 @pytest.mark.parametrize("calls", [

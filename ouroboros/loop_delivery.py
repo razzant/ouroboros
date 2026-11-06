@@ -748,11 +748,12 @@ def record_forced_completion(trace: dict, tool_ctx: Any, response_meta: dict, *,
         return None
     blocked = unadopted or verdict.get("unadopted", "")
     reason, cut = blocked or verdict["error"], forced_response_cut(response_meta)
+    ignored = None if reason else (verdict.get("request") or {}).get("ignored")
     trace["forced_completion_request"] = {
         "form": "native" if native is not None or unadopted else "text",
         "status": "not_adopted" if blocked else "refused" if reason else "selected",
         "tool_call_count": response_meta.get("tool_call_count"), **({"reason": reason} if reason else {}),
-        **({"response_cut": cut} if cut else {})}
+        **({"ignored": ignored} if ignored else {}), **({"response_cut": cut} if cut else {})}
     return None if reason else verdict["request"]
 
 

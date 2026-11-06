@@ -271,18 +271,22 @@ def test_retry_does_not_inherit_the_previous_attempts_summary(wake, cause, title
     pytest.param("stop", {**SCHEDULE, "presence": {"binding_id": "b1"}}, False, id='stop-metadata1-False'),
     pytest.param("stop", WAKE, False, id='stop-metadata3-False'),
 ])
-def test_child_summary_is_refused_but_empty_summary_keeps_ordinary_completion(wake, metadata, direct, action):
+def test_child_summary_is_dropped_and_named_and_empty_summary_keeps_ordinary_completion(wake, metadata, direct, action):
+    """A child's sentence never vetoes its honest final: the answer is staged, the sentence dropped and named."""
     from ouroboros.tools.control_runtime import _finish_task
 
     wake.ctx.task_metadata, wake.ctx.is_direct_chat = metadata, direct
     wake.ctx.task_id, wake.ctx.parent_task_id = TASK_ID, "parent-task"
     wake.ctx._active_builtin_tool_result = None
-    rejected = _finish_task(wake.ctx, action=action, answer="Answer", rationale="Unfinished", summary="A line")
-    assert "COMPLETION_ARGUMENT: summary is available only on a root task or a self-started run" in rejected
-    assert wake.ctx._active_builtin_tool_result.code == "TOOL_ARG_ERROR"
-    assert getattr(wake.ctx, "_completion_request", None) is None
+    named = _finish_task(wake.ctx, action=action, answer="Answer", rationale="Unfinished", summary="A line")
+    assert json.loads(named) == {"status": "completion_requested", "completion_control": True, "action": action,
+                                 "ignored": ["summary"]}
+    assert wake.ctx._active_builtin_tool_result is None
+    request = wake.ctx._completion_request
+    assert request["answer"] == "Answer" and request["ignored"] == ["summary"] and "wake_summary" not in request
+    wake.ctx._completion_request = None
     assert "completion_requested" in _finish_task(wake.ctx, action=action, answer="Answer", rationale="Unfinished", summary=" \n")
-    assert "wake_summary" not in wake.ctx._completion_request
+    assert "wake_summary" not in wake.ctx._completion_request and "ignored" not in wake.ctx._completion_request
 
 
 @pytest.mark.parametrize("action,silent", [("finish", True), ("finish", False), ("stop", False)])
@@ -446,9 +450,11 @@ def test_schedule_marker_does_not_bypass_quiet_authority(wake, extra, occurrence
     wake.ctx.parent_task_id = parent
     wake.ctx.task_metadata = {**extra, "schedule_occurrence": occurrence}
     assert "COMPLETION_ARGUMENT" in _finish_task(wake.ctx, action="finish", silent=True)
-    if parent or extra.get("delegation_role") == "subagent" or extra.get("root_task_id"):
-        assert "COMPLETION_ARGUMENT" in _finish_task(wake.ctx, action="finish", answer="Answer.", summary="A line.")
     assert getattr(wake.ctx, "_completion_request", None) is None
+    if parent or extra.get("delegation_role") == "subagent" or extra.get("root_task_id"):
+        assert json.loads(_finish_task(wake.ctx, action="finish", answer="Answer.", summary="A line."))["ignored"] == ["summary"]
+        assert "wake_summary" not in wake.ctx._completion_request
+        wake.ctx._completion_request = None
     assert "completion_requested" in _finish_task(wake.ctx, action="finish", answer="Ordinary answer.")
 
 
