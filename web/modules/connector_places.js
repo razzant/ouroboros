@@ -1,5 +1,5 @@
 // The connector detail's visible Places section uses the same rows as Settings.
-import { readPlaces, PLACES_CHANGED_EVENT } from './consciousness_api.js';
+import { failureText, readPlaces, PLACES_CHANGED_EVENT } from './consciousness_api.js';
 import { settingsPlaceRowHtml } from './settings_consciousness.js';
 import { openPlaceSheet } from './place_sheet.js';
 import { connectPlaceButtonHtml, openConnectPlace } from './place_connect.js';
@@ -19,7 +19,7 @@ export function mountConnectorPlaces(host, connector, { leave, returnFocus, read
                 : `<p>No connected place for this connector.</p>${connectPlaceButtonHtml()}`}`;
         } catch (error) {
             if (closed || request !== version) return;
-            host.innerHTML = `<h3>Places</h3><p role="alert" data-i18n-authored>${escapeHtml(error?.message || String(error))}</p><button type="button" class="btn btn-default btn-sm" data-connector-retry>Try again</button>`;
+            host.innerHTML = `<h3>Places</h3><p role="alert" data-i18n-authored>${escapeHtml(failureText(error))}</p><button type="button" class="btn btn-default btn-sm" data-connector-retry>Try again</button>`;
         }
     }
     const click = (event) => {

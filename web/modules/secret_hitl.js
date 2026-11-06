@@ -313,7 +313,8 @@ export function createSecretRequestForms({ apiFetch, accept = () => {}, showToas
         body.append(late, fieldsBox, readersTitle, readers, warning, error, check);
         const footer = el('div', 'marketplace-modal-actions');
         const dismiss = button('btn btn-default secret-request-cancel', tr('secret.close', 'Close'));
-        const ok = button('btn btn-primary secret-request-ok', tr('secret.save', 'Save'));
+        const ok = button('btn secret-request-ok', tr('secret.save', 'Save'));
+        ok.dataset.primary = '';  // the dialog foot's one primary action (ui.css primary slot)
         footer.append(dismiss, ok);
         panel.append(head, body, footer);
         backdrop.append(panel);

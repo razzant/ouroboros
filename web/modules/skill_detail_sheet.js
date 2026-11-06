@@ -10,7 +10,7 @@ import { mountConnectorPlaces } from './connector_places.js';
 import { reviewSentence } from './skill_card_renderer.js';
 import {
     catalogWhoHtml, connectsServices, displayAddress, externalLinkHtml, officialMarkHtml, permissionWords, popularityText,
-    relativeAge, repoLabel, routeExternalLink, versionText,
+    relativeAge, repoLabel, routeExternalLink, skillTitle, versionText,
 } from './skill_presentation.js';
 
 function section(title, html) {
@@ -71,15 +71,20 @@ function linksHtml(detail, item) {
     return rows.length ? `<p>${rows.map(([url, label]) => externalLinkHtml(url, label)).join(' · ')}</p>` : '';
 }
 
+// The sheet is named as its card is: the catalog's title, else the installed skill's (its manifest title or the place
+// it adds), never its id, which Details keeps.
+const sheetTitle = (item, installed) => (skillTitle(item) !== item.name || !installed ? skillTitle(item) : skillTitle(installed));
+
 function detailsHtml(item, installed) {
     const rows = [
+        ['ID', sheetTitle(item, installed) !== item.name ? item.name : ''],
         ['Source', [item.source_name, displayAddress(item.repo_url)].filter(Boolean).join(' · ')],
         ['Exact version', [versionText(item.version), item.digest || ''].filter(Boolean).join(' · ')],
         ['Installed folder', installed?.payload_root || ''],
         ['Ouroboros’s check', installed?.install?.check?.notes || ''],
     ].filter(([, value]) => value);
     if (!rows.length) return '';
-    return `<details class="skills-details skills-sheet-details"><summary>Details</summary><dl class="skills-sheet-facts">${rows.map(([label, value]) =>
+    return `<details class="ui-disclosure skills-details skills-sheet-details"><summary>Details</summary><dl class="skills-sheet-facts">${rows.map(([label, value]) =>
         `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('')}</dl></details>`;
 }
 
@@ -98,7 +103,7 @@ export function openSkillDetailSheet({ item, installed = null, source = null, ac
     dialog.innerHTML = `<div class="document-reader-panel">
         <div class="document-reader-head">
             <div class="document-reader-identity">
-                <h2 class="document-reader-title" id="skills-sheet-title">${escapeHtml(item.name)}${item.official ? ` ${officialMarkHtml({ control: false })}` : ''}</h2>
+                <h2 class="document-reader-title" id="skills-sheet-title">${escapeHtml(sheetTitle(item, installed))}${item.official ? ` ${officialMarkHtml({ control: false })}` : ''}</h2>
                 <div class="document-reader-meta">${catalogWhoHtml(item, { version: true })}${popularity ? ` · ${escapeHtml(popularity)}` : ''}</div>
             </div>
             <div class="document-reader-actions" data-sheet-actions>${actionsHtml}</div>
@@ -130,7 +135,7 @@ export function openSkillDetailSheet({ item, installed = null, source = null, ac
             ? note(`Its SKILL.md couldn’t be read (${escapeHtml(detail.about_error)}); this is the catalog’s description.`) : '';
         destroyChatMarkdown(content.querySelector('.skills-sheet-about'));
         content.innerHTML = [
-            reading ? `<p class="skills-sheet-status" role="status">Reading ${escapeHtml(item.name)} from ${escapeHtml(item.source_name || 'its source')}…</p>` : '',
+            reading ? `<p class="skills-sheet-status" role="status">Reading ${escapeHtml(sheetTitle(item, installed))} from ${escapeHtml(item.source_name || 'its source')}…</p>` : '',
             error ? `<div class="skills-sheet-status is-error" role="alert"><p>Couldn’t read the full description from ${escapeHtml(item.source_name || 'its source')}: ${escapeHtml(error)}.</p><button type="button" class="btn btn-default btn-sm" data-sheet-retry>Try again</button></div>` : '',
             `<section class="skills-sheet-section"><h3>About</h3><div class="skills-sheet-about" data-i18n-authored></div>${aboutError}</section>`,
             section('What it can use', usesHtml(detail, item)),

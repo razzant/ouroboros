@@ -1,6 +1,6 @@
 import { accountedUpperBound, accountedUpperBoundWithChildren, formatUsd4, plainCauseText, projectMarkdownLines, savedTerminalRowNote } from './utils.js';
 import { cancelCauseClauses, ownerStopEnding } from './cancel_presentation.js';
-import { TASK_CAUSE_PHRASES, taskReasonPhrase, describedCause, reasonCodesNote, residualToolErrorsPhrase } from './task_reason_words.js';
+import { TASK_CAUSE_PHRASES, UNSTARTED_REASONS, taskReasonPhrase, describedCause, reasonCodesNote, residualToolErrorsPhrase } from './task_reason_words.js';
 export { taskReasonPhrase, reasonCodesNote } from './task_reason_words.js';
 import { taskCheckpointLabel, taskCheckpointIdentity, checkpointHasProgressRow, waitEpisode } from './task_checkpoints.js';
 export { taskCheckpointLabel } from './task_checkpoints.js';
@@ -189,13 +189,13 @@ export function executorChip(evt) {
     // attach it to an evidence-less frame, where it could contradict the dispatch.
     const substrateNote = evidence ? (SUBSTRATE_NOTE[String(evt?.actual_substrate || '')] || '') : '';
     const withSubstrate = (title) => (substrateNote ? `${title} — ${substrateNote}` : title);
-    if (String(evt?.reason_code || '') === 'subagent_executor_unavailable') {
-        // The typed $0 terminal of a harness pin the resolution refused (#363):
-        // the route names WHO refused, the reason code says the child never ran.
+    if (UNSTARTED_REASONS.has(String(evt?.reason_code || ''))) {
+        // The typed $0 terminal of a helper the host could not start (#363): its route was refused,
+        // or its delegate tools were hidden or uncheckable; the route names the pin, the code says it never ran.
         // Checked before the evidence branches — an empty custody read would
         // otherwise print "no run yet" over a child never dispatched at all.
         // Evidence-grade so a later dispatch-shaped frame cannot downgrade it.
-        return chip(true, 'blocked', `Pinned to ${name}, but the route could not run — the task was NOT run (no metered API spend, no delegated run)`);
+        return chip(true, 'blocked', `Pinned to ${name}, but this helper could not start — the task was NOT run (no metered API spend, no delegated run)`);
     }
     if (!evidence) {
         const record = normalizeTaskTerminalRecord(evt);
@@ -760,7 +760,7 @@ export function summarizeLogEvent(evt) {
                 ],
             });
         }
-        return view('progress', narration.preview || 'Progress update', { meta: ['task'] });
+        return view('progress', narration.preview || 'Progress update', { meta: taskMeta() });
     }
 
     if (t === 'task_started') {
@@ -1310,7 +1310,7 @@ function summarizeChatLiveEventView(evt) {
                             : event === 'scheduled' ? 'start'
                                 : 'working';
         const terminal = ['completed', 'completed_warn', 'failed', 'cancelled', 'rejected'].includes(event);
-        const terminalCause = terminal ? (cancelDetail || stopDetail) : '';
+        const terminalCause = terminal ? (cancelDetail || stopDetail || (UNSTARTED_REASONS.has(String(evt.reason_code || '')) ? reasonDetail : '')) : '';
         // A child's own note carries the same voice fact (the progress branch below): a host
         // note inside the child's turn is a visible row that never claims the card's collapsed
         // line. The lifecycle, result and error frames state no voice, so they keep leading.

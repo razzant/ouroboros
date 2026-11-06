@@ -1,37 +1,14 @@
-// Agent accounts (D30, regrouped in the Agents tab) — the owner-facing surface
-// over the owned Claudexor daemon's account truth.
-//
-// The shape is the owner's (2026-08-08): "все акки клод кода должны быть
-// эквивалентны", "позиции кнопок нелогичные… в каждой секции добавить кнопку",
-// "текст про лимиты компактнее и понятнее". So:
-//
-//  * ONE CARD PER FAMILY (Claude Code / Codex / Cursor). The family name and
-//    its aggregate status sit in the card header, and that card owns its own
-//    Add-account button — the button used to hang off the native row, which is
-//    why adding a Codex account meant hunting for a control under an unrelated
-//    line.
-//  * ROWS ARE ONE TYPE. The unified account model serves every account —
-//    migrated default logins included — as a named registry row, so every row
-//    carries the same name, Enabled toggle and Remove. An engine still on the
-//    pre-unified model lists none: its families say so and offer no Connect,
-//    and the service banner says why and what ends it.
-//  * TWO LINES PER ROW. Line 1 is the one primary thing (the account) plus its
-//    status; line 2 is muted metadata in human words — "38% used · resets in
-//    2h", never a raw ISO instant.
-//  * REMOVAL and the ENABLED toggle go through the ENGINE's own contract
-//    (DELETE/PATCH /api/claudexor/credential-profiles/…).
-//
-// The status payload comes from the SHARED store (`claudexor_status_store.js`)
-// — this section owns no poll — and the login card is the SHARED controller
-// (`harness_login_cards.js`), so the onboarding wizard mounts the same flow.
-//
-// PROVENANCE IS PER FACET (the store's rule) and it OUTRANKS the aggregate:
-// `daemon.state` can say `unreachable` while two of the three fanned-out reads
-// landed, so no sentence here judges the daemon off the aggregate alone —
-// `daemonAnswered` below is the one predicate, and the status line asks the
-// facets before it repeats any runtime claim ("keeps running", "ready").
-//
-// Pure helpers up top are node-tested without a DOM.
+// Agent accounts (D30, regrouped in the Agents tab) — the owner-facing surface over the owned Claudexor
+// daemon's account truth. The shape is the owner's (2026-08-08: "все акки клод кода должны быть эквивалентны",
+// "в каждой секции добавить кнопку", "текст про лимиты компактнее и понятнее"): ONE CARD PER FAMILY whose head
+// carries the family's status and its own Add button; ROWS ARE ONE TYPE (every account a named registry row with
+// the same name, Enabled toggle and Remove; an engine on the pre-unified model lists none and the service banner
+// says why); TWO LINES PER ROW (the account and its status, then metadata in human words, never a raw ISO
+// instant); removal and Enabled go through the ENGINE's own contract (DELETE/PATCH credential-profiles).
+// The status payload comes from the SHARED store (claudexor_status_store.js; this section owns no poll) and the
+// login card is the SHARED controller (harness_login_cards.js), so the wizard mounts the same flow. PROVENANCE IS
+// PER FACET and outranks the aggregate: `daemonAnswered` is the one predicate, and the status line asks the facets
+// before it repeats any runtime claim. Pure helpers up top are node-tested without a DOM.
 
 import { apiFetch } from './api_client.js';
 import { capabilityMarkup, createAccountResourcesController, resourcePanelId, resourceReadGap,
@@ -61,9 +38,10 @@ import {
     readsFor,
 } from './claudexor_status_store.js';
 import { openConfirmDialog } from './confirm_dialog.js';
-import { harnessIdentityMarkup } from './harness_presentation.js';
+import { harnessIdentityMarkup, planLabel } from './harness_presentation.js';
 import { SIGN_IN_SCOPE_NOTE, createLoginCardController, normalizeProfileName, preserveCardFocus } from './harness_login_cards.js';
 import { createHarnessMaintenanceController } from './harness_maintenance.js';
+import { settingsSection } from './settings_controls.js';
 import { formatRelativeAge } from './ui_helpers.js';
 import { absoluteTime, escapeHtmlAttr as escapeHtml } from './utils.js';
 
@@ -675,33 +653,29 @@ export function nextUpBadge(payload, harness, { accountsRead = READ_OK } = {}) {
 // payload — the account pin selects name their options through it too.
 export { accountName };
 
-export function accountMetaLine(row, payload, { quotaRead = READ_OK, nowMs = Date.now(), action = {} } = {}) {
-    // Line 2: everything that is NOT the account itself, in human words and at
-    // muted ink. Order is the owner's — how much of the window is left, which
-    // plan, who it is, when we last checked.
+/** Line 2 as facts, each whole on its line: the window (in the warning's hue when it is spent), the plan in the
+ *  owner's words, who it is, when it was last checked. Order is the owner's. */
+export function accountMetaParts(row, payload, { quotaRead = READ_OK, nowMs = Date.now(), action = {} } = {}) {
     const parts = [];
-    if (row.enabled === false) {
-        // The one user-settable routing fact, stated where the rotation claim
-        // lives: a disabled account is excluded from rotation however healthy
-        // its login is.
-        parts.push('disabled — excluded from rotation');
-    }
+    // The one user-settable routing fact, stated where the rotation claim lives.
+    if (row.enabled === false) parts.push({ text: 'disabled — excluded from rotation' });
     const resources = resourceSummary(row, payload, { known: quotaRead === READ_OK, action });
-    parts.push(resourceReadGap(action) ? resources : quotaSummary(payload?.quota || [], row.harness, row.profile_id,
-        { quotaRead, nowMs, absences: payload?.quota_absences || [] }).label);
-    if (!resourceReadGap(action) && resources) parts.push(resources);
+    const quota = quotaSummary(payload?.quota || [], row.harness, row.profile_id,
+        { quotaRead, nowMs, absences: payload?.quota_absences || [] });
+    if (resourceReadGap(action)) parts.push({ text: resources });
+    else parts.push({ text: quota.label, tone: quota.exhausted ? 'warn' : '' }, { text: resources });
     const identity = row.identity || {};
-    if (identity.plan) parts.push(String(identity.plan));
+    if (identity.plan) parts.push({ text: planLabel(identity.plan) });
     // The email is metadata only while it is not already the row's name.
-    if (identity.email && String(identity.email) !== accountName(row)) {
-        parts.push(String(identity.email));
-    }
+    if (identity.email && String(identity.email) !== accountName(row)) parts.push({ text: String(identity.email) });
     const at = Date.parse(String(row?.status?.last_verified_at || ''));
-    if (Number.isFinite(at)) {
-        const age = formatRelativeAge(at, 'just now');
-        if (age) parts.push(`checked ${age}`);
-    }
-    return parts.filter(Boolean).join(' · ');
+    const age = Number.isFinite(at) ? formatRelativeAge(at, 'just now') : '';
+    if (age) parts.push({ text: `checked ${age}` });
+    return parts.filter((part) => part.text);
+}
+
+export function accountMetaLine(row, payload, options = {}) {
+    return accountMetaParts(row, payload, options).map((part) => part.text).join(' · ');
 }
 
 export function accountGroups(payload, {
@@ -1097,55 +1071,45 @@ function bindServiceDiagnostics() {
 }
 
 export function renderAgentAccountsSection() {
-    return `
-        <div class="form-section" id="harness-accounts-section">
-            <h3>Accounts</h3>
-            <div class="settings-section-copy">
-                ${SIGN_IN_SCOPE_NOTE} Check the intended route in Models or Agents separately.
-                Unpinned work uses enabled accounts; disabling keeps the login out of rotation.
-                Accounts live in Ouroboros's own agent home; personal logins are never imported.
-            </div>
+    return settingsSection({
+        title: 'Accounts',
+        id: 'harness-accounts-section',
+        lead: 'Subscriptions Ouroboros signs in with; where each one works is chosen in Models and Agents.',
+        details: `Connect subscriptions and API keys here, then choose their roles in Models and Agents. Adding an account keeps
+            your existing assignments. ${SIGN_IN_SCOPE_NOTE} Check the intended route in Models or Agents separately.
+            Unpinned work uses enabled accounts; disabling keeps the login out of rotation.
+            Accounts live in Ouroboros's own agent home; personal logins are never imported.`,
+        actions: '<button type="button" class="btn btn-default" id="btn-harness-refresh">Refresh</button>',
+        body: `${renderAgentsServiceBanner()}
             <div id="harness-accounts-error" class="settings-inline-status" data-tone="error" hidden></div>
             <div id="harness-model-marks-note" class="settings-inline-status" data-tone="muted" hidden></div>
             <div id="harness-accounts-groups" class="agent-family-list"></div>
-            <div id="harness-login-card"></div>
-            <div class="settings-toolbar">
-                <button type="button" class="btn btn-default" id="btn-harness-refresh">Refresh</button>
-            </div>
-        </div>
-    `;
+            <div id="harness-login-card"></div>`,
+    });
 }
 
 export function accountRowFacts(row, payload,
                                 { accountsRead = READ_OK, quotaRead = READ_OK, nowMs = Date.now(), action = {} } = {}) {
-    // Each projection is gated by ITS OWN facet: the identity claim is the
-    // ACCOUNTS read, the window is the QUOTA read, and one lands while the
-    // other refuses. The panel used to render both off the retained snapshot
-    // regardless, so after a refused read the banner said nothing could be
-    // listed while a stale row sat underneath it showing a verified badge and a
-    // red exhausted window. Pure, because that rule is the thing worth pinning.
-    //
-    // The two-line anatomy is the owner's (D-10): line 1 is the account and its
-    // status, line 2 is muted metadata in human words. `quotaSummary` carries
-    // the quota gap itself — an unread window says "Limits not checked" rather
-    // than dressing a remembered percentage as current, and it never paints the
-    // row red, because the exhausted styling is a claim about RIGHT NOW and the
-    // reset it promises may already have happened.
+    // Each projection is gated by ITS OWN facet: the identity claim is the ACCOUNTS read, the window is the
+    // QUOTA read, and one lands while the other refuses (a refused read once left a stale verified badge and a
+    // red window under a banner saying nothing could be listed). Line 1 is the account and its status, line 2 the
+    // facts in human words: an unread window says "Limits not checked" rather than dressing a remembered
+    // percentage as current, and it never paints the row, because exhaustion is a claim about RIGHT NOW.
     if (action.resourceRead) quotaRead = READ_OK;
     if (action.activity === 'refresh' && action.error) quotaRead = READ_FAILED;
+    const metaParts = accountMetaParts(row, payload, { quotaRead, nowMs, action });
     return {
         badge: verificationBadge(row, { known: accountsRead === READ_OK }),
         quota: quotaSummary(payload?.quota || [], row.harness, row.profile_id,
             { quotaRead: resourceReadGap(action) ? READ_FAILED : quotaRead,
               nowMs, absences: payload?.quota_absences || [] }),
-        name: accountName(row),
-        meta: accountMetaLine(row, payload, { quotaRead, nowMs, action }),
+        name: accountName(row), meta: metaParts.map((part) => part.text).join(' · '), metaParts,
     };
 }
 
 function rowHtml(row, payload, facets = {}) {
     const action = facets.store?.resourceAction?.(targetFor(row)) || {};
-    const { badge, quota, name, meta } = accountRowFacts(row, payload, { ...facets, action });
+    const { badge, quota, name, metaParts } = accountRowFacts(row, payload, { ...facets, action });
     const loginAction = rowLoginAction(row, payload);
     // Row ACTIONS follow the engine's own routes: every named registry row has
     // the PATCH Enabled toggle and DELETE Remove.
@@ -1158,7 +1122,7 @@ function rowHtml(row, payload, facets = {}) {
                 <strong>${escapeHtml(name)}</strong>
                 <span class="ui-status" data-tone="${badge.tone}">${escapeHtml(badge.label)}</span>
             </div>
-            <div class="harness-account-meta muted">${escapeHtml(meta)}${capabilityMarkup(row, payload)}</div>
+            <div class="harness-account-meta muted">${metaParts.map((part) => `<span class="meta-fact"${part.tone ? ` data-tone="${part.tone}"` : ''}>${escapeHtml(part.text)}</span>`).join('')}${capabilityMarkup(row, payload)}</div>
             <div class="harness-account-actions">
                 <button type="button" class="btn btn-default" data-resources aria-expanded="false" aria-controls="${escapeHtml(resourcePanelId(row))}">▸ Resources</button>
                 <button type="button" class="btn btn-default" data-harness-login>${escapeHtml(loginAction.label)}</button>${rowActions}

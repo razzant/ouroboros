@@ -30,7 +30,7 @@ const INLINE_FRAME_SHARE = 0.7;
 const LINE_PART_MAX = 300;
 const THEME_TOKENS = {
     '--ouro-text': '--text-primary', '--ouro-text-meta': '--text-meta', '--ouro-accent': '--accent',
-    '--ouro-surface': '--surface-object', '--ouro-tray': '--surface-tray', '--ouro-border': '--surface-border',
+    '--ouro-surface': '--surface-object', '--ouro-tray': '--surface-tray', '--ouro-border': '--field-border',
     '--ouro-ok': '--status-ok-fg', '--ouro-warn': '--status-warn-fg', '--ouro-error': '--status-error-fg',
     '--ouro-font': '--font-sans', '--ouro-radius': '--radius-inner',
 };

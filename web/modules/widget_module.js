@@ -524,9 +524,15 @@ function attachFrameBridge(iframe, mount, tab, {
         });
         return disposing;
     };
-    const fault = (text) => {
+    const fault = (text, options) => {
         if (inline) inline.fault(text);
-        else setWidgetCardFault(mount.closest('[data-widget-key]'), text);
+        else setWidgetCardFault(mount.closest('[data-widget-key]'), text, options);
+    };
+    // The mount ends by itself (it left its own page, its file lease ended): the card's page settles it stopped.
+    const ended = (text, details = '') => {
+        fault(text, { details, ended: true });
+        dispose();
+        mount.closest?.('[data-widget-key]')?.dispatchEvent?.(new CustomEvent('ouro-widget-ended', { bubbles: true }));
     };
     // A load without a hello since the previous one is a document that never joined (another site, or a page
     // without the bootstrap): the previous document is gone, so its channel retires. For a module frame the
@@ -537,8 +543,7 @@ function attachFrameBridge(iframe, mount, tab, {
         if (disposed || left) return;
         if (leaves && loads >= 2) {
             left = true;
-            fault('The widget left its own page and was stopped');
-            dispose();
+            ended('Stopped — it left its own page');
             return;
         }
         if (!helloSinceLoad && port) retireDocument();
@@ -546,9 +551,7 @@ function attachFrameBridge(iframe, mount, tab, {
     });
     // A route lease outlives a failed renewal and a core restart (the same URL is re-established), so the
     // running document keeps its state; a file lease ends the mount as before.
-    if (lease) releaseLease = maintainWidgetAssetLease(lease, () => {
-        fault(leaseEnded);
-        dispose();
-    }, resourceBase ? { reestablish: (signal) => reopenWidgetAssetLease(tab, lease, signal) } : {});
+    if (lease) releaseLease = maintainWidgetAssetLease(lease, () => ended("Stopped — couldn't load its files", leaseEnded),
+        resourceBase ? { reestablish: (signal) => reopenWidgetAssetLease(tab, lease, signal) } : {});
     return dispose;
 }

@@ -68,6 +68,10 @@ export const TASK_CAUSE_PHRASES = {
     empty_final_text: "The task ended without a final answer",
     deep_self_review_unavailable: "The deep self-review could not run",
     deep_self_review_error: "The deep self-review stopped on an error",
+    // A helper the host could not start (agent_dispatch.executor_blocked_outcome): it never ran and spent nothing.
+    subagent_executor_unavailable: "This helper could not start because its route was unavailable; it spent nothing",
+    delegate_tools_invisible: "This helper could not start because the tools that run its session are hidden from it; it spent nothing",
+    delegate_visibility_unverified: "This helper could not start because its tools could not be checked; it spent nothing",
     // #869: the provider-death rail's terminal words (twin of project_dialogue.TASK_CAUSE_PHRASES).
     provider_unavailable: "The task could not get a usable model answer, so it could not finish",
     accounting_wait_expired: "Accounting access did not recover within this turn’s wait window",
@@ -105,6 +109,10 @@ export const TASK_CAUSE_PHRASES = {
     // Presentation only; no producer stamps this as a reason code.
     reason_undescribed: "The recorded reason has no description yet.",
 };
+
+// The codes above of a helper the host could not start: its only result is the host's notice to its parent (codes,
+// alternatives), so its card's collapsed line states the cause and the notice stays in Details.
+export const UNSTARTED_REASONS = new Set(['subagent_executor_unavailable', 'delegate_tools_invisible', 'delegate_visibility_unverified']);
 
 export function taskReasonPhrase(code) {
     const raw = String(code || '');

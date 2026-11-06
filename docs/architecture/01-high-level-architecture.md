@@ -177,6 +177,7 @@ ouroboros/ — agent core and shared runtime (§6)
   _usage_cache_splits.py — process-local cache split by task/provider/route/review; a missing entry prices a full cache write (§6)
   _usage_settlement.py — usage/price evidence projected outside the ledger transaction (§6 Budget tracking)
   usage_store.py, usage_journal.py, openrouter_cost.py — `state/usage.sqlite`, its journal import and explicit OpenRouter price receipts (USAGE_STORE.md)
+  usage_origin.py — task usage scopes and immutable billing/cause attribution in the usage ledger (§6 Budget tracking; USAGE_STORE.md)
   store.py, store_capture.py, store_empty.py, store_journal.py, store_task_cards.py, store_timing.py, store_import.py, store_switch.py, install_identity.py, dialogue_store.py, dialogue_retry.py, dialogue_import.py, dialogue_positions.py — shared SQLite core (USAGE_STORE.md): `state/current.sqlite` (atomic `meta.commit_seq`; boot import/reconcile §2, export before storeless switches §9), `state/dialog.sqlite` (chat/progress rows by chain coordinate, ordinals, import intervals; one `append` seam; cutover, archive import, rollback export; PERSISTENCE.md)
   cost_projection.py — the one task-cost projection for every producer: `accounted_upper_bound_usd`, null as None and never $0.00 (§6 Budget tracking)
   storage.py, storage_deleted.py, storage_free.py, storage_free_view.py, storage_removers.py — Dashboard counts, temporary space, paged views (§3)
@@ -211,6 +212,7 @@ ouroboros/ — agent core and shared runtime (§6)
   ouroboros/gateway/safety_settings.py — owner Safety level, rules and checker endpoints
   consciousness.py, consciousness_wake.py — the background alarm admitting an ordinary Main turn through the supervisor tick; the wake input and `wake_task_metadata` envelope (§6 Background consciousness)
   consciousness_authority.py, consciousness_allowance.py — dispatch-bound autonomy ceilings and the rolling 24-hour allowance (§6 Background consciousness and Evolution)
+  consciousness_view.py — read-only consciousness facts: places, counted roots and bounded recent wakes (§6 Background consciousness)
   chat_chain.py, chat_references.py, chronicle_store.py, chronicle_quotes.py — addressed dialogue reads: content identities, legacy `(gen, line)` hints, Reply facts, `retain_memory_source`; append-only chronicle: pages/parts, version-bound accounts, separate common-view selections, disposable index (§6)
   mark_anchors.py — a mark tied to a tool (optional call text) or a path trails that call's result once per task (§6 Post-task work)
   chronicle_import.py, memory_nomination_receipts.py, memory_inventory.py — one model-free import of prior dialogue memory as `legacy` records; nominations imported once as marks; what is open or folded (§6)
@@ -730,7 +732,7 @@ Default root (overrides: §7). This tree orients; `docs/PERSISTENCE.md` register
 │   │   ├── WORLD.md               ← my world map
 │   │   ├── knowledge/             ← topic files (patterns.md, improvement-backlog.md: ordinary notes)
 │   │   ├── deep_review.md         ← deep-self-review output
-│   │   ├── registry.md            ← memory awareness map
+│   │   ├── registry.md            ← optional hand-written source registry (`memory_map`); absent means nothing was recorded
 │   │   └── owner_mailbox/         ← per-task owner messages
 │   ├── projects/<id>/knowledge/   ← per-project facts with provenance sidecars
 │   ├── observability/             ← private forensic ledger: blobs/, calls/<task_id>/, packs/<task>.xz

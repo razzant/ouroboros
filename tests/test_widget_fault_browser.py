@@ -236,7 +236,8 @@ def test_a_running_widget_fault_reaches_the_events_log(direct_server_with_data, 
                 }""", nonce)
                 page.wait_for_function("() => ['wrong nonce', 'wrong source'].every(x => window.faultProbeMarkers.includes(x))")
                 assert page.locator(f"{card('isolation')} [data-widget-status][data-widget-fault]").count() == 0
-                page.locator(f"{card('isolation')} [data-widget-power]").click()
+                page.locator(f"{card('isolation')} [data-widget-menu-trigger]").click()  # the owner's Stop: the card menu's
+                page.get_by_role("menuitem", name="Stop", exact=True).click()
                 page.wait_for_function("() => window.faultProbeMarkers.includes('after disposal')")
                 page.locator(f"{card('isolation')} iframe").wait_for(state="detached")
                 fault_status.scroll_into_view_if_needed()

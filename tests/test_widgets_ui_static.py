@@ -47,7 +47,7 @@ def test_widgets_use_design_radius_tokens():
     block_start = style.index(".ui-control {")
     block_end = style.index("}", block_start)
     block = style[block_start:block_end]
-    assert "border-radius: var(--radius);" in block
+    assert "border-radius: var(--radius-inner);" in block
     assert "border-radius: 9px;" not in block
 
 

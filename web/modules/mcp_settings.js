@@ -1,7 +1,7 @@
 import { apiFetch, jsonPost } from './api_client.js';
 /** MCP settings cards; preserves masked credentials until the user edits them. */
-import { escapeHtmlAttr as escapeHtml, safeExternalUrl } from './utils.js';
-import { openExternalViaHostBridge, revealNewRow } from './ui_helpers.js';
+import { absoluteTime, escapeHtmlAttr as escapeHtml, safeExternalUrl } from './utils.js';
+import { formatRelativeAge, openExternalViaHostBridge, revealNewRow } from './ui_helpers.js';
 import { resetSecretReveals } from './settings_secrets.js';
 import {
     renderHeaderFields, bindHeaderFields, credentialPayload, headerKeepsSavedValues, keptHeaderNames,
@@ -44,6 +44,9 @@ const draftGenerations = new WeakMap();
 const pendingActions = new WeakMap();
 const signInLinks = new WeakMap(); // the provider page of the sign-in this window began, per server
 const signInBusy = new WeakSet(); // a sign-in step in flight: a second press waits for it
+// A server is a row; its form opens behind Edit. A server not saved yet starts open, and a rebuild (a transport
+// change redraws the card) keeps whatever the owner opened or closed.
+const editOpen = new WeakSet();
 
 function looksMasked(value) {
     const text = String(value ?? '').trim();
@@ -202,7 +205,10 @@ function unsupportedFields(server) {
     return [...fields, ...remoteLifetimeFlags(server)];
 }
 
-/** The saved-status parts of a card: its badge and its discovered tools' list items. */
+const age = (iso) => formatRelativeAge(Date.parse(String(iso || '')), 'just now');
+
+/** The saved-status parts of a card: its chip (one typed state, relative time), its Details facts (the exact
+ *  stamps and the engine's text), and its discovered tools' list items. */
 function statusParts(server) {
     const status = statusOf(server);
     const toolCount = status ? Number(status.tool_count || 0) : 0;
@@ -210,21 +216,29 @@ function statusParts(server) {
     const listedAt = status ? String(status.listed_at || '') : '';
     const attempt = status?.latest_attempt;
     const tools = status && Array.isArray(status.tools) ? status.tools : [];
-    let label = listedAt ? `${toolCountLabel(toolCount)} (listed ${listedAt})`
-        : attempt ? 'Never listed under the current configuration' : 'Not listed yet';
-    if (attempt?.ok === false) label += `; last attempt ${attempt.at} failed: ${attempt.error}`;
-    else if (attempt?.partial) label += `; last attempt ${attempt.at} was partial`;
-    else if (lastError) label += `; ${lastError}`;
-    if (status?.publication_error) label += `; catalog publication failed: ${status.publication_error}`;
-    const badge = [label, lastError || status?.publication_error ? 'mcp-server-status-danger'
-        : toolCount > 0 ? 'mcp-server-status-ok' : listedAt ? 'mcp-server-status-warn' : 'mcp-server-status-muted'];
+    const parts = [listedAt ? `${toolCountLabel(toolCount)} · listed ${age(listedAt)}` : ''];
+    if (attempt?.ok === false) parts.push(`listing failed ${age(attempt.at)}`);
+    else if (attempt?.partial) parts.push(`listing partial ${age(attempt.at)}`);
+    else if (!listedAt) parts.push(attempt ? 'never listed' : 'not listed yet');
+    else if (lastError) parts.push('failing');
+    if (status?.publication_error) parts.push('catalog not published');
+    const label = parts.filter(Boolean).join(' · ');
+    const tone = lastError || status?.publication_error || attempt?.ok === false ? 'danger'
+        : toolCount > 0 && !attempt?.partial ? 'ok' : listedAt ? 'warn' : 'muted';
+    const facts = [
+        ['Listed', listedAt ? absoluteTime(listedAt) || listedAt : ''],
+        ['Last attempt', attempt?.at ? `${absoluteTime(attempt.at) || attempt.at}${attempt.ok === false ? ' · failed' : attempt.partial ? ' · partial' : ''}` : ''],
+        ['Error', attempt?.ok === false ? String(attempt.error || '') : lastError],
+        ['Catalog publication', status?.publication_error ? String(status.publication_error) : ''],
+    ].filter(([, value]) => value);
+    const factItems = facts.map(([name, value]) => `<div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('');
     const toolItems = tools.map((t) => `
                 <li>
                     <strong>${escapeHtml(t.name || t.prefixed_name || '')}</strong>
                     ${t.description ? `<span class="mcp-tool-desc">${escapeHtml(String(t.description).slice(0, 220))}</span>` : ''}
                 </li>
             `).join('');
-    return { badgeText: badge[0], badgeClass: `mcp-server-status ${badge[1]}`, toolItems };
+    return { badgeText: label.charAt(0).toUpperCase() + label.slice(1), badgeClass: `mcp-server-status mcp-server-status-${tone}`, factItems, toolItems };
 }
 
 /** The status row of a saved server: the backend keys it by the canonical identity (id, slug or name). */
@@ -321,7 +335,7 @@ async function signInAction(card, server, sid, action) {
 
 function toolsDisclosure(toolItems) {
     return toolItems
-        ? `<details class="mcp-tools-disclosure"><summary>Discovered tools</summary><ul class="mcp-tools-list">${toolItems}</ul></details>`
+        ? `<details class="mcp-tools-disclosure ui-disclosure"><summary>Discovered tools</summary><ul class="mcp-tools-list">${toolItems}</ul></details>`
         : '';
 }
 
@@ -335,9 +349,11 @@ function paintStatus() {
     for (const server of mcpServers) {
         const card = isServer(server) ? cardFor(server) : null;
         if (!card) continue;
-        const { badgeText, badgeClass, toolItems } = statusParts(server);
+        const { badgeText, badgeClass, factItems, toolItems } = statusParts(server);
         const weight = card.querySelector('[data-mcp-weight]');
         if (weight) { weight.textContent = weightLabel(server); weight.hidden = !weight.textContent; }
+        const facts = card.querySelector('[data-mcp-facts]');
+        if (facts && facts.innerHTML !== factItems) facts.innerHTML = factItems;
         const badge = card.querySelector('.mcp-server-status');
         badge.className = badgeClass;
         if (badge.textContent !== badgeText) badge.textContent = badgeText;
@@ -375,36 +391,38 @@ function renderServerCard(server, index) {
         const selected = opt.value === transport ? ' selected' : '';
         return `<option value="${escapeHtml(opt.value)}"${selected}>${escapeHtml(opt.label)}</option>`;
     }).join('');
-    const { badgeText, badgeClass, toolItems } = statusParts(server);
+    const { badgeText, badgeClass, factItems, toolItems } = statusParts(server);
 
     const message = cardMessages.get(server);
     const pending = pendingActions.get(server) || new Set();
     const notice = endpointNotice(server);
     const lifetime = lifetimeNote(server);
 
+    // The row: the name, one state chip, the Enabled switch and the actions; the action's result right under
+    // them; the form behind Edit (open for a server not saved yet); the stamps, the engine's text and the request
+    // weight behind Details; then the discovered tools (DESIGN "List editors").
     return `
         <article class="mcp-server-card" data-mcp-card data-mcp-index="${index}">
             <header class="mcp-server-card-head">
                 <div class="mcp-server-card-title">
                     <strong>${escapeHtml(name || id || `MCP Server ${index + 1}`)}</strong>
                     <span class="${badgeClass}">${escapeHtml(badgeText)}</span>
-                    <span class="ui-field-help" data-mcp-weight ${weight ? '' : 'hidden'}>${escapeHtml(weight)}</span>
                 </div>
                 <div class="mcp-server-card-actions">
                     <label class="mcp-server-enabled">
                         <input class="ui-checkbox" type="checkbox" aria-label="MCP server ${index + 1}: Enabled" data-mcp-field="enabled" ${enabled ? 'checked' : ''}>
                         <span>Enabled</span>
                     </label>
-                    <label class="mcp-server-enabled" title="Off: Ouroboros sees this server's tools in its connections map and loads their call schemas when it needs them. On: in Low and Max the call schemas are in every request from the start of each task.">
-                        <input class="ui-checkbox" type="checkbox" aria-label="MCP server ${index + 1}: Call schemas from task start" data-mcp-field="schemas_at_start" ${isPinned(server) ? 'checked' : ''}>
-                        <span>Schemas from task start</span>
-                    </label>
-                    <button type="button" class="btn btn-default" data-mcp-test ${pending.has('test') ? 'disabled' : ''}>Test draft catalog</button>
-                    <button type="button" class="btn btn-default" data-mcp-refresh ${pending.has('refresh') ? 'disabled' : ''}>Refresh saved catalog</button>
+                    <button type="button" class="btn btn-default" data-mcp-test ${pending.has('test') ? 'disabled' : ''}>Test draft</button>
+                    <button type="button" class="btn btn-default" data-mcp-refresh ${pending.has('refresh') ? 'disabled' : ''}>Refresh catalog</button>
                     <button type="button" class="btn btn-default mcp-server-remove" data-mcp-remove>Remove</button>
                 </div>
             </header>
             <div class="mcp-sign-in" data-mcp-sign-in data-sign-in-key="${escapeHtml(signInKey(server))}" ${signInKey(server) ? '' : 'hidden'}>${signInRow(server)}</div>
+            <div class="settings-inline-status mcp-server-message" data-mcp-message ${message ? `data-tone="${escapeHtml(message.tone)}"` : 'hidden'}>${escapeHtml(message?.text || '')}</div>
+            <details class="ui-disclosure mcp-server-edit" data-mcp-edit${editOpen.has(server) ? ' open' : ''}>
+            <summary>Edit</summary>
+            <div class="mcp-server-form">
             <div class="form-grid two">
                 <div class="form-field ui-field">
                     <label for="mcp-${index}-id">Server ID</label>
@@ -461,10 +479,19 @@ function renderServerCard(server, index) {
                     <input type="text" class="ui-control" id="mcp-${index}-allowed_tools" aria-label="MCP server ${index + 1}: Allowed tools (optional, comma-separated)" data-mcp-field="allowed_tools" value="${escapeHtml(allowedTools)}" placeholder="search, read_repo" autocomplete="off" spellcheck="false">
                 </div>
             </div>
+            <label class="mcp-server-enabled" title="Off: Ouroboros sees this server's tools in its connections map and loads their call schemas when it needs them. On: in Low and Max the call schemas are in every request from the start of each task.">
+                <input class="ui-checkbox" type="checkbox" aria-label="MCP server ${index + 1}: Call schemas from task start" data-mcp-field="schemas_at_start" ${isPinned(server) ? 'checked' : ''}>
+                <span>Schemas from task start</span>
+            </label>
             ${lifetime ? `<div class="form-row"><span class="muted" data-mcp-lifetime>${escapeHtml(lifetime)}</span></div>` : ''}
-            <div class="settings-inline-status mcp-server-message" data-mcp-message ${message ? `data-tone="${escapeHtml(message.tone)}"` : 'hidden'}>${escapeHtml(message?.text || '')}</div>
-            ${unsupported.length ? `<div class="form-row"><span class="muted">Fields retained but not applied: ${escapeHtml(unsupported.join(', '))}</span>
+            ${unsupported.length ? `<div class="ui-action-row"><span class="muted">Fields retained but not applied: ${escapeHtml(unsupported.join(', '))}</span>
                 <button type="button" class="btn btn-default" data-mcp-clear-unsupported>Remove unsupported fields</button></div>` : ''}
+            </div>
+            </details>
+            <details class="ui-disclosure mcp-server-details"><summary>Details</summary>
+                <dl class="mcp-server-facts" data-mcp-facts>${factItems}</dl>
+                <span class="ui-field-help" data-mcp-weight ${weight ? '' : 'hidden'}>${escapeHtml(weight)}</span>
+            </details>
             ${toolsDisclosure(toolItems)}
         </article>
     `;
@@ -488,6 +515,9 @@ function bindCardEvents(card) {
         if (button) void signInAction(card, rowServer, saved?.identity || '', button.dataset.mcpSignInAction);
     });
 
+    card.querySelector('[data-mcp-edit]')?.addEventListener('toggle', (event) => {
+        if (event.target.open) editOpen.add(rowServer); else editOpen.delete(rowServer);
+    });
     card.querySelectorAll('[data-mcp-field]').forEach((input) => {
         input.addEventListener('input', () => {
             const field = input.dataset.mcpField;
@@ -693,7 +723,9 @@ function bindAddButton() {
     const btn = document.getElementById('btn-mcp-add-server');
     if (!btn) return;
     btn.addEventListener('click', () => {
-        mcpServers.push(emptyServer());
+        const server = emptyServer();
+        mcpServers.push(server);
+        editOpen.add(server);
         renderAll();
         // The Add action lives in the section head while the new card lands
         // at the list's end — show it there and hand the caret to its id.
@@ -740,6 +772,7 @@ export function initMcpSettings({ onChange } = {}) {
                     if (entry.action === 'add') {
                         const server = {...entry.patch};
                         mcpServers.push(server);
+                        editOpen.add(server);
                         touched.push(server);
                     } else if (entry.action === 'update') {
                         const server = mcpServers[entry.index];

@@ -24,7 +24,7 @@ from ouroboros.gateway.router import collect_routes
 from tests._store_shared import seed_result
 from tests.test_consciousness_view import FIXTURE, _call
 
-COVERAGE = "wakes that reached a model call in the last 48 h"
+COVERAGE = "Wakes that reached a model call in the last 48 h"
 FOCUS = {"wake_cause": "focus", "focus": {"place_id": "mail", "conversation_key": "chat:a:r"}}
 
 

@@ -47,10 +47,12 @@ def _when(iso_value: Any) -> str:
     return ("due since " if parsed is not None and parsed.timestamp() <= time.time() else "at ") + _clock_of(iso_value)
 
 
-def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None) -> dict:
+def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None, *, supervisor_failed: bool = False) -> dict:
     """Project the alarm clock's snapshot into one honest status + detail line
     for the client headline (``None``: stored control is unknown, never off — #1307).
-    The appointment is the scheduled time; the next attempt is where skips and refusals moved it."""
+    The appointment is the scheduled time; the next attempt is where skips and refusals moved it.
+    Without a clock the server says why (``supervisor_failed``): a supervisor that failed to start
+    cannot wake it until a restart; otherwise Ouroboros is still starting (or waits for a provider)."""
     from ouroboros.deadline_utils import parse_deadline_ts
 
     outcome = str(snapshot.get("last_wake_outcome") or "")
@@ -61,8 +63,10 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None)
         status, detail = "unknown", "The stored consciousness control is unknown: runtime state is unavailable or recovering."
     elif not requested_enabled:
         status, detail = "disabled", "Background consciousness is off."
+    elif not snapshot and supervisor_failed:
+        status, detail = "stopped", "Cannot wake: Ouroboros did not finish starting. Restart Ouroboros."
     elif not snapshot:
-        status, detail = "stopped", "Enabled in state, but the alarm clock was not constructed (supervisor init failed)."
+        status, detail = "starting", "Waits for Ouroboros to finish starting."
     elif wake and snapshot.get("live_wake_held"):
         status, detail = "wake_paused", (f"Wake-up {wake} is paused or waiting in the queue; its card shows why. "
                                          "The next wake-up follows it.")
@@ -102,7 +106,7 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None)
 
 
 
-def describe_consciousness(clock) -> dict:
+def describe_consciousness(clock, *, supervisor_failed: bool = False) -> dict:
     """Read the same stored control as /api/state, including unknown and no-clock boot states."""
     from supervisor.state import control_value, load_state
 
@@ -110,7 +114,7 @@ def describe_consciousness(clock) -> dict:
     requested = bool(enabled) if known else None
     if clock is not None:
         return clock.details_snapshot(requested)
-    return {**describe_consciousness_state({}, requested), "recent_wakes": []}
+    return {**describe_consciousness_state({}, requested, supervisor_failed=supervisor_failed), "recent_wakes": []}
 
 
 def place_views(drive_root, allowance=None) -> list[dict]:
