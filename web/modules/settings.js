@@ -29,6 +29,7 @@ import { SECRET_KEYS, bindSettingsTabs, renderSettingsPage } from './settings_ui
 import { connectionReferencesText, createConnectionsEditor } from './settings_connections.js';
 import { showToast } from './toast.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
+import { skillTitle } from './skill_presentation.js';
 import { APP_SETTINGS_ORIGIN, apiClient, apiFetch, cleanExtensionRoute, extensionRoutePath } from './api_client.js';
 import { claudexorStatus } from './claudexor_status_store.js';
 import { createModelRolesEditor } from './model_roles.js';
@@ -224,7 +225,12 @@ function renderCustomSecrets(root, settings) {
     if (!host) return;
     resetSecretReveals(host);
     host.innerHTML = '';
-    const keys = Array.isArray(settings?._meta?.custom_secret_keys) ? settings._meta.custom_secret_keys : [];
+    // A key a skill asked for is shown once, under its asker (renderRequestedSkillSecrets): a render after that list
+    // (a Discard) leaves its custom row out, as that list's own render removes it.
+    const requested = new Set([...root.querySelectorAll('#skill-requested-secrets [data-secret-setting]')]
+        .map((input) => input.dataset.secretSetting));
+    const keys = (Array.isArray(settings?._meta?.custom_secret_keys) ? settings._meta.custom_secret_keys : [])
+        .filter((key) => !requested.has(key));
     keys.forEach((key) => host.appendChild(customSecretRow(key, settings[key] || '')));
     if (!keys.length) host.innerHTML = '<div class="muted">No custom keys yet.</div>';
 }
@@ -237,7 +243,7 @@ function renderRequestedSkillSecrets(root, skills, settings) {
     (Array.isArray(skills) ? skills : []).forEach((skill) => {
         (skill?.grants?.requested_keys || []).forEach((key) => {
             const normalized = String(key || '').trim();
-            if (normalized && !BASE_SECRET_KEYS.has(normalized)) askers.set(normalized, [...(askers.get(normalized) || []), String(skill?.name || '')]);
+            if (normalized && !BASE_SECRET_KEYS.has(normalized)) askers.set(normalized, [...(askers.get(normalized) || []), String(skill ? skillTitle(skill) : '')]);
         });
     });
     const unique = [...askers.keys()].sort((a, b) => a.localeCompare(b));
