@@ -547,6 +547,24 @@ def display_documents(root: Any, task_ids: Iterable[str],
             for task_id, text, _seq in found}
 
 
+def task_focuses(root: Any, task_ids: Iterable[str]) -> Dict[str, Any]:
+    """Read only authored focus values, without constructing task display/evidence views.
+
+    Capture the addressed bodies in one transaction, then decode outside it. Focus is
+    body-owned, not a card or handoff field; missing tasks stay absent, missing focus
+    stays null. No cache or second persisted projection changes its freshness.
+    """
+    ids = sorted({str(task_id) for task_id in task_ids if str(task_id or "").strip()})
+    if not ids:
+        return {}
+    with open_store(root, write=False) as txn:
+        captured = capture(txn.conn,
+                           "SELECT task_id, json_quote(json_extract(body, '$.focus')) AS focus "
+                           "FROM task_bodies WHERE task_id IN (SELECT value FROM json_each(?))",
+                           (json.dumps(ids),), ("task_id", "focus"))
+    return {task_id: json.loads(text) for task_id, text in captured.tuples()}
+
+
 def task_versions(root: Any, task_ids: Iterable[str]) -> Dict[str, Tuple[int, str, bool]]:
     """Each stored task's ``(write_seq, status, owes_synthesis)``, typed columns only, in ONE
     aggregated row: whether documents a window shows changed since it read them, and which of them

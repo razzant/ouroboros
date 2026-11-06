@@ -473,11 +473,11 @@ def _install_model_operation_fake(stack: contextlib.ExitStack, recorder: _Record
                     self.dispatch.append("response_received")
             return super().create_model_operation(ref, idempotency_key=idempotency_key)
 
-        def get_model_result(self, operation_id, *, expected_ref, timeout_sec=None, raw_bytes=False):
+        def get_model_result(self, operation_id, *, expected_ref, timeout_sec=None, raw_bytes=False, include_raw_bytes=False):
             # Caller timeout binds this actual control read, NOT generation duration.
             recorder.sends[int(operation_id.removeprefix("op-"))]["timeout"] = timeout_sec
             return super().get_model_result(operation_id, expected_ref=expected_ref,
-                                           timeout_sec=timeout_sec, raw_bytes=raw_bytes)
+                                           timeout_sec=timeout_sec, raw_bytes=raw_bytes, include_raw_bytes=include_raw_bytes)
 
     gateway = ModelGateway()
     gateway.lose_create = bool(spec.get("lose_model_create_reply"))

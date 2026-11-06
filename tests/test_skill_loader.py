@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import sys
 
 import pytest
 
@@ -1084,6 +1085,28 @@ def test_extension_status_reflects_persisted_verdict_in_phase4(tmp_path, monkeyp
 # ---------------------------------------------------------------------------
 # summarize_skills shape
 # ---------------------------------------------------------------------------
+
+
+def test_summary_observes_script_substrate_once_per_row_and_refreshes(tmp_path, monkeypatch):
+    import ouroboros.tools.skill_exec as executor
+    drive_root, repo_root = tmp_path / "drive", tmp_path / "skills"
+    drive_root.mkdir()
+    _write_skill(repo_root, "alpha", manifest=_valid_script_manifest("alpha"), scripts={"fetch.py": "pass\n"})
+    loaded = find_skill(drive_root, "alpha", repo_path=str(repo_root))
+    save_enabled(drive_root, "alpha", True)
+    save_review_state(drive_root, "alpha", SkillReviewState(status="pass", content_hash=loaded.content_hash))
+    loaded = find_skill(drive_root, "alpha", repo_path=str(repo_root))
+    calls, available = [], [True]
+    def runtime(name):
+        calls.append(name)
+        return (sys.executable if available[0] else None, "fixture")
+    monkeypatch.setattr(executor, "_resolve_runtime_binary", runtime)
+    first = summarize_skills(drive_root, [loaded])
+    assert calls == ["python3"] and first["skills"][0]["runnable_via_skill_exec"] is True
+    calls.clear()
+    available[0] = False
+    second = summarize_skills(drive_root, [loaded])
+    assert calls == ["python3"] and second["skills"][0]["runnable_via_skill_exec"] is False
 
 
 def test_summarize_skills_shape_contains_counts_and_flat_list(tmp_path, monkeypatch):

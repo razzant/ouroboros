@@ -340,7 +340,8 @@ def test_model_invocation_requires_stable_key(gateway_factory, key):
 
 
 @pytest.mark.parametrize("data", [b'{"n":NaN}', b'\xff', b'[]'])
-def test_result_is_strict_utf8_json_object_after_integrity_verification(gateway_factory, data):
+@pytest.mark.parametrize("mode", [{}, {"include_raw_bytes": True}])
+def test_result_is_strict_utf8_json_object_after_integrity_verification(gateway_factory, data, mode):
     calls = []
 
     def handler(request):
@@ -349,7 +350,7 @@ def test_result_is_strict_utf8_json_object_after_integrity_verification(gateway_
 
     gateway = gateway_factory(handler)
     with pytest.raises(cx.ClaudexorUnavailable) as raised:
-        gateway.get_model_result("op-one", expected_ref=_ref(data))
+        gateway.get_model_result("op-one", expected_ref=_ref(data), **mode)
     assert raised.value.code == "malformed_response"
     assert [(call.method, call.url.path) for call in calls] == [("GET", "/v2/model-operations/op-one/result")]
 

@@ -598,6 +598,62 @@ def _data_root_tree(root: pathlib.Path) -> list:
     return out
 
 
+@pytest.mark.parametrize("phase", ["mint_skill_token", "companion_spawn_env"])
+def test_companion_materialization_does_not_hold_global_registry_lock(tmp_path, monkeypatch, phase):
+    from concurrent.futures import ThreadPoolExecutor
+    from ouroboros.extension_registry_state import extension_generation_digest, _lifecycle_lock_for
+
+    init_server_process_pid()
+    loaded, _repo_root, drive_root = _reviewed_companion_skill(tmp_path)
+    fake = _patch_supervisor(monkeypatch)
+    entered, release = threading.Event(), threading.Event()
+    original = getattr(extension_plugin_api, phase)
+    def held(*args, **kwargs):
+        entered.set()
+        assert release.wait(30), "test did not release companion preparation"
+        return original(*args, **kwargs)
+    monkeypatch.setattr(extension_plugin_api, phase, held)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            pending = pool.submit(extension_loader.load_extension, loaded, lambda: {},
+                                  drive_root=drive_root, skills=[loaded])
+            try:
+                assert entered.wait(30), "loader did not reach companion materialization"
+                # The same-skill lifecycle remains held across the now-unlocked
+                # preparation; a different thread cannot unload this generation.
+                lifecycle = _lifecycle_lock_for(loaded.name)
+                assert not lifecycle.acquire(blocking=False)
+                observed = pool.submit(extension_generation_digest, "unrelated-skill")
+                assert observed.result(timeout=5) == ""
+            finally:
+                release.set()
+            assert pending.result(timeout=30) is None
+        assert len(fake.started) == 1
+    finally:
+        release.set()
+        extension_loader.unload_extension(loaded.name)
+        init_server_process_pid()
+
+
+@pytest.mark.parametrize("phase", ["mint_skill_token", "companion_spawn_env"])
+def test_companion_materialization_failure_disposes_published_bundle(tmp_path, monkeypatch, phase):
+    from ouroboros.extension_registry_state import extension_generation_digest
+
+    init_server_process_pid()
+    loaded, _repo_root, drive_root = _reviewed_companion_skill(tmp_path)
+    fake = _patch_supervisor(monkeypatch)
+    def failed(*args, **kwargs):
+        raise RuntimeError("controlled preparation failure")
+    monkeypatch.setattr(extension_plugin_api, phase, failed)
+    try:
+        error = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root, skills=[loaded])
+        assert error and "controlled preparation failure" in error
+        assert extension_generation_digest(loaded.name) == "" and not fake.started
+    finally:
+        extension_loader.unload_extension(loaded.name)
+        init_server_process_pid()
+
+
 def test_stale_recovery_with_env_from_settings_has_zero_filesystem_effects(
     tmp_path: pathlib.Path, monkeypatch,
 ) -> None:

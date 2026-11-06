@@ -542,11 +542,10 @@ class _ModelInvocation:
                         raise self.error(detail.get("problem"), detail,
                                          unknown=(detail.get("dispatch") or {}).get("state") != "not_started")
                     self.response_ref = response["ref"]
-                    raw = self.gateway.get_model_result(self.operation_id, expected_ref=self.response_ref,
-                                                        timeout_sec=min(self.timeout, _READ_TIMEOUT_SEC), raw_bytes=True)
+                    raw, result = self.gateway.get_model_result(self.operation_id, expected_ref=self.response_ref,
+                                                        timeout_sec=min(self.timeout, _READ_TIMEOUT_SEC), include_raw_bytes=True)
                     self.retain(raw)
                     self.observe_operation(phase="response_received")
-                    result = json.loads(raw.decode("utf-8"))
                     if (detail.get("dispatch") or {}).get("state") == "not_started":
                         error = self.error(result.get("problem"), detail)
                         error.route = copy.deepcopy(result.get("route") or error.route)
@@ -956,7 +955,7 @@ def recover_model_attempt(drive_root, row: dict, *, gateway_factory=None):
     operation_state, dispatch_state = manifest.get("operation_state"), manifest.get("dispatch_state")
     image = request.get("request_kind") == "image"
     raw = payload.get("result_json_utf8") if isinstance(payload, dict) else None
-    gateway = None
+    gateway, result = None, None
     try:
         if (operation_state not in TERMINAL_STATES or not dispatch_state
                 or (raw is None and (image or dispatch_state == "response_received"))):
@@ -969,8 +968,9 @@ def recover_model_attempt(drive_root, row: dict, *, gateway_factory=None):
             response = detail.get("response") or {}
             response_ref = response.get("ref") or manifest.get("response_ref") or {}
             if raw is None and response.get("state") == "ready":
-                raw = gateway.get_model_result(operation_id, expected_ref=response_ref,
-                                               timeout_sec=_READ_TIMEOUT_SEC, raw_bytes=True).decode("utf-8")
+                data, result = gateway.get_model_result(operation_id, expected_ref=response_ref,
+                                               timeout_sec=_READ_TIMEOUT_SEC, include_raw_bytes=True)
+                raw = data.decode("utf-8")
             payload = {"result_json_utf8": raw} if raw is not None else {"operation": detail}
             persist_call(drive_root, task_id=task_id, call_id=call_id,
                          call_type="llm_claudexor_response", payload=payload, keep_raw=True,
@@ -989,7 +989,7 @@ def recover_model_attempt(drive_root, row: dict, *, gateway_factory=None):
             return "released", {}, None, False
         if raw is None or (not image and dispatch_state != "response_received"):
             return "abandoned", {}, None, False
-        result = json.loads(raw)
+        result = json.loads(raw) if result is None else result
         outcomes = {"completed", "failed", "unknown"} if image else {"completed", "incomplete", "failed"}
         if not isinstance(result, dict) or result.get("outcome") not in outcomes:
             return "abandoned", {}, None, False

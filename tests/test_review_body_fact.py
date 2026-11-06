@@ -53,8 +53,13 @@ def _fact(root, system, **kwargs) -> BodyFact:
 
 # --- the body, each way it is recognized ---------------------------------------
 
-def test_the_system_repository_and_paths_inside_it_are_the_body_by_dir(system):
+def test_the_system_repository_and_paths_inside_it_are_the_body_by_dir(system, monkeypatch):
+    def unexpected(*args, **kwargs):
+        pytest.fail("physical body recognition must not inspect remotes or manifests")
+    monkeypatch.setattr(rbf, "_git", unexpected)
+    monkeypatch.setattr("ouroboros.launcher_bootstrap.load_repo_manifest", unexpected)
     fact = _fact(system, system)
+    assert body_fact(system, system_repo=system) == fact
     assert (fact.body, fact.how) == ("true", "dir")
     # A path inside the body is the body whether or not it exists yet
     # (creating ouroboros/new_module.py IS self-modification).

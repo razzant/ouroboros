@@ -808,7 +808,7 @@ class PluginAPIImpl:
         swaps into the process-wide registries as the authoritative bundle,
         stamped with a fresh generation digest, and only AFTER the swap do the
         deferred side effects attach — event-bus subscriptions, supervised
-        runners, companion spawns — still inside the same critical section. A
+        runners — inside the same critical section; companion preparation/start is outside. A
         handler is therefore visible to the bus only for an already-published
         extension: a concurrent ``EventBus.publish()`` (which takes only the
         bus's own lock) landing between the validation and the attach cannot
@@ -832,9 +832,9 @@ class PluginAPIImpl:
         (futures as they are created), so a failure while attaching leaves
         nothing orphaned: it is disclosed and raised into the caller's STANDARD
         dispose+unload path (``unload_extension`` reaps the bundle's surfaces,
-        subscriptions, futures and companions). No concurrent unload or
-        conflicting publication can interleave anywhere inside (both mutate only
-        under this lock).
+        subscriptions, futures and companions). Production callers hold the
+        same-skill lifecycle lock through preparation/start, preventing concurrent
+        unload/reload; the registry lock serializes publication and bus/runner attach.
         """
         with _lock:
             try:
@@ -926,20 +926,6 @@ class PluginAPIImpl:
             # PROCESSES, which start after the lock is released (below).
             companion_spawns = list(staged.companion_spawns)
             try:
-                if companion_spawns:
-                    # The env and the auth token materialize only HERE, after
-                    # the generation fence admitted this publication (a mint
-                    # during descriptor build would let a stale recovery rotate
-                    # auth_token.json before its typed refusal); the pre-fence
-                    # build is pure — see ``extension_companion.companion_spawn_env``.
-                    self._state_dir.mkdir(parents=True, exist_ok=True)
-                    token = mint_skill_token(self._state_dir, self._skill, self._skill_dir)
-                    for spawn in staged.companion_spawns:
-                        spawn.descriptor.env.clear()
-                        spawn.descriptor.env.update(companion_spawn_env(
-                            spawn.spec, token, env_allow=self._env_allow, granted_upper=self._granted_upper,
-                            skill=self._skill, skill_dir=self._skill_dir, state_dir=self._state_dir,
-                        ))
                 bus = get_global_event_bus()
                 for sub in staged.event_subscriptions:
                     bus.subscribe(self._skill, sub.topic, sub.handler, sub_id=sub.sub_id)
@@ -966,13 +952,25 @@ class PluginAPIImpl:
         # a spawn under it stalled the whole surface (the Telegram wedge). The
         # names are already on the bundle, so a start failure routes to the
         # same dispose+unload path as a mid-attach failure.
-        for spawn in companion_spawns:
-            try:
+        try:
+            if companion_spawns:
+                # Still after the generation fence, but not under the global
+                # registry lock: fresh hashing/settings I/O must not stall readers
+                # of unrelated skills. The caller holds this skill's lifecycle lock.
+                self._state_dir.mkdir(parents=True, exist_ok=True)
+                token = mint_skill_token(self._state_dir, self._skill, self._skill_dir)
+                for spawn in companion_spawns:
+                    spawn.descriptor.env.clear()
+                    spawn.descriptor.env.update(companion_spawn_env(
+                        spawn.spec, token, env_allow=self._env_allow, granted_upper=self._granted_upper,
+                        skill=self._skill, skill_dir=self._skill_dir, state_dir=self._state_dir,
+                    ))
+            for spawn in companion_spawns:
                 companion_supervisor.start(spawn.descriptor)
-            except Exception:
-                log.warning("extension %s companion %s failed to start; disposed through "
-                            "the standard unload path", self._skill, spawn.descriptor.name, exc_info=True)
-                raise
+        except Exception:
+            log.warning("extension %s companion preparation/start failed; disposed through "
+                        "the standard unload path", self._skill, exc_info=True)
+            raise
 
     def _close_runtime_access(self) -> None:
         with _lock:

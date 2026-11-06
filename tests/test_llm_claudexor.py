@@ -171,11 +171,14 @@ class Gateway:
                 "response": {"state": "absent"} if self.pending else {"state": "ready", "ref": REF},
                 "problem": value["problem"]}
 
-    def get_model_result(self, operation_id, *, expected_ref, timeout_sec=None, raw_bytes=False):
+    def get_model_result(self, operation_id, *, expected_ref, timeout_sec=None, raw_bytes=False, include_raw_bytes=False):
         assert expected_ref == REF
         value = deepcopy(self.results[int(operation_id.removeprefix("op-"))])
+        raw = self.raw_result or json.dumps(value, ensure_ascii=False).encode("utf-8")
+        if include_raw_bytes:
+            return raw, json.loads(raw)
         if raw_bytes:
-            return self.raw_result or json.dumps(value, ensure_ascii=False).encode("utf-8")
+            return raw
         return value
 
     def acknowledge_model_result(self, operation_id, sha256):
@@ -1030,6 +1033,26 @@ def test_async_local_switch_projects_its_new_capture_to_the_caller(setup, monkey
         assert ua.last_physical_attempt_capture().attempt_id in usage["ledger_attempt_ids"]
 
     asyncio.run(run())
+
+
+def test_live_result_parses_once_and_retains_original_bytes(setup, monkeypatch):
+    root, gateway, client = setup
+    raw = (" \r\n" + json.dumps(result(), ensure_ascii=True, indent=2) + "\n").encode("utf-8")
+    monkeypatch.setitem(globals(), "REF", {"resourceId": "res-one", "sha256": "sha256:" + hashlib.sha256(raw).hexdigest(),
+                                           "sizeBytes": len(raw)})
+    gateway._request = lambda *args, **kwargs: raw
+    gateway.get_model_result = ClaudexorGateway.get_model_result.__get__(gateway)
+    original = json.loads
+    parses = []
+    def counted(value, *args, **kwargs):
+        if value == raw.decode("utf-8"):
+            parses.append(value)
+        return original(value, *args, **kwargs)
+    monkeypatch.setattr(json, "loads", counted)
+    answer, _usage = client.chat([{"role": "user", "content": "hi"}], MODEL)
+    assert answer == result()["message"] and len(parses) == 1
+    assert len(gateway.creates) == 1 and gateway.acks == [("op-0", REF["sha256"])]
+    assert retained(root, raw=True) == raw
 
 
 def test_lost_result_read_recovers_same_operation(setup):
