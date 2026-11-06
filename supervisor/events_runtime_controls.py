@@ -121,6 +121,28 @@ def _handle_promote_to_stable(evt: Dict[str, Any], ctx: Any) -> None:
             role="system", system_type="promotion_notice")
 
 
+def _handle_free_storage(evt: Dict[str, Any], ctx: Any) -> None:
+    """The mind's Storage -> Free (``free_storage``, owner Q3 = A): the same preview and run the owner's
+    press makes, through the server's one Free owner with the supervisor's probes; its receipt is the
+    ``storage_free`` job row the tool reads, and the outcome is told to the owner in Main as a system row."""
+    from ouroboros import storage_free
+    from ouroboros.config import REPO_DIR
+
+    task_id = str(evt.get("task_id") or "").strip()
+    request_id = str(evt.get("request_id") or "").strip()
+    if not request_id:
+        return
+    actor = f"mind:{task_id}" if task_id else "mind"
+
+    def notify(text: str) -> None:
+        st = ctx.load_state()
+        if st.get("owner_chat_id"):
+            ctx.send_with_budget(int(st["owner_chat_id"]), text, role="system", system_type="storage_free_notice")
+
+    storage_free.free.request(ctx.DRIVE_ROOT, REPO_DIR, actor=actor, request_id=request_id,
+                              dry_run=bool(evt.get("dry_run")), notify=notify)
+
+
 def _handle_cancel_task(evt: Dict[str, Any], ctx: Any) -> None:
     """Dispatch the existing custody driver without holding supervisor intake."""
     task_id = str(evt.get("task_id") or "").strip()

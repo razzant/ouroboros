@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import pathlib
 import queue
+from types import SimpleNamespace
 
 import pytest
 
@@ -219,6 +220,7 @@ def test_a_declared_child_starts_with_the_owner_words_and_nothing_of_shared_memo
 
     env, memory, _rooms = world(tmp_path)
     monkeypatch.setattr("ouroboros.context.utc_now_iso", lambda: "2026-10-04T06:00:00+00:00")
+    monkeypatch.setattr("shutil.disk_usage", lambda _path: SimpleNamespace(free=1, total=2))  # a dated fact as well
     root = _root(env, memory, "bound", 1, ASKED)
     declared = _schedule(root, "Count shelf one", input_sources="declared", context="Shelf one holds forty boxes")
     assert declared["metadata"]["governing_owner_words"] and declared["metadata"][DECLARED_WORDS_FACT] is True

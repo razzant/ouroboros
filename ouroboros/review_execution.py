@@ -739,9 +739,9 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
         if not recovering and not run_id and not (use_thread and thread_id):
             _require_route_headroom(gateway, route, shape)
         if not recovering:
-            from ouroboros.delegate_registration_policy import minted_review_root, resolve_registration
-            project_id, owned_project_id, _persistent, ephemeral = resolve_registration(  # a sticky thread keeps it
-                gateway, root, "", shape.access, minted=not use_thread and minted_review_root(root, custody_drive))
+            from ouroboros.delegate_registration_policy import minted_root, resolve_registration
+            project_id, owned_project_id, _persistent, ephemeral = resolve_registration(  # one-shot roots never register
+                gateway, root, "", shape.access, minted=minted_root(root, custody_drive), thread=use_thread)
             existing_project = "" if owned_project_id else project_id
             schema_asked = bool(output_schema) and _effective_route_carries_schema(
                 gateway, route.route_id)
@@ -759,7 +759,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
                 existing_project = project_id
                 thread_id = ensure_review_thread(
                     gateway, custody, thread_id or checking.get("thread_id", ""), route=route, root=root,
-                    workspace_root=checking.get("thread_root", ""),
+                    workspace_root=checking.get("thread_root", ""), ephemeral=ephemeral,
                     surface=surface, slot_id=slot_id, task_id=task_id, access=shape.access)
                 if shape.investigation:
                     bind_checking_thread(custody_drive, task_id, f"{surface}:{slot_id}", thread_id)

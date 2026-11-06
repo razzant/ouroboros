@@ -657,6 +657,7 @@ def test_storage_kind_reads_the_saved_count_from_the_installation_root_and_refus
         "evidence": {"compressed": 12, "saved_bytes": 4096}, "seats": {"compressed": 3, "saved_bytes": None}})
     result = call(ctx, op="json", kind="storage")
     assert result["status"] == "ok" and result["source"]["kind"] == "storage" and result["reconstructed"] is True
+    assert result["data"]["storage_free"] == {}
     assert result["data"]["latest"]["finished_at"] == record["finished_at"] and result["data"]["previous"] is None
     removers = result["data"]["removers"]
     assert removers == place_removers(ctx.drive_root) == storage.count.projection(ctx.drive_root)["removers"], \
@@ -669,9 +670,11 @@ def test_storage_kind_reads_the_saved_count_from_the_installation_root_and_refus
     refused = call(ctx, op="json", kind="storage", child_task_id="second")
     assert refused["status"] == "error" and "installation-wide" in refused["message"]
     assert call(ctx, op="json", kind="storage", ids=["x"])["status"] == "error"
+    maintenance_jobs.record(ctx.drive_root, "storage_free", state="done", request_id="free-1")
     (ctx.drive_root / "state" / "storage_measurement.json").unlink()
     uncounted = call(ctx, op="json", kind="storage")
-    assert uncounted["status"] == "ok" and set(uncounted["data"]) == {"removers"}, "the removers come before any count"
+    assert uncounted["status"] == "ok" and set(uncounted["data"]) == {"removers", "storage_free"}, "the receipt travels with storage facts"
+    assert uncounted["data"]["storage_free"]["request_id"] == "free-1"
 
 
 def test_knowledge_history_lists_writes_without_bodies_from_the_installation_root(ctx, monkeypatch):
