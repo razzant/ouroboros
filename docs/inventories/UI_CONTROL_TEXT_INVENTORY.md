@@ -33,14 +33,14 @@ the same thing sit together: when your diff adds a row, read its neighbours.
 | Add mine | `btn btn-ghost btn-sm` | modules/place_sheet.js | 1 |
 | Add note | `btn btn-default btn-sm` | modules/place_sheet.js | 1 |
 | Add server | `btn btn-default` | modules/settings_ui.js | 1 |
-| Add source | `btn btn-primary` | modules/skill_dialogs.js | 1 |
+| Add source | `btn` | modules/skill_dialogs.js | 1 |
 | Add subagent | `btn btn-default` | modules/subagents_settings.js | 1 |
 | Advanced — where subagents check out their work | `(no class)` | modules/subagents_settings.js | 1 |
 | Advanced: sign in from your own terminal | `(no class)` | modules/harness_login_cards.js | 1 |
 | Answer | `(no class)` | modules/delegated_activity.js | 1 |
 | API spending limits Optional with subscriptions | `(no class)` | modules/onboarding_wizard.js | 1 |
 | Apply maximum | `btn btn-default` | modules/model_roles.js | 1 |
-| Apply to draft | `btn btn-primary` | modules/mcp_import_dialog.js | 1 |
+| Apply to draft | `btn` | modules/mcp_import_dialog.js | 1 |
 | Apply to this task | `btn btn-default` | modules/model_wait.js | 1 |
 | Ask Ouroboros to fix | `skills-menu-item skills-repair-stale` | modules/skill_card_renderer.js | 1 |
 | Available subagents | `(no class)` | modules/onboarding_wizard.js | 1 |
@@ -59,11 +59,11 @@ the same thing sit together: when your diff adds a row, read its neighbours.
 | Change in Agents | `consciousness-inline-link ui-hit-area` | modules/settings_safety.js | 1 |
 | Change in Models | `consciousness-inline-link ui-hit-area` | modules/settings_safety.js | 1 |
 | Change model or account | `btn btn-default` | modules/model_wait.js | 1 |
-| Check | `btn btn-primary` | modules/skill_dialogs.js | 1 |
+| Check | `btn` | modules/skill_dialogs.js | 1 |
 | ↻ Check | `btn btn-ghost btn-sm updates-letter-refresh` | modules/updates.js | 1 |
 | Check again | `btn btn-default btn-sm` | modules/storage_free.js | 7 |
 | Check again | `btn btn-primary` | modules/harness_login_cards.js | 1 |
-| Check and publish | `btn btn-primary` | modules/skill_dialogs.js | 1 |
+| Check and publish | `btn` | modules/skill_dialogs.js | 1 |
 | Check consciousness fully | `consciousness-inline-link ui-hit-area` | modules/settings_safety.js | 1 |
 | Check for files to remove | `btn btn-primary btn-sm` | modules/storage.js | 1 |
 | Check status | `btn btn-primary` | modules/onboarding_wizard.js | 1 |
@@ -85,7 +85,7 @@ the same thing sit together: when your diff adds a row, read its neighbours.
 | Close | `btn btn-default document-reader-close` | modules/place_sheet.js | 1 |
 | Close | `btn btn-default document-reader-close` | modules/skill_detail_sheet.js | 1 |
 | [icon] Close navigation | `shell-icon-control nav-drawer-close` | index.html | 1 |
-| Confirm | `btn btn-primary` | modules/skill_dialogs.js | 1 |
+| Confirm | `btn` | modules/skill_dialogs.js | 1 |
 | Connect a place | `btn btn-default btn-sm` | modules/place_connect.js | 1 |
 | Connect again | `btn btn-primary` | modules/harness_login_cards.js | 1 |
 | Continue in current mode | `btn btn-primary` | modules/onboarding_overlay.js | 1 |
@@ -98,7 +98,7 @@ the same thing sit together: when your diff adds a row, read its neighbours.
 | Copy link | `btn btn-default btn-sm ui-hit-area` | modules/settings.js | 1 |
 | Copy to clipboard | `(no class)` | modules/chat_media.js | 1 |
 | Create or connect «My skills» on GitHub | `btn btn-default` | modules/skill_dialogs.js | 1 |
-| Create project | `btn btn-primary` | modules/project_create.js | 1 |
+| Create project | `btn` | modules/project_create.js | 1 |
 | Delete | `btn btn-sm btn-danger` | modules/activity.js | 1 |
 | Delete | `files-context-item files-context-item-danger` | modules/files.js | 1 |
 | Delete | `skills-menu-item skills-delete-local` | modules/skill_card_renderer.js | 1 |
@@ -134,7 +134,7 @@ the same thing sit together: when your diff adds a row, read its neighbours.
 | Export | `btn btn-default btn-sm` | modules/settings_language.js | 1 |
 | + File | `btn btn-default` | modules/files.js | 1 |
 | + Folder | `btn btn-default` | modules/files.js | 1 |
-| Forget this record | `skills-link-button` | modules/skill_card_renderer.js | 1 |
+| Forget this record | `skills-link-button ui-hit-area` | modules/skill_card_renderer.js | 1 |
 | Formatted | `btn btn-default` | modules/document_reader.js | 1 |
 | Full reason | `(no class)` | modules/skill_card_renderer.js | 1 |
 | How the limits count | `(no class)` | modules/costs.js | 1 |
@@ -173,12 +173,12 @@ the same thing sit together: when your diff adds a row, read its neighbours.
 | Paste here | `files-context-item` | modules/files.js | 1 |
 | Preview | `btn btn-default` | modules/mcp_import_dialog.js | 1 |
 | Preview tone | `btn btn-default btn-sm` | modules/settings_ui.js | 1 |
-| Publish one to share it › | `skills-link-quiet` | modules/skill_sources_view.js | 1 |
+| Publish one to share it › | `skills-link-quiet ui-hit-area` | modules/skill_sources_view.js | 1 |
 | Publish… | `skills-menu-item skills-submit-hub` | modules/skill_card_renderer.js | 1 |
 | Raw | `btn btn-ghost btn-sm log-raw-toggle` | modules/logs.js | 1 |
 | Raw record | `(no class)` | modules/updates.js | 1 |
 | Read all | `btn btn-ghost btn-sm ui-list-more` | modules/updates.js | 1 |
-| Read more › | `skills-read-more` | modules/skill_browse.js | 1 |
+| Read more › | `skills-read-more ui-hit-area` | modules/skill_browse.js | 1 |
 | Reading the list… | `btn btn-default btn-sm` | modules/storage_free.js | 1 |
 | Reading the list… | `btn btn-primary btn-sm` | modules/storage_free.js | 1 |
 | Recovery | `(no class)` | modules/updates.js | 1 |
@@ -241,7 +241,7 @@ the same thing sit together: when your diff adds a row, read its neighbours.
 | Sending… | `btn btn-primary btn-sm` | modules/storage_free.js | 1 |
 | Settings | `btn btn-default` | modules/model_wait.js | 1 |
 | Settings › | `consciousness-inline-link ui-hit-area` | modules/consciousness_dashboard.js | 1 |
-| Settings → Behavior › | `skills-link-quiet` | modules/skill_sources_view.js | 1 |
+| Settings → Behavior › | `skills-link-quiet ui-hit-area` | modules/skill_sources_view.js | 1 |
 | Show | `btn btn-default` | modules/mcp_header_fields.js | 1 |
 | Show | `btn btn-default secret-toggle` | modules/settings.js | 2 |
 | Show | `btn btn-default secret-toggle` | modules/settings_provider_cards.js | 1 |
