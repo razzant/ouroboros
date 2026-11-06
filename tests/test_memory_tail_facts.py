@@ -485,3 +485,15 @@ def test_a_focus_start_sees_the_same_reading_no_thread_copy_no_task_body_and_no_
         txn.conn.execute("UPDATE task_bodies SET body='{' WHERE task_id IN ('t2', 'pturn1', 'conv1')")
     del specs["wake"]
     assert views() == {name: reference[name] for name in specs}
+
+
+def test_a_finished_roots_sentence_and_its_fold_are_tail_facts_and_its_body_is_not():
+    """Task lines and silent lines read a root's closing sentence, and the block its fold, from the stored facts."""
+    finish = {"ts": "2026-09-05T10:00:00+00:00", "direction": "system", "type": "task_summary", "task_id": "r1",
+              "status": "completed", "text": "A long host summary body " * 20, "wake_summary": "Closed the issue.",
+              "fold_read": True}
+    meta = ROW_META(finish)
+    assert (meta["wake_summary"], meta["fold_read"]) == ("Closed the issue.", True)
+    assert "text" not in meta and "A long host summary body" not in json.dumps(meta)
+    plain = ROW_META({key: value for key, value in finish.items() if key not in ("wake_summary", "fold_read")})
+    assert "wake_summary" not in plain and "fold_read" not in plain

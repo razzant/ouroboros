@@ -806,3 +806,31 @@ def test_a_storyless_room_page_keeps_story_order_when_an_older_period_is_sealed_
     assert [item["id"] for item in nanny.room["under_parts"]] == [older, newer]
     page = _section(text, "### Pages of this room")
     assert page.index("The older period, sealed later.") < page.index("The newer period.")
+
+
+def test_this_room_ends_with_the_act_that_seals_it_and_a_linked_row_leaves_my_other_conversations(tmp_path):
+    """S1: an integrating focus's room ends with the page act over its open rows, naming the newest; a delegated
+    child reads none. A writer's later terminal row its page links below it is that page's: a room holding only such
+    rows leaves my other conversations, and a new word there brings it back."""
+    from ouroboros.tools.chronicle import page_covers
+
+    rooms, rows = _install(tmp_path)
+    snapshot, text = _view(tmp_path, MAIN_TASK)
+    newest = snapshot.room["newest"]
+    assert newest and newest == _addr(rows[-1])
+    assert (f"A page with covers={{'to': '{newest}'}} seals this room's open rows, the earlier turns' with mine, so the "
+            "rest of me reads my words, not theirs;") in text
+    assert "A page with covers=" not in _view(tmp_path, MAIN_TASK, role="child")[1]
+    beta = str(rooms["beta"])
+    covers = page_covers(tmp_path, beta, from_addr=_addr(rows[13]), to_addr=_addr(rows[14]))["covers"]
+    assert ChronicleStore(tmp_path).publish_page(room_id=beta, text="Beta answered.", covers=covers,
+                                                 author={**shared.MIND, "task_id": "tb1"}).ok
+    later = shared.msg(_ts(30), "Done.", chat_id=int(beta), direction="system", type="task_summary", task_id="tb1",
+                       root_task_id="tb1", summary_kind="terminal_root_projection", status="completed")
+    shared.append(tmp_path / "logs" / "chat.jsonl", later)
+    assert beta not in {room["room_id"] for group in _view(tmp_path, MAIN_TASK)[0].conversations for room in group["rooms"]}
+    shared.append(tmp_path / "logs" / "chat.jsonl", shared.msg(_ts(31), "one more thing", chat_id=int(beta)))
+    snapshot, text = _view(tmp_path, MAIN_TASK)
+    room = next(room for group in snapshot.conversations for room in group["rooms"] if room["room_id"] == beta)
+    assert [word["text"] if "text" in word else word["line"].rsplit("] ", 1)[-1] for word in room["words"]] == ["one more thing"]
+    assert room["tasks"] == []  # the linked terminal row is no task line of the room either

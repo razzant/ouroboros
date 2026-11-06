@@ -283,3 +283,45 @@ def test_owner_update_and_client_contracts_agree(room):
     assert _js_typedef_fields((web / "api_types.js").read_text(), "ProjectClosure") == set(typing.get_type_hints(ProjectClosure))
     assert _js_typedef_fields((web / "api_types.js").read_text(), "ProjectEntry") == set(typing.get_type_hints(ProjectEntry))
     assert ("boolean=", "closed") in _js_typedef_properties((web / "client_contract_types.js").read_text(), "ProjectUpdateRequest")
+
+
+def test_closing_a_project_makes_its_note_the_rooms_page_and_links_its_notice_below_it(tmp_path, monkeypatch):
+    """S2: the closing note is the room's last page over its open rows, signed by the closing focus as
+    ``chronicle_write(kind='page')`` signs one; the System notice the host posts after it is that page's, never an
+    open row of my other conversations; an already closed project writes no second page; a refused page leaves the
+    closure standing and says why; nothing open writes none."""
+    from ouroboros import memory_inventory as mi, memory_view as mv
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.tools import chronicle
+    from ouroboros.tools.registry import ToolContext
+    from tests import _memory_inventory_shared as shared
+
+    rooms = shared.world(tmp_path)
+    alpha = str(rooms["alpha"])
+    ds.append(tmp_path, "chat", {"chat_id": int(alpha), "direction": "in", "ts": "2026-09-06T00:00:00+00:00",
+                                 "text": "is the export done?", "source": "web", "client_message_id": "alpha-late"})
+    opened = {entry[0]["row_sha256"] for entry in mi.open_room_rows(tmp_path, alpha)}
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="one", current_chat_id=1)
+    ctx.event_queue = queue.Queue()
+    note = "Finished: the export works; nothing is left open."
+    said = _close_project(ctx, "alpha", note)
+    assert said.startswith("OK: project alpha is closed.") and "is its room's page" in said, said
+    store = ChronicleStore(tmp_path)
+    [page] = store.room_records(alpha, kinds=("page",))
+    assert page["text"] == note and set(page["covers"]["rows"]) == opened and page["covers"]["mode"] == "open_to"
+    assert page["metadata"]["closes_project"] == "alpha" and page["author"]["kind"] == "mind"
+    assert mi.open_room_rows(tmp_path, alpha) == []
+    event = ctx.event_queue.get_nowait()  # delivered after the page, as the outbox does
+    ds.append(tmp_path, "chat", {"chat_id": int(alpha), "direction": "system", "type": "project_closure",
+                                 "ts": "2026-09-06T00:01:00+00:00", "text": event["text"]})
+    main = {"id": "main0001", "type": "task", "chat_id": 1, "_is_direct_chat": True}
+    view = mv.capture_memory_view(tmp_path, main, mv.view_spec_for_task(main, tmp_path))
+    held = {room["room_id"] for group in view.conversations for room in group["rooms"]}
+    assert alpha not in held and len(mi.open_room_rows(tmp_path, alpha)) == 1  # open there, linked below its page
+    assert "already closed" in _close_project(ctx, "alpha", "Again.") and len(store.room_records(alpha, kinds=("page",))) == 1
+    monkeypatch.setattr(chronicle, "publish_covered_page", lambda *a, **kw: (_ for _ in ()).throw(OSError("disk full")))
+    refused = _close_project(ctx, "beta", "Beta is done.")
+    assert "Its page was not written (OSError: disk full); the closure stands." in refused
+    assert registry.get_project(tmp_path, "beta")["closed"]["note"] == "Beta is done."
+    registry.create_project(tmp_path, "gamma", name="Gamma")
+    assert "Nothing is open in its room: no page." in _close_project(ctx, "gamma", "Never started.")

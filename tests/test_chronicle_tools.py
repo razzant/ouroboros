@@ -906,3 +906,46 @@ def test_acting_child_registry_reads_chat_history_and_writes_memory_but_no_note(
     refused = registry.execute("chronicle_write", {"kind": "note", "text": "must not land"})
     assert json.loads(refused)["reason"] == "not_integrator" and "ACTING_SUBAGENT_BLOCKED" not in refused
     assert not (data / "memory" / "chronicle" / "records.jsonl").exists()
+
+
+def _github_row(conversation, thread, minute, text, **extra):
+    """A row of one issue thread of a GitHub repository (a place conversation without its thread)."""
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_runner import presence_chat_id
+
+    chat = presence_chat_id(conversation_key("github", "me", conversation, thread))
+    transport = {"provider": "github", "account_id": "me", "conversation_id": conversation, "thread_id": thread,
+                 "actor": {"platform_actor_id": "u7"}}
+    return {"chat_id": chat, "direction": "in", "ts": f"2026-09-06T01:{minute:02d}:00+00:00", "text": text,
+            "source": "presence:github", "client_message_id": f"gh-{conversation}-{thread}-{minute}",
+            "transport": transport, **extra}
+
+
+def test_a_conversation_page_seals_every_room_of_its_conversation_each_in_its_own_room(tmp_path):
+    """S3: ``covers={'to': row, 'conversation': true}`` takes the open rows up to that row of every room of its
+    conversation (two issue threads of one repository), each sealed in its own room; a later page over one of them is
+    ``already_sealed``; another repository and a later row stay open; without ``conversation`` a page seals its one
+    room; a conversation page lives in a room it seals."""
+    from ouroboros import memory_inventory as mi
+    from tests import _memory_inventory_shared as shared
+
+    shared.world(tmp_path)
+    store, ctx = ChronicleStore(tmp_path), ctx_for(tmp_path)
+    rows = chat(tmp_path, [_github_row("repo.1", "i1", 1, "first issue"), _github_row("repo.1", "i2", 2, "second issue"),
+                           _github_row("repo.2", "i9", 3, "another repository"), _github_row("repo.1", "i1", 5, "later")])
+    i1, i2, other = (str(rows[n]["chat_id"]) for n in (0, 1, 2))
+    refused = _chronicle_write(ctx, kind="page", room_id=other, text="x", covers={"to": addr(rows[1]), "conversation": True})
+    assert "TOOL_ARG_ERROR" in refused and "lives in a room it seals" in refused, refused
+    page = write(ctx, kind="page", room_id=i2, text="Two issues read; the repository is quiet.",
+                 covers={"to": addr(rows[1]), "conversation": True})
+    assert page["ok"] and page["rows"] == 2 and page["rooms"] == sorted([i1, i2]), page
+    covers = store.get(page["node_id"])["covers"]
+    assert covers["mode"] == "conversation" and covers["rooms"] == {i1: [sha(rows[0])], i2: [sha(rows[1])]}
+    assert store.get(page["node_id"])["metadata"]["room_label"].endswith("(whole conversation, 2 rooms)")
+    assert [entry[0]["row_sha256"] for entry in mi.open_room_rows(tmp_path, i1)] == [sha(rows[3])]  # later stays open
+    assert mi.open_room_rows(tmp_path, i2) == [] and len(mi.open_room_rows(tmp_path, other)) == 1
+    again = write(ctx, kind="page", room_id=i1, text="dup", covers={"from": addr(rows[0]), "to": addr(rows[0])})
+    assert again["ok"] is False and again["reason"] == "already_sealed"
+    single = write(ctx, kind="page", room_id=other, text="The other repository.", covers={"to": addr(rows[2])})
+    assert single["ok"] and single["rows"] == 1 and "rooms" not in store.get(single["node_id"])["covers"]
+    assert [entry[0]["row_sha256"] for entry in mi.open_room_rows(tmp_path, i1)] == [sha(rows[3])]

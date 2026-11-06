@@ -314,6 +314,24 @@ def test_new_forms_do_not_inflate_a_short_notes_minimum_bound(monkeypatch):
     assert after == whole
 
 
+def test_retold_words_fold_before_considered_ones_and_other_rooms_owner_words_before_this_rooms():
+    """F6w folds by rank, oldest first in each: retold, considered, then the words nobody considered; F7 takes my
+    human's words of my other conversations before this room's; both only as physics demands."""
+    group = syn.conversation(0, words=3)
+    words = group["rooms"][0]["words"]
+    for word, rank in zip(words, (2, 0, 1)):  # the oldest nobody considered, the middle retold, the newest considered
+        word["rank"] = rank
+    owner = syn.conversation(1, words=2, owner=True)
+    room = syn.room(lane1=[syn.spoken(0, "human", 300), syn.spoken(1, "ouroboros", 300)])
+    snapshot = syn.snapshot(room_facts=room, conversations=[group, owner])
+    order = [(step, ident) for step, ident, *_ in mf.floor_elements(snapshot)]
+    assert [ident for step, ident in order if step == "F6w"] == [words[1]["id"], words[2]["id"], words[0]["id"]]
+    theirs = [word["id"] for word in owner["rooms"][0]["words"]]
+    f7 = [ident for step, ident in order if step == "F7"]
+    assert f7[:len(theirs)] == theirs and room["lane1"][0]["address"] in f7[len(theirs):]
+    assert not set(theirs) & {ident for step, ident in order if step == "F6w"}  # my human's words never fold early
+
+
 def test_my_humans_words_of_other_conversations_fold_on_their_saving_without_a_render_each():
     """At the physical bound my human's words of my other conversations fold oldest first on their own saving; the
     walk measures once the estimate says the view fits, never once a row (240 rows here, ~1,700 on a real install)."""
@@ -333,3 +351,4 @@ def test_my_humans_words_of_other_conversations_fold_on_their_saving_without_a_r
     assert folded and tuple(theirs[:len(folded)]) == folded  # oldest first, my other conversations' before this room's
     assert room["lane1"][0]["address"] not in folded and measure(level) <= full // 3
     assert len(calls) < 30, len(calls)
+

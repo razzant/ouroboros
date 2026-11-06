@@ -182,3 +182,31 @@ def test_a_gap_holds_a_room_in_the_block_without_words_or_notes(tmp_path):
     assert not conversations.capture(store, tmp_path, spec, label, {}, {}, {}, gaps={}, **kw)
     assert memory_floor.floor_elements(mv.MemoryViewSnapshot(spec=spec, store_status={"state": "active"}, frontier={},
                                                              conversations=tuple(groups)))
+
+
+@pytest.mark.parametrize("fold", [True, False])
+def test_a_finish_that_folds_what_it_read_stands_for_it_elsewhere_and_leaves_it_whole_here(tmp_path, fold):
+    """S5: in my other foci a ``fold_read`` finish's sentence and their address stand for the room's words up to it
+    until a page seals them; my human's words there stay whole, nothing is sealed, the room's own view keeps every
+    row, and later words stay whole. Without the flag the words stay whole too."""
+    rooms, rows = _install(tmp_path)
+    beta = str(rooms["beta"])
+    finish = shared.msg(_ts(30), "Done.", chat_id=int(beta), direction="system", type="task_summary", task_id="tb9",
+                        root_task_id="tb9", summary_kind="terminal_root_projection", status="completed",
+                        wake_summary="Read Beta's thread; nothing owed.", **({"fold_read": True} if fold else {}))
+    later = shared.msg(_ts(31), "one more beta question", chat_id=int(beta))
+    shared.append(tmp_path / "logs" / "chat.jsonl", finish, later)
+    snapshot, text = _view(tmp_path, MAIN_TASK)
+    item = _room(snapshot, beta)
+    beta_section = text[text.index(f"### Project Beta [chat_id={beta}]"):]
+    assert "beta words" in beta_section and "one more beta question" in beta_section  # my human's, and later words
+    assert ("beta reply" in beta_section) is not fold  # my reply there: folded into the sentence, or whole
+    if fold:
+        assert item["folded"]["count"] == 1 and _addr(rows[14]) in item["folded"]["to"]
+        assert ("«Read Beta's thread; nothing owed.» (2026-09-05): 1 words up to it read and folded into that "
+                f"sentence; memory_read(room_id='{beta}', rows=true, from='") in beta_section
+    else:
+        assert not item["folded"] and "read and folded" not in text
+    assert ChronicleStore(tmp_path).sealed_row_refs(beta) == set()  # a fold seals nothing
+    own, own_text = _view(tmp_path, {"id": "turn-beta", "type": "task", "chat_id": int(beta)})
+    assert "beta reply" in own_text and "read and folded" not in own_text  # the room itself reads every row

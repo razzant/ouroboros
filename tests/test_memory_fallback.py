@@ -950,3 +950,28 @@ def test_room_reuse_does_not_hide_a_correction_between_candidates(tmp_path, monk
     assert calls == ["1", "1"]
     assert selected[0].member_ids == (ids[2],)
     assert "NEW LIMIT: the third project is read-only." in selected[1].prompt
+
+
+@pytest.mark.parametrize("switch,folded", [(False, True), (None, True), (True, True), (False, False)],
+                         ids=["off", "unknown", "on", "nothing-folded"])
+def test_a_folded_other_conversation_is_drafted_only_where_consciousness_is_off(tmp_path, monkeypatch, light,
+                                                                                switch, folded):
+    """S6: after a root whose view folded the words of a room of my other conversations where my human or I spoke,
+    Light drafts that room's oldest open stretch as a helper's draft the mind accepts or rejects; with consciousness
+    on, or nothing folded, it drafts nothing (a direct turn takes no old periods)."""
+    rooms = shared.world(tmp_path)
+    beta = str(rooms["beta"])
+    _consciousness(monkeypatch, switch)
+    trace = {mi.VIEW_TRACE_KEY: {"role": "integrator", "room_id": "1", "floor": {
+        "steps": {"F6w": 2} if folded else {"F1": 1}, "window_tokens": 272_000, "mode": "max", "by_budget": 0,
+        "newest_addressed_row": None, "pointer_records": [], "folded_rooms": [beta] if folded else []}}}
+    assert (mi.shortage_from_trace(trace) or mi.ShortageFact("none", "")).kind == ("other_room" if folded else "none")
+    oldest = next(iter(mi.open_segments(tmp_path, ChronicleStore(tmp_path), beta)))  # before the draft acts
+    llm = _Light()
+    run = _run(tmp_path, llm, direct=True, trace=trace)
+    if switch is True or not folded:
+        assert llm.prompts == [] and _drafts(tmp_path) == []
+        return
+    assert run.outcome == "published" and run.unit.room_id == beta and run.unit.key.startswith(f"open:{beta}:")
+    [draft] = _drafts(tmp_path)
+    assert draft["room_id"] == beta and draft["covers"]["rows"] == [entry[0]["row_sha256"] for entry in oldest.rows]
