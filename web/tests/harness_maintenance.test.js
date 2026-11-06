@@ -387,7 +387,7 @@ test('disposed view retains late acceptance without rendering or refreshing unre
 
 
 function preparationError(status = 409) {
-    return Object.assign(new Error('Environment preparation complete; CLI update not started. Use Restart in the chat header, then repeat Update.'), {
+    return Object.assign(new Error('Environment preparation complete; CLI update not started. Use Restart Claudexor in Accounts, then repeat Update.'), {
         status, body: { error: { code: 'maintenance_restart_required', context: {
             acceptance: 'not_submitted', scope: 'this_attempt', preparation: 'ready', restartRequired: true,
         } } },
@@ -406,7 +406,7 @@ test('preparation-only result enables a later explicit Update and never claims a
     assert.equal(view.request, null);
     assert.equal(view.operation, null);
     assert.notEqual(view.unknownCurrent, true);
-    assert.match(harnessMaintenanceMarkup(entry(), view), /preparation complete.*Use Restart in the chat header/);
+    assert.match(harnessMaintenanceMarkup(entry(), view), /preparation complete.*Use Restart Claudexor in Accounts/);
     assert.match(harnessMaintenanceMarkup(entry(), view), />Update</);
     assert.doesNotMatch(harnessMaintenanceMarkup(entry(), view), /Cancel update|Operation completed|acceptance unconfirmed/);
     assert.equal(calls.filter(([kind]) => kind === 'read' || kind === 'cancel').length, 0);
@@ -673,7 +673,8 @@ test('the banner explains once, conditionally, with the exact text under Diagnos
     assert.equal(line.tone, 'warn');
     assert.match(line.text, /^Claudexor running · The executable reported by the last program inspection is no longer present\./);
     assert.match(line.text, /Versions below are last known\./);
-    assert.match(line.text, /If the app was moved or replaced, Restart in the chat header may help; it interrupts engine sessions, and success is not guaranteed\./);
+    assert.match(line.text, /If the app was moved or replaced, Restart Claudexor in Accounts may help; it ends every run on the engine, and success is not guaranteed\./);
+    assert.doesNotMatch(line.text, /chat header/, 'the header Restart keeps the engine');
     assert.doesNotMatch(line.text, /ENOENT|Moved\.app/);
     const facts = Object.fromEntries(line.facts);
     assert.match(facts['Last program inspection'], new RegExp(`ENOENT: spawn ${MISSING} ENOENT$`));
