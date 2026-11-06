@@ -801,3 +801,23 @@ def test_a_predecessor_that_heard_my_human_mid_turn_continues_while_its_mailbox_
     assert sources["gaps"] == [] and [(row["source"], row["content"]) for row in sources["later"]] == [
         ("place_owner", words)]
     assert admit_continuation("pred-1", action_nonce=NONCE)["ok"] is True
+
+
+def test_a_late_answer_in_a_kept_mailbox_reaches_the_successor_with_its_card(tmp_path, monkeypatch):
+    """Audit 05.11 item 37: a late answer delivered to a head still reading is my human's words with the card it
+    answers. Continue rebuilds that row from the kept mailbox with the card beside it, never the bare label."""
+    from ouroboros.owner_continue import owner_corpus_rows, owner_sources
+    from ouroboros.owner_mailbox import write_owner_message
+    from ouroboros.task_results import load_task_result
+
+    _install_queue(tmp_path, monkeypatch)
+    _interrupted(tmp_path, root_phase_checkpoint={}, child_ref_promotion={})
+    card = {"quiz_id": "q7", "question": "Publish exactly this reply?", "state": "answered", "answered_index": 0,
+            "options": ["Publish it", "Not now"], "answered_after_terminal": True}
+    assert write_owner_message(tmp_path, "1. Publish it", "pred-1", msg_id="owner-late", late_answer={
+        "task_id": "asker", "quiz_id": "q7", "answer_snapshot": {"task_id": "asker", "quiz": card}})
+    sources = owner_sources(tmp_path, load_task_result(tmp_path, "pred-1"), "pred-1")
+    assert not sources["gaps"]
+    [row] = [row for row in owner_corpus_rows(sources) if row["content"] == "1. Publish it"]
+    assert (row["reply_to"]["author"], row["reply_to"]["text"].split("\n")[0]) == (
+        "Ouroboros, task asker", "Publish exactly this reply?")

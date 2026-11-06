@@ -46,7 +46,7 @@ import pathlib
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from ouroboros.owner_words import OWNER_SOURCES, answered_card_reply, reply_target
+from ouroboros.owner_words import OWNER_SOURCES, answered_card_reply, answered_card_source, reply_target
 from ouroboros.utils import utc_now_iso
 from ouroboros.task_store import patch_document
 
@@ -636,11 +636,10 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
                    "ts": str(entry.get("ts") or ""), "exact_row": entry["_exact_row"]}
             if target := reply_target(root, entry.get("reply_reference")):  # the message these words reply to
                 row["reply_to"] = target
-            delivery = entry.get("quiz_delivery") if kind == "quiz_answer" else None
-            card = answered_card(delivery.get("answer_snapshot"), row["content"]) if isinstance(delivery, dict) else None
-            if card and all(isinstance(delivery.get(key), str) and delivery[key] for key in ("task_id", "quiz_id")):
-                # The delivered card's snapshot: its question rides beside the owner's words.
-                row.update(source_task_id=delivery["task_id"], quiz_id=delivery["quiz_id"], card=card)
+            block, asker = answered_card_source(entry)  # a live delivery's card, or a late answer's snapshot
+            card = answered_card(block, row["content"])
+            if card and all(isinstance(value, str) and value for value in (asker, card.get("quiz_id"))):
+                row.update(source_task_id=asker, quiz_id=card["quiz_id"], card=card)  # its question rides beside them
             later.append(row)
             if entry.get("attachment_manifest") or "attachment_manifest_ref" in entry:
                 attached.append(entry)  # the files that message attached, staged in this task's own store

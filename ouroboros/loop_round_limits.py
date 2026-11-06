@@ -299,18 +299,16 @@ def _drain_incoming_messages(
                 model_msg = card_press_model_text(str(getattr(owner_ctx, "budget_drive_root", "") or "") or drive_root,
                                                   entry.get("card_press"), dmsg)
             owner_content = _owner_content({**entry, "text": model_msg}, drive_root, task_id)
-            from ouroboros.owner_quiz import late_answer_ref
-            from ouroboros.owner_words import answered_card_reply, reply_target
+            from ouroboros.owner_words import answered_card_reply, answered_card_source, reply_target
 
             chats = str(getattr(owner_ctx, "budget_drive_root", "") or "") or drive_root  # the room's rows
-            late = late_answer_ref(entry.get("late_answer")) or {}  # a late answer replies to its card
             _loop()._record_owner_directive(
                 owner_ctx,
                 source="owner_mailbox",
                 content=_owner_content(entry, drive_root, task_id),
                 msg_id=str(entry.get("msg_id") or ""),
                 origin={"client_message_id": entry.get("client_message_id")},  # the same message relayed: one row
-                reply_to=answered_card_reply((late.get("answer_snapshot") or {}).get("quiz"), late.get("task_id"))
+                reply_to=answered_card_reply(*answered_card_source(entry))  # a late answer replies to its card
                 or reply_target(chats, entry.get("reply_reference")) or None,
             )
             _stamp_owner_delivery(

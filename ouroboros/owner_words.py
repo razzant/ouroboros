@@ -274,6 +274,20 @@ def merged_corpus(kept: Any, added: Any) -> List[Dict[str, Any]]:
     return merged
 
 
+def answered_card_source(row: Any) -> tuple:
+    """``(block, asking task)`` of the card a row of my human's words answers, else ``(None, None)``: a relayed quiz row's
+    ``quiz``, a live delivery's ``quiz_delivery`` snapshot, or a late answer's typed snapshot (``late_answer_ref``)."""
+    row = _mapping(row)
+    if row.get("type") == "quiz_answer":
+        return row.get("quiz"), row.get("task_id")
+    if delivery := _mapping(row.get("quiz_delivery")):
+        return delivery.get("answer_snapshot"), delivery.get("task_id")
+    from ouroboros.owner_quiz import late_answer_ref
+
+    late = late_answer_ref(row.get("late_answer")) or {}
+    return _mapping(late.get("answer_snapshot")).get("quiz"), late.get("task_id")
+
+
 def answered_card_reply(block: Any, task_id: Any) -> Dict[str, str]:
     """The card my human answered, as the message their answer replies to (a corpus row's ``reply_to``), or {}.
 

@@ -180,7 +180,7 @@ def note_place_delivery(ctx: Any, entry: Mapping[str, Any], controls: dict) -> N
 
     arrival = entry.get("place_arrival") if isinstance(entry.get("place_arrival"), Mapping) else {}
     if arrival.get("wake") is not False:
-        controls["place_event"] = True  # accepted context, never owner authority
+        controls["place_event"] = True  # accepted context; my human's own words ride the drain's own row
     message = arrival.get("message") if isinstance(arrival.get("message"), Mapping) else {}
     if ctx is not None and arrival.get("source_event_id") and not reaction_fact(message):
         if not isinstance(getattr(ctx, "_presence_delivered", None), list):

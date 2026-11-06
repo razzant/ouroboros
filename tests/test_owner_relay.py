@@ -293,14 +293,17 @@ def test_a_relayed_owner_reply_keeps_what_it_replied_to(tmp_path):
     assert "reply_to" not in owner_quote(tmp_path, unrelated)  # nothing invented for an ordinary message
 
 
-def test_a_relayed_quiz_answer_carries_the_card_it_answers(tmp_path):
-    """Audit 05.11 item 37: a quoted quiz answer reaches the told work with its card as the message it replies to, in
-    the asker's name, beside my human's words; the relayed text stays theirs."""
+@pytest.mark.parametrize("shape", ["quiz_row", "late_answer"])
+def test_a_relayed_answer_carries_the_card_it_answers(tmp_path, shape):
+    """Audit 05.11 item 37: a quoted answer (a quiz row, or the owner row a late answer's head holds) reaches the told
+    work with its card as the message it replies to, in the asker's name, beside my human's words."""
     from ouroboros.owner_relay import inject_relay, owner_quote, relay_envelope
     card = {"quiz_id": "q7", "question": "Publish exactly this reply?", "state": "answered", "answered_index": 0,
             "options": ["Publish it", "Not now"]}
     answer = {"chat_id": 1, "direction": "in", "ts": "2026-10-01T00:01:00Z", "client_message_id": "owner-answer",
-              "type": "quiz_answer", "task_id": "asker", "quiz": card, "text": "1. Publish it"}
+              "text": "1. Publish it", **({"type": "quiz_answer", "task_id": "asker", "quiz": card} if shape == "quiz_row"
+                                           else {"late_answer": {"task_id": "asker", "quiz_id": "q7", "answer_snapshot": {
+                                               "task_id": "asker", "quiz": {**card, "answered_after_terminal": True}}}})}
     dialogue_store.append(tmp_path, "chat", answer)
     receiver, messages = context(tmp_path), []
     receiver.task_id = "receiver"
