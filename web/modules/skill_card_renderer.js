@@ -1,7 +1,8 @@
 import { tr } from './i18n.js';
 // Installed skill cards (Skills → Installed): one head shared with Browse and the
-// detail sheet (name that opens the sheet, marks, purpose, who line, Details), the
-// switch, with a chip beside it only for a state the switch cannot show, and at most two attention trays,
+// detail sheet (name that opens the sheet, marks, purpose, who line), the switch,
+// with a chip beside it only for a state the switch cannot show, Details right
+// under the head (a phone keeps the switch above it), and at most two attention trays,
 // each one sentence and its actions — the owner's next step is visible text on
 // every surface, never a hover title. Review history, findings, access and the
 // install record live in Details; a connector's place lives on its sheet, not here.
@@ -684,10 +685,10 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
                 ${description ? `<p class="skills-card-purpose">${escapeHtml(description)}</p>` : ''}
                 <div class="skills-card-who">${installedWhoHtml(skill, model)}</div>
                 ${countsAsYoursText(skill) ? `<p class="skills-card-facts">${escapeHtml(countsAsYoursText(skill))}</p>` : ''}
-                ${skill.lifecycle_virtual ? '' : details}
             </div>
             <div class="skills-card-toggle"><span class="skills-card-status">${model.chip}</span>${toggle}${skill.lifecycle_virtual ? '' : menuHtml(skill, { reviewing, repairing, submit })}</div>
         </header>
+        ${skill.lifecycle_virtual ? '' : details}
         <div class="skills-card-trays" id="${trayId}" data-skill-trays>${model.trays.join('')}${widgetsButton}</div>
         <div data-skill-errors>${errors}</div>
     </article>`;

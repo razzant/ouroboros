@@ -6501,9 +6501,9 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 /* One card head for every skill (Installed, Browse, the detail sheet): the name opens the sheet, marks stay quieter
-   than the name, the purpose reads in meta ink, the who line and facts are meta lines, Details ends the head. The switch
-   is the run state; a chip beside it says only a state the switch cannot show; what needs the owner is an attention
-   tray (one sentence and its actions), visible on touch.
+   than the name, the purpose reads in meta ink, the who line and facts are meta lines, Details follows the head. The
+   switch is the run state; a chip beside it says only a state the switch cannot show; what needs the owner is an
+   attention tray (one sentence and its actions), visible on touch.
    Work shows only as the three-dot loop. Values are ui.css tokens (docs/DESIGN.md "Airy dopamine", §8). */
 .skills-list {
     display: flex;
@@ -6637,7 +6637,8 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 
 /* Attention trays: one sentence (and a quiet note) with its actions; a problem paints the error pair. */
 .skills-card-trays { display: grid; gap: var(--space-2); }
-.skills-card-trays:empty { display: none; }
+.skills-card-trays:empty,
+.skills-card [data-skill-errors]:empty { display: none; }
 .skills-tray { padding: var(--space-3) var(--space-4); border-radius: var(--radius-inner); background: var(--surface-tray); }
 .skills-tray[data-tone="danger"] { background: var(--status-error-bg); }
 .skills-tray[data-tone="danger"] .skills-tray-text { color: var(--status-error-word, var(--text-primary)); }
@@ -6694,8 +6695,8 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 .skills-switch.is-locked .skills-switch-thumb,
 .skills-switch input:disabled + .skills-switch-track .skills-switch-thumb { box-shadow: none; }
 
-/* Details (the shared disclosure, at the end of the head): sentence-case labels in the meta ink at 500, values in the
-   reading ink (DESIGN §2). */
+/* Details (the shared disclosure, right under the head, its rows the card's width): sentence-case labels in the meta
+   ink at 500, values in the reading ink (DESIGN §2). */
 .skills-details-body { display: grid; gap: var(--space-1); }
 .skills-details-facts { display: contents; }
 .skills-detail-row {
