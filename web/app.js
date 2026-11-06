@@ -607,8 +607,8 @@ function closeNotificationReaders() {
 }
 
 mainChat = initChat(ctx);
-// The start's opening ends at the reader's own first move in Main's feed: a key, wheel, touch or press (DESIGN "Unread").
-for (const type of ['wheel', 'touchstart', 'pointerdown', 'keydown']) document.getElementById('chat-messages')?.addEventListener(type, () => { mainOpening = false; }, { passive: true });
+// The start's opening ends at the reader's own first move in Main's feed or its ↓: a key, wheel, touch or press (DESIGN "Unread").
+for (const id of ['chat-messages', 'chat-scroll-bottom']) for (const type of ['wheel', 'touchstart', 'pointerdown', 'keydown']) document.getElementById(id)?.addEventListener(type, () => { mainOpening = false; }, { passive: true });
 initFiles({ ...ctx, layers });
 
 // Skills' contributions (CLIENT_CONTRACT §11): one store, read now and on every lifecycle change; their message

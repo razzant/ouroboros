@@ -17,6 +17,13 @@ function lift(name) {
     return source.slice(from + 1, until + 2);
 }
 
+// One top-level block of app.js that ends at a line `});` (a listener it registers), by how it starts.
+function liftBlock(start) {
+    const from = source.indexOf(`\n${start}`);
+    assert.ok(from >= 0, `${start}… is a top-level block in app.js`);
+    return source.slice(from + 1, source.indexOf('\n});\n', from + 1) + 5);
+}
+
 // One top-level statement of app.js, by how it starts (a declaration or a listener it registers).
 function liftLine(start) {
     const from = source.indexOf(`\n${start}`);
@@ -29,7 +36,7 @@ const heldRows = (feed, beyond = []) => ({ unreadRows: () => [...(feed() || []).
 
 function harness({ revision = null, seen = null, loaded = true, page = 'files', project = null, answer = () => ({}) } = {}) {
     const posts = [], badges = [], acks = [], landings = [];
-    const feed = { moves: {}, addEventListener(type, move) { this.moves[type] = move; } };  // Main's #chat-messages
+    const moves = {};  // what Main's feed (#chat-messages) and its ↓ (#chat-scroll-bottom) listen to
     const context = vm.createContext({
         ...readAhead,  // app.js imports these: a message read in full elsewhere (DESIGN "Unread")
         state: { mainVisibleRevision: revision, mainSeenRevision: seen, mainSeenLoaded: loaded, activePage: page },
@@ -38,17 +45,17 @@ function harness({ revision = null, seen = null, loaded = true, page = 'files', 
         refreshSharedProjectSeen: () => posts.push(['shared']),
         acknowledgeMainAfterPaint: () => acks.push(context.state.mainVisibleRevision),
         mainChat: { showLatest: (options) => landings.push(options?.arrive === true) },
-        document: { getElementById: (id) => (id === 'chat-messages' ? feed : null) },
+        document: { getElementById: (id) => ({ addEventListener(type, move) { moves[`${id} ${type}`] = move; } }) },
         fetchJson: async (url, init = {}) => {
             posts.push([url, init.method || 'GET', JSON.parse(init.body || '{}')]);
             return answer(JSON.parse(init.body || '{}'));
         },
     });
     vm.runInContext(liftLine('let mainOpening') + ['mainOnScreen', 'mainUnreadCount', 'observeMainRevision', 'landMain',
-        'mergeMainSeenRevision', 'markMainViewed'].map(lift).join('\n') + liftLine("for (const type of ['wheel'")
+        'mergeMainSeenRevision', 'markMainViewed'].map(lift).join('\n') + liftLine("for (const id of ['chat-messages'")
         + '\nglobalThis.mainUnreadCount = mainUnreadCount;'
         + ' globalThis.api = { observeMainRevision, mergeMainSeenRevision, markMainViewed, mainUnreadCount };', context);
-    return { context, posts, badges, acks, landings, feed, api: context.api };
+    return { context, posts, badges, acks, landings, moves, api: context.api };
 }
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -138,10 +145,13 @@ test('the app start lands an unread Main once; later arrivals never move it', ()
 });
 
 test("the reader's own first move in Main ends the start's opening; Main is still offered its read", () => {
-    for (const move of ['wheel', 'touchstart', 'pointerdown', 'keydown']) {
+    const moves = Object.keys(harness().moves);
+    assert.deepEqual(moves.sort(), ['chat-messages', 'chat-scroll-bottom'].flatMap((id) => ['keydown', 'pointerdown',
+        'touchstart', 'wheel'].map((type) => `${id} ${type}`)), "the feed's keys, wheel, touch and press, and its ↓");
+    for (const move of moves) {
         const moved = harness({ revision: 3, seen: null, loaded: false, page: 'chat' });
         moved.api.observeMainRevision(5);  // a slow cursor read: the opening still waits
-        moved.feed.moves[move]();
+        moved.moves[move]();
         moved.api.mergeMainSeenRevision({ main_seen_revision: 3 });
         moved.api.observeMainRevision(5);
         assert.deepEqual([moved.landings, moved.acks], [[], [5]], `${move}: no landing over the reader's place`);
@@ -341,7 +351,8 @@ function pageHarness({ unread = 0 } = {}) {
         window: { dispatchEvent(event) { if (event.detail?.page === 'chat') context.mainChat.showLatest(); } },
         CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init?.detail; } },
         updateUnreadBadge() {}, acknowledgeMainAfterPaint() {}, syncNavigationState() {},
-        closeProjectPanel() { if (context.navState.activeProjectId) claims.push('closed'); },  // it lands Main itself
+        // It lands Main itself, unless it closes for a reveal (a task's place), which brings its own.
+        closeProjectPanel(options) { if (context.navState.activeProjectId && !options?.reveal) claims.push('closed'); },
         mainUnreadCount: () => unread,
     });
     vm.runInContext(`${['showPage', 'mainOnScreen', 'landMain'].map(lift).join('\n')}\nglobalThis.show = showPage;`, context);
@@ -380,4 +391,20 @@ test("Main pressed again while shown (its row, a notification) lands what came; 
     const task = pageHarness({ unread: 2 });
     await task.context.show('chat', { reveal: true });
     assert.deepEqual(task.claims, [false], "a task's place (ouro:open-task) is its own destination: Main's news waits");
+    const taskOverProject = pageHarness({ unread: 2 });
+    Object.assign(taskOverProject.context, { state: { activePage: 'chat' }, navState: { activeProjectId: 'p1' } });
+    await taskOverProject.context.show('chat', { reveal: true });
+    assert.deepEqual(taskOverProject.claims, [], 'the Project closes for the reveal: it lands nothing of Main either');
+});
+
+test("a task opened in Main (ouro:open-task) shows Main as a reveal, never as an opening", async () => {
+    const listeners = {}, shown = [];
+    const context = vm.createContext({
+        window: { addEventListener: (type, listener) => { listeners[type] = listener; } },
+        showPage: async (...args) => { shown.push(args); return false; },  // stop there: the reveal is another test's
+        state: { activePage: 'chat' }, revealQuotedSource: async () => ({ state: 'found' }), showToast() {}, tr: (_k, s) => s,
+    });
+    vm.runInContext(liftBlock("window.addEventListener('ouro:open-task'"), context);
+    await listeners['ouro:open-task']({ detail: { task_id: 't1', chat_id: 1 } });
+    assert.deepEqual(JSON.parse(JSON.stringify(shown)), [['chat', { reveal: true }]]);
 });
