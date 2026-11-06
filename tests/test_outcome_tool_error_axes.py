@@ -5,7 +5,7 @@ import copy
 import pytest
 
 from ouroboros.outcomes import derive_loop_outcome, normalize_outcome_axes
-from ouroboros.tool_capabilities import READ_ONLY_PARALLEL_TOOLS
+from ouroboros.tool_capabilities import PURE_READ_TOOLS
 from tests._cases import plain_rows
 
 
@@ -43,7 +43,7 @@ def test_tool_errors_do_not_decide_delivery_or_acceptance(subtests):
                         judged = "degraded"
                     assert axes["objective"]["status"] == judged
                     # A failed read stays in the details (owner 06.11, A); a command warns when nothing judged it.
-                    loud = tool_error["tool"] not in READ_ONLY_PARALLEL_TOOLS
+                    loud = tool_error["tool"] not in PURE_READ_TOOLS
                     assert bool(axes["objective"].get("warning")) == (judged == "not_evaluated" and loud)
                     errors = axes["execution"]["unresolved_tool_errors"] or axes["execution"]["cosmetic_tool_errors"]
                     assert errors[0]["status"] == tool_error["status"]
@@ -71,6 +71,8 @@ def test_advisory_review_cannot_clear_unreviewed_tool_error_warning():
 @pytest.mark.parametrize(("call", "loud"), [
     pytest.param({"tool": "read_file", "status": "argument_error"}, False, id="failed-read"),
     pytest.param({"tool": "search_code", "status": "error"}, False, id="failed-search"),
+    pytest.param({"tool": "browse_page", "status": "error"}, False, id="failed-page-read"),
+    pytest.param({"tool": "github_read", "status": "error"}, False, id="failed-github-read"),
     pytest.param({"tool": "write_file", "status": "error"}, True, id="unfulfilled-write"),
     pytest.param({"tool": "run_command", "status": "non_zero_exit", "exit_code": 1}, True, id="failed-command"),
     pytest.param({"tool": "mcp_gitlab__get_commit", "status": "mcp_error"}, True, id="unknown-kind"),

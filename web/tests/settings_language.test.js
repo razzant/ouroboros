@@ -508,6 +508,9 @@ test('the block mounted in the wizard offers Import only and hides what is hidde
         assert.ok(settings.includes(marker), `${marker} in Settings`);
         assert.ok(!wizard.includes(marker), `${marker} acts on a language a first run does not have yet`);
     }
+    // Setup's step is the card: the block in it is no second card (DESIGN principle 2), while Settings' block is one.
+    assert.match(settings, /class="form-section ui-card"/);
+    assert.doesNotMatch(wizard, /ui-card/);
     // The wizard loads neither style.css (the global [hidden] rule) nor settings.css (the toolbar row):
     // its own stylesheet states both for this block, or "Other language" shows before "Other…" is chosen.
     const css = readFileSync(new URL('../onboarding.css', import.meta.url), 'utf8');

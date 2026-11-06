@@ -114,7 +114,7 @@ export function openMcpImportDialog({ draftServers, draftFreshness, draftUrl, on
                 <div class="marketplace-modal-actions">
                     <button type="button" class="btn btn-default" data-mcp-import-cancel>Cancel</button>
                     <button type="button" class="btn btn-default" data-mcp-import-preview-btn>Preview</button>
-                    <button type="button" class="btn btn-primary" data-mcp-import-apply disabled>Apply to draft</button>
+                    <button type="button" class="btn" data-primary data-mcp-import-apply disabled>Apply to draft</button>
                 </div>
             </div>`;
         const q = (selector) => backdrop.querySelector(selector);

@@ -84,6 +84,15 @@ export const TASK_CONTROL_LABELS = Object.freeze({
     [ACTION_STOP_NOW]: 'Stop now',
 });
 
+// The hard stops: a press is felt, and a stop that is the only offered action asks first.
+const STOPS = new Set([ACTION_STOP_NOW, ACTION_STOP_EARLIER]);
+const STOP_CONFIRMS = Object.freeze({
+    [ACTION_STOP_NOW]: { title: 'Stop this work now?', confirmLabel: TASK_CONTROL_LABELS[ACTION_STOP_NOW], danger: true,
+        body: 'It stops at once, with the helpers it started.' },
+    [ACTION_STOP_EARLIER]: { title: 'Stop the earlier attempt?', confirmLabel: TASK_CONTROL_LABELS[ACTION_STOP_EARLIER],
+        danger: true, body: 'What still runs of the earlier attempt stops at once; the Continue itself keeps going.' },
+});
+
 /**
  * Whether a queue row's task is the ROOT of its tree — the server's own rule
  * (`task_results.resolve_task_lineage`), so a child never offers the whole-tree
@@ -589,24 +598,49 @@ function onMenuKeydown(event) {
  * closes the menu and invokes `onAction(actionId)`. `actions` (a work's controls,
  * work_status.js) replaces the card-state set; `pauseTarget` names Pause's task
  * when the anchor does not; `afterAction` runs once an item's effect settled.
+ * On a trigger marked `data-task-control-direct` a single offered action opens no menu: it runs at once, a stop
+ * after `askConfirm` (the shared dialog) says yes.
  * @param {HTMLElement} anchor trigger element
  * @param {{cancelPending?: boolean, budgetPaused?: boolean, wholeTree?: boolean, resume?: boolean, busy?: boolean,
  *     actions?: string[], pauseTarget?: string, canAct?: (action: string) => boolean,
- *     onAction: (action: string) => void, afterAction?: (action: string) => void}} opts
+ *     onAction: (action: string) => void, afterAction?: (action: string) => void,
+ *     askConfirm?: (dialog: object) => Promise<boolean>}} opts
  */
 export function openTaskControlMenu(anchor, {
     cancelPending = false, budgetPaused = false, wholeTree = true, resume = false, busy = false, canAct = () => true, onAction,
-    actions = null, pauseTarget = '', afterAction = null,
+    actions = null, pauseTarget = '', afterAction = null, askConfirm = openConfirmDialog,
 } = {}) {
     closeTaskControlMenu();
     if (!anchor?.isConnected || !document.body) return null;
+    const offered = actions || taskControlActions({ cancelPending, budgetPaused, wholeTree, resume });
+    const run = (action) => {
+        // A portal can outlive the facts that offered it. Its owner rechecks before EVERY effect,
+        // including Pause, which dispatches here rather than through onAction.
+        if (!canAct(action)) return;
+        if (STOPS.has(action)) haptic('stop');  // a decisive press, felt
+        // Both surfaces' anchors name their task (Activity row `data-id`,
+        // chat card root `data-task-id`), so Pause needs no per-surface hook.
+        const effect = action === ACTION_PAUSE
+            ? pauseTaskAction(pauseTarget || anchor.dataset?.id || anchor.closest?.('[data-task-id]')?.dataset?.taskId || '')
+            : onAction?.(action);
+        if (afterAction) Promise.resolve(effect).then(() => afterAction(action), () => afterAction(action));
+    };
+    // A trigger that names its one offered action (`data-task-control-direct`, its label from taskControlTriggerLabel)
+    // is that action: a press does it, a stop after the shared confirmation, so an accidental click still never
+    // hard-stops. A menu of one item would be that confirmation in disguise, behind an ellipsis that promises a
+    // choice. A trigger that always says `Stop…` keeps its menu: its label and its press change together.
+    if (offered.length === 1 && anchor.dataset?.taskControlDirect === '1') {
+        const [action] = offered;
+        if (!busy) Promise.resolve(STOPS.has(action) ? askConfirm(STOP_CONFIRMS[action]) : true).then((ok) => { if (ok) run(action); });
+        return null;
+    }
     // A11y: the trigger owns a popup menu; expanded tracks the open state.
     anchor.setAttribute('aria-haspopup', 'menu');
     anchor.setAttribute('aria-expanded', 'true');
     const menu = document.createElement('div');
     menu.className = 'task-control-menu';
     menu.setAttribute('role', 'menu');
-    for (const action of actions || taskControlActions({ cancelPending, budgetPaused, wholeTree, resume })) {
+    for (const action of offered) {
         const item = document.createElement('button');
         item.type = 'button';
         item.className = `task-control-item${action === ACTION_STOP_NOW ? ' danger' : ''}`;
@@ -616,17 +650,8 @@ export function openTaskControlMenu(anchor, {
         if (busy) item.disabled = true;
         item.addEventListener('click', (event) => {
             event.stopPropagation();
-            // A portal can outlive the facts that offered it. Its owner rechecks before EVERY effect,
-            // including Pause, which dispatches here rather than through onAction.
-            if (!canAct(action)) { closeTaskControlMenu(); return; }
-            if (action === ACTION_STOP_NOW || action === ACTION_STOP_EARLIER) haptic('stop');  // a decisive press, felt
             closeTaskControlMenu();
-            // Both surfaces' anchors name their task (Activity row `data-id`,
-            // chat card root `data-task-id`), so Pause needs no per-surface hook.
-            const effect = action === ACTION_PAUSE
-                ? pauseTaskAction(pauseTarget || anchor.dataset?.id || anchor.closest?.('[data-task-id]')?.dataset?.taskId || '')
-                : onAction?.(action);
-            if (afterAction) Promise.resolve(effect).then(() => afterAction(action), () => afterAction(action));
+            run(action);
         });
         menu.appendChild(item);
     }
@@ -658,7 +683,13 @@ export function openTaskControls(anchor, taskId, { activity = null, cancelPendin
     });
 }
 
-// The trigger's constant label. The trigger always opens the dropdown; the
-// pending-cancel state changes the OFFERED actions (escalation only), not the
-// interaction shape — so an accidental click never hard-stops directly.
+// The trigger's label while it opens a menu of choices. The pending-cancel state changes the OFFERED actions
+// (escalation only); on a trigger that names its single action that action is the trigger itself and a stop asks
+// first (openTaskControlMenu).
 export const TASK_CONTROL_TRIGGER_LABEL = 'Stop…';
+
+/** What a direct trigger (`data-task-control-direct="1"`) says for the actions it will offer: the one action's own
+ *  name, else the menu's `Stop…`. */
+export function taskControlTriggerLabel(actions) {
+    return actions?.length === 1 ? TASK_CONTROL_LABELS[actions[0]] : TASK_CONTROL_TRIGGER_LABEL;
+}

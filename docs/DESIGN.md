@@ -625,8 +625,10 @@ observation confirms the supervisor can assign work; a live socket alone means
 only that the UI transport is open. The host's boot phases refine the word
 without changing the fact: `Chat ready, restoring background tasks` once the
 dialogue accepts messages durably while pooled work is still not admitted, and
-`Start failed` (its cause in the badge title) when the generation cannot become
-ready. `Online` is reserved for a ready, idle
+`Start failed` (its cause beside it where it fits, always the badge title) when
+the generation cannot become ready: a start that failed in its init. A ready generation
+that loses its task core does not fail this way: it ends and restarts (ARCHITECTURE §9,
+the Fault door), with one `supervisor_failure` Main row before and the startup notice after. `Online` is reserved for a ready, idle
 runtime; known queued, active or finalizing work keeps its own factual label. A
 durably accepted incoming message likewise proves acceptance, not that its task
 has begun or a model has read it.
@@ -657,7 +659,7 @@ needed restart or unconfirmed outcome it announces is kept in its authoritative 
 in-feed history edge) until that fact changes or the owner resolves it. A notice the owner may hide is hidden on the
 notice itself, per browser, never in its record (the Update indicator, owner 1B, 25.10). A plain acknowledgement in
 place may end by itself, but where the line is its fact's only home (Costs' budget save) an error, a warning or a
-needed restart stays until the next save replaces it. A current fact ends with its fact; unread ends when the message
+needed restart stays until the next save, or an edit of what it is about, replaces it. A current fact ends with its fact; unread ends when the message
 is shown; a retained record (Updates, history, the Settings save result, `Input saved`) lives with its record, with
 no timer. Toasts and statuses older than this rule are checked against it when touched.
 
@@ -675,7 +677,7 @@ A consumed one-shot is history whether its task succeeded or failed; the status
 never implies a result. A row is headed by its name; the instruction stays
 readable and expands by touch, and a waiting row says why inline, never in a
 hover-only tooltip. Retained rows (consumed and withdrawn) collapse into one
-History & withdrawn disclosure rather than padding the standing list or
+disclosure named for what it holds (Finished, Withdrawn) rather than padding the standing list or
 disappearing: history the owner can still open, read and act on. A withdrawn
 row says who withdrew it, when and why, and keeps Restore through the retention
 window once no hold remains on it; Restore cancels the withdrawal and brings
@@ -911,7 +913,8 @@ under one of the four categories above and fails on a new one;
 
 New messages are crimson, and only where the owner reads. The two sidebar numbers
 count the same thing, the standalone messages not read yet (below): Main's on its
-row, shown while another place is, and the Projects header's, summed over its rows
+row, shown while another place is (a Project open over Main included, which reads none of
+Main's messages meanwhile), and the Projects header's, summed over its rows
 (those it rests on, hidden or not, and the older ones an open find or browse shows),
 each a crimson pill in one column just before the marks (owner 19.10, Q1 = B). A
 Project row's mark takes the crimson tint (its work's shape, or a dot where nothing
@@ -1192,7 +1195,7 @@ preference when it opens and on every reconnect; there is no file watcher.
     table`) whose sides that still hide columns fade. No stacked row cards,
     no guessing a table's purpose from its words, no smaller text to make it
     fit.
-  - A thematic break is a `--surface-border` hairline with section spacing.
+  - A thematic break is a `--divider` hairline with section spacing.
     Inline code keeps the ink of the text around it on its neutral pill.
   - Code is the author's literal text: a fence or code span shows and
     copies exactly what was written (`&amp;`, `<div>`, `**stars**`
@@ -1253,7 +1256,8 @@ preference when it opens and on every reconnect; there is no file watcher.
   name and line (owner 30.10, B); empty activity reserves no band, and a duplicate title is not activity.
   Full narration and Reviews expand independently. A completed child's result is
   its report: `Report to parent`, semibold at the row's size and ink, leads its
-  collapsed line and replaces `[RESULT]` over full text (owner 25.10, A). The root keeps primary title
+  collapsed line and replaces `[RESULT]` over full text (owner 25.10, A). A helper the host could not start has no
+  report: its cause leads the line, the host's notice to its parent stays in details. The root keeps primary title
   ink at weight 500, children secondary ink at 400. Nested frames keep real
   ancestry on an opaque secondary surface, so white tints never accumulate.
 - **An executor label names the helper and states only exceptions.** The
@@ -1981,8 +1985,8 @@ menu and capsule row, a saved reply's actions), and the host draws them: the
 skill's label verbatim, one glyph from the host set, the host's capsule or
 icon control, never the skill's markup. Connector icons may supply reviewed SVG geometry, painted by the host in monochrome currentColor with a fallback glyph and an adjacent visible label. In "+", after Attach file, each skill
 has a section under its name with its items in the owner's order; the host's
-own items close the menu under Ouroboros's name: Add dictation… while no
-engine can dictate here, and Make a button with Ouroboros…, which starts a request in
+own items close the menu under Add to composer: Add dictation… while no
+engine can dictate here, and Make a button…, which starts a request in
 the draft for the owner to finish and send. A chip is one of the row's
 capsules: the skill's name, then the value its source answers in the meta ink
 (24 characters; the rest and its description on the chip's title), with a dot
@@ -2459,10 +2463,11 @@ fade dims a card where the list cuts it.
   the column count changes only where a card is painted; a running widget
   keeps its frame and its state. Keyboard focus keeps the card's original
   position until the window reloads.
-- **Stop holds until Start.** A framed card the owner stopped rests as its
-  facade with Start on this device across reloads, until Start or a launch
-  policy of Auto or Keep running starts it. A card whose last start the page
-  did not outlive rests the same way, with its one line (Skills in the page).
+- **Stop holds until Start.** A running card's Stop is in its ⋮ menu. A card the
+  owner stopped rests as its facade with Start on this device across reloads,
+  until Start or a launch policy of Auto or Keep running starts it. A card whose
+  start the page did not outlive, or whose files went away, rests the same way
+  and says so in one line (Skills in the page).
 - **One arrangement per installation.** Order and widths are owner UI state
   stored on the server, the same for every window and device of the
   installation; when two windows arrange at once the last change wins. A
@@ -2471,10 +2476,10 @@ fade dims a card where the list cuts it.
 
 ### Storage
 
-Storage leads with **Space used by Ouroboros**, its measurement date, growth,
-unreadable count, **Refresh sizes**, the coloured bar and five-group legend (owner
-choice 2026-11-04). **Cleanup** follows: **Can be removed** is unknown until a
-check, never the selection; **Selected** is a separate quieter figure. One
+Storage leads with **Space used by Ouroboros**, its count's age and growth
+(duration and unreadable items in Details), **Refresh sizes**, the coloured bar and
+five-group legend (owner choice 2026-11-04). **Cleanup** follows: a sentence until a
+check, then **Can be removed**, never the selection; **Selected** is a separate quieter figure. One
 **Remove N selected items** waits for the whole list and sends exactly those ids;
 hidden rows keep their choice. Copies not verified saved and saved groups have
 one compact row each, deliberately opened, unchecked, with their whole-loss
@@ -2523,12 +2528,13 @@ an explicit store failure in view, metrics under Diagnostics and exact program t
 Details.
 A rule every row shares is said once for the section, an unsaved draft once by the editor
 or its host page, and a checked box is not re-said beside it. A conditional line never
-moves the control that caused it: controls own stable slots, and a line an edit toggles
-opens beside or below them.
+moves the control that caused it.
 
-In a result/action row, the result has readable space. The action docks right
-when it fits, otherwise below, by the row's width. Long content stays whole.
-Field actions (Show/Clear) keep the field's height, not the compact result-row size.
+The result of an action sits in the row of its control, right after it, on a line
+the row keeps for it, so a late result moves nothing: never glued under the button,
+never at the far end; a row too narrow for both gives it its own line, the row's gap
+apart. It ends as §4 says, and an edit in the same subject clears it.
+Long content stays whole.
 
 Rows of the same kind are equivalent: no row gets extra visual weight for
 being first, default, or native. Grouping and section-level actions express
@@ -2552,6 +2558,13 @@ rotates compatible accounts and an explicit pin stays pinned. A model inherited
 from Main remains visibly inherited while its account can be pinned
 independently. Fallbacks use the same row in their saved order, with adjacent
 move/remove controls and the group's Add action.
+
+Restart Claudexor (Accounts toolbar, after Refresh) asks first in the shared confirm
+dialog: its body is one sentence of fact, `Restarting Claudexor ends N runs: X of
+Ouroboros, Y of other programs.`, plus any pin warning; the serving and pinned engines,
+model calls in flight and the runs open under "Engine and runs". A count that could not
+be read is said as unknown, never zero; a preview that changed while the dialog was open
+asks again with the new facts. The outcome note says the stop and the start apart.
 
 Context details show the server-built sourced window line: "set in Settings"
 labels a manual value; the Clear confirmation button removes the route acknowledgement.
@@ -2649,44 +2662,7 @@ stops clear of them.
 
 The panels a new owner opens first (Models, Providers, Agents, Behavior) show only what an owner touches in the first week. Anything a typical owner never needs or must look up to use safely lives under Advanced: deployment plumbing (bind hosts, process pools, runtime limits), transport and trust knobs such as the extra CA bundle, MCP servers, and the rarely used provider cards, which stay on the Providers page but fold under "More providers". A control needing a paragraph of explanation to be safe is Advanced by definition. Seams: the `advanced` settings panel and the `advanced: true` flag in `web/modules/settings_provider_cards.js` (DEVELOPMENT "Onboarding and Settings surfaces").
 
-## 8. Migration state
-
-The scale is applied to complete component families and declared page regions.
-Using a migrated field inside a historical page does not claim the whole page
-has migrated. Migrated today:
-
-- `web/ui.css` (shared palette, fields, buttons, status/chip recipes and
-  menu/chooser chrome, used by both top-level documents and optional author pages)
-- `web/settings.css` (settings shell, model/effort cards, MCP cards)
-- `web/onboarding.css` (the whole first-run wizard)
-- `web/model_roles.css` (shared role editor)
-- `web/room_work.css` (room work disclosure, rows and reading return)
-- `web/cards.css` (living cards in the feed)
-- `web/style.css` regions paired by `design-system:migrated-begin` /
-  `design-system:migrated-end`: harness accounts; Dashboard → Updates (status
-  card, one action row, collapsed Recovery with one restore list), Storage and
-  Evolution;
-  the Skills page (Installed, Browse, Sources, the detail sheet, its dialogs);
-  chat typography, foreground and status colour. Chat geometry retains local
-  literals per the viewport reserve contract; shared palette channels keep
-  translucent glass coherent across themes.
-- the global `.muted`, `.form-section h3` and shared `.ui-status` tone rules
-
-The remaining page-specific typography in widgets and logs is
-historical. Their adopted common controls follow the shared
-family; unrelated page rules keep their literals until their own pass. Migrate
-each selected family completely and remove its replaced recipes in the same
-change. Do not introduce a half-tokenised second field family or describe a
-control adoption as an all-page redesign. The semantic status/action/notification
-contract already applies everywhere.
-
-`tests/test_web_typography_static.py` guards the migrated set only. Extending
-the guard and migrating the corresponding family or region are the same commit.
-The bible's materials (objects, trays, sheets and the three capsule tones) reach
-every page in both themes through the "Airy dopamine" blocks of ui.css, style.css and
-the page sheets; that mapping is not a typography migration of those pages.
-
-### Author freedom
+## 8. Author freedom
 
 An extension may use the optional shared buttons, fields and status functions
 inside its own module or route-iframe page, override them, or design a completely
@@ -2937,10 +2913,20 @@ narrower, where the column becomes a drawer. `html[data-layout]` carries the
 choice, set before first paint from the one constant `web/theme.js` exposes and
 `web/modules/layout.js` reads; shell rules key off the attribute, components adapt
 to their own box with container queries, and no page adds a width breakpoint of
-its own. The surface fact sent with a message reads the same switch. On docked,
-the Project panel lies beside Main at its own width over the dimmed room; its
-handle resizes it apart from the sidebar's, and it is never wider than the
-content area.
+its own. The surface fact sent with a message reads the same switch. On docked
+with a mouse or a trackpad, the Project panel lies beside Main at its own width
+over the dimmed room; its handle resizes it apart from the sidebar's, and it is
+never wider than the content area.
+
+**The primary input** is the switch's one other fact, written with it before
+first paint as `html[data-pointer="coarse"|"fine"]` from one `(pointer: coarse)`
+query; the shell reads it through the same door. It never moves the columns; it
+decides how a room over Main sits. Where the primary input is a finger (a tablet,
+a phone held sideways, a Mini App on a tablet) a docked Project takes the whole
+content column in Main's place, dressed as the phone's room: no scrim to tap by
+mistake, no shadow or edge over the sidebar, which stays beside it and live, no
+width handle of its own (it fills the column), and the same bar with its ×. A
+desk with a mouse or a trackpad keeps the panel beside Main.
 
 **Resizing.** A handle drag writes only the dragged box's width, once per
 displayed frame; the sidebar's column, the dimmed room and the panel's edge
@@ -3061,7 +3047,9 @@ Telegram, and nothing depends on a haptic (`web/modules/haptics.js`).
 alone on a narrow page are layers in one stack (`web/modules/layers.js`); the file is part of the page, so it lies
 under every overlay, also when its read lands after the drawer opened. Dialogs, menus and the work list keep their own
 Escape and outside-press dismissal. Escape, ×, a press on the scrim close the
-topmost layer and only it; the system or browser Back and Telegram's Back close
+topmost layer and only it; a Project that covers Main (the phone's card, a finger's
+docked column) is modal with the docked sidebar live, its covered room inert once it
+has arrived; the system or browser Back and Telegram's Back close
 what is on top: a dialog over a layer first, then the layer. While a layer is
 open the page holds exactly one same-address history entry, so Back closes it
 instead of leaving the app; navigation itself is still never written into the
@@ -3087,12 +3075,13 @@ A Project's name keeps one line inside its capsule, at the controls' size and we
 in an ellipsis, so its capsule keeps the bar's height (owner 2026-11-01, A·14; it replaces the second line of
 2026-10-28). The name keeps its own direction, so a right-to-left interface still shows a Latin name's start. The
 whole name stays reachable: it is the title's hover text and accessible name, and the room's work list, which the
-title opens even in an empty Project, starts with it, wrapped. On a phone a name still cut leaves the consciousness
-chip its brain and mark, its accessible name keeping the whole state; a desk keeps the chip's word. Panic and ×
+title opens even in an empty Project, starts with it, wrapped. Where the room covers Main (a phone, a finger's docked
+column) a name still cut leaves the consciousness chip its brain and mark, its accessible name keeping the whole
+state; a desk's panel beside Main keeps the chip's word. Panic and ×
 never yield (audit №2, owner 2026-10-28T22:09Z; sidebar names wait for the navigation decision).
 Navigation sharing a toolbar also returns below the bar when the
 content column is too narrow, including while the sidebar is resized; the toolbar wraps in its
-own row. Files' location and actions return above the list, folder names fit and actions wrap.
+own row. Files' location and its actions return above the list on one row; folder names fit, actions wrap.
 Files shows the folder's list and the chosen file side by side while its own width holds both (the `files`
 container, 700 px); narrower, the list comes first and a chosen file replaces it under `Back to folder`, which
 keeps an unsaved draft: the file's row says `unsaved` (a new file's draft has its own row at the top) and reopens
@@ -3111,8 +3100,8 @@ Its word uses the viewer's zone and a short date when not today; passed explaine
 outcomes and passed allowance resets show no time.
 `Evolving` replaces the word during a campaign, even when off; Off is grey.
 Running shows moving dots, never a breathing glyph; held shows pause bars without time; unknown a ring,
-failure a red dot, amber only the owner's move (§4). The word stays visible at every width, except on a phone
-while a Project's one-line name is still cut, where the chip keeps its brain and mark (above).
+failure a red dot, amber only the owner's move (§4). The word stays visible at every width, except where the room covers Main (a phone, a
+finger's docked column) while a Project's one-line name is still cut, where the chip keeps its brain and mark (above).
 Its accessible name and the Shade state use the host sentence without adding a clock.
 A press opens its own sheet of the work list's material (the Shade), hung under the
 capsules, and switches nothing: state, Start/Stop, `$X of $Y in the last 24 hours`, “Its own wakes” then
@@ -3140,11 +3129,11 @@ applies only where a pointer can hover (`@media (hover: hover)`).
 the invisible hit area of the one `.ui-hit-area` recipe in `web/ui.css`, which a
 link inside a sentence takes too so the sentence keeps its lines. A chevron is an
 element (the Reviews door's), so a control's `::after` stays the recipe's; a row
-that wraps on a phone (a question's recovery) gives its buttons the minimum as
-their own height, so no reach covers a neighbour (audit №4, owner
-2026-10-28T22:09Z). Inside a strip
-that scrolls (a capsule's open levels on a narrow phone) a value keeps only its drawn
-height, since the strip clips that reach. Nothing that acts is hidden until hover
+that wraps on a phone (a question's recovery, an account's actions) and a strip of
+tabs or chips that scrolls give their controls the minimum as their own height, so no
+reach covers a neighbour or is clipped (audit №4, owner 2026-10-28T22:09Z); so do a
+disclosure's summary and a field. In a capsule's open levels on a narrow phone a value
+keeps only its drawn height. Nothing that acts is hidden until hover
 there (a Project row's menu is reached by its long press).
 No page scrolls sideways at any width; only code, tables, tab strips and a bar's
 Files location scroll sideways, inside themselves, with a fade where content

@@ -1,10 +1,10 @@
 # 6. Agent Core
 
-`loop.py` runs tasks/direct turns/wakes.
+`loop.py` runs tasks, direct turns and wakes; admission, completion, satisfaction, verification, review and artifact finality stay separate facts, never converted into one another.
 
 ### Task lifecycle
 
-`OuroborosAgent` runs in workers: pooled tasks and the mind's foci (§5 Conversation lane). `agent_task_pipeline.py` freezes contract/context, runs the loop, stores results/artifacts and root post-work (`post_task_synthesis.py`, `post_task_checkpoint.py`), then publishes. Store rows govern lifecycle (`get_task_result`, `query_data`); result JSON is import/export. `task_result_schema.py` admits rows (§11); usage owns money/tokens. Admission, completion, satisfaction, verification, review and artifact finality differ. Crash: `failure.kind="runtime"`; lost capture unknown. `finalization_timing.py` times delivery, sharing child projections until model wait by task/root/queue lineage. `supervisor/cognitive_operations.py` excludes typed operations from idle inference; deadlines/budgets/cancellation stay.
+`OuroborosAgent` runs in workers: pooled tasks and the mind's foci (§5 Conversation lane). `agent_task_pipeline.py` freezes contract/context, runs the loop, stores results/artifacts and root post-work (`post_task_synthesis.py`, `post_task_checkpoint.py`), then publishes. Store rows govern lifecycle (`get_task_result`, `query_data`); result JSON is import/export. `task_result_schema.py` admits rows (§11); usage owns money/tokens. Crash: `failure.kind="runtime"`; lost capture unknown. `finalization_timing.py` times delivery, sharing child projections until model wait by task/root/queue lineage. `supervisor/cognitive_operations.py` excludes typed operations from idle inference; deadlines/budgets/cancellation stay.
 
 `task_store` reads the stable terminal page plus uncertain rows; the gateway applies effective global top N. `task_status` derives stability per body write; `store_hot_facts` backfills legacy NULLs by CAS. GET keeps envelopes without writes.
 
@@ -418,7 +418,7 @@ Disclosed isolation residuals: a non-owner orphan's verdict stays with its dispo
 
 ### Vendor program maintenance
 
-`harness_maintenance.py`: Accounts and `ouroboros/tools/control_maintenance.py`; `ouroboros/gateways/claudexor_maintenance.py`: engine targets/keys/evidence. Inspection is read-only. Update prepares pinned Node/npm only on serving `embedded_npm_missing`, then asks for chat-header Restart and repeat Update; no auto-restart. External/attach-only: repair externally. Failed optional GET permits POST/rejoin; registry checks add ≤30s. Preparation shares install lock/cache; downloads delay starts. Pre-submit: this attempt; keep earlier unknown POST keys. Readers rank ready exact full runtimes (legacy schema2 too), schema1/Node-only, then bundled Node. Publish `.g-*` siblings; prior trees stay. Authority/Pause apply; no auth changes, replay or host job ledger.
+`harness_maintenance.py`: Accounts and `ouroboros/tools/control_maintenance.py`; `ouroboros/gateways/claudexor_maintenance.py`: engine targets/keys/evidence. Inspection is read-only. Update prepares pinned Node/npm only on serving `embedded_npm_missing`, then asks for Restart Claudexor (§3) and repeat Update; no auto-restart. External/attach-only: repair externally. Failed optional GET permits POST/rejoin; registry checks add ≤30s. Preparation shares install lock/cache; downloads delay starts. Pre-submit: this attempt; keep earlier unknown POST keys. Readers rank ready exact full runtimes (legacy schema2 too), schema1/Node-only, then bundled Node. Publish `.g-*` siblings; prior trees stay. Authority/Pause apply; no auth changes, replay or host job ledger.
 
 ### Own-body candidates
 

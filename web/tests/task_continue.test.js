@@ -97,7 +97,9 @@ test('a lost answer is retried under the SAME nonce; an already accepted press n
         return { ok: true, successor_task_id: 'root-1-cabc', held: attempt === 2 };
     };
     assert.equal(await continueTaskAction('root-1', { request, storage, toast }), '');
-    assert.match(toasts[0][0], /^Continue not confirmed: network timeout/);
+    // The shared failure words, never the transport's own text (U131).
+    assert.equal(toasts[0][0], "Continue not confirmed. Didn't work.");
+    assert.doesNotMatch(toasts[0][0], /network timeout/);
     assert.equal(await continueTaskAction('root-1', { request, storage, toast }), 'root-1-cabc');
     assert.equal(seen[0][1], seen[1][1], 'the retry carries the same action nonce');
     // Held without named blockers: the fact, never a promise that earlier work is merely settling (#1721). It starts
@@ -495,10 +497,10 @@ test('a resolved malformed 200 is unconfirmed: no success toast, the same nonce 
     globalThis.fetch = async (_url, init) => { nonces.push(JSON.parse(init.body).action_nonce); return replies.shift(); };
     try {
         assert.equal(await continueTaskAction('malformed-root', { storage, toast }), '');
-        assert.deepEqual(toasts, [['Continue not confirmed: non-json response (HTTP 200)', 'error']]);
+        assert.deepEqual(toasts, [["Continue not confirmed. Didn't work.", 'error']]);
         assert.equal(storage.getItem('ouro_continue_nonce:malformed-root'), nonces[0], 'the unconfirmed action keeps its nonce');
         assert.equal(await continueTaskAction('malformed-root', { storage, toast }), '', 'ok without a successor is not an acknowledgement');
-        assert.deepEqual(toasts[1], ['Continue not confirmed: no acknowledgement', 'error']);
+        assert.deepEqual(toasts[1], ["Continue not confirmed. Didn't work.", 'error']);
         assert.equal(await continueTaskAction('malformed-root', { storage, toast }), 'malformed-root-c1');
         assert.deepEqual(toasts[2], ['Continue accepted.', 'ok']);
         assert.deepEqual(nonces, [nonces[0], nonces[0], nonces[0]], 'every retry is the same admission');

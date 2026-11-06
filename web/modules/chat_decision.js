@@ -670,7 +670,7 @@ export function createChatDecision({
             if (removable && !remove) {
                 remove = document.createElement('button');
                 remove.type = 'button';
-                remove.className = 'chat-quiz-dismiss btn btn-xs btn-default';
+                remove.className = 'chat-quiz-dismiss btn btn-sm btn-default';
                 remove.textContent = tr('quiz.remove_unknown', 'Remove from pending');
                 remove.addEventListener('click', () => submitAnswer(card,
                     { taskId: card.dataset.taskId, quizId: card.dataset.quizId, options: [] }, null, '', setCardState, 'dismiss'));

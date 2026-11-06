@@ -2,11 +2,10 @@
 
 Owner Main/room turns, consciousness wakes, Presence bodies and the auto-resume
 turn execute in worker processes like any task, but they are admitted by routing
-(never through PENDING), hold no project lease and sit outside ``MAX_WORKERS``,
-the crash-storm capture and the readiness-exhaustion fence. Their slots live in
-the same ``WORKERS`` table as project workers with ``lane="conversation"``, so
-health, custody, Panic and quiescence retirement iterate every slot alike; the
-three project fences filter by lane.
+(never through PENDING), hold no project lease and sit outside ``MAX_WORKERS``
+and the readiness-exhaustion fence. Their slots live in the same ``WORKERS``
+table as project workers with ``lane="conversation"``, so health, custody, Panic
+and quiescence retirement iterate every slot alike; the project fences filter by lane.
 
 Admission (``admit_turn``, under Q and the repo-writer gate lock the caller holds)
 writes the RUNNING row first — ``execution_owner.kind="direct"`` is the origin,

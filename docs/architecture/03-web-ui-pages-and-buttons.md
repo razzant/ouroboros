@@ -20,7 +20,7 @@ Iframes inherit no host tokens or choice; `render.appearance` declares their pol
 
 `pages.js` lists the places. `syncNavigationState()` owns page/Project/expansion/drawer; widths are owner-local. `#<page>` is read once, never written (no desktop address bar; Telegram loads `/`). Projects are panels, not routes, in the sole `<nav>`: `projects_nav.js` keys rows (open/pin/rename/delete); pins survive the `/api/state` cap, older rooms load by `?all=1` on demand; `PROJECT_NAME_MAX` and lifecycle govern names; deleting rooms cannot open until registry publication. `style.css` gives Main track 2 of 2, hiding retained `#divider`, unboxing `.sidebar-scroll`; panels overlay. Below `layout.js`'s switch, Main takes track 1, sidebar becomes a drawer, Project fills content. `layers.js` owns dismissal; `host_telegram.js` binds Telegram Back; `drawer_drag.js` speeds visible controls; `shell_motion.js`/`room_retire.js`/`motion.js` move between places (DESIGN §10).
 
-- `web/ui.css` ← shared tokens and controls; `settings.css` owns the wrapping `.settings-action-row`; `style.css` owns shell/card geometry and System's edge-free shadow (DESIGN §8).
+- `web/ui.css` ← tokens, the locked control box, material, shared parts (`.ui-action-row`, `.ui-result`, `.ui-disclosure`, `.ui-row`, `.ui-list-more`, `[data-primary]`); `style.css` composes pages (Dashboard tab body, shell/card geometry, System's edge-free shadow).
 - `theme_palette.js` ← `--chart-*` tokens into mounted Chart options, a host chart's series too; updates keep data and caller-authored option groups.
 - `page_header.js` / `page_icons.js` ← headers (`bindPageHeader` places tabs/path/actions), `bindTabStrip`, `renderSegmentedField` (`--segment-count`), icons; `settings_controls.bindEffortSegments` keeps empty inheritance.
 - `ui_interactions.js` ← `bindDialogFocus`, `bindMenu`, `bindPopoverPosition`, `bindEnterSubmit`; every binding returns teardown.
@@ -28,8 +28,8 @@ Iframes inherit no host tokens or choice; `render.appearance` declares their pol
 - `status_mark.js` ← every status mark; `row_menu_gesture.js` ← a Project row menu's long press (DESIGN §10).
 - `scroll_fade.js` ← `bindScrollFade`: edge attributes from hidden content.
 - `api_client.js` / `api_types.js` / `model_route_types.js` / `decision_types.js` ← browser API calls with typed errors; mirrors of browser-facing contract shapes.
-- `ui_primitives.js` ← shared safe-field renderer/collector, tone/status and attribute escaping; `ui_helpers.js`/`utils.js` re-export it, the author kit serves it directly.
-- `ui_helpers.js` ← row/badge helpers, keyboard menu lock, System/routing action rows (`createSystemMessageActions`), text copying (`copyTextToClipboard`), older-shell detection (§2), file/copy-link/toast fallbacks, framed-onboarding links (`OnboardingHostApi`).
+- `ui_primitives.js` ← safe fields, tone/status, attribute escaping, action results (`setResult`, `clearResultOnEdit`, `errorWords`); `ui_helpers.js`/`utils.js` re-export it.
+- `ui_helpers.js` ← row/badge helpers, keyboard menu lock, System/routing action rows (`createSystemMessageActions`), `copyTextToClipboard`, older-shell detection (§2), file/copy-link/toast fallbacks, framed-onboarding links (`OnboardingHostApi`).
 - `desktop_shell.js` ← window facts from `shell_info()` (legacy `app_version`: health); installed/loaded stay distinct. Failed reads are not unsupported; no update advice.
 - `interface_size.js` ← Interface size's one setter, also `ouroInterfaceSize` for the macOS View menu: the app's `set_interface_size`, a touch screen's viewport (`theme.js` `ouroViewportScale`), else browser zoom.
 - `skill_card_renderer.js`, `skill_presentation.js` ← skill cards and the words every Skills surface shares.
@@ -39,14 +39,14 @@ Iframes inherit no host tokens or choice; `render.appearance` declares their pol
   reads/loads use `DOCUMENT_READER_TIMEOUT_MS`, while image-only scenes own
   bounded focal zoom/pinch/pan and keyboard/visible reset controls (DESIGN
   "Document reading").
-- `log_events.js` ← event classification and the one factual task-presentation projection for Chat and Logs: task truth maps only to `Working` / `Done` / `Done with warnings` / `Failed` / `Stopped`; it owns no actions, incidents or notifications, and compact headlines never expose raw reason codes. Task-to-task delivery appears in the receiving timeline (`task_message_injected`), delivery or refusal in the sending one (`task_message_routed`).
+- `log_events.js` ← event classification and the one factual task-presentation projection for Chat and Logs: task truth maps only to DESIGN §4's five task words; it owns no actions, incidents or notifications, and compact headlines never expose raw reason codes. Task-to-task delivery appears in the receiving timeline (`task_message_injected`), delivery or refusal in the sending one (`task_message_routed`).
 - `effort_evidence.js` ← Logs: requested effort, host carrier, engine preparation, sourced provider observation; missing echoes stay unknown.
 - `toast.js`, `masonry.js`, `widget_frame.js`, `widget_job.js` ← toasts, layout, framed-widget bootstrap/lifecycle, bounded widget request/job policy.
 - `result_files.js` ← Files and validated question materials via canonical artifacts, the reader and explicit downloads.
 - `history_retention.js` ← history-transfer details and storage problems for Chat and Logs; routine transfer alters no task outcome.
 - `settled_card.js` ← `syncSettledItems`: the settled card's Files row and Continue action follow one detail.
 - `task_continue.js` ← Continue projects the host's `continuation_offer`; `hard_limit_reached` is one neutral reason that buys no model call; Stop, Panic and an ordinary finish cannot Continue, an author's explicit unfinished stop can (§6); one stored nonce per task makes a retry return the same admission.
-- `task_control_menu.js` ← Chat and Activity share "Wrap up" / "Hurry up" / "Pause" / "Stop earlier attempt" / "Stop now" with the same endpoints, stop policy, request-id retry and verbatim refusals, offering a work only the controls it lists; Pause is root-only and its `request_id` survives uncertain or `latch_pending` replies until a confirmed Pause or Resume retires it.
+- `task_control_menu.js` ← Chat and Activity share Wrap up, Hurry up, Pause, Stop earlier attempt and Stop now with the same endpoints, stop policy, request-id retry and verbatim refusals, offering a work only the controls it lists; Pause is root-only and its `request_id` survives uncertain or `latch_pending` replies until a confirmed Pause or Resume retires it.
 
 `confirm_dialog.js::openConfirmDialog` owns browser dialogs: confirm returns a strict boolean, input `{confirmed, value}`, alert one acknowledgement; Cancel, Close, backdrop, Escape and supersession never confirm. Native `window.prompt`/`confirm`/`alert` are forbidden: shells render them unevenly, they block the event loop, PyWebView's prompt fails silently. Header Restart and Settings "Restart now" share `chat_activity.js::confirmAndSendRestart`: a fresh `/api/state` census warns of unfinished Pause or an unreadable state, then one `/restart` with `queue:false`; what stops, returns or stays held: §9 "Retention". `model_chooser.js` shares only popup geometry: fixed choices stay native selects; arbitrary and saved unknown model IDs stay editable.
 
@@ -192,7 +192,7 @@ Classic entries, `.mjs` included, still run inline; `entry_type: module` opts in
 
 #### Author UI kit
 
-Optional author controls reuse the installed `web/ui.css` and `modules/ui_primitives.js` (no second declarative renderer), read from the builtin tree by `server_web.read_author_kit_assets()` (§4) with no endpoint, cache or state; recipes: `docs/examples/author_ui_kit/`. Authors may override or omit the kit; its failed load stays inside the author application.
+Optional author controls reuse the installed `web/ui.css` and `modules/ui_primitives.js` (no second declarative renderer), read by `server_web.read_author_kit_assets()` (§4) from the builtin tree with no endpoint, cache or state; recipes: `docs/examples/author_ui_kit/`. Authors may override or omit the kit; a failed load stays in their application.
 
 #### Out-of-process extension responses
 
@@ -244,6 +244,8 @@ Connect renders typed URL/code: `credential_profile_required` + `add_named_accou
 
 `harness_maintenance.js` adds one program row per family, including maintenance-only families without account actions. Engine facts supply selected/baseline versions and update/return/latest-check capabilities. Exact engine text waits under Details. Lost replies keep key/body; inventory rejoins accepted operations with progress, cancel and partial effects. Existing visible ticks poll; drafts survive refresh and controls wrap across desktop/mobile/embedded clients. Inspection never wakes or logs in; Update never retries a task (§6 Vendor program maintenance).
 
+**Restart Claudexor** (`claudexor_restart.js`, Accounts toolbar) replaces the engine process after the owner confirms which runs end (DESIGN §7; CLIENT_CONTRACT §13); the header Restart keeps it. The CLI update flow and the missing-executable banner point here.
+
 #### Available subagents and the review pool
 
 **Available subagents** is the single task-actor editor, its rows the reviewers too: the list-level Delegation switch (`enabled`) and up to `MAX_CONFIGURED_SUBAGENTS` stable rows are the saved `OUROBOROS_SUBAGENTS` intent. Each card is an open editor (`subagents_settings.js`; anatomy: DESIGN §6): its `enabled` switch and Reviewer mark; Source and Model, account pin (empty = rotation), effort (Auto = the chat range; a level in the model name is read-only, follows the model in place and retires a pin), a session's Access (Full system access by default, Working files or Read only; running tasks keep their captured profile); Description (`recommended_use`, the one prose field); Processing; Details & history. Drafted until the section's one Save; switched off, still editable. A row is named by its handle (route target plus effective non-default facets, as `codex=gpt-6-astra/xhigh`; `subagent_handle`), never a stored label that rots on re-pointing; `subagent_id` is a hidden join key. Twin engines save only when both rows are marked Reviewer or exactly one carries a `minted_from` origin.
@@ -260,4 +262,4 @@ Settings save sorts keys into three effect classes, never claiming all are live 
 
 ### Visual verification policy
 
-Visual verification is governed by DEVELOPMENT §11 "Responsive and accessible behavior" and `docs/CHECKLISTS.md`.
+Visual verification: DEVELOPMENT §11 "Responsive and accessible behavior" and `docs/CHECKLISTS.md`.

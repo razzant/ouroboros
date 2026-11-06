@@ -110,6 +110,7 @@ def collect_routes(
         api_claudexor_login,
         api_claudexor_login_job,
         api_claudexor_login_job_reconcile,
+        api_claudexor_restart,
         api_claudexor_status,
         api_claudexor_wake,
     )
@@ -326,6 +327,7 @@ def collect_routes(
         *harness_maintenance_routes(),
         Route("/api/claudexor/quota/refresh", endpoint=api_claudexor_quota_refresh, methods=["POST"]),
         Route("/api/claudexor/wake", endpoint=api_claudexor_wake, methods=["POST"]),
+        Route("/api/claudexor/restart", endpoint=api_claudexor_restart, methods=["GET", "POST"]),
         Route("/api/claudexor/login", endpoint=api_claudexor_login, methods=["POST"]),
         Route(
             "/api/claudexor/login/{job_id}",

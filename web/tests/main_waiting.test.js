@@ -595,7 +595,7 @@ test('an owner-action message says its task\'s state as the owner\'s move, besid
     // Both keep their look and carry the one touch hit area (ui.css .ui-hit-area), like a task card's.
     assert.equal(resume.className, 'btn btn-sm btn-primary ui-hit-area');
     const stop = find(main.actionNode('limit'), node => node.tagName === 'BUTTON' && node.textContent === 'Stop…');
-    assert.equal(stop.className, 'btn btn-xs btn-default ui-hit-area');
+    assert.equal(stop.className, 'btn btn-sm btn-default ui-hit-area');
     main.waiting.setConnected(false);
     for (const id of ['limit', 'resumed', 'access']) assert.deepEqual(look(id), ['Activity unconfirmed', 'neutral', 'ring/ink'], id);
 });

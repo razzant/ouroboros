@@ -34,7 +34,14 @@ test('the reader keeps the single projection: service label, revision, sanitized
 test('Connect starts Silent and still offers connected connectors with their exact place count', () => {
     const html = connectListHtml({ connectors: [github], places: [place, { ...place, id: 'gh-2' }] });
     assert.match(strip(html), /It starts Silent: it hears and thinks there and sends nothing until you make it Active\./);
-    assert.match(strip(html), /Connected · 2 places · Connect another/);
+    // The count is the row's meta line, ending where its fact ends (no separator leading into the button).
+    assert.match(html, /<div class="harness-account-meta">Connected · 2 places<\/div>/);
+    assert.doesNotMatch(strip(html), /places ·/);
+    assert.match(strip(html), /Connected · 2 places Connect another/);
+    // A connector that is simply on says nothing more; an exception keeps its words beside the count.
+    assert.doesNotMatch(connectListHtml({ connectors: [{ ...github, readiness: { text: 'Connector on', tone: 'ok' } }] }), /Connector on/);
+    assert.match(connectListHtml({ connectors: [{ ...github, readiness: { text: 'Off in Skills', tone: 'warn' } }], places: [place] }),
+        /Connected · 1 place · <span data-tone="warn">Off in Skills<\/span>/);
     assert.match(html, /data-i18n-authored>GitHub</);
     assert.doesNotMatch(connectListHtml({ connectors: [github] }), /Connect another/);
     assert.match(connectListHtml({ connectors: [] }), /No installed connector/);

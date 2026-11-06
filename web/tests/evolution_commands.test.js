@@ -79,7 +79,8 @@ test('the campaign offers the commands its state allows: Start when off, Pause a
         await flush();
         const start = env.doc.getElementById('evo-start');
         const pause = env.doc.getElementById('evo-stop');
-        assert.deepEqual([start.hidden, start.disabled, pause.hidden], [false, false, true]);
+        // Pause keeps its place while there is nothing to pause: present and inactive, so no state change moves a neighbour.
+        assert.deepEqual([start.hidden, start.disabled, pause.hidden, pause.disabled], [false, false, false, true]);
         assert.equal(env.doc.getElementById('evo-campaign-note').textContent, 'Improvement cycles run only during a campaign.');
         assert.equal(env.doc.getElementById('evo-campaign-chip').textContent, 'Off');
 
@@ -94,6 +95,89 @@ test('the campaign offers the commands its state allows: Start when off, Pause a
         assert.equal(env.doc.getElementById('evo-campaign-note').textContent, 'Evolution task is running now.');
         const lines = env.doc.body.querySelectorAll('.evo-campaign-lines p').map((node) => node.textContent);
         assert.deepEqual(lines, ['Objective: Make the history tab fast', 'Cycle 3 · 2 attempts · Budget left $12.50']);
+    } finally {
+        dispose?.();
+        globalThis.fetch = savedFetch;
+        env.restore();
+    }
+});
+
+test('a Start the runtime refused says Starting… only for its window, then the state again with Start offered', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.parse('2026-11-06T12:00:00Z') });
+    const env = installDomDouble();
+    const savedFetch = globalThis.fetch;
+    const runtime = { runtime_mode: 'advanced', evolution_state: { status: 'disabled', enabled: false } };
+    globalThis.fetch = async (url) => (String(url).includes('/api/command') ? Response.json({ ok: true })
+        : Response.json(String(url).includes('evolution-data') ? NO_HISTORY : runtime));
+    let dispose;
+    try {
+        const mount = env.doc.createElement('div');
+        env.doc.body.append(mount);
+        const ws = new WS('ws://unused');
+        ({ dispose } = initEvolution({ ws, mount, state: { activePage: 'dashboard', dashboardActiveSubtab: 'evolution' },
+            dialog: async () => ({ confirmed: true, value: '' }) }));
+        ws.emit('open');
+        await flush();
+        const chip = env.doc.getElementById('evo-campaign-chip');
+        const off = chip.textContent;
+        env.doc.getElementById('evo-start').click();
+        await flush();
+        assert.equal(chip.textContent, 'Starting…', 'the queued Start is said while the runtime may still apply it');
+        t.mock.timers.tick(9000);
+        ws.emit('open');  // a read inside the window still says off: still the Start
+        await flush();
+        assert.equal(chip.textContent, 'Starting…');
+        t.mock.timers.tick(1000);  // the window's own read: still off, so the runtime refused it
+        await flush();
+        assert.equal(chip.textContent, off, 'a refused Start never says Starting… for ever');
+        assert.equal(env.doc.getElementById('evo-start').disabled, false, 'and Start is offered again');
+    } finally {
+        dispose?.();
+        globalThis.fetch = savedFetch;
+        env.restore();
+    }
+});
+
+test('a Start the runtime has not applied yet says Starting… beside the Pause it may need; no button moves', async () => {
+    const env = installDomDouble();
+    const savedFetch = globalThis.fetch;
+    let runtime = { runtime_mode: 'advanced', evolution_state: { status: 'disabled', enabled: false },
+        bg_consciousness_enabled: true, bg_consciousness_state: { status: 'due' } };
+    const commands = [];
+    globalThis.fetch = async (url, init) => {
+        if (String(url).includes('/api/command')) { commands.push(JSON.parse(init.body).cmd); return Response.json({ ok: true }); }
+        return Response.json(String(url).includes('evolution-data') ? NO_HISTORY : runtime);
+    };
+    const opened = [];
+    let dispose;
+    try {
+        const mount = env.doc.createElement('div');
+        env.doc.body.append(mount);
+        const ws = new WS('ws://unused');
+        ({ dispose } = initEvolution({ ws, mount, state: { activePage: 'dashboard', dashboardActiveSubtab: 'evolution' },
+            dialog: async () => ({ confirmed: true, value: '' }), openDashboardTab: (tab) => opened.push(tab) }));
+        ws.emit('open');
+        await flush();
+        const ids = () => env.doc.getElementById('evo-review').parent.children.filter((node) => !node.hidden).map((node) => node.id);
+        const chip = env.doc.getElementById('evo-campaign-chip');
+        const pause = env.doc.getElementById('evo-stop');
+        assert.deepEqual(ids(), ['evo-start', 'evo-stop', 'evo-review']);
+        env.doc.getElementById('evo-start').click();
+        await flush();
+        assert.deepEqual(commands, ['/evolve on']);
+        // The state still says off: the chip says the Start, never "Off" beside an offered Pause (U072).
+        assert.deepEqual([chip.textContent, chip.getAttribute('data-tone'), pause.disabled], ['Starting…', 'neutral', false]);
+        assert.equal(env.doc.getElementById('evo-start').disabled, false, 'a Start that never applies stays retryable');
+        assert.deepEqual(ids(), ['evo-start', 'evo-stop', 'evo-review'], 'every button keeps its place');
+        runtime = { ...runtime, evolution_state: { status: 'running', enabled: true } };
+        ws.emit('open');
+        await flush();
+        assert.deepEqual([chip.textContent, pause.disabled], ['Running', false]);
+        // Consciousness is one quiet pointer: a due wake is neutral, and a press opens its tab (U071).
+        const mind = env.doc.getElementById('evo-consciousness');
+        assert.deepEqual([mind.textContent, mind.getAttribute('data-tone')], ['Consciousness: due ›', 'neutral']);
+        mind.click();
+        assert.deepEqual(opened, ['consciousness']);
     } finally {
         dispose?.();
         globalThis.fetch = savedFetch;
@@ -137,8 +221,9 @@ test('Start waits for a current state: off while loading or after a failed read,
         mounted.ws.emit('open');
         await flush();
         assert.deepEqual([start().textContent, pause().hidden, pause().disabled], ['New objective…', false, false]);
-        assert.equal(env.doc.getElementById('evo-consciousness-allowance').textContent,
-            'Allowance (24 h): ≥ $1.25 / $10.00 (ledger integrity degraded)');
+        // Consciousness is one pointer to its tab; its allowance is that tab's fact, never repeated here (U071).
+        assert.equal(env.doc.getElementById('evo-consciousness-allowance'), null);
+        assert.equal(env.doc.getElementById('evo-consciousness').textContent, 'Consciousness: sleeping ›');
         assert.equal(freshness().hidden, true);
 
         mode = 'fail';
@@ -216,7 +301,8 @@ test('the campaign follows every state answer of the page: a Pause the runtime a
         runtime = { runtime_mode: 'advanced', evolution_state: { status: 'disabled', enabled: false } };
         await pageRead();
         await flush();
-        assert.deepEqual([chip.textContent, start.textContent, start.disabled, pause.hidden], ['Off', 'Start campaign…', false, true],
+        assert.deepEqual([chip.textContent, start.textContent, start.disabled, pause.hidden, pause.disabled],
+            ['Off', 'Start campaign…', false, false, true],
             'the page’s next read brings what the runtime applied, without a poll of Evolution’s own');
 
         globalThis.fetch = async () => { throw new TypeError('Failed to fetch'); };

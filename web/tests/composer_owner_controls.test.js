@@ -640,6 +640,30 @@ test('closed, the capsules keep their names while the line holds them; a narrowe
     m.controls.destroy();
 });
 
+test('closed names give way one at a time, the longest first: two equal values keep the words that tell them apart (U123)', () => {
+    const m = mountPair();
+    const name = (capsule) => capsule.querySelector('.chat-capsule-name');
+    name(m.contextEl).getBoundingClientRect = () => ({ top: 0, bottom: 20, width: 52 });
+    name(m.effortEl).getBoundingClientRect = () => ({ top: 0, bottom: 20, width: 40 });
+    // The line holds the row once Context's longer name has stepped aside.
+    m.effortEl.getBoundingClientRect = () => {
+        const top = m.contextEl.dataset.nameFit === 'off' ? 0 : 40;
+        return { top, bottom: top + 32, width: 130 };
+    };
+    m.controls.syncState({});
+    assert.equal(m.contextEl.dataset.nameFit, 'off', 'the longest name goes first');
+    assert.equal(m.effortEl.dataset.nameFit, undefined, 'the rest keep theirs');
+    assert.equal(m.row.dataset.ownerCompact, undefined, 'and the row is not compact');
+    // A line that still wraps without every name compacts the row as before.
+    m.effortEl.getBoundingClientRect = () => ({ top: 40, bottom: 72, width: 130 });
+    m.controls.syncState({});
+    assert.deepEqual([m.contextEl.dataset.nameFit, m.effortEl.dataset.nameFit, m.row.dataset.ownerCompact], ['off', 'off', 'true']);
+    m.effortEl.getBoundingClientRect = () => ({ top: 0, bottom: 32, width: 130 });
+    m.controls.syncState({});
+    assert.deepEqual([m.contextEl.dataset.nameFit, m.effortEl.dataset.nameFit], [undefined, undefined], 'room again: every name back');
+    m.controls.destroy();
+});
+
 test('a phone\'s ☰, gone down beside the field while the row folds, is not the line the capsules are read by', () => {
     const m = mountPair();
     const menu = new ElementStub('button', m.doc);

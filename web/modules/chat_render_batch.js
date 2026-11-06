@@ -5,7 +5,6 @@ import { foldWaitRow } from './task_checkpoints.js';
 import { measure } from './layout_batch.js';
 import { appendDelegatedItem, reconcileDelegatedItems } from './delegated_activity.js';
 import { isStoreMigrating } from './api_client.js';
-import { showToast } from './toast.js';
 import { tr } from './i18n.js';
 
 const nodePosition = node => node?.dataset?.historySource
@@ -20,13 +19,6 @@ export const feedIsEmpty = messages => Array.from(messages.children).every(node 
 
 const GAP_NOTE = 'Some saved history is not loaded. Shown messages may have gaps.';
 const gapNoticeDocs = new WeakSet();
-const defaultGapNotice = (text, messages) => {
-    if (typeof globalThis.document?.getElementById === 'function' && typeof globalThis.document?.createElement === 'function'
-        && globalThis.document?.body?.appendChild) {
-        return showToast(text, 'info', { haptic: false, dismissLabel: 'Dismiss history notice',
-            host: messages.closest('.page, .chat-instance-panel') });
-    }
-};
 
 /**
  * History chrome only; the chat instance retains navigation and reading state.
@@ -40,7 +32,9 @@ const defaultGapNotice = (text, messages) => {
  * button remains the only return-to-present control.
  */
 export function createHistoryControls(messagesDiv, statusHost = null, {
-    onGapNotice = defaultGapNotice, isVisible = () => messagesDiv.isConnected && messagesDiv.offsetParent !== null,
+    // The gap's fact stands at the edge of history it concerns (the note at the feed's start); a room announces nothing
+    // over its newest rows (U021). A caller with a place for a one-time announcement passes it here.
+    onGapNotice = null, isVisible = () => messagesDiv.isConnected && messagesDiv.offsetParent !== null,
 } = {}) {
     const doc = messagesDiv.ownerDocument;
     const root = doc.createElement('div');

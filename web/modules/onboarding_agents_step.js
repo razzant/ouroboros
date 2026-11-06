@@ -522,7 +522,7 @@ export function familyRowHtml(family, { status, connected = false, connectable =
                 </span>
                 <span class="agent-family-status" data-tone="${escapeHtml(status.tone)}">${escapeHtml(status.text)}</span>
             </span>
-            ${connectable ? `<button type="button" class="btn btn-secondary" data-agent-connect="${escapeHtml(family.harness)}">
+            ${connectable ? `<button type="button" class="btn btn-default" data-agent-connect="${escapeHtml(family.harness)}">
                 ${escapeHtml(connected ? 'Add another' : 'Connect')}
             </button>` : ''}
         </div>

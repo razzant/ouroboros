@@ -107,7 +107,7 @@ test('the mounted list holds its order while open, settles ended work and only n
         const anchor = header.children.find((child) => child.classList.contains('rw-shade-anchor'));
         const surface = anchor.children.find((child) => child.classList.contains('rw-surface'));
         assert.ok(surface.classList.contains('rw-shade'));
-        const list = surface.children[0];
+        const list = surface.querySelector('.rw-list');
         const ids = () => list.children.map((row) => row.dataset.id);
         assert.ok(trigger.contains(badge), 'the real status badge is the control’s word');
         assert.equal(trigger.dataset.tone, 'live');
@@ -184,7 +184,7 @@ test('View question reaches the asking task of a work, not its first root', asyn
         });
         const trigger = titleRow.children.find((child) => child.classList.contains('rw-trigger'));
         const list = header.children.find((child) => child.classList.contains('rw-shade-anchor')).children
-            .find((child) => child.classList.contains('rw-surface')).children[0];
+            .find((child) => child.classList.contains('rw-surface')).querySelector('.rw-list');
         const ask = async () => {
             trigger.click();
             list.children[0].children.find((child) => child.classList.contains('rw-verb')).children[0].click();
@@ -224,7 +224,7 @@ test('a pending send keeps its slot until its work is listed; the work takes the
             ws: { isConnected: () => true }, reading: { cancel() {}, scroll() {} },
             works: () => workState(works), liveCardRecords: records, pendingSubmissions: pending });
         const trigger = titleRow.children.find(el => el.classList.contains('rw-trigger'));
-        const list = header.children.find(el => el.classList.contains('rw-shade-anchor')).children[0].children[0];
+        const list = header.children.find(el => el.classList.contains('rw-shade-anchor')).children[0].querySelector('.rw-list');
         const turns = () => list.children.filter(el => el.dataset.id === 'turn-1');
         trigger.click();
         const card = node('div', 'chat-live-block', messages);
@@ -266,7 +266,7 @@ test('a work the server lists but cannot confirm keeps its Stop; a work kept fro
         shade = createRoomWork({ page, statusBadge: badge, messagesDiv: messages, ws: { isConnected: () => true },
             reading: { cancel() {}, scroll() {} }, works: () => state, liveCardRecords: new Map(), pendingSubmissions: new Map() });
         titleRow.children.find((el) => el.classList.contains('rw-trigger')).click();
-        const list = header.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0].children[0];
+        const list = header.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0].querySelector('.rw-list');
         const row = () => list.children.find((el) => el.dataset.id === 't-unknown');
         const more = () => row().children.find((el) => el.classList.contains('rw-more-slot')).children.length;
         assert.equal(row().dataset.tone, 'unknown');
@@ -299,7 +299,7 @@ test('a row names its card\'s coined name first, then its work\'s own name; a ho
                 room('working')), liveCardRecords: new Map([['t-run', record]]), pendingSubmissions: new Map(),
             hostReady: () => ready });
         titleRow.children.find((el) => el.classList.contains('rw-trigger')).click();
-        const list = header.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0].children[0];
+        const list = header.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0].querySelector('.rw-list');
         const row = () => list.children.find((el) => el.dataset.id === 't-run');
         const name = () => row().querySelector('.rw-name').textContent;
         const more = () => row().children.find((el) => el.classList.contains('rw-more-slot')).children.length;
@@ -458,10 +458,10 @@ function projectRoom(mount) {
     return { bar, titleRow, name, chip, page, badge, messages: node('div', 'chat-messages', page) };
 }
 
-// DESIGN "Shell": a Project's name keeps one line and wins its bar. On a phone a name that line still cuts makes the
-// consciousness chip show its brain alone (the chip's name keeps the whole state); a desk keeps the chip's word and
-// the name ends in an ellipsis; a name that fits leaves the chip whole.
-test('a Project bar gives its one-line name the chip\'s word on a phone only while the name is cut', () => {
+// DESIGN "Shell": a Project's name keeps one line and wins its bar. Where the room covers Main (a phone, a finger's docked
+// column) a name that line still cuts makes the consciousness chip show its brain alone (the chip's name keeps the whole
+// state); a desk keeps the chip's word and the name ends in an ellipsis; a name that fits leaves the chip whole.
+test('a Project bar gives its one-line name the chip\'s word where the room covers Main, only while the name is cut', () => {
     const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
     let work, resized = null, relayout = null;
     try {
@@ -492,6 +492,12 @@ test('a Project bar gives its one-line name the chip\'s word on a phone only whi
         root.dataset.layout = 'docked';
         relayout();
         assert.equal(fit(), 'whole', 'a desk keeps the chip\'s word beside a cut name');
+        root.dataset.pointer = 'coarse';
+        relayout();
+        assert.equal(fit(), 'mark', 'a finger\'s docked Project covers Main: the cut name takes the word');
+        root.dataset.pointer = 'fine';
+        relayout();
+        assert.equal(fit(), 'whole', 'a mouse again: the panel beside Main keeps the chip\'s word');
         root.dataset.layout = 'stack';
         relayout();
         assert.equal(fit(), 'mark', 'back on a phone the cut name takes the word again');
@@ -516,7 +522,7 @@ test('a Project\'s list opens on its whole name, also with no work, and says whe
         const trigger = titleRow.children.find((el) => el.classList.contains('rw-trigger'));
         const caret = trigger.children.find((el) => el.classList.contains('rw-caret'));
         const surface = bar.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0];
-        const [head, list, note] = surface.children;
+        const [head, list, note] = ['.rw-title', '.rw-list', '.rw-note'].map((selector) => surface.querySelector(selector));
         assert.ok(head.classList.contains('rw-title') && list.classList.contains('rw-list'), 'the name comes first');
         assert.equal(trigger.disabled, false, 'an empty Project\'s title still opens its list');
         assert.equal(caret.hidden, false, 'and its caret says so');
@@ -576,7 +582,7 @@ test('an unloaded row reads the page around its task and lands on its card; one 
             works: () => workState([...works.values()]), liveCardRecords: records, pendingSubmissions: new Map() });
         const trigger = titleRow.children.find((el) => el.classList.contains('rw-trigger'));
         const anchor = header.children.find((el) => el.classList.contains('rw-shade-anchor'));
-        const list = anchor.children.find((el) => el.classList.contains('rw-surface')).children[0];
+        const list = anchor.children.find((el) => el.classList.contains('rw-surface')).querySelector('.rw-list');
         const row = (id) => list.children.find((el) => el.dataset.id === id);
         const main = (id) => row(id).querySelector('.rw-main');
         const text = (el) => [el.textContent, ...el.children.map(text)].join(' ');
@@ -695,7 +701,7 @@ test('Back reads the page it left again, stays after a failed read and takes a f
             works: () => workState([work_({ activity_id: 't-old', kind: 'direct_chat', chat_id: 1 })]),
             liveCardRecords: records, pendingSubmissions: new Map() });
         const trigger = titleRow.children.find((el) => el.classList.contains('rw-trigger'));
-        const list = header.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0].children[0];
+        const list = header.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0].querySelector('.rw-list');
         const main = () => list.children.find((el) => el.dataset.id === 't-old').querySelector('.rw-main');
         const back = page.children.find((el) => el.classList.contains('rw-back'));
         const live = page.children.find((el) => el.getAttribute('role') === 'status');
@@ -760,7 +766,7 @@ for (const asPanel of [false, true]) for (const [words, expected] of [
             ws: { isConnected: () => true }, reading: { cancel() {}, scroll() {} },
             works: () => workState(works), liveCardRecords: new Map([['t-run', record]]), pendingSubmissions: new Map() });
         titleRow.children.find(el => el.classList.contains('rw-trigger')).click();
-        const list = header.children.find(el => el.classList.contains('rw-shade-anchor')).children[0].children[0];
+        const list = header.children.find(el => el.classList.contains('rw-shade-anchor')).children[0].querySelector('.rw-list');
         assert.equal(list.children[0].querySelector('.rw-focus').textContent, 'Testing the export.');
         Object.assign(record, { finished: true, phase: words.causeHeld ? 'error' : 'done' });
         works = [];

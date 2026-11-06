@@ -912,6 +912,13 @@
       "acceptance_clause": "The handbook this task requires could not be read."
     },
     {
+      "name": "a helper the host could not start says why in words, not its code",
+      "record": {"status": "failed", "reason_code": "subagent_executor_unavailable", "outcome_axes": {"execution": {"status": "infra_failed", "reason_code": "subagent_executor_unavailable"}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "This helper could not start because its route was unavailable; it spent nothing."
+    },
+    {
       "name": "a reaped task names its absolute ceiling in owner words",
       "record": {"status": "failed", "reason_code": "absolute_ceiling", "outcome_axes": {"lifecycle": {"status": "failed"}, "execution": {"status": "infra_failed", "reason_code": "absolute_ceiling"}, "review": {"status": "skipped", "trigger": "supervisor_terminal"}}},
       "phase": "error",

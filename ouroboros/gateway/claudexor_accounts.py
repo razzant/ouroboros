@@ -1,11 +1,12 @@
-"""Agent accounts HTTP surface (D30): six THIN proxies, zero auth logic.
+"""Agent accounts HTTP surface (D30): seven THIN proxies, zero auth logic.
 
 Ouroboros's own Claudexor daemon (``claudexor_daemon.py``) owns every account
 fact — profiles, login jobs, device-code custody, the two honest verification
 statuses, quota windows. The browser cannot talk to the daemon directly (its
 control plane is loopback-Origin-guarded and bearer-token'd; the token must
 never reach a page), so these handlers translate: status aggregation, the
-owner-initiated daemon wake behind Refresh or explicit Agents activation, login job
+owner-initiated daemon wake behind Refresh or explicit Agents activation, the owner's
+Restart Claudexor (preview and restart, ``claudexor_restart.py``), login job
 create, login job read/cancel/input, login job termination reconcile, and
 the credential-profile row actions — removal and the Enabled toggle,
 DELETE/PATCH on one route. Nothing here interprets a credential and nothing
@@ -601,6 +602,48 @@ async def api_claudexor_wake(request: Request) -> JSONResponse:
         return json_error(f"{type(exc).__name__}: Claudexor wake failed")
 
 
+async def api_claudexor_restart(request: Request) -> JSONResponse:
+    """GET/POST /api/claudexor/restart — the OWNER's Restart Claudexor (``claudexor_restart``).
+
+    GET is the passive preview: the live runs a restart would end, counted as this
+    Ouroboros's own and other programs', the serving engine and the checkout pin, and a
+    typed warning when the pin is below the serving engine. It starts nothing.
+
+    POST ``{token}`` restarts for the preview that token names, then answers the ``restart``
+    receipt and the freshly read ``status`` beside it: the stop's own outcome and whether
+    an engine answers again (a stopped engine that did not start is 200 with the reason,
+    not an error that hides the stop). A preview that no longer holds is 409
+    ``restart_preview_stale`` with the fresh ``preview``; nothing was stopped.
+    """
+    from ouroboros.claudexor_restart import RestartRefused, restart_engine, restart_preview
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    def _restart(token: str) -> Dict[str, Any]:
+        receipt = restart_engine(token)
+        try:
+            status = _status_payload(include_models=False, join=False)
+        except Exception as exc:  # the restart happened: its receipt is never answered as a refusal
+            log.exception("api_claudexor_restart: the status read after the restart failed")
+            status = {"error": f"{type(exc).__name__}: Claudexor status failed"}
+        return {"status": status, "restart": receipt}
+
+    try:
+        if request.method == "GET":
+            return JSONResponse(await asyncio.to_thread(restart_preview))
+        body = await request_json_or(request, {})
+        token = body.get("token") if isinstance(body, dict) else None
+        if not isinstance(token, str) or not token:
+            return json_error("token is required: the preview this restart was confirmed for", 400)
+        return JSONResponse(await asyncio.to_thread(_restart, token))
+    except RestartRefused as exc:
+        return json_error(str(exc), 409, code=exc.code, **({"preview": exc.preview} if exc.preview else {}))
+    except ClaudexorUnavailable as exc:
+        return json_error(f"{exc.code}: {exc}", 503, code=exc.code)
+    except Exception as exc:
+        log.exception("api_claudexor_restart failed (%s)", request.method)
+        return json_error(f"{type(exc).__name__}: Claudexor restart failed")
+
+
 def _build_login_request(harness: str, profile_id: str, transport: str,
                          login_flow: str, *, disclosure_native: bool = False) -> Dict[str, Any]:
     """The setup-job request body, honoring the engine's wire contract.
@@ -1055,6 +1098,7 @@ __all__ = [
     "api_claudexor_login",
     "api_claudexor_login_job",
     "api_claudexor_login_job_reconcile",
+    "api_claudexor_restart",
     "api_claudexor_status",
     "api_claudexor_wake",
 ]

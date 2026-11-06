@@ -6,6 +6,7 @@
 // source that could not be read says so in the status line without blanking
 // the others. Install returns at once; the card follows the skill's real state.
 import { applyMasonry } from './masonry.js';
+import { bindScrollFade } from './scroll_fade.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { skillSourcesApi } from './api_client.js';
 import { installedSkillModel } from './skill_card_renderer.js';
@@ -165,10 +166,10 @@ export function renderBrowseCard(item, { source, state, categoryLabels = new Map
     const cats = [connects ? chipHtml(connects, 'neutral') : '', ...(showCategory ? (item.category || [])
         .filter((cat) => cat !== CONNECTORS || !connects).map((cat) => chipHtml(categoryLabels.get(cat) || cat, 'neutral')) : [])].join('');
     const icon = connects ? `<span class="skills-card-icon" aria-hidden="true">${skillIconHtml(item.icon, 18)}</span>` : '';
-    return `<article class="marketplace-card skills-head-card" data-item="${id}" data-source="${escapeHtml(item.source_id)}">
-        <div class="skills-head-title">${icon}<button type="button" class="skills-card-name" data-browse-action="open" data-item="${id}"><span data-i18n-authored>${escapeHtml(skillTitle(item))}</span><span class="skills-card-name-more" aria-hidden="true">›</span></button>${marks}</div>
+    return `<article class="ui-card marketplace-card skills-head-card" data-item="${id}" data-source="${escapeHtml(item.source_id)}">
+        <div class="skills-head-title">${icon}<button type="button" class="skills-card-name ui-hit-area" data-browse-action="open" data-item="${id}"><span data-i18n-authored>${escapeHtml(skillTitle(item))}</span><span class="skills-card-name-more" aria-hidden="true">›</span></button>${marks}</div>
         <p class="skills-card-purpose"${long ? ' data-clamped' : ''} data-i18n-authored>${escapeHtml(item.description || '')}</p>
-        ${long ? `<button type="button" class="skills-read-more" data-browse-action="open" data-item="${id}">Read more ›</button>` : ''}
+        ${long ? `<button type="button" class="skills-read-more ui-hit-area" data-browse-action="open" data-item="${id}">Read more ›</button>` : ''}
         <div class="skills-card-meta-lines">
             <div class="skills-card-who"><span data-i18n-authored>${escapeHtml(item.name)}</span> · ${catalogWhoHtml(item)}</div>
             ${facts ? `<div class="skills-card-facts">${escapeHtml(facts)}</div>` : ''}
@@ -208,7 +209,7 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
             <label class="ui-field-inline skills-browse-filter"><span>Sort</span><select class="ui-control" data-browse-sort aria-label="Sort"></select></label>
             <label class="skills-official-toggle"><span class="skills-switch"><input type="checkbox" role="switch" data-browse-official aria-checked="false"><span class="skills-switch-track" aria-hidden="true"><span class="skills-switch-thumb"></span></span></span><span>Official only</span></label>
         </div>`;
-    pane.innerHTML = '<div class="skills-browse"><div class="skills-category-strip" data-browse-categories role="group" aria-label="Categories"></div><div class="ui-status skills-browse-status" data-browse-status role="status" aria-live="polite"></div><div data-browse-board></div></div>';
+    pane.innerHTML = '<div class="skills-browse"><div class="skills-category-strip" data-browse-categories role="group" aria-label="Categories" data-scroll-x></div><div class="ui-status skills-browse-status" data-browse-status role="status" aria-live="polite"></div><div data-browse-board></div></div>';
     const searchInput = chrome.querySelector('[data-browse-search]');
     const sourceSelect = chrome.querySelector('[data-browse-source]');
     const sortSelect = chrome.querySelector('[data-browse-sort]');
@@ -216,6 +217,7 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
     const statusEl = pane.querySelector('[data-browse-status]');
     const board = pane.querySelector('[data-browse-board]');
     const categoriesEl = pane.querySelector('[data-browse-categories]');
+    if (categoriesEl) bindScrollFade(categoriesEl, { axis: 'x' });  // a phone's one scrolling line fades where chips hide
 
     const sourceById = () => new Map(state.sources.map((source) => [source.id, source]));
     const categoryLabels = () => new Map([...(state.catalog?.categories || []).map((cat) => [cat.id, cat.label || cat.id]), [CONNECTORS, 'Connectors']]);

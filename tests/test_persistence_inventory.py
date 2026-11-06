@@ -921,7 +921,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # 453 -> 454 (#2841): ``state/body_adoption/arm-deferred.json`` (a deferred exit arm), ``handoff.json`` now spelled
 # by the detached-HEAD repair guard and ``locks/git-bootstrap.lock`` (the ``locks/**`` row) join; ``switch.py`` and
 # ``installation_stop.py`` leave the scan, now copied into a staging sibling (all on the body adoption row).
-EXPECTED_SCAN_PATHS = 454
+# 454 -> 455 (supervisor-recovery, owner 2A): the Fault boot's admitted recovery turn and the generation
+# that admitted it, ``state/core_loss_recovery.json`` (``ouroboros/server_process.py``); its own row.
+EXPECTED_SCAN_PATHS = 455
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

@@ -15,7 +15,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ouroboros.gateway.tasks import api_tasks_create
-from ouroboros.project_naming import admission_names
+from ouroboros.project_naming import admission_names, derived_run_name
 from ouroboros.projects_registry import PROJECT_NAME_MAX
 from ouroboros.task_results import load_task_result
 
@@ -55,6 +55,34 @@ def test_a_long_first_line_is_capped_like_a_project_name():
 
 def test_an_empty_request_never_invents_a_name():
     assert admission_names({}, "") == ("", "")
+
+
+def test_a_listed_run_is_named_by_its_request_never_by_its_whole_order():
+    child = {"text": "[SUBAGENT ROLE]\nreviewer\n\n[OBJECTIVE]\nCheck it", "description": "Check the parser\nthen more"}
+    assert derived_run_name(child) == "Check the parser", "a child's role block is not its name"
+    assert derived_run_name({"text": "Why did you stop?\nThe whole order follows"}) == "Why did you stop?"
+    assert derived_run_name({"title": "Audit", "text": "x"}) == "Audit"
+    assert derived_run_name({"suggested_name": "Coined later", "text": "x"}) == "Coined later"
+    # A Presence turn's text is its correspondent's words: only a stored name names it.
+    assert derived_run_name({"text": "hello from a friend", "_presence_turn": True}) == ""
+    assert derived_run_name({"text": "x", "_presence_turn": True, "suggested_name": "Work"}) == "Work"
+    assert derived_run_name({}) == ""
+
+
+def test_the_queue_activity_reads_carries_each_runs_name(tmp_path):
+    import json
+
+    from ouroboros.gateway.tasks import _queue_snapshot
+
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "queue_snapshot.json").write_text(json.dumps({"running": [], "pending": [
+        {"id": "a", "task": {"id": "a", "text": "Fix the build\n" + "detail " * 200}},
+        {"id": "b", "task": {"id": "b", "text": "hi", "_presence_turn": True}},
+        {"id": "c", "task": {"id": "c", "text": "x", "suggested_name": "Named"}}]}), encoding="utf-8")
+    tasks = {row["id"]: row["task"] for row in _queue_snapshot(tmp_path)["pending"]}
+    assert tasks["a"]["suggested_name"] == "Fix the build"
+    assert "suggested_name" not in tasks["b"]
+    assert tasks["c"]["suggested_name"] == "Named"
 
 
 @pytest.fixture()

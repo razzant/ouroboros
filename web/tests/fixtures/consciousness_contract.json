@@ -740,7 +740,7 @@
         "ledger_integrity_degraded": false
       }
     ],
-    "recent_wakes_coverage": "wakes that reached a model call in the last 48 h"
+    "recent_wakes_coverage": "Wakes that reached a model call in the last 48 h"
   },
   "history": {
     "messages": [
