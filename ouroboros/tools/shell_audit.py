@@ -44,7 +44,7 @@ from ouroboros.tools.tool_result import (
     _published_tool_result,
     _replace_tool_result,
 )
-from ouroboros.tools.verify import check_exit_masking
+from ouroboros.tools.verify import check_exit_masking, exit_masking_note
 from ouroboros.workspace_executor import (
     BackendPathNoMatch,
     executor_ref_from_ctx,
@@ -381,11 +381,7 @@ def _masked_green_disclosure(ctx: ToolContext, result: str, cmd) -> str:
     masked, reasons = check_exit_masking([str(part) for part in (cmd or [])])
     if not masked:
         return result
-    text = (
-        f"{result}\n\nEXIT_MASKING_NOTE: exit_code=0 belongs to the last stage "
-        f"({', '.join(reasons)}); an upstream failure cannot change it — drop the "
-        "filter, use `set -o pipefail`, or check each stage."
-    )
+    text = f"{result}\n\n{exit_masking_note(reasons)}"
     base = _published_tool_result(ctx, None)
     if (
         not isinstance(base, ToolResult)
