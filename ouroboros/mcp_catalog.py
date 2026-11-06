@@ -66,7 +66,7 @@ def sanitize_items(items: list, redact: Callable[[Any], str]) -> tuple[list, boo
 
 def attempt_envelope(cfg: Any, previous: dict | None, *, at: str, error: str = "",
                      items: list | None = None, complete: bool = False,
-                     schema_omissions: list[str] | None = None, instructions: str = "") -> dict:
+                     schema_omissions: list[str] | None = None, instructions: str = "", code: str = "") -> dict:
     """Failures/partial attempts cannot erase a complete last-known listing or its instructions."""
     envelope = copy.deepcopy(previous) if previous else {
         "_schema_version": 1, "server_id": cfg.id, "identity": identity(cfg),
@@ -76,7 +76,7 @@ def attempt_envelope(cfg: Any, previous: dict | None, *, at: str, error: str = "
         envelope.update(items=items, complete=complete, listed_at=at, instructions=instructions)
         envelope["schema_omissions"] = list(schema_omissions or [])
     envelope["latest_attempt"] = {"at": at, "ok": items is not None, "error": error,
-                                  "partial": items is not None and not complete}
+                                  "partial": items is not None and not complete, **({"code": code} if code else {})}
     return envelope
 
 

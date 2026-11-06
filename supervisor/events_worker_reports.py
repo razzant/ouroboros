@@ -199,6 +199,27 @@ def _handle_ui_i18n_updated(evt: Dict[str, Any], ctx: Any) -> None:
     ctx.bridge.broadcast({"type": "ui_i18n_updated", "language": language.strip(), "revision": revision})
 
 
+def _handle_mcp_signed_in(evt: Dict[str, Any], ctx: Any) -> None:
+    """A turn finished a remote MCP server's sign-in (``mcp_sign_in``); this process owns the tool
+    catalog, so it lists that server again, on its own thread: a listing waits on the network."""
+    server_id = evt.get("server_id")
+    if not isinstance(server_id, str) or not server_id.strip():
+        return
+
+    def _list() -> None:
+        try:
+            from ouroboros.mcp_client import ensure_configured_from_settings, get_manager
+
+            ensure_configured_from_settings()
+            get_manager().refresh_server(server_id.strip())
+        except Exception:
+            log.warning("MCP listing after sign-in failed for %s", server_id, exc_info=True)
+
+    import threading
+
+    threading.Thread(target=_list, name="mcp-signed-in", daemon=True).start()
+
+
 def _handle_update_progress_changed(evt: Dict[str, Any], ctx: Any) -> None:
     """A turn saved the update description (``record_update_description``); this process
     holds the windows, so it asks them to read the update status again. The record is the

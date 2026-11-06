@@ -37,7 +37,10 @@ from ouroboros.secret_masking import (
     MCP_RESPONSE_ONLY_FIELDS,
 )
 from ouroboros.mcp_browser_guard import GUARD_ENV_NAMES
-from ouroboros.mcp_headers import validate_headers
+from ouroboros import mcp_oauth
+from ouroboros.mcp_headers import (  # noqa: F401 -- the origin guard's re-export
+    MCPRedirectRefused, _CredentialOriginGuard, _origin, _origin_text, validate_headers,
+)
 from ouroboros.mcp_schema import (carrying_server_stderr, filter_schema_literals, heard_from_server,
                                   redact_metadata, server_stderr_note, tool_metadata)
 from ouroboros.tools.tool_result import ToolResult, _replace_tool_result
@@ -624,65 +627,6 @@ async def _stdio_with_diagnostics(params: Any, cfg: MCPServerConfig):
                     heard_from_server(_stderr_diagnostic(stderr, cfg, MCP_STDIO_STDERR_NOTE_BYTES))
 
 
-class MCPRedirectRefused(RuntimeError):
-    """A request that would carry saved credentials to another origin; it was never sent."""
-
-    code = "MCP_REDIRECT_REFUSED"
-
-
-def _origin(url: Any) -> tuple:
-    """``(scheme, host, port)`` with the scheme's default port made explicit."""
-    import httpx
-
-    parsed = url if isinstance(url, httpx.URL) else httpx.URL(str(url))
-    return parsed.scheme, parsed.host, parsed.port or {"http": 80, "https": 443}.get(parsed.scheme, 0)
-
-
-def _origin_text(origin: tuple) -> str:
-    """An origin for messages: never userinfo, path or query."""
-    scheme, host, port = origin
-    shown = f"[{host}]" if ":" in host else host
-    return f"{scheme}://{shown}" + ("" if port == {"http": 80, "https": 443}.get(scheme) else f":{port}")
-
-
-class _CredentialOriginGuard:
-    """One connection's HTTP client factory: saved credentials stay on the configured origin.
-
-    The SDK client follows redirects, and the HTTP client strips only
-    ``Authorization`` when a redirect leaves the origin — every other configured
-    header would follow. While the server carries credentials, a request to a
-    different scheme, host or port (``http`` → ``https`` included) is stopped by
-    a request hook before it is sent; requests on the configured origin,
-    same-origin redirects included, are unchanged. A server without credentials
-    keeps the SDK's redirect behavior. The SDK factory keeps its timeouts and
-    the transport keeps the client's lifetime.
-    """
-
-    def __init__(self, cfg: MCPServerConfig) -> None:
-        self.cfg = cfg
-        self.refusal: Optional[MCPRedirectRefused] = None
-
-    def client(self, headers: Any = None, timeout: Any = None, auth: Any = None) -> Any:
-        client = create_mcp_http_client(headers=headers, timeout=timeout, auth=auth)
-        if self.cfg.carries_credentials():
-            async def stay_on_origin(request: Any) -> None:
-                expected, actual = _origin(self.cfg.url), _origin(request.url)
-                if actual == expected:
-                    return
-                self.refusal = MCPRedirectRefused(
-                    f"MCP_REDIRECT_REFUSED: server {self.cfg.id!r} at {_origin_text(expected)} redirected a "
-                    f"request to {_origin_text(actual)}. Saved headers go only to the configured origin (scheme, "
-                    "host and port), so that request was stopped before it was sent. If the service has moved, "
-                    "enter its new address as the Server URL.")
-                # Ending the connection fails the pending session call now; an
-                # SSE message POST would otherwise wait for its tool timeout.
-                await client.aclose()
-                raise self.refusal
-
-            client.event_hooks["request"].append(stay_on_origin)
-        return client
-
-
 @asynccontextmanager
 async def _http_with_guards(cfg: MCPServerConfig):
     """One HTTP/SSE connection: the SDK transport behind the origin guard, with redacted SDK logs.
@@ -692,23 +636,28 @@ async def _http_with_guards(cfg: MCPServerConfig):
     request and its session and protocol-version headers once known; SSE sets Accept and
     Cache-Control on its stream, while its message POSTs keep a configured Accept or
     Content-Type. URL userinfo (Cyber only) makes the HTTP client send Basic credentials
-    in Authorization instead of a configured value.
+    in Authorization instead of a configured value. A server without saved credentials
+    carries the stored sign-in bearer (``mcp_oauth.StoredBearer``).
     """
-    guard = _CredentialOriginGuard(cfg)
+    from ouroboros.mcp_oauth import StoredBearer, applies
+
+    guard, bearer = _CredentialOriginGuard(cfg), (StoredBearer(cfg) if applies(cfg) else None)
     sse = cfg.transport == "sse"
     with _redacted_sdk_logs(cfg, "mcp.client.sse" if sse else "mcp.client.streamable_http"):
         opened = (sse_client if sse else streamablehttp_client)(
-            cfg.url, headers=cfg.wire_headers(), httpx_client_factory=guard.client)
+            cfg.url, headers=cfg.wire_headers(), httpx_client_factory=guard.client, auth=bearer)
         try:
             async with opened as streams:
                 yield streams
         except Exception:
             # The SDK's task groups wrap the hook's refusal or report a closed
-            # connection instead; name the stopped request. Cancellation and
-            # other base exceptions pass through unchanged.
-            if guard.refusal is None:
-                raise
-            raise MCPRedirectRefused(str(guard.refusal)) from None
+            # connection instead; name the stopped request (or the needed sign-in).
+            # Cancellation and other base exceptions pass through unchanged.
+            if guard.refusal is not None:
+                raise MCPRedirectRefused(str(guard.refusal)) from None
+            if bearer is not None and bearer.refusal is not None:
+                raise bearer.refusal from None
+            raise
 
 
 def _transport_factory(cfg: MCPServerConfig, host_env: Optional[Dict[str, str]] = None):
@@ -738,7 +687,7 @@ def _transport_factory(cfg: MCPServerConfig, host_env: Optional[Dict[str, str]] 
 async def _session(cfg: MCPServerConfig):
     """One fresh client session over ``cfg``'s transport; leaving it joins both contexts."""
     if not _MCP_SDK_AVAILABLE:  # raised before any transport exists: a proven no-send
-        missing = RuntimeError("MCP client SDK not installed. Add `mcp>=1.10` to the runtime.")
+        missing = RuntimeError("MCP client SDK not installed. Add `mcp>=1.29` to the runtime.")
         missing.mcp_unsent_joined = True
         raise missing
     async with _transport_factory(cfg) as streams:  # every transport yields (read, write, ...)
@@ -1103,7 +1052,9 @@ class MCPManager:
         """Server-owned boot/save/mtime event: prune, then schedule the latest pass."""
         with self._lock:
             self.reconfigure(settings)
-            mcp_catalog.prune_catalogs([rt.config for rt in self._servers.values()])
+            configs = [rt.config for rt in self._servers.values()]
+            mcp_catalog.prune_catalogs(configs)
+            mcp_oauth.prune(configs)  # a removed server or a changed address loses its sign-in too
             self._listing_fingerprint = self._settings_fingerprint
         self.refresh_all_background(reason=reason)
 
@@ -1258,6 +1209,7 @@ class MCPManager:
                         "latest_attempt": (runtime.catalog or {}).get("latest_attempt"),
                         "complete": bool(runtime.catalog and runtime.catalog["complete"]),
                         "publication_error": runtime.publication_error,
+                        **({"sign_in": sign_in} if (sign_in := mcp_oauth.status(cfg)) else {}),
                     }
                 )
             return {
@@ -1290,7 +1242,7 @@ class MCPManager:
                 return {"ok": False, "error": f"MCP server {server_id!r} is disabled."}
         from ouroboros.owner_pause import OwnerPauseRefused
 
-        items, complete, error, instructions = None, False, "", ""
+        items, complete, error, instructions, code = None, False, "", "", ""
         schema_omissions = []
         try:
             raw = _run_async(lambda: self._async_list_tools(cfg, timeout), join_timeout=timeout + 3)
@@ -1300,14 +1252,14 @@ class MCPManager:
         except OwnerPauseRefused as exc:
             return {"ok": False, "not_started": True, "error": f"MCP listing NOT STARTED: {exc}"}
         except BaseException as exc:  # noqa: BLE001 - retain last-known tools on every failure
-            error = _exception_text(exc, cfg)
+            error, code = _exception_text(exc, cfg), str(getattr(exc, "code", "") or "")
         at = datetime.now(timezone.utc).isoformat()
         with self._lock:
             target = self._servers.get(server_id)
             if target is not runtime or mcp_catalog.identity(target.config) != mcp_catalog.identity(cfg):
                 return {"ok": False, "published": False, "error": f"stale MCP refresh discarded for server {server_id!r}"}
             envelope = mcp_catalog.attempt_envelope(cfg, target.catalog, at=at, error=error, items=items, complete=complete,
-                                                   schema_omissions=schema_omissions,
+                                                   schema_omissions=schema_omissions, code=code,
                                                    instructions=_redact_error_text(instructions, cfg))
             target.published_before_failure = self._catalog_reader.load(cfg)
             try:
@@ -1322,12 +1274,17 @@ class MCPManager:
                 log.warning("MCP catalog publication failed for %s: %s", cfg.id, target.publication_error)
             self._adopt_catalog(target, envelope)
             return {"ok": items is not None, "published": not bool(target.publication_error),
-                    "error": error, "publication_error": target.publication_error,
+                    "error": error, "publication_error": target.publication_error, **({"code": code} if code else {}),
                     "server_id": cfg.id, "tool_count": len(target.tools),
                     "configuration_warnings": list(cfg.configuration_warnings),
                     "tool_name_collisions": list(target.tool_name_collisions),
                     "tools": [{"name": tool.raw_name, "prefixed_name": tool.prefixed_name,
                                "description": tool.description} for tool in target.tools]}
+
+    def server_config(self, server_id: str) -> Optional[MCPServerConfig]:
+        with self._lock:
+            runtime = self._servers.get(server_id)
+            return runtime.config if runtime else None
 
     def refresh_all(self) -> Dict[str, Any]:
         """Server-owned refresh of every enabled server, publishing each on completion."""
@@ -1502,6 +1459,9 @@ class MCPManager:
             ) + server_stderr_note(exc)
             return ToolResult(status="timeout", code="MCP_TIMEOUT", text=text,
                               meta={"mcp_call_not_sent": not_sent or closing})
+        except mcp_oauth.MCPAuthRequired as exc:  # the server ran nothing: no grant, refused refresh or token
+            return ToolResult(status="unavailable", code="MCP_AUTH_REQUIRED", text=f"⚠️ {exc}",
+                              meta={"dynamic_provider": True, "mcp_call_not_sent": True, "sign_in_reason": exc.reason})
         except BaseException as exc:  # noqa: BLE001 - any failure is reported
             if isinstance(exc, PhysicalDispatchInterrupted):
                 raise  # caller control is not a provider error; exited() already settled proven no-send custody

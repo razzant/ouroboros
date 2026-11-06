@@ -492,6 +492,7 @@ OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
     "skill_install", "skill_update",
     "journal_write", "workpad_write", "pin_ui_translation", "record_update_description",
     "github_write", "pr_merge",
+    "mcp_sign_in",  # stores or revokes the owner's sign-in to a remote MCP server
 })
 
 

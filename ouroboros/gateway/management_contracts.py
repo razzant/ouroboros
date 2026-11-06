@@ -740,6 +740,17 @@ class McpListingAttempt(TypedDict):
     ok: bool
     error: str
     partial: bool
+    code: NotRequired[str]  # a typed refusal's code, e.g. MCP_AUTH_REQUIRED
+
+
+class McpSignIn(TypedDict, total=False):
+    """A remote server's sign-in (``mcp_oauth.status``), present once it asked for one."""
+
+    state: Required[str]  # signed_in | sign_in_required
+    reason: str  # not_signed_in | refresh_rejected | token_rejected | expired | insufficient_scope | signed_out ...
+    since: Optional[str]
+    issuer: str
+    pending: bool  # a sign-in was begun and not completed
 
 
 class McpServerStatus(TypedDict, total=False):
@@ -775,6 +786,7 @@ class McpServerStatus(TypedDict, total=False):
     complete: bool
     publication_error: str
     code: str
+    sign_in: McpSignIn
 
 
 class McpStatusResponse(TypedDict):
@@ -811,6 +823,38 @@ class McpRefreshResponse(TypedDict, total=False):
     code: str
     not_started: bool
     refreshed: Dict[str, Any]
+
+
+class McpSignInRequest(TypedDict, total=False):
+    """``POST /api/mcp/sign-in``: ``begin`` (answers the provider page to open), ``complete`` (the provider's
+    return: ``state`` with ``code`` or ``error``, or the address the browser stopped on as ``returned_url``) or
+    ``sign_out``. ``client_id``/``client_secret``: the owner's own registration where a provider has no other."""
+
+    action: Required[str]
+    server_id: str
+    state: str
+    code: str
+    iss: str
+    error: str
+    error_description: str
+    returned_url: str
+    client_id: str
+    client_secret: str
+
+
+class McpSignInResponse(TypedDict, total=False):
+    """``ok: false`` carries ``code`` (``MCP_AUTH_REQUIRED`` with its ``reason``) and ``error``."""
+
+    ok: Required[bool]
+    server: str
+    url: str
+    redirect_uri: str
+    scope: str
+    revoked: Optional[bool]
+    listing: Dict[str, Any]
+    code: str
+    reason: str
+    error: str
 
 
 class McpTestRequest(TypedDict, total=False):
@@ -1054,8 +1098,9 @@ __all__ = [
     "ClaudexorProfileEnabledResponse", "ReviewPoolResponse",
     "ModelCatalogItem", "ModelCatalogResponse", "OpenAICompatibleModelsRequest", "LocalModelStartRequest",
     "LocalModelStartResponse", "LocalModelRuntimeMissingResponse", "LocalModelStatusResponse",
-    "LocalModelTestResponse", "McpListingAttempt", "McpServerStatus", "McpStatusResponse", "McpRefreshRequest",
-    "McpRefreshResponse", "McpTestRequest", "McpTestResponse",
+    "LocalModelTestResponse", "McpListingAttempt", "McpSignIn", "McpServerStatus", "McpStatusResponse",
+    "McpRefreshRequest", "McpRefreshResponse", "McpSignInRequest", "McpSignInResponse", "McpTestRequest",
+    "McpTestResponse",
     "UpdateProgress", "UpdateLetter", "UpdateTransactionState", "UpdateStatusResponse",
     "CommandRequest", "CommandResponse", "CommandRefusal", "GitRollbackRequest", "GitRollbackResponse", "GitPromoteResponse",
     "ResetResponse", "CostBreakdownResponse",

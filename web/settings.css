@@ -376,6 +376,12 @@
 .mcp-server-status-danger { color: var(--status-error-fg); background: var(--status-error-bg); }
 .mcp-server-status-muted { color: var(--status-neutral-fg); }
 
+/* A remote server's sign-in: one fact and one button; the paste and the app registration under Details. */
+.mcp-sign-in { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.mcp-sign-in[hidden] { display: none; }
+.mcp-sign-in-details { flex-basis: 100%; }
+.mcp-sign-in-details label { display: grid; gap: 6px; margin: 8px 0; }
+
 .mcp-tools-disclosure {
     border-radius: 12px;
     border: 1px solid rgba(var(--neutral-rgb), 0.06);

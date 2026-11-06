@@ -454,6 +454,12 @@ TOOL_CODE_SPECS: Mapping[str, ToolCodeSpec] = MappingProxyType(
             "warning",
             "enable or repair the MCP provider",
         ),
+        "MCP_AUTH_REQUIRED": _code_spec(
+            "unavailable",
+            "unavailable",
+            "warning",
+            "the owner signs in (Settings → MCP, or a link from mcp_sign_in)",
+        ),
         "EXTENSION_UNAVAILABLE": _code_spec(
             "unavailable",
             "unavailable",
@@ -883,6 +889,7 @@ def _wrap_run_script_process_result(
 _EXACT_IDENTIFIER_CODES = MappingProxyType(
     {
         "ACCESS_DENIED": "ACCESS_BLOCKED",
+        "MCP_AUTH_REQUIRED": "MCP_AUTH_REQUIRED",
         "TOOL_ACCESS_BLOCKED": "ACCESS_BLOCKED",
         "ACTING_NO_WORKSPACE_BLOCKED": "ACCESS_BLOCKED",
         "ACTING_SUBAGENT_BLOCKED": "ACCESS_BLOCKED",

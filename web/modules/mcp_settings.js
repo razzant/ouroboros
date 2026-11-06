@@ -1,7 +1,7 @@
 import { apiFetch, jsonPost } from './api_client.js';
 /** MCP settings cards; preserves masked credentials until the user edits them. */
-import { escapeHtmlAttr as escapeHtml } from './utils.js';
-import { revealNewRow } from './ui_helpers.js';
+import { escapeHtmlAttr as escapeHtml, safeExternalUrl } from './utils.js';
+import { openExternalViaHostBridge, revealNewRow } from './ui_helpers.js';
 import { resetSecretReveals } from './settings_secrets.js';
 import {
     renderHeaderFields, bindHeaderFields, credentialPayload, headerKeepsSavedValues, keptHeaderNames,
@@ -17,6 +17,14 @@ const TRANSPORTS = [
 // task_session/browser_policy: set by Import and kept as saved, with no control of their own. A held stdio card
 // says what they do; off stdio they are unsupported fields that Save refuses until they are removed.
 const LIFETIME_FLAGS = ['task_session', 'browser_policy'];
+// A remote server's sign-in (`status.sign_in`, ouroboros/mcp_oauth.py): why it is needed, in words.
+const SIGN_IN_REASONS = {
+    not_signed_in: 'not signed in yet',
+    expired: 'the sign-in expired',
+    refresh_rejected: 'the provider no longer accepts the sign-in',
+    token_rejected: 'the provider no longer accepts the sign-in',
+    signed_out: 'signed out',
+};
 const SERVER_FIELDS = new Set(['id', 'slug', 'name', 'label', 'enabled', 'transport', 'url',
     'command', 'args', 'auth_header', 'auth_token', 'headers', 'allowed_tools', 'cwd', 'env', 'env_from_settings',
     'schemas_at_start', ...LIFETIME_FLAGS]);
@@ -34,6 +42,7 @@ const savedMcpSecrets = new WeakMap();
 const cardMessages = new WeakMap();
 const draftGenerations = new WeakMap();
 const pendingActions = new WeakMap();
+const signInLinks = new WeakMap(); // the provider page of the sign-in this window began, per server
 
 function looksMasked(value) {
     const text = String(value ?? '').trim();
@@ -217,6 +226,80 @@ function statusParts(server) {
     return { badgeText: badge[0], badgeClass: `mcp-server-status ${badge[1]}`, toolItems };
 }
 
+function signInKey(server) {
+    const signIn = mcpStatusByServer[String(server.id ?? '')]?.sign_in;
+    return signIn ? `${signIn.state}:${signIn.reason || ''}:${signInLinks.get(server) || ''}` : '';
+}
+
+/** One fact and one button in view; the paste and the owner's own app registration under Details. */
+function signInRow(server) {
+    const signIn = mcpStatusByServer[String(server.id ?? '')]?.sign_in;
+    if (!signIn) return '';
+    if (signIn.state === 'signed_in') {
+        return `<span class="mcp-server-status mcp-server-status-ok">Signed in</span>
+            <button type="button" class="btn btn-default" data-mcp-sign-in-action="sign_out">Sign out</button>`;
+    }
+    const reason = SIGN_IN_REASONS[signIn.reason] || String(signIn.reason || 'not signed in yet').replaceAll('_', ' ');
+    const link = signInLinks.get(server);
+    return `<span class="mcp-server-status mcp-server-status-warn">Sign-in needed: ${escapeHtml(reason)}</span>
+        <button type="button" class="btn btn-default" data-mcp-sign-in-action="begin">Sign in</button>
+        ${link ? `<a href="${escapeHtml(safeExternalUrl(link))}" target="_blank" rel="noopener noreferrer" data-mcp-sign-in-link>Open the sign-in page ↗</a>` : ''}
+        <details class="mcp-sign-in-details"><summary>Details</summary>
+            <label class="ui-field-help">If your browser did not come back here after signing in, paste the address it stopped on:
+                <input type="text" class="ui-control" data-mcp-sign-in-returned autocomplete="off" spellcheck="false"></label>
+            <button type="button" class="btn btn-default" data-mcp-sign-in-action="complete">Finish sign-in</button>
+            <label class="ui-field-help">For a provider that registers no apps itself: your app's client ID and secret, used by Sign in
+                <input type="text" class="ui-control" data-mcp-sign-in-client-id placeholder="Client ID" autocomplete="off" spellcheck="false">
+                <input type="password" class="ui-control" data-mcp-sign-in-client-secret placeholder="Client secret (optional)" autocomplete="off"></label>
+        </details>`;
+}
+
+function paintSignIn(card, server) {
+    const el = card.querySelector('[data-mcp-sign-in]');
+    const key = signInKey(server);
+    if (!el || el.dataset.signInKey === key) return; // unchanged: a typed paste or an open Details stays
+    el.innerHTML = signInRow(server);
+    el.dataset.signInKey = key;
+    el.hidden = !key;
+}
+
+async function signInAction(card, server, sid, action) {
+    if (!sid) {
+        setCardMessage(server, 'Save the server before signing in.', 'warn');
+        return;
+    }
+    const field = (name) => String(card.querySelector(`[data-mcp-sign-in-${name}]`)?.value || '').trim();
+    const body = action === 'complete' ? { action, returned_url: field('returned') } : { action, server_id: sid };
+    if (action === 'begin' && field('client-id')) Object.assign(body, { client_id: field('client-id'), client_secret: field('client-secret') });
+    if (action === 'complete' && !body.returned_url) {
+        setCardMessage(server, 'Paste the address your browser stopped on first.', 'warn', 'sign-in');
+        return;
+    }
+    setCardMessage(server, action === 'sign_out' ? 'Signing out...' : 'Contacting the provider...', 'muted', 'sign-in');
+    try {
+        const data = await jsonPost('/api/mcp/sign-in', body);
+        if (data.ok === false) {
+            setCardMessage(server, `Sign-in refused: ${data.error || data.reason || 'unknown reason'}`, 'danger', 'sign-in');
+        } else if (action === 'begin') {
+            signInLinks.set(server, data.url);
+            setCardMessage(server, 'Finish signing in with the provider; this card updates when you come back here.', 'muted', 'sign-in');
+            window.addEventListener('focus', () => { void refreshStatus(); }, { once: true });
+            // Best effort while the press is recent; the link in the card works on every surface.
+            void openExternalViaHostBridge(data.url).catch(() => {});
+        } else if (action === 'complete') {
+            signInLinks.delete(server);
+            setCardMessage(server, `Signed in — ${toolCountLabel(Number(data.listing?.tool_count || 0))} listed.`, 'ok', 'sign-in');
+        } else {
+            setCardMessage(server, data.revoked === true ? 'Signed out; the provider confirmed the revocation.'
+                : data.revoked === false ? 'Signed out here; the provider did not confirm the revocation.'
+                    : 'Signed out here; the provider offers no revocation.', 'ok', 'sign-in');
+        }
+    } catch (err) {
+        setCardMessage(server, `Sign-in failed: ${err && err.message ? err.message : err}`, 'danger', 'sign-in');
+    }
+    await refreshStatus();
+}
+
 function toolsDisclosure(toolItems) {
     return toolItems
         ? `<details class="mcp-tools-disclosure"><summary>Discovered tools</summary><ul class="mcp-tools-list">${toolItems}</ul></details>`
@@ -239,6 +322,7 @@ function paintStatus() {
         const badge = card.querySelector('.mcp-server-status');
         badge.className = badgeClass;
         if (badge.textContent !== badgeText) badge.textContent = badgeText;
+        paintSignIn(card, server);
         const disclosure = card.querySelector('.mcp-tools-disclosure');
         if (!toolItems) {
             disclosure?.remove();
@@ -301,6 +385,7 @@ function renderServerCard(server, index) {
                     <button type="button" class="btn btn-default mcp-server-remove" data-mcp-remove>Remove</button>
                 </div>
             </header>
+            <div class="mcp-sign-in" data-mcp-sign-in data-sign-in-key="${escapeHtml(signInKey(server))}" ${signInKey(server) ? '' : 'hidden'}>${signInRow(server)}</div>
             <div class="form-grid two">
                 <div class="form-field ui-field">
                     <label for="mcp-${index}-id">Server ID</label>
@@ -372,6 +457,17 @@ function bindCardEvents(card) {
     const saved = savedMcpSecrets.get(rowServer);
     bindHeaderFields(card, {server: rowServer, savedIdentity: saved?.identity,
         onChange: () => serverEdited(rowServer), render: renderAll});
+
+    card.querySelector('[data-mcp-sign-in]')?.addEventListener('click', (event) => {
+        const link = event.target.closest('a[data-mcp-sign-in-link]');
+        if (link) {
+            event.preventDefault(); // through the host while the press is live (desktop shell, Telegram)
+            void openExternalViaHostBridge(link.getAttribute('href')).catch(() => {});
+            return;
+        }
+        const button = event.target.closest('[data-mcp-sign-in-action]');
+        if (button) void signInAction(card, rowServer, saved?.identity || '', button.dataset.mcpSignInAction);
+    });
 
     card.querySelectorAll('[data-mcp-field]').forEach((input) => {
         input.addEventListener('input', () => {

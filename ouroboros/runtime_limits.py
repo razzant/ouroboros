@@ -88,6 +88,10 @@ MCP_BROWSER_GUARD_WORKERS = 16
 MCP_BROWSER_GUARD_PENDING = 64
 MCP_STDIO_STDERR_TAIL_BYTES = 64 * 1024
 MCP_STDIO_STDERR_NOTE_BYTES = 2 * 1024  # the last words a failure shows; the log keeps the longer tail
+# A remote MCP sign-in (mcp_oauth): one authorization-server request is bounded by HTTP_TIMEOUT; a refresh holds
+# its server's lock for one such request, so a second process waits at most LOCK_WAIT before it is told.
+MCP_OAUTH_HTTP_TIMEOUT_SEC = 30.0
+MCP_OAUTH_LOCK_WAIT_SEC = 45.0
 
 
 # Worker-pool spawn bounds (structural constants, not env knobs). Grace after a full-pool spawn before the crash
