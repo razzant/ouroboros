@@ -45,7 +45,8 @@ const read = (items = rows(), { chosen = items.map((item) => item.id), ...rest }
 const AVOIDED = /At least|Excluded|System data|Junk|Clean\b|Prune|%|[Pp]ackage/;
 
 test('at rest the flow is empty and the door stands alone; every phase up to Done holds the door back', () => {
-    assert.match(trayHtml(free('idle', { plan: null, pool: null }), read()), /Can be removed[\s\S]*Not checked yet/);
+    assert.equal(trayHtml(free('idle', { plan: null, pool: null }), read()), '<p class="storage-tray-text">See what finished work can be removed.</p>',
+        'before a check a sentence, never a figure (U070)');
     assert.equal(trayState(free('idle')), 'rest');
     assert.deepEqual(['rest', 'empty', 'listing', 'ready', 'running', 'done', 'failed'].filter(doorOffered), ['rest', 'empty']);
     const listing = trayHtml(free('listing', { done: 1240, total: 1661, pool: pool({ bytes: 5.1 * GB, bytes_complete: false }) }), read());
@@ -208,7 +209,7 @@ test('an empty preview says so and the door stays; a pool of nothing still shows
     const emptyPool = pool({ count: 0, bytes: 0, kinds: {}, excluded: [] });
     const empty = free('ready', { pool: emptyPool, groups: [group('work_folders', { count: 0, inside_wait: 0, in_use: 0, bytes: 0, items: [] })] });
     assert.equal(trayState(empty), 'empty');
-    assert.match(trayHtml(empty, read([])), /Can be removed[\s\S]*Nothing right now[\s\S]*No files of finished work are waiting\./);
+    assert.equal(trayHtml(empty, read([])), '<p class="storage-tray-text">No files of finished work are waiting.</p>', 'an empty answer is a sentence, not a figure');
     const staysOnly = free('ready', { pool: pool({ count: 0, bytes: 0, kinds: {}, excluded: [{ reason: 'in_use', count: 2 }] }) });
     assert.equal(trayState(staysOnly), 'ready');
     const html = trayHtml(staysOnly, read([]));
@@ -449,8 +450,8 @@ test('what happened to the owner\'s attempt is said beside whatever the server h
     assert.match(trayHtml(free('listing', { plan: null }), { notice: 'lostFree' }), /The answer to Free was lost and the list has changed since/);
     assert.match(trayHtml(free('listing', { plan: null }), { notice: 'lost' }), /The answer to Remove was lost and the list has changed since; whether it removed anything is not known here\. Nothing is sent again\.[\s\S]*Checking for files to remove/);
     assert.match(trayHtml(free('ready', { plan: 'p2' }), read(rows(), { notice: 'refused' })), /Nothing was removed: the list you reviewed had changed\.[\s\S]*Remove 3 selected items/);
-    assert.match(trayHtml(idle, { notice: 'refused', dismissed: true }), /Not checked yet/);
-    assert.match(trayHtml(idle, {}), /Not checked yet/);
+    assert.match(trayHtml(idle, { notice: 'refused', dismissed: true }), /See what finished work can be removed\./);
+    assert.match(trayHtml(idle, {}), /See what finished work can be removed\./);
 });
 
 // ---------------------------------------------------------------------------

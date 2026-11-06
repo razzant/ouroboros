@@ -54,7 +54,7 @@ def test_a_fresh_subagent_row_invites_and_only_a_save_attempt_makes_it_red() -> 
     # Every Save click is an attempt — including one another field's validation
     # then aborts — so the stamp precedes the cadence check's early return.
     save = host[host.index("byId('btn-save-settings').addEventListener"):]
-    assert save.index("noteSubagentsSaveAttempt();") < save.index("const { messages: errors, subject } = renderValidation();")
+    assert save.index("noteSubagentsSaveAttempt();") < save.index("const { fields: invalid, messages: errors, subject } = renderValidation();")
     assert "agentsStep?.noteSaveAttempt?.();" in _read(MODULES / "onboarding_wizard.js")
 
 

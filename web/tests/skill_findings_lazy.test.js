@@ -20,7 +20,7 @@ const demo = {
 
 test('a card renders its findings block collapsed, with the summary only', () => {
     const html = renderInstalledSkillCard(demo);
-    assert.match(html, /<details class="skills-review-findings ui-rich-content" data-skill-findings="demo"><summary>3 review findings<\/summary><\/details>/);
+    assert.match(html, /<details class="ui-disclosure skills-review-findings ui-rich-content" data-skill-findings="demo"><summary>3 review findings<\/summary><\/details>/);
     assert.doesNotMatch(html, /Spawns a shell|Opens|Preflight failed|<li>/, 'no finding text before the block is opened');
     assert.match(renderInstalledSkillCard({ ...demo, review_findings: demo.review_findings.slice(0, 1) }), /1 review finding</);
     assert.equal(renderInstalledSkillCard({ ...demo, review_findings: [] }).includes('skills-review-findings'), false);

@@ -189,6 +189,5 @@ def _crashed_worker(monkeypatch, workers, task):
     }
     monkeypatch.setattr(workers, "QUEUE_MAX_RETRIES", 3)
     monkeypatch.setattr(workers, "_LAST_SPAWN_TIME", 0)
-    monkeypatch.setattr(workers, "CRASH_TS", [])
     monkeypatch.setattr(workers, "respawn_worker", lambda _wid: None)
     monkeypatch.setattr("ouroboros.tools.services.archive_task_service_logs", lambda *_a, **_k: None)

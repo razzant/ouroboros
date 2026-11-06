@@ -206,7 +206,7 @@ export function createTalkFacts() {
 }
 
 export function createCallCapsule({ page, env = globalThis, visual, light, styled = Promise.resolve(), view, talk, mute,
-    show = () => {}, vision = {}, end, dismiss, act, offered = () => true }) {
+    show = () => {}, vision = {}, end, dismiss, act, offered = () => true, adopted = false }) {
     const doc = page.ownerDocument;
     const wrap = page.querySelector('.chat-input-wrap');
     const row = wrap.querySelector('.chat-text-row');
@@ -250,21 +250,33 @@ export function createCallCapsule({ page, env = globalThis, visual, light, style
     const empty = () => !field.value.trim() && !preview?.querySelector('.attach-badge');
     // Only the feature's explicit beta configuration offers Talk.
     const entryMode = () => (showing ? 'call' : group?.dataset.busy === '1' ? 'busy' : empty() && offered() ? 'talk' : 'send');
+    // Talk's face: the sign and the word. The room's host paints this same face (`face` below) on a load's first frame
+    // from this device's last answer and hands it over at mount (`adopted`): the first paint builds it again, so it is
+    // measured and changes no pixel, or turns it into Send.
+    const talkTitle = 'Talk with Ouroboros';
+    const talkWord = () => {
+        const word = doc.createElement('span');
+        word.className = 'call-entry-word';
+        word.textContent = 'Talk';
+        return word;
+    };
+    let copy = adopted;
     function renderEntry() {
-        if (!dressed) return;
         const mode = entryMode();
         if (mode === 'talk') {
-            // Built once per face: the chat writes its own label over it when it needs the button.
-            if (!send.querySelector(':scope > .call-entry-word')) {
-                const word = doc.createElement('span');
-                word.className = 'call-entry-word';
-                word.textContent = 'Talk';
-                send.replaceChildren(mark, word);
-                send.title = 'Talk with Ouroboros';
+            // Built once per face and only with its own look; the chat writes its own label over it
+            // when it needs the button.
+            if (!dressed) return;
+            if (copy || !send.querySelector(':scope > .call-entry-word')) {
+                copy = false;
+                send.replaceChildren(mark, talkWord());
+                send.title = talkTitle;
                 send.dataset.callEntry = 'talk';
                 measureEntry();
             }
-        } else if (send.dataset.callEntry === 'talk') {
+        } else if (copy || send.dataset.callEntry === 'talk') {
+            // At once, before the stylesheet too: a draft or a staged file is never sent under a Talk label.
+            copy = false;
             send.dataset.callEntry = 'send';
             if (mode !== 'busy') { send.textContent = 'Send'; send.title = 'Send message'; }
         }
@@ -274,16 +286,15 @@ export function createCallCapsule({ page, env = globalThis, visual, light, style
     function measureEntry() {
         if (!offered() || !send.isConnected) return;
         // Approved Talk A preview: measure an unconstrained clone, not Send's
-        // previous minimum width. This can shrink after font/viewport changes.
+        // previous minimum width. This can shrink after font/viewport changes. Unrounded, so the
+        // host's copy of this face (painted before the mount) is not moved by a fraction of a pixel.
         const probe = send.cloneNode(false);
         probe.removeAttribute('id');
         probe.dataset.callEntry = 'talk';
         probe.style.cssText = 'position:absolute;visibility:hidden;min-width:0';
-        const word = doc.createElement('span');
-        word.className = 'call-entry-word'; word.textContent = 'Talk';
-        probe.append(mark.cloneNode(true), word);
+        probe.append(mark.cloneNode(true), talkWord());
         group.append(probe);
-        const measured = probe.offsetWidth;
+        const measured = probe.getBoundingClientRect().width;
         probe.remove();
         if (measured > 0) {
             const width = `${measured}px`;
@@ -516,6 +527,7 @@ export function createCallCapsule({ page, env = globalThis, visual, light, style
         row,
         render,
         entry: () => renderEntry(),
+        face: () => ({ html: mark.outerHTML + talkWord().outerHTML, title: talkTitle }),
         draw: state => visualHandle.draw(state),
         expand,
         minimise,
@@ -541,7 +553,7 @@ export function createCallCapsule({ page, env = globalThis, visual, light, style
             typingPlaceholder(false);
             capsule.remove();
             for (const name of CALL_STATE) delete wrap.dataset[name];
-            if (send.dataset.callEntry === 'talk' && group?.dataset.busy !== '1') { send.textContent = 'Send'; send.title = 'Send message'; }
+            if ((copy || send.dataset.callEntry === 'talk') && group?.dataset.busy !== '1') { send.textContent = 'Send'; send.title = 'Send message'; }
             delete send.dataset.callEntry;
             send.style.removeProperty('--call-entry-width');
         },

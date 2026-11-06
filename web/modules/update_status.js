@@ -9,6 +9,8 @@
 
 import { apiClient, updateStrategyForPlan } from './api_client.js';
 import { SHELL_ICONS } from './page_icons.js';
+import { errorWords } from './ui_primitives.js';
+import { durationLabel, formatBytes } from './storage_format.js';
 
 // Fail-soft wrapper around the api_client update helpers (the pill must never throw the app).
 async function safe(fn) {
@@ -132,10 +134,14 @@ export function preflightEvidenceRows(preflight) {
 }
 
 // The retained attempt's before/after samples as labelled rows of its Last attempt (owner 25.10: A). Only a number
-// is a measurement, so null stays "unobserved", never 0. Peak RSS keeps its word; lifetime CPU time and one
-// interval's share are separate rows; the dispatch time runs from acceptance to the first model call, not to an
-// answer. Each side is one recorded sample: history, never a verdict about the update.
-const measured = (value, unit) => (typeof value === 'number' ? `${value.toFixed(2)} ${unit}` : 'unobserved');
+// is a measurement: a zero says so, never an absent value, and a value the sample did not record leaves its row out
+// (the raw record under the rows keeps its null). Sizes and durations read as the other Dashboard tabs write them
+// (storage_format.js). Peak RSS keeps its word; lifetime CPU time and one interval's share are separate rows; the
+// dispatch time runs from acceptance to the first model call, not to an answer. Each side is one recorded sample:
+// history, never a verdict about the update.
+const measured = (value, format) => (typeof value === 'number' ? format(value) : '');
+const overrunWords = (overruns) => (overruns && typeof overruns === 'object' ? Object.entries(overruns)
+    .map(([duty, count]) => `${duty.replace(/[-_]/g, ' ')} ×${count}`).join(', ') || 'none' : '');
 
 function utcOffset(date) {
     const minutes = -date.getTimezoneOffset();
@@ -148,26 +154,24 @@ function sampleRows(sample) {
     if (!sample) return [{ label: 'Sample', value: 'unobserved' }];
     const direct = sample.direct_message_first_dispatch;
     const when = attemptTime(sample.observed_at);
-    const percent = measured(sample.cpu_percent, '%');
-    const interval = measured(sample.cpu_interval_seconds, 'seconds');
+    const percent = measured(sample.cpu_percent, (value) => `${value.toFixed(1)} %`);
+    const interval = measured(sample.cpu_interval_seconds, durationLabel);
     return [
         { label: 'Source', value: sample.source_sha || 'unknown source' },
-        // The local minute to read, with the exact recorded stamp under it.
-        when ? { label: 'Observed', value: `${when} ${utcOffset(new Date(sample.observed_at))}`, exact: sample.observed_at }
-            : { label: 'Observed', value: sample.observed_at || 'unknown time' },
-        { label: `RSS${sample.rss_measure === 'peak' ? ' peak' : ''}`,
-            value: measured(typeof sample.rss_bytes === 'number' ? sample.rss_bytes / 1048576 : null, 'MiB') },
-        { label: 'CPU time, process lifetime', value: measured(sample.cpu_seconds, 'seconds') },
+        // The local minute to read; the exact recorded stamp is the raw record's.
+        { label: 'Observed', value: when ? `${when} ${utcOffset(new Date(sample.observed_at))}` : sample.observed_at || 'unknown time' },
+        { label: `RSS${sample.rss_measure === 'peak' ? ' peak' : ''}`, value: measured(sample.rss_bytes, formatBytes) },
+        { label: 'CPU time, process lifetime', value: measured(sample.cpu_seconds, durationLabel) },
+        // One measured half of the share still says which half is missing.
         { label: 'CPU share, sample interval',
-            value: percent === 'unobserved' && interval === 'unobserved' ? 'unobserved' : `${percent} over ${interval}` },
-        { label: 'Duty overruns', value: sample.duty_overruns == null ? 'unobserved' : JSON.stringify(sample.duty_overruns) },
+            value: percent || interval ? `${percent || 'unobserved'} over ${interval || 'unobserved'}` : '' },
+        { label: 'Duty overruns', value: overrunWords(sample.duty_overruns) },
         { label: 'Direct message to first model call', value: typeof direct?.seconds === 'number'
-            ? `${measured(direct.seconds, 'seconds')} from acceptance${direct.task_id ? ` · task ${direct.task_id}` : ''}`
-            : 'unobserved' },
-    ];
+            ? `${durationLabel(direct.seconds)} from acceptance${direct.task_id ? ` · task ${direct.task_id}` : ''}` : '' },
+    ].filter((row) => row.value);
 }
 
-/** `after_update` as rows: each side's heading (`head`), then its `{label, value, exact?}` rows; [] without facts. */
+/** `after_update` as rows: each side's heading (`head`), then its `{label, value}` rows; [] without facts. */
 export function afterUpdateRows(facts) {
     if (!facts) return [];
     return [['before', 'Before the update'], ['after', 'After the update']].flatMap(([side, name]) => {
@@ -301,7 +305,8 @@ function attemptDetails(progress, outcome) {
     };
     add('Base', String(progress.base_sha || '').slice(0, 12));
     add('Target', String(progress.target_sha || '').slice(0, 12));
-    add('Stage', progress.stage || (outcome ? 'not started' : ''));
+    // The executor's stage in its own words (the progress label without its ellipsis); an unknown stage keeps its name.
+    add('Stage', progress.stage ? (UPDATE_STAGE_LABELS[progress.stage] || progress.stage).replace(/…$/, '') : (outcome ? 'not started' : ''));
     add('Outcome', outcome);
     add('Reason', progress.reason);
     add('Blocked by', (Array.isArray(progress.blockers) ? progress.blockers : []).join(', '));
@@ -355,6 +360,10 @@ export function updateAttemptView(progress, tx = null, { showRecoveryInstruction
                 : ['Confirming update…', 'Waiting for the restarted server to confirm the update…'];
     return { ...base, terminal: false, tone: 'neutral', pill, headline, text: retention };
 }
+
+/** A request that never reached Ouroboros in owner words (errorWords); the server's own words are kept as they are. */
+export const failureWords = (err) => (err instanceof TypeError && err.response === undefined
+    ? errorWords(err).text : String(err?.message || err));
 
 export function attemptTime(value) {
     const date = new Date(value);

@@ -1508,12 +1508,16 @@ def _queue_snapshot(drive_root: pathlib.Path) -> Dict[str, Any]:
     from ouroboros.queue_observation import load_queue_document
     try:
         from ouroboros.project_admission import project_hold_fact
+        from ouroboros.project_naming import derived_run_name
         snapshot = load_queue_document(drive_root)
         snapshot.pop("_queue_alive", None)
         for row in [*snapshot.get("pending", []), *snapshot.get("running", [])]:
             task = row.get("task")
             if isinstance(task, dict):
                 task["project_admission_hold"] = project_hold_fact(task)
+                # Activity names the run as its card does, never by its whole order.
+                if name := derived_run_name(task):
+                    task["suggested_name"] = name
         return snapshot
     except Exception:
         return {}

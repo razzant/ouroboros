@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import json
 import os
 from pathlib import Path
@@ -72,8 +71,7 @@ def test_settings_complete_draft_validation_and_local_stop(direct_server_with_da
             key = new_row.locator('[data-custom-secret-key]')
             value = new_row.locator('[data-custom-secret-value]')
             expect(key).to_be_focused()
-            expect(page.locator("#settings-unsaved-indicator")).to_have_class(
-                re.compile("is-visible"))
+            expect(page.locator(".settings-footer")).to_have_attribute("data-draft", "dirty")
             page.evaluate("window.dispatchEvent(new CustomEvent('ouro:settings-updated', {detail: {source: 'test'}}))")
             expect(page.locator('[data-custom-secret-row]')).to_have_count(2)
             key.fill("bad!")
@@ -231,7 +229,7 @@ def test_initial_settings_document_survives_early_edit_while_enrichment_waits(su
     model = main.locator('[data-model-role-model]')
     model.fill("owner-kept-model")
     model.evaluate("element => { window.__earlyModel = element; element.setSelectionRange(4, 4); }")
-    expect(page.locator('#settings-unsaved-indicator')).to_have_class(re.compile('is-visible'))
+    expect(page.locator('.settings-footer')).to_have_attribute('data-draft', 'dirty')
 
     page.unroute("**/api/review-pool")
     page.unroute("**/api/claudexor/status*")
@@ -250,7 +248,7 @@ def test_initial_settings_document_survives_early_edit_while_enrichment_waits(su
     expect(model).to_have_value("owner-kept-model")
     assert source.input_value() == "api:openrouter"
     assert model.evaluate("element => element === window.__earlyModel && element.selectionStart === 4")
-    expect(page.locator('#settings-unsaved-indicator')).to_have_class(re.compile('is-visible'))
+    expect(page.locator('.settings-footer')).to_have_attribute('data-draft', 'dirty')
     expect(page.locator('#btn-save-settings')).to_be_enabled()
     expect(page.locator('#settings-status')).to_contain_text('Your edits are kept')
     assert not any(path == '/api/settings' for path, _ in ui['posts'])

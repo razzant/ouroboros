@@ -3,12 +3,10 @@
    its body (components drawn as on the Widgets board, a skill's widget, or an app frame), and a foot that says
    "Ouroboros made this" beside what the owner can do with it. Born on tokens, both themes. */
 
-/* A card takes the width a task card takes: 760 px at most, the 80 % gutter only while 80 % is still 620 px or
-   more; a narrow column (620 px or less) gives it the whole width like every bubble. */
+/* A card takes the left voice's one measure, as a task card does (style.css #chat-messages --feed-measure). */
 .chat-bubble.chat-card-bubble {
-    width: min(100%, 760px);
-    max-width: max(80%, min(100%, 620px));
-    margin-inline-end: 0;
+    width: var(--feed-measure);
+    max-width: var(--feed-measure);
 }
 
 .chat-card {
@@ -95,6 +93,9 @@
     margin-inline-start: auto;
 }
 .chat-card-actions:empty { display: none; }
-.chat-card-action,
-.chat-card-expand { min-height: var(--touch-target-min); }
+/* The actions row wraps on a phone, so under a finger its buttons take the touch minimum as their own height (the
+   control token: the lock writes the box), and no reach covers a neighbour (DESIGN "Touch and containment"). */
+@media (pointer: coarse) {
+    .chat-card-actions { --control-h: var(--touch-target-min); --control-h-sm: var(--touch-target-min); }
+}
 .chat-card-expand { align-self: flex-start; }

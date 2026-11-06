@@ -21,7 +21,7 @@ const FIXTURE_NOW = Date.parse('2026-10-17T15:10:00Z');
 test('the official hub row carries the Official glyph; the folder row says Folder; counts come from the catalog', (t) => {
     t.mock.timers.enable({ apis: ['Date'], now: FIXTURE_NOW });
     const official = renderSourceRow(source('ouroboros'), { items: items('ouroboros'), health: health('ouroboros') });
-    assert.match(official, /<strong>Ouroboros<\/strong><button type="button" class="skills-mark"/);
+    assert.match(official, /<strong>Ouroboros<\/strong><button type="button" class="skills-mark ui-hit-area"/);
     assert.match(text(official), /github\.com\/razzant\/OuroborosHub at main · 4 skills · read 12 min ago/);
     assert.match(text(official), /The Ouroboros project’s own skills, marked Official by its maintainer\./);
     const community = renderSourceRow(source('ouroboros-community'), { items: items('ouroboros-community'), health: health('ouroboros-community') });
@@ -61,9 +61,9 @@ test('a row a build supplied says so; it keeps its trust value and ⋮ like any 
 
 test('trust is a setting on the right, marked suggested until the owner confirms the hub rows', () => {
     const suggested = renderSourceRow(source('ouroboros'), {});
-    assert.match(suggested, /class="skills-trust-value is-suggested" data-source-action="trust" data-source-id="ouroboros"[^>]*>Installs without review \(suggested\) ›</);
+    assert.match(suggested, /class="[^"]*skills-trust-value is-suggested[^"]*" data-source-action="trust" data-source-id="ouroboros"[^>]*>Installs without review \(suggested\) ›</);
     const confirmed = renderSourceRow(source('clawhub'), {});
-    assert.match(confirmed, /class="skills-trust-value" data-source-action="trust"[^>]*>Reviews each skill ›</);
+    assert.match(confirmed, /class="[^"]*skills-trust-value[^"]*" data-source-action="trust"[^>]*>Reviews each skill ›</);
     assert.deepEqual(unconfirmedHubRows(SOURCES).map((row) => row.id), ['ouroboros', 'ouroboros-community']);
     assert.deepEqual(unconfirmedHubRows(SOURCES.map((row) => ({ ...row, confirmed: true }))), []);
 });

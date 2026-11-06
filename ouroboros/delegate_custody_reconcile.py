@@ -179,14 +179,16 @@ def reconcile_task_runs(drive_root: Any, task_id: str, *,
     as retained, through no transport. ``gateway_factory`` defaults to
     ``attach_only_gateway``; a kill boundary names it explicitly.
 
-    ``deliberate_terminal`` is the terminal status the KILLING caller is about to
-    write, when that terminal is the task's own deliberate end (an owner
-    cancellation). The kill boundary audits custody before its terminal write, so
-    the durable result the inverted floor otherwise reads does not exist yet; the
-    caller already knows the verdict and states it here rather than having the
-    host guess or re-read a file that is not there. Empty means "no verdict from
-    me", which is what every host bound (deadline, reap) and every read-only
-    sweep passes.
+    ``deliberate_terminal`` is the caller's verdict on the task's open runs: the
+    terminal status a KILLING caller is about to write when that terminal is the
+    task's deliberate end (an owner cancellation), or ``interrupted`` for an
+    abrupt loss whose task continues in a later attempt (a signal-death retry, the
+    work an owner Restart returns or a fault holds). The kill boundary audits
+    custody before its terminal write, so the durable result the inverted floor
+    otherwise reads does not exist yet; the caller already knows the verdict and
+    states it here rather than having the host guess or re-read a file that is
+    not there. Empty means "no verdict from me", which is what every host bound
+    (deadline, reap) and every read-only sweep passes.
     """
     mine = str(task_id or "")
     if not mine:

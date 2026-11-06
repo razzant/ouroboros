@@ -20,11 +20,12 @@ function lift(name) {
 // What the Projects list says of the rows it holds (projects_nav.js `unreadRows`): here the feed's, or those a case adds.
 const heldRows = (feed, beyond = []) => ({ unreadRows: () => [...(feed() || []).filter((row) => row._unread), ...beyond] });
 
-function harness({ revision = null, seen = null, loaded = true, page = 'files', answer = () => ({}) } = {}) {
+function harness({ revision = null, seen = null, loaded = true, page = 'files', project = null, answer = () => ({}) } = {}) {
     const posts = [], badges = [], acks = [];
     const context = vm.createContext({
         ...readAhead,  // app.js imports these: a message read in full elsewhere (DESIGN "Unread")
         state: { mainVisibleRevision: revision, mainSeenRevision: seen, mainSeenLoaded: loaded, activePage: page },
+        navState: { activeProjectId: project },  // a Project open over Main (owner 06.11)
         updateUnreadBadge: () => badges.push(context.mainUnreadCount()),
         refreshSharedProjectSeen: () => posts.push(['shared']),
         acknowledgeMainAfterPaint: () => acks.push(context.state.mainVisibleRevision),
@@ -33,7 +34,7 @@ function harness({ revision = null, seen = null, loaded = true, page = 'files', 
             return answer(JSON.parse(init.body || '{}'));
         },
     });
-    vm.runInContext(['mainUnreadCount', 'observeMainRevision', 'mergeMainSeenRevision', 'markMainViewed']
+    vm.runInContext(['mainOnScreen', 'mainUnreadCount', 'observeMainRevision', 'mergeMainSeenRevision', 'markMainViewed']
         .map(lift).join('\n') + '\nglobalThis.mainUnreadCount = mainUnreadCount; globalThis.api = { observeMainRevision,'
         + ' mergeMainSeenRevision, markMainViewed, mainUnreadCount };', context);
     return { context, posts, badges, acks, api: context.api };
@@ -97,6 +98,54 @@ test('a newer revision re-reads the shared cursors, and offers the read decision
     const shown = harness({ revision: 3, seen: 3, page: 'chat' });
     shown.api.observeMainRevision(5);
     assert.deepEqual(shown.acks, [5]);
+    // A Project open over Main (a finger's column, the desk's drawer, the phone's card): Main is not the room on screen,
+    // so its new message counts and nothing reads it until Main is back (owner 06.11; DESIGN "Unread").
+    const covered = harness({ revision: 3, seen: 3, page: 'chat', project: 'p1' });
+    covered.api.observeMainRevision(5);
+    assert.deepEqual(covered.acks, []);
+    assert.equal(covered.api.mainUnreadCount(), 2);
+});
+
+// The read itself: a revision is written only after a paint made while Main is the room on screen. Main's reader
+// reaching its newest message calls it as well, so the gate is the read's own, not only its callers'.
+function paintHarness({ project = null, hold = false } = {}) {
+    const paints = [], writes = [];
+    let release = () => {};
+    const context = vm.createContext({
+        ...readAhead,
+        console,
+        state: { mainVisibleRevision: 5, mainSeenRevision: 3, mainSeenLoaded: true, activePage: 'chat' },
+        navState: { activeProjectId: project },
+        updateUnreadBadge: () => {},
+        mainChat: { refreshHistory: ({ revision }) => {
+            paints.push(revision);
+            const painted = { read: true, revision };
+            return hold ? new Promise((resolve) => { release = () => resolve(painted); }) : Promise.resolve(painted);
+        } },
+        fetchJson: async (url, init = {}) => {
+            const body = JSON.parse(init.body || '{}');
+            writes.push(body.main_seen_revision);
+            return body;
+        },
+    });
+    vm.runInContext(`let mainPaintRequest = null;\n${['mainOnScreen', 'mergeMainSeenRevision', 'markMainViewed',
+        'acknowledgeMainAfterPaint'].map(lift).join('\n')}\nglobalThis.read = acknowledgeMainAfterPaint;`, context);
+    return { context, paints, writes, release: () => release() };
+}
+
+test('Main is read only by a paint made while it is on screen; a Project over it, or opened meanwhile, takes none', async () => {
+    const shown = paintHarness();
+    await shown.context.read();
+    assert.deepEqual([shown.paints, shown.writes], [[5], [5]], 'Main on screen: its newest revision is read');
+    const covered = paintHarness({ project: 'p1' });
+    await covered.context.read();
+    assert.deepEqual([covered.paints, covered.writes], [[], []], 'a Project over Main: no paint for a read, no write');
+    const opened = paintHarness({ hold: true });
+    const reading = opened.context.read();
+    opened.context.navState.activeProjectId = 'p1';  // a Project opens while Main's paint is under way
+    opened.release();
+    await reading;
+    assert.deepEqual([opened.paints, opened.writes], [[5], []], 'the paint ends under the Project: the read is withheld');
 });
 
 test('the shared cursor only moves forward, and a write keeps what the server answers', async () => {
@@ -164,6 +213,7 @@ test("another client's read reaches this one at its next state snapshot, a late 
         projectsNav: heldRows(() => context.lastProjectRows),
         state: { mainVisibleRevision: 72, mainSeenRevision: 70, mainSeenLoaded: true, activePage: 'files',
             projectSeenRevision: { nova: 1 } },
+        navState: { activeProjectId: null },
         lastProjectRows: [{ id: 'nova', chat_id: 7302, visible_revision: 4, _unread: true }],
         updateUnreadBadge() {}, paintProjectsNav() {}, patchProjectActivityMarkers() {}, acknowledgeMainAfterPaint() {},
         fetchJson: (url, init = {}) => new Promise((resolve) => {
@@ -172,7 +222,7 @@ test("another client's read reaches this one at its next state snapshot, a late 
             answers.push(() => resolve(JSON.parse(JSON.stringify(host))));  // the host's state when it answers
         }),
     });
-    vm.runInContext(['mainUnreadCount', 'observeMainRevision', 'mergeMainSeenRevision', 'mergeProjectSeenRevisions',
+    vm.runInContext(['mainOnScreen', 'mainUnreadCount', 'observeMainRevision', 'mergeMainSeenRevision', 'mergeProjectSeenRevisions',
         'refreshSharedProjectSeen', 'paintProjectsCount'].map(lift).join('\n')
         + '\nlet sharedSeenRead = null;\nglobalThis.api = { observeMainRevision, mainUnreadCount, paintProjectsCount };', context);
     context.api.paintProjectsCount();

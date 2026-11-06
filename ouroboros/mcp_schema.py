@@ -151,6 +151,10 @@ def _redact_error_text(text: Any, cfg: Any = None) -> str:
             safe_url = urllib.parse.urlunparse(parsed._replace(netloc=safe_netloc))
             out = out.replace(cfg.url, safe_url)
         out = redact_known_values(out, cfg.secret_values)
+        if getattr(cfg, "transport", "") in ("streamable_http", "sse"):  # a stored sign-in lives outside the config
+            from ouroboros.mcp_oauth import secret_values
+
+            out = redact_known_values(out, secret_values(cfg.id))
     return out
 
 

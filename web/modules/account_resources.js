@@ -167,7 +167,8 @@ function provenanceMarkup(row, payload, resource, action) {
     const clears = (resource?.resets?.value || []).flatMap(offer => (offer.grants || [])
         .map(grant => fact(grant.label, grant.clears.join(', ') || 'Scope not reported'))).join('');
     const receipt = [action.receipt?.detail, action.receipt?.readback?.detail].filter(Boolean).join(' · ');
-    return `<details class="resource-provenance"><summary data-resource-provenance>Source details</summary><dl>${details}${diagnostics}${clears}
+    const plan = row.identity?.plan ? fact('Plan id', String(row.identity.plan)) : '';
+    return `<details class="resource-provenance"><summary data-resource-provenance>Source details</summary><dl>${plan}${details}${diagnostics}${clears}
         ${receipt ? fact('Reset operation', receipt) : ''}</dl></details>`;
 }
 
@@ -213,7 +214,7 @@ const resetLabel = (offer, prior) => offer.kind === 'session_refill'
 function resetMessage(action, busy, prefix = '') {
     const outcome = resetOutcome(action);
     if (!outcome) return '';
-    return `<div class="resource-message settings-action-row" data-tone="${outcome.tone}" role="status">
+    return `<div class="resource-message ui-action-row" data-tone="${outcome.tone}" role="status">
         <div class="settings-action-copy"><strong>${esc(prefix + outcome.title)}</strong><small>${esc(outcome.body)}</small>
             ${note(readableDetail(action.receipt?.detail))}${note(readableDetail(action.receipt?.readback?.detail))}
             ${prefix ? note(action.error) : ''}</div>

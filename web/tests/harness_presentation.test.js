@@ -17,6 +17,7 @@ import {
     harnessIdentityMarkup,
     harnessPresentation,
     joinMetaParts,
+    planLabel,
 } from '../modules/harness_presentation.js';
 import {
     ROUTE_KIND_AGENT_SESSION,
@@ -372,4 +373,16 @@ test('the executor model fact keeps observed, requested and unknown apart', () =
     assert.equal(executorModelText(report('openai/gpt-6', 'observed'), (id) => id.split('/').pop()), 'gpt-6',
         'the caller\'s compactor only drops a provider prefix');
     assert.equal(executorModelText({ harness: 'codex', label: 'Codex' }), '', 'a dispatch alone proves no model');
+});
+
+test('a vendor plan id is said in the owner words; an id the table does not know stays itself', () => {
+    assert.equal(planLabel('claude_max'), 'Max');
+    assert.equal(planLabel('promax'), 'Pro Max');
+    assert.equal(planLabel('prolite'), 'Pro Lite');
+    assert.equal(planLabel('self_serve_business_usage_based'), 'Business usage-based');
+    assert.equal(planLabel(' Team '), 'Team');
+    assert.equal(planLabel('future_plan_x'), 'future_plan_x', 'never a guessed name');
+    assert.equal(planLabel(''), '');
+    // A program id without a brand mark still reads as a name (U106).
+    assert.equal(harnessPresentation('copilot').label, 'GitHub Copilot');
 });
