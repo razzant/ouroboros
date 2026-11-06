@@ -4113,7 +4113,7 @@ html[data-layout="stack"] #primary-sidebar {
    at every scroller, so it is declared on the scrollers themselves; a code block or a table inside scrolls sideways
    as its own scroller. */
 html[data-layout="stack"] :is(#chat-messages, .chat-messages, .files-list, .files-sidebar, .files-preview-content,
-    .skills-scroll, .widgets-scroll, .settings-scroll, .costs-scroll, .dashboard-body) {
+    .skills-scroll, .widgets-scroll, .settings-scroll, .dashboard-body) {
     touch-action: pan-y pinch-zoom;
 }
 /* Outside the scrollers too (a header, the composer's row of capsules, the attach button): the page itself only pans
@@ -5661,16 +5661,12 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .evo-empty { display: grid; gap: var(--space-2); justify-items: start; padding: 4px 0 2px; }
 .evo-empty-line { margin: 0; max-width: 62ch; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
 
-
-/* The scroller Evolution and Storage still mount (evolution.js, storage.js); Costs is on the shared Dashboard tab body. */
-.costs-scroll { overflow-y: auto; flex: 1; padding: 16px 20px; }
 /* Dashboard › Costs (costs.js) on the Dashboard tab body: the known spend of the limit leads with its share as a thin
    bar under it (amber only when the limit is reached, the owner's move); the budget form is the tab's action row; the
    four breakdowns are cards of their own, two side by side where they fit, each a short list with "Show all (N)". */
 .costs-spend-bar { height: 4px; border-radius: var(--pill-radius); background: var(--status-neutral-bg); overflow: hidden; }
 .costs-spend-bar > i { display: block; width: var(--spend-share, 0%); height: 100%; border-radius: inherit; background: var(--text-meta); }
 .costs-spend-bar[data-reached="1"] > i { background: var(--amber); }
-.costs-details { margin-top: var(--space-3); }
 .costs-budget, .costs-table-card { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
 .costs-budget-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: var(--space-3) var(--space-5); align-items: start; }
 .costs-copy { margin: 0; max-width: 72ch; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
@@ -5682,18 +5678,11 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 /* Dashboard Storage (the owner-started count and the free-space tray): shared card, type, spacing
    and tone tokens; only the bar's measured share arrives at runtime (--storage-share). */
-.storage-root { min-height: 0; display: flex; flex-direction: column; gap: var(--space-3); }
-.storage-summary-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); }
-.storage-summary-text { min-width: 0; }
+/* The summary's words are the hero's own rows (.dashboard-hero), repainted as one region beside the kept actions. */
+.storage-summary-text { display: contents; }
+.dashboard-hero > .storage-summary-text > * { grid-column: 1; min-width: 0; margin: 0; }
 /* The tab's one live region: screen readers hear its phase sentence; sighted owners read the summary. */
 .storage-announce { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-.storage-total {
-    color: var(--text-primary);
-    font-size: var(--type-page);
-    line-height: var(--line-title);
-    font-weight: 650;
-    overflow-wrap: anywhere;
-}
 .storage-total.is-unknown,
 .storage-place-size.is-unknown { color: var(--text-meta); }
 .storage-kicker,
@@ -5710,11 +5699,9 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     line-height: var(--line-title);
     font-weight: 650;
 }
-.storage-summary-text > .storage-status { margin: var(--space-2) 0 0; }
 .storage-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); }
-.storage-summary-actions { flex: 0 0 auto; }
 /* A busy action keeps its focus (aria-disabled, not disabled) but stops looking pressable. */
-.storage-actions > .btn[aria-disabled="true"], .storage-free-picks > .btn[aria-disabled="true"] { box-shadow: none; color: var(--text-meta); cursor: default; }
+:is(.storage-actions, .storage-summary-actions, .storage-free-picks) > .btn[aria-disabled="true"] { box-shadow: none; color: var(--text-meta); cursor: default; }
 .storage-progress {
     display: flex;
     align-items: baseline;
@@ -5868,10 +5855,9 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .storage-free-picks > .storage-meta { margin: 0 auto 0 0; }
 
 /* A size that carries a qualifier ("3.7 GB (some could not be read)") is too long to share the name's line on a
-   narrow card: it goes under the name, so a group's name never shrinks to a column of a few letters. The card's own
+   narrow card: it goes under the name, so a group's name never shrinks to a column of a few letters. The tab body's
    width decides, not the viewport's. */
-.storage-root { container: storage / inline-size; }
-@container storage (max-width: 520px) {
+@container dashboard (max-width: 520px) {
     .storage-free-size.is-qualified { grid-column: 2; grid-row: 2; justify-self: start; white-space: normal; }
     .storage-free-groups.is-single .storage-free-size.is-qualified { grid-column: 1; }
     /* As in the free-space lists: on a narrow card a qualified size goes under the name. */
@@ -5881,8 +5867,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 /* A phone stacks everything: full-width capsules, Measure first, Stop under it; size on the name's
    line, growth under it. */
 @media (max-width: 640px) {
-    .storage-summary-head { align-items: stretch; flex-direction: column; }
-    .storage-summary-actions { align-self: stretch; }
     .storage-actions { flex-direction: column; align-items: stretch; }
     .storage-actions > .btn { width: 100%; }
     .storage-group-head { grid-template-columns: 8px minmax(0, 1fr) auto; }
@@ -5926,16 +5910,13 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .storage-decision-label { display:grid; min-width:0; color:var(--text-primary); font-size:var(--type-body); line-height:var(--line-body); font-weight:500; overflow-wrap:anywhere; }
 .storage-decision-label > .storage-meta { margin:0; font-weight:400; }
 .storage-decision-size { color:var(--text-primary); font-size:var(--type-body); white-space:nowrap; font-variant-numeric:tabular-nums; }
-@container storage (max-width:560px) {
+@container dashboard (max-width:560px) {
  .storage-cleanup.has-door { display:block; }
  .storage-folders, .storage-cleanup-figures { grid-template-columns:minmax(0,1fr); }
  .storage-folder-fold > summary { min-height:44px; }
  .storage-decision-row { grid-template-columns:minmax(0,1fr) auto; }
  .storage-decision-size.is-qualified { grid-column:1 / -1; grid-row:2; justify-self:start; white-space:normal; }
  .storage-decision-row > .btn { grid-column:1 / -1; justify-self:start; }
- .storage-summary-head { flex-direction:row; align-items:flex-start; }
- .storage-summary-actions { align-self:flex-start; }
- .storage-summary-actions > .btn { width:auto; }
 }
 
 #page-dashboard {
@@ -6039,8 +6020,10 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     .dashboard-facts { grid-template-columns: minmax(0, 1fr); row-gap: 0; }
     .dashboard-facts dd { margin-bottom: var(--space-1); }
 }
-/* Under a finger every control and summary reaches out to the touch minimum (ui.css "Touch reach"); a disclosure that
-   follows the headline's actions (or the letter's last line) keeps the two reaches apart, so neither covers the other. */
+/* A headline card's Details follow the hero. Under a finger every control and summary reaches out to the touch minimum
+   (ui.css "Touch reach"); a disclosure that follows the headline's actions (or the letter's last line) keeps the two
+   reaches apart, so neither covers the other. */
+.dashboard-hero + .ui-disclosure { margin-top: var(--space-3); }
 @media (pointer: coarse) {
     .dashboard-hero + .ui-disclosure, .updates-letter-details { margin-top: var(--space-5); }
 }
@@ -7554,10 +7537,6 @@ button.skills-mark { cursor: pointer; min-height: 0; }
         font-size: var(--type-meta);
     }
     .widget-table th[scope="row"] { display: block; padding: 6px 0; }
-
-    .costs-scroll {
-        padding: 12px 12px;
-    }
 
     .dashboard-body { padding: var(--space-3); }
     .logs-filters { padding-top: var(--space-3); }

@@ -106,7 +106,7 @@ def test_storage_dashboard_real_server_consumer(direct_server_with_data, request
         for group in ("records", "work", "temporary", "other"):
             expect(page.locator(f'.storage-legend [data-group="{group}"]')).to_be_visible()
         expect(page.get_by_role("region", name="Space used by Ouroboros", exact=True)).to_contain_text("Space used by Ouroboros")
-        expect(page.get_by_role("region", name="Space used by Ouroboros", exact=True)).to_contain_text("Last count:")
+        expect(page.get_by_role("region", name="Space used by Ouroboros", exact=True)).to_contain_text("Counted ")
         expect(page.locator('[data-storage-place="model_calls"]')).to_contain_text("Model call records")
         # Each group folds under its head; opening one shows its places with their words.
         expect(page.locator('[data-storage-place="data_other"]')).to_be_visible()
@@ -134,7 +134,7 @@ def test_storage_dashboard_real_server_consumer(direct_server_with_data, request
         with page.expect_response(lambda response: response.url.endswith("/api/storage/free/preview"), timeout=10_000) as previewed:
             page.locator("[data-storage-door]").click()
         assert previewed.value.status == 202 and previewed.value.json()["started"] is True
-        expect(tray).to_contain_text("Nothing right now", timeout=30_000)
+        expect(tray).to_contain_text("No files of finished work are waiting.", timeout=30_000)
         expect(page.locator("[data-storage-door]")).to_be_visible()
         after = _file_snapshots(protected)
         assert after == before, "the preview changed no task data or saved count"
@@ -157,7 +157,7 @@ def test_storage_dashboard_real_server_consumer(direct_server_with_data, request
         page.locator('[data-dashboard-tab="logs"]').click()
         page.locator('[data-dashboard-tab="storage"]').click()
         expect(page.locator(".storage-status")).to_contain_text("could not be read", timeout=10_000)
-        expect(page.get_by_role("region", name="Space used by Ouroboros", exact=True)).to_contain_text("Last count:")
+        expect(page.get_by_role("region", name="Space used by Ouroboros", exact=True)).to_contain_text("Counted ")
         expect(page.locator('[data-storage-place="model_calls"]')).to_be_visible()
         page.unroute("**/api/storage*", fail_one_read)
         for theme in ("dark", "light"):
@@ -175,7 +175,7 @@ def test_storage_dashboard_real_server_consumer(direct_server_with_data, request
             page.emulate_media(color_scheme=theme)
             page.wait_for_function("theme => document.documentElement.dataset.theme === theme", arg=theme)
             page.screenshot(path=str(evidence / f"storage-narrow-{theme}.png"))
-        body = page.locator("#page-storage .costs-scroll")
+        body = page.locator("#page-storage")  # the tab body is its own scroller
         overflow = body.evaluate("node => node.scrollWidth - node.clientWidth")
         assert overflow <= 2, f"storage dashboard overflows the narrow viewport by {overflow}px"
         _assert_bar_fills_its_card(page)

@@ -86,7 +86,7 @@ def open_evolution(ui, answer, *, width=1100, height=750, scheme="dark", state=S
 
 def overflow(page):
     return page.evaluate("""() => {
-        const box = document.querySelector('#page-evolution .costs-scroll');
+        const box = document.querySelector('#page-evolution');  // the tab body is its own scroller
         return {page: document.documentElement.scrollWidth - innerWidth, panel: box.scrollWidth - box.clientWidth};
     }""")
 

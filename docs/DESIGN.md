@@ -2469,10 +2469,10 @@ fade dims a card where the list cuts it.
 
 ### Storage
 
-Storage leads with **Space used by Ouroboros**, its measurement date, growth,
-unreadable count, **Refresh sizes**, the coloured bar and five-group legend (owner
-choice 2026-11-04). **Cleanup** follows: **Can be removed** is unknown until a
-check, never the selection; **Selected** is a separate quieter figure. One
+Storage leads with **Space used by Ouroboros**, its count's age and growth
+(duration and unreadable items in Details), **Refresh sizes**, the coloured bar and
+five-group legend (owner choice 2026-11-04). **Cleanup** follows: a sentence until a
+check, then **Can be removed**, never the selection; **Selected** is a separate quieter figure. One
 **Remove N selected items** waits for the whole list and sends exactly those ids;
 hidden rows keep their choice. Copies not verified saved and saved groups have
 one compact row each, deliberately opened, unchecked, with their whole-loss

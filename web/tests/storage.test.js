@@ -145,7 +145,11 @@ test('the bar exists only for a finished count, its five shares sum to 100 and s
 test('the footprint leads, free disk is secondary, every folder opens independently', () => {
     const view = renderStorage(response({ count: count({ unreadable: 12, growth_flag: 'unreadable' }) }), { now: NOW });
     assert.match(view.summary, /Space used by Ouroboros[\s\S]*storage-total"[^>]*>400 GB</);
-    assert.match(view.summary, /Last count: today at \d\d:\d\d[\s\S]*\+52 GB[\s\S]*12 items could not be read/);
+    // The count's age and its growth are the hero's own lines; how it was taken is said once, in its Details (U068).
+    assert.match(view.summary, /Counted today at \d\d:\d\d<\/p>[\s\S]*>\+52 GB since [^<]+<\/p>/);
+    assert.doesNotMatch(view.summary, /could not be read|[Tt]ook /, 'the caveat and how long it took leave the main view');
+    assert.match(view.facts, /Took 19 min\.[\s\S]*12 items could not be read\./);
+    assert.equal((view.facts.match(/could not be read/g) || []).length, 1, 'the caveat is said once');
     assert.doesNotMatch(view.summary, /Free on this disk|170 GB/);
     assert.match(view.places, /This disk: 170 GB free of 4.0 TB · read/);
     assert.match(view.auto, /7 days after the task ends/);
@@ -157,7 +161,12 @@ test('the footprint leads, free disk is secondary, every folder opens independen
     assert.doesNotMatch(view.places, /storage-folder-fold"[^>]*\sopen/);
     const unknown = renderStorage(response({ count: count(), volume: { free_bytes: null } }), { now: NOW });
     assert.match(unknown.places, /Free space on this disk could not be read/);
-    assert.match(renderStorage(response({ count: count({ growth_bytes: 0 }) }), { now: NOW }).summary, /no change since/);
+    assert.match(renderStorage(response({ count: count({ growth_bytes: 0 }) }), { now: NOW }).summary, /No change since/);
+    // An older count says how old it is; the earlier count's unreadable items alone still qualify the growth.
+    const older = renderStorage(response({ count: count({ unreadable: 0, growth_flag: 'unreadable' }) }), { now: new Date('2026-10-23T12:00:00Z') });
+    assert.match(older.summary, />Counted 17 Oct — 6 days ago</);
+    assert.match(older.facts, /Some items could not be read, so the growth is approximate\./);
+    assert.equal(renderStorage(response({ count: count({ duration_seconds: undefined }) }), { now: NOW }).facts, '', 'nothing to say draws no Details');
     assert.match(renderStorage(response({ count: count({ growth_bytes: -3 * GB }) }), { now: NOW }).summary, /−3.0 GB since/);
 });
 
@@ -186,7 +195,7 @@ test('a work folder whose default could not be chosen stays listed as unknown wi
     assert.match(row, /storage-place-size is-unknown"[^>]*>unknown<\/span>[\s\S]*Your project files\. Not deleted here\. · Not counted: the default projects folder is undecided/);
     assert.match(row, /Set OUROBOROS_SUBAGENT_PROJECTS_ROOT to the folder to use/);
     assert.doesNotMatch(row, /Could not be read\.|0 bytes/);
-    assert.match(view.summary, /1 item could not be read/);
+    assert.match(view.facts, /1 item could not be read\./);
 });
 
 test('a running count shows its progress sentence, Stop and the measure action busy; a first count lists finished places', () => {
@@ -241,7 +250,9 @@ test('before any count the empty state names what Measure does; a failed read ke
 test('the door is offered whenever an answer exists at rest, before any count too; a phase of the flow holds it back', () => {
     const never = renderStorage(response(), { now: NOW });
     assert.equal(never.door, true);
-    assert.match(never.tray, /Can be removed[\s\S]*Not checked yet/);
+    // Before a check the tray says what a check is for in a sentence; the figure slot waits for a real size (U070).
+    assert.match(never.tray, /<p class="storage-tray-text">See what finished work can be removed\.<\/p>/);
+    assert.doesNotMatch(never.tray, /storage-cleanup-amount|Can be removed/);
     assert.equal(renderStorage(null).tray, '');
     assert.equal(renderStorage(null).door, false);
     assert.equal(renderStorage(null).auto, '');
@@ -251,7 +262,7 @@ test('the door is offered whenever an answer exists at rest, before any count to
     assert.doesNotMatch(listing.tray, AVOIDED);
     const dismissed = renderStorage(response({ free: { ...free, state: 'done', plan: 'p', run: { removed: 1, kept: [] } } }), { now: NOW, tray: { checked: new Set(), dismissed: true } });
     assert.equal(dismissed.door, true);
-    assert.match(dismissed.tray, /Not checked since the last removal/);
+    assert.match(dismissed.tray, /<p class="storage-tray-text">Not checked since the last removal\.<\/p>/);
 });
 
 test('titles and accessible names are fixed chrome: no size or name is minted per count', () => {
