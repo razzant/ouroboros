@@ -46,15 +46,15 @@ def test_focus_no_ceiling_host_actor_prompt(focus):
     assert "The untrusted event" in rendered and "Already started: task1" in rendered
     assert "connector" in rendered and "folder" in rendered.lower()
     # The connector's send and edit times (CREATING_SKILLS ``message.sent_at``/``edited_at``), else unknown.
-    assert " at an unrecorded time;" in rendered
+    assert " at an unrecorded time." in rendered
     root, _place, admission, event = focus
     dated = _build_task(replace(admission, allowance={"status": "available", "remaining_usd": 2}), replace(event, message={
         "sent_at": "2026-11-05T17:32:00+03:00", "edited_at": "2026-11-05T14:40:00Z", "timestamp": "1"}),
         drive_root=root, staged_files=())
     rendered = frame_focus_content(dated, "The untrusted event")
-    assert " at 2026-11-05T17:32:00+03:00, edited at 2026-11-05T14:40:00Z;" in rendered and "unrecorded" not in rendered
+    assert " at 2026-11-05T17:32:00+03:00, edited at 2026-11-05T14:40:00Z." in rendered and "unrecorded" not in rendered
     dated["metadata"]["presence"]["event"]["message"] = {"sent_at": "2026-11-05T17:32:00"}  # no time zone: not a time
-    assert " at an unrecorded time;" in frame_focus_content(dated, "The untrusted event")
+    assert " at an unrecorded time." in frame_focus_content(dated, "The untrusted event")
 
 
 @pytest.mark.parametrize("state,facts,enabled,allowance,decision", [
@@ -459,3 +459,88 @@ def test_author_projection_cleanup_failure_still_releases_the_gate(tmp_path, mon
             pass
     finally:
         resources.close()
+
+
+# --- the frame states the connector's facts, never a verdict about whom the message is for --------------------------
+
+
+BOT = {"sends_as": {"id": "B1", "label": "Bot", "kind": "bot"}, "reads_as": []}
+
+
+def _frame(focus, *, facts, message=None, conversation=None, identity=BOT):
+    root, _place, admission, event = focus
+    event = replace(event, facts=facts, message=message or {}, conversation=conversation or {}, identity=identity)
+    task = _build_task(replace(admission, allowance={"status": "available", "remaining_usd": 2}), event, drive_root=root, staged_files=())
+    from ouroboros.presence_context import frame_focus_content
+    return task, frame_focus_content(task, event.text)
+
+
+@pytest.mark.parametrize("facts,message,identity,expect,absent,addressed", [
+    # The I1 shape: a reply in a bot-rooted thread that mentions someone else. The verdict is gone; the facts stay.
+    (("any_message", "reply_to_me", "my_thread"), {"provider_facts": {"self_user_id": "B1", "mentioned_user_ids": ["U2"]}}, BOT,
+     ["The connector observed: a message in a watched conversation; it replies to a message you wrote; it is in a thread you started or wrote in.",
+      "It mentions: id U2 (name not supplied; a connector read tool can resolve it) — not you.", "through Bot (B1)."], [], True),
+    # The honest shape after the hub fix: thread membership only.
+    (("any_message", "my_thread"), {"provider_facts": {"self_user_id": "B1", "mentioned_user_ids": ["U2"]}}, BOT,
+     ["a message in a watched conversation; it is in a thread you started or wrote in."], ["replies to a message you wrote"], False),
+    # A real mention still says so; connector-resolved names and its own is_self mark are rendered as given.
+    (("mention",), {"mentions": [{"id": "B1", "name": "Bot", "is_self": True}, {"id": "U2", "name": "Ann", "is_self": False}]}, BOT,
+     ["The connector observed: it mentions your account.", "It mentions: Bot (id B1) — you; Ann (id U2) — not you."], [], True),
+    # No credential identity: the connector's own account id still tells you who you are here.
+    (("any_message",), {"provider_facts": {"self_user_id": "B1", "mentioned_user_ids": []}}, None,
+     ["Here your account is B1.", "It mentions no one by platform id."], ["You write here"], False),
+    # A connector that reports no mentions at all: nothing is invented about them.
+    (("direct_message",), {}, BOT, ["a direct message to your account."], ["It mentions"], True),
+])
+def test_focus_frame_states_provider_facts_and_mentions_never_a_verdict(focus, facts, message, identity, expect, absent, addressed):
+    task, rendered = _frame(focus, facts=facts, message=message, identity=identity)
+    assert task["metadata"]["focus"]["addressed"] is addressed  # the stored key is unchanged in this phase
+    for words in ("addressed you", "This turn is yours", "wake list"):
+        assert words not in rendered, words
+    assert "A wake is your attention, not an obligation: answer, act or stay silent." in rendered
+    for words in expect:
+        assert words in rendered, words
+    for words in absent:
+        assert words not in rendered, words
+
+
+@pytest.mark.parametrize("shape", ["slack", "generic"])
+def test_focus_frame_renders_the_connector_thread_snapshot_with_marks_and_a_named_omission(focus, monkeypatch, shape):
+    from ouroboros import config
+    from ouroboros.presence_context import focus_frame_sources
+    if shape == "slack":
+        rows = [{"user": "B1", "ts": "1700000000.1", "bot_profile": {"name": "Bot"}, "text": "root " * 10},
+                {"user": "U2", "ts": "1700000001.2", "user_profile": {"real_name": "Ann"}, "text": "a reply " * 10},
+                {"user": "U3", "ts": "1700000002.3", "user_profile": {"real_name": "Pat"}, "text": "the waking words"}]
+        message = {"message_id": "1700000002.3", "sent_at": "2023-11-14T22:13:22+00:00"}
+    else:
+        rows = [{"id": "m1", "actor_id": "B1", "author_name": "Bot", "text": "root " * 10},
+                {"id": "m2", "actor_id": "U2", "display_name": "Ann", "text": "a reply " * 10},
+                {"id": "m3", "actor_id": "U3", "author": {"display_name": "Pat"}, "text": "the waking words"}]
+        message = {"message_id": "m3"}
+    conversation = {"thread_history": {"status": "available", "observed_at": "2023-11-14T22:13:23+00:00",
+                                       "data": {"messages": rows, "complete": True}}}
+    _task, bare = _frame(focus, facts=("my_thread",), message=message, conversation={})
+    assert "The thread as the connector captured it" not in bare  # no snapshot, no thread section
+    task, rendered = _frame(focus, facts=("my_thread",), message=message, conversation=conversation)
+    thread = rendered.split("The thread as the connector captured it (3 message(s), observed at 2023-11-14T22:13:23+00:00):\n", 1)[1]
+    lines = thread.split("\n\nAnswer or stay silent first", 1)[0].splitlines()
+    assert lines[0].startswith("- Bot (B1) [you] at ") and lines[0].endswith(json.dumps("root " * 10))
+    assert lines[1].startswith("- Ann (U2) at ") and "[you]" not in lines[1]
+    assert lines[2].startswith("- Pat (U3) [this message] at ") and lines[2].endswith('"the waking words"')
+    assert (" at 2023-11-14T22:13:22Z: " in lines[2]) is (shape == "slack")  # a numeric epoch is a time; else unknown
+    assert ("earlier message(s)" not in rendered) and ("incomplete" not in rendered)
+    # The typed records behind the frame reproduce it byte for byte, snapshot included (the Supervisor's reading).
+    assert focus_frame_sources(task["metadata"], rendered)["event"]["conversation"] == conversation
+    # Over the named physical bound the newest lines render whole; the rest is counted and given its exact reader.
+    monkeypatch.setattr(config, "FOCUS_THREAD_SNAPSHOT_CHARS", len(lines[2]) + 1)
+    _task, bounded = _frame(focus, facts=("my_thread",), message=message, conversation=conversation)
+    assert lines[2] in bounded and lines[0] not in bounded and lines[1] not in bounded
+    assert ("(2 earlier message(s), " + str(len(lines[0]) + len(lines[1]) + 2) + " characters, are not shown here: the room row of "
+            "this message carries their exact memory_read(source_ref=…) address, and the connector's thread read tool reads "
+            "the thread live.)") in bounded
+    monkeypatch.setattr(config, "FOCUS_THREAD_SNAPSHOT_CHARS", 1)  # even one line over the bound renders the newest whole
+    assert lines[2] in _frame(focus, facts=("my_thread",), message=message, conversation=conversation)[1]
+    conversation["thread_history"]["data"]["complete"] = False
+    assert "3 message(s), the connector reports it incomplete, observed at" in _frame(
+        focus, facts=("my_thread",), message=message, conversation=conversation)[1]

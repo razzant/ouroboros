@@ -629,8 +629,136 @@ def confirmed_delivery_receipts(ctx: Any) -> frozenset[tuple[str, str]]:
     return frozenset(identity for identity, state in latest.items() if state in {"delivered", "accepted"})
 
 
-PLACEHOLDERS = ("who", "place", "when", "waiting_line", "event", "place_state", "notes",
+PLACEHOLDERS = ("who", "place", "when", "facts_line", "event", "place_state", "notes",
                 "wake_item", "actor_facts", "work_here", "spent_line", "roots_line", "working_folder", "voice_line")
+
+# The connector's observed provider facts (CREATING_SKILLS ``event.facts``) in plain words. Each is what the
+# provider recorded about this event, never a reading of its text or a verdict about whom it is for.
+_FACT_WORDS = {
+    "direct_message": "a direct message to your account",
+    "group_dm": "a message in a group direct conversation you are a member of",
+    "mention": "it mentions your account",
+    "reply_to_me": "it replies to a message you wrote",
+    "my_thread": "it is in a thread you started or wrote in",
+    "new_issue": "a new issue in a watched place",
+    "new_pull_request": "a new pull request in a watched place",
+    "review_requested": "it requests your review",
+    "assigned": "it is assigned to your account",
+    "any_message": "a message in a watched conversation",
+    "from_bot": "its author is a bot",
+    "legacy_addressed": "an older connector that filtered events itself and reports no per-event facts",
+}
+
+
+def _self_ids(focus: Mapping[str, Any], event: Mapping[str, Any]) -> tuple[str, ...]:
+    """The platform ids of the account this focus writes as: its credential identity, then the connector's own
+    ``provider_facts.self_user_id``; empty when neither names one."""
+    sending = (focus.get("identity") or {}).get("sends_as") or {}
+    facts = (event.get("message") or {}).get("provider_facts")
+    own = (str(sending.get("id") or ""), str((facts or {}).get("self_user_id") or "") if isinstance(facts, Mapping) else "")
+    return tuple(dict.fromkeys(value for value in own if value))
+
+
+def _mentions(event: Mapping[str, Any], self_ids: tuple[str, ...]) -> list[dict[str, Any]] | None:
+    """Whom the message mentions, by platform id: the connector's ``message.mentions`` rows when it supplies them,
+    else its ``provider_facts.mentioned_user_ids`` with ``is_self`` by id equality; None when it reports neither."""
+    message = event.get("message") if isinstance(event.get("message"), Mapping) else {}
+    rows = message.get("mentions")
+    if isinstance(rows, list):
+        return [{"id": str(row.get("id")), "name": row.get("name") if isinstance(row.get("name"), str) else None,
+                 "is_self": bool(row.get("is_self"))} for row in rows if isinstance(row, Mapping) and row.get("id")]
+    facts = message.get("provider_facts") if isinstance(message.get("provider_facts"), Mapping) else {}
+    ids = facts.get("mentioned_user_ids")
+    if not isinstance(ids, list):
+        return None
+    return [{"id": str(value), "name": None, "is_self": str(value) in self_ids} for value in ids if str(value or "")]
+
+
+def _facts_line(focus: Mapping[str, Any], event: Mapping[str, Any]) -> str:
+    """The observed facts of this event as sentences, mentions named with a you/not-you mark."""
+    facts = list(event.get("facts")) if isinstance(event.get("facts"), list) else ["legacy_addressed"]
+    if (focus.get("actor") or {}).get("is_bot") and "from_bot" not in facts:
+        facts.append("from_bot")
+    words = [_FACT_WORDS.get(fact) or (f"the connector signalled {fact[len('signal.'):]}" if str(fact).startswith("signal.")
+                                        else f"the connector reports {fact}") for fact in facts]
+    line = "The connector observed: " + "; ".join(words) + "."
+    mentions = _mentions(event, _self_ids(focus, event))
+    if mentions is None:
+        return line
+    if not mentions:
+        return line + " It mentions no one by platform id."
+    named = []
+    for row in mentions:
+        who = (f"{row['name']} (id {row['id']})" if row["name"]
+               else f"id {row['id']} (name not supplied; a connector read tool can resolve it)")
+        named.append(who + (" — you" if row["is_self"] else " — not you"))
+    return line + " It mentions: " + "; ".join(named) + "."
+
+
+def _thread_author(message: Mapping[str, Any]) -> tuple[str, str]:
+    """``(id, name)`` of a snapshot message's author across the connector shapes the host reads (CREATING_SKILLS
+    "Thread snapshot"): flat ids, nested actor/author mappings, provider profiles; unknown stays empty."""
+    nested = next((message[key] for key in ("actor", "author") if isinstance(message.get(key), Mapping)), {})
+    identity = next((str(value) for value in (message.get("user"), message.get("actor_id"), message.get("author_id"),
+                                              message.get("platform_actor_id"), nested.get("platform_actor_id"),
+                                              nested.get("id")) if value), "")
+    profiles = [message.get(key) for key in ("user_profile", "bot_profile") if isinstance(message.get(key), Mapping)]
+    names = [*(profile.get(key) for profile in profiles for key in ("real_name", "display_name", "name")),
+             message.get("author_name"), message.get("display_name"), message.get("username"),
+             nested.get("display_name"), nested.get("username")]
+    return identity, next((str(value) for value in names if isinstance(value, str) and value.strip()), "")
+
+
+def _thread_time(message: Mapping[str, Any]) -> str:
+    from ouroboros.presence_history import instant
+    sent = message.get("sent_at")
+    if instant(sent) is not None:
+        return str(sent)
+    raw = message.get("ts") if message.get("ts") is not None else message.get("timestamp")
+    try:  # a numeric epoch is a time; anything else stays unknown
+        return datetime.fromtimestamp(float(raw), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "an unrecorded time"
+
+
+def _thread_snapshot(focus: Mapping[str, Any], event: Mapping[str, Any]) -> str:
+    """The thread as the connector captured it (``event.conversation.thread_history``), one line per message
+    with its author, a ``[you]`` mark by id, a ``[this message]`` mark on the waking message and its time. The
+    newest lines render whole under ``FOCUS_THREAD_SNAPSHOT_CHARS``; an omission names its count and exact reader.
+    Lines the room already shows are not filtered (matching them is a store read the frame does not make)."""
+    from ouroboros import config
+    history = (event.get("conversation") or {}).get("thread_history") if isinstance(event.get("conversation"), Mapping) else None
+    if not isinstance(history, Mapping):
+        return ""
+    data = history.get("data") if isinstance(history.get("data"), Mapping) else {}
+    messages = [row for row in data.get("messages") or [] if isinstance(row, Mapping)] if isinstance(data.get("messages"), list) else None
+    status = str(history.get("status") or "")
+    if messages is None:
+        return f"The connector's thread snapshot holds no messages (status {status or 'unknown'})."
+    own = _self_ids(focus, event)
+    current = event.get("message") if isinstance(event.get("message"), Mapping) else {}
+    waking = {str(value) for value in (current.get("message_id"), current.get("id"), current.get("ts")) if value}
+    lines = []
+    for row in messages:
+        identity, name = _thread_author(row)
+        marks = (" [you]" if identity and identity in own else "") + (
+            " [this message]" if waking & {str(value) for value in (row.get("message_id"), row.get("id"), row.get("ts")) if value} else "")
+        who = f"{name} ({identity})" if name and identity else name or identity or "unknown author"
+        lines.append(f"- {who}{marks} at {_thread_time(row)}: {json.dumps(str(row.get('text') or ''), ensure_ascii=False)}")
+    kept, size = len(lines), 0
+    for index in range(len(lines) - 1, -1, -1):
+        size += len(lines[index]) + 1
+        if size > config.FOCUS_THREAD_SNAPSHOT_CHARS and index < len(lines) - 1:
+            kept = len(lines) - 1 - index
+            break
+    omitted = lines[:len(lines) - kept]
+    coverage = "" if data.get("complete") in (None, True) else ", the connector reports it incomplete"
+    observed = f", observed at {history['observed_at']}" if history.get("observed_at") else ""
+    head = f"The thread as the connector captured it ({len(messages)} message(s){coverage}{observed}):"
+    gap = ([f"({len(omitted)} earlier message(s), {sum(len(line) + 1 for line in omitted)} characters, are not shown "
+            "here: the room row of this message carries their exact memory_read(source_ref=…) address, and the "
+            "connector's thread read tool reads the thread live.)"] if omitted else [])
+    return "\n".join([head, *gap, *lines[len(lines) - kept:]])
 
 
 def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int) -> dict:
@@ -676,11 +804,14 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int) -> di
     return metadata
 
 
-def _voice_line(focus: Mapping[str, Any]) -> str:
+def _voice_line(focus: Mapping[str, Any], event: Mapping[str, Any] | None = None) -> str:
+    """Who you are here: the account you write as with its platform id, so an id in the text or the thread reads as
+    you or not you. Without a credential identity, the connector's own id of this account, when it supplies one."""
     sending = (focus.get("identity") or {}).get("sends_as") or {}
     if not sending:
-        return ""
-    label = sending["label"]
+        own = _self_ids(focus, event or {})
+        return f"Here your account is {own[0]}." if own else ""
+    label = sending["label"] + (f" ({sending['id']})" if sending.get("id") else "")
     if sending["kind"] == "bot":
         return f"You write here as Ouroboros, through {label}."
     if focus.get("identity_owner"):
@@ -717,14 +848,16 @@ def frame_focus_content(task: Mapping[str, Any], content: Any) -> Any:
     previous = presence.get("previous_turn")
     if isinstance(previous, Mapping):
         work = _previous_turn_line(previous) + ("\n" + work if work else "")
-    voice = _voice_line(focus)
+    voice = _voice_line(focus, event)
+    snapshot = _thread_snapshot(focus, event)
     fields = {
         "voice_line": voice + "\n" if voice else "",
         "who": actor.get("display_name") or actor.get("platform_actor_id") or "A person",
         "place": place.get("label") or place.get("provider") or place.get("place_id"),
         "when": _when(event.get("message") or {}),
-        "waiting_line": "the event addressed you" if focus.get("addressed") else "an event matched this place's wake list",
-        "event": content if isinstance(content, str) else "\n".join(item.get("text", "") for item in content if isinstance(item, dict)),
+        "facts_line": _facts_line(focus, event),
+        "event": (content if isinstance(content, str) else "\n".join(item.get("text", "") for item in content if isinstance(item, dict)))
+                 + (f"\n\n{snapshot}" if snapshot else ""),
         "place_state": state + (". " + SILENT_DISCLOSURE if state == "silent" else ""),
         "notes": json.dumps(place.get("notes") or [], ensure_ascii=False),
         "wake_item": json.dumps([w for w in place.get("wakes", []) if w["fact"] in matched], ensure_ascii=False),

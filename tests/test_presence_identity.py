@@ -187,9 +187,9 @@ def test_authentication_controls_safety_occasion_and_child_authority(focus, auth
 
 
 @pytest.mark.parametrize("kind,owner,expected", [
-    ("bot", False, "You write here as Ouroboros, through Human mailbox."),
-    ("user", False, "You write here through the account Human mailbox; your human's notes say what that account is."),
-    ("user", True, "You write here from your human's own account, Human mailbox: your words appear as theirs, and their notes say how. If someone sincerely asks whether they are writing to a person, say what you are."),
+    ("bot", False, "You write here as Ouroboros, through Human mailbox (human@example.test)."),
+    ("user", False, "You write here through the account Human mailbox (human@example.test); your human's notes say what that account is."),
+    ("user", True, "You write here from your human's own account, Human mailbox (human@example.test): your words appear as theirs, and their notes say how. If someone sincerely asks whether they are writing to a person, say what you are."),
 ])
 def test_focus_voice_uses_detached_event_identity_and_user_owner_match(focus, kind, owner, expected):
     from ouroboros.presence_context import frame_focus_content

@@ -98,7 +98,7 @@ def test_a_promoted_place_root_names_its_retained_conversation(fired_context, mo
                   "not a private channel instead of the conversation", "does not discharge a reply someone is owed",
                   "not proof of who owns this work"):
         assert words in body, words
-    assert "This turn is yours" not in rendered  # no FOCUS frame on a promoted root
+    assert "A wake is your attention" not in rendered  # no FOCUS frame on a promoted root
 
     # Cold rebuild: the persisted (JSON, underscore-free) task renders the same section.
     cold = {key: value for key, value in json.loads(json.dumps(promoted)).items() if not key.startswith("_")}
@@ -119,7 +119,7 @@ def test_inline_scheduled_authority_only_and_missing_carriers_get_no_audience_se
     root, pending, first_request = fired_context
     registry, turn, binding = _turn(root, "team", "k1")
     inline = first_request(turn)
-    assert "This turn is yours" in inline and _section(inline) == 0  # FOCUS already frames it; no duplicate
+    assert "A wake is your attention" in inline and _section(inline) == 0  # FOCUS already frames it; no duplicate
 
     _due_promise(registry, "Check back on the report")
     check_scheduled_tasks()

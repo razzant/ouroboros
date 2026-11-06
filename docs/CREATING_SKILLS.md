@@ -1151,8 +1151,28 @@ Use the connector's ordinary content-hash-bound skill token for:
   `legacy_addressed`, compatibility for older connectors that filtered events themselves;
   new connectors send `facts` with every event. Empty facts are distinct from absent
   facts. `review_requested` and `assigned` mean requests addressed to the watched
-  identity; narrow wake declarations may use them. A new discussion is not a
+  identity; narrow wake declarations may use them. `reply_to_me` means the provider's own reply
+  relation points at a specific message the watched identity wrote; membership of a thread the
+  watched identity started or wrote in is `my_thread`, never `reply_to_me` (a thread root's author
+  is not a reply target). A new discussion is not a
   `new_issue`; `any_message` is the generic alternative. Bots require an explicit bot wake item.
+  The focus frame (`prompts/FOCUS.md`) states these facts to the mind in plain words and never a
+  verdict about whom the message is for; that judgment stays with the mind.
+- Optional `event.message.mentions`: `[{"id": str, "name": str|null, "is_self": bool}]`, every account the
+  provider marks the message as mentioning, with the name the connector resolved (null when it could not) and
+  whether the id is the account the connector writes as. Without it the host reads
+  `message.provider_facts.mentioned_user_ids` with `is_self` from `provider_facts.self_user_id` and names
+  unknown; a connector that reports neither renders no mention line. `provider_facts.self_user_id` also
+  names the focus's own account when the event carries no credential identity.
+- Optional thread snapshot `event.conversation.thread_history`: `{status, observed_at?, data: {messages:
+  [...], complete?}}`, the conversation as the provider served it at capture. The frame renders each
+  message as author, a `[you]` mark by id, a `[this message]` mark on the waking message, its time and text;
+  per message the host reads an author id (`user`, `actor_id`, `author_id`, `platform_actor_id`, or a nested
+  `actor`/`author` mapping), a name (`user_profile`/`bot_profile` `real_name`/`display_name`/`name`,
+  `author_name`, `display_name`, `username`), a time (`sent_at`, else a numeric `ts`/`timestamp` epoch), the
+  `text` and an id (`message_id`, `id`, `ts`). The newest messages render whole under
+  `FOCUS_THREAD_SNAPSHOT_CHARS` (`ouroboros/config.py`); an omission names its count and the exact readers
+  (the room row's `memory_read(source_ref=…)` address, the connector's thread read tool).
 - Optional `event.message.forward_origin` (any non-empty value): the message carries words another author wrote
   (a forward, or another person's text the event copies under the sender). The host never records such an event as
   its sender's own words: an addressed message from an account the place confirms as the owner's is the owner's words

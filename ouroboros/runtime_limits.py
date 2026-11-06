@@ -67,6 +67,10 @@ TCP_KEEPALIVE_INTERVAL_SEC = 60
 TCP_KEEPALIVE_PROBE_COUNT = 5
 # One response frame may carry metadata or a body chunk; never a total response cap.
 EXTENSION_STREAM_METADATA_BYTES = 512 * 1024
+# A place focus frame (prompts/FOCUS.md) renders the connector's thread snapshot inline, newest messages whole, up to
+# this many characters of rendered lines (the frame sits at the user tail after the cached prefix, so it is paid on
+# every round of the turn). What does not fit is named with its exact reader, never silently cut (BIBLE P1).
+FOCUS_THREAD_SNAPSHOT_CHARS = 64 * 1024
 # Only the out-of-process WS relay is limited: the existing reserve refills gradually.
 WS_RELAY_BURST = 60
 WS_RELAY_REFILL_PER_SEC = 1.0
