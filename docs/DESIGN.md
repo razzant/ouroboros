@@ -342,8 +342,8 @@ Two failure modes this table exists to prevent, both observed in this codebase:
 
 The brand red is **one value**, `--accent`. Every appearance of it is either
 that token, the named roles built on it (`--accent-light` for accent text, the crimson ink on light,
-`--accent-dim` for a fill, `--focus-accent-border` / `--focus-accent-ring` for
-focus), or a rung of the accent alpha ladder (`--accent-04` … `--accent-55`; in the light theme the crimson tone
+`--focus-accent-border` / `--focus-accent-ring` for focus), or a rung of the accent alpha ladder
+(`--accent-08` … `--accent-55`, fills included; in the light theme the crimson tone
 and its hover are `--accent-10` and `--accent-14`, while the dark theme's crimson tones are opaque fills of their own,
 listed in the seed table).
 A new alpha is a rung added to the ladder, never an `rgba()` literal in a rule:

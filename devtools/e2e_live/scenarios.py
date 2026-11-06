@@ -36,8 +36,7 @@ SM1_SERVED_STYLESHEETS = ("/static/ui.css", "/onboarding/static/ui.css")   # the
 SM1_RESTART_REASON = "e2e_live SM1: adopt the reviewed accent release"
 SM1_STUB_FINAL = "SM1 done: the brand accent change landed as a reviewed release and its adoption is requested."
 SM1_SCRIPT_ERROR = "E2E_SCRIPT_ERROR"
-SM1_REQUIRED_PALETTE = frozenset({"--accent", "--accent-light", "--accent-dim",
-                                "--accent-04", "--accent-55", "--focus-accent-border", "--focus-accent-ring"})
+SM1_REQUIRED_PALETTE = frozenset({"--accent", "--accent-light", "--accent-55", "--focus-accent-border", "--focus-accent-ring"})
 SM1_THEMES = ("light", "dark")   # what web/theme.js paints: a client's Light or Dark, or System resolved to one of them
 # The fills real controls wear (the primary action, the chosen place, the current step); their inks may rightly stay neutral.
 SM1_CONTROL_FILLS = frozenset({"--tone-crimson", "--tone-crimson-hover", "--tone-crimson-soft"})

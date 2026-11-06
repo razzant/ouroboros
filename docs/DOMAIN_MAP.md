@@ -12,7 +12,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D02 | LLM client, routing & providers | 48 | 0 |
 | D03 | Context assembly, fit & compaction | 33 | 0 |
 | D04 | Tool execution: registry, access & typed results | 24 | 0 |
-| D05 | Tool surfaces: files, code, shell, media, external | 51 | 0 |
+| D05 | Tool surfaces: files, code, shell, media, external | 53 | 0 |
 | D06 | Review stack | 99 | 0 |
 | D07 | Delegation, subagents & Claudexor | 111 | 0 |
 | D08 | Supervisor: queue, workers, events & runtime control | 76 | 0 |
@@ -28,7 +28,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D18 | Launcher, packaging, platform & shared substrate | 40 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 24 | 0 |
-| **total** | | **1000** | **0** |
+| **total** | | **1002** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -402,6 +402,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/mcp_client.py`
 - `ouroboros/mcp_headers.py`
 - `ouroboros/mcp_import.py`
+- `ouroboros/mcp_oauth.py`
 - `ouroboros/mcp_result_images.py`
 - `ouroboros/mcp_schema.py`
 - `ouroboros/mcp_task_session.py`
@@ -419,6 +420,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/tools/edit_ops.py`
 - `ouroboros/tools/health.py`
 - `ouroboros/tools/imagegen.py`
+- `ouroboros/tools/mcp_sign_in.py`
 - `ouroboros/tools/media.py`
 - `ouroboros/tools/owner_delivery.py`
 - `ouroboros/tools/query_code.py`

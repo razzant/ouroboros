@@ -603,6 +603,17 @@
  */
 
 /**
+ * A remote server's sign-in, present once it asked for one.
+ * @typedef {Object} McpSignIn
+ * @property {string} state  // signed_in | sign_in_required
+ * @property {string=} reason
+ * @property {?string=} since
+ * @property {string=} issuer
+ * @property {boolean=} pending
+ * @property {string=} required_scope
+ */
+
+/**
  * One configured MCP server (a configuration error row carries only id, enabled, tool_count, last_error, code).
  * @typedef {Object} McpServerStatus
  * @property {string} id
@@ -634,6 +645,7 @@
  * @property {boolean=} complete
  * @property {string=} publication_error
  * @property {string=} code
+ * @property {McpSignIn=} sign_in
  */
 
 /**
@@ -655,6 +667,35 @@
  * @property {string=} code
  * @property {boolean=} not_started
  * @property {Object=} refreshed
+ */
+
+/**
+ * `POST /api/mcp/sign-in`: begin, complete (state with code or error, or returned_url) or sign_out.
+ * @typedef {Object} McpSignInRequest
+ * @property {string} action
+ * @property {string=} server_id
+ * @property {string=} state
+ * @property {string=} code
+ * @property {string=} iss
+ * @property {string=} error
+ * @property {string=} error_description
+ * @property {string=} returned_url
+ * @property {string=} client_id
+ * @property {string=} client_secret
+ */
+
+/**
+ * @typedef {Object} McpSignInResponse
+ * @property {boolean} ok
+ * @property {string=} server
+ * @property {string=} url
+ * @property {string=} redirect_uri
+ * @property {string=} scope
+ * @property {?boolean=} revoked
+ * @property {Object=} listing
+ * @property {string=} code
+ * @property {string=} reason
+ * @property {string=} error
  */
 
 /**

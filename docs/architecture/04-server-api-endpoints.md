@@ -191,6 +191,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/local-model/install-runtime` | |
 | GET | `/api/mcp/status` | Read-only listing facts |
 | POST | `/api/mcp/refresh` | Lists and publishes |
+| POST | `/api/mcp/sign-in` | Sign-in steps |
 | POST | `/api/mcp/test` | Draft probe, unpublished |
 | POST | `/api/mcp/import/preview` | |
 | WS | `/ws` | |

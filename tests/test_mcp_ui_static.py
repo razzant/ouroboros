@@ -298,3 +298,66 @@ assert.equal(saved[1].schemas_at_start, true);
     result = subprocess.run([_node_bin(), '--input-type=module', '-e', script], cwd=REPO_ROOT,
                             capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stderr
+
+
+def test_mcp_cards_show_a_remote_servers_sign_in_with_one_fact_in_view():
+    """A remote server that asked for sign-in (``mcp_oauth``) shows why and one button; the paste and the
+    owner's own app registration stay under Details; a signed-in server offers Sign out; others show nothing."""
+    script = r'''
+import assert from 'node:assert/strict';
+import { applyMcpSettings } from './web/modules/mcp_settings.js';
+const host = { innerHTML: '', querySelectorAll: () => [] };
+const status = { textContent: '', dataset: {} };
+globalThis.document = { getElementById: (id) => id === 'mcp-servers-list' ? host : id === 'mcp-global-status' ? status : null,
+    querySelector: () => null };
+globalThis.fetch = async () => ({ ok: true, json: async () => ({ enabled: true, sdk_available: true, servers: [
+    { id: 'superset', tool_count: 0, sign_in: { state: 'sign_in_required', reason: 'refresh_rejected', since: 'x', issuer: 'https://a.test/' } },
+    { id: 'docs', tool_count: 3, sign_in: { state: 'signed_in', since: 'x', issuer: 'https://d.test/' } },
+    { id: 'plain', tool_count: 2 }] }) });
+const servers = [{ id: 'superset', url: 'https://s.test/mcp', enabled: true }, { id: 'docs', url: 'https://d.test/mcp', enabled: true },
+                 { id: 'plain', url: 'https://p.test/mcp', enabled: true }];
+applyMcpSettings({ MCP_ENABLED: true, MCP_SERVERS: servers });
+for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+applyMcpSettings({ MCP_ENABLED: true, MCP_SERVERS: servers });
+const cards = host.innerHTML.split('data-mcp-card ').slice(1);
+assert.equal(cards.length, 3);
+assert.match(cards[0], /Sign-in needed: the provider no longer accepts the sign-in/);
+assert.match(cards[0], /data-mcp-sign-in-action="begin"/);
+assert.match(cards[0], /<details class="mcp-sign-in-details">[\s\S]*data-mcp-sign-in-returned[\s\S]*data-mcp-sign-in-client-id/);
+assert.match(cards[1], /Signed in<\/span>\s*<button[^>]*data-mcp-sign-in-action="sign_out"/);
+assert.doesNotMatch(cards[1], /data-mcp-sign-in-returned/);
+assert.match(cards[2], /data-mcp-sign-in data-sign-in-key="" hidden><\/div>/);
+'''
+    result = subprocess.run([_node_bin(), '--input-type=module', '-e', script], cwd=REPO_ROOT,
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+
+
+def test_mcp_sign_in_row_follows_the_saved_identity_and_offers_a_step_up():
+    """MCP_RV1: a server saved without an explicit id (identity from its name) finds its status row, and a
+    grant that needs a wider scope stays signed in while offering Sign in again."""
+    script = r'''
+import assert from 'node:assert/strict';
+import { applyMcpSettings } from './web/modules/mcp_settings.js';
+const host = { innerHTML: '', querySelectorAll: () => [] };
+const status = { textContent: '', dataset: {} };
+globalThis.document = { getElementById: (id) => id === 'mcp-servers-list' ? host : id === 'mcp-global-status' ? status : null,
+    querySelector: () => null };
+globalThis.fetch = async () => ({ ok: true, json: async () => ({ enabled: true, sdk_available: true, servers: [
+    { id: 'superset', tool_count: 0, sign_in: { state: 'sign_in_required', reason: 'not_signed_in', since: 'x' } },
+    { id: 'files', tool_count: 4, sign_in: { state: 'signed_in', reason: 'insufficient_scope', required_scope: 'files:read files:write', since: 'x' } }] }) });
+const settings = { MCP_ENABLED: true, MCP_SERVERS: [
+    { id: '', name: 'Superset', url: 'https://s.example/mcp', enabled: true },
+    { id: 'files', url: 'https://f.example/mcp', enabled: true }] };
+applyMcpSettings(settings);
+for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+applyMcpSettings(settings);
+const cards = host.innerHTML.split('data-mcp-card ').slice(1);
+assert.match(cards[0], /Sign-in needed: not signed in yet[\s\S]*data-mcp-sign-in-action="begin"/);
+assert.match(cards[1], /Signed in; a call needs more access: files:read files:write/);
+assert.match(cards[1], /data-mcp-sign-in-action="begin">Sign in again[\s\S]*data-mcp-sign-in-action="sign_out"/);
+assert.match(cards[1], /data-mcp-sign-in-returned[\s\S]*data-mcp-sign-in-action="complete"/);  // a step-up finishes by paste too
+'''
+    result = subprocess.run([_node_bin(), '--input-type=module', '-e', script], cwd=REPO_ROOT,
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
