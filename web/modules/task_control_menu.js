@@ -599,16 +599,16 @@ function onMenuKeydown(event) {
  * work_status.js) replaces the card-state set; `pauseTarget` names Pause's task
  * when the anchor does not; `afterAction` runs once an item's effect settled.
  * On a trigger marked `data-task-control-direct` a single offered action opens no menu: it runs at once, a stop
- * after `confirm` (the shared dialog) says yes.
+ * after `askConfirm` (the shared dialog) says yes.
  * @param {HTMLElement} anchor trigger element
  * @param {{cancelPending?: boolean, budgetPaused?: boolean, wholeTree?: boolean, resume?: boolean, busy?: boolean,
  *     actions?: string[], pauseTarget?: string, canAct?: (action: string) => boolean,
  *     onAction: (action: string) => void, afterAction?: (action: string) => void,
- *     confirm?: (dialog: object) => Promise<boolean>}} opts
+ *     askConfirm?: (dialog: object) => Promise<boolean>}} opts
  */
 export function openTaskControlMenu(anchor, {
     cancelPending = false, budgetPaused = false, wholeTree = true, resume = false, busy = false, canAct = () => true, onAction,
-    actions = null, pauseTarget = '', afterAction = null, confirm = openConfirmDialog,
+    actions = null, pauseTarget = '', afterAction = null, askConfirm = openConfirmDialog,
 } = {}) {
     closeTaskControlMenu();
     if (!anchor?.isConnected || !document.body) return null;
@@ -631,7 +631,7 @@ export function openTaskControlMenu(anchor, {
     // choice. A trigger that always says `Stop…` keeps its menu: its label and its press change together.
     if (offered.length === 1 && anchor.dataset?.taskControlDirect === '1') {
         const [action] = offered;
-        if (!busy) Promise.resolve(STOPS.has(action) ? confirm(STOP_CONFIRMS[action]) : true).then((ok) => { if (ok) run(action); });
+        if (!busy) Promise.resolve(STOPS.has(action) ? askConfirm(STOP_CONFIRMS[action]) : true).then((ok) => { if (ok) run(action); });
         return null;
     }
     // A11y: the trigger owns a popup menu; expanded tracks the open state.

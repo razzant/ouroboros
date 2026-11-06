@@ -253,7 +253,7 @@ test('a single offered action is the trigger itself: it names the action and a s
         done.length = 0;
         asked.length = 0;
         const menu = openTaskControlMenu(anchor, { actions: [action], onAction: (a) => done.push(a),
-            confirm: async (dialog) => { asked.push(dialog); return answer; } });
+            askConfirm: async (dialog) => { asked.push(dialog); return answer; } });
         await settle();
         assert.equal(menu, null, 'no menu of one item');
         assert.equal(env.doc.body.querySelector('[role="menu"]'), null);
@@ -263,12 +263,12 @@ test('a single offered action is the trigger itself: it names the action and a s
         else assert.deepEqual([asked.length, asked[0].confirmLabel, asked[0].danger], [1, TASK_CONTROL_LABELS[action], true]);
     }
     done.length = 0;
-    openTaskControlMenu(anchor, { actions: [ACTION_STOP_NOW], busy: true, onAction: (a) => done.push(a), confirm: async () => true });
+    openTaskControlMenu(anchor, { actions: [ACTION_STOP_NOW], busy: true, onAction: (a) => done.push(a), askConfirm: async () => true });
     await settle();
     assert.deepEqual(done, [], 'a busy task takes no second press');
     // Two actions are a real choice: the menu opens and nothing runs until an item is chosen.
     const menu = openTaskControlMenu(anchor, { actions: [ACTION_HURRY, ACTION_STOP_NOW], onAction: (a) => done.push(a),
-        confirm: async () => { throw new Error('a menu item never asks again'); } });
+        askConfirm: async () => { throw new Error('a menu item never asks again'); } });
     assert.ok(menu);
     assert.equal(anchor.getAttribute('aria-expanded'), 'true');
     menu.querySelector(`[data-task-control="${ACTION_STOP_NOW}"]`).click();
@@ -279,7 +279,7 @@ test('a single offered action is the trigger itself: it names the action and a s
     const plain = env.doc.createElement('button');
     env.doc.body.append(plain);
     assert.ok(openTaskControlMenu(plain, { actions: [ACTION_STOP_NOW], onAction: (a) => done.push(a),
-        confirm: async () => { throw new Error('no dialog on a menu trigger'); } }));
+        askConfirm: async () => { throw new Error('no dialog on a menu trigger'); } }));
     assert.deepEqual(done, [ACTION_STOP_NOW], 'nothing runs before an item is chosen');
 });
 
