@@ -187,3 +187,14 @@ def test_wait_dates_stale_worker_observation_without_changing_terminal_result(tm
     assert result["live_child_status"]["child"] == "running"
     assert result["queue_snapshot_observation"]["freshness"] == "stale"
     assert result["queue_snapshot_observation"]["age_sec"] == 60
+
+
+@pytest.mark.parametrize("status, phase", [("awaiting", "requested"), ("accepted", "requested"), ("ready", "draining"),
+                                           ("refused", None), (None, None)])
+def test_a_pending_restart_is_a_dated_fact_only_while_it_is_pending(tmp_path, status, phase):
+    """Audit 05.11, item 1: the acting focus learns that a restart request waits, whose it is and in whose words."""
+    intent = {"status": status, "task_id": "requester", "reason": "adopt my commit"} if status else None
+    _write(tmp_path, {**_snapshot(), **({"restart_intent": intent} if intent else {})})
+    fact = _queue_context_fact({"budget_drive_root": str(tmp_path)})
+    expected = {"requested_by_task": "requester", "phase": phase, "requester_reason": "adopt my commit"} if phase else None
+    assert fact.get("pending_restart") == expected

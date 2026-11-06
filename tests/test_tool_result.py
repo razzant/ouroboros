@@ -968,12 +968,13 @@ def test_loop_outer_timeout_is_native_and_dispatches_once(tmp_path, monkeypatch)
         "Try a different approach or inform the user about the issue."
     )
     assert calls == [("read_file", args)]
-    assert row["result"] == expected
+    text = row["result"]  # the same text, then where the abandoned worker stood (BIBLE P1)
+    assert text.startswith(expected + " Its worker was at ") and "test_tool_result.py:execute_result <- " in text, text
     assert row["is_error"] is True
     assert row["tool_result"] == ToolResult(
         status="timeout",
         code="TOOL_TIMEOUT",
-        text=expected,
+        text=text,
         meta={"timeout_sec": 1},
     )
     assert row["result_meta"] == {

@@ -308,8 +308,16 @@ def _resume_and_launch(system, task_id):
 
 def _boot_after_stop(system, monkeypatch, root):
     """The application stops (its teardown kill); the next generation restores the saved queue."""
+    _stop(system)
+    _boot(system, monkeypatch, root)
+
+
+def _stop(system):
     system.workers.kill_workers(force=True, terminal_status="cancelled", result_reason="Server shutdown.",
                                 stop_source="server_shutdown", retain_saved_work=True)
+
+
+def _boot(system, monkeypatch, root):
     system.workers.PENDING[:] = []
     system.workers.RUNNING.clear()
     _next_generation(monkeypatch, root)
@@ -960,3 +968,305 @@ def test_a_main_turn_held_across_a_second_quit_still_waits_for_one_resume(tmp_pa
     assert [(row["id"], row["_attempt"]) for row in _resume_and_launch(system, turn.id)] == [(turn.id, 2)]
     system.workers.assign_tasks()
     assert not _launched(system)
+
+
+# ---------------------------------------------------------------------------
+# D5: a returning stop gives back an owner turn it cut before its first save (05.11, 88cb09a6)
+# ---------------------------------------------------------------------------
+
+def _assert_seed_runs_once(system, root, turn, cause):
+    from ouroboros import body_candidate
+    from supervisor.task_admission import SEED_RETURN
+
+    [row] = [row for row in system.workers.PENDING if row["id"] == turn.id]
+    assert row[SEED_RETURN] == {"source_task_id": turn.id, "from_attempt": 1, "cause": cause}
+    assert row["_attempt"] == 2 and "_working_recovery" not in row and budget_hold_fact(row) is None
+    assert row["text"] == "keep working" and row["_project_scope_none"] is True  # its own admitted input
+    # Nothing of it took effect: no child was scheduled and no body candidate was opened (both are gated tools).
+    assert [r["id"] for r in system.workers.PENDING] == [turn.id] and body_candidate.find(turn.id) is None
+    system.workers.assign_tasks()
+    [sent] = _launched(system)
+    assert (sent["id"], sent["_attempt"]) == (turn.id, 2) and "_working_recovery" not in sent
+    _persist_running(root, sent)  # its launch records attempt 2: the proof is spent
+    from supervisor.task_admission import prestart_returned_unsent
+
+    assert prestart_returned_unsent(sent) == {}
+    system.workers.assign_tasks()
+    assert not _launched(system)
+
+
+def test_a_turn_cut_before_its_first_save_comes_back_once_from_its_own_input(tmp_path, monkeypatch):
+    """05.11 (88cb09a6): the owner's Main message was cut 17 s into its preparation and lost: no working save
+    existed, so the returning stop had nothing to give back. Every tool batch waits for its pre_effect save, so
+    with the task's root present no save means nothing took effect: the return starts it again from its input."""
+    from supervisor.restart_retention import prepare_restart_returns
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    assert not wc.checkpoint_path(tmp_path, turn.id, 1).is_file()
+    assert prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING,
+                                   transaction_id="tx-seed") == {turn.id}
+    _ack(tmp_path, "tx-seed")
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    _assert_seed_runs_once(system, tmp_path, turn, "restart")
+
+
+@pytest.mark.parametrize("outcome", ["aborted", "completed"])
+def test_the_update_door_gives_back_a_turn_it_cut_in_preparation(tmp_path, monkeypatch, outcome):
+    """88cb09a6 replayed on the managed Update door, whose census and stop are the ones that cut it."""
+    from ouroboros import delegate_recovery as dr
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    assert system.control._quiesce_repo_writers("auto_merge") == []
+    assert dr.active_restart_transaction(tmp_path)["return_ids"] == [turn.id]
+    if outcome == "aborted":
+        system.control._respawn_workers_after_failed_update()
+        _assert_seed_runs_once(system, tmp_path, turn, "update_aborted")
+    else:
+        _ack(tmp_path, dr.active_restart_transaction(tmp_path)["transaction_id"])
+        _boot_after_stop(system, monkeypatch, tmp_path)
+        _assert_seed_runs_once(system, tmp_path, turn, "restart")
+
+
+def test_an_unacknowledged_return_keeps_todays_interrupted_path(tmp_path, monkeypatch):
+    """The exit was never acknowledged: the turn the door named is neither returned nor held, its boot fences it."""
+    from supervisor.restart_retention import prepare_restart_returns
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    assert prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING,
+                                   transaction_id="tx-lost") == {turn.id}
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    assert turn.id not in [row["id"] for row in system.workers.PENDING] and turn.id not in system.workers.RUNNING
+    assert ci.has_active_intent(tmp_path, turn.id, strict=True)
+
+
+@pytest.mark.parametrize("fact", ["nothing", "saved", "answer_delivered", "no_root", "call", "wake", "later_attempt",
+                                  "stopped", "model_called", "ledger_unreadable", "ledger_degraded"])
+def test_only_a_turn_with_no_effect_is_given_back_from_its_input(tmp_path, monkeypatch, fact):
+    from supervisor.task_admission import seed_returnable
+    from supervisor.terminal_delivery import delivery_id_for, register_delivery
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    task, attempt, root = dict(system.workers.RUNNING[turn.id]["task"]), 1, tmp_path
+    if fact == "saved":  # the ordinary saved return takes it instead
+        _save_work(tmp_path, turn)
+    elif fact == "answer_delivered":  # a no-tool answer saved non-gating, then sent
+        register_delivery(tmp_path, delivery_id_for(turn.id, "done"))
+    elif fact == "no_root":  # nothing could have been saved, so no file proves nothing
+        root = tmp_path / "missing-root"
+    elif fact == "call":
+        task["metadata"] = {**task.get("metadata", {}), "execution_transport": {"kind": "live_conversation"}}
+    elif fact == "wake":
+        from ouroboros.consciousness_authority import WAKE_CAUSE_OWN_CLOCK
+
+        task["metadata"] = {**task.get("metadata", {}), "wake_cause": WAKE_CAUSE_OWN_CLOCK}
+    elif fact == "later_attempt":
+        attempt = 2
+    elif fact == "stopped":
+        ci.request_cancel(tmp_path, turn.id, reason="owner stop", source="test")
+    elif fact in {"model_called", "ledger_unreadable", "ledger_degraded"}:  # the ledger's verdict, at the seam
+        ledger = {"model_called": {"cost_accounting_status": "available", "total_rounds": 1},
+                  "ledger_unreadable": {"cost_accounting_status": "unavailable", "total_rounds": None},
+                  "ledger_degraded": {"cost_accounting_status": "available", "total_rounds": 0,
+                                      "ledger_integrity_degraded": True}}[fact]
+        monkeypatch.setattr(system.queue, "reconstruct_task_cost", lambda *_a, **_k: ledger)
+    assert seed_returnable(root, task, attempt) is (fact == "nothing")
+
+
+@pytest.mark.parametrize("door", ["acknowledged_restart", "owner_restart", "aborted_update"])
+def test_a_project_room_turn_cut_before_its_first_save_comes_back_on_its_bound_basis(tmp_path, monkeypatch, door):
+    """A room turn's seed carries the basis it was bound with; Project-hold revalidation admits it on its D5 proof."""
+    from ouroboros.projects_registry import create_project
+    from supervisor.restart_retention import prepare_restart_returns
+    from supervisor.task_admission import SEED_RETURN
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    folder = tmp_path / "room-folder"
+    folder.mkdir()
+    create_project(tmp_path, "room", working_dir=str(folder))
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-room", "project_id": "room"})
+    basis = dict(system.workers.RUNNING[turn.id]["task"]["_project_admission"])
+    if door == "aborted_update":
+        assert system.control._quiesce_repo_writers("auto_merge") == []
+        system.control._respawn_workers_after_failed_update()
+    else:  # the owner's own Restart door holds what it does not return (``hold_stopped_queue``)
+        from ouroboros import delegate_recovery as dr
+
+        tx = dr.prepare_owner_restart(tmp_path)["transaction_id"] if door == "owner_restart" else "tx-room"
+        assert prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING,
+                                       transaction_id=tx) == {turn.id}
+        _ack(tmp_path, tx)
+        _stop(system)
+        monkeypatch.setattr(dr, "_PROCESS_GENERATION", "the-next-generation")  # boot reads a prior generation's door
+        _boot(system, monkeypatch, tmp_path)
+    [row] = [row for row in system.workers.PENDING if row["id"] == turn.id]
+    assert row[SEED_RETURN]["from_attempt"] == 1 and row["_attempt"] == 2
+    system.workers.assign_tasks()
+    [sent] = _launched(system)
+    assert (sent["id"], sent["_attempt"]) == (turn.id, 2) and sent["project_id"] == "room"
+    assert sent["_project_admission"]["project"] == basis["project"] and "_project_scope_none" not in sent
+    system.workers.assign_tasks()
+    assert not _launched(system)
+
+
+@pytest.mark.parametrize("second", ["acknowledged_restart", "quit"])
+def test_a_seed_caught_again_before_its_launch_stays_recoverable(tmp_path, monkeypatch, second):
+    """The returned turn waits for a slot when a second stop comes: its published row keeps the proof, so an
+    acknowledged return gives it back once and a Quit holds it for a Resume that launches it once."""
+    from supervisor.events_budget import HOLD_SAVED_WORK
+    from supervisor.restart_retention import prepare_restart_returns
+    from supervisor.task_admission import SEED_RETURN
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    assert prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING,
+                                   transaction_id="tx-seed") == {turn.id}
+    _ack(tmp_path, "tx-seed")
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    assert system.queue.publish_queue_snapshot(reason="seed_waits") is not False
+    [published] = json.loads(system.queue.QUEUE_SNAPSHOT_PATH.read_text())["pending"]
+    assert published["task"][SEED_RETURN] == {"source_task_id": turn.id, "from_attempt": 1, "cause": "restart"}
+    if second == "acknowledged_restart":
+        assert prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING,
+                                       transaction_id="tx-second") == set()  # a queued row: named in queue_ids
+        _ack(tmp_path, "tx-second")
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    [row] = system.workers.PENDING
+    assert row[SEED_RETURN]["from_attempt"] == 1 and row["_attempt"] == 2
+    if second == "quit":
+        assert budget_hold_fact(row)["reason"] == HOLD_SAVED_WORK
+        system.workers.assign_tasks()
+        assert not _launched(system), "only the owner's Resume releases a quit's saved work"
+        sent = _resume_and_launch(system, turn.id)
+    else:
+        system.workers.assign_tasks()
+        sent = _launched(system)
+    assert [(item["id"], item["_attempt"]) for item in sent] == [(turn.id, 2)]
+    system.workers.assign_tasks()
+    assert not _launched(system)
+
+
+def test_an_answer_sent_after_the_stops_mark_is_never_given_back(tmp_path, monkeypatch):
+    """A degraded in-process executor is only asked to stop: an answer it delivers after the stop marked the
+    turn is an effect, so the boot's re-check keeps today's path instead of answering again."""
+    from supervisor.restart_retention import prepare_restart_returns
+    from supervisor.task_admission import SEED_RETURN
+    from supervisor.terminal_delivery import delivery_id_for, register_delivery
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    assert prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING,
+                                   transaction_id="tx-late") == {turn.id}
+    _ack(tmp_path, "tx-late")
+    _stop(system)
+    [kept] = [row for row in json.loads(system.queue.QUEUE_SNAPSHOT_PATH.read_text())["running"] if row["id"] == turn.id]
+    assert kept["task"][SEED_RETURN] == {"source_task_id": turn.id, "from_attempt": 1}  # the stop's own mark
+    register_delivery(tmp_path, delivery_id_for(turn.id, "the answer"))
+    _boot(system, monkeypatch, tmp_path)
+    assert turn.id not in [row["id"] for row in system.workers.PENDING] and turn.id not in system.workers.RUNNING
+    assert ci.has_active_intent(tmp_path, turn.id, strict=True)
+
+
+def test_a_quit_without_a_returning_door_keeps_the_stops_own_terminal(tmp_path, monkeypatch):
+    """Only a returning door's transaction names a seed: a Quit retains nothing unsaved and ends it as before."""
+    from ouroboros.task_results import _TRULY_TERMINAL_STATUSES
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    _stop(system)
+    running = json.loads(system.queue.QUEUE_SNAPSHOT_PATH.read_text())["running"]
+    assert turn.id not in [row["id"] for row in running]
+    assert load_task_result(tmp_path, turn.id)["status"] in _TRULY_TERMINAL_STATUSES
+
+
+@pytest.mark.parametrize("launch", ["none", "dispatch_mark", "recorded_start", "terminal"])
+def test_a_seed_proof_holds_until_the_attempt_it_gave_back_launches(launch):
+    """The proof rides the row by value; a dispatch mark or a recorded start of that attempt spends it."""
+    from supervisor.task_admission import SEED_RETURN, prestart_returned_unsent
+
+    row = {"id": "seed", "_is_direct_chat": True, "_attempt": 2,
+           SEED_RETURN: {"source_task_id": "seed", "from_attempt": 1, "cause": "restart"}}
+    stored = {"task_id": "seed", "status": "running", "task_attempt": 0,
+              **({"admitted_dispatch_attempt": 2} if launch == "dispatch_mark" else {}),
+              **({"task_attempt": 2} if launch == "recorded_start" else {}),
+              **({"status": "completed"} if launch == "terminal" else {})}
+    proof = prestart_returned_unsent(row, stored)
+    assert proof == ({"seed_return": True, "from_attempt": 1, "cause": "restart"} if launch == "none" else {})
+
+
+def test_a_source_lost_after_a_real_save_before_the_door_decides_is_never_a_seed(tmp_path, monkeypatch):
+    """The working file can vanish before a stop looks (RV1 astra #2): its turn already called the model, which the
+    usage ledger keeps apart from that file, so the door names nothing and the stop ends it as before."""
+    from supervisor.restart_retention import prepare_restart_returns
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    _save_work(tmp_path, turn)  # a pre_effect save: the model answered with a tool batch
+    monkeypatch.setattr(system.queue, "reconstruct_task_cost",
+                        lambda *_a, **_k: {"cost_accounting_status": "available", "total_rounds": 1})
+    wc.checkpoint_path(tmp_path, turn.id, 1).unlink()
+    assert prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING,
+                                   transaction_id="tx-lost-source") == set()
+    _ack(tmp_path, "tx-lost-source")
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    assert turn.id not in [row["id"] for row in system.workers.PENDING] and turn.id not in system.workers.RUNNING
+
+
+@pytest.mark.parametrize("state", ["none", "reserved", "released", "dispatched", "settled", "unresolved"])
+def test_a_seed_reads_the_real_usage_ledger_of_its_own_task(tmp_path, monkeypatch, state):
+    """The real ledger, not a stub: a call reserved or released unsent leaves the seed; one dispatched never does."""
+    from ouroboros import usage_accounting as ua
+    from ouroboros.usage_origin import UsageScope
+    from supervisor.task_admission import seed_returnable
+
+    monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("TOTAL_BUDGET", "1000000")
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    if state != "none":
+        scope = UsageScope(drive_root=tmp_path, task_id=turn.id, root_task_id=turn.id, category="task", source="agent.task")
+        with ua.usage_scope(scope):
+            held = ua.reserve_attempt(ua.AttemptRequest(model="stub", provider="local", reservation_usd=0.01,
+                                                        drive_root=tmp_path, task_id=turn.id, root_task_id=turn.id))
+            if state == "released":
+                ua.release_attempt(held, "not sent")
+            elif state != "reserved":
+                ua.mark_dispatched(held)
+                if state == "settled":
+                    ua.settle_attempt(held, {}, cost_usd=0.01, cost_final=True)
+                elif state == "unresolved":
+                    ua.mark_unresolved(held, "killed in flight")
+    task = system.workers.RUNNING[turn.id]["task"]
+    assert seed_returnable(tmp_path, task, 1) is (state in {"none", "reserved", "released"})
+
+
+def test_a_returned_seed_at_an_exhausted_budget_is_paused_before_dispatch_not_failed(tmp_path, monkeypatch):
+    """Its given-back attempt never put: a spent budget pauses it before dispatch, and one Resume launches it."""
+    from supervisor import worker_assignment
+    from supervisor.restart_retention import prepare_restart_returns
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    assert prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING,
+                                   transaction_id="tx-budget") == {turn.id}
+    _ack(tmp_path, "tx-budget")
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    with monkeypatch.context() as spent:
+        spent.setattr(system.state, "budget_remaining", lambda *_a, **_k: 0.0)
+        spent.setattr(worker_assignment, "needs_paid_admission", lambda _task: True)
+        system.workers.assign_tasks()
+    [row] = [row for row in system.workers.PENDING if row["id"] == turn.id]
+    assert row["_budget_pause"]["replay_safe"] is True and load_task_result(tmp_path, turn.id)["status"] != "failed"
+    assert not _launched(system)
+    sent = _resume_and_launch(system, turn.id)
+    assert [(item["id"], item["_attempt"]) for item in sent] == [(turn.id, 2)]
