@@ -15,10 +15,9 @@ OWNER_DELIVERY_TOOL_NAMES: frozenset[str] = frozenset({
 # carries it — the main chat, a project room, and an admitted presence
 # conversation, whose ceiling compiles this set in
 # ouroboros/presence_authority.py::build_presence_capability_ceiling.
-# Reading the chronicle and marking what matters belong here; sealing chronicle
-# pages (chronicle_write) is the integrating mind's and stays in the core set,
-# so a presence writes knowledge about people and marks, not pages (a delegated
-# child's sets below carry it for the child's own drafts only).
+# Reading the chronicle and marking what matters belong here; sealing
+# (chronicle_write) is in the core set of every integrating focus, a presence
+# turn included; a delegated child publishes drafts only (its sets below).
 COGNITIVE_MEMORY_TOOL_NAMES: frozenset[str] = frozenset({
     "knowledge_read", "knowledge_write", "knowledge_list",
     "update_scratchpad", "update_identity", "update_world", "chat_history",

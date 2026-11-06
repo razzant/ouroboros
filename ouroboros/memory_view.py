@@ -1274,7 +1274,7 @@ def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]]) -> str:
               for item in room.get("sealed_by") or ()]
     if room.get("newest"):  # S1: the act a finishing response that changed, learned or closed something takes here
         lines.append(f"A page with covers={{'to': '{room['newest']}'}} seals this room's open rows, the earlier turns' with "
-                     "mine; my task's later terminal rows are linked below it.")
+                     "mine, so the rest of me reads my words, not theirs; my task's later terminal rows are linked below it.")
     return "\n".join(lines)
 
 
