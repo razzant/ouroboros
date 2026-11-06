@@ -606,8 +606,8 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any, preparation: Any = None
         )
         return
 
-    # Fail fast when the worker pool is disabled (e.g. after a crash storm put
-    # the supervisor in direct-chat mode). Without this, the task is written as
+    # Fail fast when the worker pool is disabled (readiness exhaustion put the
+    # supervisor in direct-chat mode). Without this, the task is written as
     # 'scheduled' and enqueued but nothing can ever run it — a permanent "ghost"
     # the parent keeps polling. Give the parent a clear terminal signal instead
     # so it can do the work inline.

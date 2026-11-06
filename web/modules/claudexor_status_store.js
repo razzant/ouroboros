@@ -68,6 +68,7 @@ import { harnessPresentation } from './harness_presentation.js';
 
 export const STATUS_ENDPOINT = '/api/claudexor/status';
 export const WAKE_ENDPOINT = '/api/claudexor/wake';
+export const RESTART_ENDPOINT = '/api/claudexor/restart';
 export const DEFAULT_POLL_MS = 5000;
 
 export const READ_OK = 'ok';
@@ -830,23 +831,33 @@ export function createClaudexorStatusStore({
      * it (see `refresh`). The answer commits through the same snapshot /
      * error / generation fields as every read — still ONE writer of the view.
      *
-     * @returns {Promise<{ok: boolean, error: string}>} the outcome. A failure
+     * The owner's Restart Claudexor (`restart`) is the same write with a body:
+     * its answer carries the receipt beside the fresh status (`{status, restart}`),
+     * so it commits through this one path and waits out a wake already in flight.
+     *
+     * @returns {Promise<{ok: boolean, error: string, httpStatus?: number, data?: Object}>}
+     *          the outcome; `data` is the answer's own body (a restart's receipt,
+     *          or its typed refusal). A failure
      *          deliberately does NOT touch the held snapshot or the store
      *          error: whether and how long to show a refused wake is the
      *          caller's lifecycle (the accounts panel keeps it until the
      *          daemon provably answers — `daemonAnswered`).
      */
-    function wake() {
+    function wake(restartToken = null) {
+        const restarting = restartToken !== null;
         if (inner.disposed) return Promise.resolve({ ok: false, error: 'store disposed' });
-        if (inner.wakeInFlight) return inner.wakeInFlight;
-        if (inner.resourcesInFlight) return inner.resourcesInFlight.then(() => wake());
+        if (inner.wakeInFlight) return restarting ? inner.wakeInFlight.then(() => wake(restartToken)) : inner.wakeInFlight;
+        if (inner.resourcesInFlight) return inner.resourcesInFlight.then(() => wake(restartToken));
         const pendingRead = inner.inFlight;
         inner.wakeInFlight = (async () => {
             let outcome;
             try {
                 if (pendingRead) await pendingRead.then(() => {}, () => {});
-                const resp = await fetchImpl(WAKE_ENDPOINT, { method: 'POST' });
-                const data = await resp.json().catch(() => null);
+                const resp = await fetchImpl(restarting ? RESTART_ENDPOINT : WAKE_ENDPOINT, restarting
+                    ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: restartToken }) }
+                    : { method: 'POST' });
+                const body = await resp.json().catch(() => null);
+                const data = restarting ? body?.status : body;
                 if (inner.disposed) return { ok: false, error: 'store disposed' };
                 if (resp && resp.ok && statusPayloadValid(data)) {
                     inner.loading = false;
@@ -857,14 +868,16 @@ export function createClaudexorStatusStore({
                     inner.snapshotHasModels = false;
                     inner.error = '';
                     inner.generation += 1;
-                    outcome = { ok: true, error: '' };
+                    outcome = { ok: true, error: '', data: body };
                 } else {
                     outcome = {
                         ok: false,
-                        error: String((data && data.error)
+                        error: String((body && body.error)
                             || (resp && resp.ok
                                 ? 'the status answer could not be understood'
                                 : `HTTP ${resp ? resp.status : 'error'}`)),
+                        httpStatus: resp ? resp.status : 0,
+                        data: body,
                     };
                 }
             } catch (err) {
@@ -1118,7 +1131,8 @@ export function createClaudexorStatusStore({
         refreshResources,
         resetAccount,
         resourceAction,
-        wake,
+        wake: () => wake(),
+        restart: (token) => wake(String(token ?? '')),
         subscribe,
         holdPolling,
         dispose,

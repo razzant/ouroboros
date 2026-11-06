@@ -177,7 +177,6 @@ def test_worker_crash_retry_survives_settlement_and_successor(q, monkeypatch, cr
     monkeypatch.setattr(workers, "PENDING", q.pending)
     monkeypatch.setattr(workers, "RUNNING", q.queue.RUNNING)
     monkeypatch.setattr(workers, "WORKERS", {})
-    monkeypatch.setattr(workers, "CRASH_TS", [])
     monkeypatch.setattr(workers, "_LAST_SPAWN_TIME", 0)
     monkeypatch.setattr(workers, "QUEUE_MAX_RETRIES", 1)
     monkeypatch.setattr(workers, "load_state", lambda: {"owner_chat_id": 0})

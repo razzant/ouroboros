@@ -1,8 +1,8 @@
 """What a stop may retain: the ONE predicate every shutdown consumer shares.
 
-Manual Restart, Panic, graceful shutdown and a crash-storm kill all end this
-server generation's processes. None of them may turn a SAVED pause into a
-terminal. An acknowledged Restart returns eligible saved work and its previously
+Manual Restart, Panic, graceful shutdown and the fault exit (``bus_lost``,
+``loop_failed``) all end this server generation's processes. None of them may
+turn a SAVED pause into a terminal. An acknowledged Restart returns eligible saved work and its previously
 runnable queue; existing pauses and holds remain (owner S1, 2026-10-08).
 The Restart's cancel census, ``kill_workers``'s running
 and pending handling, the snapshot restore and the unused-grant revocation all

@@ -292,6 +292,12 @@ def stop_restart_successor() -> list[dict]:
     return [request_process_tree_kill(proc) for proc in list(_restart_successors)]
 
 
+def panic_termination_requested() -> bool:
+    """Whether an accepted Panic owns this process's termination: every other stop door, the Fault door
+    and its backstop included, defers to it (the Emergency Stop is never a fault)."""
+    return bool(_restart_stop_requested)
+
+
 def exit_after_shutdown(exit_code: int) -> None:
     """Exit after lifecycle cleanup, unless Panic owns termination and its writes.
 
