@@ -984,7 +984,8 @@ def task_presentation_snapshot(drive_root: Any, task_id: str, *, task: Any = Non
         pname = _bounded_presentation_name(project_display_name(project.get("name"), pid))
     if pid and not pname:
         pname = "Project"
-    task_name = task_presentation_name(*sources)
+    # Nameless work of a Project is called by its Project: never a bare "Project › Task".
+    task_name = task_presentation_name(*sources, fallback=pname or "Task")
     label = f"{pname} › {task_name}" if pname else task_name
     # One name, said once: a task whose own name IS the project name renders
     # "Launch › Launch", which reads as two different things. Exact equality

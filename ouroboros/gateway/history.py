@@ -548,8 +548,8 @@ def _annotate_terminal_task_truth(
             if not task_id or message.get("system_type") in ("project_question_pointer", *ORIGIN_ADDRESSED_NOTICE_TYPES):
                 continue
             if message.get("system_type") in {"project_started", "project_handoff"} and not message.get("task_name"):
-                # Legacy rows reuse this request's result read, never split the prose label.
-                message["task_name"] = task_presentation_name(cache.get(task_id))
+                message["task_name"] = task_presentation_name(  # a legacy row reuses this request's result read;
+                    cache.get(task_id), fallback=message.get("project_name") or "Task")  # nameless: its Project
             # Selected receipt events keep their physical identity, but show current task-result truth.
             row_id = str(message.get("card_row_id") or "")
             if message.get("card_row") == "reviews" and row_id.startswith("merge-receipt:"):
