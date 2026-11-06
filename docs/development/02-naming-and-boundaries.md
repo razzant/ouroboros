@@ -158,7 +158,8 @@ navigates, `reference_books.book_path_role` classifies,
 `tests/_governance_docs_shared.py` is the one reader tests use, because an entrypoint
 `read_text()` substring pin passes vacuously).
 
-Enforcement: `tests/test_reference_book_validation.py` validates book shape. Residue
+Enforcement: `tests/test_reference_book_validation.py` validates book shape; whether an
+entrypoint states a fact of its own is review judgment (CHECKLISTS `architecture_doc`). Residue
 (version stamps, decision codenames, owner codes, Cyrillic, bare issue numbers, "used
 to / previously" narrative) is caught by the shrink-only check in
 `tests/test_docs_sync.py`: the case-sensitive `DOC_RESIDUE_PATTERNS`, outside
