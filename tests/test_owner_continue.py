@@ -826,8 +826,10 @@ def test_a_late_answer_in_a_kept_mailbox_reaches_the_successor_with_its_card(tmp
 @pytest.mark.parametrize("shape", ["quiz_row", "late_answer"])
 def test_a_relayed_answer_kept_in_a_mailbox_reaches_the_successor_with_its_card(tmp_path, monkeypatch, shape):
     """Audit 05.11 item 37: a quoted answer relayed to a work is my human's words with the card it answers. Continue
-    rebuilds that row from the work's kept mailbox with the card beside it (for its Supervisor and its model)."""
+    rebuilds that row from the work's kept mailbox with the card beside it (for its Supervisor and its model). A row
+    the host carried to this work (``host_carried``) is the tree's: it enters neither the corpus nor the peers."""
     from ouroboros import dialogue_store
+    from ouroboros.chat_chain import format_address, row_address
     from ouroboros.owner_continue import owner_corpus_rows, owner_sources
     from ouroboros.owner_relay import owner_quote, write_relay
     from ouroboros.task_results import load_task_result
@@ -843,8 +845,18 @@ def test_a_relayed_answer_kept_in_a_mailbox_reaches_the_successor_with_its_card(
     dialogue_store.append(tmp_path, "chat", answer)
     write_relay(tmp_path, "pred-1", relay_id="r1", note="Please act on it.", quotes=[owner_quote(tmp_path, answer)],
                 chat_id=1, teller_task_id="teller")
+    carried = {"chat_id": 1, "direction": "in", "ts": "2026-10-01T00:02:00Z", "client_message_id": "owner-carried",
+               "text": "Use the Berlin numbers"}
+    dialogue_store.append(tmp_path, "chat", carried)
+    address = format_address(row_address(carried))
+    write_relay(tmp_path, "pred-1", relay_id=f"carry:{address}", note="", chat_id=1, teller_task_id="root",
+                quotes=[owner_quote(tmp_path, carried, address=address)], canonical_root=tmp_path,
+                host_carried={"went_to": ""})
     sources = owner_sources(tmp_path, load_task_result(tmp_path, "pred-1"), "pred-1")
     assert not sources["gaps"]
-    [row] = [row for row in owner_corpus_rows(sources) if row["content"] == "1. Publish it"]
+    rows = owner_corpus_rows(sources)
+    [row] = [row for row in rows if row["content"] == "1. Publish it"]
     assert (row["reply_to"]["author"], row["reply_to"]["text"].split("\n")[0]) == (
         "Ouroboros, task asker", "Publish exactly this reply?")
+    assert "Use the Berlin numbers" not in [row["content"] for row in rows]  # the tree's row, not this corpus
+    assert [peer["msg_id"] for peer in sources["peer_context"]] == ["relay:r1:pred-1"]  # the note is a peer; the carried entry none

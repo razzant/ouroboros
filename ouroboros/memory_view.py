@@ -316,10 +316,11 @@ def _parsed_view(text: str) -> MemoryViewSnapshot:
 
 
 def _owner_words_block(task: Mapping[str, Any], drive_root: Any = None) -> str:
-    """A helper's birth set (``owner_words.task_words_text``): its field, then its room's rows read once here."""
+    """A helper's birth set (``owner_words.task_words_text``): its field, then its room's rows read once here; the
+    files the rows carry are staged on the helper's own drive and named by the path it opens them with."""
     from ouroboros.owner_words import task_words_text  # D03->D17 is lazy-only
 
-    return task_words_text(drive_root, task, indent=INDENT)
+    return task_words_text(drive_root, task, indent=INDENT, stage=True)
 
 
 def _activation(store: ChronicleStore) -> Dict[str, Any]:

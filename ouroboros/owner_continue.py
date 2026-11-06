@@ -622,7 +622,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
             later.append(carded(row, entry))  # a live delivery's card, or a late answer's snapshot, beside the words
             if entry.get("attachment_manifest") or "attachment_manifest_ref" in entry:
                 attached.append(entry)  # the files that message attached, staged in this task's own store
-        elif kind == "relay_entry":
+        elif kind == "relay_entry" and not entry.get("host_carried"):  # a carried row is the tree's, not this corpus
             for row in entry.get("owner_rows") or []:
                 from ouroboros.chat_chain import format_address, row_address
                 from ouroboros.owner_relay import owner_text
@@ -631,7 +631,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
                     later.append(carded({"source": "owner_mailbox", "content": owner_text(row), "msg_id": address}, row))
                     seen[address] = (owner_text(row), True)
                     quoted += [ref for ref in row.get("attachments") or [] if isinstance(ref, dict)]
-        if kind in {"relay_entry", "task_message"}:  # a relay's own note and a task's words are peer context
+        if kind in {"relay_entry", "task_message"} and not entry.get("host_carried"):  # a note and a task's words: peers
             peers.append({"msg_id": msg_id, "ts": str(entry.get("ts") or ""),
                           "source_task_id": str(entry.get("source_task_id") or ""),
                           "provenance": "independent_task" if kind == "relay_entry" else str(entry.get("provenance") or ""),

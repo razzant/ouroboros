@@ -520,7 +520,7 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, sc
             scheduled_tasks_digest_out.update(schedule_digest)
     # Surface running tasks so a busy-chat turn can steer instead of duplicating it.
     _meta = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
-    if ctx is not None:
+    if ctx is not None and _meta.get("delegation_role") != "subagent":  # a helper has no verb that takes a handle
         from ouroboros.owner_relay import held_owner_messages
         runtime_data["owner_quote_handles"] = list(held_owner_messages(ctx))
     # Owner Surface Fact: the surface that SENT the message this task/turn came

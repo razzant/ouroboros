@@ -385,6 +385,167 @@ def test_an_unrecordable_relay_answer_sends_nothing_and_keeps_the_relay_open(tmp
     assert "RELAY_RETURN_NOT_OWED" in receipt and q.empty() and "once" in recipient._open_relays
 
 
+def _carried_entry(canonical, drive, member, quote, *, went_to="", teller="root", earlier_ref=""):
+    """One host-carried relay entry as the carriage writes it (``owner_relay._carry_to_member``)."""
+    address = quote["source"]["address"]
+    return write_relay(drive, member, relay_id=f"{'carry-context' if went_to else 'carry'}:{address}", note="",
+                       quotes=[quote], chat_id=1, teller_task_id=teller, canonical_root=canonical,
+                       host_carried={"went_to": went_to, **({"earlier_ref": earlier_ref} if earlier_ref else {})})
+
+
+def _helper(drive, task_id="helper"):
+    from ouroboros.tools.registry import ToolContext
+    ctx = ToolContext(repo_dir=drive, drive_root=drive, task_id=task_id)
+    ctx.task_metadata = {"delegation_role": "subagent", "root_task_id": "root", "parent_task_id": "root"}
+    ctx._owner_directives = []
+    return ctx
+
+
+def test_a_carried_entry_renders_the_carried_line_and_holds_the_row_outside_corpus_return_and_receipt(tmp_path):
+    """A row the host carries is my human's words shown once under the carried line, held with its fact, its file
+    staged on the member's drive; it enters no corpus, opens no return relay, posts no receipt and moves no owner
+    hash. A helper gets no handles fact and no runtime handle list; a root with its own row prints both."""
+    from ouroboros.chat_uploads import claim_refs, store_upload
+    from ouroboros.context import build_runtime_section
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND
+    from ouroboros.loop_messages import owner_source_sha256
+    from ouroboros.owner_relay import owner_quote
+    from tests._context_shared import _make_health_env
+    import json
+    _path, ref = store_upload(b"carried attached words", "plan.txt", data_dir=tmp_path)
+    claim_refs([ref], tmp_path)
+    row, address = source(tmp_path)
+    row["attachments"] = [ref]
+    child = tmp_path / "child"
+    child.mkdir()
+    entry, created = _carried_entry(tmp_path, child, "helper", owner_quote(tmp_path, row, address=address))
+    assert created and entry["host_carried"] == {"went_to": ""} and entry["msg_id"] == f"relay:carry:{address}:helper"
+    helper = _helper(child)
+    hash_before = owner_source_sha256(helper)
+    events, messages = queue.Queue(), [{"role": "user", "content": "Your assignment."}]
+    controls = _drain_incoming_messages(messages, queue.Queue(), child, "helper", events, set(), owner_ctx=helper)
+    assert controls["owner_carried_addressed"] == [address]
+    [shown] = messages[1:]
+    line = f"[Owner words quoted verbatim; {row['ts']}; Main; carried to this work by the host (reached this work); handle {address}]"
+    assert str(shown["content"]).startswith(f"{line}\n{row['text']}\n") and shown[HOST_CONTEXT_KIND_KEY] == OWNER_WORDS_KIND
+    assert "[Message from Ouroboros" not in str(shown) and "owner_quote_handles" not in str(messages)
+    assert helper._owner_directives == [] and owner_source_sha256(helper) == hash_before
+    assert not getattr(helper, "_open_relays", None) and events.empty() and not drain_owner_entries(child, "helper")
+    assert held_owner_messages(helper)[address]["carried"] == {"from": "root", "went_to": "", "at": entry["ts"]}
+    assert held_owner_messages(helper)[address]["text"] == row["text"]
+    assert (child / "task_results/artifacts/helper/attachments" / ref["upload"]).read_bytes() == b"carried attached words"
+    assert "read_file" in str(shown["content"])
+    env = _make_health_env(tmp_path / "env")
+    section = json.loads(build_runtime_section(env, {"id": "helper", "metadata": helper.task_metadata}, ctx=helper).split("\n\n", 1)[1])
+    assert "owner_quote_handles" not in section
+    # The other direction: a context entry names where the row went and is no closing control; a root prints both facts.
+    other = tmp_path / "other"
+    other.mkdir()
+    _carried_entry(tmp_path, other, "helper", owner_quote(tmp_path, {**row, "attachments": []}, address=address), went_to="sibling")
+    peer, peer_messages = _helper(other), []
+    assert "owner_carried_addressed" not in _drain_incoming_messages(peer_messages, queue.Queue(), other, "helper", None, set(), owner_ctx=peer)
+    assert "carried to this work by the host (went to sibling)" in str(peer_messages[0]["content"])
+    root, root_messages = context(tmp_path, row), []
+    held_owner_messages(root)  # the turn holds its own row
+    _drain_incoming_messages(root_messages, queue.Queue(), tmp_path, "teller", None, set(), owner_ctx=root)
+    assert "owner_quote_handles held by this turn" in str(root_messages) and address in str(root_messages)
+    section = json.loads(build_runtime_section(env, {"id": "teller", "metadata": root.task_metadata}, ctx=root).split("\n\n", 1)[1])
+    assert section["owner_quote_handles"] == [address]
+
+
+def test_one_address_is_one_entry_and_a_row_held_under_the_same_fact_renders_nothing(tmp_path):
+    """Two drains of a root write the member identical bytes under one id, whichever name the project has by then;
+    an entry delivered again (a crash before its ack) renders nothing more; a context entry after the addressed one
+    renders nothing; an addressed entry after a context one flips the fact and is shown once."""
+    from ouroboros.owner_relay import carry_to_members, inject_relay, owner_quote, retain_owner_message
+    from ouroboros.projects_registry import create_project, update_project
+    from ouroboros.task_results import write_task_result
+    project = create_project(tmp_path, "alpha", name="Alpha")
+    row = {"chat_id": project["chat_id"], "direction": "in", "ts": "2026-10-01T00:00:00Z", "text": "exact words",
+           "client_message_id": "owner-1"}
+    dialogue_store.append(tmp_path, "chat", row)
+    address = format_address(row_address(row))
+    write_task_result(tmp_path, "member", "running", delegation_role="subagent", parent_task_id="root", root_task_id="root")
+    root = context(tmp_path)
+    root.task_id = "root"
+    retain_owner_message(root, row)
+    carry_to_members(root, delivered=True)
+    update_project(tmp_path, project["id"], name="Beta")
+    carry_to_members(root, delivered=True)  # the member holds the id: no second write, whatever the room is called now
+    [entry] = drain_owner_entries(tmp_path, "member")
+    assert entry["msg_id"] == f"relay:carry:{address}:member" and entry["source_task_id"] == "root"
+    assert entry["relay"]["source"]["label"] == "Alpha" and entry["host_carried"] == {"went_to": ""}
+    quote = owner_quote(tmp_path, row, address=address)
+    member, messages = _helper(tmp_path, "member"), []
+    assert inject_relay(member, entry, messages) == [address] and len(messages) == 1
+    assert inject_relay(member, entry, messages) == [] and len(messages) == 1  # delivered again: no second line
+    context_entry, _ = _carried_entry(tmp_path, tmp_path, "member", quote, went_to="sibling")
+    assert inject_relay(member, context_entry, messages) == [] and len(messages) == 1
+    assert held_owner_messages(member)[address]["carried"]["went_to"] == ""  # never downgraded to context
+    # The other direction: a row held as context, addressed since, is shown once more and its fact flips.
+    second = {**row, "client_message_id": "owner-2", "text": "second words", "ts": "2026-10-01T00:02:00Z"}
+    dialogue_store.append(tmp_path, "chat", second)
+    second_address = format_address(row_address(second))
+    second_quote = owner_quote(tmp_path, second, address=second_address)
+    as_context, _ = _carried_entry(tmp_path, tmp_path, "member", second_quote, went_to="sibling")
+    assert inject_relay(member, as_context, messages) == [] and len(messages) == 2
+    assert "went to sibling" in str(messages[1]["content"])
+    assert held_owner_messages(member)[second_address]["carried"]["went_to"] == "sibling"
+    addressed, _ = _carried_entry(tmp_path, tmp_path, "member", second_quote)
+    assert inject_relay(member, addressed, messages) == [second_address] and len(messages) == 3
+    assert "reached this work" in str(messages[2]["content"])
+    assert held_owner_messages(member)[second_address]["carried"]["went_to"] == ""
+    assert inject_relay(member, as_context, messages) == [] and len(messages) == 3
+
+
+def test_a_failed_write_stops_no_other_member_and_the_next_drain_writes_it_once(tmp_path, monkeypatch):
+    """The carriage keeps no delivery state: a write that raises for one member leaves the others written, the next
+    drain writes exactly the missing entry, and a quiet drain of a helper reads no member while a drain that
+    delivered, scheduled a helper or follows a failed write runs the pass."""
+    from ouroboros import owner_relay
+    from ouroboros.owner_relay import carry_to_members, retain_owner_message
+    from ouroboros.task_results import write_task_result
+    row, address = source(tmp_path)
+    root = context(tmp_path, row)
+    root.task_id = "root"
+    retain_owner_message(root, row)
+    for member in ("a", "b"):
+        write_task_result(tmp_path, member, "running", delegation_role="subagent", parent_task_id="root", root_task_id="root")
+    write_task_result(tmp_path, "done", "completed", delegation_role="subagent", parent_task_id="root", root_task_id="root")
+    real = owner_relay.write_relay
+
+    def failing(drive, task_id, **kwargs):
+        if task_id == "a":
+            raise OSError("injected mailbox outage")
+        return real(drive, task_id, **kwargs)
+
+    monkeypatch.setattr(owner_relay, "write_relay", failing)
+    carry_to_members(root, delivered=True)
+    assert not drain_owner_entries(tmp_path, "a") and len(drain_owner_entries(tmp_path, "b")) == 1
+    assert not drain_owner_entries(tmp_path, "done") and root._carriage_memo["failed"] is True
+    monkeypatch.setattr(owner_relay, "write_relay", real)
+    carry_to_members(root, delivered=False)  # the drain after a failed write runs the pass, with nothing kept
+    assert [entry["msg_id"] for entry in drain_owner_entries(tmp_path, "a")] == [f"relay:carry:{address}:a"]
+    assert len(drain_owner_entries(tmp_path, "b")) == 1 and root._carriage_memo["failed"] is False
+    monkeypatch.setattr(owner_relay, "write_relay", lambda *a, **k: (_ for _ in ()).throw(AssertionError("written twice")))
+    carry_to_members(root, delivered=True)  # a drain that delivered reads the members: nothing is missing
+    # The skip rule at a helper, both ways: a quiet drain reads no member; delivery, a new helper or a failed write does.
+    reads = []
+    monkeypatch.setattr("ouroboros.task_status.find_child_tasks", lambda *a, **k: reads.append(k) or [])
+    helper = context(tmp_path, row)
+    helper.task_id, helper.task_metadata = "b", {"delegation_role": "subagent", "root_task_id": "root"}
+    carry_to_members(helper, delivered=False)  # the attempt's first pass reads
+    carry_to_members(helper, delivered=False)
+    assert len(reads) == 1 and reads[0]["scope"] == "direct"
+    carry_to_members(helper, delivered=True)
+    helper._last_scheduled_subagents = [{"task_id": "c"}]
+    carry_to_members(helper, delivered=False)
+    helper._carriage_memo["failed"] = True
+    carry_to_members(helper, delivered=False)
+    carry_to_members(helper, delivered=False)
+    assert len(reads) == 4
+
+
 def test_quoteless_relay_to_child_drive_labels_source_from_canonical_registry(tmp_path):
     from ouroboros.projects_registry import create_project
 

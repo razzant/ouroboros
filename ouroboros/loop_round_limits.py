@@ -132,7 +132,8 @@ def _drain_incoming_messages(
     def ack_saved(entry: Dict[str, Any]) -> None:
         if not acknowledge_transcript_entry(drive_root, task_id, entry) or event_queue is None:
             return
-        if entry.get("relay") or entry.get("quiz_delivery") or entry.get("card_delivery"):
+        if ((entry.get("relay") and not entry.get("host_carried"))  # a carried row posts no receipt to the room
+                or entry.get("quiz_delivery") or entry.get("card_delivery")):
             event_queue.put_nowait({"type": "owner_message_injected", "task_id": task_id,
                                    "relay_ack": entry.get("relay"), "quiz_ack": entry.get("quiz_delivery"),
                                    "card_ack": entry.get("card_delivery")})
@@ -146,6 +147,7 @@ def _drain_incoming_messages(
             ack_saved(entry)
     if owner_ctx is not None and getattr(owner_ctx, "last_owner_delivery", None) is not None:
         owner_ctx.last_owner_delivery = None
+    before_rows, delivered = len(getattr(owner_ctx, "_owner_directives", None) or []), False
     while not incoming_messages.empty():
         try:
             injected = incoming_messages.get_nowait()
@@ -188,7 +190,12 @@ def _drain_incoming_messages(
             kind = entry.get("kind") or KIND_OWNER_TEXT
             if kind == "relay_entry":
                 from ouroboros.owner_relay import inject_relay
-                inject_relay(owner_ctx, entry, messages)
+                if entry.get("host_carried") and getattr(owner_ctx, "_task_acceptance_sealed_fence_token", None):
+                    _owner_msg_seen.discard(entry.get("msg_id"))  # a sealed close leaves a carried row as unread mail
+                    continue
+                if shown := inject_relay(owner_ctx, entry, messages):  # rows addressed to this work, read by no round
+                    controls["owner_carried_addressed"] = controls.get("owner_carried_addressed", []) + shown
+                delivered = True
                 ack_content(entry)
                 continue
             if kind == KIND_FINALIZE_NOW:
@@ -347,8 +354,13 @@ def _drain_incoming_messages(
                     })
                 except Exception:
                     pass
-    if owner_ctx is not None and getattr(owner_ctx, "_held_owner_messages", None):
-        handles = list(owner_ctx._held_owner_messages)
+    if owner_ctx is not None:  # my human's rows reach every live member below this run, by identity, each once
+        from ouroboros.owner_relay import carry_to_members
+        grown = len(getattr(owner_ctx, "_owner_directives", None) or []) > before_rows
+        carry_to_members(owner_ctx, delivered=delivered or grown)
+    if owner_ctx is not None and getattr(owner_ctx, "_held_owner_messages", None) and (
+            getattr(owner_ctx, "task_metadata", None) or {}).get("delegation_role") != "subagent":
+        handles = list(owner_ctx._held_owner_messages)  # a helper has no verb that takes a handle: no list for it
         if handles != getattr(owner_ctx, "_quote_handles_shown", None):
             _loop()._append_or_merge_user_message(messages,
                 "[Host fact: owner_quote_handles held by this turn]\n" + json.dumps(handles), slot=owner_ctx)

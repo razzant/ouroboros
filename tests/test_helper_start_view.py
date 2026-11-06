@@ -261,3 +261,49 @@ def test_a_declared_child_starts_with_the_owner_words_and_nothing_of_shared_memo
     _a, b, c, shared_cap = _start(env, shared_child)
     assert section(c, WORDS) == section(changing, WORDS) and shared_cap["memory_view"]["role"] == "child"
     assert "## My story" in b and "  Alpha began." in b and "## Working sources" in c
+
+
+# --- a file my human sent is staged at a birth: a declared helper and a grandchild open it ---------------
+
+def test_a_declared_helper_and_a_grandchild_born_after_a_carried_screenshot_open_it_at_their_first_round(tmp_path):
+    """A row with a file the root holds reaches a declared helper's and a grandchild's birth block with the file
+    staged on each one's own drive and its line naming the path it opens there; a helper born before the row
+    has neither the row nor a copy."""
+    from ouroboros import dialogue_store
+    from ouroboros.chat_uploads import claim_refs, store_upload
+    from ouroboros.context import build_llm_messages
+    from ouroboros.owner_relay import retain_owner_message
+
+    env, memory, _rooms = world(tmp_path)
+    canonical = memory.drive_root
+    root = _root(env, memory, "bound", 1, ASKED)
+    earlier = _schedule(root, "Count shelf one")
+    _path, ref = store_upload(b"PNG bytes of the shelf", "shelf.png", data_dir=canonical)
+    claim_refs([ref], canonical)
+    row = {"chat_id": 1, "direction": "in", "ts": "2026-10-04T05:30:00+00:00", "text": "Here is the shelf",
+           "client_message_id": "msg-shot", "attachments": [ref]}
+    dialogue_store.append(canonical, "chat", row)
+    assert retain_owner_message(root, row) is not None
+    declared = _schedule(root, "Count shelf two", input_sources="declared", context="Shelf two holds ten boxes")
+    child = _schedule(root, "Count shelf three")
+    grandparent = ToolContext(repo_dir=env.repo_dir, drive_root=pathlib.Path(child["drive_root"]),
+                              budget_drive_root=str(canonical), current_task_type="task")
+    grandparent.task_id, grandparent.task_depth, grandparent.event_queue = child["id"], child["depth"], queue.Queue()
+    grandparent.task_metadata, grandparent.task_contract = dict(child["metadata"]), child["task_contract"]
+    _initialize_owner_directives(grandparent, [{"role": "user", "content": child["text"]}])
+    grandchild = _schedule(grandparent, "Count the top row of shelf three")
+
+    def words_of(payload):
+        own = pathlib.Path(payload["drive_root"])
+        child_env = Env(repo_dir=env.repo_dir, drive_root=own, budget_drive_root=canonical)
+        messages, _cap = build_llm_messages(env=child_env, memory=Memory(drive_root=own, repo_dir=env.repo_dir),
+                                            task={"type": "task", "text": "hi", **payload})
+        return section(messages[0]["content"][-1]["text"], WORDS), own / "task_results/artifacts" / payload["id"]
+
+    for payload in (declared, grandchild):
+        words, store = words_of(payload)
+        assert "\n  Here is the shelf\n" in words
+        assert f"read_file(root='artifact_store', path='attachments/{ref['upload']}')" in words
+        assert (store / "attachments" / ref["upload"]).read_bytes() == b"PNG bytes of the shelf"
+    words, store = words_of(earlier)
+    assert "Here is the shelf" not in words and not store.exists()

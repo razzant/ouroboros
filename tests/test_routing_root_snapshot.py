@@ -113,6 +113,63 @@ def test_a_busy_store_is_a_disclosed_gap_and_the_message_still_gets_its_turn(mai
     assert metadata["main_routing_manifest"]["omissions"]["root_tasks"] is None  # unknown, not zero
 
 
+def test_a_room_row_reaches_the_other_live_roots_as_context_once_whatever_the_routing_outcome(tmp_path, monkeypatch):
+    """Two live readers: the row is addressed to none and a labelled context entry lands in both, no corpus and no
+    seal generation moves; a sole reader gets the addressed mail and the other root the context entry naming it;
+    a sealed reader's refusal still writes the context entry once, under a head of the room."""
+    from ouroboros import dialogue_store, owner_pause
+    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros.owner_mailbox import drain_owner_entries
+    from supervisor import queue as q
+
+    room = create_project(tmp_path, "carry-room")
+    chat = int(room["chat_id"])
+    turns = []
+    running = {tid: {"task": _root(tid, chat_id=chat, project_id=room["id"], drive_root=str(tmp_path)), "started_at": 1.0}
+               for tid in ("root-a", "root-b")}
+    for tid in running:
+        write_task_result(tmp_path, tid, "running")
+    ctx = _ctx(tmp_path, running=running, direct=lambda *_a, **kwargs: turns.append(kwargs["task_metadata"]))
+    monkeypatch.setattr(server_owner_routing.threading, "Thread", _Now)
+    monkeypatch.setattr(routing, "_recent_root_results", lambda *_a: ([], {}))
+    monkeypatch.setattr(q, "DRIVE_ROOT", tmp_path)
+    fence = {"token": "f" * 32, "root_task_id": "root-a", "task_id": "root-a", "status": "active", "owner_message_generation": 0}
+    monkeypatch.setattr(q, "ACCEPTANCE_FENCES", {"root-a": fence})
+
+    def arrives(client_message_id, text):
+        row = {"chat_id": chat, "direction": "in", "ts": f"2026-10-01T00:0{client_message_id[-1]}:00Z", "text": text,
+               "client_message_id": client_message_id}
+        dialogue_store.append(tmp_path, "chat", row)
+        _route(ctx, client_message_id, chat_id=chat)
+        return format_address(row_address(row))
+
+    def mail(tid):
+        return {entry["msg_id"]: entry for entry in drain_owner_entries(tmp_path, tid)}
+
+    first = arrives("m-1", "how is it going?")
+    assert len(turns) == 1 and fence["owner_message_generation"] == 0  # a head decides; nothing was delivered
+    for tid in ("root-a", "root-b"):
+        [entry] = mail(tid).values()
+        assert entry["msg_id"] == f"relay:carry-context:{first}:{tid}" and entry["source_task_id"] == tid
+        assert entry["host_carried"] == {"went_to": "a head of the room"} and entry["relay"]["source"]["label"] == "carry-room"
+        assert entry["owner_rows"][0]["text"] == "how is it going?" and entry["text"] == ""
+    # The sole reader (the other root paused) takes the row as addressed mail; the other hears where it went.
+    owner_pause.install_fence(tmp_path, "root-b", request_id="press-1")
+    second = arrives("m-2", "and the charts?")
+    assert len(turns) == 1 and fence["owner_message_generation"] == 1
+    assert set(mail("root-a")) == {f"relay:carry-context:{first}:root-a", "m-2:root-a"}
+    assert mail("root-b")[f"relay:carry-context:{second}:root-b"]["host_carried"] == {"went_to": "root-a"}
+    assert "m-2:root-b" not in mail("root-b")
+    # A sealed reader refuses the row: no addressed mail, and the context entry is still written once.
+    fence["status"] = "sealed"
+    third = arrives("m-3", "one more thing")
+    assert len(turns) == 2 and fence["owner_message_generation"] == 1
+    assert "m-3:root-a" not in mail("root-a")
+    assert mail("root-a")[f"relay:carry-context:{third}:root-a"]["host_carried"] == {"went_to": "a head of the room"}
+    assert mail("root-b")[f"relay:carry-context:{third}:root-b"]["host_carried"] == {"went_to": "a head of the room"}
+    assert len(mail("root-a")) == 3 and len(mail("root-b")) == 3
+
+
 def test_settlement_is_read_on_the_actors_own_drive(tmp_path):
     child = tmp_path / "child"
     child.mkdir()

@@ -816,8 +816,8 @@ def _close_forced_intake(ctx: _RoundLimitContext) -> None:
 def _drain_forced_owner_directives(
     ctx: _RoundLimitContext,
     llm_trace: Dict[str, Any],
-) -> bool:
-    """Drain typed owner input after a forced call and advance answer evidence."""
+) -> Any:
+    """Drain typed owner input after a forced call and advance answer evidence; ``"carried"``: a carried row, no growth."""
 
     tools = getattr(ctx, "tools", None)
     if tools is None:
@@ -831,7 +831,7 @@ def _drain_forced_owner_directives(
         ctx.owner_msg_seen = seen
     directives = getattr(tools._ctx, "_owner_directives", None)
     before = len(directives) if isinstance(directives, list) else 0
-    _loop()._drain_incoming_messages(
+    controls = _loop()._drain_incoming_messages(
         ctx.messages,
         incoming,
         ctx.drive_root,
@@ -843,7 +843,7 @@ def _drain_forced_owner_directives(
     directives = getattr(tools._ctx, "_owner_directives", None)
     after = len(directives) if isinstance(directives, list) else 0
     if after <= before:
-        return False
+        return "carried" if controls.get("owner_carried_addressed") else False
     if getattr(tools._ctx, "_task_acceptance_sealed_fence_token", None):
         _loop()._release_for_owner_followup(tools._ctx, llm_trace)
     _loop()._delivery_evidence_state(tools, ctx, llm_trace)
@@ -1474,7 +1474,10 @@ def _forced_final_answer(
         # The closing admission reads Stop now as an ordinary answer's does; it outranks a late directive.
         if (stop_now := presence_stop_now(tools_ctx)) or not late:
             break
-        if str(ctx.accumulated_usage.get("_last_llm_error_kind") or "") == "provider_outcome_unknown":
+        unknown = str(ctx.accumulated_usage.get("_last_llm_error_kind") or "") == "provider_outcome_unknown"
+        if late == "carried" and (single_semantic_turn or attempt == 1 or unknown):
+            break  # a carried row is not a directive: the forced final stands; both fallbacks are a grown corpus's
+        if unknown:
             return _loop()._forced_fallback_result(
                 ctx, llm_trace,
                 "⚠️ Provider outcome unknown; directive retained. Resume the task without a blind resend.",
@@ -1493,7 +1496,7 @@ def _forced_final_answer(
         _loop()._finalize_forced_services(ctx, llm_trace)
         _loop()._append_or_merge_user_message(
             ctx.messages,
-            "[FORCED_OWNER_REFRESH] Answer all current directives; ignore the stale draft."
+            "[FORCED_OWNER_REFRESH] Answer all current directives and read the owner words above; ignore the stale draft."
             + _forced_subject_prompt(ctx, llm_trace, presence_armed=_presence_forced_armed(
                 getattr(getattr(ctx, "tools", None), "_ctx", None))),
         )

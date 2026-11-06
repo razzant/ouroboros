@@ -602,6 +602,10 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
             thread_of=thread_of,
             roots=roots,
         )
+        if project_id and not late:  # the room's other live roots hear the row as context, whichever return routed it
+            from ouroboros.owner_relay import carry_room_context
+
+            carry_room_context(ctx.DRIVE_ROOT, chat_id, client_message_id, roots.rows(chat_id), routed_to_task)
         if routed_to_task:
             _record_routing_receipt(
                 bridge,

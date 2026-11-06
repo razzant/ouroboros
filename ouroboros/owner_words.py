@@ -587,10 +587,11 @@ def work_words(ctx: Any) -> Tuple[List[Dict[str, Any]], str, List[str]]:
     return rows, "" if rows else _absent(ctx), gaps
 
 
-def task_words_text(drive_root: Any, task: Mapping[str, Any], *, audience: str = "child", indent: str = "") -> str:
+def task_words_text(drive_root: Any, task: Mapping[str, Any], *, audience: str = "child", indent: str = "",
+                    stage: bool = False) -> str:
     """A task's set rendered from its record at its start (a helper's birth): the field it was scheduled with and
     the rows its record holds, then the live rows of its room, read once here; without ``drive_root`` the record
-    alone."""
+    alone. ``stage`` (a birth): the files the rows carry are staged on the task's own drive and named by path."""
     record = _mapping(task)
     meta = _mapping(record.get("metadata"))
     task_id = str(record.get("id") or record.get("task_id") or "")
@@ -604,7 +605,36 @@ def task_words_text(drive_root: Any, task: Mapping[str, Any], *, audience: str =
             drive_root, task_id, record.get("parent_task_id") or meta.get("parent_task_id"), root_id), accounts)
         rows = _deduped([*rows, *(row for context in (False, True) for row in _held_words(
             held, drive_root, task_id, context=context, accounts=accounts, read=True)), *live])
+        if stage and task_id:
+            _stage_birth_files(drive_root, record, task_id, rows)
     return render_owner_words(rows, absent, audience=audience, root_task_id=root_id, indent=indent, gaps=gaps)
+
+
+def _stage_birth_files(drive_root: Any, record: Mapping[str, Any], task_id: str, rows: List[Dict[str, Any]]) -> None:
+    """At a helper's birth the files its set's rows carry are staged on its own drive from their saved uploads
+    (``owner_relay.stage_quoted``, as a relay stages at a drain: by saved hash, idempotent), and each file's line
+    names the staged path it opens, or the host's reason it could not be staged; a declared helper and a
+    grandchild stage the same way. A staging that fails leaves the file named as before. Never raises."""
+    from types import SimpleNamespace
+
+    from ouroboros.owner_relay import stage_quoted
+
+    meta = _mapping(record.get("metadata"))
+    drive = str(record.get("child_drive_root") or record.get("drive_root") or meta.get("child_drive_root") or "")
+    ctx = SimpleNamespace(drive_root=pathlib.Path(drive) if drive else drive_root, task_id=task_id)
+    for row in rows:
+        if not row.get("attachments"):
+            continue
+        try:
+            manifest = stage_quoted(ctx, {"relay_canonical_root": str(drive_root)}, row)
+        except Exception as exc:  # the file stays named; the birth block is never refused over a copy
+            log.warning("owner words: files of a row not staged at the birth of %s (%s: %s)", task_id,
+                        type(exc).__name__, exc)
+            continue
+        for ref, item in zip(row["attachments"], manifest if isinstance(manifest, list) else []):
+            item = _mapping(item)
+            ref["staged"] = (f"read_file(root='artifact_store', path='{item.get('relpath')}')"
+                             if item.get("status") == "staged" else f"not staged: {item.get('reason') or 'unknown'}")
 
 
 def _inbound_rows(drive_root: Any, client_ids: Mapping[str, str], accounts: Any = None) -> List[Dict[str, Any]]:
@@ -780,12 +810,13 @@ def render_owner_words(rows: Any, absent: str = "", *, audience: str, root_task_
 
 
 def attachments_line(files: Any) -> str:
-    """The files a row of my human's carries, named by the host under its words (name, type, size): the row never
-    loses a file silently. ``""`` for a row with none."""
+    """The files a row of my human's carries, named by the host under its words (name, type, size, and the staged
+    path a birth gave it: ``_stage_birth_files``): the row never loses a file silently. ``""`` for a row with none."""
     named = []
     for ref in files if isinstance(files, list) else []:
         if isinstance(ref, Mapping):
-            facts = [str(ref["mime"])] * bool(ref.get("mime")) + [f"{ref['size']} bytes"] * (ref.get("size") is not None)
+            facts = ([str(ref["mime"])] * bool(ref.get("mime")) + [f"{ref['size']} bytes"] * (ref.get("size") is not None)
+                     + [str(ref.get("staged"))] * bool(ref.get("staged")))
             named.append(str(ref.get("name") or "attachment") + (f" ({', '.join(facts)})" if facts else ""))
     return f"[Host-retained attachments: {'; '.join(named)}]" if named else ""
 
@@ -815,14 +846,22 @@ def owner_words_text(ctx: Any, *, audience: str = "reviewer") -> str:
     return render_owner_words(rows, absent, audience=audience, root_task_id=root, gaps=gaps)
 
 
-def stamped_refs(text: Any) -> set:
-    """The reference tokens of every owner-words stamp in a rendered text (a review subject, a brief): the last
-    part of each ``[… · owner · … · ref]`` line, whole, so one reference is never found inside a longer one."""
-    refs = set()
+def stamped_sources(text: Any) -> Dict[str, str]:
+    """``{reference: source}`` of every owner-words stamp in a rendered text (a review subject, a brief, a member's
+    first request): the last part of each ``[… · owner · … · ref]`` line, whole, so one reference is never found
+    inside a longer one, and the source part the stamp names before it (``room_message``, ``owner_mailbox of task
+    …``). The one parser of a stamp for every reader of one."""
+    stamps: Dict[str, str] = {}
     for line in str(text or "").split("\n"):
+        line = line.strip()
         if line.startswith("[") and line.endswith("]") and "owner" in (parts := line[1:-1].split(" · "))[:2]:
-            refs.add(parts[-1])
-    return refs
+            stamps[parts[-1]] = parts[parts.index("owner") + 1] if len(parts) > 2 else ""
+    return stamps
+
+
+def stamped_refs(text: Any) -> set:
+    """The reference tokens of every owner-words stamp in a rendered text (``stamped_sources``)."""
+    return set(stamped_sources(text))
 
 
 def words_unseen_in(ctx: Any, text: Any) -> List[Dict[str, Any]]:

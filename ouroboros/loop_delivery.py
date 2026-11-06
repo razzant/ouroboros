@@ -1427,6 +1427,15 @@ def _no_tool_final_answer(
                 else:
                     tools._ctx._delivery_control_required = False
             return held("owner_followup")
+        if post_controls.get("owner_carried_addressed"):  # my human's row for this work, read by no round yet:
+            solving_again()  # one round reads it; corpus, acknowledgement hash and seal are untouched
+            if isinstance(candidate, _loop().DeliveryCandidate):  # the plain follow-up's shape: no control armed
+                candidate.finalization_control = "owner_revision_required"
+                if candidate.control_episode_seen:
+                    _loop()._arm_delivery_control(tools, limit_ctx, llm_trace, control="owner_revision_required")
+                else:
+                    tools._ctx._delivery_control_required = False
+            return held("owner_followup", "owner_carried")
         if provisional_assistant is not None and messages[-1] is provisional_assistant:
             messages.pop()
         if post_controls.get("finalize_now"):
@@ -1509,6 +1518,10 @@ def finish_completed_stop(tools: ToolRegistry, ctx: Any, emit_progress: Any,
         tools._ctx._completion_selected = None
         _loop()._arm_delivery_control(tools, ctx, ctx.llm_trace, control="owner_revision_required")
         observe_completion_hold(tools, ctx, "selection", "owner_input_changed")
+        return None
+    if controls.get("owner_carried_addressed"):  # a carried row for this work: one round reads it; the hash stands
+        tools._ctx._completion_selected = None
+        observe_completion_hold(tools, ctx, "selection", "owner_carried")
         return None
     reason = str(controls.get("finalize_now") or "").splitlines()
     cause = reason[0].strip() if reason else ""
