@@ -46,7 +46,7 @@ import pathlib
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from ouroboros.owner_words import OWNER_SOURCES, answered_card_reply, answered_card_source, reply_target
+from ouroboros.owner_words import OWNER_SOURCES, answered_card, answered_card_reply, carded, reply_target
 from ouroboros.utils import utc_now_iso
 from ouroboros.task_store import patch_document
 
@@ -115,8 +115,6 @@ def row_identity(row: Dict[str, Any]) -> str:
     return str(row.get("msg_id") or "") or (f"client {row.get('chat_id') or ''} / {client}" if client else "")
 
 
-# What a successor reads of an answered card beside the owner's words (``answered_card``).
-CARD_FIELDS = ("quiz_id", "question", "options", "option_details", "stake", "assumption", "host_facts", "materials", "answered_index", "comment", "asked_at", "answered_at")
 # The binding's copy of the work's explicit execution budget (``execution_carry``).
 EXECUTION_CARRY_KEYS = ("execution_timeout_sec", "execution_consumed_sec")
 WAKE_OPENING = "consciousness_wake"
@@ -252,21 +250,6 @@ def _mail_rows(drive_root: pathlib.Path, task_id: str) -> Tuple[List[Dict[str, A
         return [], False, True
     rows, whole = _exact_rows(mailbox_lines(content))
     return rows, whole and (not content or content.endswith("\n")), True
-
-
-def answered_card(block: Any, words: str) -> Optional[Dict[str, Any]]:
-    """What a successor reads of the card an owner answer replies to, or None.
-
-    ``block`` must be an answered card whose recorded owner words are exactly ``words``.
-    The question and options are the asking task's words; they ride beside the answer
-    and never enter the owner corpus.
-    """
-    from ouroboros.owner_quiz import STATE_ANSWERED, late_answer_owner_text
-
-    if not (isinstance(block, dict) and block.get("state") == STATE_ANSWERED
-            and late_answer_owner_text(block) == words):
-        return None
-    return {key: copy.deepcopy(block[key]) for key in CARD_FIELDS if key in block}
 
 
 def _drafted_start(root: pathlib.Path, result: Dict[str, Any], task_id: str, metadata: Dict[str, Any],
@@ -636,11 +619,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
                    "ts": str(entry.get("ts") or ""), "exact_row": entry["_exact_row"]}
             if target := reply_target(root, entry.get("reply_reference")):  # the message these words reply to
                 row["reply_to"] = target
-            block, asker = answered_card_source(entry)  # a live delivery's card, or a late answer's snapshot
-            card = answered_card(block, row["content"])
-            if card and all(isinstance(value, str) and value for value in (asker, card.get("quiz_id"))):
-                row.update(source_task_id=asker, quiz_id=card["quiz_id"], card=card)  # its question rides beside them
-            later.append(row)
+            later.append(carded(row, entry))  # a live delivery's card, or a late answer's snapshot, beside the words
             if entry.get("attachment_manifest") or "attachment_manifest_ref" in entry:
                 attached.append(entry)  # the files that message attached, staged in this task's own store
         elif kind == "relay_entry":
@@ -649,7 +628,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
                 from ouroboros.owner_relay import owner_text
                 address = format_address(row_address(row))
                 if address not in seen:
-                    later.append({"source": "owner_mailbox", "content": owner_text(row), "msg_id": address})
+                    later.append(carded({"source": "owner_mailbox", "content": owner_text(row), "msg_id": address}, row))
                     seen[address] = (owner_text(row), True)
                     quoted += [ref for ref in row.get("attachments") or [] if isinstance(ref, dict)]
         if kind in {"relay_entry", "task_message"}:  # a relay's own note and a task's words are peer context

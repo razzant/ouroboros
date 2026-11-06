@@ -280,6 +280,38 @@ def merged_corpus(kept: Any, added: Any) -> List[Dict[str, Any]]:
     return merged
 
 
+# What a successor reads of an answered card beside the owner's words (``answered_card``).
+CARD_FIELDS = ("quiz_id", "question", "options", "option_details", "stake", "assumption", "host_facts", "materials",
+               "answered_index", "comment", "asked_at", "answered_at")
+
+
+def answered_card(block: Any, words: str) -> Dict[str, Any] | None:
+    """What a successor reads of the card an owner answer replies to, or None.
+
+    ``block`` must be an answered card whose recorded owner words are exactly ``words``.
+    The question and options are the asking task's words; they ride beside the answer
+    and never enter the owner corpus.
+    """
+    import copy
+
+    from ouroboros.owner_quiz import STATE_ANSWERED, late_answer_owner_text
+
+    if not (isinstance(block, dict) and block.get("state") == STATE_ANSWERED
+            and late_answer_owner_text(block) == words):
+        return None
+    return {key: copy.deepcopy(block[key]) for key in CARD_FIELDS if key in block}
+
+
+def carded(row: Dict[str, Any], source: Any) -> Dict[str, Any]:
+    """``row`` with the card its words answer beside them (``answered_card_source(source)``) when that card records
+    exactly these words: the asking task, the card's id and the card a Continue successor reads."""
+    block, asker = answered_card_source(source)
+    card = answered_card(block, row["content"])
+    if card and all(isinstance(value, str) and value for value in (asker, card.get("quiz_id"))):
+        row.update(source_task_id=asker, quiz_id=card["quiz_id"], card=card)
+    return row
+
+
 def answered_card_source(row: Any) -> tuple:
     """``(block, asking task)`` of the card a row of my human's words answers, else ``(None, None)``: a relayed quiz row's
     ``quiz``, a live delivery's ``quiz_delivery`` snapshot, or a late answer's typed snapshot (``late_answer_ref``)."""
