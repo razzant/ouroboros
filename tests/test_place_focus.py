@@ -625,7 +625,8 @@ def test_start_task_from_a_place_cites_or_starts_its_own_work(focus, monkeypatch
     assert evt["work_kind"] == expected_kind
     cited = [row for row in evt.get("owner_corpus") or [] if row.get("source") == "place_owner"]
     if expected_kind == "owner":
-        assert cited == [{"source": "place_owner", "content": words, "basis": "cited", "carried": True, "msg_id": cited[0]["msg_id"]}]
+        assert cited == [{"source": "place_owner", "content": words, "cited": cite, "basis": "cited", "carried": True,
+                          "msg_id": cited[0]["msg_id"]}]  # the whole verified message, the span named
         assert "Started as your human's work on their cited words." in result and "consciousness_cause" not in evt
     else:
         assert cited == [] and evt["consciousness_cause"] == "started"
@@ -654,16 +655,24 @@ def test_focus_frame_folds_the_allowance_to_counts_behind_an_exact_reader(focus,
     assert task["metadata"]["focus_allowance"]["roots"] == allowance["roots"]
 
 
-def _publish_bridge_send(monkeypatch, **declaration):
-    """One declared tool of the focus's own connector ``bridge``, as the dispatcher's published registry holds it."""
+def _publish_bridge_tools(monkeypatch, *declarations):
+    """The focus's own connector ``bridge`` with these declared tools, in its registration order, as the dispatcher's
+    published registry holds them; their surface names."""
     from ouroboros import extension_registry_state as registry
     from ouroboros.extension_surface_names import extension_surface_name
-    name = extension_surface_name("bridge", "send")
-    manifest = SimpleNamespace(raw_extra={"tools": [{"name": "send", **declaration}]})
+    manifest = SimpleNamespace(raw_extra={"tools": list(declarations)})
     bundle = registry._ExtensionRegistrations(generation_digest="g1", loaded_skill=SimpleNamespace(manifest=manifest))
-    monkeypatch.setitem(registry._tools, name, {"skill": "bridge", "extension_generation": "g1"})
+    names = []
+    for declaration in declarations:
+        names.append(extension_surface_name("bridge", declaration["name"]))
+        monkeypatch.setitem(registry._tools, names[-1], {"skill": "bridge", "extension_generation": "g1"})
     monkeypatch.setitem(registry._extensions, "bridge", bundle)
-    return name
+    return names
+
+
+def _publish_bridge_send(monkeypatch, **declaration):
+    """One declared tool ``send`` of the connector ``bridge``."""
+    return _publish_bridge_tools(monkeypatch, {"name": "send", **declaration})[0]
 
 
 @pytest.mark.parametrize("declaration,records", [
@@ -685,7 +694,7 @@ def test_speak_line_and_records_only_follow_the_connectors_declarations(focus, m
     if records:
         thread = f", {declaration['thread']}=1712.5" if declaration.get("thread") else ""
         account = ", account_id=a" if "account_id" in declaration["target"] else ""
-        assert line == (f"Words reach chat only when you send them: {name} with {declaration['conversation']}=r{thread}{account}; "
+        assert line == (f"Words reach chat only when you send them, through {name} ({declaration['conversation']}=r{thread}{account}); "
                         "a send may ride in the same response as your finish. Your finish is your record, never posted.")
         # a Silent place or Advises autonomy keep the held draft, and the line says so
         task["metadata"]["presence"]["place"]["state"] = "silent"
@@ -696,6 +705,27 @@ def test_speak_line_and_records_only_follow_the_connectors_declarations(focus, m
     else:
         assert line.startswith("Your non-silent finish is posted in chat as your words")
     assert "bridge" not in line.replace(name, ""), "no connector is named by the host; the tool's own name is"
+
+
+def test_speak_line_names_every_declared_door_with_its_own_arguments(focus, monkeypatch):
+    """Review R1 MAJOR-1, the Slack shape: the connector registers its file upload before its send and declares an
+    edit too. The line lists each door with its own arguments, in the connector's order; the host picks none (the first
+    registered tool was a false door: the upload wants a file, and its channel argument is not the send's)."""
+    from ouroboros.place_reply import conversation_send_tools, speak_line
+    root, _place, admission, event = focus
+    upload, send, edit = _publish_bridge_tools(monkeypatch,
+        {"name": "file_upload", "effect": "message", "target": ["channel_id", "thread_ts"], "conversation": "channel_id", "thread": "thread_ts"},
+        {"name": "send", "effect": "message", "target": ["channel_or_user", "thread_ts"], "conversation": "channel_or_user", "thread": "thread_ts"},
+        {"name": "message_edit", "effect": "message", "target": ["channel"], "conversation": "channel"})
+    task = _build_task(replace(admission, allowance={"status": "available", "remaining_usd": 2}),
+                       replace(event, thread_id="1712.5", conversation_key="chat:a:r:1712.5"), drive_root=root, staged_files=())
+    assert [name for name, _effect in conversation_send_tools("bridge")] == [upload, send, edit]
+    line = speak_line(task["metadata"])
+    assert line == (f"Words reach chat only when you send them, through one of {upload} (channel_id=r, thread_ts=1712.5); "
+                    f"{send} (channel_or_user=r, thread_ts=1712.5); {edit} (channel=r); a send may ride in the same response "
+                    "as your finish. Your finish is your record, never posted.")
+    from ouroboros.presence_context import frame_focus_content
+    assert line in frame_focus_content(task, "hello"), "the frame carries the same line"
 
 
 # --- a place turn reads any project journal; writes and a child's reads stay forbidden (owner 06.11, 4=A) ----------

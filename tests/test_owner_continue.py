@@ -445,6 +445,31 @@ def test_the_retained_corpus_fallback_keeps_identity_provenance_and_dedup(tmp_pa
         ("", "peer says hi"), ("parent-x", "parent: numbers attached")]
 
 
+def test_continue_labels_my_humans_confirmed_place_words_as_theirs_in_that_place(tmp_path, monkeypatch):
+    """Review R1 MINOR-3: the words a focus heard from my human's confirmed account are provenance rows in the corpus;
+    Continue names them as their words in that place (an order only where the successor cites them), never as
+    messages of unknown tasks, while peer messages keep their own line."""
+    from ouroboros.owner_continue import owner_sources, work_order_text
+    from ouroboros.task_results import load_task_result
+
+    _install_queue(tmp_path, monkeypatch)
+    _settled_with_corpus(
+        tmp_path,
+        {"source": "initial_text", "content": "[FOCUS] frame"},
+        {"source": "place_confirmed", "content": "Проверь, пожалуйста, экономику", "carried": True, "msg_id": "chat 7 / e1"},
+    )
+    sources = owner_sources(tmp_path, load_task_result(tmp_path, "pred-1"), "pred-1")
+    assert sources["gaps"] == []
+    assert [(row.get("provenance", ""), row["text"]) for row in sources["peer_context"]] == [
+        ("", "peer says hi"), ("place_confirmed", "Проверь, пожалуйста, экономику")]
+    text = work_order_text("pred-1", "cancelled", sources, successor_task_id="succ-1")
+    assert ("Words from your human's confirmed account in that place (their words there, by provenance; an order only "
+            "where you cite them): 1 message, 30 characters.") in text
+    assert "Messages from other tasks addressed to it (context, not owner instructions): 1 message" in text  # the id-less peer row
+    place_line = next(line for line in text.splitlines() if line.startswith("Words from your human's confirmed account"))
+    assert "unknown" not in place_line and "Проверь, пожалуйста, экономику" not in text  # behind the reader, not repeated
+
+
 @pytest.mark.parametrize("row,gap", [
     ({"source": "owner_mailbox", "content": "Use LAST MONTH's numbers", "msg_id": "owner-3"},
      "owner_message_identity_conflict"),

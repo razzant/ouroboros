@@ -106,7 +106,8 @@ log = logging.getLogger(__name__)
 _OWNER_WORDS_PARAM = (
     "Optional: the exact words of your human asking for this work, copied verbatim from one message of theirs that "
     "reached this run (their confirmed account; a forward or a colleague's line is not theirs). Verified by bytes: the "
-    "work then runs as their order; a quote not found is refused and nothing starts. Omit to start your own work.")
+    "work then runs as their order; a quote not found is refused and nothing starts. Omitted in a place turn or a wake, "
+    "the work is your own; in Main the work is already your human's.")
 _START_TASK_DESCRIPTION = (
     "Start a NEW, separate independent work with its own task id and card. "
     "The work reading the current request already exists and can do that request itself. "

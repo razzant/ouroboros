@@ -689,10 +689,6 @@ def selected_completion_text(request: dict, candidate: Any, messages: list,
     return None, "selection_unavailable: select the current retained/whole held answer or supply complete bytes"
 
 
-OWNER_REPLY_OWED_REFUSAL = ("owner_reply_owed: your human wrote after your last live message; "
-                            "answer before finishing silently")
-
-
 def forced_completion_selection(parsed: Any, malformed: bool, candidate: Any, *, tool_ctx: Any = None,
                                 envelope_keys: Tuple[str, ...] = (), messages: list | None = None,
                                 held_sha256: str = "") -> tuple[dict | None, str | None, str]:
@@ -700,7 +696,7 @@ def forced_completion_selection(parsed: Any, malformed: bool, candidate: Any, *,
     ``(request, selected text, "")`` or ``(None, None, error)``. Pure: finish_task's own contract
     (``completion_request``), the same byte selection and the silence rule of
     ``consume_completion_request``; nothing is staged, executed or acknowledged here."""
-    from ouroboros.loop_messages import owner_reply_owed
+    from ouroboros.loop_messages import OWNER_REPLY_OWED_REFUSAL, owner_reply_owed
     from ouroboros.place_reply import records_only_now
     from ouroboros.tools.control_runtime import completion_request
 
@@ -768,7 +764,7 @@ def carry_forced_selection(tool_ctx: Any, request: dict | None, candidate: Any) 
 def consume_completion_request(tools: ToolRegistry, ctx: Any, trace: dict, content: Any = None) -> bool:
     """Resolve one staged author act after the full batch, using its original observation."""
     from ouroboros.tool_capabilities import completion_observation_calls
-    from ouroboros.loop_messages import owner_reply_owed, owner_source_sha256
+    from ouroboros.loop_messages import OWNER_REPLY_OWED_REFUSAL, owner_reply_owed, owner_source_sha256
     tool_ctx = tools._ctx
     request = getattr(tool_ctx, "_completion_request", None)
     if not isinstance(request, dict):
@@ -1237,6 +1233,8 @@ def _no_tool_final_answer(
     from ouroboros.loop_messages import transcript_growth_signature
     before = transcript_growth_signature(messages)
     origin = "resume" if resume_candidate else "selection" if explicit_candidate else "prose"
+    if origin == "prose":  # a tool-less response carries nothing that rides: a records-only place returns its note once
+        tools._ctx._completion_riding_send = False
 
     def held(reason: str, subreason: str = ""):
         if transcript_growth_signature(messages) != before:

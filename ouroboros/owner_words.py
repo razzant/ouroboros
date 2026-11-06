@@ -256,9 +256,11 @@ def cited_owner_basis(ctx: Any, owner_words: Any) -> Tuple[Dict[str, Any] | None
     The host verifies provenance and nothing else: the exact bytes (``chronicle_quotes.quote_in``, emphasis
     markers aside) inside one message that reached THIS run and is my human's by provenance: an owner-door row
     (``OWNER_SOURCES``) or a place event from an account its place confirms (``PLACE_CONFIRMED``: confirmed,
-    not unauthenticated, not forwarded). Absent words: ``(None, "")``, the work is my own. Words found:
-    the ``place_owner`` row the new root carries (``basis: cited``). Words not found: a typed refusal, nothing
-    started. Whether the words ask for this work is the citing mind's reading, visible on the card."""
+    not unauthenticated, not forwarded). Absent words: ``(None, "")``, the work is my own. Words found: the row
+    the new root carries (``basis: cited``) holds the whole verified message as ``content`` (never a host cut of my
+    human's words) with the cited span as ``cited``, labelled by its real source: the owner door it came through,
+    or ``place_owner`` for a confirmed account's place words. Words not found: a typed refusal, nothing started.
+    Whether the words ask for this work is the citing mind's reading, visible on the card."""
     from ouroboros.chronicle_quotes import quote_in
 
     wanted = str(owner_words or "").strip()
@@ -266,12 +268,12 @@ def cited_owner_basis(ctx: Any, owner_words: Any) -> Tuple[Dict[str, Any] | None
         return None, ""
     for row in directive_owner_rows(ctx):  # owner-door rows that reached this run (never a reply target's words)
         if row["source"] in OWNER_SOURCES and quote_in(wanted, row["text"]):
-            return {"source": "place_owner", "content": wanted, "basis": CITED, "carried": True,
+            return {"source": row["source"], "content": row["text"], "cited": wanted, "basis": CITED, "carried": True,
                     **({"msg_id": row["ref"]} if row.get("ref") else {})}, ""
     for item in getattr(ctx, "_owner_directives", None) or []:  # confirmed place events, with what they replied to
         if isinstance(item, dict) and item.get("source") == PLACE_CONFIRMED and quote_in(wanted, str(item.get("content") or "")):
-            return {"source": "place_owner", "content": wanted, "basis": CITED, "carried": True,
-                    **{key: item[key] for key in ("msg_id", "reply_to") if item.get(key)}}, ""
+            return {"source": "place_owner", "content": str(item.get("content") or ""), "cited": wanted, "basis": CITED,
+                    "carried": True, **{key: item[key] for key in ("msg_id", "reply_to") if item.get(key)}}, ""
     return None, ("owner_words were not found verbatim in any message of your human that reached this run (their "
                   "confirmed account, not forwarded): nothing was started. Copy their exact words, or omit owner_words "
                   "to start the work as your own.")

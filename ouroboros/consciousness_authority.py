@@ -189,12 +189,17 @@ def stamp_schedule_writer(record: Dict[str, Any], writer_kind: str, writer_metad
 
     Independent schedules use root-start semantics: a consciousness writer's schedule is its own work
     unless the writer passed the host-verified cite of my human's words (``owner_basis`` in its
-    writer metadata). A related continuation keeps its caller's kind and cause.
+    writer metadata), or the record already runs on one: a pause, resume or restore by a writer
+    without a cite keeps the cite stored on the schedule's next occurrence (its ``owner_corpus``),
+    never re-deriving the kind from that writer. A related continuation keeps its caller's kind and cause.
     """
     source = writer_metadata if isinstance(writer_metadata, Mapping) else {}
     kind = WORK_KIND_OWNER if writer_kind == WORK_KIND_OWNER else WORK_KIND_CONSCIOUSNESS
-    origin = consciousness_origin_metadata({**source, "work_kind": kind}, started_root=started_root,
-                                           owner_basis=source.get("owner_basis") if started_root else None)
+    basis = source.get("owner_basis") if started_root else None
+    if basis is None and started_root and record.get("writer_kind") == WORK_KIND_OWNER:
+        corpus = ((record.get("task") or {}).get("metadata") or {}).get("owner_corpus") or []
+        basis = next((row for row in corpus if isinstance(row, Mapping) and row.get("basis") == "cited"), None)
+    origin = consciousness_origin_metadata({**source, "work_kind": kind}, started_root=started_root, owner_basis=basis)
     record.update(writer_kind=origin["work_kind"], writer_origin=origin)
 
 

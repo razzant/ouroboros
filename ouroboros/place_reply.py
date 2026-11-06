@@ -148,10 +148,11 @@ def records_only_now(ctx) -> bool:
 
 def riding_sends(ctx, calls) -> list:
     """This response's successful sends into the turn's own conversation: words that reach people beside the finish
-    they ride with. Two proofs: a ``tool_delivered`` finish beside a call whose delivery receipt the host matched to
-    this conversation (``presence_delivery_confirmed``; the #2538 contract, kept), or the event's own connector's
-    declared send tool addressing this conversation (the records form, whatever the finish says). A refused or
-    failed send is ``is_error`` and stays a result to read."""
+    they ride with. Two proofs: a ``tool_delivered`` finish beside a call whose delivery receipts the host matched to
+    this conversation (``presence_delivery_confirmed``, re-checked against ``confirmed_delivery_receipts``; the #2538
+    contract, kept; today only the frozen legacy completion fixture produces that outcome), or the event's own
+    connector's declared send tool addressing this conversation (the records form, whatever the finish says). A
+    refused or failed send is ``is_error`` and stays a result to read."""
     from ouroboros.place_guard import call_place_facts
 
     metadata = getattr(ctx, "task_metadata", {}) or {}
@@ -162,8 +163,11 @@ def riding_sends(ctx, calls) -> list:
     for call in calls or []:
         if not isinstance(call, dict) or call.get("is_error"):
             continue
-        if delivered and (call.get("presence_delivery_confirmed") or (call.get("result_meta") or {}).get("presence_delivery_confirmed")):
-            riding.append(call)
+        receipts = call.get("presence_delivery_confirmed") or (call.get("result_meta") or {}).get("presence_delivery_confirmed")
+        if delivered and isinstance(receipts, (list, tuple, set)) and receipts:
+            from ouroboros.presence_context import confirmed_delivery_receipts
+            if {tuple(pair) for pair in receipts} <= confirmed_delivery_receipts(ctx):  # receipts the host matched to this conversation
+                riding.append(call)
             continue
         if not carrier or call.get("tool") not in tools:
             continue
@@ -174,8 +178,9 @@ def riding_sends(ctx, calls) -> list:
 
 
 def speak_line(metadata) -> str:
-    """How words reach this place, from the connector's declarations and the event's own ids: the send tool and its
-    arguments, that the finish is a record (or held), or posted where no such tool exists."""
+    """How words reach this place, from the connector's declarations and the event's own ids: every send tool the
+    connector declares for this conversation, each with its own arguments (the host picks none: a pick would be a
+    verdict), that the finish is a record (or held), or posted where no such tool exists."""
     from ouroboros.consciousness_authority import is_observe_origin
 
     metadata = metadata if isinstance(metadata, dict) else {}
@@ -185,18 +190,21 @@ def speak_line(metadata) -> str:
     tools = conversation_send_tools(str(presence.get("transport_skill") or "")) if metadata.get("wake_cause") == "focus" else []
     if not tools:
         return f"Your non-silent finish is posted in {label} as your words."
-    name, effect = tools[0]
-    args = [f"{effect.conversation}={event.get('conversation_id') or '…'}"]
-    if effect.thread and event.get("thread_id"):
-        args.append(f"{effect.thread}={event['thread_id']}")
-    if "account_id" in effect.targets and event.get("account_id"):
-        args.append(f"account_id={event['account_id']}")
+    doors = []
+    for name, effect in tools:
+        args = [f"{effect.conversation}={event.get('conversation_id') or '…'}"]
+        if effect.thread and event.get("thread_id"):
+            args.append(f"{effect.thread}={event['thread_id']}")
+        if "account_id" in effect.targets and event.get("account_id"):
+            args.append(f"account_id={event['account_id']}")
+        doors.append(f"{name} ({', '.join(args)})")
+    through = ("one of " if len(doors) > 1 else "") + "; ".join(doors)
     state = str(place.get("state") or "")
     held = (f" ({label} is {state.title()}: a send is refused and your finish is held for your human, not posted)"
             if state in {"silent", "paused"} else
             " (autonomy is Advises: a send is refused and your finish is held for your human, not posted)"
             if is_observe_origin(metadata) else "")
-    return (f"Words reach {label} only when you send them: {name} with {', '.join(args)}; a send may ride in the same "
+    return (f"Words reach {label} only when you send them, through {through}; a send may ride in the same "
             f"response as your finish. Your finish is your record, never posted{held}.")
 
 
@@ -232,6 +240,10 @@ def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, s
     from ouroboros.tool_access import canonical_data_root
     from ouroboros.presence_continuation import _handoff_ref, selection_for
     records = records_only_now(ctx)
+    if records and text and not quiet:
+        from ouroboros.loop_messages import OWNER_REPLY_OWED_REFUSAL, owner_reply_owed
+        if owner_reply_owed(ctx):  # R3 at the common exit: a records-only finish owes my human's reply as a silent one does
+            return False, OWNER_REPLY_OWED_REFUSAL
     if (records and text and not quiet and getattr(ctx, "_completion_riding_send", None) is False
             and not getattr(ctx, "_records_only_noted", False)):
         ctx._records_only_noted = True  # once: the mind then sends, or finishes again to keep its record

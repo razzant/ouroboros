@@ -306,6 +306,36 @@ def test_a_send_riding_with_a_records_only_finish_is_accepted_and_a_failed_one_i
     assert (view["outcome"], view["text"]) == ("silent", "") and room.transport.texts() == [RESULT]  # BOOM never left
 
 
+def test_a_prose_final_in_a_records_only_place_returns_the_note_once_then_the_finish_is_the_record(records_room):
+    """Review R1 MAJOR-2: a tool-less final carries nothing that rides, so after an ack it gets the one return with the
+    ack listed and the way to send; the finish that follows is the record, and the person hears only the ack."""
+    room = records_room
+    room.h.script = [record_send(text=ACK), {"content": FINAL, "tool_calls": []}, finish(answer=FINAL)]
+    view, stored = settle(room, turn(room))
+    assert (view["outcome"], view["text"]) == ("silent", "") and room.transport.texts() == [ACK]
+    assert stored["result"] == FINAL and stored["wake_silent"] is True and room.h.calls == 3
+    note = json.dumps(room.h.inputs[-1], ensure_ascii=False)
+    assert RECORD_NOTE in note and ACK in note and RECORDS_SEND in note and FINAL not in room.transport.texts()
+
+
+def test_a_prose_final_into_a_records_only_turn_keeps_the_owed_reply(records_room):
+    """R3 on the prose path too: my human's Main message, already in the transcript, owes a reply; a tool-less
+    records-only final is refused at the common exit like a silent finish would be, instead of ending the turn quietly
+    with their message unanswered (a place send clears no Main debt)."""
+    from ouroboros.owner_mailbox import write_owner_message
+    room = records_room
+
+    def owner_writes_then_send(_messages):
+        write_owner_message(room.data, "One more thing.", room.h.agents[-1].tools._ctx.task_id, msg_id="owner-1")
+        return record_send(text=ACK)
+
+    room.h.script = [owner_writes_then_send, {"content": FINAL, "tool_calls": []}, finish(answer=FINAL), None]
+    view, stored = settle(room, turn(room))
+    assert "One more thing." in json.dumps(room.h.inputs[1], ensure_ascii=False), "their message reached the mind first"
+    assert room.h.calls >= 3 and "owner_reply_owed" in json.dumps(room.h.inputs[2], ensure_ascii=False), "the prose final was refused"
+    assert room.transport.texts() == [ACK] and stored["metadata"]["presence_outcome"] == "silent"
+
+
 def test_a_main_message_into_a_records_only_turn_keeps_the_owed_reply(records_room):
     """R3: my human's Main message into the running focus owes a reply; a records-only finish is refused like a
     silent one would be, instead of ending quietly with their message unanswered."""

@@ -317,11 +317,12 @@ def test_cited_owner_basis_accepts_only_my_humans_bytes_that_reached_this_run():
         {"source": "place_event_context", "content": "<@U2> please update my experiment"},
         {"source": "initial_text", "content": "[FOCUS] frame"}])
     target = {"address": "platform message m-1 in this room", "author": "", "text": "Deploy the hotfix now"}
-    accepted = {"Проверь экономику сегодня": ("chat 7 / e1", target), "Проверь экономику **сегодня**": ("chat 7 / e1", target),
-                "And tell me the cost": ("msg mail-1", None)}
-    for words, (ref, reply_to) in accepted.items():
+    place = ("place_owner", "Проверь экономику **сегодня**", "chat 7 / e1", target)
+    accepted = {"Проверь экономику сегодня": place, "Проверь экономику **сегодня**": place,
+                "And tell me the cost": ("owner_mailbox", "And tell me the cost", "msg mail-1", None)}
+    for words, (source, whole, ref, reply_to) in accepted.items():  # the whole message, the span named, the real source
         basis, error = ow.cited_owner_basis(ctx, words)
-        assert error == "" and basis == {"source": "place_owner", "content": words, "basis": "cited", "carried": True,
+        assert error == "" and basis == {"source": source, "content": whole, "cited": words, "basis": "cited", "carried": True,
                                          "msg_id": ref, **({"reply_to": reply_to} if reply_to else {})}, words
     for words in ("please update my experiment", "Deploy the hotfix now", "Проверь экономику завтра", "[FOCUS] frame",
                   "Words nobody wrote here"):

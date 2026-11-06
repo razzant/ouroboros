@@ -1239,8 +1239,9 @@ clock. Before allowance, rate or capacity is consulted, the conversation's curre
 sole reader (a promoted or follow-up root of this place and conversation whose loop reads mail or
 is in an unheld cold sleep, or an author parked for its review or private question, whose wait
 wakes and retakes the conversation before any model call), receives later arrivals as typed
-context-only mail, whether or not they match a wake fact (an addressed one from the owner's confirmed
-account carries the owner's words); they never answer its question. An untagged message in the same thread, topic or direct message is a
+context-only mail, whether or not they match a wake fact (one from the owner's confirmed account is stored as their
+words there by provenance: `place_confirmed`, carried, outside the owner sources that owe a reply; it becomes an order
+only by a verified cite); they never answer its question. An untagged message in the same thread, topic or direct message is a
 wake: it ends an ordinary wait and reopens an unsent final. Other untagged group messages reach a
 current author as background and a root not at all; they stay readable in the room. Several
 readers receive nothing: the arrival takes an ordinary focus under the allowance, whose
@@ -1264,13 +1265,15 @@ answer was lost; a closed or ended one leaves the event eligible for ordinary ad
 after a Host crash or a torn write returns to its recorded holder, but the handoff is not
 exactly-once: a write whose effect cannot be proven stays unknown, as above. A
 wake arrival its model has not seen when it finishes reopens it for another round; background
-arrivals alone never do, though the owner's own words in one are owner input its final answers. An author's own explicit `action="stop"` stands: an arrival drained at
+arrivals alone never do, though a message from the owner's confirmed account in one is kept as their words there
+(provenance; an order only by a verified cite, and it owes no reply by itself). An author's own explicit `action="stop"` stands: an arrival drained at
 its close is acknowledged in its transcript, never read by its model, and starts no round.
 
 A focus, or a root promoted or scheduled from it, uses ordinary `finish_task`, including
 `silent=true`; receipts never choose its outcome. Where the connector speaks by an in-conversation
-message tool (above) a focus's finish is its record: a send may ride in the same response, a finish
-with words that sent nothing there returns once with the facts, the next is accepted; a Silent or
+message tool (above) a focus's finish, a `finish_task` answer or a tool-less final alike, is its record: a send
+may ride in the same response, a finish with words that sent nothing there returns once with the facts, the
+next is accepted (a Main message pending from the owner is owed first, as for a silent finish); a Silent or
 Paused place and Advises keep the held draft. Elsewhere, and for a promoted root, an answer after
 any send, file or reaction is new speech; started work stays `deferred` (empty after silence).
 Automatic speech passes the `place_reply` Safety check, which sees the turn's own sends in that conversation

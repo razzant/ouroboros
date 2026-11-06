@@ -1056,14 +1056,21 @@ def test_off_names_the_roots_it_leaves_running_on_my_humans_cited_words(clock, m
                {"id": "owner-door-root", "metadata": {"work_kind": "owner", "owner_corpus": [{"source": "initial_user", "content": "x"}]}},
                {"id": "own-root", "metadata": {"initiator": "consciousness", "work_kind": "consciousness", "owner_corpus": [cited]}}]
     monkeypatch.setattr(q, "PENDING", pending)
+    span = {**cited, "content": "Проверь экономику и напиши мне", "cited": "Проверь экономику"}  # the whole message, the span named
     monkeypatch.setattr(q, "RUNNING", {"cited-running": {"task": {"id": "cited-running", "metadata": {
-        "work_kind": "owner", "owner_corpus": [{"source": "owner_mailbox", "content": "y"}, cited]}}}})
+        "work_kind": "owner", "owner_corpus": [{"source": "owner_mailbox", "content": "y"}, span]}}}})
     assert carriers.cited_owner_roots() == [("cited-root", "Проверь экономику"), ("cited-running", "Проверь экономику")]
+    schedules = [{"id": "sched-1", "enabled": True, "writer_kind": "owner", "task": {"metadata": {"owner_corpus": [span]}}},
+                 {"id": "sched-off", "enabled": False, "writer_kind": "owner", "task": {"metadata": {"owner_corpus": [span]}}},
+                 {"id": "sched-own", "enabled": True, "writer_kind": "consciousness", "task": {"metadata": {"owner_corpus": [span]}}}]
+    monkeypatch.setattr(q, "list_scheduled_tasks", lambda _root=None: {"tasks": schedules})
+    assert carriers.cited_owner_schedules(None) == [("sched-1", "Проверь экономику")]
     stopped = []
     monkeypatch.setattr(carriers, "stop_pooled_wake", stopped.append)
     assert clock.clock.stop() == ("Background consciousness disabled; autonomous work ends at its next step."
                                   "\nKept running on your words (task cited-root): «Проверь экономику»"
-                                  "\nKept running on your words (task cited-running): «Проверь экономику»")
+                                  "\nKept running on your words (task cited-running): «Проверь экономику»"
+                                  "\nKept firing on your words (schedule sched-1): «Проверь экономику»")
     assert set(stopped) <= {"own-root"}, "only the autonomous root is stopped; the cited ones keep running"
-    monkeypatch.setattr(q, "PENDING", []); monkeypatch.setattr(q, "RUNNING", {})
+    monkeypatch.setattr(q, "PENDING", []); monkeypatch.setattr(q, "RUNNING", {}); schedules.clear()
     assert clock.clock.stop() == "Background consciousness is already disabled."

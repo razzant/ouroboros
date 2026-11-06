@@ -307,6 +307,9 @@ def owner_input_revision(ctx: Any) -> int:
                for row in getattr(ctx, "_owner_directives", None) or [])
 
 
+OWNER_REPLY_OWED_REFUSAL = "owner_reply_owed: your human wrote after your last live message; answer before finishing silently"
+
+
 def owner_reply_owed(ctx: Any) -> bool:
     """Owner rows arrived after this run's latest LIVE text send (``tools/owner_delivery.py``).
 

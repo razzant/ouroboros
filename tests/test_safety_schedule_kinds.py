@@ -177,6 +177,26 @@ def test_lifecycle_edits_use_host_relationship_and_ignore_payload_origin(q):
                 assert fired["consciousness_cause"] == ("started" if relation == "independent" else "place:p")
 
 
+def test_a_pause_or_restore_keeps_the_cite_a_schedule_runs_on(q):
+    """Review R1 MINOR-1: «Напомни мне каждый день…» created on a verified cite stays my human's when a later place
+    turn pauses or restores it without a cite (the cite lives on the schedule's next occurrence); an owner-kind record
+    that stores no cite is re-stamped from the writer, as before."""
+    from supervisor.queue_schedules import _task_from_schedule
+    cited = _register_origin(q, _focus_origin(cited=True), "independent", door="followup")
+    assert cited["writer_kind"] == "owner" and CITE in cited["task"]["metadata"]["owner_corpus"]
+    main = _register_origin(q, {"work_kind": "owner", "task_id": "main-author"}, "independent")
+    assert main["writer_kind"] == "owner" and not any(row.get("basis") == "cited" for row in main["task"]["metadata"].get("owner_corpus") or [])
+    for action in ("disable", "restore"):
+        for record, expected in ((cited, "owner"), (main, "consciousness")):
+            result = q.queue.mutate_scheduled_task(action, record["id"], drive_root=q.root, actor="agent",
+                reason="Pause it for now", writer_kind="consciousness", writer_metadata=_focus_origin(cited=False))
+            assert result["changed"], (action, record["id"], result)
+            stored = next(r for r in q.queue.list_scheduled_tasks(q.root)["tasks"] if r["id"] == record["id"])
+            fired = _task_from_schedule(stored)["metadata"]
+            assert stored["writer_kind"] == fired["work_kind"] == expected, (action, record["id"])
+            assert ("consciousness_cause" in fired) is (expected == "consciousness")
+
+
 @pytest.mark.parametrize("cited", [False, True])
 def test_hold_restore_stamps_origin_after_resolving_relationship(world, cited):
     from tests.test_g1_followup_policy import ORIGIN, row as stored_row, stop, restore
