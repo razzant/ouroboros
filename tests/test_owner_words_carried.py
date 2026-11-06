@@ -125,12 +125,17 @@ def test_one_list_names_my_humans_corpus_labels_for_every_reader(tmp_path):
 
 
 def test_words_repeat_only_by_identity_never_by_likeness():
-    def row(text, ref):
-        return {"text": text, "source": "owner_mailbox", "carrier": "ctx", "task_id": "t", "ts": "", "ref": ref}
+    def row(text, ref, ts=""):
+        return {"text": text, "source": "owner_mailbox", "carrier": "ctx", "task_id": "t", "ts": ts, "ref": ref}
 
     assert len(_deduped([row("да", "msg a"), row("да", "msg b")])) == 2, "two yeses are two messages"
     assert len(_deduped([row("да", "msg a"), row("да", "msg a")])) == 1
     assert len(_deduped([row("да", ""), row("да", "")])) == 1, "without an identity the text is the only key"
+    # A row with no reference is told by its words and its time: two id-less «да» at two times are two rows,
+    # and the first of one identity keeps its carrier.
+    two = _deduped([row("да", "", "received 2026-11-05T10:00:00+00:00"), row("да", "", "received 2026-11-05T10:05:00+00:00")])
+    assert [r["ts"] for r in two] == ["received 2026-11-05T10:00:00+00:00", "received 2026-11-05T10:05:00+00:00"]
+    assert len(_deduped([row("да", "", "2026-11-05T10:00:00+00:00"), row("да", "", "2026-11-05T10:00:00+00:00")])) == 1
 
 
 def test_the_message_my_human_replied_to_rides_whole_under_its_author(tmp_path):

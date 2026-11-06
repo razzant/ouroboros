@@ -784,11 +784,23 @@ def test_new_owner_words_after_a_review_of_the_same_answer_are_asked_about_once(
     """Owner, 18.10 (A): the only review of this exact answer judged an earlier request, so the host shows the
     owner's words since then once and asks. If they change what was asked, the mind asks for a review of the
     current request (the reviewers now see them and FAIL it; Blocking holds); if not, it delivers again and the
-    earlier review stands, with no new seat."""
+    earlier review stands, with no new seat.
+
+    The question names each new row by its identity — the reference token of its stamp, whole — never by likeness
+    of words or of the whole stamp: a one-word row and a Project room's row are named with their stamps; ``msg m-1``
+    is not ``msg m-12``; a row whose source or date merely changed, or that the earlier subject held under its
+    pre-update ``msg`` reference, is not named; a subject that cannot be read back names every row; none of it
+    buys a seat."""
+    from ouroboros import dialogue_store as ds
+    from ouroboros.projects_registry import bind_task_to_project, create_project
     from ouroboros.tools import review_result as rr
 
     ctx = _floor_ctx(tmp_path, monkeypatch, enforcement="blocking")
     _produced_answer_protocol(monkeypatch)
+    room = create_project(ctx.drive_root, "quotas", name="Quotas")["chat_id"]
+    bind_task_to_project(ctx.drive_root, ctx.task_id, "quotas", room, origin={"absent": "system"})
+    ctx._owner_directives = [{"source": "owner_mailbox", "content": "да", "msg_id": "m-1", "received": "2026-10-01T00:00:00+00:00"},
+                             {"source": "owner_mailbox", "content": "Use miles", "msg_id": "m-3", "client_message_id": "cm-3"}]
     sends: list[dict] = []
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
     trace, shown = {"tool_calls": []}, []
@@ -796,10 +808,25 @@ def test_new_owner_words_after_a_review_of_the_same_answer_are_asked_about_once(
     assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 12 miles", trace, shown.append) is False, "then delivers"
     paid = len(sends)
     words = "Requirement change: give the distance in kilometres."
-    ctx._owner_directives = [*(getattr(ctx, "_owner_directives", None) or []),
+    # Since that review: the first «да» rides on under another source and date (a Continue's corpus); the pre-update
+    # row is now held with its chat row (one identity, two printed references); a second «да» (``msg m-12``), the
+    # change, and a «да» in the Project room are new.
+    ctx._owner_directives = [{"source": "owner_corpus", "content": "да", "msg_id": "m-1", "ts": "2026-10-01T00:00:01+00:00"},
+                             ctx._owner_directives[1], {"source": "owner_mailbox", "content": "да", "msg_id": "m-12"},
                              {"source": "owner_mailbox", "content": words, "msg_id": "m-2"}]
+    ctx._held_owner_messages = {"row:held": {"ts": "2026-10-01T00:00:02+00:00", "direction": "in", "chat_id": 1,
+                                             "text": "Use miles", "client_message_id": "cm-3", "task_id": ""}}
+    ds.append(ctx.drive_root, "chat", {"ts": "2026-10-01T00:00:03+00:00", "direction": "in", "chat_id": room, "text": "да",
+                                       "client_message_id": "cm-room", "task_id": ""})
     assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 12 miles", trace, shown.append) is True, "asked once"
     assert words in shown[-1] and len(sends) == paid
+    assert [line for line in shown[-1].split("\n") if line.startswith("- [")] == [
+        f"- [owner · owner_mailbox of task {ctx.task_id} · msg m-12]", f"- [owner · owner_mailbox of task {ctx.task_id} · msg m-2]",
+        f"- [2026-10-01T00:00:03+00:00 · owner · room_message · chat {room} / cm-room]"]
+    assert "msg m-1]" not in shown[-1] and "cm-3" not in shown[-1] and "Use miles" not in shown[-1]
+    # A retained subject that cannot be read back names every current row, and buys nothing.
+    every = rr._request_changed_text(ctx, {"record_id": "lost", "subject": {"diff_sha": "0" * 64}, "verdict": {"aggregate": "PASS"}})
+    assert every.count("\n- [") == 5 and "msg m-1]" in every and "chat 1 / cm-3]" in every and len(sends) == paid
     if words_change_the_request:
         monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends, {"t1": CRITICAL}))
         current = run_review_change(ctx, subject="result", answer="FINAL ANSWER: 12 miles")

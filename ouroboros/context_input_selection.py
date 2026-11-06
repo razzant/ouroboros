@@ -504,7 +504,7 @@ def _capture_declared_context_core(
     same_drive = canonical_root.resolve(strict=False) == memory.drive_root.resolve(strict=False)
     process_memory = memory if same_drive else Memory(drive_root=canonical_root, repo_dir=memory.repo_dir)
     supplementary_messages: list = []
-    words = _owner_words_block(task) if declared_inputs_carry_owner_words(task) else ""
+    words = _owner_words_block(task, canonical_root) if declared_inputs_carry_owner_words(task) else ""
     parts = [
         "## Input source selection\n\n" + json.dumps(input_source_selection_receipt(task), ensure_ascii=False, sort_keys=True),
         *([words] if words else []),

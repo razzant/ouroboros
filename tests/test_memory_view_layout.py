@@ -337,7 +337,9 @@ def test_a_helpers_role_line_names_exactly_what_its_request_holds(tmp_path, rout
     assert "the index arrives with your first delegation" in missing and "## Shared understanding" not in c
     assert "## Knowledge base" not in c and "knowledge_list" in missing
     assert "raw conversations" in missing and "### Open conversation" not in c and "## Live rooms" not in c
-    assert "the words of my human that caused this work" not in loaded  # no root record: no block drawn
+    # No root record gave this helper a field; its room's rows of my human are read at its start and drawn.
+    assert "the words of my human that caused this work" in loaded
+    assert "· owner · room_message · chat " in section(c, "## Words of my human that caused this work (verbatim)")
 
 
 def test_the_tool_schemas_count_in_the_floor_of_every_mode(tmp_path):

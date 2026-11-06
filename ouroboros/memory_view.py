@@ -315,13 +315,11 @@ def _parsed_view(text: str) -> MemoryViewSnapshot:
     return MemoryViewSnapshot(**data)
 
 
-def _owner_words_block(task: Mapping[str, Any]) -> str:
-    from ouroboros.owner_words import render_owner_words, task_governing_words  # D03->D17 is lazy-only
+def _owner_words_block(task: Mapping[str, Any], drive_root: Any = None) -> str:
+    """A helper's birth set (``owner_words.task_words_text``): its field, then its room's rows read once here."""
+    from ouroboros.owner_words import task_words_text  # D03->D17 is lazy-only
 
-    meta = _mapping(task.get("metadata"))
-    root = str(task.get("root_task_id") or meta.get("root_task_id") or "")
-    rows, absent = task_governing_words(task)
-    return render_owner_words(rows, absent, audience="child", root_task_id=root, indent=INDENT)
+    return task_words_text(drive_root, task, indent=INDENT)
 
 
 def _activation(store: ChronicleStore) -> Dict[str, Any]:
@@ -958,7 +956,7 @@ def capture_memory_view(drive_root: Any, task: Mapping[str, Any], spec: ViewSpec
     reason and the room id: no story, lanes or live rooms, and no chain read.
     """
     root = pathlib.Path(drive_root)
-    owner_words = _owner_words_block(task) if spec.owner_words else ""
+    owner_words = _owner_words_block(task, root) if spec.owner_words else ""
     status = _activation(ChronicleStore(root))
     label = room_labeler(root)
     bare = {"room_id": spec.room_id, "label": label(spec.room_id)} if spec.room_id is not None else None

@@ -61,10 +61,21 @@ class _CompactionRoundContext:
     extra_tool_schemas: Tuple[Dict[str, Any], ...] = ()  # host-admitted feature schemas, under the same selection
 
 
+def _arrival(row: Any = None, received: Any = "") -> Dict[str, Any]:
+    """Where and when an owner row arrived, for its corpus row's ``origin``: the room, client id and accept time
+    of the chat row the host holds for it; without one, ``received``, when its mailbox entry was written or (none
+    given) this drain read it. A time the host does not have is never invented."""
+    from ouroboros.utils import utc_now_iso
+
+    row = row if isinstance(row, dict) else {}
+    ids = {key: row.get(key) for key in ("chat_id", "client_message_id")}
+    return {**ids, "ts": row["ts"]} if row.get("ts") else {**ids, "received": str(received or utc_now_iso())}
+
+
 def _stamp_owner_delivery(
     owner_ctx: Any, *, msg_id: str, client_message_id: str, text: str, ts: str,
-) -> None:
-    """Record the latest owner message this turn actually DRAINED (latest wins).
+) -> Any:
+    """Record the latest owner message this turn actually DRAINED (latest wins); returns the chat row held for it.
 
     The steer relay reads this fact to attach its acknowledgement to the owner
     message delivered this round. Receipt identity does not grant owner authority:
@@ -76,12 +87,13 @@ def _stamp_owner_delivery(
     the mailbox, so a later relay cannot borrow an earlier round's receipt identity.
     """
     if owner_ctx is None:
-        return
+        return None
     from ouroboros.owner_relay import retain_owner_message
-    retain_owner_message(owner_ctx, client_message_id=client_message_id)
+    held = retain_owner_message(owner_ctx, client_message_id=client_message_id)
     owner_ctx.last_owner_delivery = {
         "msg_id": msg_id, "client_message_id": client_message_id, "text": text, "ts": ts,
     }
+    return held
 
 
 def _owner_content(entry: Dict[str, Any], drive_root: Any, task_id: str) -> Any:
@@ -140,14 +152,8 @@ def _drain_incoming_messages(
             if isinstance(injected, dict):
                 owner_content = _owner_content(injected, drive_root, task_id)
                 _loop()._record_owner_directive(
-                    owner_ctx,
-                    source="direct_incoming",
-                    content=owner_content,
-                    msg_id=str(
-                        injected.get("client_message_id")
-                        or injected.get("msg_id")
-                        or ""
-                    ),
+                    owner_ctx, source="direct_incoming", content=owner_content, origin=_arrival(injected),
+                    msg_id=str(injected.get("client_message_id") or injected.get("msg_id") or ""),
                 )
                 _stamp_owner_delivery(
                     owner_ctx,
@@ -161,7 +167,7 @@ def _drain_incoming_messages(
                 )
             else:
                 _loop()._record_owner_directive(
-                    owner_ctx, source="direct_incoming", content=injected,
+                    owner_ctx, source="direct_incoming", content=injected, origin=_arrival(),
                 )
                 _stamp_owner_delivery(
                     owner_ctx, msg_id="", client_message_id="", text=str(injected), ts="",
@@ -228,7 +234,7 @@ def _drain_incoming_messages(
                         room = presence_chat_id(str((entry.get("sender_origin") or {}).get("conversation_key") or ""))
                         _loop()._record_owner_directive(owner_ctx, source="place_owner", carried=True,
                             content=arrival["owner_words"], msg_id=f"chat {room} / {arrival.get('source_event_id') or ''}",
-                            reply_to=place_reply_target(arrival.get("message")))
+                            reply_to=place_reply_target(arrival.get("message")), origin=_arrival(received=entry.get("ts")))
                 if provenance not in CONTEXT_ONLY_TASK_PROVENANCES:
                     _loop()._record_owner_directive(
                         owner_ctx, content=dmsg, msg_id=str(entry.get("msg_id") or ""),
@@ -259,7 +265,7 @@ def _drain_incoming_messages(
                     ack_content(entry)
                     continue
             if kind in (KIND_QUIZ_CLOSED, KIND_CARD_INPUT):  # host frames around the owner's own act
-                _loop()._record_owner_directive(owner_ctx, source="owner_mailbox",
+                _loop()._record_owner_directive(owner_ctx, source="owner_mailbox", origin=_arrival(received=entry.get("ts")),
                     content=dmsg, msg_id=str(entry.get("msg_id") or ""))
                 _loop()._append_or_merge_user_message(messages, dmsg, slot=owner_ctx, kind=OWNER_WORDS_KIND)
                 ack_content(entry)
@@ -270,12 +276,11 @@ def _drain_incoming_messages(
                 delivery = entry.get("quiz_delivery") or {}
                 answer = delivery.get("answer_snapshot")
                 owner_words = late_answer_owner_text(answer) if isinstance(answer, dict) else dmsg
-                if isinstance(answer, dict):
-                    from ouroboros.owner_relay import retain_owner_message
-                    retain_owner_message(owner_ctx, (answer.get("delivery") or {}).get("answer_row"))
+                from ouroboros.owner_relay import retain_owner_message
+                held = retain_owner_message(owner_ctx, (answer.get("delivery") or {}).get("answer_row")) if isinstance(answer, dict) else None
                 _loop()._record_owner_directive(  # the card it answers rides beside it, the asking task's words
                     owner_ctx, source="owner_quiz_answer", content=owner_words, msg_id=str(entry.get("msg_id") or ""),
-                    origin={"source_task_id": delivery.get("task_id"), "quiz_id": delivery.get("quiz_id")},
+                    origin={"source_task_id": delivery.get("task_id"), "quiz_id": delivery.get("quiz_id"), **_arrival(held, entry.get("ts"))},
                     reply_to=answered_card_reply(answer, delivery.get("task_id")))
                 deliver_quiz_answer(
                     entry, task_id, event_queue,
@@ -304,21 +309,22 @@ def _drain_incoming_messages(
             from ouroboros.owner_words import answered_card_reply, answered_card_source, reply_target
 
             chats = str(getattr(owner_ctx, "budget_drive_root", "") or "") or drive_root  # the room's rows
-            _loop()._record_owner_directive(
-                owner_ctx,
-                source="owner_mailbox",
-                content=_owner_content(entry, drive_root, task_id),
-                msg_id=str(entry.get("msg_id") or ""),
-                origin={"client_message_id": entry.get("client_message_id")},  # the same message relayed: one row
-                reply_to=answered_card_reply(*answered_card_source(entry))  # a late answer replies to its card
-                or reply_target(chats, entry.get("reply_reference")) or None,
-            )
-            _stamp_owner_delivery(
+            held = _stamp_owner_delivery(  # the chat row is held first: its corpus row names the same room and time
                 owner_ctx,
                 msg_id=str(entry.get("msg_id") or ""),
                 client_message_id=str(entry.get("client_message_id") or ""),
                 text=dmsg,
                 ts=str(entry.get("ts") or ""),
+            )
+            _loop()._record_owner_directive(
+                owner_ctx,
+                source="owner_mailbox",
+                content=_owner_content(entry, drive_root, task_id),
+                msg_id=str(entry.get("msg_id") or ""),
+                # The same message relayed, or read from its room, is one row: its room and client id name it.
+                origin={**_arrival(held, entry.get("ts")), "client_message_id": entry.get("client_message_id")},
+                reply_to=answered_card_reply(*answered_card_source(entry))  # a late answer replies to its card
+                or reply_target(chats, entry.get("reply_reference")) or None,
             )
             from ouroboros.client_surface import noted_owner_text
 

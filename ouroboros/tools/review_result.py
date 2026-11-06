@@ -375,13 +375,12 @@ def earlier_request_subject(ctx: Any, subject: Any, rows: Optional[List[Dict[str
 
 
 def _words_since(ctx: Any, earlier: str) -> List[str]:
-    """The owner's words this run holds now that the earlier subject's request did not carry, verbatim."""
-    from ouroboros.owner_words import FIELD, REPLY_TARGET, governing_words_for_schedule
+    """My human's rows this run holds now that the earlier subject's request did not carry, each under its stamp:
+    told by the row's identity, never by likeness of words (``owner_words.words_unseen_in``; what my human
+    replied to is not theirs; a subject that cannot be read back names every row)."""
+    from ouroboros.owner_words import words_stamp, words_unseen_in
 
-    rows = [row for row in governing_words_for_schedule(ctx).get(FIELD) or []
-            if isinstance(row, dict) and row.get("source") != REPLY_TARGET]  # what my human replied to is not theirs
-    texts = [str(row.get("text") or "").strip() for row in rows]
-    return [text for text in texts if text and text not in earlier] if earlier else []
+    return [f"{words_stamp(row)}\n{row['text']}" for row in words_unseen_in(ctx, earlier)]
 
 
 def _request_changed_text(ctx: Any, record: Dict[str, Any], *, outcome: bool = False) -> str:
@@ -392,8 +391,8 @@ def _request_changed_text(ctx: Any, record: Dict[str, Any], *, outcome: bool = F
     aggregate = str((record.get("verdict") or {}).get("aggregate") or "")
     lines = [f"[Result review] This exact result was reviewed (record {record.get('record_id')}: {aggregate}) before "
              "what was asked last changed; its reviewers did not see these words of your human:"]
-    lines += [f"- {text}".replace("\n", "\n  ") for text in words] or [  # each whole, every one: my human's words
-        "- (the request changed: its claims or contract, or words the earlier request cannot be read back for)"]
+    lines += [f"- {text}".replace("\n", "\n  ") for text in words] or [  # each whole and dated, every one
+        "- (the request changed: its claims or contract; no row of your human is new to that review)"]
     found = _outcome_lines(record) if outcome else []
     if found:
         lines += ["What that review found:", *found]

@@ -60,10 +60,11 @@ def held_owner_messages(ctx) -> dict:
     return held
 
 
-def retain_owner_message(ctx, row=None, *, client_message_id="", accounts=None) -> None:
-    """Hold one owner row of this turn by its address; ``accounts``: the caller's one place snapshot for its rows."""
+def retain_owner_message(ctx, row=None, *, client_message_id="", accounts=None):
+    """Hold one owner row of this turn by its address and return it (``None`` when nothing was held), so its corpus
+    row can name the same room and time; ``accounts``: the caller's one place snapshot for its rows."""
     if ctx is None:
-        return
+        return None
     if row is None and client_message_id and getattr(ctx, "drive_root", None):
         from supervisor.message_ingress import accepted_chat_message
         from ouroboros.tool_access import canonical_data_root
@@ -75,6 +76,8 @@ def retain_owner_message(ctx, row=None, *, client_message_id="", accounts=None) 
                           accounts=accounts):
         held_owner_messages(ctx)[format_address(row_address(row))] = copy.deepcopy(row)
         persist_held_state(ctx)
+        return row
+    return None
 
 
 def persist_held_state(ctx) -> None:
@@ -245,7 +248,7 @@ def inject_relay(ctx, entry: dict, messages: list) -> None:
         loop._record_owner_directive(ctx, source="owner_mailbox", content=owner_text(row), msg_id=address, carried=True,
                                      origin={"source_task_id": entry.get("source_task_id"),
                                              "client_message_id": row.get("client_message_id"),
-                                             "chat_id": row.get("chat_id")},
+                                             "chat_id": row.get("chat_id"), "ts": row.get("ts")},
                                      reply_to=replied)
         body = f"[Owner words quoted verbatim; handle {address}]\n{owner_text(row)}"
         if isinstance(row.get("reply_to"), dict) and row["reply_to"]:
