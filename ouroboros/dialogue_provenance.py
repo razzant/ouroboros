@@ -838,7 +838,8 @@ def owner_speech(row: Mapping[str, Any], author: Mapping[str, Any]) -> bool:
 
 def row_class(row: Mapping[str, Any], **lineage: Any) -> dict[str, Any]:
     """``{"lane": 1|2, "author": row_author(...)}``: people, a room's reaction facts and my own words to them
-    are lane 1; children's reports, host facts, the legacy retelling and unattributed rows are lane 2."""
+    are lane 1, an inbound row with no recorded speaker too (``unattributed: True``: shown whole, counted apart);
+    children's reports, host facts, the legacy retelling and outgoing rows with no recorded author are lane 2."""
     author = row_author(row, **lineage)
     spoken = author["kind"] in {"human", "ouroboros", "place_fact"} and row.get("type") not in _FACT_TYPES
     return {"lane": 1 if spoken else 2, "author": author}
