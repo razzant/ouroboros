@@ -808,6 +808,34 @@ def test_an_actual_refusal_narrows_memory_even_when_the_estimate_fits(tmp_path, 
     assert tool_ctx.memory_view_facts is kept and trace[VIEW_TRACE_KEY] == kept
 
 
+def test_memory_pays_a_presend_overflow_it_can_answer_and_max_keeps_its_books(main_call, monkeypatch, tmp_path):
+    """06.11, the other side of the low fold below: when memory's detail can pay what the owner's words passed the
+    window by (20,000, the numbers that lowered the books before memory paid in the first pass), memory alone
+    narrows and Max keeps its whole books (29.10)."""
+    from ouroboros import memory_floor as mf
+    from ouroboros.memory_view import snapshot_json
+    from ouroboros.tool_policy import initial_tool_schemas
+    from tests import _memory_view_synthetic as syn
+
+    ctx, gateway, tools, events, plan, windows = _native(main_call, monkeypatch, tmp_path, owner_mode="max",
+                                                         view=snapshot_json(syn.actor("main")), books=120_000)
+    roomy = plan(10_000_000)
+    full = roomy.projected_tokens_with_tools("max", initial_tool_schemas(tools, context_mode="max"))
+    windows["account-a"] = window = math.ceil((full + roomy.output_reserve_tokens) * 4 / 3) + 4_000
+    built = plan(window)
+    words = "Owner, while you worked: keep the old API alive. "
+    owner = {"role": "user", "content": words * math.ceil((window - full - roomy.output_reserve_tokens + 20_000) * 4 / len(words))}
+    ctx.messages[:] = [*built.messages_for("max"), owner]
+    gateway.results = [_answer(ROUTE, {"role": "assistant", "content": "Kept."})]
+    gateway.dispatch = ["response_received"]
+    tools._ctx.memory_view_facts = mf.trace_facts(built.projection("max").memory_facts)
+    text, _usage, _trace = _run(ctx, tools, events, built)
+    rows = _drained(events)
+    assert text == "Kept." and len(gateway.creates) == 1 and tools._ctx.active_context_mode == "max"
+    assert [row.get("effective_mode") for row in rows if row.get("checkpoint_kind") == "context_memory_coarsened"] == ["max"]
+    assert "context_fit_low_retry" not in [row.get("checkpoint_kind") for row in rows]
+
+
 def test_a_presend_low_fold_keeps_every_address_narrowed_from_the_max_view(
         main_call, monkeypatch, tmp_path):
     """The production pre-send passes preserve continuity: narrow Max's memory before lowering its books,
@@ -819,15 +847,17 @@ def test_a_presend_low_fold_keeps_every_address_narrowed_from_the_max_view(
     from tests import _memory_view_synthetic as syn
 
     ctx, gateway, tools, events, plan, windows = _native(main_call, monkeypatch, tmp_path, owner_mode="max",
-                                                         view=snapshot_json(syn.actor("main")), books=120_000)
+                                                         view=snapshot_json(syn.actor("main")), books=400_000)
     roomy = plan(10_000_000)
     full = roomy.projected_tokens_with_tools("max", initial_tool_schemas(tools, context_mode="max"))
-    # A window that holds Max with all of my memory and both working margins; the owner's words then pass it by 20,000.
+    # A window that holds Max with all of my memory and both working margins.
     windows["account-a"] = window = math.ceil((full + roomy.output_reserve_tokens) * 4 / 3) + 4_000
     built = plan(window)
     assert built.initial_mode == "max" and not built.projection("max").memory_facts["floor"]["steps"]  # startup: whole
     words = "Owner, while you worked: keep the old API alive. "
-    owner = {"role": "user", "content": words * math.ceil((window - full - roomy.output_reserve_tokens + 20_000) * 4 / len(words))}
+    # The owner's words pass the window by 90,000: more than my memory's detail can give (06.11: memory pays in the
+    # first pass), so its floor lowers the books itself, the physical fact BIBLE P1 names; no second pass runs.
+    owner = {"role": "user", "content": words * math.ceil((window - full - roomy.output_reserve_tokens + 90_000) * 4 / len(words))}
     ctx.messages[:] = [*built.messages_for("max"), owner]
     full_low = built.reproject_transcript(ctx.messages, "low")
     assert context_fit.estimate_context_prompt_tokens(full_low, initial_tool_schemas(tools, context_mode="low")) + \
@@ -839,9 +869,12 @@ def test_a_presend_low_fold_keeps_every_address_narrowed_from_the_max_view(
     text, _usage, trace = _run(ctx, tools, events, built)
 
     [low] = [payload["messages"] for payload, _key in gateway.uploads]
-    kinds = [row.get("checkpoint_kind") for row in _drained(events)]
+    rows = _drained(events)
+    kinds = [row.get("checkpoint_kind") for row in rows]
     assert text == "Kept." and len(gateway.creates) == 1 and tools._ctx.active_context_mode == "low"
-    assert kinds.index("context_memory_coarsened") < kinds.index("context_fit_low_retry")  # one pass: memory, then books
+    # Memory folded first and, unable to make room, its own floor lowered the books in that same pass.
+    assert [row.get("effective_mode") for row in rows if row.get("checkpoint_kind") == "context_memory_coarsened"] == ["low"]
+    assert "context_fit_low_retry" not in kinds
 
     def shows(sent, whole):
         return json.dumps(whole, ensure_ascii=False)[1:-1] in json.dumps(sent, ensure_ascii=False)

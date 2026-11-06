@@ -238,14 +238,21 @@ def collect_commit_reference(ctx, reference, **request):
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=str(exc)))
 
 
+_PAID_FIELDS = ("review_rebuttal", "goal", "scope", "reviewers", "reason", "preflight_reviewer", "since_review",
+                "author_disposition")  # the order of ``commit_reviewed``'s ``mutations``
+
+
 def prepare_commit_collection(ctx, reference, *, commit_message="", mutations=(), continue_seats=None):
     """Separate from Advisory author continuation: resume the paid gate itself (``continue_seats``: and its
     chosen stopped seats, armed only after the staged bytes match, ``bind_commit_collection``)."""
     from ouroboros.review_continuation import parse_selections
 
     _root, attempt, record = resolve_reference(ctx, reference, commit=True)
-    if any(mutations) or (commit_message and commit_message != attempt.commit_message):
-        raise ValueError("a paid reference cannot change its commit message, brief, panel or author disposition")
+    changed = [name for name, value in zip(_PAID_FIELDS, mutations) if value]
+    changed += ["commit_message"] if commit_message and commit_message != attempt.commit_message else []
+    if changed:  # the fields named (06.11), so the next call can omit exactly them
+        raise ValueError(f"a paid reference cannot change its commit message, brief, panel or author disposition "
+                         f"(changed: {', '.join(changed)}); omit them to collect the paid review as recorded")
     ctx._collect_commit_continue_seats = None if continue_seats is None else (parse_selections(continue_seats) and continue_seats)
     if attempt.status == "succeeded":
         raise ValueError("this paid attempt already committed; collection cannot commit it again")
@@ -572,6 +579,106 @@ def bind_commit_collection(ctx, fingerprint, retry_key):
 def publish_commit_delivery(ctx, text):
     from ouroboros.review_waiting import publish_delivery
     from ouroboros.review_ledger import ledger_root, load_record
+    from ouroboros.tools.tool_result import append_published_text
+    if notes := getattr(ctx, "_commit_call_notes", None):  # fields this call set aside or filled (06.11)
+        text, ctx._commit_call_notes = append_published_text(ctx, text, "\nNote: " + " ".join(notes)), []
     record_id = str(getattr(ctx, "_current_review_record_id", "") or "")
     record = load_record(ledger_root(ctx), record_id) if record_id else None
     return publish_delivery(ctx, text, record) if record else text
+
+
+def note_commit_call(ctx, text):
+    """One sentence the commit call's result ends with: a field this call set aside or filled (06.11)."""
+    notes = getattr(ctx, "_commit_call_notes", None)
+    if isinstance(notes, list) and text not in notes:
+        notes.append(text)
+
+
+class ContinuationWaits(ValueError):
+    """A returned commit outcome whose reviewers are still running: the author's decision waits for them."""
+
+
+def continuation_refusal(exc: Exception) -> str:
+    """A refused author continuation names the next call its cause leaves (06.11)."""
+    from ouroboros.config import get_review_enforcement
+    from ouroboros.tools.review_helpers import review_enforcement_blocks
+
+    if review_enforcement_blocks(get_review_enforcement()):
+        step = ("under Blocking enforcement a passing review lands the commit: call commit_reviewed without "
+                "author_disposition and review_reference.")
+    elif isinstance(exc, ContinuationWaits):
+        step = ("collect that outcome (its review_reference, no author_disposition) once its reviewers answer, "
+                "then decide.")
+    else:
+        step = ("decide with the review_reference an outcome you read returned (the last commit_reviewed call names "
+                "its own), or call without author_disposition to review the current bytes.")
+    return f"ERROR: REVIEW_AUTHOR_CONTINUATION_INVALID: {exc}. Nothing was staged or committed. Next: {step}"
+
+
+def default_commit_continuation(ctx, kwargs) -> str:
+    """A decision without ``review_reference``: "" with the decision set aside, so this call asks for the review
+    when none of this copy was returned yet; else a refusal that names the exact reference of the latest returned
+    outcome. The reference a decision quotes from an outcome it read is what shows that outcome reached the mind: a
+    default would let a decision written beside its review in one message land before that review was shown, on a
+    live call or a fallback alike (owner 11.10, review 06.11)."""
+    if (kwargs.get("author_disposition") is None or kwargs.get("review_reference") is not None
+            or kwargs.get("continue_seats") is not None):
+        return ""
+    import json
+    from ouroboros.config import get_review_enforcement
+    from ouroboros.review_state import _load_state_unlocked, make_repo_key
+    from ouroboros.tools.review_helpers import review_enforcement_blocks
+
+    repo_key, task_id = make_repo_key(pathlib.Path(ctx.repo_dir)), str(getattr(ctx, "task_id", "") or "")
+    blocking = review_enforcement_blocks(get_review_enforcement())
+    try:
+        state = _load_state_unlocked(pathlib.Path(ctx.drive_root), strict_attempt_authority=True)
+        returned = [attempt for attempt in state.filter_attempts(repo_key=repo_key, task_id=task_id)
+                    if attempt.tool_name in {"commit_reviewed", "vcs_commit_reviewed"}
+                    and attempt.phase in {"review_only", "late_wait"} and attempt.pre_review_fingerprint]
+    except (OSError, ValueError) as exc:
+        return continuation_refusal(ValueError("author continuation requires Advisory enforcement")) if blocking else (
+            f"ERROR: REVIEW_AUTHOR_CONTINUATION_INVALID: this copy's review state is unreadable ({exc}). Nothing "
+            "was staged or committed. Next: name review_reference, or call without author_disposition.")
+    if not returned:
+        kwargs["author_disposition"] = None
+        note_commit_call(ctx, "author_disposition was set aside: " + (
+            "under Blocking enforcement this call's review decides, and a passing review lands the commit."
+            if blocking else "no review of this copy was returned yet, so this call asks for it; decide after its outcome."))
+        return ""
+    if blocking:
+        return continuation_refusal(ValueError("author continuation requires Advisory enforcement"))
+    latest = returned[-1]
+    reference = json.dumps({"surface": "commit", "repo_key": repo_key, "task_id": task_id, "tool_name": latest.tool_name,
+                            "attempt": latest.attempt, "pre_review_fingerprint": latest.pre_review_fingerprint})
+    return ("ERROR: REVIEW_AUTHOR_CONTINUATION_INVALID: author_disposition names no review_reference, and a decision "
+            "answers an outcome it has read. Nothing was staged or committed. Next: once you have read the outcome of "
+            f"attempt {latest.attempt}, the latest returned for this copy, call again with this author_disposition "
+            f"and review_reference={reference}.")
+
+
+def set_aside_wrong_step_fields(ctx, continuation, wake_on):
+    """A continuation's fields of another step are set aside with a note, never a refusal (06.11): it keeps the
+    saved wake selection, and it dispatches no critic for ``since_review`` to brief. Returns the wake to use."""
+    if continuation and wake_on is not None:
+        wake_on = None
+        note_commit_call(ctx, "wake_on was set aside: it shapes a new ask, and a continuation keeps the saved selection.")
+    if continuation and getattr(ctx, "_review_since", ""):
+        ctx._review_since = ""
+        note_commit_call(ctx, "since_review was set aside: it shapes a new wave's brief, and a continuation "
+                         "dispatches no critic.")
+    return wake_on
+
+
+def without_broken_subagent_check(ctx, disposition):
+    """A malformed optional ``subagent_check`` is a recorded gap, never the refusal of the decision it rides with."""
+    from ouroboros.review_doctrine import parse_subagent_check
+
+    if not isinstance(disposition, dict) or disposition.get("subagent_check") is None:
+        return disposition
+    try:
+        parse_subagent_check(disposition["subagent_check"])
+    except ValueError as exc:
+        note_commit_call(ctx, f"subagent_check was set aside ({exc}); the decision records no helper check.")
+        return {key: value for key, value in disposition.items() if key != "subagent_check"}
+    return disposition

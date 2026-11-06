@@ -73,7 +73,8 @@ def units_since_note(messages: Sequence[Dict[str, Any]], observation: Any) -> st
 
     Plan item 16 (review r1, 17.10): the record indexes what left the view since the newest note, so a
     renewal never hides which calls ran (a child started, a commit attempted) or which results the mind
-    never saw. The facts are ``context_source_view._unit_facts``; exposure is the usable-send evidence
+    never saw. The facts are ``context_source_view._unit_facts`` without error texts (the physical floor stays
+    lean; each reader keeps them one read away); exposure is the usable-send evidence
     (``_exposed_units``); unknown exposure reads as never shown.
     """
     from ouroboros import context_compaction as compaction
@@ -86,7 +87,7 @@ def units_since_note(messages: Sequence[Dict[str, Any]], observation: Any) -> st
     retained = chosen_read_units(messages, units)
     units = [unit for unit in units if unit.unit_id not in retained]
     shown = _exposed_units(list(messages), units, observation if isinstance(observation, dict) else {})
-    return "\n".join(f"{_unit_facts(messages, unit)}\n  {'shown to me' if unit.unit_id in shown else 'never shown to me'}"
+    return "\n".join(f"{_unit_facts(messages, unit, error_text=False)}\n  {'shown to me' if unit.unit_id in shown else 'never shown to me'}"
                      for unit in units)
 
 

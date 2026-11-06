@@ -141,7 +141,7 @@ def test_actual_refusal_runs_the_host_copies_step_first(tmp_path, monkeypatch):
     assert inner.messages is context.messages and inner._transcript_rewrite_sanctioned == "refusal_pass:host_copies"
     emergency = [e for e in events if e.get("checkpoint_kind") == "context_reclaim_emergency"]
     assert [(e["rung"], e["status"]) for e in emergency] == [("host_copies", "applied"), ("bodies", "no_eligible")]
-    assert inner._context_overflow_retries == {("exec:round:1", "host_copies+bodies")}  # once per round, whatever the route
+    assert inner._context_overflow_retries == {("exec:round:1", "host_copies+bodies+floor")}  # once per round, whatever the route
 
 
 def _candidate(disposition, size):

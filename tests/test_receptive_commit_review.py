@@ -1110,6 +1110,47 @@ def test_collection_exception_belongs_to_final_subject_after_lock_wait(author, m
     assert (original.status, original.phase) == ("reviewing", "late_wait")
 
 
+@pytest.mark.parametrize("mode", ["pro", "cyber_pro"])
+def test_a_decision_written_beside_its_review_lands_only_with_the_reference_it_read(author, monkeypatch, mode):
+    """Owner 11.10 (review 06.11), both directions with real Git and the real batch: a decision written in the same
+    assistant message as its review stages nothing and names that review's exact reference, which reaches the mind
+    with the outcome; the next call quoting it lands, its empty message taken from the reviewed call."""
+    from ouroboros import config, loop_tool_execution as le
+
+    config.reset_runtime_mode_baseline_for_tests()
+    config.initialize_runtime_mode_baseline(mode)
+    a = author
+    a.reviewer.release()
+    shown, effects, base = [], [], _git(a.repo, "rev-parse", "HEAD")
+
+    def execute(tools, tc, *args):
+        with _parent(a):
+            text = a.git._commit_reviewed(a.ctx, **json.loads(tc["function"]["arguments"]))
+        effects.append((_git(a.repo, "rev-parse", "HEAD") != base, bool(shown), text))
+        return {"result": text, "is_error": False}
+
+    monkeypatch.setattr(le, "_execute_with_timeout", execute)
+    monkeypatch.setattr(le, "_get_tool_timeout", lambda *a: 60)
+    monkeypatch.setattr(le, "process_tool_results", lambda *a, **k: shown.append(a[0]) or 0)
+    decided = {"disposition": "accepted", "rationale": "Accept the review."}
+
+    def turn(*arguments):
+        calls = [{"id": f"call-{len(effects) + n}", "function": {"name": "commit_reviewed", "arguments": json.dumps(args)}}
+                 for n, args in enumerate(arguments)]
+        le.handle_tool_calls(calls, SimpleNamespace(_ctx=a.ctx), a.data / "logs", TASK, None, [], {"tool_calls": []},
+                             lambda *a: None)
+
+    turn({"commit_message": "Change value", "paths": ["change.py"], "skip_advisory_review": True},
+         {"commit_message": "", "author_disposition": decided})
+    assert [effect[:2] for effect in effects] == [(False, False), (False, False)], effects
+    refusal = effects[1][2]
+    assert "Nothing was staged or committed" in refusal and "review_reference=" in refusal
+    reference = json.loads(refusal.split("review_reference=", 1)[1].strip().rstrip("."))
+    turn({"commit_message": "", "author_disposition": decided, "review_reference": reference})
+    assert effects[2][:2] == (True, True), effects[2][2]
+    assert _git(a.repo, "log", "-1", "--format=%s") == "Change value"
+
+
 def test_refused_author_continuation_preserves_source_and_corrected_reference(author):
     a, out = author, {}
     reference = _open_uncertain_wave(a, out, feedback=True)

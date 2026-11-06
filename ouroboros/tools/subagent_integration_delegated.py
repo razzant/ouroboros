@@ -461,7 +461,7 @@ def _locked_apply(
     prepared = None
     temporary = ExitStack()
     try:
-        _git_lock = _acquire_git_lock(ctx)
+        _git_lock = _acquire_git_lock(ctx, repo_dir=target)
     except Exception as exc:
         result["lock_error"] = f"{type(exc).__name__}: {exc}"
         return result
@@ -889,8 +889,8 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
     if outcome.get("lock_error"):
         custody.record_patch_apply_resolved(drive, entry, reason="lock_error")
         return (
-            "⚠️ INTEGRATE_LOCK_TIMEOUT: could not acquire the repo git lock: "
-            f"{outcome['lock_error']}."
+            f"⚠️ INTEGRATE_NOT_STARTED: run {rid} into {target}: the target is busy "
+            f"({outcome['lock_error']}). Retry later."
         )
     proc = outcome["proc"]
     drifted = outcome["drifted"]
