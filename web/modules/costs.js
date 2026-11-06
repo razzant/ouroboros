@@ -109,7 +109,7 @@ export function costDashboardPresentation(data) {
 }
 
 const tableCardHtml = ([id, title, column]) => `<section class="ui-card costs-table-card" aria-labelledby="${id}-title">
-        <h3 class="costs-card-title" id="${id}-title">${title}</h3>
+        <h3 class="dashboard-card-title" id="${id}-title">${title}</h3>
         <table class="cost-table" id="${id}"><thead><tr><th>${column}</th><th class="cost-cell-right">Calls</th><th class="cost-cell-right">Cost</th></tr></thead><tbody></tbody></table>
         <button type="button" class="btn btn-ghost btn-sm ui-list-more" data-costs-more hidden></button>
     </section>`;
@@ -119,7 +119,7 @@ export function initCosts({ state, mount }) {
     // budget it is set against follows as the tab's action row, then where the money went.
     const page = document.createElement('div');
     page.id = 'page-costs';
-    page.className = 'dashboard-body';
+    page.className = 'dashboard-body scroll-fade-y';  // the page binds every .scroll-fade-y scroller once (app.js)
     page.innerHTML = `
         <section class="ui-card" aria-label="Known spend">
             <div class="dashboard-hero">
@@ -131,11 +131,11 @@ export function initCosts({ state, mount }) {
             </div>
             <details class="ui-disclosure costs-details" id="cost-details" hidden>
                 <summary>Details</summary>
-                <dl class="costs-facts" id="cost-facts"></dl>
+                <dl class="dashboard-facts" id="cost-facts"></dl>
             </details>
         </section>
         <section class="ui-card costs-budget" aria-labelledby="costs-budget-title">
-            <h3 class="costs-card-title" id="costs-budget-title">Budget</h3>
+            <h3 class="dashboard-card-title" id="costs-budget-title">Budget</h3>
             <div class="costs-budget-fields">
                 <div class="form-field ui-field">
                     <label for="s-budget">Total budget ($)</label>

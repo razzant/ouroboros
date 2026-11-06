@@ -8,10 +8,10 @@ import * as api from '../modules/api_client.js';
 import { normalizeConsciousness, normalizePlacesResponse, normalizeWake } from '../modules/consciousness_api.js';
 import { createContributionsStore } from '../modules/contributions.js';
 import {
-    countedRootsText, dashboardPlaceRowHtml, factsLineParts, headlineView, initConsciousnessDashboard, liveWake,
-    paintWakeRows, placesCardHtml, summaryHtml, wakeRowHtml, wakesCardHtml,
+    countedRootsText, dashboardPlaceRowHtml, headlineView, initConsciousnessDashboard, liveWake,
+    paintWakeRows, placesCardHtml, spendDetails, summaryHtml, wakeRowHtml, wakesCardHtml,
 } from '../modules/consciousness_dashboard.js';
-import { wakeCheckText, wakeCostText } from '../modules/consciousness_words.js';
+import { consciousnessMark, wakeCheckChip, wakeCheckText, wakeCostText } from '../modules/consciousness_words.js';
 import { applyPayload, setMissTransport } from '../modules/i18n.js';
 
 const FIXTURE = JSON.parse(fs.readFileSync(new URL('./fixtures/consciousness_contract.json', import.meta.url), 'utf8'));
@@ -25,9 +25,9 @@ test('Dashboard keeps two titled wake lists and their separate empty sentences',
     for (const rows of [full().recentWakes, [], [wake('214a31b6')], [wake('w-focus-user')]]) {
         const html = wakesCardHtml(rows, full().coverage);
         assert.equal(html.split(full().coverage).length - 1, 1);
-        assert.ok(html.indexOf(full().coverage) < html.indexOf('<section '));
+        assert.ok(html.indexOf(full().coverage) > html.lastIndexOf('</section>'), 'the lists come first, their scope is their caption');
         const groups = html.split('<section ').slice(1);
-        assert.deepEqual(groups.map((group) => group.match(/<h4[^>]*>([^<]+)</)[1]), ['Its own wakes', 'Wakes in places']);
+        assert.deepEqual(groups.map((group) => group.match(/<h3[^>]*>([^<]+)</)[1]), ['Its own wakes', 'Wakes in places']);
         for (const [n, cause, empty] of [[0, 'own', 'No own wakes with a recorded model call in the last 48 h.'],
             [1, 'focus', 'No wakes in places in the last 48 h.']]) {
             const expected = rows.filter((row) => row.cause === cause).map((row) => row.taskId);
@@ -98,13 +98,51 @@ test('server status alone owns the headline even with finished or active rows in
     assert.equal(headlineView({ ...full(), status: 'thinking' }).moving, true);
 });
 
-test('facts keep money with its cause and say when some calls have no price', () => {
-    assert.deepEqual(factsLineParts(fromState(), 3).map(strip),
-        ['on its own clock', '3 places', 'own $0.62', 'Slack · Acme $0.88', 'started work $0.48', 'Some calls have no price']);
-    assert.deepEqual(factsLineParts({ ...fromState(), enabled: false, spendByCause: [] }, 1).map(strip), ['off', '1 place']);
-    assert.equal(countedRootsText(fromState()), 'Its own tasks: 1 of 2 · Release notes draft (Slack · Acme)');
-    assert.match(summaryHtml(fromState()), /data-cx-act="toggle" data-enabled="1">Stop</);
+test('the headline card says the money of the last 24 hours alone; where it went is the card\'s Details', () => {
+    const snapshot = fromState();
+    const html = summaryHtml(snapshot, { placeIds: [] });
+    const [main, details] = [html.split('<details')[0], html.slice(html.indexOf('<details'))];
+    assert.match(strip(main), /\$\d[\d,]*\.\d\d of \$\d[\d,]*\.\d\d in the last 24 hours/, 'one money line, grouped like Costs');
+    assert.doesNotMatch(main, /Slack · Acme \$|Started work|Some calls have no price|on its own clock/, 'no run-on of causes on the card');
+    assert.match(main, /class="dashboard-hero"/);
+    // Each cause that spent something, with the place a place row does not show; the caveat once, at the end.
+    assert.deepEqual(spendDetails(snapshot, []).rows.map((row) => `${row.words} ${row.amount}`),
+        ['Own time $0.62', 'Slack · Acme $0.88', 'Started work $0.48']);
+    assert.equal(spendDetails(snapshot, []).unpriced, true);
+    const placeId = snapshot.spendByCause.find((row) => row.cause.startsWith('place:')).cause.slice('place:'.length);
+    assert.deepEqual(spendDetails(snapshot, [placeId]).rows.map((row) => row.words), ['Own time', 'Started work'],
+        'a listed place keeps its spend in its own row');
+    assert.deepEqual(spendDetails({ ...snapshot, spendByCause: [{ cause: 'own', label: '', usd: 0, unmeteredCalls: 0 }] }, []),
+        { rows: [], unpriced: false }, 'a zero is not listed');
+    assert.match(details, /^<details class="ui-disclosure consciousness-details"><summary>Details<\/summary>/);
+    assert.match(strip(details), /Own time\s*\$0\.62.*Some calls have no price\..*Release notes draft \(Slack · Acme\)/);
+    assert.equal(countedRootsText(snapshot), 'Its own tasks: 1 of 2 · Release notes draft (Slack · Acme)');
+    assert.match(strip(main), /Its own tasks: 1 of 2/);
+    assert.match(summaryHtml(snapshot), /data-cx-act="toggle" data-enabled="1">Stop</);
     assert.doesNotMatch(summaryHtml(normalizeConsciousness({})), /data-cx-act="toggle"/);
+    assert.match(summaryHtml(snapshot, { detailsOpen: true }), /consciousness-details" open>/, 'an opened Details stays open');
+});
+
+test('a state that cannot wake wears its failure mark and offers Restart; starting is said without alarm', () => {
+    const stopped = normalizeConsciousness({ enabled: true, status: 'stopped',
+        detail: 'Cannot wake: Ouroboros did not finish starting. Restart Ouroboros.' });
+    const html = summaryHtml(stopped);
+    assert.match(html, /data-shape="dot" data-hue="failed"/);
+    assert.match(html, /data-cx-act="restart">Restart</);
+    assert.ok(html.indexOf('data-cx-act="restart"') < html.indexOf('data-cx-act="toggle"'), 'the next step leads the actions');
+    const starting = summaryHtml(normalizeConsciousness({ enabled: true, status: 'starting',
+        detail: 'Waits for Ouroboros to finish starting.' }));
+    assert.doesNotMatch(starting, /data-hue="failed"|data-cx-act="restart"/);
+    assert.doesNotMatch(summaryHtml(normalizeConsciousness({ enabled: false, status: 'stopped', detail: 'Off.' })), /data-cx-act="restart"/);
+    // One mark per state for the bar's chip and this headline (consciousness_words.consciousnessMark).
+    assert.deepEqual(consciousnessMark(stopped), { shape: 'dot', hue: 'failed' });
+    assert.deepEqual(consciousnessMark({ ...stopped, status: 'allowance_exhausted' }), { shape: 'dot', hue: 'owner' });
+    assert.deepEqual(consciousnessMark({ ...stopped, status: 'thinking' }), { shape: 'moving', hue: 'ink' });
+    assert.deepEqual(consciousnessMark({ ...stopped, enabled: false }), { shape: 'none', hue: 'ink' });
+    // A Start/Stop on its way says so and waits; nothing else on the card changes.
+    assert.match(summaryHtml(fromState(), { toggling: 'stop' }), /data-cx-act="toggle" data-enabled="1" disabled>Stopping…</);
+    assert.match(summaryHtml({ ...fromState(), enabled: false }, { toggling: 'start' }), /disabled>Starting…</);
+    assert.match(summaryHtml(fromState()), /class="btn btn-default btn-sm" data-cx-act="toggle"/, 'the neutral small capsule');
 });
 
 test('producer rows retain terminal truth and all five active phases', () => {
@@ -144,40 +182,60 @@ test('summary is authored, note is whole and disclosed, only flagged checks get 
     assert.match(focusRow, /data-cx-open-room="1099511627777"/, 'a focus row opens its captured conversation');
     assert.match(focusRow, /Open the conversation/);
     assert.doesNotMatch(wakeRowHtml({ ...named, cause: 'focus', chatId: 0, placeLabel: 'Slack' }), /data-cx-open-room/, 'no room, no door');
-    assert.match(wakesCardHtml(full().recentWakes, full().coverage), /wakes that reached a model call in the last 48 h/);
+    assert.match(wakesCardHtml(full().recentWakes, full().coverage), /Wakes that reached a model call in the last 48 h/);
+    // The details of a row are the one shared disclosure, its words "Details", no own marker and no indent.
+    assert.match(oldHtml, /<details class="ui-disclosure consciousness-wake-more"><summary>Details<\/summary>/);
+});
+
+test('a warning chip says what the Safety Supervisor did; a raw tool id waits in the row\'s Details', () => {
+    assert.equal(wakeCheckChip({ chip: 'warned', tool: 'ext_8_r_github_github_place_message' }), 'Safety Supervisor warned about a step');
+    assert.equal(wakeCheckChip({ chip: 'held', tool: 'run_command' }), 'Safety Supervisor held a step');
+    assert.equal(wakeCheckChip({ chip: 'sent_despite', tool: 'slack_send' }), 'A step was sent despite the check');
+    assert.equal(wakeCheckChip({ chip: 'warned', tool: 'place_reply' }), 'Safety Supervisor warned about the reply', 'a tool it names in words stays');
+    const row = wakeRowHtml({ ...wake('w-summary'), checks: [{ chip: 'warned', tool: 'ext_8_r_github_github_place_message' }] });
+    const [main, details] = [row.split('<details')[0], row.slice(row.indexOf('<details'))];
+    assert.doesNotMatch(main, /ext_8_r_github/, 'no raw id on the row');
+    assert.match(main, /Safety Supervisor warned about a step/);
+    assert.match(details, /Safety Supervisor warned about ext_8_r_github_github_place_message/, 'the exact tool is one click away');
 });
 
 test('unknown, zero, known, open and mixed costs stay distinct in visible and accessible words', () => {
-    assert.equal(wakeCostText(wake('214a31b6')), 'spend unknown');
+    // An unknown cost leaves the row's money column empty and is said in the row's Details, never as a zero.
+    assert.equal(wakeCostText(wake('214a31b6')), '');
+    assert.match(wakeRowHtml(wake('214a31b6')), /<span class="consciousness-wake-cost"><\/span>/);
+    assert.match(wakeRowHtml(wake('214a31b6')).slice(wakeRowHtml(wake('214a31b6')).indexOf('<details')), /Cost unknown/);
+    assert.doesNotMatch(wakeRowHtml(wake('w-running')), /Cost unknown/);
     assert.equal(wakeCostText(wake('w-running')), 'up to $0.02 so far');
     const priced = (amount, extra = {}) => normalizeWake({ cost_presentation: {
         has_rows: true, tracked_amount: amount, tracked_final: true, has_unpriced: false, accounting_open: false, ...extra } });
     assert.equal(wakeCostText(priced(0)), '$0.00');
     assert.equal(wakeCostText(priced(1.23)), '$1.23');
-    assert.equal(wakeCostText(priced(null)), 'spend unknown');
+    assert.equal(wakeCostText(priced(null)), '');
     assert.equal(wakeCostText(priced(1.23, { tracked_final: false, accounting_open: true })), 'up to $1.23 so far');
     assert.equal(wakeCostText(priced(1.23, { has_unpriced: true })), 'Tracked: $1.23');
     const { places } = normalizePlacesResponse(FIXTURE.places);
     const slack = dashboardPlaceRowHtml(places[0], { awake: true });
-    assert.match(strip(slack), /Slack · Acme active · wakes for direct messages, mentions and replies · 2 open turns · Connector on \$0\.88/);
+    assert.match(strip(slack), /Slack · Acme active · wakes for direct messages, mentions and replies · 2 open turns \$0\.88/);
     assert.match(slack, /class="status-mark consciousness-mark"/);
     assert.match(slack, /aria-label="Open Slack · Acme, awake here now: /);
-    assert.match(slack, /aria-label="[^"]*Connector on/);
+    // A connector that is simply on says nothing on every row; an exception is said, in words and to a reader.
+    assert.doesNotMatch(slack, /Connector on/);
     const off = dashboardPlaceRowHtml({ ...places[0], readiness: { text: 'Off in Skills', tone: 'warn' } });
     assert.match(off, /aria-label="[^"]*Off in Skills/);
+    assert.match(strip(off), /Off in Skills/);
     assert.doesNotMatch(off, /Connector on/);
-    assert.match(dashboardPlaceRowHtml(places[1]), /class="consciousness-spend is-none">unknown</);
-    assert.match(dashboardPlaceRowHtml(places[1]), /spend unknown/);
+    assert.match(dashboardPlaceRowHtml(places[1]), /class="consciousness-spend"><\/span>/, 'an unknown spend leaves its column empty');
+    assert.match(dashboardPlaceRowHtml(places[1]), /spend unknown/, 'and a reader still hears it');
     assert.doesNotMatch(dashboardPlaceRowHtml(places[1]), /nothing spent|\$0\.00 spent/);
-    assert.match(strip(dashboardPlaceRowHtml(places[1])), /^Telegram · Ouroboros community silent · wakes for mentions unknown$/, 'Silent still wakes for its list');
+    assert.match(strip(dashboardPlaceRowHtml(places[1])), /^Telegram · Ouroboros community silent · wakes for mentions$/, 'Silent still wakes for its list');
     assert.match(strip(dashboardPlaceRowHtml(places[2])), /^Mail · inbox paused \$0\.00$/);
     assert.match(dashboardPlaceRowHtml(places[2]), />\$0\.00</);
     assert.match(dashboardPlaceRowHtml(places[2]), /\$0\.00 spent/);
     assert.doesNotMatch(dashboardPlaceRowHtml(places[2]), /spend unknown/);
     assert.match(placesCardHtml(places), /data-place-connect>Connect a place</, "the one Connect control");
-    assert.match(placesCardHtml([]), /No place yet\. Connect one from an installed connector\./);
-    assert.match(placesCardHtml([]), /A connector you install can connect a place here: Connect a place\./);
-    assert.doesNotMatch(placesCardHtml(places), /Each connector you install adds/);
+    assert.match(placesCardHtml([]), /No place yet\. A connector you install can connect one here\./);
+    assert.doesNotMatch(placesCardHtml(places), /A connector you install|Each connector you install adds/, 'the button says it; the intro is for the empty card');
+    assert.match(placesCardHtml(places), /^<div class="consciousness-card-head">\s*<h3 class="dashboard-card-title">Places<\/h3>/, 'the title leads the card');
     assert.match(placesCardHtml(null, { error: 'Places could not be read: HTTP 404' }), /data-tone="warn"/);
 });
 
@@ -200,7 +258,7 @@ test('the Dashboard always reads the Places projection, even with an empty snaps
     assert.equal(reads, 1, 'mount reads Places even when the Dashboard is hidden');
     await controller.refresh();
     assert.match(placesHtml(), /Slack · Acme/);
-    assert.match(placesHtml(), /Connector on/);
+    assert.doesNotMatch(placesHtml(), /Connector on/, 'a connector that is on says nothing on its row');
     offline = true;
     await controller.refresh();
     assert.match(placesHtml(), /Slack · Acme/);
@@ -540,7 +598,7 @@ for (const rich of [true, false]) test(`opened ${rich ? 'fenced code' : 'plain'}
     assert.equal(mount.querySelector('[data-wake]'), null);
     next = { ...next, recentWakes: [wake('214a31b6')] };
     await controller.refresh();
-    const last = mount.querySelector('details');
+    const last = mount.querySelector('[data-wake]').querySelector('details');
     last.open = true;
     await mount.fire('toggle', { target: last });
     controller.destroy(); controller = null;
