@@ -482,7 +482,7 @@ def test_forwarded_rows_keep_each_source_through_pending_read_delivery_and_conti
     from ouroboros import places, owner_words
     from ouroboros.chat_references import reference_from_row
     from ouroboros.chat_uploads import store_upload, claim_refs
-    from ouroboros.owner_continue import owner_sources, owner_corpus_rows
+    from ouroboros.owner_continue import owner_sources, owner_corpus_rows, declared_inputs
     from ouroboros.owner_relay import inject_relay, owner_row_address
     from tests.test_place_owner_author import _place_row
 
@@ -521,8 +521,18 @@ def test_forwarded_rows_keep_each_source_through_pending_read_delivery_and_conti
     pending, _ = owner_words.task_owner_words(final_root, "final", task={"id": "final"})
     assert [r["text"] for r in pending if r["source"] != owner_words.REPLY_TARGET] == [r[0]["text"] for r in expected]
     assert [r["text"] for r in pending if r["source"] == owner_words.REPLY_TARGET] == [r[1]["text"] for r in expected]
+    record = {"origin_message_text": "Original work", "origin_message_ref": {},
+              "owner_mailbox": {"rows": [], "read_complete": True}}
+    before_drain = owner_sources(final_root, record, "final")
+    inputs = declared_inputs("final", record, before_drain)
+    assert len(inputs) == len(expected)
+    for item, index in zip(inputs, range(1 if revoked else 0, source_count)):
+        assert item["status"] == "staged"
+        from pathlib import Path
+        assert Path(item["abs_path"]).read_bytes() == f"attachment {index}".encode()
     final = context(final_root); final.task_id = "final"
-    inject_relay(final, entry, [])
+    events = queue.Queue()
+    _drain_incoming_messages([], queue.Queue(), final_root, "final", events, set(), owner_ctx=final)
     assert [r["content"] for r in getattr(final, "_owner_directives", [])] == [r[0]["text"] for r in expected]
     for index in range(1 if revoked else 0, source_count):
         delivered = final_root / "task_results/artifacts/final/attachments" / uploads[index]["upload"]
@@ -533,3 +543,36 @@ def test_forwarded_rows_keep_each_source_through_pending_read_delivery_and_conti
     assert [r["content"] for r in continued["later"]] == [r[0]["text"] for r in expected]
     assert [r["reply_to"]["text"] for r in continued["later"]] == [r[1]["text"] for r in expected]
     assert [r["content"] for r in owner_corpus_rows(continued)][1:] == [r[0]["text"] for r in expected]
+    if not revoked:
+        from ouroboros.project_dialogue import chat_annotation_receipt
+        from ouroboros.owner_relay import publish_relay_ack
+        for index, (root, _place) in enumerate(roots):
+            assert chat_annotation_receipt(root, f"owner-{index}", "forwarded")["status"] == "read"
+        saved_ack = events.get_nowait()["relay_ack"]
+        sent = []
+        publish_relay_ack(final_root, "final", saved_ack, SimpleNamespace(send_routing_ack=lambda *a, **kw: sent.append(kw)))
+        assert {row["client_message_id"] for row in sent} == {f"owner-{i}" for i in range(source_count)}
+
+
+def test_cross_root_return_reference_survives_continue(tmp_path):
+    from ouroboros.owner_continue import owner_sources
+    from ouroboros.tools.control_runtime import _send_user_message
+
+    source_root, target_root = tmp_path / "source", tmp_path / "target"
+    row, handle = source(source_root)
+    quotes, error = quote_rows(context(source_root, row), [handle])
+    assert not error
+    write_relay(target_root, "receiver", relay_id="return", note="context", quotes=quotes,
+                chat_id=1, teller_task_id="teller", canonical_root=source_root)
+    receiver = context(target_root); receiver.task_id = "receiver"
+    _drain_incoming_messages([], queue.Queue(), target_root, "receiver", None, set(), owner_ctx=receiver)
+    sources = owner_sources(target_root, {"origin_message_text": "Work", "origin_message_ref": {},
+                                          "held_owner_messages": receiver._held_owner_messages,
+                                          "open_relays": receiver._open_relays,
+                                          "owner_mailbox": {"rows": [], "read_complete": True}}, "receiver")
+    successor = context(target_root); successor.task_id = "successor"
+    successor.task_metadata = {"continuation": {"owner_sources": sources}}
+    held_owner_messages(successor)
+    assert _send_user_message(successor, "Done", reply_to_relay="return").startswith("OK:")
+    [event] = successor.pending_events
+    assert event["progress_meta"]["reply_to"]["snippet"] == "exact owner words"

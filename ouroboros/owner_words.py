@@ -470,8 +470,15 @@ def _message_rows(drive_root: Any, task_id: str, text: Any, ref: Any, carrier: s
                   accounts: Any = None) -> List[Dict[str, str]]:
     ref = _mapping(ref)
     from ouroboros.project_dialogue import resolve_owner_message_source
+    from ouroboros.store import StoreError
 
-    row = resolve_owner_message_source(drive_root, dict(ref)) if ref else None
+    try:
+        row = resolve_owner_message_source(drive_root, dict(ref)) if ref else None
+    except (StoreError, OSError):
+        if not (isinstance(text, str) and text.strip()):
+            raise
+        log.debug("Reply source unreadable; retaining recorded owner words", exc_info=True)
+        row = None
     if isinstance(text, str) and text.strip():
         target = reply_target(drive_root, _mapping(row).get("reply_to"))
         return _words_rows({"source": "origin_message", "content": text, "reply_to": target}, carrier=carrier,
@@ -563,9 +570,8 @@ def _mailbox_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any], a
             source = quote.get("source") if isinstance(quote, Mapping) else {}
             canonical = source.get("address") if isinstance(source, Mapping) else ""
             canonical = canonical or f"{entry.get('msg_id') or 'relay'}#{index}"
-            item = {**row, "source": "owner_mailbox", "content": owner_text(row)}
-            if target := reply_target(source_root, row.get("reply_to")):
-                item["reply_to"] = target
+            item = {**row, "source": "owner_mailbox", "content": owner_text(row),
+                    "reply_to": reply_target(source_root, row.get("reply_to"))}
             rows.extend(_words_rows(item, carrier="relay", task_id=task_id, ts=row.get("ts"),
                                     ref=_carrier_ref(row, canonical=canonical)))
     return rows
@@ -604,9 +610,8 @@ def task_owner_words(drive_root: Any, task_id: str, *,
             source_accounts = accounts_by_root[source_key] = owner_place_accounts(source_root)
         if not quotable_owner_row(row, source_root, accounts=source_accounts):
             continue
-        item = {**row, "source": "owner_mailbox", "content": owner_text(row)}
-        if target := reply_target(source_root, row.get("reply_to")):
-            item["reply_to"] = target
+        item = {**row, "source": "owner_mailbox", "content": owner_text(row),
+                "reply_to": reply_target(source_root, row.get("reply_to"))}
         held.extend(_words_rows(item, carrier="held", task_id=task_id, ts=row.get("ts"),
                                 ref=_carrier_ref(row, canonical=handle)))
     rows, absent = task_governing_words(record)

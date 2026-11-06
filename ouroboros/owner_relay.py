@@ -138,6 +138,8 @@ def flush_held_state(ctx) -> None:
 
 
 def quote_rows(ctx, handles) -> tuple[list, str]:
+    if handles == []:
+        return [], ""  # An unquoted note reads no owner source or account snapshot.
     held = held_owner_messages(ctx)
     from ouroboros.owner_words import owner_place_accounts
     from ouroboros.tool_access import canonical_data_root
@@ -154,8 +156,6 @@ def quote_rows(ctx, handles) -> tuple[list, str]:
             current[handle] = row
     if not isinstance(handles, list) or any(not isinstance(h, str) or h not in current for h in handles):
         return [], "QUOTE_NOT_HELD: choose only held owner handles: " + json.dumps(list(current), ensure_ascii=False)
-    if not handles:
-        return [], ""
     return [owner_quote(root, current[handle], address=handle) for handle in dict.fromkeys(handles)], ""
 
 
@@ -251,6 +251,19 @@ def write_relay(root, task_id: str, *, relay_id: str, note: str, quotes: list, c
     return entry, True
 
 
+def retained_relay(entry: dict) -> dict:
+    """The internal return/ACK envelope keeps each quoted source's store. The visible relay stays unchanged."""
+    relay = copy.deepcopy(entry.get("relay") or {})
+    rows, roots = entry.get("owner_rows") or [], {}
+    for index, quote in enumerate(relay.get("quotes") or []):
+        row = rows[index] if index < len(rows) else {}
+        if root := row.get("_owner_source_root") or entry.get("relay_canonical_root"):
+            roots[str(quote.get("source", {}).get("address") or "")] = str(root)
+    if roots:
+        relay["_owner_source_roots"] = roots
+    return relay
+
+
 def inject_relay(ctx, entry: dict, messages: list) -> None:
     """Only exact owner rows enter the owner corpus, carried from the teller (no reply owed); the note has its
     own voice."""
@@ -303,7 +316,7 @@ def inject_relay(ctx, entry: dict, messages: list) -> None:
         relays = getattr(ctx, "_open_relays", None)
         if not isinstance(relays, dict):
             ctx._open_relays = relays = {}
-        relays[relay["relay_id"]] = copy.deepcopy(relay)
+        relays[relay["relay_id"]] = retained_relay(entry)
         persist_held_state(ctx)
 
 
@@ -373,10 +386,12 @@ def select_return(ctx, relay_id: str) -> tuple[dict, str]:
 def acknowledge_relay(root, target: str, entry: dict) -> None:
     """Called only after the mailbox's durable content acknowledgement."""
     from ouroboros.project_dialogue import append_chat_annotation
-    for quote in entry["relay"].get("quotes") or []:
+    relay = retained_relay(entry)
+    for quote in relay.get("quotes") or []:
         message_id = quote["source"].get("client_message_id")
         if message_id:
-            append_chat_annotation(root, message_id, action="steer_task", target=target, status="read",
+            source_root = relay.get("_owner_source_roots", {}).get(quote["source"].get("address", "")) or root
+            append_chat_annotation(source_root, message_id, action="steer_task", target=target, status="read",
                                    routing_token=entry["relay"]["relay_id"],
                                    **relay_target_facts(root, target))
 
@@ -408,7 +423,8 @@ def publish_relay_ack(root, target: str, relay: dict, bridge) -> None:
         source = quote["source"]
         if source.get("client_message_id"):
             try:
-                saved = chat_annotation_receipt(root, source["client_message_id"], relay["relay_id"])
+                source_root = relay.get("_owner_source_roots", {}).get(source.get("address", "")) or root
+                saved = chat_annotation_receipt(source_root, source["client_message_id"], relay["relay_id"])
             except OSError:  # an unreadable sidecar sends the ack from the work's facts, as before
                 saved = {}
             fields = ({key: saved[key] for key in ROUTING_RECEIPT_FIELDS if key in saved} if saved.get("status") == "read"

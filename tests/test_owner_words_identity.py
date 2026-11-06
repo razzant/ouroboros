@@ -206,7 +206,8 @@ def test_legacy_held_rows_without_client_ids_keep_their_canonical_handles(tmp_pa
 
 
 @pytest.mark.parametrize("carrier", ["origin_text", "origin_ref", "binding", "annotation", "held", "mailbox"])
-def test_fallback_carriers_keep_the_whole_reply_target(tmp_path, monkeypatch, carrier):
+@pytest.mark.parametrize("target_kind", ["message", "task_card"])
+def test_fallback_carriers_keep_the_whole_reply_target(tmp_path, monkeypatch, carrier, target_kind):
     """The same stored reply reaches the page writer through each supported fallback, not only its live corpus."""
     from ouroboros.chat_references import reference_from_row
     from ouroboros.owner_relay import owner_quote, write_relay
@@ -215,8 +216,10 @@ def test_fallback_carriers_keep_the_whole_reply_target(tmp_path, monkeypatch, ca
     proposal = {"chat_id": 1, "direction": "out", "ts": "2026-09-30T05:40:00Z",
                 "text": "A whole proposal. " * 100, "client_message_id": "proposal"}
     ds.append(tmp_path, "chat", proposal)
+    reference = (reference_from_row(proposal) if target_kind == "message"
+                 else {"address": "task:some-work", "snippet": "A work card, not a message."})
     owner = {"chat_id": 1, "direction": "in", "ts": TS, "text": "Yes, do that.",
-             "client_message_id": "reply", "reply_to": reference_from_row(proposal)}
+             "client_message_id": "reply", "reply_to": reference}
     ds.append(tmp_path, "chat", owner)
     stored = next(item.row for item in ds.rows_by_client_id(tmp_path, "reply"))
     ref = build_owner_message_ref(chat_id=1, client_message_id="reply", ts=TS, text=owner["text"])
@@ -237,8 +240,21 @@ def test_fallback_carriers_keep_the_whole_reply_target(tmp_path, monkeypatch, ca
                     chat_id=1, teller_task_id="teller", canonical_root=tmp_path)
     rows, absent = ow.task_owner_words(tmp_path, ROOT, task=record)
     assert not absent and [row["text"] for row in rows if row["source"] != ow.REPLY_TARGET] == [owner["text"]]
+    if target_kind == "task_card":
+        assert not [row for row in rows if row["source"] == ow.REPLY_TARGET], "a task card is not someone's words"
+        return
     [target] = [row for row in rows if row["source"] == ow.REPLY_TARGET]
     assert target["text"] == proposal["text"] and target["author"] != "owner"
+
+
+@pytest.mark.parametrize("carrier", ["origin_message", "binding"])
+def test_retained_owner_text_survives_unreadable_reply_source(tmp_path, monkeypatch, carrier):
+    def unavailable(*_args, **_kw):
+        raise OSError("source temporarily unreadable")
+    monkeypatch.setattr("ouroboros.project_dialogue.resolve_owner_message_source", unavailable)
+    rows = ow._message_rows(tmp_path, ROOT, "Exact retained owner words", {"chat_id": 1,
+                            "client_message_id": "original"}, carrier)
+    assert [r["text"] for r in rows] == ["Exact retained owner words"]
 
 
 def _drafted_corpus(tmp_path, stored):
