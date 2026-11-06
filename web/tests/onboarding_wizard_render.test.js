@@ -373,7 +373,7 @@ test('an unknown save keeps the draft; Check status reads back THIS attempt, whi
         // "Check status" is the ONE primary action while the outcome is unknown; the re-submit stays offered,
         // as an explicit secondary "Retry save" (rc.15 review MINOR 3).
         assert.match(html, /class="btn btn-primary" id="check-save-btn"[^>]*>Check status</);
-        assert.match(html, /class="btn btn-secondary" id="next-btn"[^>]*>Retry save</);
+        assert.match(html, /class="btn btn-default" id="next-btn"[^>]*>Retry save</);
         assert.equal((html.match(/btn-primary/g) || []).length, 1, 'exactly one primary action');
 
         doc.getElementById('check-save-btn').fire('click');
