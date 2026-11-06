@@ -279,6 +279,12 @@ def test_a_long_running_servers_stderr_is_logged_as_a_bounded_tail_with_every_se
             return mcp_schema._stderr_diagnostic(stderr, cfg, 1000)
 
     assert logged(f"BOOT {secret} READY\n") == "BOOT *** READY\n"  # within the bound: whole, as before
+    long_cfg = dataclasses.replace(cfg, secret_values=("K" * 3000,))  # masked far shorter than it was
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stderr:
+        stderr.write("K" * 3000 + "\nAuthentication required.\n")
+        stderr.flush()
+        note = mcp_schema._stderr_diagnostic(stderr, long_cfg, 1000)
+    assert note.endswith("\nAuthentication required.\n") and "K" * 20 not in note, note[:120]
     for at in range(0, 3000, 7):  # the secret before, across and after every cut point
         text = "Z" * at + secret + "\n" + "Y\n" * ((3500 - at) // 2) + "END\n"
         record = logged(text)
