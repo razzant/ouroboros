@@ -1293,9 +1293,10 @@ textarea.ui-control { resize: vertical; }
         inset: var(--ui-hit-inset);
     }
     /* A disclosure stacked under controls or under another one: its line of words is the minimum tall, so its reach
-       covers neither (its look stays a line: the summary has no body). A field is a target too, and a native select
-       cannot carry the ::after. */
+       covers neither (its look stays a line: the summary has no body). A menu's items stack the same way. A field is a
+       target too, and a native select cannot carry the ::after. */
     details.ui-disclosure > summary,
+    .ui-popup [role^="menuitem"],
     .ui-control { min-height: var(--touch-target-min); }
 }
 
