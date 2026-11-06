@@ -223,10 +223,12 @@ def _drain_incoming_messages(
                     from ouroboros.presence_continuation import note_place_delivery
                     note_place_delivery(owner_ctx, entry, controls)  # the event is context; my human's words are theirs
                     if arrival.get("owner_words"):  # as at the opening, under its id: this mailbox row is context
+                        from ouroboros.owner_words import place_reply_target
                         from ouroboros.presence_runner import presence_chat_id
                         room = presence_chat_id(str((entry.get("sender_origin") or {}).get("conversation_key") or ""))
                         _loop()._record_owner_directive(owner_ctx, source="place_owner", carried=True,
-                            content=arrival["owner_words"], msg_id=f"chat {room} / {arrival.get('source_event_id') or ''}")
+                            content=arrival["owner_words"], msg_id=f"chat {room} / {arrival.get('source_event_id') or ''}",
+                            reply_to=place_reply_target(arrival.get("message")))
                 if provenance not in CONTEXT_ONLY_TASK_PROVENANCES:
                     _loop()._record_owner_directive(
                         owner_ctx, content=dmsg, msg_id=str(entry.get("msg_id") or ""),

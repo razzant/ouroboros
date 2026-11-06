@@ -247,7 +247,7 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
     metadata = getattr(ctx, "task_metadata", None)
     metadata = metadata if isinstance(metadata, dict) else {}
     from ouroboros.owner_quiz import late_answer_ref, late_answer_owner_text
-    from ouroboros.owner_words import OWNER_SOURCES, answered_card_reply, place_owner_words, reply_target
+    from ouroboros.owner_words import OWNER_SOURCES, answered_card_reply, place_owner_words, place_reply_target, reply_target
     late = late_answer_ref(metadata.get("late_answer"))
     answered = ((late or {}).get("answer_snapshot") or {}).get("quiz") or {}
     if answered.get("presence_contact"):
@@ -276,10 +276,8 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
     if words := place_owner_words(focus, presence.get("observed_text"), event.get("message")):
         # A place turn addressed to me from an account its place confirmed at admission: my human's exact
         # words, beside the event frame (``initial_text``, which Safety reads); an unaddressed one is not work.
-        replied = str((event.get("message") or {}).get("reply_to_message_id") or "")
-        target = {"address": f"platform message {replied} in this room", "author": "", "text": ""} if replied else None
-        _loop()._record_owner_directive(ctx, source="place_owner", content=words, carried=True,
-            msg_id=f"chat {focus.get('room_chat_id')} / {event.get('source_event_id') or ''}", reply_to=target)
+        _loop()._record_owner_directive(ctx, source="place_owner", content=words, carried=True, reply_to=place_reply_target(
+            event.get("message")), msg_id=f"chat {focus.get('room_chat_id')} / {event.get('source_event_id') or ''}")
     for message in messages:
         if isinstance(message, dict) and str(message.get("role") or "") == "user":
             from ouroboros.dialogue_provenance import run_origin

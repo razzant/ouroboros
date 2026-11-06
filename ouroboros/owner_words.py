@@ -244,6 +244,12 @@ def place_owner_words(focus: Any, text: Any, message: Any) -> str:
     return words if confirmed and words.strip() and not _mapping(message).get("forward_origin") else ""
 
 
+def place_reply_target(message: Any) -> Dict[str, str] | None:
+    """The platform message a place event replies to, by address (a connector gives no words for it), else None."""
+    replied = str(_mapping(message).get("reply_to_message_id") or "")
+    return {"address": f"platform message {replied} in this room", "author": "", "text": ""} if replied else None
+
+
 def owner_words_contain(ctx: Any, text: Any) -> bool:
     """``text`` is my human's own words that reached this run: exact, as a quote is (``chronicle_quotes.quote_in``),
     inside one owner row of the run, never a reply target (another author's words beside theirs). Provenance of
