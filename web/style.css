@@ -1389,7 +1389,15 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 }
 .chat-page-header > .app-page-leading { flex: 0 0 auto; }
 .chat-page-header > .app-page-title-block { flex: 0 1 auto; min-width: 0; }
-.chat-page-header > .app-page-actions { flex: 0 0 auto; gap: 6px; justify-content: flex-end; }
+.chat-page-header > .app-page-actions { flex: 0 0 auto; justify-content: flex-end; }
+/* A room's bar (Main's and a Project's) ends in one group of capsules: the consciousness chip leads it
+   (chat_header.js), then Main's Restart, Panic and budget or a Project's Panic and ×, all one gap apart (owner seed S3);
+   Main's commands lie in the group as its own capsules. */
+:is(.chat-page-header, .project-panel-bar) > :is(.app-page-actions, .app-page-trailing) { gap: var(--space-2); }
+.chat-header-actions { display: contents; }
+/* On a phone, while a Project's one-line name is still cut, the chip shows its brain and mark alone (room_work.js
+   fitWord); its name says it all. */
+.project-panel-bar > .app-page-trailing > .cx-chip[data-fit="mark"] .cx-chip-word { display: none; }
 
 .chat-page-header > * {
     pointer-events: auto;
@@ -1419,16 +1427,6 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     pointer-events: auto;
 }
 .chat-page-note:not(:has(> :not([hidden]))) { display: none; }
-
-.chat-header-actions {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    flex-wrap: nowrap;
-    gap: 6px;
-    min-width: 0;
-    max-width: min(100%, 640px);
-}
 
 /* The bars' controls (DESIGN.md design bible): neutral capsules on glass, standing on the rest shadow; Panic is the
    danger tone (--panic-fill: on dark the capsule's own veil, since the red tone there is already a neutral veil and
@@ -1464,10 +1462,7 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
    stopped waits for the owner (data-attention, from Main's attention rows): then the money is the owner's move. */
 .chat-budget-pill {
     appearance: none;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 3px;
+    position: relative;
     border: 1px solid transparent;
     background: var(--chip-float);
     box-shadow: var(--elev-rest);
@@ -1495,8 +1490,12 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     letter-spacing: 0.02em;
 }
 
+/* The amount keeps the capsule's centre line, as Restart's and Panic's words do; its track lies along the capsule's
+   bottom inset, out of the line (U004). */
 .chat-budget-bar {
-    width: 100%;
+    position: absolute;
+    inset-inline: var(--pill-padding-x);
+    bottom: var(--space-1);
     height: 2px;
     border-radius: 1px;
     background: var(--status-neutral-bg);
@@ -4287,11 +4286,6 @@ html[data-layout="stack"] .chat-page-header > .app-page-title-block {
 /* The actions keep their own width; the title block takes the rest (the status after the title ellipsizes last). */
 html[data-layout="stack"] .chat-page-header > .app-page-actions {
     flex: 0 0 auto;
-}
-html[data-layout="stack"] .chat-header-actions {
-    display: flex;
-    flex-wrap: nowrap;
-    gap: var(--space-2);
 }
 html[data-layout="stack"] .chat-page-note {
     left: var(--space-3);
@@ -8537,13 +8531,6 @@ body.keyboard-open .project-panel .chat-instance-panel .chat-messages {
    and the pointer-events pass-through; no second fade layer. */
 .chat-instance-panel .chat-input-area {
     padding: 24px 14px max(16px, var(--inset-bottom));
-}
-
-/* Project threads hide the GLOBAL controls (evolution/consciousness/restart/
-   panic/budget belong to the one agent, not to a project thread). */
-.chat-instance-panel .chat-header-actions,
-.chat-instance-panel .chat-budget-pill {
-    display: none;
 }
 
 /* Docked, the panel lies beside Main at its own width (its handle resizes it apart from the sidebar's), over the
