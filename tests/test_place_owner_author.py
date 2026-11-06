@@ -93,6 +93,23 @@ def test_a_stored_row_says_the_same_author_as_its_whole_row(tmp_path, place):
     assert not labels[2].startswith("my human") and labels[3].startswith("my human: ")
 
 
+@pytest.mark.parametrize("authenticated,mine", [(False, False), (True, True), (None, True)],
+                         ids=["unauthenticated", "authenticated", "no-fact"])
+def test_a_sender_equal_to_my_account_is_mine_only_when_the_connector_did_not_deny_it(tmp_path, place, authenticated,
+                                                                                    mine):
+    """An unauthenticated actor is never my account: a mail From equal to the mailbox address proves nothing
+    (``places.own_account_event``); the same id authenticated, or with no such fact, is my own account's event; on
+    the whole row and on its stored facts."""
+    accounts = place_owner_accounts(tmp_path)
+    row = _place_row(place.place_id, "box@example.com", sends_as="box@example.com", sends_kind="user",
+                     authenticated=authenticated)
+    for read in (row, row_meta(row)):
+        author = row_author(read, owner_accounts=accounts)
+        assert (author["kind"] == "ouroboros" and author.get("via") == "own_account") is mine, author
+        assert author["label"].startswith("the account I send as: ") is mine, author["label"]
+        assert row_class(read, owner_accounts=accounts)["lane"] == 1
+
+
 def test_the_snapshot_reads_the_stored_places_without_migrating_them(tmp_path):
     path = places.places_path(tmp_path)
     path.parent.mkdir(parents=True)

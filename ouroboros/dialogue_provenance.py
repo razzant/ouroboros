@@ -733,8 +733,10 @@ def _pre_epoch_author(row: Mapping[str, Any], lineage_lookup: Any) -> dict[str, 
 
 def _place_speaker(row: Mapping[str, Any], owner_accounts: Mapping[str, Any] | None) -> str:
     """The host fact a place row's author label leads with: ``my human`` (``places.owner_confirmed_row`` over the
-    current snapshot), else ``the account I send as`` (a bot or service account of mine wrote it), else ``a bot``
-    when the connector marked its actor one (owner 4 Nov, Q2=A: bots come whole with an author fact), else none."""
+    current snapshot), else ``the account I send as`` (a bot or service account of mine wrote it; never an actor the
+    connector reports unauthenticated: a mail From equal to my mailbox proves nothing, as ``places.own_account_event``
+    reads it), else ``a bot`` when the connector marked its actor one (owner 4 Nov, Q2=A: bots come whole with an
+    author fact), else none."""
     if owner_accounts is not None:
         from ouroboros.places import owner_confirmed_row  # D15->D20 is lazy-only
 
@@ -744,7 +746,7 @@ def _place_speaker(row: Mapping[str, Any], owner_accounts: Mapping[str, Any] | N
     actor = _mapping(transport.get("actor"))
     actor_id = _text(actor.get("platform_actor_id") or actor.get("id"))
     sends_as = _text(_mapping(_mapping(transport.get("identity")).get("sends_as")).get("id"))
-    if actor_id and actor_id == sends_as:
+    if sends_as and actor_id == sends_as and actor.get("authenticated") is not False:
         return "the account I send as"
     return "a bot" if actor.get("is_bot") is True else ""
 
