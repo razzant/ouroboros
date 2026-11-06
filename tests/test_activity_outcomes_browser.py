@@ -180,7 +180,7 @@ def test_activity_outcome_rows_and_their_controls_in_a_real_browser(tmp_path, mo
                             .querySelector('[data-activity-phase]');
                         const mark = chip.querySelector(':scope > .status-mark');
                         const stop = document.querySelector('[data-act="task-control"][data-id="failed-root"]');
-                        const scroll = document.querySelector('#dashboard-panel-activity .dashboard-body');
+                        const scroll = document.querySelector('#activity .dashboard-body');
                         const out = {chip: getComputedStyle(chip).color, chipBg: getComputedStyle(chip).backgroundColor,
                             second: getComputedStyle(chip.nextElementSibling).color, error: ink('var(--status-error-fg)'),
                             errorBg: ink('var(--status-error-bg)'), meta: ink('var(--text-meta)'),

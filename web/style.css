@@ -4118,7 +4118,7 @@ html[data-layout="stack"] #primary-sidebar {
    as its own scroller. */
 html[data-layout="stack"] :is(#chat-messages, .chat-messages, .files-list, .files-sidebar, .files-preview-content,
     .skills-scroll, .widgets-scroll, .settings-scroll, .costs-scroll,
-    #log-entries, .dashboard-body, .updates-scroll) {
+    .dashboard-body, .updates-scroll) {
     touch-action: pan-y pinch-zoom;
 }
 /* Outside the scrollers too (a header, the composer's row of capsules, the attach button): the page itself only pans
@@ -5248,7 +5248,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
    the inner radius and no shadow; a tray inside a tray drops its fill, so fills never stack and its rows part by space
    alone. Neither has an edge: the transparent 1px border only keeps each box's size. */
 :is(.settings-shell .form-section, .settings-card, .settings-provider-card, .skills-card,
-    .marketplace-card, .widgets-card, .updates-card, .costs-budget-card, .stat-card, .log-task-card) {
+    .marketplace-card, .widgets-card, .updates-card, .costs-budget-card, .stat-card) {
     border: 1px solid transparent;
     background: var(--surface-object);
     border-radius: var(--radius-object);
@@ -5367,28 +5367,42 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     padding: 0;
 }
 
+/* Logs (U026-U035, U140): the tab body scrolls; its filters stay at its top on the room's colour (the stream lives
+   at its newest end, the filters must stay in reach) while the list, one card whose events are trays, scrolls under
+   them. A task's event is the same tray with its kind and its timeline. The system face reads the sentences;
+   monospace keeps only the time and the raw record. */
+/* The body's top inset rides on the bar, so the bar sticks flush at the scroller's edge (a sticky box keeps clear of
+   its scroller's padding, which let rows show above it). */
+#page-logs { padding-top: 0; }
 .logs-filters {
+    --control-h: var(--control-h-sm);
+    position: sticky;
+    top: 0;
+    z-index: 1;
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
-    padding: 8px 20px;
+    gap: var(--space-2);
     align-items: center;
+    padding: var(--space-4) 0 var(--space-2);
+    background: var(--bg-primary);
 }
+/* foundation-request: the shared .filter-chip has no weight of its own (400); controls are 600 (DESIGN type line). */
+.logs-filters .filter-chip { font-weight: 600; }
 
 .logs-inline-clear {
     margin-left: auto;
 }
 
+.logs-card { display: grid; gap: var(--space-2); min-width: 0; }
+.logs-empty { margin: 0; color: var(--text-secondary); font-size: var(--type-body); line-height: var(--line-body); }
+.logs-empty[hidden] { display: none; }
+
 #log-entries {
-    flex: 1;
-    overflow-y: auto;
-    padding: 12px;
-    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
-    font-size: 12px;
-    line-height: 1.55;
-    background: rgba(var(--neutral-rgb), 0.02);
-    margin: 0 12px 12px;
-    border-radius: var(--radius-inner);
+    display: grid;
+    gap: var(--space-2);
+    min-width: 0;
+    font-size: var(--type-body);
+    line-height: var(--line-body);
 }
 
 /* A log row is a tray inside the Logs object: the soft neutral fill, the inner radius, no outline. */
@@ -5400,11 +5414,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     gap: 6px;
     border: 1px solid transparent;
     background: var(--surface-tray);
-    margin-bottom: 8px;
-}
-
-.log-entry:hover {
-    background: var(--tone-quiet-hover);
+    min-width: 0;
 }
 
 .log-main {
@@ -5417,27 +5427,30 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .log-entry .log-ts {
     color: var(--text-muted);
     flex-shrink: 0;
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: var(--type-meta);
+    font-variant-numeric: tabular-nums;
 }
 
 .log-entry .log-type {
     font-weight: 700;
     flex-shrink: 0;
-    min-width: 78px;
     font-size: var(--type-meta);
 }
 
+/* A level chip lies flat; the default `info` level says nothing and is not drawn (U028). */
 .log-entry .log-phase {
     padding: 1px 8px;
     border-radius: 999px;
     font-size: var(--type-meta);
-    border: 1px solid rgba(var(--neutral-rgb), 0.08);
+    border: 1px solid transparent;
     color: var(--text-secondary);
     background: rgba(var(--neutral-rgb), 0.04);
 }
+.log-entry .log-phase.info { display: none; }
 
 .log-entry .log-phase:is(.start, .calling, .context, .progress, .thought, .boot, .working, .thinking) {
     color: var(--accent-light);
-    border-color: var(--accent-25);
     background: var(--accent-10);
 }
 
@@ -5453,6 +5466,10 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     font-size: var(--type-meta);
 }
 
+/* Raw is the line's last, quiet control (.btn.btn-ghost.btn-sm); after a count it follows it, else it takes the end. */
+.log-raw-toggle { flex: none; align-self: center; }
+.log-main > .log-repeat[hidden] + .log-raw-toggle { margin-left: auto; }
+
 .log-meta {
     display: flex;
     flex-wrap: wrap;
@@ -5466,7 +5483,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     border-radius: 999px;
     background: rgba(var(--neutral-rgb), 0.05);
     color: var(--text-secondary);
-    border: 1px solid rgba(var(--neutral-rgb), 0.05);
+    border: 1px solid transparent;
     font-size: var(--type-meta);
 }
 
@@ -5476,36 +5493,15 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     white-space: pre-wrap;
 }
 
-.log-actions {
-    display: flex;
-    justify-content: flex-end;
-}
-
-/* Raw is a quiet capsule: no body, no outline, the quiet tone on hover (it adopts .btn.btn-ghost.btn-sm in the Logs lane). */
-.log-raw-toggle {
-    border: 1px solid transparent;
-    background: transparent;
-    color: var(--text-muted);
-    border-radius: var(--pill-radius);
-    padding: 3px 8px;
-    font-size: var(--type-meta);
-    cursor: pointer;
-}
-
-.log-raw-toggle:hover {
-    color: var(--text-primary);
-    background: var(--tone-quiet-hover);
-}
-
 .log-raw {
     margin: 0;
-    padding: 10px;
-    border-radius: var(--radius-inner);
-    background: rgba(0, 0, 0, 0.25);
     color: var(--text-secondary);
     overflow-x: auto;
     white-space: pre-wrap;
     word-break: break-word;
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
 }
 
 .log-type.tools { color: var(--status-info-fg); }
@@ -5521,38 +5517,16 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     gap: 6px;
 }
 
-.log-task-review {
-    margin-top: 8px;
-    padding: 8px 10px;
-    border: 1px solid rgba(var(--neutral-rgb), 0.06);
-    border-radius: var(--radius-inner);
-    background: rgba(0,0,0,0.14);
-}
+.log-task-review { margin-top: var(--space-2); }
 
-.log-task-details {
-    border-top: 1px solid rgba(var(--neutral-rgb), 0.05);
-    padding-top: 8px;
-}
-
-.log-task-details summary {
-    cursor: pointer;
-    color: var(--text-secondary);
-    font-size: var(--type-meta);
-    user-select: none;
-}
-
+/* Inside the task's tray its timeline rows part by space alone: a tray inside a tray drops its fill. */
 .log-task-timeline {
-    margin-top: 8px;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: var(--space-3);
 }
 
 .log-task-event {
-    padding: 8px 10px;
-    border-radius: var(--radius-inner);
-    background: rgba(0, 0, 0, 0.16);
-    border: 1px solid rgba(var(--neutral-rgb), 0.04);
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -7697,16 +7671,6 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     }
     .widget-table th[scope="row"] { display: block; padding: 6px 0; }
 
-    .logs-filters {
-        padding: 8px 12px;
-    }
-
-    #log-entries {
-        margin: 0 8px 8px;
-        min-width: 0;
-        overflow-x: hidden;
-    }
-
     .costs-budget-fields,
     .costs-tables-grid {
         grid-template-columns: 1fr;
@@ -7717,6 +7681,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     }
 
     .dashboard-body { padding: var(--space-3); }
+    .logs-filters { padding-top: var(--space-3); }
 
 }
 

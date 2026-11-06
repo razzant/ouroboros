@@ -528,6 +528,74 @@ test('Logs reports partial history without losing live rows or deduplication, th
     assert.equal(calls.length, 8, 'only existing init/reconnect backfill runs');
 });
 
+test('Logs reads oldest to newest, says why it is empty, and keeps one quiet tone until a filter narrows it', async (t) => {
+    const { mount, routes, ws } = setup(t);
+    const live = { type: 'test_live_event', ts: '2026-09-09T12:00:00Z', message: 'live' };
+    const earlier = { type: 'test_earlier_event', ts: '2026-09-09T11:59:00Z', message: 'earlier' };
+    for (const name of ['events', 'tools', 'progress', 'supervisor']) routes.set(logUrl(name), response({ entries: [] }));
+    let finishEvents;
+    routes.set(logUrl('events'), () => new Promise((resolve) => { finishEvents = resolve; }));
+    const state = { activePage: 'dashboard', dashboardActiveSubtab: 'logs' };
+    initLogs({ mount, ws, state });
+    const empty = mount.querySelector('[data-log-empty]');
+    assert.equal(empty.hidden, true, 'nothing is said about an empty list while its history loads');
+    ws.emit('log', { data: live });
+    finishEvents(response({ entries: [earlier] }));
+    await settle();
+    const entries = mount.querySelector('#log-entries');
+    // History that arrives after a live event takes its place by its own time (U035).
+    assert.deepEqual(entries.children.map((entry) => entry.dataset.logTime), [String(Date.parse(earlier.ts)), String(Date.parse(live.ts))]);
+    // The event's one line: Raw at its end as the quiet small capsule, never a row of its own (U027, U032).
+    const main = entries.children[0].querySelector('.log-main');
+    const raw = main.querySelector('.log-raw-toggle');
+    assert.equal(raw.className, 'btn btn-ghost btn-sm log-raw-toggle');
+    assert.equal(entries.children[0].querySelector('.log-actions'), null);
+    await raw.fire('click');
+    assert.equal(entries.children[0].querySelector('.log-raw').hasAttribute('hidden'), false);
+    assert.equal(raw.getAttribute('aria-expanded'), 'true');
+    // Every filter on narrows nothing: no chip takes the chosen tone; one off, the ones still on do (U031).
+    const chips = mount.querySelectorAll('.filter-chip');
+    assert.ok(chips.length > 1);
+    assert.ok(chips.every((chip) => !chip.classList.contains('active') && chip.getAttribute('aria-pressed') === 'true'));
+    await chips[0].fire('click');
+    assert.equal(chips[0].classList.contains('active'), false);
+    assert.equal(chips[0].getAttribute('aria-pressed'), 'false');
+    assert.ok(chips.slice(1).every((chip) => chip.classList.contains('active')));
+    for (const chip of chips.slice(1)) await chip.fire('click');
+    assert.equal(empty.hidden, false);
+    assert.match(empty.textContent, /The filters hide every event\./);
+    await empty.fire('click', { target: empty.querySelector('[data-log-show-all]') });
+    assert.ok(entries.children.every((entry) => !entry.hidden), 'Show all brings every event back');
+    assert.equal(empty.hidden, true);
+    assert.ok(chips.every((chip) => !chip.classList.contains('active')));
+    // Clear says when, and that new events appear (U033).
+    await mount.querySelector('#btn-clear-logs').fire('click');
+    assert.match(empty.textContent, /^Cleared at \d\d:\d\d\. New events appear here\.$/);
+    ws.emit('log', { data: { ...live, ts: '2026-09-09T12:01:00Z' } });
+    assert.equal(empty.hidden, true);
+});
+
+test('Logs prints an event\'s name once and names a task card by its short id without repeating its lineage', async (t) => {
+    const { mount, routes, ws } = setup(t);
+    for (const name of ['events', 'tools', 'progress', 'supervisor']) routes.set(logUrl(name), response({ entries: [] }));
+    initLogs({ mount, ws, state: { activePage: 'dashboard', dashboardActiveSubtab: 'logs' } });
+    await settle();
+    ws.emit('log', { data: { type: 'worker_ready', ts: '2026-09-16T12:00:00Z' } });
+    const entries = mount.querySelector('#log-entries');
+    const plain = entries.children.find((node) => !node.dataset.taskGroup);
+    const headline = plain.querySelector('.log-headline').textContent;
+    const type = plain.querySelector('.log-type');
+    assert.ok(!type || type.textContent !== headline, 'the type is not printed again beside the same headline (U028)');
+    ws.emit('log', { data: { type: 'task_heartbeat', task_id: '55d180783850458f', phase: 'running', ts: '2026-09-16T12:00:02Z',
+        runtime_sec: 61 } });
+    const card = entries.children.find((node) => node.dataset.taskGroup === '55d180783850458f');
+    assert.equal(card.querySelector('[data-task-kind]').textContent, 'task 55d18078', 'eight characters, as every row');
+    const pills = card.querySelector('[data-task-summary]').querySelectorAll('.log-pill').map((pill) => pill.textContent);
+    assert.ok(!pills.some((pill) => pill.startsWith('task=') || pill === 'task'), `no repeated id: ${pills}`);
+    const timeline = card.querySelector('[data-task-timeline]').querySelectorAll('.log-pill').map((pill) => pill.textContent);
+    assert.ok(timeline.includes('task=55d180783850458f'), 'the timeline keeps the full id');
+});
+
 test('Logs catches unavailable and malformed sources while retaining later live events', async (t) => {
     const { mount, routes, ws } = setup(t);
     routes.set(logUrl('events'), response(null));
