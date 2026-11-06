@@ -452,6 +452,109 @@
    "works_complete": true,
    "works_gaps": []
   },
+  "carried_preparing": {
+   "works": [
+    {
+     "work_id": "cp",
+     "room": 1,
+     "name": "",
+     "episode": {
+      "task_id": "cp",
+      "live": true
+     },
+     "activity": "working",
+     "transition": "none",
+     "call": "preparing",
+     "because": [
+      {
+       "code": "turn_context_building",
+       "text": "Building context"
+      }
+     ],
+     "tails": [],
+     "live": true,
+     "turn": [],
+     "release": "self",
+     "stop": {},
+     "refusal": {},
+     "members": {
+      "ids": [
+       "cp"
+      ],
+      "states": {
+       "cp": {
+        "activity": "working",
+        "transition": "none",
+        "call": "preparing",
+        "live": true,
+        "release": "self",
+        "confirmed": true,
+        "turn": [],
+        "because": [
+         {
+          "code": "turn_context_building",
+          "text": "Building context"
+         }
+        ],
+        "tails": []
+       }
+      }
+     },
+     "confirmed": true,
+     "mark": "moving",
+     "kind": "direct",
+     "project_id": "",
+     "since": 100.0,
+     "controls": [
+      {
+       "action": "wrap_up",
+       "target": "cp"
+      },
+      {
+       "action": "hurry",
+       "target": "cp"
+      },
+      {
+       "action": "pause",
+       "target": "cp"
+      },
+      {
+       "action": "stop",
+       "target": "cp",
+       "scope": "cascade"
+      }
+     ],
+     "client_message_id": "cm-carried"
+    }
+   ],
+   "rooms": {
+    "1": {
+     "activity": "working",
+     "transition": "none",
+     "call": "preparing",
+     "turn": [],
+     "amber": false,
+     "mark": "moving",
+     "confirmed": true,
+     "works": [
+      "cp"
+     ]
+    }
+   },
+   "work_summary": {
+    "counts": {
+     "working": 1,
+     "queued": 0,
+     "waiting": 0,
+     "paused": 0,
+     "unknown": 0
+    },
+    "turn": 0,
+    "confirmed": true
+   },
+   "works_complete": true,
+   "works_gaps": []
+  },
   "direct_requested": {
    "works": [
     {
@@ -1124,7 +1227,7 @@
      "because": [
       {
        "code": "queued",
-       "text": "Waiting for a free worker"
+       "text": ""
       }
      ],
      "tails": [],
@@ -1149,7 +1252,7 @@
         "because": [
          {
           "code": "queued",
-          "text": "Waiting for a free worker"
+          "text": ""
          }
         ],
         "tails": []
@@ -3640,7 +3743,7 @@
    "": "Waiting for Project verification"
   },
   "queued": {
-   "": "Waiting for a free worker"
+   "": ""
   },
   "review_work_finishing": {
    "": "Review work finishing"

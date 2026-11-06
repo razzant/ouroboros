@@ -424,7 +424,7 @@ def _capture(reason: str, *, census: Optional[str] = None) -> Optional[Dict[str,
             "attempt": t.get("_attempt"), "queued_at": t.get("queued_at"),
             "queue_seq": t.get("_queue_seq"),
             "task": _frozen({**{key: t.get(key) for key in _PENDING_FIELDS}, **subagent_intent_fields(t), **carried_basis(t),
-                             **{key: t[key] for key in ('admitted_dispatch', '_project_scope_none', '_working_recovery',
+                             **{key: t[key] for key in ('admitted_dispatch', '_project_scope_none', '_working_recovery', '_seed_return',
                                                         # #939: the execution budget and its carried clock offset travel with the row.
                                                         'execution_timeout_sec', '_execution_consumed_sec', '_execution_handoff_sec') if key in t}}),
         })
@@ -448,35 +448,35 @@ def _capture(reason: str, *, census: Optional[str] = None) -> Optional[Dict[str,
 
 
 def _pool_counts() -> Dict[str, Any]:
-    """Honest worker-pool counts from the ACTUAL pool (not the configured max): the live pool can be
-    smaller (a crash-storm/direct-chat fallback clears WORKERS) and a slot mid-reap is popped from
-    RUNNING but NOT assignable, so the context queue digest never falsely advertises a free slot."""
+    """The pool's published facts, measured by ``worker_pool_lifecycle.pool_slot_counts`` (its docstring names
+    each count) from the ACTUAL pool, never the configured ceiling, plus the last assignment pass's growth
+    forecast (``project_demand``). A slot mid-reap is not assignable, so no reader is told of a free slot that
+    is not. A failed measurement publishes ``pool_observation_status: "unknown"`` with null counts: never
+    zeros, which would read as an empty pool. The census hashes these facts, so nothing here carries a clock
+    that moves without the facts."""
     try:
         from supervisor import workers as _workers_mod
-        from supervisor.worker_pool_lifecycle import is_project_slot, worker_ready
+        from supervisor.worker_pool_lifecycle import demand_forecast, pool_slot_counts
 
-        def idle(slot: Any) -> bool:
-            return (getattr(slot, "busy_task_id", None) is None and worker_ready(slot)
-                    and getattr(slot, "active_capacity", True) and not getattr(slot, "resume_hold", ""))
-
-        # Project slots alone: they are what MAX_WORKERS bounds and the queue assigns to. The
-        # conversation lane's carriers are outside that count (owner decision 4A) and reported apart (W9).
-        _ws = [w for w in _workers_mod.WORKERS.values() if is_project_slot(w)]
-        lane = [w for w in _workers_mod.WORKERS.values() if not is_project_slot(w)]
-        active = sum(1 for w in _ws if getattr(w, "active_capacity", True))
+        counts = pool_slot_counts(_workers_mod.WORKERS)
         disabled = _workers_mod._worker_pool_execution_state()["disabled_reason"]
-        return {
-            "reaping_count": sum(1 for _w in _ws if getattr(_w, "reaping", False)),
-            "worker_total": len(_ws), "active_worker_count": active, "parked_worker_count": len(_ws) - active,
-            # Absence is counted above, not an explicit disablement.
-            "worker_pool_disabled_reason": "" if disabled == "no_workers" else disabled,
-            "assignable_idle_workers": sum(1 for _w in _ws if idle(_w)),
-            "lane_carrier_total": len(lane), "lane_carrier_idle": sum(1 for _w in lane if idle(_w)),
-        }
+        # Absence is counted above, not an explicit disablement.
+        counts["worker_pool_disabled_reason"] = "" if disabled == "no_workers" else disabled
+        counts["pool_observation_status"] = "observed"
+        counts["project_demand"] = demand_forecast()
+        return counts
     except Exception:
-        return {"reaping_count": 0, "worker_total": 0, "active_worker_count": 0, "parked_worker_count": 0,
-                "worker_pool_disabled_reason": "unknown", "assignable_idle_workers": 0,
-                "lane_carrier_total": 0, "lane_carrier_idle": 0}
+        log.debug("Worker pool facts unavailable; published as unknown", exc_info=True)  # every tick: no warning flood
+        return {**dict.fromkeys(_POOL_COUNT_KEYS), "worker_pool_disabled_reason": "unknown",
+                "pool_observation_status": "unknown", "pool_observation_error": "introspection_failed",
+                "project_demand": {"status": "unknown", "admissible_pending": None, "reason": "introspection_failed",
+                                   "scope": "last_assignment_pass"}}
+
+
+#: The counts ``pool_slot_counts`` measures; an unknown observation publishes each as null.
+_POOL_COUNT_KEYS = ("max_workers", "worker_total", "active_worker_count", "parked_worker_count", "busy_worker_count",
+                    "booting_count", "reaping_count", "retiring_count", "assignable_idle_workers",
+                    "lane_carrier_total", "lane_carrier_idle")
 
 
 def _documents(capture: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:

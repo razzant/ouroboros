@@ -713,6 +713,7 @@ D20 = "Presence"
 "ouroboros/copy_environments.py" = "D07"  # declared temporary environments beside a copy: the one rule of Free and the custody pass
 "ouroboros/owner_keep.py" = "D07"  # the owner's direct keep of one task's materials, read at every retirer
 "ouroboros/review_thread_retention.py" = "D07"  # a finished reviewer thread: export kept here, then engine retirement
+"ouroboros/delegate_result_taken.py" = "D07"  # a held delegated Git result: the engine told `taken` once its tree ends
 "ouroboros/copy_capture_proof.py" = "D07"  # may a finished plain copy go: unique work proven in its saved patch
 "ouroboros/workspace_copies.py" = "D07"
 "ouroboros/body_candidate.py" = "D07"  # own-body authoring candidate: one more kind of task-owned isolated copy
@@ -916,6 +917,7 @@ D20 = "Presence"
 "ouroboros/storage_free_view.py" = "D16"  # Temporary space pool and paged item views over the held plan
 "ouroboros/storage_free.py" = "D16"  # Dashboard Storage: the owner's free-space preview and run over the existing retirers
 "ouroboros/storage_removers.py" = "D16"  # Dashboard Storage: each place's removers and how their last pass ended
+"ouroboros/tools/control_storage.py" = "D16"  # Dashboard Storage: the mind's Free tool over the same storage_free owner
 "ouroboros/jsonl_tail.py" = "D18"
 "ouroboros/temp_sweep.py" = "D18"
 "ouroboros/utils.py" = "D18"
@@ -931,6 +933,7 @@ D20 = "Presence"
 "ouroboros/docker_process_observer.py" = "D17"
 "ouroboros/workspace_patch_rules.py" = "D17"
 "ouroboros/workspace_preflight.py" = "D17"
+"ouroboros/session_scratch.py" = "D17"
 "ouroboros/world_profiler.py" = "D15"
 "server.py" = "D11"
 "ouroboros/server_liveness.py" = "D11"
@@ -1244,6 +1247,7 @@ allowed = [
   "D15->D18",
   "D15->D19",
   "D16->D02",
+  "D16->D04",
   "D16->D06",
   "D16->D12",
   "D16->D17",

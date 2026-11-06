@@ -64,8 +64,8 @@ def _reaction_actions(actions: Any) -> list[str]:
 
 # A moved turn's author whose saved work the queue keeps, or may keep (``presence_continuation.continuation_status``).
 _HELD_AUTHOR = {
-    "saved": ("The queue keeps its saved work (the owner's Pause, or a restart's return): it does not run now, "
-              "continues only when the owner resumes it or the queue returns it, and may then still reply. It is not "
+    "saved": ("The queue keeps its saved work (a Pause, or a restart's return): it does not run now, "
+              "continues only when that Pause is resumed or the queue returns it, and may then still reply. It is not "
               "lost; do not redo its work or report it lost."),
     "custody_unknown": ("Its saved work was handed to the queue, but no current read confirms the queue keeps it: it "
                         "is neither confirmed lost nor running, and may still continue and reply."),
@@ -637,29 +637,26 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int) -> di
     from copy import deepcopy
     from ouroboros.config import get_consciousness_autonomy, runtime_setting
     from ouroboros.presence_runner import presence_event_identity
-    from ouroboros.places import FACT_LEGACY_ADDRESSED, is_owner_account, wake_matches
+    from ouroboros.places import is_owner_account, observed_facts, wake_matches, writes_as_owner
     place = admission.place
-    facts = event.facts if event.facts is not None else (FACT_LEGACY_ADDRESSED,)
-    if event.actor.get("is_bot") is True:
-        facts = (*facts, "from_bot")
+    facts = observed_facts(event)
     actor = str(event.actor.get("platform_actor_id") or event.actor.get("id") or "")
     owner_address = is_owner_account(place, actor, event.account_id)
     identity = deepcopy(event.identity)
-    sending = (identity or {}).get("sends_as") or {}
     allowance = dict(admission.allowance or {})
     metadata = {
         "initiator": "consciousness", "usage_category": "consciousness", "model_role": "consciousness",
         "consciousness_autonomy": get_consciousness_autonomy(), "wake_cause": "focus",
         "consciousness_cause": "place:" + place.place_id, "work_kind": "consciousness",
         "focus": {"place_id": place.place_id, "conversation_key": event.conversation_key,
-                  "identity": identity, "identity_owner": sending.get("kind") == "user" and is_owner_account(place, sending["id"], event.account_id),
+                  "identity": identity, "identity_owner": writes_as_owner(place, identity, event.account_id),
                   "room_chat_id": chat_id, "event_identity": presence_event_identity(admission.binding_id, event),
                   "actor": {"platform_actor_id": actor,
                             "display_name": str(event.actor.get("display_name") or event.actor.get("username") or ""),
                             **({"owner_address_unverified": True} if owner_address and event.actor.get("authenticated") is False else {}),
                             "owner_confirmed": owner_address and event.actor.get("authenticated") is not False,
                             **({"authenticated": event.actor["authenticated"]} if "authenticated" in event.actor else {}),
-                            "is_bot": event.actor.get("is_bot") is True or "from_bot" in facts},
+                            "is_bot": "from_bot" in facts},
                   "matched_wakes": [w.fact for w in wake_matches(place, facts)],
                   "addressed": bool(set(facts) & {"direct_message", "group_dm", "mention", "reply_to_me",
                                                   "review_requested", "assigned", "legacy_addressed"})},

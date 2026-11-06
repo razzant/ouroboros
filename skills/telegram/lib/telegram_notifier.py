@@ -295,8 +295,9 @@ def _cost_text(presentation: Any, lang: str) -> str:
         return ""
     if not math.isfinite(amount):
         return ""
-    # ``toFixed(2)``: the exact binary value, a tie going up, as the card rounds it.
-    money = str(Decimal(amount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    # ``toFixed``: the exact binary value, a tie going up, as the card rounds it; under a cent keeps four places.
+    places = Decimal("0.0001") if 0 < amount < 0.01 else Decimal("0.01")
+    money = str(Decimal(amount).quantize(places, rounding=ROUND_HALF_UP))
     texts = _NOTIFY[lang]
     cost = texts.format("cost_final" if presentation.get("tracked_final") else "cost_up_to", amount=money)
     return texts.format("cost_tracked", cost=cost) if presentation.get("has_unpriced") else cost

@@ -25,7 +25,7 @@ COGNITIVE_MEMORY_TOOL_NAMES: frozenset[str] = frozenset({
 })
 
 CORE_TOOL_NAMES: frozenset[str] = frozenset({
-    "inspect_harness", "inspect_subagent", "maintain_harness",
+    "inspect_harness", "inspect_subagent", "maintain_harness", "free_storage",
     "finish_task",
     "read_file", "list_files", "write_file", "edit_text",
     "apply_patch", "edit_batch",
@@ -87,6 +87,15 @@ META_TOOL_NAMES: frozenset[str] = frozenset({
     "list_available_tools", "enable_tools",
 })
 
+# An actor's own working form: which model thinks (switch_model) and how its own
+# transcript is folded under its own note, exact sources kept (compact_context).
+# Both change cognitive power or the view of what the actor already holds, never
+# authority over anything else, so every restricted actor profile below carries
+# them in every context mode: a child that finds the work harder raises itself
+# instead of failing, and one whose window fills folds instead of dying of
+# overflow (BIBLE P1, P5).
+OWN_FORM_TOOL_NAMES: frozenset[str] = frozenset({"switch_model", "compact_context"})
+
 LOCAL_READONLY_SUBAGENT_MODE: str = "local_readonly_subagent"
 
 # V1 subagents are read-only against local Ouroboros state, except the signed
@@ -96,10 +105,7 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "inspect_harness",
     "inspect_subagent",
     "finish_task",
-    # switch_model changes COGNITIVE POWER, not authority: a child that started on
-    # the cheap lane and finds the work harder raises itself instead of failing or
-    # asking the parent to respawn it (BIBLE P5). Nothing about the sandbox changes.
-    "switch_model",
+    *OWN_FORM_TOOL_NAMES,
     "read_file", "list_files", "search_code", "query_code", "query_data",
     "vcs_read", "github_read",
     # Memory: a child reads, writes knowledge notes and marks in its own name (the
@@ -150,7 +156,7 @@ TASK_DIAGNOSTIC_TOOL_NAMES: frozenset[str] = frozenset({
     "inspect_harness", "chat_history", "recent_tasks", "get_task_result", "peek_task",
     "tree_read", "knowledge_read", "knowledge_list", "memory_read", "wait_task", "wait_tasks",
     "await_messages", "forward_to_worker", "pause_task", "resume_task", "continue_task",
-    "finish_task", "list_available_tools", "switch_model",
+    "finish_task", "list_available_tools", *OWN_FORM_TOOL_NAMES,
 })
 
 ACTING_SUBAGENT_MODE: str = "acting_subagent"
@@ -172,10 +178,7 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "inspect_harness",
     "inspect_subagent",
     "finish_task",
-    # switch_model changes COGNITIVE POWER, not authority: a child that started on
-    # the cheap lane and finds the work harder raises itself instead of failing or
-    # asking the parent to respawn it (BIBLE P5). Nothing about the sandbox changes.
-    "switch_model",
+    *OWN_FORM_TOOL_NAMES,
     "read_file", "list_files", "search_code", "query_code", "query_data",
     "vcs_read", "github_read",
     "write_file", "edit_text",
@@ -207,11 +210,11 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
 })
 
 def schema_selection_tools_for_context(ctx: object) -> frozenset[str]:
-    """Existing Nano view controls select schemas without granting capabilities."""
+    """Nano's schema selectors, for an actor whose set lacks them; they load schemas and grant nothing."""
     from ouroboros.config import get_context_mode
 
     mode = str(getattr(ctx, "active_context_mode", "") or get_context_mode())
-    return META_TOOL_NAMES | {"compact_context"} if mode == "nano" else frozenset()
+    return META_TOOL_NAMES if mode == "nano" else frozenset()
 
 
 def acting_tool_names_for_context(ctx: object, registered_names: Iterable[str]) -> frozenset[str]:
@@ -232,6 +235,13 @@ READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
     "web_search", "chat_history",
     "vcs_read", "service_status", "service_logs",
     "get_task_result", "list_projects", "memory_read", "search_ui_translations",
+})
+
+# The known pure reads: a failed one stays in a card's details instead of warning that no review checked the result
+# (owner 06.11, A; _outcome_tool_errors.warns_without_review). Every parallel-safe read, plus reads that cannot run in
+# parallel. A tool not named here (an effect, a command, MCP, an extension) stays loud.
+PURE_READ_TOOLS: frozenset[str] = READ_ONLY_PARALLEL_TOOLS | frozenset({
+    "browse_page", "view_image", "github_read", "knowledge_read", "youtube_transcript",
 })
 
 # Enqueue-only tools safe to emit in parallel within one tool-call round.
@@ -460,7 +470,7 @@ def routing_action_for_tool(name: object) -> str:
 # at the authority module.
 OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
     "pause_task", "resume_task", "continue_task",
-    "maintain_harness",
+    "maintain_harness", "free_storage",
     # starting or steering work (tell_task stays: the nanny of a running campaign)
     "start_task", "schedule_subagent", "schedule_followup", "plan_task",
     "move_to_project", "close_project", "delegate_start", "initiate_presence",

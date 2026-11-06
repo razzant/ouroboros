@@ -174,6 +174,15 @@ def looks_masked_secret(value: Any) -> bool:
     return text == CONFIGURED_SECRET_PLACEHOLDER or looks_masked_mcp_secret(text)
 
 
+# JSON Schema words that redaction and schema presentation share (``observability._redact_any``,
+# ``mcp_schema.wrap_schema_text``): a name map's keys name parameters or definitions, never credentials;
+# a subschema says what it accepts by at least one kind keyword; notes describe it and hold no instance data.
+SCHEMA_MAPS = frozenset({"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"})
+SCHEMA_ARRAYS = frozenset({"allOf", "anyOf", "oneOf", "prefixItems"})
+SCHEMA_KINDS = frozenset({"type", "$ref", "enum", "const"}) | SCHEMA_ARRAYS
+SCHEMA_NOTES = frozenset({"type", "$ref", "title", "description", "format"})
+
+
 # Well-known entropy token formats (SSOT; ``observability`` reuses this list
 # for forensic redaction). File-tool results do not apply these patterns.
 SECRET_TOKEN_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (

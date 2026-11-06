@@ -1050,8 +1050,10 @@ A place connector reports observations; the host decides attention. While runnin
 authenticated, report every supported event within the connected place's granted
 account, conversation and thread bounds, with observed provider facts. Do not discard
 these events based on their text, perceived relevance, wake list or place state.
-A bot sender is the fact `from_bot`, not an intake filter. Disable, unload, Panic and
-provider access still govern connector operation; this promises no access to events
+A bot sender is the fact `from_bot`, not an intake filter. It names the author's provider account, not the
+client that posted: a person writing through an app or an assistant is that person, and app or bot markers on
+a message decide only when the provider names no person or cannot say what kind of account wrote it.
+Disable, unload, Panic and provider access still govern connector operation; this promises no access to events
 outside the provider API or the connector's declared support.
 
 The host validates and captures an event before applying authored wakes and execution
@@ -1082,7 +1084,12 @@ Neither carrier adds fields to `places.json`.
 The owner's “This is my account” confirms `sends_as.id` using the existing `owner_accounts` writer.
 For `kind: user` only, a matching `platform_actor_id` in the same `account_id` scope derives `owner: true`; revocation removes it.
 This says whose credential writes or reads, independently of who sent an incoming message. Never return your own
-sends as incoming events: from the owner's confirmed account they would read as the owner's words. Bot identities
+sends as incoming events: from the owner's confirmed account they would read as the owner's words. Where the
+provider lets you tell them apart (GitHub does), do report the account's other activity (its edits, merges and posts
+made by other tools acting as it): the host settles an event whose actor is `sends_as.id`, not reported
+unauthenticated, as heard with reason `own_account`; it stays in the room and the next own wake and never wakes a
+focus. Where `sends_as` is the owner's confirmed account, its posts are the owner's words and keep the ordinary path.
+Otherwise, other people who post from the sending account are heard as it, not woken on. Bot identities
 never derive owner status or offer this confirmation. Only the human activates a place, through its sheet or an owner-door Main turn;
 consciousness may still set Silent or Paused.
 
@@ -1146,6 +1153,10 @@ Use the connector's ordinary content-hash-bound skill token for:
   facts. `review_requested` and `assigned` mean requests addressed to the watched
   identity; narrow wake declarations may use them. A new discussion is not a
   `new_issue`; `any_message` is the generic alternative. Bots require an explicit bot wake item.
+- Optional `event.message.forward_origin` (any non-empty value): the message carries words another author wrote
+  (a forward, or another person's text the event copies under the sender). The host never records such an event as
+  its sender's own words: an addressed message from an account the place confirms as the owner's is the owner's words
+  at a turn's opening, mid-turn and when a focus hands it on; a forward of it is not.
 - Optional `event.message.reaction` (object with `schema_version: 1`; `text` and files empty; an object
   without that key is not this fact): `change` `add`/`remove`/`replace`/`count`; `old`/`new` lists hold provider
   `{type, value}`; `count` instead has only `counts` entries `{type, value, count}` (non-negative integer),
@@ -1199,7 +1210,8 @@ clock. Before allowance, rate or capacity is consulted, the conversation's curre
 sole reader (a promoted or follow-up root of this place and conversation whose loop reads mail or
 is in an unheld cold sleep, or an author parked for its review or private question, whose wait
 wakes and retakes the conversation before any model call), receives later arrivals as typed
-context-only mail, whether or not they match a wake fact; they never answer its question. An untagged message in the same thread, topic or direct message is a
+context-only mail, whether or not they match a wake fact (an addressed one from the owner's confirmed
+account carries the owner's words); they never answer its question. An untagged message in the same thread, topic or direct message is a
 wake: it ends an ordinary wait and reopens an unsent final. Other untagged group messages reach a
 current author as background and a root not at all; they stay readable in the room. Several
 readers receive nothing: the arrival takes an ordinary focus under the allowance, whose
@@ -1223,7 +1235,7 @@ answer was lost; a closed or ended one leaves the event eligible for ordinary ad
 after a Host crash or a torn write returns to its recorded holder, but the handoff is not
 exactly-once: a write whose effect cannot be proven stays unknown, as above. A
 wake arrival its model has not seen when it finishes reopens it for another round; background
-arrivals alone never do. An author's own explicit `action="stop"` stands: an arrival drained at
+arrivals alone never do, though the owner's own words in one are owner input its final answers. An author's own explicit `action="stop"` stands: an arrival drained at
 its close is acknowledged in its transcript, never read by its model, and starts no round.
 
 A focus, or a root promoted or scheduled from it, uses ordinary `finish_task`, including

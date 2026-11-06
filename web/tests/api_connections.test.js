@@ -152,6 +152,13 @@ test("a route names its key in the owner's words: the chip, and the task card's 
         };
         assert.match(card('openrouter@claude-credits::anthropic/claude-opus-5.5'), /claude-opus-5\.5 · Claude credits/);
         assert.doesNotMatch(card('anthropic/claude-opus-5.5'), /·\s*(Default|OpenRouter)/, 'the built-in key adds nothing');
+        // Audit 05.11 (U007): a Claudexor route names its model, never its stored spelling `codex=…`.
+        assert.match(card('claudexor::codex=gpt-6-astra'), /gpt-6-astra/);
+        assert.doesNotMatch(card('claudexor::codex=gpt-6-astra'), /codex=|claudexor/);
+        const unobserved = { finished: true, metaEl: { innerHTML: '', isConnected: true },
+            modelExecution: { source: 'none', requested_model: 'claudexor::codex=gpt-6-astra' } };
+        renderLiveCardMeta(unobserved);
+        assert.match(unobserved.metaEl.innerHTML, /Requested gpt-6-astra · execution not observed/);
         // An observed execution names the key it actually used, not the requested one.
         const record = { finished: true, metaEl: { innerHTML: '', isConnected: true }, modelExecution: {
             source: 'usable_solve_response', requested_model: 'anthropic/claude-opus-5.5',

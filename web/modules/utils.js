@@ -341,6 +341,15 @@ export function formatUsd2(value) {
     return Number.isFinite(num) ? `$${num.toFixed(2)}` : '—';
 }
 
+/** A known dollar amount: two places, four under a cent and `<$0.0001` below that, so a positive amount never
+ *  reads as the priced zero `$0.00`; absent or unreadable is the dash. */
+export function formatUsdKnown(value) {
+    if (value === null || value === undefined || value === '') return '—';
+    const num = Number(value);
+    if (!Number.isFinite(num)) return '—';
+    return num > 0 && num < 0.0001 ? '<$0.0001' : `$${num > 0 && num < 0.01 ? num.toFixed(4) : num.toFixed(2)}`;
+}
+
 export function allowanceLabel(spent, daily, unknownUnmetered = 0, integrityDegraded = false) {
     // The consciousness allowance line: an absent number stays absent (never $0.00), a
     // window with unmetered rows prints as a floor ("≥"), a quarantined ledger says so.

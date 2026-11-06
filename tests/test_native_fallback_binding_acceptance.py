@@ -407,7 +407,7 @@ def test_primary_choice_survives_shared_cold_continuation(main_call, monkeypatch
     model, effort, local, mode, _round, restored_plan = budget_pause.resume_paused_loop(
         ctx.tools, state, ctx.messages, {}, {}, set(), budget_remaining_usd=5.0)
     assert budget_pause.budget_pause_row(ctx.drive_root, inner.task_id)["state"] == budget_pause.STATE_RESUMED
-    assert any("explicit owner Resume" in str(row.get("content")) for row in ctx.messages)
+    assert any("after an explicit Resume (" in str(row.get("content")) for row in ctx.messages)  # a grant naming nobody
     model, local, effort, plan, _mode = loop_model_call._apply_round_route_overrides(
         inner, ctx.tools, ctx.messages, (model, local, effort), restored_plan, mode, "max", [])
     assert plan.model_role == "main" and inner.route_wait_on_primary is (choice == "wait")

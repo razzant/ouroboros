@@ -25,7 +25,7 @@ from ouroboros.finalization_timing import (  # noqa: F401 — compatibility expo
     emit_finalization_timing, mark_last_answer, stamp_finalization_enqueue,
     task_timing, task_timing_scope, timed_phase, without_finalization_timing,
 )
-from ouroboros.secret_masking import SECRET_TOKEN_PATTERNS
+from ouroboros.secret_masking import SCHEMA_KINDS, SCHEMA_MAPS, SCHEMA_NOTES, SECRET_TOKEN_PATTERNS
 from ouroboros.utils import (
     atomic_write_json,
     extract_trailing_json_object,
@@ -1219,25 +1219,43 @@ def _secret_value_fingerprint(value: Any) -> str:
     return f"***REDACTED[{type(value).__name__}:len={len(raw)}:sha256_8={digest}]***"
 
 
-def _redact_any(value: Any, records: List[RedactionRecord], path: str) -> Any:
+def _schema_names(item: Any) -> bool:
+    """A name map: every entry is a subschema - a boolean, ``{}``, or a dict saying what it accepts."""
+    return isinstance(item, dict) and all(isinstance(sub, bool) or isinstance(sub, dict) and (
+        not sub or (SCHEMA_KINDS | SCHEMA_MAPS) & set(sub)) for sub in item.values())
+
+
+def _redact_any(value: Any, records: List[RedactionRecord], path: str, *, secret_literals: bool = False,
+                schema: bool = False) -> Any:
+    if secret_literals and not isinstance(value, (dict, list, tuple, bool)) and value not in (None, ""):
+        records.append(RedactionRecord(path=path, rule="secret_key_name"))
+        return _secret_value_fingerprint(value)
     if isinstance(value, dict):
+        # A JSON Schema's name maps name parameters (``page_token``), not credentials: names and shapes
+        # stay readable (P1: tool schemas); under a credential-named one every value but its notes is masked.
+        kinds = value.get("type") if isinstance(value.get("type"), list) else [value.get("type")]
+        schema = schema or "object" in [str(kind).lower() for kind in kinds]
         out: Dict[str, Any] = {}
         for key, item in value.items():
             key_text = str(key)
             item_path = f"{path}.{key_text}" if path else key_text
-            if _is_secret_key_name(key_text):
+            if schema and key_text in SCHEMA_MAPS and _schema_names(item):
+                out[key_text] = {str(name): _redact_any(sub, records, f"{item_path}.{name}", schema=True,
+                                                        secret_literals=secret_literals or _is_secret_key_name(str(name)))
+                                 for name, sub in item.items()}
+            elif _is_secret_key_name(key_text):
                 if item not in (None, "", False):
                     records.append(RedactionRecord(path=item_path, rule="secret_key_name"))
                 out[key_text] = (
                     _secret_value_fingerprint(item) if item not in (None, "", False) else item
                 )
             else:
-                out[key_text] = _redact_any(item, records, item_path)
+                out[key_text] = _redact_any(item, records, item_path,
+                                            secret_literals=secret_literals and key_text not in SCHEMA_NOTES)
         return out
-    if isinstance(value, list):
-        return [_redact_any(item, records, f"{path}[{idx}]") for idx, item in enumerate(value)]
-    if isinstance(value, tuple):
-        return [_redact_any(item, records, f"{path}[{idx}]") for idx, item in enumerate(value)]
+    if isinstance(value, (list, tuple)):
+        return [_redact_any(item, records, f"{path}[{idx}]", secret_literals=secret_literals)
+                for idx, item in enumerate(value)]
     if isinstance(value, str):
         return _redact_text(value, records, path)
     return value

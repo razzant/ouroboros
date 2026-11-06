@@ -432,7 +432,7 @@ def _finish_task_done_dispatch(
             or load_task_result(ctx.DRIVE_ROOT, str(task_id or ""))
             or {}
         )
-        from supervisor.subagent_task_truth import enrich_task_done_event
+        from supervisor.subagent_task_truth import enrich_task_done_event, terminal_executor_route
 
         _envelope = enrich_task_done_event(task_done_event, effective_result)
         # Membership, not truthiness (C4): chat 0 real, negative A2A.
@@ -513,7 +513,7 @@ def _finish_task_done_dispatch(
                 # The terminal frame carries the route so the finished card's chip can be
                 # rebuilt on replay, and the completion-seam EVIDENCE (below) so the chip
                 # upgrades from the neutral "dispatched" decision to what actually ran.
-                "executor_route": str(effective_result.get("executor_route") or ""),
+                "executor_route": terminal_executor_route(effective_result),
                 # The effort decision survives the terminal card and its replay (empty = unknown).
                 "effort_level": str(effective_result.get("effort_level") or ""),
                 "effort_requested": str(effective_result.get("effort_requested") or ""),

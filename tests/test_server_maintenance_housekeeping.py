@@ -234,7 +234,8 @@ def test_every_custody_pass_prunes_the_working_copies_with_the_supervisor_probe(
 
     custody_pass()
     custody_pass()
-    assert calls == [("worktrees", {"live": probe}), ("snapshots", {"snapshot-open"})] * 2
+    assert calls == [("worktrees", {"live": probe, "reasons": {}}),
+                     ("snapshots", {"snapshot-open"})] * 2
 
     calls.clear()
     closed = threading.Event()

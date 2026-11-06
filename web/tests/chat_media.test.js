@@ -58,6 +58,14 @@ test('private contact source stays in the voice line, separate from authored wor
         assert.equal(plain.querySelector('.md-link'), null);
         const unknown = fx.controller.bubbleFrameNode({ role: 'assistant', presence_contact: { label: 'unbound' } }, document.createElement('div'));
         assert.equal(unknown.querySelector('.sender').children.length, 0);
+        // A label stored before its connector stopped prefixing its own word (audit 05.11, U015) reads that word once.
+        const doubled = fx.controller.bubbleFrameNode({ role: 'assistant', presence_contact: { ...origin, label: 'Telegram · Telegram · Anton' } },
+            document.createElement('div'));
+        assert.equal(doubled.querySelector('.sender').querySelector('.md-link').textContent, 'Telegram · Anton');
+        const repeatedName = fx.controller.bubbleFrameNode({ role: 'assistant', presence_contact: { ...origin, label: 'GitHub · ouroboros · GitHub' } },
+            document.createElement('div'));
+        assert.equal(repeatedName.querySelector('.sender').querySelector('.md-link').textContent, 'GitHub · ouroboros · GitHub',
+            'only a segment equal to the one right before it goes');
     } finally { fx.controller.destroy(); fx.restore(); }
 });
 

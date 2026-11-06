@@ -911,7 +911,8 @@ under one of the four categories above and fails on a new one;
 
 New messages are crimson, and only where the owner reads. The two sidebar numbers
 count the same thing, the standalone messages not read yet (below): Main's on its
-row, shown while another place is, and the Projects header's, summed over its rows,
+row, shown while another place is, and the Projects header's, summed over its rows
+(those it rests on, hidden or not, and the older ones an open find or browse shows),
 each a crimson pill in one column just before the marks (owner 19.10, Q1 = B). A
 Project row's mark takes the crimson tint (its work's shape, or a dot where nothing
 works), and ☰ carries a crimson dot while Main or a Project hidden in the drawer has
@@ -994,8 +995,8 @@ this Project" came to be drawn six ways. The rule is therefore about intents.
   the glyph and the arrow say in pixels (`Open project <name>`); nothing depends
   on hover.
 - **Two forms, one recipe.** The reference is a capsule: it leads a Project-bound work card's action
-  row at that row's 28px height and meta size, and sits everywhere else: under a mirrored answer or a
-  System lifecycle row (in the shared `createSystemMessageActions` row, token spacing, wrapping,
+  row at that row's 28px height and meta size, and sits everywhere else: under a mirrored answer, a
+  Main notice of a Project's work or a System lifecycle row (in the shared `createSystemMessageActions` row, token spacing, wrapping,
   focus-ring clearance), ending an owner message's one receipt line ("Passed on to «work…» in": the
   owner asked for it compact on 27.10, the name stays stored whole; "Started as a task in"), and in a
   Main question copy's voice line beside `Ouroboros`, at that line's 28px height and meta size
@@ -1032,6 +1033,7 @@ questions stay model-authored even when typed.
 A host fact has a subject, and the subject names its carrier: a task's fact is a
 row of its card, a fact about the owner's message is the typed annotation on that
 message, and a landed act publishes no row (its receipt or card already says it).
+The mind's Storage → Free request is reported in Main as a typed System row (`storage_free_notice`).
 A standalone System row exists only where nothing else can carry the fact: no mind
 can speak, no mind will read the message, the owner's own direct act, the
 runtime's state (a settings change saved outside the app: one
@@ -1251,7 +1253,8 @@ preference when it opens and on every reconnect; there is no file watcher.
   name and line (owner 30.10, B); empty activity reserves no band, and a duplicate title is not activity.
   Full narration and Reviews expand independently. A completed child's result is
   its report: `Report to parent`, semibold at the row's size and ink, leads its
-  collapsed line and replaces `[RESULT]` over full text (owner 25.10, A). The root keeps primary title
+  collapsed line and replaces `[RESULT]` over full text (owner 25.10, A). A helper the host could not start has no
+  report: its cause leads the line, the host's notice to its parent stays in details. The root keeps primary title
   ink at weight 500, children secondary ink at 400. Nested frames keep real
   ancestry on an opaque secondary surface, so white tints never accumulate.
 - **An executor label names the helper and states only exceptions.** The
@@ -1297,10 +1300,21 @@ reader; composer files stay.
   controls translate. Titles preserve line breaks and wrap whole in a bounded
   keyboard scroller; actions wrap before squeezing the name. On a phone sheet
   the name keeps its row beside Close and every action stays in sight under it
-  in two groups, the view (`Formatted`/`Source`, `Fit`/`Actual size`), then the
+  in two groups, the view (`Formatted`/`Source`) or image-scene zoom controls
+  (`−`/`Reset`/`+`), then the
   file's (Copy, Open, Download): one row when both fit, else a row each; nothing
-  goes under a menu (audit №5, owner 2026-10-28T22:09Z).
-- Images open at `Fit` (whole, never enlarged); `Actual size` scrolls their pixels.
+  goes under a menu (audit №5, owner 2026-10-28T22:09Z). Image-only A Scene is
+  the scoped exception chosen by the owner on 2026-11-05: on a coarse phone its
+  existing chrome is visible when opened and a tap on the image stage toggles it;
+  keyboard focus, Escape and the existing actions remain available. Text readers
+  and non-image sheets keep the always-visible rule. This change does not add
+  swipe or sibling navigation between images.
+- Images open as an image scene fitted to the stage. The scene owns a bounded
+  focal zoom with visible minus/reset/plus controls, double click/tap zoom,
+  pinch zoom and pan; keyboard arrows pan while zoomed and `0`/Home resets.
+  Phone/coarse-pointer chrome is visible when opened and can be toggled by a
+  stage tap; keyboard focus, Escape and the existing file actions remain
+  available. There is no gallery or sibling-image swipe in this change.
 - Markdown follows the reading size and heading ladder of a rich answer (§1).
   Single newlines inside a paragraph are soft; explicit hard breaks stay.
   Raw HTML and SVG stay literal, images stay references and never load, and
@@ -1427,7 +1441,8 @@ that saved no choice reads `until it is woken`), unless a helper its sleep chose
 that helper (`… until Ouroboros resumes it` only when this episode may ask for it,
 or `until you resume it` after Panic; a Continue's earlier helper is just
 `paused`), with no new control or turn; helpers an earlier attempt left running
-read as `Working`, with their count; an
+read as `Working`, with their count; `Queued` carries no cause when the scheduler
+recorded none, never a free-worker claim; an
 access wait is not an answer wait, and unknown stays unknown. Under the state a
 live work shows its authored focus (`update_focus`: stage · done · left), led by its time,
 quiet, at most two lines. A finished row shows the author’s closing sentence,
@@ -1725,7 +1740,7 @@ A chat transport shows such a request as the host's note on where to enter it, w
 
 **Project question mirror.** A Project question's Main copy is its own `buildQuizCard` card, whole as anatomized above, in an assistant bubble at its ask time in the feed, not a section of its own; the Project reference in its voice line opens the exact original, and answers, materials and recovery controls work in Main. It uses the shared ring and `--project` tints; names ellipsize (full titles); the head stays the room's row. History, live pointers and the census share one task/quiz card and lifecycle wording; the canonical current questions only confirm or settle copies the feed holds, never mount them, and an incomplete read withholds only what its typed gaps name. Optional, resumed and terminal-author questions stay answerable until answered or closed; no display/history cap drops them. Replaced questions stay read-only. The owner closes from the card, a model its own or a host-proven continued task line's question, or a finished task's, always with its own reason. Closure records a reason, never an answer/approval. A late answer left delivery-unknown by a restart offers Remove from pending (no resend, never marked delivered). Publication destination stays fixed across Project conversion; current room membership controls display. Explicit materials use registered task artifacts and the existing reader.
 
-A task that cannot continue without the owner is one System message in the feed, stamped when first seen: the task, one sentence, its own controls (revision-bound model access, Resume/Stop, children's included; activity counts each work once, its helpers within it). Sign-in, unobservable automatic access, disabled automatic continuation, budget pauses and Resume-only holds qualify; viable automatic account/quota recovery, queues, self-waking sleep, background scope verification and own Pause stay quiet. Deduplicate the same quiz/wait identity, not all waits on a task; the message leaves when a complete census drops the row. Missing action evidence stays unavailable; visibility never authorizes login, budget changes or automatic Resume.
+A task that cannot continue without the owner is one System message in the feed, stamped when first seen: the task, one sentence (none where its own control already says it: a plain resume pause beside Resume), its own controls (revision-bound model access, Resume/Stop, children's included; activity counts each work once, its helpers within it). Sign-in, unobservable automatic access, disabled automatic continuation, budget pauses and Resume-only holds qualify; viable automatic account/quota recovery, queues, self-waking sleep, background scope verification and own Pause stay quiet. Deduplicate the same quiz/wait identity, not all waits on a task; the message leaves when a complete census drops the row. Missing action evidence stays unavailable; visibility never authorizes login, budget changes or automatic Resume.
 
 One amber pill among the composer's pills (their row, height and type, at its end; `--status-warn-*`) counts the unanswered questions and owner actions — `1 question`, `3 questions`, `1 action`, `4 waiting` — and shows only while one of them is off screen; a narrow row keeps the glyph and number. Each press shows the next, oldest first, cycling: the card head lands under the chat header and the question text takes focus, never the answer field, so no touch keyboard opens. A question outside the loaded history mounts at its own date under the existing history note; there is no history seek.
 
@@ -2183,7 +2198,8 @@ A task that ends with a cause states it on the collapsed line in the
 owner's words (the sentence of the durable row and the expanded body), so a
 `Done with warnings` chip never stands beside an unrelated last action; a clean
 ending's own summary replaces the last narration (owner 01.11 10:52, A). Residual tool
-errors name the first recorded failure in plain words (a noun for the step and
+errors warn unless the failed tool is a known pure read: a failed read or search stays in the details,
+while an effect or command that failed, or a tool of unknown kind, warns. They name the first such failure in plain words (a noun for the step and
 what happened, never a tool name, its result text or a path) and count the rest (`tool_error_words`). Successful tool calls are not rows: they fold
 into ONE evidence row per block (`N tool calls`, `N tool calls · M errors` once
 a call failed) at the first call's position and time, patched in place; Expand
@@ -2249,13 +2265,16 @@ status and wait controls but no title or conversion until the first work row
 adds one.
 
 The compact meta line names executor/model (roots: observed solve model, else
-agent model), duration, cost, exceptions and running narration's `updated`
-(in a root's head).
+agent model; a Claudexor route by its model), duration, cost, exceptions (tool
+errors only under a chip that warns or fails; under Done the block's own rows
+name them) and running narration's `updated` (in a root's head).
 One positive task-local tool-call count joins that line and remains after Done
 (owner 22.10, A). Helpers are not aggregated. Rounds (usable solve responses)
 and known zero calls stay in Details, making no work or footer row; missing
 counts stay absent. Session nanny counts appear only in `Supervision` (footer and
-Details), apart from unreported executor counts. Portals keep one count. Model provenance, origin and a finished card's update time stay in Details. Money
+Details), apart from unreported executor counts. Portals keep one count. Model provenance, origin and a finished card's update time stay in Details. A root's Details add `Spent on` and `Ran on`, its read-time cost breakdown by purpose and by the route that
+served the rows: each line in the card's money words beside the model calls, sessions and tokens the ledger
+recorded, a part it did not record absent; the main line keeps its one amount (owner 02.09). Money
 there is ONE line whose wording carries its openness and never renders an
 unknown as a number: `$0.00` only where priced rows evidenced that zero,
 `up to $1.20` while the tracked subtotal is inexact, `Tracked: $1.20` when part
@@ -2598,7 +2617,8 @@ leaves later configuration to Settings. Summary names exactly the assignments
 the one atomic Finish saves, including deep self-review. Reviewers remain
 editable with the same controls as Settings. A subscription-only Budget step leads with quota/reset facts and keeps
 optional API spending fields collapsed. "No API key" never claims unlimited free
-work or that paid provider credits were enabled.
+work or that paid provider credits were enabled. When a subscription serves a model, Summary says
+what an exhausted quota does: a set Fallback is tried first, then the work waits for the reset.
 
 Before the first completion, Summary offers Consciousness as an unchecked choice. Its
 row names the autonomy, daily allowance and own-task limit consciousness runs under
@@ -2947,11 +2967,20 @@ neither opens nor reads it. Pinned Projects lead the one list, and one `--space-
 shown row is their only boundary: no caption, glyph, tint, rule or column, so
 nothing reads as one more Project; the row's tooltip and accessible name say
 Pinned. Within each group unread leads, then recency; the column's places follow §5.
-After Unpin, a room outside the recent sidebar slice disappears from that slice,
-not from the registry. The Projects header collapses the whole list or opens it:
-collapsed, only the pinned Projects stay, in their order and with their air; every
-other row hides whatever it is doing, the open one included, and the header keeps
-its mark and unread count for them. The choice is remembered on the device; a row
+The list rests on the pins and the most recent other Projects. Every other one is one step away by the owner's
+choice A1: Find a project under the header and Show more at the end of the list. As built, the field is a
+capsule a row high in the header pills' material, made like the composer's field; it matches every Project's
+name, older and closed ones included, by its letters (any case or accent, each word anywhere in it), and a found
+name may take three lines. Show more ends a list the state knows more rooms for and adds the next fifty by
+recency; a find with no match says no project name contains those words and offers Clear search and Show all
+projects. A list that could not be read again says so, with the time of the one shown and Try again; until a
+read answers, nothing is said to be missing. Neither reads a room's history or marks anything read. Beyond the
+recent rows the order is the one the owner's last action gave, pins still leading: activity changes rows in
+place, and a room that comes or goes never moves the row in view. A Project outside the list opens by its own
+id; a missing or deleting one leaves the room on screen and says so. The Projects header collapses the whole
+list or opens it: collapsed, only the pinned Projects stay, in their order and with their air; every
+other row hides whatever it is doing, the open one included, a find or a browse ends, and the
+header keeps its mark and unread count for them. The choice is remembered on the device; a row
 that hides while it or its menu holds focus closes its menu and hands focus to the
 header. No label is set in capitals. A short window first compacts rows (fine pointer only), then lets the
 whole column scroll with Main pinned at the top and the version and the update on the bottom edge (owner 23.10);

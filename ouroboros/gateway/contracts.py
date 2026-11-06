@@ -40,6 +40,7 @@ from ouroboros.gateway.decision_contracts import (  # noqa: F401 -- public re-ex
     SecretConsumer, SecretKeyState, SecretRequestField, SecretRequestMeta,
 )
 from ouroboros.gateway.card_contracts import CardOutbound, CardStateOutbound  # noqa: F401 -- public re-exports
+from ouroboros.gateway.cost_breakdown import TaskCostBreakdown, TaskCostSlice  # noqa: F401 -- public re-exports
 from ouroboros.gateway.update_contracts import (  # noqa: F401 -- public re-exports
     UpdateApplyErrorResponse, UpdateApplyRequest, UpdateApplySuccessResponse, UpdateDescriptionErrorResponse,
     UpdateDescriptionRequest, UpdateDescriptionResponse, UpdateMergePlan,
@@ -796,8 +797,8 @@ class StateResponse(WorkStateFields):
     accounting: Dict[str, Any]
     # Multi-project sidebar feed: compact registered projects [{id, name, chat_id, working_dir, last_active_at, ...}].
     projects: list
-    # COMPLETE (uncapped) registered project chat_ids — the live WS fan-out isolation SSOT, unlike `projects`.
-    project_chat_ids: list
+    project_listable_count: Optional[int]  # active/deleting Projects the sidebar can list; null when unavailable
+    project_chat_ids: list  # COMPLETE (uncapped) registered chat_ids; the live WS fan-out isolation SSOT
     # Main's room revision (its standalone messages, the kind a Project's visible_revision counts); null while unreadable.
     main_visible_revision: NotRequired[Optional[int]]
     # Task->project bindings ({task_id: {project_id, chat_id, project_name}}): a bound card hides the stray
@@ -1128,25 +1129,6 @@ class TaskListResponse(TypedDict, total=False):
     tasks: list[Dict[str, Any]]
     queue: Dict[str, Any]
     error: str
-
-
-class TaskCostBreakdown(TypedDict):
-    """Root-only task-detail ledger projection, computed on read, never persisted.
-    All keys appear together; ``own + children + unattributed == subtree``. Omit
-    the object for non-roots, unavailable accounting or no attributable subtree rows; never invent $0."""
-
-    own_usd: float
-    children_usd: float
-    unattributed_usd: float
-    delegated_disclosed_usd: float
-    # C2: own + children + unattributed is an accounted UPPER BOUND, not a receipt.
-    accounted_upper_bound_usd: float
-    subscription_sessions: int
-    unknown_unmetered: int
-    non_final_rows: int
-    cost_final: bool
-    cost_custody: Optional[CostCustody]
-    authority: Literal["physical_attempt_ledger"]
 
 
 class HistoryRetentionProjection(TypedDict):

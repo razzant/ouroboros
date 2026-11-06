@@ -139,6 +139,41 @@ def test_negative_a2a_subagent_no_chat_frame_but_log_enriched(tmp_path):
         assert k not in done_rows[0]
 
 
+def test_a_child_refused_at_dispatch_names_the_session_route_its_row_named(tmp_path):
+    """Live, its card said ``{harness} · blocked`` from the dispatch caps; the record keeps no route (nothing ran
+    on it), so the terminal carriers take it from the configured row. An API-model row names none, as live."""
+    from ouroboros.task_results import write_task_result
+    from supervisor.subagent_task_truth import terminal_executor_route
+
+    def refused(kind, target):
+        return dict(result="⚠️ SUBAGENT_UNAVAILABLE: this subagent could not start.", chat_id=0,
+                    parent_task_id="root-9", root_task_id="root-9", delegation_role="subagent",
+                    effective_executor="blocked", executor_route="", reason_code="subagent_executor_unavailable",
+                    configured_subagent={"route": {"kind": kind, "target_id": target}})
+
+    session, api = refused("agent_session", "claude=claude-opus-5-5:high"), refused("api_model", "openai/gpt-6")
+    assert (terminal_executor_route(session), terminal_executor_route(api)) == ("claude", "")
+    # A recorded route stays the record's, and a child that ran natively names none.
+    assert terminal_executor_route({**session, "executor_route": "codex=gpt-6-astra"}) == "codex=gpt-6-astra"
+    assert terminal_executor_route({**session, "effective_executor": "native"}) == ""
+    for task_id, fields, route in (("child-r", session, "claude"), ("child-q", api, None)):
+        (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+        sent, pushed = [], []
+        ctx = _mk_ctx(tmp_path, sent, pushed)
+        task = {"id": task_id, "type": "task", "chat_id": 0, "delegation_role": "subagent", "role": "critic",
+                "parent_task_id": "root-9", "root_task_id": "root-9"}
+        ctx.RUNNING[task_id] = {"task": task}
+        write_task_result(tmp_path, task_id, "failed", **fields)
+        from ouroboros.headless import prepare_terminal_task_files
+        from supervisor.events import _handle_task_done
+        assert not prepare_terminal_task_files(tmp_path, task)["error"]
+        _handle_task_done({"type": "task_done", "task_id": task_id, "task_type": "task", "worker_id": 0, "chat_id": 0,
+                           "ts": "2026-11-06T00:00:00Z", "_files_prepared_attempt": 1}, ctx)
+        pushed_done = [p for p in pushed if p.get("type") == "task_done"]
+        assert pushed_done[0].get("executor_route") == route, task_id
+        assert [meta["executor_route"] for _c, _t, meta in sent] == [route or ""], task_id
+
+
 def test_non_subagent_log_channel_not_enriched(tmp_path):
     sent, pushed, done_rows = _run(tmp_path, "root-task", 1, delegation_role="")
     pushed_done = [p for p in pushed if p.get("type") == "task_done"]

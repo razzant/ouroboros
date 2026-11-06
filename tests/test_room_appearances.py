@@ -110,6 +110,35 @@ class TestWorkSpeechWrittenElsewhere:
         row = ds.rows_by_identity(tmp_path, 1, frame["ts"])[0].row
         assert mi.rooms_of_row(mi.row_meta(row), mi.membership_facts(tmp_path)) == {"1", str(nova)}
 
+    def test_a_notice_in_main_names_its_works_project_live_and_on_reload_and_never_one_that_cannot_open(
+            self, tmp_path, host):
+        """Audit 05.11 item 4: a Main notice of a Project's work carries that Project's reference (its id and current
+        name, from the one room the row already stands in), live and on reload; a Project being deleted, whose room no
+        longer opens, is named by none."""
+        from ouroboros.projects_registry import begin_project_deletion, update_project
+
+        nova = _project(tmp_path, "nova")
+        _born_in(tmp_path, "nova-root", nova)
+        frame = _notice(tmp_path, host, "nova-root", nova, "Nova finished its series.")
+        assert (frame.get("project_id"), frame.get("project_name")) == ("nova", "Nova")
+        notice = lambda: next(r for r in _read(tmp_path, 1)[1]["messages"] if r.get("text") == "Nova finished its series.")
+        update_project(tmp_path, "nova", name="Nova Prime")  # a projection, never a stored copy
+        assert (notice().get("project_id"), notice().get("project_name")) == ("nova", "Nova Prime")
+        begin_project_deletion(tmp_path, "nova")
+        assert "project_id" not in notice() and "project_name" not in notice()
+
+    def test_history_names_a_project_from_the_rows_room_stamp_and_never_re_derives_its_rooms(self, tmp_path, monkeypatch):
+        """Review R2 (N1): a history row's Project reference comes from its room stamp; a row written before rooms
+        were stamped names none rather than costing a registry parse per row."""
+        from ouroboros import room_appearances as ra
+
+        nova = _project(tmp_path, "nova")
+        monkeypatch.setattr(ra, "write_facts", lambda *a: pytest.fail("history never re-derives a row's rooms"))
+        row = {"type": "main_notice", "chat_id": 1}
+        assert ra.frame_project(tmp_path, row) == {}
+        assert ra.frame_project(tmp_path, {**row, "room_revisions": {"1": 3, str(nova): 2}}) == {
+            "project_id": "nova", "project_name": "Nova"}
+
     def test_a_relay_answer_returns_to_its_source_and_stays_in_its_works_project(self, tmp_path, host):
         from ouroboros.owner_relay import relay_envelope
 
@@ -122,6 +151,7 @@ class TestWorkSpeechWrittenElsewhere:
         host.handle(q.get_nowait())
         frame = next(f for f in host.frames if f.get("system_type") == "relay_reply")
         assert frame["chat_id"] == 1 and frame["also_rooms"] == [nova]
+        assert (frame.get("project_id"), frame.get("project_name")) == ("nova", "Nova"), "it carries its work's reference"
         assert "Here is the result you asked for." in _texts(tmp_path, 1)
         assert "Here is the result you asked for." in _texts(tmp_path, nova)
 

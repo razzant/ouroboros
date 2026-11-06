@@ -95,7 +95,7 @@ from ouroboros.runtime_limits import (
     WS_RELAY_BURST, WS_RELAY_REFILL_PER_SEC,  # noqa: F401
     MCP_TASK_SESSION_CLOSE_WAIT_SEC, MCP_TASK_SESSION_RETURN_WAIT_SEC, MCP_TASK_SESSION_IDLE_POLL_SEC,  # noqa: F401
     MCP_BROWSER_GUARD_READ_SEC, MCP_BROWSER_GUARD_LINE_BYTES, MCP_BROWSER_GUARD_WORKERS,  # noqa: F401
-    MCP_BROWSER_GUARD_PENDING, MCP_STDIO_STDERR_TAIL_BYTES,  # noqa: F401
+    MCP_BROWSER_GUARD_PENDING, MCP_STDIO_STDERR_TAIL_BYTES, MCP_STDIO_STDERR_NOTE_BYTES,  # noqa: F401
     CLAUDEXOR_MODEL_POLL_INTERVAL_SEC, CLAUDEXOR_OPERATOR_STOP_TIMEOUT_SEC,  # noqa: F401
     CLAUDEXOR_STOP_EXIT_WAIT_SEC, BODY_MAINTENANCE_INTERVAL_SEC,  # noqa: F401
     DELEGATE_WAIT_CEILING_SEC,  # noqa: F401
@@ -226,6 +226,8 @@ CLAUDEXOR_DELEGATED_MARKER_MIN_VERSION: str = "3.3.0"
 CLAUDEXOR_DELEGATED_WORKSPACE_ROOT_MIN_VERSION: str = "3.8.1"
 CLAUDEXOR_MODEL_TURN_STATE_MIN_VERSION: str = "3.10.4"  # active-turn request field (`llm_claudexor.py` docstring)
 CLAUDEXOR_EPHEMERAL_SCOPE_MIN_VERSION: str = "3.3.7"  # `scope.ephemeral` for host-minted roots (`delegate_registration_policy`)
+# The same on a sticky thread: its lane needs an engine that sweeps unregistered namespaces (Claudexor C6, 5.1.0).
+CLAUDEXOR_EPHEMERAL_THREAD_MIN_VERSION: str = "5.1.0"
 
 
 # Boot-time runtime-mode baseline. Pinning the owner-selected mode after settings load stops an

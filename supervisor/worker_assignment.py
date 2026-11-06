@@ -817,6 +817,26 @@ def _choose_candidate(queue, remaining, unresolved_invalid_id_set, refused_this_
         return chosen_idx, False
 
 
+def _forecast_or_unknown(assign):
+    """One assignment pass. A pass that ends before growth recorded its forecast (a busy serializer,
+    a fenced pool, unreadable authority, an exception) leaves that forecast unknown: an older
+    value is never published as this pass's."""
+    @functools.wraps(assign)
+    def one_pass() -> None:
+        from supervisor.worker_pool_lifecycle import demand_forecast_passes, record_demand_forecast
+
+        passes = demand_forecast_passes()
+        try:
+            assign()
+        finally:
+            if demand_forecast_passes() == passes:
+                record_demand_forecast(None, reason="pool_disabled" if _pool()._WORKER_POOL_DISABLED_REASON
+                                       else "assignment_pass_incomplete")
+
+    return one_pass
+
+
+@_forecast_or_unknown
 def assign_tasks() -> None:
     from supervisor import queue
     from supervisor.state import budget_remaining
@@ -897,12 +917,15 @@ def assign_tasks() -> None:
                 if cost_fields.get("cost_accounting_status") != "available":
                     log.error("Budget pause blocked: task attempt history unavailable for %s", task_id)
                     return
+                from supervisor.restart_retention import returned_before_body
+
+                seed = bool((returned_before_body(task) or {}).get("seed_return"))  # D5: its given-back attempt never put
                 retry_lineage = bool(
-                    int(task.get("_attempt") or 1) > 1
+                    int(task.get("_attempt") or 1) > 1 and not seed
                     or task.get("original_task_id") or task.get("timeout_retry_from")
                 )
                 replay_safe = (
-                    (task.get("admitted_dispatch") == "none" or _unsent(task) is not None)  # never put here
+                    (task.get("admitted_dispatch") == "none" or _unsent(task) is not None or seed)  # never put here
                     and int(cost_fields.get("total_rounds") or 0) == 0
                     and not bool(cost_fields.get("ledger_integrity_degraded"))
                     and not retry_lineage

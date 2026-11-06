@@ -473,7 +473,8 @@ def test_an_interrupted_owner_resume_of_a_project_member_offers_its_existing_res
     assert _main_consumer([payload], CHILD) == {
         "card": True, "sender": "System", "resume": True, "enabled": True, "stop": False,
         "posted": [[f"/api/tasks/{CHILD}/resume", "POST"]],
-        "reason": "Needs an explicit Resume." if returning else "Needs Resume after the restart."}
+        # Beside its Resume button a plain resume pause says nothing more (audit 05.11, U014); a restart says why.
+        "reason": "" if returning else "Needs Resume after the restart."}
     before = read_fence(host.root, ROOT)
     response = client.post(f"/api/tasks/{CHILD}/resume")
     assert response.status_code == 200 and response.json()["ok"], response.text

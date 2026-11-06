@@ -111,6 +111,7 @@ def _prepare_self_change(ctx: ToolContext, resume: str = "", in_place: bool = Fa
         "an exact reviewed commit is adopted with request_restart(adopt_commit=...), or published through the Git/PR tools."
         + (f" The earlier checkout of this task was gone; its commits remain on branch {bound['previous_branch']}."
            if bound.get("previous_branch") else "") + body_candidate.attribution_note(bound.get("attribution"))
+        + (f"\n{neighbours}" if (neighbours := body_candidate.neighbour_note(ctx, with_ended=True)) else "")
     )
 
 
@@ -151,8 +152,9 @@ def _request_restart(ctx: ToolContext, reason: str, adopt_commit: str = "") -> s
             adopt_commit = run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir).strip()
         if str(adopt_commit or "").strip():
             handoff = body_adoption.authorize(ctx, adopt_commit, reason=restart_reason)
+            relation = body_adoption.official_relation_text(handoff.get("official_relation") or {})
             adoption_note = (f" It adopts candidate commit {handoff['cand'][:12]} onto {handoff['branch']} "
-                             "once this generation's readers have stopped.")
+                             "once this generation's readers have stopped." + (f" {relation}" if relation else ""))
     except body_adoption.AdoptionRefused as exc:
         return f"⚠️ RESTART_BLOCKED: {exc.code}: {exc.text}"
     if not adoption_note and body_candidate.is_bound(ctx):
@@ -230,8 +232,9 @@ def self_change_tool_entries() -> list:
                 "never reaches the files the live server imports. Body file writes and acting self_worktree "
                 "children prepare it automatically; processes do not, so call this first for process-first work. "
                 "Idempotent. resume deliberately continues ONE exact retained candidate (its id, owner task or "
-                "branch) whose previous owner has ended. in_place is Cyber Pro's explicit decision to edit the "
-                "serving checkout directly instead."),
+                "branch) whose previous owner has ended. The receipt, like the first automatic bind, names other open "
+                "candidates with the paths they have changed, read at that moment. in_place is Cyber Pro's explicit "
+                "decision to edit the serving checkout directly instead."),
             "parameters": {"type": "object", "properties": {
                 "resume": {"type": "string", "description": "Exact retained candidate to continue; omit for this task's own."},
                 "in_place": {"type": "boolean", "description": "Cyber Pro only: author the serving checkout directly."},
@@ -241,7 +244,8 @@ def self_change_tool_entries() -> list:
             "name": "request_restart",
             "description": (
                 "Ask supervisor to restart runtime after this task finalizes; confirmed acceptance holds new "
-                "independent work, including Main, for Restart. An unconfirmed reply proves no acceptance. "
+                "independent background work for Restart, never the owner's conversation (saved only in the final "
+                "drain). An unconfirmed reply proves no acceptance. "
                 "evolution requires its exact active commit receipt. A restart alone adopts nothing: pass "
                 "adopt_commit (the exact reviewed commit of your body candidate) to adopt it locally at this "
                 "restart, after the running generation's readers have stopped."),

@@ -872,9 +872,9 @@ class OuroborosAgent:
         _delta_block = capability_delta_prompt_block(dispatch)
         if _delta_block:
             messages.append({"role": "user", "content": _delta_block})
-        # The executor note tells a harness child it is a NANNY (delegate_start/delegate_wait,
-        # not metered thinking), and an `auto` child that fell back to metered spend
-        # must be able to say so before spending.
+        # The executor note tells a configured session child it is a NANNY
+        # (delegate_start/delegate_wait, not metered thinking); a child without a
+        # configured row runs natively and gets no note.
         _exec_note = dispatch_executor_note(
             dispatch.executor_resolution if dispatch is not None else None,
             lane=dispatch.lane if dispatch is not None else None,
@@ -923,7 +923,7 @@ class OuroborosAgent:
         # adopt p34's `SubagentExecutorResolution`/`executor_blocked_outcome` without
         # a same-named twin to dedup here.
         if not startup_wake:
-            _fill_executor_blocked_caps(ctx, cap_info, dispatch)
+            _fill_executor_blocked_caps(ctx, cap_info, dispatch, task)
         self._emit_live_log(
             "context_building_finished",
             task_id=str(task.get("id") or ""),
@@ -1492,8 +1492,8 @@ class OuroborosAgent:
         the route the pin named and the resolution refused, from the cap_info
         projection `_fill_executor_blocked_caps` wrote, so the child's card can
         say `{harness} · blocked` beside its typed `subagent_executor_unavailable`
-        terminal; the durable record keeps its empty route (the completion-seam
-        evidence gate must stay closed for a child that never ran). A blocked
+        terminal; a pin blocked at dispatch keeps an empty durable route, a refused
+        start keeps its route with ``blocked`` (only ``harness`` is audited). A blocked
         API-model actor names no route and stays chip-less.
         """
         if not isinstance(self._current_task_metadata, dict):

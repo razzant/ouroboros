@@ -472,7 +472,7 @@ DISPLAY_DROPPED: Tuple[str, ...] = (
     "governing_owner_words", "verification_ledger", "plan_review_state", "acceptance_debt",
     "mutation_evidence", "configured_subagent", "context", "continuation_narrative", "origin_message_text",
     "owner_mailbox", "subagent_availability", "plan_record", "review_status", "schedule_admission",
-    "task_acceptance_review_accounting", "review_thread_releases",
+    "task_acceptance_review_accounting", "review_thread_releases", "delegated_result_taken",
     *(f"metadata.{key}" for key in (
         "task_contract", "main_routing_manifest", "governing_owner_words", "routing_contract",
         "configured_subagent", "continuation", "project_routing_manifest", "subagent_envelope", "owner_corpus",

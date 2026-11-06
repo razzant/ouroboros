@@ -72,7 +72,8 @@ def test_the_supervisor_and_the_author_read_the_same_snapshot(tmp_path, monkeypa
             section = owner_rules_section()
         assert bundle["standing_delegation"]["owner_rules"] == rules
         assert section.endswith("\n\n" + rules) if rules else section.endswith("None set: "
-            "Settings › Behavior › Safety Supervisor › Your rules is empty.")
+            "Settings › Behavior › Safety Supervisor › Your rules is empty; once set, every Safety check and "
+            "delegated session reads them, while my marks reach only my own work.")
         assert LIVE not in section
 
 

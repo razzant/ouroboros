@@ -3,7 +3,7 @@
 The row is what the mind reads when it decides whether to schedule, start, or
 wait. It reports the primary binding's recent attempts, the newest stored
 engine observation, the gateway's already-logged control latency, and the
-queue snapshot's slot counts. It does not call the daemon, poll, or apply a
+queue snapshot's project worker pool. It does not call the daemon, poll, or apply a
 threshold. A missing source is named, not replaced with a zero or a judgment.
 """
 
@@ -199,25 +199,48 @@ def _count(document: dict, key: str) -> Optional[int]:
 
 
 def _pool_clause(root: Path) -> str:
+    """The published project worker pool (``queue_publication._pool_counts``): ceiling apart from the slots
+    that exist, dispatch-enabled capacity apart from slots holding a task, the scheduler's last admissible
+    demand apart from pending rows (a pending row may be paused or held), the conversation lane apart."""
     try:
-        from ouroboros.queue_observation import load_queue_document
+        from ouroboros.queue_observation import load_queue_document, pool_observation_status, queue_stamp
         document = load_queue_document(root)
     except Exception:
         document = {"_snapshot_missing": True}
     if not isinstance(document, dict) or document.get("_snapshot_missing") or document.get("_snapshot_invalid"):
-        pool = "pool: not observed"
+        return "pool: not observed; " + _completions_clause(root)
+    certified = str(queue_stamp(document).get("ts") or "")
+    published = str(document.get("ts") or "")
+    when = (f" as of {certified}" if certified else
+            f" as published {published}, uncertified" if published else "")
+    if pool_observation_status(document) == "unknown":
+        return f"project worker pool{when}: unknown (introspection failed); " + _completions_clause(root)
+
+    def said(label: str, key: str) -> str:
+        value = _count(document, key)
+        return f"{label} {value}" if value is not None else f"{label} not observed"
+
+    pending = _count(document, "pending_count")
+    if pending is None and isinstance(document.get("pending"), list):
+        pending = len(document["pending"])
+    parts = [said("ceiling", "max_workers"), said("total", "worker_total"),
+             said("dispatch-enabled", "active_worker_count"), said("with a task", "busy_worker_count"),
+             said("booting", "booting_count"), said("reaping (incl. booting)", "reaping_count"),
+             said("assignable idle", "assignable_idle_workers")]
+    demand = document.get("project_demand")
+    if isinstance(demand, dict) and demand.get("status") == "computed" and _count(demand, "admissible_pending") is not None:
+        parts.append(f"admissible pending {demand['admissible_pending']}"
+                     + (" or more" if demand.get("at_ceiling") else "")
+                     + f" (last assignment pass, unchanged since {demand.get('observed_since') or 'an unrecorded time'})")
+    elif isinstance(demand, dict):
+        parts.append(f"admissible pending unknown ({demand.get('reason') or 'not computed'})")
     else:
-        pending = _count(document, "pending_count")
-        if pending is None and isinstance(document.get("pending"), list):
-            pending = len(document["pending"])
-        active, total, idle = _count(document, "active_worker_count"), _count(document, "worker_total"), _count(document, "assignable_idle_workers")
-        pool = "pool: " + ", ".join((
-            f"active {active}" if active is not None else "active not observed",
-            f"total {total}" if total is not None else "total not observed",
-            f"assignable idle {idle}" if idle is not None else "assignable idle not observed",
-            f"pending {pending}" if pending is not None else "pending not observed",
-        ))
-    return pool + "; " + _completions_clause(root)
+        parts.append("admissible pending not observed")
+    parts.append(f"pending rows {pending}" if pending is not None else "pending rows not observed")
+    carriers = _count(document, "lane_carrier_total")
+    lane = (f"conversation carriers {carriers}, outside the ceiling" if carriers is not None
+            else "conversation carriers not observed")
+    return f"project worker pool{when}: " + ", ".join(parts) + "; " + lane + "; " + _completions_clause(root)
 
 
 def _completions_clause(root: Path) -> str:
