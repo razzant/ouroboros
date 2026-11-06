@@ -1033,6 +1033,7 @@ questions stay model-authored even when typed.
 A host fact has a subject, and the subject names its carrier: a task's fact is a
 row of its card, a fact about the owner's message is the typed annotation on that
 message, and a landed act publishes no row (its receipt or card already says it).
+The mind's Storage → Free request is reported in Main as a typed System row (`storage_free_notice`).
 A standalone System row exists only where nothing else can carry the fact: no mind
 can speak, no mind will read the message, the owner's own direct act, the
 runtime's state (a settings change saved outside the app: one

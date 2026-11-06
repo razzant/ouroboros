@@ -1061,6 +1061,18 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
             raise ClaudexorUnavailable("malformed_response", "Run decision returned a non-object response")
         return body
 
+    def run_result_taken_supported(self) -> bool:
+        """Does the serving engine's own decision vocabulary (``GET /v2/agent-capabilities``
+        ``runDecisionActions``) name ``taken``? Presence decides, never a version."""
+        actions = self.agent_capabilities().get("runDecisionActions")
+        return isinstance(actions, list) and "taken" in actions
+
+    def take_run_result(self, run_id: str, *, idempotency_key: str) -> Dict[str, Any]:
+        """Tell the engine its caller holds this terminal patch result whole (Claudexor's ``taken``
+        decision): its copy then follows ordinary retention. The wire spelling lives here alone."""
+        return self.decide_run(run_id, {"action": "taken", "reason": "captured_result"},
+                               idempotency_key=idempotency_key)
+
     def answer_interaction(self, run_id: str, interaction_id: str,
                            answers: List[Dict[str, Any]], *,
                            timeout_sec: Optional[float] = None) -> Dict[str, Any]:

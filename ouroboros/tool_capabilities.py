@@ -26,7 +26,7 @@ COGNITIVE_MEMORY_TOOL_NAMES: frozenset[str] = frozenset({
 })
 
 CORE_TOOL_NAMES: frozenset[str] = frozenset({
-    "inspect_harness", "inspect_subagent", "maintain_harness",
+    "inspect_harness", "inspect_subagent", "maintain_harness", "free_storage",
     "finish_task",
     "read_file", "list_files", "write_file", "edit_text",
     "apply_patch", "edit_batch",
@@ -464,7 +464,7 @@ def routing_action_for_tool(name: object) -> str:
 # at the authority module.
 OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
     "pause_task", "resume_task", "continue_task",
-    "maintain_harness",
+    "maintain_harness", "free_storage",
     # starting or steering work (tell_task stays: the nanny of a running campaign)
     "start_task", "schedule_subagent", "schedule_followup", "plan_task",
     "move_to_project", "close_project", "delegate_start", "initiate_presence",

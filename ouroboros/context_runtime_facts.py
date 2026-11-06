@@ -405,21 +405,34 @@ def _runtime_budget_info(env: Any, task: Dict[str, Any], ctx: Any = None) -> Dic
 
 
 def storage_fact(data_root: Any) -> Optional[Dict[str, Any]]:
-    """The last finished storage count as one compact fact for the mind: when it was counted,
-    what Ouroboros owns and how many items it could not read, the growth since the count before
-    (flagged when either count had unreadable items), free and total space of the data folder's
-    disk, and one ``removers`` line only while a maintenance job's last outcome is not clean
-    (``storage_removers.not_ok`` over the local job rows: never an engine call while a turn is prepared;
-    the engine's record is ``query_data(kind="storage")``'s and the Storage page's), present before any
-    count too. None when nothing was counted and every job is clean (never zero, never an exception). No
-    threshold, tier or warning stands in for judgment here: the mind reads the numbers. The saved file is
-    read through the storage owner's identity cache; free space and the job rows are read fresh."""
+    """What the mind knows about its disk, as one compact fact, every turn: free and total space of the
+    data folder's disk (read fresh, with or without a count); what every retirer holds and why
+    (``holds``: by remover, each class with its count, one example and since when, from the job rows the
+    server's five retirer passes and the custody sweep's engine record keep; never an engine call while a
+    turn is prepared) and what the last pass of each released; the last finished storage count when there
+    is one (when it was counted, what Ouroboros owns and how many items it could not read, the growth since
+    the count before, flagged when either count had unreadable items); and one ``removers`` line only
+    while a remover's last outcome is not clean (``storage_removers.not_ok``). None only when free space
+    cannot be read, nothing holds, nothing was counted and every remover is clean (never a fake zero). No
+    threshold, tier or warning stands in for judgment here: the mind reads the numbers and acts through
+    ``free_storage`` or the owner's Storage page."""
     import shutil
 
     from ouroboros import storage, storage_removers
 
+    fact: Dict[str, Any] = {}
     try:
-        removers = "; ".join(storage_removers.not_ok(storage_removers.place_removers(data_root, engine=False)))
+        usage = shutil.disk_usage(str(data_root))
+        fact["free_bytes"], fact["volume_total_bytes"] = usage.free, usage.total
+    except OSError:
+        pass  # unknown stays absent, never zero
+    removers = ""
+    try:
+        found = storage_removers.place_removers(data_root, engine=False)
+        removers = "; ".join(storage_removers.not_ok(found))
+        holds = storage_removers.holds_by_remover(found)
+        if holds:
+            fact["holds"] = holds
     except Exception:  # the readers already answer unknown; anything else is said, never a broken section
         log.debug("storage removers unreadable for the runtime fact", exc_info=True)
         removers = "the removers' facts could not be read"
@@ -429,27 +442,21 @@ def storage_fact(data_root: Any) -> Optional[Dict[str, Any]]:
     except Exception:  # an unreadable or malformed file is no fact, never a broken Runtime section
         log.debug("storage count unreadable for the runtime fact", exc_info=True)
         count = None
-    if count is None:
-        return {"removers": removers} if removers else None
-    try:
-        usage = shutil.disk_usage(str(data_root))
-        free, total = usage.free, usage.total
-    except OSError:
-        free = total = None
-    fact = {
-        "counted_at": count["finished_at"],
-        "bytes": count["bytes"],
-        "unreadable": count["unreadable"],  # items the count could not read: the headline excludes them
-        "basis": count.get("basis"),
-        "previous_at": count.get("growth_since"),
-        "growth_bytes": count.get("growth_bytes"),
-        "free_bytes": free,
-        "volume_total_bytes": total,
-    }
-    if count.get("growth_flag"):
-        fact["growth_flag"] = count["growth_flag"]  # either count had unreadable items: the growth is qualified
+    if count is not None:
+        fact.update({
+            "counted_at": count["finished_at"],
+            "bytes": count["bytes"],
+            "unreadable": count["unreadable"],  # items the count could not read: the headline excludes them
+            "basis": count.get("basis"),
+            "previous_at": count.get("growth_since"),
+            "growth_bytes": count.get("growth_bytes"),
+        })
+        if count.get("growth_flag"):
+            fact["growth_flag"] = count["growth_flag"]  # either count had unreadable items: the growth is qualified
     if removers:
         fact["removers"] = removers
+    if not fact:
+        return None
     return fact
 
 

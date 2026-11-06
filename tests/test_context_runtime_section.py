@@ -650,9 +650,9 @@ def test_captured_recent_and_drive_sections_carry_one_capture_label(tmp_path, mo
 
 
 class TestStorageFact:
-    """The last finished storage count reaches the Runtime block as one compact fact (Commit 5 of
-    the storage plan): present with a count, absent without, never zero, and no threshold, tier or
-    WARNING stands in for the mind's judgment."""
+    """The disk reaches the Runtime block as one compact fact (Commit 5 of the storage plan): free and
+    total space every turn, the last finished count with its growth once there is one, never a zero for
+    what is unknown, and no threshold, tier or WARNING stands in for the mind's judgment."""
 
     def _env(self, tmp_path):
         class FakeEnv:
@@ -672,14 +672,14 @@ class TestStorageFact:
         section = build_runtime_section(env, {"id": "t1", "type": "task"})
         return section, json.loads(section.split("## Runtime context\n\n", 1)[1])
 
-    def test_absent_until_the_owner_counts_then_the_count_with_growth(self, tmp_path, monkeypatch):
+    def test_free_space_every_turn_then_the_count_with_growth_once_counted(self, tmp_path, monkeypatch):
         from types import SimpleNamespace
 
         from ouroboros import storage
 
         env = self._env(tmp_path)
         _section, data = self._runtime(env)
-        assert "storage" not in data, "no count yet: no fact, never zero"
+        assert set(data["storage"]) == {"free_bytes", "volume_total_bytes"}, "no count yet: free space, never a zero count"
 
         (tmp_path / "observability").mkdir()
         (tmp_path / "observability" / "a.bin").write_bytes(b"x" * 4096)
@@ -717,16 +717,15 @@ class TestStorageFact:
         monkeypatch.setattr("shutil.disk_usage", unavailable)
         _section, child_data = self._runtime(child_env)
         assert child_data["storage"]["bytes"] == second["bytes"]
-        assert child_data["storage"]["free_bytes"] is None
-        assert child_data["storage"]["volume_total_bytes"] is None
+        assert "free_bytes" not in child_data["storage"] and "volume_total_bytes" not in child_data["storage"]
 
-    def test_an_unreadable_saved_count_is_no_fact(self, tmp_path):
+    def test_an_unreadable_saved_count_is_no_count(self, tmp_path):
         from ouroboros import storage
 
         env = self._env(tmp_path)
         (tmp_path / storage.MEASUREMENT_FILE).write_bytes(b"not json")
         _section, data = self._runtime(env)
-        assert "storage" not in data
+        assert set(data["storage"]) == {"free_bytes", "volume_total_bytes"}, "an unreadable count is no count fact"
 
     @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs a folder this user cannot list")
     def test_unreadable_items_qualify_the_headline_and_the_growth(self, tmp_path):
