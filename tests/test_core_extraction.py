@@ -171,7 +171,7 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # Main and asks for one line in the conversation, sent in the asking tool batch, when the human is the
     # person talked with there.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "5239c17334cd44035ef7ecf84d70723a8ddd349ed34c6f3d61b0701422bc37af"
+        "8892c8af0d30ec0c377896b0592b7b75298a768e1dfa6a9e212b08d28d0e17a3"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)
