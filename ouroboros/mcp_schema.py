@@ -17,7 +17,7 @@ import urllib.parse
 from copy import deepcopy
 from typing import Any, Callable, Dict, List
 
-from ouroboros.secret_masking import redact_known_values
+from ouroboros.secret_masking import SCHEMA_ARRAYS, SCHEMA_MAPS, redact_known_values
 
 try:
     from builtins import BaseExceptionGroup as _ExceptionGroup
@@ -27,12 +27,10 @@ except ImportError:  # Python 3.10: AnyIO's task groups raise the backport's gro
     except ImportError:  # without AnyIO's dependency nothing raises a group
         _ExceptionGroup = ()
 
-_SCHEMA_MAPS = frozenset({"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"})
 _SCHEMA_VALUES = frozenset({
     "additionalProperties", "unevaluatedProperties", "propertyNames", "items",
     "additionalItems", "unevaluatedItems", "contains", "not", "if", "then", "else", "contentSchema",
 })
-_SCHEMA_ARRAYS = frozenset({"allOf", "anyOf", "oneOf", "prefixItems"})
 
 
 def untrusted_text(value: str) -> str:
@@ -95,10 +93,10 @@ def wrap_schema_text(value: Any, redact: Callable[[str], str], *, label_annotati
                     dropped.append(key)
         elif key in {"description", "title"} and isinstance(item, str):
             out[key] = untrusted_text(redact(item)) if label_annotations else redact(item)
-        elif key in _SCHEMA_MAPS and isinstance(item, dict):
+        elif key in SCHEMA_MAPS and isinstance(item, dict):
             out[key] = {_literal_copy(name, redact): wrap_schema_text(schema, redact, label_annotations=label_annotations, dropped=dropped)
                         for name, schema in item.items()}
-        elif key in _SCHEMA_ARRAYS and isinstance(item, list):
+        elif key in SCHEMA_ARRAYS and isinstance(item, list):
             out[key] = [wrap_schema_text(schema, redact, label_annotations=label_annotations, dropped=dropped) for schema in item]
         elif key in _SCHEMA_VALUES:
             out[key] = ([wrap_schema_text(schema, redact, label_annotations=label_annotations, dropped=dropped) for schema in item]
