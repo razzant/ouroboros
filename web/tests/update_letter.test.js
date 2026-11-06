@@ -388,8 +388,11 @@ test('the letter body goes through the sanitizing markdown pipeline and is dispo
     const render = SOURCE.slice(SOURCE.indexOf('function renderLetter()'), SOURCE.indexOf('function render()'));
     assert.ok(render.indexOf('releaseLetterBody()') < render.indexOf('letterBody.innerHTML'), 'release before write');
     assert.equal((render.match(/releaseLetterBody\(\)/g) || []).length, 2, 'hide path and content path both release');
-    // Unchanged content keeps its DOM (and the owner's selection with it).
-    assert.match(render, /const nextKey = letterContentKey\(view\);\s*if \(nextKey === letterKey\) return;/);
+    // Unchanged content keeps its DOM (and the owner's selection with it); a "Read all" measure taken while the tab
+    // was hidden (0 x 0, unknown) is still owed and runs once the body has a height.
+    assert.match(render, /const nextKey = letterContentKey\(view\);\s*if \(nextKey === letterKey\) \{\s*if \(letterMeasureOwed\) requestAnimationFrame\(measureLetter\);\s*return;\s*\}/);
+    assert.match(SOURCE, /function measureLetter\(\) \{\s*if \(!letterMeasureOwed \|\| letterBody\.hidden \|\| !letterBody\.clientHeight\) return;/);
+    assert.match(SOURCE, /'ouro:dashboard-subtab-shown', \(event\) => \{\s*if \(event\.detail\?\.tab !== 'updates'[^\n]*\n\s*requestAnimationFrame\(measureLetter\);/);
     // Content identity is the CONTENT: two different paragraphs of equal length must not
     // share a key, and a rewrite that produced the same text must not throw the DOM away.
     assert.match(SOURCE, /function letterContentKey\(view\) \{[\s\S]*?return view\.markdown;/);

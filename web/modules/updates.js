@@ -678,6 +678,9 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     let letterRequestError = null;
     let letterDisposer = null;
     let letterKey = null;
+    // "Read all" offers the rest only when the clamped body hides some. A body in a hidden tab measures 0 x 0, which
+    // says nothing, so that measure stays owed until the body has a height (the tab shown, or the next render).
+    let letterMeasureOwed = false;
     let letterDoor = '';
     let latestStatus = null;
     let phase = 'loading';
@@ -703,6 +706,12 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         } else {
             destroyChatMarkdown(letterBody);
         }
+    }
+
+    function measureLetter() {
+        if (!letterMeasureOwed || letterBody.hidden || !letterBody.clientHeight) return;
+        letterMeasureOwed = false;
+        letterMore.hidden = letterBody.scrollHeight <= letterBody.clientHeight + 1;
     }
 
     /** The letter is a fact: no control the markdown pipeline adds may survive in it. */
@@ -736,6 +745,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
                 releaseLetterBody();
                 letterBody.innerHTML = '';
                 letterKey = null;
+                letterMeasureOwed = false;
             }
             letterSection.hidden = true;
             return;
@@ -786,7 +796,10 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
             ? `${letterRefreshError ? 'Last check failed' : 'Last failure'}${failedAt ? ` on ${failedAt}` : ''}${failedRange}: ${lastFailure}` : '';
         letterError.hidden = !lastFailure;
         const nextKey = letterContentKey(view);
-        if (nextKey === letterKey) return;
+        if (nextKey === letterKey) {
+            if (letterMeasureOwed) requestAnimationFrame(measureLetter);
+            return;
+        }
         releaseLetterBody();
         letterKey = nextKey;
         letterBody.hidden = !view.markdown;
@@ -795,8 +808,9 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         letterMore.textContent = 'Read all';
         letterMore.hidden = true;
         mountChatMarkdown(letterBody, view.markdown || '');
+        letterMeasureOwed = Boolean(view.markdown);
         if (!view.markdown) return;
-        requestAnimationFrame(() => { letterMore.hidden = letterBody.scrollHeight <= letterBody.clientHeight + 1; });
+        requestAnimationFrame(measureLetter);
         // No anchored scroll to protect on this page, so markdown's deferred
         // writes (highlight, latex, mermaid, charts) run directly.
         // The authored body keeps no controls of its own. The shared
@@ -1244,6 +1258,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     bindAppVersionRender({ getStatus: () => latestStatus, render });  // same lifetime as the panel
     window.addEventListener('ouro:dashboard-subtab-shown', (event) => {
         if (event.detail?.tab !== 'updates' || state.activePage !== 'dashboard') return;
+        requestAnimationFrame(measureLetter);
         loadStatus({ fetchRemote: false });
         versions.load();
     });
