@@ -108,6 +108,9 @@ def allowance_window(
         "limit_usd": limit,
         "settled_usd": known,
         "accounted_usd": float(summary["accounted_usd"]),
+        # The uncounted parts by their ledger names, as /status and the review refusals say them (P8).
+        "reserved_usd": float(summary["reserved_usd"]),
+        "unresolved_upper_bound_usd": float(summary["unresolved_upper_bound_usd"]),
         "remaining_usd": round(max(0.0, limit - known), 6),
         "unknown_unmetered": int(summary["unknown_unmetered"]),
         "non_final_rows": int(summary["non_final_rows"]),

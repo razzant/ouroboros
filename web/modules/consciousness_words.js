@@ -2,6 +2,7 @@ import { tr, fmt } from './i18n.js';
 import { taskPresentation } from './log_events.js';
 import { taskCostMeta } from './chat_activity.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
+import { formatUsd } from './storage_format.js';
 
 /** The same account stamp on wake and delivery rows; account names remain authored. */
 export function sendsAsHtml(sender) {
@@ -151,12 +152,39 @@ export function placeScopeText(place) {
     return 'everything this connector serves';
 }
 
-/** A dollar amount as Costs writes it; an absent amount is the dash, never $0.00. */
-export function usdText(value) {
-    if (value === null || value === undefined || value === '') return '—';
-    const number = Number(value);
-    if (!Number.isFinite(number)) return '—';
-    return `$${number < 0.01 && number > 0 ? number.toFixed(4) : number.toFixed(2)}`;
+/** A dollar amount as Costs writes it (grouped); an absent amount is the dash, never $0.00. */
+export const usdText = formatUsd;
+
+/** The money line of the chip's Shade and the Dashboard's headline card: «$1.50 of $20.00 in the last 24 hours»; a
+ *  floor (≥) while some calls have no price; '' when either amount is unknown. */
+export function allowanceText(snapshot) {
+    const { spentUsd, dailyUsd } = snapshot;
+    if (spentUsd === null || dailyUsd === null) return '';
+    const floor = snapshot.unknownUnmetered > 0 ? '≥ ' : '';
+    const degraded = snapshot.integrityDegraded ? ' (ledger integrity degraded)' : '';
+    return `${floor}${formatUsd(spentUsd)} of ${formatUsd(dailyUsd)} in the last 24 hours${degraded}`;
+}
+
+// The owner's move (DESIGN "Status marks", amber): consciousness stopped by its spending limit or waiting for a first
+// conversation. A failure is an outcome's red dot, an unconfirmed outcome a ring, a paused wake two bars, a due wake
+// the still mark.
+const OWNER_MOVE = new Set(['allowance_exhausted', 'waiting_for_first_conversation']);
+const FAILED = new Set(['wake_failed', 'wake_rejected', 'stopped']);
+const UNCONFIRMED = new Set(['wake_outcome_unknown', 'allowance_unknown']);
+
+/** The one status mark of a consciousness state, for the bar's chip and the Dashboard's headline alike; `owner` adds
+ *  an owner's move the caller knows of (an Evolution campaign that waits for the owner). */
+export function consciousnessMark(snapshot, { owner = false } = {}) {
+    const off = snapshot.enabled === false;
+    const unknown = snapshot.enabled === null;
+    const status = snapshot.status;
+    if (owner || (!off && !unknown && OWNER_MOVE.has(status))) return { shape: 'dot', hue: 'owner' };
+    if (status === 'thinking') return { shape: 'moving', hue: 'ink' };
+    if (off) return { shape: 'none', hue: 'ink' };
+    if (FAILED.has(status)) return { shape: 'dot', hue: 'failed' };
+    if (unknown || UNCONFIRMED.has(status)) return { shape: 'ring', hue: 'ink' };
+    if (status === 'wake_paused') return { shape: 'pause', hue: 'ink' };
+    return status === 'due' ? { shape: 'still', hue: 'ink' } : { shape: 'none', hue: 'ink' };
 }
 
 /** «12:40» in the viewer's clock, or '' for an absent or unreadable instant. */
@@ -237,12 +265,20 @@ export function wakeCheckText(check) {
     return !named && check.tool && text.startsWith(check.tool) ? text : capitalized(text);
 }
 
-/** Keep the card's scoped cost projection; word openness and unknown without a false zero. */
+/** A warning chip on the wake row says what the Safety Supervisor did in words; a tool it names in words stays, a raw
+ *  tool id waits in the row's Details (wakeCheckText). */
+export function wakeCheckChip(check) {
+    if (!check.tool || ['place_reply', 'send_user_message'].includes(check.tool)) return wakeCheckText(check);
+    const words = { checked: 'Safety Supervisor checked a step', warned: 'Safety Supervisor warned about a step',
+        held: 'Safety Supervisor held a step', sent_despite: 'A step was sent despite the check', not_checked: 'Not checked' };
+    return words[check.chip] ? tr(`consciousness.chip.${check.chip}`, words[check.chip]) : '';
+}
+
+/** Keep the card's scoped cost projection and its words; openness is said, and an unknown cost leaves the row for its
+ *  Details ('' here, never a false zero). */
 export function wakeCostText(wake) {
     const meta = taskCostMeta(wake.cost)[0];
-    if (!meta || meta === 'Cost unknown' || meta === 'Cost pending' || meta === 'Cost not priced' || meta === 'cost unavailable') {
-        return tr('consciousness.spend_unknown', 'spend unknown');
-    }
+    if (!meta || meta === 'Cost unknown' || meta === 'Cost pending' || meta === 'Cost not priced' || meta === 'cost unavailable') return '';
     // These are the card's closed presentation templates, never authored text.
     const words = meta.startsWith('Tracked: up to ') ? fmt('Tracked: up to {amount}', { amount: meta.slice(15) })
         : meta.startsWith('Tracked: ') ? fmt('Tracked: {amount}', { amount: meta.slice(9) })

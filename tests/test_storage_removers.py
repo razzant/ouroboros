@@ -270,7 +270,10 @@ def test_the_gateway_reads_the_record_and_types_an_engine_without_the_route(monk
 
 
 def test_the_runtime_fact_reads_job_rows_alone_and_never_asks_the_engine(data, monkeypatch):
-    assert set(storage_fact(data)) == {"free_bytes", "volume_total_bytes"}, "free space before any count; nothing held, every remover clean"
+    assert set(storage_fact(data)) == {"free_bytes", "free_gb", "volume_total_bytes", "volume_total_gb", "disk_read_at"}, "the disk before any count; nothing held, every remover clean"
+    with monkeypatch.context() as unreadable:
+        unreadable.setattr("shutil.disk_usage", lambda _path: (_ for _ in ()).throw(OSError("volume gone")))
+        assert storage_fact(data) is None, "an unreadable disk, nothing counted, every remover clean"
     maintenance_jobs.record(data, "runtime_retirement", state="done", last_error={"class": "OSError", "at": "T"})
     assert storage_fact(data)["removers"] == "runtime_retirement: last run threw OSError at T"
     asked = _engine(data, monkeypatch, ClaudexorUnavailable("daemon_unreachable", "down"))

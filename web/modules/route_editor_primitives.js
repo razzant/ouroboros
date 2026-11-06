@@ -5,6 +5,7 @@
 
 import { accountRows, accountName, accountModelUnsupported } from './claudexor_status_store.js';
 import { formatRelativeAge } from './ui_helpers.js';
+import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { modelChooserHtml, updateModelChooserOptions } from './model_chooser.js';
 
@@ -38,7 +39,7 @@ export function processingSelectHtml(attrs, selected, { global = false } = {}) {
 
 /** Intent controls never change model/effort or claim the route served this mode. */
 export function processingDetailsHtml(attrs, selected, inherited = '') {
-    return `<details class="model-role-details" data-processing-details><summary>Processing · <span data-processing-summary>${escapeHtml(processingIntentLabel(selected, inherited))}</span></summary>
+    return `<details class="model-role-details ui-disclosure" data-processing-details><summary><span>Processing · <span data-processing-summary>${escapeHtml(processingIntentLabel(selected, inherited))}</span></span></summary>
         <label class="ui-field">Processing ${processingSelectHtml(attrs, selected)}</label>
         <div class="ui-field-help">Uses the same model and reasoning effort. An explicit native service choice takes precedence.</div></details>`;
 }
@@ -90,13 +91,6 @@ export function composeModelSource(source, model) {
 export const API_PROVIDER_ORDER = ['openrouter', 'openai', 'anthropic', 'deepseek',
     'zai', 'minimax', 'cloudru', 'gigachat', 'openai-compatible'];
 
-// Fallback names for providers the setup contract does not describe (GigaChat
-// has no profile spec). The contract's label wins whenever it exists.
-const API_PROVIDER_LABELS = {
-    openrouter: 'OpenRouter', openai: 'OpenAI', anthropic: 'Anthropic', deepseek: 'DeepSeek',
-    zai: 'Z.ai (GLM)', minimax: 'MiniMax', cloudru: 'Cloud.ru Foundation Models', gigachat: 'GigaChat',
-    'openai-compatible': 'OpenAI-compatible endpoint',
-};
 
 // Credential shapes that make a provider usable, mirroring the runtime's
 // PROVIDER_CREDENTIAL_GROUPS: any ONE group whose every key is present counts.
@@ -510,9 +504,10 @@ export function routeChoiceGroups({
     const savedChoice = String(currentChoice || '');
     if (savedChoice.startsWith('session:')
         && !sessionValues.some((option) => option.value === savedChoice)) {
+        // The saved harness keeps its display name (the catalog's own table), with the check's state after it.
         sessionValues.push({
             value: savedChoice,
-            label: undiscoveredLabel(savedChoice.slice('session:'.length), catalogKnown),
+            label: `${harnessPresentation(savedChoice.slice('session:'.length)).label} (agent) · ${catalogKnown ? 'not in discovery' : 'not checked'}`,
         });
     }
     const modelValues = modelSources.map((source) => ({
@@ -520,7 +515,7 @@ export function routeChoiceGroups({
     }));
     if (savedChoice.startsWith('subscription:')
         && !modelValues.some((option) => option.value === savedChoice)) {
-        modelValues.push({ value: savedChoice, label: `${savedChoice.slice(13)} (not checked)` });
+        modelValues.push({ value: savedChoice, label: `${harnessPresentation(savedChoice.slice(13)).label} (model) · not checked` });
     }
     // One entry per enabled connection that holds its key. A saved choice that
     // cannot send stays selectable and says why, so a save cannot silently
@@ -542,7 +537,7 @@ export function routeChoiceGroups({
                     ? 'No model sources listed — refresh Model Catalog'
                     : 'No model sources listed — connect one in Accounts')
                 : catalogKnown ? 'No model sources listed; accounts have not been checked'
-                    : 'Model sources have not been read — use Refresh Model Catalog' }] }] : []),
+                    : 'Model sources have not been read — use Refresh model catalog' }] }] : []),
         { label: 'API keys', options: apiValues },
         ...(includeSessions ? [sessionValues.length
             ? { label: 'Agents · sessions', options: sessionValues }

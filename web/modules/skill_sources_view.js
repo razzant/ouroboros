@@ -63,8 +63,8 @@ export function renderSourceRow(source, { items = [], health = null } = {}) {
     return `<div class="skills-source-row" data-source-row="${id}">
         <div class="skills-source-main"><strong>${escapeHtml(source.name)}</strong>${marks}</div>
         <div class="skills-source-actions">
-            <button type="button" class="skills-trust-value${suggested ? ' is-suggested' : ''}" data-source-action="trust" data-source-id="${id}" aria-label="${escapeHtml(`${source.name}: ${trustValueText(source)}${suggested ? ' (suggested)' : ''}. Change`)}">${escapeHtml(trustValueText(source))}${suggested ? ' (suggested)' : ''} ›</button>
-            <div class="skills-card-menu"><button type="button" class="skills-card-menu-trigger" aria-label="More actions for ${escapeHtml(source.name)}" aria-haspopup="menu" aria-expanded="false" data-source-menu="${id}">⋮</button></div>
+            <button type="button" class="skills-trust-value${suggested ? ' is-suggested' : ''} ui-hit-area" data-source-action="trust" data-source-id="${id}" aria-label="${escapeHtml(`${source.name}: ${trustValueText(source)}${suggested ? ' (suggested)' : ''}. Change`)}">${escapeHtml(trustValueText(source))}${suggested ? ' (suggested)' : ''} ›</button>
+            <div class="skills-card-menu"><button type="button" class="btn btn-ghost btn-sm skills-card-menu-trigger" aria-label="More actions for ${escapeHtml(source.name)}" aria-haspopup="menu" aria-expanded="false" data-source-menu="${id}">⋮</button></div>
         </div>
         <div class="skills-source-meta">
             <div class="skills-source-about">${escapeHtml(sourceAboutText(source))}</div>
@@ -105,7 +105,7 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
         const madeHere = (host.installedSkills() || []).filter((row) => !row.install && ['external', 'self_authored'].includes(String(row.source || ''))).length;
         const pendingRows = unconfirmedHubRows(sources);
         pane.innerHTML = `
-            <section class="skills-card skills-sources-card">
+            <section class="ui-card skills-card skills-sources-card">
                 <div class="skills-sources-head">
                     <div class="skills-sources-id"><h3>Sources</h3>${statusHtml(error ? `couldn’t be read: ${escapeHtml(error)}` : `${plural(sources.length, 'source')} connected`, error ? 'danger' : 'muted')}</div>
                     ${buttonHtml('Add source', { attrs: 'data-source-action="add"' })}
@@ -117,8 +117,8 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
                 <div class="skills-source-rows">${sources.map((source) => renderSourceRow(source, { items: items.get(source.id) || [], health: health.get(source.id) })).join('')}</div>
             </section>
             <div class="skills-sources-foot">
-                <p>Skills made on this computer${host.installedSkills() ? ` (${madeHere})` : ''} don’t come from a source. <button type="button" class="skills-link-quiet" data-source-action="made_here">Publish one to share it ›</button></p>
-                <p>Automatic keys for skills that may run: <button type="button" class="skills-link-quiet" data-source-action="behavior">Settings → Behavior ›</button></p>
+                <p>Skills made on this computer${host.installedSkills() ? ` (${madeHere})` : ''} don’t come from a source. <button type="button" class="skills-link-quiet ui-hit-area" data-source-action="made_here">Publish one to share it ›</button></p>
+                <p>Automatic keys for skills that may run: <button type="button" class="skills-link-quiet ui-hit-area" data-source-action="behavior">Settings → Behavior ›</button></p>
             </div>`;
     }
 

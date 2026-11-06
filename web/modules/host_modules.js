@@ -40,7 +40,7 @@ export function createHostModules({ store, draft = null, win = globalThis.window
     const factListeners = new Set();
     const disposers = [];
     const announced = new Set();  // `key@revision` of held modules a notice already named
-    const heldNotices = new Set();  // persistent recovery notices owned by this page runtime
+    const heldNotices = new Set();  // { toast, keys } for persistent recovery notices owned by this page runtime
     let mode = 'idle';  // idle → running → stopped (Panic, unload, destroy)
 
     const live = (rec) => mounts.get(rec.item.key) === rec && (rec.status === 'mounting' || rec.status === 'mounted');
@@ -178,7 +178,21 @@ export function createHostModules({ store, draft = null, win = globalThis.window
             const toast = notice(text, 'warn', { ttl: 0, action: { label: tr('holds.start_it', 'Start it'), run() {
                 group.forEach((item) => startHeldModule(item.key));
             } } });
-            if (toast?.dispose) heldNotices.add(toast);
+            if (toast?.dispose) heldNotices.add({ toast, refs: group.map((item) => ({ key: item.key, revision: item.revision })) });
+        }
+    }
+
+    function retireClearedHeldNotices() {
+        for (const entry of [...heldNotices]) {
+            const current = entry.refs.map((ref) => store.byKey(ref.key));
+            const unchanged = current.map((item, index) => item && item.revision === entry.refs[index].revision
+                && holds.reason(moduleHoldKey(item), item.revision) ? item : null);
+            if (unchanged.every(Boolean)) continue;
+            entry.toast.dispose?.();
+            heldNotices.delete(entry);
+            entry.refs.forEach((ref) => announced.delete(`${ref.key}@${ref.revision}`));
+            const next = current.filter((item) => item && holds.reason(moduleHoldKey(item), item.revision));
+            if (next.length) announce(next);
         }
     }
 
@@ -187,6 +201,7 @@ export function createHostModules({ store, draft = null, win = globalThis.window
         if (!item || mode !== 'running') return false;
         holds.release(moduleHoldKey(item));
         sync();
+        retireClearedHeldNotices();
         notifyFacts();
         return true;
     }
@@ -202,6 +217,7 @@ export function createHostModules({ store, draft = null, win = globalThis.window
 
     function sync() {
         if (mode !== 'running') return;
+        retireClearedHeldNotices();
         const wanted = new Map(store.hostEntries().map((item) => [item.key, item]));
         for (const rec of [...mounts.values()]) {
             const item = wanted.get(rec.item.key);
@@ -218,7 +234,7 @@ export function createHostModules({ store, draft = null, win = globalThis.window
         if (mode === 'stopped') return;
         mode = 'stopped';
         for (const rec of [...mounts.values()]) retire(rec);
-        for (const notice of heldNotices) notice.dispose?.();
+        for (const { toast } of heldNotices) toast.dispose?.();
         heldNotices.clear();
         notifyFacts();
     }

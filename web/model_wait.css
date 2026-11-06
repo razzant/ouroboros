@@ -3,7 +3,7 @@
     margin-bottom: var(--space-2);
     padding: var(--space-2);
     border: 1px solid transparent;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
     background: var(--surface-tray);
 }
 /* The owner's move: a wait only the owner can end (sign-in, automatic continuation off, unobservable access). */
@@ -50,8 +50,8 @@
 .model-wait-picker .model-role-controls input:not(.ui-control),
 .model-wait-picker .model-role-controls select:not(.ui-control) {
     background: var(--bg-secondary);
-    border: 1px solid var(--surface-border);
-    border-radius: var(--radius-sm);
+    border: 1px solid var(--field-border);
+    border-radius: var(--radius-inner);
     padding: var(--space-1) var(--space-2);
 }
 .model-wait-picker .model-role-controls input:not(.ui-control):focus {

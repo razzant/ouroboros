@@ -108,9 +108,10 @@ test('each key row docks Test beside its other actions and reports in its own li
         }
         assert.match(row, /data-connection-test-status[^>]*role="status" aria-live="polite"/);
     }
-    // The catalog refresh keeps the status-first single-action row. The Claude-runtime
-    // status/Repair panel is retired with its product surface.
-    assert.equal([...html.matchAll(/<div class="settings-action-row(?:"|\s)/g)].length, 1);
+    // The catalog refresh is the shared action row: the button, then its result right after it (ui.css
+    // .ui-action-row). The Claude-runtime status/Repair panel is retired with its product surface.
+    assert.match(html, /<div class="ui-action-row">\s*<button type="button" class="btn btn-default" id="btn-refresh-model-catalog">[^<]*<\/button>\s*<span id="settings-model-catalog-status" class="ui-result"/);
+    assert.doesNotMatch(html, /settings-action-row/);
     assert.doesNotMatch(html, /settings-claude-code/);
     assert.doesNotMatch(html, /settings-ghost-btn/);
 });
@@ -131,9 +132,11 @@ test('access, supervisor, and review remain independent owner controls', () => {
     const access = html.split('<h3>Access</h3>')[1].split('<h3>')[0];
     const enforcement = html.split('<h3>Review Enforcement</h3>')[1].split('<h3>')[0];
     const cycles = html.split('<h3>Max Review Cycles</h3>')[1].split('<h3>')[0];
-    assert.doesNotMatch(html, /Blocking<\/code> stays available in Cyber Pro|nothing blocks/);
-    assert.match(access, /<code>Cyber Pro<\/code>[\s\S]*Review still runs[\s\S]*review findings do not block actions in Cyber Pro/);
-    assert.match(enforcement, /<code>Blocking<\/code> stops commits[\s\S]*outside Cyber Pro/);
+    assert.doesNotMatch(html, /Blocking<\/strong> stays available in Cyber Pro|nothing blocks/);
+    // Option names are plain words set in 600, never code (U108); the essays live behind the section's Details.
+    assert.doesNotMatch(html, /<code>(Advisory|Blocking|Light|Dark|System|Cyber Pro)<\/code>/);
+    assert.match(access, /<strong>Cyber Pro<\/strong>[\s\S]*Review still runs[\s\S]*review findings do not block actions in Cyber Pro/);
+    assert.match(enforcement, /<strong>Blocking<\/strong> stops commits[\s\S]*outside Cyber Pro/);
     assert.match(cycles, /Blocking still requires reviewer approval outside Cyber Pro\./);
 });
 

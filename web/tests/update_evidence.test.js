@@ -103,14 +103,19 @@ test('after-update rows keep peak RSS, lifetime CPU, interval share and dispatch
     assert.equal(rows[0].head, 'After the update (recorded sample, server process)');
     assert.deepEqual(rows.slice(1).map((row) => row.label), ['Source', 'Observed', 'RSS peak', 'CPU time, process lifetime',
         'CPU share, sample interval', 'Duty overruns', 'Direct message to first model call']);
+    // Sizes and durations read as the other Dashboard tabs write them; the duties in words, each with its count.
     assert.deepEqual(values(rows), {
-        Source: source, Observed: rows[2].value, 'RSS peak': '700.00 MiB', 'CPU time, process lifetime': '412.50 seconds',
-        'CPU share, sample interval': '12.35 % over 600.00 seconds', 'Duty overruns': '{"reconcile":2}',
-        'Direct message to first model call': '4.57 seconds from acceptance · task turn-task',
+        Source: source, Observed: rows[2].value, 'RSS peak': '734 MB', 'CPU time, process lifetime': '7 min',
+        'CPU share, sample interval': '12.3 % over 10 min', 'Duty overruns': 'reconcile ×2',
+        'Direct message to first model call': '4.6 s from acceptance · task turn-task',
     });
-    // The local minute to read and, under it, the exact recorded stamp: a detailed technical fact stays whole.
+    assert.equal(values(afterUpdateRows({ after: { ...after, cpu_seconds: 17690.78, rss_bytes: 2363.23 * 1048576,
+        duty_overruns: { 'custody-maintenance': 1, owner_pause_settlement: 1 } } }).slice(3))['CPU time, process lifetime'], '4 h 55 min');
+    assert.equal(values(afterUpdateRows({ after: { ...after, duty_overruns: { 'custody-maintenance': 1, owner_pause_settlement: 1 } } })
+        .slice(3))['Duty overruns'], 'custody maintenance ×1, owner pause settlement ×1');
+    // The local minute to read; the exact recorded stamp is the raw record's alone.
     assert.match(rows[2].value, /UTC[+-]\d/);
-    assert.equal(rows[2].exact, after.observed_at);
+    assert.ok(!JSON.stringify(rows).includes(after.observed_at));
     const text = JSON.stringify(rows);
     assert.doesNotMatch(text, /better|worse|regress|improv|healthy|median|average|latency|response time|current/i);
 });
@@ -121,18 +126,19 @@ test('a zero is a measurement and a missing one stays unobserved; a current RSS 
     const missing = { source_sha: '', rss_bytes: null, rss_measure: 'unobserved', cpu_seconds: null, cpu_percent: null,
         cpu_interval_seconds: null, duty_overruns: null, direct_message_first_dispatch: null };
     const [before, after] = sides(afterUpdateRows({ before: zero, after: missing }));
+    // A zero is a measurement and says so; a value the sample did not record leaves its row (the raw record keeps the
+    // null), never a zero in its place.
     assert.deepEqual(values(before), {
-        Source: 'a'.repeat(40), Observed: 'unknown time', RSS: '0.00 MiB', 'CPU time, process lifetime': '0.00 seconds',
-        'CPU share, sample interval': '0.00 % over 0.00 seconds', 'Duty overruns': '{}',
-        'Direct message to first model call': '0.00 seconds from acceptance',
+        Source: 'a'.repeat(40), Observed: 'unknown time', RSS: '0 bytes', 'CPU time, process lifetime': '0.0 s',
+        'CPU share, sample interval': '0.0 % over 0.0 s', 'Duty overruns': 'none',
+        'Direct message to first model call': '0.0 s from acceptance',
     });
-    assert.deepEqual(values(after), {
-        Source: 'unknown source', Observed: 'unknown time', RSS: 'unobserved', 'CPU time, process lifetime': 'unobserved',
-        'CPU share, sample interval': 'unobserved', 'Duty overruns': 'unobserved',
-        'Direct message to first model call': 'unobserved',
-    });
-    assert.ok([...before, ...after].every((row) => !row.exact));
+    assert.deepEqual(values(after), { Source: 'unknown source', Observed: 'unknown time' });
+    assert.doesNotMatch(JSON.stringify(after), /unobserved|\b0\b/);
+    // A side with no sample at all still says so once.
+    assert.deepEqual(sides(afterUpdateRows({ before: null, after: zero }))[0],
+        [{ head: 'Before the update' }, { label: 'Sample', value: 'unobserved' }]);
     // One measured half of the share still says which half is missing.
     const half = sides(afterUpdateRows({ before: { ...missing, cpu_percent: 5 }, after: null }))[0];
-    assert.equal(values(half)['CPU share, sample interval'], '5.00 % over unobserved');
+    assert.equal(values(half)['CPU share, sample interval'], '5.0 % over unobserved');
 });

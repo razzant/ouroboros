@@ -1,7 +1,8 @@
 import { tr } from './i18n.js';
 // Installed skill cards (Skills → Installed): one head shared with Browse and the
-// detail sheet (name that opens the sheet, marks, purpose, who line), the run
-// state as one status chip beside the switch, and at most two attention trays,
+// detail sheet (name that opens the sheet, marks, purpose, who line), the switch,
+// with a chip beside it only for a state the switch cannot show, Details right
+// under the head (a phone keeps the switch above it), and at most two attention trays,
 // each one sentence and its actions — the owner's next step is visible text on
 // every surface, never a hover title. Review history, findings, access and the
 // install record live in Details; a connector's place lives on its sheet, not here.
@@ -65,8 +66,8 @@ function statusBadge(status, gate = null, profile = '') {
     // verdict word stays distinct from a reviewed one. It was the owner's own
     // choice, so it is a neutral fact, not a move still waiting for the owner.
     if (profile === 'owner_attested') return chipHtml('review skipped by you', 'neutral');
-    // Running on its install basis with no review of these bytes: the sentence says why; «pending» would not.
-    if ((status || 'pending') === 'pending' && INSTALL_ACCEPTANCE_REASONS.includes(String(gate?.blocking_reason || ''))) return '';
+    // No verdict yet is no chip: the sentence says what runs and whether a review is pending.
+    if ((status || 'pending') === 'pending') return '';
     const executable = gate && typeof gate.executable_review === 'boolean'
         ? gate.executable_review
         : ['clean', 'warnings'].includes(status);
@@ -207,14 +208,14 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
     const conflict = skillConflictReason(skill);
     const reviewRunning = reviewRunningNow(skill, reviewing);
     const didNotFinish = reviewDidNotFinish(skill);
-    const pageFault = (pageModules.faults || []).find((fault) => fault.current !== false && fault.skill === name);
-    const pageHold = !pageFault && (pageModules.held || []).find((hold) => hold.skill === name);
+    const pageFaults = (pageModules.faults || []).filter((fault) => fault.current !== false && fault.skill === name);
+    const pageHolds = (pageModules.held || []).filter((hold) => hold.skill === name);
     const pageRuntimeStopped = Boolean(pageModules.stopped);
     // Continuing saved work is its own choice beside a new review, never folded into Try again.
     const resume = continuableReview(skill) ? smallButton('Continue review', name, 'continue_review') : '';
     const resumeNote = resume ? 'A reviewer stopped with work it can continue from where it stopped.' : '';
     const trays = [];
-    let chip = skill.enabled ? chipHtml('On', 'ok') : chipHtml('Off', 'neutral');
+    let chip = '';
     let needs = false;
     let lockReason = '';
     const pageTray = (kind, page) => kind === 'fault'
@@ -245,7 +246,7 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
     if (repairing) chip = chipHtml('Asking Ouroboros…', 'neutral', { work: true });
 
     if (skill.lifecycle_virtual) {
-        return { chip, trays, needs, update: false, withdrawn: false, lockReason: '', sourceName, modified, install };
+        return { chip, trays, overflow: [], needs, update: false, withdrawn: false, lockReason: '', sourceName, modified, install };
     }
 
     if (install?.pending_update) {
@@ -354,18 +355,20 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
     }
 
     const pageTrays = [];
-    if (pageFault) {
+    if (pageFaults.length) {
         chip = chipHtml('Off in this window', 'warn');
         needs = true;
-        pageTrays.push(pageTray('fault', pageFault));
-    } else if (pageHold) {
+        pageFaults.forEach((fault) => pageTrays.push(pageTray('fault', fault)));
+    }
+    if (pageHolds.length) {
         chip = chipHtml('Held in this window', 'warn');
         needs = true;
-        pageTrays.push(pageTray('hold', pageHold));
+        pageHolds.forEach((hold) => pageTrays.push(pageTray('hold', hold)));
     }
     if (!skill.enabled && !lockReason && conflict) lockReason = `Conflicts with ${conflict}.`;
+    const allTrays = [...pageTrays, ...trays];
     return {
-        chip, trays: [...pageTrays, ...trays].slice(0, 2), needs, lockReason: skill.enabled ? '' : lockReason, sourceName, modified, install,
+        chip, trays: allTrays.slice(0, 2), overflow: allTrays.slice(2), needs, lockReason: skill.enabled ? '' : lockReason, sourceName, modified, install,
         update: Boolean(update || withdrawn || install?.update_rejected || install?.pending_update), withdrawn: Boolean(withdrawn),
         widgets: skill.enabled && skill.type === 'extension' && skill.live_loaded && hasSkillUiTab(skill, live),
     };
@@ -439,7 +442,7 @@ function reviewFindings(skill) {
     const findings = Array.isArray(skill.review_findings) ? skill.review_findings : [];
     if (!findings.length) return '';
     // Collapsed with its summary only: findings are most of the list payload.
-    return `<details class="skills-review-findings ui-rich-content" data-skill-findings="${escapeHtml(skill.name)}"><summary>${plural(findings.length, 'review finding')}</summary></details>`;
+    return `<details class="ui-disclosure skills-review-findings ui-rich-content" data-skill-findings="${escapeHtml(skill.name)}"><summary>${plural(findings.length, 'review finding')}</summary></details>`;
 }
 
 function reviewRunTitle(run) {
@@ -471,7 +474,7 @@ function reviewRunOutcome(run) {
 function reviewReasonRow(reason) {
     if (!reason) return '';
     const shown = boundedText(reason, 400);
-    const complete = shown === reason ? '' : `<details class="skills-review-reason"><summary>Full reason</summary><div>${escapeHtml(reason)}</div></details>`;
+    const complete = shown === reason ? '' : `<details class="ui-disclosure skills-review-reason"><summary>Full reason</summary><div>${escapeHtml(reason)}</div></details>`;
     return `<div class="skills-review-reason">Reason: ${escapeHtml(shown)}</div>${complete}`;
 }
 
@@ -491,7 +494,7 @@ function reviewHistory(skill) {
     const historyLabel = Number.isFinite(omitted) && omitted > 0 ? `${history.length} of ${history.length + omitted}` : `${history.length}`;
     const currentOutcome = reviewRunOutcome(current);
     return `<div class="skills-review-current">${escapeHtml(reviewRunTitle(current))} · ${escapeHtml(currentOutcome.label)}</div>${reviewReasonRow(currentOutcome.reason)}
-        ${rows ? `<details class="skills-review-history ui-rich-content"><summary>Skill Review history (${historyLabel})</summary><ol>${rows}</ol></details>` : ''}`;
+        ${rows ? `<details class="ui-disclosure skills-review-history ui-rich-content"><summary>Review history (${historyLabel})</summary><ol>${rows}</ol></details>` : ''}`;
 }
 
 /** Exactly one sentence of review evidence for the current bytes (UX §3.4). */
@@ -513,8 +516,12 @@ export function reviewSentence(skill) {
         return `Ouroboros read it before accepting it and recorded why: “${boundedText(notes, 240)}”.`;
     }
     if (ready && skill.review_profile === 'native_seed') return 'Comes with the app; it runs without a separate review.';
-    if (ready && skill.review_status === 'warnings') return 'Reviewed on this computer · passed with notes.';
-    if (ready) return 'Reviewed on this computer · passed.';
+    // A passed review stays the evidence while a newer round of the same files has no verdict yet.
+    const job = ready && reviewJob(skill);
+    const again = job && (reviewRunningNow(skill, false) || reviewRunOutcome(job).label === 'pending')
+        ? ` · a new review${job.review_round ? ` (round ${Number(job.review_round)})` : ''} is pending` : '';
+    if (ready && skill.review_status === 'warnings') return `Reviewed on this computer · passed with notes${again}.`;
+    if (ready) return `Reviewed on this computer · passed${again}.`;
     if (skill.review_status === 'blockers' || preflightFailed(skill)) return 'Review found problems; it doesn’t run until you decide.';
     if (preflightFailedStale(skill)) return 'The last file check failed on earlier files; review the current files.';
     return 'Not reviewed for its current files.';
@@ -577,7 +584,7 @@ function publicationRow(skill) {
     });
     if (!line) return '';
     const destination = published.destination || published.repository;
-    return detailRow('Publication', `${line}${destination ? ` · ${escapeHtml(String(destination))}` : ''} <button type="button" class="skills-link-button" ${actionAttrs(skill.name, 'forget_publication')}>Forget this record</button>`);
+    return detailRow('Publication', `${line}${destination ? ` · ${escapeHtml(String(destination))}` : ''} <button type="button" class="skills-link-button ui-hit-area" ${actionAttrs(skill.name, 'forget_publication')}>Forget this record</button>`);
 }
 
 function provenanceRows(skill) {
@@ -590,7 +597,7 @@ function provenanceRows(skill) {
     if (href) parts.push(`<a href="${href}" target="_blank" rel="noopener noreferrer" data-skill-external>homepage ↗</a>`);
     const warnings = (prov.adapter_warnings || []).map((msg) => `<li>${escapeHtml(msg)}</li>`).join('');
     return detailRow('ClawHub', parts.join(' · '))
-        + (warnings ? `<details class="skills-card-warnings"><summary>Adapter warnings</summary><ul>${warnings}</ul></details>` : '');
+        + (warnings ? `<details class="ui-disclosure skills-card-warnings"><summary>Adapter warnings</summary><ul>${warnings}</ul></details>` : '');
 }
 
 function makeRunnableOffer(skill, repairing) {
@@ -643,7 +650,7 @@ function menuHtml(skill, { reviewing, repairing, submit }) {
     } else if (skill.removal === 'delete') {
         items.push(`<button type="button" role="menuitem" class="skills-menu-item skills-delete-local" ${actionAttrs(skill.name, 'delete', `data-payload-root="${escapeHtml(skill.payload_root || '')}"`)}>Delete</button>`);
     }
-    return `<div class="skills-card-menu"><button type="button" class="skills-card-menu-trigger" aria-label="More actions for ${name}" aria-haspopup="menu" aria-expanded="false" data-skill-menu-trigger>⋮</button><dialog class="skills-card-menu-dialog" role="menu">${items.join('')}</dialog></div>`;
+    return `<div class="skills-card-menu"><button type="button" class="btn btn-ghost btn-sm skills-card-menu-trigger" aria-label="More actions for ${name}" aria-haspopup="menu" aria-expanded="false" data-skill-menu-trigger>⋮</button><dialog class="skills-card-menu-dialog" role="menu">${items.join('')}</dialog></div>`;
 }
 
 /** One installed card. `options.githubTokenConfigured` gates Publish; `live` names loaded UI tabs. */
@@ -679,10 +686,11 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
         skill.health_regressed ? `<div class="skills-load-error">Regression: was live at ${escapeHtml(String((skill.last_known_good || {}).version || '?'))} (${escapeHtml(String((skill.last_known_good || {}).sha || '').slice(0, 12))}); broken after a code update.</div>` : '',
     ].join('');
     // Details: two fact groups the listing re-reads in place and the review block (kept while its key holds).
-    const details = `<details class="skills-details"><summary>Details</summary>
+    const details = `<details class="ui-disclosure skills-details"><summary>Details</summary>
         <div class="skills-details-body">
             <div class="skills-details-facts" data-skill-detail-review>${detailRow('Review', `${escapeHtml(reviewSentence(skill))} ${statusBadge(skill.review_status, skill.review_gate, skill.review_profile)}`)}</div>
             <div class="skills-review-block" data-review-key="${escapeHtml(reviewBlockKey(skill))}">${reviewHistory(skill)}${reviewFindings(skill)}</div>
+            <div class="skills-details-overflow" data-skill-detail-overflow>${(model.overflow || []).join('')}</div>
             <div class="skills-details-facts" data-skill-detail-facts>
                 ${detailRow('Can use', escapeHtml(permissionWords(skill.permissions).join(' · ') || 'Nothing beyond its own folder'))}
                 ${accessRows(skill)}
@@ -695,19 +703,19 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
             </div>
         </div>
     </details>`;
-    return `<article class="skills-card skills-installed-card" data-skill="${safeName}"${skill.lifecycle_virtual ? ' data-lifecycle-virtual' : ''}${model.needs ? ' data-needs-you' : ''}${reviewing ? ' data-reviewing="1"' : ''}${repairing ? ' data-repairing="1"' : ''}>
+    return `<article class="ui-card skills-card skills-installed-card" data-skill="${safeName}"${skill.lifecycle_virtual ? ' data-lifecycle-virtual' : ''}${model.needs ? ' data-needs-you' : ''}${reviewing ? ' data-reviewing="1"' : ''}${repairing ? ' data-repairing="1"' : ''}>
         <header class="skills-card-head">
             <div class="skills-card-title">
-                <div class="skills-head-title">${connectsServices(skill).length ? `<span class="skills-card-icon" aria-hidden="true">${skillIconHtml(skill.icon, 18)}</span>` : ''}<button type="button" class="skills-card-name" ${actionAttrs(skill.name, 'open_detail')}><span data-i18n-authored>${escapeHtml(skillTitle(skill))}</span><span class="skills-card-name-more" aria-hidden="true">›</span></button><span class="skills-card-marks">${marks}</span></div>
+                <div class="skills-head-title">${connectsServices(skill).length ? `<span class="skills-card-icon" aria-hidden="true">${skillIconHtml(skill.icon, 18)}</span>` : ''}<button type="button" class="skills-card-name ui-hit-area" ${actionAttrs(skill.name, 'open_detail')}><span data-i18n-authored>${escapeHtml(skillTitle(skill))}</span><span class="skills-card-name-more" aria-hidden="true">›</span></button><span class="skills-card-marks">${marks}</span></div>
                 ${description ? `<p class="skills-card-purpose">${escapeHtml(description)}</p>` : ''}
                 <div class="skills-card-who">${installedWhoHtml(skill, model)}</div>
                 ${countsAsYoursText(skill) ? `<p class="skills-card-facts">${escapeHtml(countsAsYoursText(skill))}</p>` : ''}
             </div>
             <div class="skills-card-toggle"><span class="skills-card-status">${model.chip}</span>${toggle}${skill.lifecycle_virtual ? '' : menuHtml(skill, { reviewing, repairing, submit })}</div>
         </header>
+        ${skill.lifecycle_virtual ? '' : details}
         <div class="skills-card-trays" id="${trayId}" data-skill-trays>${model.trays.join('')}${widgetsButton}</div>
         <div data-skill-errors>${errors}</div>
-        ${skill.lifecycle_virtual ? '' : `<footer class="skills-card-actions">${details}</footer>`}
     </article>`;
 }
 
@@ -731,7 +739,7 @@ export function patchInstalledSkillEnrichment(card, skill, reviewing, repairing,
         else card.removeAttribute(name);
     }
     for (const selector of ['.skills-card-status', '[data-skill-trays]', '[data-skill-errors]', '.skills-card-who', '.skills-card-marks', '.skills-card-purpose',
-        '[data-skill-detail-review]', '[data-skill-detail-facts]']) {
+        '[data-skill-detail-review]', '[data-skill-detail-overflow]', '[data-skill-detail-facts]']) {
         const target = card.querySelector(selector), source = next.querySelector(selector);
         if (!target && source) {
             if (selector === '.skills-card-purpose') card.querySelector('.skills-head-title')?.after(source);

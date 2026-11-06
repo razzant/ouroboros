@@ -238,6 +238,13 @@ READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
     "get_task_result", "list_projects", "memory_read", "search_ui_translations",
 })
 
+# The known pure reads: a failed one stays in a card's details instead of warning that no review checked the result
+# (owner 06.11, A; _outcome_tool_errors.warns_without_review). Every parallel-safe read, plus reads that cannot run in
+# parallel. A tool not named here (an effect, a command, MCP, an extension) stays loud.
+PURE_READ_TOOLS: frozenset[str] = READ_ONLY_PARALLEL_TOOLS | frozenset({
+    "browse_page", "view_image", "github_read", "knowledge_read", "youtube_transcript",
+})
+
 # Enqueue-only tools safe to emit in parallel within one tool-call round.
 # schedule_subagent is fire-and-forget: it writes a `requested` task result and
 # does event_queue.put_nowait(...) with no blocking LLM/RPC on the parent path.
@@ -491,6 +498,7 @@ OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
     "skill_install", "skill_update",
     "journal_write", "workpad_write", "pin_ui_translation", "record_update_description",
     "github_write", "pr_merge",
+    "remote_mcp_sign_in",  # stores or revokes the owner's sign-in to a remote MCP server
 })
 
 

@@ -121,7 +121,7 @@ test('detailed Updates UI makes destructive replacement an explicit recovery act
     assert.doesNotMatch(source, />Promote to Stable<\/button>/);
     assert.match(source, /does not change the official QA feed/);
     assert.match(source, /<summary>Recovery<\/summary>/);
-    assert.match(source, /Replace with Official Version \(Recovery\)/);
+    assert.match(source, />Replace with the official version<\/button>/);
     assert.match(source, /apiClient\.updateApply\('replace', plan, \{ confirmRecovery: true \}\)/);
     assert.match(source, /updatePreflight\(\)/);
     assert.match(source, /data\.check_ok === false/);
@@ -212,7 +212,7 @@ test('Replace outcomes say a restart was requested, never that the version alrea
     const src = readFileSync(new URL('../modules/updates.js', import.meta.url), 'utf8');
     const fn = src.slice(src.indexOf('async function replaceWithOfficial'));
     const body = fn.slice(0, fn.indexOf('async function', 10));
-    const toasts = [...body.matchAll(/showToast\('([^']*)'/g)].map((match) => match[1]);
+    const toasts = [...body.matchAll(/showToast\(['`]([^'`$]*)/g)].map((match) => match[1]);
     assert.deepEqual(toasts, [
         'Recovery needs a restart that could not be requested. Restart Ouroboros to finish.',
         'Restart requested to finish recovery with the official version.',

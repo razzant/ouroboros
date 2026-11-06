@@ -30,18 +30,18 @@ test('Restart now confirm-and-send sends exactly one non-queueable /restart', as
     assert.deepEqual(sent[0][1], { queue: false });
     assert.equal(seenOptions[0].danger, true);
     assert.equal(seenOptions[0].confirmLabel, 'Restart');
-    // Truthful about the server's owner Restart (restart_retention.py):
-    // eligible saved work and the previously runnable queue return; existing
-    // pauses, holds and limits are not released by Restart.
-    assert.match(seenOptions[0].body, /Running tasks stop, then eligible saved work resumes after the restart/);
-    assert.match(seenOptions[0].body, /already paused stay paused/);
-    assert.match(seenOptions[0].body, /Runnable queued tasks return to the queue/);
-    assert.match(seenOptions[0].body, /Existing holds and limits still apply/);
+    // One line in the main view (U022); the policy is the dialog's Details, truthful about the server's owner
+    // Restart (restart_retention.py): eligible saved work and the previously runnable queue return; existing pauses,
+    // holds and limits are not released by Restart.
+    assert.equal(seenOptions[0].body, 'Running tasks stop and continue after the restart.');
+    const facts = seenOptions[0].details.rows.map((row) => `${row.label}: ${row.value}`).join('\n');
+    assert.match(facts, /Running tasks: They stop, then eligible saved work resumes after the restart/);
+    assert.match(facts, /already paused stay paused/);
+    assert.match(facts, /Queued tasks: Runnable ones return to the queue/);
+    assert.match(facts, /Existing holds and limits still apply/);
     // Live routing: resumed work that follows a role takes its current model; an explicit choice stays.
-    assert.match(seenOptions[0].body,
-        /work that follows a model setting resumes on the current setting; task-specific choices stay\./);
-    assert.doesNotMatch(seenOptions[0].body, /queued tasks stop/);
-    assert.doesNotMatch(seenOptions[0].body, /still pausing/);
+    assert.match(facts, /work that follows a model setting resumes on the current setting; task-specific choices stay\./);
+    assert.doesNotMatch(`${seenOptions[0].body}\n${facts}`, /queued tasks stop|still pausing/);
 });
 
 test('Settings and the chat header share ONE restart confirmation (owner quiz 285597)', () => {
@@ -113,7 +113,7 @@ test('a per-task unknown pause is disclosed even in a returned census array', ()
     assert.match(restartConfirmBody([{ phase: 'unknown' }]), /Pause status could not be read/);
 });
 
-const QUIET_RESTART_LINES = 3;  // the three lines every confirmation says
+const QUIET_RESTART_LINES = 1;  // the one line every confirmation says
 
 test('Restart counts live inline Presence turns as interrupted, promising no return; nothing else adds the line', () => {
     const quiet = restartConfirmBody([]);

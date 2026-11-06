@@ -60,8 +60,8 @@ def test_owner_turn_is_admitted_to_the_lane_and_runs_in_the_carrier(lane):
     assert conversation_lane.lane_turn_rows()[0]["phase"] == "working"
 
 
-def test_hello_during_a_project_crash_storm_is_admitted_to_the_lane_never_pending(lane, monkeypatch):
-    monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "worker_crash_storm")
+def test_hello_under_an_exhausted_project_pool_is_admitted_to_the_lane_never_pending(lane, monkeypatch):
+    monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "worker_readiness_exhausted")
     workers.WORKERS[0].proc.alive = False  # every project worker is dead
     worker_chat_lane.handle_chat_direct(1, "hello", None, task_metadata={"client_message_id": "cm-2"})
     assert not workers.PENDING

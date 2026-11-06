@@ -20,7 +20,7 @@ Iframes inherit no host tokens or choice; `render.appearance` declares their pol
 
 `pages.js` lists the places. `syncNavigationState()` owns page/Project/expansion/drawer; widths are owner-local. `#<page>` is read once, never written (no desktop address bar; Telegram loads `/`). Projects are panels, not routes, in the sole `<nav>`: `projects_nav.js` keys rows (open/pin/rename/delete); pins survive the `/api/state` cap, older rooms load by `?all=1` on demand; `PROJECT_NAME_MAX` and lifecycle govern names; deleting rooms cannot open until registry publication. `style.css` gives Main track 2 of 2, hiding retained `#divider`, unboxing `.sidebar-scroll`; panels overlay. Below `layout.js`'s switch, Main takes track 1, sidebar becomes a drawer, Project fills content. `layers.js` owns dismissal; `host_telegram.js` binds Telegram Back; `drawer_drag.js` speeds visible controls; `shell_motion.js`/`room_retire.js`/`motion.js` move between places (DESIGN §10).
 
-- `web/ui.css` ← shared tokens and controls; `settings.css` owns the wrapping `.settings-action-row`; `style.css` owns shell/card geometry and System's edge-free shadow (DESIGN §8).
+- `web/ui.css` ← tokens, the locked control box, material, shared parts (`.ui-action-row`, `.ui-result`, `.ui-disclosure`, `.ui-row`, `.ui-list-more`, `[data-primary]`); `style.css` composes pages (Dashboard tab body, shell/card geometry, System's edge-free shadow).
 - `theme_palette.js` ← `--chart-*` tokens into mounted Chart options, a host chart's series too; updates keep data and caller-authored option groups.
 - `page_header.js` / `page_icons.js` ← headers (`bindPageHeader` places tabs/path/actions), `bindTabStrip`, `renderSegmentedField` (`--segment-count`), icons; `settings_controls.bindEffortSegments` keeps empty inheritance.
 - `ui_interactions.js` ← `bindDialogFocus`, `bindMenu`, `bindPopoverPosition`, `bindEnterSubmit`; every binding returns teardown.
@@ -28,8 +28,8 @@ Iframes inherit no host tokens or choice; `render.appearance` declares their pol
 - `status_mark.js` ← every status mark; `row_menu_gesture.js` ← a Project row menu's long press (DESIGN §10).
 - `scroll_fade.js` ← `bindScrollFade`: edge attributes from hidden content.
 - `api_client.js` / `api_types.js` / `model_route_types.js` / `decision_types.js` ← browser API calls with typed errors; mirrors of browser-facing contract shapes.
-- `ui_primitives.js` ← shared safe-field renderer/collector, tone/status and attribute escaping; `ui_helpers.js`/`utils.js` re-export it, the author kit serves it directly.
-- `ui_helpers.js` ← row/badge helpers, keyboard menu lock, System/routing action rows (`createSystemMessageActions`), text copying (`copyTextToClipboard`), older-shell detection (§2), file/copy-link/toast fallbacks, framed-onboarding links (`OnboardingHostApi`).
+- `ui_primitives.js` ← safe fields, tone/status, attribute escaping, action results (`setResult`, `clearResultOnEdit`, `errorWords`); `ui_helpers.js`/`utils.js` re-export it.
+- `ui_helpers.js` ← row/badge helpers, keyboard menu lock, System/routing action rows (`createSystemMessageActions`), `copyTextToClipboard`, older-shell detection (§2), file/copy-link/toast fallbacks, framed-onboarding links (`OnboardingHostApi`).
 - `desktop_shell.js` ← window facts from `shell_info()` (legacy `app_version`: health); installed/loaded stay distinct. Failed reads are not unsupported; no update advice.
 - `interface_size.js` ← Interface size's one setter, also `ouroInterfaceSize` for the macOS View menu: the app's `set_interface_size`, a touch screen's viewport (`theme.js` `ouroViewportScale`), else browser zoom.
 - `skill_card_renderer.js`, `skill_presentation.js` ← skill cards and the words every Skills surface shares.
@@ -39,14 +39,14 @@ Iframes inherit no host tokens or choice; `render.appearance` declares their pol
   reads/loads use `DOCUMENT_READER_TIMEOUT_MS`, while image-only scenes own
   bounded focal zoom/pinch/pan and keyboard/visible reset controls (DESIGN
   "Document reading").
-- `log_events.js` ← event classification and the one factual task-presentation projection for Chat and Logs: task truth maps only to `Working` / `Done` / `Done with warnings` / `Failed` / `Stopped`; it owns no actions, incidents or notifications, and compact headlines never expose raw reason codes. Task-to-task delivery appears in the receiving timeline (`task_message_injected`), delivery or refusal in the sending one (`task_message_routed`).
+- `log_events.js` ← event classification and the one factual task-presentation projection for Chat and Logs: task truth maps only to DESIGN §4's five task words; it owns no actions, incidents or notifications, and compact headlines never expose raw reason codes. Task-to-task delivery appears in the receiving timeline (`task_message_injected`), delivery or refusal in the sending one (`task_message_routed`).
 - `effort_evidence.js` ← Logs: requested effort, host carrier, engine preparation, sourced provider observation; missing echoes stay unknown.
 - `toast.js`, `masonry.js`, `widget_frame.js`, `widget_job.js` ← toasts (including keyboard-close for non-expiring announcements), layout, framed-widget bootstrap/lifecycle, bounded widget request/job policy.
 - `result_files.js` ← Files and validated question materials via canonical artifacts, the reader and explicit downloads.
 - `history_retention.js` ← history-transfer details and storage problems for Chat and Logs; routine transfer alters no task outcome.
 - `settled_card.js` ← `syncSettledItems`: the settled card's Files row and Continue action follow one detail.
 - `task_continue.js` ← Continue projects the host's `continuation_offer`; `hard_limit_reached` is one neutral reason that buys no model call; Stop, Panic and an ordinary finish cannot Continue, an author's explicit unfinished stop can (§6); one stored nonce per task makes a retry return the same admission.
-- `task_control_menu.js` ← Chat and Activity share "Wrap up" / "Hurry up" / "Pause" / "Stop earlier attempt" / "Stop now" with the same endpoints, stop policy, request-id retry and verbatim refusals, offering a work only the controls it lists; Pause is root-only and its `request_id` survives uncertain or `latch_pending` replies until a confirmed Pause or Resume retires it.
+- `task_control_menu.js` ← Chat and Activity share Wrap up, Hurry up, Pause, Stop earlier attempt and Stop now with the same endpoints, stop policy, request-id retry and verbatim refusals, offering a work only the controls it lists; Pause is root-only and its `request_id` survives uncertain or `latch_pending` replies until a confirmed Pause or Resume retires it.
 
 `confirm_dialog.js::openConfirmDialog` owns browser dialogs: confirm returns a strict boolean, input `{confirmed, value}`, alert one acknowledgement; Cancel, Close, backdrop, Escape and supersession never confirm. Native `window.prompt`/`confirm`/`alert` are forbidden: shells render them unevenly, they block the event loop, PyWebView's prompt fails silently. Header Restart and Settings "Restart now" share `chat_activity.js::confirmAndSendRestart`: a fresh `/api/state` census warns of unfinished Pause or an unreadable state, then one `/restart` with `queue:false`; what stops, returns or stays held: §9 "Retention". `model_chooser.js` shares only popup geometry: fixed choices stay native selects; arbitrary and saved unknown model IDs stay editable.
 
@@ -56,7 +56,7 @@ Iframes inherit no host tokens or choice; `render.appearance` declares their pol
 
 `chat.js` owns timeline, runtime/budget controls, routing, task/child cards, subscriptions, threads/order/unread/reconnect, focus corners. `chat_media.js` owns delivery (living cards: `chat_cards.js`)/paste/drop, `chat_attachments.js` staged files/owner attachments, `chat_input_sizing.js` field height. Routing ACKs update the owner's `client_message_id` sidecar, never an assistant bubble.
 
-Rows order by time then arrival (DESIGN). Keyed replay keeps nodes, disclosure, focus, selection and child lifecycle; current results outrank history. `LIVE_CARD_CAP` bounds live cards, `chat_history.js` bounds pages; `historyCoverage` proves bytes, not EOF/IDs/time. `chat_reading_position.js` owns anchors; `showLatest({arrive})` and `project_read_state.js` land on newest arrival. `createHistoryControls` keeps read gaps at the feed edge; `toast.js` announces once per document in an exposed room, retaining the room-scoped placement and explicit close contract. Floating headers reserve measured height; sidebar selection is instant. Origins adopt by `project_dialogue.project_origin_identity`.
+Rows order by time then arrival (DESIGN). Keyed replay keeps nodes, disclosure, focus, selection and child lifecycle; current results outrank history. `LIVE_CARD_CAP` bounds live cards, `chat_history.js` bounds pages; `historyCoverage` proves bytes, not EOF/IDs/time. `chat_reading_position.js` owns anchors; `showLatest({arrive})` and `project_read_state.js` land on newest arrival. `createHistoryControls` keeps read gaps at the feed edge; `toast.js` announces once per document in an exposed room. Floating headers reserve measured height; sidebar selection is instant. Origins adopt by `project_dialogue.project_origin_identity`.
 
 `chat_reply.js` jumps; `chat_history_reveal.js` pages `around=<row_address>` (below). `app.js` preloads via full registry, suppressing newest/ACK arrival. Reading claims cancel stale work; cards reveal exact lines, never portals/context. Task refs mean cards.
 
@@ -168,7 +168,7 @@ Files browses, previews (image, sandboxed PDF, text; binary/unsupported said), e
 
 ### Skills and Widgets
 
-`skills.js` owns Installed, Browse and Sources. Installed merges listing and lifecycle queue without waiting for sources; failed reads keep the prior list. Card replacement closes its menu; enrichment preserves disclosures and focus. Each card has one chip and at most two actionable trays; ended reviews keep their verdict state. Skills consumes the page-local `host_modules.pageModuleFacts()` projection: current faults show window-scoped Off, held starts keep shared wording and offer `startHeldModule` only while the page runtime is running, and a stopped runtime replaces that action with reload guidance; rendering owns no duplicate fault/hold state. Browse uses cached catalogs and registry search (§13), explains trust before Install and compares competing names. Sources separates health from trust. Updates bind shown digests; modified copies offer merge/replace/keep. Cards show acceptance basis and outcome. Lifecycle, repair, owner ingress and publication use §13; listing never runs Betterleaks.
+`skills.js` owns Installed, Browse and Sources. Installed joins listing/lifecycle facts without waiting for sources; failed reads retain a labelled list. Virtual↔installed replacement closes only that menu; enrichment keeps controls, disclosures and focus. Switches show On/Off; exceptional states get a chip and at most two action trays. Ended reviews keep outcome and verdict. `host_modules.pageModuleFacts()` supplies window-local faults/holds to cards, Needs you and Browse; `startHeldModule` recovers holds only while running. Stop removes recovery toasts and publishes reload guidance. No duplicate fault/hold state. Browse reads cached catalogs and registry search, discloses trust and compares competing names (§13); Sources separates health from trust. Digest-bound updates preserve merge/replace/keep. Cards show acceptance basis and update outcome. Enable, Remove, Skip review and Repair follow §13; later owner disable wins. Publish selects a destination then preflight/task; listing never runs Betterleaks.
 
 `connector_places.js` lists Places beside the shared Connect control. The sheet's `consciousness_api.readPlaceConnector` requests its `account_id` for identity/readiness, refusing an explicit mismatch; Connect still reads all instances. `place_history.js` reads conversations there. Back/Escape keep editor drafts, status, disclosures and focus across repaint; native or button Close disposes the sheet. Exits abort reads and free Markdown. Speech is role-labelled and untranslated; only recorded facts appear (§12), without progress. Pagination, import and gaps stay distinct; Retry keeps its cursor; a changed view rereads the newest page.
 
@@ -192,7 +192,7 @@ Classic entries, `.mjs` included, still run inline; `entry_type: module` opts in
 
 #### Author UI kit
 
-Optional author controls reuse the installed `web/ui.css` and `modules/ui_primitives.js` (no second declarative renderer), read from the builtin tree by `server_web.read_author_kit_assets()` (§4) with no endpoint, cache or state; recipes: `docs/examples/author_ui_kit/`. Authors may override or omit the kit; its failed load stays inside the author application.
+Optional author controls reuse the installed `web/ui.css` and `modules/ui_primitives.js` (no second declarative renderer), read by `server_web.read_author_kit_assets()` (§4) from the builtin tree with no endpoint, cache or state; recipes: `docs/examples/author_ui_kit/`. Authors may override or omit the kit; a failed load stays in their application.
 
 #### Out-of-process extension responses
 
@@ -228,7 +228,7 @@ Each key row's **Test** (`POST /api/providers/test`, §4) is one bounded, physic
 
 A directory or separately hosted builtin client offers outside-frame recovery via `?builtin=1`; the builtin main page omits it (`ws.pageOwnedByCore`). macOS `launcher_onboarding.setup_recovery_menu` opens it without page JS. Completion writes starter skills; previews write nothing.
 
-`web/provider-return.html`, `provider-return.css` and `modules/provider_return.js` finish provider navigation on builtin `/onboarding/static/`, then POST to the owning skill. They keep the deployment prefix and report confirmed/denied/unconfirmed outcomes; credential custody and the protocol belong to CREATING_SKILLS “Provider sign-in return”.
+`web/provider-return.html`, `provider-return.css` and `modules/provider_return.js` finish provider navigation on builtin `/onboarding/static/`, then POST to the state's owner (a skill, or `/api/mcp/sign-in`); protocol and outcomes: CREATING_SKILLS “Provider sign-in return”.
 
 #### Agent accounts
 
@@ -243,6 +243,8 @@ Connect renders typed URL/code: `credential_profile_required` + `add_named_accou
 `claudexor_status_store.js` owns exact-account/full refresh and reset/refill. Subject/facet clocks keep newer observations and refresh acknowledgements on replay. Before transport, client storage saves every unresolved original key/body, no snapshots; reopening sends nothing. Confirmation mints a key and keeps earlier requests for same-key POST/receipt GET; refill keeps its verb. Outcome and readback differ: applied/uncertain effects leave old values last-known, no-effect keeps them. Refresh neither resets nor decrements. Disclosure/focus survive repaint; Claudexor owns credentials/policy.
 
 `harness_maintenance.js` adds one program row per family, including maintenance-only families without account actions. Engine facts supply selected/baseline versions and update/return/latest-check capabilities. Exact engine text waits under Details. Lost replies keep key/body; inventory rejoins accepted operations with progress, cancel and partial effects. Existing visible ticks poll; drafts survive refresh and controls wrap across desktop/mobile/embedded clients. Inspection never wakes or logs in; Update never retries a task (§6 Vendor program maintenance).
+
+**Restart Claudexor** (`claudexor_restart.js`, Accounts toolbar) replaces the engine process after the owner confirms which runs end (DESIGN §7; CLIENT_CONTRACT §13); the header Restart keeps it. The CLI update flow and the missing-executable banner point here.
 
 #### Available subagents and the review pool
 
@@ -260,4 +262,4 @@ Settings save sorts keys into three effect classes, never claiming all are live 
 
 ### Visual verification policy
 
-Visual verification is governed by DEVELOPMENT §11 "Responsive and accessible behavior" and `docs/CHECKLISTS.md`.
+Visual verification: DEVELOPMENT §11 "Responsive and accessible behavior" and `docs/CHECKLISTS.md`.

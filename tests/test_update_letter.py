@@ -354,7 +354,7 @@ def test_refresh_records_the_checked_head_even_without_an_update(tmp_path, monke
     assert record["state"] == "none" and record["checked_head_sha"] == "a" * 40
     assert ul.project_letter(record, head_sha="a" * 40, latest_sha="") is None
     fact = ul.official_update_projection("a" * 40, drive_root=drive, state={"managed_update_cache": {
-        "latest_sha": "", "available": False, "behind": 0, "ahead": 2, "checked_at": "t0"}})
+        "latest_sha": "", "available": False, "behind": 0, "ahead": 2, "checked_at": "t0", "checked_head_sha": "a" * 40}})
     assert fact["status"] == "up_to_date" and fact["letter"] is None
 
 
@@ -377,7 +377,7 @@ def test_a_check_records_material_and_facts_without_a_model_or_a_description(tmp
     view = ul.project_letter(record, head_sha="a" * 40, latest_sha="b" * 40)
     assert view["state"] == "none" and view["text"] == "" and view["checked_key"]["target_sha"] == "b" * 40
     cache = {"managed_update_cache": {"latest_sha": "b" * 40, "available": True, "behind": 3, "checked_at": "t",
-                                      "update_channel": "stable"}}
+                                      "update_channel": "stable", "checked_head_sha": "a" * 40}}
     monkeypatch.setenv("OUROBOROS_UPDATE_CHANNEL", "stable")
     fact = ul.official_update_projection("a" * 40, drive_root=drive, state=cache)
     assert fact["status"] == "update_available" and fact["letter"]["state"] == "none"
@@ -627,11 +627,12 @@ def test_official_update_projection_applied_only_while_the_check_describes_this_
     merged = "e" * 40
     ul.record_path(drive).write_text(json.dumps(_record(checked_head_sha=merged, target_in_head=True)))
     cache = {"managed_update_cache": {"latest_sha": "b" * 40, "available": False, "behind": 0,
-                                      "checked_at": "t1", "update_channel": "stable"}}
+                                      "checked_at": "t1", "update_channel": "stable", "checked_head_sha": merged}}
     assert ul.official_update_projection(merged, drive_root=drive, state=cache)["letter"]["relation"] == "applied"
-    # HEAD moved on after that check: the recorded fact is about another head.
+    # HEAD moved on after that check: the recorded fact is about another head, and so are its counts.
     moved = ul.official_update_projection("f" * 40, drive_root=drive, state=cache)
     assert moved["status"] == "moved_since_check" and moved["letter"]["relation"] == "other"
+    assert (moved["behind"], moved["ahead"], moved["checked_head"]) == (None, None, merged)
 
 
 def test_official_update_projection_applied_after_divergent_merge(tmp_path):
@@ -639,7 +640,7 @@ def test_official_update_projection_applied_after_divergent_merge(tmp_path):
     (drive / "state").mkdir(parents=True)
     ul.record_path(drive).write_text(json.dumps(_record(checked_head_sha="e" * 40, target_in_head=True)))
     cache = {"managed_update_cache": {"latest_sha": "b" * 40, "available": False, "behind": 0, "ahead": 2,
-                                      "checked_at": "t1", "update_channel": "stable"}}
+                                      "checked_at": "t1", "update_channel": "stable", "checked_head_sha": "e" * 40}}
     fact = ul.official_update_projection("e" * 40, drive_root=drive, state=cache)
     assert fact["status"] == "up_to_date" and fact["letter"]["relation"] == "applied"
     assert fact["target"] == {"version": "6.114.0", "sha": "b" * 40}
@@ -652,12 +653,16 @@ def test_official_update_projection_after_a_channel_switch_is_unchecked(tmp_path
     (drive / "state").mkdir(parents=True)
     ul.record_path(drive).write_text(json.dumps(_record()))
     cache = {"managed_update_cache": {"latest_sha": "b" * 40, "available": False, "behind": 0,
-                                      "checked_at": "t1", "update_channel": "stable"}}
+                                      "checked_at": "t1", "update_channel": "stable", "checked_head_sha": "a" * 40}}
     monkeypatch.setenv("OUROBOROS_UPDATE_CHANNEL", "development")
     fact = ul.official_update_projection("a" * 40, drive_root=drive, state=cache)
     assert fact["status"] == "unchecked" and fact["target"] is None and fact["update_channel"] == "development"
     assert fact["letter"]["text"] == "letter" and fact["letter"]["relation"] in ("superseded", "other")
     monkeypatch.setenv("OUROBOROS_UPDATE_CHANNEL", "stable")
+    assert ul.official_update_projection("a" * 40, drive_root=drive, state=cache)["status"] == "up_to_date"
+    # A caller without the channel in its environment reads the settings' channel, as the server does.
+    monkeypatch.delenv("OUROBOROS_UPDATE_CHANNEL")
+    monkeypatch.setattr("ouroboros.config.load_settings", lambda *a, **k: {"OUROBOROS_UPDATE_CHANNEL": "stable"})
     assert ul.official_update_projection("a" * 40, drive_root=drive, state=cache)["status"] == "up_to_date"
 
 
@@ -692,18 +697,26 @@ def test_official_update_projection_states(tmp_path):
     head = "a" * 40
     assert ul.official_update_projection(head, drive_root=drive, state={})["status"] == "unchecked"
     cache = {"managed_update_cache": {"latest_sha": "b" * 40, "available": True, "behind": 3, "ahead": 0,
-                                      "checked_at": "t0", "update_channel": "stable"}}
-    # A cache from a check this code never recorded (no record at all): never invented.
-    assert ul.official_update_projection(head, drive_root=drive, state=cache)["status"] == "moved_since_check"
+                                      "checked_at": "t0", "update_channel": "stable", "checked_head_sha": head}}
+    # The check is the authority on what it checked, not the letter: with no letter the fact still reads it.
+    bare = ul.official_update_projection(head, drive_root=drive, state=cache)
+    assert bare["status"] == "update_available" and bare["letter"] is None
+    assert bare["checked_head"] == head and bare["check"] == ul.CHECK_SOURCE
+    # A letter recorded at another head cannot decide which HEAD the check described.
+    ul.record_path(drive).write_text(json.dumps(_record(checked_head_sha="d" * 40)))
+    assert ul.official_update_projection(head, drive_root=drive, state=cache)["status"] == "update_available"
     ul.record_path(drive).write_text(json.dumps(_record()))
     fact = ul.official_update_projection(head, drive_root=drive, state=cache)
     assert fact["status"] == "update_available" and fact["letter"]["relation"] == "pending"
     assert fact["target"] == {"version": "6.114.0", "sha": "b" * 40} and fact["status_as_of"] == "t0"
-    assert fact["running"]["sha"] == head and fact["behind"] == 3
+    assert fact["running"]["sha"] == head and (fact["behind"], fact["ahead"]) == (3, 0)
     applied = ul.official_update_projection("b" * 40, drive_root=drive, state=cache)
     assert applied["status"] == "up_to_date" and applied["letter"]["relation"] == "applied"
+    # Level with the checked tip, as of that check: not a claim that the official line stood still since.
+    assert (applied["behind"], applied["ahead"], applied["status_as_of"]) == (0, 0, "t0")
     moved = ul.official_update_projection("e" * 40, drive_root=drive, state=cache)
     assert moved["status"] == "moved_since_check" and moved["letter"]["relation"] == "other"
+    assert moved["behind"] is None and moved["ahead"] is None, "another HEAD's counts are unknown, never copied"
     # A newer official target than the letter's: the target version is not the letter's.
     newer = dict(cache); newer["managed_update_cache"] = dict(cache["managed_update_cache"], latest_sha="c" * 40)
     superseded = ul.official_update_projection(head, drive_root=drive, state=newer)
@@ -720,7 +733,7 @@ def test_official_update_projection_unresolved_head_is_unknown_not_moved(tmp_pat
     cache = {"managed_update_cache": {"latest_sha": "b" * 40, "available": True, "behind": 3, "checked_at": "t"}}
     for head in ("unknown", ""):
         fact = ul.official_update_projection(head, drive_root=drive, state=cache)
-        assert fact == {"status": "unknown", "error": "head_unresolved"}, head
+        assert fact == {"status": "unknown", "error": "head_unresolved", "check": ul.CHECK_SOURCE}, head
 
 
 def test_official_update_projection_never_raises(tmp_path):

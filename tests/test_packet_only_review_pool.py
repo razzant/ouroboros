@@ -182,7 +182,7 @@ def test_switching_to_blocking_over_a_stored_packet_pool_warns_and_every_later_s
 def _review_block(monkeypatch, catalog: dict) -> dict:
     import ouroboros.subagent_runtime as runtime
 
-    monkeypatch.setattr(runtime, "_api_review_cost_hint", lambda slot: "cost unknown")
+    monkeypatch.setattr(runtime, "_api_review_cost_hint", lambda slot, *_price: "cost unknown")
     monkeypatch.setenv(SUBAGENTS_SETTING, json.dumps(catalog))
     text = review_facts_block()
     return json.loads(text.split("\n\n", 1)[1])

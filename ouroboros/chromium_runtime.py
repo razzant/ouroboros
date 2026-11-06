@@ -36,6 +36,7 @@ from typing import Iterable, Mapping, Optional
 CHROMIUM_VERSION = "156.0.8078.80"
 SANDBOX_ENV = "OUROBOROS_CHROMIUM_SANDBOX"
 UNAVAILABLE = "BROWSER_CHROMIUM_UNAVAILABLE"
+PREPARING = "BROWSER_PREPARING"  # a browser engine is still being installed beside the calls
 SANDBOX_UNAVAILABLE = "BROWSER_CHROMIUM_SANDBOX_UNAVAILABLE"
 RECEIPT_NAME = "install.json"
 _DOWNLOAD_BASE = "https://storage.googleapis.com/chrome-for-testing-public"
@@ -189,7 +190,8 @@ def _verifier(pin: ChromiumPin):
                              label=f"Chrome for Testing {CHROMIUM_VERSION} {pin.platform} archive")
 
 
-def _acquire(pin: ChromiumPin, archive: Optional[pathlib.Path], download_to: pathlib.Path) -> pathlib.Path:
+def _acquire(pin: ChromiumPin, archive: Optional[pathlib.Path], download_to: pathlib.Path,
+             progress: Optional[dict] = None) -> pathlib.Path:
     from ouroboros.verified_download import VerifiedDownloadError, fetch_exact_file
 
     try:
@@ -199,7 +201,7 @@ def _acquire(pin: ChromiumPin, archive: Optional[pathlib.Path], download_to: pat
                                 size_bytes=pin.archive_size, overflow_code="chromium_archive_oversize",
                                 failure_code="chromium_archive_download_failed",
                                 label=f"Chrome for Testing {CHROMIUM_VERSION} {pin.platform} archive",
-                                timeout_sec=_DOWNLOAD_TIMEOUT_SEC)
+                                timeout_sec=_DOWNLOAD_TIMEOUT_SEC, progress=progress)
     except VerifiedDownloadError as exc:
         raise ChromiumRefusal(UNAVAILABLE, f"{exc} ({exc.code}). {_NO_FALLBACK}") from exc
 
@@ -250,7 +252,7 @@ def _publish(staging: pathlib.Path, final: pathlib.Path, pin: ChromiumPin) -> No
 
 
 def install(root: "str | pathlib.Path", pin: Optional[ChromiumPin] = None, *,
-            archive: "str | pathlib.Path | None" = None) -> pathlib.Path:
+            archive: "str | pathlib.Path | None" = None, progress: Optional[dict] = None) -> pathlib.Path:
     """Install the exact pin under ``root`` (verified ``archive``, else a download) and return it."""
     pin = pin or host_pin()
     root = pathlib.Path(root)
@@ -262,7 +264,7 @@ def install(root: "str | pathlib.Path", pin: Optional[ChromiumPin] = None, *,
     try:
         root.mkdir(parents=True, exist_ok=True)
         try:
-            verified = _acquire(pin, pathlib.Path(archive) if archive is not None else None, download_to)
+            verified = _acquire(pin, pathlib.Path(archive) if archive is not None else None, download_to, progress)
             _extract(pin, verified, staging)
             (staging / RECEIPT_NAME).write_text(json.dumps(pin.receipt(), indent=1, sort_keys=True) + "\n",
                                                 encoding="utf-8")

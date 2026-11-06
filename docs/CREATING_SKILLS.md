@@ -1153,6 +1153,10 @@ Use the connector's ordinary content-hash-bound skill token for:
   facts. `review_requested` and `assigned` mean requests addressed to the watched
   identity; narrow wake declarations may use them. A new discussion is not a
   `new_issue`; `any_message` is the generic alternative. Bots require an explicit bot wake item.
+- Optional `event.message.forward_origin` (any non-empty value): the message carries words another author wrote
+  (a forward, or another person's text the event copies under the sender). The host never records such an event as
+  its sender's own words: an addressed message from an account the place confirms as the owner's is the owner's words
+  at a turn's opening, mid-turn and when a focus hands it on; a forward of it is not.
 - Optional `event.message.reaction` (object with `schema_version: 1`; `text` and files empty; an object
   without that key is not this fact): `change` `add`/`remove`/`replace`/`count`; `old`/`new` lists hold provider
   `{type, value}`; `count` instead has only `counts` entries `{type, value, count}` (non-negative integer),
@@ -1206,7 +1210,8 @@ clock. Before allowance, rate or capacity is consulted, the conversation's curre
 sole reader (a promoted or follow-up root of this place and conversation whose loop reads mail or
 is in an unheld cold sleep, or an author parked for its review or private question, whose wait
 wakes and retakes the conversation before any model call), receives later arrivals as typed
-context-only mail, whether or not they match a wake fact; they never answer its question. An untagged message in the same thread, topic or direct message is a
+context-only mail, whether or not they match a wake fact (an addressed one from the owner's confirmed
+account carries the owner's words); they never answer its question. An untagged message in the same thread, topic or direct message is a
 wake: it ends an ordinary wait and reopens an unsent final. Other untagged group messages reach a
 current author as background and a root not at all; they stay readable in the room. Several
 readers receive nothing: the arrival takes an ordinary focus under the allowance, whose
@@ -1230,7 +1235,7 @@ answer was lost; a closed or ended one leaves the event eligible for ordinary ad
 after a Host crash or a torn write returns to its recorded holder, but the handoff is not
 exactly-once: a write whose effect cannot be proven stays unknown, as above. A
 wake arrival its model has not seen when it finishes reopens it for another round; background
-arrivals alone never do. An author's own explicit `action="stop"` stands: an arrival drained at
+arrivals alone never do, though the owner's own words in one are owner input its final answers. An author's own explicit `action="stop"` stands: an arrival drained at
 its close is acknowledged in its transcript, never read by its model, and starts no round.
 
 A focus, or a root promoted or scheduled from it, uses ordinary `finish_task`, including
@@ -1859,8 +1864,11 @@ An opaque widget's `location.origin` is `null`: use the host-bridged begin reque
 
 Encode OAuth `state` as base64url UTF-8 JSON `{v:1,skill:<canonical name>,nonce:<random>}` and retain it with PKCE
 in your state directory. Register POST `oauth/complete`; the page forwards `{state,code}` or
-`{state,error,error_description}` to that same-origin skill route, retaining its deployment prefix. The skill validates
-its issued state, handles denial, exchanges credentials and stores tokens. The page neither validates grants nor owns tokens.
+`{state,error,error_description}` to that same-origin skill route, retaining its deployment prefix, plus `iss` when the
+provider sent one. The skill validates its issued state, compares a present `iss` with the issuer it asked (RFC 9207;
+a provider that advertises `authorization_response_iss_parameter_supported` must send it), handles denial, exchanges
+credentials and stores tokens. The page neither validates grants nor owns tokens. A state `{v:1,mcp:<server>,nonce}` is
+the core's own remote MCP sign-in (`ouroboros/mcp_oauth.py`), posted to `/api/mcp/sign-in`.
 Reply `{ok:true,email}` (or a human-readable `label`) only on confirmed connection; failures use `{ok:false,code,error}`.
 The page shows unconfirmed outcomes without automatic replay and clears its query from history when supported.
 Use separate local disconnect and provider-wide revoke semantics; shared client configuration does not imply independent grants.

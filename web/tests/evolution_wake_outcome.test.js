@@ -27,16 +27,18 @@ test('enabled consciousness keeps historical pause and unknown wake outcomes vis
         const ws = new WS('ws://unused');
         ({ dispose } = initEvolution({ ws, mount, state: { activePage: 'dashboard', dashboardActiveSubtab: 'evolution' } }));
         const line = () => env.doc.getElementById('evo-consciousness');
-        // A paused or unknown wake-up goes on by itself: the neutral sentence, never the owner's amber.
+        // A paused or unknown wake-up goes on by itself: the neutral pointer, never the owner's amber; a sleeping or due
+        // one is neutral too (a green dot over a wake that has not started said success, U071).
         for (const [next, label, tone] of [['wake_paused', 'paused', 'neutral'],
-            ['wake_outcome_unknown', 'unknown', 'neutral'], ['sleeping', 'sleeping', 'ok'], ['due', 'due', 'ok'],
-            ['future_status', 'off', 'neutral'], ['disabled', 'off', 'neutral']]) {
+            ['wake_outcome_unknown', 'unknown', 'neutral'], ['sleeping', 'sleeping', 'neutral'], ['due', 'due', 'neutral'],
+            ['thinking', 'thinking', 'ok'], ['starting', 'starting', 'neutral'], ['future_status', 'off', 'neutral'],
+            ['disabled', 'off', 'neutral']]) {
             status = next;
             ws.emit('open');
             await flush();
-            assert.equal(line().textContent, `Consciousness ${label}`);
+            assert.equal(line().textContent, `Consciousness: ${label} ›`);
             assert.equal(line().getAttribute('data-tone'), tone);
-            assert.equal(env.doc.getElementById('evo-consciousness-detail').textContent, details[status] || '', 'historical wording stays intact');
+            assert.equal(env.doc.getElementById('evo-consciousness-detail'), null, 'its detail is the Consciousness tab\'s');
         }
         translate({ language: 'ru', english: false, entries: {
             'code:consciousness.wake_paused': { text: 'приостановлено', provenance: 'imported' },
@@ -45,7 +47,7 @@ test('enabled consciousness keeps historical pause and unknown wake outcomes vis
         } });
         for (const [next, label] of [['wake_paused', 'приостановлено'], ['wake_outcome_unknown', 'исход неизвестен'], ['due', 'пора']]) {
             status = next; ws.emit('open'); await flush();
-            assert.equal(line().textContent, `Consciousness ${label}`);
+            assert.equal(line().textContent, `Consciousness: ${label} ›`);
         }
     } finally {
         dispose?.();

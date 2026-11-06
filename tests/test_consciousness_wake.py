@@ -184,19 +184,30 @@ def test_launch_captures_previous_wake_before_binding_the_new_id(clock, has_prev
     assert f"- previous wake: {expected}\n" in launch["task"]["metadata"]["wake_observation"]["projection_text"]
 
 
-@pytest.mark.parametrize(("summary", "announced"), [("Проверил состояние системы: всё спокойно.", True), ("", False)])
-def test_only_direct_turns_with_authored_lines_join_the_observation_text(tmp_path, announced, summary):
-    row = seed_wake(tmp_path, **({"wake_summary": summary} if summary else {}))
+_AUTHOR_STOP = {"lifecycle": {"status": "completed"}, "objective": {"status": "fail", "source": "task_completion",
+                                                                     "reason": "author_stop"},
+                "execution": {"status": "ok", "task_completion": {"action": "stop", "rationale": "It waits on an Allow."}}}
+
+
+@pytest.mark.parametrize(("summary", "announced", "stopped"), [
+    ("Проверил состояние системы: всё спокойно.", True, False), ("", False, False), ("", False, True)])
+def test_only_direct_turns_with_a_line_or_an_open_continue_join_the_observation_text(tmp_path, announced, summary,
+                                                                                      stopped):
+    """A finished turn's exchange is the dialogue itself, so it is counted; an authored line, or an open Continue (a
+    stop with work left, which the dialogue does not show), lists it."""
+    row = seed_wake(tmp_path, **({"wake_summary": summary} if summary else {}),
+                    **({"outcome_axes": _AUTHOR_STOP} if stopped else {}))
     now = wake._parse_iso(row["terminal_time"]["occurred_at"]) + 60
     if announced:
         _chat(tmp_path, _summary(row["task_id"], now - 30))
     observation = wake.observe_wake(tmp_path, boundary=None, since=now - 3600, now=now, reason="heartbeat")
     line = next(line for kind, _, line in observation.events if kind.startswith("direct_turn"))
-    assert (line in observation.full_text()) is bool(summary)
+    assert (line in observation.full_text()) is bool(summary or stopped)
+    assert line.endswith(" · Continue open (author_stop)") is stopped
     if summary:
         assert line.endswith(": " + summary)
     else:
-        assert "its line" not in line and row["result"] not in line
+        assert row["result"] not in line
     assert row["result"] not in observation.full_text(), "the whole note has its separate previous-wake slot"
 
 
@@ -749,12 +760,16 @@ def test_projection_names_every_honest_status(describe):
     assert done["status"] == "sleeping"
 
 
-def test_projection_without_a_constructed_clock_is_stopped_not_running(monkeypatch):
+def test_projection_without_a_constructed_clock_says_why_and_is_never_running(monkeypatch):
     import server
 
     monkeypatch.setattr(server, "_consciousness", None)
-    described = server._describe_bg_consciousness_state(True)
-    assert described["status"] == "stopped" and "not constructed" in described["detail"]
+    monkeypatch.setattr(server, "_supervisor_error", None)
+    starting = server._describe_bg_consciousness_state(True)
+    assert starting["status"] == "starting" and starting["detail"] == "Waits for Ouroboros to finish starting."
+    monkeypatch.setattr(server, "_supervisor_error", "Supervisor init failed: boom")
+    failed = server._describe_bg_consciousness_state(True)
+    assert failed["status"] == "stopped" and failed["detail"].endswith("Restart Ouroboros.")
     assert server._describe_bg_consciousness_state(False)["status"] == "disabled"
 
 

@@ -205,8 +205,8 @@ def test_packaged_update_preparation_requires_an_explicit_restart_without_fake_o
     row = _inventory_row("codex")
     posts = []
     message = ("Environment preparation complete; CLI update not started. "
-               "Use Restart in the chat header, then repeat Update. Restart interrupts engine sessions; "
-               "saved work follows the existing recovery rules.")
+               "Use Restart Claudexor in Accounts, then repeat Update. It ends every run on the engine; "
+               "its confirmation says how many and whose.")
 
     def maintenance(route):
         if route.request.method == "GET":
@@ -318,8 +318,8 @@ def test_missing_executable_is_one_explained_section_fact_until_a_real_fresh_rea
     world["broken"] = True
     codex.get_by_role("button", name="Check latest", exact=True).click()
     expect(banner).to_contain_text("The executable reported by the last program inspection is no longer present.")
-    expect(banner).to_contain_text("If the app was moved or replaced, Restart in the chat header may help")
-    expect(banner).to_contain_text("it interrupts engine sessions, and success is not guaranteed.")
+    expect(banner).to_contain_text("If the app was moved or replaced, Restart Claudexor in Accounts may help")
+    expect(banner).to_contain_text("it ends every run on the engine, and success is not guaranteed.")
     expect(banner).to_have_attribute("data-tone", "warn")
     expect(banner).not_to_contain_text("ENOENT")
     for family in (codex, agy):

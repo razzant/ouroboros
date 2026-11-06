@@ -659,6 +659,7 @@ def test_storage_kind_reads_the_saved_count_from_the_installation_root_and_refus
     assert result["status"] == "ok" and result["source"]["kind"] == "storage" and result["reconstructed"] is True
     assert result["data"]["storage_free"] == {}
     assert result["data"]["latest"]["finished_at"] == record["finished_at"] and result["data"]["previous"] is None
+    assert set(result["data"]["disk"]) == {"free_bytes", "free_gb", "volume_total_bytes", "volume_total_gb", "disk_read_at"}
     removers = result["data"]["removers"]
     assert removers == place_removers(ctx.drive_root) == storage.count.projection(ctx.drive_root)["removers"], \
         "the per-place facts GET /api/storage serves"
@@ -673,8 +674,13 @@ def test_storage_kind_reads_the_saved_count_from_the_installation_root_and_refus
     maintenance_jobs.record(ctx.drive_root, "storage_free", state="done", request_id="free-1")
     (ctx.drive_root / "state" / "storage_measurement.json").unlink()
     uncounted = call(ctx, op="json", kind="storage")
-    assert uncounted["status"] == "ok" and set(uncounted["data"]) == {"removers", "storage_free"}, "the receipt travels with storage facts"
+    assert uncounted["status"] == "ok" and set(uncounted["data"]) == {"removers", "storage_free", "disk"}, \
+        "the removers, the Free receipt and the disk read now come before any count"
     assert uncounted["data"]["storage_free"]["request_id"] == "free-1"
+    disk = uncounted["data"]["disk"]
+    assert disk["free_gb"] == round(disk["free_bytes"] / 1e9, 1) and disk["disk_read_at"], "the Storage page's decimal GB, dated"
+    monkeypatch.setattr("shutil.disk_usage", lambda _path: (_ for _ in ()).throw(OSError("volume gone")))
+    assert call(ctx, op="json", kind="storage")["data"]["disk"] == {}, "an unreadable disk is absent, never zero"
 
 
 def test_knowledge_history_lists_writes_without_bodies_from_the_installation_root(ctx, monkeypatch):

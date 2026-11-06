@@ -119,7 +119,7 @@ def test_reconstructed_amount_survives_normalizers_and_text_reader(tmp_path, mon
         assert fields["cost_final"] is False
         assert fields["cost_presentation"]["accounting_open"] is True
     assert cost_display(fields) == (
-        "unknown (accounting unavailable or not settled)" if cash is None
+        "unknown (accounting unavailable)" if cash is None  # nothing priced and the custody view unreadable
         else f"Tracked: ${cash:.2f} (total unknown)")
     if cash == 0:
         # An own-scope zero cannot establish a tree amount, nor replace explicit null.

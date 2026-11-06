@@ -12,7 +12,7 @@ import { delegatedActivityBodyHtml, delegatedHeadline, delegatedLineView } from 
 import { REUSABLE_TASK_IDS } from './task_control_menu.js';
 import { ownLiveDetail, paintLiveDetail } from './task_phase_chip.js';
 import { fmt, tr } from './i18n.js';
-import { formatMsgTime } from './utils.js';
+import { formatMsgTime, formatUsdKnown } from './utils.js';
 import { placeIngressNote } from './chat_attachments.js';
 import { hostRowDisplayText, hostSentenceText } from './host_notice_text.js';
 export { bootPhase, startingStatus, supervisorReady } from './host_starting_status.js';
@@ -49,12 +49,10 @@ export function applyHistoricalModelExecution(record, historical) {
     return true;
 }
 
-export function senderLabel(role, isProgress = false, systemType = '', opts = {}, chatSessionId = '') {
+export function senderLabel(role, isProgress = false, systemType = '', opts = {}) {
     if (role === 'user') {
         if (opts.source === 'telegram') return opts.senderLabel || 'Telegram';
-        if (opts.senderSessionId && opts.senderSessionId !== chatSessionId) {
-            return `WebUI (${opts.senderSessionId.slice(0, 8)})`;
-        }
+        // The owner's words from another window or device are still the owner's: no session id.
         return opts.senderLabel || 'You';
     }
     if (role === 'system') {
@@ -417,11 +415,8 @@ const PAUSING_PHASES = new Set(['budget_pausing', 'pausing']);
  * @returns {string}
  */
 export function restartConfirmBody(activities) {
-    const lines = [
-        'Running tasks stop, then eligible saved work resumes after the restart. Tasks already paused stay paused.',
-        'Runnable queued tasks return to the queue. Existing holds and limits still apply.',
-        'Saved settings apply after the restart: work that follows a model setting resumes on the current setting; task-specific choices stay.',
-    ];
+    // One line says what happens; the policy is the dialog's Details (RESTART_FACTS); a gap that changes the choice stays.
+    const lines = ['Running tasks stop and continue after the restart.'];
     if (!Array.isArray(activities) || activities.some((row) => row?.phase === 'unknown')) {
         lines.push('Pause status could not be read: a task that is still pausing would be interrupted instead of staying paused.');
         if (!Array.isArray(activities)) return lines.join('\n');
@@ -439,6 +434,12 @@ export function restartConfirmBody(activities) {
     }
     return lines.join('\n');
 }
+
+export const RESTART_FACTS = { summary: 'Details', rows: [
+    { label: 'Running tasks', value: 'They stop, then eligible saved work resumes after the restart. Tasks already paused stay paused.' },
+    { label: 'Queued tasks', value: 'Runnable ones return to the queue. Existing holds and limits still apply.' },
+    { label: 'Settings', value: 'Saved settings apply: work that follows a model setting resumes on the current setting; task-specific choices stay.' },
+] };
 
 async function readLiveActivities() {
     const { state: data } = await readState();  // a refusal, an unparsable body or no answer is unknown, never "none"
@@ -473,10 +474,7 @@ export async function confirmAndSendRestart({ openConfirmDialog, ws, readActivit
         activities = null;
     }
     const confirmed = await openConfirmDialog({
-        title: 'Restart agent',
-        body: restartConfirmBody(activities),
-        confirmLabel: 'Restart',
-        danger: true,
+        title: 'Restart agent', body: restartConfirmBody(activities), details: RESTART_FACTS, confirmLabel: 'Restart', danger: true,
     });
     if (!confirmed) return 'cancelled';
     const result = ws?.send?.({ type: 'command', cmd: '/restart' }, { queue: false });
@@ -701,7 +699,7 @@ export function costPresentationMeta(presentation, context = null) {
         if (presentation.has_unpriced) return ['Cost not priced'];
         return ['Cost unknown'];
     }
-    const money = `$${Number(amount).toFixed(2)}`;
+    const money = formatUsdKnown(Number(amount));  // never $0.00 for a positive amount
     if (presentation.has_unpriced) return [`Tracked: ${presentation.tracked_final ? money : `up to ${money}`}`];
     return [presentation.tracked_final ? money : `up to ${money}`];
 }
@@ -774,7 +772,7 @@ export function taskCostMeta(payload = {}) {
     // breakdowns and unmetered counts stay on Costs, Logs and task detail.
     if (total === null) return ['Cost unknown'];
     if (!(finalKnown || pendingKnown || total !== 0)) return [];
-    const amount = `$${total.toFixed(2)}`;
+    const amount = formatUsdKnown(total);
     return [finalKnown ? amount : `up to ${amount}`];
 }
 
@@ -1486,6 +1484,8 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
     ) : '';
     const model = chip ? executorModelText(chip, compactModel)
         : execution && !execution.observed ? execution.value : execution?.model || coordinator;
+    // The compact line names the model a Claudexor route ran on, not the route's spelling `codex=…` (Details keep it).
+    const lineModel = String(model || '').replace(/(^|\s)[a-z][\w.-]*=(?=\S)/i, '$1');
     // A key added under Accounts follows its model ("claude-opus-5.5 · Claude credits"); the built-in key adds nothing.
     const keyRoute = chip || (execution && !execution.observed) ? '' : execution ? record.modelExecution?.used_model : agentModel;
     const key = connectionLabel(routeConnectionId(keyRoute));
@@ -1501,13 +1501,15 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
         // final (with its own end time) arrives as a message.
         toolCalls, ...cost, clock,
     ].filter(Boolean).map(text)) : metaLineHtml([
-        chip ? executorIdentityMarkup(chip, { model }) : (model ? text(key ? `${model} · ${key}` : model) : ''),
+        chip ? executorIdentityMarkup(chip, { model }) : (lineModel ? text(key ? `${lineModel} · ${key}` : lineModel) : ''),
         effortChipMarkup(record.effort),
         ...[
             record.historicalUnavailable ? 'Outcome unavailable' : (record.historicalUnconfirmed ? 'Activity unconfirmed' : ''),
             !record.finished && record.projectHoldDetail || '',
             record.historyRetentionProblem || '',
-            record.toolErrors > 0 ? `${record.toolErrors} error${record.toolErrors === 1 ? '' : 's'}` : '',
+            // Under a Done chip the block's own rows name the errors; this line does not repeat them (DESIGN principle 7).
+            record.toolErrors > 0 && !(record.finished && record.phaseEl?.dataset?.phase === 'done')
+                ? `${record.toolErrors} error${record.toolErrors === 1 ? '' : 's'}` : '',
             Number.isFinite(record.durationSec) ? formatLogDuration(record.durationSec) : '',
             !supervision && record.toolCalls > 0 ? toolCalls : '',
             ...(Array.isArray(record._lastFrameMeta) ? record._lastFrameMeta : []),
@@ -1528,6 +1530,7 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
         ['Supervision', supervision && (rounds || toolCalls)
             ? `${[rounds, toolCalls].filter(Boolean).join(META_PART_SEPARATOR)} (supervising agent; executor session counts are not reported)` : ''],
         ['Updated', escapeHtml(updated)],
+        ...(record.costBreakdownRows || []),  // a root's detail: where its money and work went
     ]);
     const detailChanged = paintLiveDetail(record, 'liveCostDetail', String(record.costMeta?.detail || ''));
     if (record.metaEl.innerHTML === html) return (detailChanged || factsChanged || clockChanged) && Boolean(record.metaEl.isConnected);

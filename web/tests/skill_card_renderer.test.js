@@ -1,5 +1,5 @@
-// Installed skill cards (Skills → Installed): one head shared with Browse, the run
-// state as one chip, at most two attention trays (one sentence + its actions), and
+// Installed skill cards (Skills → Installed): one head shared with Browse, the switch as
+// the run state (a chip only for a state it cannot show), at most two attention trays (one sentence + its actions), and
 // Details for the record. Rows come from the listing fixture shaped as SPEC §8.1.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -29,7 +29,7 @@ function skill(overrides = {}) {
 
 test('one head: the name opens the detail sheet, marks stay beside it, the who line names the source', () => {
     const html = renderInstalledSkillCard(row('weather'));
-    assert.match(html, /<button type="button" class="skills-card-name" data-skill="weather" data-skill-action="open_detail"><span data-i18n-authored>weather<\/span><span class="skills-card-name-more" aria-hidden="true">›<\/span><\/button>/);
+    assert.match(html, /<button type="button" class="skills-card-name ui-hit-area" data-skill="weather" data-skill-action="open_detail"><span data-i18n-authored>weather<\/span><span class="skills-card-name-more" aria-hidden="true">›<\/span><\/button>/);
     assert.match(html, /data-official-mark[^>]*>[\s\S]*?Official<\/button>/, 'Official comes from the install record');
     assert.match(installedWhoHtml(row('weather')), /^Ouroboros · v0\.3\.1 · installed .* by Ouroboros$/);
     assert.match(installedWhoHtml(row('telegram')), /^Built in · v1\.3\.0 · came with Ouroboros /);
@@ -38,9 +38,9 @@ test('one head: the name opens the detail sheet, marks stay beside it, the who l
     assert.doesNotMatch(html, / title="/, 'no explanation lives in a hover title');
 });
 
-test('the run state is one status chip: On, Off, Needs access, Reviewing…, Review found problems, Not reviewed yet', () => {
-    assert.deepEqual(chipOf(renderInstalledSkillCard(row('telegram'))).slice(1), ['ok', 'On']);
-    assert.deepEqual(chipOf(renderInstalledSkillCard(skill())).slice(1), ['neutral', 'Off']);
+test('normal On and Off state lives in the switch; only attention states get a status chip', () => {
+    assert.equal(chipOf(renderInstalledSkillCard(row('telegram'))), null);
+    assert.equal(chipOf(renderInstalledSkillCard(skill())), null);
     // Amber is the owner's move: a grant, a review, a review to try again (each offers the owner's own action).
     assert.deepEqual(chipOf(renderInstalledSkillCard(row('zoom_meeting'))).slice(1), ['warn', 'Needs access']);
     assert.deepEqual(chipOf(renderInstalledSkillCard(row('claudexor_quotas'))).slice(1), ['warn', 'Not reviewed yet']);
@@ -95,7 +95,32 @@ test('page-module faults and holds are owner-visible and keep recovery discovera
     const stale = renderInstalledSkillCard(skill({ enabled: true }), new Set(), new Set(), {}, {
         pageModules: { faults: [{ skill: 'demo', reason: 'old', current: false }], held: [] },
     });
-    assert.deepEqual(chipOf(stale).slice(1), ['ok', 'On']);
+    assert.equal(chipOf(stale), null, 'stale faults do not add a chip to the normal enabled switch');
+    assert.match(stale, /class="skills-toggle"[^>]*checked/);
+});
+
+test('faults and held siblings of one skill both retain their page facts', () => {
+    const html = renderInstalledSkillCard(skill({ enabled: true }), new Set(), new Set(), {}, {
+        pageModules: {
+            faults: [{ skill: 'demo', reason: 'voice failed', current: true }],
+            held: [{ key: 'demo:tts', skill: 'demo', reason: 'start' }],
+        },
+    });
+    assert.match(html, /page module stopped in this window: voice failed/);
+    assert.match(html, /data-skill-action="start_host_module"[^>]*data-host-module-key="demo:tts"/);
+});
+
+test('page attention keeps an overflow update fact in Details', () => {
+    const row = skill({
+        enabled: true,
+        install: { update_available: { version: '2.0.0' }, release: { version: '1.0.0' } },
+    });
+    const html = renderInstalledSkillCard(row, new Set(['demo']), new Set(), {}, {
+        pageModules: { faults: [], held: [{ key: 'demo:voice', skill: 'demo', reason: 'start' }] },
+    });
+    assert.match(html, /data-skill-detail-overflow/);
+    assert.match(html, /2\.0\.0 is available/);
+    assert.match(html, /data-skill-action="update"/);
 });
 
 test('updates: one click for an unmodified skill, «Update…» asks what to keep for a modified one', () => {
@@ -139,7 +164,7 @@ test('a rejected update names the restored state and offers findings and owner s
     assert.match(traysOf(html), /data-skill-action="read_findings"[^>]*>See findings</);
     assert.match(traysOf(html), /data-skill-action="update_without_review"[^>]*>Update without review</);
     assert.match(traysOf(html), /data-skill-action="update"[^>]*>Update</);
-    assert.deepEqual(chipOf(html).slice(1), ['ok', 'On']);
+    assert.equal(chipOf(html), null);
     const pending = renderInstalledSkillCard(FIXES.find((skill) => skill.name === 'pending_update'));
     assert.match(traysOf(pending), /Updating to 2\.0\.0: it stays off until the review finishes\./);
     assert.match(pending, /class="skills-toggle"[^>]*disabled/);
@@ -160,6 +185,16 @@ test('self-check is escaped, abbreviated in the review sentence, complete in Det
     changed.review_gate = { ...changed.review_gate, executable_review: false, blocking_reason: 'review_pending' };
     changed.executable_review = false;
     assert.equal(reviewSentence(changed), 'Not reviewed for its current files.');
+});
+
+test('a passed review stays the evidence while a newer round has no verdict: one sentence, no pending chip', () => {
+    const detailsReview = (html) => html.split('data-skill-detail-review>')[1].split('</div>')[0];
+    const waiting = skill({ review_status: 'pending', skill_review: { current: { review_round: 2, snapshot_attempt: 2, content_hash: 'd853fe070533aa', status: 'pending' }, history: [] } });
+    assert.equal(reviewSentence(waiting), 'Reviewed on this computer · passed · a new review (round 2) is pending.');
+    assert.doesNotMatch(detailsReview(renderInstalledSkillCard(waiting)), /ui-chip/, 'no verdict yet is no chip, never a green pending');
+    // Without a newer round the passed review is said alone, beside its verdict.
+    assert.equal(reviewSentence(skill()), 'Reviewed on this computer · passed.');
+    assert.match(detailsReview(renderInstalledSkillCard(skill())), /data-tone="ok"[^>]*>clean</);
 });
 
 test('per-release withdrawal names the withdrawn version supplied by the host', () => {

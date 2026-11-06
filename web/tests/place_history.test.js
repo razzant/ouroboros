@@ -290,6 +290,17 @@ test('page, pending import, range gaps and unknown coverage have distinct words'
     assert.match(placeRoomsHtml({rooms:[],coverage:{...coverage,importing:true}}), /still being imported/);
 });
 
+test('a thread row says it is a thread in its one meta line; the raw thread id stays off its face', () => {
+    const thread = { room_chat_id: 7, label: 'joi-eva_agentic-bots', last_at: '2026-11-02T10:14:00Z', unanswered_count: 0,
+        thread_id: '1793546052.282509' };
+    const html = placeRoomsHtml({ rooms: [thread], coverage: {} });
+    const face = html.replace(/<[^>]+>/g, ' ');
+    assert.doesNotMatch(face, /1793546052|Thread:/, 'no id on the row');
+    assert.match(face, /thread ·/);
+    assert.match(html, /title="Thread 1793546052\.282509"/, 'the id is still there for whoever looks for it');
+    assert.doesNotMatch(placeRoomsHtml({ rooms: [{ ...thread, thread_id: '' }], coverage: {} }), /thread ·|title=/);
+});
+
 test('reader forwards large IDs, retries exact cursor and excludes progress/evidence', async (t) => {
     const f=fixture(t); const cursor='opaque /+?&cursor'; let attempt=0;
     f.reply(({url}) => {

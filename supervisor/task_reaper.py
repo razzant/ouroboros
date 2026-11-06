@@ -67,18 +67,12 @@ def _retry_deferred_reap_jobs() -> None:
             for job in due:
                 if job.get("_replaying") or not any(kept is job for kept in _deferred_reap_jobs):
                     continue
-                # The pool storm owns its separate latch and transfers on enqueue;
-                # task custody must remain visible to Stop throughout the replay.
-                retain = job.get("kind") != "worker_crash_storm"
-                if retain:
-                    job["_replaying"] = True
+                job["_replaying"] = True  # task custody stays visible to Stop throughout the replay
                 try:
                     q._reap_queue.put(job)
                 except Exception:
                     job.pop("_replaying", None)  # no handoff: the next health tick can retry
                     raise
-                if not retain:
-                    _deferred_reap_jobs[:] = [kept for kept in _deferred_reap_jobs if kept is not job]
     except Exception:
         log.warning("Deferred reaper work remains pending", exc_info=True)
 
@@ -101,8 +95,6 @@ def reaper_loop() -> None:
             elif job.get("kind") == "confirmed_dead_worker":
                 from supervisor.worker_health import recover_confirmed_dead_worker
                 recover_confirmed_dead_worker(job)
-            elif job.get("kind") == "worker_crash_storm":
-                _stop_crashed_worker_pool(job)
             elif job.get("kind") in ("idle_worker_retirement", "unready_worker_teardown"):
                 from supervisor import worker_pool_lifecycle as lifecycle
                 (lifecycle.reap_idle_worker if job["kind"] == "idle_worker_retirement" else lifecycle.finish_unready_teardown)(job)
@@ -162,34 +154,6 @@ def ensure_reaper_started() -> None:
             log.warning("Task reaper thread had died; restarting it.")
         _reaper_thread = threading.Thread(target=reaper_loop, name="task-reaper", daemon=True)
         _reaper_thread.start()
-
-
-def _stop_crashed_worker_pool(job: dict) -> None:
-    """The old crash-storm decision runs after captured terminal-file custody settles."""
-    from supervisor import queue as q, workers
-    from supervisor.worker_pool_lifecycle import _WORKER_LIFECYCLE_LOCK
-
-    from ouroboros.task_carrier import LANE_PROJECT
-    from supervisor.worker_pool_lifecycle import is_project_slot
-
-    captured = dict(job["workers"])
-    with _WORKER_LIFECYCLE_LOCK:
-        with q._queue_lock:
-            # The storm captured the PROJECT membership; the conversation lane's slots are not its.
-            project = {wid: worker for wid, worker in workers.WORKERS.items() if is_project_slot(worker)}
-            if (pathlib.Path(job["drive_root"]) != pathlib.Path(workers.DRIVE_ROOT)
-                    or set(project) != set(captured)
-                    or any(project[wid] is not worker for wid, worker in captured.items())):
-                return
-            for worker in captured.values():
-                meta = workers.RUNNING.get(worker.busy_task_id)
-                if isinstance(meta, dict) and (
-                    meta.get("_terminal_file_recovery") or not worker.proc.is_alive()
-                ):
-                    raise TerminalFileRecoveryPending("captured terminal task has not settled")
-        if not workers.kill_workers(disable_reason="worker_crash_storm", lanes=frozenset({LANE_PROJECT})):
-            raise TerminalFileRecoveryPending("crash-storm terminalization was not durable")
-        workers.CRASH_TS.clear()
 
 
 def request_finalization_grace(
@@ -821,7 +785,7 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
         # outbox BEFORE the history salvage below can replace the preserved copy
         # a held host salvage points at (both live at salvaged/<task>.txt).
         adopted_answer = _adopt_held_answer(_q, task, task_id, attempt, terminal_reason)
-        # 3. Reconstruct real cost/rounds from durable llm_usage (the killed worker never
+        # 3. Reconstruct real cost/rounds from the usage ledger (the killed worker never
         #    finalized; the event would otherwise carry zeros and understate metrics).
         #    A failure here cannot abort teardown before the slot is respawned.
         try:

@@ -55,6 +55,13 @@ CASES = {
               turn_phase="context_building")],
         {}, {}, {},
     ),
+    # The same turn held by a conversation-lane carrier, the ordinary path since #2654: the lane row reads `working`
+    # once carried, and its frame-fed start step still says Preparing · Building context.
+    "carried_preparing": (
+        [_row("cp", "working", kind="direct_chat", chat_id=1, client_message_id="cm-carried", carrier="worker",
+              turn_phase="context_building")],
+        {}, {}, {},
+    ),
     # Its own Main call started before its census phase moved: the word that move gives (Working), no start step.
     "direct_requested": (
         [_row("dr", "preparing", kind="direct_chat", chat_id=1, client_message_id="cm-call", turn_phase="requested")],

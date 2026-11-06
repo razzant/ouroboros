@@ -37,8 +37,8 @@ function markCut(stack) {
 /**
  * One toast; a press anywhere on it dismisses it, a scroll over it never does. `ttl` 0 keeps it until then. `action`
  * ({label, run}) adds one button that dismisses the toast and runs (a recovery notice's way back, host_modules.js).
- * `dismissLabel` adds an accessible close button, the words beside it in their own box; hover or focus pauses the
- * auto-dismiss timer. An error toast answers the owner's own action and plays Telegram's error haptic (haptics.js); a
+ * Non-expiring toasts always have an accessible close; `dismissLabel` also adds one to timed toasts and can name it.
+ * Words stay beside the close in their own box; hover or focus pauses the auto-dismiss timer. An error toast answers the owner's own action and plays Telegram's error haptic (haptics.js); a
  * notice the owner did not cause passes `{ haptic: false }`.
  * Optional `host` confines the stack above a room's composer. Its owner calls the returned node's `dispose()` on teardown.
  */

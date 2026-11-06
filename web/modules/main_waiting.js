@@ -89,7 +89,8 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
         heading.append(title, phaseEl);
         root.append(heading, reason, controls, timelineEl);
         bubble.append(sender, root);
-        const reference = row.project_id ? projectReference({ id: row.project_id, name: row.project_name }, { taskId: id }) : null;
+        const reference = row.project_id ? projectReference({ id: row.project_id, name: row.project_name },
+            { taskId: id, beside: title }) : null;
         if (reference) controls.append(reference);
         // The message stands only while the census says the task needs the owner, so its chip is the owner's move.
         record = { groupId: id, bubble, root, phaseEl, title, reason, controls, timelineEl, reference,
@@ -109,8 +110,11 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
         record.title.textContent = row.task_name || row.title || row.project_name || 'Task';
         // What it needs, then its latest refused Resume as dated history in the door's words (never a second message).
         const attempt = resumeAttemptWords(row.last_resume);
-        record.reason.textContent = [tx(REASONS[row.attention_reason] || row.reason || row.project_admission_hold?.label || ''),
-            attempt && (/[.!?…]$/.test(attempt) ? attempt : `${attempt}.`)].filter(Boolean).join(' ');
+        // Beside its own Resume button a plain resume pause says nothing more: the button is the whole ask.
+        const needs = row.attention_reason === 'resume' && row.can_resume === true && row.pause_cause !== 'owner' ? ''
+            : tx(REASONS[row.attention_reason] || row.reason || row.project_admission_hold?.label || '');
+        record.reason.textContent = [needs, attempt && (/[.!?…]$/.test(attempt) ? attempt : `${attempt}.`)].filter(Boolean).join(' ');
+        record.reason.hidden = !record.reason.textContent;
         if (record.reference) nameProjectReference(record.reference, { id: row.project_id, name: row.project_name });
         syncParkedPhase(record, connected ? row.phase : 'unknown', row);
         if (canResume(record) && !record.resume) {
@@ -121,7 +125,7 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
         if (row.cancelable === true && !record.stop) {
             const button = document.createElement('button');
             button.type = 'button';
-            button.className = 'btn btn-xs btn-default ui-hit-area';
+            button.className = 'btn btn-sm btn-default ui-hit-area';
             button.textContent = tx(TASK_CONTROL_TRIGGER_LABEL);
             button.addEventListener('click', () => {
                 if (!connected || !record.available || record.row.cancelable !== true) return;

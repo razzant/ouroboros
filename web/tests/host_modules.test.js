@@ -148,6 +148,7 @@ test('held-module facts expose one owner recovery path', async () => {
     assert.equal(h.runtime.startHeldModule(item.key), true);
     await tick();
     assert.deepEqual(h.runtime.mounted(), [item.key]);
+    assert.equal(h.notices[0].disposed, true, 'a recovered hold retires its stale toast action');
     h.runtime.destroy();
 });
 
@@ -278,6 +279,30 @@ test('a module whose last start the page did not outlive is held, named once, an
     const updated = await setup({ items: [fixed], modules, local: seeded({ 'module:one:x': { reason: 'start', rev: 'r1', at: 1 } }) });
     assert.deepEqual(updated.runtime.mounted(), ['one:x'], 'the skill\'s next revision starts as usual');
     assert.deepEqual(updated.notices, []);
+});
+
+test('a held recovery notice retires when its contribution leaves the projection', async () => {
+    const item = hostItem('demo:voice', { runtime: 'client', provides: 'tts' });
+    const local = seeded({ [`module:${item.key}`]: { reason: 'start', rev: 'r1', at: 1 } });
+    const h = await setup({ items: [item], local, modules: { [item.render.url]: { mount: () => ({ dispose() {} }) } } });
+    assert.equal(h.notices.length, 1);
+    await h.publish([]);
+    assert.equal(h.notices[0].disposed, true, 'a removed held contribution cannot leave an obsolete recovery action');
+    h.runtime.destroy();
+});
+
+test('a held recovery notice follows a contribution revision', async () => {
+    const item = hostItem('demo:voice', { runtime: 'client', provides: 'tts' });
+    const local = seeded({ [`module:${item.key}`]: { reason: 'start', rev: 'r1', at: 1 } });
+    const h = await setup({ items: [item], local, modules: { [item.render.url]: { mount: () => ({ dispose() {} }) } } });
+    const first = h.notices[0];
+    const revised = hostItem(item.key, { revision: 'r2', runtime: 'client', provides: 'tts',
+        render: { kind: 'host', url: '/api/extensions/demo/ui/r2/ui/voice.js' } });
+    await h.publish([revised]);
+    assert.equal(first.disposed, true, 'the old revision notice is retired');
+    assert.equal(h.notices.length, 2);
+    assert.equal(h.notices[1].disposed, false, 'the current revision remains recoverable');
+    h.runtime.destroy();
 });
 
 test('?hold=all holds every page module for that load, each released by Start it', async () => {
