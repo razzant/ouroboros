@@ -83,6 +83,27 @@ def _reply_bundle(root, monkeypatch, prompts, *, thread="", before_reply=None, t
     return ctx, bundle, prompt
 
 
+def test_an_owner_answer_reaches_the_supervisor_with_the_card_it_answers(focus, monkeypatch, checker, tmp_path):
+    """The Supervisor reads an owner's answer together with what it answers (audit 05.11 item 37): the row the drain
+    records for a delivered answer reaches the bundle with the card beside my human's words, never inside them."""
+    import queue
+
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.owner_mailbox import KIND_QUIZ_ANSWER, write_owner_message
+
+    card = {"quiz_id": "q7", "question": "Publish exactly this reply?\n> Thanks, taking it up.", "state": "answered",
+            "options": ["Publish it", "Not now"], "answered_index": 0}
+    assert write_owner_message(tmp_path, "[Owner quiz answer] quiz q7", task_id="root", msg_id="qa-7",
+                               kind=KIND_QUIZ_ANSWER, quiz_delivery={"task_id": "asker", "quiz_id": "q7",
+                                                                     "answer_snapshot": card})
+    drained = SimpleNamespace(_owner_directives=[])
+    _drain_incoming_messages([], queue.Queue(), tmp_path, "root", None, set(), owner_ctx=drained)
+    root, _place, _admission, _event = focus
+    _ctx, bundle, _prompt = _reply_bundle(root, monkeypatch, checker, extra_rows=tuple(drained._owner_directives))
+    [shown] = [source for source in bundle["occasion"]["sources"] if source.get("quiz_id") == "q7"]
+    assert shown["content"] == "1. Publish it" and "> Thanks, taking it up." in shown["reply_to"]["text"]
+
+
 def test_each_source_projection_appears_once_and_the_event_is_typed(focus, monkeypatch, checker):
     root, place, _admission, _event = focus
     p.edit_place(root, place.place_id, "add_note", author="owner", text="OWNER NOTE: reply in Russian here.")

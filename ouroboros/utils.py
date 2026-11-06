@@ -8,7 +8,6 @@ import hashlib
 import io
 import json
 import logging
-import math
 import os
 import pathlib
 import re as _re
@@ -963,28 +962,6 @@ def iter_jsonl_chain_objects(
     with jsonl_chain_handles(pathlib.Path(path)) as handles:
         for segment, handle in handles:
             yield from iter_jsonl_objects(segment, dict_only=dict_only, _handle=handle)
-
-
-def iter_llm_usage_events(
-    path: pathlib.Path,
-    *,
-    max_entries: Optional[int] = None,
-    tail_bytes: Optional[int] = None,
-) -> Iterator[Dict[str, Any]]:
-    yield from (event for event in iter_jsonl_objects(path, max_entries=max_entries, tail_bytes=tail_bytes)
-                if event.get("type") == "llm_usage")
-
-
-def llm_usage_cost(event: Dict[str, Any]) -> float:
-    usage = event.get("usage")
-    value = event.get("cost")
-    if value is None and isinstance(usage, dict):
-        value = usage.get("cost")
-    try:
-        cost = float(value or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
-    return cost if math.isfinite(cost) else 0.0
 
 
 # ---------------------------------------------------------------------------

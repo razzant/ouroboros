@@ -636,17 +636,22 @@ test('Costs numeric inputs have visible associated names and one line of owner h
     const { mount } = setup(t);
     initCosts({ mount, state: {} });
     for (const [id, label, help] of [['s-budget', 'Total budget ($)', /Paid work stops/],
-        ['s-per-task-cost', 'Per-task cap ($)', /A task and its helpers stop/]]) {
+        ['s-per-task-cost', 'Per-task cost cap ($)', /A task and its helpers stop/]]) {
         const field = mount.querySelector(`#${id}`);
         assert.ok(field);
         assert.equal(mount.querySelector(`[for="${id}"]`).textContent, label);
         assert.equal(field.classList.contains('ui-control'), true);
-        const description = mount.querySelector(`#${field.getAttribute('aria-describedby')}`);
+        const [own, note] = field.getAttribute('aria-describedby').split(' ');
+        const description = mount.querySelector(`#${own}`);
         assert.match(description.textContent, help);
         assert.doesNotMatch(description.textContent, /root task tree|auto-resume/, 'the mechanism lives under its disclosure');
+        assert.equal(note, 'costs-budget-help', 'the setup contract\'s one budget note describes both fields too');
     }
-    // The mechanism is one disclosure away, never under one field only.
-    assert.match(mount.querySelector('.costs-budget').querySelector('.ui-disclosure').textContent, /whole tree/);
+    // The mechanism is one disclosure away, never under one field only: the setup contract's one budget note (Settings
+    // and onboarding say the same), its fallback until /api/settings answers.
+    const note = mount.querySelector('.costs-budget').querySelector('.ui-disclosure').querySelector('#costs-budget-help');
+    assert.ok(note);
+    assert.match(note.textContent, /root task tree/);
 });
 
 test('Dashboard binds stored, keyboard and programmatic selection to the same named panels', async (t) => {

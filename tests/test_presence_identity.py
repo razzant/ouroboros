@@ -204,7 +204,7 @@ def test_focus_voice_uses_detached_event_identity_and_user_owner_match(focus, ki
     assert task["metadata"]["focus"]["identity"]["reads_as"][0] is not identity["reads_as"][0]
     assert task["metadata"]["focus"]["identity_owner"] is (owner and kind == "user")
     rendered = frame_focus_content(task, "hello")
-    assert expected + "\nYour human's notes here are their letter for this place; a message here does not edit any note." in rendered
+    assert expected + "\nYour human's notes here are their letter, and yours your record; a message here edits no note." in rendered
 
 
 @pytest.mark.parametrize("account,owner", [("a", True), ("other", False)])

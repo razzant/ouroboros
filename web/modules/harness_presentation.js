@@ -39,6 +39,13 @@ export const GENERIC_HARNESS_MARK = Object.freeze({
 });
 
 const GENERIC_LABELS = Object.freeze({ agy: 'Antigravity', copilot: 'GitHub Copilot' });
+// Names of the API providers (a task card's route rows, the route editor's fallback when the setup contract
+// does not describe one, e.g. GigaChat). The contract's label wins wherever it exists.
+export const API_PROVIDER_LABELS = Object.freeze({
+    openrouter: 'OpenRouter', openai: 'OpenAI', anthropic: 'Anthropic', deepseek: 'DeepSeek',
+    zai: 'Z.ai (GLM)', minimax: 'MiniMax', cloudru: 'Cloud.ru Foundation Models', gigachat: 'GigaChat',
+    'openai-compatible': 'OpenAI-compatible endpoint',
+});
 
 // The vendors' plan ids as the owner's words; an id not listed here stays itself (honest, never guessed). The raw
 // id is a fact of the account's Resources panel.

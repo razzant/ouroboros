@@ -12,7 +12,7 @@ import { delegatedActivityBodyHtml, delegatedHeadline, delegatedLineView } from 
 import { REUSABLE_TASK_IDS } from './task_control_menu.js';
 import { ownLiveDetail, paintLiveDetail } from './task_phase_chip.js';
 import { fmt, tr } from './i18n.js';
-import { formatMsgTime } from './utils.js';
+import { formatMsgTime, formatUsdKnown } from './utils.js';
 import { placeIngressNote } from './chat_attachments.js';
 import { hostRowDisplayText, hostSentenceText } from './host_notice_text.js';
 export { bootPhase, startingStatus, supervisorReady } from './host_starting_status.js';
@@ -677,24 +677,44 @@ export function headerBudgetPresentation(data) {
  *
  * `null` means "no carrier here, use the legacy derivation below".
  */
-export function costPresentationMeta(presentation) {
+export function costPresentationMeta(presentation, context = null) {
     if (!presentation || typeof presentation !== 'object') return null;
-    if (!presentation.has_rows) return presentation.accounting_open ? ['Cost unknown'] : [];
     const amount = presentation.tracked_amount;
-    if (amount === null || amount === undefined || !Number.isFinite(Number(amount))) {
+    const known = presentation.has_rows === true && amount !== null && amount !== undefined
+        && Number.isFinite(Number(amount));
+    // An unreadable custody view or quarantined ledger is not an in-flight
+    // accounting state: without a known subtotal it reads unknown, never pending.
+    // A known subtotal keeps the qualification its producer gave it below.
+    if (!known && (context?.ledger_integrity_degraded === true
+        || context?.cost_custody?.status === 'unavailable')) return ['Cost unknown'];
+    if (!presentation.has_rows) {
+        if (!presentation.accounting_open) return [];
+        // Pending delegated custody has an unpriced row even before a priced
+        // row arrives; an empty open carrier is instead an integrity gap.
+        return presentation.has_unpriced ? ['Cost pending'] : ['Cost unknown'];
+    }
+    if (!known) {
         // No priced or bounded row evidenced anything: an empty ledger and a
         // ledger of exclusively unpriced calls both sum to 0.0, and neither is a
         // measured zero. The card says so instead of inventing a free result.
+        if (presentation.accounting_open === true) return ['Cost pending'];
+        if (presentation.has_unpriced) return ['Cost not priced'];
         return ['Cost unknown'];
     }
-    const money = `$${Number(amount).toFixed(2)}`;
+    const money = formatUsdKnown(Number(amount));  // never $0.00 for a positive amount
     if (presentation.has_unpriced) return [`Tracked: ${presentation.tracked_final ? money : `up to ${money}`}`];
     return [presentation.tracked_final ? money : `up to ${money}`];
 }
 
 /** Why a mixed subtotal reads `Tracked:`: said in the card's details, never a hover-only title. */
-export const costPresentationDetail = (presentation) => (costPresentationMeta(presentation)?.[0]?.startsWith('Tracked: ')
-    ? 'Cost: some steps have no price, so Tracked counts only the priced steps.' : '');
+export const costPresentationDetail = (presentation, context = null) => {
+    const meta = costPresentationMeta(presentation, context);
+    const first = meta?.[0] || '';
+    if (first === 'Cost pending') return 'Cost: accounting is still open; no amount is counted as $0.';
+    if (first === 'Cost not priced') return 'Cost: settled usage has no price, so it is not counted as known spend or as $0.';
+    if (!first.startsWith('Tracked: ')) return '';
+    return 'Cost: some steps have no price, so Tracked counts only the priced steps.';
+};
 
 export function taskCostMeta(payload = {}) {
     // Presence means a VALUE, exactly as in `resolveCostPair`: a browser
@@ -730,7 +750,7 @@ export function taskCostMeta(payload = {}) {
     // #498: the producer's own carrier wins, because it was built from the exact
     // ledger bucket it describes. The derivation below stays for legacy frames
     // and is deliberately conservative: it may not know a zero is unevidenced.
-    const presented = costPresentationMeta(payload.cost_presentation);
+    const presented = costPresentationMeta(payload.cost_presentation, payload);
     if (presented) return presented;
 
     // C2/F12: ONE precedence resolver, shared with the Python seams and with
@@ -754,7 +774,7 @@ export function taskCostMeta(payload = {}) {
     // breakdowns and unmetered counts stay on Costs, Logs and task detail.
     if (total === null) return ['Cost unknown'];
     if (!(finalKnown || pendingKnown || total !== 0)) return [];
-    const amount = `$${total.toFixed(2)}`;
+    const amount = formatUsdKnown(total);
     return [finalKnown ? amount : `up to ${amount}`];
 }
 
@@ -767,7 +787,7 @@ export function taskCostMeta(payload = {}) {
 export function taskCostProjection(payload = {}, rawTs = '') {
     const meta = taskCostMeta(payload);
     if (!meta.length) return null;
-    const detail = costPresentationDetail(payload.cost_presentation);
+    const detail = costPresentationDetail(payload.cost_presentation, payload);
     const unavailable = payload.cost_accounting_status === 'unavailable' || payload.cost_presentation === null;
     const presentation = payload.cost_presentation;
     const legacyRollup = payload.cost_presentation === null && (
@@ -1355,13 +1375,14 @@ export function syncCandidateRemainderItem(record, detail) {
     return true;
 }
 
-// The 13 cost-meta keys shared by both subagent whitelists (the delegation
+// The 15 cost-meta keys shared by both subagent whitelists (the delegation
 // trio stays inline in each literal — the wire test scans those literals).
 const COST_META_KEYS = [
     'cost_usd', 'accounted_upper_bound_usd', 'accounted_upper_bound_usd_with_children',
     'cost_accounting_status', 'cost_accounting_error', 'cost_final', 'cost_usd_with_children',
     'cost_with_children_partial', 'reserved_usd', 'unresolved_upper_bound_usd',
-    'unknown_unmetered', 'non_final_rows', 'cost_presentation',
+    'unknown_unmetered', 'non_final_rows', 'cost_presentation', 'cost_custody',
+    'ledger_integrity_degraded',
 ];
 export function costMetaKeys(src) {
     return Object.fromEntries(COST_META_KEYS.map((key) => [key, src?.[key]]));
@@ -1507,6 +1528,7 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
         ['Supervision', supervision && (rounds || toolCalls)
             ? `${[rounds, toolCalls].filter(Boolean).join(META_PART_SEPARATOR)} (supervising agent; executor session counts are not reported)` : ''],
         ['Updated', escapeHtml(updated)],
+        ...(record.costBreakdownRows || []),  // a root's detail: where its money and work went
     ]);
     const detailChanged = paintLiveDetail(record, 'liveCostDetail', String(record.costMeta?.detail || ''));
     if (record.metaEl.innerHTML === html) return (detailChanged || factsChanged || clockChanged) && Boolean(record.metaEl.isConnected);

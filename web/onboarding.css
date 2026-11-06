@@ -1277,7 +1277,7 @@ textarea::placeholder {
   .wizard-step-copy,
   .step-copy,
   .panel-card p,
-  .field-note:not(.compatible-load-status),
+  .field-note:not(.compatible-load-status):not(.budget-shared-note),
   .footer-copy {
     display: none;
   }

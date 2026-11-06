@@ -16,6 +16,14 @@ const TABLES = [
     ['cost-by-task-cat', 'By task category', 'Category', 'by_task_category'],
 ];
 
+// The setup contract is authoritative once /api/settings answers. Keep a useful
+// non-empty explanation during the request and on a failed read so aria-describedby
+// never points at an empty node; the fallback is deliberately shorter than the
+// canonical note and is replaced whenever the contract is available.
+const BUDGET_NOTE_FALLBACK =
+    'Budget limits use known spend: Total Budget applies globally, while Per-task Cost Cap applies to one root task tree. '
+    + 'Unpriced calls remain unknown and are not counted as $0; reservations and unresolved charges are not counted as spending.';
+
 function readPositiveBudget(id) {
     const input = document.getElementById(id);
     const raw = String(input?.value || '').trim();
@@ -30,17 +38,23 @@ function optionalFiniteNumber(value) {
     return Number.isFinite(number) ? number : null;
 }
 
-/** One breakdown cell: the amount alone, an open bucket marked as not final with its cause in words; an open zero is
- *  never free and an absent amount never $0.00. `{ text, open, note }`. */
+/** One breakdown cell in the task card's words: `Cost pending` while a call of it is still open and nothing is
+ *  priced, `Cost not priced` once its calls settled without a price (subscription work among them: no price will
+ *  arrive), `Tracked:` before a priced subtotal beside unpriced calls. The face is that amount alone, an open bucket
+ *  marked; the whole sentence (`(pending)` after an amount more may join, the count of calls without a price — a
+ *  subscription row may have no physical call) is the cell's `note`. Never an unpriced or open zero as free, never a
+ *  positive amount as $0.00. `{ text, open, note }`. */
 export function costBucketPresentation(info) {
     const cost = optionalFiniteNumber(info?.cost);
     if (cost === null) return { text: 'unknown', open: false, note: '' };
     const unknown = Math.trunc(optionalFiniteNumber(info?.unknown_unmetered) || 0);
-    const nonFinalRows = optionalFiniteNumber(info?.non_final_rows) || 0;
-    const open = info?.cost_final === false || nonFinalRows > 0 || unknown > 0;
-    if (!open) return { text: formatUsd(cost), open: false, note: '' };
-    const unpriced = unknown > 0 ? `; ${number(unknown)} ${unknown === 1 ? 'call has' : 'calls have'} no price yet` : '';
-    return { text: cost === 0 ? 'pending' : formatUsd(cost), open: true, note: `Not final${unpriced}.` };
+    const nonFinal = optionalFiniteNumber(info?.non_final_rows) || 0;
+    // Rows that can still settle; an older payload without the count has its non-final rows past the unpriced ones.
+    const open = (optionalFiniteNumber(info?.accounting_open_rows) ?? nonFinal - unknown) > 0;
+    const word = cost === 0 && (open || unknown > 0);
+    const text = word ? (open ? 'Cost pending' : 'Cost not priced') : `${unknown > 0 ? 'Tracked: ' : ''}${formatUsd(cost)}`;
+    const said = `${text}${open && !word ? ' (pending)' : ''}${unknown > 0 ? ` · ${number(unknown)} without a price` : ''}`;
+    return { text, open, note: said === text ? '' : said };
 }
 
 /** What one budget save says and whether that saying may end by itself: `{ text, tone, transient }`. */
@@ -85,19 +99,22 @@ export function costDashboardPresentation(data) {
     // A flag without its cause is not reconstructible. `cost_final: false` holds with every
     // dollar bucket at $0.00 and `unknown` at 0 — an ESTIMATED zero, or a dispatched row
     // whose reservation is exactly zero — so the count of open rows rides beside the flag
-    // it explains rather than in a new tile nobody correlates. Absent on an older payload,
-    // and then this says only what it knows instead of inventing a zero.
-    const nonFinal = optionalFiniteNumber(accounting.non_final_rows);
-    const openCause = nonFinal !== null && nonFinal > 0 ? ` (${number(Math.trunc(nonFinal))} open)` : '';
+    // it explains rather than in a new tile nobody correlates. Open rows are the ledger's
+    // `accounting_open_rows`; `non_final_rows` also counts calls that will never get a price
+    // (subscription work), which "open" would misname. Absent on an older payload, the
+    // older count stands in; with neither this says only what it knows.
+    const openRows = optionalFiniteNumber(accounting.accounting_open_rows ?? accounting.non_final_rows);
+    const openCause = openRows !== null && openRows > 0 ? ` (${number(Math.trunc(openRows))} open)` : '';
     return {
         state: 'available',
         figure: limit > 0 ? `${formatUsd(known)} of ${formatUsd(limit)}` : formatUsd(known),
         left: reached ? 'Limit reached: new paid work is refused' : limit > 0 ? `${formatUsd(remaining)} left` : 'No limit set',
-        open: unresolved > 0 ? `up to ${formatUsd(unresolved)} more is still being priced` : '',
+        // The producer's words for the unresolved upper bound (cost_projection.uncounted_money_text): a worst case.
+        open: unresolved > 0 ? `up to ${formatUsd(unresolved)} for calls without a known price` : '',
         reached,
         share: limit > 0 ? Math.min(100, Math.max(0, (known / limit) * 100)) : null,
         facts: [
-            ['Final', accounting.cost_final === true ? 'Yes' : `Pending${openCause}`],
+            ['Final', accounting.cost_final === true ? 'Yes' : `No${openCause}`],
             ['Confirmed', formatUsd(confirmed)],
             ['Estimated', formatUsd(estimated)],
             ['Reserved', formatUsd(reserved)],
@@ -132,6 +149,7 @@ export function initCosts({ state, mount }) {
             <details class="ui-disclosure costs-details" id="cost-details" hidden>
                 <summary>Details</summary>
                 <dl class="dashboard-facts" id="cost-facts"></dl>
+                <p class="costs-copy">The unresolved upper bound is calls in flight, or ended without a price, at their reserved ceiling: a worst case, not spending.</p>
             </details>
         </section>
         <section class="ui-card costs-budget" aria-labelledby="costs-budget-title">
@@ -139,18 +157,18 @@ export function initCosts({ state, mount }) {
             <div class="costs-budget-fields">
                 <div class="form-field ui-field">
                     <label for="s-budget">Total budget ($)</label>
-                    <input id="s-budget" class="ui-control" type="number" value="200" aria-describedby="costs-budget-help">
-                    <div class="ui-field-help" id="costs-budget-help">Paid work stops when known spend reaches it.</div>
+                    <input id="s-budget" class="ui-control" type="number" value="200" aria-describedby="costs-total-note costs-budget-help">
+                    <div class="ui-field-help" id="costs-total-note">Paid work stops when known spend reaches it.</div>
                 </div>
                 <div class="form-field ui-field">
-                    <label for="s-per-task-cost">Per-task cap ($)</label>
-                    <input id="s-per-task-cost" class="ui-control" type="number" value="50" aria-describedby="costs-per-task-note">
+                    <label for="s-per-task-cost">Per-task cost cap ($)</label>
+                    <input id="s-per-task-cost" class="ui-control" type="number" value="50" aria-describedby="costs-per-task-note costs-budget-help">
                     <div class="ui-field-help" id="costs-per-task-note">A task and its helpers stop when their known spend reaches it.</div>
                 </div>
             </div>
             <details class="ui-disclosure">
                 <summary>How the limits count</summary>
-                <p class="costs-copy">Known spend is the confirmed and estimated cost. The cap covers a task's whole tree. Calls already in flight settle normally, and raising the cap does not resume paused work.</p>
+                <p class="costs-copy" id="costs-budget-help" role="note">${BUDGET_NOTE_FALLBACK}</p>
             </details>
             <div class="ui-action-row">
                 <button type="button" class="btn btn-save" id="btn-save-budget">Save</button>
@@ -185,10 +203,10 @@ export function initCosts({ state, mount }) {
             nameCell.setAttribute('title', name);
             const cost = costBucketPresentation(info);
             const costCell = cell('cost-cell-right', cost.text);
-            if (cost.open) {
-                costCell.innerHTML = `${escapeHtmlAttr(cost.text)}${statusMarkHtml('cost-open', { shape: 'ring', hue: 'ink' })}`;
+            if (cost.open) costCell.innerHTML = `${escapeHtmlAttr(cost.text)}${statusMarkHtml('cost-open', { shape: 'ring', hue: 'ink' })}`;
+            if (cost.note) {
                 costCell.setAttribute('title', cost.note);
-                costCell.setAttribute('aria-label', `${cost.text}. ${cost.note}`);
+                costCell.setAttribute('aria-label', cost.note);
             }
             tr.append(nameCell, cell('cost-cell-right', number(info?.calls)), costCell);
             tbody.appendChild(tr);
@@ -248,6 +266,12 @@ export function initCosts({ state, mount }) {
             const resp = await apiFetch('/api/settings', { cache: 'no-store' });
             const s = await resp.json().catch(() => ({}));
             const fields = s?._meta?.setup_contract?.budgetFields || [];
+            const note = fields.map((field) => String(field.note || '').trim()).find(Boolean) || '';
+            const noteEl = document.getElementById('costs-budget-help');
+            if (noteEl && note) {
+                noteEl.textContent = note;
+                noteEl.hidden = false;
+            }
             fields.forEach((field) => {
                 const input = document.getElementById(COST_BUDGET_INPUTS[field.settingKey]);
                 if (!input) return;

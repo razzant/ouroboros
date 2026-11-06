@@ -84,8 +84,8 @@ COST_CASES = [
     # width, theme, ledger, status, figure, meta line, {facts in Details}
     (390, "light", _ledger(confirmed_usd=58.1, estimated_usd=5.32, reserved_usd=4.3, unresolved_upper_bound_usd=1.25,
                            unknown_unmetered=3, cost_final=False, non_final_rows=2),
-     200, "$63.42 of $200.00", "$136.58 left · up to $1.25 more is still being priced",
-     {"Final": "Pending (2 open)", "Unresolved upper bound": "$1.25", "Calls without a price": "3", "Reserved": "$4.30"}),
+     200, "$63.42 of $200.00", "$136.58 left · up to $1.25 for calls without a known price",
+     {"Final": "No (2 open)", "Unresolved upper bound": "$1.25", "Calls without a price": "3", "Reserved": "$4.30"}),
     (1100, "dark", _ledger(), 200, "$63.42 of $200.00", "$136.58 left",
      {"Final": "Yes", "Unresolved upper bound": "$0.00", "Calls without a price": "0", "Reserved": "$0.00"}),
     (390, "dark", {"error": "Spend records could not be read"}, 500, "Unavailable", "", {}),

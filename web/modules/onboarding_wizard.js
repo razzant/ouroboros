@@ -920,6 +920,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
     }
 
         function renderBudgetStep() {
+            const budgetNote = BUDGET_FIELDS.map((field) => String(field.note || '').trim()).find(Boolean) || '';
             return `
             <div class="step-header">
                 <div>
@@ -936,12 +937,13 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
                             <h3>${escapeHtml(field.title)}</h3>
                             <div class="field ui-field">
                                 <label for="${escapeHtml(field.inputId)}">${escapeHtml(field.label)}</label>
-                                <input id="${escapeHtml(field.inputId)}" class="ui-control" type="number" aria-describedby="${escapeHtml(field.inputId)}-help" min="${escapeHtml(field.min || '0.01')}" step="${escapeHtml(field.step || 'any')}" value="${escapeHtml(state[field.stateKey])}">
-                                <div id="${escapeHtml(field.inputId)}-help" class="field-note ui-field-help">${escapeHtml(field.note)}</div>
+                                <input id="${escapeHtml(field.inputId)}" class="ui-control" type="number" aria-describedby="budget-fields-help" min="${escapeHtml(field.min || '0.01')}" step="${escapeHtml(field.step || 'any')}" value="${escapeHtml(state[field.stateKey])}">
                             </div>
                         </div>
                     `).join('')}
-                </div></details>
+                </div>
+                ${budgetNote ? `<div id="budget-fields-help" class="field-note ui-field-help budget-shared-note">${escapeHtml(budgetNote)}</div>` : ''}
+                </details>
             `;
         }
 

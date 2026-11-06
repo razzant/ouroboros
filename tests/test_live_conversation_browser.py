@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 import pytest
 from tests import test_voice_browser as voice
 from tests import test_subscription_setup_browser as browser
+from tests._shared import answer_projects
 
 subscription_ui = browser.subscription_ui
 pytestmark = [pytest.mark.ui_browser]
@@ -101,7 +102,8 @@ FAKES = r"""(() => {
 })();"""
 
 
-def open_call_ui(ui, monkeypatch, *, width, scheme, engine="openai", enabled=True, offered=True, projects=(), refusal=""):
+def open_call_ui(ui, monkeypatch, *, width, scheme, engine="openai", enabled=True, offered=True, projects=(), refusal="",
+                 registered=None):
     state = {"whisper": True, "voice": {"stt": "whisper-voice:stt", "tts": "", "tts_voice": ""}}
     projection = voice.projection
     include_call = False
@@ -176,8 +178,7 @@ def open_call_ui(ui, monkeypatch, *, width, scheme, engine="openai", enabled=Tru
             "call_id": CALL_ID, "ws_path": "/ws/call/" + CALL_ID, "vision": engine != "grok"}))
     page.route("**/api/call/open", admit)
     if projects:
-        page.route("**/api/projects*", lambda route: route.fulfill(
-            content_type="application/json", body=json.dumps({"projects": list(projects)})))
+        page.route("**/api/projects*", lambda route: answer_projects(route, registered or projects))
         page.route("**/api/state", lambda route: route.fulfill(content_type="application/json", body=json.dumps({
             "supervisor_ready": True, "projects": list(projects), "active_chat_activities": [],
             "active_chat_activities_complete": True})))
@@ -435,7 +436,7 @@ def test_project_call_names_and_reveals_its_room_across_navigation(subscription_
     projects = [{"id": "voice-room", "name": "Voice project", "chat_id": 71, "lifecycle": "active"},
                 {"id": "other-room", "name": "Other project", "chat_id": 72, "lifecycle": "active"}]
     page, posts = open_call_ui(subscription_ui, monkeypatch, width=1280, scheme="light",
-                               projects=projects[1:] if from_reference else projects)
+                               projects=projects[1:] if from_reference else projects, registered=projects)
     if from_reference:
         page.evaluate("project => window.dispatchEvent(new CustomEvent('ouro:open-project', {detail: {project}}))", projects[0])
     else:

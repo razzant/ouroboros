@@ -38,7 +38,7 @@ export function projectRoomOptions({ rows, nav, state, title, freshProjectRow, o
         return {
             label: () => project ? freshProjectRow(project).name || project.id : 'Main',
             onScreen: () => state.activePage === 'chat' && !page.hidden && current(),
-            reveal: () => project ? openProjectPanel(freshProjectRow(project), { openOnly: true }) : showPage('chat'),
+            reveal: () => project ? openProjectPanel({ id: project.id, name: project.name }, { openOnly: true }) : showPage('chat'),
             onSettled: () => queueMicrotask(() => { if (project && !current()) destroyProjectInstance(project.id); }),
         };
     };

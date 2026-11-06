@@ -22,10 +22,11 @@ LONG = ("Sasha's estimate is fine, but before you start: keep the old export pat
         "write the migration as a reversible step, and only then switch the default. ") * 3 + "Do NOT ship on Friday."
 
 
-def _place_turn(tmp_path, *, addressed=True, confirmed=True, reply_to_message_id=""):
+def _place_turn(tmp_path, *, addressed=True, confirmed=True, reply_to_message_id="", forwarded=False):
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, current_task_type="presence")
     ctx.task_id = "place-turn"
     message = {"reply_to_message_id": reply_to_message_id} if reply_to_message_id else {}
+    message.update({"forward_origin": {"sender_user_name": "Andrew"}} if forwarded else {})
     ctx.task_metadata = {
         "focus": {"place_id": "p1", "room_chat_id": 2 ** 41 + 3, "addressed": addressed,
                   "actor": {"platform_actor_id": "anton", "owner_confirmed": confirmed}},
@@ -43,9 +44,9 @@ def test_an_addressed_place_turn_from_my_human_carries_their_exact_words(tmp_pat
     assert [row["text"] for row in words] == [LONG], "a helper gets the whole words, not a cut"
 
 
-@pytest.mark.parametrize("addressed,confirmed", [(False, True), (True, False)])
-def test_an_unaddressed_remark_or_a_participant_is_not_work(tmp_path, addressed, confirmed):
-    ctx = _place_turn(tmp_path, addressed=addressed, confirmed=confirmed)
+@pytest.mark.parametrize("addressed,confirmed,forwarded", [(False, True, False), (True, False, False), (True, True, True)])
+def test_an_unaddressed_remark_a_participant_or_a_forward_is_not_work(tmp_path, addressed, confirmed, forwarded):
+    ctx = _place_turn(tmp_path, addressed=addressed, confirmed=confirmed, forwarded=forwarded)  # a forward: another author
     assert [row["source"] for row in ctx._owner_directives] == ["initial_text"]
     assert FIELD not in governing_words_for_schedule(ctx)
 

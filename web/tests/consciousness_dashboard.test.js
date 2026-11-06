@@ -210,9 +210,21 @@ test('unknown, zero, known, open and mixed costs stay distinct in visible and ac
         has_rows: true, tracked_amount: amount, tracked_final: true, has_unpriced: false, accounting_open: false, ...extra } });
     assert.equal(wakeCostText(priced(0)), '$0.00');
     assert.equal(wakeCostText(priced(1.23)), '$1.23');
+    // No amount — unknown, still pending, or settled without a price — leaves the column empty for the row's Details.
     assert.equal(wakeCostText(priced(null)), '');
+    assert.equal(wakeCostText(priced(null, { has_unpriced: true })), '');
+    assert.equal(wakeCostText(priced(null, { has_unpriced: true, accounting_open: true, tracked_final: false })), '');
     assert.equal(wakeCostText(priced(1.23, { tracked_final: false, accounting_open: true })), 'up to $1.23 so far');
     assert.equal(wakeCostText(priced(1.23, { has_unpriced: true })), 'Tracked: $1.23');
+    // Custody facts ride with the wake: an unreadable view without a known amount says
+    // unknown and gives no pending explanation; a known subtotal keeps its qualified money.
+    const custody = (amount) => normalizeWake({ task_id: `w-custody-${amount}`, cost_custody: { status: 'unavailable' },
+        cost_presentation: { has_rows: true, tracked_amount: amount, tracked_final: false, has_unpriced: true, accounting_open: true } });
+    assert.equal(custody(null).cost.cost_custody.status, 'unavailable');
+    assert.equal(wakeCostText(custody(null)), '');
+    assert.doesNotMatch(wakeRowHtml(custody(null), { open: true }), /accounting is still open/);
+    assert.equal(wakeCostText(custody(2)), 'Tracked: up to $2.00 so far');
+    assert.match(wakeRowHtml(custody(2), { open: true }), /Tracked counts only the priced steps/);
     const { places } = normalizePlacesResponse(FIXTURE.places);
     const slack = dashboardPlaceRowHtml(places[0], { awake: true });
     assert.match(strip(slack), /Slack · Acme active · wakes for direct messages, mentions and replies · 2 open turns \$0\.88/);

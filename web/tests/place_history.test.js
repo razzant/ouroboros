@@ -65,6 +65,7 @@ test('role-first names and facts never infer delivery or exact wake', () => {
     assert.deepEqual(historyFactWords({place_history: {delivery_state: 'authored'}}), ['Delivery not confirmed']);
     assert.deepEqual(historyFactWords({place_history: {attention: {decision:'focus_started'}}}), ['Focus started']);
     assert.deepEqual(historyFactWords({place_history: {attention: {decision:'heard', reason:'current_author'}}}), ['Passed to the current author']);
+    assert.deepEqual(historyFactWords({place_history: {attention: {decision:'heard', reason:'own_account'}}}), ['Heard; written by the account it sends as']);
     assert.deepEqual(historyFactWords({place_history: {attention: {decision:'heard', reason:'conversation_work', recipient:'work-7'}}}), ['Passed to work work-7']);
     assert.deepEqual(historyFactWords({place_history: {attention: {decision:'heard', reason:'conversation_work'}}}), ['Passed to work in this conversation']);
 });

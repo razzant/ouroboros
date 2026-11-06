@@ -70,21 +70,6 @@ def test_iter_jsonl_objects_tail_keeps_line_boundary_start(tmp_path):
     assert [entry["i"] for entry in iter_jsonl_objects(path, tail_bytes=tail)] == [1, 2]
 
 
-def test_llm_usage_helpers_normalize_flat_and_nested_costs(tmp_path):
-    from ouroboros.utils import iter_llm_usage_events, llm_usage_cost
-
-    path = tmp_path / "events.jsonl"
-    flat = {"type": "llm_usage", "cost": "1.25", "prompt_tokens": "10", "completion_tokens": 2}
-    nested = {"type": "llm_usage", "usage": {"cost": 0.5, "prompt_tokens": 3, "cached_tokens": "2"}}
-    path.write_text(
-        "\n".join([json.dumps(flat), json.dumps({"type": "other"}), json.dumps(nested)]),
-        encoding="utf-8",
-    )
-
-    events = list(iter_llm_usage_events(path))
-    assert [llm_usage_cost(event) for event in events] == [1.25, 0.5]
-
-
 def test_supervisor_usage_summaries_use_shared_cost_normalizer(tmp_path, monkeypatch):
     from supervisor import state
 

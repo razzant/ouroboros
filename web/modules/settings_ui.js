@@ -24,6 +24,10 @@ const SETTINGS_TABS = [
 ];
 // Guard markers: renderTabStrip emits behavior/advanced tabs at runtime.
 
+// The setup contract replaces this after the settings read. Keep the accessible
+// description useful while that read is pending or unavailable.
+const BUDGET_NOTE_FALLBACK = 'Budget limits use known spend: Total Budget applies globally, while Per-task Cost Cap applies to one root task tree. Unpriced calls remain unknown and are not counted as $0; reservations and unresolved charges are not counted as spending.';
+
 // Runtime mode is one axis of the owner policy contract. Keep the Settings
 // presentation in the same vocabulary as the onboarding setup contract; the
 // saved value is still handled by settings.js and the owner endpoint.
@@ -494,7 +498,8 @@ function advancedPanel() {
         ${settingsSection({
             title: 'Runtime Limits',
             lead: 'How much Ouroboros may run and spend at once.',
-            details: 'Workers control parallel task capacity. A quiet task is checked on, never stopped for being quiet; the per-task round and lifetime limits are optional — a positive number, or <strong>unlimited</strong> for none (the fresh-install default). A settings file from an earlier release that never set them keeps the finite limits it ran under until you change them here; startup names the values once. Budget limits control runtime cost thresholds. How many subagents a task may run, and how deep they may nest, live in <strong>Agents</strong>.',
+            details: `Workers control parallel task capacity. A quiet task is checked on, never stopped for being quiet; the per-task round and lifetime limits are optional — a positive number, or <strong>unlimited</strong> for none (the fresh-install default). A settings file from an earlier release that never set them keeps the finite limits it ran under until you change them here; startup names the values once. Budget limits control runtime cost thresholds. How many subagents a task may run, and how deep they may nest, live in <strong>Agents</strong>.
+                <br><span id="s-budget-help" role="note">${BUDGET_NOTE_FALLBACK}</span>`,
             body: `<!-- Active Subagents / Root and Subagent Depth moved to
                  Agents → Delegation (D-10): they bound the agents,
                  not the process pool. Max Workers stays: it is
@@ -502,11 +507,11 @@ function advancedPanel() {
             <div class="form-grid two">
                 <div class="form-field ui-field">
                     <label for="s-total-budget">Total Budget (USD)</label>
-                    <input id="s-total-budget" type="number" min="0.01" step="any" value="200.0" class="ui-control" name="s-total-budget">
+                    <input id="s-total-budget" type="number" min="0.01" step="any" value="200.0" class="ui-control" name="s-total-budget" aria-describedby="s-budget-help">
                 </div>
                 <div class="form-field ui-field">
                     <label for="s-settings-per-task-cost">Per-Task Cost Cap (USD)</label>
-                    <input id="s-settings-per-task-cost" type="number" min="0.01" step="any" value="50.0" class="ui-control" name="s-settings-per-task-cost">
+                    <input id="s-settings-per-task-cost" type="number" min="0.01" step="any" value="50.0" class="ui-control" name="s-settings-per-task-cost" aria-describedby="s-budget-help">
                 </div>
                 <div class="form-field ui-field">
                     <label for="s-workers">Max Workers</label>

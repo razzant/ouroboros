@@ -5,7 +5,7 @@
 
 import { accountRows, accountName, accountModelUnsupported } from './claudexor_status_store.js';
 import { formatRelativeAge } from './ui_helpers.js';
-import { harnessPresentation } from './harness_presentation.js';
+import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { modelChooserHtml, updateModelChooserOptions } from './model_chooser.js';
 
@@ -91,13 +91,6 @@ export function composeModelSource(source, model) {
 export const API_PROVIDER_ORDER = ['openrouter', 'openai', 'anthropic', 'deepseek',
     'zai', 'minimax', 'cloudru', 'gigachat', 'openai-compatible'];
 
-// Fallback names for providers the setup contract does not describe (GigaChat
-// has no profile spec). The contract's label wins whenever it exists.
-const API_PROVIDER_LABELS = {
-    openrouter: 'OpenRouter', openai: 'OpenAI', anthropic: 'Anthropic', deepseek: 'DeepSeek',
-    zai: 'Z.ai (GLM)', minimax: 'MiniMax', cloudru: 'Cloud.ru Foundation Models', gigachat: 'GigaChat',
-    'openai-compatible': 'OpenAI-compatible endpoint',
-};
 
 // Credential shapes that make a provider usable, mirroring the runtime's
 // PROVIDER_CREDENTIAL_GROUPS: any ONE group whose every key is present counts.

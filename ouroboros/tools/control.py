@@ -197,18 +197,25 @@ def _project_tool_entries() -> List[ToolEntry]:
     ]
 
 
+def _sibling_tool_entries() -> List[ToolEntry]:
+    """The control tools homed in sibling modules: harness maintenance, the mind's Storage -> Free, the
+    mind's lifecycle choices, UI translation and update descriptions."""
+    from ouroboros.tools.control_maintenance import maintenance_tool_entries
+    from ouroboros.tools.control_mind import mind_tool_entries
+    from ouroboros.tools.control_storage import storage_tool_entries
+    from ouroboros.tools.control_ui_translation import ui_translation_tool_entries
+    from ouroboros.tools.control_update_description import update_description_tool_entries
+
+    return [*maintenance_tool_entries(), *storage_tool_entries(), *mind_tool_entries(), *ui_translation_tool_entries(),
+            *update_description_tool_entries()]
+
+
 def get_tools() -> List[ToolEntry]:
     from ouroboros.native_task_wait import SLEEP_PARAMS
     from ouroboros.subagent_inspection import inspect_subagent_tool
-    from ouroboros.tools.control_maintenance import maintenance_tool_entries
-    from ouroboros.tools.control_mind import mind_tool_entries
-    from ouroboros.tools.control_ui_translation import ui_translation_tool_entries
-    from ouroboros.tools.control_update_description import update_description_tool_entries
+
     return [
-        *maintenance_tool_entries(),
-        *mind_tool_entries(),
-        *ui_translation_tool_entries(),
-        *update_description_tool_entries(),
+        *_sibling_tool_entries(),
         ToolEntry("inspect_subagent", {
             "name": "inspect_subagent",
             "description": "Inspect one configured actor from this task's captured catalog: exact route, model, account pin and access, with dated passive engine quota/resource facts. Works without Quotas. Never starts or refreshes an engine/provider, changes accounts, or chooses an executor. Missing/stale facts and unhonored model/request selectors remain unknown; availability is not an execution guarantee.",
@@ -309,7 +316,7 @@ def get_tools() -> List[ToolEntry]:
                 "quote": {"type": "array", "items": {"type": "string"}, "default": [],
                           "description": "Owner row addresses held by this turn; exact words and attachments travel together."},
                 "arrival": {"type": ["boolean", "string"], "default": False,
-                            "description": "Place focus only: forward the exact message as context, never owner words. true selects the opening "
+                            "description": "Place focus only: forward the exact message as it arrived (your human's own words stay theirs, any other is context). true selects the opening "
                                            "message; a string, a later source_event_id delivered here from this conversation. One receiving work. "
                                            "Not with quote; note stays your own, separately."},
             }, "required": ["task_id"]},
@@ -368,8 +375,10 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("send_user_message", {
             "name": "send_user_message",
             "description": "Send a separate reply to the owner while work continues: the first line of longer work (what "
-                           "I am about to do and why), a question, an invitation to collaborate, or anything else that "
-                           "needs the owner now. It appears in this work's room as a normal reply, calls the owner back "
+                           "I am about to do and why), a question the work does not wait on, an invitation to "
+                           "collaborate, or anything else that needs the owner now; a decision this work needs from "
+                           "the owner is an escalate card, which shows its options, stays listed as waiting and brings "
+                           "the answer back here. It appears in this work's room as a normal reply, calls the owner back "
                            "and leaves the work running; work news goes on update_focus, later progress stays in the "
                            "card. For Presence-bound work that room is local, not the place conversation: a connector "
                            "tool reaches that, and your final answer only where your context names that route.",

@@ -6,19 +6,17 @@
 
 import { fmt } from './i18n.js';
 import { statusMarkHtml } from './status_mark.js';
-import { escapeHtmlAttr, escapeHtmlText } from './utils.js';
+import { escapeHtmlAttr, escapeHtmlText, formatUsdKnown } from './utils.js';
 
 /** Counts in one fixed format, like the file counts of result_files.js. */
 export const number = (n) => Number(n || 0).toLocaleString('en-US');
 
-/** Money grouped like a count ($29,438.20); four decimals below a cent, so a real cost never reads $0.00; an absent
- *  amount is the dash, never $0.00. */
+/** Money grouped like a count ($29,438.20) under the app's one amount rule (utils.js `formatUsdKnown`): four places
+ *  under a cent and `<$0.0001` below that, so a real cost never reads $0.00; an absent amount is the dash. */
 export function formatUsd(value) {
-    if (value === null || value === undefined || value === '') return '—';
     const amount = Number(value);
-    if (!Number.isFinite(amount)) return '—';
-    const digits = amount > 0 && amount < 0.01 ? 4 : 2;
-    return `$${amount.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
+    return Number.isFinite(amount) && amount >= 999.995  // a cent below $1,000 rounds into the grouped form
+        ? `$${amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : formatUsdKnown(value);
 }
 
 export const plural = (n, one, many) => (Number(n) === 1 ? fmt(one, { n }) : fmt(many, { n, count: number(n) }));

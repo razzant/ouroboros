@@ -16,6 +16,15 @@ from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 
+def answer_projects(route, rows):
+    """``GET /api/projects`` from a page fixture's rows: the list, or the one row ``?id=`` names, as a reference reads
+    its room (CLIENT_CONTRACT §6)."""
+    from urllib.parse import parse_qs, urlparse
+
+    wanted = parse_qs(urlparse(route.request.url).query).get("id")
+    route.fulfill(json={"projects": [row for row in rows if not wanted or row["id"] == wanted[0]]})
+
+
 def producer_evidence_dir(fallback, name, *, env=()):
     """Where one test producer's own diagnostics go: one destination per invocation.
 

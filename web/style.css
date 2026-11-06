@@ -7763,6 +7763,142 @@ body.keyboard-open .chat-instance-panel .chat-input-area {
     display: none;
 }
 
+/* Find a project (owner 4.11, A1 refined; projects_nav.js): one floating capsule a Project row high (32 on the desk,
+   44 on touch) in the header pills' material, --chip-float standing on --elev-rest. It is built as the composer's
+   field is (DESIGN "The composer field"): the capsule is the object, the words' row has no surface, and focus is a
+   ring drawn as shadows, so no border adds to its height. The magnifier takes the rows' icon column at the house
+   glyph size, the words start on the rows' label column, and × (while there is a query) closes the row in the +
+   column. --space-1 after the header row, --space-2 before the first row: the step the pins keep before the rest. */
+.nav-projects-find {
+    display: flex;
+    align-items: center;
+    flex: 0 0 auto;
+    width: 100%;
+    min-height: var(--nav-item-h);
+    margin: var(--space-1) 0 var(--space-2);
+    border-radius: var(--pill-radius);
+    background: var(--chip-float);
+    box-shadow: var(--elev-rest);
+    outline: 1px solid transparent;
+    outline-offset: -1px;
+    transition: var(--motion-tone);
+}
+.nav-projects-find[hidden] { display: none; }
+.nav-projects-find:has(> .nav-find-input:focus) {
+    outline-width: 2px;
+    outline-offset: -2px;
+    box-shadow: inset 0 0 0 1px var(--focus-accent-border), 0 0 0 3px var(--focus-accent-ring), var(--elev-rest);
+}
+
+.nav-find-glyph {
+    display: inline-flex;
+    flex: 0 0 18px;
+    align-items: center;
+    justify-content: center;
+    height: 18px;
+    margin-left: calc(var(--space-3) + 1px);  /* the rows' icons: their 1px border, then --space-3 */
+    color: var(--text-secondary);
+    pointer-events: none;
+}
+.nav-find-glyph > svg { width: 18px; height: 18px; }
+
+.nav-projects-find > .nav-find-input {
+    flex: 1 1 auto;
+    align-self: stretch;
+    min-width: 0;
+    padding: 0 var(--space-1) 0 var(--space-3);
+    border: 0;
+    border-radius: var(--pill-radius);
+    background: transparent;
+    box-shadow: none;
+}
+.nav-projects-find > .nav-find-input:focus { box-shadow: none; }
+.nav-find-input::-webkit-search-cancel-button,
+.nav-find-input::-webkit-search-decoration { -webkit-appearance: none; appearance: none; display: none; }
+/* A finger's field keeps the composer's 16px, the size a phone does not zoom into on focus. */
+@media (pointer: coarse) {
+    .nav-projects-find > .nav-find-input { font-size: var(--type-section); }
+}
+
+.nav-projects-find > .nav-find-clear { flex: 0 0 auto; border-radius: var(--pill-radius); }
+.nav-projects-find > .nav-find-clear[hidden] { display: none; }
+.nav-find-clear > svg { width: 16px; height: 16px; }
+
+/* The find's spoken count and outcome, for a screen reader only (the list shows them): one clipped pixel, no room. */
+.nav-find-status {
+    flex: 0 0 1px;
+    width: 1px;
+    height: 1px;
+    margin-left: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+
+/* Beyond the feed (a find or a browse) the list keeps the row in view in place itself (projects_nav.js), so the
+   engine's own scroll anchoring, which WebKit lacks, never adds a second correction. */
+.nav-projects-list[data-beyond] { overflow-anchor: none; }
+
+/* While finding, a found name may take three lines, so the words that matched are not cut off behind the ellipsis
+   (the resting list keeps one line). The row grows; its mark keeps its column, centred on the row. */
+.nav-projects-list[data-finding] .nav-project-row { padding-block: 5px; }
+.nav-projects-list[data-finding] .nav-project-row > .nav-row-label {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.35;
+}
+
+/* The list's own commands (Show more, Clear search, Show all projects, Try again) and its one sentence take a
+   Project row's geometry in the meta ink, their words on the label column (Show more's chevron in the icon column),
+   so none reads as one more Project. */
+.nav-projects-more {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    flex: 0 0 auto;
+    width: 100%;
+    min-height: var(--nav-item-h);
+    margin-top: var(--space-1);
+    padding: 0 var(--space-1) 0 var(--nav-label-x);
+    border: 1px solid transparent;
+    border-radius: var(--radius-inner);
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+    font-size: var(--type-meta);
+    font-weight: 600;
+    text-align: left;
+    cursor: pointer;
+}
+.nav-projects-more:has(> svg) { padding-left: var(--space-3); }
+.nav-projects-more > svg { flex: 0 0 18px; width: 18px; height: 18px; }
+.nav-projects-more + .nav-projects-more { margin-top: 0; }
+.nav-projects-more[aria-busy="true"] { cursor: progress; }
+@media (hover: hover) {
+    .nav-projects-more:hover {
+        background: var(--tone-quiet-hover);
+        color: var(--text-primary);
+    }
+}
+.nav-projects-more:focus { outline: none; }
+.nav-projects-more:focus-visible {
+    outline: 2px solid var(--focus-accent-border);
+    outline-offset: -2px;
+    color: var(--text-primary);
+}
+
+.nav-projects-note {
+    margin: var(--space-1) 0 0;
+    padding: var(--space-1) var(--space-2) var(--space-1) calc(var(--nav-label-x) + 1px);  /* the rows' words: their 1px border */
+    color: var(--text-meta);
+    font-size: var(--type-body);
+    line-height: var(--line-body);
+    overflow-wrap: anywhere;
+}
+
 /* Project rows read as a compact list nested under the "Projects" header (no
    glyph/dot, label indented to align under the parent label, shorter rows and
    no left active bar) — a dropdown list, not standalone tabs. */
@@ -9314,6 +9450,7 @@ body.keyboard-open .project-panel {
    them, never inside one while it fits. */
 .document-reader-actions,
 .document-reader-views,
+.document-reader-zoom,
 .document-reader-file {
     display: flex;
     flex-wrap: wrap;
@@ -9405,8 +9542,7 @@ body.keyboard-open .project-panel {
 
 /* An image: Fit shows it whole and never enlarges it; Actual size scrolls its own pixels. */
 .document-reader-body.is-image {
-    display: grid;
-    grid-template: minmax(0, 1fr) / minmax(0, 1fr);
+    display: block;
 }
 
 .document-reader-image {
@@ -9414,9 +9550,62 @@ body.keyboard-open .project-panel {
     max-height: 100%;
     margin: auto;
     object-fit: contain;
+    user-select: none;
+    -webkit-user-drag: none;
 }
 
 .document-reader-body.is-actual .document-reader-image { max-width: none; max-height: none; }
+
+/* Image scenes reuse the reader's existing chrome and actions, but let the
+   picture occupy the stage. Text, Place and Skill sheets never receive this
+   modifier. */
+.document-reader.is-image-scene .document-reader-panel { position: relative; }
+.document-reader.is-image-scene .document-reader-head {
+    position: absolute;
+    z-index: 2;
+    inset: 0 0 auto;
+    border-bottom: 0;
+    background: linear-gradient(to bottom, var(--bg-primary), transparent);
+}
+
+.document-reader.is-image-scene .document-reader-body.is-image {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding: var(--space-3) var(--space-4) var(--space-4);
+    background: var(--bg-primary);
+    overflow: hidden;
+}
+
+.document-reader-image-stage {
+    position: relative;
+    display: grid;
+    place-items: center;
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    touch-action: none;
+    user-select: none;
+}
+
+.document-reader-image-stage .document-reader-image {
+    transform: translate3d(var(--image-x, 0px), var(--image-y, 0px), 0)
+        scale(var(--image-scale, 1));
+    transform-origin: center center;
+    cursor: grab;
+    will-change: transform;
+}
+
+.document-reader-image-stage.is-image-panned .document-reader-image { cursor: grabbing; }
+
+.document-reader-zoom .btn {
+    min-width: var(--control-h);
+}
+
+/* [hidden] also removes the scene controls from the dialog focus cycle. */
+.document-reader.is-image-scene.is-scene-chrome-hidden .document-reader-head { display: none; }
 
 /* A phone reads the document on a full sheet; Close returns to the same place in the chat. */
 @media (max-width: 620px) {
@@ -9446,6 +9635,12 @@ body.keyboard-open .project-panel {
 
     .document-reader-body {
         padding: var(--space-4) var(--space-3) calc(var(--space-5) + env(safe-area-inset-bottom, 0px));
+    }
+
+    .document-reader.is-image-scene .document-reader-body.is-image {
+        padding: calc(var(--space-3) + env(safe-area-inset-top, 0px))
+            var(--space-3)
+            calc(var(--space-4) + env(safe-area-inset-bottom, 0px));
     }
 }
 

@@ -726,7 +726,7 @@ function imageCapture(doc) {
     return images;
 }
 
-test('an image opens Fit first, switches to Actual size, and returns focus without scrolling the chat', async () => {
+test('an image opens fitted, zooms through scene controls, and returns focus without scrolling the chat', async () => {
     const fx = readerFixture();
     const images = imageCapture(fx.doc);
     try {
@@ -742,21 +742,63 @@ test('an image opens Fit first, switches to Actual size, and returns focus witho
         assert.deepEqual(images.map((img) => [img.getAttribute('src'), img.getAttribute('alt')]), [[ARTIFACT_PNG, 'Quarterly chart']]);
         images[0].dispatch('load');
         await settle();
-        assert.deepEqual([body.children[0], body.getAttribute('aria-busy')], [images[0], 'false']);
+        const stage = body.children[0];
+        assert.deepEqual([stage.classList.contains('document-reader-image-stage'), stage.children[0], body.getAttribute('aria-busy')],
+            [true, images[0], 'false']);
         assert.deepEqual([body.classList.contains('is-image'), body.classList.contains('is-actual')], [true, false]);
-        const views = fx.dialog().querySelectorAll('[data-reader-view]');
-        assert.equal(fx.dialog().querySelector('.document-reader-views').hidden, false);
-        assert.deepEqual(views.map((button) => [button.dataset.readerView, button.textContent, button.getAttribute('aria-pressed')]),
-            [['fit', 'Fit', 'true'], ['actual', 'Actual size', 'false']]);
-        views[1].click();
-        assert.deepEqual([body.classList.contains('is-actual'), views[1].getAttribute('aria-pressed')], [true, 'true']);
-        assert.deepEqual([body.children[0], images.length], [images[0], 1], 'the decoded image is kept, nothing loads again');
+        const zoom = fx.dialog().querySelector('.document-reader-zoom');
+        assert.equal(zoom.hidden, false);
+        zoom.querySelector('[data-reader-zoom="in"]').click();
+        zoom.querySelector('[data-reader-zoom="reset"]').click();
+        assert.equal(zoom.querySelector('[data-reader-zoom="reset"]').textContent, 'Reset');
+        assert.deepEqual([body.children[0], stage.children[0], images.length], [stage, images[0], 1], 'the decoded image is kept, nothing loads again');
         fx.dialog().dispatch('keydown', { key: 'Escape' });
         assert.equal(fx.dialog(), null);
         // In place before showModal (the engine's own close restores it) and back after close: never scrolled.
         assert.deepEqual(returned, [{ preventScroll: true }, { preventScroll: true }], 'the chat keeps its place');
         assert.equal(fx.doc.activeElement, tile.card, 'focus is back on the tile');
     } finally {
+        fx.restore();
+    }
+});
+
+test('a phone image scene toggles existing chrome without changing the image, while text stays ordinary', async () => {
+    const fx = readerFixture();
+    const images = imageCapture(fx.doc);
+    const matchMedia = fx.doc.defaultView.matchMedia;
+    fx.doc.defaultView.matchMedia = (query) => ({ matches: query.includes('pointer: coarse') || query.includes('max-width: 620px') });
+    try {
+        const tile = fx.item('chart.png');
+        fx.reader.open(imageFile(ARTIFACT_PNG), { owner: tile.node, returnFocus: tile.card });
+        const dialog = fx.dialog();
+        const head = dialog.querySelector('.document-reader-head');
+        assert.equal(dialog.classList.contains('is-image-scene'), true);
+        assert.equal(head.hidden, false, 'scene chrome starts visible');
+        images[0].dispatch('load');
+        await settle();
+        const body = dialog.querySelector('.document-reader-body');
+        const stage = body.querySelector('.document-reader-image-stage');
+        stage.dispatch('pointerdown', { pointerId: 1, pointerType: 'touch', clientX: 20, clientY: 20, isPrimary: true });
+        stage.dispatch('pointerup', { pointerId: 1, pointerType: 'touch', clientX: 20, clientY: 20, isPrimary: true });
+        stage.dispatch('click', { detail: 1 });
+        assert.deepEqual([head.hidden, dialog.classList.contains('is-scene-chrome-hidden'), images[0].getAttribute('src')],
+            [true, true, ARTIFACT_PNG]);
+        stage.dispatch('pointerdown', { pointerId: 2, pointerType: 'touch', clientX: 20, clientY: 20, isPrimary: true });
+        stage.dispatch('pointermove', { pointerId: 2, pointerType: 'touch', clientX: 40, clientY: 20 });
+        stage.dispatch('pointerup', { pointerId: 2, pointerType: 'touch', clientX: 40, clientY: 20, isPrimary: true });
+        stage.dispatch('click', { detail: 1 });
+        assert.equal(head.hidden, true, 'a pan does not toggle the scene');
+        body.dispatch('keydown', { key: 'Tab' });
+        assert.equal(head.hidden, false, 'keyboard reveals hidden chrome');
+        dialog.querySelector('[data-reader-zoom="in"]').click();
+        assert.equal(head.hidden, false, 'action clicks do not hide chrome');
+        fx.reader.close();
+
+        const text = fx.item('notes.txt');
+        fx.reader.open(text.file, { owner: text.node, returnFocus: text.card });
+        assert.equal(fx.dialog().classList.contains('is-image-scene'), false, 'text has no scene class');
+    } finally {
+        fx.doc.defaultView.matchMedia = matchMedia;
         fx.restore();
     }
 });
@@ -805,7 +847,8 @@ test('a failed image says so; Retry loads the same source, and refused inline by
         assert.equal(fx.doc.activeElement, fx.dialog().querySelector('.document-reader-body'));
         images[1].dispatch('load');
         await settle();
-        assert.equal(fx.dialog().querySelector('.document-reader-body').children[0], images[1]);
+        assert.equal(fx.dialog().querySelector('.document-reader-body').children[0]
+            .querySelector('.document-reader-image'), images[1]);
         fx.reader.close();
         fx.reader.open(imageFile('data:image/heic;base64,AAAA'), { owner: tile.node, returnFocus: tile.card });
         images[2].dispatch('error');
@@ -981,7 +1024,8 @@ test("an owner's uploaded image previews from its upload route and its preview c
         assert.equal(images.at(-1).getAttribute('src'), view.url);
         images.at(-1).dispatch('load');
         await settle();
-        assert.equal(fx.reader().querySelector('.document-reader-body').children[0], images.at(-1));
+        assert.equal(fx.reader().querySelector('.document-reader-body').children[0]
+            .querySelector('.document-reader-image'), images.at(-1));
         // The tile's own thumbnail then fails: the HEAD says the file is there, so it becomes an honest card.
         globalThis.fetch = async (_url, init) => ({ ok: true, status: 200, method: init?.method });
         bubble.querySelector('img.chat-photo').dispatch('error');
