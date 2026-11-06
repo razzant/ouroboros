@@ -272,28 +272,22 @@ def test_a_long_running_servers_stderr_is_logged_as_a_bounded_tail_with_every_se
                               secret_values=(secret,))
     pieces = [secret[i:i + 5] for i in range(len(secret) - 4) if "\n" not in secret[i:i + 5]]
 
-    def logged(text):
+    def logged(text, case=cfg):
         # The host's own kind of file; only the server's process writes it, as bytes past the host's text wrapper
         # (whose newline translation would turn every "\n" into "\r\n" on Windows).
         with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as stderr:
             stderr.buffer.write(text.encode())
             stderr.buffer.flush()
-            return mcp_schema._stderr_diagnostic(stderr, cfg, 1000)
+            return mcp_schema._stderr_diagnostic(stderr, case, 1000)
 
     assert logged(f"BOOT {secret} READY\n") == "BOOT *** READY\n"  # within the bound: whole, as before
     long_cfg = dataclasses.replace(cfg, secret_values=("K" * 3000,))  # masked far shorter than it was
-    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stderr:
-        stderr.write("K" * 3000 + "\nAuthentication required.\n")
-        stderr.flush()
-        note = mcp_schema._stderr_diagnostic(stderr, long_cfg, 1000)
+    note = logged("K" * 3000 + "\nAuthentication required.\n", long_cfg)
     assert note.endswith("\nAuthentication required.\n") and "K" * 20 not in note, note[:120]
     for text, cfg_case in (("password=abcdefghijkl\n" * 45, cfg),  # within the bound raw, past it once masked
                            ("Z\n" * 11000 + "K" * 1700 + "\nAuthentication required.\n" + "T\n" * 200, long_cfg)):
-        with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stderr:
-            stderr.write(text)
-            stderr.flush()
-            note = mcp_schema._stderr_diagnostic(stderr, dataclasses.replace(cfg_case, secret_values=(
-                "K" * 1700,)) if cfg_case is long_cfg else cfg_case, 1000)
+        note = logged(text, dataclasses.replace(cfg_case, secret_values=("K" * 1700,))
+                      if cfg_case is long_cfg else cfg_case)
         body = note.split("follow]\n", 1)[1]
         assert note.startswith(f"[{len(text)} bytes of stderr;") and len(body.encode()) <= 1000, note[:120]
         assert body.endswith("password=***REDACTED***\n" if cfg_case is cfg else "Authentication required.\n" + "T\n" * 200)
@@ -302,10 +296,7 @@ def test_a_long_running_servers_stderr_is_logged_as_a_bounded_tail_with_every_se
     rest = "arer\n" + token + "\nAuthentication required.\n"
     for text, end in (("P" * 999 + "\nBe" + rest + "T" * (999 - len(rest)) + "\n", "Authentication required.\n"),
                       ("Z\n" * 600 + "Y" * 999 + "\n", "Y" * 999 + "\n")):  # the window opens inside "Bearer"; a whole line
-        with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stderr:
-            stderr.write(text)
-            stderr.flush()
-            note = mcp_schema._stderr_diagnostic(stderr, plain, 1000)
+        note = logged(text, plain)
         body = note.split("follow]\n", 1)[1]
         assert token not in note and end in body and len(body.encode()) <= 1000, note[:160]
     for at in range(0, 3000, 7):  # the secret before, across and after every cut point
