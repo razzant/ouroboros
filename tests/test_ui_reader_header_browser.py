@@ -68,6 +68,7 @@ STATE = """() => {
         whiteSpace: getComputedStyle(title).whiteSpace,
         body: box(body), bodyScroll: [body.scrollLeft, body.scrollTop],
         image: image ? box(image) : null, natural: image ? [image.naturalWidth, image.naturalHeight] : null,
+        scene: dialog.classList.contains('is-image-scene'),
         active: document.activeElement.className, theme: document.documentElement.dataset.theme,
         dialogCount: document.querySelectorAll('dialog[open]').length,
         caption: document.querySelector('figcaption')?.textContent,
@@ -114,14 +115,16 @@ def _check_geometry(state):
         assert button["hit"] and button["x"] >= 0 and button["y"] >= 0, button
         assert button["right"] <= width + 1 and button["bottom"] <= height + 1, button
     assert state["head"]["y"] >= state["dialog"]["y"] - 1, state
-    assert state["body"]["y"] >= state["head"]["bottom"] - 1, state
+    if not state["scene"]:
+        assert state["body"]["y"] >= state["head"]["bottom"] - 1, state
     assert state["body"]["height"] >= state["dialog"]["height"] * 0.4, state
     if state["image"]:
         image, body = state["image"], state["body"]
         assert state["natural"] == [700, 1300], state
         assert image["height"] > 200 and image["width"] > 100, state
-        assert image["x"] >= body["x"] and image["right"] <= body["right"] + 1, state
-        assert image["y"] >= body["y"] and image["bottom"] <= body["bottom"] + 1, state
+        if not state["scene"]:
+            assert image["x"] >= body["x"] and image["right"] <= body["right"] + 1, state
+            assert image["y"] >= body["y"] and image["bottom"] <= body["bottom"] + 1, state
 
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
@@ -187,14 +190,16 @@ def test_long_reader_title_keeps_controls_and_content_reachable(component_url, t
                         assert page.locator(".document-reader-body").evaluate("n => n === document.activeElement")
                         records[key]["tab_order"] = focused
                         if kind != "text":
-                            page.locator('[data-reader-view="actual"]').click()
-                            body = page.locator(".document-reader-body")
-                            body.focus()
-                            page.keyboard.press("PageDown")
-                            page.wait_for_function("() => document.querySelector('.document-reader-body').scrollTop > 0")
-                            actual = page.evaluate(STATE)
-                            assert [actual["image"]["width"], actual["image"]["height"]] == [700, 1300], actual
-                            records[key]["actual"] = actual
+                            before_zoom = page.evaluate("() => document.querySelector('.document-reader-image').getBoundingClientRect().width")
+                            page.locator('[data-reader-zoom="in"]').click()
+                            page.wait_for_function("before => document.querySelector('.document-reader-image')?.getBoundingClientRect().width > before + 5",
+                                                   arg=before_zoom)
+                            zoomed = page.evaluate(STATE)
+                            assert zoomed["image"]["width"] > before_zoom + 5 and zoomed["image"]["height"] > before_zoom + 5, zoomed
+                            page.locator('[data-reader-zoom="reset"]').click()
+                            reset = page.evaluate(STATE)
+                            assert reset["image"]["width"] > 100 and reset["image"]["height"] > 200, reset
+                            records[key]["zoom_reset"] = reset
                         if case in ("caption", "text"):
                             page.locator('[data-reader-action="close"]').click()
                         else:
@@ -284,7 +289,8 @@ GROUPS = """() => {
     const head = dialog.querySelector('.document-reader-head');
     return {width: innerWidth, head: box(head), headOverflow: head.scrollWidth - head.clientWidth,
         close: box(dialog.querySelector('.document-reader-close')), views: group('.document-reader-views'),
-        file: group('.document-reader-file'), menus: dialog.querySelectorAll('[role="menu"], [aria-haspopup="menu"]').length};
+        zoom: group('.document-reader-zoom'), file: group('.document-reader-file'),
+        menus: dialog.querySelectorAll('[role="menu"], [aria-haspopup="menu"]').length};
 }"""
 
 
@@ -313,31 +319,37 @@ def test_phone_reader_keeps_every_action_in_sight_in_two_groups(component_url, t
                         key = f"{engine}-{width}-{theme}-{case}"
                         page.evaluate(MOUNT, {"kind": kind, "name": name})
                         page.wait_for_function("() => document.querySelector('.document-reader-body')?.getAttribute('aria-busy') === 'false'")
+                        if kind == "photo":
+                            page.locator('.document-reader-zoom [data-reader-zoom]').first.wait_for(state="visible")
                         page.wait_for_timeout(300)
                         state = records[key] = page.evaluate(GROUPS)
                         page.screenshot(path=str(evidence / f"{key}-groups.png"))
                         views, file = state["views"], state["file"]
-                        expected = (["Formatted", "Source"], ["Download"]) if case == "answer" else (
-                            ["Fit", "Actual size"], ["Copy", "Open", "Download"])
-                        assert ([b["label"] for b in views], [b["label"] for b in file]) == expected, state
+                        expected = (["Formatted", "Source"], [], ["Download"]) if case == "answer" else (
+                            ([], ["−", "Reset", "+"], ["Copy", "Open", "Download"]))
+                        assert ([b["label"] for b in views], [b["label"] for b in state["zoom"]],
+                                [b["label"] for b in file]) == expected, state
                         assert state["menus"] == 0 and state["headOverflow"] <= 1, state
-                        for button in views + file:
+                        for button in views + state["zoom"] + file:
                             assert button["hit"] and button["left"] >= 0 and button["right"] <= width + 1, state
                         # A group is one row; the file's actions never come before the view.
-                        assert len({b["top"] for b in views}) == 1 and len({b["top"] for b in file}) == 1, state
-                        assert file[0]["top"] >= views[0]["top"], state
+                        groups = [group for group in (views, state["zoom"], file) if group]
+                        assert all(len({b["top"] for b in group}) == 1 for group in groups), state
+                        assert file[0]["top"] >= (state["zoom"] or views)[0]["top"], state
                         if width == 390:
                             # Actions are under the name's row (Close), and only as many rows as the groups need.
-                            assert views[0]["top"] >= state["close"]["bottom"], state
+                            anchor = state["zoom"] or views
+                            assert anchor[0]["top"] >= state["close"]["bottom"], state
                             if case == "answer":
                                 assert file[0]["top"] == views[0]["top"], state
                                 assert state["head"]["bottom"] - state["head"]["top"] <= 100, state
                             else:
-                                assert file[0]["top"] >= views[0]["bottom"], state
+                                assert file[0]["top"] >= state["zoom"][0]["bottom"], state
                         else:
                             # The desk keeps its one head row: the actions beside Close.
-                            assert abs(views[0]["top"] - state["close"]["top"]) <= 1, state
-                            assert file[0]["top"] == views[0]["top"], state
+                            anchor = state["zoom"] or views
+                            assert abs(anchor[0]["top"] - state["close"]["top"]) <= 1, state
+                            assert file[0]["top"] == anchor[0]["top"], state
                         page.keyboard.press("Escape")
                         page.locator("dialog.document-reader").wait_for(state="detached")
             assert not errors, errors
