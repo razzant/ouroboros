@@ -2504,12 +2504,12 @@ an explicit store failure in view, metrics under Diagnostics and exact program t
 Details.
 A rule every row shares is said once for the section, an unsaved draft once by the editor
 or its host page, and a checked box is not re-said beside it. A conditional line never
-moves the control that caused it: controls own stable slots, and a line an edit toggles
-opens beside or below them.
+moves the control that caused it.
 
-In a result/action row, the result has readable space. The action docks right
-when it fits, otherwise below, by the row's width. Long content stays whole.
-Field actions (Show/Clear) keep the field's height, not the compact result-row size.
+The result of an action sits in the row of its control, right after it, on a line
+the row keeps for it, so a late result moves nothing: never under the button, never
+at the far end. It ends as §4 says, and an edit in the same subject clears it.
+Long content stays whole.
 
 Rows of the same kind are equivalent: no row gets extra visual weight for
 being first, default, or native. Grouping and section-level actions express
