@@ -162,6 +162,17 @@ fixed; a second managed container sharing the data volume loses the launcher loc
 and exits 0. `init: true` reaps orphans the launcher or server cannot. See
 Docker's [restart policy documentation](https://docs.docker.com/engine/containers/start-containers-automatically/).
 
+**Fault exit.** A ready server whose event-bus process ended (`bus_lost`) or whose task
+loop failed three times in a row (`loop_failed`) ends its generation through the ordinary
+teardown (saved work held, the cause in `shutdown_entry.json`) and comes back with the
+same code: under the launcher (the managed image, systemd, the desktop apps) it exits 1
+and the launcher's crash path restarts it (fuse: five crashes in 120 s); a direct server
+(the plain image, `ouroboros server`, Colab) re-executes itself in place after its own
+process census, and only a failed successor exits 1, which `restart: on-failure` then
+retries. Neither path is a planned restart (exit 42) or Panic (99); the shared Claudexor
+daemon is untouched. A persistent cause cycles about every two minutes with a Main row
+each time until someone looks.
+
 **Browser sandbox.** Browser tools launch only the pinned Chromium (`ouroboros/chromium_runtime.py`)
 inside its own sandbox. The images run as root, for whom Chromium refuses its sandbox (Docker's
 default seccomp profile also restricts the user namespaces it uses), so by default Chromium is
