@@ -69,8 +69,8 @@ def get_tools() -> list[ToolEntry]:
         "name": "configure_presence",
         "description": "Inspect places and their connector choices; edit state, wakes, notes, folder or model. "
                        "Only your human switches a place to Active, on its sheet or by a word in Main; propose it there. "
-                       "Only an owner-door turn may confirm an owner account. A note is your human's only when its "
-                       "whole text is their exact words from this owner-door turn; any other note is yours. "
+                       "Only an owner-door turn may confirm an owner account. A note is your human's only in such a "
+                       "turn and only when its whole text is their exact words that reached this run; any other note is yours. "
                        "A folder is an address, not a fence. "
                        "Connect starts Silent using the installed connector's declaration; disconnect keeps room history.",
         "parameters": {"type": "object", "properties": {

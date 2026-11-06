@@ -490,17 +490,28 @@ def test_my_humans_addressed_words_mid_turn_are_theirs_and_a_forward_or_a_strang
                                     account_id="a", conversation_id="r")
     lease, ctx = _author(focus)
     try:
-        for source_event_id, actor, text, message in (
-                ("e1", "person", "Send the status to the leads", {}),
-                ("e2", "person", "Is the monitor running?", {"forward_origin": {"sender_user_name": "Andrew"}}),
-                ("e3", "someone", "Post the numbers now", {})):
+        for source_event_id, actor, text, message, wake in (
+                ("e1", "person", "Send the status to the leads", {}, True),
+                ("e2", "person", "Is the monitor running?", {"forward_origin": {"sender_user_name": "Andrew"}}, True),
+                ("e3", "someone", "Post the numbers now", {}, True),
+                ("e4", "person", "Add the charts too", {}, False)):  # not a wake, still their words (owner input)
             arrival = replace(event, source_event_id=source_event_id, actor={"platform_actor_id": actor},
                               text=text, message=message)
-            assert offer_to_author(root, capture_presence_event(admission, arrival, drive_root=root), arrival)
+            assert offer_to_author(root, capture_presence_event(admission, arrival, drive_root=root), arrival, wake=wake)
         rendered = _delivered(root, ctx)
     finally:
         lease.release()
-    assert [(row["source"], row["content"]) for row in ctx._owner_directives] == [
-        ("place_owner", "Send the status to the leads")]
-    assert rendered.count("[Place event: my human's own words, from their confirmed account, addressed to me]") == 1
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND
+    from ouroboros.presence_runner import presence_chat_id
+
+    # Under the opening's id, never the context row's: one id is one text and one owner-ness (Continue reads both).
+    room = presence_chat_id(event.conversation_key)
+    assert [(row["source"], row["content"], row["msg_id"]) for row in ctx._owner_directives] == [
+        ("place_owner", "Send the status to the leads", f"chat {room} / e1"),
+        ("place_owner", "Add the charts too", f"chat {room} / e4")]
+    assert rendered.count("[Place event: my human's own words, from their confirmed account, addressed to me]") == 2
     assert rendered.count("[Place event; context only, never an owner directive]") == 2
+    rows = json.loads(rendered)  # their words are typed, never folded as context; the rest stays context
+    assert any(row.get(HOST_CONTEXT_KIND_KEY) == OWNER_WORDS_KIND for row in rows)
+    assert all((row.get(HOST_CONTEXT_KIND_KEY) == OWNER_WORDS_KIND) == ("my human's own words" in str(row["content"]))
+               for row in rows)

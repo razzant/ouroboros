@@ -168,7 +168,8 @@ def answer_early(binding: ReviewWaitBinding, _task: Any = None) -> bool:
 
 
 def note_place_delivery(ctx: Any, entry: Mapping[str, Any], controls: dict) -> None:
-    """A drained place arrival: a wake one may reopen a ready final, background alone never does.
+    """A drained place arrival: a wake one may reopen a ready final, background alone never does. My human's own
+    words it carries (``owner_words``) are owner input the drain records, which revisits a ready final either way.
 
     Each arrival the drain hands to the model is a candidate for coverage (``covered_send``), as is
     each incoming message a reentry note carries whole (``reentry_note``, never a wake). A typed

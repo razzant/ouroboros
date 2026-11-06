@@ -293,6 +293,27 @@ def test_a_relayed_owner_reply_keeps_what_it_replied_to(tmp_path):
     assert "reply_to" not in owner_quote(tmp_path, unrelated)  # nothing invented for an ordinary message
 
 
+def test_a_relayed_quiz_answer_carries_the_card_it_answers(tmp_path):
+    """Audit 05.11 item 37: a quoted quiz answer reaches the told work with its card as the message it replies to, in
+    the asker's name, beside my human's words; the relayed text stays theirs."""
+    from ouroboros.owner_relay import inject_relay, owner_quote, relay_envelope
+    card = {"quiz_id": "q7", "question": "Publish exactly this reply?", "state": "answered", "answered_index": 0,
+            "options": ["Publish it", "Not now"]}
+    answer = {"chat_id": 1, "direction": "in", "ts": "2026-10-01T00:01:00Z", "client_message_id": "owner-answer",
+              "type": "quiz_answer", "task_id": "asker", "quiz": card, "text": "1. Publish it"}
+    dialogue_store.append(tmp_path, "chat", answer)
+    receiver, messages = context(tmp_path), []
+    receiver.task_id = "receiver"
+    inject_relay(receiver, {"kind": "relay_entry", "text": "Please act on it.", "owner_rows": [answer],
+                            "relay": relay_envelope("quoted", [owner_quote(tmp_path, answer)], chat_id=1),
+                            "source_task_id": "teller"}, messages)
+    [row] = [row for row in receiver._owner_directives if row["source"] == "owner_mailbox"]
+    assert "Publish exactly this reply?" not in str(row["content"])
+    assert row["reply_to"] == {"address": "quiz q7 of task asker", "author": "Ouroboros, task asker",
+                               "text": "Publish exactly this reply?\n1. Publish it\n2. Not now\n"
+                                       "(host record: my human pressed option 1)"}
+
+
 def test_a_relay_answer_is_owed_before_the_queue_and_survives_a_failed_send(tmp_path, monkeypatch):
     """F4: the named return is owed in the terminal outbox under a stable id before the queue sees it; a
     send that fails after enqueue leaves it owed (deferred), and the receipt never claims it was sent."""

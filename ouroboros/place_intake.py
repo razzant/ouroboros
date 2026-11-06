@@ -215,7 +215,8 @@ def _arrival_append(root, drive, recipient: str, task: dict, event, wake: bool, 
     Its words carry the event's text, exact message and conversation facts, observed facts and
     attachments; where they leave a transport queue's events out, its ``context_source_ref`` reads
     them. ``wake``, the source event and its message also ride the entry as typed facts:
-    the drain lets only a wake reopen a ready final and anchors replies (``presence_continuation``).
+    the drain lets only a wake reopen a ready final (my human's own words are owner input either way) and
+    anchors replies (``presence_continuation``).
     Inside the recipient's mail lock, admission precedes the first pin claim. A retry instead checks
     its existing pin. Once claimed, a holder is never released: the append may have landed even if
     its reply was lost and the holder has since consumed and retired its mailbox.
@@ -225,7 +226,9 @@ def _arrival_append(root, drive, recipient: str, task: dict, event, wake: bool, 
     from ouroboros.owner_words import place_owner_words
     source = _arrival_source(root, task, event) if isinstance(event.conversation.get("transport_queue"), dict) else None
     reaction = reaction_fact(event.message)
-    owner_words = "" if reaction else place_owner_words(task["metadata"].get("focus"), event.text, event.message)
+    # My human's words only from the arrival's own admitted facts: a hand-off reads the focus's (context, never theirs).
+    owner_words = "" if reaction or task.get("handed") else place_owner_words(
+        task["metadata"].get("focus"), event.text, event.message)
     text = json.dumps({"actor": dict(event.actor), "event": event.text,
                        **({"non_speech": f"Reaction, not speech: {reaction_words(reaction)}"} if reaction else {}),
                        "source_event_id": event.source_event_id, "conversation_key": event.conversation_key,
@@ -424,7 +427,7 @@ def _captured_arrival(root, metadata: dict, captured: str, identity: str, facts)
         actor=dict(transport.get("actor") or {}), conversation=dict(transport.get("conversation") or {}),
         message=dict(transport.get("message") or {}), text=str(body.get("text") or ""),
         facts=None if facts == ["legacy_addressed"] or not isinstance(facts, list) else tuple(facts))
-    task = {"id": captured, "metadata": {**metadata, "presence_event_identity": identity},
+    task = {"id": captured, "metadata": {**metadata, "presence_event_identity": identity}, "handed": True,
             **{key: body[key] for key in ("attachment_manifest", "attachment_manifest_ref") if key in body}}
     return task, event
 

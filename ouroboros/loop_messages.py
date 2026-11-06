@@ -286,12 +286,11 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
 
             stamped = run_origin({"metadata": metadata})["owner_ingress"]
             target = reply_target(getattr(ctx, "drive_root", None), metadata.get("reply_reference")) if stamped else {}
-            _loop()._record_owner_directive(
-                ctx,
-                source="initial_user" if stamped else "initial_text",
-                content=message.get("content"),
-                reply_to=target or None,
-            )
+            # A late answer's head: my human's words with the card they answered, never the host's frame.
+            late_words = late_answer_owner_text(answered) if answered and stamped else ""
+            card = answered_card_reply(answered, late["task_id"]) if late_words else {}
+            _loop()._record_owner_directive(ctx, source="initial_user" if stamped else "initial_text",
+                                            content=late_words or message.get("content"), reply_to=card or target or None)
             return
 
 
