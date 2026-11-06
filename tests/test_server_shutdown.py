@@ -726,12 +726,15 @@ def test_a_fault_teardown_cancels_unsaved_rows_as_server_shutdown_naming_the_cau
 def test_the_lifespan_teardown_hands_a_faults_cause_to_kill_workers(tmp_path, monkeypatch, request, stop_source):
     """The real lifespan's one ``kill_workers`` call (the Fault door, ARCHITECTURE §9): after a fault the rows it cancels
     carry the fault's sentence as their reason, still ``stop_source="server_shutdown"``; after an ordinary stop the
-    door's own text stands (the quiet direction)."""
+    door's own text stands (the quiet direction). After that call a fault ends the delegated runs of the rows it
+    holds with their saved work (``end_fault_held_runs``); an ordinary stop addresses none."""
     from starlette.testclient import TestClient
 
     import server as srv
     from ouroboros import server_process
     from ouroboros.server_restart import _shutdown_task_cleanup_args
+    from supervisor import workers
+    from supervisor.restart_retention import RETAINED_FOR_BOOT
     from tests.test_extensions_api import _patch_lifespan_for_drive_root_test
 
     drive_root = tmp_path / "drive"
@@ -741,8 +744,11 @@ def test_the_lifespan_teardown_hands_a_faults_cause_to_kill_workers(tmp_path, mo
     _patch_lifespan_for_drive_root_test(monkeypatch, srv, {}, request)
     monkeypatch.setattr(srv, "_boot_managed_update_tasks", lambda: None)
     monkeypatch.setattr("ouroboros.config.get_skills_repo_path", lambda: "")
-    calls = []
-    monkeypatch.setattr("supervisor.workers.kill_workers", lambda **kw: calls.append(kw))
+    calls, ended = [], []
+    monkeypatch.setattr(workers, "RUNNING", {})
+    monkeypatch.setattr("supervisor.workers.kill_workers", lambda **kw: calls.append(kw) or workers.RUNNING.update(
+        {"t-held": {"task": {"id": "t-held"}, RETAINED_FOR_BOOT: True}}))
+    monkeypatch.setattr(server_process, "end_task_runs", lambda root, ids, **kw: ended.append(list(ids)))
     with TestClient(srv.app):
         monkeypatch.setattr(server_process, "_stop_source", stop_source)
     [call] = calls
@@ -751,8 +757,41 @@ def test_the_lifespan_teardown_hands_a_faults_cause_to_kill_workers(tmp_path, mo
     if stop_source == "bus_lost":
         assert call["result_reason"] == server_process.fault_cancel_reason() != ordinary
         assert "event-bus process exited" in call["result_reason"]
+        assert ended == [["t-held"]], "the fault's held task keeps its saved work; its own runs end after the kill"
     else:
         assert call["result_reason"] == ordinary
+        assert ended == [], "an ordinary stop leaves the held rows' runs as they were"
+
+
+@pytest.mark.parametrize("stop_source", ["bus_lost", "launcher_quit"])
+def test_a_fault_ends_its_held_tasks_own_runs_and_a_quit_leaves_them(tmp_path, monkeypatch, stop_source):
+    """Owner 1A at the Fault door: a task the fault holds with its saved work continues at the next boot, and its own
+    live delegated run is cancelled now with the abrupt-loss verdict (``owner_task_gone``) over the attach-only
+    gateway; a review panel's run on that task stays its panel's. A Quit holds the same row and addresses no run."""
+    from ouroboros import claudexor_daemon, delegate_custody as custody, owned_shutdown, server_process
+    from ouroboros.task_results import write_task_result
+    from supervisor import workers
+    from supervisor.restart_retention import RETAINED_FOR_BOOT
+    from tests._delegated_transport_shared import _LiveRunStub
+
+    write_task_result(tmp_path, "t-held", "running", root_task_id="t-held")
+    for run_id, source in (("run-held", "delegated_subagent"), ("run-panel", "review_substrate")):
+        custody._CUSTODY.clear()
+        custody.record_started(tmp_path, custody.RunCustody(
+            run_id=run_id, task_id="t-held", route_id="r", model="m", project_id="p", project_owned=False,
+            root_task_id="t-held", ledger_root=str(tmp_path), source=source))
+    custody._CUSTODY.clear()
+    live = _LiveRunStub()
+    monkeypatch.setattr(claudexor_daemon, "read_owned_gateway", lambda **_kw: live)
+    monkeypatch.setattr(owned_shutdown, "stop_deadline", lambda: time.monotonic() + 20)
+    monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
+    monkeypatch.setattr(workers, "RUNNING", {"t-held": {"task": {"id": "t-held"}, RETAINED_FOR_BOOT: True}})
+    monkeypatch.setattr(server_process, "_stop_source", stop_source)
+    try:
+        server_process.end_fault_held_runs()
+    finally:
+        custody._CUSTODY.clear()
+    assert live.cancels == ([("run-held", "owner_task_gone")] if stop_source == "bus_lost" else [])
 
 
 def test_the_startup_notice_names_the_previous_faults_cause_and_the_held_count(monkeypatch):

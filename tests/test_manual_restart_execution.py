@@ -237,6 +237,33 @@ def test_the_owners_restart_teardown_takes_the_one_pin_rule(owners, restart_root
     assert [c[0] for c in owners.calls].count("daemon_stop") == 1, "a forward pin replaces the engine"
 
 
+def test_the_owners_restart_ends_the_runs_of_the_work_it_returns(owners, restart_root, monkeypatch):
+    """Owner 3A: Restart restarts Ouroboros and stops only its own runs, returned work included. A task the Restart
+    returns gets no cancel intent and continues from its saved state, while its own live delegated run is cancelled
+    with the abrupt-loss verdict (``owner_task_gone``) over the attach-only gateway; a review panel's run on that task
+    stays its panel's; the engine is kept, so nothing outside Ouroboros's custody is addressed."""
+    from ouroboros.task_results import write_task_result
+    from tests._delegated_transport_shared import _LiveRunStub
+
+    write_task_result(restart_root, "t-returned", "running", root_task_id="t-returned")
+    for run_id, source in (("run-returned", "delegated_subagent"), ("run-panel", "review_substrate")):
+        custody._CUSTODY.clear()
+        custody.record_started(restart_root, custody.RunCustody(
+            run_id=run_id, task_id="t-returned", route_id="r", model="m", project_id="p", project_owned=False,
+            root_task_id="t-returned", ledger_root=str(restart_root), source=source))
+    custody._CUSTODY.clear()
+    live = _LiveRunStub()  # answers every run id as running, the engine's other programs' included
+    monkeypatch.setattr(owned, "read_owned_gateway", lambda **_kw: live)
+    monkeypatch.setattr(server_restart, "_prepare_owner_restart_returns", lambda ctx: ({"t-returned"}, set()))
+    try:
+        stopped = server_restart._stop_owned_work(_ctx(owners.calls, running={"t-returned": {"task": {"id": "t-returned"}}}))
+    finally:
+        custody._CUSTODY.clear()
+    assert stopped == ["direct-1"] and [c[1] for c in owners.calls if c[0] == "cancel"] == ["direct-1"]
+    assert live.cancels == [("run-returned", "owner_task_gone")], "the returned task's run ends; the panel's stays"
+    assert "daemon_stop" not in [c[0] for c in owners.calls], "the shared engine is kept"
+
+
 def test_an_abandoned_restart_does_not_keep_its_stop_fact(owners, restart_root, monkeypatch):
     """A BaseException inside the stop returns the queue and keeps this generation admitting: a later
     planned door must then keep a newer engine again."""

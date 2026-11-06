@@ -56,7 +56,7 @@ from ouroboros.server_process import (  # noqa: F401
     _SignalStopServer, _embedded_uvicorn_server,
     capture_server_source_baseline, server_stop_cause, log,
     FAULT_BUS_LOST, FAULT_LOOP_FAILED, bind_fault_exit, end_generation_on_fault, fault_cancel_reason,
-    fault_exit, held_saved_work_count, previous_fault_sentence,
+    fault_exit, held_saved_work_count, previous_fault_sentence, end_fault_held_runs,
 )
 from ouroboros.server_routing_context import (  # noqa: F401
     _active_direct_roots,
@@ -1279,6 +1279,7 @@ async def lifespan(app):
                 **_restart_cleanup_kwargs(),
                 **_managed_update_pending_kwargs(),
             )
+            end_fault_held_runs()  # a fault's held tasks keep their saved work; their own delegated runs end
             # Record an explicit shutdown cause so a task interrupted by the shutdown is
             # never later read as a worker death. Diagnostic, so it runs AFTER the
             # custody write: append_jsonl waits up to two seconds for the log lock, and

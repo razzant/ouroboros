@@ -602,6 +602,59 @@ def fault_cancel_reason() -> str:
     return _FAULT_CANCEL_REASONS.get(_stop_source, "")
 
 
+def end_task_runs(root: Any, task_ids: Any, *, gateway_factory: Optional[Callable[[], Any]] = None) -> None:
+    """End Ouroboros's OWN open delegated runs of tasks a stop keeps for the next boot (the owner Restart's returns,
+    the Fault door's holds): the tasks continue from their saved state, their runs end (owner 3A, 1A). The verdict
+    is the abrupt loss a signal-death retry passes (``reconcile_task_runs(..., deliberate_terminal=
+    STATUS_INTERRUPTED)``), over an attach-only transport (default ``attach_only_gateway``): a review panel's run
+    stays its panel's (only a cancellation speaks for it), and other programs' runs on the kept engine are not
+    touched. One pass on its own thread, joined for at most half the generation's remaining stop grace, so the
+    owned-process stop keeps the rest and a slow engine never holds the door. A run the pass has not reached by
+    then is left to the existing custody: the pass goes on while the process lives; after that the run stays live
+    (the next boot's sweep has no verdict for it) until it ends, or the owner stops its task."""
+    ids = [str(task_id) for task_id in dict.fromkeys(task_ids or ()) if task_id]
+    if not ids:
+        return
+    from ouroboros.delegate_custody_reconcile import attach_only_gateway, reconcile_task_runs
+    from ouroboros.owned_shutdown import stop_deadline
+    from ouroboros.task_results import STATUS_INTERRUPTED
+
+    def run() -> None:
+        for task_id in ids:
+            try:
+                reconcile_task_runs(root, task_id, gateway_factory=gateway_factory or attach_only_gateway,
+                                    deliberate_terminal=STATUS_INTERRUPTED)
+            except Exception:
+                log.warning("Delegated runs of %s were not ended; custody keeps them", task_id, exc_info=True)
+
+    worker = threading.Thread(target=run, name="kept-task-runs-end", daemon=True)
+    worker.start()
+    worker.join(max(0.0, ((stop_deadline() or time.monotonic()) - time.monotonic()) / 2))
+    if worker.is_alive():
+        log.warning("Ending the delegated runs of %d kept task(s) outlived its bound; the rest stay in custody", len(ids))
+
+
+def end_fault_held_runs() -> None:
+    """The Fault door after its teardown's terminal custody: the rows it holds with their saved work
+    (``RETAINED_FOR_BOOT``) continue at the next boot, and their own delegated runs end now (``end_task_runs``).
+    Any other stop, a restart and an accepted Panic: nothing here."""
+    from ouroboros.server_control import panic_termination_requested
+
+    if _stop_source not in FAULT_CAUSES or _restart_requested.is_set() or panic_termination_requested():
+        return
+    try:
+        from supervisor import workers
+        from supervisor.queue import _queue_lock
+        from supervisor.restart_retention import RETAINED_FOR_BOOT
+
+        with _queue_lock:
+            held = [str(task_id) for task_id, meta in workers.RUNNING.items()
+                    if isinstance(meta, dict) and meta.get(RETAINED_FOR_BOOT)]
+        end_task_runs(workers.DRIVE_ROOT, held)
+    except Exception:
+        log.warning("The fault's held tasks' delegated runs were not ended; custody keeps them", exc_info=True)
+
+
 def previous_fault_entry() -> Dict[str, Any]:
     """The previous generation's shutdown entry when it ended through the Fault door, else ``{}``: the record
     the boot claim replaced (``owned_shutdown.claim_shutdown_entry``), with its ``cause`` and ``entered_at``."""

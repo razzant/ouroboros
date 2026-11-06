@@ -17,7 +17,7 @@ import time
 from typing import Any, Dict
 
 from ouroboros.server_process import (
-    DATA_DIR, _owner_restart_requested, _request_restart_exit, _restart_requested, log,
+    DATA_DIR, _owner_restart_requested, _request_restart_exit, _restart_requested, end_task_runs, log,
 )
 
 _RESTARTABLE_UPDATE_PHASES = frozenset({"pending_boot_smoke", "applying_replace"})
@@ -328,17 +328,17 @@ def _stop_owned_work(ctx: Any) -> list:
     ``preserve_pending``, preserved owner waits and
     ``reconcile_delegate_custody=False``. Tasks actually settled record the
     typed ``owner_restart`` cause (an earlier Stop keeps its own). External
-    runs gain no adoption authority from native continuation: request cancellation
-    of Ouroboros's own delegated runs through the public owner-gone seam over the
-    attach-only gateway, and finally the generation's one bounded stop of its
-    owned processes (``stop_owned_work``), which the teardown and the restart
-    watcher later join. The shared Claudexor daemon is KEPT (owner 3A, 2026-11-06):
-    Restart restarts Ouroboros, other programs' runs on the engine are untouched,
-    and the teardown's one pin rule (``_stop_owned_daemon_for_new_pin``) replaces
-    the engine only for a forward pin; the engine's own restart is the Accounts
-    action. Between the cancel intents and the bounded stop nothing may call
-    ``ensure_owned_gateway`` — it would start a dead daemon — which is what the
-    prepared transaction and live latch guarantee.
+    runs gain no adoption authority from native continuation: the returned tasks'
+    own delegated runs end with the abrupt-loss verdict (``end_task_runs``), the
+    stopped tasks' through the public owner-gone seam, both over the attach-only
+    gateway, and finally the generation's one bounded stop of its owned processes
+    (``stop_owned_work``), which the teardown and the restart watcher later join.
+    The shared Claudexor daemon is KEPT (owner 3A, 2026-11-06): Restart restarts
+    Ouroboros, other programs' runs on the engine are untouched, and the teardown's
+    one pin rule (``_stop_owned_daemon_for_new_pin``) replaces the engine only for
+    a forward pin; the engine's own restart is the Accounts action. Nothing here
+    calls ``ensure_owned_gateway``: a stop admits nothing and never starts or
+    repairs the engine; every transport only attaches.
 
     Returns the owned live task ids it addressed — captured ONCE, before the
     stop makes them unreadable — so the caller can tell the owner what was
@@ -378,6 +378,7 @@ def _stop_owned_work(ctx: Any) -> list:
         if confirmed is False:
             log.critical("Owner restart: worker shutdown is unconfirmed; the restart proceeds and "
                          "the next generation reconciles the remainder")
+    end_task_runs(DATA_DIR, returning, gateway_factory=read_owned_gateway)  # returned work continues; its runs end
     try:  # attach only; no replay_pending: a Restart re-POSTs nothing, the next generation's sweep does
         reconcile_orphaned_runs(DATA_DIR, running_task_ids=set(), gateway_factory=read_owned_gateway)
     except Exception:
