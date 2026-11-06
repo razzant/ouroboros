@@ -2,10 +2,6 @@
 
 This present-tense map (BIBLE P6) explains structure and rationale; module docstrings own mechanisms. Its three mandatory layers: **Structural**, components/modules/endpoints/flows/boundaries; **Operational**, the complete registry of logs/state/configs/paths/environment variables/tools, their locations and use; **Rationale**, why non-trivial decisions hold. Replace affected descriptions. Guards, review and lifecycles need no historical search. History: README.md, tags and Git.
 
-Two helpers support [Agent Core](architecture/06-agent-core.md): `ouroboros/consciousness_view.py` projects places, counted roots and bounded recent wakes; `ouroboros/usage_origin.py` owns task usage scopes and immutable billing/cause attribution in the usage ledger.
-
-Chat/work Subagents choices are live per room (§6–7); Context/Effort retain actor snapshots.
-
 ## Chapters
 
 - [1. High-Level Architecture](architecture/01-high-level-architecture.md)

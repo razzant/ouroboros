@@ -31,7 +31,7 @@ def adaptive_quorum(n_slots: int) -> int:
     """Reviewer-quorum SSOT for an ARBITRARY configured slot count, reused by
     triad/scope/plan/skill/acceptance review. One configured reviewer needs 1 (a loud
     single_reviewer_no_diversity degraded mode), 2 need both, 3+ keep the classic 2-of-N
-    majority. DISTINCT from "configured >= quorum but fewer responded", which stays a loud
+    quorum. DISTINCT from "configured >= quorum but fewer responded", which stays a loud
     infra quorum FAILURE at the call site."""
     return 2 if n_slots >= 3 else max(1, n_slots)
 
