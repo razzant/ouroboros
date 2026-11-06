@@ -286,6 +286,34 @@ def test_deliver_final_message_live_registers_owed_before_enqueue(tmp_path):
     assert deliver_final_message_live(_CaptureQueue(), events2, "fin2", drive_root=tmp_path) is True
     assert td.pending_deliveries(tmp_path) == []
 
+def test_a_dead_bus_proxy_leaves_the_delivery_owed_and_fabricates_no_terminal(tmp_path, monkeypatch):
+    """CANDIDATE_v2 §0 row 8: an injected proxy whose manager died answers ``ENQUEUE_UNAVAILABLE``: the owed row
+    stays for the next generation's replay and no terminal is written for the task; without an endpoint the
+    lost server bus (``EventBusLost``) answers the same. A live bus answers ``queued`` (the quiet direction)."""
+    from ouroboros.task_results import load_task_result
+    from supervisor import terminal_delivery as td, workers
+
+    class _DeadProxy:
+        def put(self, _event):
+            raise ConnectionRefusedError("the manager process is gone")
+
+    event = {"type": "send_message", "chat_id": 3, "task_id": "dead1", "text": "the answer", "delivery_id": "d-dead1"}
+    assert td.enqueue_terminal_delivery_outcome(tmp_path, dict(event), event_queue=_DeadProxy()) == td.ENQUEUE_UNAVAILABLE
+    assert [row["delivery_id"] for row in td.pending_deliveries(tmp_path)] == ["d-dead1"]
+    assert load_task_result(tmp_path, "dead1") is None
+
+    def lost(*_a, **_k):
+        raise workers.EventBusLost(-15)
+
+    monkeypatch.setattr(workers, "get_event_q", lost)
+    assert td.enqueue_terminal_delivery_outcome(tmp_path, dict(event)) == td.ENQUEUE_UNAVAILABLE
+    assert [row["delivery_id"] for row in td.pending_deliveries(tmp_path)] == ["d-dead1"]
+
+    live = _CaptureQueue()
+    assert td.enqueue_terminal_delivery_outcome(tmp_path, dict(event), event_queue=live) == td.ENQUEUE_QUEUED
+    assert [sent["delivery_id"] for sent in live.events] == ["d-dead1"]
+
+
 def test_reaper_registers_the_salvage_before_task_done(qenv, monkeypatch):
     """AR2-5a crash order: the owed salvage delivery precedes the task_done
     enqueue, so a crash between them can no longer resolve the card while

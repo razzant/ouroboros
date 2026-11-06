@@ -20,12 +20,12 @@ import threading
 import time
 import urllib.parse
 from contextlib import nullcontext
-from typing import Callable
+from typing import Any, Callable, Optional
 
 import uvicorn
 
 from ouroboros.launch_roots import data_dir as _configured_data_dir
-from ouroboros.utils import read_json_dict, update_json_locked
+from ouroboros.utils import read_json_dict, update_json_locked, utc_now_iso
 
 
 DATA_DIR = _configured_data_dir()  # config's root; a direct entry has already settled and exported it (launch_roots)
@@ -38,14 +38,24 @@ PROCESS_STARTED_MONOTONIC = time.monotonic()  # the boot clock's zero: this modu
 _restart_requested = threading.Event()
 # Set FIRST in the lifespan teardown: the supervisor loop reads it in its
 # ``while`` and in its crash handler, so the bus/Manager being torn down by
-# the shutdown itself never counts as a loop crash (no false "died after 3
-# consecutive crashes" alarm on a graceful window close / SIGTERM).
+# the shutdown itself never counts as a loop failure (no false fault row on a
+# graceful window close / SIGTERM).
 _supervisor_stop = threading.Event()
-# Set by the main uvicorn server's signal handler (server._SignalStopServer): the
-# PROCESS is exiting. Unlike ``_supervisor_stop`` it is never cleared — a settings
-# save that lands mid-teardown must not revive a supervisor generation (#1142).
+# Set by the main uvicorn server's signal handler (server._SignalStopServer) and by
+# the fault latch below: the PROCESS is exiting. Unlike ``_supervisor_stop`` it is
+# never cleared — a settings save that lands mid-teardown must not revive a
+# supervisor generation (#1142), nor one on a dead bus.
 _exit_signalled = threading.Event()
 _stop_source = "external_signal"
+
+# The two causes that end a READY generation at once (a server generation is whole or it is
+# over): its task core is lost (the event-bus manager process ended: ``workers.EventBusLost``,
+# a ``waitpid`` fact, no retries) or its tick failed three times in a row on a live bus (the
+# reviewed rule). Both leave through the lifespan teardown, as a SIGTERM does, then
+# ``fault_exit``; neither is a restart request (never exit 42) nor Panic (never 99).
+FAULT_BUS_LOST = "bus_lost"
+FAULT_LOOP_FAILED = "loop_failed"
+FAULT_CAUSES = frozenset({FAULT_BUS_LOST, FAULT_LOOP_FAILED})
 
 
 # Set only when the OWNER asked for the restart (the chat Restart button, and the
@@ -468,11 +478,7 @@ class _SignalStopServer(uvicorn.Server):
                 except (OSError, ValueError):
                     log.warning("Launcher stop pipe failed; treating it as the launcher's end", exc_info=True)
             self.request_shutdown(source)
-            from ouroboros.runtime_limits import LAUNCHER_STOP_GRACE_SEC
-
-            backstop = threading.Timer(LAUNCHER_STOP_GRACE_SEC + 5, _launcher_stop_backstop, args=(source,))
-            backstop.daemon = True
-            backstop.start()
+            _arm_stop_backstop(source)
 
         threading.Thread(target=receive, name="launcher-stop", daemon=True).start()
 
@@ -481,6 +487,157 @@ def _launcher_stop_backstop(source: str) -> None:
     """The ordinary stop outlived the launcher's own grace: nobody else will end this process."""
     log.critical("Ordinary stop (%s) did not finish within the launcher grace; exiting", source)
     os._exit(1)
+
+
+def _arm_stop_backstop(source: str) -> None:
+    """One independent exit after the launcher's own grace, for a stop nobody else would end."""
+    from ouroboros.runtime_limits import LAUNCHER_STOP_GRACE_SEC
+
+    backstop = threading.Timer(LAUNCHER_STOP_GRACE_SEC + 5, _launcher_stop_backstop, args=(source,))
+    backstop.daemon = True
+    backstop.start()
+
+
+def latch_fault_stop(cause: str) -> None:
+    """The fault's irreversible stop, exactly as ``request_shutdown`` latches one, without a server handle:
+    ``on_tick`` ends uvicorn, a settings save revives nothing, the backstop ends a teardown that outlives
+    the launcher grace; the lifespan teardown that follows is the SIGTERM path with this cause."""
+    global _stop_source
+    _stop_source = cause
+    _exit_signalled.set()
+    _supervisor_stop.set()
+    _arm_stop_backstop(cause)
+
+
+def _saved_running_count() -> int:
+    """How many RUNNING rows the teardown holds with their saved work (``restart_retention.working_saved``, the
+    predicate ``kill_workers(retain_saved_work=True)`` applies; read here, marked there)."""
+    from supervisor import restart_retention as retention, workers
+    from supervisor.queue import _queue_lock
+
+    with _queue_lock:
+        rows = [(str(task_id), dict(meta)) for task_id, meta in workers.RUNNING.items() if isinstance(meta, dict)]
+    saved = 0
+    for task_id, meta in rows:
+        task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
+        try:
+            saved += bool(task and retention.working_saved(
+                pathlib.Path(task.get("budget_drive_root") or workers.DRIVE_ROOT), task_id,
+                int(meta.get("attempt") or task.get("_attempt") or 1), task=task))
+        except Exception:
+            log.debug("Saved-work read of %s failed; not counted", task_id, exc_info=True)
+    return saved
+
+
+def fault_row_text(cause: str, *, exitcode: Any = None, saved: int = 0) -> str:
+    """The one Main row before a fault exit, in owner words: what happened, what happens next, what is kept.
+    The raw error goes to the server log and the journal row, never to this line (UI audit U013)."""
+    if cause == FAULT_BUS_LOST:
+        happened = f"🛑 The event-bus process of this server exited (exit {exitcode}). "
+    else:
+        happened = "🛑 The task loop failed three times in a row; the last error is in the server log. "
+    held = ("" if saved <= 0 else " 1 task keeps its saved state." if saved == 1
+            else f" {saved} tasks keep their saved state.")
+    return (happened + "Restarting the server now. Claudexor keeps running and other programs' runs are not "
+            "touched; this server's own runs for the interrupted tasks stop and can be continued." + held)
+
+
+def end_generation_on_fault(cause: str, *, exitcode: Any = None, error: Optional[BaseException] = None) -> None:
+    """A ready generation lost its task core or its tick failed three times in a row: one journal row with
+    the raw facts, one Main row in owner words, then the latch. The caller clears readiness and leaves its
+    loop; the lifespan teardown holds saved work (``retain_saved_work=True``), records the cause in
+    ``shutdown_entry.json`` and ``fault_exit`` is the door."""
+    from supervisor.message_bus import send_with_budget
+    from supervisor.state import append_jsonl, load_state
+
+    saved = _saved_running_count()
+    log.critical("Server generation ended: %s (exit code %s): %s", cause, exitcode, error, exc_info=error is not None)
+    try:
+        append_jsonl(DATA_DIR / "logs" / "supervisor.jsonl", {
+            "ts": utc_now_iso(), "type": "supervisor_generation_fault", "cause": cause, "exitcode": exitcode,
+            "error": f"{type(error).__name__}: {error}" if error is not None else "", "saved_running": saved})
+    except Exception:
+        log.debug("Failed to record the generation fault", exc_info=True)
+    try:
+        st = load_state()
+        if st.get("owner_chat_id"):
+            send_with_budget(int(st["owner_chat_id"]), fault_row_text(cause, exitcode=exitcode, saved=saved),
+                             role="system", system_type="supervisor_failure")
+    except Exception:
+        log.debug("Failed to notify the owner about the generation's end", exc_info=True)
+    latch_fault_stop(cause)
+
+
+_FAULT_CANCEL_REASONS = {
+    FAULT_BUS_LOST: ("The server's event-bus process exited and the server restarted before this task finished; "
+                     "the task was interrupted by that fault, not a worker crash."),
+    FAULT_LOOP_FAILED: ("The server's task loop failed three times in a row and the server restarted before this "
+                        "task finished; the task was interrupted by that fault, not a worker crash."),
+}
+
+
+def fault_cancel_reason() -> str:
+    """The cancel reason of an unsaved row the fault teardown cancels; '' for every other stop (its door's text
+    stands). The documented stop-cause/Continue mapping: ``stop_source`` stays ``server_shutdown`` (a technical
+    interruption, Continue-eligible: ``owner_continue.TECHNICAL_CANCEL_SOURCES``), the text names the cause, no
+    new source; the process cause itself is ``shutdown_entry.json``/``server_shutdown.cause``."""
+    return _FAULT_CANCEL_REASONS.get(_stop_source, "")
+
+
+def previous_fault_sentence(held: int) -> str:
+    """The startup notice's clause after a fault exit: the previous generation's cause and the held count,
+    read from the shutdown entry the boot claim replaced (``owned_shutdown.claim_shutdown_entry``)."""
+    from ouroboros.owned_shutdown import _GENERATION_STOP
+
+    cause = str(_GENERATION_STOP.previous.get("cause") or "")
+    if cause not in FAULT_CAUSES:
+        return ""
+    what = ("its event-bus process exited" if cause == FAULT_BUS_LOST
+            else "its task loop failed three times in a row")
+    kept = (" No task holds saved work." if held <= 0 else " 1 task is held with its saved state." if held == 1
+            else f" {held} tasks are held with their saved state.")
+    return f"The previous server generation restarted itself: {what}.{kept}"
+
+
+def held_saved_work_count(pending: Any) -> int:
+    """How many restored queue rows the boot holds under their saved-work hold (``HOLD_SAVED_WORK``)."""
+    from supervisor.events_budget import HOLD_SAVED_WORK, budget_hold_fact
+
+    return sum(1 for task in list(pending or ()) if isinstance(task, dict)
+               and str((budget_hold_fact(task) or {}).get("reason") or "") == HOLD_SAVED_WORK)
+
+
+def fault_exit(host: str, port: int, *, launcher_managed: bool, repo_dir: pathlib.Path,
+               cleanup: Callable[[], Any], restart: Callable[..., Any]) -> int:
+    """``main()``'s return after a fault latched the stop; 0 when no fault did (an ordinary return).
+
+    Launcher-managed installs (desktop, Linux browser fallback, managed Docker, systemd, Android) return 1:
+    the launcher's crash path restarts the same code (sleep 2 + 3 s, fuse 5 in 120 s) and spares the shared
+    daemon; never 42 (no sync, dependency install, handoff, store switch or adoption) and never 99. Direct
+    installs (plain Docker, Colab, ``ouroboros server``, bare POSIX) run the pre-exec census first
+    (``_emergency_process_cleanup`` with ``_restart_requested`` clear: no adoption, no pin stop, surviving
+    children force-killed), drop any planned-restart transaction and hand over through
+    ``restart_current_process(owner_initiated=False)``: a same-PID exec on POSIX; on Windows a supervised
+    successor whose parent exit 0 is the handoff. A failed successor returns 1. Recovery is the behaviour on
+    every install (owner question A, option A); an install preference to stop and wait would be one more
+    gate before the restart here, nothing else.
+    """
+    if _stop_source not in FAULT_CAUSES or _restart_requested.is_set():
+        return 0
+    if launcher_managed:
+        log.critical("Server generation ended (%s); exiting 1 for the launcher's restart", _stop_source)
+        return 1
+    try:
+        cleanup()
+        from ouroboros.delegate_recovery import PLANNED_RESTART_TRANSACTION_ENV
+
+        os.environ.pop(PLANNED_RESTART_TRANSACTION_ENV, None)
+        log.critical("Server generation ended (%s); restarting this direct server in place", _stop_source)
+        restart(host, port, repo_dir=repo_dir, log=log, owner_initiated=False)
+    except Exception:
+        log.exception("Fault restart failed; this server exits without a successor")
+        return 1
+    return 0
 
 
 def _embedded_uvicorn_server(config: "uvicorn.Config") -> "uvicorn.Server":

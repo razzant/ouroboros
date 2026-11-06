@@ -55,6 +55,8 @@ from ouroboros.server_process import (  # noqa: F401
     _supervisor_stop, _exit_signalled,
     _SignalStopServer, _embedded_uvicorn_server,
     capture_server_source_baseline, server_stop_cause, log,
+    FAULT_BUS_LOST, FAULT_LOOP_FAILED, end_generation_on_fault, fault_cancel_reason, fault_exit,
+    held_saved_work_count, previous_fault_sentence,
 )
 from ouroboros.server_routing_context import (  # noqa: F401
     _active_direct_roots,
@@ -676,7 +678,7 @@ def _run_supervisor(settings: dict) -> None:
         from supervisor.workers import (
             init as workers_init, get_event_q, WORKERS, PENDING, RUNNING,
             spawn_workers, kill_workers, assign_tasks, ensure_workers_healthy,
-            handle_chat_direct, auto_resume_after_restart,
+            handle_chat_direct, auto_resume_after_restart, EventBusLost, event_bus_exitcode,
         )
 
         max_workers = int(settings.get("OUROBOROS_MAX_WORKERS", 10))
@@ -717,7 +719,8 @@ def _run_supervisor(settings: dict) -> None:
         _startup_prune_sweeps(preserve_task_sources=bool(
             recovered_files["unresolved"] or recovered_files["protected"] or recovered_files["errors"]), recovery_report=recovered_files)
 
-        if restored_pending > 0 or interrupted_running:
+        previous_fault = previous_fault_sentence(held_saved_work_count(PENDING))  # the last generation's fault, if one
+        if restored_pending > 0 or interrupted_running or previous_fault:
             st_boot = load_state()
             if st_boot.get("owner_chat_id"):
                 # The second clause states an INTENT, not an outcome: restore only
@@ -731,7 +734,7 @@ def _run_supervisor(settings: dict) -> None:
                     count = len(interrupted_running)
                     notice.append(f"Settling {count} task{'' if count == 1 else 's'} that "
                                   f"{'was' if count == 1 else 'were'} still running when the server stopped.")
-                notice.extend(filter(None, [places.paused_places_sentence(DATA_DIR)]))
+                notice.extend(filter(None, [previous_fault, places.paused_places_sentence(DATA_DIR)]))
                 send_with_budget(int(st_boot["owner_chat_id"]), " ".join(notice), role="system", system_type="startup_notice")
         _startup_retired_settings_notice(settings)
         _startup_environment_review_notice()
@@ -825,12 +828,13 @@ def _run_supervisor(settings: dict) -> None:
             rotate_jsonl_log_if_needed(DATA_DIR, "tools.jsonl", "tools")
             rotate_jsonl_log_if_needed(DATA_DIR, "supervisor.jsonl", "supervisor")
             rotate_jsonl_log_if_needed(DATA_DIR, "task_reflections.jsonl", "task_reflections")
+            event_q = get_event_q()  # the bus fact first: no dead worker is handed to the reaper on a dead bus
             ensure_workers_healthy()
 
             # One BOUNDED events batch (count + time; the remainder waits for the next
             # turn), so a producer that keeps the queue non-empty cannot hide intake.
             backlog = drain_worker_events(
-                get_event_q(), _event_ctx, _loop_liveness, on_restart=_handle_restart_in_supervisor,
+                event_q, _event_ctx, _loop_liveness, on_restart=_handle_restart_in_supervisor,
             )
 
             if _restart_requested.is_set():
@@ -885,25 +889,20 @@ def _run_supervisor(settings: dict) -> None:
                 # A shutdown-torn Manager proxy is not a supervisor crash.
                 log.info("Supervisor loop exiting on shutdown: %s", exc)
                 break
+            # Two causes, one door (server_process.end_generation_on_fault): the task core is lost (the bus fact,
+            # confirmed for a proxy error too; no retries) or the third consecutive failure on a live bus. Readiness
+            # clears, the owner gets one row, the stop latches, this generation ends: no half-alive loop remains.
+            bus_exitcode = exc.exitcode if isinstance(exc, EventBusLost) else event_bus_exitcode()
+            if bus_exitcode is not None:
+                _supervisor_ready.clear()
+                end_generation_on_fault(FAULT_BUS_LOST, exitcode=bus_exitcode, error=exc)
+                break
             crash_count += 1
             log.error("Supervisor loop crash #%d: %s", crash_count, exc, exc_info=True)
             if crash_count >= 3:
-                # Clear readiness and notify: a dead loop must not look healthy.
-                _supervisor_error = f"Supervisor loop died after 3 consecutive crashes: {exc}"
                 _supervisor_ready.clear()
-                log.critical("Supervisor exceeded max retries: %s", _supervisor_error)
-                try:
-                    st = load_state()
-                    if st.get("owner_chat_id"):
-                        send_with_budget(
-                            int(st["owner_chat_id"]),
-                            "🛑 Supervisor loop died after repeated crashes; tasks are no "
-                            "longer being assigned. Saving settings or restarting the app "
-                            f"will revive it. Last error: {exc}",
-                            role="system", system_type="supervisor_failure")
-                except Exception:
-                    log.debug("Failed to notify owner about supervisor death", exc_info=True)
-                break  # this generation is dead: the shared exit below stops its watchdog
+                end_generation_on_fault(FAULT_LOOP_FAILED, error=exc)
+                break
             # Backoff on the stop event, not time.sleep, so a shutdown is prompt.
             _supervisor_stop.wait(min(30, 2 ** crash_count))
     _watchdog_stop.set()  # every ordinary exit (restart, shutdown, crash death) stops this generation's watchdog
@@ -1275,7 +1274,7 @@ async def lifespan(app):
             kill_workers(
                 force=True,
                 terminal_status=cleanup_status,
-                result_reason=cleanup_reason,
+                result_reason=fault_cancel_reason() or cleanup_reason,  # a fault's unsaved rows name their cause
                 stop_source="server_shutdown",
                 **_restart_cleanup_kwargs(),
                 **_managed_update_pending_kwargs(),
@@ -1556,7 +1555,8 @@ def main() -> int:
         if _restart_requested.is_set():
             restart_thread.join()  # uvicorn returning does not complete cleanup or direct re-exec
 
-    return 0
+    return fault_exit(args.host, actual_port, launcher_managed=_LAUNCHER_MANAGED, repo_dir=REPO_DIR,
+                      cleanup=_emergency_process_cleanup, restart=_restart_current_process_impl)  # 0 without a fault
 
 
 def executable_main() -> None:

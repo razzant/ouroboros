@@ -532,6 +532,128 @@ def test_main_graceful_restart_cleanup_avoids_port_sweep(monkeypatch, tmp_path, 
     assert exits == [server.RESTART_EXIT_CODE]
 
 
+@pytest.mark.parametrize("launcher_managed", [True, False])
+def test_main_fault_exit_restarts_through_the_installs_own_restarter(monkeypatch, tmp_path, launcher_managed):
+    """§2(b) at main()'s return. Launcher-managed: 1, no cleanup here (the launcher's crash path restarts;
+    never 42, never 99). Direct: the pre-exec census first, the planned-restart transaction dropped from the
+    env, no store switch, then ``restart_current_process(owner_initiated=False)`` with the bound port; a
+    failed successor returns 1. The quiet direction: without a fault main returns 0 and runs no cleanup
+    (``test_main_normal_exit_does_not_run_emergency_cleanup``)."""
+    import server
+    from ouroboros import server_process
+    from ouroboros.delegate_recovery import PLANNED_RESTART_TRANSACTION_ENV
+
+    calls, bound = [], []
+    exit_event, stop_event = threading.Event(), threading.Event()
+
+    class FakeServer:
+        def __init__(self, _config):
+            self.should_exit = False
+
+        def watch_launcher_stop(self):
+            pass
+
+        def run(self, *, sockets):
+            bound.append(sockets[0].getsockname()[1])
+            server_process.latch_fault_stop("bus_lost")  # the loop's door, latched during the run
+            return None
+
+    monkeypatch.setattr(server, "load_settings", lambda: {"OUROBOROS_SERVER_HOST": "127.0.0.1"})
+    monkeypatch.setattr(server, "parse_server_args", lambda *_a, **_k: SimpleNamespace(host="127.0.0.1", port=0, host_explicit=False))
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(server, "get_network_auth_startup_warning", lambda _host: "")
+    monkeypatch.setattr(server, "validate_network_auth_configuration", lambda _host: "")
+    monkeypatch.setattr(server, "find_free_port", lambda _host, port, **_: port)
+    monkeypatch.setattr(server, "write_port_file", lambda *_a, **_k: None)
+    monkeypatch.setattr(server.uvicorn, "Config", lambda *a, **k: object())
+    monkeypatch.setattr(server, "_SignalStopServer", FakeServer)
+    monkeypatch.setattr(server, "_LAUNCHER_MANAGED", launcher_managed)
+    monkeypatch.setattr(server, "_event_loop", None)
+    for module in (server, server_process):
+        monkeypatch.setattr(module, "_exit_signalled", exit_event)
+        monkeypatch.setattr(module, "_supervisor_stop", stop_event)
+    monkeypatch.setattr(server_process, "_stop_source", "external_signal")
+    monkeypatch.setattr(server_process, "_arm_stop_backstop", lambda source: calls.append(("backstop", source)))
+    census = {"worker_exits": {"unconfirmed": []}, "live_children": [], "owned_stop": {"state": "completed"}}
+    monkeypatch.setattr(server, "_emergency_process_cleanup", lambda: calls.append(("cleanup",)) or census)
+    monkeypatch.setattr(server.store_switch, "switch_at_restart",
+                        lambda *_a, **_k: pytest.fail("a fault exit switches no store and adopts nothing"))
+    successor = {"fails": False}
+
+    def restart(host, port, **kw):
+        calls.append(("restart", host, port, kw))
+        if successor["fails"]:
+            raise OSError("exec refused")
+
+    monkeypatch.setattr(server, "_restart_current_process_impl", restart)
+    monkeypatch.setenv(PLANNED_RESTART_TRANSACTION_ENV, "stale-tx")
+    server._restart_requested.clear()
+
+    try:
+        code = server.main()
+    finally:
+        _stop_restart_watcher(server)
+    assert not server._restart_requested.is_set() and server_process.server_stop_source() == "bus_lost"
+    if launcher_managed:
+        assert code == 1 and calls == [("backstop", "bus_lost")]
+        assert os.environ[PLANNED_RESTART_TRANSACTION_ENV] == "stale-tx"  # not this branch's business
+        return
+    assert code == 0  # the exec never returns; a Windows successor's parent exit 0 is its handoff
+    assert calls == [("backstop", "bus_lost"), ("cleanup",),
+                     ("restart", "127.0.0.1", bound[0], {"repo_dir": server.REPO_DIR, "log": server_process.log,
+                                                         "owner_initiated": False})]
+    assert PLANNED_RESTART_TRANSACTION_ENV not in os.environ
+
+    # A failed successor returns 1: no half-alive process, no false restart code.
+    calls.clear()
+    exit_event.clear()
+    successor["fails"] = True
+    try:
+        assert server.main() == 1
+    finally:
+        _stop_restart_watcher(server)
+    assert [call[0] for call in calls] == ["backstop", "cleanup", "restart"]
+
+
+def test_a_fault_teardown_cancels_unsaved_rows_as_server_shutdown_naming_the_cause(monkeypatch):
+    """§2(d), the documented stop-cause/Continue mapping (no new source): an unsaved row the fault teardown
+    cancels keeps ``stop_source="server_shutdown"`` (a technical interruption the owner may Continue) and its
+    reason text names the cause; every other door keeps its own text (the mapping answers '')."""
+    from ouroboros import server_process
+    from ouroboros.owner_continue import TECHNICAL_CANCEL_SOURCES
+    from ouroboros.server_restart import _shutdown_task_cleanup_args
+
+    assert "server_shutdown" in TECHNICAL_CANCEL_SOURCES
+    assert server_process.fault_cancel_reason() == ""  # an ordinary stop: the door's own text stands
+    assert "crash" not in _shutdown_task_cleanup_args(False)[1].split("not a worker crash")[0]
+    monkeypatch.setattr(server_process, "_stop_source", "bus_lost")
+    bus_lost = server_process.fault_cancel_reason()
+    assert "event-bus process exited" in bus_lost and bus_lost.endswith("not a worker crash.")
+    monkeypatch.setattr(server_process, "_stop_source", "loop_failed")
+    assert "failed three times in a row" in server_process.fault_cancel_reason()
+    monkeypatch.setattr(server_process, "_stop_source", "launcher_quit")
+    assert server_process.fault_cancel_reason() == ""
+
+
+def test_the_startup_notice_names_the_previous_faults_cause_and_the_held_count(monkeypatch):
+    """§2(c)/(d): after a fault exit the next start says what ended the previous generation and how many
+    restored rows hold their saved work; after an ordinary stop the clause is absent (quiet)."""
+    from ouroboros import owned_shutdown, server_process
+    from supervisor.events_budget import HOLD_SAVED_WORK, hold_budget_row
+
+    held = [hold_budget_row({"id": "a"}, reason=HOLD_SAVED_WORK), hold_budget_row({"id": "b"}, reason=HOLD_SAVED_WORK)]
+    pending = [{"id": "a", "_budget_pause_hold": held[0]}, {"id": "b", "_budget_pause_hold": held[1]}, {"id": "plain"}]
+    assert server_process.held_saved_work_count(pending) == 2
+    monkeypatch.setattr(owned_shutdown._GENERATION_STOP, "previous", {"cause": "launcher_quit"})
+    assert server_process.previous_fault_sentence(2) == ""
+    monkeypatch.setattr(owned_shutdown._GENERATION_STOP, "previous", {"cause": "bus_lost"})
+    assert server_process.previous_fault_sentence(2) == (
+        "The previous server generation restarted itself: its event-bus process exited. "
+        "2 tasks are held with their saved state.")
+    monkeypatch.setattr(owned_shutdown._GENERATION_STOP, "previous", {"cause": "loop_failed"})
+    assert server_process.previous_fault_sentence(0).endswith("its task loop failed three times in a row. No task holds saved work.")
+
+
 def test_emergency_cleanup_joins_the_one_owned_stop(monkeypatch):
     import server
 
@@ -704,6 +826,8 @@ def _supervisor_harness(monkeypatch, tmp_path, steps):
             rec.stop.set()
         if step in ("restart", "raise_after_restart"):
             rec.restart.set()
+        if step == "bus_lost":  # the manager process ended: the fact every get_event_q call reads
+            raise workers_mod.EventBusLost(-15)
         if step.startswith("raise"):
             raise BrokenPipeError(32, "Broken pipe")
 
@@ -738,6 +862,20 @@ def _supervisor_harness(monkeypatch, tmp_path, steps):
     monkeypatch.setattr(server, "_supervisor_stop", rec.stop)
     monkeypatch.setattr(server, "_restart_requested", rec.restart)
     monkeypatch.setattr(server, "_supervisor_ready", rec.ready)
+    # The fault door latches through server_process (the same globals request_shutdown latches):
+    # the harness owns those too, records the backstop instead of arming a 15 s os._exit timer,
+    # and reads the bus as live unless a test says otherwise.
+    from ouroboros import server_process
+    rec.exit = threading.Event()
+    rec.backstops = []
+    monkeypatch.setattr(server, "_exit_signalled", rec.exit)
+    monkeypatch.setattr(server_process, "_exit_signalled", rec.exit)
+    monkeypatch.setattr(server_process, "_supervisor_stop", rec.stop)
+    monkeypatch.setattr(server_process, "_stop_source", "external_signal")
+    monkeypatch.setattr(server_process, "_arm_stop_backstop", rec.backstops.append)
+    monkeypatch.setattr(workers_mod, "event_bus_exitcode", lambda: None)
+    monkeypatch.setattr(workers_mod, "RUNNING", {})
+    monkeypatch.setattr(workers_mod, "PENDING", [])
     monkeypatch.setattr(server, "_supervisor_error", None)
     monkeypatch.setattr(server, "_supervisor_thread", None)
     monkeypatch.setattr(server, "_consciousness", None)
@@ -794,7 +932,7 @@ def _supervisor_harness(monkeypatch, tmp_path, steps):
 
 def _run(rec, server):
     server._run_supervisor({})
-    assert rec.ready.is_set() or server._supervisor_error  # init reached the loop
+    assert rec.ready.is_set() or server._supervisor_error or rec.exit.is_set()  # init reached the loop
     return rec
 
 
@@ -856,25 +994,66 @@ def test_exception_while_restarting_exits_quietly_too(monkeypatch, tmp_path):
     assert rec.watchdog_stops[0].is_set()
 
 
-def test_three_genuine_consecutive_crashes_still_die_visibly(monkeypatch, tmp_path):
-    """Without a shutdown the contract stays: the third consecutive crash records
-    the error, clears readiness, alerts the owner exactly once, stops the
-    watchdog generation — and the backoff between crashes waits on the stop
-    event (prompt shutdown), never on time.sleep."""
+def test_the_third_consecutive_failure_on_a_live_bus_ends_the_generation(monkeypatch, tmp_path):
+    """Two causes, one door (CANDIDATE_v2 §2(b)): the third consecutive tick failure on a LIVE bus posts one
+    Main row in owner words (what happened, what happens next; the raw error stays in the log), clears
+    readiness, latches the stop exactly as a signal would (``_exit_signalled``, ``_stop_source=loop_failed``,
+    the launcher-grace backstop armed), requests no restart, leaves no ``_supervisor_error`` (so ``boot.phase``
+    never reads ``failed`` for a loop death), stops the watchdog generation, and the backoff between the
+    failures waited on the stop event, never on time.sleep. The quiet direction, a healthy tick between
+    failures resetting the count, is ``test_healthy_tick_between_crashes_resets_the_count``."""
     import server
+    from ouroboros import server_process
 
     rec = _supervisor_harness(monkeypatch, tmp_path, ["raise", "raise", "raise", "ok"])
     _run(rec, server)
 
-    assert len(rec.alerts) == 1
-    assert rec.alerts[0][0] == 7
-    assert "died after repeated crashes" in rec.alerts[0][1]
-    assert rec.ready.is_set() is False
-    assert "3 consecutive crashes" in str(server._supervisor_error)
-    assert rec.watchdog_stops[0].is_set()
-    assert server._supervisor_thread is None
+    assert [chat for chat, _text in rec.alerts] == [7]
+    text = rec.alerts[0][1]
+    assert text.startswith("🛑 The task loop failed three times in a row") and "Restarting the server now." in text
+    assert "Broken pipe" not in text, "the raw error belongs to the log, not the owner's line"
+    assert rec.ready.is_set() is False and server._supervisor_error is None
+    assert rec.exit.is_set() and rec.stop.is_set() and server_process.server_stop_source() == "loop_failed"
+    assert rec.backstops == ["loop_failed"] and not rec.restart.is_set()
+    assert rec.watchdog_stops[0].is_set() and server._supervisor_thread is None
     assert rec.stop.waits == [2, 4]
-    assert rec.steps == ["ok"]  # the loop is dead: the next tick never ran
+    assert rec.steps == ["ok"]  # the generation ended: the next tick never ran
+
+
+def test_a_lost_event_bus_ends_the_generation_at_once_without_retries(monkeypatch, tmp_path):
+    """§2(a)/(b): one transient failure on a live bus keeps the loop (a backoff, no row: the quiet direction);
+    ``EventBusLost`` ends it at the tick that read it: no backoff, no count, one ``bus_lost`` row naming the
+    exit code and the next step, readiness cleared, the stop latched with ``_stop_source=bus_lost``."""
+    import server
+    from ouroboros import server_process
+
+    rec = _supervisor_harness(monkeypatch, tmp_path, ["raise", "ok", "bus_lost", "ok"])
+    _run(rec, server)
+
+    assert len(rec.alerts) == 1, rec.alerts
+    assert rec.alerts[0][1].startswith("🛑 The event-bus process of this server exited (exit -15). Restarting the server now.")
+    assert rec.stop.waits == [2]  # the transient's backoff; the bus loss waited for nothing
+    assert rec.steps == ["ok"] and rec.ready.is_set() is False and server._supervisor_error is None
+    assert server_process.server_stop_source() == "bus_lost" and rec.exit.is_set() and rec.backstops == ["bus_lost"]
+    assert not rec.restart.is_set()
+
+
+def test_a_proxy_error_is_bus_lost_only_when_the_manager_is_confirmed_dead(monkeypatch, tmp_path):
+    """§2(a): a proxy error (BrokenPipe) counts as the bus lost only once the manager's exit code confirms
+    it; with a live manager it is one failure of three (quiet), with a dead one the generation ends at once."""
+    import server
+    import supervisor.workers as workers
+    from ouroboros import server_process
+
+    rec = _supervisor_harness(monkeypatch, tmp_path, ["raise", "stop"])
+    _run(rec, server)
+    assert rec.alerts == [] and rec.stop.waits == [2] and server_process.server_stop_source() == "external_signal"
+
+    rec = _supervisor_harness(monkeypatch, tmp_path, ["raise", "stop"])
+    monkeypatch.setattr(workers, "event_bus_exitcode", lambda: -9)
+    _run(rec, server)
+    assert len(rec.alerts) == 1 and "(exit -9)" in rec.alerts[0][1] and rec.stop.waits == []
+    assert server_process.server_stop_source() == "bus_lost" and rec.exit.is_set()
 
 
 def test_healthy_tick_between_crashes_resets_the_count(monkeypatch, tmp_path):
@@ -905,7 +1084,7 @@ def test_a_kept_saved_queue_is_not_a_failed_tick(monkeypatch, tmp_path, publishe
     if published is None:
         assert rec.alerts == [] and server._supervisor_error is None and rec.stop.waits == []
     else:
-        assert len(rec.alerts) == 1 and "died after repeated crashes" in rec.alerts[0][1]
+        assert len(rec.alerts) == 1 and rec.alerts[0][1].startswith("🛑 The task loop failed three times in a row")
 
 
 def test_lifespan_teardown_stops_and_joins_the_loop_before_the_bus_goes_down():

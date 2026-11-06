@@ -11,7 +11,7 @@
 import { fmt, tr, tx } from './i18n.js';
 
 export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
-    startup_notice: ['♻️ Restored pending queue: ', '♻️ Settling '],
+    startup_notice: ['♻️ Restored pending queue: ', '♻️ Settling ', '♻️ The previous server generation restarted itself: '],
     command_reply: ['⚠️ Command ignored: ', '✅ Owner chat registered.', '♻️ Restarting.', '⚠️ Restart cancelled: ',
         '🧬 Evolution campaign: ', '🧬 Evolution stayed OFF: ', '🧬 Evolution did not turn on: ',
         '🧠 Background consciousness ', '🧠 Background consciousness:'],
@@ -24,7 +24,7 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
     evolution_cycle_outcome: ['🧬 Evolution cycle absorbed ', '⚠️ Evolution cycle abandoned '],
     promotion_notice: ['❌ Evolution promotion refused: ', '❌ Failed to promote to stable: ', '✅ Promoted: '],
     managed_update_notice: ['📦 Managed update: ', '🔒 An update is using the repository.'],
-    supervisor_failure: ['🛑 Supervisor loop died after repeated crashes; '],
+    supervisor_failure: ['🛑 The event-bus process of this server exited', '🛑 The task loop failed three times in a row'],
     retired_settings_notice: ['⚙️ Settings: '],
     review_pool_migration_notice: ['⚙️ Review pool: ', '⚙️ Review pool initialized. ', '⚙️ Review settings migrated. ',
         '⚙️ Review settings could not be migrated automatically: '],
@@ -59,6 +59,7 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
 // display (host_notice_text.test.js pins that none of them is written again).
 export const RETIRED_HOST_NOTICE_PREFIXES = new Map(Object.entries({
     startup_notice: ['♻️ Restored pending queue from snapshot: ', '♻️ Cancelling '],
+    supervisor_failure: ['🛑 Supervisor loop died after repeated crashes; '],
     worker_failure: ['⚠️ Frequent worker crashes.', '❌ worker process crashed ',
         '❌ Deep self-review failed: worker process crashed '],
     attachment_notice: ['📎 Attachment staging report for ', '⚠️ Task not started: every attachment was rejected.',

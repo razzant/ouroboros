@@ -78,6 +78,7 @@ class _Stop:
         self.outcome: Optional[Dict[str, Any]] = None
         self.entry_lock = threading.Lock()  # orders the entry file's boot claim and first cause; never the deadline
         self.entry: Dict[str, Any] = {}  # this generation's shutdown_entry.json record: its claim, then its cause
+        self.previous: Dict[str, Any] = {}  # the record the boot claim replaced: the previous generation's cause
 
 
 _GENERATION_STOP = _Stop()  # one per server process; a test starts a fresh one
@@ -800,7 +801,7 @@ def claim_shutdown_entry(root: Any) -> Dict[str, Any]:
                 previous = "unreadable"
             if isinstance(previous, dict) and previous.get("generation") == claim["generation"]:
                 return {"state": "current"}
-            stop.entry = claim
+            stop.entry, stop.previous = claim, previous if isinstance(previous, dict) else {}
             try:
                 atomic_write_json(path, claim)
             except Exception:
@@ -854,7 +855,6 @@ def stop_owned_work(drive_root: Any = None) -> Dict[str, Any]:
     """Start/join the one stop; completed evidence includes any subsequently registered targets."""
     if drive_root is None:
         from ouroboros.config import resolve_data_dir
-
         drive_root = resolve_data_dir()
     root = installation_root(drive_root)
     stop = _GENERATION_STOP
@@ -893,7 +893,6 @@ def _current_stop_outcome(root: Any, outcome: Dict[str, Any]) -> Dict[str, Any]:
     if result.get("state") in ("completed", "unconfirmed"):
         try:
             from ouroboros.tools.shell_process import unsettled_tracked_children
-
             late = unsettled_tracked_children()
         except Exception:
             late = {"state": "unknown"}
