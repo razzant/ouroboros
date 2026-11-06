@@ -954,7 +954,8 @@ def capture_memory_view(drive_root: Any, task: Mapping[str, Any], spec: ViewSpec
 
     Before the import has completed (another importer holds the legacy lock, the
     import was refused, the journal cannot be opened) the snapshot carries only the
-    reason and the room id: no story, lanes or live rooms, and no chain read.
+    reason and the room id: no story, lanes or live rooms; the owner-words block,
+    built first, still reads the bound room (``owner_words.task_words_text``).
     """
     root = pathlib.Path(drive_root)
     owner_words = _owner_words_block(task, root) if spec.owner_words else ""

@@ -230,7 +230,8 @@ def _dated_directives(ctx: Any):
     """``(item, time, reference, door-stamped)`` for each owner-sourced item of the run's corpus: the door's stamp
     for its first message; else the item's own room, client id and time (empty here: ``_words_rows`` reads them);
     an item without a room reads under the chat row this focus holds for it (``_held_twin``), so one message is
-    one row whichever carrier names it."""
+    one row whichever carrier names it, and an answer recorded without its card takes the card its twin answers,
+    so the card renders beside the answer."""
     origin_ref = _mapping(_ctx_metadata(ctx).get("origin_message_ref"))
     held = _mapping(getattr(ctx, "_held_owner_messages", None))
     for item in getattr(ctx, "_owner_directives", None) or []:
@@ -240,6 +241,9 @@ def _dated_directives(ctx: Any):
             yield item, str(origin_ref.get("ts") or ""), _chat_ref(origin_ref), True
             continue
         twin = {} if item.get("chat_id") and item.get("client_message_id") else _held_twin(item, held)
+        if twin and not _mapping(item.get("reply_to")).get("address") and (
+                card := answered_card_reply(*answered_card_source(twin))):
+            item = {**item, "reply_to": card}
         yield item, str(twin.get("ts") or ""), _chat_ref(twin) if twin else "", False
 
 
@@ -490,13 +494,15 @@ def _held_words(held: Any, drive_root: Any, task_id: str, *, context: Any = None
 def _live_words(drive_root: Any, room: int, accounts: Any) -> Tuple[List[Dict[str, Any]], List[str]]:
     """``(rows, gap lines)`` read live at a handoff: my human's rows of the bound Project room (carrier ``room``),
     the Project's retained origin rows (``origin``), then the rows that marks in force target (``marked``: the
-    room's and the global marks; Main's for a tree outside every Project). A store that cannot be read is one
-    typed gap line; the rows that could be read stay, and nothing else is withheld."""
+    room's and the global marks; Main's for a tree outside every Project). Each store that cannot be read is one
+    typed gap line, as is a room read that may lack rows (``room_appearances.read_gaps``); the rows that could be
+    read stay, and nothing else is withheld."""
     from ouroboros.chat_chain import format_address, resolve_row, room_rows, row_address
     from ouroboros.chronicle_store import ChronicleStore
     from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
     from ouroboros.owner_relay import quotable_owner_row
     from ouroboros.project_dialogue import project_origin_rows
+    from ouroboros.room_appearances import GAP_DETAILS
 
     def words(row: Any, carrier: str, source: str) -> List[Dict[str, Any]]:
         if not quotable_owner_row(row, drive_root, accounts=accounts):
@@ -505,18 +511,27 @@ def _live_words(drive_root: Any, room: int, accounts: Any) -> Tuple[List[Dict[st
 
     rows: List[Dict[str, Any]] = []
     gaps: List[str] = []
+    lacking: set = set()
     if room:
         try:
-            for entry in room_rows(drive_root, room):
+            for entry in room_rows(drive_root, room, gaps=lacking):
                 rows += words(entry.row, "room", "room_message")
+        except Exception as exc:  # a room that cannot be read is a named gap, never a withheld set
+            log.warning("owner words: room %s unreadable at a handoff (%s: %s)", room, type(exc).__name__, exc)
+            gaps.append(f"[Host fact: my human's rows of room {room} could not be read here "
+                        f"({type(exc).__name__}); chat_history reads that room.]")
+        if lacking:
+            gaps.append(f"[Host fact: my human's rows of room {room} read here may lack some "
+                        f"({'; '.join(GAP_DETAILS.get(kind, kind) for kind in sorted(lacking))}); chat_history reads that room.]")
+        try:  # the registry's retained copies of the Project's first words: read whether or not the room read failed
             for origin in project_origin_rows(drive_root, room):
                 ref = _mapping(origin.get("ref"))
                 rows.append(_row(origin.get("text"), source="origin_message", carrier="origin", ts=ref.get("ts"),
                                  ref=_chat_ref(ref) if ref.get("client_message_id") else "",
                                  attachments=origin.get("attachments")))
-        except Exception as exc:  # a room that cannot be read is a named gap, never a withheld set
-            log.warning("owner words: room %s unreadable at a handoff (%s: %s)", room, type(exc).__name__, exc)
-            gaps.append(f"[Host fact: my human's rows of room {room} could not be read here "
+        except Exception as exc:
+            log.warning("owner words: origin rows of room %s unreadable at a handoff (%s: %s)", room, type(exc).__name__, exc)
+            gaps.append(f"[Host fact: the origin rows the Project retained for room {room} could not be read here "
                         f"({type(exc).__name__}); chat_history reads that room.]")
     try:
         store = ChronicleStore(drive_root)
@@ -846,15 +861,21 @@ def owner_words_text(ctx: Any, *, audience: str = "reviewer") -> str:
     return render_owner_words(rows, absent, audience=audience, root_task_id=root, gaps=gaps)
 
 
+def _stamp_parts(line: str) -> List[str]:
+    """The parts of one owner-words stamp line as ``words_stamp`` prints it (``[… · owner · …]``); ``[]`` for any
+    other line, a reply target's stamp among them. The one parser of a stamp for every reader of one."""
+    line = line.strip()
+    parts = line[1:-1].split(" · ") if line.startswith("[") and line.endswith("]") else []
+    return parts if "owner" in parts[:2] else []
+
+
 def stamped_sources(text: Any) -> Dict[str, str]:
     """``{reference: source}`` of every owner-words stamp in a rendered text (a review subject, a brief, a member's
-    first request): the last part of each ``[… · owner · … · ref]`` line, whole, so one reference is never found
-    inside a longer one, and the source part the stamp names before it (``room_message``, ``owner_mailbox of task
-    …``). The one parser of a stamp for every reader of one."""
+    first request): the last part of each stamp line, whole, so one reference is never found inside a longer one,
+    and the source part the stamp names before it (``room_message``, ``owner_mailbox of task …``)."""
     stamps: Dict[str, str] = {}
     for line in str(text or "").split("\n"):
-        line = line.strip()
-        if line.startswith("[") and line.endswith("]") and "owner" in (parts := line[1:-1].split(" · "))[:2]:
+        if parts := _stamp_parts(line):
             stamps[parts[-1]] = parts[parts.index("owner") + 1] if len(parts) > 2 else ""
     return stamps
 
@@ -864,21 +885,36 @@ def stamped_refs(text: Any) -> set:
     return set(stamped_sources(text))
 
 
+def _stamp_blocks(text: str) -> List[Tuple[str, str]]:
+    """``(time, words)`` under every owner-words stamp line of a rendered text: the stamp's time part (``""`` when
+    undated) and the lines beneath it up to the next stamp line, as a row with no reference is told
+    (``words_unseen_in``)."""
+    blocks: List[Tuple[str, List[str]]] = []
+    for line in text.split("\n"):
+        if parts := _stamp_parts(line):
+            blocks.append(("" if parts[0] == "owner" else parts[0], []))
+        elif blocks:
+            blocks[-1][1].append(line)
+    return [(when, "\n".join(lines).strip()) for when, lines in blocks]
+
+
 def words_unseen_in(ctx: Any, text: Any) -> List[Dict[str, Any]]:
     """My human's rows of this run's set (``work_words``; never a reply target, another author's words) whose
     identity a rendered ``text`` does not hold. Identity is the stamp's reference token, matched whole, under
-    either reference the row has printed (``_earlier_refs``); a row with no reference is told by its words and
-    its time. Never the whole stamp: a row's source or date may change for a reader that did see it. A text with
-    no stamp at all (unreadable, or rendered without words) holds no row: every row is unseen."""
+    either reference the row has printed (``_earlier_refs``); a row with no reference is told by its words under
+    a stamp with its time (``_stamp_blocks``: the words whole at the block's head, never a substring of the text).
+    Never the whole stamp: a row's source, and a referenced row's date, may change for a reader that did see it.
+    A text with no stamp at all (unreadable, or rendered without words) holds no row: every row is unseen."""
     rows = [row for row in work_words(ctx)[0] if row.get("source") != REPLY_TARGET]
     text = str(text or "")
-    seen, earlier = stamped_refs(text), _earlier_refs(ctx)
+    seen, earlier, blocks = stamped_refs(text), _earlier_refs(ctx), _stamp_blocks(text)
 
     def held(row: Mapping[str, Any]) -> bool:
         if row["ref"]:
             return row["ref"] in seen or earlier.get(row["ref"]) in seen
         words = row["text"].strip()
-        return bool(words) and words in text and (not row["ts"] or f"[{row['ts']} · owner" in text)
+        return bool(words) and any(when == row["ts"] and (block == words or block.startswith(words + "\n"))
+                                   for when, block in blocks)
 
     return [row for row in rows if not (seen and held(row))]
 

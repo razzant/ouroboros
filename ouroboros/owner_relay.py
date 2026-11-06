@@ -63,15 +63,22 @@ def held_owner_messages(ctx) -> dict:
 
 def retain_owner_message(ctx, row=None, *, client_message_id="", accounts=None):
     """Hold one owner row of this turn by its address and return it (``None`` when nothing was held), so its corpus
-    row can name the same room and time; ``accounts``: the caller's one place snapshot for its rows."""
+    row can name the same room and time; ``accounts``: the caller's one place snapshot for its rows. A row named
+    by client id is looked up in the context's chat, then in the room the room rule names for its tree: a task
+    bound to a Project after admission keeps its admitted chat (``control_relay._teller_room``)."""
     if ctx is None:
         return None
     if row is None and client_message_id and getattr(ctx, "drive_root", None):
         from supervisor.message_ingress import accepted_chat_message
+        from ouroboros.projects_registry import project_chat_for_task_tree
         from ouroboros.tool_access import canonical_data_root
+        root, meta = canonical_data_root(ctx), getattr(ctx, "task_metadata", None) or {}
         chat_id = getattr(ctx, "current_chat_id", None)  # a context may carry no chat: Main's lookup
-        row = accepted_chat_message(canonical_data_root(ctx), 1 if chat_id is None else int(chat_id),
-                                    client_message_id)
+        chat = 1 if chat_id is None else int(chat_id)
+        bound = project_chat_for_task_tree(root, str(getattr(ctx, "task_id", "") or ""), meta.get("parent_task_id", ""),
+                                           meta.get("root_task_id", ""))
+        row = accepted_chat_message(root, chat, client_message_id) or (
+            accepted_chat_message(root, bound, client_message_id) if bound and bound != chat else None)
     from ouroboros.tool_access import canonical_data_root
     if quotable_owner_row(row, canonical_data_root(ctx) if getattr(ctx, "drive_root", None) else None,
                           accounts=accounts):

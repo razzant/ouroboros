@@ -222,12 +222,22 @@ def test_a_handoff_renders_the_rooms_rows_live_dated_in_the_unions_order_and_eve
     text = ow.render_owner_words(rows, audience="child", root_task_id=ROOT, gaps=gaps)
     assert f"[{_at(3)} · owner · room_message · chat {room} / cm-f]\nSee the file\n[Host-retained attachments: quota.png (image/png, 1234 bytes)]\n" in text
     assert text.count("\nда\n") == 2 and "Ouroboros says" not in text
-    # The other side: a room that cannot be read is one gap line; the tree's, the held and the marked rows stay.
+    # The other side: a room that cannot be read is one gap line; the tree's, the held, the origin and the marked
+    # rows stay. An origin read that fails is its own line; a room read that may lack rows says so.
     monkeypatch.setattr("ouroboros.chat_chain.room_rows", _raising(OSError("locked")))
     rows, absent, gaps = ow.work_words(ctx)
-    assert ([row["carrier"] for row in rows], absent) == (["ctx", "went to other01", "marked"], "")
+    assert ([row["carrier"] for row in rows], absent) == (["ctx", "went to other01", "origin", "marked"], "")
     assert gaps == [f"[Host fact: my human's rows of room {room} could not be read here (OSError); chat_history reads that room.]"]
     assert ow.render_owner_words(rows, audience="child", gaps=gaps).endswith("Main room words\n\n" + gaps[0])
+    monkeypatch.setattr("ouroboros.chat_chain.room_rows",
+                        lambda root, room_id, gaps=None, **_kw: gaps.add("appearances_deriving") or iter(()))
+    monkeypatch.setattr("ouroboros.project_dialogue.project_origin_rows", _raising(KeyError("binding")))
+    rows, _absent, gaps = ow.work_words(ctx)
+    assert [row["carrier"] for row in rows] == ["ctx", "went to other01", "marked"] and gaps == [
+        f"[Host fact: my human's rows of room {room} read here may lack some (Rows this Project shows but that were "
+        "written elsewhere are still being indexed); chat_history reads that room.]",
+        f"[Host fact: the origin rows the Project retained for room {room} could not be read here (KeyError); "
+        "chat_history reads that room.]"]
     monkeypatch.undo()
     # Every ingress branch, through its own seam. A root in Main: the door; owner mail with its chat row held and
     # without one; an answer with its row; a card frame; a direct delivery with a dated payload, an undated one
@@ -303,7 +313,8 @@ def test_a_helper_in_the_room_shows_a_drained_message_once_and_one_message_is_on
     message once (a mailbox-only row keeps its ``msg`` reference). A corpus row recorded before the update (a client
     id, no room) renders under the chat reference of the row this focus holds for it, paired by client id, by quiz
     id or by a direct delivery's id; an answer to a card and a direct delivery each render once, the card beside
-    the answer under the asking task's name, whichever carrier holds the row."""
+    the answer under the asking task's name, whichever carrier holds the row. A root bound to the room after its
+    admission (its admitted chat stays) still holds a drained message's chat row, found in the bound room."""
     room = _project(tmp_path)
     _chat(tmp_path, _in_row("Add charts", "cm-mail", ts=_at(2), chat_id=room))
     write_owner_message(tmp_path, "Add charts", ROOT, msg_id="m-2", client_message_id="cm-mail")
@@ -354,6 +365,31 @@ def test_a_helper_in_the_room_shows_a_drained_message_once_and_one_message_is_on
     before._held_owner_messages = {"row:mail": _in_row("Add charts", "cm-mail", ts=_at(2), chat_id=room)}
     assert [row["ref"] for row in ow.work_words(before)[0]] == [
         f"chat {room} / cm-mail", "msg qa-7", "quiz q7 of task asker", "msg direct-1"]
+    # An answer recorded before its card rode with it (no ``reply_to``) takes the card of the held twin: the card
+    # is the next row, not a row after the rest of the corpus.
+    before._held_owner_messages["row:answer"] = answer
+    next(row for row in before._owner_directives if row["source"] == "owner_quiz_answer").pop("reply_to")
+    assert [row["ref"] for row in ow.work_words(before)[0]] == [
+        f"chat {room} / cm-mail", f"chat {room} / cm-ans", "quiz q7 of task asker", "msg direct-1"]
+    # A room answer read live (no focus holds it): once, its card beside it under the asking task's name.
+    _chat(tmp_path, answer)
+    rows = ow.work_words(helper)[0]
+    assert _stamps(rows)[-2:] == [("room", f"chat {room} / cm-ans", _at(3), "1. Publish it"), (
+        "room", "quiz q7 of task asker", "", "Publish?\n1. Publish it\n2. Not now\n(host record: my human pressed option 1)")]
+    assert rows[-1]["author"] == "Ouroboros, task asker" and rows[-1]["source"] == ow.REPLY_TARGET
+    assert [row["ref"] for row in rows].count(f"chat {room} / cm-ans") == 1
+    # A root bound to the room after admission keeps its admitted chat (1): the chat row of a message it drains is
+    # found in the bound room, so the message is one row under its room and accept time, and its mailbox
+    # reference stays an identity of the same row.
+    _chat(tmp_path, _in_row("Bind me late", "cm-late", ts=_at(5), chat_id=room))
+    write_owner_message(tmp_path, "Bind me late", ROOT, msg_id="m-5", client_message_id="cm-late")
+    stale = _ctx(tmp_path, metadata={"origin_message_ref": door, "root_task_id": ROOT}, chat_id=1)
+    messages = [{"role": "user", "content": "Fix the quota bar"}]
+    _initialize_owner_directives(stale, messages)
+    _drain_incoming_messages(messages, queue.Queue(), tmp_path, ROOT, None, set(), owner_ctx=stale)
+    assert [(row["ref"], row["ts"]) for row in ow.work_words(stale)[0] if row["text"] == "Bind me late"] == [
+        (f"chat {room} / cm-late", _at(5))]
+    assert ow._earlier_refs(stale) == {f"chat {room} / cm-late": "msg m-5"}
 
 
 def test_task_governing_words_reads_both_payload_shapes(tmp_path):
