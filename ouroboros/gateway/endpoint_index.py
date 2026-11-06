@@ -131,6 +131,8 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "POST /api/claudexor/account-resets",
     "GET /api/claudexor/account-resets/{operation_id}",
     "POST /api/claudexor/wake",
+    "GET /api/claudexor/restart",
+    "POST /api/claudexor/restart",
     "POST /api/claudexor/login",
     "GET /api/claudexor/login/{job_id}",
     "DELETE /api/claudexor/login/{job_id}",
@@ -532,7 +534,7 @@ HTTP_SHAPES: dict[str, Shape] = {
         f"202:ClaudexorMaintenanceOperation {_MAINTENANCE}", "ClaudexorMaintenanceRequest", headers="Idempotency-Key!",
         note="can start the engine and prepare Node/npm; 409 maintenance_restart_required or 409/503 "
              "maintenance_preparation_failed: acceptance=not_submitted, scope=this_attempt; "
-             "use chat-header Restart when required; external/attach-only Node/npm needs external repair; "
+             "use Restart Claudexor in Accounts when required; external/attach-only Node/npm needs external repair; "
              "optional inspection failure still submits; the same key and body join one operation; "
              "keep both after 503 acceptance unknown, even after a later preparation-only reply"),
     "GET /api/claudexor/maintenance/operations/{operation_id}": Shape(
@@ -552,6 +554,15 @@ HTTP_SHAPES: dict[str, Shape] = {
         note="poll while state is running"),
     "POST /api/claudexor/wake": Shape("200:ClaudexorStatusResponse 503:ErrorResponse",
                                       note="starts the engine when needed, then reads status"),
+    "GET /api/claudexor/restart": Shape(
+        "200:ClaudexorRestartPreview",
+        note="passive, starts nothing: the live runs a restart ends, attributed by this installation's own "
+             "run records; runs.status unknown or unattributed is a gap, never zero"),
+    "POST /api/claudexor/restart": Shape(
+        "200:ClaudexorRestartResponse 400:ErrorResponse 409,503:ClaudexorRestartProblem", "ClaudexorRestartRequest",
+        note="not idempotent: stops the engine and every run on it, other programs' included, then starts it; "
+             "409 restart_preview_stale carries the fresh preview and stopped nothing; 200 restart.serving false "
+             "is a stopped engine that did not start"),
     "POST /api/claudexor/login": Shape(
         "200:ClaudexorLoginJobResponse 400,409:ErrorResponse|ClaudexorLoginJobProblem 503:ClaudexorLoginJobProblem|ErrorResponse",
         "ClaudexorLoginRequest", note="not idempotent: every call may start a job; can start the engine"),
