@@ -5587,30 +5587,31 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     --evo-bridge: rgba(var(--neutral-rgb), 0.3);
     --evo-ring: var(--surface-object-opaque);
 }
-.evo-root { display: flex; flex-direction: column; gap: var(--space-4); container-type: inline-size; }
 .evo-meta { margin: 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
-.evo-title { margin: 0; color: var(--text-primary); font-size: var(--type-section); line-height: var(--line-title); font-weight: 600; }
 
-/* Keep a reading measure for the campaign; status and actions reflow before they can squeeze its words. */
-.evo-campaign { display: flex; flex-wrap: wrap; align-items: center;
-    gap: var(--space-3) var(--space-5); padding: 14px 16px 14px 20px; }
+/* Keep a reading measure for the campaign; status and actions reflow before they can squeeze its words. Its inset is
+   the card's own (--card-pad). */
+.evo-campaign { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3) var(--space-5); }
 .evo-campaign-main, .evo-campaign-lines, .evo-campaign-side { display: grid; gap: 3px; min-width: 0; }
 .evo-campaign-main { flex: 2 1 24rem; min-width: min(100%, 24rem); }
 .evo-campaign-line { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
-.evo-campaign-name { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-title); font-weight: 600; }
 .evo-campaign-chip { height: 20px; padding: 0 8px; font-size: var(--type-meta); font-weight: 500; }
 .evo-campaign-side { flex: 1 1 17rem; }
 .evo-campaign-side .ui-status { margin: 0; }
-.evo-campaign-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); max-width: 100%; margin-inline-start: auto; }
-/* Long translated labels can grow; the Dashboard still supplies the larger touch minimum. */
+/* The pointer to the Consciousness tab is a quiet link with its state's dot (U071). */
+.evo-consciousness { justify-self: start; max-width: 100%; }
+/* A campaign verb grows a line when a translation is long: the row's box comes from its tokens (the lock owns the
+   property), one line staying the control's height. */
+.evo-campaign-actions { --control-h: auto; --control-pad-y: var(--space-2);
+    display: flex; flex-wrap: wrap; gap: var(--space-2); max-width: 100%; margin-inline-start: auto; }
 .evo-campaign .evo-campaign-actions .btn { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .evo-campaign :is(.evo-meta, .ui-status) { overflow-wrap: anywhere; }
 @container (max-width: 420px) {
-    .evo-campaign { padding: 14px 16px; }
     .evo-campaign-actions { margin-inline-start: 0; }
 }
 
-/* How Ouroboros changed: the head, one measure at a time, the chart, its caption and the chosen version. */
+/* How Ouroboros changed: the head, one measure at a time (the shared segments, wrapping on a narrow card so none
+   hides past its edge), the chart, how it is measured behind a disclosure, and the chosen version. */
 .evo-story { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .evo-story-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3) var(--space-4); flex-wrap: wrap; }
 .evo-story-words { display: grid; gap: 2px; min-width: 0; }
@@ -5618,37 +5619,15 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .evo-story-status { display: flex; align-items: center; gap: 2px var(--space-2); flex-wrap: wrap; margin: 0; min-height: calc(var(--type-meta) * var(--line-meta)); }
 .evo-story-status .ui-status { margin: 0; }
 .evo-progress { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
-.evo-measures { display: flex; flex-wrap: wrap; gap: 6px; }
-.evo-measures-sep { width: 1px; align-self: stretch; margin: 6px 2px; background: rgba(var(--neutral-rgb), 0.12); }
-.evo-measure { height: 30px; padding: 0 12px; border: 0; border-radius: var(--pill-radius); background: var(--surface-capsule);
-    box-shadow: var(--elev-rest); color: var(--text-secondary); font-family: var(--font-sans); font-size: var(--button-font-size);
-    font-weight: 600; white-space: nowrap; cursor: pointer; transition: var(--motion-tone); }
-.evo-measure:hover { background: var(--surface-capsule-hover); color: var(--text-primary); }
-.evo-measure:active { filter: var(--press); }
-.evo-measure[aria-pressed="true"] { background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); }
-.evo-quiet { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 28px; padding: 0; border: 0;
-    border-radius: var(--pill-radius); background: transparent; color: var(--text-primary); cursor: pointer; transition: var(--motion-tone); }
-.evo-quiet:hover { background: var(--tone-quiet-hover); }
-.evo-quiet:disabled { color: var(--text-disabled); background: transparent; cursor: default; }
+.evo-measures { --control-h: var(--control-h-sm); display: flex; flex-wrap: wrap; gap: 6px; }
+.evo-measures-sep { width: 1px; align-self: stretch; margin: 0; background: rgba(var(--neutral-rgb), 0.12); }
+.evo-quiet { --control-pad-x: var(--space-2); }
 .evo-quiet svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .evo-link { padding: 0; border: 0; background: none; color: var(--text-primary); font-family: inherit; font-size: var(--type-meta);
     line-height: var(--line-meta); text-decoration: underline; text-decoration-color: rgba(var(--neutral-rgb), 0.3);
     text-underline-offset: 3px; cursor: pointer; }
 .evo-link:hover { text-decoration-color: currentColor; }
-:is(.evo-measure, .evo-quiet, .evo-link, .evo-chart-hit):focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
-/* A choice row that would wrap scrolls sideways instead, as the product's tab strips do (room kept for shadows), and
-   fades on each side that still hides a measure (data-scroll-start/-end from bindScrollFade, the tab strip's fade). */
-@container (max-width: 640px) {
-    .evo-measures { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin: -6px -20px -10px; padding: 6px 20px 10px;
-        --evo-fade-start: 0px;
-        --evo-fade-end: 0px;
-        -webkit-mask-image: linear-gradient(to right, transparent, black var(--evo-fade-start), black calc(100% - var(--evo-fade-end)), transparent);
-        mask-image: linear-gradient(to right, transparent, black var(--evo-fade-start), black calc(100% - var(--evo-fade-end)), transparent); }
-    .evo-measures[data-scroll-start] { --evo-fade-start: var(--space-4); }
-    .evo-measures[data-scroll-end] { --evo-fade-end: var(--space-4); }
-    .evo-measures::-webkit-scrollbar { display: none; }
-    .evo-measures > * { flex: 0 0 auto; }
-}
+:is(.evo-link, .evo-chart-hit):focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 
 .evo-chart { position: relative; margin: 2px 0 0; }
 .evo-chart svg { display: block; width: 100%; overflow: visible; }
@@ -5676,7 +5655,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .evo-tip span { display: block; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .evo-tip .evo-tip-delta { display: inline; font-weight: 500; }
 .evo-tip .evo-tip-head { color: var(--text-primary); margin-top: 2px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.evo-caption { margin-top: -4px; }
 
 .evo-detail { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 14px 16px 16px; border-radius: var(--radius-inner); background: var(--surface-tray); }
 .evo-detail-top { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }

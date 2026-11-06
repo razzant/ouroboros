@@ -204,10 +204,10 @@ def test_evolution_chip_and_sentence_are_amber_only_for_the_owner(subscription_u
                     page.evaluate("t => __probe(`var(--status-${t}-bg)`, 'backgroundColor')", tone))
              for tone in ("warn", "error", "ok", "neutral")}
     for evolution, consciousness, labels, chip_tones in (
-            ("waiting_for_first_conversation", "wake_paused", ("Needs owner", "Consciousness paused"), ("warn", "neutral")),
-            ("budget_stopped", "waiting_for_owner_chat", ("Budget", "Consciousness needs owner"), ("warn", "warn")),
-            ("waiting_for_restart_verify", "sleeping", ("Restart verify", "Consciousness sleeping"), ("neutral", "ok")),
-            ("paused", "wake_failed", ("Paused", "Consciousness failed"), ("neutral", "error"))):
+            ("waiting_for_first_conversation", "wake_paused", ("Needs owner", "Consciousness: paused"), ("warn", "neutral")),
+            ("budget_stopped", "waiting_for_owner_chat", ("Budget", "Consciousness: needs owner"), ("warn", "warn")),
+            ("waiting_for_restart_verify", "sleeping", ("Restart verify", "Consciousness: sleeping"), ("neutral", "neutral")),
+            ("paused", "wake_failed", ("Paused", "Consciousness: failed"), ("neutral", "error"))):
         status.update(evolution=evolution, consciousness=consciousness)
         page.evaluate("() => window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', {detail: {tab: 'evolution'}}))")
         chip, sentence = page.locator("#evo-campaign-chip"), page.locator("#evo-consciousness")

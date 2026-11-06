@@ -995,8 +995,7 @@ def test_quiz_dot_and_evolution_facts_keep_their_shape_in_narrow_columns(subscri
     page.locator('[data-dashboard-tab="evolution"]').click()
     fact = page.locator('.evo-campaign-lines p', has_text='measure-every-tagged-commit-once')
     fact.wait_for()
-    page.locator('#evo-consciousness-allowance', has_text='≥ $1.25 / $10.00 (ledger integrity degraded)').wait_for()
-    metrics = page.locator('#page-evolution .costs-scroll').evaluate("""box => {
+    metrics = page.locator('#page-evolution').evaluate("""box => {
         const card = box.querySelector('.evo-campaign').getBoundingClientRect();
         return {scroll: box.scrollWidth - box.clientWidth,
             outside: [...box.querySelectorAll('.evo-campaign p, .evo-campaign .btn')]
