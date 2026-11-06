@@ -5,6 +5,7 @@
 import { apiClient } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { absoluteTime, escapeHtmlAttr as escapeHtml } from './utils.js';
+import { errorWords } from './ui_primitives.js';
 
 const ACTIVE = new Set(['queued', 'running']);
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'interrupted']);
@@ -319,7 +320,10 @@ export function createHarnessMaintenanceController({
                 const before = inspectionProblem();
                 claim(key);
                 if (current && claimEngine()) forgetMissingExecutable();
-                state.inspectionError = `Program inspection unavailable: ${error.message || error}`;
+                // A transport failure is said in owner words (a TypeError with no response: errorWords); an engine's own
+                // sentence stays on the row (an unclassified failure keeps its exact sentence).
+                const reason = error instanceof TypeError && error.response === undefined ? errorWords(error).text : error.message || error;
+                state.inspectionError = `Program inspection unavailable: ${reason}`;
                 state.inspectionNeedsFresh = current;
                 state.inspectionProblem = missing;
                 if (inspectionProblem() !== before) onInspectionProblem();

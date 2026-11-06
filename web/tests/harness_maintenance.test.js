@@ -889,3 +889,14 @@ test('Checking… answers the check the owner asked for, never the cached read a
     assert.equal(controller.view('fixture').inspectionPending, false);
     controller.dispose();
 });
+
+test('a program read the transport lost is said in owner words; an engine sentence stays as it is', async () => {
+    const { controller } = setup({ harnessMaintenanceInventory: async () => { throw new TypeError('Load failed'); } });
+    await controller.refresh({ fresh: true });
+    assert.equal(controller.view('fixture').inventoryError, "Program inspection unavailable: Couldn't reach Ouroboros.");
+    assert.doesNotMatch(controller.view('fixture').inventoryError, /Load failed/);
+    const engine = setup({ harnessMaintenanceInventory: async () => { throw Object.assign(new Error('child timed out'), { status: 502 }); } });
+    await engine.controller.refresh({ fresh: true });
+    assert.equal(engine.controller.view('fixture').inventoryError, 'Program inspection unavailable: child timed out');
+    controller.dispose(); engine.controller.dispose();
+});
