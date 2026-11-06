@@ -276,22 +276,30 @@ export async function saveSafetyOwnerChanges(draft, current = {}, { askOwner = o
     return { saved: saved.join(' '), error: errors.join(' '), unknown };
 }
 
-/** Waved-through checks among the inspected recent events (the Light/Off audit), counted within 24 h. */
+const SKIP_TAIL = 2000;
+
+/** Waved-through checks among the inspected recent events (the Light/Off audit), counted within 24 h; a full tail
+ * younger than a day says the span it read, never a day it did not inspect. */
 export async function refreshSafetySkipCounter(root, { logsTail = apiClient.logsTail, now = Date.now() } = {}) {
     const el = root?.querySelector?.('#s-safety-skip-counter');
     if (!el) return;
     try {
-        const data = await logsTail('events', 2000);
+        const data = await logsTail('events', SKIP_TAIL);
+        const entries = data?.entries || [];
         const cutoff = now - 24 * 3600 * 1000;
-        const n = (data?.entries || []).filter((entry) => {
+        const times = entries.map((entry) => Date.parse(String(entry?.ts || ''))).filter(Number.isFinite);
+        const n = entries.filter((entry) => {
             if (String(entry?.type || '') !== 'safety_mode_skip') return false;
             const time = Date.parse(String(entry?.ts || ''));
             return Number.isFinite(time) && time >= cutoff;
         }).length;
-        // The tail may cover less than a day, including when it has no matches.
+        const oldest = times.length ? Math.min(...times) : null;
+        const span = entries.length >= SKIP_TAIL && oldest !== null && oldest > cutoff
+            ? `since ${new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false }).format(oldest)} (the latest ${SKIP_TAIL.toLocaleString('en-US')} events)`
+            : 'in the last 24 h';
         el.textContent = n > 0
-            ? `${n} safety ${n === 1 ? 'check' : 'checks'} let through in the last 24 h.`
-            : 'No safety checks let through in the last 24 h.';
+            ? `${n} safety ${n === 1 ? 'check' : 'checks'} let through ${span}.`
+            : `No safety checks let through ${span}.`;
     } catch {
         el.textContent = '';
     }
