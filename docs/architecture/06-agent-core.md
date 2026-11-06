@@ -1,6 +1,6 @@
 # 6. Agent Core
 
-`loop.py` runs tasks/direct turns/wakes.
+`loop.py` runs tasks, direct turns and wakes; admission, completion, satisfaction, verification, review and artifact finality stay separate facts that code records and the model judges.
 
 ### Task lifecycle
 
