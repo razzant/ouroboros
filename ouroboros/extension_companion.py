@@ -483,8 +483,8 @@ def companion_spawn_env(
 ) -> Dict[str, str]:
     """The env one staged companion is spawned with (fix-round-6).
 
-    Built only inside ``PluginAPIImpl._publish_registrations``'s post-swap attach, after
-    the generation fence admitted the publication: the settings-derived
+    Built in ``PluginAPIImpl._publish_registrations`` after its initial generation
+    fence, before publication and outside the registry lock: the settings-derived
     values (``_scrub_env`` -> ``load_settings``, a lock-free read that
     persists nothing), the manifest env overlay, the Host
     Service bridge URL/token and the isolated-dep PYTHONPATH are all

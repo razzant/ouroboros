@@ -206,7 +206,7 @@ def skill_state_dir_path(drive_root: pathlib.Path, name: str) -> pathlib.Path:
 
     The generation-fenced companion recovery resolves the state dir through
     here BEFORE its fence (fix-round-6); creation belongs to the post-fence
-    attach in ``_publish_registrations``, so a stale refusal creates no
+    preparation in ``_publish_registrations``, so a stale refusal creates no
     directories. ``skill_state_dir`` is the creating variant for load paths.
 
     The name is normalized to its alnum-dashes shape before joining so a

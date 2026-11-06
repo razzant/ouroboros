@@ -639,7 +639,7 @@ class PluginAPIImpl:
         # Fix-round-6: the descriptor build is purely computational — the env
         # stays EMPTY here; settings-derived values, the manifest env overlay,
         # the bridge URL and the auth token materialize only in the post-fence
-        # attach of ``_publish_registrations``.
+        # preparation of ``_publish_registrations``.
         workdir = self._runtime_skill_dir or self._skill_dir or self._state_dir
         descriptor = CompanionDescriptor(
             skill_name=self._skill,
