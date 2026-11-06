@@ -18,6 +18,7 @@ from PIL import Image
 
 from ouroboros.launcher_window_chrome import DOCUMENT_SCRIPT, HANDLER
 from tests import test_subscription_setup_browser as setup_browser
+from tests._shared import answer_projects
 from tests._work_projection_shared import work_fields
 from tests.test_design_system_gate_browser import rest
 
@@ -91,7 +92,7 @@ def room_page(ui, *, width=W, height=H, scheme='dark', panel_width=575, activiti
              'project_chat_ids': [p['chat_id'] for p in PROJECTS],
              **work_fields(activities, {}, results={}, fences={}, complete=True)}
     page.route('**/api/state*', lambda route: route.fulfill(json=state))
-    page.route('**/api/projects*', lambda route: route.fulfill(json={'projects': PROJECTS}))
+    page.route('**/api/projects*', lambda route: answer_projects(route, PROJECTS))
 
     def history(route):
         chat_id = int(parse_qs(urlparse(route.request.url).query).get('chat_id', ['1'])[0])

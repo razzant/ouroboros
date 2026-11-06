@@ -428,6 +428,7 @@ def produced_fields(snap: Dict[str, Any]) -> Dict[str, Any]:
         "github_token_configured": snap["github_token_configured"],
         "accounting": _accounting_block(snap["accounting"], available, limit),
         "projects": snap["projects"],
+        "project_listable_count": snap.get("project_listable_count"),
         "project_chat_ids": snap["project_chat_ids"],
         "main_visible_revision": snap.get("main_visible_revision"),
         "task_bindings_revision": snap["task_bindings_revision"],
