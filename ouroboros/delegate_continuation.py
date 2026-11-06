@@ -469,14 +469,17 @@ def with_run_binding(start: ContinuationStart, authority: Any, binding: str, wor
     not only a changed root, so carries the exact text its own instructions got from the
     same renderers after provisioning, or, where none applies, the directory it starts
     in, plus this run's own selected ``input_files`` note, if any.
-    A plan-thread turn (no ``workspace`` fact) keeps its own contract, plus that note even when the
-    caller's text is empty; a fresh start (``NO_CONTINUATION``, no facts) is unchanged.
+    A plan-thread turn (no ``workspace`` fact) keeps its own contract, plus my human's rows its line
+    lacks (``words``) and that note, even when the caller's text is empty; with neither to add it is
+    returned untouched, as a fresh start (``NO_CONTINUATION``, no facts) always is.
     """
     from ouroboros.delegate_start_instructions import access_instruction, no_copy_binding_instruction
 
     if not start.facts:
         return start
     if "workspace" not in start.facts:
+        if not (start.words or inputs):
+            return start
         return start._replace(prompt="\n\n".join(part for part in (start.prompt, start.words, inputs) if part))
     current = (access_instruction(authority.access, investigation=authority.investigation)
                + (binding or no_copy_binding_instruction(workdir)) + inputs)
