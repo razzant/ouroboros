@@ -18,7 +18,7 @@ from ouroboros.tools.control_events import (
 )
 from ouroboros.tool_access_paths import canonical_data_root
 from ouroboros.tools.registry import ToolContext
-from ouroboros.tools.tool_result import completed_local_read
+from ouroboros.tools.tool_result import ToolResult, completed_local_read, publish_no_effect
 from ouroboros.utils import append_jsonl, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -232,8 +232,9 @@ def _start_task(
     if not goal:
         return "⚠️ TOOL_ARG_ERROR (start_task): objective is required"
     owner_basis, cite_error = cited_owner_basis(ctx, owner_words)
-    if cite_error:
-        return f"⚠️ OWNER_WORDS_UNVERIFIED (start_task): {cite_error}"
+    if cite_error:  # the same typed argument refusal the schedule doors publish: nothing was started
+        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
+                                                 text=f"⚠️ OWNER_WORDS_UNVERIFIED (start_task): {cite_error}"))
     card_title, title_error = _task_card_title_arg(title, "start_task")
     if title_error:
         return title_error
