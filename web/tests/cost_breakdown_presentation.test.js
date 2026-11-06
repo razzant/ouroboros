@@ -34,9 +34,9 @@ test('each line is its word, the card\'s own money words and the recorded volume
     assert.equal(costSliceLine(VIEW.by_purpose[0], 'Plan review'),
         'Plan review · Tracked: $107.71 · 248 model calls · 6 sessions · 65.4M tokens');
     assert.equal(costSliceLine(VIEW.by_route[0], 'OpenRouter'), 'OpenRouter · $123.05 · 283 model calls · 68.1M tokens');
-    // No priced row: the card's unknown word, never $0; billions read as B; no tokens recorded, no token part.
-    assert.equal(costSliceLine(VIEW.by_route[1], 'Claudexor'), 'Claudexor · Cost unknown · 421 model calls · 1.8B tokens');
-    assert.equal(costSliceLine(VIEW.by_route[2], 'Codex'), 'Codex · Cost unknown · 8 sessions');
+    // No priced row: the card's word for settled unpriced use, never $0; billions read as B; no tokens, no token part.
+    assert.equal(costSliceLine(VIEW.by_route[1], 'Claudexor'), 'Claudexor · Cost not priced · 421 model calls · 1.8B tokens');
+    assert.equal(costSliceLine(VIEW.by_route[2], 'Codex'), 'Codex · Cost not priced · 8 sessions');
     assert.equal(costSliceLine(slice('task', carrier(1), { model_calls: 1, sessions: 1, tokens: 5 }), 'Work'),
         'Work · $1.00 · 1 model call · 1 session · 5 tokens');
 });

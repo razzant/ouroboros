@@ -82,6 +82,7 @@ def _compat_cost_bucket(bucket: Dict[str, Any]) -> Dict[str, Any]:
         # amount is zero but whose accounting is still open or undisclosed.
         "unknown_unmetered": int(bucket.get("unknown_unmetered") or 0),
         "non_final_rows": int(bucket.get("non_final_rows") or 0),
+        "accounting_open_rows": int(bucket.get("accounting_open_rows") or 0),  # rows that can still settle
         "cost_final": bool(bucket.get("cost_final")),
         "prompt_tokens": int(bucket.get("prompt_tokens") or 0),
         "completion_tokens": int(bucket.get("completion_tokens") or 0),
@@ -111,7 +112,7 @@ def _compat_cost_groups(
             continue
         target = result[key]
         for field in (
-            "cost", "calls", "unknown_unmetered", "non_final_rows",
+            "cost", "calls", "unknown_unmetered", "non_final_rows", "accounting_open_rows",
             "prompt_tokens", "completion_tokens",
             "cached_tokens", "cache_write_tokens",
         ):

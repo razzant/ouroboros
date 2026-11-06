@@ -28,16 +28,20 @@ function optionalFiniteNumber(value) {
     return Number.isFinite(number) ? number : null;
 }
 
-/** Render one breakdown bucket in the task card's money words (`Cost unknown`, `Tracked:`, `up to`), never
- *  turning an unpriced or open zero into free: a call with no price (subscription work among them) is unknown,
- *  not "pending" — no price will arrive for it. */
+/** Render one breakdown bucket in the task card's words: `Cost pending` while a call of it is still open and
+ *  nothing is priced, `Cost not priced` once its calls settled without a price (subscription work among
+ *  them: no price will arrive), `Tracked:` before a priced subtotal beside unpriced calls, and `(pending)`
+ *  after an amount more may join. Never an unpriced or open zero as free. */
 export function costBucketPresentation(info) {
     const cost = optionalFiniteNumber(info?.cost);
     if (cost === null) return 'unknown';
     const unknown = optionalFiniteNumber(info?.unknown_unmetered) || 0;
-    const open = info?.cost_final === false || (optionalFiniteNumber(info?.non_final_rows) || 0) > 0;
-    if (unknown > 0) return cost === 0 ? 'Cost unknown' : `Tracked: ${formatUsd2(cost)}`;
-    return open ? `up to ${formatUsd2(cost)}` : formatUsd2(cost);
+    const nonFinal = optionalFiniteNumber(info?.non_final_rows) || 0;
+    // Rows that can still settle; an older payload without the count has its non-final rows past the unpriced ones.
+    const open = (optionalFiniteNumber(info?.accounting_open_rows) ?? nonFinal - unknown) > 0;
+    if (cost === 0 && (open || unknown > 0)) return open ? 'Cost pending' : 'Cost not priced';
+    const amount = unknown > 0 ? `Tracked: ${formatUsd2(cost)}` : formatUsd2(cost);
+    return open ? `${amount} (pending)` : amount;
 }
 
 // A plain "saved" is an acknowledgement of what the owner just did and ends by itself; anything the owner may still

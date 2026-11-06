@@ -314,16 +314,26 @@ test('cost dashboard sets the limit against known spend, open holds beside it (#
         ['$1.50', '$0.50', '$4.00', '$20.00']);
 });
 
-test('breakdown buckets say unknown and open amounts in the card\'s words, never a free zero', () => {
+test('breakdown buckets say open and unpriced amounts in the card\'s words, never a free zero', () => {
+    // Subscription calls settle without a price: none will arrive, so not pending.
     assert.equal(costBucketPresentation({
-        cost: 0, calls: 1, unknown_unmetered: 1, non_final_rows: 1, cost_final: false,
-    }), 'Cost unknown');
+        cost: 0, calls: 1, unknown_unmetered: 1, non_final_rows: 1, accounting_open_rows: 0, cost_final: false,
+    }), 'Cost not priced');
     assert.equal(costBucketPresentation({
-        cost: 0, calls: 1, unknown_unmetered: 0, non_final_rows: 1, cost_final: false,
-    }), 'up to $0.00');
+        cost: 0, calls: 1, unknown_unmetered: 1, non_final_rows: 1, accounting_open_rows: 1, cost_final: false,
+    }), 'Cost pending');
     assert.equal(costBucketPresentation({
-        cost: 0.25, calls: 2, unknown_unmetered: 1, non_final_rows: 1, cost_final: false,
+        cost: 0, calls: 1, unknown_unmetered: 0, non_final_rows: 1, accounting_open_rows: 1, cost_final: false,
+    }), 'Cost pending');
+    assert.equal(costBucketPresentation({
+        cost: 0.25, calls: 2, unknown_unmetered: 1, non_final_rows: 1, accounting_open_rows: 0, cost_final: false,
     }), 'Tracked: $0.25');
+    assert.equal(costBucketPresentation({
+        cost: 0.25, calls: 2, unknown_unmetered: 0, non_final_rows: 1, accounting_open_rows: 1, cost_final: false,
+    }), '$0.25 (pending)');
+    // An older payload without the open count: its non-final rows past the unpriced ones are the open ones.
+    assert.equal(costBucketPresentation({ cost: 0, calls: 1, unknown_unmetered: 1, non_final_rows: 1, cost_final: false }),
+        'Cost not priced');
     assert.equal(costBucketPresentation({
         cost: 0, calls: 1, unknown_unmetered: 0, non_final_rows: 0, cost_final: true,
     }), '$0.00');
