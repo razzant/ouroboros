@@ -18,6 +18,18 @@ import pytest
 import supervisor.git_ops as git_ops
 
 
+@pytest.fixture(autouse=True)
+def _own_tracked_registry(monkeypatch):
+    """Each test gets its own tracked registry (#2841 routes these Git reads through tracked custody).
+
+    The runners keep naming a child whose tree they could not measure; in the worker's shared registry such a
+    record outlived its test and left later readers in the worker (a scope teardown, an owned-work stop) a child
+    that never settles: tests/test_task_scope_lifetime.py went red beside this module."""
+    from ouroboros.tools import shell_process
+
+    monkeypatch.setattr(shell_process, "_active_subprocesses", set())
+
+
 def _git(repo, *args):
     import subprocess
 
