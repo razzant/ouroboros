@@ -794,7 +794,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         } else if (meta.reachability === 'lan_reachable') {
             const url = escapeHtml(meta.recommended_url || '');
             const warning = escapeHtml(meta.warning || '');
-            // Status first, action right (DESIGN "settings-action-row"). The link keeps its own words; the button
+            // Status first, action right (ui.css .ui-action-row). The link keeps its own words; the button
             // carries the address this read drew, so a click after any later read copies that read's address.
             const copy = url ? `<button type="button" class="btn btn-default btn-sm ui-hit-area" data-copy-lan-url="${url}">Copy link</button>` : '';
             hint.innerHTML = `<div class="ui-action-row"><span>LAN URL: <a href="${url}" target="_blank" rel="noopener">${url}</a>${warning ? ' — <strong>' + warning + '</strong>' : ''}</span>${copy}</div>`;

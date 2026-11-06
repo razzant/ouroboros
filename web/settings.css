@@ -392,8 +392,8 @@
     gap: 10px;
 }
 
-/* Readers outside Settings only (Skills › Browse cards in skill_browse.js, Dashboard › Updates in updates.js): Settings
-   composes ui.css .ui-action-row. This goes with its last reader, once those screens compose the shared row. */
+/* One reader left, outside Settings: the Skills › Browse cards (skill_browse.js). Settings and Dashboard › Updates
+   compose ui.css .ui-action-row; this goes with its last reader, once Skills composes the shared row too. */
 .settings-action-row {
     display: flex;
     flex-wrap: wrap;
