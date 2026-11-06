@@ -1045,7 +1045,7 @@ def test_an_unacknowledged_return_keeps_todays_interrupted_path(tmp_path, monkey
 
 
 @pytest.mark.parametrize("fact", ["nothing", "saved", "answer_delivered", "no_root", "call", "wake", "later_attempt",
-                                  "stopped"])
+                                  "stopped", "model_called", "ledger_unreadable"])
 def test_only_a_turn_with_no_effect_is_given_back_from_its_input(tmp_path, monkeypatch, fact):
     from supervisor.task_admission import seed_returnable
     from supervisor.terminal_delivery import delivery_id_for, register_delivery
@@ -1069,6 +1069,10 @@ def test_only_a_turn_with_no_effect_is_given_back_from_its_input(tmp_path, monke
         attempt = 2
     elif fact == "stopped":
         ci.request_cancel(tmp_path, turn.id, reason="owner stop", source="test")
+    elif fact in {"model_called", "ledger_unreadable"}:  # the usage ledger's own verdict, read at the predicate's seam
+        ledger = ({"cost_accounting_status": "available", "total_rounds": 1} if fact == "model_called"
+                  else {"cost_accounting_status": "unavailable", "total_rounds": None})
+        monkeypatch.setattr(system.queue, "reconstruct_task_cost", lambda *_a, **_k: ledger)
     assert seed_returnable(root, task, attempt) is (fact == "nothing")
 
 
@@ -1194,3 +1198,22 @@ def test_a_seed_proof_holds_until_the_attempt_it_gave_back_launches(launch):
               **({"status": "completed"} if launch == "terminal" else {})}
     proof = prestart_returned_unsent(row, stored)
     assert proof == ({"seed_return": True, "from_attempt": 1, "cause": "restart"} if launch == "none" else {})
+
+
+def test_a_source_lost_after_a_real_save_before_the_door_decides_is_never_a_seed(tmp_path, monkeypatch):
+    """The working file can vanish before a stop looks (RV1 astra #2): its turn already called the model, which the
+    usage ledger keeps apart from that file, so the door names nothing and the stop ends it as before."""
+    from supervisor.restart_retention import prepare_restart_returns
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-main"})
+    _save_work(tmp_path, turn)  # a pre_effect save: the model answered with a tool batch
+    monkeypatch.setattr(system.queue, "reconstruct_task_cost",
+                        lambda *_a, **_k: {"cost_accounting_status": "available", "total_rounds": 1})
+    wc.checkpoint_path(tmp_path, turn.id, 1).unlink()
+    assert prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING,
+                                   transaction_id="tx-lost-source") == set()
+    _ack(tmp_path, "tx-lost-source")
+    _boot_after_stop(system, monkeypatch, tmp_path)
+    assert turn.id not in [row["id"] for row in system.workers.PENDING] and turn.id not in system.workers.RUNNING

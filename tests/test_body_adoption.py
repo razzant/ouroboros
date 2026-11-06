@@ -762,3 +762,8 @@ def test_official_relation_is_dated_history_against_the_checked_tip_never_a_zero
     assert unreadable["unknown"] == "official_tip_unreadable" and "only_here" not in unreadable
     assert "not readable here" in body_adoption.official_relation_text(unreadable)
     assert body_adoption.official_relation_text({}) == ""
+    # A direct caller without the channel in its environment reads the settings' channel, as the server does.
+    monkeypatch.delenv("OUROBOROS_UPDATE_CHANNEL")
+    monkeypatch.setattr("ouroboros.config.load_settings", lambda *a, **k: {"OUROBOROS_UPDATE_CHANNEL": "development"})
+    check(latest_sha=tip, checked_at="t1", update_channel="development")
+    assert body_adoption.official_relation(repo, diverged, data)["only_here"] == 2

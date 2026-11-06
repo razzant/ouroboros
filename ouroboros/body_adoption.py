@@ -167,7 +167,7 @@ def official_relation(serving: pathlib.Path, cand: str, data_dir: Any) -> Dict[s
     ``managed_update_cache`` names the tip and when it was checked; one ``rev-list`` in the serving repository (the
     candidate shares its objects) counts commits only here and only in that tip. History, not content: the updater's
     own merges count too. Unknown, with its reason, is never zero."""
-    from ouroboros.update_channels import normalize_update_channel
+    from ouroboros.update_channels import get_update_channel
     from ouroboros.utils import read_json_dict
 
     cache = (read_json_dict(pathlib.Path(data_dir) / "state" / "state.json") or {}).get("managed_update_cache") or {}
@@ -175,7 +175,7 @@ def official_relation(serving: pathlib.Path, cand: str, data_dir: Any) -> Dict[s
     channel = str(cache.get("update_channel") or "")
     if not tip:
         return {"unknown": "no_official_check"}
-    if channel and channel != normalize_update_channel(os.environ.get("OUROBOROS_UPDATE_CHANNEL")):
+    if channel and channel != get_update_channel():
         return {"unknown": "update_channel_changed", "tip": tip, "checked_at": checked_at}
     counted = _git(serving, "rev-list", "--left-right", "--count", f"{cand}...{tip}", check=False)
     parts = counted.stdout.split() if counted.returncode == 0 else []

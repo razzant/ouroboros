@@ -373,13 +373,11 @@ SEED_RETURN = "_seed_return"  # D5: a returning stop gave back a turn cut before
 
 
 def seed_returnable(root: Any, task: dict, attempt: int) -> bool:
-    """An owner text turn of the conversation lane cut before its first working save (D5).
-
-    ``pre_effect`` holds every tool batch until its file is written; only without a durable root is nothing written
-    while the batch runs, and the task's stored record proves that root. So no file proves no tool ran, while a no-tool
-    answer saved non-gating, a live park and an owed or delivered final read as effects. Positive evidence only: a later
-    attempt, a continuation, a wake, a call, Presence, a child or any unreadable fact keeps the interrupted path.
-    """
+    """An owner text turn of the conversation lane cut before its first model call (D5). Every tool batch and answer
+    follows a model call, which the usage ledger records apart from the working file: zero recorded calls is the positive
+    proof that nothing took effect, a lost file included. No working file (a saved turn returns from it), park, owed or
+    delivered final or Stop, and a non-terminal result complete it; a later attempt, continuation, wake, call, Presence,
+    child or any unreadable fact keeps the interrupted path."""
     from ouroboros.consciousness_authority import wake_cause
     from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, STATUS_CANCEL_REQUESTED
     from ouroboros.working_checkpoint import checkpoint_path, final_answer_registered, live_park
@@ -393,9 +391,14 @@ def seed_returnable(root: Any, task: dict, attempt: int) -> bool:
         return False
     try:
         stored = load_task_result(root, task_id, strict=True) or {}
-        return bool(stored) and stored.get("status") not in _TRULY_TERMINAL_STATUSES | {STATUS_CANCEL_REQUESTED} \
-            and not (checkpoint_path(root, task_id, attempt).is_file() or live_park(root, task_id, attempt)
-                     or final_answer_registered(root, task_id) or _cancel_intent_active(root, task_id))
+        if not stored or stored.get("status") in _TRULY_TERMINAL_STATUSES | {STATUS_CANCEL_REQUESTED} or (
+                checkpoint_path(root, task_id, attempt).is_file() or live_park(root, task_id, attempt)
+                or final_answer_registered(root, task_id) or _cancel_intent_active(root, task_id)):
+            return False
+        from supervisor import queue
+        cost = queue.reconstruct_task_cost(task_id, fields=True, drive_root=root)
+        return (cost.get("cost_accounting_status") == "available" and not cost.get("ledger_integrity_degraded")
+                and int(cost.get("total_rounds") or 0) == 0)
     except Exception:
         log.warning("Return of %s before its first save is unprovable; interrupted path", task_id, exc_info=True)
         return False

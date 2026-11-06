@@ -36,13 +36,12 @@ import contextlib
 import hashlib
 import json
 import logging
-import os
 import pathlib
 import re
 import threading
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
-from ouroboros.update_channels import normalize_update_channel
+from ouroboros.update_channels import get_update_channel
 from ouroboros.utils import atomic_write_json, read_json_dict, truncate_within_limit, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -1008,7 +1007,7 @@ def official_update_projection(
         if not head or head == "unknown":
             # context.py's own sentinel for a git it could not read. Comparing it with real
             # SHAs would report "moved since check" about a body that has not moved at all.
-            return {"status": "unknown", "error": "head_unresolved"}
+            return {"status": "unknown", "error": "head_unresolved", "check": CHECK_SOURCE}
         if state is None:
             # Lock-free read, like the neighbouring drive-state section: this runs at each
             # task head's context build and consciousness cycle, never under the state lock.
@@ -1019,7 +1018,7 @@ def official_update_projection(
         # The cached check describes ONE channel. After the owner switches channels it says
         # nothing about the active one (the panel asks for a new check for the same reason),
         # so the fact is honestly "unchecked" there — the letter stays, as history.
-        active_channel = normalize_update_channel(os.environ.get("OUROBOROS_UPDATE_CHANNEL"))
+        active_channel = get_update_channel()  # the environment, else the settings (direct callers set none)
         cached_channel = str(cache.get("update_channel") or "")
         if cached_channel and cached_channel != active_channel:
             return {
@@ -1076,4 +1075,4 @@ def official_update_projection(
         }
     except Exception as exc:  # noqa: BLE001 — a fact that raises would take the whole context with it
         log.debug("official_update projection failed", exc_info=True)
-        return {"status": "unknown", "error": type(exc).__name__}
+        return {"status": "unknown", "error": type(exc).__name__, "check": CHECK_SOURCE}

@@ -729,7 +729,7 @@ def test_official_update_projection_unresolved_head_is_unknown_not_moved(tmp_pat
     cache = {"managed_update_cache": {"latest_sha": "b" * 40, "available": True, "behind": 3, "checked_at": "t"}}
     for head in ("unknown", ""):
         fact = ul.official_update_projection(head, drive_root=drive, state=cache)
-        assert fact == {"status": "unknown", "error": "head_unresolved"}, head
+        assert fact == {"status": "unknown", "error": "head_unresolved", "check": ul.CHECK_SOURCE}, head
 
 
 def test_official_update_projection_never_raises(tmp_path):
