@@ -524,10 +524,10 @@ def test_non_completed_terminal_status_not_requeued(tmp_path):
 
 
 def test_a_signal_death_takes_the_same_one_retry_and_reserves_no_handoff(tmp_path, monkeypatch):
-    """CANDIDATE_v2 §2(e): only a recorded stop terminalizes. A worker killed by a signal (-15 here, the
+    """ARCHITECTURE §5: only a recorded stop terminalizes. A worker killed by a signal (-15 here, the
     05.11 pattern kill) is an unrecorded death like an exit code: attempt 1 is retried once on the same id
     from its saved state (``interrupted``, the signal on the row), with NO delegated handoff reserved: the dead
-    attempt's still-running delegated runs are cancelled as an abrupt loss (RV1 native F4: ``reconcile_task_runs``
+    attempt's still-running delegated runs are cancelled as an abrupt loss (``reconcile_task_runs``
     through the attach-only gateway, the verdict this caller writes next), while an exit-code death keeps its
     handoff and leaves its runs to it; the retried attempt that dies again is terminal
     (``worker_crash_retry_exhausted``), as is a recorded cancel. ``worker_crash_signal`` stays a readable reason

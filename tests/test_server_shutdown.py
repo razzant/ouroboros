@@ -536,10 +536,10 @@ def test_main_graceful_restart_cleanup_avoids_port_sweep(monkeypatch, tmp_path, 
 
 @pytest.mark.parametrize("launcher_managed", [True, False])
 def test_main_fault_exit_restarts_through_the_installs_own_restarter(monkeypatch, tmp_path, launcher_managed):
-    """§2(b) at main()'s return. Launcher-managed: 1, no cleanup here (the launcher's crash path restarts;
-    never 42, never 99). Direct: the pre-exec census first, the planned-restart transaction dropped from the
-    env, no store switch, then ``restart_current_process(owner_initiated=False)`` with the bound port; a
-    failed successor returns 1. The quiet direction: without a fault main returns 0 and runs no cleanup
+    """The Fault door's exit (ARCHITECTURE §9) at main()'s return. Launcher-managed: 1, no cleanup here (the launcher's
+    crash path restarts; never 42, never 99). Direct: the pre-exec census first, the planned-restart transaction
+    dropped from the env, no store switch, then ``restart_current_process(owner_initiated=False)`` with the bound
+    port; a failed successor returns 1. The quiet direction: without a fault main returns 0 and runs no cleanup
     (``test_main_normal_exit_does_not_run_emergency_cleanup``)."""
     import server
     from ouroboros import server_process
@@ -663,11 +663,11 @@ def test_the_fault_backstop_takes_the_same_door_as_mains_return(monkeypatch, lau
 
 
 def test_a_stuck_census_does_not_hang_the_fault_door(monkeypatch):
-    """RV1 native F12: on a direct install the pre-exec census (``_emergency_process_cleanup``) can block behind
-    a teardown holding the queue lock while ``fault_exit`` holds its own; the one decision is still taken: the
-    census is bounded by the launcher grace and the successor starts over an unfinished census (the next
-    generation's custody sweep settles the rest). The other direction: a census that finishes runs whole, before
-    the successor."""
+    """The Fault door's bounded census: on a direct install the pre-exec census (``_emergency_process_cleanup``) can
+    block behind a teardown holding the queue lock while ``fault_exit`` holds its own; the one decision is still
+    taken: the census is bounded by the launcher grace and the successor starts over an unfinished census (the next
+    generation's custody sweep settles the rest). The other direction: a census that finishes runs whole, before the
+    successor."""
     from ouroboros import server_process
 
     calls, release = [], threading.Event()
@@ -703,9 +703,9 @@ def test_a_stuck_census_does_not_hang_the_fault_door(monkeypatch):
 
 
 def test_a_fault_teardown_cancels_unsaved_rows_as_server_shutdown_naming_the_cause(monkeypatch):
-    """§2(d), the documented stop-cause/Continue mapping (no new source): an unsaved row the fault teardown
-    cancels keeps ``stop_source="server_shutdown"`` (a technical interruption the owner may Continue) and its
-    reason text names the cause; every other door keeps its own text (the mapping answers '')."""
+    """The Fault door (ARCHITECTURE §9), the documented stop-cause/Continue mapping (no new source): an unsaved row the
+    fault teardown cancels keeps ``stop_source="server_shutdown"`` (a technical interruption the owner may Continue)
+    and its reason text names the cause; every other door keeps its own text (the mapping answers '')."""
     from ouroboros import server_process
     from ouroboros.owner_continue import TECHNICAL_CANCEL_SOURCES
     from ouroboros.server_restart import _shutdown_task_cleanup_args
@@ -722,9 +722,42 @@ def test_a_fault_teardown_cancels_unsaved_rows_as_server_shutdown_naming_the_cau
     assert server_process.fault_cancel_reason() == ""
 
 
+@pytest.mark.parametrize("stop_source", ["bus_lost", "external_signal"])
+def test_the_lifespan_teardown_hands_a_faults_cause_to_kill_workers(tmp_path, monkeypatch, request, stop_source):
+    """The real lifespan's one ``kill_workers`` call (the Fault door, ARCHITECTURE §9): after a fault the rows it cancels
+    carry the fault's sentence as their reason, still ``stop_source="server_shutdown"``; after an ordinary stop the
+    door's own text stands (the quiet direction)."""
+    from starlette.testclient import TestClient
+
+    import server as srv
+    from ouroboros import server_process
+    from ouroboros.server_restart import _shutdown_task_cleanup_args
+    from tests.test_extensions_api import _patch_lifespan_for_drive_root_test
+
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    srv.app.app.state.drive_root = drive_root
+    srv.app.app.state.repo_dir = tmp_path / "repo"
+    _patch_lifespan_for_drive_root_test(monkeypatch, srv, {}, request)
+    monkeypatch.setattr(srv, "_boot_managed_update_tasks", lambda: None)
+    monkeypatch.setattr("ouroboros.config.get_skills_repo_path", lambda: "")
+    calls = []
+    monkeypatch.setattr("supervisor.workers.kill_workers", lambda **kw: calls.append(kw))
+    with TestClient(srv.app):
+        monkeypatch.setattr(server_process, "_stop_source", stop_source)
+    [call] = calls
+    assert call["stop_source"] == "server_shutdown"
+    _status, ordinary = _shutdown_task_cleanup_args(False)
+    if stop_source == "bus_lost":
+        assert call["result_reason"] == server_process.fault_cancel_reason() != ordinary
+        assert "event-bus process exited" in call["result_reason"]
+    else:
+        assert call["result_reason"] == ordinary
+
+
 def test_the_startup_notice_names_the_previous_faults_cause_and_the_held_count(monkeypatch):
-    """§2(c)/(d): after a fault exit the next start says what ended the previous generation and how many
-    restored rows hold their saved work; after an ordinary stop the clause is absent (quiet)."""
+    """The Fault door (ARCHITECTURE §9): after a fault exit the next start says what ended the previous generation and
+    how many restored rows hold their saved work; after an ordinary stop the clause is absent (quiet)."""
     from ouroboros import owned_shutdown, server_process
     from supervisor.events_budget import HOLD_SAVED_WORK, hold_budget_row
 
@@ -890,7 +923,10 @@ def _supervisor_harness(monkeypatch, tmp_path, steps):
     ``steps`` fire from the first call of each tick: ``ok`` = healthy tick,
     ``raise`` = a crash, ``stop``/``restart`` = set the flag (the loop exits at
     its next ``while`` check), ``raise_after_stop``/``raise_after_restart`` =
-    the flag is set and the same tick then crashes (the shutdown race)."""
+    the flag is set and the same tick then crashes (the shutdown race),
+    ``bus_dead`` = from this tick on every ``get_event_q`` call raises
+    ``EventBusLost(-9)``. ``rec.health`` lists the tick of each
+    ``ensure_workers_healthy`` call."""
     import threading
     import queue as queue_mod
 
@@ -906,9 +942,12 @@ def _supervisor_harness(monkeypatch, tmp_path, steps):
     rec.steps = list(steps)
     rec.restart = threading.Event()
     rec.ready = threading.Event()
+    rec.ticks, rec.health, rec.bus_dead = 0, [], False
 
     def _tick_head(_data_dir):
         step = rec.steps.pop(0) if rec.steps else "stop"
+        rec.ticks += 1
+        rec.bus_dead = rec.bus_dead or step == "bus_dead"
         if step in ("stop", "raise_after_stop"):
             rec.stop.set()
         if step in ("restart", "raise_after_restart"):
@@ -1011,10 +1050,16 @@ def _supervisor_harness(monkeypatch, tmp_path, steps):
         monkeypatch.setattr(queue_pkg, name, noop)
     monkeypatch.setattr(queue_pkg, "persist_queue_snapshot", lambda **_k: True)
     monkeypatch.setattr(queue_pkg, "restore_pending_from_snapshot", rec.restore)
-    for name in ("init", "spawn_workers", "kill_workers", "assign_tasks", "ensure_workers_healthy",
-                 "auto_resume_after_restart"):
+    for name in ("init", "spawn_workers", "kill_workers", "assign_tasks", "auto_resume_after_restart"):
         monkeypatch.setattr(workers_mod, name, noop)
-    monkeypatch.setattr(workers_mod, "get_event_q", lambda: queue_mod.Queue())
+    monkeypatch.setattr(workers_mod, "ensure_workers_healthy", lambda: rec.health.append(rec.ticks))
+
+    def _event_q():
+        if rec.bus_dead:
+            raise workers_mod.EventBusLost(-9)
+        return queue_mod.Queue()
+
+    monkeypatch.setattr(workers_mod, "get_event_q", _event_q)
     monkeypatch.setattr("ouroboros.delegate_recovery.pre_adopt_planned_handoffs", noop)
     monkeypatch.setattr("ouroboros.tools.services.prune_service_logs", lambda _root: {})
     monkeypatch.setattr("ouroboros.consciousness.BackgroundConsciousness", _Consciousness)
@@ -1052,6 +1097,22 @@ def test_boot_notice_states_recovery_as_an_intent(
     assert [text for _chat, text in rec.alerts if text.startswith("♻️")] == [expected]
 
 
+@pytest.mark.parametrize("cause", ["bus_lost", "launcher_quit"])
+def test_a_fault_boot_with_nothing_restored_still_states_the_fault(monkeypatch, tmp_path, cause):
+    """After the Fault door (ARCHITECTURE §9) the next start says what ended
+    the previous generation even when no queue row was restored and no task interrupted; after an ordinary stop
+    with nothing restored the boot posts no notice (the quiet direction)."""
+    import server
+    from ouroboros import owned_shutdown
+
+    rec = _supervisor_harness(monkeypatch, tmp_path, ["stop"])
+    monkeypatch.setattr(owned_shutdown._GENERATION_STOP, "previous", {"cause": cause})
+    _run(rec, server)
+
+    expected = ["♻️ The server restarted itself after its event-bus process exited. No task holds saved work."]
+    assert [text for _chat, text in rec.alerts if text.startswith("♻️")] == (expected if cause == "bus_lost" else [])
+
+
 def test_exception_while_stopping_exits_quietly_without_counting_a_crash(monkeypatch, tmp_path, caplog):
     """The graceful-shutdown race: the teardown sets the stop flag, then the tick
     meets the torn-down bus (BrokenPipe). That is not a crash: no owner alarm,
@@ -1086,7 +1147,7 @@ def test_exception_while_restarting_exits_quietly_too(monkeypatch, tmp_path):
 
 
 def test_the_third_consecutive_failure_on_a_live_bus_ends_the_generation(monkeypatch, tmp_path):
-    """Two causes, one door (CANDIDATE_v2 §2(b)): the third consecutive tick failure on a LIVE bus posts one
+    """Two causes, one door (ARCHITECTURE §5 and §9): the third consecutive tick failure on a LIVE bus posts one
     Main row in owner words (what happened, what happens next; the raw error stays in the log), clears
     readiness, latches the stop exactly as a signal would (``_exit_signalled``, ``_stop_source=loop_failed``,
     the launcher-grace backstop armed), requests no restart, leaves no ``_supervisor_error`` (so ``boot.phase``
@@ -1112,7 +1173,7 @@ def test_the_third_consecutive_failure_on_a_live_bus_ends_the_generation(monkeyp
 
 
 def test_a_lost_event_bus_ends_the_generation_at_once_without_retries(monkeypatch, tmp_path):
-    """§2(a)/(b): one transient failure on a live bus keeps the loop (a backoff, no row: the quiet direction);
+    """ARCHITECTURE §5: one transient failure on a live bus keeps the loop (a backoff, no row: the quiet direction);
     ``EventBusLost`` ends it at the tick that read it: no backoff, no count, one ``bus_lost`` row (one fact in
     the main line; the exit code is a journal detail), readiness cleared, the stop latched with
     ``_stop_source=bus_lost``."""
@@ -1130,8 +1191,24 @@ def test_a_lost_event_bus_ends_the_generation_at_once_without_retries(monkeypatc
     assert not rec.restart.is_set()
 
 
+def test_the_tick_reads_the_bus_fact_before_worker_health(monkeypatch, tmp_path):
+    """The Fault door's bus fact comes first in a tick (ARCHITECTURE §5): on a dead bus the
+    tick ends the generation before ``ensure_workers_healthy`` could hand a dead worker to the reaper, where its
+    one retry would be spent and its delegated runs released on a bus that is already gone. With a live bus each
+    tick checks worker health once (the quiet direction)."""
+    import server
+    from ouroboros import server_process
+
+    rec = _supervisor_harness(monkeypatch, tmp_path, ["ok", "ok", "bus_dead", "ok"])
+    _run(rec, server)
+
+    assert rec.health == [1, 2], "one health check per live tick, none on the tick that read a dead bus"
+    assert rec.alerts == [(7, "🛑 The event-bus process of this server exited; the server is restarting.")]
+    assert server_process.server_stop_source() == "bus_lost" and rec.exit.is_set() and rec.steps == ["ok"]
+
+
 def test_a_proxy_error_is_bus_lost_only_when_the_manager_is_confirmed_dead(monkeypatch, tmp_path):
-    """§2(a): a proxy error (BrokenPipe) counts as the bus lost only once the manager's exit code confirms
+    """ARCHITECTURE §5: a proxy error (BrokenPipe) counts as the bus lost only once the manager's exit code confirms
     it; with a live manager it is one failure of three (quiet), with a dead one the generation ends at once."""
     import server
     import supervisor.workers as workers
@@ -1150,7 +1227,7 @@ def test_a_proxy_error_is_bus_lost_only_when_the_manager_is_confirmed_dead(monke
 
 
 def test_panic_never_takes_the_fault_door(monkeypatch, tmp_path, caplog):
-    """RV1 native F1/F3 (reproduced in RV1_native_opus_evidence/probe_panic_bus.py and probe_backstop_panic.py):
+    """Panic owns the exit (ARCHITECTURE §9, the Fault door defers to it):
     an accepted Panic kills the workers and the bus itself, so the tick that then reads ``EventBusLost`` is
     Panic's own work, not a fault. The loop leaves quietly: no ``supervisor_failure`` row, no ``bus_lost``
     cause (so no Continue-eligible ``server_shutdown`` cancellation of its rows), nothing latched or armed.

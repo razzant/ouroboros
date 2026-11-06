@@ -525,10 +525,10 @@ def test_the_kill_boundary_states_its_own_verdict_before_it_writes_it(tmp_path):
 
 
 def test_a_signal_deaths_verdict_ends_the_dead_attempts_run_as_an_abrupt_loss(tmp_path):
-    """RV1 native F4. A worker killed by a signal reserves no handoff for its delegated runs (the leaf settles as
-    on abrupt loss), so the kill boundary states the verdict it writes next, ``interrupted``, and the still-running
-    run is cancelled as ``owner_task_gone``; a death that keeps its handoff passes no verdict and the run is left to
-    the handoff (``tests/test_worker_crash_retry.py`` holds the two callers)."""
+    """A worker death (ARCHITECTURE §5). A worker killed by a signal reserves no handoff for its delegated runs (the leaf
+    settles as on abrupt loss), so the kill boundary states the verdict it writes next, ``interrupted``, and the
+    still-running run is cancelled as ``owner_task_gone``; a death that keeps its handoff passes no verdict and the
+    run is left to the handoff (``tests/test_worker_crash_retry.py`` holds the two callers)."""
     import ouroboros.delegate_custody as dc
     from ouroboros.task_results import STATUS_INTERRUPTED
 

@@ -3,7 +3,7 @@
 Run only via unchanged scripts/safe_test.py with OUROBOROS_E2E_DEEP=mock.
 No lifecycle function, ACK, queue, admission, clock or checkpoint is mocked.
 The model is an HTTP loopback peer. The non-signal worker fault exits a real
-worker(23); the SIGKILL case takes the same one retry (CANDIDATE_v2 §2(e): only a
+worker(23); the SIGKILL case takes the same one retry (ARCHITECTURE §5: only a
 recorded stop terminalizes; a signal death is an unrecorded death like an exit code).
 
 Managed update means current-candidate replace recovery through /api/update/apply:

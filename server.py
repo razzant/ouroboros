@@ -1369,8 +1369,8 @@ app.app.state.start_supervisor_if_needed = _start_supervisor_if_needed  # type: 
 
 
 def _restart_cleanup_kwargs() -> dict:
-    """Keep owner Restart from re-opening daemon custody after its stop; every
-    application stop keeps saved work and accepted queue for the next boot (#1563)."""
+    """Owner Restart already asked its delegated runs to stop (the engine is kept): no second reconcile
+    here; every application stop keeps saved work and accepted queue for the next boot (#1563)."""
     if _owner_restart_requested.is_set():
         return {"reconcile_delegate_custody": False, "retain_saved_work": True}
     return {"retain_saved_work": True}

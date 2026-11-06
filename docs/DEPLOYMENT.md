@@ -171,8 +171,10 @@ and the launcher's crash path restarts it (fuse: five crashes in 120 s); a direc
 process census, and only a failed successor exits 1, which `restart: on-failure` then
 retries. After a fault boot the mind gets one recovery turn in Main with the facts (the held
 tasks, the roots cancelled without a saved point): one paid Main turn per fault boot, so a fault
-that returns after every boot costs one turn per cycle; the only bound is the previous recovery
-turn still open. Neither path is a planned restart (exit 42) or Panic (99); the shared Claudexor
+that returns after every boot costs one turn per cycle. No new turn starts when the server fell
+while the previous recovery turn was going (admitted in the generation that fell, unfinished); an
+earlier turn waiting with saved work does not block a later fault's turn. Neither path is a
+planned restart (exit 42) or Panic (99); the shared Claudexor
 daemon is untouched. A persistent cause cycles about every two minutes with a Main row
 each time until someone looks.
 

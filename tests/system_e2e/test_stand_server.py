@@ -67,7 +67,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.timeout(3600, method=_TIMEOUT
 
 LANE_FULL = "stand_full"  # the full shape's own lane: 50 real workers
 HOOK = pathlib.Path(__file__).resolve().parents[1] / "_stand_hook.py"
-STORM_WORKERS = 3  # three busy project workers killed at once: each task gets its one retry, no fence (CANDIDATE_v2 §2(e))
+STORM_WORKERS = 3  # three busy project workers killed at once: each task gets its one retry, no fence (ARCHITECTURE §5)
 RESTORED_MARKER = "live work "  # the input of every row the root's queue restores at boot (tests/_live_set.py ``_task``)
 TURN_MARKER = "[STAND-TURN]"
 READ_WINDOW_SEC = 60.0  # a transport bound for one answer under load
@@ -336,7 +336,7 @@ class _Run:
     # ---- recovery: the conversation with no pool ------------------------------------------------------------------------------
     def storm(self) -> None:
         """E7: three project workers at work, kill -9 at once, then the owner says hello: the lane answers while each
-        killed task takes its one retry; no crash-storm fence freezes the pool (CANDIDATE_v2 §2(e))."""
+        killed task takes its one retry; no crash-storm fence freezes the pool (ARCHITECTURE §5)."""
         pids = [_carrier_pid(self.oracle, self.data_root, task_id) for task_id in self.at_work(STORM_WORKERS)]
         self.facts["storm_workers"] = sum(bool(pid) for pid in pids)
         for pid in pids:

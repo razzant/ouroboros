@@ -245,7 +245,7 @@ def test_host_close_rejects_a_live_descendant_after_the_parent_exits(tmp_path):
 def test_fixture_joins_owned_multiprocessing_support_before_exit(tmp_path, method):
     """Force the bus to exist; test cleanup independently of late-notice timing.
 
-    The bus process is spawn-started whatever the worker start method is (CANDIDATE_v2 §2(a): it inherits no
+    The bus process is spawn-started whatever the worker start method is (ARCHITECTURE §5: it inherits no
     forkserver), so under ``forkserver`` the script starts the forkserver the first worker start would, and the
     fixture must join it too."""
     script = r'''

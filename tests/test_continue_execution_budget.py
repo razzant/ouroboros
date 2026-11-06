@@ -218,7 +218,7 @@ def test_an_owner_restart_cancel_that_wins_the_race_closes_the_attempt(pool):
 
 def test_a_crash_terminal_closes_the_dead_attempt(pool):
     """The retried attempt's death (attempt 2 of ``QUEUE_MAX_RETRIES`` 1) is the crash terminal; a signal death is
-    no longer terminal on its own (CANDIDATE_v2 §2(e): it takes the same one retry), so the dead attempt here is
+    no longer terminal on its own (it takes the same one retry, ARCHITECTURE §5), so the dead attempt here is
     the second."""
     from ouroboros.agent import OuroborosAgent
     from ouroboros.task_results import load_task_result

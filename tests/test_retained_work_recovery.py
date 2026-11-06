@@ -54,7 +54,7 @@ def test_the_existing_crash_retry_continues_the_dead_attempts_saved_work(tmp_pat
 
 
 def test_a_signal_crash_continues_the_saved_work_once_and_the_bound_still_holds(tmp_path, monkeypatch):
-    """CANDIDATE_v2 §2(e): a signal death is no longer terminal on its own. Attempt 1 continues the dead
+    """A worker death (ARCHITECTURE §5): a signal death is no longer terminal on its own. Attempt 1 continues the dead
     attempt's saved work on the same id (the existing retry, its starting point unchanged); the retried
     attempt that dies again is terminal with the signal recorded, so saved work never widens the count."""
     import supervisor.queue as q

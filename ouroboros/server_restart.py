@@ -330,7 +330,7 @@ def _stop_owned_work(ctx: Any) -> list:
     typed ``owner_restart`` cause (an earlier Stop keeps its own). External
     runs gain no adoption authority from native continuation: request cancellation
     of Ouroboros's own delegated runs through the public owner-gone seam over the
-    attach-only gateway (D24), and finally the generation's one bounded stop of its
+    attach-only gateway, and finally the generation's one bounded stop of its
     owned processes (``stop_owned_work``), which the teardown and the restart
     watcher later join. The shared Claudexor daemon is KEPT (owner 3A, 2026-11-06):
     Restart restarts Ouroboros, other programs' runs on the engine are untouched,

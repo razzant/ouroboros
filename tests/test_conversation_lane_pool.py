@@ -114,7 +114,7 @@ def test_project_pool_without_a_lane_spare_keeps_its_last_idle_worker(pool, monk
 
 
 def test_three_project_deaths_fence_nothing_and_the_exhaustion_fence_spares_the_lane(pool, monkeypatch):
-    """Three dead project workers are three recoveries, no fence (CANDIDATE_v2 §2(e): the crash-storm fence is
+    """Three dead project workers are three recoveries, no fence (ARCHITECTURE §5: the crash-storm fence is
     gone); the live lane carrier and its row survive them. The one project fence left, readiness exhaustion,
     still spares the lane: its stop owns project slots only and the lane's spare is replenished under the latch."""
     monkeypatch.setattr(workers, "_LAST_SPAWN_TIME", 0.0)

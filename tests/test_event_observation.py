@@ -85,7 +85,7 @@ def _stopped_rows(tmp_path):
 
 
 def test_original_manager_survives_killed_producer_and_accepts_replacement(tmp_path, monkeypatch):
-    """The bus is whole or it is over (CANDIDATE_v2 §2(a)): a killed PRODUCER leaves the bus, which keeps
+    """The bus is whole or it is over (ARCHITECTURE §5): a killed PRODUCER leaves the bus, which keeps
     serving (quiet); the MANAGER's own death is read on the cached return as a waitpid fact (``EventBusLost``
     with its exit code), so nothing is handed a dead proxy and nothing respawns onto a dead bus."""
     workers, ctx, bus = _fresh_bus(tmp_path, monkeypatch)
@@ -132,10 +132,10 @@ def test_original_manager_survives_killed_producer_and_accepts_replacement(tmp_p
 
 @pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM semantics are POSIX; TerminateProcess cannot be ignored")
 def test_the_manager_ignores_the_groups_sigterm_and_shutdown_ends_it_even_when_the_rpc_fails(tmp_path, monkeypatch):
-    """§2(g): a SIGTERM aimed at the server's group (the launcher's group stop, #1142) leaves the bus alive and
-    serving, so ``get_event_q`` keeps answering and a put still lands (quiet); ``shutdown_event_q`` ends the
-    manager even when the RPC ``shutdown()`` fails (kill + join: the fire direction, no orphan bus), and
-    journals that the manager was alive when the teardown reached it."""
+    """The SIGTERM-immune bus (ARCHITECTURE §5): a SIGTERM aimed at the server's group (the launcher's group stop, #1142)
+    leaves the bus alive and serving, so ``get_event_q`` keeps answering and a put still lands (quiet);
+    ``shutdown_event_q`` ends the manager even when the RPC ``shutdown()`` fails (kill + join: the fire direction, no
+    orphan bus), and journals that the manager was alive when the teardown reached it."""
     workers, _ctx, bus = _fresh_bus(tmp_path, monkeypatch)
     manager = workers._EVENT_Q_MANAGER
     try:

@@ -185,7 +185,7 @@ def test_real_admission_hurry_and_pre_running_death_recover(pool, monkeypatch, o
     assert task_id not in queue.RUNNING and pool.jobs.empty()
     assert pool.respawns == [0]
     row = results.load_task_result(pool.root, task_id, strict=True)
-    # A signal death takes the same one retry as an exit code (CANDIDATE_v2 §2(e)); the row names the signal.
+    # A signal death takes the same one retry as an exit code (ARCHITECTURE §5); the row names the signal.
     assert row["status"] == "interrupted" and (exitcode > 0 or "signal 11" in row["result"])
     assert not [event for event in pool.events.queue if event.get("type") == "task_done"]
     assert [(task["id"], task["_attempt"]) for task in queue.PENDING] == [(task_id, 2)]

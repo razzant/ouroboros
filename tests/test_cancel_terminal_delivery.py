@@ -287,8 +287,8 @@ def test_deliver_final_message_live_registers_owed_before_enqueue(tmp_path):
     assert td.pending_deliveries(tmp_path) == []
 
 def test_a_dead_bus_proxy_leaves_the_delivery_owed_and_fabricates_no_terminal(tmp_path, monkeypatch):
-    """CANDIDATE_v2 §0 row 8: an injected proxy whose manager died answers ``ENQUEUE_UNAVAILABLE``: the owed row
-    stays for the next generation's replay and no terminal is written for the task; without an endpoint the
+    """A lost bus is no delivered terminal: an injected proxy whose manager died answers ``ENQUEUE_UNAVAILABLE``: the
+    owed row stays for the next generation's replay and no terminal is written for the task; without an endpoint the
     lost server bus (``EventBusLost``) answers the same. A live bus answers ``queued`` (the quiet direction)."""
     from ouroboros.task_results import load_task_result
     from supervisor import terminal_delivery as td, workers
