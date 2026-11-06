@@ -753,7 +753,7 @@ def recorded_system_checkout(result: Dict[str, Any]) -> Dict[str, str]:
 def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any], *,
                     deadline_at: str = "", authority_source: Optional[Dict[str, Any]] = None,
                     checkout: Optional[Dict[str, str]] = None, successor_task_id: str = "",
-                    drive_mode: str = "", stop_note: str = "") -> str:
+                    drive_mode: str = "", stop_note: str = "", tree_note: str = "") -> str:
     """The successor's first message: host-authored FACTS, the owner's words verbatim.
 
     It frames nothing as a decision: the model judges whether and how to go on and asks the owner in this
@@ -788,6 +788,7 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
         "verification) or rejected, "
         "and the old task's stopped delegated runs are yours to continue with delegate_start(subagent_id=..., "
         "continue_from=<run_id>, prompt=...) instead of redoing them.",
+        *([tree_note] if tree_note else []),
         result_line,
         *([stop_note] if stop_note else []),
         "Decide whether and how to continue; if the right next step is unclear (for example the work "
