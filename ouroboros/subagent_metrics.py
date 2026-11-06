@@ -375,14 +375,16 @@ def read(root, row_id, *, row_identity=None, purpose=None):
 
 
 def seat_facts(root, seats):
-    """Each review seat's measured answers, silences and mean seconds per surface (``review``, ``plan``) on its
-    current target (``seats`` = ``(row_id, target)`` pairs), for ``## Review seat activity``: one display read
-    for the pool (the usage display wait, then unknown); ``"unknown"`` without an observation, never a zero."""
+    """Each review seat's measured answers, silences and mean seconds per surface (``review``, ``plan``; a
+    session row's plan-mode runs count under ``plan`` too) on its current target (``seats`` = ``(row_id,
+    target)`` pairs), for ``## Review seat activity``, with the store's coverage: one display read for the pool
+    (the usage display wait, then unknown); ``"unknown"`` without an observation, never a zero."""
     from ouroboros.runtime_limits import USAGE_DISPLAY_LOCK_TIMEOUT_SEC
 
-    found = [{} for _ in seats]
+    found, coverage = [{} for _ in seats], {"state": "unknown", "stream": "unavailable"}
     try:
         with store.open_store(root, write=False, wait_sec=USAGE_DISPLAY_LOCK_TIMEOUT_SEC) as txn:
+            coverage = (txn.meta(CURSOR) or {}).get("coverage") or {"state": "unknown", "stream": "not_observed"}
             for measured, (row_id, target) in zip(found, seats):
                 for row in txn.set_rows(set_name("subagent_metrics", row_id)).values():
                     if row.get("purpose") in ("review", "plan") and (row.get("row_identity") or {}).get("target_id") == target:
@@ -394,12 +396,12 @@ def seat_facts(root, seats):
                                     sec=seat["sec"] + float(samples.get("sum_sec") or 0.0))
     except Exception:
         log.debug("review seat measurements unavailable", exc_info=True)
-        found = [{} for _ in seats]
+        found, coverage = [{} for _ in seats], {"state": "unknown", "stream": "unavailable"}
     for measured in found:
         for seat in measured.values():
             count, total = seat.pop("n"), seat.pop("sec")
             seat["mean_sec"] = round(total / count) if count else None
-    return [measured or "unknown" for measured in found]
+    return {"coverage": coverage, "seats": [measured or "unknown" for measured in found]}
 
 
 def fact_line(task, *, drive_root):

@@ -379,7 +379,8 @@ def review_facts_block(snapshot: Optional[TaskSettingsSnapshot] = None, *,
                 # A session seat logs in itself; an api seat answers only with its provider's key.
                 if not session and not model_has_credentials_in_settings(slot.model, dict(settings)):
                     without_credentials.append(pool[-1]["subagent_id"])
-            for seat, measured in zip(activity, seat_facts(resolve_data_dir(), [(s.subagent_id or s.slot_id, s.session_target or s.model) for s in slots])):
+            seats_measured = seat_facts(resolve_data_dir(), [(s.subagent_id or s.slot_id, s.session_target or s.model) for s in slots])
+            for seat, measured in zip(activity, seats_measured["seats"]):
                 seat["measured"] = measured
         # No marked row: the seats built are the one Main seat (``review_pool_slots``).
         main_alone = state["state"] == "empty" and bool(slots)
@@ -415,7 +416,7 @@ def review_facts_block(snapshot: Optional[TaskSettingsSnapshot] = None, *,
         facts["migration_snapshot"] = migration["snapshot"]
     if activity_out is not None and activity:
         activity_out.append(f"{REVIEW_ACTIVITY_HEADER}\n\n" + json.dumps(
-            {"seats": activity}, ensure_ascii=False, separators=(",", ":")))
+            {"seats": activity, "measured_coverage": seats_measured["coverage"]}, ensure_ascii=False, separators=(",", ":")))
     return review_pool_host_section(facts)
 
 

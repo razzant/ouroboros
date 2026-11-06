@@ -168,6 +168,10 @@ def test_each_seat_shows_how_often_it_answered_and_how_long_on_its_current_targe
                                                   "plan": {"answered": 0, "no_answer": 1, "mean_sec": None}}
     # A seat never observed reads unknown, not zero answers.
     assert activity["packet-key"]["measured"] == activity["session-key"]["measured"] == "unknown"
+    out: list = []
+    review_facts_block(activity_out=out)  # the store's own coverage rides beside the counts, once per block
+    coverage = json.loads(out[0].split("\n\n", 1)[1])["measured_coverage"]
+    assert coverage == subagent_metrics.read(tmp_path, "critic-key")["coverage"] and coverage.get("state")
 
 
 def test_the_cost_hint_of_a_cold_seat_never_waits_on_the_provider_catalog(tmp_path, monkeypatch):
