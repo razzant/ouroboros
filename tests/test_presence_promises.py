@@ -54,7 +54,8 @@ def _turn(root, account, conversation, number=1):
 
 
 def _promise(registry, objective):
-    reply = registry.execute("schedule_followup", {"objective": objective, "run_at": RUN_AT, "relation": "independent"})
+    reply = registry.execute("schedule_followup", {"objective": objective, "run_at": RUN_AT, "relation": "independent",
+                                                   "destination": "place"})
     assert reply.startswith("FOLLOWUP_SCHEDULED"), reply
     return reply.split("follow-up ", 1)[1].split(" ", 1)[0]
 
@@ -184,7 +185,8 @@ DUE = "2000-01-01T00:00:00+00:00"
 
 
 def _due_promise(registry, objective):
-    reply = registry.execute("schedule_followup", {"objective": objective, "run_at": DUE, "relation": "independent"})
+    reply = registry.execute("schedule_followup", {"objective": objective, "run_at": DUE, "relation": "independent",
+                                                   "destination": "place"})
     assert reply.startswith("FOLLOWUP_SCHEDULED"), reply
     return reply.split("follow-up ", 1)[1].split(" ", 1)[0]
 

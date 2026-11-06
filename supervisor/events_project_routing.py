@@ -546,7 +546,10 @@ def _promote_chat_to_task_outcome(evt: Dict[str, Any], ctx: Any) -> Dict[str, An
 
         claim_promotion_intent(ctx.DRIVE_ROOT, evt)
         evt = {**evt, "_admission_reserved": True}
-        if str(evt.get("source") or "").strip() and not evt.get("_source_prepared"):
+        from ouroboros.presence_owner_contact import private_start_refusal
+
+        private_refusal = private_start_refusal(ctx.DRIVE_ROOT, evt)
+        if not private_refusal and str(evt.get("source") or "").strip() and not evt.get("_source_prepared"):
             threading.Thread(
                 target=_prepare_promote_source_off_loop,
                 args=(dict(evt), ctx),
@@ -555,10 +558,10 @@ def _promote_chat_to_task_outcome(evt: Dict[str, Any], ctx: Any) -> Dict[str, An
             ).start()
             return {"status": "preparing", "task_id": task_id}
         source_error = str(evt.get("_source_error") or "")
-        if source_error:
+        if private_refusal or source_error:
             outcome = {
                 "status": "needs_manual_target",
-                "reason": "project_source_error",
+                "reason": private_refusal or "project_source_error",
                 "never_admitted": True,
                 "detail": source_error,
                 "task_id": task_id,

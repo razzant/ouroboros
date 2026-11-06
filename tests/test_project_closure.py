@@ -49,7 +49,8 @@ def test_closed_is_optional_reversible_metadata_without_a_routing_change(room):
 
 
 @pytest.mark.parametrize("value", [True, False, "closed", {}, [], {**CLOSED, "by": ""},
-                                  {**CLOSED, "at": None}, {**CLOSED, "note": 1}, {**CLOSED, "extra": "x"}])
+                                  {**CLOSED, "at": None}, {**CLOSED, "note": 1}, {**CLOSED, "extra": "x"},
+                                  {**CLOSED, "delivery": ""}])
 @pytest.mark.parametrize("already_closed", [False, True])
 def test_malformed_closure_refuses_the_whole_partial_update(room, value, already_closed):
     if already_closed:
@@ -283,3 +284,75 @@ def test_owner_update_and_client_contracts_agree(room):
     assert _js_typedef_fields((web / "api_types.js").read_text(), "ProjectClosure") == set(typing.get_type_hints(ProjectClosure))
     assert _js_typedef_fields((web / "api_types.js").read_text(), "ProjectEntry") == set(typing.get_type_hints(ProjectEntry))
     assert ("boolean=", "closed") in _js_typedef_properties((web / "client_contract_types.js").read_text(), "ProjectUpdateRequest")
+
+
+@pytest.mark.parametrize("order", ["before", "after"])
+def test_closing_a_project_makes_its_note_the_rooms_page_and_links_its_own_notice_by_its_delivery(tmp_path, monkeypatch,
+                                                                                                  order):
+    """S2: the closing note is the room's last page over its open rows, signed by the closing focus as
+    ``chronicle_write(kind='page')`` signs one, then the host posts its System notice under the delivery the page names:
+    that one row, landed before the page fixed its rows or after it, is the page's, never an open row of my other
+    conversations, and the page's reader names its address; a reopening's notice is its own and keeps the project in
+    view; an already closed project writes no second page or notice; a refused page leaves the closure standing, says
+    why and still owes its notice; nothing open writes none, and the closed record holds the notice: out of my view
+    until a reopening."""
+    from ouroboros import chat_chain, memory_inventory as mi, memory_view as mv
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.tools import chronicle
+    from ouroboros.tools.registry import ToolContext
+    from tests import _memory_inventory_shared as shared
+
+    rooms = shared.world(tmp_path)
+    alpha = str(rooms["alpha"])
+    ds.append(tmp_path, "chat", {"chat_id": int(alpha), "direction": "in", "ts": "2026-09-06T00:00:00+00:00",
+                                 "text": "is the export done?", "source": "web", "client_message_id": "alpha-late"})
+    opened = {entry[0]["row_sha256"] for entry in mi.open_room_rows(tmp_path, alpha)}
+    delivered = {}
+
+    def deliver(event, **_kw):  # the bus stores a System row once per delivery, as the outbox does
+        if event["delivery_id"] not in delivered:
+            delivered[event["delivery_id"]] = row = {
+                "chat_id": int(event["chat_id"]), "direction": "system", "type": "project_closure", "text": event["text"],
+                "ts": f"2026-09-06T00:0{len(delivered) + 1}:00+00:00", "delivery_id": event["delivery_id"]}
+            ds.append(tmp_path, "chat", row)
+        return terminal_delivery.ENQUEUE_QUEUED
+
+    monkeypatch.setattr(terminal_delivery, "enqueue_terminal_delivery_outcome", lambda _root, event, **kw: deliver(event))
+    publish = chronicle.publish_covered_page
+    if order == "before":  # the notice lands after the page read its open rows, before the page fixes its own
+        def landed_first(root, store, author, room, text, covers, **kw):
+            deliver({"chat_id": room, "text": "closed", "delivery_id": kw.get("closure_delivery", "")})
+            return publish(root, store, author, room, text, covers, **kw)
+        monkeypatch.setattr(chronicle, "publish_covered_page", landed_first)
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="one", current_chat_id=1)
+    note = "Finished: the export works; nothing is left open."
+    said = _close_project(ctx, "alpha", note)
+    assert said.startswith("OK: project alpha is closed.") and "is its room's page" in said, said
+    store = ChronicleStore(tmp_path)
+    [page] = store.room_records(alpha, kinds=("page",))
+    assert page["text"] == note and set(page["covers"]["rows"]) == opened and page["covers"]["mode"] == "open_to"
+    assert page["metadata"]["closes_project"] == "alpha" and page["author"]["kind"] == "mind"
+    [notice] = delivered.values()
+    assert page["metadata"]["closure_delivery"] == notice["delivery_id"] and len(mi.open_room_rows(tmp_path, alpha)) == 1
+    main = {"id": "main0001", "type": "task", "chat_id": 1, "_is_direct_chat": True}
+
+    def held():
+        view = mv.capture_memory_view(tmp_path, main, mv.view_spec_for_task(main, tmp_path))
+        return {room["room_id"] for group in view.conversations for room in group["rooms"]}
+    assert alpha not in held()  # open there, linked below its page
+    reader = chronicle._memory_read(ctx, node_id=page["id"])
+    assert chat_chain.format_address(chat_chain.row_address(notice)) in reader, reader
+    assert "already closed" in _close_project(ctx, "alpha", "Again.") and len(store.room_records(alpha, kinds=("page",))) == 1
+    assert _close_project(ctx, "alpha", "A new export failure.", reopen=True).startswith("OK: project alpha is open.")
+    assert len(delivered) == 2 and alpha in held()  # the reopening's own notice keeps the project in view
+    monkeypatch.setattr(chronicle, "publish_covered_page", lambda *a, **kw: (_ for _ in ()).throw(OSError("disk full")))
+    refused = _close_project(ctx, "beta", "Beta is done.")
+    assert "Its page was not written (OSError: disk full); the closure stands." in refused and len(delivered) == 3
+    assert registry.get_project(tmp_path, "beta")["closed"]["note"] == "Beta is done."
+    registry.create_project(tmp_path, "gamma", name="Gamma")
+    gamma = str(registry.get_project(tmp_path, "gamma")["chat_id"])
+    assert "Nothing is open in its room: no page." in _close_project(ctx, "gamma", "Never started.")
+    assert registry.get_project(tmp_path, "gamma")["closed"]["delivery"] == list(delivered)[-1]
+    assert gamma not in held()  # its one row, the notice, is the closed record's: nothing is open there
+    assert _close_project(ctx, "gamma", "Started after all.", reopen=True).startswith("OK: project gamma is open.")
+    assert gamma in held()  # reopening removes the record: its notices are the room's open rows again

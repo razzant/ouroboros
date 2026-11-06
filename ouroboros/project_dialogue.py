@@ -286,40 +286,38 @@ def bound_room_chat(rooms: Callable[..., int], row: Dict[str, Any]) -> int:
     return int(rooms(row.get("task_id"), row.get("parent_task_id"), row.get("root_task_id")) or 0)
 
 
-
 def _source_ref_identity(ref: Dict[str, Any]) -> Optional[tuple]:
     try:
         chat_id = int(ref.get("chat_id") or 0)
     except (TypeError, ValueError):
         return None
-    return (
-        chat_id, str(ref.get("client_message_id") or ""), str(ref.get("ts") or ""),
-        str(ref.get("text_sha256") or ""),
-    )
+    return (chat_id, str(ref.get("client_message_id") or ""), str(ref.get("ts") or ""),
+            str(ref.get("text_sha256") or ""))
 
 
 def _entry_source_identities(entry: Dict[str, Any]) -> set:
+    """An owner row's source keys: an inbound row's, or a card's recorded answer's, keyed by the owner's words, not its frame."""
+    text = entry.get("text")
     if str(entry.get("direction") or "") != "in":
-        return set()
+        from ouroboros.owner_relay import owner_text, quotable_owner_row
+
+        text = owner_text(entry) if entry.get("type") == "quiz_answer" and quotable_owner_row(entry) else ""
+        if not text:
+            return set()
     try:
         chat_id = int(entry.get("chat_id", 1))
     except (TypeError, ValueError):
         chat_id = 1
     client_id = str(entry.get("client_message_id") or "")
     ts = str(entry.get("ts") or "")
-    text_hash = _text_sha256(entry.get("text"))
-    return {
-        (chat_id, client_id, ts, text_hash), (chat_id, "", ts, text_hash),
-        (chat_id, client_id, "", text_hash), (chat_id, "", "", text_hash),
-    }
+    text_hash = _text_sha256(text)
+    return {(chat_id, client, stamp, text_hash) for client in (client_id, "") for stamp in (ts, "")
+            if client or entry.get("direction") == "in"}
 
 
 def entry_matches_source_ref(entry: Dict[str, Any], refs: Iterable[Dict[str, Any]]) -> bool:
     """Whether ``entry`` is the original row identified by one binding ref."""
-    ref_keys = {
-        key for ref in refs if isinstance(ref, dict)
-        if (key := _source_ref_identity(ref)) is not None
-    }
+    ref_keys = {key for ref in refs if isinstance(ref, dict) if (key := _source_ref_identity(ref)) is not None}
     return bool(_entry_source_identities(entry) & ref_keys)
 
 
@@ -629,6 +627,8 @@ ROUTING_REFUSAL_CAUSES: Dict[str, str] = {
     "project_scope_conflict": "the task already belongs to another project",
     "missing_task_or_project": "no task or project was named",
     "project_unavailable": "the project is no longer available",
+    "private_owner_source_invalid": "its owner answer could not be verified",
+    "private_owner_source_unavailable": "its owner answer could not be read",
     # Historical routing-card refusal codes, retained for receipt replay.
     "target_unspecified": "no destination was chosen",
     "invalid_project_id": "that project id is not valid",

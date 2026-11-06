@@ -231,16 +231,15 @@ def test_the_standing_facts_count_the_helpers_parts_and_my_folded_page_and_show_
     assert facts == mi.room_facts(store, "1", mi.open_room_rows(tmp_path, "1"), row_lineage(tmp_path), 0)
     assert (facts["rows"], facts["pages"], facts["earliest"][:16], facts["last_covered"][:16]) == (
         3, 2, "2026-09-03T00:05", "2026-09-03T00:06")  # rows 15 (the transport's, Main's too), 18 and 19 stay open
-    header = mv.render_room(snapshot).split("## This room (Main) — head ", 1)[1].split("\n", 1)[0]
-    assert header.endswith(f"; open 2026-09-03 00:05 → 2026-09-03 00:09; people {facts['people']}, mine {facts['mine']}, "
-                           f"task facts {facts['task_facts']}, ~{facts['chars']} chars; my notes not yet sealed: 0; "
-                           "pages of this room: 2, last covered row 2026-09-03 00:06")
+    header = mv.render_room(snapshot).split("### This room now\n", 1)[1].split("\n", 1)[0]  # the room's last facts
+    assert header == (f"open 2026-09-03 00:05 → 2026-09-03 00:09; people {facts['people']}, mine {facts['mine']}, "
+                      f"task facts {facts['task_facts']}, ~{facts['chars']} chars; my notes not yet sealed: 0; "
+                      "pages of this room: 2, last covered row 2026-09-03 00:06")
     assert "sealed up to" not in header and "through" not in header
     # Alpha: the note is unsealed and the room has no page; its one part counts in the story, not as a page.
-    alpha = next(room for room in snapshot.live_rooms if room["room_id"] == made.alpha)["facts"]
+    alpha = next(room for group in snapshot.conversations for room in group["rooms"] if room["room_id"] == made.alpha)["facts"]
     assert (alpha["notes"], alpha["pages"], alpha["last_covered"]) == (1, 0, "")
-    assert f"; my notes not yet sealed: 1; no page of this room yet\nmemory_read(room_id='{made.alpha}', rows=true)" in (
-        mv.render_room(snapshot))
+    assert f"; no page of that room yet; memory_read(room_id='{made.alpha}', rows=true)\nnote " in mv.render_room(snapshot)
 
 
 def test_story_reduction_is_not_a_claim_that_the_origin_room_shrank(tmp_path):

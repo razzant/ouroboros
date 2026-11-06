@@ -449,7 +449,7 @@ def test_a_rescued_start_keeps_the_core_and_the_words_a_whole_start_shows(tmp_pa
     assert core_rescued == core_whole
     assert section(room_rescued, "## This room (Main)") == section(room_whole, "## This room (Main)")
     assert "next please" in section(room_rescued, "## This room (Main)")
-    assert section(room_rescued, "## Live rooms") == section(room_whole, "## Live rooms")
+    assert section(room_rescued, "## Other conversations") == section(room_whole, "## Other conversations")
 
 
 def test_a_start_whose_route_holds_the_observation_sends_it_whole(tmp_path, monkeypatch):
