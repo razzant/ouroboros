@@ -40,13 +40,23 @@ export function syncPolicyState(root, meta) {
         const node = root?.querySelector(`[data-policy-state="${key}"]`);
         if (node) node.textContent = text;
     };
+    // One value said once ("Advisory now and for new tasks"); the facts are spelled out only where they differ.
     const access = state.access || {};
+    const now = policyValueLabel(access.current_process || access.effective);
+    const later = policyValueLabel(access.configured);
     render('access', access.restart_required
-        ? `Saved: ${policyValueLabel(access.configured)} · Current process: ${policyValueLabel(access.current_process || access.effective)} · After restart: ${policyValueLabel(access.configured)} · Restart required`
-        : `Current process: ${policyValueLabel(access.current_process || access.effective)} · After restart: ${policyValueLabel(access.configured)}`);
-    const suffix = (item) => item.active_task_snapshot
-        ? `Saved: ${policyValueLabel(item.configured)} · Current process: ${policyValueLabel(item.current_process || item.effective)} · Next task: ${policyValueLabel(item.next_task || item.configured)} · Current task keeps its start snapshot`
-        : `Current process: ${policyValueLabel(item.current_process || item.effective)} · Next task: ${policyValueLabel(item.next_task || item.configured)}`;
+        ? `Saved: ${later} · Current process: ${now} · After restart: ${later} · Restart required`
+        : now === later ? `${now} now and after restart` : `Current process: ${now} · After restart: ${later}`);
+    const suffix = (item) => {
+        const saved = policyValueLabel(item.configured);
+        const current = policyValueLabel(item.current_process || item.effective);
+        const next = policyValueLabel(item.next_task || item.configured);
+        const running = item.active_task_snapshot ? '; the running task keeps the value it started with' : '';
+        if (current === next && (!item.active_task_snapshot || saved === current)) return `${current} now and for new tasks${running}`;
+        return item.active_task_snapshot
+            ? `Saved: ${saved} · Current process: ${current} · Next task: ${next} · Current task keeps its start snapshot`
+            : `Current process: ${current} · Next task: ${next}`;
+    };
     render('supervisor', suffix(state.supervisor || {}));
     // The consciousness level's line, only where the server reports it (an older one has one level).
     if (state.supervisor_consciousness) render('supervisor_consciousness', suffix(state.supervisor_consciousness));

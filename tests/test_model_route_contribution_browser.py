@@ -41,7 +41,7 @@ def test_settings_search_and_exact_response_maximum(route_ui):
     page = route_ui['page']
     page.goto(route_ui['url'] + '/#settings')
     page.locator('[data-settings-tab="models"]').click()
-    page.wait_for_function("document.querySelector('#s-websearch-preview').textContent.includes('openrouter')")
+    page.wait_for_function("document.querySelector('#s-websearch-preview').textContent.includes('OpenRouter')")
     assert page.locator('#s-websearch-model').input_value() == 'gpt-5.2'
     page.locator('#s-websearch-source').select_option('openrouter')
     page.locator('#s-websearch-model').fill('vendor/future-search')

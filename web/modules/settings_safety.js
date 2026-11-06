@@ -290,8 +290,8 @@ export async function refreshSafetySkipCounter(root, { logsTail = apiClient.logs
         }).length;
         // The tail may cover less than a day, including when it has no matches.
         el.textContent = n > 0
-            ? `${n} safety check(s) waved through among inspected recent events dated within 24h.`
-            : 'No waved-through safety checks found among inspected recent events dated within 24h.';
+            ? `${n} safety ${n === 1 ? 'check' : 'checks'} let through in the last 24 h.`
+            : 'No safety checks let through in the last 24 h.';
     } catch {
         el.textContent = '';
     }

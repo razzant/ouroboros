@@ -116,7 +116,7 @@ def test_cyber_pro_names_a_kept_blocking_choice_beside_its_control(direct_server
                 note = page.locator('[data-policy-state="review"]')
                 blocking = page.locator('[data-enforcement-group] [data-effort-value="blocking"]')
                 assert blocking.get_attribute("aria-pressed") == "true"  # the owner's choice is kept
-                assert "Current process: Blocking" in note.inner_text()
+                assert "Blocking now and for new tasks" in note.inner_text()  # one value, said once
                 assert "Cyber Pro: Blocking is not enforced; review findings do not block actions" in note.inner_text()
                 access_copy = page.locator('[data-settings-panel="behavior"] .form-section', has_text="Access level")
                 assert "review findings do not block actions in Cyber Pro" in access_copy.inner_text()
@@ -135,7 +135,7 @@ def test_cyber_pro_names_a_kept_blocking_choice_beside_its_control(direct_server
                 assert not page.locator('[data-confirm-ok]').is_visible()  # nothing is confirmed or saved
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
                 access_note = page.locator('[data-policy-state="access"]')
-                assert "Current process: Cyber Pro" in access_note.inner_text()
+                assert "Cyber Pro now and after restart" in access_note.inner_text()
                 note.scroll_into_view_if_needed()
                 page.screenshot(path=str(evidence / f"settings-cyber-blocking-draft-pro-{theme}-{width}.png"))
                 access_note.scroll_into_view_if_needed()

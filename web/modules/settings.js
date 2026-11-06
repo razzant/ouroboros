@@ -4,7 +4,8 @@ import { refreshModelCatalog, watchAccountModelCatalog } from './settings_catalo
 export { accountCatalogRefreshKey } from './settings_catalog.js';
 import { getNotifier } from './notifications.js';
 import { mountDesktopShell } from './desktop_shell.js';
-import { bindEffortSegments, syncEffortSegments, readCustomSecretDraft, collectCustomSecretDraft, paintSettingsFieldErrors, setButtonBusy, settingsWriteFailure } from './settings_controls.js';
+import { bindEffortSegments, syncEffortSegments, readCustomSecretDraft, collectCustomSecretDraft, paintSettingsFieldErrors, setButtonBusy, settingsWriteFailure,
+    webSearchPreviewWords } from './settings_controls.js';
 import { bindLocalModelControls } from './settings_local_model.js';
 import { bindAutostartControl } from './settings_autostart.js';
 import { applyMcpSettings, collectMcpSettings, initMcpSettings, mcpDraftSnapshot, validateMcpSettings } from './mcp_settings.js';
@@ -1136,14 +1137,10 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         try {
             const data = await apiClient.webSearchPreview(searchSelectionEdited ? collectSearchSelection() : {});
             if (sequence !== searchPreviewSequence || !target.isConnected) return;
-            // The help text already says skills, MCP and browser tools stay independent.
-            const legacy = data.ignored_legacy_model ? ` Anthropic does not apply the saved model ${data.ignored_legacy_model}; edit Source or Model to change it.`
-                : data.unapplied_model ? ` No built-in search serves the saved model ${data.unapplied_model}; Auto uses the recommended models.` : '';
-            const causes = { no_credentials: 'no API key', package_missing: 'package not installed', legacy_openai_base_url: 'OPENAI_BASE_URL is set' };
-            const unavailable = (data.unavailable || []).map((leg) => `${leg.source} (${causes[leg.unavailable_reason] || 'not ready'})`).join(', ');
-            // provider_default names the source's recommended model (search_routes.SEARCH_MODELS), not the owner's.
-            const route = (leg) => `${leg.source}${leg.model ? ` · ${leg.model}${leg.model_source === 'provider_default' ? ' (recommended)' : ''}` : ''}`;
-            target.textContent = data.error || `Eligible routes: ${(data.legs || []).map(route).join(' → ') || 'none'}.${unavailable ? ` Unavailable: ${unavailable}.` : ''} Uses saved account credentials.${legacy}`;
+            // The help text already says skills, MCP and browser tools stay independent; a source is named by its option.
+            const names = new Map(Array.from(byId('s-websearch-source')?.options || [], (option) => [option.value, option.textContent]));
+            const { main, details } = webSearchPreviewWords(data, (id) => names.get(id) || id);
+            target.innerHTML = `${escapeHtml(main)}${details ? ` <details class="ui-disclosure"><summary>Details</summary>${escapeHtml(details)}</details>` : ''}`;
         } catch (_) { if (sequence === searchPreviewSequence && target.isConnected) target.textContent = 'Search routes could not be checked. Your choices are kept.'; }
     }
     const onSearchSelectionEdited = () => { searchSelectionEdited = true; void refreshSearchPreview(); };

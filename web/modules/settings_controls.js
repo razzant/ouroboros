@@ -135,6 +135,28 @@ export function settingsWriteFailure(error, label = 'Settings') {
     return { unknown: true, text: `${label} outcome is unknown: ${detail}` };
 }
 
+const SEARCH_GAPS = { no_credentials: 'no API key', package_missing: 'package not installed', legacy_openai_base_url: 'OPENAI_BASE_URL is set' };
+
+/** The web search preview in owner words: the sources in the order they are tried (each named by `name`, the
+ *  Source select's own word for its id) and a saved model a source ignores stay in the main line; the models, the
+ *  sources not available now and the credential note are Details. */
+export function webSearchPreviewWords(data, name = (id) => id) {
+    if (data?.error) return { main: String(data.error), details: '' };
+    const legs = data?.legs || [];
+    const ignored = data?.ignored_legacy_model ? ` Anthropic does not apply the saved model ${data.ignored_legacy_model}; edit Source or Model to change it.`
+        : data?.unapplied_model ? ` No built-in search serves the saved model ${data.unapplied_model}; Auto uses the recommended models.` : '';
+    // provider_default names the source's recommended model (search_routes.SEARCH_MODELS), not the owner's.
+    const models = legs.filter((leg) => leg.model)
+        .map((leg) => `${name(leg.source)} · ${leg.model}${leg.model_source === 'provider_default' ? ' (recommended)' : ''}`);
+    const unavailable = (data?.unavailable || [])
+        .map((leg) => `${name(leg.source)} (${SEARCH_GAPS[leg.unavailable_reason] || 'not ready'})`);
+    return {
+        main: `${legs.length ? `Uses ${legs.map((leg) => name(leg.source)).join(', then ')}.` : 'No search source is ready.'}${ignored}`,
+        details: [models.length ? `${models.join('; ')}.` : '', unavailable.length ? `Not available now: ${unavailable.join(', ')}.` : '',
+            'Uses saved account credentials.'].filter(Boolean).join(' '),
+    };
+}
+
 /* The one Settings section recipe (DESIGN.md principle 7; the 06.11 convergence): a title, one authored lead in
    owner words, the controls, then everything else behind one Details disclosure, where the section's former copy
    lives unchanged. Quiet actions dock in the title row. Every tab's sections come from here, so Models, Agents and
