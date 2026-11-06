@@ -2,7 +2,7 @@
 
 A snapshot is plain data (``memory_view.MemoryViewSnapshot``), so the floor can be pinned
 at the sizes measured on the owner's copy without a chronicle: 377 retold-memory pointers
-in 78 rooms, twelve marks, a dozen live rooms, the current room's retold page, its open
+in 78 rooms, twelve marks, a dozen other conversations, the current room's retold page, its open
 conversation and one line per task. Shapes follow ``capture_memory_view`` exactly; a
 capture-shape test in ``test_memory_view_floor`` keeps the two from drifting.
 """
@@ -55,20 +55,27 @@ def marks(count: int = 12) -> List[Dict[str, Any]]:
              "date": "2026-09-01", "target": f"node legacy-b00-r{1000 + i}", "quote": ""} for i in range(count)]
 
 
-def live_room(i: int, *, notes: int = 0, words: int = 0, word_chars: int = 300) -> Dict[str, Any]:
+def conversation(i: int, *, notes: int = 0, words: int = 0, word_chars: int = 300, owner: bool = False,
+                 engaged: bool = True) -> Dict[str, Any]:
+    """One other conversation of one room in the shape ``memory_view_conversations.capture`` returns: ``words``
+    people's (or, with ``owner``, my human's) words whole; a silent room is one line."""
     room = str(2000 + i)
     first, last = _ts(60 + i), _ts(60 + i, 300)
     spoken = []
-    for n in range(words):
-        ts = _ts(60 + i, 10 + n)
-        head = f"[{ts}; Owner; {_address(room, ts, i * 100 + n)}]"
-        spoken.append({"line": f"{head} " + "s" * word_chars, "head": head, "kind": "human",
-                       "address": _address(room, ts, i * 100 + n), "ts": ts, "chars": word_chars,
-                       "pos": 20_000 + i * 100 + n})
-    return {"room_id": room, "label": f"Project room {i} [chat_id={room}]", "key": 20_000 + i * 100,
+    for n in range(words if engaged else 0):
+        ts, address = _ts(60 + i, 10 + n), _address(room, _ts(60 + i, 10 + n), i * 100 + n)
+        head = f"[{ts}; {'Owner' if owner else 'Sasha'}; {address}]"
+        spoken.append({"line": f"{head} " + "s" * word_chars, "head": head, "kind": "human", "owner_side": owner,
+                       "address": address, "ts": ts, "chars": word_chars, "pos": 20_000 + i * 100 + n,
+                       "id": f"{room}:{address}", "rank": 2})
+    label = f"Project room {i} [chat_id={room}]"
+    item = {"room_id": room, "label": label, "engaged": engaged, "first": 20_000 + i * 100,
             "facts": facts(rows=3, people=words or 1, mine=1, first=first, last=last, notes=notes), "words": spoken,
-            "notes": [{"id": f"note-{i}-{n}", "date": "2026-09-01", "role": "root", "text": "What this project is."}
-                      for n in range(notes)]}
+            "notes": [{"id": f"note-{i}-{n}", "date": "2026-09-01", "ts": first, "role": "root",
+                       "text": "What this project is."} for n in range(notes)],
+            "tasks": [], "silent": "" if engaged else f"last {mv._minute(last)}; 1 words nobody considered; "
+                                                      f"memory_read(room_id='{room}', rows=true)"}
+    return {"key": f"project:{room}", "label": label, "latest": last, "running": [], "place": False, "rooms": [item]}
 
 
 def facts(*, rows: int = 3, people: int = 1, mine: int = 1, chars: int = 2_400, first: str = "", last: str = "",
@@ -113,15 +120,17 @@ def room(room_id: str = "1", *, label: str = "Main", legacy: int = 0, legacy_cha
 
 
 def snapshot(*, role: str = "integrator", room_facts: Optional[Dict[str, Any]] = None, story: Any = (),
-             live: Any = (), mark_count: int = 0, owner_words: str = "",
-             live_rooms: Optional[str] = None) -> mv.MemoryViewSnapshot:
-    """A snapshot of ``role``'s default spec (``live_rooms`` overrides it) over synthetic facts."""
-    spec = dataclasses.replace(mv.ROLE_DEFAULTS[role], live_rooms=live_rooms or mv.ROLE_DEFAULTS[role].live_rooms,
-                               room_id=room_facts["room_id"] if room_facts else None)
+             conversations: Any = (), mark_count: int = 0, owner_words: str = "",
+             other_conversations: Optional[bool] = None) -> mv.MemoryViewSnapshot:
+    """A snapshot of ``role``'s default spec (``other_conversations`` overrides it) over synthetic facts."""
+    default = mv.ROLE_DEFAULTS[role].other_conversations
+    spec = dataclasses.replace(mv.ROLE_DEFAULTS[role], room_id=room_facts["room_id"] if room_facts else None,
+                               other_conversations=default if other_conversations is None else other_conversations)
     status = {"folded": 0, "total": 23, "pages_by_me": 0, "latest_by_me": "", "helper_pages": 0, "parts": 0,
               "open_records": 377, "open_rows": 9_422, "open_chars": 2_001_746, "helper_route": "light"} if spec.story else {}
     return mv.MemoryViewSnapshot(spec=spec, store_status={"state": "active"}, frontier={"status": "exact", "pos": 12_400},
-                                 story=tuple(story) if spec.story else (), room=room_facts, live_rooms=tuple(live),
+                                 story=tuple(story) if spec.story else (), room=room_facts,
+                                 conversations=tuple(conversations) if spec.other_conversations else (),
                                  marks=tuple(marks(mark_count)), legacy_blocks=status, owner_words=owner_words)
 
 
@@ -133,17 +142,17 @@ def actor(name: str) -> mv.MemoryViewSnapshot:
     main_lane = [spoken(0, "human", 400), spoken(1, "ouroboros", 5_600), spoken(2, "human", 1_600),
                  spoken(3, "ouroboros", 1_200)]
     project_lane = [spoken(i, "human" if i % 2 else "ouroboros", 1_100) for i in range(5)]
-    live12 = [live_room(i) for i in range(12)]
+    live12 = [conversation(i) for i in range(12)]
     main_room = room("1", legacy=23, legacy_chars=8_400, lane1=main_lane, lane2=19)
     if name == "main":
-        return snapshot(room_facts=main_room, story=pointers(), live=live12, mark_count=12)
+        return snapshot(room_facts=main_room, story=pointers(), conversations=live12, mark_count=12)
     if name == "project":
         return snapshot(room_facts=room("257912875", label="Project X [chat_id=257912875]", legacy=8,
                                         legacy_chars=4_900, origins=1, lane1=project_lane, lane2=2),
-                        story=pointers(), live=live12, mark_count=12)
-    if name == "consciousness":  # Main's own view, and the words of people in the other live rooms
+                        story=pointers(), conversations=live12, mark_count=12)
+    if name == "consciousness":  # Main's own view, and the words of people in my other conversations
         return snapshot(role="consciousness", room_facts=main_room, story=pointers(),
-                        live=[live_room(i, words=2, word_chars=1_100) for i in range(12)], mark_count=12)
+                        conversations=[conversation(i, words=2, word_chars=1_100) for i in range(12)], mark_count=12)
     if name in ("child_project", "nanny"):
         return snapshot(role="child" if name == "child_project" else "nanny", story=pointers(),
                         room_facts=room("257912875", label="Project X [chat_id=257912875]", legacy=8,

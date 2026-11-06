@@ -27,7 +27,7 @@ from tests import _memory_inventory_shared as shared
 from tests.test_chronicle_tools import snapshot as tree
 from tests.test_common_story import G_TEXT, NANNY, _block, _ctx, _journal, _page, _part, _rooms, _snapshot, _story, _write
 
-PAGE = mv.ViewSpec("integrator", room_id="1", room_lanes=False, origin_words=False, live_rooms="none", marks="none",
+PAGE = mv.ViewSpec("integrator", room_id="1", room_lanes=False, origin_words=False, other_conversations=False, marks="none",
                    knowledge=False)  # the room page the proposal read compares
 
 

@@ -63,14 +63,14 @@ def test_ordinary_scale_fit_measurements(tmp_path, monkeypatch, rows):
     assert calls <= rows // 3 + 15, f'{rows} rows: at most rows/3 + 15 complete envelope measurements, got {calls}'
 
 
-def _near_even_plan(root, monkeypatch, window, tail=61, owner=5200, pad=2, shift=1):
+def _near_even_plan(root, monkeypatch, window, tail=61, owner=5199, pad=2, shift=1):
     """A small real start whose note's label sits within a token of its receipt clause, so each host step's own bytes
     can change whether the label saves: the whole request rounds differently beside every new address."""
     lane = [syn.spoken(i, 'ouroboros', 300) for i in range(2)]
     lane.append({**syn.spoken(90, 'human', owner), 'owner_side': True, 'carried': False})
     room = syn.room('1', lane1=lane)
     room['notes'] = [{'id': 'note-here-0', 'date': '2026-09-02', 'role': 'root', 'text': 'Where this stands. ' + 'x' * tail}]
-    snap = syn.snapshot(room_facts=room, story=syn.pages(2, 300), live_rooms='none')
+    snap = syn.snapshot(room_facts=room, story=syn.pages(2, 300), other_conversations=False)
     runtime = HostSection('runtime', '## runtime\n\n' + 'o' * (1600 + pad), '## runtime\n\nOperative.' + 'q' * shift)
     skills = HostSection('installed_skills', '## skills\n\n' + 's' * (1200 + pad), '## skills\n\nPurpose.')
     index = HostSection('knowledge_index', '## knowledge\n\n' + 'k' * 2400, '## knowledge\n\nOutline.')
@@ -94,11 +94,11 @@ def _hosts(plan):
 @pytest.mark.parametrize('window,shape,hosts,steps', [
     # Beside the second host form the label starts to save and the request fits: the index stays whole. Forms chosen
     # beside the first host form would price it a token over and outline the index for no physical need.
-    (4740, {}, [('runtime', False), ('installed_skills', False)], {'F2': 2, 'F5': 2, 'F8': 1}),
+    (4745, {}, [('runtime', False), ('installed_skills', False)], {'F2': 2, 'F5': 2, 'F8': 1}),
     # The window holds the request after the first step, and the next one pays only the start's room.
-    (4977, {}, [('runtime', False), ('installed_skills', True)], {'F2': 2, 'F5': 2}),
+    (4982, {}, [('runtime', False), ('installed_skills', True)], {'F2': 2, 'F5': 2}),
     # Three characters fewer, and beside the middle host form the whole request still rounds to the same price.
-    (4077, {'tail': 63, 'owner': 1600, 'pad': 0, 'shift': 0},
+    (4082, {'tail': 63, 'owner': 1600, 'pad': 0, 'shift': 0},
      [('runtime', False), ('installed_skills', True)], {'F2': 2, 'F5': 2, 'F8': 1}),
 ])
 def test_each_host_address_walks_its_own_shortest_forms(tmp_path, monkeypatch, window, shape, hosts, steps):

@@ -256,6 +256,7 @@ D20 = "Presence"
 "ouroboros/memory_floor.py" = "D03"  # the memory view's physical floor: what a window shows only by address
 "ouroboros/memory_view_legacy.py" = "D03"  # how my story names a retold old record: what its address holds
 "ouroboros/memory_view_account.py" = "D03"  # common-view account rendering and retained source addresses
+"ouroboros/memory_view_conversations.py" = "D03"  # my other conversations: their groups, words whole, task lines
 "ouroboros/contracts/__init__.py" = "D19"
 "ouroboros/contracts/chat_id_policy.py" = "D19"
 "ouroboros/contracts/plugin_api.py" = "D19"

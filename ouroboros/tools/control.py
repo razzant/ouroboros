@@ -172,10 +172,10 @@ def _project_tool_entries() -> List[ToolEntry]:
     return [
         ToolEntry("close_project", {
             "name": "close_project",
-            "description": "Close a finished project with a note, or reopen it. Its room and history stay; a new owner message or task reopens it.",
+            "description": "Close a finished project with a note, or reopen it. Closing makes the note the room's last page over its open rows, from what I hold (name what I did not re-read); its room and history stay; a new owner message or task reopens it.",
             "parameters": {"type": "object", "properties": {
                 "project_id": {"type": "string"},
-                "note": {"type": "string", "description": "Why I close or reopen this project."},
+                "note": {"type": "string", "description": "Why I close or reopen this project; closing: also the room's page, so what it did, found and left open."},
                 "reopen": {"type": "boolean", "default": False},
             }, "required": ["project_id", "note"], "additionalProperties": False},
         }, _close_project, safety_policy="skip"),
@@ -238,7 +238,8 @@ def get_tools() -> List[ToolEntry]:
                 "pending_review": {"type": "string", "enum": ["wait", "finish"], "default": "wait"},
                 "swarm_comparison": {"type": "string", "description": "Optional solo-versus-swarm comparison in your own words, attributed to you separately from measured tree facts."},
                 "silent": {"type": "boolean", "default": False, "description": "Finish without a message where allowed above and no human reply is owed; any answer stays internal (wake_silent)."},
-                "summary": {"type": "string", "default": "", "description": "On a root task or self-started run: one short plain sentence for your human, in their language, saying what this run did, found or decided. A clean finish shows it on the card, room row and portal; a held cause takes precedence. An unnamed self-started run, including a schedule-born root without a Presence binding, may take it as its title; an authored title and an ordinary task's name stay. It also appears in the schedule's last-run line or Consciousness row; the next scheduled run or wake reads it. Your full answer stays as written. Not available to a child."},
+                "summary": {"type": "string", "default": "", "description": "On a root task or self-started run: one short plain sentence for your human, in their language, saying what this run did, found or decided. A clean finish shows it on the card, room row and portal; a held cause takes precedence. An unnamed self-started run, including a schedule-born root without a Presence binding, may take it as its title; an authored title and an ordinary task's name stay. It also appears in the schedule's last-run line or Consciousness row; the next scheduled run or wake reads it, and my other foci read it beside this room until a page seals its rows. Your full answer stays as written. Not available to a child."},
+                "fold_read": {"type": "boolean", "default": False, "description": "With summary, when this run read words here and owes nothing: my other conversations read this room's words up to this finish as this sentence with their address, until a page seals them. My human's words stay whole; nothing is sealed."},
             }, "required": ["action"]}}, _finish_task),
         ToolEntry("set_tool_timeout", {
             "name": "set_tool_timeout",

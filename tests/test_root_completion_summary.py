@@ -45,3 +45,27 @@ def test_root_sentence_names_only_an_unnamed_self_started_run(wake, title, metad
     _, stored = quiet.emit(wake, text, usage, trace, bus=bus, task=task)
     assert stored["wake_summary"] == summary and stored["result"] == answer
     assert (stored.get("suggested_name") == summary) == (metadata == quiet.SCHEDULE and not contract and not title)
+
+
+@pytest.mark.parametrize("fold", [True, False, None], ids=["fold", "false", "absent"])
+def test_a_finish_may_fold_what_it_read_into_its_sentence_and_the_flag_rides_the_sentence(wake, fold):
+    """S5: ``fold_read=true`` rides the closing sentence's own path into the stored result; false or absent leaves
+    no flag, and the sentence stands either way."""
+    wake.ctx.is_direct_chat = False
+    answer, summary = "Read the thread; nothing is owed there.", "Прочитал тред: ничего не должен."
+    extra = {} if fold is None else {"fold_read": fold}
+    text, usage, trace, bus = wake.run([quiet.finish(answer, summary=summary, **extra)])
+    _, stored = quiet.emit(wake, text, usage, trace, bus=bus)
+    assert stored["wake_summary"] == summary and stored["result"] == answer
+    assert stored.get("fold_read") is (True if fold else None)
+    assert terminal_result_fields({"wake_summary": summary, "fold_read": True})["fold_read"] is True
+    assert "fold_read" not in terminal_result_fields({"fold_read": True})  # no sentence, nothing to stand for
+
+
+def test_a_fold_without_its_sentence_is_refused_and_stages_nothing(wake):
+    wake.ctx.task_id, wake.ctx.is_direct_chat, wake.ctx.task_metadata = quiet.TASK_ID, False, {}
+    refused = _finish_task(wake.ctx, action="finish", answer="Full answer.", fold_read=True)
+    assert "COMPLETION_ARGUMENT" in refused and "give the sentence" in refused, refused
+    assert not getattr(wake.ctx, "_completion_request", None)
+    staged = _finish_task(wake.ctx, action="finish", answer="Full answer.", summary="Read it.", fold_read=True)
+    assert "completion_requested" in staged and wake.ctx._completion_request["fold_read"] is True
