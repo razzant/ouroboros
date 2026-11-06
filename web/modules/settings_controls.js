@@ -158,8 +158,8 @@ export function webSearchPreviewWords(data, name = (id) => id) {
 }
 
 /* The one Settings section recipe (DESIGN.md principle 7; the 06.11 convergence): a title, one authored lead in
-   owner words, the controls, then everything else behind one Details disclosure, where the section's former copy
-   lives unchanged. Quiet actions dock in the title row. Every tab's sections come from here, so Models, Agents and
+   owner words, right under it the one Details disclosure that holds the section's former copy unchanged (so it opens
+   next to the line it explains, not screens below in a long section), then the controls. Quiet actions dock in the title row. Every tab's sections come from here, so Models, Agents and
    Accounts read as one scheme. `titleId` lets a lone control name itself by the title; `card: false` is a section
    that already sits inside a card (setup's step), which a second card would outline (DESIGN principle 2). */
 export function settingsSection({ title, lead = '', details = '', body = '', actions = '', id = '', titleId = '', className = '', attrs = '', card = true }) {
@@ -169,7 +169,7 @@ export function settingsSection({ title, lead = '', details = '', body = '', act
         <div class="form-section${card ? ' ui-card' : ''}${className ? ` ${className}` : ''}"${id ? ` id="${id}"` : ''}${attrs ? ` ${attrs}` : ''}>
             ${head}
             ${lead ? `<p class="settings-section-lead">${lead}</p>` : ''}
-            ${body}
             ${details ? `<details class="ui-disclosure settings-section-details"><summary>Details</summary><div class="settings-section-copy">${details}</div></details>` : ''}
+            ${body}
         </div>`;
 }
