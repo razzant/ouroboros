@@ -211,7 +211,7 @@ from ouroboros.consciousness_view import _clock_of as _clock_of, describe_consci
 
 
 def _describe_bg_consciousness_state(requested_enabled: bool | None) -> dict:
-    return describe_consciousness_state(_consciousness.status_snapshot() if _consciousness else {}, requested_enabled)
+    return describe_consciousness_state(_consciousness.status_snapshot() if _consciousness else {}, requested_enabled, supervisor_failed=bool(_supervisor_error))
 
 
 def _start_supervisor_if_needed(settings: dict) -> bool:
@@ -1363,7 +1363,7 @@ app.app.state.supervisor_ready_event = _supervisor_ready  # type: ignore[attr-de
 app.app.state.supervisor_init_done_event = _supervisor_init_done  # type: ignore[attr-defined]
 app.app.state.get_supervisor_error = lambda: _supervisor_error  # type: ignore[attr-defined]
 app.app.state.describe_bg_consciousness_state = _describe_bg_consciousness_state  # type: ignore[attr-defined]
-app.app.state.describe_consciousness = lambda: describe_consciousness(_consciousness)  # type: ignore[attr-defined]
+app.app.state.describe_consciousness = lambda: describe_consciousness(_consciousness, supervisor_failed=bool(_supervisor_error))  # type: ignore[attr-defined]
 app.app.state.startup_owner_command = _startup_owner_command
 app.app.state.request_restart = _request_restart_exit  # type: ignore[attr-defined]
 app.app.state.runtime_branch_defaults = _runtime_branch_defaults  # type: ignore[attr-defined]

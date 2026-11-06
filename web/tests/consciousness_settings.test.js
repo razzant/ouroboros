@@ -14,7 +14,7 @@ import {
 } from '../modules/consciousness_api.js';
 import {
     agentRowHandle, applySafetySettings, bindSafetySettings, checkerSaveEffect, checkerTabsText, checkerText, safetyOwnerDraft,
-    safetySectionHtml,
+    safetySectionHtml, refreshSafetySkipCounter,
     saveSafetyChecker, saveSafetyOwnerChanges, secondCheckText, takeCheckerChanges,
 } from '../modules/settings_safety.js';
 import { chooseRecheckRow, recheckDraft, recheckMarkHtml, syncRecheckState } from '../modules/safety_recheck.js';
@@ -214,6 +214,24 @@ test('Save writes only what changed: the checker first, the levels and rules aft
     assert.equal(result.saved, 'Safety Supervisor model saved as claude-opus-5.5. Safety for your work saved as Light.');
     // Settings declares itself on every owner write, so the server records the change without a row in Main.
     assert.ok(stub.calls.every(({ headers }) => headers['X-Ouroboros-Surface'] === 'app' && headers['X-Ouroboros-Actor'] === 'owner'));
+});
+
+test('the let-through counter says 24 h only when the events it read cover a day', async () => {
+    const now = Date.parse('2026-11-06T12:00:00Z');
+    const at = (hoursAgo) => new Date(now - hoursAgo * 3600 * 1000).toISOString();
+    const counter = async (entries) => {
+        const el = { textContent: '' };
+        await refreshSafetySkipCounter({ querySelector: () => el }, { now, logsTail: async () => ({ entries }) });
+        return el.textContent;
+    };
+    // A short log reaches past the day: it is the whole day.
+    assert.equal(await counter([{ type: 'safety_mode_skip', ts: at(2) }, { type: 'task_done', ts: at(30) }]),
+        '1 safety check let through in the last 24 h.');
+    // A full tail of 2,000 events from the last three hours never claims the day it did not read.
+    const busy = Array.from({ length: 2000 }, (_, i) => ({ type: i ? 'llm_round' : 'safety_mode_skip', ts: at(3 - i / 1000) }));
+    const said = await counter(busy);
+    assert.match(said, /^1 safety check let through since \d\d:\d\d \(the latest 2,000 events\)\.$/);
+    assert.doesNotMatch(said, /24 h/);
 });
 
 test('the shared safety helpers declare no origin unless their caller does', async () => {

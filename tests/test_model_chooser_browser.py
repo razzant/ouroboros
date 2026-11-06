@@ -159,7 +159,7 @@ def test_partial_numeric_context_blocks_save_and_preserves_auto(role_ui):
     field.press('1')
     field.press('e')
     assert field.evaluate('e => e.validity.badInput')
-    assert 'is-visible' in page.locator('#settings-unsaved-indicator').get_attribute('class')
+    assert page.locator('#settings-status').text_content() == 'Unsaved changes'
 
 
 def test_chooser_scrolls_with_mobile_keyboard_boundary(role_ui):

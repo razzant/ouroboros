@@ -7,7 +7,7 @@ import { renderSegmentedField } from './page_header.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { APP_SETTINGS_ORIGIN, apiClient } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
-import { settingsWriteFailure, syncEffortSegments } from './settings_controls.js';
+import { settingsSection, settingsWriteFailure, syncEffortSegments } from './settings_controls.js';
 import { parseModelSource } from './route_editor_primitives.js';
 import { modelRoleMap } from './model_roles.js';
 import { subagentSettingsFingerprint } from './subagents_settings.js';
@@ -24,15 +24,15 @@ export const SAFETY_MODEL_KEY = 'OUROBOROS_MODEL_SAFETY';
 const LEVEL_OPTIONS = SAFETY_LEVELS.map(({ value, label }) => ({ value, label }));
 const LOWERING_TITLE = 'Lowering a level asks for confirmation.';
 
-/** The section body under its title (settings_ui.js keeps the `<h3>`). */
+/** The whole Behavior › Safety Supervisor section (settings_controls.js settingsSection). */
 export function safetySectionHtml() {
-    const notes = SAFETY_LEVELS.map((level) => `<br><code>${escapeHtml(level.label)}</code> &mdash; ${escapeHtml(level.note)}`).join('');
-    return `
-        <div class="settings-section-copy">
-            A second model judges a step before it runs. Your work: what you asked for. Consciousness: what it does on its own, places included.${notes}
-            <br><strong>Configuration authority:</strong> outside Cyber Pro, Ouroboros cannot lower its own checks; Cyber Pro also lets it configure Supervisor coverage. Changes apply on the next task; every step a lower level lets through is recorded.
-        </div>
-        <div class="safety-levels">
+    const notes = SAFETY_LEVELS.map((level) => `<br><strong>${escapeHtml(level.label)}</strong> &mdash; ${escapeHtml(level.note)}`).join('');
+    return settingsSection({
+        title: 'Safety Supervisor',
+        lead: 'Which steps a second model checks before Ouroboros takes them.',
+        details: `A second model judges a step before it runs. Your work: what you asked for. Consciousness: what it does on its own, places included.${notes}
+            <br><strong>Configuration authority:</strong> outside Cyber Pro, Ouroboros cannot lower its own checks; Cyber Pro also lets it configure Supervisor coverage. Changes apply on the next task; every step a lower level lets through is recorded.`,
+        body: `<div class="safety-levels">
             <div class="settings-effort-card">
                 <label>${escapeHtml(SAFETY_KINDS.your_work)}</label>
                 <input id="s-safety-mode" type="hidden" value="full">
@@ -55,7 +55,8 @@ export function safetySectionHtml() {
             <textarea id="s-safety-rules" class="ui-control consciousness-owner-words" rows="3" spellcheck="false" aria-describedby="s-safety-rules-help"></textarea>
             <div class="settings-inline-note ui-field-help" id="s-safety-rules-help">Ouroboros and the Safety Supervisor read these in every task and check. Rules for one place live in that place's notes.</div>
         </div>
-        <div id="s-safety-skip-counter" class="settings-inline-note"></div>`;
+        <div id="s-safety-skip-counter" class="settings-inline-note"></div>`,
+    });
 }
 
 /** The one in-page link to another Settings tab («Change in Models»); the section's binder opens the tab. */
@@ -275,22 +276,30 @@ export async function saveSafetyOwnerChanges(draft, current = {}, { askOwner = o
     return { saved: saved.join(' '), error: errors.join(' '), unknown };
 }
 
-/** Waved-through checks among the inspected recent events (the Light/Off audit), counted within 24 h. */
+const SKIP_TAIL = 2000;
+
+/** Waved-through checks among the inspected recent events (the Light/Off audit), counted within 24 h; a full tail
+ * younger than a day says the span it read, never a day it did not inspect. */
 export async function refreshSafetySkipCounter(root, { logsTail = apiClient.logsTail, now = Date.now() } = {}) {
     const el = root?.querySelector?.('#s-safety-skip-counter');
     if (!el) return;
     try {
-        const data = await logsTail('events', 2000);
+        const data = await logsTail('events', SKIP_TAIL);
+        const entries = data?.entries || [];
         const cutoff = now - 24 * 3600 * 1000;
-        const n = (data?.entries || []).filter((entry) => {
+        const times = entries.map((entry) => Date.parse(String(entry?.ts || ''))).filter(Number.isFinite);
+        const n = entries.filter((entry) => {
             if (String(entry?.type || '') !== 'safety_mode_skip') return false;
             const time = Date.parse(String(entry?.ts || ''));
             return Number.isFinite(time) && time >= cutoff;
         }).length;
-        // The tail may cover less than a day, including when it has no matches.
+        const oldest = times.length ? Math.min(...times) : null;
+        const span = entries.length >= SKIP_TAIL && oldest !== null && oldest > cutoff
+            ? `since ${new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false }).format(oldest)} (the latest ${SKIP_TAIL.toLocaleString('en-US')} events)`
+            : 'in the last 24 h';
         el.textContent = n > 0
-            ? `${n} safety check(s) waved through among inspected recent events dated within 24h.`
-            : 'No waved-through safety checks found among inspected recent events dated within 24h.';
+            ? `${n} safety ${n === 1 ? 'check' : 'checks'} let through ${span}.`
+            : `No safety checks let through ${span}.`;
     } catch {
         el.textContent = '';
     }

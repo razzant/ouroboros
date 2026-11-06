@@ -46,11 +46,12 @@ Keep the returned unsubscribe in the module disposer. The bridge delivers
 have no bridge. Fetching the kit again alone does not synchronize appearance.
 
 Authors may set their own root's `data-theme`, track their document's media
-query, or keep a fixed palette. `data-theme` selects only that palette: the
-product's capsule button and chip recipes apply where the document root itself is
-`.ouro-ui` (the app and its setup page), so an inner `.ouro-ui` area like this
-example's keeps the base controls that later author CSS such as `.ouro-ui .btn`
-overrides. Native `Canvas`/`CanvasText` colours follow the document's supported
+query, or keep a fixed palette. `data-theme` selects only that palette. Every
+document that loads the kit gets the product's one capsule recipe for buttons
+and chips. Only a document whose root element is itself `.ouro-ui` (the app,
+setup and login) also locks a control's box (`:root:where(.ouro-ui)` in
+`ui.css`); an inner `.ouro-ui` area like this example's is not locked, so later
+author CSS such as `.ouro-ui .btn` still wins. Native `Canvas`/`CanvasText` colours follow the document's supported
 `color-scheme`, not necessarily the host's pinned choice or the OS. Declare that
 scheme deliberately if following the OS. The example keeps its own native-colour
 surface readable before kit loading and on kit failure.

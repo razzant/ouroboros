@@ -8,8 +8,9 @@
 .model-role-group {
     min-width: 0;
     padding: var(--space-2);
-    border: 1px solid var(--surface-border);
-    border-radius: var(--radius-sm);
+    border: 1px solid transparent;
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
 }
 .model-role-head,
 .model-role-controls,
@@ -46,34 +47,29 @@
 .model-role-controls > select { flex: 1 1 170px; min-width: 0; }
 .model-role-controls > [data-model-role-account] { flex-basis: 220px; }
 .model-role-order { flex: 0 0 auto; }
-.model-role-order .btn { padding-inline: var(--space-2); }
+.model-role-order .btn { --control-pad-x: var(--space-2); }
 .model-role-details { margin-top: var(--space-1); }
-/* The context/processing override is a disclosure, not a note. `display`
-   other than list-item drops the native ::marker, so the house ▸/▾ pair is
-   drawn here (settings.css .settings-subsection has it, but the wizard does
-   not load settings.css); the label takes control ink while the value span
-   stays meta. padding-inline cancels the 14px that .wizard-collapse summary
+/* The context/processing override is the shared disclosure (ui.css details.ui-disclosure: one caret, the quiet
+   summary); its name and value are one span (one word space after the "·"), the value in meta ink. padding-inline cancels the 14px that .wizard-collapse summary
    leaks onto the nested Available subagents / Reviewers summaries. */
-.model-role-details > summary {
-    display: inline-block;
-    list-style: none;
-    cursor: pointer;
-    padding-block: var(--space-1);
-    padding-inline: 0;
-    color: var(--text-primary);
+.model-role-details > summary { padding-block: var(--space-1); padding-inline: 0; }
+/* Under a finger the narrow ↑ and ↓ part by their two sideways reaches, and a row's Details stands below its controls'
+   reach, so no target covers its neighbour. */
+@media (pointer: coarse) {
+    .model-role-order { gap: var(--space-4); }
+    .model-role-details { margin-top: var(--space-2); }
 }
-.model-role-details > summary::-webkit-details-marker { display: none; }
-.model-role-details > summary::before { content: "▸ "; }
-.model-role-details[open] > summary::before { content: "▾ "; }
-.model-role-details > summary [data-processing-summary] { color: var(--text-meta); }
-.model-role-details > summary:focus-visible,
+.model-role-details > summary [data-processing-summary] { display: inline-block; color: var(--text-meta); }  /* moves to the next line whole */
 .model-role-editor button:focus-visible {
     outline: 2px solid var(--focus-accent-border);
     outline-offset: 2px;
 }
-.model-role-context { flex-wrap: wrap; padding-top: var(--space-1); }
-.model-role-context label { display: flex; align-items: center; gap: var(--space-2); }
+/* A context field is the one field anatomy (ui.css .ui-field: label over control over help, left-aligned); its
+   action stands beside the control, on the control's line. */
+.model-role-context { flex-wrap: wrap; align-items: flex-start; padding-top: var(--space-1); }
+.model-role-context label { flex: 0 1 auto; }
 .model-role-context input { width: 150px; }
+.model-role-context > .btn { margin-top: calc(var(--type-meta) * var(--line-meta) + var(--space-1)); }
 .model-role-controls [hidden] { display: none; }
 @media (max-width: 720px) {
     .model-role-controls { flex-wrap: wrap; }
