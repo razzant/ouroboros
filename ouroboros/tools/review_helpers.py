@@ -308,10 +308,9 @@ def review_wave_budget_gate(
             "limit_usd": admission.get("limit_usd"),
             "known_usd": admission.get("known_usd"),
             "accounted_usd": admission.get("accounted_usd"),
-            "reserved_usd": admission.get("reserved_usd"),
             **{key: admission.get(key) for key in (
-                "binding_axis", "global_limit_usd", "global_known_usd", "global_accounted_usd",
-                "global_reserved_usd", "global_remaining_usd")},
+                "reserved_usd", "unresolved_upper_bound_usd", "binding_axis", "global_limit_usd", "global_known_usd",
+                "global_accounted_usd", "global_reserved_usd", "global_unresolved_upper_bound_usd", "global_remaining_usd")},
             "slots": admission.get("slots"),
             "slot_bounds": admission.get("slot_bounds"),
             "unpriced_slots": unpriced,

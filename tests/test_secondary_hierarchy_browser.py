@@ -84,7 +84,7 @@ COST_CASES = [
     # width, theme, ledger, status, lead, [cost final, unresolved, unknown], reserved
     (390, "light", _ledger(confirmed_usd=58.1, estimated_usd=5.32, reserved_usd=4.3, unresolved_upper_bound_usd=1.25,
                            unknown_unmetered=3, cost_final=False, non_final_rows=2),
-     200, "$63.42 / $200.00", ["Pending (2 open)", "$1.25", "3"], "$4.30"),
+     200, "$63.42 / $200.00", ["No (2 open)", "$1.25", "3"], "$4.30"),
     (1100, "dark", _ledger(), 200, "$63.42 / $200.00", ["Yes", "$0.00", "0"], "$0.00"),
     (390, "dark", {"error": "Spend records could not be read"}, 500, "Unavailable", ["Unavailable", "—", "—"], "—"),
 ]

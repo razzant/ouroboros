@@ -142,6 +142,7 @@ def quote_rows(ctx, handles) -> tuple[list, str]:
 
 def owner_quote(root, row: dict, *, address: str = "") -> dict:
     """One retained owner row as a quote: exact words, attachments and where/when."""
+    from ouroboros.owner_words import answered_card_source
     from ouroboros.projects_registry import list_reserved_projects
     labels = {int(p["chat_id"]): p["name"] for p in list_reserved_projects(root)}
     chat_id = int(row.get("chat_id", 1))
@@ -152,9 +153,9 @@ def owner_quote(root, row: dict, *, address: str = "") -> dict:
              "owner_row": copy.deepcopy(row)}
     if isinstance(row.get("reply_to"), dict) and row["reply_to"]:  # what the owner was replying to, as the host resolved it
         quote["reply_to"] = copy.deepcopy(row["reply_to"])
-    if row.get("type") == "quiz_answer":
+    if isinstance(answered := answered_card_source(row)[0], dict):  # a quiz row's card or a late answer's snapshot
         from ouroboros.owner_quiz import recorded_answer_frame
-        quote["question_frame"] = recorded_answer_frame(row["quiz"])
+        quote["question_frame"] = recorded_answer_frame(answered)
     return quote
 
 
@@ -231,7 +232,7 @@ def inject_relay(ctx, entry: dict, messages: list) -> None:
     """Only exact owner rows enter the owner corpus, carried from the teller (no reply owed); the note has its
     own voice."""
     from ouroboros import loop
-    from ouroboros.owner_words import owner_place_accounts, reply_target
+    from ouroboros.owner_words import answered_card_reply, answered_card_source, owner_place_accounts, reply_target
     from ouroboros.tool_access import canonical_data_root
 
     root = canonical_data_root(ctx) if getattr(ctx, "drive_root", None) else None
@@ -239,18 +240,20 @@ def inject_relay(ctx, entry: dict, messages: list) -> None:
     for row in entry.get("owner_rows") or []:
         retain_owner_message(ctx, row, accounts=accounts)
         address = format_address(row_address(row))
+        # An answer replies to its card (a quiz row's own, or a late answer's snapshot), else to its chat target.
+        replied = answered_card_reply(*answered_card_source(row)) or reply_target(root, row.get("reply_to")) or None
         loop._record_owner_directive(ctx, source="owner_mailbox", content=owner_text(row), msg_id=address, carried=True,
                                      origin={"source_task_id": entry.get("source_task_id"),
                                              "client_message_id": row.get("client_message_id"),
                                              "chat_id": row.get("chat_id")},
-                                     reply_to=reply_target(root, row.get("reply_to")) or None)
+                                     reply_to=replied)
         body = f"[Owner words quoted verbatim; handle {address}]\n{owner_text(row)}"
         if isinstance(row.get("reply_to"), dict) and row["reply_to"]:
             body += ("\n[Host reference: the message these owner words reply to; context, not the owner's words]\n"
                      + json.dumps(row["reply_to"], ensure_ascii=False))
-        if row.get("type") == "quiz_answer":
+        if isinstance(answered := answered_card_source(row)[0], dict):  # the question it answers, for the model too
             from ouroboros.owner_quiz import recorded_answer_frame
-            body += "\n[Host question frame]\n" + recorded_answer_frame(row["quiz"])
+            body += "\n[Host question frame]\n" + recorded_answer_frame(answered)
         if row.get("attachments"):
             body += "\n[Host-retained attachments]\n" + json.dumps(row["attachments"], ensure_ascii=False)
         content = quote_content(ctx, entry, row, body)

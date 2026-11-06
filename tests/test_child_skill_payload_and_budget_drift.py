@@ -444,3 +444,5 @@ class TestBudgetDriftOpenRouterOnly:
         assert "openrouter tracked: $30.00" in text
         # The all-provider delta ($130) must not masquerade as the tracked side.
         assert "tracked: $130.00" not in text
+        # Reservations and price-less bounds are never one blended "open holds" figure.
+        assert "open_holds_usd" not in text

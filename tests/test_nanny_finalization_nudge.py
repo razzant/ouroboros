@@ -21,14 +21,31 @@ def _run(ctx_obj, msgs, tool_calls, drive):
     )
 
 
-def test_harness_child_finalizing_without_delegation_gets_one_nudge(tmp_path):
-    ctx = SimpleNamespace(_nanny_route_dispatched=True, _nanny_finalization_injected=False)
+# A configured session actor with no leaf run and no typed zero-run decision yet.
+_ZERO_LEAF_BOOTSTRAP = {"route_available": True, "exact_start_pending": True, "physical_started": False,
+                        "zero_run_receipt_recorded": False, "selected_subagent_id": "session-a"}
+
+
+def _configured_ctx(drive, **extra):
+    return SimpleNamespace(
+        _nanny_route_dispatched=True, _nanny_finalization_injected=False, task_id="t",
+        task_metadata={"budget_drive_root": str(drive)},
+        _configured_actor_bootstrap=dict(_ZERO_LEAF_BOOTSTRAP), **extra)
+
+
+def test_configured_actor_finalizing_without_a_leaf_gets_one_nudge(tmp_path):
+    drive = _custody_drive(tmp_path)
+    ctx = _configured_ctx(drive)
     msgs: list = []
-    assert _run(ctx, msgs, [], tmp_path) is True
-    assert any("NANNY_DID_NOT_DELEGATE" in m.get("content", "") for m in msgs)
+    assert _run(ctx, msgs, [], drive) is True
+    assert any("CONFIGURED_ACTOR_INCOMPLETE" in m.get("content", "") for m in msgs)
     # One-shot: the latch suppresses a second injection — the child may still
     # finalize with a stated reason, never a hard gate on its judgment (P5).
-    assert _run(ctx, [], [], tmp_path) is False
+    assert _run(ctx, [], [], drive) is False
+    # Without a configured row there is no charter fact: the retired legacy
+    # accusation (NANNY_DID_NOT_DELEGATE) is not replaced by anything.
+    legacy = SimpleNamespace(_nanny_route_dispatched=True, _nanny_finalization_injected=False)
+    assert _run(legacy, [], [], drive) is False
 
 
 def test_nanny_nudge_stays_out_of_owner_chat_progress(tmp_path):
@@ -37,27 +54,24 @@ def test_nanny_nudge_stays_out_of_owner_chat_progress(tmp_path):
     # Observability rides a compact typed task_checkpoint on events.jsonl.
     import json
 
-    drive_logs = tmp_path / "logs"
-    drive_logs.mkdir()
-    ctx = SimpleNamespace(
-        _nanny_route_dispatched=True, _nanny_finalization_injected=False,
-        event_queue=None, drive_logs=drive_logs,
-    )
+    drive = _custody_drive(tmp_path)
+    drive_logs = drive / "logs"
+    ctx = _configured_ctx(drive, event_queue=None, drive_logs=drive_logs)
     msgs: list = []
     progress: list = []
     trace = {"reasoning_notes": [], "tool_calls": []}
     assert _maybe_inject_finalization_nudges(
-        SimpleNamespace(_ctx=ctx), tmp_path, "t", trace, "done", msgs,
+        SimpleNamespace(_ctx=ctx), drive, "t", trace, "done", msgs,
         progress.append,
     ) is True
     assert progress == []
-    assert any("NANNY_DID_NOT_DELEGATE" in m.get("content", "") for m in msgs)
-    assert any("NANNY_DID_NOT_DELEGATE" in n for n in trace["reasoning_notes"])
+    assert any("CONFIGURED_ACTOR_INCOMPLETE" in m.get("content", "") for m in msgs)
+    assert any("CONFIGURED_ACTOR_INCOMPLETE" in n for n in trace["reasoning_notes"])
     events = [json.loads(line) for line in
               (drive_logs / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     assert any(e.get("type") == "task_checkpoint"
                and e.get("checkpoint_kind") == "nanny_finalization_nudge"
-               and e.get("nanny_code") == "NANNY_DID_NOT_DELEGATE"
+               and e.get("nanny_code") == "CONFIGURED_ACTOR_INCOMPLETE"
                for e in events)
 
 
@@ -132,7 +146,6 @@ def test_failed_delegated_run_gets_the_truthful_reminder(tmp_path):
     joined = "\n".join(m.get("content", "") for m in msgs)
     assert "NANNY_DELEGATED_RUN_FAILED" in joined
     assert "failed" in joined
-    assert "NANNY_DID_NOT_DELEGATE" not in joined
 
 
 def test_succeeded_delegated_run_suppresses_the_reminder(tmp_path):
@@ -179,7 +192,6 @@ def test_failed_run_nudges_even_with_delegate_start_in_this_trace(tmp_path):
                      [{"tool": "delegate_start", "args": {}}]) is True
     joined = "\n".join(m.get("content", "") for m in msgs)
     assert "NANNY_DELEGATED_RUN_FAILED" in joined
-    assert "NANNY_DID_NOT_DELEGATE" not in joined
 
 
 def _split_root_ctx(parent, child):
@@ -229,7 +241,6 @@ def test_split_root_nanny_reads_custody_from_the_canonical_root(tmp_path):
     })
     message = _nanny_finalization_message(tools, child, "child-dead")
     assert "NANNY_DELEGATED_RUN_FAILED" in message
-    assert "NANNY_DID_NOT_DELEGATE" not in message
 
 
 def _emit_started(drive, run_id, task_id):
@@ -266,7 +277,6 @@ def test_pending_run_gets_the_wait_reminder_not_a_failure_accusation(tmp_path):
     assert "NANNY_DELEGATED_RUN_PENDING" in message
     assert "delegate_wait" in message
     assert "NANNY_DELEGATED_RUN_FAILED" not in message
-    assert "NANNY_DID_NOT_DELEGATE" not in message
 
 
 def test_mixed_failed_and_pending_runs_prefer_the_pending_reminder(tmp_path):
@@ -324,9 +334,9 @@ def test_a_delegating_nanny_and_a_native_child_are_not_nudged(tmp_path):
     # A delegate_start in the trace with NO custody row yet (pending settlement
     # or an uncustodied start) is an attempt, not a choice — no accusation, and
     # the failure case is owned by custody evidence (see the test above).
-    delegating = SimpleNamespace(_nanny_route_dispatched=True,
-                                 _nanny_finalization_injected=False)
-    assert _run(delegating, [], [{"tool": "delegate_start", "args": {}}], tmp_path) is False
+    drive = _custody_drive(tmp_path)
+    assert _run(_configured_ctx(drive), [], [{"tool": "delegate_start", "args": {}}], drive) is False
+    assert _run(_configured_ctx(drive), [], [], drive) is True
 
     native = SimpleNamespace(_nanny_route_dispatched=False,
                              _nanny_finalization_injected=False)
@@ -339,14 +349,9 @@ def test_host_coordination_no_longer_suppresses_zero_leaf_accusation(tmp_path):
     from ouroboros.loop import _nanny_finalization_message
 
     drive = _custody_drive(tmp_path)
-    ctx = SimpleNamespace(
-        _nanny_route_dispatched=True,
-        _nanny_finalization_injected=False,
-        task_metadata={"budget_drive_root": str(drive)},
-    )
-    tools = _tools(ctx, ["delegate_start", "delegate_wait", "schedule_subagent"])
-    message = _nanny_finalization_message(tools, drive, "child-1")
-    assert "NANNY_DID_NOT_DELEGATE" in message
+    tools = _tools(_configured_ctx(drive), ["delegate_start", "delegate_wait", "schedule_subagent"])
+    message = _nanny_finalization_message(tools, drive, "t")
+    assert "CONFIGURED_ACTOR_INCOMPLETE" in message
 
     undispatched = SimpleNamespace()  # a ctx that never saw a dispatch at all
     assert _run(undispatched, [], [], tmp_path) is False
@@ -550,7 +555,6 @@ def test_unreadable_custody_surfaces_the_configured_unknown_nudge(tmp_path):
     assert "UNREADABLE" in message
     # Never a fresh-start recipe over a possibly-live leaf, never an accusation.
     assert "Start the exact assigned session now" not in message
-    assert "NANNY_DID_NOT_DELEGATE" not in message
 
 
 def test_evidence_reader_crash_surfaces_the_configured_unknown_nudge(tmp_path, monkeypatch):
@@ -585,9 +589,9 @@ def test_a_withheld_delegate_verb_is_never_a_choice_not_to_delegate(tmp_path):
     parent = _custody_drive(tmp_path / "parent")
     child = _custody_drive(tmp_path / "child")
     accused = _nanny_finalization_message(
-        _tools(_split_root_ctx(parent, child), ["delegate_start", "delegate_wait"]), child, "child-none")
-    assert "NANNY_DID_NOT_DELEGATE" in accused
-    withheld = _split_root_ctx(parent, child)
+        _tools(_configured_ctx(parent), ["delegate_start", "delegate_wait"]), child, "t")
+    assert "CONFIGURED_ACTOR_INCOMPLETE" in accused
+    withheld = _configured_ctx(parent)
     withheld.task_metadata = {**withheld.task_metadata, "disabled_tools": ["delegate_start"]}
     assert _nanny_finalization_message(
-        _tools(withheld, ["delegate_start", "delegate_wait"]), child, "child-none") == ""
+        _tools(withheld, ["delegate_start", "delegate_wait"]), child, "t") == ""

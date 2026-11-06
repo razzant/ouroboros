@@ -12,7 +12,7 @@ import { delegatedActivityBodyHtml, delegatedHeadline, delegatedLineView } from 
 import { REUSABLE_TASK_IDS } from './task_control_menu.js';
 import { ownLiveDetail, paintLiveDetail } from './task_phase_chip.js';
 import { fmt, tr } from './i18n.js';
-import { formatMsgTime } from './utils.js';
+import { formatMsgTime, formatUsdKnown } from './utils.js';
 import { placeIngressNote } from './chat_attachments.js';
 import { hostRowDisplayText, hostSentenceText } from './host_notice_text.js';
 export { bootPhase, startingStatus, supervisorReady } from './host_starting_status.js';
@@ -701,7 +701,7 @@ export function costPresentationMeta(presentation, context = null) {
         if (presentation.has_unpriced) return ['Cost not priced'];
         return ['Cost unknown'];
     }
-    const money = `$${Number(amount).toFixed(2)}`;
+    const money = formatUsdKnown(Number(amount));  // never $0.00 for a positive amount
     if (presentation.has_unpriced) return [`Tracked: ${presentation.tracked_final ? money : `up to ${money}`}`];
     return [presentation.tracked_final ? money : `up to ${money}`];
 }
@@ -774,7 +774,7 @@ export function taskCostMeta(payload = {}) {
     // breakdowns and unmetered counts stay on Costs, Logs and task detail.
     if (total === null) return ['Cost unknown'];
     if (!(finalKnown || pendingKnown || total !== 0)) return [];
-    const amount = `$${total.toFixed(2)}`;
+    const amount = formatUsdKnown(total);
     return [finalKnown ? amount : `up to ${amount}`];
 }
 
@@ -1528,6 +1528,7 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
         ['Supervision', supervision && (rounds || toolCalls)
             ? `${[rounds, toolCalls].filter(Boolean).join(META_PART_SEPARATOR)} (supervising agent; executor session counts are not reported)` : ''],
         ['Updated', escapeHtml(updated)],
+        ...(record.costBreakdownRows || []),  // a root's detail: where its money and work went
     ]);
     const detailChanged = paintLiveDetail(record, 'liveCostDetail', String(record.costMeta?.detail || ''));
     if (record.metaEl.innerHTML === html) return (detailChanged || factsChanged || clockChanged) && Boolean(record.metaEl.isConnected);
