@@ -842,7 +842,7 @@
 /* The notification choices sit under their master switch; while it is off they are disabled (the words say so
    in the disabled ink). */
 .notify-choices { display: flex; flex-direction: column; gap: 10px; padding-left: calc(var(--local-toggle-box) + var(--local-toggle-gap)); }
-.notify-choices :is(.local-toggle:has(> input:disabled), .notify-tone-volume:has(> input:disabled) > label) {
+.notify-choices :is(.local-toggle:has(> input:disabled), .notify-tone-volume > label:has(+ input:disabled)) {
     color: var(--text-disabled);
     cursor: default;
 }

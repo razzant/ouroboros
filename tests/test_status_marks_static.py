@@ -62,6 +62,7 @@ warning | web/style.css | .chat-quiz-storage-note | color
 warning | web/style.css | .document-reader-notice | background, border-bottom, color
 warning | web/style.css | @container files (max-width: 700px) » .files-entry:is(.is-draft, [data-unsaved]) .files-entry-unsaved | color
 warning | web/style.css | .harness-account-meta .meta-fact[data-tone="warn"] | color
+warning | web/style.css | :root[data-theme="light"] .harness-account-row.harness-exhausted | background
 warning | web/style.css | .harness-maintenance-notice[data-tone="warn"] | color
 warning | web/style.css | .log-entry .log-phase:is(.warn, .empty):not([data-chip-tone]) | background, border-color, color
 warning | web/style.css | .msg-attachment-outcome | color

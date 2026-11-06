@@ -8852,6 +8852,10 @@ body.keyboard-open .project-panel {
 .harness-account-meta .meta-fact { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
 .harness-account-meta .meta-fact:not(:last-of-type)::after { content: " ·"; margin-right: 0.35em; color: var(--text-meta); }
 .harness-account-meta .meta-fact[data-tone="warn"] { color: var(--status-warn-word, var(--text-meta)); }
+/* The light seed's half of the warning row (DESIGN seed table: light — the row's tint, its words in their own ink).
+   foundation-request: one ui.css token for a warning row's body (light: the tint, dark: none), as --status-warn-word
+   is for its words, so this rule can be written once for both themes. */
+:root[data-theme="light"] .harness-account-row.harness-exhausted { background: var(--status-warn-bg); }
 /* "Checking…" keeps the inspect button's width, so a press resizes nothing (DESIGN principle 6). */
 .harness-maintenance-actions [data-maintenance-action="inspect"] { min-width: 7.5em; }
 /* The login card frames itself: .panel-card is an onboarding.css class the
