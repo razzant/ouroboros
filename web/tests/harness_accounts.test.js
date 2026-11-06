@@ -1827,7 +1827,7 @@ test('a lower pin under a newer engine is never promised to activate', () => {
     const line = daemonStatusLine(read, {});
     assert.equal(line.tone, 'warn');
     assert.match(line.text, /^Engine 4\.3\.1 keeps serving; this Ouroboros version pins older Claudexor 4\.3\.0\./);
-    assert.match(line.text, /After a Restart, Panic or engine exit, 4\.3\.0 may refuse data a newer engine served\./);
+    assert.match(line.text, /After Restart Claudexor, Panic or an engine exit, 4\.3\.0 may refuse data a newer engine served\./);
     assert.ok(!/activate|staged|ready/.test(line.text), line.text);
     // A facet gap: the serving claim yields to the facets; the pin fact stays.
     const gap = daemonStatusLine({ ...read, reads: { catalog: 'ok', accounts: 'failed', quota: 'ok' } }, {});

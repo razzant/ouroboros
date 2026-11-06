@@ -485,7 +485,7 @@ class ClaudexorProblem(TypedDict):
 
 class ClaudexorMaintenanceProblem(TypedDict):
     """Engine or host preparation problem: ``{code, message, retryable?, requiredActions?, context?}``.
-    POST may prepare Node/npm: 409 ``maintenance_restart_required`` asks for chat-header Restart;
+    POST may prepare Node/npm: 409 ``maintenance_restart_required`` asks for Restart Claudexor in Accounts;
     409/503 ``maintenance_preparation_failed`` reports failure. Both use
     ``context.acceptance=not_submitted, scope=this_attempt``. Optional inspection failure still
     permits POST. A 503 ``acceptance=unknown`` may have been accepted: retain its body and

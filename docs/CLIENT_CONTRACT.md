@@ -800,7 +800,7 @@ Connected coding subscriptions use Claudexor. Its API v2 objects (`job`, mainten
 
 **Agent tool maintenance:**
 - `GET /api/claudexor/maintenance/harnesses` passively lists installed, tested and available tools and current operations (rejoin after reload).
-- `POST /api/claudexor/maintenance/operations` (`{harness, target}`, `Idempotency-Key` header) installs, updates or rolls back a tool: `202` returns its operation. It can start the engine and prepare Node/npm. `409 maintenance_restart_required` asks for chat-header Restart, then repeat Update; `409/503 maintenance_preparation_failed` reports failure. Optional inspection failure still permits POST.
+- `POST /api/claudexor/maintenance/operations` (`{harness, target}`, `Idempotency-Key` header) installs, updates or rolls back a tool: `202` returns its operation. It can start the engine and prepare Node/npm. `409 maintenance_restart_required` asks for Restart Claudexor (above), then repeat Update; `409/503 maintenance_preparation_failed` reports failure. Optional inspection failure still permits POST.
 - `409 maintenance_already_active`: follow `context.operationId`. Poll `GET .../operations/{id}` while `state` is `queued`/`running` or `termination` is `unconfirmed`. `POST .../operations/{id}/cancel` requests cancellation, without proving termination.
 - `ClaudexorMaintenanceProblem.error` holds engine or host `{code, message, context}`. Preparation's `context.acceptance=not_submitted, scope=this_attempt` cannot resolve an earlier `503 acceptance=unknown`: keep and resend that same key/body.
 

@@ -509,7 +509,7 @@ function daemonBaseStatusLine(payload, { checking = false, reads = null } = {}) 
     // same facet gate decides whether the line may say what is serving.
     if (runtimeState === 'newer_serving') {
         const pinned = runtime.target_version || '?';
-        const refusal = `After a Restart, Panic or engine exit, ${pinned} may refuse data a newer engine served.`;
+        const refusal = `After Restart Claudexor, Panic or an engine exit, ${pinned} may refuse data a newer engine served.`;
         if (!unread.length) {
             return { tone: 'warn', text: `Engine ${daemon.engine_version || '?'} keeps serving; this Ouroboros version pins older Claudexor ${pinned}. ${refusal}` };
         }
@@ -839,8 +839,8 @@ function faultOutranksReassurance(service, note) {
 // tense: status carries no engine process identity, so a replacement made from another tab or
 // phone is only noticed by this page's next inspection (opening the tab, Refresh, Check version).
 const MISSING_EXECUTABLE_NOTICE = 'The executable reported by the last program inspection is no longer present. '
-    + 'Versions below are last known. If the app was moved or replaced, Restart in the chat header may help; '
-    + 'it interrupts engine sessions, and success is not guaranteed.';
+    + 'Versions below are last known. If the app was moved or replaced, Restart Claudexor in Accounts may help; '
+    + 'it ends every run on the engine, and success is not guaranteed.';
 
 function withMissingExecutable(line, problem) {
     const context = problem.context;
