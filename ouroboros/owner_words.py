@@ -232,9 +232,10 @@ def directive_owner_rows(ctx: Any) -> List[Dict[str, str]]:
     for item in getattr(ctx, "_owner_directives", None) or []:
         if not isinstance(item, dict) or item.get("source") not in OWNER_SOURCES:
             continue
-        stamped = item["source"] == "initial_user" and origin_ref
+        door = item["source"] == "initial_user" and origin_ref
+        stamped = door or (item["source"] == "origin_message" and origin_ref and not row_ref(item))
         rows += _words_rows(item, carrier="ctx", task_id=task_id,
-                            content=door_text if stamped and door_text is not None else None,
+                            content=door_text if door and door_text is not None else None,
                             ts=origin_ref.get("ts") if stamped else "", ref=reference if stamped else "")
     return _deduped(rows)
 

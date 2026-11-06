@@ -1195,9 +1195,8 @@ def test_memory_view_main_names_the_bound_room_and_the_project_task_sees_its_row
     _a, _b, main_ctx, _cap = blocks(env, mem, {"id": "main-turn", "chat_id": 1})
     assert "] plain-main" in section(main_ctx, "## This room (Main)")
     assert "bound-task-row" not in main_ctx
-    live = section(main_ctx, "## Live rooms")
-    assert "1 open rooms;" in live and "memory_read(room_id='*', start=0)" in live
-    assert f"Project Promoted [chat_id={pchat}]" not in live
+    others = section(main_ctx, "## Other conversations")
+    assert f"### Project Promoted [chat_id={pchat}]" in others and "; host; task task-7] " in others  # a task line
     reader = types.SimpleNamespace(drive_root=root)
     assert f"- Project Promoted [chat_id={pchat}];" in _memory_read(reader, room_id="*", start=0)
 
@@ -1205,7 +1204,7 @@ def test_memory_view_main_names_the_bound_room_and_the_project_task_sees_its_row
     room = section(proj_ctx, f"## This room (Project Promoted [chat_id={pchat}])")
     # A pre-lineage outgoing row is a host fact of its task, with its address one read away.
     assert "; host; task task-7] " in room and "get_task_result(task_id='task-7')" in room
-    assert "plain-main" not in proj_ctx
+    assert "plain-main" not in room and "] plain-main" in section(proj_ctx, "## Other conversations")  # Main's, there
     history = _memory_read(reader, room_id=str(pchat), rows=True)
     assert "bound-task-row" in history and "plain-main" not in history
 

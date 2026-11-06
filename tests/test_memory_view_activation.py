@@ -73,7 +73,7 @@ def test_an_import_not_completed_leaves_a_view_with_its_reason_and_reads_no_chai
     snapshot = mv.capture_memory_view(tmp_path, MAIN_TASK, spec)
     assert not snapshot.active
     assert snapshot.store_status == {"state": receipt["kind"], "reason": receipt["reason"]}
-    assert snapshot.story == () and snapshot.live_rooms == () and snapshot.marks == ()
+    assert snapshot.story == () and snapshot.conversations == () and snapshot.marks == ()
     assert snapshot.room == {"room_id": "1", "label": "Main"} and snapshot.frontier == {}
 
 

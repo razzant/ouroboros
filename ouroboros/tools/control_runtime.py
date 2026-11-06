@@ -1028,7 +1028,8 @@ def _effort_switch(ctx: ToolContext, requested: str) -> tuple[str, str]:
 def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,
                  answer_sha256: str | None = None, rationale: str = "",
                  acceptance_subject: dict | None = None, pending_review: str | None = None,
-                 silent: bool = False, swarm_comparison: str | None = None, summary: str = "") -> str:
+                 silent: bool = False, swarm_comparison: str | None = None, summary: str = "",
+                 fold_read: bool = False) -> str:
     """Stage an author act; a self-started run (an own-clock or focused wake, a schedule-born root
     without a Presence binding) may choose silence and may leave one sentence for its human.
     A task that answers its own retained place conversation (its reply carrier: a promoted or
@@ -1036,7 +1037,7 @@ def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,
     request, error = completion_request(ctx, {
         "action": action, "answer": answer, "answer_sha256": answer_sha256, "rationale": rationale,
         "acceptance_subject": acceptance_subject, "pending_review": pending_review, "silent": silent,
-        "swarm_comparison": swarm_comparison, "summary": summary,
+        "swarm_comparison": swarm_comparison, "summary": summary, "fold_read": fold_read,
     })
     if error:
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
@@ -1073,7 +1074,12 @@ def completion_request(ctx: ToolContext | None, arguments: object) -> tuple[dict
         return None, "silent must be true or false"
     if summary is not None and not isinstance(summary, str):
         return None, "summary must be text"
+    fold_read = arguments.get("fold_read")
+    if fold_read is not None and not isinstance(fold_read, bool):
+        return None, "fold_read must be true or false"
     summary = " ".join((summary or "").split())
+    if fold_read and not summary:
+        return None, "fold_read folds what this run read into its summary: give the sentence"
     if silent and action != "finish":
         return None, "silent requires action=finish"
     if summary and not (self_started or resolve_ctx_lineage(ctx)["is_root_task"]):
@@ -1088,7 +1094,8 @@ def completion_request(ctx: ToolContext | None, arguments: object) -> tuple[dict
         "action": action, "answer": answer, "answer_sha256": selector,
         "rationale": arguments.get("rationale", ""), "acceptance_subject": arguments.get("acceptance_subject"),
         "pending_review": arguments.get("pending_review"), "wake_silent": bool(silent) or None,
-        "wake_summary": summary or None, "swarm_comparison": arguments.get("swarm_comparison"),
+        "wake_summary": summary or None, "fold_read": True if fold_read else None,
+        "swarm_comparison": arguments.get("swarm_comparison"),
     }, allow_empty=bool(silent))
 
 

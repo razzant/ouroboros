@@ -457,6 +457,6 @@ def test_the_real_first_request_of_the_next_wake_carries_the_note_and_keeps_room
     assert cap["memory_view"]["role"] == "consciousness"
     assert f"- previous wake: {previous}\n" in assignment and HOST_WORDS in assignment and "A's whole note." in assignment
     assert "words of nobody recorded" in assignment and "wake0002 may have changed it" in assignment
-    live_rooms = system.split("## Live rooms", 1)[1]
-    assert "Project Alpha" in live_rooms and f"memory_read(room_id='{room['chat_id']}'" in live_rooms
+    others = system.split("## Other conversations", 1)[1]
+    assert "Project Alpha" in others and f"memory_read(room_id='{room['chat_id']}'" in others
     assert "The owner's whole words in another room." not in assignment, "older than the observed window; the room reader retains it"

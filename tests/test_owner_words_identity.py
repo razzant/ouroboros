@@ -80,7 +80,8 @@ def test_legacy_origin_and_held_copy_share_identity_without_collapsing_another_m
                                                      (format_address(row_address(other)), "yes")]
 
 
-def test_a_legacy_origin_quoted_back_into_the_live_turn_is_one_known_source(tmp_path):
+@pytest.mark.parametrize("author", ["door", "task", "continuation"])
+def test_a_legacy_origin_quoted_back_into_the_live_turn_is_one_known_source(tmp_path, author):
     from ouroboros.loop_messages import _initialize_owner_directives
     from ouroboros.owner_relay import inject_relay, owner_quote, relay_envelope
     from tests.test_owner_relay import context
@@ -91,10 +92,16 @@ def test_a_legacy_origin_quoted_back_into_the_live_turn_is_one_known_source(tmp_
     ctx = context(tmp_path)
     ctx.task_metadata = {"origin_message_ref": build_owner_message_ref(chat_id=1, client_message_id="", ts=TS, text="yes"),
                          "origin_message_text": "yes"}
+    if author != "door":
+        ctx.task_metadata.update(objective_author={"kind": author}, owner_corpus=[
+            {"source": "origin_message", "content": "yes"},
+            {"source": "origin_message", "content": "yes", "chat_id": "1", "client_message_id": "another"}])
     _initialize_owner_directives(ctx, [{"role": "user", "content": "yes"}])
     inject_relay(ctx, {"relay": relay_envelope("same", [owner_quote(tmp_path, stored)], chat_id=1),
                        "owner_rows": [stored], "text": "context", "source_task_id": "other"}, [])
-    assert [r["text"] for r in ow.directive_owner_rows(ctx)] == ["yes"]
+    expected = ["yes"] if author == "door" else ["yes", "yes"]
+    assert [r["text"] for r in ow.directive_owner_rows(ctx)] == expected
+    assert [r["text"] for r in ow.governing_words_for_schedule(ctx)[ow.FIELD]] == expected
 
 
 def test_missing_origin_identity_does_not_infer_a_match_from_equal_words(tmp_path):

@@ -124,10 +124,10 @@ def test_the_settled_fact_names_cause_cuts_and_gap(mode, floor_need, cause):
     fact = {"window": 1_000, "allowance": 0, "floor_need": floor_need, "schemas": 200, "zero_need": 1_100,
             "need": 1_230, "story": 60, "room": 70, "unfolded": 20, "levels": 1, "room_id": "1", "reserve": 10,
             "work": 125, "folds": 0, "parts": [["books", 600], ["core", 40]]}
-    facts = {"floor": {"steps": {"F1": 2, "F1b": 1, "F6a": 3, "F2": 4}}}
+    facts = {"floor": {"steps": {"F1": 2, "F6w": 5, "F6a": 1, "F2": 4}}}
     settled = mf.with_max_room(facts, fact, mode)["max_room"]
     assert settled["cause"] == cause and settled["short"] == 230 and "headroom" not in settled
-    assert settled["cuts"] == (["F6a", "F2"] if cause == "held" else [])
+    assert settled["cuts"] == (["F6w", "F2", "F6a"] if cause == "held" else [])  # the ladder's order, F6a last
     assert mf.with_max_room(facts, None, mode) == facts
     # Memory took the books' room only when everything else fits: here the tool schemas tip it (zero_need > window).
     assert not mf.crowded_by_memory(settled) and not mf.crowded_by_memory(None)

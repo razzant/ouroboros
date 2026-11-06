@@ -529,7 +529,8 @@ def _list_projects(ctx: ToolContext, limit: int = 50, closed: Optional[bool] = N
 
 
 def _close_project(ctx: ToolContext, project_id: str, note: str, reopen: bool = False) -> str:
-    """Record a project decision and owe its owner one System row in that room."""
+    """Record a project decision and owe its owner one System row in that room, whose delivery the closed record names,
+    as does the closing page written before it when anything is open there."""
     meta = getattr(ctx, "task_metadata", {}) or {}
     lineage = (getattr(ctx, "task_contract", {}) or {}).get("lineage") or {}
     if str(meta.get("delegation_role") or lineage.get("delegation_role") or "") == "subagent":
@@ -545,9 +546,10 @@ def _close_project(ctx: ToolContext, project_id: str, note: str, reopen: bool = 
         return "⚠️ TOOL_ERROR (close_project): this work has no task id."
     root, at = canonical_data_root(ctx), utc_now_iso()
     by = f"ouroboros:{task_id}"
+    notice = f"project-closure:{uuid.uuid4().hex}"  # the record and the page name it first; it is posted after the page
     try:
-        project, changed = update_project(root, project_id, return_changed=True,
-            closed=None if reopen else {"at": at, "by": by, "note": note.strip()}) or (None, False)
+        closed = None if reopen else {"at": at, "by": by, "note": note.strip(), "delivery": notice}
+        project, changed = update_project(root, project_id, return_changed=True, closed=closed) or (None, False)
     except Exception as exc:
         return f"⚠️ PROJECTS_ERROR: {type(exc).__name__}: {exc}"
     if project is None:
@@ -559,18 +561,47 @@ def _close_project(ctx: ToolContext, project_id: str, note: str, reopen: bool = 
     text = f"Ouroboros ({task_id}) {action} this project. {note.strip()}"
     if not reopen:
         text += " A message from you in this room or a new task will reopen it."
+    page = "" if reopen else _closing_page(ctx, root, project, note.strip(), notice)
     try:
         delivery = outbox.enqueue_terminal_delivery_outcome(root, {
             "type": "send_message", "chat_id": project["chat_id"],
-            "role": "system", "system_type": "project_closure",
-            "text": text, "delivery_id": f"project-closure:{uuid.uuid4().hex}",
+            "role": "system", "system_type": "project_closure", "text": text, "delivery_id": notice,
         }, event_queue=getattr(ctx, "event_queue", None))
     except Exception:
         log.warning("Project closure committed but room notice failed", exc_info=True)
         delivery = outbox.ENQUEUE_UNAVAILABLE
     suffix = ("Room notice queued." if delivery in {outbox.ENQUEUE_QUEUED, outbox.ENQUEUE_ALREADY_DELIVERED}
               else f"Room notice delivery is {delivery}; the project change is saved.")
-    return f"OK: project {project['id']} is {state}. {suffix}"
+    return f"OK: project {project['id']} is {state}. {suffix}{page}"
+
+
+def _closing_page(ctx: ToolContext, root: Any, project: Dict[str, Any], note: str, notice: str) -> str:
+    """S2: closing a project writes its room's last page from the closing note, over the room's open rows, as
+    ``chronicle_write(kind='page', covers={'to': …})`` writes one (``tools.chronicle.publish_covered_page``), naming
+    the delivery of the closure's System notice (``notice``, posted after it). Nothing open writes none; a page the
+    store refuses, or memory not yet active, leaves the closure standing and says why."""
+    from ouroboros import chat_chain, memory_inventory
+    from ouroboros.tools.chronicle import _activated, _NotActivated, _signed_author, publish_covered_page
+
+    room = str(project["chat_id"])
+    try:
+        entries = memory_inventory.open_room_rows(root, room)
+        if not entries:
+            return " Nothing is open in its room: no page."
+        author, role = _signed_author(ctx, "page")
+        if author is None:
+            return f" No page: a {role} drafts no project's last page."
+        newest = chat_chain.format_address(max(entries, key=lambda entry: entry[2])[0])
+        result, covers, _facts, _stamp = publish_covered_page(root, _activated(root), author, room, note, {"to": newest},
+                                                              closes_project=str(project["id"]), closure_delivery=notice)
+    except _NotActivated:
+        return " No page: my memory is not active yet; the closure stands."
+    except Exception as exc:  # a store refusal path or an unreadable room never undoes the closure
+        log.warning("Project closure page not written", exc_info=True)
+        return f" Its page was not written ({type(exc).__name__}: {exc}); the closure stands."
+    if not result.ok:
+        return f" Its page was not written ({result.reason}); the closure stands."
+    return f" The closing note is its room's page {result.record['id']}, sealing {covers['count']} open rows."
 
 
 def _cause_words(code: str) -> str:

@@ -258,7 +258,7 @@ def test_first_main_refusal_recovers_unobserved_body_on_same_model_and_effort(ma
     monkeypatch.setattr("ouroboros.loop_llm_call._sleep_within_deadline", lambda *_a, **_kw: True)
     answer, _, _ = f.run([refuse] * 8)
     assert answer == "Recovered from the exact address." and len(f.inputs) >= 2
-    assert rungs == ["host_copies", "bodies", "floor", "books", "unseen_bodies"]  # books already navigation
+    assert rungs == ["host_copies", "bodies", "floor", "books", "unseen_bodies", "memory_rest"]  # books already navigation
     assert before_observation and all(observation is None for observation in before_observation)
     assert len({entry["model"] for entry in f.inputs}) == 1
     assert len({entry["reasoning_effort"] for entry in f.inputs}) == 1
@@ -429,3 +429,41 @@ def test_main_emergency_measurement_uses_sealed_final_facts_without_mutating_liv
     after = cc._context_tokens_for_messages(ctx.messages, 1.0)
     assert receipt.reclaimed_tokens == before - after
     assert any(row.get(HOST_CONTEXT_KIND_KEY) == CONTEXT_FACTS_NAME for row in measured[-1][1])
+
+
+def test_a_non_ok_outcome_keeps_its_text_while_its_record_is_shorter_than_its_body(tmp_path):
+    """Audit of early stops (06.11): the error a work must act on stays verbatim in the address record while
+    that unit's record is shorter than its body; a log too long to keep inline leaves only its exact reader.
+    Each unit decides alone, so a short error beside a long one keeps its text inside one combined record."""
+    short = _tool("short", invocation="short-error", text="ERROR: commit_message must be non-empty.",
+                  facts={"status": "argument_error", "code": "TOOL_ARG_ERROR", "is_error": True})
+    short[0]["tool_calls"][0]["function"]["arguments"] = json.dumps({"cmd": ["fixture"], "note": "x" * 6_000})
+    long = _tool("long", invocation="long-error", facts={"status": "error", "code": "EXIT_NONZERO", "is_error": True})
+    passed = _tool("passed", invocation="passed-run", facts={"status": "ok", "code": "OK", "is_error": False})
+    messages = [*_prefix(), *short, *long, *passed]
+    request = _request(messages, 100_000)
+    rebuilt, receipt = emergency_address_view(messages, request, rung="bodies", observation=_observation(messages),
+                                             drive_root=tmp_path, task_id="source-view")
+    assert receipt.status == "applied" and not any(m.get("role") == "tool" for m in rebuilt)
+    text = "\n".join(_visible(row) for row in _records(rebuilt))
+    assert "argument_error result, verbatim:\nERROR: commit_message must be non-empty." in text
+    assert "invocation long-error" in text and "CONSEQUENTIAL-TAIL" not in text  # the long log: its reader, no text
+    assert text.count("result, verbatim") == 1  # neither the long error nor the ok run is copied inline
+    _assert_exact_restore(tmp_path, messages, request, receipt)
+
+
+@pytest.mark.parametrize("provider_refused", [False, True])
+def test_a_shown_chosen_read_is_an_ordinary_shown_body_only_after_a_providers_refusal(tmp_path, provider_refused):
+    """06.11: a chosen read a usable turn already showed becomes an ordinary shown body only when a provider's
+    refusal started the round (BIBLE P1: a chosen read is cut only by a fact; an estimate never cuts one)."""
+    read = _tool("read", invocation="chosen-read")
+    read[0]["tool_calls"][0]["function"] = {"name": "read_file", "arguments": json.dumps(
+        {"path": "notes.txt", "start_line": 1, "max_lines": 400})}
+    other = _tool("other", invocation="other-run")
+    messages = [*_prefix(), *read, *other]
+    request = _request(messages, 10_000_000)  # every eligible body would go
+    rebuilt, _receipt = emergency_address_view(messages, request, rung="bodies", observation=_observation(messages),
+                                              drive_root=tmp_path, task_id="source-view",
+                                              release_shown_chosen=provider_refused)
+    kept = {m["tool_call_id"] for m in rebuilt if m.get("role") == "tool"}
+    assert kept == (set() if provider_refused else {"read"})

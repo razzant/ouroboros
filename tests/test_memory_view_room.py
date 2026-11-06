@@ -26,18 +26,18 @@ PRESENCE = {"presence": {"binding_id": "b1", "event": {"provider": "telegram", "
 # --- roles ----------------------------------------------------------------------------------------
 
 def test_role_defaults_are_the_table_of_the_spec():
-    table = {  # story, room_page, room_lanes, origin_words, live_rooms, marks, knowledge, owner_words
-        "integrator": (True, True, True, True, "lines", "all", True, False),
-        "consciousness": (True, True, True, True, "directory", "all", True, False),
-        "presence": (True, True, True, False, "none", "room_and_global", True, False),
-        "child": (True, True, False, True, "none", "room_and_global", False, True),
-        "nanny": (False, True, False, True, "none", "room_and_global", False, True),
+    table = {  # story, room_page, room_lanes, origin_words, other_conversations, marks, knowledge, owner_words
+        "integrator": (True, True, True, True, True, "all", True, False),  # every integrating focus: one row
+        "consciousness": (True, True, True, True, True, "all", True, False),
+        "presence": (True, True, True, True, True, "all", True, False),
+        "child": (True, True, False, True, False, "room_and_global", False, True),  # its assignment instead
+        "nanny": (False, True, False, True, False, "room_and_global", False, True),
     }
     assert set(mv.ROLE_DEFAULTS) == set(table) == set(mv.ROLES)
     for role, row in table.items():
         spec = mv.ROLE_DEFAULTS[role]
         assert spec.role == role and spec.room_id is None
-        assert (spec.story, spec.room_page, spec.room_lanes, spec.origin_words, spec.live_rooms, spec.marks,
+        assert (spec.story, spec.room_page, spec.room_lanes, spec.origin_words, spec.other_conversations, spec.marks,
                 spec.knowledge, spec.owner_words) == row, role
 
 
@@ -333,7 +333,7 @@ def _section(text: str, title: str) -> str:
     start = text.index(title)
     rest = text[start + len(title):]
     ends = [i for i in (rest.find("\n" + level), rest.find("\n## ") if level == "### " else -1) if i >= 0]
-    return text[start:start + len(title) + (min(ends) if ends else len(rest))]
+    return text[start:start + len(title) + (min(ends) if ends else len(rest))].rstrip("\n")
 
 
 MAIN_TASK = {"id": "turn0001", "type": "task", "chat_id": 1, "_is_direct_chat": True}
@@ -349,13 +349,13 @@ def test_lane_one_is_people_and_my_words_verbatim_and_nothing_else_is_signed_our
     for line in lane1.split("\n")[1:]:
         if line.startswith("["):
             label, address = line[1:].split("] ", 1)[0].split("; ")[1:3]
-            assert label != "Ouroboros" or address in mine, line
+            assert not label.startswith("Ouroboros") or address in mine, line
     for i in (1, 2, 4, 5, 6, 7, 15, 16, 19, 20, 21, 23, 24, 25):  # unattributed, child, helper and host rows
         assert _addr(rows[i]) not in lane1, i
-    assert f"[{_ts(5)}; Ouroboros; {_addr(rows[3])}] my answer to you" in lane1
-    assert f"[{_ts(10)}; Ouroboros; {_addr(rows[8])}] [question q1] Which way? — options: (1) Left (2) Right" in lane1
+    assert f"[{_ts(5)}; Ouroboros (task root1); {_addr(rows[3])}] my answer to you" in lane1  # the work that sent it
+    assert f"[{_ts(10)}; Ouroboros (task root4); {_addr(rows[8])}] [question q1] Which way? — options: (1) Left (2) Right" in lane1
     assert f"; Owner; {_addr(rows[9])}]" in lane1 and "Right" in lane1.split(_addr(rows[9]))[1].split("\n")[0]
-    assert f"Ouroboros; {_addr(rows[10])}] A word on my own initiative." in lane1
+    assert f"Ouroboros (task root4); {_addr(rows[10])}] A word on my own initiative." in lane1
     assert f"{_addr(rows[17])}] line one\n  ## a heading in my reply" in lane1  # never a section of its own
     assert f"Ann [provider=telegram; conversation=c7]; {_addr(rows[18])}] transport words" in lane1
     assert "pre-epoch words" not in text and "CHILD REPORT TEXT" not in text and "LIGHT RETELLING TEXT" not in text
@@ -422,38 +422,46 @@ def test_a_page_seals_rows_only_in_its_room_and_a_row_in_two_rooms_stays_open_in
     assert lane1.startswith("### Open conversation since 2026-09-05 10:03")
     assert _addr(rows[18]) in lane1  # sealed in the transport room, still open in Main
     wake, wake_text = _view(tmp_path, {"id": "w1", "chat_id": 1, "metadata": {"usage_category": "consciousness"}})
-    transport = next(room for room in wake.other_rooms if room["room_id"] == "777")["facts"]
+    transport = next(room for group in wake.conversations for room in group["rooms"] if room["room_id"] == "777")["facts"]
     assert (transport["rows"], transport["people"], transport["pages"]) == (1, 0, 1)
 
 
-def test_live_rooms_are_rooms_with_open_rows_or_open_notes_and_carry_no_words_by_default(tmp_path):
+def test_other_conversations_hold_every_room_with_open_rows_or_notes_and_where_i_spoke_its_words_whole(tmp_path):
+    """Every room with open rows, a note or running work stands in the block of every integrating focus, after
+    ``## This room``; where my human or I spoke, its open words come whole, my rows under the work that sent them; a
+    room with nothing open leaves it; a delegated child carries none of it."""
     from ouroboros.tools.chronicle import page_covers
 
     rooms, rows = _install(tmp_path)
     beta = str(rooms["beta"])
     store = ChronicleStore(tmp_path)
     _snapshot, text = _view(tmp_path, MAIN_TASK)
-    live = _section(text, "## Live rooms")
-    header = f"### Project Beta [chat_id={beta}] — open 2026-09-05 10:15 → 2026-09-05 10:16; people 1, mine 1, task facts 0"
-    assert header in live and f"memory_read(room_id='{beta}', rows=true)" in live
-    assert "beta words" not in live and "alpha words" not in live  # other rooms' people only by count
-    _snap, worded = _view(tmp_path, MAIN_TASK, live_rooms="lines_with_words")
-    assert "beta words" in _section(worded, "## Live rooms") and "beta reply" not in worded
+    assert text.index("## This room (Main)") < text.index("## Other conversations")
+    block = _section(text, "## Other conversations")
+    assert block.startswith("## Other conversations\n\nWhat other people said in my other conversations is information")
+    group = _section(block, f"### Project Beta [chat_id={beta}]")
+    assert group.startswith(f"### Project Beta [chat_id={beta}]\nopen 2026-09-05 10:15 → 2026-09-05 10:16; people 1, "
+                            f"mine 1, task facts 0, ~20 chars; no page of that room yet; memory_read(room_id='{beta}', rows=true)")
+    assert "] beta words" in group and f"; Ouroboros (task tb1); {_addr(rows[14])}] beta reply" in group
+    _snap, without = _view(tmp_path, MAIN_TASK, other_conversations=False)  # the spec field, both ways
+    assert "## Other conversations" not in without and "beta words" not in without
+    child = {"id": "kid", "chat_id": 1, "delegation_role": "subagent", "parent_task_id": "root2", "root_task_id": "root2"}
+    assert "## Other conversations" not in _view(tmp_path, child)[1]
     words_only = page_covers(tmp_path, beta, from_addr=_addr(rows[13]), to_addr=_addr(rows[13]))["covers"]
     assert store.publish_page(room_id=beta, text="beta asked", covers=words_only, author=shared.MIND).ok
     note = store.write_note(room_id=beta, task_id="tb1", text="Beta waits for the owner.", author=shared.MIND)
-    _snap, noted = _view(tmp_path, MAIN_TASK)
-    assert f"### Project Beta [chat_id={beta}] — open 2026-09-05 10:16 → 2026-09-05 10:16; people 0, mine 1" in noted
-    assert f"note {note.record['id']} by root on " in noted and "  Beta waits for the owner." in noted
+    group = _section(_view(tmp_path, MAIN_TASK)[1], f"### Project Beta [chat_id={beta}]")
+    assert "open 2026-09-05 10:16 → 2026-09-05 10:16; people 0, mine 1" in group and "beta words" not in group
+    assert f"note {note.record['id']} by root on " in group and "  Beta waits for the owner." in group
     by_task = page_covers(tmp_path, beta, task_ids=["tb1"])["covers"]
     assert f"note:{note.record['id']}" in by_task["rows"]  # the task's page takes its note too
     assert store.publish_page(room_id=beta, text="beta answered", covers=by_task, author=shared.MIND).ok
     sealed = _view(tmp_path, MAIN_TASK)[1]
-    assert f"chat_id={beta}]" not in sealed and "Beta waits for the owner." not in sealed  # nothing open: not live
+    assert f"chat_id={beta}]" not in sealed and "Beta waits for the owner." not in sealed  # nothing open there
     store.write_note(room_id=beta, task_id="tb1", text="One more thought on beta.", author=shared.MIND)
-    _snap, again = _view(tmp_path, MAIN_TASK)
-    assert (f"### Project Beta [chat_id={beta}] — no open rows; my notes not yet sealed: 1; pages of this room: 2, "
-            f"last covered row 2026-09-05 10:16\nmemory_read(room_id='{beta}')\nnote ") in again  # no rows: the page reads
+    again = _section(_view(tmp_path, MAIN_TASK)[1], f"### Project Beta [chat_id={beta}]")
+    assert again.startswith(f"### Project Beta [chat_id={beta}]\nno open rows; pages of that room: 2, last covered row "
+                            f"2026-09-05 10:16; memory_read(room_id='{beta}', rows=true)\nnote ")  # a note alone holds it
 
 
 def test_a_rooms_standing_facts_are_the_inventorys_in_its_header_its_live_line_and_the_floors_summed_line(tmp_path):
@@ -474,13 +482,14 @@ def test_a_rooms_standing_facts_are_the_inventorys_in_its_header_its_live_line_a
     chars = sum(len(row["text"]) for row in rows if row["chat_id"] in (1, 777) and row.get("type") != "presence_delivery")  # the transport's rows are Main's too
     assert facts == {"rows": 21, "people": 4, "mine": 4, "task_facts": 13, "chars": chars, "earliest": _ts(2),
                      "latest": _ts(27), "notes": 0, "pages": 0, "last_covered": ""}
-    head = f"## This room (Main) — head {store.room_head('1')}; open 2026-09-05 10:02 → 2026-09-05 10:27; people 4, mine 4, "
-    assert f"{head}task facts 13, ~{chars} chars; my notes not yet sealed: 0; no page of this room yet\n" in text
-    live = _section(text, "## Live rooms")
-    assert (f"### Project Beta [chat_id={beta}] — open 2026-09-05 10:15 → 2026-09-05 10:16; people 1, mine 1, task facts 0, "
-            f"~20 chars; my notes not yet sealed: 0; no page of this room yet\nmemory_read(room_id='{beta}', rows=true)") in live
-    quiet = [room for room in (*snapshot.live_rooms, *snapshot.other_rooms) if not room["notes"] and not room["words"]]
-    assert [room["room_id"] for room in quiet] == [str(rooms["alpha"]), beta, "777"]
+    assert f"## This room (Main) — head {store.room_head('1')}\n" in text  # the header keeps what changes slowly
+    head = "### This room now\nopen 2026-09-05 10:02 → 2026-09-05 10:27; people 4, mine 4, "
+    assert f"{head}task facts 13, ~{chars} chars; my notes not yet sealed: 0; no page of this room yet" in text
+    block = _section(text, "## Other conversations")
+    assert (f"### Project Beta [chat_id={beta}]\nopen 2026-09-05 10:15 → 2026-09-05 10:16; people 1, mine 1, task facts 0, "
+            f"~20 chars; no page of that room yet; memory_read(room_id='{beta}', rows=true)") in block
+    quiet = [room for group in snapshot.conversations for room in group["rooms"]]  # what the last rung counts
+    assert sorted(room["room_id"] for room in quiet) == sorted([str(rooms["alpha"]), beta, "777"])
     assert mv._rooms_line(quiet) == (
         "3 open rooms; open 2026-09-05 10:13 → 2026-09-05 10:20; people 3, mine 2, task facts 1, "
         f"~{sum(room['facts']['chars'] for room in quiet)} chars; no page of these rooms yet; "
@@ -497,11 +506,11 @@ def test_a_rooms_standing_facts_are_the_inventorys_in_its_header_its_live_line_a
     sealed = sum(len(rows[i]["text"]) for i in range(3, 9))
     assert facts == {"rows": 15, "people": 4, "mine": 2, "task_facts": 9, "chars": chars - sealed, "earliest": _ts(2),
                      "latest": _ts(27), "notes": 1, "pages": 1, "last_covered": _ts(10)}
-    head = f"## This room (Main) — head {store.room_head('1')}; open 2026-09-05 10:02 → 2026-09-05 10:27; people 4, mine 2, "
+    head = "### This room now\nopen 2026-09-05 10:02 → 2026-09-05 10:27; people 4, mine 2, "
     assert (f"{head}task facts 9, ~{chars - sealed} chars; my notes not yet sealed: 1; pages of this room: 1, "
-            "last covered row 2026-09-05 10:10\n") in text
+            "last covered row 2026-09-05 10:10") in text
     assert "sealed up to" not in text and "sealed through" not in text and "frontier" not in text
-    quiet = [room for room in (*snapshot.live_rooms, *snapshot.other_rooms) if not room["notes"] and not room["words"]]
+    quiet = [room for group in snapshot.conversations for room in group["rooms"]]
     assert mv._rooms_line(quiet).startswith(
         "3 open rooms; open 2026-09-05 10:13 → 2026-09-05 10:17; people 2, mine 2, task facts 1, ")
     assert "; pages of these rooms: 1, last covered row 2026-09-05 10:20; memory_read(" in mv._rooms_line(quiet)
@@ -599,20 +608,19 @@ def test_each_role_sees_its_parts_of_the_live_view(tmp_path):
     assert "- [global; Main] For everyone" in wake_text and "Watch alpha" in wake_text  # all marks, as Main's turn
     assert _section(wake_text, "## This room (Main)") == _section(main_text, "## This room (Main)")  # byte for byte
     assert "please look at X" in _section(wake_text, "### Open conversation since")
-    assert "### Main — " not in wake_text  # Main is this room, not a live-room line
-    live = _section(wake_text, "## Live rooms")
-    assert "alpha words" not in live and "beta words" not in live
-    assert "transport words" not in live and wake_text.count("transport words") == 1
-    assert "alpha reply" not in wake_text and "beta reply" not in wake_text  # my replies there: one read by address
-    assert f"memory_read(room_id='{rooms['alpha']}', rows=true)" in live
-    assert "alpha words" not in main_text and "beta words" not in main_text  # the Main turn keeps its one line per room
+    assert "### Main\n" not in wake_text  # Main is this room, not another conversation
+    block = _section(wake_text, "## Other conversations")
+    assert block == _section(main_text, "## Other conversations")  # a wake holds the block a Main turn holds
+    assert "alpha words" in block and "beta words" in block and "alpha reply" in block  # where I spoke: whole
+    assert wake_text.count("transport words") == 1  # a row open here and in another room is read here, once
+    assert f"memory_read(room_id='{rooms['alpha']}', rows=true)" in block
     child_task = {"id": "kid9", "chat_id": 1, "delegation_role": "subagent", "root_task_id": "root1",
                   "metadata": words}
     child, child_text = _view(tmp_path, child_task)
     assert mv.render_story(child).startswith("## My story\n") and "## This room (Main) — head " in child_text
     assert "  Old Main talk." in mv.render_story(child)  # the retold record is in its story, whole, as in Main's
     assert "### Retold before the update" not in child_text and "### Open conversation" not in child_text
-    assert "## Live rooms" not in child_text and "Watch alpha" not in child_text and "Watch root1" in child_text
+    assert "## Other conversations" not in child_text and "Watch alpha" not in child_text and "Watch root1" in child_text
     assert child_text.startswith("## Words of my human that caused this work (verbatim)\n")
     assert "Find the cause" in child_text and "Find the cause" not in main_text
     nanny_task = {**child_task, "id": "nan9", "configured_subagent": {"route": {"kind": "agent_session"}}}
@@ -655,7 +663,7 @@ def test_before_activation_the_room_is_one_line_with_a_reader_that_works_without
     assert text == ("## This room (Main)\n\nOpen conversation unavailable until my memory is activated "
                     "(legacy_memory_lock_busy); read it: chat_history(count=100) — every room, newest first; this "
                     "room is chat_id 1.")
-    assert snapshot.live_rooms == () and snapshot.marks == ()
+    assert snapshot.conversations == () and snapshot.marks == ()
 
 
 def test_private_contact_reads_as_private_with_its_exact_source_in_main_and_its_project(tmp_path):
@@ -684,17 +692,18 @@ def test_private_contact_reads_as_private_with_its_exact_source_in_main_and_its_
     for task in ({"id": "bound", "chat_id": 1}, MAIN_TASK):  # the Project's own root and Main's integrator
         _snapshot, text = _view(tmp_path, task)
         words = _section(text, "### Open conversation")
-        assert f"; Ouroboros, privately to the owner; row:1@{_ts(40)}#" in words, task
-        assert f"; Ouroboros, privately to the owner; row:1@{_ts(41)}#" in words and "[question qp]" in words
+        assert f"; Ouroboros (task bound), privately to the owner; row:1@{_ts(40)}#" in words, task
+        assert f"; Ouroboros (task bound), privately to the owner; row:1@{_ts(41)}#" in words and "[question qp]" in words
         assert f"; Owner; row:1@{_ts(42)}#" in words and "[answer qp] chose (1) Research only" in words
         assert words.count(source) == 3 and "f" * 64 not in words  # exact source facts, no fingerprints
-        assert f"; Ouroboros; row:1@{_ts(43)}#" in words  # an ordinary notice stays ordinary
+        assert f"; Ouroboros (task bound); row:1@{_ts(43)}#" in words  # an ordinary notice stays ordinary
     read = _memory_read(ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="bound", current_chat_id=1), rows=True)
     assert read.count(source) == 3
     evidence = [row for row in read_room_source(tmp_path, rooms["alpha"])["rows"]
                 if (row.get("presence_contact") or (row.get("quiz") or {}).get("presence_contact")) == contact]
     assert [(row["author"], row["type"]) for row in evidence] == [
-        ("Ouroboros, privately to the owner", "main_notice"), ("Ouroboros, privately to the owner", "quiz"),
+        ("Ouroboros (task bound), privately to the owner", "main_notice"),
+        ("Ouroboros (task bound), privately to the owner", "quiz"),
         ("Owner", "quiz_answer")]
 
 
@@ -798,3 +807,31 @@ def test_a_storyless_room_page_keeps_story_order_when_an_older_period_is_sealed_
     assert [item["id"] for item in nanny.room["under_parts"]] == [older, newer]
     page = _section(text, "### Pages of this room")
     assert page.index("The older period, sealed later.") < page.index("The newer period.")
+
+
+def test_this_room_ends_with_the_act_that_seals_it_and_a_linked_row_leaves_my_other_conversations(tmp_path):
+    """S1: an integrating focus's room ends with the page act over its open rows, naming the newest; a delegated
+    child reads none. A writer's later terminal row its page links below it is that page's: a room holding only such
+    rows leaves my other conversations, and a new word there brings it back."""
+    from ouroboros.tools.chronicle import page_covers
+
+    rooms, rows = _install(tmp_path)
+    snapshot, text = _view(tmp_path, MAIN_TASK)
+    newest = snapshot.room["newest"]
+    assert newest and newest == _addr(rows[-1])
+    assert (f"A page with covers={{'to': '{newest}'}} seals this room's open rows, the earlier turns' with mine, so the "
+            "rest of me reads my words, not theirs;") in text
+    assert "A page with covers=" not in _view(tmp_path, MAIN_TASK, role="child")[1]
+    beta = str(rooms["beta"])
+    covers = page_covers(tmp_path, beta, from_addr=_addr(rows[13]), to_addr=_addr(rows[14]))["covers"]
+    assert ChronicleStore(tmp_path).publish_page(room_id=beta, text="Beta answered.", covers=covers,
+                                                 author={**shared.MIND, "task_id": "tb1"}).ok
+    later = shared.msg(_ts(30), "Done.", chat_id=int(beta), direction="system", type="task_summary", task_id="tb1",
+                       root_task_id="tb1", summary_kind="terminal_root_projection", status="completed")
+    shared.append(tmp_path / "logs" / "chat.jsonl", later)
+    assert beta not in {room["room_id"] for group in _view(tmp_path, MAIN_TASK)[0].conversations for room in group["rooms"]}
+    shared.append(tmp_path / "logs" / "chat.jsonl", shared.msg(_ts(31), "one more thing", chat_id=int(beta)))
+    snapshot, text = _view(tmp_path, MAIN_TASK)
+    room = next(room for group in snapshot.conversations for room in group["rooms"] if room["room_id"] == beta)
+    assert [word["text"] if "text" in word else word["line"].rsplit("] ", 1)[-1] for word in room["words"]] == ["one more thing"]
+    assert room["tasks"] == []  # the linked terminal row is no task line of the room either
