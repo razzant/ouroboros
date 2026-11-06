@@ -168,7 +168,6 @@ _MOVED_OWNERS = {
     "TCP_KEEPALIVE_INTERVAL_SEC": runtime_limits,
     "TCP_KEEPALIVE_PROBE_COUNT": runtime_limits,
     "EXTENSION_STREAM_METADATA_BYTES": runtime_limits,
-    "FOCUS_THREAD_SNAPSHOT_CHARS": runtime_limits,
     "WS_RELAY_BURST": runtime_limits,
     "WS_RELAY_REFILL_PER_SEC": runtime_limits,
     "CLAUDEXOR_STARTUP_WAIT_SEC": settings_defaults,

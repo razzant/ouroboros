@@ -641,8 +641,8 @@ def confirmed_delivery_receipts(ctx: Any) -> frozenset[tuple[str, str]]:
     return frozenset(identity for identity, state in latest.items() if state in {"delivered", "accepted"})
 
 
-PLACEHOLDERS = ("who", "place", "when", "facts_line", "event", "place_state", "notes",
-                "wake_item", "actor_facts", "work_here", "spent_line", "roots_line", "working_folder", "voice_line")
+PLACEHOLDERS = ("who", "place", "when", "facts_line", "event", "speak_line", "place_state", "notes",
+                "wake_item", "actor_facts", "work_here", "spent_line", "working_folder", "voice_line")
 
 # The connector's observed provider facts (CREATING_SKILLS ``event.facts``) in plain words. Each is what the
 # provider recorded about this event, never a reading of its text or a verdict about whom it is for.
@@ -753,10 +753,9 @@ def _thread_time(message: Mapping[str, Any]) -> str:
 def _thread_snapshot(focus: Mapping[str, Any], event: Mapping[str, Any]) -> str:
     """The thread as the connector captured it (``event.conversation.thread_history``), one line per message
     with its author (named through ``thread_history.authors`` first), a ``[you]`` mark by that directory or by id, a
-    ``[this message]`` mark on the waking message and its time. The
-    newest lines render whole under ``FOCUS_THREAD_SNAPSHOT_CHARS``; an omission names its count and exact reader.
-    Lines the room already shows are not filtered (matching them is a store read the frame does not make)."""
-    from ouroboros import config
+    ``[this message]`` mark on the waking message and its time. Rendered whole: the connector's capture is already
+    bounded, and a cut only the window itself may record (BIBLE P1). Lines the room already shows are not filtered
+    (matching them is a store read the frame does not make)."""
     history = (event.get("conversation") or {}).get("thread_history") if isinstance(event.get("conversation"), Mapping) else None
     if not isinstance(history, Mapping):
         return ""
@@ -778,20 +777,9 @@ def _thread_snapshot(focus: Mapping[str, Any], event: Mapping[str, Any]) -> str:
             " [this message]" if waking & {str(value) for value in (row.get("message_id"), row.get("id"), row.get("ts")) if value} else "")
         who = f"{name} ({identity})" if name and identity else name or identity or "unknown author"
         lines.append(f"- {who}{marks} at {_thread_time(row)}: {json.dumps(str(row.get('text') or ''), ensure_ascii=False)}")
-    kept, size = len(lines), 0
-    for index in range(len(lines) - 1, -1, -1):
-        size += len(lines[index]) + 1
-        if size > config.FOCUS_THREAD_SNAPSHOT_CHARS and index < len(lines) - 1:
-            kept = len(lines) - 1 - index
-            break
-    omitted = lines[:len(lines) - kept]
     coverage = "" if data.get("complete") in (None, True) else ", the connector reports it incomplete"
     observed = f", observed at {history['observed_at']}" if history.get("observed_at") else ""
-    head = f"The thread as the connector captured it ({len(messages)} message(s){coverage}{observed}):"
-    gap = ([f"({len(omitted)} earlier message(s), {sum(len(line) + 1 for line in omitted)} characters, are not shown "
-            "here: the room row of this message carries their exact memory_read(source_ref=…) address, and the "
-            "connector's thread read tool reads the thread live.)"] if omitted else [])
-    return "\n".join([head, *gap, *lines[len(lines) - kept:]])
+    return "\n".join([f"The thread as the connector captured it ({len(messages)} message(s){coverage}{observed}):", *lines])
 
 
 def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int) -> dict:
@@ -818,11 +806,8 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int) -> di
                             "owner_confirmed": owner_address and event.actor.get("authenticated") is not False,
                             **({"authenticated": event.actor["authenticated"]} if "authenticated" in event.actor else {}),
                             "is_bot": "from_bot" in facts},
-                  "matched_wakes": [w.fact for w in wake_matches(place, facts)],
-                  "addressed": bool(set(facts) & {"direct_message", "group_dm", "mention", "reply_to_me",
-                                                  "review_requested", "assigned", "legacy_addressed"})},
+                  "matched_wakes": [w.fact for w in wake_matches(place, facts)]},
         "focus_allowance": allowance,
-        "focus_counted_roots": allowance.get("counted_roots", "unavailable; inspect current work"),
     }
     remaining = allowance.get("remaining_usd")
     if remaining is not None and float(remaining) > 0:
@@ -861,8 +846,21 @@ def _when(message: Mapping[str, Any]) -> str:
     return (f"at {sent}" if sent else "at an unrecorded time") + (f", edited at {edited}" if edited else "")
 
 
+def _allowance_line(allowance: Mapping[str, Any], task_id: str) -> str:
+    """The consciousness allowance as counts (money, window, how many roots it counts); the root ids stay behind an
+    exact reader of this task's own record, never a dump in the frame (BIBLE P1: a raw payload behind an exact reader)."""
+    roots = allowance.get("roots")
+    folded = {key: allowance[key] for key in ("status", "limit_usd", "settled_usd", "remaining_usd", "resets_at") if key in allowance}
+    if isinstance(roots, list):
+        folded["counted_roots"] = len(roots)
+        folded["root_ids"] = (f'query_data(op="json", kind="task_result", ids=["{task_id}"], '
+                              'select="metadata.focus_allowance.roots")')
+    return json.dumps(folded or allowance, ensure_ascii=False)
+
+
 def frame_focus_content(task: Mapping[str, Any], content: Any) -> Any:
     """The volatile assignment lives at the user tail, after the shared cached prefix."""
+    from ouroboros.place_reply import speak_line
     from ouroboros.places import SILENT_DISCLOSURE
     metadata = task.get("metadata") or {}
     presence = metadata.get("presence") or {}
@@ -898,8 +896,8 @@ def frame_focus_content(task: Mapping[str, Any], content: Any) -> Any:
             "; authenticated: no" + ("; your human's own address: yes (unverified)" if unverified else "")
             if actor.get("authenticated") is False else ""),
         "work_here": work or "No earlier work recorded here; recent_tasks reads current work.",
-        "spent_line": json.dumps(allowance, ensure_ascii=False),
-        "roots_line": json.dumps(metadata.get("focus_counted_roots", "unavailable; inspect current work"), ensure_ascii=False),
+        "spent_line": _allowance_line(allowance, str(task.get("id") or "")),
+        "speak_line": speak_line(metadata),
         "working_folder": place.get("working_folder") or "not selected",
     }
     template = (Path(__file__).resolve().parents[1] / "prompts" / "FOCUS.md").read_text(encoding="utf-8")
