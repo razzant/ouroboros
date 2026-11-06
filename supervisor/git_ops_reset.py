@@ -958,7 +958,6 @@ def _bootstrap_snapshot() -> Optional[dict]:
     import smoke; a failed or interrupted smoke certifies no later boot.
     """
     import json
-    from supervisor.update_merge import UPDATE_TX_MARKER_NAME
     from ouroboros.body_adoption import holds_checkout
 
     try:
@@ -972,10 +971,7 @@ def _bootstrap_snapshot() -> Optional[dict]:
             if rc or not path:
                 return None
             git_dir = pathlib.Path(path.strip())
-        if any((git_dir / name).exists() for name in
-               (_go().BOOTSTRAP_PIN_MARKER_NAME, _go().UPDATE_INTENT_MARKER_NAME,
-                UPDATE_TX_MARKER_NAME, "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD",
-                "rebase-apply", "rebase-merge", "sequencer")):
+        if any((git_dir / name).exists() for name in _go()._bootstrap_git_markers()):
             return None
         campaign_path = drive / "state" / "evolution_campaign.json"
         if campaign_path.exists():

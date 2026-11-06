@@ -888,8 +888,12 @@ def _unwind_stashed_update(tx: dict, context: str) -> str:
 
     result = restore_stash_with_marker(tx, context)
     note = result.note
-    if result.complete and not clear_update_tx():
-        note = (note + "; " if note else "") + "the update transaction marker could not be cleared"
+    if result.complete:
+        cleared = clear_update_tx()
+        if cleared is None:
+            note = (note + "; " if note else "") + "the update transaction marker remains while another transition is active"
+        elif not cleared:
+            note = (note + "; " if note else "") + "the update transaction marker could not be cleared"
     return note
 
 

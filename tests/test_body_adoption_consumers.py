@@ -104,6 +104,38 @@ def _switch(scene, reason="adopt it"):
     body_switch._attest_loaded(root, body_adoption.read(scene.data))
 
 
+def test_adoption_authorization_refuses_an_update_that_already_owns_the_checkout(scene, monkeypatch):
+    """The common admission seam must reject an update-lock owner before writing a handoff."""
+    from supervisor import update_merge
+
+    monkeypatch.setattr(update_merge._g, "DRIVE_ROOT", scene.data)
+    lock = update_merge.acquire_update_lock()
+    try:
+        with pytest.raises(body_adoption.AdoptionRefused) as refused:
+            body_adoption.authorize(scene.ctx, scene.cand, reason="while-update")
+        assert refused.value.code == "ADOPTION_UPDATE_ACTIVE"
+        assert body_adoption.read(scene.data) == {}
+    finally:
+        update_merge.release_update_lock(lock)
+
+
+def test_adoption_arm_does_not_wait_or_drop_authorized_handoff_when_transition_is_busy(scene):
+    """A shutdown arm busy refusal preserves the authorized handoff for explicit recovery."""
+    from supervisor import git_ops
+
+    body_adoption.authorize(scene.ctx, scene.cand, reason="busy-arm")
+    restart_receipt(scene.data, scene.cand, "busy-arm")
+    assert body_adoption.bind_restart(lambda **_kw: (True, "ok"), scene.data, "busy-arm")()[0]
+    with git_ops.bootstrap_transition_lock(data_dir=scene.data):
+        assert body_adoption.arm(
+            scene.data, worker_exits=EXITED, live_children=[],
+            owner_restart=False, owned_stop={"state": "completed", "unconfirmed": []},
+        ) == "authorized"
+    handoff = body_adoption.read(scene.data)
+    assert handoff["phase"] == "authorized"
+    assert not pathlib.Path(body_switch.pointer_path(str(scene.serving))).exists()
+
+
 def test_managed_boot_right_after_a_switch_does_not_reset_or_clean_the_checkout(scene, monkeypatch):
     server = _managed_server(monkeypatch, scene)
     ordinary = _GitOps()

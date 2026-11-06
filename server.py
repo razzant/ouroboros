@@ -162,11 +162,15 @@ def _has_active_evolution_transaction() -> bool:
 
 
 def _launcher_managed_repo_matches() -> bool:
-    if not _LAUNCHER_MANAGED: return False
-    if not _LAUNCHER_MANAGED_REPO_DIR: return (REPO_DIR / ".git" / "ouroboros-managed.json").is_file()
     try:
-        return pathlib.Path(_LAUNCHER_MANAGED_REPO_DIR).resolve(strict=False) == REPO_DIR.resolve(strict=False)
-    except (OSError, RuntimeError, ValueError):
+        from supervisor import git_ops as git_ops_module
+
+        return git_ops_module.launcher_managed_repo_matches(
+            REPO_DIR,
+            managed_by_launcher=_LAUNCHER_MANAGED,
+            managed_repo_dir=_LAUNCHER_MANAGED_REPO_DIR,
+        )
+    except (OSError, RuntimeError, ValueError, ImportError):
         return False
 
 

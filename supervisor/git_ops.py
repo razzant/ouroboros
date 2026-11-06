@@ -11,6 +11,7 @@ import shutil  # noqa: F401
 import subprocess
 import sys
 import uuid
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Tuple
 
 from supervisor.state import (
@@ -59,6 +60,45 @@ def current_drive_root() -> pathlib.Path:
     """The pinned DRIVE_ROOT when init()/a rebind set it, else the env-resolved one."""
     pinned = globals().get("DRIVE_ROOT")
     return pinned if pinned is not None else _config.resolve_data_dir()
+
+
+class BootstrapTransitionBusy(RuntimeError):
+    """The optional bootstrap transition could not acquire its lock."""
+
+
+@contextmanager
+def bootstrap_transition_lock(timeout_sec: float = 30.0, *, data_dir: Optional[pathlib.Path] = None):
+    """Serialize source bootstrap with writers that create transition markers.
+
+    Git's ref transaction protects refs, HEAD and their native lockfiles, but
+    adoption/update/evolution ownership is represented in the data tree.  The
+    shared lock keeps those ownership records from appearing between the
+    repair's final guard and its ref commit.  A lock refusal is a safe refusal
+    of the optional repair, never a reason to reset or attach another way.
+    """
+    from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
+
+    lock_path = pathlib.Path(data_dir) if data_dir is not None else current_drive_root()
+    lock_path = lock_path / "locks" / "git-bootstrap.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = acquire_exclusive_file_lock(
+        lock_path,
+        timeout_sec=float(timeout_sec),
+        stale_sec=600.0,
+        owner_aware_stale=True,
+        # Keep the creator identity in the on-disk stamp.  The platform lock
+        # helper uses it to distinguish a dead owner from a live holder when
+        # owner-aware stale recovery is enabled; supplying custom metadata
+        # otherwise replaces its default ``pid=...`` stamp.
+        metadata=f"pid={os.getpid()} locked_at={utc_now_iso()}\n",
+        poll_sec=0.2,
+    )
+    if fd is None:
+        raise BootstrapTransitionBusy(lock_path)
+    try:
+        yield
+    finally:
+        release_exclusive_file_lock(lock_path, fd)
 
 
 def _guard_live_repo_destructive_git(cmd: List[str]) -> None:
@@ -135,10 +175,49 @@ def managed_branch_defaults(repo_dir: Optional[pathlib.Path] = None) -> Tuple[st
     return branch_dev, branch_stable
 
 
-def _is_launcher_managed_repo() -> bool:
-    if str(os.environ.get("OUROBOROS_MANAGED_BY_LAUNCHER", "") or "").strip() == "1":
+def launcher_managed_repo_matches(
+    repo_dir: Optional[pathlib.Path] = None,
+    *,
+    managed_by_launcher: Optional[bool] = None,
+    managed_repo_dir: Optional[str] = None,
+) -> bool:
+    """Return the single launcher/managed identity predicate used at boot.
+
+    A copied marker is not enough: when the launcher supplies a repo path it
+    must name this checkout; when it does not, the managed metadata file is the
+    identity witness.  Callers may pass captured server values so import-time
+    environment snapshots and bootstrap probes use the same rule.
+    """
+    repo = pathlib.Path(repo_dir or current_repo_dir())
+    marked = (
+        str(os.environ.get("OUROBOROS_MANAGED_BY_LAUNCHER", "") or "").strip() == "1"
+        if managed_by_launcher is None else bool(managed_by_launcher)
+    )
+    if not marked:
+        return False
+    target = (
+        str(os.environ.get("OUROBOROS_MANAGED_REPO_DIR", "") or "").strip()
+        if managed_repo_dir is None else str(managed_repo_dir or "").strip()
+    )
+    try:
+        target_matches = bool(target) and pathlib.Path(target).resolve(strict=False) == repo.resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        target_matches = False
+    if target_matches:
         return True
-    return bool(_read_managed_repo_meta())
+    # A stale launcher-path environment value must not demote a valid managed
+    # checkout. The metadata witness is path-bound and is the only fallback;
+    # an empty or copied JSON file is not managed authority.
+    try:
+        raw = json.loads((repo / ".git" / MANAGED_REPO_META_NAME).read_text(encoding="utf-8"))
+        recorded = str(raw.get("managed_repo_dir") or "").strip() if isinstance(raw, dict) else ""
+        return bool(recorded) and pathlib.Path(recorded).resolve(strict=False) == repo.resolve(strict=False)
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _is_launcher_managed_repo() -> bool:
+    return launcher_managed_repo_matches()
 
 
 def _list_remotes(*, capture=None, warnings: Optional[List[str]] = None) -> List[str]:
@@ -533,55 +612,151 @@ def _ensure_local_version_tag() -> None:
     log.info("Created local-only version tag %s at %s", tag_name, head_sha[:8])
 
 
-def _repair_detached_head_branch() -> None:
-    """Attach a detached HEAD to a missing local dev branch when that is safe.
+def _bootstrap_git_markers() -> tuple:
+    """Git-operation markers shared by the bootstrap receipt and source repair."""
+    from supervisor.update_merge import UPDATE_TX_MARKER_NAME
 
-    Cycle adoption (``body_adoption``) and the managed update both move the
-    local dev branch; a checkout left on a detached HEAD (a source install
-    checked out at a tag or SHA) refused them without naming the repair. The
-    boot repair is deliberately narrow: only when HEAD is detached, no local
-    branch of the configured dev name exists, a remote release line contains
-    HEAD and the tree is clean. Everything else is left to the owner; the
-    refusal that follows names the exact command.
+    return (BOOTSTRAP_PIN_MARKER_NAME, UPDATE_INTENT_MARKER_NAME, UPDATE_TX_MARKER_NAME,
+            "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-apply", "rebase-merge",
+            "sequencer", "BISECT_START")
 
-    Every probe runs under the rescue-only wall-clock bound, and every
-    uncertain answer — a raised adoption-transition guard, an adoption handoff
-    that exists but cannot be read, a failed or timed-out Git call, an
-    indeterminate branch check — stops the repair instead of guessing: a boot
-    must fail closed here, never stall. The branch is created non-forcing at
-    the validated commit (``git branch <name> <sha>``), so a branch that
-    appears concurrently is refused, never reset, and wherever HEAD goes the
-    branch itself always sits on a verified release-line commit. HEAD is
-    attached (``git symbolic-ref``) only when it still equals that commit and
-    the tree is still clean — a HEAD that moved meanwhile stays detached, and
-    a created-but-unattached branch is harmless. The end state is revalidated;
-    a failure to record the repair row is logged and does not undo the repair.
-    """
-    branch = managed_branch_defaults()[0]
-    hint = f"git checkout -B {branch}"
 
+def _detached_repair_blocked() -> bool:
+    from ouroboros.body_adoption import helper_dir, holds_checkout, read
+    from ouroboros.body_switch import HANDOFF_NAME
+
+    if _is_launcher_managed_repo() or holds_checkout(DRIVE_ROOT, current_repo_dir()):
+        return True
+    if (helper_dir(DRIVE_ROOT) / HANDOFF_NAME).exists() and not read(DRIVE_ROOT):
+        raise RuntimeError("adoption handoff exists but could not be read")
+    rc, path, error = rescue_git_capture(["git", "rev-parse", "--absolute-git-dir"])
+    if rc or not path:
+        raise RuntimeError(error or "Git directory could not be read")
+    if any((pathlib.Path(path) / name).exists() for name in _bootstrap_git_markers()):
+        return True
+    campaign = DRIVE_ROOT / "state" / "evolution_campaign.json"
+    if campaign.exists():
+        row = json.loads(campaign.read_text(encoding="utf-8"))
+        tx = row.get("active_transaction")
+        if row.get("status") in {"active", "paused"} and isinstance(tx, dict) and not tx.get("commit_sha"):
+            return True
+    return False
+
+
+def _attach_detached_head(branch: str, head: str) -> Tuple[bool, str]:
+    state_fd = None
     try:
-        from ouroboros.body_adoption import helper_dir, holds_checkout
-        from ouroboros.body_adoption import read as read_adoption
-        from ouroboros.body_switch import HANDOFF_NAME
+        # Evolution campaign writes take state.lock before the bootstrap lock;
+        # take the same short admission lock here so the campaign cannot appear
+        # between the guard and Git's prepared ref commit.
+        from supervisor import state
 
-        if holds_checkout(DRIVE_ROOT, current_repo_dir()):
-            return  # an adoption transition owns this tree's refs; never touch them
-        # read() collapses an unreadable handoff to {}; a handoff that exists
-        # but will not parse may be a transition this boot cannot see — treat
-        # it as one.
-        if (helper_dir(DRIVE_ROOT) / HANDOFF_NAME).exists() and not read_adoption(DRIVE_ROOT):
-            log.warning(
-                "An adoption handoff exists but could not be read; an adoption may be in "
-                "progress, so no branch is attached to a detached HEAD this boot. Run `%s` "
-                "yourself if the branch is missing.", hint)
-            return
-    except Exception:
-        log.warning(
-            "Could not check for an adoption transition; not attaching a branch to a "
-            "detached HEAD this boot. Run `%s` yourself if the branch is missing.", hint,
-            exc_info=True)
-        return
+        state_fd = state.acquire_file_lock(state.STATE_LOCK_PATH, timeout_sec=0.0)
+        if state_fd is None:
+            return False, "state transition lock unavailable"
+        with bootstrap_transition_lock():
+            return _attach_detached_head_locked(branch, head)
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    finally:
+        if state_fd is not None:
+            try:
+                from supervisor import state
+                state.release_file_lock(state.STATE_LOCK_PATH, state_fd)
+            except Exception:
+                log.warning("Detached-HEAD state-lock cleanup is unconfirmed", exc_info=True)
+
+
+def _attach_detached_head_locked(branch: str, head: str) -> Tuple[bool, str]:
+    """Create the branch and attach HEAD in one prepared native Git transaction.
+
+    An oid condition alone also accepts a *symbolic* HEAD at that oid. Read its
+    form after prepare, while Git holds HEAD and branch locks, before committing.
+    Old Git without symref-update refuses before commit; there is no unsafe fallback.
+    No checkout, index refresh, reset or worktree write belongs to this repair.
+    """
+    import queue
+    import threading
+    from ouroboros.platform_layer import kill_process_tree, subprocess_new_group_kwargs
+    from ouroboros.tools.shell_process import _active_subprocesses, _subprocess_lock, tracked_start
+    from ouroboros.update_channels import get_rescue_git_timeout_sec
+
+    timeout = get_rescue_git_timeout_sec()
+    proc, reader = None, None
+    try:
+        with tracked_start() as publish:
+            proc = publish(subprocess.Popen(
+                ["git", "update-ref", "--no-deref", "--stdin"], cwd=str(current_repo_dir()),
+                env=host_git_env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, **subprocess_new_group_kwargs()))
+        # Bytes avoid CRLF translation in Git's line protocol on Windows.
+        proc.stdin.write((f"start\ncreate refs/heads/{branch} {head}\n"
+                          f"symref-update HEAD refs/heads/{branch} oid {head}\nprepare\n").encode("utf-8"))
+        proc.stdin.flush()
+        replies = queue.Queue()
+
+        def prepared():
+            replies.put((proc.stdout.readline(), proc.stdout.readline()))
+
+        reader = threading.Thread(target=prepared, daemon=True)
+        reader.start()
+        reply = replies.get(timeout=timeout)
+        reader.join()
+        if reply != (b"start: ok\n", b"prepare: ok\n"):
+            raise RuntimeError(b"".join(reply).decode("utf-8", "replace").strip())
+        # No successful Git writer can move these refs until commit/abort. In
+        # particular a concurrently chosen named HEAD at the SAME oid is kept.
+        rc, _named, _err = rescue_git_capture(["git", "symbolic-ref", "-q", "HEAD"])
+        if rc != 1 or _detached_repair_blocked():
+            raise RuntimeError("HEAD is no longer detached, or a checkout transition owns it")
+        rc, dirty, _err = rescue_git_capture(["git", "--no-optional-locks", "status", "--porcelain"])
+        if rc or dirty:
+            raise RuntimeError("the tree is no longer known clean")
+        output, _ = proc.communicate(input=b"commit\n", timeout=timeout)
+        if proc.returncode != 0 or output != b"commit: ok\n":
+            raise RuntimeError(output.decode("utf-8", "replace").strip() or "commit outcome unconfirmed")
+        return True, ""
+    except Exception as exc:
+        # An ordinary refusal releases Git's prepared locks through its protocol,
+        # rather than killing it and leaving lockfiles behind.
+        if proc is not None and proc.poll() is None and (reader is None or not reader.is_alive()):
+            try:
+                proc.communicate(input=b"abort\n", timeout=timeout)
+            except Exception:
+                log.warning("Could not confirm transaction abort", exc_info=True)
+        return False, f"{type(exc).__name__}: {exc}"
+    finally:
+        if proc is not None:
+            if proc.poll() is None:
+                kill_process_tree(proc)  # an interrupted Git transaction is never retried
+            if reader is not None:
+                reader.join(timeout=10)
+            try:
+                if reader is None or not reader.is_alive():
+                    proc.communicate(timeout=10)
+            except Exception:
+                log.warning("Detached-HEAD transaction cleanup is unconfirmed", exc_info=True)
+            if proc.poll() is not None and (reader is None or not reader.is_alive()):
+                with _subprocess_lock:
+                    _active_subprocesses.discard(proc)
+                for pipe in (proc.stdin, proc.stdout):
+                    if pipe is not None:
+                        pipe.close()
+            else:
+                log.warning("Detached-HEAD Git process/pipe cleanup is unconfirmed; its handle stays tracked")
+
+
+def _repair_detached_head_branch() -> None:
+    """Repair only a clean, idle source checkout on a known remote dev line.
+
+    Managed reset and adoption retain their owners. Unknown probes refuse this
+    optional repair; branch creation and HEAD attachment commit together, or an
+    uncommitted transaction aborts without rewriting the owner's refs or files.
+    """
+    import shlex
+
+    branch = managed_branch_defaults()[0]
+    hint = f"git switch -c <new-branch> HEAD (unused name), or git switch {shlex.quote(branch)} (existing branch)"
 
     rc, current, _err = rescue_git_capture(["git", "symbolic-ref", "-q", "--short", "HEAD"])
     if rc == 0 and current.strip():
@@ -598,6 +773,17 @@ def _repair_detached_head_branch() -> None:
             "commit you mean.", branch, hint)
         return
     head = head.strip()
+    rc, _out, _err = rescue_git_capture(["git", "check-ref-format", f"refs/heads/{branch}"])
+    if rc:
+        log.warning("Invalid dev branch name %r; choose a valid new branch with git switch -c.", branch)
+        return
+    try:
+        if _detached_repair_blocked():
+            log.warning("A checkout transition owns this tree; no detached-HEAD repair. After it settles, use %s.", hint)
+            return
+    except Exception as exc:
+        log.warning("Could not check checkout transitions: %s; no detached-HEAD repair. After inspection, use %s.", exc, hint)
+        return
 
     # With --quiet, rc 1 is exactly "no such ref"; any other nonzero is a Git
     # failure and must never read as "the branch is absent".
@@ -646,43 +832,12 @@ def _repair_detached_head_branch() -> None:
             "Commit or stash your work, then run `%s`.", head[:12], on_line, branch, hint)
         return
 
-    # Create the branch non-forcing at the validated commit: `git branch
-    # <name> <sha>` refuses when the name already exists, and wherever HEAD
-    # goes from here the branch itself always sits on a verified release-line
-    # commit, so a concurrent external git process is never serialized — only
-    # made harmless.
-    rc, _out, err = rescue_git_capture(["git", "branch", branch, head])
-    if rc != 0:
+    attached_ok, error = _attach_detached_head(branch, head)
+    if not attached_ok:
         log.warning(
-            "Could not create branch '%s' at detached HEAD %s: %s. Run `%s` at the "
-            "commit you mean if the branch is missing.", branch, head[:12],
-            err or f"git exited {rc}", hint)
-        return
-    # Attach HEAD only while it still equals the commit the checks validated
-    # and the tree is still clean: `symbolic-ref` rewrites no working-tree
-    # file, so a HEAD that moved meanwhile is simply left detached where its
-    # mover put it.
-    rc, now, _err = rescue_git_capture(["git", "rev-parse", "--verify", "HEAD^{commit}"])
-    if rc != 0 or now.strip() != head:
-        log.warning(
-            "Created branch '%s' at %s but HEAD no longer sits there (now %s); leaving HEAD "
-            "detached — the branch is harmless where it is. Run `git checkout %s` only if "
-            "that is the branch you mean.", branch, head[:12], (now.strip() or "?")[:12], branch)
-        return
-    rc, status, _err = rescue_git_capture(["git", "status", "--porcelain"])
-    if rc != 0 or status.strip():
-        log.warning(
-            "Created branch '%s' at %s but the tree is no longer clean; leaving HEAD "
-            "detached — the branch is harmless where it is. Run `git checkout %s` once the "
-            "tree is settled.", branch, head[:12], branch)
-        return
-    rc, _out, err = rescue_git_capture(
-        ["git", "symbolic-ref", "HEAD", f"refs/heads/{branch}"])
-    if rc != 0:
-        log.warning(
-            "Created branch '%s' at %s but could not attach HEAD to it: %s; leaving HEAD "
-            "detached. Run `git checkout %s`.", branch, head[:12],
-            err or f"git exited {rc}", branch)
+            "Detached-HEAD attachment was not confirmed: %s. Safe automatic repair requires "
+            "Git update-ref --stdin with symref-update and prepared transactions. No retry or "
+            "rollback was attempted; inspect HEAD/refs, then use %s.", error, hint)
         return
     rc_now, attached, _err = rescue_git_capture(["git", "symbolic-ref", "-q", "--short", "HEAD"])
     rc_at, at, _err = rescue_git_capture(["git", "rev-parse", "HEAD^{commit}"])
@@ -730,13 +885,11 @@ def ensure_repo_present() -> None:
         subprocess.run(["git", "branch", "-M", BRANCH_DEV], cwd=str(repo), check=False)
         subprocess.run(["git", "branch", BRANCH_STABLE], cwd=str(repo), check=False)
 
-    try:
-        _repair_detached_head_branch()
-    except Exception:
-        log.warning("Detached-HEAD branch repair failed; boot continues without it.",
-                    exc_info=True)
-
     if not _is_launcher_managed_repo():
+        try:
+            _repair_detached_head_branch()
+        except Exception:
+            log.warning("Detached-HEAD branch repair failed; boot continues without it.", exc_info=True)
         _ensure_local_version_tag()
 
 
