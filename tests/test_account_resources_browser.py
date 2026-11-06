@@ -222,7 +222,7 @@ def test_timeout_before_receipt_survives_session_storage_loss_and_recovers_same_
     original = ui["reset_calls"][0]
     # The recovery result is multiline and its action is optional. Narrow the
     # real row inside a wide window: zero overflow alone missed text starvation.
-    result_row = row.locator(".settings-action-row").filter(has=page.locator("[data-recover-reset]"))
+    result_row = row.locator(".resource-message").filter(has=page.locator("[data-recover-reset]"))
     result_row.evaluate("e => { e.style.width = '320px'; e.style.maxWidth = '100%'; }")
     result_row.scroll_into_view_if_needed()
     copy_box = result_row.locator(".settings-action-copy").bounding_box()

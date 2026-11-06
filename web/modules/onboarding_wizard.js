@@ -843,7 +843,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
                         <select class="ui-control" id="compatible-model-source">${compatibleSources().map((entry) =>
                             `<option value="${escapeHtml(entry.id)}">${escapeHtml(entry.label)}</option>`).join('')}</select>
                     </label>
-                    <button type="button" class="btn btn-secondary" id="load-compatible-models">Load models</button>
+                    <button type="button" class="btn btn-default" id="load-compatible-models">Load models</button>
                 </div>
                 <div id="compatible-load-status" class="field-note compatible-load-status" role="status">Choose a source for each role below. You can also type any model ID.</div>
             </div>`;
@@ -1045,12 +1045,12 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
                         <div class="wizard-error" role="status">${escapeHtml(state.error)}</div>
                         <div class="footer-copy">${escapeHtml(saveUnknown ? 'The last save did not return a confirmed result.' : meta.footer)}</div>
                         <div class="footer-actions">
-                            <button class="btn btn-secondary" id="back-btn" type="button" ${index === 0 || state.saving || state.preparingRecovery ? 'disabled' : ''}>Back</button>
-                            ${state.currentStep === 'accounts' ? `<button class="btn btn-secondary" id="quick-start-btn" type="button" ${hasModelSubscription() ? '' : 'hidden'}>Review &amp; start</button>` : ''}
+                            <button class="btn btn-default" id="back-btn" type="button" ${index === 0 || state.saving || state.preparingRecovery ? 'disabled' : ''}>Back</button>
+                            ${state.currentStep === 'accounts' ? `<button class="btn btn-default" id="quick-start-btn" type="button" ${hasModelSubscription() ? '' : 'hidden'}>Review &amp; start</button>` : ''}
                             ${state.currentStep === 'summary' ? `
-                                <button class="btn btn-secondary" id="skip-presets-btn" type="button" ${shouldOfferPresetSkip() ? '' : 'hidden'} ${state.saving || state.preparingRecovery ? 'disabled' : ''}>Use Main for reviewers</button>
+                                <button class="btn btn-default" id="skip-presets-btn" type="button" ${shouldOfferPresetSkip() ? '' : 'hidden'} ${state.saving || state.preparingRecovery ? 'disabled' : ''}>Use Main for reviewers</button>
                             ` : ''}
-                            <button class="btn ${saveUnknown ? 'btn-secondary' : 'btn-primary'}" id="next-btn" type="button" ${nextButtonShouldBeDisabled() ? 'disabled' : ''}>${escapeHtml(nextLabel)}</button>
+                            <button class="btn ${saveUnknown ? 'btn-default' : 'btn-primary'}" id="next-btn" type="button" ${nextButtonShouldBeDisabled() ? 'disabled' : ''}>${escapeHtml(nextLabel)}</button>
                             ${saveUnknown ? `
                                 <button class="btn btn-primary" id="check-save-btn" type="button" ${state.saving ? 'disabled' : ''}>Check status</button>
                             ` : ''}

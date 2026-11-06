@@ -38,7 +38,21 @@ export const GENERIC_HARNESS_MARK = Object.freeze({
     path: 'M12 2 22 12 12 22 2 12Z',
 });
 
-const GENERIC_LABELS = Object.freeze({ agy: 'Antigravity' });
+const GENERIC_LABELS = Object.freeze({ agy: 'Antigravity', copilot: 'GitHub Copilot' });
+
+// The vendors' plan ids as the owner's words; an id not listed here stays itself (honest, never guessed). The raw
+// id is a fact of the account's Resources panel.
+const PLAN_LABELS = Object.freeze({
+    free: 'Free', plus: 'Plus', pro: 'Pro', prolite: 'Pro Lite', promax: 'Pro Max', max: 'Max', team: 'Team',
+    business: 'Business', enterprise: 'Enterprise', claude_pro: 'Pro', claude_max: 'Max', claude_team: 'Team',
+    claude_enterprise: 'Enterprise', self_serve_business_usage_based: 'Business usage-based',
+});
+
+/** The plan's word for a vendor plan id, or the id itself. */
+export function planLabel(plan) {
+    const raw = String(plan ?? '').trim();
+    return PLAN_LABELS[raw.toLowerCase()] || raw;
+}
 const API_IDS = new Set(['api', 'api_chat', 'api_model', 'native']);
 
 /** Return presentation facts only; callers retain status and evidence ownership. */

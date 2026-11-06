@@ -5238,8 +5238,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
    tokens, until their screens adopt the class. Inside an object a group or row is a tray: the soft neutral fill with
    the inner radius and no shadow; a tray inside a tray drops its fill, so fills never stack and its rows part by space
    alone. Neither has an edge: the transparent 1px border only keeps each box's size. */
-:is(.settings-shell .form-section, .settings-card, .settings-provider-card, .skills-card,
-    .marketplace-card, .widgets-card, .log-task-card) {
+:is(.skills-card, .marketplace-card, .widgets-card, .log-task-card) {
     border: 1px solid transparent;
     background: var(--surface-object);
     border-radius: var(--radius-object);
@@ -5711,28 +5710,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .evo-empty { display: grid; gap: var(--space-2); justify-items: start; padding: 4px 0 2px; }
 .evo-empty-line { margin: 0; max-width: 62ch; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
 
-.about-body {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    flex: 1;
-    gap: 24px;
-    padding: 40px 20px;
-    text-align: center;
-}
-.about-logo {
-    width: 96px;
-    height: 96px;
-    border-radius: var(--radius-object);
-    object-fit: cover;
-}
-.about-title { font-size: 28px; font-weight: 700; margin: 0; }
-.about-version { color: var(--text-muted); font-size: var(--type-meta); margin: 4px 0 0; }
-.about-desc { max-width: 480px; color: var(--text-secondary); font-size: 14px; line-height: 1.6; }
-.about-credits { display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
-.about-links { display: flex; gap: 16px; justify-content: center; margin-top: 4px; }
-.about-links a { color: var(--accent); text-decoration: none; }
 
 /* The scroller Evolution and Storage still mount (evolution.js, storage.js); Costs is on the shared Dashboard tab body. */
 .costs-scroll { overflow-y: auto; flex: 1; padding: 16px 20px; }
@@ -8754,13 +8731,19 @@ body.keyboard-open .project-panel {
     width: fit-content;
     max-width: 100%;
 }
-/* A spent window is EMPHASIS, not de-emphasis. The row used to be dimmed to
-   0.62 opacity, which greyed out the very sentence that reports the limit and
-   made its still-clickable buttons read as disabled (docs/DESIGN.md: "a control
-   rendered at secondary ink reads as disabled"). A warn tint says the same
-   thing without hiding it. */
-.harness-account-row.harness-exhausted { background: var(--tone-amber); }
-.harness-exhausted .harness-account-meta { color: var(--status-warn-word, var(--text-meta)); }
+/* The meta line is facts: each one whole on its line (a fact wider than the line wraps inside itself), parted by a
+   dot that stays with the fact before it, so no line starts with a separator. A spent window is the one fact in the
+   warning's hue (DESIGN principle 3: the words that carry the state take the hue; the row's body stays neutral, so
+   rows never alternate); the plan, who it is and "checked …" keep the meta ink. */
+.harness-account-meta .meta-fact { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
+.harness-account-meta .meta-fact:not(:last-of-type)::after { content: " ·"; margin-right: 0.35em; color: var(--text-meta); }
+.harness-account-meta .meta-fact[data-tone="warn"] { color: var(--status-warn-word, var(--text-meta)); }
+/* The light seed's half of the warning row (DESIGN seed table: light — the row's tint, its words in their own ink).
+   foundation-request: one ui.css token for a warning row's body (light: the tint, dark: none), as --status-warn-word
+   is for its words, so this rule can be written once for both themes. */
+:root[data-theme="light"] .harness-account-row.harness-exhausted { background: var(--status-warn-bg); }
+/* "Checking…" keeps the inspect button's width, so a press resizes nothing (DESIGN principle 6). */
+.harness-maintenance-actions [data-maintenance-action="inspect"] { min-width: 7.5em; }
 /* The login card frames itself: .panel-card is an onboarding.css class the
    settings pages never load, so leaning on it rendered a bare, frameless
    card (finding #4). Same ui-card tokens as every other panel surface. */
@@ -10507,30 +10490,6 @@ body.keyboard-open .secret-request-backdrop .secret-request-dialog {
 .chat-bubble:not(.assistant, .system) .message > :is(p:not(:has(img, video)), ul, ol, blockquote, .md-h1, .md-h2, .md-h3) {
     max-inline-size: 72ch;
 }
-
-/* track-migration:begin — the one field recipe for a .form-field input that has not adopted .ui-control yet (the
-   Settings range sliders are the remaining raw inputs). The Settings lane deletes this block with the last raw field;
-   the skills menu, the photo menu and the kanban select already carry .ui-popup / .ui-control. */
-.form-field input:not(.ui-control):not(.ui-checkbox), .form-field select:not(.ui-control):not(.ui-checkbox) {
-    padding: 8px 12px;
-    border-radius: var(--radius-inner);
-    border: 1px solid var(--field-border);
-    background: var(--bg-secondary);
-    color: var(--text-primary);
-    font-size: 14px;
-    font-family: inherit;
-    outline: none;
-    width: 320px;
-    max-width: 100%;
-    transition: border-color 0.2s, box-shadow 0.2s;
-}
-
-.form-field input:not(.ui-control):not(.ui-checkbox):focus {
-    border-color: var(--focus-accent-border);
-    box-shadow: 0 0 0 3px var(--focus-accent-ring);
-}
-
-/* track-migration:end */
 
 /* Light surfaces keep geometry and domain state semantics unchanged. */
 :root[data-theme="light"] #nav-version { opacity: 1; color: var(--text-meta); }

@@ -658,7 +658,7 @@ export function extractVersions(data) {
 
 export function formatDualVersion(data) {
     const { appVersion, runtimeVersion } = extractVersions(data);
-    return `app ${appVersion} | rt ${runtimeVersion}`;
+    return `App ${appVersion} · Runtime ${runtimeVersion}`;
 }
 
 const versionField = (value) => (typeof value === 'string' ? value.trim() : '');

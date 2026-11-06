@@ -224,7 +224,7 @@ def test_settings_footer_controls_are_reachable_at_content_breakpoints(subscript
             for name, message, busy, restart in states:
                 page.evaluate("""s => {
                     document.querySelector('#settings-status').textContent=s.message;
-                    document.querySelector('#settings-unsaved-indicator').classList.toggle('is-visible',s.name==='dirty');
+                    document.querySelector('.settings-footer').dataset.draft=s.name==='dirty'?'dirty':'clean';
                     document.querySelector('#btn-save-settings').disabled=s.busy;
                     document.querySelector('#btn-restart-now').hidden=!s.restart;
                 }""", {"name": name, "message": message, "busy": busy, "restart": restart})

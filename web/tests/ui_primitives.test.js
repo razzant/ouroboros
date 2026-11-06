@@ -18,6 +18,7 @@ const onboardingCss = await readFile(new URL('../onboarding.css', import.meta.ur
 const sharedCss = await readFile(new URL('../ui.css', import.meta.url), 'utf8');
 const documents = await Promise.all(['index.html', 'onboarding_template.html'].map(name => readFile(new URL('../' + name, import.meta.url), 'utf8')));
 const settingsJs = await readFile(new URL('../modules/settings.js', import.meta.url), 'utf8');
+const settingsUiJs = await readFile(new URL('../modules/settings_ui.js', import.meta.url), 'utf8');
 const controlsJs = await readFile(new URL('../modules/settings_controls.js', import.meta.url), 'utf8');
 const connectionsJs = await readFile(new URL('../modules/settings_connections.js', import.meta.url), 'utf8');
 const catalogJs = await readFile(new URL('../modules/settings_catalog.js', import.meta.url), 'utf8');
@@ -205,9 +206,11 @@ test('neutral controls have one shared button role in both UI shells', () => {
 test('result/action composition has one shared owner, independent of page and viewport', async () => {
     // Real-container reflow and readability are exercised by the browser consumer.
     const pageCss = await readFile(new URL('../style.css', import.meta.url), 'utf8');
-    assert.match(settingsCss, /\.settings-action-row\s*\{[^}]*flex-wrap:\s*wrap/);
-    assert.match(settingsCss, /\.settings-action-row\s*>\s*:last-child[^}]*margin-inline-start:\s*auto/);
+    // Settings composes the shared row (the footer, the catalog refresh, the LAN hint); the private row stays only for
+    // the screens that still read it (Skills › Browse, Updates) and never reaches the shared sheet.
+    assert.doesNotMatch(settingsUiJs, /settings-action-row/);
     assert.doesNotMatch(sharedCss, /\.settings-action-row\s*\{/);
+    assert.match(settingsUiJs, /<div class="settings-footer ui-action-row" data-draft="clean">/);
     assert.doesNotMatch(pageCss, /\.skills-card-action-row\s*\{[^}]*(?:display:|grid-template|flex:)/);
     // The shared parts: the action row keeps a reserved result line, the result shares the status sentence's tones.
     assert.match(sharedCss, /\.ui-action-row\s*\{[^}]*flex-wrap:\s*wrap/);
@@ -228,8 +231,10 @@ test('async actions expose the same busy and status semantics', () => {
     assert.match(settingsJs, /refreshModelCatalog\(\{ button: byId\('btn-refresh-model-catalog'\) \}\)/);
     assert.match(connectionsJs, /setInlineStatus\(row\.querySelector\('\[data-connection-test-status\]'\), '', 'muted'\)/);
     assert.match(primitivesJs, /if \(el\.textContent !== next\) el\.textContent = next/);
-    assert.match(catalogJs, /import \{ setInlineStatus \} from '\.\/ui_helpers\.js'/);
-    assert.match(catalogJs, /setInlineStatus\(statusEl, text, tone\)/);
+    // The catalog's result is the shared result line: its count ends by itself, a read gap stays.
+    assert.match(catalogJs, /import \{ setResult \} from '\.\/ui_primitives\.js'/);
+    assert.match(catalogJs, /setResult\(statusEl, \{ text, tone, ends: tone === 'ok' \}\)/);
+    assert.doesNotMatch(catalogJs, /setInlineStatus/);
     assert.match(catalogJs, /refreshModelCatalog\(\{ button \} = \{\}\)/);
     assert.match(catalogJs, /buttonRefreshes\.get\(button\) === refreshSeq/);
 });
