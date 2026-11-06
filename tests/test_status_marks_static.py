@@ -33,6 +33,7 @@ owner | web/ui.css | .status-mark[data-hue="owner"] | color
 owner | web/style.css | .chat-budget-pill[data-attention="1"] .chat-budget-bar | background
 owner | web/style.css | .chat-budget-pill[data-attention="1"] .chat-budget-bar-fill | background
 owner | web/style.css | .chat-budget-pill[data-attention="1"] .chat-budget-text | color
+owner | web/style.css | .costs-spend-bar[data-reached="1"] > i | background
 owner | web/style.css | .chat-live-phase[data-chip-tone="owner"] | background, color
 owner | web/style.css | .chat-question-nav | background, color
 owner | web/style.css | .skills-trust-value.is-suggested | color

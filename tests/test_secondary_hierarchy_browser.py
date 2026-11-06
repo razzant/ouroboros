@@ -2,9 +2,9 @@
 
 Chromium and WebKit, light and dark, a phone and a window, over fixture answers on the shapes the modules read:
 
-* Costs names the known spend first and keeps what leaves it incomplete in the same card; the composition, the open
-  hold and the technical facts step down in size and come after it, then the limit, then the tables. An unavailable
-  ledger says so and invents no zero.
+* Costs names the known spend of the limit first, in the Dashboard's headline figure, with one line of what is left
+  and what is still open under it; the accounting facts are the record's, behind that card's Details; then the
+  budget form, then the tables. An unavailable ledger says so and invents no zero.
 * Activity rows name their work whole (no ellipsis), in the primary ink above their quieter facts, say how long a task
   has run in words, and never put a control over the words.
 * Storage's saved groups keep a group's name its room on a narrow card: the long size that carries a qualifier goes
@@ -81,19 +81,21 @@ def _ledger(**accounting):
 
 
 COST_CASES = [
-    # width, theme, ledger, status, lead, [cost final, unresolved, unknown], reserved
+    # width, theme, ledger, status, figure, meta line, {facts in Details}
     (390, "light", _ledger(confirmed_usd=58.1, estimated_usd=5.32, reserved_usd=4.3, unresolved_upper_bound_usd=1.25,
                            unknown_unmetered=3, cost_final=False, non_final_rows=2),
-     200, "$63.42 / $200.00", ["Pending (2 open)", "$1.25", "3"], "$4.30"),
-    (1100, "dark", _ledger(), 200, "$63.42 / $200.00", ["Yes", "$0.00", "0"], "$0.00"),
-    (390, "dark", {"error": "Spend records could not be read"}, 500, "Unavailable", ["Unavailable", "—", "—"], "—"),
+     200, "$63.42 of $200.00", "$136.58 left · up to $1.25 more is still being priced",
+     {"Final": "Pending (2 open)", "Unresolved upper bound": "$1.25", "Calls without a price": "3", "Reserved": "$4.30"}),
+    (1100, "dark", _ledger(), 200, "$63.42 of $200.00", "$136.58 left",
+     {"Final": "Yes", "Unresolved upper bound": "$0.00", "Calls without a price": "0", "Reserved": "$0.00"}),
+    (390, "dark", {"error": "Spend records could not be read"}, 500, "Unavailable", "", {}),
 ]
 
 
-@pytest.mark.parametrize("width,theme,ledger,status,lead,facts,reserved", COST_CASES,
+@pytest.mark.parametrize("width,theme,ledger,status,figure,meta,facts", COST_CASES,
                          ids=["open-phone-light", "closed-window-dark", "unavailable-phone-dark"])
 def test_costs_names_the_known_spend_with_what_is_still_open_before_anything_else(
-        ui, width, theme, ledger, status, lead, facts, reserved):
+        ui, width, theme, ledger, status, figure, meta, facts):
     page = _open(ui, width=width, theme=theme, place="dashboard", tab="costs",
                  routes=[("**/api/cost-breakdown", _json(ledger, status))])
     page.wait_for_function("document.querySelector('#cost-known-limit').textContent !== 'Loading…'")
@@ -101,40 +103,35 @@ def test_costs_names_the_known_spend_with_what_is_still_open_before_anything_els
         const el = (sel) => document.querySelector(sel);
         const top = (sel) => el(sel).getBoundingClientRect().top;
         const size = (sel) => parseFloat(getComputedStyle(el(sel)).fontSize);
-        const text = (sel) => el(sel).textContent.trim();
-        const card = el('.costs-lead');
-        const scroll = el('#page-costs .costs-scroll');
+        const card = el('#cost-known-limit').closest('.ui-card');
+        const details = el('#cost-details');
+        const body = el('#page-costs');
+        const facts = {};
+        for (const dt of details.querySelectorAll('dt')) facts[dt.textContent] = dt.nextElementSibling.textContent;
         return {
-            text: [text('#cost-known-limit'), ...['#cost-final', '#cost-unresolved', '#cost-unknown'].map(text)],
-            reserved: text('#cost-reserved'),
-            inLead: ['#cost-known-limit', '#cost-final', '#cost-unresolved', '#cost-unknown'].map((s) => card.contains(el(s))),
-            below: ['#cost-confirmed', '#cost-estimated', '#cost-reserved', '#cost-calls', '#cost-top-model', '#s-budget']
-                .map((s) => !card.contains(el(s))),
-            lead: top('#cost-known-limit'),
-            open: ['#cost-final', '#cost-unresolved', '#cost-unknown'].map(top),
-            breakdown: ['#cost-confirmed', '#cost-estimated', '#cost-reserved'].map(top),
-            budget: top('#s-budget'),
-            tables: top('#cost-by-model'),
-            sizes: [size('#cost-known-limit'), size('#cost-final'), size('#cost-confirmed'), size('#cost-calls')],
-            leadBottom: card.getBoundingClientRect().bottom,
+            figure: el('#cost-known-limit').textContent.trim(), meta: el('#cost-left').textContent.trim(), facts,
+            body: body.classList.contains('dashboard-body') && body.parentElement.classList.contains('dashboard-panel'),
+            detailsInCard: card.contains(details) && !details.open,
+            lead: top('#cost-known-limit'), metaTop: top('#cost-left'),
+            budget: top('#s-budget'), tables: top('#cost-by-model'),
+            sizes: [size('#cost-known-limit'), size('#cost-left')],
+            leadBottom: el('#cost-left').getBoundingClientRect().bottom,
             viewport: innerHeight,
-            leadText: card.textContent,
-            sideways: scroll.scrollWidth > scroll.clientWidth + 1,
+            visibleText: card.innerText,
+            sideways: body.scrollWidth > body.clientWidth + 1,
         };
     }""")
-    assert seen["text"] == [lead, *facts], seen["text"]
-    assert seen["reserved"] == reserved
-    # The known spend and everything that leaves it incomplete stand in one card; the rest comes after it.
-    assert all(seen["inLead"]) and all(seen["below"]), seen
-    assert seen["lead"] < min(seen["open"]) and max(seen["open"]) < min(seen["breakdown"]), seen
-    assert max(seen["breakdown"]) < seen["budget"] < seen["tables"], seen
-    # Each tier steps down: the known spend, the open facts and the composition, then the technical count.
-    lead_size, fact_size, composition_size, technical_size = seen["sizes"]
-    assert lead_size > composition_size > fact_size == technical_size, seen["sizes"]
+    assert seen["figure"] == figure and seen["meta"] == meta, seen
+    assert {key: seen["facts"].get(key) for key in facts} == facts, seen["facts"]
+    # One tab body is the panel's root and scroller; the open facts are the hero card's own Details, closed.
+    assert seen["body"] and (seen["detailsInCard"] or status != 200), seen
+    assert seen["lead"] < seen["metaTop"] < seen["budget"] < seen["tables"], seen
+    # The known spend is the one headline figure; its line steps down to the meta size.
+    assert seen["sizes"][0] > seen["sizes"][1], seen["sizes"]
     # On the first screen of a phone: the number and what is open about it, without a scroll.
     assert seen["leadBottom"] < seen["viewport"], seen
     if status != 200:
-        assert "$" not in seen["leadText"], "an unavailable ledger invents no zero"
+        assert "$" not in seen["visibleText"], "an unavailable ledger invents no zero"
     assert not seen["sideways"], "the page never scrolls sideways"
     _shot(page, ui, "costs", width, theme)
 

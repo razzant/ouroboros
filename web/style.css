@@ -4118,7 +4118,7 @@ html[data-layout="stack"] #primary-sidebar {
    as its own scroller. */
 html[data-layout="stack"] :is(#chat-messages, .chat-messages, .files-list, .files-sidebar, .files-preview-content,
     .skills-scroll, .widgets-scroll, .settings-scroll, .costs-scroll, .activity-scroll,
-    #log-entries, .updates-scroll) {
+    #log-entries, .updates-scroll, .dashboard-body) {
     touch-action: pan-y pinch-zoom;
 }
 /* Outside the scrollers too (a header, the composer's row of capsules, the attach button): the page itself only pans
@@ -5248,7 +5248,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
    the inner radius and no shadow; a tray inside a tray drops its fill, so fills never stack and its rows part by space
    alone. Neither has an edge: the transparent 1px border only keeps each box's size. */
 :is(.settings-shell .form-section, .settings-card, .settings-provider-card, .skills-card,
-    .marketplace-card, .widgets-card, .updates-card, .costs-budget-card, .stat-card, .log-task-card) {
+    .marketplace-card, .widgets-card, .updates-card, .log-task-card) {
     border: 1px solid transparent;
     background: var(--surface-object);
     border-radius: var(--radius-object);
@@ -5285,21 +5285,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     border: 1px solid transparent;
     background: var(--ui-modal-bg);
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
-}
-
-.stat-card .label {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-secondary);
-    margin-bottom: 8px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-
-.stat-card .value {
-    font-size: 20px;
-    font-weight: 700;
 }
 
 .section-title {
@@ -5752,87 +5737,33 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .about-links { display: flex; gap: 16px; justify-content: center; margin-top: 4px; }
 .about-links a { color: var(--accent); text-decoration: none; }
 
+/* The scroller Evolution and Storage still mount (evolution.js, storage.js); Costs is on the shared Dashboard tab body. */
 .costs-scroll { overflow-y: auto; flex: 1; padding: 16px 20px; }
-.costs-budget-card {
-    margin-bottom: 20px;
-}
-.costs-budget-title { font-size: 15px; font-weight: 600; margin: 0; color: var(--text-primary); }
-/* Budget card head row hosts title plus embedded Refresh. */
-.costs-budget-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
-.costs-budget-refresh { flex: 0 0 auto; }
-.costs-budget-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px 20px; margin-bottom: 16px; }
-.costs-budget-fields .form-field { min-width: 0; }
-.costs-budget-fields input { width: 100%; min-width: 0; }
-.costs-budget-save { margin-top: 4px; }
-/* The known spend leads and what leaves it incomplete stands in the same card; the composition and the open hold step
-   down one size, the technical facts one more (DESIGN §2: one primary thing in a card). */
-.costs-lead {
+/* Dashboard › Costs (costs.js) on the Dashboard tab body: the known spend of the limit leads with its share as a thin
+   bar under it (amber only when the limit is reached, the owner's move); the budget form is the tab's action row; the
+   four breakdowns are cards of their own, two side by side where they fit, each a short list with "Show all (N)". */
+.costs-card-title { margin: 0; color: var(--text-primary); font-size: var(--type-section); line-height: var(--line-title); font-weight: 600; }
+.costs-spend-bar { height: 4px; border-radius: var(--pill-radius); background: var(--status-neutral-bg); overflow: hidden; }
+.costs-spend-bar > i { display: block; width: var(--spend-share, 0%); height: 100%; border-radius: inherit; background: var(--text-meta); }
+.costs-spend-bar[data-reached="1"] > i { background: var(--amber); }
+.costs-details { margin-top: var(--space-3); }
+.costs-facts {
     display: grid;
-    gap: var(--space-1);
-    padding: var(--space-4) var(--space-5);
-    margin-bottom: var(--space-3);
+    grid-template-columns: fit-content(14rem) minmax(0, 1fr);
+    gap: var(--space-1) var(--space-4);
+    margin: 0;
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
 }
-.costs-lead-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
-.costs-lead-head > .label { margin: 0; }
-.costs-lead > .value {
-    color: var(--text-primary);
-    font-size: var(--type-page);
-    line-height: var(--line-title);
-    font-weight: 650;
-    overflow-wrap: anywhere;
-}
-/* The page's own width decides the columns (the viewport does not know the content column): a narrow page reads each
-   open fact as one label-and-value row and the breakdown in two columns, a wide one in three. */
-#page-costs .costs-scroll { container: costs / inline-size; }
-.costs-lead-facts { display: grid; gap: var(--space-2); margin-top: var(--space-3); }
-.costs-fact { min-width: 0; display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); }
-.costs-fact > .label { margin: 0; font-size: var(--type-meta); line-height: var(--line-meta); }
-.costs-fact > .value {
-    color: var(--text-primary);
-    font-size: var(--type-body);
-    line-height: var(--line-body);
-    font-weight: 600;
-    text-align: end;
-    overflow-wrap: anywhere;
-}
-.costs-stats-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: var(--space-3);
-    margin-bottom: var(--space-5);
-}
-.costs-stats-grid > .stat-card { padding: var(--space-3) var(--space-4); }
-.costs-stats-grid > .costs-technical:last-child { grid-column: span 2; }
-@container costs (min-width: 560px) {
-    .costs-lead-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-4); }
-    .costs-fact { display: block; }
-    .costs-fact > .label { display: block; margin-bottom: 2px; }
-    .costs-fact > .value { text-align: start; }
-    .costs-stats-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-}
-.costs-tables-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
-    gap: 20px;
-}
-.costs-stats-grid > *, .costs-tables-grid > * { min-width: 0; }
-.costs-tables-grid > * { overflow-x: auto; }
-.costs-stats-grid .value {
-    font-size: var(--type-section);
-    line-height: var(--line-title);
-    font-weight: 600;
-    overflow-wrap: anywhere;
-}
-.costs-stats-grid .costs-technical .value { font-size: var(--type-body); line-height: var(--line-body); }
-.costs-table-label { font-size: 14px; color: var(--text-secondary); margin: 0 0 8px; }
-.cost-cell-name { font-size: 12px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cost-cell-right { text-align: right; }
-.costs-stats-grid .cost-top-model { font-size: var(--type-meta); line-height: var(--line-meta); }
-.cost-bar-cell { width: 60px; }
-.cost-bar { width: 60px; height: 6px; border: 0; border-radius: var(--pill-radius); overflow: hidden; opacity: 0.7; }
-.cost-bar::-webkit-progress-bar { background: rgba(var(--neutral-rgb), 0.08); }
-.cost-bar::-webkit-progress-value { background: var(--accent); }
-.cost-bar::-moz-progress-bar { background: var(--accent); }
+.costs-facts dd { margin: 0; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.costs-budget, .costs-table-card { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+.costs-budget-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: var(--space-3) var(--space-5); align-items: start; }
+.costs-copy { margin: 0; max-width: 72ch; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.costs-tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: var(--space-4); align-items: start; }
+.cost-cell-name { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cost-table .cost-cell-right { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.status-mark.cost-open { margin-inline-start: var(--space-1); vertical-align: middle; }
 .cost-empty-cell { color: var(--text-muted); text-align: center; }
 
 /* Dashboard Storage (the owner-started count and the free-space tray): shared card, type, spacing
@@ -7761,11 +7692,6 @@ button.skills-mark { cursor: pointer; min-height: 0; }
         margin: 0 8px 8px;
         min-width: 0;
         overflow-x: hidden;
-    }
-
-    .costs-budget-fields,
-    .costs-tables-grid {
-        grid-template-columns: 1fr;
     }
 
     .costs-scroll {

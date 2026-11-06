@@ -60,7 +60,7 @@ MEASURE = """root => {
     const name = e => e.tagName.toLowerCase() + (e.id ? '#' + e.id : '') +
         [...e.classList].slice(0,3).map(c=>'.'+c).join('');
     const local = e => e.matches('.app-tab-strip, pre, .md-table-wrap, .widget-table-wrap, ' +
-        '.costs-tables-grid > div, .files-preview-content, .files-editor');
+        '.files-preview-content, .files-editor');
     const overflow = [], small = [], headers = [];
     const scope = document.querySelector(root);
     const doc = document.scrollingElement;
@@ -374,11 +374,11 @@ def test_content_regions_fit_with_touch_controls_and_local_table_scroll(gate_ui)
                 page.wait_for_selector('.widgets-card')
             if name == 'dashboard':
                 page.locator('[data-dashboard-tab="costs"]').click()
-                page.wait_for_function("document.querySelector('#cost-top-model').textContent.length > 200")
-                table = page.locator('#cost-by-model').locator('..')
-                assert table.evaluate('e => e.scrollWidth > e.clientWidth'), 'fixture must scroll locally'
-                table.evaluate('e => e.scrollLeft = e.scrollWidth')
-                assert table.evaluate('e => e.scrollLeft > 0')
+                page.wait_for_function("document.querySelector('#cost-by-model .cost-cell-name')?.textContent.length > 200")
+                cell = page.locator('#cost-by-model .cost-cell-name').first
+                # The cell is the amount's neighbour: a name longer than its column ends in an ellipsis in place.
+                assert cell.evaluate('e => e.scrollWidth > e.clientWidth'), 'the fixture name is longer than its cell'
+                assert cell.evaluate('e => getComputedStyle(e).textOverflow') == 'ellipsis'
             if name == 'settings':
                 page.wait_for_selector('#available-subagents-editor .available-subagent-row', state='attached')
                 for tab in page.locator('[data-settings-tab]').all():
@@ -391,13 +391,13 @@ def test_content_regions_fit_with_touch_controls_and_local_table_scroll(gate_ui)
                 results[name] = page.evaluate(MEASURE, scope)
         assert not {k:v for k,v in results.items() if any(v.values())}, json.dumps(results, indent=2)
 
-        # Regression sensitivity: restoring the old ineffective stat-value rule
-        # must make the same probe fail, although the table still scrolls locally.
+        # Regression sensitivity: a name cell allowed to grow (the old recipe) must make the same probe fail: the long
+        # name would widen its table past its card and the tab body would scroll sideways.
         open_nav(page, 'dashboard')
         page.locator('[data-dashboard-tab="costs"]').click()
-        page.add_style_tag(content='.costs-stats-grid .value { overflow-wrap: normal; }')
+        page.add_style_tag(content='.cost-cell-name { max-width: none; overflow: visible; }')
         settle(page)
         broken = page.evaluate(MEASURE, '.dashboard-shell')
-        assert any(row['node'] == 'div.costs-scroll' for row in broken['overflow']), broken
+        assert any(row['node'].startswith('div#page-costs') for row in broken['overflow']), broken
     finally:
         page.close()

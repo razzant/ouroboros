@@ -278,9 +278,25 @@ function costsPanel(t, answers) {
     env.mount.querySelector('#s-budget').value = '200';
     env.mount.querySelector('#s-per-task-cost').value = '50';
     const press = async () => { await save.fire('click', { currentTarget: save }); await settle(); };
-    const words = () => [status.textContent, status.dataset.tone ?? ''];
-    return { ...env, status, save, posts, press, words, tick: (ms) => t.mock.timers.tick(ms) };
+    // The result's sentence; its raw text, if any, is the disclosure after it (setResult).
+    const words = () => {
+        const all = status.textContent;
+        const details = status.querySelector('.ui-result-details');
+        return [details ? all.slice(0, all.indexOf('Details')) : all, status.dataset.tone ?? ''];
+    };
+    const raw = () => status.querySelector('.ui-result-details')?.textContent ?? '';
+    return { ...env, status, save, posts, press, words, raw, tick: (ms) => t.mock.timers.tick(ms) };
 }
+
+test('the budget form is the reference action row: Save, then its result as the next sibling in one row', (t) => {
+    const panel = costsPanel(t, []);
+    const row = panel.save.parentElement;
+    assert.ok(row.classList.contains('ui-action-row'), 'Save stands in the shared action row');
+    assert.equal(panel.save.nextElementSibling, panel.status, 'the result comes right after its button, never under it');
+    assert.ok(panel.status.classList.contains('ui-result'));
+    assert.equal(row.children.length, 2, 'nothing else sits between the button and its result');
+    assert.equal(panel.save.textContent, 'Save');
+});
 
 test('a plain save acknowledges, then clears its words and its tone after the acknowledgement time', async (t) => {
     const panel = costsPanel(t, [reply({ immediate_changed: true })]);
@@ -309,7 +325,29 @@ test('a restart the save requires, a warning and an error are never erased by ti
     assert.deepEqual(panel.words(), ['Saved. Took effect immediately. Warnings: Limit is below known spend.', 'warn']);
     await panel.press();
     panel.tick(10 * ACK);
-    assert.deepEqual(panel.words(), ['Error: Settings file is read-only.', 'error'], 'a failed save is not an acknowledgement');
+    assert.deepEqual(panel.words(), ["Not saved. Ouroboros couldn't do this.", 'danger'], 'a failed save is not an acknowledgement');
+    assert.equal(panel.raw(), 'Settings file is read-only.', "the server's own words stay one disclosure away");
+});
+
+test('an edit of the budget fields clears the result that time never clears; a failed reach is owner words', async (t) => {
+    const panel = costsPanel(t, [reply({ restart_required: true }), new TypeError('Load failed')]);
+    await panel.press();
+    panel.tick(10 * ACK);
+    assert.deepEqual(panel.words(), ['Saved. Restart required.', 'warn']);
+    const card = panel.save.closest('.costs-budget');
+    const field = panel.mount.querySelector('#s-budget');
+    await card.fire('input', { target: panel.status });
+    assert.deepEqual(panel.words(), ['Saved. Restart required.', 'warn'], 'its own disclosure toggling is no edit');
+    await card.fire('input', { target: field });
+    assert.deepEqual(panel.words(), ['', ''], 'a new edit starts a new subject');
+    await panel.press();
+    assert.deepEqual(panel.words(), ["Not saved. Couldn't reach Ouroboros.", 'danger']);
+    assert.equal(panel.raw(), 'Load failed', "the browser's transport text is never the sentence");
+    assert.doesNotMatch(panel.words()[0], /Error:|Load failed/);
+    field.value = '0';
+    await panel.press();
+    assert.deepEqual(panel.words(), ['Budget values must be at least 0.01.', 'danger'], 'nothing is sent for an invalid value');
+    assert.equal(panel.posts.length, 2);
 });
 
 test('one timer owner: an older acknowledgement never erases what a newer save says', async (t) => {
@@ -319,7 +357,8 @@ test('one timer owner: an older acknowledgement never erases what a newer save s
     panel.tick(ACK - 1000);
     await panel.press();  // a failing save inside the window: the first timer must not take it away
     panel.tick(ACK);
-    assert.deepEqual(panel.words(), ['Error: Offline.', 'error']);
+    assert.deepEqual(panel.words(), ["Not saved. Ouroboros couldn't do this.", 'danger']);
+    assert.equal(panel.raw(), 'Offline.');
     // Two plain saves: the second one's own full time counts, and the first one's timer is gone.
     await panel.press();
     panel.tick(ACK - 1000);
@@ -335,6 +374,6 @@ test('a validation message after an acknowledgement is not erased by the acknowl
     panel.tick(ACK - 1);
     await panel.press();
     panel.tick(ACK);
-    assert.deepEqual(panel.words(), ['Budget values must be at least 0.01.', 'error'], 'never in the acknowledgement\'s tone');
+    assert.deepEqual(panel.words(), ['Budget values must be at least 0.01.', 'danger'], 'never in the acknowledgement\'s tone');
     assert.equal(panel.posts.length, 1, 'an invalid value is never sent');
 });
