@@ -171,7 +171,9 @@
        under them; inside a voice its own opaque steps (the voice materials, after the light block). */
     --elev-rest: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 20px rgba(0, 0, 0, 0.28);
     --elev-float: 0 2px 8px rgba(0, 0, 0, 0.45), 0 18px 44px rgba(0, 0, 0, 0.5);
-    --row-lift-dim: rgba(0, 0, 0, 0.45);  /* the feed under a row lifted by a long press */
+    /* The one veil under every layer: dialogs, the Project panel, the file dialog and the reader, the feed under a row
+       lifted by a long press. */
+    --scrim: rgba(0, 0, 0, 0.45);
     --radius-object: 18px;
     --radius-inner: 12px;
     --radius-sheet: 24px;
@@ -382,7 +384,7 @@
     /* Airy dopamine seed, light values (the dark ones are in :root): white objects and capsules on two soft shadows. */
     --elev-rest: 0 1px 2px rgba(28, 33, 51, 0.05), 0 6px 18px rgba(28, 33, 51, 0.06);
     --elev-float: 0 2px 6px rgba(28, 33, 51, 0.06), 0 18px 44px rgba(28, 33, 51, 0.11);
-    --row-lift-dim: rgba(16, 18, 28, 0.24);
+    --scrim: rgba(16, 18, 28, 0.24);
     --surface-object: #ffffff;
     --surface-object-opaque: var(--surface-object);
     --surface-capsule: #ffffff;
@@ -672,7 +674,8 @@
     font-variant-numeric: tabular-nums;
 }
 
-/* Filters are quiet controls: no body, so no shadow; a chosen filter takes the soft crimson. */
+/* Filters are quiet controls: no body, so no shadow; a chosen filter takes the soft crimson. Their words carry the
+   controls' weight (DESIGN type line), as .btn and .app-tab do. */
 .filter-chip {
     --control-pad-x: var(--space-3);
     --button-font-size: var(--type-meta);
@@ -685,6 +688,7 @@
     color: var(--text-secondary);
     box-shadow: none;
     font-size: var(--button-font-size);
+    font-weight: 600;
     font-family: inherit;
     cursor: pointer;
     transition: var(--motion-tone);

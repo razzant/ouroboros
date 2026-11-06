@@ -2186,7 +2186,7 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 :is(.chat-bubble, .chat-live-card)[data-row-press="hold"] { transform: scale(0.985); }
 :is(.chat-bubble, .chat-live-card)[data-row-press="lift"] {
     transform: scale(1.012);
-    box-shadow: var(--elev-float), 0 0 0 100vmax var(--row-lift-dim);
+    box-shadow: var(--elev-float), 0 0 0 100vmax var(--scrim);
     transition: transform 0.24s var(--ease-sheet), box-shadow 0.24s ease-out;
 }
 :is(.chat-bubble, .chat-live-card)[data-row-swipe] {
@@ -5255,9 +5255,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 
-/* Every layer over the room lies over one veil, the theme's (U020): the dialogs here, the Project panel's scrim, the
-   file dialog's and the document reader's. foundation-request: name ui.css's --row-lift-dim (dark black .45, light
-   ink .24, today the feed under a long-pressed row) --scrim, the one veil token of every layer. */
+/* Every layer over the room lies over one veil, the theme's --scrim (ui.css; U020): the dialogs here, the Project
+   panel's, the file dialog's and the document reader's, and the feed under a long-pressed row. */
 .ui-modal-backdrop,
 :where(.marketplace-modal-backdrop) {
     position: fixed;
@@ -5266,7 +5265,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     display: flex;
     justify-content: center;
     overflow-y: auto;
-    background: var(--row-lift-dim);
+    background: var(--scrim);
 }
 
 /* A dialog stands in the middle of the window, clear of the bars (U024); one taller than the window starts at its top
@@ -5366,8 +5365,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     padding: var(--space-4) 0 var(--space-2);
     background: var(--bg-primary);
 }
-/* foundation-request: the shared .filter-chip has no weight of its own (400); controls are 600 (DESIGN type line). */
-.logs-filters .filter-chip { font-weight: 600; }
 
 .logs-inline-clear {
     margin-left: auto;
@@ -6002,8 +5999,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 @container dashboard (max-width: 480px) {
     .dashboard-hero-actions { grid-column: 1; grid-row: auto; align-self: start; }
 }
-/* foundation-request: a card's title role (16/600) and a list of facts (label, value) belong in ui.css with the other
-   shared parts (U136); until they move there, the Dashboard tabs' cards share these two. */
+/* A Dashboard card's title (16/600) and its list of facts (label, value): the tabs' cards share these two parts of the
+   tab body (Costs, Consciousness, Updates, Activity, Evolution). */
 .dashboard-card-title { margin: 0; color: var(--text-primary); font-size: var(--type-section); line-height: var(--line-title); font-weight: 600; }
 .dashboard-facts {
     display: grid;
@@ -8300,7 +8297,7 @@ body.keyboard-open .chat-instance-panel .chat-input-area {
     inset: 0;
     z-index: var(--z-project-scrim);
     cursor: default;
-    background: var(--row-lift-dim);
+    background: var(--scrim);
     backdrop-filter: blur(1.5px);
     -webkit-backdrop-filter: blur(1.5px);
     opacity: 0;
@@ -8736,9 +8733,8 @@ body.keyboard-open .project-panel {
 .harness-account-meta .meta-fact { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
 .harness-account-meta .meta-fact:not(:last-of-type)::after { content: " ·"; margin-right: 0.35em; color: var(--text-meta); }
 .harness-account-meta .meta-fact[data-tone="warn"] { color: var(--status-warn-word, var(--text-meta)); }
-/* The light seed's half of the warning row (DESIGN seed table: light — the row's tint, its words in their own ink).
-   foundation-request: one ui.css token for a warning row's body (light: the tint, dark: none), as --status-warn-word
-   is for its words, so this rule can be written once for both themes. */
+/* The light seed's half of the warning row (DESIGN seed table: light — the row's tint, its words in their own ink;
+   dark — a neutral row, its words in the hue): the one warning row with a body, so the theme scopes its rule here. */
 :root[data-theme="light"] .harness-account-row.harness-exhausted { background: var(--status-warn-bg); }
 /* "Checking…" keeps the inspect button's width, so a press resizes nothing (DESIGN principle 6). */
 .harness-maintenance-actions [data-maintenance-action="inspect"] { min-width: 7.5em; }
@@ -9300,7 +9296,7 @@ body.keyboard-open .project-panel {
 
 /* An engine whose ::backdrop does not inherit custom properties yet (WebKit before 17.4) keeps the dark veil. */
 .chat-file-dialog::backdrop,
-.document-reader::backdrop { background: var(--row-lift-dim, rgba(0, 0, 0, 0.45)); }
+.document-reader::backdrop { background: var(--scrim, rgba(0, 0, 0, 0.45)); }
 
 .chat-file-dialog-panel { padding: 18px; }
 
@@ -10316,7 +10312,7 @@ body.keyboard-open .secret-request-backdrop .secret-request-dialog {
 }
 .chat-bubble.assistant.chat-relay-note[data-row-press] { box-shadow: none; }
 .chat-relay-note[data-row-press] > .chat-relay-face { box-shadow: var(--elev-rest), 0 0 0 100vmax transparent; transition: box-shadow 0.24s ease-out; }
-.chat-relay-note[data-row-press="lift"] > .chat-relay-face { box-shadow: var(--elev-float), 0 0 0 100vmax var(--row-lift-dim); }
+.chat-relay-note[data-row-press="lift"] > .chat-relay-face { box-shadow: var(--elev-float), 0 0 0 100vmax var(--scrim); }
 
 /* The address line: who → whom, and at the right edge the time (a range on a closed stack) with the stack's control
    as one unit, so a narrow card wraps that unit whole and never the control alone. */
