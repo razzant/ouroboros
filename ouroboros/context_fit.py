@@ -846,11 +846,8 @@ def build_context_fit_plan(
         preferred = "max"
 
     meta = task.get("task_metadata") if isinstance(task.get("task_metadata"), dict) else {}
-    is_subagent = str(
-        task.get("delegation_role") or meta.get("delegation_role") or ""
-    ).strip().lower() == "subagent"
-    try:
-        route, evidence = route_resolver(task, allow_fetch=not is_subagent)
+    try:  # a child probes its own route too: its parent's warm evidence is no fact about it
+        route, evidence = route_resolver(task, allow_fetch=True)
     except Exception:
         log.debug("Context-fit route evidence unavailable; preserving Max", exc_info=True)
         route, evidence = _failed_route_evidence(task)
