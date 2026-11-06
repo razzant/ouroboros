@@ -5685,6 +5685,10 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 @container (max-width: 600px) {
     .evo-facts { grid-template-columns: minmax(0, 1fr); gap: 6px; }
     .evo-fact { grid-template-columns: 110px minmax(0, 1fr); align-items: baseline; }
+    /* Beside its label a value may wrap before its change (the number and the change each stay whole), so a phone's
+       tab never scrolls sideways for a "+7.1%". */
+    .evo-fact-value { white-space: normal; }
+    .evo-fact-delta { white-space: nowrap; }
 }
 .evo-empty { display: grid; gap: var(--space-2); justify-items: start; padding: 4px 0 2px; }
 .evo-empty-line { margin: 0; max-width: 62ch; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
