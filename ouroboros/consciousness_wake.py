@@ -29,16 +29,9 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-from ouroboros.consciousness_authority import (
-    CONSCIOUSNESS_CATEGORY,
-    CONSCIOUSNESS_INITIATOR,
-    WAKE_CAUSE_OWN_CLOCK,
-    WORK_KIND_CONSCIOUSNESS,
-    disabled_tools_for,
-    is_consciousness_origin,
-    normalize_level,
-    runtime_mode_cap_for,
-)
+from ouroboros.consciousness_authority import (CONSCIOUSNESS_CATEGORY, CONSCIOUSNESS_INITIATOR, WAKE_CAUSE_OWN_CLOCK,
+                                               WORK_KIND_CONSCIOUSNESS, disabled_tools_for, is_consciousness_origin,
+                                               normalize_level, runtime_mode_cap_for)
 from ouroboros.chat_chain import format_address, row_address, source_row_id
 from ouroboros.context_health import safe_read
 from ouroboros.deadline_utils import ago_text
@@ -429,6 +422,14 @@ _KIND_WORDS = {  # (one, many)
 _COUNTED_ONLY = frozenset({"direct_turn", "history_import"})
 
 
+def _continue_open(result: Dict[str, Any], task_id: str) -> str:
+    """' · Continue open (<cause>)' while this settled root may still be continued; nothing for a closed one."""
+    from ouroboros.owner_continue import continuation_offer
+
+    offer = continuation_offer(result, task_id) if result else {}
+    return f" · Continue open ({offer['cause']})" if offer.get("eligible") else ""
+
+
 def _presence_failure(result: Dict[str, Any]) -> bool:
     """Inline Presence shares the direct lane, but its host failure is absent from the dialogue."""
     from ouroboros.task_finalization import HOST_AUTHORED_TERMINAL_ORIGINS
@@ -480,8 +481,10 @@ def _event_line(kind: str, row: Dict[str, Any], results: Dict[str, Dict[str, Any
     project = str(row.get("project_id") or result.get("project_id") or "")
     where = f" in project {projects.get(project, project)}" if project else ""
     summary = f": {result['wake_summary']}" if result.get("wake_summary") else ""
+    opened = _continue_open(result, task_id)
     if kind in {"direct_turn", "direct_turn_summary"}:
-        return f"- {'wake' if is_consciousness_origin(metadata) else 'direct turn'} {task_id} {status}{where}, {when}{summary}"
+        return (f"- {'wake' if is_consciousness_origin(metadata) else 'direct turn'} {task_id} {status}{where}, {when}"
+                f"{summary}{opened}")
     if is_presence_task(result):
         if isinstance(metadata.get("presence_unknown_outcome"), dict):
             from ouroboros.presence_recovery import retained_turn_facts
@@ -506,7 +509,7 @@ def _event_line(kind: str, row: Dict[str, Any], results: Dict[str, Dict[str, Any
         outcome = "Interrupted" if result.get("status") == "interrupted" else OUTCOME_PHASE_HEADLINE[outcome_phase(settled, {})]
         cause = _completion_verdict(settled, {}, include_review_details=False)
     return (f"- {noun} {outcome}{cost_text}{where}, {when}: {title}".rstrip(": ") + summary
-            + (f" ({cause})" if cause else ""))
+            + (f" ({cause})" if cause else "") + opened)
 
 
 # --- canonical transitions: identities in the task results, not chat rows or stamps --------
@@ -589,7 +592,7 @@ def _transition_line(fact: Dict[str, Any], results: Dict[str, Dict[str, Any]], r
     result = results.get(task_id) or {}
     when = ago if fact["proven"] or stamp is None else f"completion time not recorded (last updated {ago})"
     if result.get("_is_direct_chat") and not _presence_failure(result):
-        kind = "direct_turn_summary" if result.get("wake_summary") else "direct_turn"
+        kind = "direct_turn_summary" if result.get("wake_summary") or _continue_open(result, task_id) else "direct_turn"
     return kind, _event_line(kind, {"task_id": task_id}, results, rooms, projects, now, when=when)
 
 
@@ -834,7 +837,8 @@ def observe_wake(drive_root: Any, *, boundary: Any, since: float, now: float, re
             continue
         result = results.get(str(row.get("task_id") or "")) or {}
         if kind == "task_terminal" and result.get("_is_direct_chat") and not _presence_failure(result):
-            kind = "direct_turn_summary" if result.get("wake_summary") else "direct_turn"
+            listed = result.get("wake_summary") or _continue_open(result, str(row.get("task_id") or ""))
+            kind = "direct_turn_summary" if listed else "direct_turn"
         events.append((kind, offset, _event_line(kind, row, results, rooms, projects, now, accounts=accounts)))
         if kind in {"owner_message", "correspondent_message"}:
             pointer = _event_line(kind, row, results, rooms, projects, now, accounts=accounts, whole=False)
@@ -863,11 +867,10 @@ def observe_wake(drive_root: Any, *, boundary: Any, since: float, now: float, re
     chat_boundary = window.get("boundary") or {key: accepted[key] for key in _CHAT_BOUNDARY_KEYS if key in accepted}
     state_to_accept = {**chat_boundary, **({"transitions": state} if isinstance(state, dict) else {}),
                        **({"memory": memory_boundary} if memory_boundary is not None else {})}
-    return WakeObservation(
-        trigger=trigger, events=tuple(events),
-        outstanding=tuple(line for _stamp, line in sorted(cards, reverse=True)),
-        window=window, gaps=tuple(sorted(gaps)), captured_at=_iso(now),
-        boundary=None if source_unreadable else state_to_accept or None, whole_rows=tuple(whole))
+    return WakeObservation(trigger=trigger, events=tuple(events),
+                           outstanding=tuple(line for _stamp, line in sorted(cards, reverse=True)),
+                           window=window, gaps=tuple(sorted(gaps)), captured_at=_iso(now),
+                           boundary=None if source_unreadable else state_to_accept or None, whole_rows=tuple(whole))
 
 
 def prepare_wake(task: Dict[str, Any], drive_root: Any) -> None:
@@ -983,17 +986,14 @@ def render_wake_message(repo_dir: Any, *, drive_root: Any, reason: str, last_wak
     if appointment_at:
         reason_text += f" ({'on time' if now - appointment_at < 60 else 'due ' + ago_text(now - appointment_at)})"
     facts = {
-        "reason": reason_text,
+        "reason": reason_text, "previous_wake": previous_wake, "events": events or "nothing new",
         "last_wake_ago": ago_text(now - last_wake_at) if last_wake_at else "no wake since this process started",
-        "previous_wake": previous_wake,
-        "events": events or "nothing new",
         "level": {"observe": "Advises", "act": "Acts", "full": "Evolves"}[normalized],
-        "level_line": LEVEL_LINES[normalized],
+        "level_line": LEVEL_LINES[normalized], "places": places_text(drive_root, places),
         "withheld_tools": ", ".join(disabled_tools) if disabled_tools else "none",
         "spent_usd": spent, "daily_usd": f"{float(daily_usd):.2f}",
         "running": str(int(running)), "max_tasks": str(int(max_tasks)), "interval": str(int(interval)),
         "spend_by_cause": spend_text(spend_by_cause), "counted_roots": roots_text(counted_roots),
-        "places": places_text(drive_root, places),
     }
     # One pass: a fact (a task title inside {events}) that happens to contain "{daily_usd}"
     # is never substituted again.

@@ -97,11 +97,17 @@ def mind_tool_entries() -> list:
         ToolEntry("pause_task", _control_schema("pause_task",
              "Request Pause of a listed work through the owner's tree-pause control. "
              "The owner reads your reason under the work's name: say plainly, in one short sentence without ids, "
-             "why you paused it and whose decision it was. Started reviews may finish while the task pauses. "
+             "why you paused it, whose decision it was and what returns it: a time, an event, or only the word of "
+             "whoever decided it. Every later focus, consciousness included, sees that sentence beside the work; "
+             "a press on work already paused keeps its first sentence. Started reviews may finish while the task pauses. "
              "Self-pause is refused: sleep with await_messages or escalate. The outcome arrives in your task mailbox."),
              _pause_task),
         ToolEntry("resume_task", _accepting_schema(_control_schema("resume_task",
              "Request Resume of listed paused work through the owner's existing grants. "
+             "A pause or a sleep returns when the return it records has come (what its pause sentence names, or "
+             "its sleep's wake_at), or on the word of whoever decided it. Your human's general word to continue "
+             "returns what their general request paused; work they paused by name waits for their word about it "
+             "or the return they named. "
              "It preserves spent money, clocks and review history; capacity and holds still apply. "
              "Only the owner can release a Panic hold. The outcome arrives in your task mailbox.")), _resume_task),
         ToolEntry("continue_task", _control_schema("continue_task",

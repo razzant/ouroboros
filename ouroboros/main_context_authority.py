@@ -297,8 +297,10 @@ def late_answer_notes_message(task: Mapping[str, Any], *, drive_root: Any) -> Op
     ``_kept_notes``'s, except that a field the asker's latest fold cleared stays cleared. The
     header says whose dated account it is (``WORKING_NOTES_AT_FIELD``, the validated end in
     ``terminal_time``), that it may be intermediate, and how the asker's final result is read.
-    An unreadable source yields a typed gap row; an asker that kept no notes yields none.
+    An unreadable source yields a typed gap row; an asker that kept no notes yields none unless its
+    Continue is open (``owner_continue.continuation_offer``), which the lead names whenever it is.
     """
+    from ouroboros.owner_continue import continuation_offer
     from ouroboros.owner_quiz import late_answer_ref
     from ouroboros.task_results import load_task_result
     from ouroboros.terminal_time import terminal_time_fact
@@ -318,6 +320,9 @@ def late_answer_notes_message(task: Mapping[str, Any], *, drive_root: Any) -> Op
     except _SOURCE_ERRORS as exc:
         return row(f"{lead}; its stored result could not be read now ({type(exc).__name__}: {exc}), so whether "
                    f"it kept working notes is unknown and nothing was inferred. Its reader is {reader}.")
+    offer = continuation_offer(saved, asker) if saved else {}
+    if offer.get("eligible"):  # it stopped with work left: its Continue may still resume it
+        lead += f"; its Continue is open ({offer['cause']}; continue_task)"
     try:
         kept = _kept_notes(drive_root, asker, saved, cleared_is_final=True)
     except _SOURCE_ERRORS as exc:
@@ -329,7 +334,8 @@ def late_answer_notes_message(task: Mapping[str, Any], *, drive_root: Any) -> Op
                    f"({type(kept).__name__}: {kept}); nothing was inferred. Its complete stored record stays "
                    f"readable with {reader}.")
     if kept is None:
-        return None
+        return (row(f"{lead}. It kept no working notes; its complete stored record stays readable with {reader}.")
+                if offer.get("eligible") else None)
     texts, where = kept
     at = saved.get(WORKING_NOTES_AT_FIELD) if isinstance(saved.get(WORKING_NOTES_FIELD), Mapping) else None
     named = (f"named in its result at {at}" if isinstance(at, str) and at

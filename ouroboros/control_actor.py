@@ -82,7 +82,8 @@ def owner_door(door: str):
 
     A mind's doors bind ``mind_control`` and automatic paths bind nothing, or unbind it where a door's call reaches
     them (``host_control``), so neither reads as this door.
-    Its one reader is the owner's choice of 2026-11-02 (#2566): a moved Presence turn's producer allowance.
+    Its readers: the owner's choice of 2026-11-02 (#2566), a moved Presence turn's producer allowance; who asked for a
+    Resume (``work_stop``); and who granted one (a Resume grant's ``by``, which its resumed work is told).
     """
     from ouroboros.utils import utc_now_iso
 

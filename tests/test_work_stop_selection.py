@@ -236,6 +236,27 @@ def test_mind_attribution_on_a_grant_preserves_its_q9_door(tmp_path, monkeypatch
     assert q.resume_budget_paused_task("first", selected_by="saved-root")["ok"]
 
 
+@pytest.mark.parametrize("kind", ["exact", "warm"])
+@pytest.mark.parametrize("door", [True, False])
+def test_a_grant_names_the_owner_only_through_the_owners_own_resume_door(tmp_path, monkeypatch, kind, door):
+    """The resumed work is told who granted its Resume: the owner's own door names the owner; an unbound call (the
+    host's own act) names nobody, never the owner by default."""
+    from ouroboros.control_actor import owner_door
+    from ouroboros.owner_pause import read_fence
+    from tests.test_root_resume_selection_survival import _world, _exact_root, _warm_root
+
+    q, workers, _sent = _world(tmp_path, monkeypatch, "saved")
+    with owner_door("api_task_resume") if door else nullcontext():
+        (_exact_root if kind == "exact" else _warm_root)(tmp_path, monkeypatch, q, workers)
+    grant = (bp.budget_pause_row(tmp_path, "saved-root")["grant"] if kind == "exact"
+             else read_fence(tmp_path, "saved-root")["resume_grant"])
+    if door:
+        assert grant["by"]["actor"] == "owner" and grant["by"]["door"] == "api_task_resume"
+    else:
+        assert grant["by"] == {}
+    assert grant["selected_by"] == "owner", "the Q9 door stays independent of who asked"
+
+
 def test_money_gate_reads_selection_from_dispatch_on_every_send(tmp_path, monkeypatch):
     from tests.test_budget_pause_holds import _fenced_member
     from ouroboros.task_results import write_task_result

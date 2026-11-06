@@ -169,6 +169,26 @@ def test_two_completed_tasks_read_their_card_outcomes_not_a_bare_lifecycle(tmp_p
     direct = [wake._event_line("task_terminal", {"task_id": tid, "ts": _iso(since)}, results, RoomLabelResolver(projects=[]),
                                {}, T0) for tid in ("done1", "stop1")]
     assert direct[0].startswith("- task done1 Done") and "The API stayed down" in direct[1]
+    assert stopped.endswith(" · Continue open (author_stop)") and direct[1].endswith(" · Continue open (author_stop)")
+    assert "Continue open" not in done and "Continue open" not in direct[0], "a finished root offers no Continue"
+
+
+def test_a_stopped_direct_turn_is_listed_with_its_open_continue_and_a_finished_one_is_only_counted():
+    """A chat turn that stopped with unfinished work is a root its Continue may still resume: the wake lists it with
+    that fact even without a wake line of its own; a finished turn stays counted, not listed."""
+    axes = {"lifecycle": {"status": "completed"}, "objective": {"status": "fail", "source": "task_completion",
+                                                                "reason": "author_stop"},
+            "execution": {"status": "ok", "task_completion": {"action": "stop", "rationale": "It waits on an Allow."}}}
+    results = {"turn-stop": {"task_id": "turn-stop", "status": "completed", "description": "do it", "metadata": {},
+                             "_is_direct_chat": True, "outcome_axes": axes},
+               "turn-done": {"task_id": "turn-done", "status": "completed", "description": "do it", "metadata": {},
+                             "_is_direct_chat": True}}
+    rooms = RoomLabelResolver(projects=[])
+    for task_id, listed in (("turn-stop", True), ("turn-done", False)):
+        fact = {"kind": "task_terminal", "task_id": task_id, "stamp": T0 - 60, "proven": True}
+        kind, line = wake._transition_line(fact, results, rooms, T0, {})
+        assert kind == ("direct_turn_summary" if listed else "direct_turn"), (task_id, kind)
+        assert line.endswith(" · Continue open (author_stop)") is listed, line
 
 
 @pytest.mark.parametrize("synthesis", ["pending_once", "running", "completed"])

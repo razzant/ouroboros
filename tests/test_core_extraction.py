@@ -167,8 +167,11 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # is relative to the active workspace or absolute; nothing else changed (c624c58e... before).
     # Rolled again for #2633: send_photo, send_video, send_file, send_links and show_card name this work's
     # room and say that for Presence-bound work it is local, not the place conversation.
+    # Rolled for the pause/continue doors (audit 05.11): escalate's wait_for_answer description says waiting
+    # keeps the work alive with what it holds, until when, and what the default does; nothing else changed
+    # (1a3dfcea... before).
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "1a3dfcea20968da1ea9dc84a81abba50de7f449867bdf43800a44076891a84a8"
+        "3d3638592fadc2c7bb60ddbbc42cf320d9b41fd3298a16308bd8383b46d4347e"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)

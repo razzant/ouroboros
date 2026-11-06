@@ -5,7 +5,7 @@ import pathlib
 import time
 import uuid
 
-from ouroboros.control_actor import control_actor, observed_control_stop
+from ouroboros.control_actor import control_actor, observed_control_stop, owner_door_bound
 from ouroboros.utils import utc_now_iso
 from ouroboros.work_stop import release_refusal
 
@@ -64,7 +64,7 @@ def resume_terminal_tree(task_id: str, *, gaps: list | None = None) -> dict | No
             else:
                 q.BUDGET_ROOT_FENCES[task_id] = prior_latch
 
-        grant = {"by": control_actor(), "grant_id": uuid.uuid4().hex, "granted_at": utc_now_iso(),
+        grant = {"by": control_actor() or owner_door_bound(), "grant_id": uuid.uuid4().hex, "granted_at": utc_now_iso(),
                  "granted_at_ts": time.time(), "authority": "explicit_resume", "selected_by": "owner",
                  "generation": int(fence.get("generation") or 0), "root_resume_basis": state["basis"],
                  "tree_only": True}

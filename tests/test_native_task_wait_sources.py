@@ -319,6 +319,7 @@ def test_a_child_proven_queued_before_its_first_result_sleeps_and_losing_that_pr
     _queue(tmp_path, running=[{"id": "queued", "parent_task_id": "parent", "root_task_id": "parent"}])
     assert model_sleep.wake_reason(ctx, ctx._model_sleep) == "", "started, still before its first result"
     assert model_sleep.wake_notice(ctx._model_sleep, "task_wait:unknown:queued", 1.0)["content"].count("unknown, not success") == 1
+
     messages = _woken(ctx, lambda: _queue(tmp_path))  # a scheduling refusal took the only proof: no terminal exists
     assert "state is unknown, not success" in str(messages[-1]["content"]), messages[-1]
     assert deliver_owed(_limit(ctx, messages)) is True
@@ -351,6 +352,21 @@ def test_a_child_proven_queued_before_its_first_result_sleeps_and_losing_that_pr
     lead, _end = json.JSONDecoder().raw_decode(_wait_for_task(torn, "torn", sleep_mode="warm"))
     assert lead["reason"] == "ready" and lead["woke_by"] == "task_wait:unknown:torn"
     assert not getattr(torn, "_pending_task_wait", None) and not getattr(torn, "_model_sleep", None)
+
+
+@pytest.mark.parametrize(("by", "outcome", "woken"), [
+    ({"actor": "owner", "door": "api_task_resume"}, "control:resume", "an explicit Resume by your human"),
+    ({"actor": "ouroboros", "task_id": "c1", "text": "Its run finished."}, "",
+     'an explicit Resume by Ouroboros (task c1), saying "Its run finished."'),
+    ({}, "control:resume", "the owner's message or control"),
+    ({"actor": "owner"}, "timeout", "the wake time you chose")])
+def test_a_wake_names_the_resume_that_woke_it_and_only_for_a_control_wake(by, outcome, woken):
+    """A Resume that ended a sleep names who granted it; an unnamed control keeps its old words, and a wake time the
+    sleeper chose is never retold as somebody's Resume."""
+    from ouroboros import model_sleep
+
+    text = model_sleep.wake_notice({"mode": "cold"}, outcome, 5.0, by=by)["content"]
+    assert f"were woken by {woken}" in text, text
 
 
 def test_a_wake_before_the_first_result_says_the_queue_holds_the_child(tmp_path):
