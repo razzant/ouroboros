@@ -44,8 +44,9 @@ _BLOB_KIND_HINT = ("; op=blob reads observability CAS blobs only. A digest in a 
                    "result names, memory_read(source_ref={kind, root, path, size, sha256, task_id})")
 # ``context_snapshot``: the skill's current declared context snapshot, the address its outdated note names.
 _STATES = ("review", "review_job", "health", "enabled", "deps", "grants", "context_snapshot")
-# Each knowledge history row holds both complete versions of its note, so the ordinary
-# 8 MiB log window would cover hours of writes; this read budget covers far more of them.
+# A knowledge history row holds the complete version it published and, unless it names an
+# earlier row, the one it replaced, so the ordinary 8 MiB log window would cover hours of
+# writes; this read budget covers far more of them.
 _HISTORY_SCAN_BYTES = 256 * 1024 * 1024
 _HISTORY_BODY_FIELDS = ("old_content", "new_content")
 _SELECTOR = re.compile(r"(?:[^.\[\]]+|\[(?:\d+|\*)\])(?:\.[^.\[\]]+|\[(?:\d+|\*)\])*")
