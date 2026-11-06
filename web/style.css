@@ -5282,7 +5282,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 /* A dialog stands in the middle of the window, clear of the bars (U024); one taller than the window starts at its top
-   and scrolls (the auto margins centre only while there is room). */
+   and scrolls (the auto margins centre only while there is room). While a phone's keyboard is up the window keeps its
+   height under it, so a dialog stands at the top instead, its foot above the keyboard (M12). */
 .ui-modal,
 :where(.marketplace-modal) {
     width: 100%;
@@ -5293,6 +5294,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     background: var(--ui-modal-bg);
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
 }
+body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 
 .section-title {
     font-size: 14px;
@@ -10087,9 +10089,6 @@ body.keyboard-open .project-panel {
 }
 .secret-request-backdrop .secret-request-dialog {
     margin-block: auto;
-}
-body.keyboard-open .secret-request-backdrop .secret-request-dialog {
-    margin-block: 0 auto;
 }
 .secret-request-dialog {
     max-width: 480px;
