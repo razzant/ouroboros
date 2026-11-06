@@ -144,8 +144,12 @@ const OWNER_TEXT_LINKS = [
         ['https://e.com/q', 'https://e.com/q'], ['https://e.com/s', 'https://e.com/s'], ['https://e.com/t', 'https://e.com/t']]],
     // Markdown and backticks stay literal text; an address inside them still links.
     ['`https://e.com/code` **https://e.com/bold** [x](https://e.com/md)',
-        [['https://e.com/code', 'https://e.com/code'], ['https://e.com/bold', 'https://e.com/bold'],
+        [['https://e.com/code', 'https://e.com/code'], ['https://e.com/bold**', 'https://e.com/bold**'],
             ['https://e.com/md', 'https://e.com/md']]],
+    // URL data is not a Markdown delimiter: standalone suffixes survive, including query tokens.
+    ['https://e.com/download?token=AbC_ https://e.com/~ https://e.com/?q=topic*',
+        [['https://e.com/download?token=AbC_', 'https://e.com/download?token=AbC_'],
+            ['https://e.com/~', 'https://e.com/~'], ['https://e.com/?q=topic*', 'https://e.com/?q=topic*']]],
     // HTML stays text: its javascript: attribute is never a destination, only the visible address is.
     ['<a href="javascript:alert(1)">https://e.com/x</a><img src=x onerror=alert(1)>', [['https://e.com/x', 'https://e.com/x']]],
     // Only an explicit http(s) address with a host links: no other scheme, bare host or address glued to a word.

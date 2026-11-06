@@ -51,7 +51,7 @@ SAVED_LINKS = [
     ["https://example.com/visible", "https://example.com/visible"],
     [LONG_URL, LONG_URL],
 ]
-SENT = "New one: https://example.org/new?a=1&b=2, thanks!"
+SENT = "New one: https://example.org/new?a=1&b=2_, thanks!"
 REMOTE = "From the phone: (https://example.net/phone)"
 IN_PROJECT = "Project source: https://example.com/project/plan#step-2."
 
@@ -271,7 +271,7 @@ def test_owner_messages_link_addresses_keep_their_words_and_open_outside(links_u
     assert sent_frame["content"] == SENT, sent_frame
     sent = owner_bubble(page, "New one:")
     assert sent.count() == 1
-    assert_message(page, sent, SENT, [["https://example.org/new?a=1&b=2", "https://example.org/new?a=1&b=2"]],
+    assert_message(page, sent, SENT, [["https://example.org/new?a=1&b=2_", "https://example.org/new?a=1&b=2_"]],
                    f"{tag} sent")
 
     # A message the owner sent from another session arrives live the same way.

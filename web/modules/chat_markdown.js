@@ -266,7 +266,7 @@ export function chatMarkdownUrl(value) {
 const PLAIN_TEXT_ADDRESS = /(?<![\p{L}\p{N}_])https?:\/\/(?![/\\])[^\s<>"`\\\p{Cc}\p{Cf}]+/giu;
 // Punctuation that ends a sentence or closes a quotation is not part of the address before it; a
 // closing bracket is, while it closes one opened inside the address (`wiki/Foo_(bar)`).
-const ADDRESS_TRAIL = new Set([...'.,:;!?…\'’”»›*_~。、，；：！？']);
+const ADDRESS_TRAIL = new Set([...'.,:;!?…\'’”»›。、，；：！？']);
 const ADDRESS_CLOSERS = { ')': '(', ']': '[', '}': '{' };
 
 function addressEnd(candidate) {
