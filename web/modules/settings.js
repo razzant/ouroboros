@@ -1050,7 +1050,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             if (messages.length) setStatus(validationSummary(messages), 'warn', 'validation', subject);
             else { setStatus('', 'ok'); paintDirtyWord(); }
         }
-        return { messages, subject };
+        return { fields, messages, subject };
     }
 
     async function confirmDiscardSettings(action) {
@@ -1269,8 +1269,11 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         modelRoles.noteSaveAttempt();
         page.querySelectorAll('[data-custom-secret-row]').forEach((row) => { row.dataset.judged = '1'; });
         validationAttempted = true;
-        const { messages: errors, subject } = renderValidation();
+        const { fields: invalid, messages: errors, subject } = renderValidation();
         if (errors.length) {
+            // The first refused field is shown where it is: a closed disclosure holding it (a saved MCP server's Edit)
+            // opens, so its message and the fix beside it are in view.
+            for (let fold = invalid[0]?.input?.closest('details'); fold; fold = fold.parentElement?.closest('details')) fold.open = true;
             setStatus(validationSummary(errors), 'warn', 'validation', subject);
             return;
         }
