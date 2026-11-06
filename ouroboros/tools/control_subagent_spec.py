@@ -76,6 +76,14 @@ def schedule_subagent_properties() -> Dict[str, Any]:
             ),
         },
         "constraints": {"type": "string", "description": "Optional constraints/non-goals for the child."},
+        "memory_view": {
+            "type": "object",
+            "description": (
+                "Optional widening of the child's memory view by field, e.g. {\"knowledge\": true} starts it with the whole "
+                "knowledge base instead of the outline. Fields: story, room_page, room_lanes, origin_words, live_rooms "
+                "(none|lines|lines_with_words|directory), marks (all|room_and_global|none), knowledge, owner_words. Omitted: the "
+                "role's default view. A field or value the view does not know is refused at the child's start with the role default and one event."),
+        },
         "memory_mode": {
             "type": "string",
             "enum": sorted(VALID_SUBTASK_MEMORY_MODES),
@@ -354,6 +362,7 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None) -> tu
         "memory_mode": memory_mode, "may_mutate": params.get("may_mutate", False),
         "requested_effort": requested_effort,
         **({"delegated_mode": params["mode"]} if params.get("mode") is not None else {}),
+        **({"memory_view": params["memory_view"]} if params.get("memory_view") is not None else {}),  # checked at the child's start
         "acceptance_claims": acceptance_claims,
         "resource_policy": resource_policy,
         "parent_contract": parent,

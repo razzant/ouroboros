@@ -114,7 +114,7 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     # drafts signed with its focus (it is not the integrating mind, so tools/chronicle.py
     # refuses its note, correction and decision); the integrating mind accepts or rejects the drafts,
     # keeps identity and scratchpad, and receives the child's result as a report.
-    "knowledge_read", "knowledge_list", "knowledge_write", "memory_read", "memory_mark", "chronicle_write",
+    "knowledge_read", "knowledge_list", "knowledge_write", "memory_read", "memory_mark", "chronicle_write", "journal_read", "workpad_read",
     "chat_history", "recent_tasks", "get_task_result", "wait_task", "wait_tasks",
     "await_messages",
     "escalate",
@@ -155,7 +155,7 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
 TASK_DIAGNOSTIC_TOOL_NAMES: frozenset[str] = frozenset({
     "read_file", "list_files", "search_code", "query_code", "query_data", "vcs_read",
     "inspect_harness", "chat_history", "recent_tasks", "get_task_result", "peek_task",
-    "tree_read", "knowledge_read", "knowledge_list", "memory_read", "wait_task", "wait_tasks",
+    "tree_read", "knowledge_read", "knowledge_list", "journal_read", "workpad_read", "memory_read", "wait_task", "wait_tasks",
     "await_messages", "forward_to_worker", "pause_task", "resume_task", "continue_task",
     "finish_task", "list_available_tools", *OWN_FORM_TOOL_NAMES,
 })
@@ -196,7 +196,7 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     # An independent look at the assigned work, never child approval or commit.
     # review_change admits the physical subject before freezing or dispatching.
     "review_change",
-    "knowledge_read", "knowledge_list", "knowledge_write", "memory_read", "memory_mark", "chronicle_write",
+    "knowledge_read", "knowledge_list", "knowledge_write", "memory_read", "memory_mark", "chronicle_write", "journal_read", "workpad_read",
     "chat_history",
     "tree_note", "tree_read", "override_delegation_constraint",
     # Same nanny verbs, same host-derived profile — an acting child hosts a

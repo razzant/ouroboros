@@ -334,11 +334,12 @@ def test_a_helpers_role_line_names_exactly_what_its_request_holds(tmp_path, rout
     assert f"the page of your parent's room {alpha}" in loaded and f"## This room ({alpha})" in c
     assert ("the top level of your story" in loaded) == story == ("## My story" in b)
     assert ("the top level of your story" in missing) == (not story)
-    assert "the index arrives with your first delegation" in missing and "## Shared understanding" not in c
+    assert "the whole knowledge index (it arrives with your first delegation)" in missing and "## Shared understanding" not in c
     assert "## Knowledge base" not in c and "knowledge_list" in missing
+    assert "the knowledge outline (every note by address and title)" in loaded and "## Knowledge outline" in c
     assert "raw conversations" in missing and "### Open conversation" not in c and "## Live rooms" not in c
     # No root record gave this helper a field; its room's rows of my human are read at its start and drawn.
-    assert "the words of my human that caused this work" in loaded
+    assert "my human's words for this work" in loaded
     assert "· owner · room_message · chat " in section(c, "## Words of my human that caused this work (verbatim)")
 
 

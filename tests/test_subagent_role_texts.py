@@ -16,10 +16,7 @@ import pathlib
 
 from ouroboros.memory import Memory
 
-ROLE_TEXT = (
-    "Work from this assignment first — it is written to be enough; read memory or sources only to fill a "
-    "gap it leaves, and name what you read in your report."
-)
+ROLE_TEXT = "Read memory or sources whenever they could change what you do, and name what you read in your answer."
 DRAFT_RIGHT = ("You may also publish chronicle pages and parts as drafts in your own name; the integrating mind "
                "accepts or rejects them.")
 MEMORY_SENTENCE = "Knowledge notes and memory marks may be written in your own name"

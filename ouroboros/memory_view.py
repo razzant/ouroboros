@@ -75,8 +75,7 @@ _TERMINAL = frozenset({"terminal_root_projection", "terminal_result_projection"}
 # The host's facts row; a ``task_summary`` without a kind is the old writer's model prose, never a status.
 _HOST_FACTS, _KINDLESS = frozenset({"host_task_facts"}), frozenset({"", None})
 # The delegated child's role text, carried verbatim, then its draft right: it publishes only drafts in its own name.
-CHILD_ROLE_TEXT = ("Work from this assignment first — it is written to be enough; read memory or sources only to "
-                   "fill a gap it leaves, and name what you read in your report. " + CHILD_DRAFT_RIGHT)
+CHILD_ROLE_TEXT = "Read memory or sources whenever they could change what you do, and name what you read in your answer. " + CHILD_DRAFT_RIGHT
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -130,7 +129,7 @@ class ViewSpec:
     room_id: Optional[str] = None  # the current room; None: no ``## This room``
     room_page: bool = True  # the room's retold records not yet folded, pages under my parts, my open notes
     room_lanes: bool = True  # the open conversation (lane 1) and one line per task (lane 2)
-    origin_words: bool = True  # the owner's words that started a Project, when its rows are not open
+    origin_words: bool = True  # the owner's words that started a Project, when its rows are not open (a helper's set carries them)
     live_rooms: str = "lines"  # none | lines | lines_with_words | directory
     marks: str = "all"  # all | room_and_global | none
     knowledge: bool = True  # overview, knowledge index, project journal (rendered by the context)
@@ -143,10 +142,10 @@ ROLE_DEFAULTS: Mapping[str, ViewSpec] = MappingProxyType({
     # A wake sees ordinary Main and one directory line per other room.
     "consciousness": ViewSpec("consciousness", live_rooms="directory"),
     "presence": ViewSpec("presence", origin_words=False, live_rooms="none", marks="room_and_global"),
-    "child": ViewSpec("child", room_lanes=False, live_rooms="none", marks="room_and_global", knowledge=False,
-                      owner_words=True),
-    "nanny": ViewSpec("nanny", story=False, room_lanes=False, live_rooms="none", marks="room_and_global",
+    "child": ViewSpec("child", room_lanes=False, origin_words=False, live_rooms="none", marks="room_and_global",
                       knowledge=False, owner_words=True),
+    "nanny": ViewSpec("nanny", story=False, room_lanes=False, origin_words=False, live_rooms="none",
+                      marks="room_and_global", knowledge=False, owner_words=True),
 })
 _FIELDS = {field.name: field.type for field in dataclasses.fields(ViewSpec)}
 
@@ -1456,12 +1455,14 @@ def working_sources_line(spec: ViewSpec, snapshot: Optional[MemoryViewSnapshot] 
         missing.append(f"{', '.join(memory)} (my memory is not activated yet: {snapshot.store_status.get('reason')})")
     else:
         loaded += memory
-    (loaded if spec.knowledge else missing).append("knowledge (overview, index, project journal and workpad" + (
-        ")" if spec.knowledge else "; the index arrives with your first delegation)"))  # delegation_knowledge_index
+    loaded.append("knowledge (overview, index, project journal and workpad)" if spec.knowledge
+                  else "the knowledge outline (every note by address and title)")  # context.helper_navigation_sections
+    if not spec.knowledge:  # the whole index rides the first accepted delegation's result (delegation_knowledge_index)
+        missing.append("the overview, the whole knowledge index (it arrives with your first delegation), the project journal and workpad")
     if spec.owner_words and (snapshot is None or snapshot.owner_words):  # named only when the block was drawn
-        loaded.append("the words of my human that caused this work")
+        loaded.append("my human's words for this work; my human's later words reach you at your next round")
     missing += ["the global scratchpad", "earlier task reports"]
     return ("## Working sources\n\n"
             f"Loaded above: {', '.join(loaded)}; your own recent process is loaded below. "
-            f"Not loaded: {', '.join(missing)}; memory_read, chat_history, knowledge_list, knowledge_read and "
-            "get_task_result reach them, as they reach your parent.\n" + CHILD_ROLE_TEXT)
+            f"Not loaded: {', '.join(missing)}; memory_read, chat_history, knowledge_list, knowledge_read, "
+            "journal_read, workpad_read and get_task_result reach them, as they reach your parent.\n" + CHILD_ROLE_TEXT)

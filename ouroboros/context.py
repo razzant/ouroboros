@@ -635,7 +635,7 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, sc
 
 
 from ouroboros.context_sections import (  # noqa: E402,F401 — existing public builder surface
-    build_knowledge_sections, knowledge_navigation_sections, _build_registry_section,
+    build_knowledge_sections, knowledge_navigation_sections, helper_navigation_sections, _build_registry_section,
     _build_installed_skills_section, _drive_state_section, runtime_host_section,
     _SHARED_UNDERSTANDING_GAP,
 )
@@ -896,10 +896,12 @@ def _capture_context_core(
         semi_stable_parts.append(always_on)
     from ouroboros.safety_config import owner_rules_section
     semi_stable_parts.append(owner_rules_section())  # the Supervisor's read, for every focus and child
-    # Knowledge leads the changing block (its edits never cost the cached story) and
-    # rides only where the view holds it: a child or nanny reads it by knowledge_read.
-    head_parts = (build_knowledge_sections(context_env, project_id=resolve_project_id(task))
-                  if view_spec.knowledge else [])
+    # Knowledge leads the changing block (its edits never cost the cached story) and rides whole
+    # only where the view holds it; a child or nanny starts with its outline (every note by address
+    # and title) and meets the whole index with its first accepted delegation (delegation_knowledge_index).
+    project_id = resolve_project_id(task)
+    head_parts = (build_knowledge_sections(context_env, project_id=project_id) if view_spec.knowledge
+                  else helper_navigation_sections(canonical_root, project_id))
     if design_nav:
         head_parts.append(design_nav)
 

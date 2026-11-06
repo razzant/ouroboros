@@ -117,6 +117,44 @@ def test_children_of_two_trees_share_block_b_and_siblings_share_the_room_page_an
     assert views["first"][2] != views["second"][2]
 
 
+# --- a helper is born with the knowledge outline: every note by address and title, both audiences --------
+
+def test_a_child_and_a_nanny_start_with_the_knowledge_outline_not_the_whole_index(tmp_path):
+    """A helper's first request holds every active note of the global shelf and its room's by address and title
+    (a person's summary kept, a plain note's one read away), under its own heading; the whole index and the
+    overview are not in it (they ride its first accepted delegation), and the working-sources line says so."""
+    from ouroboros.knowledge import resolve_knowledge_address, write_knowledge_note
+
+    env, memory, _rooms = world(tmp_path)
+    root = memory.drive_root
+    for topic, scope, note in (
+            ("overview", "global", "---\ntitle: Overview\nsummary: WHOLE_OVERVIEW\n---\n# Overview\nOVERVIEW_BODY\n"),
+            ("people/owner", "global", "---\ntitle: My human\ntype: person\nsummary: PERSON_SUMMARY\n---\n# Owner\n"),
+            ("shelf-plan", "global", "---\ntitle: Shelf plan\nsummary: PLAIN_SUMMARY\n---\n# Plan\nPLAN_BODY\n"),
+            ("room-plan", "project:alpha", "---\ntitle: Alpha plan\nsummary: ROOM_SUMMARY\n---\n# Alpha\nROOM_BODY\n")):
+        assert write_knowledge_note(resolve_knowledge_address(root, topic, scope), note).ok
+    alpha_root = _root(env, memory, "bound", 1, ASKED)
+    alpha_root.project_id = "alpha"  # the parent's Project: its child is scheduled into the same shelf
+    child = _schedule(alpha_root, "Count shelf one")
+    assert child["project_id"] == "alpha"
+    nanny = {"id": "nanny1", "chat_id": 1, "delegation_role": "subagent", "parent_task_id": "bound", "root_task_id": "bound",
+             "project_id": "alpha", "configured_subagent": {"id": "h", "route": {"kind": "agent_session"}}}
+    for who, (_a, _b, c, cap) in (("child", _start(env, child)), ("nanny", blocks(env, memory, nanny))):
+        assert cap["memory_view"]["role"] == who and not cap["memory_view"]["spec"]["knowledge"], who
+        outline, room = section(c, "## Knowledge outline"), section(c, "## Project knowledge outline (alpha)")
+        assert "- people/owner — My human\n  PERSON_SUMMARY" in outline and "- shelf-plan — Shelf plan\n" in outline, who
+        assert "- overview — Overview\n" in outline and "every active note (3) by its address and title" in outline, who
+        assert "- room-plan — Alpha plan\n" in room and "knowledge_list(scope='project:alpha')" in room, who
+        assert "PLAIN_SUMMARY" not in c and "WHOLE_OVERVIEW" not in c and "ROOM_SUMMARY" not in c, who  # one read away
+        assert "PLAN_BODY" not in c and "ROOM_BODY" not in c and "OVERVIEW_BODY" not in c, who
+        assert "## Knowledge base" not in c and "## Shared understanding" not in c and "## Project workpad" not in c, who
+        assert c.index("## Knowledge outline") < c.index("## Project knowledge outline") < c.index("## Runtime context"), who
+        loaded, missing = section(c, "## Working sources").split("Loaded above: ", 1)[1].split(" Not loaded: ", 1)
+        assert "the knowledge outline (every note by address and title)" in loaded, who
+        assert "the whole knowledge index (it arrives with your first delegation)" in missing, who
+        assert "knowledge_list, knowledge_read, journal_read, workpad_read" in missing, who
+
+
 # --- a chronicle that cannot be read leaves a visible gap and no model call --------------------------
 
 @pytest.fixture
@@ -160,7 +198,7 @@ def test_a_child_starts_with_a_visible_gap_when_its_chronicle_cannot_be_read(tmp
     assert "\n  Count the alpha inventory\n  and name what is missing" in section(c, WORDS)
     loaded, missing = section(c, "## Working sources").split("Loaded above: ", 1)[1].split(" Not loaded: ", 1)
     assert f"(my memory is not activated yet: {reason})" in missing
-    assert "the words of my human that caused this work" in loaded
+    assert "my human's words for this work" in loaded
     assert cap["memory_view"]["store_status"]["state"] != "active"
     # The same child on a readable chronicle sees its story and its room page, and no gap (still no model).
     monkeypatch.setattr(ChronicleStore, "ensure_activated", readable)
