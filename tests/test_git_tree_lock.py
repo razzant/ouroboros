@@ -120,8 +120,11 @@ def test_the_continuation_texts_name_the_step_their_cause_leaves(tmp_path, monke
     def unreadable(*_a, **_kw):
         raise OSError("state locked away")
     monkeypatch.setattr(review_state, "_load_state_unlocked", unreadable)
-    text = rc.default_commit_continuation(blocking, {"author_disposition": DECISION})
+    text = rc.default_commit_continuation(blocking, {"author_disposition": DECISION})  # advisory again here
     assert "unreadable (state locked away)" in text and "Next: name review_reference" in text
+    monkeypatch.setattr("ouroboros.config.get_review_enforcement", lambda: "blocking")
+    assert "a passing review lands the commit" in rc.default_commit_continuation(blocking, {"author_disposition": DECISION})
+    monkeypatch.setattr("ouroboros.config.get_review_enforcement", lambda: "advisory")
     assert rc.default_commit_continuation(blocking, {"author_disposition": DECISION, "review_reference": {}}) == ""
 
 

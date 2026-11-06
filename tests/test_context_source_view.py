@@ -258,7 +258,7 @@ def test_first_main_refusal_recovers_unobserved_body_on_same_model_and_effort(ma
     monkeypatch.setattr("ouroboros.loop_llm_call._sleep_within_deadline", lambda *_a, **_kw: True)
     answer, _, _ = f.run([refuse] * 8)
     assert answer == "Recovered from the exact address." and len(f.inputs) >= 2
-    assert rungs == ["host_copies", "bodies", "floor", "books", "unseen_bodies"]  # books already navigation
+    assert rungs == ["host_copies", "bodies", "floor", "books", "unseen_bodies", "memory_rest"]  # books already navigation
     assert before_observation and all(observation is None for observation in before_observation)
     assert len({entry["model"] for entry in f.inputs}) == 1
     assert len({entry["reasoning_effort"] for entry in f.inputs}) == 1

@@ -637,8 +637,9 @@ def default_commit_continuation(ctx, kwargs) -> str:
                     if attempt.tool_name in {"commit_reviewed", "vcs_commit_reviewed"}
                     and attempt.phase in {"review_only", "late_wait"} and attempt.pre_review_fingerprint]
     except (OSError, ValueError) as exc:
-        return (f"ERROR: REVIEW_AUTHOR_CONTINUATION_INVALID: this copy's review state is unreadable ({exc}). Nothing "
-                "was staged or committed. Next: name review_reference, or call without author_disposition.")
+        return continuation_refusal(ValueError("author continuation requires Advisory enforcement")) if blocking else (
+            f"ERROR: REVIEW_AUTHOR_CONTINUATION_INVALID: this copy's review state is unreadable ({exc}). Nothing "
+            "was staged or committed. Next: name review_reference, or call without author_disposition.")
     if not returned:
         kwargs["author_disposition"] = None
         note_commit_call(ctx, "author_disposition was set aside: " + (

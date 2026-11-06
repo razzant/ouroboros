@@ -370,6 +370,9 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     # D1 per-target mutation custody: the existing INTEGRATE_ family reports a
     # busy target as a substrate refusal; no historical answer is fabricated.
     "INTEGRATE_DELEGATED_TARGET_BUSY": (True, "integration_blocked"),
+    # #2889: a target another git step holds is no conflict: nothing applied, no verdict recorded, the result kept; an
+    # INTEGRATE_ refusal like its family, which the retired pair never saw.
+    "INTEGRATE_NOT_STARTED": (True, "integration_blocked"),
     # integrate_subagent_patch decision='accept' on a non-shared result: refused before any
     # effect, an INTEGRATE_ refusal like its family; the retired pair never saw the decision.
     "INTEGRATE_ACCEPT_UNSUPPORTED": (True, "integration_blocked"),

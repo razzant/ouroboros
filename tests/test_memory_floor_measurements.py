@@ -148,11 +148,15 @@ def test_a_shortest_walk_measures_no_form_its_text_settles(tmp_path, monkeypatch
     assert walks == ['nano'] * 4 and ties == []
 
 
-@pytest.mark.parametrize("target, outlined", [(12_500, []), (25_000, ["knowledge_index"])])
-def test_the_slack_alone_never_outlines_the_knowledge_index(tmp_path, monkeypatch, target, outlined):
+@pytest.mark.parametrize("step, target, outlined", [
+    ("floor", 12_500, []), ("floor", 25_000, ["knowledge_index"]),  # slack alone / a measured excess
+    ("floor", None, []), ("memory_rest", None, ["knowledge_index"]),  # unknown: first pass / after a further refusal
+])
+def test_the_slack_alone_never_outlines_the_knowledge_index(tmp_path, monkeypatch, step, target, outlined):
     """BIBLE P1, both directions, on the real floor (review 06.11): when the measured excess is paid and only the
     return-after-fold slack remains, memory and ordinary host forms pay it and the index stays whole; a measured
-    excess the host forms cannot pay outlines it."""
+    excess the host forms cannot pay outlines it. Against an unknown target the first pass outlines nothing; memory's
+    rest after a further refusal may."""
     from ouroboros import loop, loop_model_call as lmc
 
     index = HostSection("knowledge_index", "## knowledge\n\n" + "k" * 10000, "## knowledge\n\nOutline.")
@@ -178,6 +182,6 @@ def test_the_slack_alone_never_outlines_the_knowledge_index(tmp_path, monkeypatc
         task_id="slack-probe", event_queue=None, drive_logs=tmp_path, round_idx=1)
     monkeypatch.setattr(loop, "_measure_round_main_fit", lambda *a, **kw: fit)
     monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *a, **kw: None)
-    lmc._apply_refusal_step(ctx, "floor", fit, target, 12_500)  # the target holds the 12,500 slack
+    lmc._apply_refusal_step(ctx, step, fit, target, 12_500)  # a known target holds the 12,500 slack
     hosts = ctx.context_fit_plan.projection(ctx.active_context_mode).memory_facts.get("host_sections_addressed", [])
     assert [row["section_id"] for row in hosts] == outlined
