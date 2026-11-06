@@ -99,6 +99,14 @@ log = logging.getLogger(__name__)
 # the parent for the whole requested window on ids that exist nowhere.
 
 
+# A cite: my human's exact words, copied from a message of theirs that reached this run. The host verifies only
+# provenance (their confirmed account, not forwarded, the bytes inside that message); whether the words ask for
+# this work is the citing mind's reading, shown on the card. Cited work is my human's (their allowance, not stopped
+# by the consciousness switch); uncited work from a wake is my own.
+_OWNER_WORDS_PARAM = (
+    "Optional: the exact words of your human asking for this work, copied verbatim from one message of theirs that "
+    "reached this run (their confirmed account; a forward or a colleague's line is not theirs). Verified by bytes: the "
+    "work then runs as their order; a quote not found is refused and nothing starts. Omit to start your own work.")
 _START_TASK_DESCRIPTION = (
     "Start a NEW, separate independent work with its own task id and card. "
     "The work reading the current request already exists and can do that request itself. "
@@ -276,6 +284,7 @@ def get_tools() -> List[ToolEntry]:
                     "context_requires_development": {"type": "boolean", "description": "true: all of docs/DEVELOPMENT.md in every mode; false: its chapter map."},
                     "source": {"type": "string", "description": "Attach an existing folder or clone a git URL (https://... or git@host:path) server-side into the projects root; private auth failures are typed auth_required. Registers the folder with provenance + trusted_at as the Project/task workspace. Use for work on a supplied repo/folder.", "default": ""},
                     "reasoning_effort": _ROOT_EFFORT_PARAM,
+                    "owner_words": {"type": "string", "description": _OWNER_WORDS_PARAM, "default": ""},
                 },
                 "required": ["objective", "title"],
             },

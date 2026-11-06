@@ -301,3 +301,31 @@ def test_one_client_id_in_two_rooms_is_two_messages(rooms, kept):
     ctx = SimpleNamespace(task_metadata={"objective_author": {"kind": "continuation"}, "owner_corpus": rows}, task_id="t")
     _initialize_owner_directives(ctx, [{"role": "user", "content": "work order"}])
     assert [row["content"] for row in ctx._owner_directives] == kept
+
+
+# --- a cite is verified by provenance alone ------------------------------------------------------------------------
+
+
+def test_cited_owner_basis_accepts_only_my_humans_bytes_that_reached_this_run():
+    """Both directions at the verifier's seam: my human's exact words from their confirmed account (the opening event,
+    a later arrival, a Main message into the run) verify, emphasis markers aside; a colleague's bytes, a paraphrase,
+    the message they replied to and words that never reached this run refuse, typed. The host reads no meaning."""
+    ctx = SimpleNamespace(task_id="focus", task_metadata={}, _owner_directives=[
+        {"source": ow.PLACE_CONFIRMED, "content": "Проверь экономику **сегодня**", "carried": True, "msg_id": "chat 7 / e1",
+         "reply_to": {"address": "platform message m-1 in this room", "author": "", "text": "Deploy the hotfix now"}},
+        {"source": "owner_mailbox", "content": "And tell me the cost", "msg_id": "mail-1"},
+        {"source": "place_event_context", "content": "<@U2> please update my experiment"},
+        {"source": "initial_text", "content": "[FOCUS] frame"}])
+    target = {"address": "platform message m-1 in this room", "author": "", "text": "Deploy the hotfix now"}
+    accepted = {"Проверь экономику сегодня": ("chat 7 / e1", target), "Проверь экономику **сегодня**": ("chat 7 / e1", target),
+                "And tell me the cost": ("msg mail-1", None)}
+    for words, (ref, reply_to) in accepted.items():
+        basis, error = ow.cited_owner_basis(ctx, words)
+        assert error == "" and basis == {"source": "place_owner", "content": words, "basis": "cited", "carried": True,
+                                         "msg_id": ref, **({"reply_to": reply_to} if reply_to else {})}, words
+    for words in ("please update my experiment", "Deploy the hotfix now", "Проверь экономику завтра", "[FOCUS] frame",
+                  "Words nobody wrote here"):
+        basis, error = ow.cited_owner_basis(ctx, words)
+        assert basis is None and error.startswith("owner_words were not found verbatim"), words
+    assert ow.cited_owner_basis(ctx, "") == (None, "") and ow.cited_owner_basis(SimpleNamespace(), "x")[0] is None
+    assert ow.PLACE_CONFIRMED not in ow.OWNER_SOURCES and "place_owner" in ow.OWNER_SOURCES

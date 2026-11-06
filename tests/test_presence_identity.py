@@ -173,7 +173,7 @@ def test_authentication_controls_safety_occasion_and_child_authority(focus, auth
     assert metadata["focus"]["actor"].get("owner_address_unverified", False) is (address_matches and authenticated is False)
     assert metadata["focus"]["actor"]["owner_confirmed"] is owner
     child = consciousness_origin_metadata(metadata, started_root=True)
-    assert child["work_kind"] == ("owner" if owner else "consciousness")
+    assert child["work_kind"] == "consciousness"  # a confirmed account mints nothing; only a verified cite does
     ctx = SimpleNamespace(task_metadata=metadata, drive_root=root, repo_dir=root)
     evidence = _build_check_prompt("read_file", {}, ctx=ctx)
     assert ('"cause": "confirmed owner account"' in evidence) is owner

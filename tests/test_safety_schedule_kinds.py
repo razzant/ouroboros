@@ -86,12 +86,16 @@ def test_legacy_owner_origin_at_admission_is_positive_provenance(q):
         assert task["metadata"]["work_kind"] == expected
 
 
-def _focus_origin(*, addressed=True, confirmed=True, wake="focus"):
+CITE = {"source": "place_owner", "content": "Report tomorrow", "basis": "cited", "carried": True}
+
+
+def _focus_origin(*, cited=False, confirmed=True, wake="focus"):
+    """A place focus's metadata as the schedule doors see it; ``cited``: the writer passed a host-verified cite."""
     return {"initiator": "consciousness", "work_kind": "consciousness", "wake_cause": wake,
             "task_id": "focus-author", "consciousness_autonomy": "act",
             "consciousness_cause": "place:p" if wake == "focus" else "own",
             "resource_intent": {"kind": "system_repo"},
-            "focus": {"addressed": addressed, "actor": {"owner_confirmed": confirmed}}}
+            "focus": {"actor": {"owner_confirmed": confirmed}}, **({"owner_basis": CITE} if cited else {})}
 
 
 def _register_origin(q, metadata, relation="independent", *, door="writer"):
@@ -103,7 +107,7 @@ def _register_origin(q, metadata, relation="independent", *, door="writer"):
         from ouroboros.tools.followup import _register_followup
         ctx = SimpleNamespace(task_id="focus-author", task_metadata=metadata, task_contract={})
         result = _register_followup(ctx, ctx.task_id, q.root, "Report tomorrow", "", row()["trigger"],
-                                    "", "", "", origin, relationship)
+                                    "", "", "", origin, relationship, owner_basis=metadata.get("owner_basis"))
         assert result.startswith("FOLLOWUP_SCHEDULED"), result
         return q.queue.list_scheduled_tasks(q.root)["tasks"][-1]
     payload = row()
@@ -118,12 +122,14 @@ def _register_origin(q, metadata, relation="independent", *, door="writer"):
 
 
 @pytest.mark.parametrize("door", ["writer", "followup"])
-def test_confirmed_owner_scheduled_root_keeps_owner_kind(q, door):
+def test_only_a_cited_scheduled_root_keeps_owner_kind(q, door):
+    """A schedule or follow-up a place focus writes is its own work; one written on my human's cited words is theirs
+    (owner 20.10: their requests from a confirmed account are their orders), whatever the focus's actor flags say."""
     from supervisor.queue_schedules import _task_from_schedule
-    for addressed, confirmed in [(False, True), (True, False), (True, True)]:
-        metadata = _focus_origin(addressed=addressed, confirmed=confirmed)
+    for cited, confirmed in [(False, True), (True, False), (True, True)]:
+        metadata = _focus_origin(cited=cited, confirmed=confirmed)
         record = _register_origin(q, metadata, door=door)
-        expected = "owner" if addressed and confirmed else "consciousness"
+        expected = "owner" if cited else "consciousness"
         assert record["writer_kind"] == record["writer_origin"]["work_kind"] == expected
         fired = _task_from_schedule(record)["metadata"]
         assert fired["work_kind"] == fired["schedule_writer_kind"] == expected
@@ -147,10 +153,10 @@ def test_autonomous_independent_schedule_is_started_work(q, wake):
 
 
 @pytest.mark.parametrize("door", ["writer", "followup"])
-def test_confirmed_owner_exception_does_not_reclassify_a_continuation(q, door):
+def test_a_cite_does_not_reclassify_a_continuation(q, door):
     from supervisor.queue_schedules import _task_from_schedule
     for relation, expected in [("related", "consciousness"), ("independent", "owner")]:
-        record = _register_origin(q, _focus_origin(), relation, door=door)
+        record = _register_origin(q, _focus_origin(cited=True), relation, door=door)
         assert record["writer_kind"] == _task_from_schedule(record)["metadata"]["work_kind"] == expected
 
 
@@ -158,21 +164,21 @@ def test_lifecycle_edits_use_host_relationship_and_ignore_payload_origin(q):
     from supervisor.queue_schedules import _task_from_schedule
     for relation in ("related", "independent"):
         record = _register_origin(q, _focus_origin(confirmed=False), relation)
-        for confirmed in (True, False):
+        for cited in (True, False):
             result = q.queue.mutate_scheduled_task("disable", record["id"], drive_root=q.root,
                 actor="agent", reason="Revise future work", writer_kind="consciousness",
-                writer_metadata=_focus_origin(confirmed=confirmed))
+                writer_metadata=_focus_origin(cited=cited))
             assert result["changed"]
             record = next(r for r in q.queue.list_scheduled_tasks(q.root)["tasks"] if r["id"] == record["id"])
             fired = _task_from_schedule(record)["metadata"]
-            expected = "owner" if relation == "independent" and confirmed else "consciousness"
+            expected = "owner" if relation == "independent" and cited else "consciousness"
             assert record["writer_kind"] == fired["work_kind"] == expected
             if expected == "consciousness":
                 assert fired["consciousness_cause"] == ("started" if relation == "independent" else "place:p")
 
 
-@pytest.mark.parametrize("confirmed", [False, True])
-def test_hold_restore_stamps_origin_after_resolving_relationship(world, confirmed):
+@pytest.mark.parametrize("cited", [False, True])
+def test_hold_restore_stamps_origin_after_resolving_relationship(world, cited):
     from tests.test_g1_followup_policy import ORIGIN, row as stored_row, stop, restore
     from supervisor import queue
     from supervisor.queue_schedules import _task_from_schedule
@@ -183,14 +189,14 @@ def test_hold_restore_stamps_origin_after_resolving_relationship(world, confirme
         payload.update(id=relation, source="task_followup")
         payload["task"]["metadata"]["origin_task_id"] = ORIGIN
         queue.upsert_scheduled_task(payload, drive_root=root, writer_kind="consciousness",
-                                   writer_metadata=_focus_origin(confirmed=confirmed))
+                                   writer_metadata=_focus_origin(cited=cited))
         held = stored_row(root, relation)["followup_hold"]["hold_id"]
         result = restore(root, relation, held, relation=relation, writer_kind="consciousness",
-                         writer_metadata=_focus_origin(confirmed=confirmed))
+                         writer_metadata=_focus_origin(cited=cited))
         assert result["status"] == "hold_released", result
         record = stored_row(root, relation)
         fired = _task_from_schedule(record)["metadata"]
-        expected = "owner" if relation == "independent" and confirmed else "consciousness"
+        expected = "owner" if relation == "independent" and cited else "consciousness"
         assert record["writer_kind"] == fired["work_kind"] == expected
         if expected == "consciousness":
             assert fired["consciousness_cause"] == ("started" if relation == "independent" else "place:p")

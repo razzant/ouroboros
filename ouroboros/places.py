@@ -424,6 +424,16 @@ def is_owner_account(place: Place, platform_actor_id: str, account_id: str = "")
     return owner_account_matches(place.owner_accounts, platform_actor_id, account_id)
 
 
+def confirmed_author(place: Mapping[str, Any], actor: Mapping[str, Any], account_id: str = "") -> bool:
+    """Whether an event's author is an account this place's stored row (``place_summary``) confirms as my human's,
+    and the connector does not report it unauthenticated: provenance of the words, never whom they are for."""
+    actor_id = str((actor or {}).get("platform_actor_id") or (actor or {}).get("id") or "").strip()
+    rows = (place or {}).get("owner_accounts") or ()
+    return bool(actor_id) and (actor or {}).get("authenticated") is not False and any(
+        isinstance(row, Mapping) and str(row.get("platform_actor_id") or "") == actor_id
+        and (not row.get("account_id") or row.get("account_id") == account_id) for row in rows)
+
+
 def owner_account_matches(owner_accounts: Iterable[OwnerAccount], platform_actor_id: str, account_id: str) -> bool:
     """Pure account-scoped owner match shared by actors and credential identities."""
     actor = str(platform_actor_id or "").strip()

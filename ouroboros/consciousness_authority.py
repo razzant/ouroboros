@@ -150,20 +150,20 @@ def work_kind(metadata: Any) -> str:
     return WORK_KIND_CONSCIOUSNESS
 
 
-def consciousness_origin_metadata(parent_metadata: Any, *, started_root: bool = False) -> Dict[str, Any]:
+def consciousness_origin_metadata(parent_metadata: Any, *, started_root: bool = False,
+                                  owner_basis: Any = None) -> Dict[str, Any]:
     """Copy host origin by value, never the wake identity itself.
 
-    Children keep the root's kind/cause; independent roots use ``started``.
-    Only a root occasioned by an addressed, confirmed-owner request changes kind.
-    The focus itself remains consciousness.
+    Children keep the root's kind/cause; independent roots use ``started``. A root a consciousness
+    focus starts is its own work unless ``owner_basis`` is the host-verified cite of my human's words
+    (``owner_words.cited_owner_basis``): no host flag and no argument mint owner kind. The focus
+    itself remains consciousness.
     """
     from copy import deepcopy
 
     source = parent_metadata if isinstance(parent_metadata, Mapping) else {}
     kind = work_kind(source)
-    focus = source.get("focus") or {}
-    if (started_root and is_focus_wake(source) and focus.get("addressed") is True
-            and (focus.get("actor") or {}).get("owner_confirmed") is True):
+    if started_root and is_consciousness_origin(source) and isinstance(owner_basis, Mapping) and owner_basis.get("basis") == "cited":
         kind = WORK_KIND_OWNER
     inherited = {"work_kind": kind}
     for key in ("focus", "schedule_writer_kind", "origin_wake_task_id"):
@@ -187,12 +187,14 @@ def stamp_schedule_writer(record: Dict[str, Any], writer_kind: str, writer_metad
                           *, started_root: bool) -> None:
     """Persist the next occurrence's origin from host writer facts, never the template.
 
-    Independent schedules use root-start semantics, including the confirmed-owner
-    exception. A related continuation keeps its caller's kind and cause.
+    Independent schedules use root-start semantics: a consciousness writer's schedule is its own work
+    unless the writer passed the host-verified cite of my human's words (``owner_basis`` in its
+    writer metadata). A related continuation keeps its caller's kind and cause.
     """
     source = writer_metadata if isinstance(writer_metadata, Mapping) else {}
     kind = WORK_KIND_OWNER if writer_kind == WORK_KIND_OWNER else WORK_KIND_CONSCIOUSNESS
-    origin = consciousness_origin_metadata({**source, "work_kind": kind}, started_root=started_root)
+    origin = consciousness_origin_metadata({**source, "work_kind": kind}, started_root=started_root,
+                                           owner_basis=source.get("owner_basis") if started_root else None)
     record.update(writer_kind=origin["work_kind"], writer_origin=origin)
 
 

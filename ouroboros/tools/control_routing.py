@@ -220,14 +220,20 @@ def _start_task(
     context_requires_self_body_docs: bool = False,
     reasoning_effort: Any = None,
     context_requires_development: Optional[bool] = None,
+    owner_words: str = "",
 ) -> str:
     """Start separate new work; the caller keeps its identity and obligations."""
+    from ouroboros.owner_words import cited_owner_basis
+
     effort_fields, effort_error, effort_note = _root_effort_arg(reasoning_effort, "start_task")
     if effort_error:
         return effort_error
     goal = str(objective or "").strip()
     if not goal:
         return "⚠️ TOOL_ARG_ERROR (start_task): objective is required"
+    owner_basis, cite_error = cited_owner_basis(ctx, owner_words)
+    if cite_error:
+        return f"⚠️ OWNER_WORDS_UNVERIFIED (start_task): {cite_error}"
     card_title, title_error = _task_card_title_arg(title, "start_task")
     if title_error:
         return title_error
@@ -365,12 +371,20 @@ def _start_task(
     # origin label, ledger category and level ride the event by value; the
     # supervisor stamps them on the new root (worker_promotion) — no presence-style
     # stripping, the wake chooses project/workspace like any Main turn (В9').
-    from ouroboros.consciousness_authority import consciousness_origin_metadata
+    from ouroboros.consciousness_authority import consciousness_origin_metadata, is_focus_wake
 
-    evt.update(consciousness_origin_metadata({**metadata, "task_id": str(getattr(ctx, "task_id", "") or "")}, started_root=True))
+    evt.update(consciousness_origin_metadata({**metadata, "task_id": str(getattr(ctx, "task_id", "") or "")},
+                                             started_root=True, owner_basis=owner_basis))
     _attach_origin_from_metadata(ctx, evt)
     _attach_drafted_objective(ctx, evt)
+    if owner_basis:  # the cited words ride into the new root alone, never back into this run's own corpus
+        evt["owner_corpus"] = [*evt.get("owner_corpus", []), owner_basis]
     _attach_client_surface(ctx, evt)
+    kind_note = ""
+    if is_focus_wake(metadata):  # a place turn's start: whose work it is, in one plain sentence (facts, no nudge)
+        kind_note = (" Started as your human's work on their cited words." if owner_basis else
+                     " Started as your own work (consciousness kind): it draws on the consciousness allowance, and "
+                     "the Off switch stops it.")
     mode, confirmation = _emit_and_wait_for_routing(ctx, evt)
     confirmation_status = str(confirmation.get("status") or "unconfirmed")
     reason = str(confirmation.get("reason") or "")
@@ -382,7 +396,7 @@ def _start_task(
         scope_note = _effective_scope_note(ctx, effective_pid)
         response = (
             f"OK: task {tid}{scope_note} accepted and durably scheduled ({mode}){repo_root_note}."
-            f"{source_confirmation} "
+            f"{source_confirmation}{kind_note} "
             "The task now runs independently, and follow-up chat can steer it. "
             "Use wait_task/get_task_result if its result "
             "is needed in this conversation."

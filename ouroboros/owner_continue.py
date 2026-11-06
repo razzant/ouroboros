@@ -98,12 +98,13 @@ OWNER_SOURCE_KINDS = frozenset({"owner_text", "quiz_answer", "quiz_closed", "car
 # The retained owner corpus (``review_evidence.task_inputs``) labels each row by its recorder's typed
 # ``source`` (``loop_messages._record_owner_directive``): my human's later words (the one owner list less
 # the first text; the successor's seeding set), the run's first text (a projection of the original, never a
-# later message) and a task's words (context). A row whose label is none of these is not promoted to owner text.
-# The door's labels in words carried by value (a follow-up's, a drafted start's ``owner_corpus``) are my human's.
+# later message), a task's words and a confirmed account's place words (context; an order only by cite). A row whose
+# label is none of these is not promoted to owner text. The door's labels in words carried by value (a follow-up's, a
+# drafted start's ``owner_corpus``) are my human's.
 CORPUS_INITIAL_SOURCES = frozenset({"origin_message", "initial_user", "initial_text", "initial_text_transcript"})
 CORPUS_OWNER_SOURCES = OWNER_SOURCES - CORPUS_INITIAL_SOURCES
 CARRIED_DOOR_SOURCES = frozenset({"origin_message", "initial_user"})
-CORPUS_TASK_SOURCES = frozenset({"principal_task_message", "relayed_peer_message"})
+CORPUS_TASK_SOURCES = frozenset({"principal_task_message", "relayed_peer_message", "place_confirmed"})
 # The typed ids an owner-source row may carry, each a string when present: its message, a task message's sender and
 # relaying sibling, an owner answer's card, the chat row it is and that id's room; its ``reply_to`` rides beside them.
 ROW_IDS = ("msg_id", "source_task_id", "relayed_from_task_id", "quiz_id", "client_message_id", "chat_id")
@@ -839,9 +840,10 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
         lines += ["", "That task was a wake of your consciousness; no owner message opened it. Its recorded "
                       "opening (host facts, not owner words):",
                   json.dumps({key: value for key, value in wake.items() if key != "observed_text"}, ensure_ascii=False)]
-        # Once, below, as mine, only when this opening event was itself recorded as mine (``place_owner``).
+        # Once, below, as mine, only when my human's confirmed account opened the wake and a ``place_owner`` row
+        # (cited, or an older record's) holds these words; a participant's same words stay theirs, beside mine.
         focus = wake.get("focus") if isinstance(wake.get("focus"), dict) else {}
-        recorded = focus.get("addressed") is True and (focus.get("actor") or {}).get("owner_confirmed") is True
+        recorded = (focus.get("actor") or {}).get("owner_confirmed") is True
         mine = {row["content"] for row in later if row.get("source") == "place_owner"} if recorded else set()
         if "observed_text" in wake and wake["observed_text"] not in mine:
             lines += ["The event's words, from the sender recorded above (context, not an owner "

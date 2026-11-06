@@ -798,8 +798,9 @@ def test_a_predecessor_that_heard_my_human_mid_turn_continues_while_its_mailbox_
     write_task_result(tmp_path, "pred-1", "cancelled", review_evidence=_corpus(
         *_accept_owner_directives(reader, tmp_path, "pred-1")))
     sources = owner_sources(tmp_path, load_task_result(tmp_path, "pred-1"), "pred-1")
-    assert sources["gaps"] == [] and [(row["source"], row["content"]) for row in sources["later"]] == [
-        ("place_owner", words)]
+    # A confirmed account's later place message is provenance the run may cite, never an owner directive of its own;
+    # the Continue packet's owner rows therefore do not carry it (its words stay in the kept mailbox).
+    assert sources["gaps"] == [] and sources["later"] == []
     assert admit_continuation("pred-1", action_nonce=NONCE)["ok"] is True
 
 
