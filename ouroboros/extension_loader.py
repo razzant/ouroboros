@@ -560,7 +560,7 @@ def ensure_companions_running(
             "missing_permissions": list(grant_status.get("missing_permissions") or []),
         }
 
-    # Fix-round-6: resolved WITHOUT mkdir — the post-fence attach creates it.
+    # Resolved WITHOUT mkdir — the post-fence preparation creates it.
     state_dir = skill_state_dir_path(drive_root, skill.name)
     # ABI-9 generation-bound recovery: publish under the lifecycle lock; the
     # seam re-validates that the publication observed above is still live —

@@ -467,8 +467,10 @@ def test_a_refused_read_of_an_accepted_operation_keeps_its_custody(tmp_path, mon
             return {"id": operation, "state": "succeeded", "dispatch": {"state": "response_received", "route": ROUTE},
                     "response": {"state": "ready", "ref": {"sha256": "exact"}}}
 
-        def get_model_result(self, operation, **_kwargs):
-            return b'{"outcome":"completed","message":{"content":"same operation answer"}}'
+        def get_model_result(self, operation, *, raw_bytes=False, include_raw_bytes=False, **_kwargs):
+            raw = b'{"outcome":"completed","message":{"content":"same operation answer"}}'
+            value = json.loads(raw)
+            return (raw, value) if include_raw_bytes else raw if raw_bytes else value
 
         def create_model_operation(self, *_a, **_kw):
             pytest.fail("a second model operation")
