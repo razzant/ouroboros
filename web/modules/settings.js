@@ -778,7 +778,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         const hint = document.getElementById('settings-lan-hint');
         if (!hint || !meta) return;
         if (meta.reachability === 'loopback_only') {
-            hint.innerHTML = 'Bound to <code>localhost</code>: only accessible from this machine. Set Server Bind Host to <code>0.0.0.0</code>, save, and restart for LAN access.';
+            hint.innerHTML = 'Bound to localhost: only this machine can reach Ouroboros. Set Server Bind Host to <code>0.0.0.0</code>, save, and restart for LAN access.';
             hint.dataset.tone = 'info';
             hint.hidden = false;
         } else if (meta.reachability === 'lan_reachable') {

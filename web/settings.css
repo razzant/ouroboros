@@ -127,6 +127,7 @@
     color: var(--text-meta);
     font-size: var(--type-meta);
     line-height: var(--line-meta);
+    font-weight: 400;
     text-align: right;
 }
 
@@ -814,12 +815,12 @@
     cursor: pointer;
 }
 
-/* A slider row (Notifications: the soft app tone's level, under Sound; Appearance: the interface size). The label on
 /* The notification choices sit under their master switch; while it is off they are disabled (the words say so
    in the disabled ink). */
 .notify-choices { display: flex; flex-direction: column; gap: 10px; padding-left: calc(var(--local-toggle-box) + var(--local-toggle-gap)); }
 .notify-choices .local-toggle:has(> input:disabled) { color: var(--text-disabled); cursor: default; }
 
+/* A slider row (Notifications: the soft app tone's level, under Sound; Appearance: the interface size). The label on
    its own line, the slider and its value on one, then its action and the note across the row. */
 .notify-tone-volume,
 .interface-size-range {
