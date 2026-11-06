@@ -1,12 +1,13 @@
 """Product-management envelopes beside ``contracts.py`` (skills, marketplaces, agent accounts, local model,
 MCP, model catalog, updates, core control): descriptive TypedDicts, the twin of ``web/modules/management_contract_types.js``
-(twins older tests read stay in ``api_types.js``). Account routes relay the bundled Claudexor engine's own API v2 objects
+(twins older tests read stay in ``api_types.js``; the Restart Claudexor shapes' in ``claudexor_restart_types.js``). Account routes relay the bundled Claudexor engine's own API v2 objects
 (protocol major 3, release pinned in ``ouroboros/claudexor_runtime_pin.json``, source https://github.com/razzant/claudexor), named by their engine schema type."""
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Union
 
+from ouroboros.gateway.claudexor_contracts import ClaudexorStatusResponse
 from ouroboros.gateway.widgets import ExtensionLiveSnapshot
 from ouroboros.gateway.contributions import UiContributionsResponse
 
@@ -491,6 +492,94 @@ class ClaudexorMaintenanceProblem(TypedDict):
     Idempotency-Key even after a later preparation-only reply, then resend both."""
 
     error: Dict[str, Any]
+
+
+class ClaudexorRestartRun(TypedDict):
+    """One live engine run a restart ends. ``owner`` is ``ouroboros`` when this installation's
+    own delegated-run records hold the run (or the run the engine started it for), else ``other``:
+    another program's. ``task_id`` and ``kind`` are that record's task and category, "" for ``other``."""
+
+    run_id: str
+    state: Literal["queued", "running"]
+    owner: Literal["ouroboros", "other"]
+    task_id: str
+    kind: str
+    harness: str
+    project: str
+    started_at: str
+
+
+class ClaudexorRestartRuns(TypedDict):
+    """``known``: every count is exact. ``unattributed``: the engine listed ``total`` live runs and the
+    own run records could not be read. ``unknown``: the engine did not list its runs (``error`` says
+    why); ``ouroboros`` is then what the own records hold open and ``other`` is null. Null is a gap,
+    never zero. ``items`` holds at most 50 rows, oldest first; ``items_omitted`` counts the rest."""
+
+    status: Literal["known", "unattributed", "unknown"]
+    total: Optional[int]
+    ouroboros: Optional[int]
+    other: Optional[int]
+    error: Optional[str]
+    items: List[ClaudexorRestartRun]
+    items_omitted: int
+
+
+class ClaudexorRestartWarning(TypedDict):
+    """``engine_pin_below_serving``: this checkout pins an older engine than the one serving. Engine
+    data only moves forward, so the pinned engine may refuse it and not start after the restart."""
+
+    code: str
+    message: str
+    pin_version: str
+    serving_version: str
+
+
+class ClaudexorRestartPreview(TypedDict):
+    """``GET /api/claudexor/restart``: what Restart Claudexor would end and start, read now.
+    ``engine``: ``{state: serving|not_answering|not_started, serving: {version, build_sha}|null,
+    pin: {version, build_sha}|null, direction}``. ``model_calls``: ``{status: known|unknown, active,
+    queued}``, the engine's model calls in flight; they end too and are not part of ``token``.
+    ``token`` names the engine, the pin and exactly which runs end and whose they are."""
+
+    engine: Dict[str, Any]
+    runs: ClaudexorRestartRuns
+    model_calls: Dict[str, Any]
+    warnings: List[ClaudexorRestartWarning]
+    token: str
+
+
+class ClaudexorRestartRequest(TypedDict):
+    """``POST /api/claudexor/restart``: the ``token`` of the preview the owner confirmed."""
+
+    token: str
+
+
+class ClaudexorRestartReceipt(TypedDict):
+    """``stop`` is the engine stop's own outcome; ``unconfirmed`` means the old process may still run.
+    ``serving`` says whether an engine answers after the start; false carries the start's ``error``.
+    ``runs`` are the confirmed preview's counts ``{status, total, ouroboros, other}``."""
+
+    stop: Literal["stopped", "nothing_to_stop", "unconfirmed"]
+    serving: bool
+    error: Optional[str]
+    runs: Dict[str, Any]
+
+
+class ClaudexorRestartResponse(TypedDict):
+    """The restart happened: its receipt and the status read after it."""
+
+    status: ClaudexorStatusResponse
+    restart: ClaudexorRestartReceipt
+
+
+class ClaudexorRestartProblem(TypedDict):
+    """Nothing was stopped. 409 ``restart_preview_stale`` carries the fresh ``preview`` to confirm
+    again; 409 ``restart_in_progress``; 503 carries the engine's typed code (``owner_restart``,
+    ``attach_only_engine``)."""
+
+    error: str
+    code: str
+    preview: NotRequired[ClaudexorRestartPreview]
 
 
 class ClaudexorAccountTarget(TypedDict):
@@ -1048,6 +1137,8 @@ __all__ = [
     "MarketplaceUninstallResponse", "MarketplaceSearchResponse", "MarketplaceInstalledResponse",
     "HubPublicationClearRequest", "HubPublicationClearResponse",
     "ClaudexorProblem", "ClaudexorMaintenanceProblem", "ClaudexorAccountTarget",
+    "ClaudexorRestartRun", "ClaudexorRestartRuns", "ClaudexorRestartWarning", "ClaudexorRestartPreview",
+    "ClaudexorRestartRequest", "ClaudexorRestartReceipt", "ClaudexorRestartResponse", "ClaudexorRestartProblem",
     "ClaudexorMaintenanceRequest", "ClaudexorMaintenanceOperation", "ClaudexorMaintenanceInventory",
     "ClaudexorQuotaRefreshRequest", "ClaudexorAccountResources", "ClaudexorAccountResetRequest",
     "ClaudexorAccountResetReceipt", "ClaudexorLoginRequest", "ClaudexorLoginInputRequest",

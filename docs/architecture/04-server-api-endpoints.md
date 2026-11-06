@@ -85,6 +85,8 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/claudexor/account-resets` | exact request (§3) |
 | GET | `/api/claudexor/account-resets/{operation_id}` | receipt inspection (§3) |
 | POST | `/api/claudexor/wake` | |
+| GET | `/api/claudexor/restart` | passive preview of Restart Claudexor: live runs by owner (own delegated-run records), serving engine, pin, `engine_pin_below_serving`; an uncounted engine is unknown, never zero (§3) |
+| POST | `/api/claudexor/restart` | owner-confirmed `{token}`: the attested engine stop, then the ordinary start; `409 restart_preview_stale` returns the fresh preview and stops nothing; the receipt keeps stop and start apart |
 | GET | `/api/claudexor/maintenance/harnesses` | passive inspection |
 | POST | `/api/claudexor/maintenance/operations` | 202 handle; Node/npm preparation: 409 `maintenance_restart_required`, 409/503 `maintenance_preparation_failed`; `not_submitted` covers this attempt only (§6) |
 | GET | `/api/claudexor/maintenance/operations/{operation_id}` | retained engine facts |
