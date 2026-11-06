@@ -118,9 +118,10 @@ def test_cyber_pro_names_a_kept_blocking_choice_beside_its_control(direct_server
                 assert blocking.get_attribute("aria-pressed") == "true"  # the owner's choice is kept
                 assert "Blocking now and for new tasks" in note.inner_text()  # one value, said once
                 assert "Cyber Pro: Blocking is not enforced; review findings do not block actions" in note.inner_text()
-                access_copy = page.locator('[data-settings-panel="behavior"] .form-section', has_text="Access level")
-                assert "review findings do not block actions in Cyber Pro" in access_copy.inner_text()
-                assert "nothing blocks" not in access_copy.inner_text() and "stays available" not in access_copy.inner_text()
+                access_copy = page.locator('[data-settings-panel="behavior"] .form-section', has=page.locator("#s-runtime-mode"))
+                copy = access_copy.text_content()  # the section's copy beyond its lead is behind its Details
+                assert "review findings do not block actions in Cyber Pro" in copy
+                assert "nothing blocks" not in copy and "stays available" not in copy
                 note.scroll_into_view_if_needed()
                 page.screenshot(path=str(evidence / f"settings-cyber-blocking-{theme}-{width}.png"))
                 # A drafted Access for the next start is a distinct fact from the current process.

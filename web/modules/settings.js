@@ -649,6 +649,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     // The unsaved draft is the footer's one word beside Save: it replaces an acknowledgement it would
     // contradict and leaves a warning, a validation or a load in place; a clean draft takes it away.
     function paintDirtyWord() {
+        page.querySelector('.settings-footer')?.setAttribute('data-draft', settingsDirty ? 'dirty' : 'clean');  // whatever the line says
         const status = byId('settings-status');
         if (!status) return;
         const owner = status.dataset.owner || '';
