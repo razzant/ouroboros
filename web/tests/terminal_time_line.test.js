@@ -50,7 +50,13 @@ test('two different minutes that read alike across a DST fallback carry their zo
     const now = new Date('2026-11-01T12:00:00Z');
     const [end, added] = ['2026-11-01T05:30:10Z', '2026-11-01T06:30:40Z'];
     const note = terminalTimeNote(ended(end), added, now);
-    assert.equal(note.short, 'Ended 01:30 EDT · added 01:30 EST');
+    // ICU localizes zone labels: Russian Windows uses GMT-4/GMT-5, not EDT/EST.
+    const formatter = new Intl.DateTimeFormat(undefined, { timeZone: 'America/New_York', timeZoneName: 'short' });
+    const zones = [end, added].map((value) => formatter.formatToParts(new Date(value))
+        .find((part) => part.type === 'timeZoneName')?.value);
+    assert.ok(zones.every(Boolean), 'both instants have a zone label');
+    assert.notEqual(zones[0], zones[1], 'the fallback hour must remain distinguishable');
+    assert.equal(note.short, `Ended 01:30 ${zones[0]} · added 01:30 ${zones[1]}`);
     assert.equal(note.full, `Task ended ${at(end, 'short')} · Notification added ${at(added, 'short')}`);
 });
 
