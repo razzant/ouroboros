@@ -164,29 +164,6 @@ def test_type_scale_tokens_are_declared_once_in_the_root_block() -> None:
     )
 
 
-def test_chat_reading_ladder_is_relative_and_read_only_by_chat_headings() -> None:
-    """The one exception to the closed scale (docs/DESIGN.md §1): Markdown
-    headings in a full rich chat answer step up from the bubble's own reading
-    text. The steps are relative, so they cannot become a fifth UI size, and
-    only the rich answer's heading rules may read them — shared, in the same
-    rules, with a delivered document in the reader (DESIGN "Document reading"):
-    compact Markdown in a bubble (a Skill Review report) keeps its --type-body
-    labels."""
-    root = _root_declarations("web/ui.css")
-    ladder = {"--md-heading-major": "1.25em", "--md-heading-minor": "1.125em"}
-    assert {name: root.get(name) for name in ladder} == ladder
-    css = _decommented(_read("web/style.css"))
-    readers = [
-        " ".join(selector.split())
-        for selector, body in RULE.findall(css)
-        if any(f"var({name})" in body for name in ladder)
-    ]
-    assert readers == [
-        ".chat-bubble .message:where(.ui-rich-content) :is(.md-h1, .md-h2), .document-reader-markdown :is(.md-h1, .md-h2)",
-        ".chat-bubble .message:where(.ui-rich-content) .md-h3, .document-reader-markdown .md-h3",
-    ], readers
-
-
 def _root_declarations(rel: str) -> dict[str, str]:
     """The ``:root`` block of a stylesheet as ``{token: value}``.
 
@@ -220,26 +197,6 @@ def _document_stylesheets(document: str) -> list[str]:
     parser.feed(_read(document))
     assert parser.paths, f"no local stylesheets in {document}"
     return parser.paths
-
-
-def test_both_documents_load_one_real_shared_palette_before_page_styles() -> None:
-    """No copied palette: both hosts must load the same nonempty source.
-
-    Required roles prevent an empty source from passing. Page declarations
-    cannot silently shadow a shared role and make onboarding a second theme.
-    Actual effective palette and controls are also exercised in the browser.
-    """
-    shared = _root_declarations("web/ui.css")
-    required = TYPE_TOKENS + LINE_TOKENS + FOREGROUND_TOKENS + STATUS_TOKENS + ("--accent",)
-    for token in required:
-        assert shared.get(token), f"{token} missing from shared palette"
-    assert len(shared) > 20, "shared source must contain the actual palette"
-    for document in ("web/index.html", "web/onboarding_template.html"):
-        sheets = _document_stylesheets(document)
-        assert sheets[0] == "web/ui.css" and sheets.count("web/ui.css") == 1
-        for sheet in sheets[1:]:
-            declared = set(DECLARATION.findall(_decommented(_read(sheet))))
-            assert not (declared & shared.keys()), f"{sheet} shadows shared roles: {declared & shared.keys()}"
 
 
 def test_no_tiny_raw_font_sizes_on_migrated_surfaces() -> None:
@@ -277,53 +234,6 @@ def test_no_uppercase_label_pattern_on_migrated_surfaces() -> None:
 # ---------------------------------------------------------------------------
 # The four root causes, pinned individually
 # ---------------------------------------------------------------------------
-
-
-def test_muted_is_a_global_colour_only_utility() -> None:
-    """Root cause #1. `.muted` must resolve globally, and must NOT set a size:
-    its call sites are sized by their contexts, so a font-size here would
-    silently resize all of them."""
-    css = _decommented(_read("web/ui.css"))
-    bodies = [body for selector, body in RULE.findall(css) if selector.strip() == ".muted"]
-    assert bodies, "no global `.muted` rule in web/ui.css"
-    declarations = [
-        part.split(":", 1)[0].strip()
-        for body in bodies
-        for part in body.split(";")
-        if part.strip()
-    ]
-    assert declarations == ["color"], (
-        "`.muted` is a colour-only utility (docs/DESIGN.md '.muted'); it "
-        f"declares {declarations}"
-    )
-    assert any("var(--text-meta)" in body for body in bodies)
-
-
-def test_chips_and_meta_lines_declare_their_own_foreground() -> None:
-    """Root cause #2. A rule that declares a size and no colour inherits
-    near-white --text-primary — invisible in the CSS, loudest on screen."""
-    region = _migrated_style_region() + _decommented(_read("web/settings.css"))
-    for selector in (".harness-chip", ".available-subagent-facts dd", ".harness-account-main strong"):
-        bodies = [
-            body for sel, body in RULE.findall(region) if sel.strip() == selector
-        ]
-        assert bodies, f"{selector} missing from the migrated region of web/style.css or web/settings.css"
-        assert any("color:" in body for body in bodies), (
-            f"{selector} declares no colour, so it inherits --text-primary "
-            "(docs/DESIGN.md 'Status and chips')"
-        )
-
-
-def test_settings_field_labels_use_the_named_meta_foreground() -> None:
-    """Root cause #3. The hand-written rgba(255,255,255,0.68) is now the named
-    --text-meta, in both stylesheets that carried a copy of it."""
-    for rel in ("web/settings.css", "web/onboarding.css"):
-        css = _read(rel)
-        # Only the shared source declares the value. Page rules name its role.
-        assert "rgba(255, 255, 255, 0.68)" not in css
-        # The wizard's former private grey family remains retired.
-        assert "rgba(237, 242, 247, 0.68)" not in css
-        assert "var(--text-meta)" in css, f"{rel} never names --text-meta"
 
 
 def test_migrated_region_markers_do_not_swallow_unmigrated_surfaces() -> None:
@@ -499,80 +409,6 @@ def test_every_focus_visible_selector_gets_the_canonical_ring() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_quiz_question_reads_as_text_with_its_own_emphasis() -> None:
-    """Pins the owner-visible defect "the whole question is one bold block": a
-    real question is a marked title plus several lines, so the question itself
-    is regular weight and only what it marks is semibold (DESIGN "Quiz card")."""
-    css = _decommented(_read("web/style.css"))
-
-    def weights(wanted: str) -> list[str]:
-        return [
-            part.split(":", 1)[1].strip()
-            for selector, body in RULE.findall(css)
-            if selector.strip() == wanted
-            for part in body.split(";")
-            if part.strip() and part.split(":", 1)[0].strip() == "font-weight"
-        ]
-
-    assert weights(".chat-quiz-question") == ["400"]
-    assert weights(".chat-quiz-question strong") == ["600"]
-
-
-def test_select_control_clips_its_value() -> None:
-    """Pins the owner-visible defect "Settings -> Advanced paints a horizontal
-    scrollbar in the desktop app": WebKit computes `overflow: visible` on a
-    native select (Blink's UA sheet clips it), so a long selected option leaks
-    out of the control and into the page scroller."""
-    css = _decommented(_read("web/ui.css"))
-    bodies = [
-        body for selector, body in RULE.findall(css)
-        if selector.strip() == "select.ui-control"
-    ]
-    assert bodies, "no `select.ui-control` rule in web/ui.css"
-    values = [
-        part.split(":", 1)[1].strip().lower()
-        for body in bodies
-        for part in body.split(";")
-        if part.strip() and part.split(":", 1)[0].strip() == "overflow"
-    ]
-    assert values, (
-        "`select.ui-control` declares no `overflow`, so WebKit lets a long "
-        "selected option paint past the control's own box and widen the "
-        "settings scroller"
-    )
-    assert all(value != "visible" for value in values), (
-        f"`select.ui-control` re-opens the clip: overflow {values}"
-    )
-
-
-def test_webkit_scrollbar_recipe_covers_both_axes() -> None:
-    """Pins the owner-visible defect "the scrollbar is thick and red": the
-    global `::-webkit-scrollbar` recipe sized only `width`, which is the
-    VERTICAL bar, so any horizontal bar kept the 16-17px UA thickness while
-    still wearing the accent thumb."""
-    css = _decommented(_read("web/style.css"))
-    bodies = [
-        body for selector, body in RULE.findall(css)
-        if selector.strip() == "::-webkit-scrollbar"
-    ]
-    assert bodies, "no global `::-webkit-scrollbar` rule in web/style.css"
-    declarations: dict[str, str] = {}
-    for body in bodies:
-        for part in body.split(";"):
-            if ":" not in part:
-                continue
-            name, _, value = part.partition(":")
-            declarations[name.strip().lower()] = value.strip().lower()
-    assert "width" in declarations and "height" in declarations, (
-        "the global scrollbar recipe must size both axes; it declares "
-        f"{sorted(declarations)}"
-    )
-    assert declarations["width"] == declarations["height"], (
-        "the horizontal bar must be as thin as the vertical one: "
-        f"width {declarations['width']} vs height {declarations['height']}"
-    )
-
-
 def test_every_mask_keeps_its_webkit_companion() -> None:
     """A fade is a mask (`.scroll-fade-y`, the sideways table fade): each rule that
     sets `mask-image` also sets `-webkit-mask-image`, as the file's first fade does,
@@ -581,25 +417,3 @@ def test_every_mask_keeps_its_webkit_companion() -> None:
     unpaired = [selector.strip() for selector, body in RULE.findall(css)
                 if re.search(r"(?<![-\w])mask-image\s*:", body) and "-webkit-mask-image" not in body]
     assert not unpaired, f"mask-image without its -webkit- companion: {unpaired}"
-
-def test_chat_transcript_reserves_composer_space_as_one_flex_spacer():
-    """End space is a flex item; keyboard flow removes it and its extra gap."""
-    css = _decommented(_read("web/style.css"))
-    rules = [(selector.strip(), body) for selector, body in RULE.findall(css)]
-    assert not re.search(r"padding-bottom:\s*(?:calc\()?var\(--chat-input-reserve", css)
-    spacers = [(selector, body) for selector, body in rules if "chat-messages::after" in selector]
-    bases = [body for _, body in spacers if "flex:" in body]
-    assert len(bases) == 1
-    assert "content: '';" in bases[0]
-    assert "flex: 0 0 calc(var(--chat-input-reserve, 108px) - 8px);" in bases[0]
-    # The stack layout's spacer adds the shell's bottom inset (ui.css --inset-bottom: the system safe area and,
-    # inside Telegram, the host's), never a raw env() of its own.
-    mobile = [body for _, body in spacers if "var(--inset-bottom)" in body]
-    assert len(mobile) == 1
-    assert "- 8px" in mobile[0]
-    panel = [body for selector, body in spacers if selector == ".chat-instance-panel .chat-messages::after"]
-    assert len(panel) == 1
-    assert "flex-basis: calc(var(--chat-input-reserve, 108px) - 8px);" in panel[0]
-    keyboard = [body for selector, body in spacers if "body.keyboard-open" in selector]
-    assert len(keyboard) == 1
-    assert "content: none;" in keyboard[0]

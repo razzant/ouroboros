@@ -565,7 +565,7 @@ def test_failed_grant_rolls_back_marker_and_wait_together(pool, monkeypatch):
     assert load_task_result(pool.root, "owner")["owner_wait"]["state"] == "waiting"
 
 
-@pytest.mark.parametrize("stage", ["resumed", "cold_loading", "ordinary", "other_attempt"])
+@pytest.mark.parametrize("stage", ["resumed", "cold_loading", "other_attempt"])
 def test_idle_timeout_never_clones_a_checkpointed_attempt(pool, monkeypatch, stage):
     from supervisor import evolution_lifecycle, state
 

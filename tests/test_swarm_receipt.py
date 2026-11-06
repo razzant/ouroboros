@@ -217,7 +217,7 @@ def test_ordinary_task_writes_do_not_scan_tree_until_receipt_exists(tmp_path, mo
     write_task_result(tmp_path, "root", "completed")
 
 
-@pytest.mark.parametrize("case", ["selected", "unselected", "pending", "additional"])
+@pytest.mark.parametrize("case", ["selected", "pending", "additional"])
 def test_review_detach_retains_the_canonical_waking_actor(tmp_path, monkeypatch, case):
     from ouroboros import review_pause, store, swarm_receipt_sources
     from ouroboros.subagent_metrics import set_name

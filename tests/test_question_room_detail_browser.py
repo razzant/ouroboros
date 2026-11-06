@@ -11,7 +11,7 @@ from tests._shared import producer_evidence_dir
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 from tests.test_main_shared_state_browser import _REAL_SOCKET_DROP
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def test_actual_detail_recovers_native_main_context_and_hidden_publication(direct_server_with_data):

@@ -13,6 +13,7 @@ gate selects a test module by its direct imports) instead of booting the contrac
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -201,8 +202,7 @@ def test_the_steady_state_is_not_reached_by_a_pass_the_handed_in_judge_names_ref
 
 @pytest.mark.parametrize("runs, refusals", [
     ("failed done", ["L:child-jobs refused: ['custody_trash: failed']"]),
-    ("none", ["L:child-jobs refused: ['no report: None']"]),
-    ("pending done", []), ("done", [])], ids=["failed_then_done", "no_report", "pending_then_done", "done"])
+    ("pending done", []), ("done", [])], ids=["failed_then_done", "pending_then_done", "done"])
 def test_the_live_set_s_preparation_reads_each_maintenance_run(tmp_path, monkeypatch, runs, refusals):
     """``_child_jobs_done`` (tests/_live_set.py, the live set's and the stand's preparation) runs the child's pass while
     a job is due. Each run's report is read as the contract's own preparation reads it: one refused run is a driver
@@ -328,7 +328,7 @@ def test_a_broken_measurement_is_not_a_performance_assertion(tmp_path, monkeypat
     from pathlib import Path
     from types import SimpleNamespace
 
-    from tests import group_run, test_cost_contract as contract
+    from tests import _stand_cache as cache, group_run, test_cost_contract as contract
 
     # The inline R_late allowance must not bypass the generic gap's error distinction.
     late = next(row for mark in contract.test_room_history_is_flat.pytestmark if mark.name == "parametrize"
@@ -344,5 +344,90 @@ def test_a_broken_measurement_is_not_a_performance_assertion(tmp_path, monkeypat
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(group_run, "run_in_group", child)
-    with pytest.raises(RuntimeError, match="controlled measurement refusal"):
-        contract.measure(tmp_path, 1)
+    monkeypatch.setenv("OUROBOROS_TEST_TEMP_ROOT", str(tmp_path))  # a stand of this test's own
+    with pytest.raises(RuntimeError, match="controlled measurement refusal"), cache.measuring(1):
+        pass
+
+
+def _stand_build(built):
+    def build(home, k, journal=""):
+        built.append((k, journal))
+        (home / "data" / "archive").mkdir(parents=True)
+        (home / "data" / "archive" / "segment.jsonl").write_text("sealed\n", encoding="utf-8")
+        (home / "data" / "logs.jsonl").write_text("as built\n", encoding="utf-8")
+        (home / "data" / "gone.json").write_text("{}", encoding="utf-8")
+        (home / "data" / "state.json").write_text("{}", encoding="utf-8")
+        (home / "data" / "object").write_text("read only\n", encoding="utf-8")
+        os.chmod(home / "data" / "object", 0o444)
+        os.symlink("logs.jsonl", home / "data" / "link")
+    return build
+
+
+def _drive_it(home):
+    """What a consumer leaves behind: a rotated log, an atomic write, a file deleted, one appended to, a new folder, a moved link."""
+    data = home / "data"
+    os.replace(data / "logs.jsonl", data / "archive" / "logs_rotated.jsonl")
+    (data / "logs.jsonl").write_text("a consumer's row\n", encoding="utf-8")
+    (data / "state.tmp").write_text('{"driven": true}', encoding="utf-8")
+    os.replace(data / "state.tmp", data / "state.json")
+    (data / "gone.json").unlink()
+    with (data / "archive" / "segment.jsonl").open("a", encoding="utf-8") as stream:
+        stream.write("appended\n")
+    (data / "added" / "deep").mkdir(parents=True)
+    (data / "added" / "deep" / "file").write_text("new\n", encoding="utf-8")
+    os.utime(data / "object")  # as Git freshens an object it was asked to write again
+    (data / "link").unlink()
+    os.symlink("archive", data / "link")
+
+
+def _identity(path):
+    seen = os.stat(path, follow_symlinks=False)
+    return seen.st_ino, seen.st_size, seen.st_mtime_ns
+
+
+def test_a_stand_is_built_once_and_each_consumer_finds_it_back_in_place(tmp_path, monkeypatch):
+    """Paths and inodes stay: a root's records name both, so even a rotated or atomically replaced file comes back as itself."""
+    from tests import _stand_cache as cache
+
+    built = []
+    monkeypatch.setenv("OUROBOROS_TEST_TEMP_ROOT", str(tmp_path))
+    monkeypatch.setattr(cache, "build", _stand_build(built))
+    with cache.stand(1) as first:
+        data = first / "data"
+        named = [data / name for name in ("logs.jsonl", "state.json", "gone.json", "object", "archive", "archive/segment.jsonl")]
+        pristine = [_identity(path) for path in named]
+        _drive_it(first)
+        assert _identity(named[0]) != pristine[0] and _identity(named[4]) != pristine[4]
+    with cache.stand(1) as second:
+        assert second == first and built == [(1, "")]
+        assert [_identity(path) for path in named] == pristine
+        assert (data / "logs.jsonl").read_text(encoding="utf-8") == "as built\n"
+        assert (data / "state.json").read_text(encoding="utf-8") == "{}"
+        assert (data / "archive" / "segment.jsonl").read_text(encoding="utf-8") == "sealed\n"
+        assert sorted(path.name for path in data.iterdir()) == ["archive", "gone.json", "link", "logs.jsonl", "object", "state.json"]
+        assert os.readlink(data / "link") == "logs.jsonl" and os.listdir(data / "archive") == ["segment.jsonl"]
+    with cache.stand(1, "WAL") as other, cache.stand(30) as larger:
+        assert len({first, other, larger}) == 3 and built == [(1, ""), (1, "WAL"), (30, "")]
+
+
+def test_a_stand_in_use_makes_nobody_wait_and_a_killed_build_publishes_nothing(tmp_path, monkeypatch):
+    from tests import _stand_cache as cache
+
+    built = []
+    monkeypatch.setenv("OUROBOROS_TEST_TEMP_ROOT", str(tmp_path))
+    monkeypatch.setattr(cache, "build", _stand_build(built))
+    with cache.stand(1) as held, cache.stand(1) as private:
+        assert private != held and built == [(1, ""), (1, "")] and len(private.parts) == len(held.parts)
+        (private / "data" / "logs.jsonl").write_text("private\n", encoding="utf-8")
+        assert (held / "data" / "logs.jsonl").read_text(encoding="utf-8") == "as built\n"
+
+    def killed(home, _k, _journal=""):
+        (home / "data").mkdir(parents=True)
+        raise RuntimeError("killed half way")
+
+    monkeypatch.setattr(cache, "build", killed)
+    with pytest.raises(RuntimeError, match="killed half way"), cache.stand(2):
+        pass
+    monkeypatch.setattr(cache, "build", _stand_build(built))
+    with cache.stand(2) as whole:
+        assert (whole / "data" / "logs.jsonl").is_file() and built[-1] == (2, "")

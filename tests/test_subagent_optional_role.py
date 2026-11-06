@@ -16,10 +16,10 @@ from tests import _dialogue as dialogue_test
 from tests._shared import configure_test_subagent
 from tests.test_subagent_role_texts import _env
 from tests._store_shared import result_signature, seed_result, unreadable_result
+from tests._cases import case_folders, chosen_rows, plain_rows
 
 
 # These consumers patch process-wide routing/configuration and supervisor seams.
-pytestmark = pytest.mark.serial
 
 ROLE_CASES = [
     pytest.param({}, "", id="omitted"),
@@ -67,7 +67,7 @@ def _assert_role(record, role):
     assert record["delegation_role"] == "subagent"
 
 
-@pytest.mark.parametrize("role_fields,role", ROLE_CASES)
+@pytest.mark.parametrize("role_fields,role", chosen_rows(ROLE_CASES, 0, 2, 5))
 def test_role_reaches_child_prompt_and_durable_lifecycle_without_inference(tmp_path, monkeypatch, role_fields, role):
     from ouroboros.agent import Env, OuroborosAgent
     from ouroboros.agent_task_pipeline import _store_task_result
@@ -182,74 +182,83 @@ def test_role_reaches_child_prompt_and_durable_lifecycle_without_inference(tmp_p
     assert load_task_result(drive, tid)["role"] == role
 
 
-@pytest.mark.parametrize("role_fields,role", ROLE_CASES)
-def test_depth_refusal_persists_only_the_supplied_role(tmp_path, monkeypatch, role_fields, role):
-    monkeypatch.setenv("OUROBOROS_MAX_SUBAGENT_DEPTH", "0")
-    _repo, drive, parent, result = _request(tmp_path, monkeypatch, role_fields)
-    assert "depth limit (0) exceeded" in result
-    assert parent.pending_events == []
-    from ouroboros.task_store import list_documents
-    records = list_documents(drive)
-    assert len(records) == 1
-    record = records[0]
-    assert record["reason_code"] == "subtask_depth_limit"
-    _assert_role(record, role)
+def test_depth_refusal_persists_only_the_supplied_role(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for role_fields, role in plain_rows(ROLE_CASES, 2):
+        tmp_path = next(case_paths)
+        with subtests.test(role_fields=role_fields, role=role), monkeypatch.context() as monkeypatch:
+            monkeypatch.setenv("OUROBOROS_MAX_SUBAGENT_DEPTH", "0")
+            _repo, drive, parent, result = _request(tmp_path, monkeypatch, role_fields)
+            assert "depth limit (0) exceeded" in result
+            assert parent.pending_events == []
+            from ouroboros.task_store import list_documents
+            records = list_documents(drive)
+            assert len(records) == 1
+            record = records[0]
+            assert record["reason_code"] == "subtask_depth_limit"
+            _assert_role(record, role)
 
 
-@pytest.mark.parametrize("role_fields,role", ROLE_CASES)
-def test_final_only_history_recovers_role_without_rewriting_old_rows(tmp_path, role_fields, role):
-    from ouroboros.gateway.history import make_chat_history_endpoint
+def test_final_only_history_recovers_role_without_rewriting_old_rows(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for role_fields, role in plain_rows(ROLE_CASES, 2):
+        tmp_path = next(case_paths)
+        with subtests.test(role_fields=role_fields, role=role):
+            from ouroboros.gateway.history import make_chat_history_endpoint
 
-    results = tmp_path / "task_results"
-    results.mkdir()
-    history = tmp_path / "archive" / "chat_20260821T100001.jsonl"
-    dialogue_test.seed(tmp_path, archives={history.name: [{
-        "ts": "2026-08-21T10:00:01Z", "chat_id": 7, "direction": "out",
-        "task_id": "historic-child", "text": "Retained child findings",
-    }]})
-    result = results / "historic-child.json"
-    result.write_text(json.dumps({
-        "_schema_version": 1, "task_id": "historic-child", "status": "completed",
-        "delegation_role": "subagent", "parent_task_id": "parent", "root_task_id": "parent",
-        "actor_id": "historical-actor", "model": "openai/fixture-model", **role_fields,
-    }), encoding="utf-8")
-    originals = {path: path.read_bytes() for path in (history, result)}
-    from ouroboros.store_import import ensure_current_store
-    ensure_current_store(tmp_path)  # the boot door imports the historic file; a page read never imports
-    dialogue_test.import_all(tmp_path)
-    stored_rows = dialogue_test.chat_rows(tmp_path)
-    endpoint = make_chat_history_endpoint(tmp_path)
-    response = asyncio.run(endpoint(SimpleNamespace(query_params={"chat_id": "7"})))
-    assert response.status_code == 200
-    row = next(item for item in json.loads(response.body)["messages"]
-               if item.get("task_id") == "historic-child")
-    assert row["subagent_role"] == role
-    assert row["model"] == "openai/fixture-model"
-    assert row["parent_task_id"] == "parent"
-    assert dialogue_test.chat_rows(tmp_path) == stored_rows
-    assert {path: path.read_bytes() for path in originals} == originals
+            results = tmp_path / "task_results"
+            results.mkdir()
+            history = tmp_path / "archive" / "chat_20260821T100001.jsonl"
+            dialogue_test.seed(tmp_path, archives={history.name: [{
+                "ts": "2026-08-21T10:00:01Z", "chat_id": 7, "direction": "out",
+                "task_id": "historic-child", "text": "Retained child findings",
+            }]})
+            result = results / "historic-child.json"
+            result.write_text(json.dumps({
+                "_schema_version": 1, "task_id": "historic-child", "status": "completed",
+                "delegation_role": "subagent", "parent_task_id": "parent", "root_task_id": "parent",
+                "actor_id": "historical-actor", "model": "openai/fixture-model", **role_fields,
+            }), encoding="utf-8")
+            originals = {path: path.read_bytes() for path in (history, result)}
+            from ouroboros.store_import import ensure_current_store
+            ensure_current_store(tmp_path)  # the boot door imports the historic file; a page read never imports
+            dialogue_test.import_all(tmp_path)
+            stored_rows = dialogue_test.chat_rows(tmp_path)
+            endpoint = make_chat_history_endpoint(tmp_path)
+            response = asyncio.run(endpoint(SimpleNamespace(query_params={"chat_id": "7"})))
+            assert response.status_code == 200
+            row = next(item for item in json.loads(response.body)["messages"]
+                       if item.get("task_id") == "historic-child")
+            assert row["subagent_role"] == role
+            assert row["model"] == "openai/fixture-model"
+            assert row["parent_task_id"] == "parent"
+            assert dialogue_test.chat_rows(tmp_path) == stored_rows
+            assert {path: path.read_bytes() for path in originals} == originals
 
 
-@pytest.mark.parametrize("role_fields,role", ROLE_CASES)
-@pytest.mark.parametrize("unreadable", [False, True], ids=["invalid-depth", "unreadable-record"])
-def test_supervisor_direct_rejection_does_not_invent_a_role(tmp_path, monkeypatch, role_fields, role, unreadable):
-    from supervisor import events
+def test_supervisor_direct_rejection_does_not_invent_a_role(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for role_fields, role in plain_rows(ROLE_CASES, 2):
+        for unreadable in [False, True]:
+            tmp_path = next(case_paths)
+            with subtests.test(role_fields=role_fields, role=role, unreadable=unreadable), monkeypatch.context() as monkeypatch:
+                from supervisor import events
 
-    supervisor = _supervisor(tmp_path)
-    if unreadable:
-        seed_result(tmp_path, "child", {"task_id": "child", "status": "scheduled"})
-        before = result_signature(tmp_path, "child")
-        broken = unreadable_result(monkeypatch, "child")
-    event = {
-        "type": "schedule_subagent", "task_id": "child", "parent_task_id": "parent",
-        "root_task_id": "parent", "delegation_role": "subagent", "depth": -1,
-        "objective": "Inspect the interface", "expected_output": "Findings", **role_fields,
-    }
-    events._handle_schedule_task(event, supervisor)
-    assert supervisor.PENDING == []
-    assert supervisor.sent[-1][2]["progress_meta"]["subagent_role"] == role
-    if unreadable:
-        broken["on"] = False
-        assert result_signature(tmp_path, "child") == before
-    else:
-        assert load_task_result(tmp_path, "child")["role"] == role
+                supervisor = _supervisor(tmp_path)
+                if unreadable:
+                    seed_result(tmp_path, "child", {"task_id": "child", "status": "scheduled"})
+                    before = result_signature(tmp_path, "child")
+                    broken = unreadable_result(monkeypatch, "child")
+                event = {
+                    "type": "schedule_subagent", "task_id": "child", "parent_task_id": "parent",
+                    "root_task_id": "parent", "delegation_role": "subagent", "depth": -1,
+                    "objective": "Inspect the interface", "expected_output": "Findings", **role_fields,
+                }
+                events._handle_schedule_task(event, supervisor)
+                assert supervisor.PENDING == []
+                assert supervisor.sent[-1][2]["progress_meta"]["subagent_role"] == role
+                if unreadable:
+                    broken["on"] = False
+                    assert result_signature(tmp_path, "child") == before
+                else:
+                    assert load_task_result(tmp_path, "child")["role"] == role

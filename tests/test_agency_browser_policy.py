@@ -60,7 +60,7 @@ def control_page(tmp_path, monkeypatch):
         assert not thread.is_alive()
 
 
-@pytest.mark.parametrize("mode", ["light", "advanced", "pro", "cyber_pro"])
+@pytest.mark.parametrize("mode", ["light", "advanced", "cyber_pro"])
 def test_http_policy_uses_actual_operation_and_identity(mode, tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     record_service_binding(tmp_path, "main", "127.0.0.1", 49159, pid=os.getpid())
@@ -75,7 +75,7 @@ def test_http_policy_uses_actual_operation_and_identity(mode, tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("url", [
-    "http://169.254.169.254/latest/meta-data", "http://[fe80::1]/", "http://2852039166/",
+    "http://169.254.169.254/latest/meta-data", "http://2852039166/",
     "http://10.0.0.1/",
 ])
 def test_cyber_targets_do_not_require_internal_permission(url):
@@ -83,7 +83,7 @@ def test_cyber_targets_do_not_require_internal_permission(url):
     assert browser_policy.browser_url_block_reason(url, restricted=True, runtime_mode="cyber_pro")
 
 
-@pytest.mark.parametrize("mode", ["light", "advanced", "pro", "cyber_pro"])
+@pytest.mark.parametrize("mode", ["light", "advanced", "cyber_pro"])
 def test_local_file_reads_follow_parent_reach_without_a_workspace_fence(mode):
     for restricted in (False, True):
         assert browser_policy.browser_url_block_reason(

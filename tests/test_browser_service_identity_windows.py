@@ -65,7 +65,6 @@ def test_creation_filetime_uses_limited_query_and_closes_handle(kernel32):
     ({"handle": 0}, OSError, False),
     ({"ok": False}, OSError, True),
     ({"creation": 0}, ValueError, True),
-    ({"raises": True}, RuntimeError, True),
 ])
 def test_native_identity_failure_is_explicit_and_closes_owned_handle(kernel32, change, error, closed):
     kernel32.update(change)

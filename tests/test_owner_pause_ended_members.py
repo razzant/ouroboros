@@ -491,7 +491,7 @@ def test_the_room_says_pausing_for_an_ended_roots_tail_and_nothing_once_it_ended
     assert _works(tmp_path) == []
 
 
-@pytest.mark.parametrize("case", ["failed_owner", "unknown_stop", "unbound", "live"])
+@pytest.mark.parametrize("case", ["failed_owner", "unbound", "live"])
 def test_a_requested_pause_types_its_tail_as_the_work_does_and_never_promotes_unknown(tmp_path, monkeypatch, case):
     """The nanny's projection probe, kept as a countertest. An ended root's requested Pause shows its reason beside
     what its tree left, typed by the work's own run typing (``work_status.run_tail``). A run nobody can confirm (its own

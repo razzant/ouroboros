@@ -1,14 +1,12 @@
 """Live carriers and room handoff retain the ordinary restart/delivery gates."""
 import json
 
-import pytest
 
 from tests.test_agent_restart_intent import runtime as runtime, accept
 from tests.test_call_task_lifecycle import direct_call as direct_call
 from tests.test_delivery_contention import sender as sender, owed
 from tests.test_live_review_r9_relay import actor
 
-pytestmark = pytest.mark.serial
 
 
 def test_restart_defers_live_intent_without_constructing_an_actor(direct_call, runtime, monkeypatch):

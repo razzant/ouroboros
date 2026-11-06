@@ -58,7 +58,7 @@ from tests.test_ui_document_reader_browser import (
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
 
-pytestmark = [pytest.mark.serial, pytest.mark.ui_browser]
+pytestmark = [pytest.mark.ui_browser]
 
 ENGINES = ["chromium", "webkit"]
 PHONE = {"width": 390, "height": 844}

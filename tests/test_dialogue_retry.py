@@ -112,8 +112,7 @@ def test_uncertain_commit_is_deduped_in_the_write_transaction(tmp_path, monkeypa
     assert len(progress_rows(tmp_path)) == 3
 
 
-@pytest.mark.parametrize("mode", ["PERSIST", "WAL"])
-@pytest.mark.parametrize("bound", ["rows", "bytes"])
+@pytest.mark.parametrize(("bound", "mode"), [("rows", "WAL"), ("bytes", "PERSIST")])
 def test_overflow_evicts_oldest_counts_every_row_and_keeps_live_producers(tmp_path, monkeypatch, caplog, mode, bound):
     seed(tmp_path, monkeypatch, mode)
     monkeypatch.setattr(retry, "MAX_ROWS", 3 if bound == "rows" else 100)

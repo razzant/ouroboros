@@ -21,7 +21,7 @@ def _reserve(root, task):
                    "reservation_upper_bound_usd": 0.01, "pricing_known": True})
 
 
-@pytest.mark.parametrize("change", ["money", "delivery", "live_row", "live_evidence"])
+@pytest.mark.parametrize("change", ["money", "delivery", "live_evidence"])
 def test_unrelated_changes_do_not_wake_the_look_or_the_swept_task(root, monkeypatch, change):
     _task(root, "packed", blobs=1)
     assert packer.run_pass(root)["unlinked"] == 2

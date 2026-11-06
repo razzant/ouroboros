@@ -12,7 +12,6 @@ from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 from tests.ui_chat_viewport_smoke import state_reads
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("browser_engine", ["chromium", "webkit"])
 def test_bound_direct_task_header_and_review_cost_survive_reopen(

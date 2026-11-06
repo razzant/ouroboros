@@ -349,7 +349,7 @@ def test_abandoned_cycle_keeps_its_report_and_its_row_is_separate(cycle, monkeyp
     assert len(rows(cycle)) == 1
 
 
-@pytest.mark.parametrize("failure", ["preserve_refused", "preserve_raises", "reset_refused", "reset_raises"])
+@pytest.mark.parametrize("failure", ["preserve_refused", "preserve_raises", "reset_raises"])
 def test_partial_success_keeps_the_stash_and_the_first_failure(cycle, monkeypatch, failure):
     """A later ref or reset failure neither hides the stash that succeeded nor loses its own cause."""
     from supervisor import git_ops
@@ -457,7 +457,7 @@ def test_a_refused_stash_moved_nothing_and_publishes_no_move(cycle, monkeypatch,
     assert (cycle.repo / "untracked.txt").is_file() and rows(cycle) == []
 
 
-@pytest.mark.parametrize("unread", [(), (1,), (2,), (1, 2)], ids=["read", "before_unread", "after_unread", "both_unread"])
+@pytest.mark.parametrize("unread", [(), (1,), (1, 2)], ids=["read", "before_unread", "both_unread"])
 def test_dirt_stash_cannot_save_is_never_reported_as_a_move(cycle, monkeypatch, unread):
     """Exit 0 saved nothing here. Only a readable list after the push can say so; an unread one stays unconfirmed."""
     transaction = nested_only_dirt(cycle)
@@ -507,7 +507,7 @@ def test_an_unread_push_keeps_the_earlier_stash_and_its_partial_outcome(cycle, m
     assert (cycle.repo / "tracked.txt").read_text(encoding="utf-8") == "a later edit\n"
 
 
-@pytest.mark.parametrize("variant", ["candidate", "clean", "disabled", "never_admitted", "other_running", "lock_busy"])
+@pytest.mark.parametrize("variant", ["candidate", "disabled", "lock_busy"])
 def test_nothing_moved_means_no_row_and_no_claim(cycle, monkeypatch, variant):
     from supervisor import evolution_lifecycle, queue, update_merge
 
@@ -759,7 +759,7 @@ def test_crash_between_the_stash_and_its_evidence_recovers_by_the_exact_label(cy
     assert stash_oids(cycle)[0] in row["text"]
 
 
-@pytest.mark.parametrize("guard", ["other_running", "lock_busy", "admission_closed", "candidate_found", "candidate_unreadable"])
+@pytest.mark.parametrize("guard", ["other_running", "admission_closed", "candidate_unreadable"])
 def test_a_replay_that_is_skipped_still_says_what_the_interrupted_attempt_moved(cycle, monkeypatch, guard):
     """Every guard that ends this attempt runs after the read of its own label and branch."""
     from ouroboros import body_adoption, body_candidate

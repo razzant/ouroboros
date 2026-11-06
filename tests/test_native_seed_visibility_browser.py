@@ -18,7 +18,6 @@ from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 
 
 @pytest.mark.ui_browser
-@pytest.mark.serial
 @pytest.mark.skipif(sys.platform not in {"darwin", "linux"}, reason="Unix-host visibility journey")
 def test_skills_shows_native_unix_and_keeps_owner_off(direct_server_with_data, tmp_path):  # noqa: F811
     from ouroboros.skill_builtin import ensure_builtin_skills, install_builtin_skill

@@ -20,7 +20,7 @@ from tests.test_shell_interactions_browser import DRAWER, UNDER, boot, chromium_
 from tests.test_ui_smoke_playwright import _install_controlled_visual_viewport
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 __all__ = ['chromium_ui', 'shell_ui', 'subscription_ui']
 
 

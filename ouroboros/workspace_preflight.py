@@ -20,24 +20,13 @@ import uuid
 from typing import Any, Dict, Iterable, List, NamedTuple, Tuple
 
 from ouroboros.platform_layer import (
-    IS_LINUX,
-    IS_MACOS,
-    IS_WINDOWS,
-    bootstrap_process_path,
-    node_runtime_health,
-    resolve_bundled_node,
+    IS_LINUX, IS_MACOS, IS_WINDOWS, bootstrap_process_path, node_runtime_health, resolve_bundled_node,
 )
 from ouroboros.utils import utc_now_iso
 
 
 _CURATED_TOOLS = (
-    "git",
-    "python",
-    "python3",
-    "pip",
-    "pip3",
-    "pytest",
-    "uv",
+    "git", "python", "python3", "pip", "pip3", "pytest", "uv",
     "node",
     "npm",
     "npx",

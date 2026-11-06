@@ -22,6 +22,7 @@ import tempfile
 import pytest
 
 from devtools.benchmarks.editbench import run_editbench
+from tests._cases import case_folders
 
 # The very module objects the runner imported (it puts the editbench dir on sys.path),
 # so a pin patched here is the pin the runner checks.
@@ -368,20 +369,23 @@ def _scripted_calls(name: str, seed_root: pathlib.Path, oracle_root: pathlib.Pat
     return [("write_file", {"path": "provider_models.py", "content": oracle})]
 
 
-@pytest.mark.parametrize("name", V2_NAMES)
-def test_todays_edit_tools_solve_the_pinned_task_and_the_checker_agrees(name, published, tmp_path, monkeypatch):
-    task = run_editbench.TASKS[name]
-    seed_root, oracle_root = published / name / "workspace", published / name / "expected"
-    workspace = run_editbench._make_workspace(tmp_path, name, seed_root)
-    registry = _registry_on(tmp_path, monkeypatch, workspace)
+def test_todays_edit_tools_solve_the_pinned_task_and_the_checker_agrees(subtests, published, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for name in V2_NAMES:
+        tmp_path = next(case_paths)
+        with subtests.test(name=name), monkeypatch.context() as monkeypatch:
+            task = run_editbench.TASKS[name]
+            seed_root, oracle_root = published / name / "workspace", published / name / "expected"
+            workspace = run_editbench._make_workspace(tmp_path, name, seed_root)
+            registry = _registry_on(tmp_path, monkeypatch, workspace)
 
-    for tool, args in _scripted_calls(name, seed_root, oracle_root):
-        result = str(registry.execute(tool, args))
-        assert result.startswith("✅"), f"{tool}: {result[:400]}"
+            for tool, args in _scripted_calls(name, seed_root, oracle_root):
+                result = str(registry.execute(tool, args))
+                assert result.startswith("✅"), f"{tool}: {result[:400]}"
 
-    graded = checker.grade_generic(workspace, oracle_root, task["files"],
-                                   check_argv=task["check"], check_pythonpath=task["check_pythonpath"])
-    assert graded["pass"], json.dumps(graded, indent=2)[:2000]
+            graded = checker.grade_generic(workspace, oracle_root, task["files"],
+                                           check_argv=task["check"], check_pythonpath=task["check_pythonpath"])
+            assert graded["pass"], json.dumps(graded, indent=2)[:2000]
 
 
 def test_the_checker_rejects_an_overreaching_rename(published, tmp_path, monkeypatch):

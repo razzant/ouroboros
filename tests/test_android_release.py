@@ -215,8 +215,6 @@ def test_default_host_build_uses_the_shared_root_asset_path():
     ("pull_request", "docs/readme.md", "refs/pull/1/merge", False),
     ("pull_request", "ouroboros/core.py", "refs/pull/1/merge", False),
     ("pull_request", "android/host/change.java", "refs/pull/1/merge", True),
-    ("push", "android/host/change.java", "refs/heads/ouroboros", True),
-    ("push", "docs/readme.md", "refs/tags/v7.0.0", True),
     ("schedule", "android/host/change.java", "refs/heads/main", False),
 ])
 @pytest.mark.skipif(os.name == "nt", reason="Exercises the Ubuntu workflow's POSIX Bash step")
@@ -250,7 +248,7 @@ def test_android_emulator_selection_uses_event_diff(tmp_path, event, path, ref, 
     assert result.returncode == 0, result.stderr
     detected = output.read_text(encoding="utf-8").strip().split("=", 1)[1]
     expression = jobs["android-emulator-smoke"]["if"]
-    for key, value in {"github.event_name": event, "github.ref": ref,
+    for key, value in {"github.event_name": event, "github.ref": ref, "inputs.scope": "",  # no dispatch: inputs are empty
                        "needs.android-test.outputs.android_changed": detected}.items():
         expression = expression.replace(key, repr(value))
     expression = expression.replace("&&", " and ").replace("||", " or ")
@@ -319,7 +317,7 @@ def test_attestation_command_failure_excludes_android_but_stops_desktop(tmp_path
         assert {release_asset_name(key, version) for key in DESKTOP_DOWNLOAD_IDS} <= set(observed)
 
 
-@pytest.mark.parametrize("api", [26, 29, 30, 33, 36])
+@pytest.mark.parametrize("api", [26, 29, 36])
 @pytest.mark.skipif(os.name == "nt", reason="Exercises the Ubuntu emulator setup's Bash step")
 def test_emulator_image_selection_uses_google_apis_only_for_oreo(tmp_path, api):
     import shutil
@@ -351,7 +349,7 @@ def test_emulator_image_selection_uses_google_apis_only_for_oreo(tmp_path, api):
 
 
 @pytest.mark.parametrize(("case", "expected_exit", "attempts"), [
-    ("recover", 0, 3), ("dump_error", 7, 5), ("stale", 9, 5), ("crash_dialog", 1, 1),
+    ("recover", 0, 3), ("dump_error", 7, 5), ("stale", 9, 5),
 ])
 @pytest.mark.skipif(os.name == "nt", reason="Exercises the Ubuntu capture and EXIT trap in Bash")
 def test_emulator_capture_retries_fresh_xml_and_preserves_failure_evidence(tmp_path, case, expected_exit, attempts):

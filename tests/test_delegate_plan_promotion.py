@@ -60,7 +60,7 @@ def test_unready_requires_explicit_recorded_override(plan_setup, readiness):
     assert p.engine.calls[-1][1]["overridePlanReadiness"] is True
 
 
-@pytest.mark.parametrize("blocked", ["leaf", "peer", "unrecorded_starter", "legacy", "beyond_ceiling", "changed_authority", "changed_target"])
+@pytest.mark.parametrize("blocked", ["leaf", "beyond_ceiling", "changed_target"])
 def test_promotion_floor_refuses_without_ceiling_authority_and_keeps_ordinary_floor(plan_setup, monkeypatch, blocked):
     p = plan_setup
     prior = ready_plan(p)

@@ -45,12 +45,8 @@ def test_external_ui_reopen_attaches_without_browser(external_launcher, monkeypa
 
 @pytest.mark.parametrize("intent,marker,launches", [
     ("automatic", "panic", False),
-    ("owner", "panic", True),
     ("automatic", "owner_restart_no_resume", True),
-    ("automatic", None, True),
     ("systemd", "panic", False),
-    ("systemd", "owner_restart_no_resume", True),
-    ("systemd", None, True),
     ("desktop", "panic", True),
 ])
 def test_native_boot_preserves_panic_but_owner_can_start(

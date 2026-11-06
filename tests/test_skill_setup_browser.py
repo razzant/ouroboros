@@ -10,7 +10,7 @@ from tests._skills_page_harness import (
     URL, capture, no_overflow, open_skills, refresh, skills_browser as _skills_browser,
 )
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 skills_browser = _skills_browser
 
 

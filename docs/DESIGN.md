@@ -3147,7 +3147,6 @@ page and every Settings tab in WebKit and Chromium at 360, 390, a Telegram-like
 390 × 780, 719, 720, 721, 1280 and short windows (no page scrolls sideways, coarse
 targets reach 44 px, default-width bars stay one row, one scroller per sidebar, Projects
 scroll by touch); `tests/test_shell_layout_static.py`,
-`tests/test_shell_header_static.py`, `tests/test_shell_drawer_static.py`,
 `tests/test_shell_tokens_static.py`, `tests/test_pages_registry_static.py` and
 `tests/test_design_system_css_static.py` keep the one switch, the registry, the
 glyph set, the breakpoint ratchet and sentence case; `web/tests/layers.test.js`,

@@ -136,7 +136,7 @@ def test_macos_fixture_on_a_simulated_windows_host(request, monkeypatch):
     assert stopped.value.executable == str(l.entry)
 
 
-@pytest.mark.parametrize("reason", ["same-generation", "server-only", "imports-broken", "legacy-bundle", "source"])
+@pytest.mark.parametrize("reason", ["same-generation", "imports-broken", "source"])
 def test_cold_fallback_and_source_never_loop_into_frozen(launch, monkeypatch, reason):
     l = launch
     argv = []
@@ -280,7 +280,7 @@ def _lifecycle(l, monkeypatch, *, returncode=42, landed=lambda: None, waited=lam
     monkeypatch.setattr(module, "start_agent", start)
 
 
-@pytest.mark.parametrize("mode", ["helper-change", "server-only", "source", "legacy", "panic", "tray-panic"])
+@pytest.mark.parametrize("mode", ["helper-change", "source", "tray-panic"])
 def test_lifecycle_restart_and_panic_keep_the_existing_owners(launch, monkeypatch, mode):
     l = launch
     module = l.module
@@ -316,7 +316,7 @@ def test_lifecycle_restart_and_panic_keep_the_existing_owners(launch, monkeypatc
         assert l.calls[:3] == ["server", "sync", "deps"] and l.calls[-2:] == ["release", "exec"]
 
 
-@pytest.mark.parametrize("stop_at", ["sleep", "sync", "deps", "change-check"])
+@pytest.mark.parametrize("stop_at", ["sleep", "sync", "change-check"])
 def test_panic_during_exit_42_cannot_handoff(launch, monkeypatch, stop_at):
     l = launch
     _lifecycle(l, monkeypatch, returncode=42)
@@ -350,8 +350,12 @@ def _git(repo, *args):
                           check=True, capture_output=True, text=True).stdout.strip()
 
 
-@pytest.mark.parametrize("changed", ["ouroboros/process_scope.py", "supervisor/queue.py", "server.py", None])
-@pytest.mark.parametrize("macos", [True, False])
+@pytest.mark.parametrize(("macos", "changed"), [
+    (True, "ouroboros/process_scope.py"),
+    (True, "server.py"),
+    (False, "supervisor/queue.py"),
+    (False, None),
+])
 def test_cold_open_counts_packaged_helpers_the_frozen_launcher_has_not_imported_yet(launch, monkeypatch, changed,
                                                                                 macos):
     """Real Git and the real detector. A frozen launcher imports more helpers from its seed later (Panic sweep,

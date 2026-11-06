@@ -29,7 +29,6 @@ from tests.test_store_switch import git
 from tests.test_store_switch import switch_root as _switch_root
 from tests.test_store_switch import target_repo as _switch_target_repo
 
-pytestmark = pytest.mark.serial
 switch_root, target_repo = _switch_root, _switch_target_repo  # real store roots; ``old`` lacks the stores
 
 SLEEP = [sys.executable, "-c", "import time; time.sleep(60)"]

@@ -21,7 +21,7 @@ from tests.ui_console_errors import PageErrors
 from tests.ui_failure_evidence import FailureEvidence
 
 wait_clone = clone_fixture
-pytestmark = [pytest.mark.serial, pytest.mark.browser]
+pytestmark = [pytest.mark.browser]
 
 
 

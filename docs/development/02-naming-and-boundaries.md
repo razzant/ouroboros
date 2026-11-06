@@ -120,8 +120,8 @@ review-only.
 
 `docs/ARCHITECTURE.md` is the present-tense map of the body in BIBLE P6's three layers:
 what exists and where, how it flows, why. `docs/DEVELOPMENT.md` is how the body is
-changed: one rule per change class, each naming its enforcing test, gate or CI lane or
-saying review-only. ARCHITECTURE, CHECKLISTS, BIBLE, DESIGN and `config.py` are pointed
+changed: one rule per change class, each naming its invariant's home (the home test or
+the product owner, never a test file per rule), gate or CI lane, or saying review-only. ARCHITECTURE, CHECKLISTS, BIBLE, DESIGN and `config.py` are pointed
 to, never restated; the ARCHITECTURE settings and endpoint tables are test-checked
 registries of those owners, not second authorities.
 
@@ -142,7 +142,9 @@ run receipts belong in the external work area or durable task evidence, not the
 tracked tree; a test preserving their presence gives them no product role. Retire
 campaign tooling when its purpose ends. Name a new test module for the behaviour or
 owner it protects, not a round, batch, issue, PR or version. Review enforces this,
-without automatic deletion or filename matching.
+without automatic deletion or filename matching. A test module is not imported by
+another test module; shared fixtures live in `tests/_*.py` helpers, which select their
+importers in the commit gate.
 
 Both are reference books: an entrypoint plus one chapter file per subject under
 `docs/architecture/` or `docs/development/`. The entrypoint's ordered `## Chapters`

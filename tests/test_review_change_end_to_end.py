@@ -18,6 +18,7 @@ from ouroboros.tools.registry import ToolContext
 from ouroboros.tools.review_change import run_review_change
 from ouroboros.tools.review_subject import CHECKOUT_SUBDIR
 from tests import _contributor_packet_shared as shared
+from tests._worlds import clone_repository, world
 from tests.review_pool_rosters import set_review_pool
 
 GOAL = "Make the installed body's helper return the proposal's constant."
@@ -380,6 +381,15 @@ def test_a_new_round_of_the_same_index_is_a_new_physical_review_not_a_replay(sta
     assert len({send["retry_key"] for send in sends}) == 4
 
 
+def _lay_project(folder: Path) -> None:
+    shared.git(folder, "init", "-q")
+    (folder / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (folder / "lib.py").write_text("LIB = 'base'\n", encoding="utf-8")
+    shared.git(folder, "add", "-A")
+    shared.git(folder, "commit", "-q", "-m", "base")
+    shared.git(folder, "remote", "add", "origin", "https://example.com/third-party/project.git")
+
+
 def _foreign_project(tmp_path, monkeypatch) -> tuple:
     """The production geometry of a project review: the body and its data under one
     Ouroboros home, the reviewed project elsewhere under the user's files; the project
@@ -387,14 +397,7 @@ def _foreign_project(tmp_path, monkeypatch) -> tuple:
     monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(tmp_path))
     set_review_pool(monkeypatch, shared.golden_pool())
     system = Path(shared.init_installed_body(tmp_path / "ouroboros")["repo"])
-    project = (tmp_path / "work" / "project").resolve()
-    project.mkdir(parents=True)
-    shared.git(project, "init", "-q")
-    (project / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
-    (project / "lib.py").write_text("LIB = 'base'\n", encoding="utf-8")
-    shared.git(project, "add", "-A")
-    shared.git(project, "commit", "-q", "-m", "base")
-    shared.git(project, "remote", "add", "origin", "https://example.com/third-party/project.git")
+    project = clone_repository(world("foreign-project", _lay_project), (tmp_path / "work" / "project").resolve())
     drive = tmp_path / "ouroboros" / "data"
     for sub in ("logs", "locks", "state"):
         (drive / sub).mkdir(parents=True)

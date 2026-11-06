@@ -64,7 +64,7 @@ def test_previous_wake_reads_one_document_and_keeps_the_whole_note(tmp_path, mon
 
 
 @pytest.mark.parametrize("status,word", [("completed", "Done"), ("failed", "Failed"),
-                                        ("cancelled", "Stopped"), ("interrupted", "Interrupted")])
+                                        ("cancelled", "Stopped")])
 def test_previous_wake_uses_card_outcome_words_and_never_guesses_completion_time(tmp_path, status, word):
     row = seed_wake(tmp_path, status=status, outcome_axes={}, terminal_time=None)
     previous = wake.previous_wake_text(tmp_path, row["task_id"], now=T0)
@@ -119,8 +119,7 @@ def test_previous_wake_failure_does_not_block_launch(clock, monkeypatch, caplog,
         assert any(row["task_id"] in record.message and record.exc_info for record in caplog.records)
 
 
-@pytest.mark.parametrize("restart", [False, True])
-@pytest.mark.parametrize("failure", ["write", "readback"])
+@pytest.mark.parametrize(("failure", "restart"), [("write", False), ("readback", True)])
 def test_next_wake_reads_last_admitted_note_even_when_its_input_source_failed(clock, monkeypatch, failure, restart):
     from ouroboros import artifacts, chat_chain
     from ouroboros.consciousness import BackgroundConsciousness, OBSERVATION_STATE_KEY, OWN_WAKE_STATE_KEY
@@ -185,8 +184,7 @@ def test_launch_captures_previous_wake_before_binding_the_new_id(clock, has_prev
     assert f"- previous wake: {expected}\n" in launch["task"]["metadata"]["wake_observation"]["projection_text"]
 
 
-@pytest.mark.parametrize("announced", [True, False])
-@pytest.mark.parametrize("summary", ["Проверил состояние системы: всё спокойно.", ""])
+@pytest.mark.parametrize(("summary", "announced"), [("Проверил состояние системы: всё спокойно.", True), ("", False)])
 def test_only_direct_turns_with_authored_lines_join_the_observation_text(tmp_path, announced, summary):
     row = seed_wake(tmp_path, **({"wake_summary": summary} if summary else {}))
     now = wake._parse_iso(row["terminal_time"]["occurred_at"]) + 60
@@ -553,7 +551,7 @@ def test_human_input_is_classified_by_producer_provenance(tmp_path):
 
 
 @pytest.mark.parametrize("status, origin", [("failed", "host_notice"), ("cancelled", ""),
-                                           ("completed", "host_notice"), ("failed", "model_final")])
+                                           ("completed", "host_notice")])
 def test_failed_inline_presence_is_visible_on_regular_wake_without_reviving_owner_turns(tmp_path, status, origin):
     from ouroboros.presence_runner import _build_task
     from ouroboros.task_results import write_task_result

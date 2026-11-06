@@ -8,7 +8,6 @@ from ouroboros.presence_continuation import _custody_blockers
 from tests.test_batch4_producer_custody import _registry
 from tests.test_invocation_ownership import claims, owner, run
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("bound", [False, True])

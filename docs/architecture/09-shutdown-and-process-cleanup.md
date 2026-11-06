@@ -55,3 +55,7 @@ Only a measured birth/command mismatch retires other owned custody, journalled f
 **Work scopes** (`process_scope.py`). Plant an installation marker before spawning; daemon, kept services, MCP and extension children/companions keep it, shedding task markers (task-session MCP servers keep theirs). Invocation identity—not display labels—binds commands, task skills and non-kept services to markers/groups. Only truly-terminal transitions end leftovers by measured birth, never Pause/hold/handoff/placeholders. Retire after recorded settlement (denied signals are final) or `unsupported`; unknown identities stay owed. Panic reads the owned engine's schema-1 `daemon/run-scopes.json`; full settlement needs an absent/valid index. Groups need a matching live/zombie leader; leaderless numbers stay unknown. Markers/captured births remain independent. Linux nondumpable/setuid peers and macOS system binaries can hide markers; command-launched GUI children have no lifetime exemption; Windows/Docker-executor children stay `unsupported`.
 
 **Follow-up controls** (§5). Recorded cancel intent wins over the door's cause (`followup_policy`); failed Stop transfer retains it. Unreadable stores invent no control. Restart records its episode; Panic needs no schedule control.
+
+### Test runs
+
+Lanes and `safe_test` commands run in a `ProcessContainer` with scrubbed temporary roots (`test_environment.py`). A passed test's `tmp_path` goes once its processes are gone; a marker keeps its folder; a private copy's test records join its task (PERSISTENCE).

@@ -44,7 +44,7 @@ from tests.system_e2e.harness import (
 )
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
 
-pytestmark = [pytest.mark.serial, pytest.mark.browser,
+pytestmark = [pytest.mark.browser,
               pytest.mark.skipif(os.name == "nt", reason="FIFO/crash qualification requires POSIX")]
 
 REPO = Path(__file__).resolve().parents[1]

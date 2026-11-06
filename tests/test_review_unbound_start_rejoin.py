@@ -37,7 +37,6 @@ from tests.test_receptive_session_seat_checkpoint import session_wave as _sessio
 from tests.test_review_operation_collection import forbid_effects as _forbid_effects
 
 author, fake_route, session_wave, forbid_effects = _author, _fake_route, _session_wave, _forbid_effects
-pytestmark = pytest.mark.serial
 AUTHOR_ENDED = "no retained outcome when its author's task ended"
 UNBOUND = "A start was requested but no run was ever bound to it; its outcome stays unknown and it is never re-posted."
 # The maintenance pass's report over the one owed left-wave duty.

@@ -130,8 +130,11 @@ def test_real_reply_is_sent(tmp_path, monkeypatch):
     assert len(_Rec.sent) == 1 and "answer" in _Rec.sent[0][1]
 
 
-@pytest.mark.parametrize("notify", ["off", "on"])
-@pytest.mark.parametrize("silent", [None, "off", "on"], ids=["default", "off", "on"])
+@pytest.mark.parametrize(("silent", "notify"), [
+    pytest.param(None, "off", id='default-off'),
+    ("off", "on"),
+    ("on", "off"),
+])
 def test_a_terminal_answer_reaches_telegram_alone_and_keeps_every_reply(tmp_path, monkeypatch, silent, notify):
     """The real terminal delivery sends the model's answer alone, as its own message: the
     host notice stays a field of the result and never becomes a second message, and

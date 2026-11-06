@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import types
 
-import pytest
 
-pytestmark = pytest.mark.serial
 
 
 def test_source_created_promote_announces_once_and_persists_admitted_contract(

@@ -193,7 +193,7 @@ def test_late_supplement_remains_full_and_can_later_receive_its_own_exact_select
     assert shown["parsed_findings"]["representation"] == "actor_authored_view"
 
 
-@pytest.mark.parametrize("failure", ["missing", "corrupt", "no_reader", "wrong_owner"])
+@pytest.mark.parametrize("failure", ["corrupt", "no_reader", "wrong_owner"])
 def test_unavailable_selection_keeps_every_body_and_adds_visible_gap(tmp_path, failure):
     history = fixture()
     pointer, reader, _ = persisted(tmp_path, history)
@@ -218,7 +218,7 @@ def test_unavailable_selection_keeps_every_body_and_adds_visible_gap(tmp_path, f
     assert view["history"]["rounds"] == history["rounds"]
 
 
-@pytest.mark.parametrize("invalid", ["helper", "hash", "uncovered", "not_applied", "empty_coverage"])
+@pytest.mark.parametrize("invalid", ["hash", "uncovered", "not_applied", "empty_coverage"])
 def test_non_applied_or_unbound_note_is_not_retained(tmp_path, monkeypatch, invalid):
     import ouroboros.artifacts as artifacts
 

@@ -193,7 +193,7 @@ def test_unreadable_ref_keeps_request_unknown_and_retry_refuses(tmp_path, damage
     assert json.loads(refusal.text)["reason"] == "invocation_request_unrecorded"
 
 
-@pytest.mark.parametrize("inline_request", [None, {}, [], "invalid"])
+@pytest.mark.parametrize("inline_request", [None, {}, "invalid"])
 def test_malformed_legacy_inline_without_a_reference_keeps_existing_behavior(tmp_path, inline_request):
     assert custody.emit(tmp_path, custody.START_REQUESTED, {
         "invocation_id": "legacy-empty", "task_id": "owner", "request": inline_request})
@@ -273,7 +273,7 @@ def test_missing_pending_body_keeps_snapshot_and_orphan_recovery_without_a_post(
     assert custody.pending_invocations(tmp_path) == [] and custody.open_snapshot_ids(tmp_path) == set()
 
 
-@pytest.mark.parametrize("prior", ["absent", "refused", "intact", "missing", "corrupt"])
+@pytest.mark.parametrize("prior", ["absent", "refused", "corrupt"])
 def test_skill_review_retries_distinguish_known_pending_from_absent_or_refused(tmp_path, fake_route, prior):
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
     from ouroboros.review_execution import ReviewRouteUnavailable

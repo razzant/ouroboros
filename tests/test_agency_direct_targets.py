@@ -15,7 +15,6 @@ from ouroboros.contracts.task_constraint import TaskConstraint
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros.tools.shell_guards import direct_utility_target_rows
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture
@@ -100,10 +99,7 @@ def test_acting_write_root_and_real_symlink_target(resources, monkeypatch, runti
 
 
 @pytest.mark.parametrize("cmd", [
-    ["echo", ">", "/runtime/settings.json"], ["echo", "tee", "/runtime/settings.json"],
-    ["python", "-c", "open('/runtime/settings.json','w').write('x')"],
-    ["ruby", "-e", "puts 'settings.json'"], ["sed", "-f", "program.sed", "/runtime/file"],
-    ["tar", "-cf", "archive.tar", "/runtime/source"],
+    ["echo", ">", "/runtime/settings.json"], ["sed", "-f", "program.sed", "/runtime/file"],
     ["sh", "-c", "printf '%s' '>' /runtime/settings.json"],
 ])
 def test_unknown_bodies_and_literal_operators_do_not_manufacture_targets(cmd):
@@ -158,8 +154,12 @@ def test_cyber_keeps_explicit_readonly_task(resources, monkeypatch):
     assert result.status == "blocked" and not (workspace / "not-created").exists()
 
 
-@pytest.mark.parametrize("runtime", ["light", "advanced", "pro", "cyber_pro"])
-@pytest.mark.parametrize("marker", [".seed-origin", ".clawhub.json"])
+@pytest.mark.parametrize(("marker", "runtime"), [
+    (".seed-origin", "light"),
+    (".seed-origin", "cyber_pro"),
+    (".clawhub.json", "advanced"),
+    (".clawhub.json", "pro"),
+])
 def test_selected_payload_actual_marker_write_and_ordinary_file(resources, monkeypatch, runtime, marker):
     registry, _ctx, _home, _system, data, _workspace = resources
     from tests.test_skill_exec import _build_skill

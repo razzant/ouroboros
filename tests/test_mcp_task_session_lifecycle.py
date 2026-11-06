@@ -32,7 +32,7 @@ from tests.test_mcp_task_session import (  # noqa: F401  (the autouse fixture mu
     wire,
 )
 
-pytestmark = [pytest.mark.serial,
+pytestmark = [
               pytest.mark.skipif(sys.platform == "win32", reason="asserts POSIX process death and signals")]
 
 

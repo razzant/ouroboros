@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 
 from ouroboros import chat_chain
 from ouroboros import consciousness_authority as ca
@@ -179,11 +178,12 @@ def test_without_a_journal_the_observation_is_the_bases(tmp_path, monkeypatch):
 # --- what a wake may write ----------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("level", ca.LEVELS)
-def test_every_level_keeps_chronicle_write(level):
-    assert "chronicle_write" not in ca.disabled_tools_for(level)
-    assert ca.observe_argument_refusal({"initiator": "consciousness", "consciousness_autonomy": level},
-                                       "chronicle_write", {"kind": "page"}) == ""
+def test_every_level_keeps_chronicle_write(subtests):
+    for level in ca.LEVELS:
+        with subtests.test(level=level):
+            assert "chronicle_write" not in ca.disabled_tools_for(level)
+            assert ca.observe_argument_refusal({"initiator": "consciousness", "consciousness_autonomy": level},
+                                               "chronicle_write", {"kind": "page"}) == ""
 
 
 def test_observe_seals_a_page_and_still_cannot_start_work(tmp_path, monkeypatch):

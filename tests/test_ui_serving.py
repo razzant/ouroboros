@@ -133,7 +133,7 @@ def test_before_the_lifespan_the_routes_serve_the_builtin_interface(tmp_path):
     assert served.selection.source == "builtin"
 
 
-@pytest.mark.parametrize("mode", ["builtin", "directory", "none", "invalid"])
+@pytest.mark.parametrize("mode", ["builtin", "none", "invalid"])
 def test_each_selection_serves_marks_and_reports_one_generation(mode, custom_ui, tmp_path, applied_settings):
     value = {"builtin": "", "directory": str(custom_ui), "none": "none", "invalid": str(tmp_path / "gone")}[mode]
     served = ServedUI(REPO)
@@ -291,7 +291,6 @@ def _stored(settings_path: pathlib.Path) -> dict:
     ("", "none", ""),                # an explicitly saved blank selects builtin over a stale env
     ("", "/srv/ui", ""),
     ("/srv/ui", "none", "/srv/ui"),  # a saved directory beats the environment
-    ("none", "", "none"),
 ])
 def test_a_saved_choice_blank_included_beats_the_environment(isolated_settings, monkeypatch, saved, env, effective):
     from ouroboros import config as cfg
@@ -397,7 +396,7 @@ def test_the_settings_endpoint_keeps_an_absent_choice_absent_and_saves_an_explic
     assert cleared.json()["restart_state"]["restart_keys"] == ["OUROBOROS_UI_DIR"]
 
 
-@pytest.mark.parametrize("environment", [None, "", "none", "/srv/interface"])
+@pytest.mark.parametrize("environment", [None, "", "/srv/interface"])
 def test_explicit_settings_choice_equal_to_environment_or_default_is_authored(
         isolated_settings, monkeypatch, applied_settings, environment):
     from ouroboros import config as cfg

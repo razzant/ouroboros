@@ -34,7 +34,6 @@ from tests.test_retry_pause_identity import (  # noqa: F401
 )
 from tests.test_swarm_host_admission import host  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 class _Drained(BaseException):

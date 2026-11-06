@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
-pytestmark = [pytest.mark.serial, pytest.mark.ui_browser]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])

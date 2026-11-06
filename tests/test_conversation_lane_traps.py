@@ -81,7 +81,6 @@ def _policy_entry(*args):
     worker_main(*args)
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("method", ["spawn", "forkserver"])
 def test_a_spawned_or_forkserver_carrier_keeps_the_servers_proxy_policy(tmp_path, monkeypatch, method):
     """Trap 1 in the child itself: a carrier started by the default start methods (spawn on macOS/Windows,

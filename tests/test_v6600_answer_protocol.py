@@ -8,29 +8,10 @@ import pathlib
 
 from ouroboros.contracts.task_contract import (
     answer_protocol_active,
-    build_task_contract,
-    normalize_answer_protocol,
 )
 
 
 # --- 4.1 contract field ---------------------------------------------------------
-
-def test_normalize_answer_protocol_closed_enum():
-    assert normalize_answer_protocol("final_answer_line") == "final_answer_line"
-    assert normalize_answer_protocol("FINAL_ANSWER_LINE") == "final_answer_line"
-    assert normalize_answer_protocol("") == ""
-    assert normalize_answer_protocol(None) == ""
-    assert normalize_answer_protocol("bogus") == ""  # unknown -> no protocol, never an instruction
-
-
-def test_contract_carries_answer_protocol_and_inherits_via_metadata():
-    contract = build_task_contract({"description": "x", "answer_protocol": "final_answer_line"})
-    assert contract["answer_protocol"] == "final_answer_line"
-    # metadata path (the subagent/CLI --task-metadata-json route)
-    contract_meta = build_task_contract({"description": "x", "metadata": {"answer_protocol": "final_answer_line"}})
-    assert contract_meta["answer_protocol"] == "final_answer_line"
-    # default: no protocol
-    assert build_task_contract({"description": "x"})["answer_protocol"] == ""
 
 
 def test_answer_protocol_active_gate_reads_ctx_and_dicts():

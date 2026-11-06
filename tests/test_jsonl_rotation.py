@@ -12,12 +12,12 @@ from __future__ import annotations
 
 import json
 
-import pytest
 
 from supervisor.state import (
     ISOLATED_BENCHMARK_SENTINEL,
     rotate_jsonl_log_if_needed,
 )
+from tests._cases import case_folders
 
 
 # (live filename, archive prefix) — the logs the supervisor tick still rotates.
@@ -41,21 +41,24 @@ def _seed_log(root, name, rows=50):
     return path
 
 
-@pytest.mark.parametrize(("name", "prefix"), ROTATED_LOG_NAMES)
-def test_rotation_moves_live_to_archive(tmp_path, name, prefix):
+def test_rotation_moves_live_to_archive(subtests, tmp_path):
     """A threshold-sized runtime log rotates to
     archive/<prefix>_<ts>.jsonl, the live file is recreated empty, and no
     line is lost (v6.109.29)."""
-    live = _seed_log(tmp_path, name)
-    original = live.read_text(encoding="utf-8")
+    case_paths = case_folders(tmp_path)
+    for name, prefix in ROTATED_LOG_NAMES:
+        tmp_path = next(case_paths)
+        with subtests.test(name=name, prefix=prefix):
+            live = _seed_log(tmp_path, name)
+            original = live.read_text(encoding="utf-8")
 
-    rotate_jsonl_log_if_needed(tmp_path, name, prefix, max_bytes=100)
+            rotate_jsonl_log_if_needed(tmp_path, name, prefix, max_bytes=100)
 
-    archives = sorted((tmp_path / "archive").glob(f"{prefix}_*.jsonl"))
-    assert len(archives) == 1
-    assert archives[0].read_text(encoding="utf-8") == original
-    assert live.exists()
-    assert live.stat().st_size == 0
+            archives = sorted((tmp_path / "archive").glob(f"{prefix}_*.jsonl"))
+            assert len(archives) == 1
+            assert archives[0].read_text(encoding="utf-8") == original
+            assert live.exists()
+            assert live.stat().st_size == 0
 
 
 def test_rotation_noop_below_threshold(tmp_path):

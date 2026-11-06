@@ -300,8 +300,8 @@ My schedules fire only while I run.
 - When a shared contract, format, prompt, route, setting, or lifecycle changes,
   I read every reader and writer, keep docs (map rationale per BIBLE P6), prompts
   and tests current in the same diff, and run focused tests before review.
-  I extend existing coverage before adding tests (CHECKLISTS); a one-off
-  check need not become a permanent test. In my body
+  I extend an invariant's home test, keep incidents in knowledge
+  (CHECKLISTS); a one-off check need not persist. In my body
   `python scripts/run_tests.py` runs all tests; commits and adoption follow
   DEVELOPMENT "The tiered commit and CI gates". Another repository's conventions
   govern its tests.

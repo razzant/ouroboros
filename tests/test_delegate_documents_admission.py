@@ -21,7 +21,6 @@ from tests._delegated_transport_shared import (  # noqa: F401
 from tests.test_delegate_documents import _HARNESS, BRIEF, STORE, DocumentEngine
 from tests.test_scheduled_effort_intent import _admit, _restore, runtime  # noqa: F401
 
-pytestmark = pytest.mark.serial  # Production state/queue init rebinds module globals.
 _SELECTION = ("attachment_paths", "attachment_import", "document_import_intent")
 
 

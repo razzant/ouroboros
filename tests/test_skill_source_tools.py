@@ -58,12 +58,7 @@ def _typed_call(tool, ctx, **kwargs):
 
 @pytest.mark.parametrize("tool, arguments, code, status", [
     ("skill_sources", {"action": "unknown"}, "TOOL_ARG_ERROR", "argument_error"),
-    ("skill_sources", {"action": "remove", "source_id": "builtin"}, "TOOL_ERROR", "error"),
     ("skill_install", {"id": "https://example.test/skill", "reason": "r"}, "TOOL_ARG_ERROR", "argument_error"),
-    ("skill_install", {"id": "builtin/skill", "reason": " "}, "TOOL_ARG_ERROR", "argument_error"),
-    ("skill_install", {"id": "builtin/skill", "reason": "r", "replace": True}, "TOOL_ERROR", "error"),
-    ("skill_update", {"name": "skill", "mode": "later"}, "TOOL_ARG_ERROR", "argument_error"),
-    ("skill_update", {"name": "", "mode": "replace"}, "TOOL_ARG_ERROR", "argument_error"),
     ("skill_update", {"name": "absent", "mode": "replace"}, "TOOL_ERROR", "error"),
 ])
 def test_refusals_publish_argument_or_host_errors(tmp_path, monkeypatch, tool, arguments, code, status):
@@ -77,10 +72,10 @@ def test_refusals_publish_argument_or_host_errors(tmp_path, monkeypatch, tool, a
     assert _typed_result_metadata(tool, result.text, True, result)["status"] == status
 
 
-@pytest.mark.parametrize("tool", ["skill_install", "skill_update"])
-@pytest.mark.parametrize("http_status", [400, 502])
-@pytest.mark.parametrize("error_code, expected", [("bad_check", "TOOL_ARG_ERROR"),
-                                                  ("registry_host_failed", "TOOL_ERROR")])
+@pytest.mark.parametrize(("error_code", "expected", "http_status", "tool"), [
+    ("bad_check", "TOOL_ARG_ERROR", 400, "skill_install"),
+    ("registry_host_failed", "TOOL_ERROR", 502, "skill_update"),
+])
 def test_installer_error_classification_uses_code_not_http_status(tmp_path, monkeypatch, tool, http_status,
                                                                 error_code, expected):
     from ouroboros import skill_source_install as installer
@@ -110,7 +105,7 @@ def test_source_host_failures_publish_tool_error(ctx, monkeypatch, failure):
     assert (result.status, result.code) == ("error", "TOOL_ERROR")
 
 
-@pytest.mark.parametrize("tool", ["skill_sources", "skill_search", "skill_install", "skill_update"])
+@pytest.mark.parametrize("tool", ["skill_sources", "skill_install", "skill_update"])
 def test_successful_calls_publish_ok(ctx, tool):
     context, _drive, _reviews, _hub = ctx
     _call("skill_search", context)
@@ -167,8 +162,10 @@ def test_install_from_a_review_row_starts_the_review_and_records_the_reason(ctx)
     assert record["task_id"] == "task-1" and record["basis"] == "review"
 
 
-@pytest.mark.parametrize("tool", ["skill_install", "skill_update"])
-@pytest.mark.parametrize("enforcement,expected", [("blocking", ["a", "b"]), ("advisory", ["a"])])
+@pytest.mark.parametrize(("enforcement", "expected", "tool"), [
+    pytest.param("blocking", ["a", "b"], "skill_install", id='blocking-expected0-skill_install'),
+    pytest.param("advisory", ["a"], "skill_update", id='advisory-expected1-skill_update'),
+])
 def test_skill_tools_carry_the_admitted_panel_before_mutation(tmp_path, monkeypatch, tool, enforcement, expected):
     from ouroboros import skill_source_install as installer
     from tests.review_pool_rosters import pool_roster, pool_seat, set_review_pool

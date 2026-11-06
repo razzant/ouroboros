@@ -50,7 +50,7 @@ from tests.test_room_work_backend_browser import (
 
 direct_server_with_data = smoke.direct_server_with_data
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 FILLER = 700  # older saved lines; pages hold 150 conversation rows (gateway/history.py _DEFAULT_N_HUMAN)
 LATER = 300   # newer saved lines written after the question, so it lives two pages back

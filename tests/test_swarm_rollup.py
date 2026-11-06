@@ -255,7 +255,6 @@ def test_absent_parent_and_unreadable_store_never_prove_zero(tmp_path, monkeypat
 
 
 @pytest.mark.parametrize("boundary", ["before_commit", "after_commit"])
-@pytest.mark.serial
 def test_process_death_at_publication_boundary_keeps_exact_committed_facts(tmp_path, boundary):
     task_results.write_task_result(tmp_path, "parent", "running")
     event = {"type": "swarm_fanout", "event_id": "swarm:crash", "parent_task_id": "parent",

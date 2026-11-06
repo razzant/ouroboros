@@ -31,6 +31,7 @@ import pytest
 from ouroboros import process_scope as ps
 from ouroboros.tools.shell import _SHELL_BUILTINS, _run_shell, get_tools
 from ouroboros.tools.shell_process import _active_subprocesses
+from tests._cases import case_folders
 
 _DESCRIPTION_CHARS_BEFORE = 481  # measured on ef33a0a956c2; T1 allowance ~80
 _ALLOWANCE = 80
@@ -114,10 +115,13 @@ def test_description_limits_the_task_end_to_local_posix_runs(monkeypatch):
     assert outcome["ended"] == [] and outcome["settled"] is False, "nothing is ended where no census runs"
 
 
-@pytest.mark.parametrize("builtin", sorted(_SHELL_BUILTINS))
-def test_handler_refuses_only_a_bare_builtin_as_cmd0(tmp_path, builtin):
-    result = _run_shell(_ctx(tmp_path), [builtin, "x"])
-    assert result.startswith("⚠️ SHELL_CMD_ERROR"), result
+def test_handler_refuses_only_a_bare_builtin_as_cmd0(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for builtin in sorted(_SHELL_BUILTINS):
+        tmp_path = next(case_paths)
+        with subtests.test(builtin=builtin):
+            result = _run_shell(_ctx(tmp_path), [builtin, "x"])
+            assert result.startswith("⚠️ SHELL_CMD_ERROR"), result
 
 
 @pytest.mark.skipif(os.name != "posix", reason="uses sh")

@@ -342,7 +342,6 @@ def test_photo_material_serves_exact_selected_bytes_at_existing_artifact_endpoin
     assert reply.headers["content-type"] == "image/png"
 
 
-@pytest.mark.serial
 def test_explicit_close_releases_existing_parked_worker_only_after_native_grant(tmp_path):
     from ouroboros.owner_mailbox import drain_owner_entries
     from ouroboros.owner_quiz import record_asked

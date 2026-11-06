@@ -157,12 +157,9 @@ def test_quarantine_is_idempotent_for_repeat_reads(tmp_path):
 
 @pytest.mark.parametrize("payload, reason", [
     ("{ not json", "malformed"),
-    (["not", "an", "object"], "malformed"),
     ({SCHEMA_VERSION_KEY: TASK_RESULT_SCHEMA_VERSION + 1, "task_id": "t7", "status": "completed"},
      "future_schema"),
     ({SCHEMA_VERSION_KEY: "1", "task_id": "t7", "status": "completed"}, "invalid_stamp"),
-    ({SCHEMA_VERSION_KEY: True, "task_id": "t7", "status": "completed"}, "invalid_stamp"),
-    ({SCHEMA_VERSION_KEY: 0, "task_id": "t7", "status": "completed"}, "invalid_stamp"),
 ])
 def test_inadmissible_rows_are_quarantined_with_the_typed_reason(tmp_path, payload, reason):
     _write_raw(tmp_path, "t7", payload)

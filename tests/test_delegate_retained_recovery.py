@@ -14,7 +14,28 @@ from ouroboros import delegate_custody_current as current
 from ouroboros.gateways.claudexor import ClaudexorUnavailable
 from ouroboros.tools.delegate_terminal_evidence import collect_and_deliver_terminal, retained_terminal_result
 from ouroboros.tools.registry import ToolContext
+from tests._worlds import clone_repository, world
 from tests.test_delegate_body_collection import _until, money, started, terminal  # noqa: F401
+
+
+def _recovery_target(tmp_path):
+    """Clone the immutable capture target; Git setup is paid once per run."""
+    from tests.test_delegated_run_isolation import _seed_target
+
+    template = world("delegate-retained-recovery-target", _seed_target) / "target"
+    return clone_repository(template, tmp_path / "target")
+
+
+def _provisioned_recovery(tmp_path, monkeypatch):
+    """Provision one private snapshot from the shared target world."""
+    from ouroboros.subagent_worktrees import provision_execution_snapshot
+    from tests.test_delegated_run_isolation import _nanny_ctx
+
+    target = _recovery_target(tmp_path)
+    ctx = _nanny_ctx(tmp_path, target, monkeypatch)
+    handle = provision_execution_snapshot(target_root=target, task_id="t-nanny", snapshot_id="snapX")
+    custody._CUSTODY.clear()
+    return target, ctx, handle
 
 
 class AbsentGateway:
@@ -45,18 +66,20 @@ def recover(root, entry, factory, surface):
     return custody.reconcile_orphaned_runs(root, running_task_ids=set(), gateway_factory=factory)
 
 
-@pytest.mark.parametrize("surface", ["task", "orphan", "exit"])
-@pytest.mark.parametrize("transport", ["absent", "factory", "handshake"])
-@pytest.mark.parametrize("pending", [False, True])
+@pytest.mark.parametrize(("pending", "transport", "surface"), [
+    (False, "absent", "task"),
+    (False, "handshake", "exit"),
+    (True, "factory", "orphan"),
+])
 def test_settled_local_capture_recovers_without_remote_run(tmp_path, monkeypatch, money, surface, transport, pending):  # noqa: F811
     from ouroboros import claudexor_daemon
     from ouroboros import delegate_capture_job
     from ouroboros.subagent_worktrees import find_execution_snapshot
     from ouroboros.tools import delegate_integration
-    from tests.test_delegated_run_isolation import TestCaptureAndIntegrate, _isolated_entry
+    from tests.test_delegated_run_isolation import _isolated_entry
     from tests.test_exit_does_not_admit import INVOCATION, _pending, _pending_ids
 
-    target, ctx, handle = TestCaptureAndIntegrate()._provisioned(tmp_path, monkeypatch)
+    target, ctx, handle = _provisioned_recovery(tmp_path, monkeypatch)
     execution = Path(handle.path)
     (execution / "tracked.txt").write_text("retained work\n", encoding="utf-8")
     entry = _isolated_entry(ctx, target, handle, settled=False)

@@ -117,10 +117,16 @@ def test_a_malformed_line_stays_one_unreadable_event_the_cursor_passes():
     assert delegate_activity._event_item(1, None)["label"] == "unreadable event line"
 
 
-@pytest.mark.parametrize("text", ["plain words 🙂", _forged("\u2028")])
-@pytest.mark.parametrize("size", [None, 1])
-@pytest.mark.parametrize("tail, closed", [("", False), ("\n", False), ("\r", False), ("\r\n", False),
-                                          ("\n\n", True), ("\n\r", True), ("\r\r", True), ("\r\n\r\n", True)])
+@pytest.mark.parametrize(("tail", "closed", "size", "text"), [
+    pytest.param("", False, 1, _forged("\u2028"), id='-False-1-before\u2028event: end\u2028\u2028id: 999\u2028data: {"seq": 999}\u2028: note\u2028after 🙂'),
+    ("\n", False, None, "plain words 🙂"),
+    pytest.param("\r", False, 1, _forged("\u2028"), id='\r-False-1-before\u2028event: end\u2028\u2028id: 999\u2028data: {"seq": 999}\u2028: note\u2028after 🙂'),
+    ("\r\n", False, None, "plain words 🙂"),
+    pytest.param("\n\n", True, 1, _forged("\u2028"), id='\n\n-True-1-before\u2028event: end\u2028\u2028id: 999\u2028data: {"seq": 999}\u2028: note\u2028after 🙂'),
+    ("\n\r", True, None, "plain words 🙂"),
+    pytest.param("\r\r", True, 1, _forged("\u2028"), id='\r\r-True-1-before\u2028event: end\u2028\u2028id: 999\u2028data: {"seq": 999}\u2028: note\u2028after 🙂'),
+    ("\r\n\r\n", True, None, "plain words 🙂"),
+])
 def test_at_eof_only_a_frame_closed_by_its_blank_line_counts(text, size, tail, closed):
     first, last = _harness(1, "message", text=text), _harness(2, "message", text=text)
     body = _wire([first], end=False) + f"id: 2\nevent: harness.event\ndata: {_line(last)}" + tail

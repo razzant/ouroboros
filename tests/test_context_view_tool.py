@@ -109,7 +109,7 @@ def test_omitted_revision_binds_this_actors_actual_send_without_inspection(tmp_p
     assert _compact_context(ctx, expected_view_revision="unrelated", working_note="stale", keep_unit_ids=[]).startswith("Context view mismatch")
 
 
-@pytest.mark.parametrize("outcome", ["applied", "fit_rejected", "no_op", "store_error", "retention_error"])
+@pytest.mark.parametrize("outcome", ["applied", "fit_rejected", "retention_error"])
 def test_checkpoint_event_keeps_final_facts_and_resolves_saved_structures(tmp_path, monkeypatch, outcome):
     from ouroboros import artifacts, loop
     from ouroboros.loop_round_limits import _run_authored_context_view

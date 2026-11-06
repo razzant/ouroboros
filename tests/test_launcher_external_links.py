@@ -8,7 +8,7 @@ import pytest
 from tests.test_onboarding_host import _install_fake_webview
 
 
-@pytest.mark.parametrize("settled", [True, False, RuntimeError("no browser"), None])
+@pytest.mark.parametrize("settled", [True, False, None])
 def test_setup_and_main_bridge_share_the_bounded_external_opener(monkeypatch, settled):
     import launcher
     from ouroboros import launcher_onboarding

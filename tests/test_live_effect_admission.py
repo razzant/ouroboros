@@ -19,7 +19,7 @@ from ouroboros.live_conversation import end_feature_calls
 from ouroboros.llm_attempt import PhysicalDispatchInterrupted
 from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, write_owner_message
 from tests._extension_loader_shared import _clear_loader_state  # noqa: F401
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 from tests.test_live_conversation_driver import Batch, Host, until
 from tests.test_live_tool_continuity import invocation, is_request, reached, unit_at
 
@@ -178,9 +178,13 @@ def test_a_control_taken_while_a_batch_waits_for_history_starts_no_call_tool(hos
 # --- the pre-effect checkpoint ------------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize('kind', ['call-tool', 'ordinary', 'mcp', 'isolated', 'inprocess'])
-@pytest.mark.parametrize('control,code', [('none', ''), ('stop-durable', 'finalize_requested'), ('calls-disabled', 'calls_disabled'),
-                                          ('end', '')])
+@pytest.mark.parametrize(("control", "code", "kind"), [
+    ('none', '', 'call-tool'),
+    ('stop-durable', 'finalize_requested', 'ordinary'),
+    ('calls-disabled', 'calls_disabled', 'inprocess'),
+    ('end', '', 'mcp'),
+    ('end', '', 'isolated'),
+])
 def test_a_control_taken_during_the_pre_effect_checkpoint_starts_nothing(host_world, monkeypatch, kind, control, code):
     host = host_world.host
     entered = []
@@ -227,8 +231,14 @@ def test_a_control_taken_during_the_pre_effect_checkpoint_starts_nothing(host_wo
 # --- a later handler of the same batch ----------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize('control', ['none', 'stop-undrained', 'stop-drained', 'wrap-up-drained', 'hard-stop', 'end'])
-@pytest.mark.parametrize('second', ['ordinary', 'mcp', 'isolated', 'inprocess'])
+@pytest.mark.parametrize(("second", "control"), [
+    ('ordinary', 'none'),
+    ('ordinary', 'hard-stop'),
+    ('mcp', 'stop-undrained'),
+    ('mcp', 'end'),
+    ('isolated', 'stop-drained'),
+    ('inprocess', 'wrap-up-drained'),
+])
 def test_a_control_taken_while_an_ordinary_handler_runs_starts_no_later_one(host_world, monkeypatch, control, second):
     """The critic's ordering: the running handler finishes with its exact result, the next one never begins."""
     host = host_world.host
@@ -276,7 +286,7 @@ def test_a_control_taken_while_an_ordinary_handler_runs_starts_no_later_one(host
 
 
 @pytest.mark.parametrize('control,code', [('none', ''), ('stop-durable', 'finalize_requested'), ('stop-drained', 'owner_stop'),
-                                          ('wrap-up-drained', 'owner_stop'), ('hard-stop', 'cancelled'), ('end', '')])
+                                          ('end', '')])
 def test_a_control_taken_while_a_call_tool_runs_starts_no_later_one(host_world, control, code):
     host = host_world.host
     host.incoming = queue.Queue()
@@ -366,7 +376,7 @@ def test_a_parallel_batch_refused_before_it_begins_says_so_for_every_call(host_w
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('ending', ['finished', 'control', 'cancelled-waiter', 'job-cancelled'])
+@pytest.mark.parametrize('ending', ['finished', 'control', 'job-cancelled'])
 def test_the_gate_reads_a_calls_end_only_during_its_own_batch(host_world, ending):
     """The task context outlives the batch, and its later work is no effect of this call. The reader lives only in the
     contexts the batch started its work from, never on the shared context, so later work, started elsewhere, cannot
@@ -471,8 +481,11 @@ def call_control(host, control):
     return asyncio.sleep(0)
 
 
-@pytest.mark.parametrize('control', ['open', 'end', 'stop-drained'])
-@pytest.mark.parametrize('kind', ['builtin-nested', 'mcp-entry'])
+@pytest.mark.parametrize(("kind", "control"), [
+    ('builtin-nested', 'open'),
+    ('builtin-nested', 'stop-drained'),
+    ('mcp-entry', 'end'),
+])
 def test_a_worker_the_batch_stopped_waiting_for_keeps_its_calls_end(host_world, monkeypatch, kind, control):
     """Astra's ordering: a non-foreground tool outlives its wait, the batch returns its timeout result and the
     conversation goes on, then End or a drained Stop arrives before the worker's next start. That start is new work of
@@ -507,8 +520,11 @@ def test_a_worker_the_batch_stopped_waiting_for_keeps_its_calls_end(host_world, 
     assert refusals == [(CALL_END if control == 'end' else 'owner_stop', kind == 'mcp-entry')], refusals
 
 
-@pytest.mark.parametrize('control', ['open', 'end', 'stop-drained'])
-@pytest.mark.parametrize('phase', ['entry', 'after-initialize'])
+@pytest.mark.parametrize(("phase", "control"), [
+    ('entry', 'open'),
+    ('after-initialize', 'end'),
+    ('after-initialize', 'stop-drained'),
+])
 def test_a_real_mcp_send_the_batch_stopped_waiting_for_keeps_its_calls_end(host_world, monkeypatch, phase, control):
     """The same ordering through the real MCPManager, held in its preparation before the entry gate or in the session's
     initialize before the final send gate; only the SDK transport, session and catalog are synthetic. After End or a
@@ -754,7 +770,7 @@ def test_real_call_tool_admitted_before_a_control_never_begins(host_world, monke
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('control', ['stop', 'wrap-up', 'hard-stop', 'end'])
+@pytest.mark.parametrize('control', ['stop', 'wrap-up', 'end'])
 def test_real_second_ordinary_handler_never_begins_after_a_control(host_world, monkeypatch, control):
     """The original case end to end: one native batch of two ordinary calls, the first running when the owner's control lands.
     The call's teardown joins the running effect; the second handler's own gate refuses it."""

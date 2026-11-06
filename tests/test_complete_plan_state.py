@@ -69,8 +69,7 @@ def test_large_operative_values_persist_once_and_rehydrate_for_consumers(tmp_pat
     assert _raw_state(tmp_path)["waves"][0]["spec"] == {}
 
 
-@pytest.mark.parametrize("source", ["wave_artifact", "spec_source_ref"])
-@pytest.mark.parametrize("damage", ["missing", "changed"])
+@pytest.mark.parametrize(("damage", "source"), [("missing", "wave_artifact"), ("changed", "spec_source_ref")])
 def test_unavailable_full_spec_preserves_paid_state_and_never_becomes_empty_claims(tmp_path, damage, source):
     from ouroboros.artifacts import task_artifact_dir_path
     from ouroboros.owner_hurry import plan_gate_decision

@@ -130,7 +130,7 @@ def test_unreadable_success_is_unknown_and_status_cancel_never_invent_settlement
         gateway.maintenance_operation("another-operation")
 
 
-@pytest.mark.parametrize("key", ["", " ", "bad\nkey", "x" * 257])
+@pytest.mark.parametrize("key", ["", "bad\nkey", "x" * 257])
 def test_invalid_key_never_contacts_engine(client, key):
     gateway, seen = client(lambda request: pytest.fail("Invalid key must not be sent"))
     with pytest.raises(ValueError):

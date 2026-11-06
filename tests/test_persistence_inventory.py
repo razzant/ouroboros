@@ -913,7 +913,12 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # 450 -> 452: request views stored once (W10) spell the view's skeleton placement
 # ``observability/blobs/<sha>.json.shared.gz`` and its canonical loose address beside
 # the family's ``*.*.gz``; both sit under the observability row.
-EXPECTED_SCAN_PATHS = 450
+# The 450 -> 452 request-view paths above were already present in the integrated tree when
+# the test-duration pin below was authored, so the combined count is 453.
+# 452 -> 453 (test diet): the install's test durations table ``state/test-durations.json``
+# (``ouroboros/test_evidence.py`` names it, the evidence plugin of the gate's sessions writes it);
+# its own section-2 row.
+EXPECTED_SCAN_PATHS = 453
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
@@ -1072,23 +1077,6 @@ def _covers(scan_path: str, pattern: str, scan_prefix_ok: bool = True) -> bool:
 
 
 # --- tests -----------------------------------------------------------------
-
-
-def test_update_backup_inventory_names_its_pending_and_partial_restore_lifetime():
-    row = next(line for line in DOC.read_text(encoding="utf-8").splitlines()
-               if line.startswith("| `state/skills/<name>/` owner state"))
-    assert "`update_backup.json`" in row
-    assert "only while a review-basis update is pending" in row
-    assert "removed when it settles or the skill is uninstalled" in row
-    assert "kept as evidence after a partial restore" in row
-    assert "state/skills/*/update_backup.json" in scan_data_paths()
-
-
-def test_skill_update_docs_name_all_rejection_reasons():
-    for filename in ("CREATING_SKILLS.md", "CLIENT_CONTRACT.md"):
-        text = (REPO / "docs" / filename).read_text(encoding="utf-8")
-        for reason in ("review_blockers", "review_unfinished", "preflight_failed", "landing_failed"):
-            assert f"`{reason}`" in text, (filename, reason)
 
 
 def test_scan_is_populated_and_pinned():

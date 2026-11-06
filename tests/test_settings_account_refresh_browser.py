@@ -12,7 +12,7 @@ from tests import test_subscription_setup_browser as setup_browser
 subscription_ui = setup_browser.subscription_ui
 capture = setup_browser.capture
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.mark.parametrize("transition", ["login", "reconnect"])

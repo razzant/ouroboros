@@ -92,7 +92,7 @@ def test_root_snapshot_reaches_saved_and_gateway_results_without_flattening_own_
     assert saved["root_phase_checkpoint"]["accounting"] == expected
 
 
-@pytest.mark.parametrize("state", ["reserved", "dispatched", "estimated", "unknown"])
+@pytest.mark.parametrize("state", ["reserved", "dispatched", "unknown"])
 def test_zero_dollar_or_unpriced_rows_remain_distinguishable_from_unresolved(root, state):
     _settle(root, 1.0)
     reservation = _reserve(root, task_id="child", bound=0.0)
@@ -132,7 +132,7 @@ def test_running_checkpoint_emits_no_terminal_accounting_snapshot(root):
     assert "accounting" not in _checkpoint(root, "running")["root_phase_checkpoint"]
 
 
-@pytest.mark.parametrize("stale_phase", ["pending_once", "running", "degraded", "completed"])
+@pytest.mark.parametrize("stale_phase", ["pending_once", "degraded", "completed"])
 def test_canonical_snapshot_survives_stale_replica_reads_and_copyback(root, stale_phase):
     _settle(root, 1.0)
     canonical = _checkpoint(root)

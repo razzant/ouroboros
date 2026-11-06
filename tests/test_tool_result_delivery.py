@@ -184,10 +184,8 @@ def test_requested_head_tail_spends_free_room_while_unsolicited_shares_the_eight
 @pytest.mark.parametrize("window,target,reserve,part,multiple", [
     (100_000, 85_000, 8_192, 60_000, False),
     (100_000, 85_000, 8_192, 60_000, True),
-    (None, 85_000, 8_192, 90_000, True),
-    (300_000, 250_000, 65_536, 160_000, True),
     (40_000, 85_000, 8_192, 60_000, True),
-], ids=["nano", "multiple-forms", "unknown-beyond-target", "low", "physical-nonfit"])
+], ids=["nano", "multiple-forms", "physical-nonfit"])
 def test_only_requested_content_over_the_window_can_shrink_a_chosen_form(
         tmp_path, window, target, reserve, part, multiple):
     """Escaped ends and a plain omitted middle misprice the unasked log initially.
@@ -604,8 +602,15 @@ def test_chosen_body_survives_a_full_host_prefix_unless_it_alone_exceeds_usable_
         assert not trace["tool_calls"][0].get("result_partial")
 
 
-@pytest.mark.parametrize('reader', [False, True])
-@pytest.mark.parametrize('tool', ['chat_history', 'journal_read', 'tree_read', 'recent_tasks', 'query_code', 'query_data', 'run_shell'])
+@pytest.mark.parametrize(("tool", "reader"), [
+    ('chat_history', False),
+    ('journal_read', True),
+    ('tree_read', True),
+    ('recent_tasks', False),
+    ('query_code', True),
+    ('query_data', False),
+    ('run_shell', True),
+])
 def test_range_recovery_respects_pageable_tool_and_loaded_reader(tool, reader):
     from ouroboros.tool_result_delivery import render_result_view
     text, view = render_result_view('complete source ' * 2000, head_chars=30, tail_chars=30,

@@ -26,7 +26,7 @@ import pytest
 from tests._budget_pause_exact_helpers import _install_queue
 from tests._work_projection_shared import state_fields, with_work_fields
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 WEB = Path(__file__).resolve().parents[1] / "web"
 HTML = """<!doctype html><html lang="en" class="ouro-ui"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">

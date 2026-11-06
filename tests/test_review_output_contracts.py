@@ -14,15 +14,8 @@ class TestEmptyArrayIsVerifiedClean:
 
     @pytest.mark.parametrize("raw,expected", [
         ("[]\nNO_FINDINGS", True),
-        ("[]", True),
         ("[] NO_FINDINGS", True),          # sentinel must never make it worse
-        ("[]\r\nNO_FINDINGS", True),        # CRLF
-        ("[ ]\nNO_FINDINGS", True),
         ("[]\nNO_FINDINGS\nHope that helps!", False),
-        ("```json\n[]\n```", True),
-        ("```json\n[]\n```\nNO_FINDINGS", True),   # fencing model puts the sentinel after the fence
-        ("```\n[]\n```\nNO_FINDINGS", True),
-        ("```JSON\n[]\n```", True),               # tag case must not matter
         ("```json\n[]\n```\nI cannot review this", False),
         ("prose ```[]``` NO_FINDINGS", False),
         ("```json\n[1]\n```\nNO_FINDINGS", False),

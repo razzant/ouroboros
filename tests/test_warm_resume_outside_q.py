@@ -25,7 +25,6 @@ from tests.test_admission_contention import database_reader
 from tests.test_owner_wait_pool import maintain_capacity, park, pool as pool
 from tests.test_workspace_preparation import _WAIT_SEC
 
-pytestmark = pytest.mark.serial
 _REAL_THREAD = threading.Thread  # the pool fixture stubs the global Thread; the lane needs the real one
 
 

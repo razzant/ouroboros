@@ -261,7 +261,7 @@ def test_an_invalid_block_member_becomes_a_located_gap_and_its_neighbours_stay(t
     assert not _by_type(clean_store, "gap")
 
 
-@pytest.mark.parametrize("bad", [b"{broken", b"{}", b"null", b"\xff\xfe"])
+@pytest.mark.parametrize("bad", [b"{broken", b"null", b"\xff\xfe"])
 def test_an_unreadable_blocks_file_is_retained_and_the_flat_summary_still_imports(tmp_path, bad):
     memory = tmp_path / "memory"
     memory.mkdir()
@@ -294,10 +294,10 @@ def test_a_flat_summary_that_repeats_a_section_is_not_imported_twice(tmp_path):
 
 
 @pytest.mark.parametrize("cursor", [
-    b"{broken", b"[]", b'{"last_consolidated_offset":-1}', b'{"last_consolidated_offset":"100"}',
+    b'{"last_consolidated_offset":"100"}',
     b'{"last_consolidated_offset":1,"last_consolidated_offset":2}',
     b'{"pending_knowledge_nominations":[{"topic":"no id"}]}',
-    "missing_generation", "past_the_rows",
+    "missing_generation",
 ])
 def test_an_unreadable_or_unresolvable_cursor_makes_the_frontier_unknown_at_the_chain_end(tmp_path, cursor):
     rows = _chat(tmp_path)

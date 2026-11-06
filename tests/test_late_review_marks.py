@@ -600,7 +600,6 @@ def test_while_its_author_runs_the_asks_settled_frame_reaches_its_mailbox_and_no
 @pytest.mark.parametrize("raw,lines", [
     (_reply("Split the migration.", objections=[("o2", "Run the backfill first."), ("o3", "Keep the old\nreader.")]),
      ["Prose: Split the migration.", "- objection o2: Run the backfill first.", "- objection o3: Keep the old reader."]),
-    (_reply("Looks sound to me."), ["Prose: Looks sound to me."]),
     ("I think this is fine, but no JSON here.",
      ["Its reply could not be read as the reply object; the full text is in its retained source."]),
     ("", None),  # a failed seat: no paid words to keep, so no mark

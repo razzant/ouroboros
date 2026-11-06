@@ -26,7 +26,7 @@ from tests.ui_chat_viewport_smoke import state_reads
 
 direct_server_with_data = smoke.direct_server_with_data
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 TASK = "jump-far-task"
 ANSWER = "JUMP The release audit found two missing citations."

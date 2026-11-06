@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
 
 from tests.test_direct_project_turn_recovery import (
     PID,
@@ -25,7 +24,6 @@ from supervisor.worker_chat_lane import admit_owner_turn as _OWNER_DOOR
 from tests.test_placement_pinned_resources import _assert_defaults, _started
 from tests.test_swarm_host_admission import host as host
 
-pytestmark = pytest.mark.serial
 PROOF = "resource-proof.txt"
 
 

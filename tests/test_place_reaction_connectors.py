@@ -23,6 +23,7 @@ from ouroboros.gateway.host_service import create_host_service_app
 from ouroboros.presence_runner import _read_previous_turn, run_presence_turn
 from ouroboros.task_results import load_task_result, write_task_result
 from ouroboros.tools.registry import ToolEntry
+from tests._cases import chosen_rows
 
 pytestmark = pytest.mark.usefixtures("provider_catalog_offline")
 WIRE = json.loads((Path(__file__).parent / "fixtures" / "reaction_connector_wire.json").read_text(encoding="utf-8"))
@@ -165,8 +166,7 @@ def test_a_tool_wait_runs_to_its_bound_over_a_real_reaction(chain, provider, wai
 
     world.h.script = [start, after]
     post(world, world.spec.first)
-    until(lambda: world.h.calls == 1, "the wait")
-    time.sleep(0.2)
+    until(lambda: world.h.agents and getattr(world.author(), "_in_slot_waits", {}), "the tool's in-slot wait")
     assert post(world, world.spec.heard)["outcome"] == "silent"
     assert attention(world)[world.spec.heard] == "current_author" and world.h.calls == 1
     assert settled(world)["text"] == FINAL
@@ -185,8 +185,7 @@ def test_control_a_real_message_ends_that_wait(chain, provider):
 
     world.h.script = [call(("await_messages", {"timeout_sec": 30})), after]
     post(world, world.spec.first)
-    until(lambda: world.h.calls == 1, "the wait")
-    time.sleep(0.2)
+    until(lambda: world.h.agents and getattr(world.author(), "_in_slot_waits", {}), "the tool's in-slot wait")
     post(world, world.spec.later)
     settled(world)
     assert '"reason": "owner_mailbox_pending"' in seen["result"]
@@ -294,7 +293,7 @@ def test_a_delegate_wait_and_a_transport_backoff_run_over_a_real_reaction(chain,
 # --- The owed final, the reply it answers, and a gesture beside them --------------------------------------
 
 
-@pytest.mark.parametrize("provider,outcome", [(provider, name) for provider, spec in CHAINS.items() for name in spec.receipts])
+@pytest.mark.parametrize("provider,outcome", chosen_rows([(provider, name) for provider, spec in CHAINS.items() for name in spec.receipts], 0, 1, 5))
 def test_a_real_gesture_receipt_is_an_action_beside_the_owed_final(chain, provider, outcome):
     from ouroboros.presence_context import _previous_turn_line
 

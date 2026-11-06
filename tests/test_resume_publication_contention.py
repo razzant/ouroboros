@@ -9,7 +9,6 @@ from ouroboros import cancel_intents, owner_pause
 from ouroboros.task_results import load_task_result, write_task_result
 from tests.test_admission_contention import database_reader
 
-pytestmark = pytest.mark.serial
 
 
 def _contend_publication(monkeypatch, *, outside=None, acquire_wait_sec=0.0):
@@ -38,7 +37,7 @@ def _contend_publication(monkeypatch, *, outside=None, acquire_wait_sec=0.0):
     return publications, waits
 
 
-@pytest.mark.parametrize("interruption", ["open", "pause", "stop", "different_grant", "read_probe"])
+@pytest.mark.parametrize("interruption", ["pause", "stop", "different_grant", "read_probe"])
 def test_resume_publication_rechecks_exact_current_controls(tmp_path, monkeypatch, interruption):
     write_task_result(tmp_path, "root", "running", root_task_id="root")
     fence, _ = owner_pause.install_fence(tmp_path, "root", request_id="original-pause")

@@ -4,7 +4,7 @@ import pytest
 
 from ouroboros.context_images import evict_stale_image_blocks, image_positions
 from ouroboros.realtime_setup import rows_for_engine
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 def images(n, source='screen'):

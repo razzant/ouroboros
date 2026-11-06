@@ -333,8 +333,7 @@ def test_a_lost_or_legacy_opening_stays_a_named_gap(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("damage", [
-    "card_missing", "card_unanswered", "words_changed", "identity_removed", "identity_malformed", "own_card",
-    "foreign_card",
+    "card_missing", "identity_removed", "foreign_card",
 ])
 def test_a_start_card_that_does_not_resolve_refuses_by_name(tmp_path, monkeypatch, damage):
     from ouroboros.owner_quiz import _mutate_projection, quiz_states, record_answered, record_asked

@@ -15,7 +15,6 @@ import pathlib
 import subprocess
 from types import SimpleNamespace
 
-import pytest
 
 
 def _init_git_repo(path: pathlib.Path) -> None:
@@ -136,7 +135,6 @@ def test_quiescence_detect_requires_truly_settled_root(tmp_path, monkeypatch):
 # --- off-loop execution (real git; spawns subprocesses) ---------------------
 
 
-@pytest.mark.serial
 def test_spawned_checkpoint_commits_budget_dead_tree_off_loop(tmp_path, monkeypatch):
     """End-to-end wave shape: root died budget_exhausted, last child terminal,
     tree dirty — the off-loop run commits it and appends a triggered receipt."""
@@ -196,7 +194,6 @@ def test_spawned_checkpoint_commits_budget_dead_tree_off_loop(tmp_path, monkeypa
     assert receipts[-1]["committed"] is True
 
 
-@pytest.mark.serial
 def test_spawned_checkpoint_revalidates_quiescence_before_git(tmp_path, monkeypatch):
     """A tree member admitted between detect and run wins: the off-loop body
     re-reads liveness and the helper skips entirely."""
@@ -225,7 +222,6 @@ def test_spawned_checkpoint_revalidates_quiescence_before_git(tmp_path, monkeypa
     assert calls["live"] is True
 
 
-@pytest.mark.serial
 def test_spawned_checkpoint_revalidation_survives_a_racing_running_pop(tmp_path, monkeypatch):
     """The off-loop re-validation must read PENDING/RUNNING under the queue lock.
 
@@ -280,7 +276,6 @@ def test_spawned_checkpoint_revalidation_survives_a_racing_running_pop(tmp_path,
     assert not receipts[-1].get("error")  # not the loud-fail receipt
 
 
-@pytest.mark.serial
 def test_inflight_latch_defers_duplicate_trigger_for_replay(tmp_path):
     """A trigger hitting the latch mid-flight is not lost: it is remembered
     (per root, last-wins) for a single replay after the run completes."""
@@ -303,7 +298,6 @@ def test_inflight_latch_defers_duplicate_trigger_for_replay(tmp_path):
             events._COOP_CHECKPOINT_DROPPED.pop("rootZ", None)
 
 
-@pytest.mark.serial
 def test_dropped_quiescence_trigger_is_replayed_after_latch_clear(tmp_path, monkeypatch):
     """G4-4 regression — the lost-trigger interleaving:
 
@@ -442,7 +436,6 @@ def _subjects(tree: pathlib.Path) -> str:
                           capture_output=True, text=True).stdout
 
 
-@pytest.mark.serial
 def test_checkpoint_skips_a_root_mid_merge_and_the_receipt_is_loud(tmp_path, monkeypatch):
     from supervisor import events
 
@@ -477,7 +470,6 @@ def test_checkpoint_skips_a_root_mid_merge_and_the_receipt_is_loud(tmp_path, mon
     assert receipts[-1]["committed"] is False
 
 
-@pytest.mark.serial
 def test_checkpoint_skips_a_root_mid_cherry_pick(tmp_path, monkeypatch):
     from ouroboros.coop_checkpoint import checkpoint_commit_coop_roots
 
@@ -490,7 +482,6 @@ def test_checkpoint_skips_a_root_mid_cherry_pick(tmp_path, monkeypatch):
     assert "paid-work.txt" in _porcelain(tree)
 
 
-@pytest.mark.serial
 def test_a_clean_state_dirty_root_still_commits(tmp_path, monkeypatch):
     """The skip is about interrupted operations only: an ordinary dirty coop
     tree keeps its checkpoint."""
@@ -505,7 +496,6 @@ def test_a_clean_state_dirty_root_still_commits(tmp_path, monkeypatch):
     assert _porcelain(tree) == ""
 
 
-@pytest.mark.serial
 def test_checkpoint_keeps_a_key_named_deck_and_unstages_key_material_by_content(
     tmp_path, monkeypatch,
 ):

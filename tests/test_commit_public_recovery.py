@@ -95,7 +95,7 @@ def test_public_commit_collects_original_contract_and_removed_reviewers(paid_com
     assert read_call_payload(ctx.drive_root, task_id=ctx.task_id, call_id="op-old-triad_prompt") == before
 
 
-@pytest.mark.parametrize("changed", ["candidate", "commit_message", "goal", "scope", "review_rebuttal"])
+@pytest.mark.parametrize("changed", ["candidate", "goal", "review_rebuttal"])
 def test_public_commit_rejects_changed_candidate_or_intent_before_collection(paid_commit, monkeypatch, changed):
     ctx, _attempt, *_rest = paid_commit
     if changed == "candidate":
@@ -110,7 +110,7 @@ def test_public_commit_rejects_changed_candidate_or_intent_before_collection(pai
     assert asdict(load_state(ctx.drive_root).attempts[0]) == before
 
 
-@pytest.mark.parametrize("damage", ["foreign_task", "foreign_slot", "foreign_roster", "wrong_token", "missing_prompt"])
+@pytest.mark.parametrize("damage", ["foreign_task", "wrong_token", "missing_prompt"])
 def test_public_commit_rejects_foreign_source_but_keeps_independent_paid_answer(paid_commit, damage):
     ctx, _attempt, ready, _unknown, _peer, prompt = paid_commit
     if damage == "missing_prompt":

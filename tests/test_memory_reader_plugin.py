@@ -24,6 +24,7 @@ from tests.test_extension_route_streaming import collect_response
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 MIND = {"kind": "mind", "task_id": "t1", "focus": {"role": "root", "task_id": "t1"}}
+_PAGE_TEXT = "Слова страницы " * 4000
 ATLAS = '''
 import json
 from ouroboros.contracts.plugin_api import MemoryReadError
@@ -53,7 +54,7 @@ def _memory(drive_root: pathlib.Path) -> dict:
     """Chronicle written by its producer inside the extension host's own data root."""
     store = ChronicleStore(drive_root)
     span = {"start": "2026-10-20T10:00:00+00:00", "end": "2026-10-24T18:00:00+00:00", "incomplete": False}
-    page = store.publish_page(room_id="1", text="Слова страницы " * 4000, covers={"mode": "range", "rows": ["a"],
+    page = store.publish_page(room_id="1", text=_PAGE_TEXT, covers={"mode": "range", "rows": ["a"],
                                                                                   "stream_span": [0, 0], "ts_span": span},
                               author=MIND)
     fix = store.correct(page.record["id"], "Исправление.", MIND)
@@ -96,6 +97,26 @@ def _reads(drive_root: pathlib.Path, skill: str, ids: dict) -> list:
             ask("changes", {}), ask("document", {"address": {"kind": "record", "id": "absent"}})]
 
 
+def _parity_reads(drive_root: pathlib.Path, skill: str, ids: dict) -> list:
+    """The high-risk record and changes answers used for the one process-parity witness."""
+    def ask(op, params):
+        status, body = _dispatch(drive_root, skill, "atlas/read", {"op": op, "params": json.dumps(params)})
+        assert status == 200, body
+        return body
+
+    record = {"kind": "record", "id": ids["page"]}
+    document = ask("document", {"address": record, "length": 100_000})["answer"]
+    return [document, ask("changes", {})]
+
+
+def _without_timestamps(value):
+    if isinstance(value, dict):
+        return {key: _without_timestamps(item) for key, item in value.items() if key != "ts"}
+    if isinstance(value, list):
+        return [_without_timestamps(item) for item in value]
+    return value
+
+
 def _load(tmp_path, name, body, frontmatter, *, isolated):
     loaded, repo_root, drive_root = _prepare_extension(tmp_path, name, body, permissions=["route"],
                                                        extra_frontmatter=frontmatter)
@@ -136,14 +157,13 @@ def test_both_execution_modes_answer_identically(tmp_path, monkeypatch):
                                       isolated=isolated)
         monkeypatch.setattr("ouroboros.config.get_skills_repo_path", lambda repo=repo_root: str(repo))
         ids = _memory(drive_root)
-        answers.append(json.loads(json.dumps(_reads(drive_root, f"atlas_{int(isolated)}", ids)).replace(
+        answers.append(json.loads(json.dumps(_parity_reads(drive_root, f"atlas_{int(isolated)}", ids)).replace(
             ids["page"], "PAGE").replace(ids["fix"], "FIX")))
     host, child = answers
     for answer in (host, child):  # publication times differ between the two producers' runs
-        for entry in answer[1]["answer"]["entries"]:
-            entry.pop("ts")
-        answer[6]["answer"]["position"].pop("record_id")
-        answer[6]["answer"]["newest"].pop("record_id")
+        answer[0] = _without_timestamps(answer[0])
+        answer[1]["answer"]["position"].pop("record_id")
+        answer[1]["answer"]["newest"].pop("record_id")
     assert host == child
 
 

@@ -54,7 +54,7 @@ def test_an_update_being_finalized_counts_though_its_receipt_stays_off(managed):
     assert git_ops.advance_recovery_point(True) == _git(repo, "rev-parse", "HEAD")
 
 
-@pytest.mark.parametrize("case", ["dirty", "other_branch", "unmanaged", "no_smoke_this_process"])
+@pytest.mark.parametrize("case", ["dirty", "other_branch", "no_smoke_this_process"])
 def test_only_a_clean_managed_dev_smoke_moves_it(managed, monkeypatch, case):
     repo, _drive, _calls, first = managed
     if case == "dirty":

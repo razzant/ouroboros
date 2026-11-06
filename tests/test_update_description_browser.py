@@ -34,7 +34,7 @@ from tests.test_update_description import _no_git_for_versions as _no_git_for_ve
 from tests.test_update_description import door as door  # pytest fixture; the alias re-exports it (no F811)
 from tests.ui_console_errors import PageErrors
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "update_description_ranges.json").read_text(encoding="utf-8"))
 BOOT = """<script type="module">
 import {initDashboard} from '/static/modules/dashboard.js';

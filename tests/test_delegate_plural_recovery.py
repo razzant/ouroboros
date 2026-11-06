@@ -112,7 +112,7 @@ def test_orphan_protection_names_handles_instead_of_every_run_of_the_task(tmp_pa
     assert seen == ["unreserved"]
 
 
-@pytest.mark.parametrize("bad", [None, "birth", "exit", "handle"])
+@pytest.mark.parametrize("bad", [None, "birth", "handle"])
 def test_windows_generation_proof_applies_to_each_holder(tmp_path, monkeypatch, bad):
     from ouroboros import platform_layer
 
@@ -162,8 +162,7 @@ def test_handoff_migration_reads_without_effect_and_preserves_unknown(tmp_path):
     assert recovery.adopt_handoff(ctx, task)["reason"] == "handoff_unreadable"
 
 
-@pytest.mark.parametrize("fault", ["foreign_binding", "unreadable_fate"])
-@pytest.mark.parametrize("planned", [False, True])
+@pytest.mark.parametrize(("planned", "fault"), [(False, "unreadable_fate"), (True, "foreign_binding")])
 def test_unknown_old_pending_holder_preserves_its_valid_sleeping_sibling(tmp_path, monkeypatch, fault, planned):
     task, ctx = task_and_context(tmp_path)
     task["_working_recovery"] = {}

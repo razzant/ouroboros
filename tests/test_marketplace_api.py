@@ -291,9 +291,10 @@ def test_clawhub_fresh_install_rolls_back_payload_on_dependency_failure(monkeypa
     assert not (tmp_path / "state" / "skills" / "demo" / "clawhub.json").exists()
 
 
-@pytest.mark.parametrize('basis', ['trusted', 'owner_skip'])
-@pytest.mark.parametrize('floor_ok', [False, True])
-@pytest.mark.parametrize('mode', ['advanced', 'cyber_pro'])
+@pytest.mark.parametrize(("mode", "floor_ok", "basis"), [
+    ('advanced', False, 'trusted'),
+    ('cyber_pro', True, 'owner_skip'),
+])
 def test_registry_acceptance_floor_precedes_package_execution(monkeypatch, tmp_path, basis, floor_ok, mode):
     from ouroboros.skill_source_install import accept_and_turn_on
 

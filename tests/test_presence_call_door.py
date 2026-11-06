@@ -84,8 +84,6 @@ def test_a_waking_active_place_opens_the_call_under_its_place(tmp_path, place, o
 @pytest.mark.parametrize("change, facts, autonomy, code", [
     (("set_state", {"state": "silent"}), ["mention"], "act", "place_silent"),
     (("set_state", {"state": "paused"}), ["mention"], "act", "place_paused"),
-    (None, ["direct_message"], "act", "place_no_wake_match"),
-    (None, None, "act", "place_no_wake_match"),
     (None, ["mention"], "observe", "place_advises"),
 ])
 def test_a_call_never_opens_where_a_focus_would_not_start(tmp_path, place, opened, monkeypatch,
@@ -160,7 +158,6 @@ def _reaction(kind="add", actor=None, text="", **fact):
 
 @pytest.mark.parametrize("event", [
     _reaction("count", counts=3),  # a shape /presence/turn refuses; a reader of its count would raise
-    _reaction(change="noted"),
     _reaction(text="thumbs up!"),  # a reaction carries no words
     _reaction("count", actor={"kind": "user", "platform_actor_id": "u1"}),  # an aggregate has no individual
 ])

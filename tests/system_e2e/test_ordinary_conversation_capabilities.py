@@ -55,7 +55,6 @@ def _received_turn(oracle: ArtifactOracle, client_message_id: str) -> dict | Non
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s27_ordinary_main_and_project_mcp_with_concurrent_native_turn(e2e_clone, tmp_path):
     require_lane(LANE_MOCK)
     room, mcp_dir = tmp_path / "attached room", tmp_path / "mcp fixture"

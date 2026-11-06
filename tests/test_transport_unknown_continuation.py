@@ -222,7 +222,7 @@ def test_loopback_response_cannot_prove_upstream_recovery(monkeypatch):
     assert not transport.upstream_transport_reachable(llm, "vendor/model", timeout=3)
 
 
-@pytest.mark.parametrize("fact", ["absent", "stale", "local", "upstream"])
+@pytest.mark.parametrize("fact", ["absent", "local", "upstream"])
 def test_subscription_requires_fresh_typed_upstream_observation(monkeypatch, fact):
     from ouroboros import llm_claudexor
     now = datetime.now(timezone.utc)

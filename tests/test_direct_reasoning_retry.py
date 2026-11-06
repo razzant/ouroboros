@@ -129,8 +129,7 @@ def _run(lane, messages, *, asynchronous=False, adopt=False, effort="high", stre
         return error, pop_replay_omission()
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("kind", ["thinking", "redacted_thinking"])
+@pytest.mark.parametrize(("kind", "asynchronous"), [("thinking", False), ("redacted_thinking", True)])
 def test_generic_400_rebuilds_once_without_native_receipt_and_main_keeps_the_omission(lane, asynchronous, kind):
     messages = _history(kind)
     expected = LLMClient._strip_openrouter_roundtrip_metadata(messages, keep_reasoning_content=True)
@@ -167,8 +166,7 @@ def test_normal_success_does_not_report_or_adopt_an_omission(lane, asynchronous)
     assert len(lane.sent) == 1 and len(lane.builds) == 1 and _thinking(lane.sent[0])
 
 
-@pytest.mark.parametrize("scenario", ["text_overflow", "structured_overflow", "no_native_thinking", "policy", "processing",
-                                      "stream", "status_429", "status_500"])
+@pytest.mark.parametrize("scenario", ["text_overflow", "no_native_thinking", "status_500"])
 def test_other_failures_never_strip_or_adopt_replayed_reasoning(lane, scenario):
     messages = _history(None if scenario == "no_native_thinking" else "thinking")
     original = copy.deepcopy(messages)

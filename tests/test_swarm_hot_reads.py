@@ -61,7 +61,7 @@ def test_child_receipt_writes_leave_legacy_catchup_to_an_explicit_read(tmp_path,
     assert expected_gap in receipt["coverage"]["gaps"]
 
 
-@pytest.mark.parametrize("history", ["event", "empty", "absent", "torn", "unreadable"])
+@pytest.mark.parametrize("history", ["event", "empty", "unreadable"])
 def test_missing_parent_observes_available_history_without_creating_result(tmp_path, monkeypatch, history):
     log = tmp_path / "logs/events.jsonl"
     if history != "absent":

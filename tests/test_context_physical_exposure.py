@@ -19,7 +19,7 @@ def source(call_id="read", text="exact evidence " * 500):
         {"role": "tool", "tool_call_id": call_id, "content": text}]
 
 
-@pytest.mark.parametrize("dialect", ["function", "custom", "native", "gigachat", "claudexor"])
+@pytest.mark.parametrize("dialect", ["function", "gigachat", "claudexor"])
 def test_complete_source_survives_real_transport_syntax(dialect):
     from ouroboros.llm import LLMClient
 

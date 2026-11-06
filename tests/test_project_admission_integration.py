@@ -13,7 +13,6 @@ from tests._store_shared import unreadable_result
 from tests.test_schedule_occurrence import _row
 from tests.test_swarm_host_admission import host  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def convert(host, tid="converted"):  # noqa: F811
@@ -39,7 +38,7 @@ def admit(host, tmp_path, *, scoped=False, tid="converted"):  # noqa: F811
     return row
 
 
-@pytest.mark.parametrize("authority", ["malformed", "unreadable", "missing", "readable"])
+@pytest.mark.parametrize("authority", ["malformed", "missing", "readable"])
 def test_bare_promotion_checks_scope_before_drive_effects(host, tmp_path, monkeypatch, authority):  # noqa: F811
     from ouroboros import headless
     from supervisor.events_project_routing import _handle_promote_chat_to_task
@@ -221,8 +220,7 @@ def test_conversion_bind_failure_preserves_scope_and_exact_carrier(host, tmp_pat
     assert queue.QUEUE_SNAPSHOT_PATH.read_bytes() == saved
 
 
-@pytest.mark.parametrize("timestamp", ["old", "invalid", "absent"])
-@pytest.mark.parametrize("schedule", [False, True])
+@pytest.mark.parametrize(("schedule", "timestamp"), [(False, "old"), (False, "absent"), (True, "invalid")])
 def test_project_hold_survives_early_restore_pruning(host, tmp_path, monkeypatch, timestamp, schedule):  # noqa: F811
     from supervisor import queue
 

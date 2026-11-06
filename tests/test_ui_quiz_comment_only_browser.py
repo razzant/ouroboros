@@ -33,7 +33,7 @@ from tests.system_e2e.harness import (
 )
 
 wait_clone = clone_fixture
-pytestmark = [pytest.mark.serial, pytest.mark.browser]
+pytestmark = [pytest.mark.browser]
 
 QUESTION = "What deadline should the report state on its cover page?"
 REQUEST = ("Ask me for the deadline,", "then wait for my answer.")

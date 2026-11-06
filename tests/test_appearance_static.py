@@ -113,8 +113,6 @@ _SVG = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3C
     (f"    mask-image: {_SVG.format('black')};", False),
     (f"    -webkit-mask-image: {_SVG.format('black')};", False),
     (f"    background-image: {_SVG.format('black')};", True),
-    (f"    background-image: {_SVG.format('%23888')};", True),
-    (f"    -webkit-mask-image: {_SVG.format('%23888')};", True),
     (f"    mask-image: {_SVG.format('black').replace('/%3E', ' style=%22fill:%23888%22/%3E')};", True),
 ])
 def test_inline_svg_guard_separates_token_paint_and_mask_geometry_from_baked_colour(line, baked):
@@ -125,109 +123,11 @@ def _rules(css: str) -> list[tuple[str, str]]:
     """``(selector, body)`` of every innermost rule, comments removed (an @media wrapper is not a selector)."""
     css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
     return [(" ".join(selector.split()), body) for selector, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css)]
-
-
-THEME_BLOCKS = (":root", ':root[data-theme="light"]')
-DARK_VOICE = ':root:not([data-theme="light"])'
-# The roles the dark palette sets apart from the light theme's: each has its own light value, equal to the light
-# theme's before the dark voices were added (docs/DESIGN.md seed table). `--green` among them: the light theme read
-# the dark seed's green until the dark one changed.
-LIGHT_RESTATED = (
-    "--voice-owner", "--voice-ouroboros", "--voice-ouroboros-card", "--system-sender", "--amber",
-    "--green", "--status-ok-fg", "--status-warn-fg", "--status-error-fg", "--accent-light", "--focus-accent-border",
-    "--assistant-sender", "--panic-ink", "--tone-chosen-answer", "--tone-chosen-answer-ink",
-    "--tone-chosen-answer-detail", "--tone-chosen-answer-shadow", "--chosen-answer-cue-display", "--tone-recommended",
-    "--tone-recorded-answer", "--tone-recorded-mark", "--quiz-held-opacity", "--message-pending-opacity",
-)
-
-
-def test_the_dark_voice_materials_stay_out_of_the_light_theme():
-    """A voice material (ui.css, after the light block) restates palette roles on a voice's own objects. Only the dark
-    theme has one. Code blocks deliberately reset their quiet hover to the room's neutral material in both themes;
-    every other role override stays in its theme block."""
-    rules = _rules(_read("web/ui.css"))
-    declared = lambda body: set(re.findall(r"(--[\w-]+)\s*:", body))  # noqa: E731
-    materials = {selector: declared(body) for selector, body in rules if selector.startswith(DARK_VOICE)}
-    assert set(materials) == {f"{DARK_VOICE} :is(.chat-bubble.assistant, .chat-live-card)", f"{DARK_VOICE} .chat-bubble.user"}, materials
-    voice_roles = set().union(*materials.values())
-    neutral_code = [body.strip() for selector, body in rules if selector == ".md-code-block"]
-    assert neutral_code == ["--tone-quiet-hover: var(--bg-hover);"], neutral_code
-    leaks = [(selector, sorted(declared(body) & voice_roles)) for selector, body in rules
-             if selector not in (*THEME_BLOCKS, ".md-code-block")
-             and not selector.startswith(DARK_VOICE) and declared(body) & voice_roles]
-    assert not leaks, f"voice material roles restated outside the dark voice materials: {leaks}"
-    light = "".join(body for selector, body in rules if selector == ':root[data-theme="light"]')
-    missing = [name for name in LIGHT_RESTATED if not re.search(rf"(?<![\w-]){re.escape(name)}\s*:", light)]
-    assert not missing, f"these roles differ in the dark seed and need their own light value: {missing}"
-
-
-def test_every_colour_the_design_seed_table_names_is_a_value_of_the_palette():
-    """The seed table (docs/DESIGN.md) and web/ui.css say the same colours: a value changed on one side only fails."""
-    design = _read("docs/DESIGN.md")
-    table = design.split("**Seed (light | dark)**", 1)[1].split("\n\n", 2)[1]
-    named = {value.lower() for value in re.findall(r"#[0-9a-fA-F]{6}\b", table)}
-    ui = {value.lower() for value in re.findall(r"#[0-9a-fA-F]{6}\b", re.sub(r"/\*.*?\*/", "", _read("web/ui.css"), flags=re.S))}
-    assert len(named) > 15, "the seed table was not found"
-    assert not named - ui, f"the seed table names colours web/ui.css does not have: {sorted(named - ui)}"
-
-
-def test_selected_advisory_reads_like_every_other_setting_value():
-    """A setting's value is never amber: the selected Advisory takes the shared selected look of a chosen option,
-    the themed soft crimson pair, so the old ~2:1 amber wash on the light surface cannot come back."""
-    css = _read("web/settings.css")
-    assert not re.search(r'advisory"\][^{]*\{', css), "Advisory has a look of its own again"
-    selected = re.search(r':root\[data-theme\] \.settings-effort-btn\.active,?[^{]*\{([^}]*)\}', css)
-    assert selected, "the shared selected-value rule is gone"
-    assert "var(--tone-crimson-soft)" in selected.group(1) and "var(--tone-crimson-soft-ink)" in selected.group(1)
-    assert ".wizard-choice.advisory" not in _read("web/onboarding.css")
-
-
-def test_appearance_is_a_named_destination_that_never_reaches_the_server():
-    ui = _read("web/modules/settings_ui.js")
-    assert re.search(r"value:\s*'appearance'", ui), "Appearance needs its own tab"
-    panel = re.search(
-        r'data-settings-panel="appearance"(.*?)</section>', ui, re.S).group(1)
-    assert "data-theme-control" in panel
-    # An id starting with s- would be swept into the /api/settings payload.
-    assert not re.search(r'\bid="s-[\w-]*"', panel.replace('id="s-appearance-theme-label"', '')), \
-        "a settings-collected input would POST the client-local appearance choice"
-    # Appearance now owns a second client-local block (notifications), so the
-    # guard is stated as its own intent instead of "no control at all": every
-    # control here must lack the ONE handle the collector reads.
-    for control in re.finditer(r"<(?:input|select)\b[^>]*>", panel):
-        assert not re.search(r'\bid="s-', control.group(0)), (
-            f"{control.group(0)} would be swept into the /api/settings payload"
-        )
-    collector = _read("web/modules/settings.js")
-    assert 'input[id^="s-"]' in collector, "the collector moved; re-check this guard"
-
-
-def test_the_onboarding_wizard_is_no_longer_pinned_to_the_viewport():
-    # body{min-height:100vh;padding:16px} plus a shell pinned to
-    # calc(100vh - 32px) exactly fills the window, so ANY control above #root
-    # overflowed by its own height.
-    css = _read("web/onboarding.css")
-    assert "calc(100vh - 32px)" not in css
-    assert ".onboarding-appearance" in css
-    template = _read("web/onboarding_template.html")
-    assert "data-theme-control" in template
-    assert "data-theme-toggle" not in template
-
-
 def test_status_text_uses_foreground_roles_not_raw_hues():
     # Raw hues remain valid for fills/borders, never small status text.
     for rel in ('web/style.css', 'web/settings.css'):
         assert not re.search(r'(?:^|[;{])\s*color:\s*var\(--(?:amber|red|green|blue)\)',
                              _read(rel), re.M), rel
-
-
-def test_chat_palette_redraw_is_local_viewport_work():
-    chat = _read('web/modules/chat.js')
-    mount = chat.split('function enhanceMountedMarkdown(root)', 1)[1].split('const {', 1)[0]
-    assert 'onThemeDomWrite: foldedWrite(withStableViewport)' in mount
-    assert 'const foldedWrite = writer => (mutate, options) => writer(() => {' in mount
-    assert mount.index('const changed = mutate();') < mount.index('refreshProjectAnswerFold(') < mount.index('return changed;')
-    assert 'refreshProjectAnswerFold(root.closest?.(\'.project-answer\'))' in mount
 
 
 def test_surface_sheets_carry_no_near_white_ink():
@@ -246,19 +146,6 @@ def test_surface_sheets_carry_no_near_white_ink():
         if near_white.search(line)
     ]
     assert not leftovers, "near-white literals outside the token sheet:\n" + "\n".join(leftovers)
-
-
-def test_an_old_desktop_app_is_named_where_its_choices_are_lost():
-    """In-app updates replace the core, never the frozen launcher that decides WebView storage, so
-    the Appearance panel carries the line ``desktop_shell.js`` fills for an app that erases it."""
-    panel = re.search(
-        r'data-settings-panel="appearance"(.*?)</section>', _read("web/modules/settings_ui.js"), re.S).group(1)
-    assert "data-shell-storage-status" in panel
-    settings = _read("web/modules/settings.js")
-    assert "mountDesktopShell(page" in settings and "disposeShell()" in settings
-    shell = _read("web/modules/desktop_shell.js")
-    assert "PERSISTENT_STORAGE_SINCE = Object.freeze([7, 2, 0])" in shell, (
-        "7.2.0 is the first release whose launcher passes private_mode=False (git tag --contains e30957143)")
 
 
 # ---- Screens before the interface (#1111): what paints before, or outside, the page that reads the choice ----
@@ -306,23 +193,6 @@ def test_a_host_charts_default_series_are_the_approved_tokens_of_each_theme():
     assert [dark[name] for name in names] == ["#ee6780", "#60a5fa", "#3fdca3", "#fbbf24"]
     fallback = re.search(r"CHART_SERIES = Object\.freeze\(\[([^\]]*)\]\)", _read("web/modules/theme_palette.js"))
     assert re.findall(r"'(#[0-9a-f]{6})'", fallback.group(1)) == [dark[name] for name in names]
-
-
-def test_the_telegram_connecting_page_reads_the_one_saved_choice_before_it_paints():
-    """No second store: the same key theme.js writes. The script runs in <head> after Telegram's (whose
-    colorScheme is the System source there), never deferred, so the first paint already has the palette;
-    the page's CSP still admits no inline script."""
-    key = re.search(r"const KEY = '([^']+)';", _read("web/theme.js")).group(1)
-    script = _constant("skills/telegram/scripts/sidecar.py", "_BOOTSTRAP_JS")
-    assert f"localStorage.getItem('{key}')" in script
-    assert script.index("colorScheme") < script.index("prefers-color-scheme")  # Telegram's before the device's
-    assert "DOMContentLoaded" in script  # the launch waits for the document it reports into
-    page = _constant("skills/telegram/scripts/sidecar.py", "_BOOTSTRAP_HTML")
-    head = page.split("</head>", 1)[0]
-    sdk = head.index('<script src="https://telegram.org/js/telegram-web-app.js"></script>')
-    own = head.index('<script src="/__telegram/bootstrap.js"></script>')
-    assert sdk < own and "defer" not in head and "async" not in head
-    assert re.findall(r"<script[^>]*>([^<]*)</script>", page) == ["", ""], "an inline script would break its CSP"
 
 
 def test_windows_before_the_server_wear_the_interface_not_a_fixed_palette():

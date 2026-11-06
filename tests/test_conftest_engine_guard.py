@@ -19,7 +19,7 @@ from ouroboros.claudexor_daemon import CUSTODY_PURPOSE
 from ouroboros.process_custody import spawn_supervised
 from tests.conftest import engine_left_at_the_shared_root
 
-pytestmark = [pytest.mark.serial,
+pytestmark = [
               pytest.mark.skipif(os.name == "nt", reason="custody spawn/stop mechanics are POSIX-first")]
 
 

@@ -269,9 +269,12 @@ def test_local_candidate_is_measured_as_prepared_without_a_compactor(data_root, 
     assert final["candidate_raw_size_bytes"] == len(raw)
 
 
-@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
-@pytest.mark.parametrize("timeout", [33.0, None, 0.0, -1.0])
-@pytest.mark.parametrize("measurement_supported", [False, True], ids=["estimated", "measured"])
+@pytest.mark.parametrize(("measurement_supported", "timeout", "asynchronous"), [
+    pytest.param(False, 33.0, False, id='estimated-33.0-sync'),
+    pytest.param(False, 0.0, False, id='estimated-0.0-sync'),
+    pytest.param(True, None, True, id='measured-None-async'),
+    pytest.param(True, -1.0, True, id='measured--1.0-async'),
+])
 def test_local_transport_timeout_is_separate_from_physical_candidate(
     data_root, monkeypatch, asynchronous, timeout, measurement_supported,
 ):

@@ -130,9 +130,11 @@ def test_the_reader_and_the_microphone_go_on_while_a_delivery_is_measured(resume
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('next_connection', ['resumed', 'fresh'])
-@pytest.mark.parametrize('close', ['writer_first', 'writer_first_with_microphone', 'reader_first'])
-@pytest.mark.parametrize('item', ['output', 'mail'])
+@pytest.mark.parametrize(("item", "close", "next_connection"), [
+    ('output', 'writer_first', 'resumed'),
+    ('output', 'reader_first', 'resumed'),
+    ('mail', 'writer_first_with_microphone', 'fresh'),
+])
 def test_a_release_on_a_resumed_connection_whose_socket_closes(item, close, next_connection):
     """Whichever side of the driver sees the close first, the reader classifies it and the call goes on. The item stays in
     custody until a write succeeds: a resume gets it once, before any pointer, and a fresh fit holds it and owes one answer."""
@@ -191,8 +193,7 @@ def test_a_release_on_a_resumed_connection_whose_socket_closes(item, close, next
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('next_connection', ['resumed', 'fresh'])
-@pytest.mark.parametrize('item', ['output', 'mail'])
+@pytest.mark.parametrize(("item", "next_connection"), [('output', 'resumed'), ('mail', 'fresh')])
 def test_a_first_release_whose_socket_closes_keeps_the_call(item, next_connection):
     """The route that used to escape the call's global tool worker: no resume before it, nothing but a refused fit."""
     is_output, resumes = item == 'output', next_connection == 'resumed'

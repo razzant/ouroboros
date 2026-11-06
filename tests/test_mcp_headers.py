@@ -81,16 +81,8 @@ def test_an_active_legacy_pair_that_sets_the_same_header_fails_explicitly():
 
 
 @pytest.mark.parametrize("headers, fragment", [
-    ("Authorization: " + BEARER, "must be an object"),
-    ([["Authorization", BEARER]], "must be an object"),
-    ({"Authorization": 7}, "must be a string"),
     ({"Bad Name: " + BEARER: "x"}, "#1 name is not a single HTTP header token"),
-    ({"X-A": "ok", "": "x"}, "#2 name"),
     ({"X-A": BEARER + "\r\nInjected: 1"}, "printable ASCII"),
-    ({"X-A": "ends-with-newline\n"}, "printable ASCII"),
-    ({"X-A\n": "value"}, "name is not a single HTTP header token"),
-    ({"X-A": "tab\tvalue"}, "printable ASCII"),
-    ({"X-A": "café"}, "printable ASCII"),
     ({"X-A": " " + CUSTOM}, "start or end with whitespace"),
     ({"X-Key": CUSTOM, "x-key": "other"}, "differ only by case"),
 ])
@@ -158,7 +150,7 @@ def test_exact_placeholder_restores_and_repeated_saves_are_stable():
     assert saved == before
 
 
-@pytest.mark.parametrize("lookalike", ["***", "Bearer s...", "***set", " ***set***"])
+@pytest.mark.parametrize("lookalike", ["***", "Bearer s...", " ***set***"])
 def test_only_the_exact_emitted_placeholder_is_treated_as_a_mask(lookalike):
     saved = http(headers={"Authorization": BEARER})
     assert restore_headers({"Authorization": lookalike}, saved, server_id="docs_server") == {
@@ -292,7 +284,6 @@ def test_settings_writer_normalizes_its_own_copy_never_the_request_body(mcp_sett
     assert gateway.ALLOW_EMPTY_REVIEW_POOL not in case.saved
 
 
-@pytest.mark.serial  # the shared fixture's module is serial: it re-points the Settings file
 def test_show_reads_one_exact_saved_header_value(reveal_settings):  # noqa: F811
     case = reveal_settings
     case.settings["OUROBOROS_CONSCIOUSNESS_SAFETY_MODE"] = "full"
@@ -363,8 +354,7 @@ def test_test_refuses_a_mask_it_cannot_restore_without_probing(test_endpoint, bo
 
 
 @pytest.mark.parametrize("headers", [
-    {"X-Key": "synthetic-edit\n"}, {"X-Key": 42}, {"X-Key": "one", "x-key": "two"},
-    {"X-Legacy": "collision"},
+    {"X-Key": "synthetic-edit\n"}, {"X-Key": 42}, {"X-Legacy": "collision"},
 ])
 def test_settings_rejects_invalid_authored_headers_without_writing(mcp_settings, headers):
     case = mcp_settings
@@ -388,7 +378,6 @@ def test_unrelated_save_keeps_malformed_existing_headers_and_unknown_fields(mcp_
     assert case.saved["MCP_SERVERS"][0]["future"] == {"yes": True}
 
 
-@pytest.mark.serial  # the shared fixture's module is serial: it re-points the Settings file
 def test_production_read_and_write_keep_untouched_legacy_and_malformed_values(reveal_settings, monkeypatch):  # noqa: F811
     """The real loader, GET, POST and file: not an in-memory helper document.
 

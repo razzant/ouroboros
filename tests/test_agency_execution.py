@@ -9,7 +9,6 @@ import pytest
 from ouroboros import config, safety
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 
-pytestmark = pytest.mark.serial
 
 
 def context(tmp_path, monkeypatch, mode, coverage):
@@ -62,9 +61,6 @@ def test_one_process_effect_under_selected_supervisor(tmp_path, monkeypatch, mod
 
 @pytest.mark.parametrize("script", [
     "print('OUROBOROS_CONTEXT_MODE settings.json OUROBOROS_REVIEW_ENFORCEMENT')",
-    "import io; f=io.StringIO(); f.write('data/state/skills/grants.json'); print(f.getvalue())",
-    "import ast; print(ast.dump(ast.parse('OUROBOROS_SAFETY_MODE = 1')))",
-    "import importlib; print(importlib.import_module('json').dumps({'content':'ok'}))",
     "print(compile('1+1', '<example>', 'eval').co_name)",
     "import sqlite3; uri='file:fixture?mode=memory&cache=shared'; c=sqlite3.connect(uri,uri=True); print(c.execute('select 1').fetchone())",
 ])

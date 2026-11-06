@@ -9,7 +9,7 @@ import pytest
 from tests.test_subscription_setup_browser import subscription_ui as subscription_ui
 from tests.test_subscription_setup_browser import capture, settings_saves
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def _watch_previews(page):

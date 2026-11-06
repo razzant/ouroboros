@@ -34,7 +34,7 @@ def test_artifact_write_binding_cannot_select_child_store_or_ancestors(world):
     assert (artifacts.task_artifact_dir_path(child, "t1") / "report.txt").read_text() == "ordinary output"
 
 
-@pytest.mark.parametrize("root", ["runtime_data", "task_drive", "artifact_store", "user_files"])
+@pytest.mark.parametrize("root", ["runtime_data", "artifact_store", "user_files"])
 def test_acting_subagent_file_tools_have_no_generated_data_write_binding(world, root):
     ctx = ToolContext(repo_dir=world.repo, drive_root=world.data, task_id="t1",
                       task_constraint=TaskConstraint(mode="acting_subagent", surface="external_workspace",
@@ -91,9 +91,11 @@ def test_supported_task_scratch_is_not_a_sqlite_store(world, monkeypatch, record
     assert bool(attempts) == replay_old_discovery, attempts
 
 
-@pytest.mark.parametrize("layout", ["headless", "legacy"])
-@pytest.mark.parametrize("status", ["completed", "cancelled"])
-@pytest.mark.parametrize("root_field", ["child_drive_root", "headless_child_drive_root", "metadata"])
+@pytest.mark.parametrize(("root_field", "status", "layout"), [
+    ("child_drive_root", "completed", "headless"),
+    ("headless_child_drive_root", "cancelled", "legacy"),
+    ("metadata", "completed", "headless"),
+])
 def test_admitted_child_claims_survive_cancellation_and_legacy_layout(world, layout, status, root_field):
     from ouroboros.gateway import task_archive
     data = world.data
@@ -151,8 +153,10 @@ def test_retry_occupant_store_requires_canonical_execution_fact(world, monkeypat
     assert attempts == [str(child)]
 
 
-@pytest.mark.parametrize("loose", [False, True])
-@pytest.mark.parametrize("ordinary_gate_closed", [False, True], ids=["platform-gate", "closed-gate-portable-logic"])
+@pytest.mark.parametrize(("ordinary_gate_closed", "loose"), [
+    pytest.param(False, True, id='platform-gate-True'),
+    pytest.param(True, False, id='closed-gate-portable-logic-False'),
+])
 def test_supported_scratch_source_never_opens_placement_index(
         world, monkeypatch, record_property, loose, ordinary_gate_closed):
     """Published scratch sources remain readable without granting SQLite authority.

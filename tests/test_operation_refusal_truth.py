@@ -10,7 +10,6 @@ from ouroboros import mcp_client, owner_pause
 from tests.test_batch4_producer_custody import _registry
 from tests.test_invocation_ownership import claims, owner, run
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("code,status", [("OWNER_OPERATION_REFUSED", "blocked"),

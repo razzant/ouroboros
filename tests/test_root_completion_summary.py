@@ -9,9 +9,11 @@ wake = quiet.wake
 _no_post_task_model = quiet._no_post_task_model
 
 
-@pytest.mark.parametrize("metadata,direct", [({}, True), ({}, False),
-    ({**quiet.SCHEDULE, "presence": {"binding_id": "b1"}}, False)])
-@pytest.mark.parametrize("action", ["finish", "stop"])
+@pytest.mark.parametrize(("action", "metadata", "direct"), [
+    pytest.param("finish", {}, True, id='finish-metadata0-True'),
+    pytest.param("finish", {**quiet.SCHEDULE, "presence": {"binding_id": "b1"}}, False, id='finish-metadata2-False'),
+    pytest.param("stop", {}, False, id='stop-metadata1-False'),
+])
 def test_root_may_close_with_a_sentence_without_gaining_silent_authority(wake, metadata, direct, action):
     wake.ctx.task_id, wake.ctx.is_direct_chat, wake.ctx.task_metadata = quiet.TASK_ID, direct, metadata
     assert "COMPLETION_ARGUMENT" in _finish_task(wake.ctx, action="finish", silent=True)

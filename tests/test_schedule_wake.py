@@ -14,14 +14,12 @@ import datetime as dt
 import time
 from types import SimpleNamespace
 
-import pytest
 
 from ouroboros.runtime_limits import BODY_MAINTENANCE_INTERVAL_SEC
 from ouroboros.task_results import write_task_result
 from tests.test_schedule_occurrence import _row, _rows
 from tests.test_schedule_occurrence import q as _q
 
-pytestmark = pytest.mark.serial
 q = _q
 
 

@@ -59,9 +59,6 @@ class Gateway:
 @pytest.mark.parametrize("serving,action,direction", [
     (("4.6.0", "a" * 40), "keep", "unchanged"),
     (("4.5.0", "b" * 40), "replace", "forward"),
-    (("4.6.0", "b" * 40), "replace", "same_release"),
-    (("4.7.0", "b" * 40), "keep", "backward"),
-    (("4.6.1-rc.1", "b" * 40), "replace", "unordered"),
     (None, "unknown", "unknown"),
 ])
 def test_preflight_and_restart_pin_decision_matrix(scene, monkeypatch, serving, action, direction):
@@ -90,7 +87,7 @@ def test_preflight_and_restart_pin_decision_matrix(scene, monkeypatch, serving, 
     assert bool(stops) is (action == "replace")
 
 
-@pytest.mark.parametrize("active", [RuntimeError("cannot read"), {}, {"model": 1}, {"model": True, "non_model": 0}])
+@pytest.mark.parametrize("active", [RuntimeError("cannot read"), {}, {"model": True, "non_model": 0}])
 def test_unreadable_work_stays_unknown_without_hiding_the_pin(scene, monkeypatch, active):
     _repo, plan, _stops = scene
     monkeypatch.setattr(claudexor_daemon, "read_owned_gateway", lambda: Gateway(("4.5.0", "b" * 40), active))

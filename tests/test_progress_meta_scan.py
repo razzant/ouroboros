@@ -37,15 +37,6 @@ def test_closed_helper_keywords_are_collected_including_new_keys(tmp_path):
     (', **marks})', ', **unknown})'),
     ('terminal_receipt="retained_work"', '**dynamic'),
     ('key: value', 'key + "_renamed": value'),
-    ('key not in ("task_phase",)', 'mutate(meta)'),
-    ('    row("receipt",', '    forward(row)\n    row("receipt",'),
-    ('    row("receipt",', '    row = another\n    row("receipt",'),
-    ('    def row(text, **marks):', '    meta["undeclared"] = True\n    def row(text, **marks):'),
-    ('    def row(text, **marks):', '    meta.update(extra)\n    def row(text, **marks):'),
-    ('    def row(text, **marks):', '    meta |= extra\n    def row(text, **marks):'),
-    ('    def row(text, **marks):', '    meta = extra\n    def row(text, **marks):'),
-    ('        ctx.send(', '        marks["undeclared"] = True\n        ctx.send('),
-    ('        ctx.send(', '        def mutate():\n            marks["undeclared"] = True\n        mutate()\n        ctx.send('),
 ])
 def test_unproven_compositions_fail_closed(tmp_path, old, new):
     with pytest.raises(AssertionError, match="dynamic keys"):

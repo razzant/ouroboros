@@ -109,20 +109,21 @@ PAID, SUBSCRIPTION = 'openai/gpt-5.2', 'claudexor::codex=gpt-6-astra'
 ROUTES = [('local-model', True, False), (SUBSCRIPTION, False, False), (PAID, False, True)]
 
 
-@pytest.mark.parametrize('model, local, pays', ROUTES)
-def test_the_reached_global_limit_owns_an_authored_stop_only_on_a_paid_route(monkeypatch, model, local, pays):
+def test_the_reached_global_limit_owns_an_authored_stop_only_on_a_paid_route(subtests, monkeypatch):
     """Owner 2A: the limit refuses paid admission only, so on a $0 route (local, an unbilled subscription) neither
     the task's wallet snapshot nor a fresh wallet at zero makes its own stop a budget failure; the root cap binds
     every route."""
-    from ouroboros.loop_budget import authored_completion_budget_exhausted
-    import ouroboros.loop as loop
-    ctx = SimpleNamespace(active_use_local=local, active_model=model, accumulated_usage={'cost': 0.0})
-    monkeypatch.setattr('ouroboros.loop_budget._wrapup_global_remaining', lambda: 10)
-    assert authored_completion_budget_exhausted(ctx, 0, None) is pays  # the snapshot the task started with
-    monkeypatch.setattr('ouroboros.loop_budget._wrapup_global_remaining', lambda: 0)
-    assert authored_completion_budget_exhausted(ctx, 10, None) is pays  # the wallet reached zero meanwhile
-    monkeypatch.setattr(loop, '_loop_tree_accounting', lambda **kw: {'settled_usd': 5.0, 'accounted_usd': 5.0})
-    assert authored_completion_budget_exhausted(ctx, 10, SimpleNamespace(root_cap_usd=5.0)) is True
+    for model, local, pays in ROUTES:
+        with subtests.test(model=model, local=local, pays=pays), monkeypatch.context() as monkeypatch:
+            from ouroboros.loop_budget import authored_completion_budget_exhausted
+            import ouroboros.loop as loop
+            ctx = SimpleNamespace(active_use_local=local, active_model=model, accumulated_usage={'cost': 0.0})
+            monkeypatch.setattr('ouroboros.loop_budget._wrapup_global_remaining', lambda: 10)
+            assert authored_completion_budget_exhausted(ctx, 0, None) is pays  # the snapshot the task started with
+            monkeypatch.setattr('ouroboros.loop_budget._wrapup_global_remaining', lambda: 0)
+            assert authored_completion_budget_exhausted(ctx, 10, None) is pays  # the wallet reached zero meanwhile
+            monkeypatch.setattr(loop, '_loop_tree_accounting', lambda **kw: {'settled_usd': 5.0, 'accounted_usd': 5.0})
+            assert authored_completion_budget_exhausted(ctx, 10, SimpleNamespace(root_cap_usd=5.0)) is True
 
 
 @pytest.mark.parametrize('model, local, pays', ROUTES)

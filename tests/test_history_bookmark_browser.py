@@ -16,7 +16,7 @@ from tests.test_chat_history_paging_browser import (
 from tests.test_chat_history_recovery_browser import _click_project
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])

@@ -13,6 +13,7 @@ import pytest
 
 from devtools.e2e_live import scenarios
 from devtools.e2e_live.ui_probe import UIProbe
+from tests._cases import case_folders
 
 
 def _repo(root: pathlib.Path) -> pathlib.Path:
@@ -281,70 +282,73 @@ THEME_READ_PROBLEMS = {
 }
 
 
-@pytest.mark.parametrize("problem", sorted(THEME_READ_PROBLEMS))
-def test_sm1_oracle_requires_every_theme_of_both_documents_and_the_landed_commit(tmp_path, problem):
-    calls = []
-    landed = scenarios.css_theme_tokens(scenarios.css_with_accent(SHEET_SEED, scenarios.SM1_NEW_ACCENT))
+def test_sm1_oracle_requires_every_theme_of_both_documents_and_the_landed_commit(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for problem in sorted(THEME_READ_PROBLEMS):
+        tmp_path = next(case_paths)
+        with subtests.test(problem=problem):
+            calls = []
+            landed = scenarios.css_theme_tokens(scenarios.css_with_accent(SHEET_SEED, scenarios.SM1_NEW_ACCENT))
 
-    class PaletteUI:
-        path = scheme = ""
+            class PaletteUI:
+                path = scheme = ""
 
-        def color_scheme(self, scheme):
-            calls.append(("scheme", scheme))
-            self.scheme = scheme
+                def color_scheme(self, scheme):
+                    calls.append(("scheme", scheme))
+                    self.scheme = scheme
 
-        def goto(self, path, *, ready_selector):
-            self.path = path
-            calls.append((path, ready_selector))
+                def goto(self, path, *, ready_selector):
+                    self.path = path
+                    calls.append((path, ready_selector))
 
-        def computed_property(self, selector, name):
-            assert selector == ":root"
-            wizard, light = self.path == "/onboarding", self.scheme == "light"
-            if wizard and problem == "missing-sheet":
-                return ""
-            if name == "--native-color-scheme":
-                return "dark" if problem == "light-never-painted" else self.scheme
-            if name == "--accent":
-                if wizard and problem == "wizard-stale-accent":
-                    return "#c93545"
-                if (light and problem == "light-keeps-old-accent") or (not light and problem == "dark-keeps-old-accent"):
-                    return "#c93545" if light else "#f45152"
-            if name == "--tone-crimson" and not light and problem == "dark-control-fill-at-seed":
-                return "#d32d43"
-            if name == "--focus-accent-border":
-                if wizard and problem == "wizard-stale-focus":
-                    return "#00ff00"
-                if light and problem == "light-role-at-seed":
-                    return "#bf2f40"
-            return landed[self.scheme].get(name, "")
+                def computed_property(self, selector, name):
+                    assert selector == ":root"
+                    wizard, light = self.path == "/onboarding", self.scheme == "light"
+                    if wizard and problem == "missing-sheet":
+                        return ""
+                    if name == "--native-color-scheme":
+                        return "dark" if problem == "light-never-painted" else self.scheme
+                    if name == "--accent":
+                        if wizard and problem == "wizard-stale-accent":
+                            return "#c93545"
+                        if (light and problem == "light-keeps-old-accent") or (not light and problem == "dark-keeps-old-accent"):
+                            return "#c93545" if light else "#f45152"
+                    if name == "--tone-crimson" and not light and problem == "dark-control-fill-at-seed":
+                        return "#d32d43"
+                    if name == "--focus-accent-border":
+                        if wizard and problem == "wizard-stale-focus":
+                            return "#00ff00"
+                        if light and problem == "light-role-at-seed":
+                            return "#bf2f40"
+                    return landed[self.scheme].get(name, "")
 
-        screenshot = close = lambda self, *args: None
+                screenshot = close = lambda self, *args: None
 
-    server = types.SimpleNamespace(base_url="http://lane.test")
-    ctx = scenarios.LaneContext(server=server, clone=tmp_path, data_root=tmp_path, oracle=None,
-                                harness=None, ui_resolver=lambda _: (PaletteUI(), ""), ui_reason="",
-                                shots=tmp_path, log=lambda _: None, task_timeout=1,
-                                restart=lambda: (calls.append("restart") or server))
-    ctx.check("commit_landed", problem != "no-commit")
-    seed = scenarios.css_with_accent(SHEET_SEED, scenarios.SM1_NEW_ACCENT) if problem == "seed-already-target" else SHEET_SEED
-    names = scenarios.SM1_REQUIRED_PALETTE | scenarios.sm1_palette_tokens(SHEET_SEED).keys()
-    scenarios.check_sm1_rendered_palette(ctx, names, served=problem != "not-adopted", seed_css=seed)
-    assert calls == [step for path, ready in (("/", "#chat-input"), ("/onboarding", ".wizard-shell"))
-                     for theme in ("light", "dark") for step in (("scheme", theme), (path, ready))], (
-        "every theme is asked for before its document opens; the adoption restarted the server, the stand never does")
-    expected = THEME_READ_PROBLEMS[problem]
-    for (document, theme), reason in expected.items():
-        assert reason in ctx.facts["palette_problems"][document][theme], ctx.facts["palette_problems"]
-    for document in ("app", "onboarding"):
-        for theme in scenarios.SM1_THEMES:
-            assert bool(ctx.facts["palette_problems"][document][theme]) is ((document, theme) in expected), ctx.facts["palette_problems"]
-    documents_ok = {document: not any(key[0] == document for key in expected) and problem not in {"no-commit", "not-adopted"}
-                    for document in ("app", "onboarding")}
-    assert ctx.checks["ui_app_palette"] is documents_ok["app"] and ctx.checks["ui_onboarding_palette"] is documents_ok["onboarding"]
-    assert ctx.checks["ui_computed_style"] is (problem == "none"), "a document or theme apart, or an unserved commit, is no consistency"
-    assert all(len(ctx.facts["palette_computed"][document][theme]) == len(names)
-               for document in ("app", "onboarding") for theme in scenarios.SM1_THEMES)
-    ctx.close_ui()
+            server = types.SimpleNamespace(base_url="http://lane.test")
+            ctx = scenarios.LaneContext(server=server, clone=tmp_path, data_root=tmp_path, oracle=None,
+                                        harness=None, ui_resolver=lambda _: (PaletteUI(), ""), ui_reason="",
+                                        shots=tmp_path, log=lambda _: None, task_timeout=1,
+                                        restart=lambda: (calls.append("restart") or server))
+            ctx.check("commit_landed", problem != "no-commit")
+            seed = scenarios.css_with_accent(SHEET_SEED, scenarios.SM1_NEW_ACCENT) if problem == "seed-already-target" else SHEET_SEED
+            names = scenarios.SM1_REQUIRED_PALETTE | scenarios.sm1_palette_tokens(SHEET_SEED).keys()
+            scenarios.check_sm1_rendered_palette(ctx, names, served=problem != "not-adopted", seed_css=seed)
+            assert calls == [step for path, ready in (("/", "#chat-input"), ("/onboarding", ".wizard-shell"))
+                             for theme in ("light", "dark") for step in (("scheme", theme), (path, ready))], (
+                "every theme is asked for before its document opens; the adoption restarted the server, the stand never does")
+            expected = THEME_READ_PROBLEMS[problem]
+            for (document, theme), reason in expected.items():
+                assert reason in ctx.facts["palette_problems"][document][theme], ctx.facts["palette_problems"]
+            for document in ("app", "onboarding"):
+                for theme in scenarios.SM1_THEMES:
+                    assert bool(ctx.facts["palette_problems"][document][theme]) is ((document, theme) in expected), ctx.facts["palette_problems"]
+            documents_ok = {document: not any(key[0] == document for key in expected) and problem not in {"no-commit", "not-adopted"}
+                            for document in ("app", "onboarding")}
+            assert ctx.checks["ui_app_palette"] is documents_ok["app"] and ctx.checks["ui_onboarding_palette"] is documents_ok["onboarding"]
+            assert ctx.checks["ui_computed_style"] is (problem == "none"), "a document or theme apart, or an unserved commit, is no consistency"
+            assert all(len(ctx.facts["palette_computed"][document][theme]) == len(names)
+                       for document in ("app", "onboarding") for theme in scenarios.SM1_THEMES)
+            ctx.close_ui()
 
 
 def test_a_shot_waits_for_the_page_briefly_and_never_gates_on_it(tmp_path):

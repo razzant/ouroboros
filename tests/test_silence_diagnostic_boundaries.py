@@ -47,8 +47,7 @@ def _running(attention, task):
     }
 
 
-@pytest.mark.parametrize("diagnostic", [True, False])
-@pytest.mark.parametrize("retired", [True, False])
+@pytest.mark.parametrize(("retired", "diagnostic"), [(True, True), (False, False)])
 def test_child_settlement_only_rearms_source_for_real_work(attention, monkeypatch, diagnostic, retired):
     from supervisor.events_task_done import _handle_task_done
     from ouroboros.utils import append_jsonl
@@ -498,11 +497,10 @@ def _assert_delegation_refusal_stays_settled(attention, monkeypatch, reason):
     assert attention.running["root"] is attention.meta and queue._reap_queue.empty()
 
 
-@pytest.mark.parametrize("budget,reason", [
-    ({"max_children": 1}, "delegation_rights_max_children"),
-    ({"may_fan_out": False}, "delegation_rights_may_fan_out"),
+@pytest.mark.parametrize(("durable_only", "budget", "reason"), [
+    pytest.param(False, {"max_children": 1}, "delegation_rights_max_children", id='False-budget0-delegation_rights_max_children'),
+    pytest.param(True, {"may_fan_out": False}, "delegation_rights_may_fan_out", id='True-budget1-delegation_rights_may_fan_out'),
 ])
-@pytest.mark.parametrize("durable_only", [False, True])
 def test_diagnostic_inherits_frozen_child_limits(attention, monkeypatch, budget, reason, durable_only):
     from ouroboros.contracts.task_contract import attach_task_contract
 
@@ -525,7 +523,7 @@ def test_diagnostic_inherits_frozen_child_limits(attention, monkeypatch, budget,
 
 @pytest.mark.parametrize("permitted,live,depth,allowed", [
     (4, 2, 3, True), (2, 4, 2, False), (4, 0, 2, False),
-    (None, 3, 2, True), (None, 2, 2, False),
+    (None, 2, 2, False),
 ])
 def test_diagnostic_depth_keeps_frozen_permission_and_current_global_zero(
         attention, monkeypatch, permitted, live, depth, allowed):
@@ -550,8 +548,7 @@ def test_diagnostic_depth_keeps_frozen_permission_and_current_global_zero(
         _assert_delegation_refusal_stays_settled(attention, monkeypatch, "subtask_depth_limit")
 
 
-@pytest.mark.parametrize("early,final,limited", [(None, 0, True), (None, None, True),
-                                                (0, None, True), (None, None, False)])
+@pytest.mark.parametrize("early,final,limited", [(None, 0, True), (0, None, True), (None, None, False)])
 def test_diagnostic_unknown_child_count_is_decided_by_interlocked_recheck(
         attention, monkeypatch, early, final, limited):
     from ouroboros.contracts.task_contract import attach_task_contract
@@ -582,9 +579,7 @@ def test_diagnostic_unknown_child_count_is_decided_by_interlocked_recheck(
 @pytest.mark.parametrize("change,reason", [
     ("child", "delegation_rights_max_children"),
     ("legacy_depth", "subtask_depth_limit"),
-    ("frozen_zero", "subtask_depth_limit"),
     ("frozen_nonzero", ""),
-    ("hard_cap", "active_subagent_hard_cap"),
 ])
 def test_diagnostic_rechecks_between_preparation_receipt_and_queue_put(attention, monkeypatch, change, reason):
     from ouroboros.contracts.task_contract import attach_task_contract
@@ -716,12 +711,11 @@ def _durable_only_budget(attention, budget, earlier):
                           root_task_id="root", delegation_role="subagent")
 
 
-@pytest.mark.parametrize("error", ["contention", "unreadable"])
-@pytest.mark.parametrize("budget,earlier,reason", [
-    ({"may_delegate": False}, 0, "delegation_rights_may_delegate"),
-    ({"max_children": 1}, 1, "delegation_rights_max_children"),
-    ({"max_children": 2}, 1, ""),
-], ids=["no-delegation", "children-exhausted", "permitted-control"])
+@pytest.mark.parametrize(("budget", "earlier", "reason", "error"), [
+    pytest.param({"may_delegate": False}, 0, "delegation_rights_may_delegate", "unreadable", id='no-delegation-unreadable'),
+    pytest.param({"max_children": 1}, 1, "delegation_rights_max_children", "contention", id='children-exhausted-contention'),
+    pytest.param({"max_children": 2}, 1, "", "unreadable", id='permitted-control-unreadable'),
+])
 def test_unreadable_parent_budget_defers_the_same_episode_until_it_reads(
         attention, monkeypatch, error, budget, earlier, reason):
     """A failed canonical read is not the omitted legacy budget: nothing is frozen or

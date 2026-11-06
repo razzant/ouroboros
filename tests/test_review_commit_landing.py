@@ -147,6 +147,33 @@ def test_the_landing_fact_types_only_what_trees_prove():
     assert public_commit_landings({"commit_landings": {"commit_sha": sha}}) == []
 
 
+def test_the_merge_reader_keeps_a_real_landing_portable_and_links_only_its_exact_commit(candidate, monkeypatch):  # noqa: F811
+    """The real gate's landing reaches ``pr_merge``'s reader as commit/tree/parent/relation only; that exact
+    commit links the index review to a merged head, while the critic's FAIL stays the verdict."""
+    from ouroboros import merge_receipts
+
+    ctx = candidate
+    _mode(monkeypatch, "pro", "advisory")
+    _prepare(ctx, monkeypatch)
+    _install_reviewer(ctx, monkeypatch, REJECTING)
+    before = _head(ctx)
+    reference = _reference(git._commit_reviewed(ctx, "Fix amount", skip_advisory_review=True))
+    git._commit_reviewed(ctx, "Fix amount", review_reference=reference,
+                         author_disposition={"disposition": "rejected", "rationale": "A private reason."})
+    head, record = _head(ctx), _record(ctx, reference)
+    bound = merge_receipts.load_review_record(rl.ledger_root(ctx), record["record_id"])
+    assert bound["subject"]["kind"] != merge_receipts.COMMITTED_SUBJECT_KIND and bound["subject"]["base"] == before
+    assert bound["commit_landings"] == [{"commit_sha": head, "tree_sha": _tree(ctx), "parent_sha": before,
+                                         "reviewed_subject": "same"}]
+    assert "A private reason." not in repr(bound) and record["author_decision"]["subject_hash"] not in repr(bound)
+    assert bound["verdict"]["aggregate"] == "FAIL" and not merge_receipts.record_approves(bound)
+    assert merge_receipts.review_coverage(None, [], head, bound) == {"status": "covers_head", "gaps": [],
+                                                                      "landing": "same"}
+    for other, gaps in ((head[:12], ["subject_kind_not_committed", "merged_head_not_full_sha"]),
+                        (before, ["subject_kind_not_committed"])):  # a short head; a commit that never landed here
+        assert merge_receipts.review_coverage(None, [], other, bound) == {"status": "unknown", "gaps": gaps}
+
+
 def test_each_commit_lands_once_and_the_record_keeps_every_one_while_its_panel_says_what_it_left_out():
     record = {"record_id": "r", "subject": {"tree_sha": "b" * 40}, "verdict": {"aggregate": "PASS"}}
     for n in range(20):

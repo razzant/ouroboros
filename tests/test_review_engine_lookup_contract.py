@@ -18,7 +18,6 @@ from tests._review_session_route_shared import (
 
 _owned_gateway_uses_each_test_transport = _transport_fixture
 fake_route = _route_fixture
-pytestmark = pytest.mark.serial  # the session fixture mutates its shared transport registry
 RESPONSES = json.loads((Path(__file__).parent / "fixtures/review_engine_lookup_problems.json")
                        .read_text(encoding="utf-8"))["responses"]
 
@@ -29,25 +28,26 @@ def _problem(row):
     return gateway._problem(httpx.Response(row["status"], json=row["problem"]))
 
 
-@pytest.mark.parametrize("row", RESPONSES, ids=lambda r: f'{r["route"]}-{r["scenario"]}')
-def test_engine_wire_problem_reaches_the_review_actor_without_reclassification(row):
-    error = _problem(row)
-    assert error.code == row["problem"]["code"] and error.status_code == row["status"]
-    assert error.required_actions == tuple(row["problem"]["requiredActions"])
-    envelope = parse_model_response("example/model", {
-        "error": str(error), "failure_code": error.code, "http_status": error.status_code,
-        "reported_cause": error.reported_cause, "usage": {},
-    }, {})
-    record = parse_seat_answers({"results": [envelope]}, {}).actor_records[0].to_dict()
-    assert record["failure_code"] == error.code and record["http_status"] == error.status_code
-    context = row["problem"]["context"]
-    if isinstance(context.get("cause"), dict):
-        assert record["reported_cause"] == error.reported_cause
-        assert context["stage"] in record["reported_cause"]
-        if context["cause"].get("code"):
-            assert context["cause"]["code"] in record["reported_cause"]
-    else:
-        assert record.get("reported_cause", "") == ""
+def test_engine_wire_problem_reaches_the_review_actor_without_reclassification(subtests):
+    for row in RESPONSES:
+        with subtests.test(row=row):
+            error = _problem(row)
+            assert error.code == row["problem"]["code"] and error.status_code == row["status"]
+            assert error.required_actions == tuple(row["problem"]["requiredActions"])
+            envelope = parse_model_response("example/model", {
+                "error": str(error), "failure_code": error.code, "http_status": error.status_code,
+                "reported_cause": error.reported_cause, "usage": {},
+            }, {})
+            record = parse_seat_answers({"results": [envelope]}, {}).actor_records[0].to_dict()
+            assert record["failure_code"] == error.code and record["http_status"] == error.status_code
+            context = row["problem"]["context"]
+            if isinstance(context.get("cause"), dict):
+                assert record["reported_cause"] == error.reported_cause
+                assert context["stage"] in record["reported_cause"]
+                if context["cause"].get("code"):
+                    assert context["cause"]["code"] in record["reported_cause"]
+            else:
+                assert record.get("reported_cause", "") == ""
 
 
 @pytest.mark.parametrize("route", ["create", "retry"])

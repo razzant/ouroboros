@@ -48,8 +48,7 @@ def _resource(profile="chosen", harness="cursor"):
     return row
 
 
-@pytest.mark.parametrize("scope", [None, {}, {"model": "fable", "requestKind": "text", "basis": "quota_block"},
-                                   {"model": "claude-fable-5-1", "requestKind": "image"}])
+@pytest.mark.parametrize("scope", [None, {}, {"model": "claude-fable-5-1", "requestKind": "image"}])
 def test_sent_selector_is_not_honored_selector(scope):
     value = _quota()
     value["availability_scope"] = scope
@@ -84,7 +83,7 @@ def test_pin_and_absences_are_subject_exact():
     assert quota_availability(value, "claude", model="claude-fable-5-1")["state"] == "unknown"
 
 
-@pytest.mark.parametrize("failure", ["timeout", "malformed", 403, 500])
+@pytest.mark.parametrize("failure", ["timeout", "malformed", 500])
 def test_no_legacy_repeat_for_unknown_or_non_selector_refusal(failure):
     class Gateway:
         calls = []

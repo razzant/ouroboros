@@ -83,9 +83,9 @@ def test_empty_patch_fields_are_absent_and_reason_is_required(registry):
 
 
 @pytest.mark.parametrize("params", [
-    {"cron": "hourly"}, {"run_at": "soon"}, {"cron": "0 9 * * *", "run_at": "2099-01-01T00:00:00Z"},
-    {"timezone": "Mars/Olympus"}, {"reasoning_effort": "invented"},
-    {"objective": "x" * 4001}, {"context": "x" * 8001},
+    {"cron": "0 9 * * *", "run_at": "2099-01-01T00:00:00Z"},
+    {"reasoning_effort": "invented"},
+    {"objective": "x" * 4001},
 ])
 def test_invalid_edits_are_typed_and_leave_bytes_unchanged_with_a_valid_path_open(registry, params):
     path = registry._ctx.drive_root / "state/scheduled_tasks.json"

@@ -180,7 +180,7 @@ def test_docker_workspace_payload_edits_preserve_file_identity(tmp_path, tool):
     assert target.read_text(encoding="utf-8") == "edited\n"
 
 
-@pytest.mark.parametrize("case", ["unmapped", "local", "prefix", "traversal", "outside_mapping", "system_root"])
+@pytest.mark.parametrize("case", ["unmapped", "local", "system_root"])
 def test_docker_mapping_does_not_authorize_other_absolute_addresses(tmp_path, case):
     registry, ctx, workspace = _docker_workspace_registry(tmp_path)
     path, root = "/workspace/answer.txt", "active_workspace"

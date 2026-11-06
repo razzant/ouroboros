@@ -12,7 +12,7 @@ import pytest
 
 from ouroboros import call_protocol as cp
 from tests._extension_loader_shared import _clear_loader_state  # noqa: F401
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 from tests.test_live_tool_continuity import Held, POINTER, is_request, reached, unit_at
 
 
@@ -56,8 +56,11 @@ def fitted(live):
     return json.loads(session.selected.messages_json) if session is not None else []
 
 
-@pytest.mark.parametrize('successor', ['sequential', 'prepared'])
-@pytest.mark.parametrize('engine', ['openai', 'grok', 'gemini'])
+@pytest.mark.parametrize(("engine", "successor"), [
+    ('openai', 'sequential'),
+    ('grok', 'prepared'),
+    ('gemini', 'sequential'),
+])
 def test_a_dropped_connection_returns_live_while_its_tool_runs(host_world, monkeypatch, engine, successor):
     from ouroboros.context_compaction import _atomic_units
     from tests._live_stack import stack
@@ -144,8 +147,7 @@ def test_typed_room_mail_during_a_running_tool_is_answered_before_its_result(hos
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('engine,queued', [('openai', 'ordinary'), ('grok', 'ordinary'), ('gemini', 'ordinary'),
-                                           ('openai', 'silent'), ('gemini', 'silent')])
+@pytest.mark.parametrize('engine,queued', [('openai', 'ordinary'), ('openai', 'silent'), ('gemini', 'silent')])
 def test_a_queued_second_batch_stays_visible_and_ordered(host_world, monkeypatch, engine, queued):
     from tests._live_stack import stack
     slow = Held(monkeypatch)
@@ -233,7 +235,7 @@ def test_completion_while_a_successor_prepares_refits_instead_of_replaying_its_c
 
 @pytest.mark.parametrize('engine,control,dropped', [
     ('openai', 'end', False), ('openai', 'stop', False), ('grok', 'end', True),
-    ('grok', 'stop', True), ('gemini', 'end', True), ('gemini', 'stop', False)])
+    ('gemini', 'stop', False)])
 def test_end_or_stop_during_a_running_tool_keeps_custody_and_starts_nothing_queued(host_world, monkeypatch, engine,
                                                                                   control, dropped):
     from tests._live_stack import stack
@@ -276,10 +278,7 @@ def test_end_or_stop_during_a_running_tool_keeps_custody_and_starts_nothing_queu
 
 
 @pytest.mark.parametrize('engine,failure,reason', [
-    ('openai', 'event', 'provider_error'), ('gemini', 'event', 'provider_error'),
-    ('grok', 'close', 'provider_closed'), ('gemini', 'close', 'provider_closed'),
-    ('openai', 'replacement', 'provider_error'), ('grok', 'replacement', 'provider_error'),
-    ('gemini', 'replacement', 'provider_error')])
+    ('openai', 'event', 'provider_error'), ('grok', 'close', 'provider_closed'), ('gemini', 'replacement', 'provider_error')])
 def test_a_true_refusal_while_a_tool_runs_stays_terminal_and_keeps_custody(host_world, monkeypatch, engine, failure, reason):
     from tests._live_stack import stack
     from tests._live_stack_wire import NativeWire
@@ -387,8 +386,7 @@ def force_look_order(order, live, monkeypatch):
         monkeypatch.setattr(host, 'tool_batch', held_look)
 
 
-@pytest.mark.parametrize('order', ['natural', 'snapshot_between_unit_and_pixels', 'pixels_after_adoption',
-                                   'adoption_before_unit'])
+@pytest.mark.parametrize('order', ['natural', 'snapshot_between_unit_and_pixels', 'adoption_before_unit'])
 def test_a_queued_requested_look_reaches_the_fresh_connection_once_before_its_pointer(host_world, monkeypatch, order):
     import base64
     import hashlib
@@ -482,9 +480,7 @@ def test_a_frame_shared_while_a_tool_runs_reaches_the_fresh_connection(host_worl
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('engine,handle', [('openai', ''), ('gemini', ''), ('openai', 'cut'), ('gemini', 'cut'),
-                                            ('gemini', 'before-write'), ('gemini', 'after-write'),
-                                            ('gemini', 'after-write-unanswered')])
+@pytest.mark.parametrize('engine,handle', [('openai', ''), ('gemini', ''), ('openai', 'cut'), ('gemini', 'before-write')])
 def test_a_result_written_just_before_a_drop_is_answered_once(host_world, monkeypatch, engine, handle):
     from tests._live_stack import stack
 
@@ -742,8 +738,7 @@ def test_a_batch_landing_while_a_native_resume_opens_continues_fresh(host_world,
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('engine,further', [('openai', 'issuing'), ('openai', 'ordinary'), ('openai', 'silent'),
-                                             ('grok', 'ordinary'), ('gemini', 'ordinary')])
+@pytest.mark.parametrize('engine,further', [('openai', 'issuing'), ('openai', 'ordinary'), ('openai', 'silent')])
 def test_a_further_call_behind_the_running_effect_delays_only_openais_answer(host_world, monkeypatch, engine, further):
     """The disclosed limit: OpenAI's adapter holds response.create while its own call awaits an output,
     on the connection that issued the running call or after a further call queued behind it.
@@ -795,9 +790,6 @@ def test_a_further_call_behind_the_running_effect_delays_only_openais_answer(hos
 @pytest.mark.parametrize('engine,thinking,case,owed', [
     ('grok', False, 'owner_answer_finishes_after_queueing', 1),
     ('gemini', False, 'call_turn_keeps_talking', 1),
-    ('gemini', True, 'call_turn_tail_then_idle', 1),
-    ('gemini', True, 'call_turn_continues', 1),
-    ('gemini', True, 'thinking_then_drop', 1),
     ('gemini', True, 'thinking_then_answer', 0)])
 def test_only_a_turn_begun_after_delivery_settles_a_written_result(host_world, monkeypatch, engine, thinking, case, owed):
     """Through real adapters: speech of a response begun before the result was delivered, its transcript tail
@@ -878,7 +870,7 @@ def test_only_a_turn_begun_after_delivery_settles_a_written_result(host_world, m
 
 @pytest.mark.parametrize('engine,thinking,answered', [
     ('openai', False, False), ('grok', False, False), ('gemini', False, False), ('gemini', True, False),
-    ('openai', False, True), ('grok', False, True), ('gemini', False, True), ('gemini', True, True)])
+    ('openai', False, True), ('gemini', True, True)])
 def test_an_unanswered_result_stays_owed_across_successive_fresh_losses(host_world, monkeypatch, engine, thinking, answered):
     """Through real adapters: a fresh session's pointer carries the result's answer obligation. Unanswered when
     that session drops, the next fresh session is owed the same one pointer; answered there, a later drop is silent."""

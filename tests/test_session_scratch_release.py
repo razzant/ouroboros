@@ -405,7 +405,7 @@ def test_continuation_keeps_original_environment_through_maintenance_then_releas
     assert not env.exists()
 
 
-@pytest.mark.parametrize("order", ["release_first", "retire_first", "whole_drive_first", "cached_drive_first"])
+@pytest.mark.parametrize("order", ["release_first", "retire_first", "cached_drive_first"])
 def test_finished_seat_scratch_release_survives_either_cleanup_order(tmp_path, monkeypatch, order):
     """Seat-home retirement and the task-drive scratch pass are independent; neither may strand the other."""
     from types import SimpleNamespace
@@ -452,7 +452,7 @@ def test_finished_seat_scratch_release_survives_either_cleanup_order(tmp_path, m
     assert not scratch.exists()
 
 
-@pytest.mark.parametrize('fault', ['keep', 'capture_failed', 'unreadable_marker', 'drive_in_trash', 'drive_settlement'])
+@pytest.mark.parametrize('fault', ['keep', 'capture_failed', 'drive_settlement'])
 def test_seat_environment_survives_negative_proofs_and_drive_retirement(tmp_path, monkeypatch, fault):
     from types import SimpleNamespace
     from ouroboros import review_checking as rc

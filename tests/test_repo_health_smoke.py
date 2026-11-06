@@ -99,9 +99,9 @@ def test_module_hard_boundary_is_1600_then_1601(tmp_path: Path) -> None:
     assert inventory.giant_paths == frozenset({"over_limit.py"})
 
 
-def test_module_scope_includes_tests_devtools_and_web_tests(tmp_path: Path) -> None:
+def test_module_scope_includes_devtools_and_leaves_test_modules_out(tmp_path: Path) -> None:
     _write_lines(tmp_path / "tests" / "foo.py", MAX_MODULE_LINES + 1)
-    _write_lines(tmp_path / "devtools" / "helper.py", 2)
+    _write_lines(tmp_path / "devtools" / "helper.py", MAX_MODULE_LINES + 1)
     _write_lines(tmp_path / "web" / "tests" / "ui.test.js", 2)
     _write_lines(tmp_path / "web" / "modules" / "live.js", 2)
     _write_lines(tmp_path / "web" / "vendor" / "bundle.min.js", 2)
@@ -112,12 +112,12 @@ def test_module_scope_includes_tests_devtools_and_web_tests(tmp_path: Path) -> N
 
     paths = {item.path for item in iter_gated_modules(tmp_path)}
 
-    assert "tests/foo.py" in paths
+    assert "tests/foo.py" not in paths
     assert "devtools/helper.py" in paths
-    assert "web/tests/ui.test.js" in paths
+    assert "web/tests/ui.test.js" not in paths
     assert "web/modules/live.js" in paths
     assert "web/vendor/bundle.min.js" not in paths
-    assert collect_size_ratchet_inventory(tmp_path).giant_paths == frozenset({"tests/foo.py"})
+    assert collect_size_ratchet_inventory(tmp_path).giant_paths == frozenset({"devtools/helper.py"})
 
 
 def test_default_inventory_sees_untracked_but_injected_inventory_does_not(tmp_path: Path) -> None:
@@ -354,7 +354,6 @@ def _band_repo(tmp_path: Path, lines: dict[str, int], manifest: SizeRatchetManif
     return tmp_path / "repo"
 
 
-@pytest.mark.serial
 def test_band_entry_stays_only_while_its_module_sits_above_the_band(tmp_path: Path) -> None:
     """A module drifting to 1501-1600 lines keeps its band entry (live and staged); below
     the band, above the hard gate or deleted, the entry is stale, and a band module without
@@ -387,7 +386,6 @@ def test_band_entry_stays_only_while_its_module_sits_above_the_band(tmp_path: Pa
     assert "GIANT_PATHS contains stale entry: 'big.py'" in validate_size_ratchet(repo)
 
 
-@pytest.mark.serial
 def test_band_entry_kept_above_the_band_returns_with_its_reason(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1188,7 +1186,6 @@ def test_generator_candidate_allows_tracked_source_deletion(tmp_path: Path, monk
     assert generated.giant_paths == frozenset()
 
 
-@pytest.mark.serial
 def test_generator_keeps_a_band_entry_only_while_its_module_sits_above_the_band(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1289,8 +1286,8 @@ def test_generator_writes_a_validated_candidate(tmp_path: Path, monkeypatch: pyt
 
 def test_health_metrics_use_the_same_inventory(tmp_path: Path) -> None:
     (tmp_path / "runtime.py").write_text("def f():\n    return 1\nvalue = f()\n", encoding="utf-8")
-    _write_lines(tmp_path / "tests" / "large.py", 4)
-    _write_lines(tmp_path / "web" / "tests" / "view.test.js", 5)
+    _write_lines(tmp_path / "devtools" / "large.py", 4)
+    _write_lines(tmp_path / "web" / "modules" / "view.js", 5)
 
     inventory = collect_size_ratchet_inventory(tmp_path)
     metrics = compute_repo_complexity_metrics(tmp_path)

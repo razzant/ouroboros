@@ -124,7 +124,6 @@ def _write_long_option_settings_extension(data_dir: pathlib.Path) -> str:
     return name
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 def test_settings_advanced_never_scrolls_horizontally_in_webkit(direct_server_with_data):
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")

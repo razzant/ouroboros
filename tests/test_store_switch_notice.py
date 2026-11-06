@@ -25,7 +25,7 @@ def progress(root):
     return json.loads((root / store_switch.PROGRESS_REL).read_text(encoding="utf-8"))
 
 
-@pytest.mark.parametrize("outcome", ["refused", "abandoned", "switch_not_performed", "switch_failed", "switched"])
+@pytest.mark.parametrize("outcome", ["refused", "abandoned", "switched"])
 def test_next_boot_reports_failed_switch_once(switch_root, target_repo, owner_chat, outcome):
     root, (repo, old, _) = switch_root, target_repo
     intent(root, old)

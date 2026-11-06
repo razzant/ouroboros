@@ -136,7 +136,6 @@ def no_model_client(monkeypatch):
     ({"kind": "import_pending", "reason": "legacy_memory_lock_busy"}, "legacy_memory_lock_busy"),
     ({"kind": "import_refused", "reason": "invalid"}, "invalid"),
     (OSError("journal io"), "OSError: journal io"),
-    (ValueError("chronicle authority shortened"), "ValueError: chronicle authority shortened"),
 ])
 def test_a_child_starts_with_a_visible_gap_when_its_chronicle_cannot_be_read(tmp_path, monkeypatch, no_model_client,
                                                                             failure, reason):

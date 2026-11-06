@@ -14,8 +14,8 @@ from ouroboros import _usage_wait, owner_pause, store, usage_accounting as usage
 from ouroboros.model_wait import task_model_wait_scope
 from ouroboros.task_results import load_task_result, write_task_result
 from tests.test_admission_contention import database_reader, publish
+from tests._cases import chosen_rows
 
-pytestmark = pytest.mark.serial
 SURFACES = ("ordinary", "run_operation", "submit_tool", "handed_inline_tool", "model_send",
             "model_send_async", "async_operation", "async_preparation")
 
@@ -70,7 +70,7 @@ def _invoke(surface, source, body):
     return asyncio.run(start())
 
 
-@pytest.mark.parametrize("surface", SURFACES)
+@pytest.mark.parametrize("surface", chosen_rows(SURFACES, 0, 7))
 @pytest.mark.parametrize("budget", [None, 0.8])
 def test_handed_body_waits_out_real_sqlite_contention_with_its_original_policy(source, surface, budget):
     effects = []
@@ -189,9 +189,12 @@ def test_failed_submission_restores_transient_parent_scope_without_losing_other_
     assert not store._ADMISSION_NO_WAIT.get() and store._WAIT_BUDGET.get() is None
 
 
-@pytest.mark.parametrize("stage", ["claim", "submit"])
-@pytest.mark.parametrize("reason", ["contention", "permission", "kernel_refused", "identity_unreadable"])
-@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize(("asynchronous", "reason", "stage"), [
+    (False, "contention", "submit"),
+    (False, "identity_unreadable", "claim"),
+    (True, "permission", "claim"),
+    (True, "kernel_refused", "submit"),
+])
 def test_launch_lock_outcome_keeps_proven_unsent_distinct_from_contention(
     source, monkeypatch, stage, reason, asynchronous,
 ):

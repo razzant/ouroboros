@@ -248,7 +248,6 @@ PRODUCER = ("import sys\nout = sys.stdout.buffer\n"
             "for index in range(10240):\n    out.write(b'%07d ' % index + b'x' * 1015 + b'\\n')\nout.flush()\n")
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("sink", ["unwritable", "writable"])
 def test_a_real_child_writing_past_pipe_capacity_never_blocks(tmp_path, sink):
     """10 MiB through a real pipe: the child exits with a working sink or immediate storage errors."""

@@ -60,7 +60,7 @@ def test_only_operation_created_tag_is_pushed_and_later_neutral_push_stays_quiet
     assert refs(remote, "refs/tags") == ["refs/tags/v-new"]
 
 
-@pytest.mark.parametrize("kind", ["absent", "lightweight", "wrong_commit", "off_branch", "no_evidence"])
+@pytest.mark.parametrize("kind", ["absent", "off_branch", "no_evidence"])
 def test_invalid_or_unadopted_tag_keeps_branch_success_but_reports_partial(origin, kind):
     repo, remote = origin
     commit = git(repo, "rev-parse", "HEAD")

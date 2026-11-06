@@ -28,7 +28,7 @@ from tests._launch_stop_shared import (
 )
 from tests.test_launch_stop_contract import BACKENDS, _host
 
-pytestmark = [pytest.mark.serial,
+pytestmark = [
               pytest.mark.skipif(os.name == "nt", reason="the measured stop is POSIX; Windows keeps its native kill")]
 
 

@@ -170,7 +170,7 @@ def test_a_malformed_catalog_raises_on_every_pool_reader_never_a_default_panel(c
 # --- an empty pool: the Main model reviews alone (owner decision B) ------------------------
 
 
-@pytest.mark.parametrize("catalog", ["unmarked", "switched_off", "no_rows", "absent"])
+@pytest.mark.parametrize("catalog", ["unmarked", "switched_off", "absent"])
 def test_an_empty_valid_pool_is_one_main_seat_that_reads_and_answers_both_parts(clean_env, catalog):
     """No enabled marked row (rows unmarked, the marked row switched off, no rows, no
     catalog) is ONE seat on every pool reader: ``main``, the direct Main row on Main's own
@@ -229,9 +229,10 @@ def _sent(monkeypatch, seat) -> tuple:
     return provider_call(monkeypatch, executor._chat_kwargs([], [], 8))
 
 
-@pytest.mark.parametrize("local", [False, True], ids=["remote", "local"])
-@pytest.mark.parametrize("catalog", [_roster(_row("helper", "m/helper", marked=False)), _roster()],
-                         ids=["unmarked", "no_rows"])
+@pytest.mark.parametrize(("catalog", "local"), [
+    pytest.param(_roster(_row("helper", "m/helper", marked=False)), False, id='unmarked-remote'),
+    pytest.param(_roster(), True, id='no_rows-local'),
+])
 def test_an_empty_pools_main_seat_sends_mains_binding_from_the_settings_the_pool_reads(install, clean_env,
                                                                                          catalog, local):
     """The Main seat is Main's whole binding — model, local flag, account pin, processing — in the settings the

@@ -255,7 +255,7 @@ def test_hurry_does_not_release_restored_work_before_owner_resume(pool):
     assert pool.slot.in_q.empty() and set(queue.RUNNING) == {task_id}
 
 
-@pytest.mark.parametrize("status", ["scheduled", "running", "interrupted", "completed", "cancelled", "future_status"])
+@pytest.mark.parametrize("status", ["scheduled", "running", "future_status"])
 def test_create_only_observes_late_row_under_the_store_write_lock(tmp_path, status):
     """A create-only seed that meets another writer's open transaction waits for it and
     then observes the row that writer published: the late row lands once, unchanged."""

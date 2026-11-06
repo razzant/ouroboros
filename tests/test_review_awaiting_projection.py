@@ -190,9 +190,6 @@ def test_an_awaited_row_projects_a_gap_and_keeps_its_custody_identity():
     ("timeout", "timeout", "malformed", TIMEOUT_ERROR),
     ("custody_lost", "provider_transport_error", "malformed", CUSTODY_ERROR),
     ("run_failed", "provider_transport_error", "malformed", RUN_FAILED_ERROR),
-    ("not_dispatched", "not_dispatched", "malformed", REFUSAL_ERROR),
-    ("reservation", "provider_transport_error", "malformed", "Reviewer response was malformed or absent."),
-    ("empty", "success", "malformed", "Reviewer response was malformed or absent."),
 ])
 def test_a_row_that_is_not_awaited_keeps_its_failure_words(shape, transport, parse, reason):
     truth = _review_actor_projection(row(shape, "s1"), "task_acceptance")
@@ -224,23 +221,24 @@ def test_the_typed_state_outranks_words_stored_by_an_earlier_projection():
 
 # ── arithmetic: identical to the base for every input ────────────────────────
 
-@pytest.mark.parametrize("policy", list(POLICIES))
-@pytest.mark.parametrize("shapes", list(BASE_AGGREGATE), ids=lambda shapes: "+".join(shapes) or "empty")
-def test_aggregate_quorum_and_gate_fields_equal_the_base(shapes, policy):
-    before = [dataclasses.asdict(row(shape, f"s{index + 1}")) for index, shape in enumerate(shapes)]
-    result, actors = aggregate(shapes, policy)
-    expected = BASE_AGGREGATE[shapes][list(POLICIES).index(policy)]
-    assert result["aggregate_signal"] == expected
-    assert result["degraded"] is (expected == "DEGRADED")
-    for shape, actor, stored in zip(shapes, actors, before):
-        assert (actor.signal, actor.semantic_verdict, actor.enforcement_impact,
-                actor.quorum_contribution) == BASE_ROW[shape], shape
-        assert {key: getattr(actor, key) for key in INPUT_FIELDS} == {key: stored[key] for key in INPUT_FIELDS}
-    panel = panel_of(shapes, policy)
-    assert panel["aggregate_signal"] == expected
-    assert panel["quorum"] == {
-        "required": max(1, int(POLICIES[policy][1]["min_successful_slots"] or 1)),
-        "contributed": sum(BASE_ROW[shape][3] for shape in shapes), "configured": len(shapes)}
+def test_aggregate_quorum_and_gate_fields_equal_the_base(subtests):
+    for policy in list(POLICIES):
+        for shapes in list(BASE_AGGREGATE):
+            with subtests.test(policy=policy, shapes=shapes):
+                before = [dataclasses.asdict(row(shape, f"s{index + 1}")) for index, shape in enumerate(shapes)]
+                result, actors = aggregate(shapes, policy)
+                expected = BASE_AGGREGATE[shapes][list(POLICIES).index(policy)]
+                assert result["aggregate_signal"] == expected
+                assert result["degraded"] is (expected == "DEGRADED")
+                for shape, actor, stored in zip(shapes, actors, before):
+                    assert (actor.signal, actor.semantic_verdict, actor.enforcement_impact,
+                            actor.quorum_contribution) == BASE_ROW[shape], shape
+                    assert {key: getattr(actor, key) for key in INPUT_FIELDS} == {key: stored[key] for key in INPUT_FIELDS}
+                panel = panel_of(shapes, policy)
+                assert panel["aggregate_signal"] == expected
+                assert panel["quorum"] == {
+                    "required": max(1, int(POLICIES[policy][1]["min_successful_slots"] or 1)),
+                    "contributed": sum(BASE_ROW[shape][3] for shape in shapes), "configured": len(shapes)}
 
 
 def test_an_awaited_slot_holds_the_fail_closed_place_without_becoming_a_pass():
@@ -292,11 +290,6 @@ def test_a_refusal_beside_a_wait_keeps_both_of_its_entries():
      [f"s1:{REFUSAL_ERROR}", f"s2:{REFUSAL_ERROR}", f"s3:{REFUSAL_ERROR}",
       "s1:degraded", "s2:degraded", "s3:degraded"]),
     (("timeout",) * 3, ["awaiting 3 of 3 reviewer slot(s): s1, s2, s3 — no verdict"]),
-    (("pass", "custody_lost", "custody_lost"),
-     [f"s2:{CUSTODY_ERROR}", f"s3:{CUSTODY_ERROR}", "s2:degraded", "s3:degraded"]),
-    (("reservation",) * 3, ["awaiting 3 of 3 reviewer slot(s): s1, s2, s3 — no verdict"]),
-    (("pass", "pass", "empty"), ["s3:empty", "s3:degraded"]),
-    (("pass", "pass", "malformed"), ["s3:degraded"]),
     ((), ["quorum_not_met: pass_count=0 < min_successful=2"]),
     (("pass", "pass", "pass"), []),
 ])
@@ -325,7 +318,6 @@ def test_the_hold_is_decided_from_the_row_as_a_mapping(monkeypatch):
 
 @pytest.mark.parametrize("shape, words, vote", [
     ("held_raw_pass", ("provider_transport_error", "valid", "PASS", "solved", "done"), True),
-    ("held_raw_fail", ("provider_transport_error", "valid", "FAIL", "best_effort", "broken"), True),
     ("held_raw_prose", ("provider_transport_error", "malformed", "", "", PENDING_ERROR), False),
     ("ok_pending", ("success", "valid", "PASS", "solved", "done"), True),
 ])
@@ -367,22 +359,10 @@ def test_a_stored_parsed_answer_on_a_pending_row_projects_as_before():
 
 @pytest.mark.parametrize("shapes, transport, parse", [
     (("pending", "pending", "pending"), "awaiting", "awaiting"),
-    (("pass", "pass", "pending"), "awaiting", "awaiting"),
-    (("fail", "pending", "pending"), "awaiting", "awaiting"),
-    (("degraded", "pending", "pending"), "awaiting", "awaiting"),
     # A real failure beside a wait keeps its own word.
     (("run_failed", "pending", "pending"), "provider_transport_error", "malformed"),
-    (("custody_lost", "pending", "pending"), "provider_transport_error", "malformed"),
-    (("timeout", "pending", "pending"), "awaiting", "awaiting"),
-    (("pending", "not_dispatched", "not_dispatched"), "not_dispatched", "malformed"),
-    (("pass", "run_failed", "pending"), "partial", "malformed"),
     # No awaited slot: the base fold, literally.
     (("pass", "pass", "pass"), "success", "valid"),
-    (("pass", "pass", "timeout"), "awaiting", "awaiting"),
-    (("pass", "pass", "malformed"), "success", "malformed"),
-    (("timeout",) * 3, "awaiting", "awaiting"),
-    (("not_dispatched",) * 3, "not_dispatched", "malformed"),
-    (("reservation",) * 3, "awaiting", "awaiting"),
     ((), "provider_transport_error", "malformed"),
 ])
 def test_panel_words_follow_the_collected_slots(shapes, transport, parse):

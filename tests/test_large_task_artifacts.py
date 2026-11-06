@@ -373,7 +373,7 @@ def test_document_bridge_rejects_foreign_task_and_changed_capture(tmp_path, monk
     assert not bridge.send_document(1, b"", task_id=ctx.task_id, file_ref=first["file_ref"])[0]
 
 
-@pytest.mark.parametrize("ref", [{}, "", False, {"kind": "task_source"}])
+@pytest.mark.parametrize("ref", [{}, "", {"kind": "task_source"}])
 def test_malformed_full_reference_cannot_become_a_complete_preview(tmp_path, ref):
     authority = {"attachment_manifest": [{"status": "staged", "label": "only a preview"}],
                  "attachment_manifest_ref": ref}
@@ -604,7 +604,6 @@ def test_immutable_child_copy_back_retains_name_bytes_and_original_identity(tmp_
             record["path"], immutable=True, expected=record)
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("method", ["GET", "HEAD"])
 @pytest.mark.parametrize("registered", [True, False])
 def test_file_verification_does_not_run_on_the_asgi_loop(tmp_path, monkeypatch, method, registered):
@@ -846,7 +845,7 @@ def test_first_materialization_copy_failure_keeps_each_gc_root(tmp_path, monkeyp
     assert Path(published["path"]).is_relative_to(artifacts.task_artifact_dir_path(parent, "capture").resolve())
 
 
-@pytest.mark.parametrize("context", ["healthy", "missing", "none", "storage_failure"])
+@pytest.mark.parametrize("context", ["healthy", "missing", "storage_failure"])
 def test_small_document_keeps_inline_delivery_when_capture_is_unavailable(tmp_path, monkeypatch, context):
     import base64
     from ouroboros.tools import core_artifacts
@@ -914,8 +913,13 @@ def test_inline_fallback_keeps_the_source_and_capture_boundaries(tmp_path, monke
     assert ctx.pending_events == []
 
 
-@pytest.mark.parametrize("initial_input", [False, True])
-@pytest.mark.parametrize("count,failure", [(1, ""), (28, ""), (28, "file"), (28, "manifest"), (28, "mailbox")])
+@pytest.mark.parametrize(("count", "failure", "initial_input"), [
+    (1, "", False),
+    (28, "", True),
+    (28, "file", False),
+    (28, "manifest", True),
+    (28, "mailbox", False),
+])
 def test_acknowledged_owner_inputs_survive_copyback_retry_mailbox_cleanup_and_gc(
     tmp_path, monkeypatch, initial_input, count, failure,
 ):

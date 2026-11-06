@@ -11,7 +11,6 @@ import pytest
 from tests.test_available_subagents_runtime import _session_row, _settings, _snapshot
 from tests._stub_delegate_engines import stub_delegate_engines as stub_delegate_engines
 
-pytestmark = pytest.mark.serial
 
 
 class InputReached(BaseException):
@@ -87,8 +86,12 @@ def _known_custody(root, task, fate):
                                                   "model": "stub-model"})
 
 
-@pytest.mark.parametrize("carrier", ["working", "exact_pause", "owner_wait"])
-@pytest.mark.parametrize("fate", ["none", "live", "terminal", "pending"])
+@pytest.mark.parametrize(("fate", "carrier"), [
+    ("none", "working"),
+    ("live", "exact_pause"),
+    ("terminal", "owner_wait"),
+    ("pending", "owner_wait"),
+])
 def test_saved_dispatch_and_first_input_restore_before_leaf_admission(
         tmp_path, monkeypatch, stub_delegate_engines, carrier, fate):
     from ouroboros import loop, subagent_bootstrap, subagent_runtime
@@ -142,7 +145,7 @@ def test_saved_dispatch_and_first_input_restore_before_leaf_admission(
         loop.run_llm_loop(**kwargs)
 
 
-@pytest.mark.parametrize("locator", [None, {}, "unreadable", {"source_ref": {"path": "missing"}}])
+@pytest.mark.parametrize("locator", [None, {}, {"source_ref": {"path": "missing"}}])
 def test_present_invalid_working_carrier_is_a_gap_never_a_fresh_start(tmp_path, monkeypatch, locator):
     from ouroboros import loop, subagent_bootstrap, subagent_runtime
     from ouroboros.agent import _load_start_continuation
@@ -222,8 +225,7 @@ def test_fresh_start_and_retry_keep_bootstrap_once_rules(tmp_path, monkeypatch, 
         assert ctx._configured_startup_refusal["reason"] == "daemon_recovery_only"
 
 
-@pytest.mark.parametrize("save_fails", [False, True])
-@pytest.mark.parametrize("delivery", ["startup", "tool"])
+@pytest.mark.parametrize(("delivery", "save_fails"), [("startup", False), ("tool", True)])
 def test_shown_interactions_save_before_ack_and_survive_cold_restore(
         tmp_path, monkeypatch, save_fails, delivery):
     from ouroboros import delegate_supervision as ds, loop, working_checkpoint as wc

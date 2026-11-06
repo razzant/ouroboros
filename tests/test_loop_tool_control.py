@@ -13,7 +13,6 @@ from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN
 from tests._usage_store_testing import ledger_rows
 from tests.test_billing_authority_unavailable import _loop_driver
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("stop,pooled", [(False, False), (True, False), (True, True)])

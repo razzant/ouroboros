@@ -11,7 +11,6 @@ from tests.test_common_story import HELPER, KID, _block, _ctx, _journal, _page, 
 
 @pytest.mark.parametrize("source_kind,change_kind", [
     ("account", "correction"), ("account", "rejection"), ("account", "acceptance"),
-    ("part", "correction"), ("part", "rejection"),
 ])
 def test_selected_account_keeps_changes_inside_its_retained_sources(tmp_path, source_kind, change_kind):
     _world, alpha, beta, page, other, draft = _rooms(tmp_path)

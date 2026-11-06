@@ -13,7 +13,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D03 | Context assembly, fit & compaction | 33 | 0 |
 | D04 | Tool execution: registry, access & typed results | 24 | 0 |
 | D05 | Tool surfaces: files, code, shell, media, external | 51 | 0 |
-| D06 | Review stack | 97 | 0 |
+| D06 | Review stack | 99 | 0 |
 | D07 | Delegation, subagents & Claudexor | 108 | 0 |
 | D08 | Supervisor: queue, workers, events & runtime control | 76 | 0 |
 | D09 | Cancellation, owner control & process custody | 28 | 0 |
@@ -28,7 +28,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D18 | Launcher, packaging, platform & shared substrate | 40 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 24 | 0 |
-| **total** | | **993** | **0** |
+| **total** | | **995** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -445,6 +445,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/plan_record.py`
 - `ouroboros/preflight_inventory.py`
 - `ouroboros/preflight_node.py`
+- `ouroboros/preflight_probe.py`
 - `ouroboros/preflight_qualification.py`
 - `ouroboros/preflight_receipts.py`
 - `ouroboros/preflight_runner.py`
@@ -497,6 +498,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/reviewer_window.py`
 - `ouroboros/safe_test_supervisor.py`
 - `ouroboros/task_continuation.py`
+- `ouroboros/test_bytecode.py`
 - `ouroboros/test_environment.py`
 - `ouroboros/test_evidence.py`
 - `ouroboros/test_selection.py`

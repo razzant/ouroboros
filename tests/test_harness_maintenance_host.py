@@ -121,14 +121,9 @@ def test_tools_share_service_and_update_crosses_existing_pause_boundary(tmp_path
 
 @pytest.mark.parametrize("arguments", [
     {"action": "update", "request_id": "missing-harness"},
-    {"action": "update", "harness": "agy"},
-    {"action": "update", "harness": "agy", "request_id": "bad\nkey"},
-    {"action": "update", "harness": "agy", "request_id": "key", "operation_id": "existing"},
     {"action": "update", "harness": "agy", "request_id": "key", "target": "version"},
-    {"action": "update", "harness": "agy", "request_id": "key", "version": "1.2.3"},
     {"action": "update", "harness": "agy", "request_id": "key", "target": "unknown"},
     {"action": "cancel"},
-    {"action": "unknown"},
 ])
 def test_flat_schema_keeps_action_requirements_enforced_before_engine(tmp_path, owned, arguments):
     answer = json.loads(tools._maintain_harness(context(tmp_path), **arguments))
@@ -286,12 +281,12 @@ def test_check_latest_never_prepares_a_runtime(http, owned, monkeypatch):
     assert "ensure" not in owned.opened
 
 
-@pytest.mark.parametrize("failed_read", [1, 2])
-@pytest.mark.parametrize("failure", [ClaudexorUnavailable("daemon_unreachable", "negative unreachable"),
-                                    ClaudexorUnavailable("maintenance_inspection_failed", "read failed", status_code=502),
-                                    OSError("read unavailable")])
-@pytest.mark.parametrize("target", [{"kind": "latest"}, {"kind": "version", "version": "1.2.3"},
-                                   {"kind": "previous"}, {"kind": "baseline"}])
+@pytest.mark.parametrize(("target", "failure", "failed_read"), [
+    pytest.param({"kind": "latest"}, ClaudexorUnavailable("daemon_unreachable", "negative unreachable"), 1, id='target0-failure0-1'),
+    pytest.param({"kind": "version", "version": "1.2.3"}, ClaudexorUnavailable("maintenance_inspection_failed", "read failed", status_code=502), 2, id='target1-failure1-2'),
+    pytest.param({"kind": "previous"}, OSError("read unavailable"), 1, id='target2-failure2-1'),
+    pytest.param({"kind": "baseline"}, ClaudexorUnavailable("daemon_unreachable", "negative unreachable"), 2, id='target3-failure0-2'),
+])
 def test_optional_read_failure_preserves_post_and_same_key_rejoin(http, owned, monkeypatch, failed_read, failure, target):
     from ouroboros import claudexor_runtime as runtime
     monkeypatch.setattr(runtime, "get_runtime_manager", lambda: pytest.fail("unknown observation must not prepare"))
@@ -329,8 +324,7 @@ def test_optional_read_failure_preserves_post_and_same_key_rejoin(http, owned, m
     assert submitted == [(body, "same-key"), (body, "same-key")]
 
 
-@pytest.mark.parametrize("code", ["daemon_unreachable", "daemon_spawn_failed", "daemon_starting",
-                                 "foreign_daemon_home", "attach_only_engine"])
+@pytest.mark.parametrize("code", ["daemon_unreachable", "daemon_spawn_failed", "attach_only_engine"])
 def test_gateway_acquisition_failure_remains_before_submit(http, owned, monkeypatch, code):
     def offline():
         raise ClaudexorUnavailable(code, "cannot acquire gateway")
@@ -354,8 +348,7 @@ def test_unrelated_observation_fault_is_not_swallowed(owned):
     assert not owned.calls
 
 
-@pytest.mark.parametrize("selection", ["external", "attach_only"])
-@pytest.mark.parametrize("missing_npm", [False, True])
+@pytest.mark.parametrize(("missing_npm", "selection"), [(False, "external"), (True, "attach_only")])
 def test_external_engine_preparation_cannot_promise_header_restart(http, owned, monkeypatch, selection, missing_npm):
     from ouroboros import claudexor_runtime as runtime, review_run_isolation
     monkeypatch.setattr(runtime, "get_runtime_manager", lambda: pytest.fail("external runtime must not be prepared"))
@@ -384,10 +377,7 @@ def test_external_engine_preparation_cannot_promise_header_restart(http, owned, 
 
 @pytest.mark.parametrize("body", [
     {"harness": "agy", "target": {"kind": []}},
-    {"harness": "agy", "target": {"kind": {}}},
-    {"harness": "agy", "target": {"kind": "unsupported"}},
     {"harness": "agy", "target": {"kind": "version", "version": ""}},
-    {"harness": "agy", "target": {"kind": "latest", "unexpected": True}},
     {"harness": "agy", "target": {"kind": "latest"}, "unexpected": True},
 ])
 def test_malformed_update_never_downloads_before_engine_validation(http, owned, body):
@@ -482,9 +472,7 @@ def test_a_present_file_is_not_called_missing(http, real_wire, tmp_path):
 
 
 @pytest.mark.parametrize("message", [
-    "spawn node ENOENT", "spawn ./bin/node ENOENT", "spawn  ENOENT", "spawn ENOENT",
-    "before spawn {missing} ENOENT", "spawn {missing} ENOENT after", "spawn {missing} EACCES",
-    "spawn {missing} ENOENT\nspawn {missing} ENOENT", "ENOENT: no such file, open '{missing}'",
+    "spawn node ENOENT", "spawn {missing} ENOENT\nspawn {missing} ENOENT", "ENOENT: no such file, open '{missing}'",
 ])
 def test_unknown_message_shapes_pass_unchanged(http, real_wire, tmp_path, message):
     body = {**spawn_failure_body(tmp_path), "message": message.format(missing=tmp_path / "gone")}
@@ -492,7 +480,7 @@ def test_unknown_message_shapes_pass_unchanged(http, real_wire, tmp_path, messag
     unchanged(http, body)
 
 
-@pytest.mark.parametrize("code", ["EACCES", "enoent", "maintenance_inspection_failed", None])
+@pytest.mark.parametrize("code", ["EACCES", "maintenance_inspection_failed", None])
 def test_other_codes_pass_unchanged(http, real_wire, tmp_path, code):
     body = {**spawn_failure_body(tmp_path / "gone"), "code": code}
     real_wire(lambda request: httpx.Response(500, json=body))

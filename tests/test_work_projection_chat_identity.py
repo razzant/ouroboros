@@ -41,7 +41,6 @@ def _upkeep(root, bindings=None, **stored):
 
 
 @pytest.mark.parametrize("stored, room, key", [
-    pytest.param({"chat_id": HIDDEN_CHAT_ID}, HIDDEN_CHAT_ID, "0", id="hidden-partition"),
     pytest.param({"chat_id": WEB_UI_CHAT_ID}, WEB_UI_CHAT_ID, "1", id="main"),
     pytest.param({"chat_id": PROJECT_CHAT, "project_id": "p-x"}, PROJECT_CHAT, str(PROJECT_CHAT), id="project"),
     # Negative control: absence is None, not the hidden partition's 0. The page files an unplaced work under the

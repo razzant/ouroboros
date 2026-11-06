@@ -20,7 +20,6 @@ from ouroboros.task_results import load_task_result, write_task_result
 from tests._budget_pause_exact_helpers import _loop_ctx
 from tests.test_worker_crash_retry import _isolate_worker_crash_state, _reserved_job  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def _saved(root, task_id, attempt, boundary="post_batch"):

@@ -127,8 +127,7 @@ def test_a_marked_checkout_no_review_can_read_is_removed_and_its_worktree_pruned
     assert len(_git(subject.repo, "worktree", "list").splitlines()) == 1, "the subject's worktree entry is pruned"
 
 
-@pytest.mark.parametrize("hold", ["task_live", "task_running", "custody_active", "seat_checking", "operation_live",
-                                  "no_owner"])
+@pytest.mark.parametrize("hold", ["task_live", "seat_checking", "operation_live"])
 def test_a_checkout_a_review_may_still_read_stays(subject, hold):
     entry = _retain(subject, task_status="running" if hold == "task_running" else "completed")
     live = {TASK} if hold == "task_live" else set()

@@ -27,7 +27,7 @@ from tests.system_e2e.harness import (
 )
 
 wait_clone = clone_fixture
-pytestmark = [pytest.mark.serial, pytest.mark.browser]
+pytestmark = [pytest.mark.browser]
 SOURCE = "https://example.test/community/research-request#comment-7"
 LABEL = "Community research request"
 QUESTION = "May I research this request before promising any implementation?"

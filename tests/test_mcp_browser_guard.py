@@ -26,7 +26,6 @@ from tests.test_batch4_producer_custody import _registry
 from tests.test_invocation_ownership import owner
 from tests.test_mcp_task_session import _private_mcp, body, call, fixture_server, rows, session_of, wire  # noqa: F401
 
-pytestmark = pytest.mark.serial  # the shared producer-custody queue fixture of the process tests
 
 OWNER_BODY = '{"OUROBOROS_REVIEW_ENFORCEMENT":"advisory"}'
 

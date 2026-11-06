@@ -67,9 +67,11 @@ def test_project_completion_mirrors_only_published_results(tmp_path, scheduled_p
         assert len(chat_rows(tmp_path)) == len(rows) and bus.empty()
 
 
-@pytest.mark.parametrize("fault", [False, True], ids=["normal", "lifecycle-fault"])
-@pytest.mark.parametrize("silent,notice", [(True, ""), (False, ""), (True, "A tool failed.")],
-                         ids=["quiet", "ordinary", "quiet-with-notice"])
+@pytest.mark.parametrize(("silent", "notice", "fault"), [
+    pytest.param(True, "", False, id='quiet-normal'),
+    pytest.param(False, "", True, id='ordinary-lifecycle-fault'),
+    pytest.param(True, "A tool failed.", False, id='quiet-with-notice-normal'),
+])
 def test_task_done_carries_canonical_quiet_facts(tmp_path, scheduled_project, monkeypatch, fault, silent, notice):
     from ouroboros.headless import prepare_terminal_task_files
     from supervisor import events

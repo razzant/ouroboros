@@ -20,7 +20,6 @@ from tests._review_session_route_shared import (
 
 fake_route = _fake_route
 _owned_gateway_uses_each_test_transport = _owned_gateway_fixture
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture
@@ -76,8 +75,12 @@ def test_actual_review_start_retains_one_request_and_post(start, tmp_path, monke
     assert custody.invocation_record(tmp_path, events[0]["invocation_id"])["request"] == posts()[0][0]
 
 
-@pytest.mark.parametrize("journal", ["PERSIST", "WAL"])
-@pytest.mark.parametrize("control", ["pause", "stop", "deadline", "closed"])
+@pytest.mark.parametrize(("control", "journal"), [
+    ("pause", "PERSIST"),
+    ("stop", "WAL"),
+    ("deadline", "PERSIST"),
+    ("closed", "WAL"),
+])
 def test_current_controls_end_the_unsent_wait_without_post(start, tmp_path, monkeypatch, control, journal):
     use_journal(monkeypatch, journal)  # a held write fails its COMMIT (rollback journal), its BEGIN (WAL)
     stopped, waited = [], []
@@ -116,8 +119,8 @@ def uncertain_rollback():
 
 
 @pytest.mark.parametrize("error", [store.StoreBusy("unknown"),
-    store.StoreBusy("uninspectable", reason="uninspectable"), uncertain_rollback(),
-    store.StoreLost("lost"), PermissionError("denied")])
+    uncertain_rollback(),
+    PermissionError("denied")])
 def test_hard_unknown_and_uncertain_claim_fail_once(start, monkeypatch, error):
     publish, calls = current.publish, []
 

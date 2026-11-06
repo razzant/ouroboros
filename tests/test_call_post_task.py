@@ -27,8 +27,14 @@ def test_admitted_calls_and_text_dispatch_the_same_post_task_work(direct_call, t
     assert not task.get("_skip_post_task_synthesis")
 
 
-@pytest.mark.parametrize("seam", ["recovery", "preparation"])
-@pytest.mark.parametrize("case", ["text", "live", "missing", "mismatched", "closed", "owner_stop"])
+@pytest.mark.parametrize(("case", "seam"), [
+    ("text", "recovery"),
+    ("live", "preparation"),
+    ("missing", "preparation"),
+    ("mismatched", "recovery"),
+    ("closed", "preparation"),
+    ("owner_stop", "preparation"),
+])
 def test_only_restart_refusals_add_a_synthesis_skip(direct_call, seam, case):
     from ouroboros.agent import OuroborosAgent
     from ouroboros.realtime_turn import recovery_refusal

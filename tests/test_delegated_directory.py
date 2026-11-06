@@ -77,8 +77,7 @@ def context(tmp_path, monkeypatch):
                        workspace_mode="external"), target
 
 
-@pytest.mark.parametrize("strategy", ["direct", "copy"])
-@pytest.mark.parametrize("access", ["workspace_write", "full"])
+@pytest.mark.parametrize(("access", "strategy"), [("workspace_write", "direct"), ("full", "copy")])
 def test_start_uses_normal_writing_mode_without_git_or_fake_snapshot(tmp_path, monkeypatch, strategy, access):
     from ouroboros.gateways import claudexor
     import tests._delegated_transport_shared as shared
@@ -368,8 +367,7 @@ class _NoProductEngine(DirectoryEngine):
         return {"summary": {"state": self.state, "result": {"applyState": "not_applied"}}}
 
 
-@pytest.mark.parametrize("strategy", ["direct", "copy"])
-@pytest.mark.parametrize("decision", ["apply", "reject"])
+@pytest.mark.parametrize(("decision", "strategy"), [("apply", "direct"), ("reject", "copy")])
 def test_a_finished_run_without_file_work_product_is_finished_with_no_changes(tmp_path, monkeypatch, strategy, decision):
     """VERIFY_SWEEPS S3: such a run stayed collection-pending, re-collected every sweep pass
     (a daemon read, a capture attempt, a money read) because the engine's final answer was
@@ -546,8 +544,7 @@ def test_partial_apply_and_consumer_copies_leave_shared_content_unchanged(tmp_pa
     assert _retained(ctx.drive_root, held)[1] == before
 
 
-@pytest.mark.parametrize("fault,code", [("corrupt", "artifact_integrity_error"), ("size", "artifact_integrity_error"),
-                                        ("unavailable", "artifact_not_found"), ("truncated", "daemon_unreachable")])
+@pytest.mark.parametrize("fault,code", [("corrupt", "artifact_integrity_error"), ("unavailable", "artifact_not_found"), ("truncated", "daemon_unreachable")])
 def test_failures_of_repeated_content_stay_failures_and_a_new_capture_refetches(tmp_path, monkeypatch, fault, code):
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
 

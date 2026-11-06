@@ -3,7 +3,6 @@ import pytest
 
 from tests.test_reply_preparation import world, body, _Supervisor, _observed, _chats, _intent  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("control", ["owner_pause", "stop", "restart"])

@@ -40,8 +40,7 @@ def _next_run_words(ctx):
     return [row["text"] for row in governing_words_for_schedule(live)[FIELD]]  # what it hands its helper
 
 
-@pytest.mark.parametrize("edit", [{"objective": "Check production."}, {"context": "Production only."},
-                                  {"cron": "0 10 * * 1"}, {"name": "Production check"}])
+@pytest.mark.parametrize("edit", [{"objective": "Check production."}, {"cron": "0 10 * * 1"}, {"name": "Production check"}])
 def test_an_edit_of_the_assignment_carries_the_words_that_changed_it(tmp_path, edit):
     from ouroboros.tools.followup import _manage_schedules
 

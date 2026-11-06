@@ -17,7 +17,6 @@ from tests.system_e2e import harness
 from tests.test_candidate_checkout import git, source as source_fixture
 
 
-pytestmark = pytest.mark.serial
 source = source_fixture
 
 
@@ -201,7 +200,7 @@ def test_alternate_checkout_drift_refuses_restart_before_spawning(consumer, tmp_
             assert len(launch_probe.runs) == 1 and checkout.unproven == 0
 
 
-@pytest.mark.parametrize("failure", ["reap_error", "reap_raise", "close", "wait"])
+@pytest.mark.parametrize("failure", ["reap_error", "close", "wait"])
 def test_alternate_consumers_retain_unproven_tree_and_cannot_clear_failed_pin(
     consumer, source, tmp_path, launch_probe, failure,
 ):

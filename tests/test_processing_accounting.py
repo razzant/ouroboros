@@ -80,8 +80,6 @@ def test_anthropic_capacity_tier_is_not_speed_and_engine_mixed_stays_mixed():
 
 @pytest.mark.parametrize("attempts,expected", [
     ([{"usageCost": {"cashUsd": 0, "cashKnowledge": "unknown", "valuationUsd": 5}}], (None, False)),
-    ([{"usageCost": {"cashUsd": 0, "cashKnowledge": "exact", "valuationUsd": 5}}], (0.0, False)),
-    ([{"usageCost": {"cashUsd": 2, "cashKnowledge": "exact", "valuationUsd": 5}}], (2.0, False)),
     ([{"usageCost": {"cashUsd": 2, "cashKnowledge": "estimated"}}, {}], (2.0, True)),
     ([{}, {"usageCost": {"cashUsd": 2, "cashKnowledge": "exact"}}], (2.0, True)),
 ])

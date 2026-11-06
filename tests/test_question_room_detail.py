@@ -42,7 +42,7 @@ def detail_client(root):
     return TestClient(app)
 
 
-@pytest.mark.parametrize('task_id', ['context-main', 'hidden-main', 'plain-main', 'converted', 'project-local', 'missing-parent'])
+@pytest.mark.parametrize('task_id', ['context-main', 'hidden-main', 'missing-parent'])
 def test_actual_task_detail_recovers_shared_question_form(tmp_path, task_id):
     a, b = question_world(tmp_path)
     detail = detail_client(tmp_path).get('/api/tasks/' + task_id).json()

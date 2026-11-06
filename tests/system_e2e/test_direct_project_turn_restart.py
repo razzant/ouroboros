@@ -111,7 +111,6 @@ def _saved(data_root, task_id: str) -> list:
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s42_direct_project_turn_continues_after_stop_restart_and_owner_resume(e2e_clone, tmp_path):
     require_lane(LANE_MOCK)
     room = tmp_path / "room"
@@ -234,7 +233,6 @@ def _send(server, project, text):
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s42_resumed_folderless_work_keeps_its_task_drive_after_a_sibling_gives_the_room_a_folder(e2e_clone, tmp_path):
     require_lane(LANE_MOCK)
     folder = tmp_path / "sibling-folder"

@@ -12,7 +12,7 @@ from tests.test_reconnect_feed_browser import HISTORY_LANDED
 subscription_ui = setup_browser.subscription_ui
 capture = setup_browser.capture
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 TASK = "analysis-task"
 # The wait picker offers an API lane per provider whose credential is stored.
 API_LANE = "api:openai"

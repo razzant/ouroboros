@@ -355,7 +355,7 @@ def test_runtime_actor_snapshot_reads_the_pool_not_stale_lane_or_legacy_strings(
 
 @pytest.mark.parametrize(
     "local_key",
-    ("USE_LOCAL_MAIN", "USE_LOCAL_LIGHT", "USE_LOCAL_FALLBACK", "USE_LOCAL_CONSCIOUSNESS"),
+    ("USE_LOCAL_MAIN", "USE_LOCAL_FALLBACK", "USE_LOCAL_CONSCIOUSNESS"),
 )
 def test_runtime_actor_snapshot_refuses_each_remote_to_local_route_drift(local_key):
     model = "openai/gpt-5.5"
@@ -375,19 +375,20 @@ def test_single_model_slot_snapshot_is_cli_derived_and_has_no_heavy():
     assert "OUROBOROS_MODEL_HEAVY" not in slots
 
 
-@pytest.mark.parametrize("relative,expected", PROFILE_TARGETS.items())
-def test_committed_single_model_profiles_use_one_canonical_actor(relative: str, expected: str):
-    payload = json.loads((REPO / relative).read_text(encoding="utf-8"))
-    raw = payload["OUROBOROS_SUBAGENTS"]
-    assert _only_target(raw) == expected == payload["OUROBOROS_MODEL"]
-    # The review pool rides the roster: packet seats on the measured model only.
-    pool = _pool(raw)
-    assert pool and {(target, delivery) for target, delivery, _effort in pool} == {(expected, "packet")}
-    assert REVIEWER_SLOTS_ENV not in payload  # the lane-era panel key is gone from templates
-    assert serialize_configured_subagents(parse_configured_subagents(raw)) == raw
-    assert "OUROBOROS_MODEL_HEAVY" not in payload
-    assert "USE_LOCAL_HEAVY" not in payload
-    assert not RETIRED_REVIEW_KEYS.intersection(payload)
+def test_committed_single_model_profiles_use_one_canonical_actor(subtests):
+    for relative, expected in PROFILE_TARGETS.items():
+        with subtests.test(relative=relative, expected=expected):
+            payload = json.loads((REPO / relative).read_text(encoding="utf-8"))
+            raw = payload["OUROBOROS_SUBAGENTS"]
+            assert _only_target(raw) == expected == payload["OUROBOROS_MODEL"]
+            # The review pool rides the roster: packet seats on the measured model only.
+            pool = _pool(raw)
+            assert pool and {(target, delivery) for target, delivery, _effort in pool} == {(expected, "packet")}
+            assert REVIEWER_SLOTS_ENV not in payload  # the lane-era panel key is gone from templates
+            assert serialize_configured_subagents(parse_configured_subagents(raw)) == raw
+            assert "OUROBOROS_MODEL_HEAVY" not in payload
+            assert "USE_LOCAL_HEAVY" not in payload
+            assert not RETIRED_REVIEW_KEYS.intersection(payload)
 
 
 @pytest.mark.parametrize(

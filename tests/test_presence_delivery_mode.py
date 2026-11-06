@@ -13,8 +13,7 @@ from tests.test_presence_runner import _admission, _event
 from tests._store_shared import seed_result
 
 
-@pytest.mark.parametrize("outcome", ["message", "deferred"])
-@pytest.mark.parametrize("version", [0, 1])
+@pytest.mark.parametrize(("version", "outcome"), [(0, "message"), (1, "deferred")])
 def test_receipt_mode_defers_only_outgoing_log_until_transport_confirmation(tmp_path, outcome, version):
     captured = {}
 

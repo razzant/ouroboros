@@ -8,7 +8,8 @@ import pytest
 
 from ouroboros.contracts.live_conversation import LiveOptions
 from tests._socket_seal import block_network_except_socketpair
-from tests.test_live_conversation import ROOT, VoiceWire, host_world as host_world
+from tests._live_world import host_world as host_world
+from tests.test_live_conversation import ROOT, VoiceWire
 
 
 def host_events(host):

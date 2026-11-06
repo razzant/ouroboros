@@ -102,7 +102,7 @@ def test_shared_observability_directory_is_same_store(tmp_path, monkeypatch):
     assert Path(promoted["path"]).read_bytes() == original
 
 
-@pytest.mark.parametrize("defect", ["sha", "size", "encoding", "existing_outside"])
+@pytest.mark.parametrize("defect", ["sha", "encoding", "existing_outside"])
 def test_missing_locator_fallback_does_not_replace_invalid_blob_evidence(tmp_path, monkeypatch, defect):
     root = tmp_path / "data"
     ref = obs.write_blob(root, {"answer": "exact"})
@@ -177,8 +177,7 @@ def test_distinct_retention_reuses_shared_sources_and_revalidates_inventory(tmp_
     assert obs.read_call_manifest_ref(parent, ref, task_id=task["id"])["call_id"] == "call"
 
 
-@pytest.mark.parametrize("retry", [False, True])
-@pytest.mark.parametrize("change_source", [False, True])
+@pytest.mark.parametrize(("change_source", "retry"), [(False, False), (True, True)])
 def test_current_review_writer_runs_during_bulk_io_and_wins(tmp_path, monkeypatch, retry, change_source):
     parent, child, task = _child(tmp_path)
     old = _call(child, call_id="old")["manifest_ref"]

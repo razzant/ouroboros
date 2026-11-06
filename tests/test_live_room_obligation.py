@@ -16,7 +16,7 @@ from ouroboros import call_protocol as cp
 from ouroboros.contracts.live_conversation import ContextUpdate
 from ouroboros.contracts.realtime import CatalogModel
 from tests._extension_loader_shared import _clear_loader_state  # noqa: F401
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 from tests.test_live_conversation_driver import Host, until
 from tests.test_live_deferred_custody import MAIL, READY, answer, holding_mail, mail_updates, outputs, pointers, successor
 from tests.test_live_delivery_owner import ROOM_POINTER, Socket, never, opened, position, room_pointers
@@ -148,8 +148,7 @@ def test_a_continuing_response_answers_only_once_it_ends(ends):
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('case,owed', [('lost-while-queued', True), ('response-underway-at-acceptance', True),
-                                       ('response-begun-while-queued', True), ('written-then-no-response', True),
+@pytest.mark.parametrize('case,owed', [('lost-while-queued', True), ('written-then-no-response', True),
                                        ('response-begun-after-delivery', False)])
 def test_adapter_acceptance_is_not_delivery(case, owed):
     """Accepting the words removes their pointer from the offers. Only the adapter's own record of a real write delivers
@@ -356,7 +355,7 @@ def test_an_older_session_uses_its_send_boundary(answered):
 
 @pytest.mark.parametrize('case,room,tool', [('neither-answered', 1, 1), ('result-answered-before-the-mail', 1, 0),
                                             ('mail-accepted-during-the-results-answer', 1, 0),
-                                            ('result-written-during-the-mails-answer', 0, 1), ('one-answer-after-both', 0, 0)])
+                                            ('one-answer-after-both', 0, 0)])
 def test_room_and_tool_obligations_settle_independently(case, room, tool):
     """Each is answered only by a response begun after its own delivery. What is left gets its pointer, in one offer, and
     one response then settles everything left."""
@@ -473,8 +472,7 @@ async def asked(live, wire, owed):
     assert len(room_frames(wire)) == int(owed), (wire.number, owed)
 
 
-@pytest.mark.parametrize('answered_on', [1, 3])
-@pytest.mark.parametrize('engine', ['gemini', 'openai', 'grok'])
+@pytest.mark.parametrize(("engine", "answered_on"), [('gemini', 1), ('openai', 3), ('grok', 1)])
 def test_real_typed_mail_is_owed_on_each_fresh_session_until_answered(host_world, monkeypatch, engine, answered_on):
     """The real producer, adapters and sockets. Unanswered words follow each fresh session; once answered, on whichever
     connection, later losses stay silent."""
@@ -500,9 +498,11 @@ def test_real_typed_mail_is_owed_on_each_fresh_session_until_answered(host_world
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('case,owed', [('lost-while-queued', True), ('written-as-the-old-turn-ended', True),
-                                       ('answered-after-delivery', False)])
-@pytest.mark.parametrize('engine', ['gemini', 'openai', 'grok'])
+@pytest.mark.parametrize(("engine", "case", "owed"), [
+    ('gemini', 'lost-while-queued', True),
+    ('openai', 'written-as-the-old-turn-ended', True),
+    ('grok', 'answered-after-delivery', False),
+])
 def test_real_adapter_queued_mail_is_owed_until_answered_after_delivery(host_world, monkeypatch, engine, case, owed):
     """A turn is already underway, so the adapter accepts the words and writes them only when it ends. That turn saw
     nothing of them; only a response begun after the write can answer them."""

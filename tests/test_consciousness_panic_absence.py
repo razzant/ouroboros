@@ -41,8 +41,12 @@ def _only_for(target, error, real):
     return call
 
 
-@pytest.mark.parametrize("errors", ["native", "windows"])
-@pytest.mark.parametrize("flag_entry", ["dangling", "native_link", "unreadable", "unproven_ancestor"])
+@pytest.mark.parametrize(("flag_entry", "errors"), [
+    ("dangling", "native"),
+    ("native_link", "windows"),
+    ("unreadable", "windows"),
+    ("unproven_ancestor", "native"),
+])
 def test_every_wake_reader_needs_a_proven_absent_panic_flag(root, monkeypatch, flag_entry, errors):
     from supervisor import conversation_lane, worker_chat_lane
 

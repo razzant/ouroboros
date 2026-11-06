@@ -11,7 +11,6 @@ from ouroboros.observability import redact_projection
 from ouroboros.contracts.task_constraint import TaskConstraint
 from ouroboros.tools.registry import ToolRegistry
 
-pytestmark = pytest.mark.serial
 
 TOKEN = "ghp_" + "syntheticfixture0123456789" * 2
 PEM = "-----BEGIN PRIVATE KEY-----\nsynthetic-key-material\n-----END PRIVATE KEY-----\n"

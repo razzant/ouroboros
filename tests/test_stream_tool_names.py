@@ -41,35 +41,37 @@ def call_body(message, kind):
     return message["function_call"] if kind == "legacy" else message["tool_calls"][0][kind]
 
 
-@pytest.mark.parametrize("kind", CALL_KINDS)
-@pytest.mark.parametrize("name", ("send_file", "send_user_message"))
-def test_twelve_repeated_names_keep_every_argument_fragment(kind, name):
-    field = "input" if kind == "custom" else "arguments"
-    fragments = ['{"q":"', *(["x"] * 10), '"}']
-    accumulator = assemble(*(call_delta(kind, {"name": name, field: part}) for part in fragments))
+def test_twelve_repeated_names_keep_every_argument_fragment(subtests):
+    for kind in CALL_KINDS:
+        for name in (("send_file", "send_user_message")):
+            with subtests.test(kind=kind, name=name):
+                field = "input" if kind == "custom" else "arguments"
+                fragments = ['{"q":"', *(["x"] * 10), '"}']
+                accumulator = assemble(*(call_delta(kind, {"name": name, field: part}) for part in fragments))
 
-    body = call_body(accumulator.result()["choices"][0]["message"], kind)
-    assert body == {"name": name, field: '{"q":"xxxxxxxxxx"}'}
-    facts = accumulator.anomaly_facts()
-    assert facts["count"] == 11
-    assert len(facts["first"]) == 11
-    assert all(note.endswith("equal name value not appended") for note in facts["first"])
+                body = call_body(accumulator.result()["choices"][0]["message"], kind)
+                assert body == {"name": name, field: '{"q":"xxxxxxxxxx"}'}
+                facts = accumulator.anomaly_facts()
+                assert facts["count"] == 11
+                assert len(facts["first"]) == 11
+                assert all(note.endswith("equal name value not appended") for note in facts["first"])
 
 
-@pytest.mark.parametrize("kind", CALL_KINDS)
-@pytest.mark.parametrize("fragments, expected", (
-    (("send_", "file"), "send_file"),
-    (("ba", "na", "na", "banana"), "banana"),
-    (("a", "a"), "a"),  # Accepted ambiguity: these could have meant additive "aa".
-    (("abab",), "abab"),  # Never collapse repetition already inside a single value.
-))
-def test_name_assembly_compares_with_the_whole_accumulated_value(kind, fragments, expected):
-    field = "input" if kind == "custom" else "arguments"
-    accumulator = assemble(*(call_delta(kind, {"name": part, field: ""}) for part in fragments))
+def test_name_assembly_compares_with_the_whole_accumulated_value(subtests):
+    for kind in CALL_KINDS:
+        for fragments, expected in ((
+(("send_", "file"), "send_file"),
+(("ba", "na", "na", "banana"), "banana"),
+(("a", "a"), "a"),  # Accepted ambiguity: these could have meant additive "aa".
+(("abab",), "abab"),  # Never collapse repetition already inside a single value.
+)):
+            with subtests.test(kind=kind, fragments=fragments, expected=expected):
+                field = "input" if kind == "custom" else "arguments"
+                accumulator = assemble(*(call_delta(kind, {"name": part, field: ""}) for part in fragments))
 
-    body = call_body(accumulator.result()["choices"][0]["message"], kind)
-    assert body["name"] == expected
-    assert accumulator.anomaly_facts()["count"] == len(fragments) - 1
+                body = call_body(accumulator.result()["choices"][0]["message"], kind)
+                assert body["name"] == expected
+                assert accumulator.anomaly_facts()["count"] == len(fragments) - 1
 
 
 def test_composed_name_can_dispatch_to_a_registered_callable(tmp_path, monkeypatch):
@@ -101,20 +103,21 @@ def test_composed_name_can_dispatch_to_a_registered_callable(tmp_path, monkeypat
                for note in accumulator.anomaly_facts()["first"])
 
 
-@pytest.mark.parametrize("kind", CALL_KINDS)
-def test_missing_null_and_empty_names_do_not_erase_or_prevent_later_fragments(kind):
-    field = "input" if kind == "custom" else "arguments"
-    bodies = [
-        {field: "{}"}, {"name": None}, {"name": ""}, {"name": "send_"},
-        {}, {"name": None}, {"name": ""}, {"name": "file"},
-        {"name": "send_file"}, {}, {"name": None}, {"name": ""},
-    ]
-    accumulator = assemble(*(call_delta(kind, body) for body in bodies))
+def test_missing_null_and_empty_names_do_not_erase_or_prevent_later_fragments(subtests):
+    for kind in CALL_KINDS:
+        with subtests.test(kind=kind):
+            field = "input" if kind == "custom" else "arguments"
+            bodies = [
+                {field: "{}"}, {"name": None}, {"name": ""}, {"name": "send_"},
+                {}, {"name": None}, {"name": ""}, {"name": "file"},
+                {"name": "send_file"}, {}, {"name": None}, {"name": ""},
+            ]
+            accumulator = assemble(*(call_delta(kind, body) for body in bodies))
 
-    assert call_body(accumulator.result()["choices"][0]["message"], kind) == {
-        "name": "send_file", field: "{}",
-    }
-    assert accumulator.anomaly_facts()["count"] == 2
+            assert call_body(accumulator.result()["choices"][0]["message"], kind) == {
+                "name": "send_file", field: "{}",
+            }
+            assert accumulator.anomaly_facts()["count"] == 2
 
 
 @pytest.mark.parametrize("kind", ("function", "custom"))
@@ -181,27 +184,29 @@ def test_name_policy_does_not_spread_to_content_reasoning_or_unrelated_nested_ob
     assert accumulator.anomaly_facts()["count"] == 1
 
 
-@pytest.mark.parametrize("kind", CALL_KINDS)
-def test_later_name_shape_conflicts_keep_the_first_valid_text(kind):
-    field = "input" if kind == "custom" else "arguments"
-    accumulator = assemble(
-        call_delta(kind, {"name": "send_file", field: "{}"}),
-        *(call_delta(kind, {"name": value}) for value in ({"bad": "shape"}, ["bad"], 7)),
-    )
-    assert call_body(accumulator.result()["choices"][0]["message"], kind)["name"] == "send_file"
-    assert accumulator.anomaly_facts()["count"] == 3
+def test_later_name_shape_conflicts_keep_the_first_valid_text(subtests):
+    for kind in CALL_KINDS:
+        with subtests.test(kind=kind):
+            field = "input" if kind == "custom" else "arguments"
+            accumulator = assemble(
+                call_delta(kind, {"name": "send_file", field: "{}"}),
+                *(call_delta(kind, {"name": value}) for value in ({"bad": "shape"}, ["bad"], 7)),
+            )
+            assert call_body(accumulator.result()["choices"][0]["message"], kind)["name"] == "send_file"
+            assert accumulator.anomaly_facts()["count"] == 3
 
 
-@pytest.mark.parametrize("kind", CALL_KINDS)
-def test_initial_invalid_name_shape_stays_a_rejected_complete_response(kind):
-    field = "input" if kind == "custom" else "arguments"
-    accumulator = assemble(call_delta(kind, {"name": [], field: "{}"}),
-                            call_delta(kind, {"name": "send_file"}))
-    with pytest.raises(RejectedProviderStream):
-        accumulator.result()
-    assert accumulator.done is True
-    assert call_body(accumulator.partial()["choices"][0]["message"], kind)["name"] == []
-    assert accumulator.anomaly_facts()["count"] == 1
+def test_initial_invalid_name_shape_stays_a_rejected_complete_response(subtests):
+    for kind in CALL_KINDS:
+        with subtests.test(kind=kind):
+            field = "input" if kind == "custom" else "arguments"
+            accumulator = assemble(call_delta(kind, {"name": [], field: "{}"}),
+                                    call_delta(kind, {"name": "send_file"}))
+            with pytest.raises(RejectedProviderStream):
+                accumulator.result()
+            assert accumulator.done is True
+            assert call_body(accumulator.partial()["choices"][0]["message"], kind)["name"] == []
+            assert accumulator.anomaly_facts()["count"] == 1
 
 
 @pytest.mark.parametrize("asynchronous", (False, True))

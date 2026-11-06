@@ -103,7 +103,6 @@ def test_free_replay_refreshes_disabled_auto_flow_without_another_panel(developm
     assert (drive / "state" / "skills" / "demo" / "review.json").read_bytes() == before
 
 
-@pytest.mark.serial
 def test_installed_script_edit_review_execute_repeat_without_owner_click(development):
     registry, _repo, drive, panels = development
     payload = drive / "skills" / "external" / "demo"

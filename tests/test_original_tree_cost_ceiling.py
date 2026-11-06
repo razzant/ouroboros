@@ -29,8 +29,7 @@ def _schedule(ctx):
     return payload
 
 
-@pytest.mark.parametrize("wallet_recovers", [False, True])
-@pytest.mark.parametrize("pct", [0, 20, 50])
+@pytest.mark.parametrize(("pct", "wallet_recovers"), [(0, False), (20, True), (50, False)])
 def test_three_generations_share_the_original_threshold_while_wallet_changes(tmp_path, monkeypatch, wallet_recovers, pct):
     monkeypatch.setattr(control, "load_settings", lambda: _settings(_api_row()))
     monkeypatch.setenv("OUROBOROS_MAX_SUBAGENT_DEPTH", "4")

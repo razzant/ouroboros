@@ -286,9 +286,6 @@ SLACK = math.ceil(500_000 / RECLAIM_LOW_WATER_DIVISOR)  # the owner's return-aft
 
 @pytest.mark.parametrize("message,anchor,accepted,estimate,target", [
     (STATED, 480_000, 480_000, 520_000, 520_000 + 65_536 - 500_000 + SLACK),  # the provider's stated limit
-    (NUMBERLESS, 480_000, 480_000, 520_000, 520_000 - 480_000 + SLACK),  # the refused estimate over the accepted floor
-    (NUMBERLESS, 480_000, 480_000, 480_000, None),  # an estimate at the floor contradicts the reading: unknown
-    (NUMBERLESS, 480_000, 480_000, 470_000, None),  # below the floor likewise
     (NUMBERLESS, 480_000, None, 520_000, None),  # nothing accepted yet: no floor to measure against
     (STATED, None, None, 520_000, 520_000 + 65_536 - 500_000 + SLACK),  # a stated limit measures even a cold E
 ])

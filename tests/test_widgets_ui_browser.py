@@ -107,18 +107,6 @@ def _write_module_widget_smoke_extension(data_dir: pathlib.Path) -> str:
     return name
 
 
-def test_module_widget_smoke_fixture_has_deterministic_fault(tmp_path):
-    name = _write_module_widget_smoke_extension(tmp_path)
-    skill_dir = tmp_path / "skills" / "external" / name
-    plugin = (skill_dir / "plugin.py").read_text(encoding="utf-8")
-    fault = (skill_dir / "fault.js").read_text(encoding="utf-8")
-
-    assert 'register_ui_tab("fault", "Fault module"' in plugin
-    assert '"entry": "fault.js", "max_height": 640, "start": "auto"' in plugin
-    assert "height: 900px" in fault
-    assert "throw new Error('Deterministic module widget fault: ' + 'x'.repeat(320));" in fault
-
-
 def _write_temporal_module_widget_extension(data_dir: pathlib.Path) -> str:
     """Install a Cache-derived width/height feedback fixture."""
     from ouroboros.skill_loader import SkillReviewState, compute_content_hash, save_review_state

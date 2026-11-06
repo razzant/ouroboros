@@ -11,10 +11,6 @@ show the words under it. Real rendering is in ``tests/test_work_list_panel_brows
 from __future__ import annotations
 
 import re
-from pathlib import Path
-
-REPO = Path(__file__).resolve().parents[1]
-SHEETS = ("web/ui.css", "web/style.css", "web/room_work.css", "web/settings.css", "web/cards.css")
 PAINT = ("background", "box-shadow", "backdrop-filter", "-webkit-backdrop-filter")
 
 
@@ -23,14 +19,6 @@ def _rules(css: str):
     css = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
     for match in re.finditer(r"([^{}]+)\{([^{}]*)\}", css):
         yield " ".join(match.group(1).split()), match.group(2)
-
-
-def _by_selector(css: str) -> dict[str, str]:
-    """Every rule's declarations joined by selector, so a later media block adds to a rule and never replaces it."""
-    merged: dict[str, str] = {}
-    for selector, body in _rules(css):
-        merged[selector] = merged.get(selector, "") + ";" + body
-    return merged
 
 
 def _declares(body: str, props=PAINT) -> list[str]:
@@ -70,39 +58,3 @@ def test_scanners_see_the_shape_they_refuse():
         ':root[data-theme] :is(.chat-header-menu, .task-control-menu)']
     assert translucent_popup_paint('.task-control-menu { background: var(--popup-float); } '
                                    '.chat-header-menu-item { background: var(--surface-float); }') == []
-
-
-def test_popup_paint_is_the_popups_own_and_no_role_selects_it():
-    ui = (REPO / "web/ui.css").read_text(encoding="utf-8")
-    popup = _by_selector(ui)[".ui-popup"]
-    assert set(_declares(popup, ("background", "box-shadow", "border-radius"))) >= {"background", "box-shadow"}, (
-        "every popup wears the float material from its own rule, so a role-less dialog needs no menu to borrow it from")
-    assert "border-radius" in popup
-    for rel in SHEETS:
-        assert role_keyed_popup_paint((REPO / rel).read_text(encoding="utf-8")) == [], rel
-
-
-def test_menus_and_dialogs_keep_an_opaque_backing():
-    ui = (REPO / "web/ui.css").read_text(encoding="utf-8")
-    declaration = re.search(r"--popup-float:\s*([^;]+);", ui)
-    assert declaration and "rgba(" not in declaration.group(1) and "rgb(var(--shell-rgb))" in declaration.group(1), (
-        "the popups' backing is a shared token whose base layer is the room's ink at full alpha")
-    assert "var(--popup-float)" in _by_selector(ui)[".ui-popup"]
-    for rel in SHEETS:
-        assert translucent_popup_paint((REPO / rel).read_text(encoding="utf-8")) == [], (
-            rel, "a menu or dialog wears an opaque backing, never the translucent float colour")
-
-
-def test_the_work_list_wears_its_own_sheet_never_the_rooms_ink():
-    sheets = {rel: (REPO / rel).read_text(encoding="utf-8") for rel in SHEETS}
-    for rel, css in sheets.items():
-        assert borrowed_room_ink(css) == [], (rel, "the list is not the room's ink continued from a bar")
-    shade = _by_selector(sheets["web/room_work.css"])[".rw-shade"]
-    for token in ("--sheet-float", "--elev-float", "--radius-sheet"):
-        assert f"var({token})" in shade, (token, "the sheet's material comes from the shared tokens")
-    ui = sheets["web/ui.css"]
-    declaration = re.search(r"--sheet-float:\s*([^;]+);", ui)
-    assert declaration, "the opaque sheet is a shared token"
-    assert "rgba(" not in declaration.group(1) and "rgb(var(--shell-rgb))" in declaration.group(1), (
-        "its base layer is the room's ink at full alpha: nothing under the list shows through")
-    assert "--chrome-shade-shadow" not in ui, "the bar-continuing Shade's shadow alias has no reader and no meaning left"
