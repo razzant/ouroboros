@@ -34,6 +34,25 @@ def autonomous_tasks() -> list[str]:
                                  and is_autonomous_work(task.get("metadata"))))
 
 
+def cited_owner_roots() -> list[tuple[str, str]]:
+    """Live roots the switch does not stop because they run on my human's cited words: ``(task_id, quote)`` for every
+    pending or running owner-kind task whose corpus holds a ``place_owner`` row with ``basis: cited``."""
+    from supervisor import queue as q
+
+    with q._queue_lock:
+        tasks = [*q.PENDING, *(meta.get("task") or {} for meta in q.RUNNING.values())]
+    found: dict[str, str] = {}
+    for task in tasks:
+        metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+        if not task.get("id") or work_kind(metadata) != "owner":
+            continue
+        quote = next((str(row.get("content") or "") for row in metadata.get("owner_corpus") or []
+                      if isinstance(row, dict) and row.get("source") == "place_owner" and row.get("basis") == "cited"), "")
+        if quote:
+            found.setdefault(str(task["id"]), quote)
+    return list(found.items())
+
+
 def autonomous_work_enabled(task: dict, drive_root) -> bool:
     """Recheck Off/Panic at selection and launch, including restored autonomous work."""
     if not is_autonomous_work(task.get("metadata") or {}):

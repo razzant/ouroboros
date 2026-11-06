@@ -1043,3 +1043,27 @@ def test_finish_before_dispatch_budget_pause_is_not_done(clock):
     clock.clock._wake_finished("wake0001", True, pooled=True)
     assert clock.clock.status_snapshot()["last_wake_outcome"] == "paused"
     assert clock.clock._backoff == 1
+
+
+def test_off_names_the_roots_it_leaves_running_on_my_humans_cited_words(clock, monkeypatch):
+    """Owner 06.11 (3A): the switch stops autonomous work, not work started on a verified cite of my human's words,
+    and its one Main row says which roots keep running and on which words; without such roots it adds nothing."""
+    import supervisor.consciousness_carriers as carriers
+    from supervisor import queue as q
+
+    cited = {"source": "place_owner", "content": "Проверь экономику", "basis": "cited", "carried": True}
+    pending = [{"id": "cited-root", "metadata": {"work_kind": "owner", "owner_corpus": [cited]}},
+               {"id": "owner-door-root", "metadata": {"work_kind": "owner", "owner_corpus": [{"source": "initial_user", "content": "x"}]}},
+               {"id": "own-root", "metadata": {"initiator": "consciousness", "work_kind": "consciousness", "owner_corpus": [cited]}}]
+    monkeypatch.setattr(q, "PENDING", pending)
+    monkeypatch.setattr(q, "RUNNING", {"cited-running": {"task": {"id": "cited-running", "metadata": {
+        "work_kind": "owner", "owner_corpus": [{"source": "owner_mailbox", "content": "y"}, cited]}}}})
+    assert carriers.cited_owner_roots() == [("cited-root", "Проверь экономику"), ("cited-running", "Проверь экономику")]
+    stopped = []
+    monkeypatch.setattr(carriers, "stop_pooled_wake", stopped.append)
+    assert clock.clock.stop() == ("Background consciousness disabled; autonomous work ends at its next step."
+                                  "\nKept running on your words (task cited-root): «Проверь экономику»"
+                                  "\nKept running on your words (task cited-running): «Проверь экономику»")
+    assert set(stopped) <= {"own-root"}, "only the autonomous root is stopped; the cited ones keep running"
+    monkeypatch.setattr(q, "PENDING", []); monkeypatch.setattr(q, "RUNNING", {})
+    assert clock.clock.stop() == "Background consciousness is already disabled."
