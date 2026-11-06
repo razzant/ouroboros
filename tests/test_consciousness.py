@@ -202,8 +202,8 @@ def test_status_details_and_launch_use_only_stored_places(clock, monkeypatch):
         "Places: {places}", encoding="utf-8")
     assert clock.clock.tick(clock.clock.next_wake_at) == "launched"
     text = clock.launches[-1]["text"]
-    assert f"Research room [{place.place_id}]: active; open turns: 3; chat_history(chat_id=123)" in text
-    assert "note (owner): Watch releases." in text
+    assert f"Research room [{place.place_id}]: active; open turns: 3; rooms: 2" in text
+    assert "note (owner): Watch releases." in text and "a place's rooms: configure_presence(action='inspect'," in text
 
 
 @pytest.mark.parametrize("captured", [True, False])

@@ -140,14 +140,15 @@ def places_text(drive_root, views) -> str:
         if sending:
             voice = (f'; as Ouroboros (bot {sending["label"]})' if sending["kind"] == "bot"
                      else f'; writes as {sending["label"]}' + (" (your human's own account)" if owner else ""))
-        count = view.get("unanswered")
-        addresses = [str(room.get("address") or f'chat_history(chat_id={int(room["room_chat_id"])})')
-                     for room in view.get("rooms") or []]
-        address = "; ".join(addresses) or ("no captured room" if view.get("rooms") == [] else "room address unknown")
+        count, rooms = view.get("unanswered"), view.get("rooms")
+        # A count; the closing line names the reader of every room, sealed ones included.
+        held = f"rooms: {len(rooms)}" if rooms else "no captured room" if rooms == [] else "rooms unknown"
         lines.append(f'{view.get("label") or view["place_id"]} [{view["place_id"]}]: {view["state"]}; '
-                     f'open turns: {count if count is not None else "unknown"}; {address}{voice}')
+                     f'open turns: {count if count is not None else "unknown"}; {held}{voice}')
         for note in view.get("notes") or []:
             lines.extend(f'  note ({note["author"]}): {line}' for line in note["text"].splitlines())
+    if lines:
+        lines.append("a place's rooms: configure_presence(action='inspect', place_id=<its id in brackets>)")
     return "\n  ".join(lines) if lines else "none"
 
 
