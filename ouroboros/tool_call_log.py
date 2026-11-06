@@ -170,9 +170,9 @@ def worker_position(invocation: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         return {"worker_started": False}
     stack = _loop_thread_stack(ident, limit=sys.getrecursionlimit())
     if invocation.get("_worker_done"):  # read after the capture: its thread may already serve another call
-        return {"worker_at": "the worker had settled when its wait ended"}
+        return {"worker_at": "settled before its wait ended"}
     if not stack:
-        return {"worker_at": "unknown: its stack could not be read"}
+        return {"worker_at": "unknown (its stack could not be read)"}
     own = _innermost_repo_frame(stack)
     return {"worker_at": " <- ".join(dict.fromkeys(filter(None, (own, stack[-1])))), "worker_stack": stack}
 
@@ -181,7 +181,9 @@ def worker_phrase(position: Dict[str, Any]) -> str:
     """The same fact in the sentence the model reads."""
     if position.get("worker_started") is False:
         return " The call never reached a worker."
-    return f" Its worker was at {position['worker_at']}." if position.get("worker_at") else ""
+    if not position.get("worker_at"):
+        return ""
+    return f" Its worker {'was at' if position.get('worker_stack') else 'stood:'} {position['worker_at']}."
 
 
 def start_log_field(invocation: Optional[Dict[str, Any]]) -> Dict[str, Any]:

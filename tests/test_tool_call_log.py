@@ -12,7 +12,7 @@ import pytest
 
 import ouroboros.loop_tool_execution as execution
 from ouroboros.observability import read_call_payload
-from ouroboros.tool_call_log import logical_calls, worker_position
+from ouroboros.tool_call_log import logical_calls, worker_phrase, worker_position
 from ouroboros.tools.tool_result import ToolResult
 
 
@@ -471,8 +471,13 @@ def test_a_worker_position_states_only_what_it_saw(monkeypatch):
 
     live = {"_worker_thread": threading.get_ident()}
     monkeypatch.setattr(server_liveness, "_loop_thread_stack", lambda *_a, **_k: [])
-    assert worker_position(live) == {"worker_at": "unknown: its stack could not be read"}
+    unknown = worker_position(live)
+    assert unknown == {"worker_at": "unknown (its stack could not be read)"}
+    assert worker_phrase(unknown) == " Its worker stood: unknown (its stack could not be read)."
     monkeypatch.setattr(server_liveness, "_loop_thread_stack", lambda *_a, **_k: ["ouroboros/next.py:1 in other"])
     assert worker_position(live)["worker_stack"] == ["ouroboros/next.py:1 in other"]
-    assert worker_position({**live, "_worker_done": True}) == {"worker_at": "the worker had settled when its wait ended"}
+    assert worker_phrase(worker_position(live)).startswith(" Its worker was at ")
+    settled = worker_position({**live, "_worker_done": True})
+    assert settled == {"worker_at": "settled before its wait ended"}
+    assert worker_phrase(settled) == " Its worker stood: settled before its wait ended."
     assert worker_position({}) == {"worker_started": False} and worker_position(None) == {}
