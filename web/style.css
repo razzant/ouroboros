@@ -5987,7 +5987,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .dashboard-body {
     flex: 1;
     min-height: 0;
-    overflow-y: auto;
+    /* `scroll`, not `auto`: a WebKit without scrollbar-gutter keeps its classic bar's room on a tab that fits too (M14). */
+    overflow-y: scroll;
     scrollbar-gutter: stable;
     padding: var(--space-4) 20px var(--space-5);
     display: flex;
