@@ -161,7 +161,7 @@
     --control-pad-x: var(--space-4);
     --control-pad-y: 0px;
     --control-radius: var(--pill-radius);
-    --button-font-size: 13px;
+    --button-font-size: var(--type-body);
     /* A floating group's inset, which its negative margin cancels so grouping moves no control. */
     --chrome-inset: calc(var(--space-1) + 1px);
     /* Airy dopamine seed (DESIGN.md design bible): the dark values; the light theme's follow in its block. One set of
@@ -739,6 +739,9 @@
     box-shadow: var(--elev-rest);
     padding: var(--card-pad);
 }
+/* On a phone a card keeps 18 px at its sides, so a three-way choice fits its row instead of wrapping two and one
+   (owner, board of 06.11: 24 px on a desk, 18 px on a phone). */
+html[data-layout="stack"] { --card-pad: var(--space-4) 18px; }
 
 /* ---- The control box lock (owner decision 06.11.2026, Q1 = A) ---------------------------------------------------
    Why it exists: one button had eight heights (18–39 px) because any page sheet could write height, padding, radius,
@@ -752,7 +755,7 @@
      --control-h: auto                     a control that carries a paragraph (style.css .chat-file-card), with
      --control-pad-y                       its block inset, --control-pad-x its inline inset (one or two values),
      --control-radius                      its corner (the pill, or --radius-inner for a card),
-     --button-font-size                    its text (one token until the board picks 13 or 14 px).
+     --button-font-size                    its text (the body size at rest; .btn-sm takes the meta size).
    How to add a role: give its class the token values it needs (as .btn-sm does), add it to the :is() lists below and
    to the touch-reach family, and name it in DESIGN.md principle 4.
    Scope: the product documents only (their root is .ouro-ui: the app, setup, login). An author frame loads this sheet
