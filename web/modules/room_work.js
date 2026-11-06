@@ -17,7 +17,7 @@
 import { fetchTaskDetail, fetchTaskDetailStrict } from './api_client.js';
 import { bindContentButton, confirmAndSendRestart } from './chat_activity.js';
 import { openConfirmDialog } from './confirm_dialog.js';
-import { createStartFailure } from './host_starting_status.js';
+import { createStartFailure, startFailureCause } from './host_starting_status.js';
 import { compareHistoryPosition } from './chat_history_replay.js';
 import { createHistoryReveal } from './chat_history_reveal.js';
 import { fmt, tr } from './i18n.js';
@@ -751,7 +751,7 @@ export function createRoomWork({
         const text = [clean(statusBadge.textContent), clean(statusBadge.dataset.step)].filter(Boolean).join(' · ');
         // A Project's list always has its head, the room's whole name, so its title opens it even with no work; a failed
         // start always has its line and Restart.
-        const failed = statusBadge.dataset.tone === 'failed';
+        const failed = startFailureCause({ badge: statusBadge, ready: hostReady(), latest: stateSnapshots?.latest?.() }) !== null;
         const listed = Boolean(head) || failed || rows.length > 0 || extras.children.length > 0;
         // Word, tone, mark and what waits for the owner come together from the chat's producer
         // (work_status.roomStatusView via setStatus); the control paints them and never ranks row tones or reads a
@@ -769,7 +769,7 @@ export function createRoomWork({
         // elsewhere stays Working. A pause by the owner or by Ouroboros is not the owner's move. The room at rest says
         // Online beside its green dot.
         const owner = statusBadge.dataset.owner === '1';
-        const reshaped = paintStatusMark(mark, failed ? START_FAILED
+        const reshaped = paintStatusMark(mark, tone === 'failed' ? START_FAILED
             : tone === 'online' && !owner ? AT_REST : markView({ mark: statusBadge.dataset.mark, owner }));
         // The owner's move said in words too, where the word does not already say it.
         const said = amberNote(statusBadge.dataset.amber || '');
@@ -782,11 +782,11 @@ export function createRoomWork({
 
     function paintNote() {
         const latest = stateSnapshots?.latest?.();
-        // The badge's own state, so the list never says "starting" under a capsule that says the start failed (U003).
-        const failed = statusBadge.dataset.tone === 'failed';
-        failure.paint(failed ? statusBadge.title : null);
+        // The failed start the bar says, or the producer says under work words, so the list never says "starting" (U003).
+        const cause = startFailureCause({ badge: statusBadge, ready: hostReady(), latest });
+        failure.paint(cause);
         const message = !connected() ? tr('room_work.note.reconnecting', 'Reconnecting — showing the last known state.')
-            : failed ? '' : !hostReady() ? tr('room_work.note.starting', 'Ouroboros is starting…')
+            : cause !== null ? '' : !hostReady() ? tr('room_work.note.starting', 'Ouroboros is starting…')
                 : Array.isArray(latest?.works) && latest.works_complete === false
                     ? tr('room_work.note.partial', 'Not all current work could be confirmed; this list may be incomplete.')
                     // A Project's list that opened on its name alone says so in Activity's words.

@@ -31,6 +31,15 @@ export function startingStatus(boot) {
     return { kind: 'starting', text: 'Starting…', title };
 }
 
+/** The cause of a failed start a room's list says (U003), null when the start did not fail: the bar's own failure
+ * (`badge`, the status setStatus writes), or, where the room's work words outrank the start's word in the bar, the same
+ * producer over the latest snapshot's boot, so the list never says "starting" for a start that failed. */
+export function startFailureCause({ badge, ready, latest }) {
+    if (badge?.dataset?.tone === 'failed') return String(badge.title || '');
+    const view = !ready && startingStatus(bootPhase(latest));
+    return view?.kind === 'failed' ? view.title : null;
+}
+
 /**
  * The first line of a room's Shade while its start failed (U001/U003): the capsule and the Shade read the same state
  * (the badge setStatus writes from startingStatus), so the Shade says the failure, never "starting", with Restart

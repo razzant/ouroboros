@@ -12,6 +12,7 @@ import {
     supervisorReady,
 } from '../modules/chat_activity.js';
 import { createChatInstance } from '../modules/chat.js';
+import { startFailureCause } from '../modules/host_starting_status.js';
 import { emptyWorkState, roomStatusView } from '../modules/work_status.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
 import { projection, room, work } from './work_fixture.js';
@@ -278,6 +279,18 @@ test('the Starting… header follows the phase: starting, chat ready, failed', (
         'readiness outranks the phase: a ready supervisor is Online whatever the boot said');
     assert.equal(roomStatusView({ ...idle, room: room('queued') }, { ready: false, boot: CHAT_READY }).text,
         'Queued', 'work keeps its own word beside the phase');
+});
+
+test('a room\'s list says a failed start whatever word its work puts in the bar, and only a failed start (U003)', () => {
+    const badge = (tone, title = '') => ({ dataset: { tone }, title });
+    assert.equal(startFailureCause({ badge: badge('failed', FAILED.error), ready: false, latest: null }), FAILED.error);
+    // Work outranks the start's word in the bar ("Working"); the list still reads the same producer over the boot.
+    assert.equal(startFailureCause({ badge: badge('live'), ready: false, latest: { boot: FAILED } }), FAILED.error);
+    assert.equal(startFailureCause({ badge: badge('live'), ready: true, latest: { boot: FAILED } }), null,
+        'readiness outranks the phase, as in the bar');
+    for (const boot of [SERVING, CHAT_READY, SOFT_FAILED, null]) {
+        assert.equal(startFailureCause({ badge: badge('starting'), ready: false, latest: { boot } }), null);
+    }
 });
 
 test('Main: the header paints the phase from the snapshot and forgets it on disconnect', async () => {
