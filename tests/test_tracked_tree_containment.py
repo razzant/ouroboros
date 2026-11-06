@@ -31,6 +31,9 @@ from ouroboros.tools import shell_process
 from tests._shared import wait_test_child_stop
 
 POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="a real sh tree and process groups; Windows has fakes below")
+# A retained POSIX leader handle (``_ouroboros_group_held``) exists only where contained_popen builds _RetainedPopen;
+# its group calls need os.killpg and os.WNOHANG, which Windows' os lacks. Windows children are Jobs: the cases below.
+POSIX_HANDLE = pytest.mark.skipif(os.name == "nt", reason="a retained POSIX leader handle; Windows tracked children are Jobs")
 
 
 def fake_tree_read(monkeypatch, proc, *, remains):
@@ -95,6 +98,7 @@ if {retired!r}:
     assert result.stderr == "", "destruction must not import after Python has dismantled its import machinery"
 
 
+@POSIX_HANDLE
 @pytest.mark.parametrize("identity", ["foreign", None])
 @pytest.mark.parametrize("leader_exited", [False, True])
 def test_recycled_or_unreadable_group_is_never_signalled(registry, monkeypatch, identity, leader_exited):
@@ -115,6 +119,7 @@ def test_recycled_or_unreadable_group_is_never_signalled(registry, monkeypatch, 
     assert signals == []
 
 
+@POSIX_HANDLE
 @pytest.mark.parametrize("state", ["live", "exited", "reaped", "unreadable", "contended"])
 def test_linux_group_requests_require_both_native_birth_and_waitable_child(monkeypatch, state):
     """Exercise Linux's no-ps request path independently of this host's native ABI."""
