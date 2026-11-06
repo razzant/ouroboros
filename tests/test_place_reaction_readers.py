@@ -37,9 +37,7 @@ def test_a_wake_lists_each_reaction_as_its_context_fact_never_as_a_correspondent
                              "[Reaction, not speech: counts observed: thumbsup 3 on message 1712.0001]")
     assert lines[3].startswith("- message in a place in Place chat r") and lines[3].endswith('] Real words.')
     text = observation.full_text()
-    assert "3 Presence reactions (context, not speech), 1 message in a place (counted, not listed:" in text
-    assert "Real words." not in text  # the message's words are my view's; the stored observation keeps its line
-    assert b"Real words." in observation.source_bytes()
+    assert "3 Presence reactions (context, not speech), 1 message in a place;" in text and lines[3] in text
     assert ': ""' not in text and "messages in places" not in text  # no reaction reads as an empty message
     assert b'"composition": {"correspondent_message": 1, "correspondent_reaction": 3}' in observation.source_bytes()
 

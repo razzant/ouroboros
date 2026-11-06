@@ -1,8 +1,8 @@
 """A wake keeps its start floor while its fallback form carries my human's card answers whole: when that projection
 is physically unfit too, the first build delivers the bare pointer its producer bound, the plan keeps the whole input,
 a round boundary measures the projection as well before it swaps one in, a route that holds more gets it back, and
-every delivery record names the form the request carried. My human's and other people's messages are counted in a
-wake's text: my view holds their words (``## This room``, ``## Other conversations``), the source keeps each line.
+every delivery record names the form the request carried. A wake's text counts my human's messages (my view carries
+them: ``## This room``, ``## Other conversations``) and lists place messages whole; the source keeps each line.
 
 Built on the review's reproduction (RV1W Astra F3): the same memory, window and words that refused Max and Low
 before now start; an unreadable source still rescues nothing.
@@ -179,10 +179,11 @@ def test_a_projection_that_saves_nothing_never_stops_the_pointer_or_the_whole_in
     assert [(event["checkpoint_kind"], event["form"]) for event in events] == [form]
 
 
-def test_a_busy_window_is_counted_and_starts_whole_with_my_humans_words_in_my_view(tmp_path, monkeypatch):
-    """Opus N2's window: thousands of short messages of a participant beside one of my human's. The wake counts both
-    (the source keeps every line), so its whole input is small and starts as it is; my human's words reach the first
-    request in my view, and the participant's silent room is one line with its count."""
+def test_a_busy_window_lists_the_places_messages_and_starts_with_my_humans_words_in_my_view(tmp_path, monkeypatch):
+    """Opus N2's window: thousands of short messages of a participant beside one of my human's. The wake lists the
+    participant's messages whole and counts my human's (the source keeps every line), so its whole input is unfit and
+    the bare pointer starts; my human's words reach the first request in my view, and the participant's silent room is
+    one line with its count."""
     from ouroboros import dialogue_store as ds, places
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.consciousness_wake import bind_wake_observation, observe_wake
@@ -208,14 +209,14 @@ def test_a_busy_window_is_counted_and_starts_whole_with_my_humans_words_in_my_vi
     bind_wake_observation(env.drive_root, task, observation, render)
     registry._ctx.task_metadata = dict(task["metadata"])
     wake = task["metadata"]["wake_observation"]
-    assert "1 owner message (counted, not listed" in task["text"] and "6000 messages in places (counted" in task["text"]
-    assert words not in task["text"] and "message number 17 " not in task["text"]
+    assert "1 owner message (counted, not listed" in task["text"] and "6000 messages in places;" in task["text"]
+    assert words not in task["text"] and "message number 17 " in task["text"]  # the place's messages: listed whole
     assert not {"owner_projection_text", "pointer_text"} & set(wake)  # no card answer: the projection is the pointer
     stored = read_actor_source_bytes(env.drive_root, wake["source"]["task_id"], wake["source"]).decode("utf-8")
     assert words in stored and "message number 5999 " in stored  # every line whole at the source
     messages, _capture = _first_build(env, memory, task, registry, monkeypatch, "max")
-    assert messages[1]["content"] == task["text"], "the whole input starts"
+    assert messages[1]["content"] == wake["projection_text"], "the whole input is unfit: the bare pointer starts"
     view = json.dumps(messages[0], ensure_ascii=False)
     assert words in view, "my human's words reach the first request, in my view"
     assert "message number 17 " not in view and "6000 words nobody considered" in view
-    assert _delivery_records(env) == []
+    assert _delivery_records(env) == [("wake_input_by_source", 0, "pointer")]

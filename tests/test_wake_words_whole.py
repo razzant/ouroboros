@@ -1,7 +1,9 @@
 """A wake records people's words whole in its stored observation, every new row under its host-known author and
-exact address, while the text it reads counts them and lists none: my view holds them (``## This room`` and
-``## Other conversations``; owner 06.11, Q2-A). The fallback form keeps my human's card answers whole beside the
-exact pointer, and a task's terminal line says the card's outcome and an explicit stop's recorded reason.
+exact address. The text it reads lists every new place message whole (a room my view shows as one line holds no
+words; an engaged room's new rows may stand in both) and counts my human's messages, which my view always carries
+(``## This room`` and ``## Other conversations``, folded last; owner 06.11, Q2-A). The fallback form keeps my human's
+card answers whole beside the exact pointer, and a task's terminal line says the card's outcome and an explicit stop's
+recorded reason.
 
 Every guard is checked both ways (recorded whole vs the earlier 240-character cut; my human vs a participant, a
 shared account or a bot; counted vs listed; coverage only beside a stored source; a plain finish vs an author's stop).
@@ -67,9 +69,9 @@ def test_people_words_reach_the_wake_whole_with_author_and_address(tmp_path, pla
     assert "Sasha [" in lines[1] and "my human" not in lines[1] and "a bot" not in lines[1]
     assert "a bot: Ci-Bot" in lines[4], "a connector-marked bot comes whole with its author fact (owner Q2=A)"
     text = observation.full_text()
-    assert TAIL not in text and "…[" not in text, "counted, never listed: my view holds their words"
-    assert ("2 owner messages (counted, not listed: my view holds the words), 3 messages in places (counted, "
-            "not listed:") in text
+    assert all(lines[n] in text for n in (1, 3, 4)) and "…[" not in text, "a place message: listed whole"
+    assert lines[0] not in text and lines[2] not in text, "my human's: counted, my view holds their words"
+    assert "2 owner messages (counted, not listed: my view holds the words), 3 messages in places; " in text
     source = observation.source_bytes().decode("utf-8")
     assert source.count(TAIL.replace('"', '\\"')) == 5, "the stored source holds the same whole lines"
 

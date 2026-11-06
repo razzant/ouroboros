@@ -802,8 +802,7 @@ def test_wake_counts_imported_history_without_listing_it(room):
     assert kinds.count("history_import") == 3 and kinds.count("correspondent_message") == 1
     text = observation.full_text()
     assert "3 imported earlier Presence messages (counted, not listed: room history" in text
-    assert "1 message in a place (counted, not listed:" in text  # its words are my view's, not the wake text's
-    assert "a live correspondent" not in text and b"a live correspondent" in observation.source_bytes()
+    assert "1 message in a place;" in text and "a live correspondent" in text  # a place message: listed whole
     assert "message 1" not in text and "message 2" not in text
 
 

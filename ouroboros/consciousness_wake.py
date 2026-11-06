@@ -405,9 +405,7 @@ def _row_kind(row: Dict[str, Any], accounts: Any = None) -> str:
 _KIND_WORDS = {  # (one, many)
     "owner_message": ("owner message (counted, not listed: my view holds the words)",
                       "owner messages (counted, not listed: my view holds the words)"),
-    "correspondent_message": ("message in a place (counted, not listed: my view holds it, its words or its room's line)",
-                              "messages in places (counted, not listed: my view holds them, their words or their "
-                              "rooms' lines)"),
+    "correspondent_message": ("message in a place", "messages in places"),
     "correspondent_reaction": ("Presence reaction (context, not speech)", "Presence reactions (context, not speech)"),
     "card_answer": ("card answer", "card answers"), "task_terminal": ("task terminal", "task terminals"),
     "direct_turn": ("own direct turn ended (counted, not listed: its exchange is the dialogue itself)",
@@ -421,9 +419,10 @@ _KIND_WORDS = {  # (one, many)
     "history_import": ("imported earlier Presence message (counted, not listed: room history, not an arrival)",
                        "imported earlier Presence messages (counted, not listed: room history, not arrivals)"),
 }
-# Kinds the wake counts without listing: their content is the room itself, or my view's ``## This room`` and
-# ``## Other conversations`` (every integrating focus holds them); the stored observation keeps each whole.
-_COUNTED_ONLY = frozenset({"direct_turn", "history_import", "owner_message", "correspondent_message"})
+# Kinds the wake counts without listing: their content is the room itself, or my human's words, which my view always
+# carries (``## This room``, ``## Other conversations``; folded last, by address); the stored observation keeps each
+# whole. A place message is listed: my view may carry its room as one line (an engaged room's new rows stand in both).
+_COUNTED_ONLY = frozenset({"direct_turn", "history_import", "owner_message"})
 
 
 def _continue_open(result: Dict[str, Any], task_id: str) -> str:
