@@ -1062,3 +1062,35 @@ def test_only_a_turn_with_no_effect_is_given_back_from_its_input(tmp_path, monke
     elif fact == "stopped":
         ci.request_cancel(tmp_path, turn.id, reason="owner stop", source="test")
     assert seed_returnable(root, task, attempt) is (fact == "nothing")
+
+
+@pytest.mark.parametrize("door", ["acknowledged_restart", "aborted_update"])
+def test_a_project_room_turn_cut_before_its_first_save_comes_back_on_its_bound_basis(tmp_path, monkeypatch, door):
+    """A room turn's seed carries the basis it was bound with; Project-hold revalidation admits it on its D5 proof."""
+    from ouroboros.projects_registry import create_project
+    from supervisor.restart_retention import prepare_restart_returns
+    from supervisor.task_admission import SEED_RETURN
+    from tests.test_restart_saved_work import _ack
+
+    system = _system(tmp_path, monkeypatch)
+    folder = tmp_path / "room-folder"
+    folder.mkdir()
+    create_project(tmp_path, "room", working_dir=str(folder))
+    turn = _carried_turn(system, tmp_path, metadata={"client_message_id": "cm-room", "project_id": "room"})
+    basis = dict(system.workers.RUNNING[turn.id]["task"]["_project_admission"])
+    if door == "aborted_update":
+        assert system.control._quiesce_repo_writers("auto_merge") == []
+        system.control._respawn_workers_after_failed_update()
+    else:
+        assert prepare_restart_returns(tmp_path, system.workers.RUNNING, system.workers.PENDING,
+                                       transaction_id="tx-room") == {turn.id}
+        _ack(tmp_path, "tx-room")
+        _boot_after_stop(system, monkeypatch, tmp_path)
+    [row] = [row for row in system.workers.PENDING if row["id"] == turn.id]
+    assert row[SEED_RETURN]["from_attempt"] == 1 and row["_attempt"] == 2
+    system.workers.assign_tasks()
+    [sent] = _launched(system)
+    assert (sent["id"], sent["_attempt"]) == (turn.id, 2) and sent["project_id"] == "room"
+    assert sent["_project_admission"]["project"] == basis["project"] and "_project_scope_none" not in sent
+    system.workers.assign_tasks()
+    assert not _launched(system)
