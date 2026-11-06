@@ -13,17 +13,10 @@ independent causes produced it (docs/DESIGN.md):
 4. there was no scale at all — every size was a literal px, across three
    mutually inconsistent grey families.
 
-This guard keeps that class closed on the **migrated** surfaces only. It is
-deliberately NOT a sweep of the historical stylesheet: ``web/style.css`` still
-carries unmigrated skills/marketplace/widget/log rules whose literals are a
-later pass, and a guard that fails on all of them would be turned off. The
-migrated slices of ``style.css`` are delimited in the file itself by
-``design-system:migrated-begin`` / ``design-system:migrated-end`` marker PAIRS
-— several, because migrated surfaces (harness accounts, the chat transcript,
-the chat page chrome, structured chat delivery) are not contiguous in the file
-and moving hundreds of unrelated lines to join them would destroy blame. So
-migrating a new surface means moving a marker or adding a pair (or a file
-below) in the same commit that migrates it.
+This guard keeps that class closed on every first-party stylesheet. Until the
+06.11.2026 convergence it read a delimited "migrated" subset of ``style.css``
+(marker pairs in the file); the sheets now carry one system, so there is no
+subset to delimit and nothing for a literal to hide behind.
 
 Pattern follows ``tests/test_web_dialogs_static.py``: read the sources, assert
 the structural fact, no browser needed.
@@ -38,9 +31,6 @@ import re
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 WEB = REPO_ROOT / "web"
-
-BEGIN_MARKER = "design-system:migrated-begin"
-END_MARKER = "design-system:migrated-end"
 
 # The four sizes, the three line heights, the two named foregrounds, and the
 # four status pairs. The scale is closed: a fifth size token is a design change
@@ -97,50 +87,11 @@ def _decommented(css: str) -> str:
     return COMMENT.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), css)
 
 
-def _style_marker_spans() -> list[tuple[int, int]]:
-    """Every ``(begin, end)`` marker pair of style.css, structurally validated.
-
-    N pairs are allowed (migrated surfaces are not contiguous in the file), but
-    the pairing itself must stay honest: as many ends as begins, strictly
-    alternating begin/end — which rules out nested and overlapping regions and
-    a stray marker mention that would silently truncate a guarded slice."""
-    css = _read("web/style.css")
-    events = sorted(
-        [(m.start(), "begin") for m in re.finditer(re.escape(BEGIN_MARKER), css)]
-        + [(m.start(), "end") for m in re.finditer(re.escape(END_MARKER), css)]
-    )
-    assert events, "no design-system markers in web/style.css"
-    kinds = [kind for _, kind in events]
-    assert kinds == ["begin", "end"] * (len(events) // 2), (
-        "design-system markers must be strictly alternating begin/end pairs — "
-        "nesting, overlap, or an unpaired mention silently reshapes the "
-        f"guarded regions; got sequence {kinds}"
-    )
-    return [
-        (events[i][0], events[i + 1][0]) for i in range(0, len(events), 2)
-    ]
-
-
-def _migrated_style_region(raw: bool = False) -> str:
-    """The concatenated marked (migrated) slices of style.css."""
-    css = _read("web/style.css")
-    slices = [css[start:end] for start, end in _style_marker_spans()]
-    if not raw:
-        slices = [_decommented(s) for s in slices]
-    return "\n".join(slices)
-
-
-def _migrated_sources() -> dict[str, str]:
+def _sheet_sources() -> dict[str, str]:
+    """Every first-party stylesheet, comments blanked (vendored sheets are not ours)."""
     return {
-        "web/ui.css": _decommented(_read("web/ui.css")),
-        "web/settings.css": _decommented(_read("web/settings.css")),
-        "web/onboarding.css": _decommented(_read("web/onboarding.css")),
-        "web/model_roles.css": _decommented(_read("web/model_roles.css")),
-        "web/model_wait.css": _decommented(_read("web/model_wait.css")),
-        "web/room_work.css": _decommented(_read("web/room_work.css")),
-        "web/cards.css": _decommented(_read("web/cards.css")),
-        "web/consciousness.css": _decommented(_read("web/consciousness.css")),
-        "web/style.css (migrated regions)": _migrated_style_region(),
+        str(path.relative_to(REPO_ROOT)): _decommented(path.read_text(encoding="utf-8"))
+        for path in sorted(WEB.glob("*.css"))
     }
 
 
@@ -199,87 +150,36 @@ def _document_stylesheets(document: str) -> list[str]:
     return parser.paths
 
 
-def test_no_tiny_raw_font_sizes_on_migrated_surfaces() -> None:
+def test_no_tiny_raw_font_sizes_in_any_sheet() -> None:
     violations: list[str] = []
-    for label, source in _migrated_sources().items():
+    for label, source in _sheet_sources().items():
         for lineno, line in enumerate(source.splitlines(), 1):
             if _is_tiny_font(line):
                 violations.append(f"{label}:{lineno}: {line.strip()}")
     assert not violations, (
-        "Raw sub-12px text is retired on migrated surfaces: below 12px this "
-        "dark theme forces a choice between illegible and glaring, and glaring "
-        "is what the owner reported. Use var(--type-meta) (docs/DESIGN.md "
-        "'Type scale').\n" + "\n".join(violations)
+        "Raw sub-12px text is retired: below 12px this dark theme forces a "
+        "choice between illegible and glaring, and glaring is what the owner "
+        "reported. Use var(--type-meta) (docs/DESIGN.md 'Type scale').\n"
+        + "\n".join(violations)
     )
 
 
-def test_no_uppercase_label_pattern_on_migrated_surfaces() -> None:
+def test_no_uppercase_label_pattern_in_any_sheet() -> None:
     violations: list[str] = []
-    for label, source in _migrated_sources().items():
+    for label, source in _sheet_sources().items():
         for selector, body in RULE.findall(source):
             if "label" not in selector.lower():
                 continue
             if UPPERCASE.search(body):
                 violations.append(f"{label}: {' '.join(selector.split())}")
     assert not violations, (
-        "The 12px UPPERCASE label pattern is retired on migrated surfaces "
+        "The 12px UPPERCASE label pattern is retired "
         "(docs/DESIGN.md 'Hierarchy rule'): all-caps at a small size costs "
         "legibility, widens every label, and a panel that repeats it dozens of "
         "times makes the labels out-shout the values they describe. Author the "
         "string in sentence case instead of manufacturing caps in CSS.\n"
         + "\n".join(violations)
     )
-
-
-# ---------------------------------------------------------------------------
-# The four root causes, pinned individually
-# ---------------------------------------------------------------------------
-
-
-def test_migrated_region_markers_do_not_swallow_unmigrated_surfaces() -> None:
-    """Root cause #4's guard rail: the scoping must stay honest in BOTH
-    directions. The regions have to actually contain the migrated rules —
-    including the chat surface and its `.chat-live-executor-chip`, which
-    migrated with the chat typography pass — and they must not creep over
-    neighbours (marketplace, logs, widgets) that still carry their
-    historical literals. Marker-pair structure itself (as many ends as begins,
-    strictly alternating) is asserted by ``_style_marker_spans`` on every call
-    that reads a region."""
-    region = _migrated_style_region(raw=True)
-    assert ".harness-account-row" in region
-    # The Dashboard -> Updates tab migrated on 2026-08-31; its rules must stay
-    # inside the guarded region so a later edit cannot drift them out of it.
-    assert ".updates-status" in region
-    assert ".updates-restore-row" in region
-    # Dashboard -> Storage (#1418) was written on the scale; its slice stays guarded.
-    assert ".storage-place-label" in region
-    # Dashboard -> Evolution was rewritten on the scale (the time line of versions); its slice stays guarded.
-    assert ".evo-campaign" in region
-    assert ".evo-detail-title" in region
-    # Chat migrated on 2026-09-01 (frontend sprint, Q1=B): page chrome,
-    # transcript/bubbles/live cards/composer, and the structured-delivery +
-    # quiz-card slice, executor chip now included.
-    assert ".chat-page-header" in region
-    assert ".chat-bubble.progress" in region
-    assert ".chat-live-title" in region
-    assert ".chat-live-executor-chip" in region
-    assert ".chat-quiz-card" in region
-    # The Skills page (Installed, Browse, Sources, the detail sheet and its
-    # dialogs) migrated with the skill-sources redesign; its region stays guarded.
-    assert ".skills-installed-card" in region
-    assert ".skills-head-card" in region
-    assert ".skills-source-row" in region
-    # Unmigrated neighbours stay out until their own pass. (`.log-entry` is NOT
-    # in this list: the shared status-tone rules inside the chat region
-    # legitimately name it as a co-selector.)
-    for selector in (".widgets-card",):
-        assert selector not in region, (
-            f"{selector} is an unmigrated surface; a marker crept over it"
-        )
-    # NOTE: deliberately NOT asserting that debt still exists out there. A guard
-    # that fails when someone independently improves an unmigrated surface would
-    # punish exactly the work it wants. The marker pairing (asserted in
-    # ``_style_marker_spans``) is what proves the regions are really scoped.
 
 
 # ---------------------------------------------------------------------------

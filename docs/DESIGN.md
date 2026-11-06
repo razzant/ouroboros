@@ -2629,44 +2629,7 @@ stops clear of them.
 
 The panels a new owner opens first (Models, Providers, Agents, Behavior) show only what an owner touches in the first week. Anything a typical owner never needs or must look up to use safely lives under Advanced: deployment plumbing (bind hosts, process pools, runtime limits), transport and trust knobs such as the extra CA bundle, MCP servers, and the rarely used provider cards, which stay on the Providers page but fold under "More providers". A control needing a paragraph of explanation to be safe is Advanced by definition. Seams: the `advanced` settings panel and the `advanced: true` flag in `web/modules/settings_provider_cards.js` (DEVELOPMENT "Onboarding and Settings surfaces").
 
-## 8. Migration state
-
-The scale is applied to complete component families and declared page regions.
-Using a migrated field inside a historical page does not claim the whole page
-has migrated. Migrated today:
-
-- `web/ui.css` (shared palette, fields, buttons, status/chip recipes and
-  menu/chooser chrome, used by both top-level documents and optional author pages)
-- `web/settings.css` (settings shell, model/effort cards, MCP cards)
-- `web/onboarding.css` (the whole first-run wizard)
-- `web/model_roles.css` (shared role editor)
-- `web/room_work.css` (room work disclosure, rows and reading return)
-- `web/cards.css` (living cards in the feed)
-- `web/style.css` regions paired by `design-system:migrated-begin` /
-  `design-system:migrated-end`: harness accounts; Dashboard → Updates (status
-  card, one action row, collapsed Recovery with one restore list), Storage and
-  Evolution;
-  the Skills page (Installed, Browse, Sources, the detail sheet, its dialogs);
-  chat typography, foreground and status colour. Chat geometry retains local
-  literals per the viewport reserve contract; shared palette channels keep
-  translucent glass coherent across themes.
-- the global `.muted`, `.form-section h3` and shared `.ui-status` tone rules
-
-The remaining page-specific typography in widgets and logs is
-historical. Their adopted common controls follow the shared
-family; unrelated page rules keep their literals until their own pass. Migrate
-each selected family completely and remove its replaced recipes in the same
-change. Do not introduce a half-tokenised second field family or describe a
-control adoption as an all-page redesign. The semantic status/action/notification
-contract already applies everywhere.
-
-`tests/test_web_typography_static.py` guards the migrated set only. Extending
-the guard and migrating the corresponding family or region are the same commit.
-The bible's materials (objects, trays, sheets and the three capsule tones) reach
-every page in both themes through the "Airy dopamine" blocks of ui.css, style.css and
-the page sheets; that mapping is not a typography migration of those pages.
-
-### Author freedom
+## 8. Author freedom
 
 An extension may use the optional shared buttons, fields and status functions
 inside its own module or route-iframe page, override them, or design a completely

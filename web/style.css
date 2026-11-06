@@ -499,7 +499,6 @@ html[data-layout="stack"] .resize-handle { display: none; }
 
 /* The layered reference tint keeps the shared colour transition. */
 @property --project-reference-fill { syntax: '<color>'; inherits: true; initial-value: transparent; }
-/* === design-system:migrated-begin (chat: Project reference) === */
 /* The Project reference (project_reference.js; docs/DESIGN.md "References and actions"): the Projects glyph, the
    Project's name and ↗ in the Project's ink on the Project's fill, in two forms only. The whole control is the
    target: hover deepens its fill (a hovering pointer only), a press deepens it again, focus wears the shared ring;
@@ -591,9 +590,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
 }
 .chat-live-bound-pointer:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 .chat-live-bound-pointer .chat-live-project-name { font-weight: 600; }
-/* === design-system:migrated-end === */
 
-/* === design-system:migrated-begin (chat: Project completion mirror) === */
 /* A Project root's final answer in Main is an ordinary Ouroboros message (docs/DESIGN.md
    "Project completion mirror"): folded when it is long, with the Project chip under it. The
    seven-line footprint stays fixed while the painted tail borrows footer whitespace. JS
@@ -710,7 +707,6 @@ html[data-layout="stack"] .resize-handle { display: none; }
 .owner-action-body { display: flex; flex-direction: column; gap: var(--space-2); }
 .owner-action-reason { font-size: var(--type-meta); color: var(--text-meta); }
 .chat-quiz-materials { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-block: var(--space-2); }
-/* === design-system:migrated-end === */
 
 
 /* A block that exists only for open attention (a model wait, a pending or
@@ -949,13 +945,13 @@ html[data-layout="stack"] .resize-handle { display: none; }
 
 .files-entry-meta {
     color: var(--text-muted);
-    font-size: 11px;
+    font-size: var(--type-meta);
 }
 
 .files-empty {
     padding: 18px 12px;
     color: var(--text-muted);
-    font-size: 13px;
+    font-size: var(--type-body);
 }
 
 .files-preview {
@@ -1366,7 +1362,6 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     align-items: center;
 }
 
-/* === design-system:migrated-begin (chat: page header, budget pill, load-older) === */
 
 /* Main's header is one bar like a Project's, one row in every layout (DESIGN "Page header"): the title with the
    room's status right after it, then the agent's commands. The commands keep their width and the title block
@@ -1622,7 +1617,6 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 .typing-bubble { opacity: 0.7; color: var(--text-secondary); }
 .typing-bubble > .typing-mark { height: 20px; }
 
-/* === design-system:migrated-end === */
 
 .onboarding-overlay {
     position: fixed;
@@ -1688,7 +1682,6 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     line-height: 1.5;
 }
 
-/* === design-system:migrated-begin (chat: transcript, bubbles, live cards, composer) === */
 
 #chat-messages,
 .chat-messages {
@@ -5248,7 +5241,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     }
 }
 
-/* === design-system:migrated-end === */
 
 /* Objects and trays (DESIGN.md design bible; the role's own class is ui.css .ui-card). The page classes below are the
    cards that have not yet taken .ui-card in their markup: they wear the same object material, read from the same
@@ -5431,13 +5423,13 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     font-weight: 700;
     flex-shrink: 0;
     min-width: 78px;
-    font-size: 11px;
+    font-size: var(--type-meta);
 }
 
 .log-entry .log-phase {
     padding: 1px 8px;
     border-radius: 999px;
-    font-size: 11px;
+    font-size: var(--type-meta);
     border: 1px solid rgba(var(--neutral-rgb), 0.08);
     color: var(--text-secondary);
     background: rgba(var(--neutral-rgb), 0.04);
@@ -5458,7 +5450,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .log-entry .log-repeat {
     margin-left: auto;
     color: var(--text-muted);
-    font-size: 11px;
+    font-size: var(--type-meta);
 }
 
 .log-meta {
@@ -5475,7 +5467,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     background: rgba(var(--neutral-rgb), 0.05);
     color: var(--text-secondary);
     border: 1px solid rgba(var(--neutral-rgb), 0.05);
-    font-size: 11px;
+    font-size: var(--type-meta);
 }
 
 .log-body {
@@ -5545,7 +5537,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .log-task-details summary {
     cursor: pointer;
     color: var(--text-secondary);
-    font-size: 11px;
+    font-size: var(--type-meta);
     user-select: none;
 }
 
@@ -5578,13 +5570,13 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .cost-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 13px;
+    font-size: var(--type-body);
 }
 .cost-table th {
     text-align: left;
     font-weight: 500;
     color: var(--text-muted);
-    font-size: 11px;
+    font-size: var(--type-meta);
     padding: 4px 8px;
     border-bottom: 1px solid var(--divider);
 }
@@ -5610,7 +5602,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 .settings-lan-hint[data-tone="warn"] { color: var(--status-warn-word, var(--text-secondary)); }
 .settings-lan-hint a { color: inherit; text-decoration: underline; opacity: 0.9; }
-/* === design-system:migrated-begin (Dashboard Evolution tab) === */
 /* Dashboard Evolution (evolution.js): the campaign object, then one time line of versions with the chosen version
    beneath it. Both are .ui-card objects on the shared materials. The chart's inks: the line and its area, milestone
    dots ringed in the object's own colour, ticks for every version and a dashed bridge over a break in the axis. */
@@ -5737,7 +5728,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 .evo-empty { display: grid; gap: var(--space-2); justify-items: start; padding: 4px 0 2px; }
 .evo-empty-line { margin: 0; max-width: 62ch; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
-/* === design-system:migrated-end === */
 
 .about-body {
     display: flex;
@@ -5756,7 +5746,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     object-fit: cover;
 }
 .about-title { font-size: 28px; font-weight: 700; margin: 0; }
-.about-version { color: var(--text-muted); font-size: 13px; margin: 4px 0 0; }
+.about-version { color: var(--text-muted); font-size: var(--type-meta); margin: 4px 0 0; }
 .about-desc { max-width: 480px; color: var(--text-secondary); font-size: 14px; line-height: 1.6; }
 .about-credits { display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
 .about-links { display: flex; gap: 16px; justify-content: center; margin-top: 4px; }
@@ -5845,7 +5835,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .cost-bar::-moz-progress-bar { background: var(--accent); }
 .cost-empty-cell { color: var(--text-muted); text-align: center; }
 
-/* === design-system:migrated-begin (Dashboard Storage tab) === */
 /* Dashboard Storage (the owner-started count and the free-space tray): shared card, type, spacing
    and tone tokens; only the bar's measured share arrives at runtime (--storage-share). */
 .storage-root { min-height: 0; display: flex; flex-direction: column; gap: var(--space-3); }
@@ -6103,7 +6092,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
  .storage-summary-actions { align-self:flex-start; }
  .storage-summary-actions > .btn { width:auto; }
 }
-/* === design-system:migrated-end === */
 
 #page-dashboard {
     min-height: 0;
@@ -6159,7 +6147,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 .activity-h {
     margin: 0 0 8px;
-    font-size: 13px;
+    font-size: var(--type-body);
     font-weight: 600;
     color: var(--text-meta);
 }
@@ -6225,14 +6213,14 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .activity-tag {
-    font-size: 11px;
+    font-size: var(--type-meta);
     color: var(--text-meta);
     font-style: italic;
 }
 
 .activity-empty,
 .activity-loading {
-    font-size: 13px;
+    font-size: var(--type-body);
     color: var(--text-secondary);
     padding: 8px 2px;
 }
@@ -6341,7 +6329,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     content: '\25B8';
     display: inline-block;
     transition: transform 120ms ease;
-    font-size: 10px;
+    font-size: var(--type-meta);
 }
 
 .skills-details[open] > summary::before,
@@ -6406,7 +6394,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     box-shadow: 0 18px 42px rgba(0, 0, 0, 0.34);
     backdrop-filter: blur(14px);
     -webkit-backdrop-filter: blur(14px);
-    font-size: 13px;
+    font-size: var(--type-body);
     line-height: 1.45;
     /* Error text can be a long unbroken token (a path, a URL, a serialized
        body); without this it overflows the toast instead of wrapping. */
@@ -6481,7 +6469,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     container: skillspane / inline-size;
 }
 
-/* === design-system:migrated-begin (Skills page: Installed, Browse, Sources, detail sheet, dialogs) === */
 /* One card head for every skill (Installed, Browse, the detail sheet): the name opens the sheet, marks stay quieter
    than the name, the purpose reads in meta ink, the who line and facts are meta lines. The run state is one flat status
    chip beside the switch; what needs the owner is an attention tray (one sentence and its actions), visible on touch.
@@ -6874,7 +6861,6 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 .skills-sheet-facts div { display: grid; grid-template-columns: minmax(110px, 0.35fr) minmax(0, 1fr); gap: var(--space-2); }
 .skills-sheet-facts dt { color: var(--text-primary); font-size: var(--type-meta); font-weight: 600; }
 .skills-sheet-facts dd { margin: 0; color: var(--text-meta); font-size: var(--type-meta); overflow-wrap: anywhere; }
-/* === design-system:migrated-end === */
 
 
 /* Detail modal. */
@@ -7461,8 +7447,8 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 .widget-metric { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
 .widget-metric > span { color: var(--text-secondary); font-size: 12px; }
 .widget-metric > strong { font-size: 18px; }
-.widget-metric small { color: var(--text-secondary); font-size: 11px; font-weight: 500; }
-.widget-callout { font-size: 13px; line-height: 1.45; background: var(--surface-tray); }
+.widget-metric small { color: var(--text-secondary); font-size: var(--type-meta); font-weight: 500; }
+.widget-callout { font-size: var(--type-body); line-height: 1.45; background: var(--surface-tray); }
 .widget-metric[data-tone="ok"], .widget-callout[data-tone="ok"] { border-left-color: var(--status-ok-fg); }
 .widget-metric[data-tone="warn"], .widget-callout[data-tone="warn"] { border-left-color: var(--status-warn-fg); }
 .widget-metric[data-tone="danger"], .widget-callout[data-tone="danger"] { border-left-color: var(--status-error-fg); }
@@ -7484,7 +7470,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 .widget-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 13px;
+    font-size: var(--type-body);
 }
 
 .widget-table th,
@@ -7530,10 +7516,10 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     padding: 10px;
     background: rgba(var(--neutral-rgb), 0.02);
 }
-.widget-map-list { margin: 0; padding-left: 18px; font-size: 13px; }
+.widget-map-list { margin: 0; padding-left: 18px; font-size: var(--type-body); }
 .widget-map-list li { padding: 2px 0; }
 
-.widget-calendar { font-size: 13px; }
+.widget-calendar { font-size: var(--type-body); }
 .widget-calendar-list { list-style: none; margin: 0; padding: 0; }
 .widget-calendar-row {
     display: flex;
@@ -7558,7 +7544,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 }
 .widget-kanban-col.is-empty { min-height: 72px; }
 .widget-kanban-col-head { margin-bottom: 8px; font-size: 12px; color: var(--text-secondary); }
-.widget-kanban-empty { color: var(--text-muted); font-size: 11px; }
+.widget-kanban-empty { color: var(--text-muted); font-size: var(--type-meta); }
 .widget-kanban-card {
     display: flex;
     flex-direction: column;
@@ -7579,7 +7565,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     justify-content: space-between;
     gap: 6px;
     color: var(--text-secondary);
-    font-size: 10px;
+    font-size: var(--type-meta);
 }
 
 .widget-kanban-move select { min-width: 0; max-width: 112px; }
@@ -7716,7 +7702,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     .widget-table td::before {
         content: attr(data-label);
         color: var(--text-secondary);
-        font-size: 11px;
+        font-size: var(--type-meta);
     }
     .widget-table th[scope="row"] { display: block; padding: 6px 0; }
 
@@ -8228,7 +8214,7 @@ body.keyboard-open .chat-instance-panel .chat-input-area {
     flex-direction: column;
     gap: 4px;
     margin-bottom: var(--space-3);
-    font-size: 13px;
+    font-size: var(--type-body);
 }
 
 .new-project-sources {
@@ -8239,7 +8225,7 @@ body.keyboard-open .chat-instance-panel .chat-input-area {
     padding: var(--space-2) var(--space-3);
     border: 1px solid var(--divider);
     border-radius: var(--radius-inner);
-    font-size: 13px;
+    font-size: var(--type-body);
 }
 
 .new-project-sources legend {
@@ -8292,7 +8278,7 @@ body.keyboard-open .chat-instance-panel .chat-input-area {
     border: none;
     background: transparent;
     color: var(--text-primary);
-    font-size: 13px;
+    font-size: var(--type-body);
     cursor: pointer;
 }
 
@@ -8593,9 +8579,6 @@ body.keyboard-open .project-panel {
    Borders read the theme's --divider like every other panel surface. They used
    to name --border, which this dark-only :root never declares, so all three
    rules silently took their literal grey fallback instead of the token. */
-/* === design-system:migrated-begin (harness accounts + Dashboard Updates tab) ===
-   Down to the matching end marker: docs/DESIGN.md tokens only, guarded by
-   tests/test_web_typography_static.py. The rest of this file is a later pass. */
 /* Subsection rhythm: a group is its head (heading + that group's own Add
    action, docked right — docs/DESIGN.md "List editors") followed by its rows,
    one space token apart inside the group; the section's own flex gap keeps
@@ -9262,9 +9245,7 @@ body.keyboard-open .project-panel {
     margin: var(--space-2) 0 var(--space-1);
 }
 
-/* === design-system:migrated-end === */
 
-/* === design-system:migrated-begin (chat: executor chip, structured delivery, quiz card) === */
 /* The child card's effort chip: one text part of the meta line; a pinned level wears the pin glyph. */
 .chat-live-effort {
     display: inline-flex;
@@ -10731,7 +10712,6 @@ body.keyboard-open .secret-request-backdrop .secret-request-dialog {
     .chat-media-rate-menu { display: none; }
 }
 
-/* === design-system:migrated-end === */
 
 /* Compact horizontal spacing leaves room for wider native system-font metrics. */
 .chat-panel-statusbar { flex-wrap: wrap; gap: var(--space-2) var(--space-1); }
@@ -10742,88 +10722,9 @@ body.keyboard-open .secret-request-backdrop .secret-request-dialog {
     max-inline-size: 72ch;
 }
 
-/* track-migration:begin — Baseline recipes only for consumers not yet adopted
-   in this parallel track. Aggregate removes this block after owner adapters land. */
-.skills-card-menu-dialog:not(.ui-popup) {
-    /* Anchored non-modal popover aligned to the trigger's right edge. */
-    position: absolute;
-    top: calc(100% + 6px);
-    right: 0;
-    left: auto;
-    margin: 0;
-    min-width: 160px;
-    padding: 6px;
-    border-radius: var(--radius-object);
-    border: 1px solid rgba(var(--neutral-rgb), 0.08);
-    background: rgba(var(--modal-rgb), 0.96);
-    color: var(--text-primary);
-    box-shadow: 0 18px 44px rgba(0, 0, 0, 0.32);
-    z-index: 50;
-}
-
-.skills-card-menu-dialog:not(.ui-popup) .skills-menu-item {
-    width: 100%;
-    border: 0;
-    background: transparent;
-    color: var(--text-secondary);
-    border-radius: var(--radius-inner);
-    padding: 9px 10px;
-    text-align: left;
-    cursor: pointer;
-    font: inherit;
-    font-size: 12px;
-}
-
-.skills-card-menu-dialog:not(.ui-popup) .skills-menu-item:disabled,
-.skills-card-menu-dialog:not(.ui-popup) .skills-menu-item.is-disabled {
-    opacity: 0.55;
-    cursor: not-allowed;
-}
-
-.skills-card-menu-dialog:not(.ui-popup) .skills-menu-item:disabled:hover,
-.skills-card-menu-dialog:not(.ui-popup) .skills-menu-item.is-disabled:hover {
-    background: transparent;
-    color: var(--text-secondary);
-}
-
-.skills-card-menu-dialog:not(.ui-popup) .skills-menu-item:hover {
-    background: var(--menu-item-hover);
-    color: var(--text-primary);
-}
-
-
-.chat-photo-menu:not(.ui-popup) {
-    position: absolute;
-    top: 34px;
-    right: 0;
-    display: grid;
-    width: max-content;
-    min-width: 160px;
-    overflow: hidden;
-    border: 1px solid transparent;
-    border-radius: var(--radius-object);
-    background: var(--ui-modal-bg);
-    box-shadow: 0 18px 44px rgba(0, 0, 0, 0.34);
-}
-
-.chat-photo-menu:not(.ui-popup) button {
-    padding: 8px 10px;
-    border: 0;
-    border-bottom: 1px solid var(--divider);
-    background: transparent;
-    color: var(--text-primary);
-    font: inherit;
-    text-align: left;
-    cursor: pointer;
-}
-
-.chat-photo-menu:not(.ui-popup) button:last-child { border-bottom: 0; }
-.chat-photo-menu:not(.ui-popup) button:hover { background: var(--menu-item-hover); }
-
-
-
-
-
+/* track-migration:begin — the one field recipe for a .form-field input that has not adopted .ui-control yet (the
+   Settings range sliders are the remaining raw inputs). The Settings lane deletes this block with the last raw field;
+   the skills menu, the photo menu and the kanban select already carry .ui-popup / .ui-control. */
 .form-field input:not(.ui-control):not(.ui-checkbox), .form-field select:not(.ui-control):not(.ui-checkbox) {
     padding: 8px 12px;
     border-radius: var(--radius-inner);
@@ -10842,19 +10743,6 @@ body.keyboard-open .secret-request-backdrop .secret-request-dialog {
     border-color: var(--focus-accent-border);
     box-shadow: 0 0 0 3px var(--focus-accent-ring);
 }
-
-
-.widget-kanban-move select:not(.ui-control) {
-    min-width: 0;
-    max-width: 112px;
-    border: 1px solid rgba(var(--neutral-rgb), 0.1);
-    border-radius: 5px;
-    background: rgba(var(--shell-rgb), 0.82);
-    color: var(--text-primary);
-    font: inherit;
-    padding: 3px 5px;
-}
-
 
 /* track-migration:end */
 
