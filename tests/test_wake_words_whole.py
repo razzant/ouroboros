@@ -173,7 +173,6 @@ def test_two_completed_tasks_read_their_card_outcomes_not_a_bare_lifecycle(tmp_p
     assert "Continue open" not in done and "Continue open" not in direct[0], "a finished root offers no Continue"
 
 
-
 @pytest.mark.parametrize("synthesis", ["pending_once", "running", "completed"])
 def test_a_finished_root_reads_its_outcome_while_its_synthesis_is_still_open(tmp_path, synthesis):
     """Every root's terminal write leaves its post-task synthesis open for a while, and the card reads Working until it
