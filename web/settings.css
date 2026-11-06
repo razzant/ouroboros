@@ -392,6 +392,29 @@
     gap: 10px;
 }
 
+/* Readers outside Settings only (Skills › Browse cards in skill_browse.js, Dashboard › Updates in updates.js): Settings
+   composes ui.css .ui-action-row. This goes with its last reader, once those screens compose the shared row. */
+.settings-action-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-3);
+    min-width: 0;
+}
+.settings-action-row > :first-child {
+    flex: 1 1 0;
+    min-width: min(100%, var(--result-copy-min-width));
+    overflow-wrap: anywhere;
+}
+.settings-action-row > :last-child:not(:first-child) {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 100%;
+    margin-inline-start: auto;
+    white-space: normal;
+}
+.settings-action-row > :empty { display: none; }
+
 /* The Save bar is one shared action row (ui.css .ui-action-row): Reload, Save, then the one result right after
    them; About hides it. */
 .settings-footer {

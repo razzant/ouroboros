@@ -206,10 +206,11 @@ test('neutral controls have one shared button role in both UI shells', () => {
 test('result/action composition has one shared owner, independent of page and viewport', async () => {
     // Real-container reflow and readability are exercised by the browser consumer.
     const pageCss = await readFile(new URL('../style.css', import.meta.url), 'utf8');
-    // Settings composes the shared row (the footer, the catalog refresh, the LAN hint); its private copy is gone.
-    assert.doesNotMatch(settingsCss, /settings-action-row/);
+    // Settings composes the shared row (the footer, the catalog refresh, the LAN hint); the private row stays only for
+    // the screens that still read it (Skills › Browse, Updates) and never reaches the shared sheet.
+    assert.doesNotMatch(settingsUiJs, /settings-action-row/);
     assert.doesNotMatch(sharedCss, /\.settings-action-row\s*\{/);
-    assert.match(settingsUiJs, /<div class="settings-footer ui-action-row">/);
+    assert.match(settingsUiJs, /<div class="settings-footer ui-action-row" data-draft="clean">/);
     assert.doesNotMatch(pageCss, /\.skills-card-action-row\s*\{[^}]*(?:display:|grid-template|flex:)/);
     // The shared parts: the action row keeps a reserved result line, the result shares the status sentence's tones.
     assert.match(sharedCss, /\.ui-action-row\s*\{[^}]*flex-wrap:\s*wrap/);
