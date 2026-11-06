@@ -22,6 +22,7 @@ import {
     sessionRouteVerdict,
 } from './subagent_status_primitives.js';
 import { recheckMarkHtml } from './safety_recheck.js';
+import { settingsSection } from './settings_controls.js';
 import { revealNewRow } from './ui_helpers.js';
 import { effortLabel } from './effort_levels.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
@@ -1308,23 +1309,22 @@ export const reviewerTickCaption = (enforcement, access) => REVIEWER_TICK_CAPTIO
     ? 'cyber_pro' : String(enforcement || '').trim().toLowerCase() === 'blocking' ? 'blocking' : 'advisory'];
 
 export function renderSubagentsSection() {
-    return `
-        <div class="form-section" id="subagents-section">
-            <h3>Available subagents</h3>
-            <div class="settings-section-copy">
-                Describe when Ouroboros should choose each numbered subagent, then select how it runs.
-                Clearing a subagent's checkbox keeps its configuration and stops new tasks and reviews
-                from choosing it. Internal references stay stable automatically. A route that is unavailable stays saved
-                and returns an explicit refusal instead of silently changing actor or model. An unpinned
-                session row may rotate among compatible healthy accounts for that same route.
-                Rows marked Reviewer form the review pool; an unmarked row Ouroboros asks is an adviser, heard but never counted.
-            </div>
-            <div class="settings-inline-note" data-reviewer-tick-caption hidden></div>
-            <div class="settings-inline-note">
-                Saved reviewer changes apply from the next task: a task that is already running keeps the
-                reviewers it started with. A reviewer on a subscription waits for capacity rather than
-                silently falling back to API spend.
-            </div>
+    return settingsSection({
+        title: 'Available subagents',
+        id: 'subagents-section',
+        lead: 'Which agents Ouroboros may hand work to, and which of them review it.',
+        details: `Configure the subagents and reviewers Ouroboros works with. Subscriptions and
+            API keys are in Accounts; global model roles are in Models.
+            Describe when Ouroboros should choose each numbered subagent, then select how it runs.
+            Clearing a subagent's checkbox keeps its configuration and stops new tasks and reviews
+            from choosing it. Internal references stay stable automatically. A route that is unavailable stays saved
+            and returns an explicit refusal instead of silently changing actor or model. An unpinned
+            session row may rotate among compatible healthy accounts for that same route.
+            Rows marked Reviewer form the review pool; an unmarked row Ouroboros asks is an adviser, heard but never counted.
+            Saved reviewer changes apply from the next task: a task that is already running keeps the
+            reviewers it started with. A reviewer on a subscription waits for capacity rather than
+            silently falling back to API spend.`,
+        body: `<div class="settings-inline-note" data-reviewer-tick-caption hidden></div>
             ${availableSubagentsEditorHost()}
             <div class="settings-effort-card">
                 <label>Allow mutative subagents</label>
@@ -1356,7 +1356,7 @@ export function renderSubagentsSection() {
                     <div class="settings-inline-note">How deep the chain may nest. <code>0</code> turns delegation off entirely.</div>
                 </div>
             </div>
-            <details class="settings-subsection" id="delegation-advanced">
+            <details class="settings-subsection ui-disclosure" id="delegation-advanced">
                 <summary>Advanced — where subagents check out their work</summary>
                 <div class="settings-subsection-body">
                     <div class="form-grid two">
@@ -1374,8 +1374,8 @@ export function renderSubagentsSection() {
                         Genesis projects are durable; worktrees follow the GC retention setting.
                     </div>
                 </div>
-            </details>
-        </div>`;
+            </details>`,
+    });
 }
 
 let settingsEditor = null;

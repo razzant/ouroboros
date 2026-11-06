@@ -64,6 +64,7 @@ import { openConfirmDialog } from './confirm_dialog.js';
 import { harnessIdentityMarkup } from './harness_presentation.js';
 import { SIGN_IN_SCOPE_NOTE, createLoginCardController, normalizeProfileName, preserveCardFocus } from './harness_login_cards.js';
 import { createHarnessMaintenanceController } from './harness_maintenance.js';
+import { settingsSection } from './settings_controls.js';
 import { formatRelativeAge } from './ui_helpers.js';
 import { absoluteTime, escapeHtmlAttr as escapeHtml } from './utils.js';
 
@@ -1097,23 +1098,21 @@ function bindServiceDiagnostics() {
 }
 
 export function renderAgentAccountsSection() {
-    return `
-        <div class="form-section" id="harness-accounts-section">
-            <h3>Accounts</h3>
-            <div class="settings-section-copy">
-                ${SIGN_IN_SCOPE_NOTE} Check the intended route in Models or Agents separately.
-                Unpinned work uses enabled accounts; disabling keeps the login out of rotation.
-                Accounts live in Ouroboros's own agent home; personal logins are never imported.
-            </div>
+    return settingsSection({
+        title: 'Accounts',
+        id: 'harness-accounts-section',
+        lead: 'Subscriptions Ouroboros signs in with; where each one works is chosen in Models and Agents.',
+        details: `Connect subscriptions and API keys here, then choose their roles in Models and Agents. Adding an account keeps
+            your existing assignments. ${SIGN_IN_SCOPE_NOTE} Check the intended route in Models or Agents separately.
+            Unpinned work uses enabled accounts; disabling keeps the login out of rotation.
+            Accounts live in Ouroboros's own agent home; personal logins are never imported.`,
+        actions: '<button type="button" class="btn btn-default" id="btn-harness-refresh">Refresh</button>',
+        body: `${renderAgentsServiceBanner()}
             <div id="harness-accounts-error" class="settings-inline-status" data-tone="error" hidden></div>
             <div id="harness-model-marks-note" class="settings-inline-status" data-tone="muted" hidden></div>
             <div id="harness-accounts-groups" class="agent-family-list"></div>
-            <div id="harness-login-card"></div>
-            <div class="settings-toolbar">
-                <button type="button" class="btn btn-default" id="btn-harness-refresh">Refresh</button>
-            </div>
-        </div>
-    `;
+            <div id="harness-login-card"></div>`,
+    });
 }
 
 export function accountRowFacts(row, payload,

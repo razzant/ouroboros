@@ -33,6 +33,7 @@ import { claudexorStatus } from './claudexor_status_store.js';
 import { createModelRolesEditor } from './model_roles.js';
 import { PROCESSING_PREFERENCE_KEY } from './route_editor_primitives.js';
 import { collectSafeFieldValues, normalizeTone, renderSafeField, setInlineStatus, revealNewRow, copyTextWithToast } from './ui_helpers.js';
+import { setResult } from './ui_primitives.js';
 import { extensionActionStatus } from './extension_status_text.js';
 import { bindLanguageSettings } from './settings_language.js';
 import { mountInterfaceSize } from './interface_size.js';
@@ -149,10 +150,10 @@ function isTruthySetting(value) {
 
 // A loading, validation or editor owner may update its own status. A later
 // message from anyone else drops that ownership, protecting the newer result.
+// The footer's one result line (ui.css .ui-result): an acknowledgement ends by itself, a warning stays.
 function setStatus(text, tone = 'ok', owner = '', subject = '') {
     const status = byId('settings-status');
-    status.textContent = text;
-    status.dataset.tone = tone;
+    setResult(status, { text, tone, ends: !owner && tone === 'ok' });
     if (owner) status.dataset.owner = owner;
     else delete status.dataset.owner;
     if (subject) status.dataset.subject = subject;
@@ -184,24 +185,21 @@ function applySecretInputs(root, settings) {
 
 function customSecretRow(key = '', value = '') {
     const id = `custom-secret-${Math.random().toString(36).slice(2)}`;
-    const ordinal = document.querySelectorAll('[data-custom-secret-row]').length + 1;
     const row = document.createElement('div');
     row.className = 'settings-custom-secret-row';
     row.dataset.customSecretRow = '1';
     row.dataset.originalKey = key;
+    // One row is the key and its value; the field words are the inputs' names, the buttons share the field row.
     row.innerHTML = `
-        <div class="form-field ui-field settings-custom-secret-key"><label for="${id}-key">Custom key ${ordinal}</label><input id="${id}-key" name="custom-key" type="text" class="ui-control" data-custom-secret-key value="${escapeHtml(key)}" placeholder="SLACK_WEBHOOK_URL" spellcheck="false"></div>
-        <div class="form-field ui-field settings-custom-secret-value"><label for="${id}">Value for ${escapeHtml(key || `custom key ${ordinal}`)}</label><div class="secret-input-row">
-            <input id="${id}" name="custom-value" data-custom-secret-value class="secret-input ui-control" type="password" value="${escapeHtml(value || '')}" placeholder="Secret value">
+        <div class="form-field ui-field settings-custom-secret-key"><input id="${id}-key" name="custom-key" type="text" class="ui-control" data-custom-secret-key value="${escapeHtml(key)}" placeholder="SLACK_WEBHOOK_URL" aria-label="Key name" spellcheck="false"></div>
+        <div class="form-field ui-field settings-custom-secret-value"><div class="secret-input-row">
+            <input id="${id}" name="custom-value" data-custom-secret-value class="secret-input ui-control" type="password" value="${escapeHtml(value || '')}" placeholder="Secret value" aria-label="Key value">
             <button type="button" class="btn btn-default secret-toggle" data-target="${id}" data-row-secret-toggle>Show</button>
             <button type="button" class="btn btn-default secret-clear" data-target="${id}" data-row-secret-clear>Clear</button>
-        </div></div>
-        <button type="button" class="btn btn-default settings-custom-secret-remove" data-custom-secret-remove>Remove</button>`;
+            <button type="button" class="btn btn-default" data-custom-secret-remove>Remove</button>
+        </div></div>`;
     bindSecretInputs(row);
     row.querySelector('[data-custom-secret-value]').dataset.appliedValue = value;
-    row.querySelector('[data-custom-secret-key]').addEventListener('input', (event) => {
-        row.querySelector(`label[for="${id}"]`).textContent = `Value for ${event.target.value.trim() || `custom key ${ordinal}`}`;
-    });
     row.querySelector('[data-custom-secret-remove]')?.addEventListener('click', () => {
         // The caret moves to the key now in this place, else to Add (DESIGN "List editors").
         const shown = [...row.parentElement.querySelectorAll('[data-custom-secret-row]:not([hidden])')];
@@ -230,39 +228,41 @@ function renderRequestedSkillSecrets(root, skills, settings) {
     const host = root.querySelector('#skill-requested-secrets');
     if (!host) return;
     resetSecretReveals(host);
-    const keys = [];
+    const askers = new Map();
     (Array.isArray(skills) ? skills : []).forEach((skill) => {
         (skill?.grants?.requested_keys || []).forEach((key) => {
             const normalized = String(key || '').trim();
-            if (normalized && !BASE_SECRET_KEYS.has(normalized)) keys.push(normalized);
+            if (normalized && !BASE_SECRET_KEYS.has(normalized)) askers.set(normalized, [...(askers.get(normalized) || []), String(skill?.name || '')]);
         });
     });
-    const unique = Array.from(new Set(keys)).sort((a, b) => a.localeCompare(b));
+    const unique = [...askers.keys()].sort((a, b) => a.localeCompare(b));
+    // A key a skill asked for is shown once, here, under its asker; its custom row (if it was saved as one) steps aside.
+    root.querySelectorAll('#custom-secrets-list [data-custom-secret-row]').forEach((row) => {
+        if (askers.has(row.dataset.originalKey)) row.remove();
+    });
     if (!unique.length) { host.innerHTML = '<div class="muted">No skill-requested secrets.</div>'; return; }
     host.innerHTML = '';
     unique.forEach((key, idx) => {
         const id = `requested-secret-${idx}`;
         const el = document.createElement('div');
         el.className = 'settings-requested-secret-row';
+        const by = askers.get(key).filter(Boolean);
         el.innerHTML = `<div class="form-field ui-field"><label for="${id}">${escapeHtml(key)}</label><div class="secret-input-row">
             <input id="${id}" name="${escapeHtml(key)}" data-secret-setting="${escapeHtml(key)}" class="secret-input ui-control" type="password" value="${escapeHtml(settings[key] || '')}" placeholder="Secret value">
             <button type="button" class="btn btn-default secret-toggle" data-target="${id}" data-row-secret-toggle>Show</button>
             <button type="button" class="btn btn-default secret-clear" data-target="${id}" data-row-secret-clear>Clear</button>
-        </div></div>`;
+        </div>${by.length ? `<div class="settings-inline-note">Asked for by ${escapeHtml(by.join(', '))}</div>` : ''}</div>`;
         el.querySelector('.secret-input').dataset.appliedValue = settings[key] || '';
         bindSecretInputs(el); host.appendChild(el);
     });
 }
 
-// A declarative extension form must show what is STORED. Rendering the bare
-// schema and posting it overwrote real values with the schema's first option —
-// the bundled Telegram skill unbound its owner chat id that way. The host reads
-// the current values from the SAME route it posts to. A route with no GET
-// handler (404/405) cannot say what is stored: its fields start locked behind a
-// warning until the owner chooses Edit anyway, knowing Save may replace values
-// nobody saw. Any other failed read keeps Save disabled with no way around it,
+// A declarative extension form must show what is STORED (posting the bare schema once unbound the
+// Telegram skill's owner chat id). The host reads the current values from the SAME route it posts
+// to. A route with no GET handler (404/405) cannot say what is stored: its fields start locked
+// behind a warning until the owner chooses Edit anyway; any other failed read keeps Save disabled,
 // and a successful `{}` is a real empty document.
-const EXTENSION_VALUES_UNREADABLE = 'Current values could not be read; Save is disabled so it does not overwrite them. Use Reload Settings to retry.';
+const EXTENSION_VALUES_UNREADABLE = 'Current values could not be read; Save is disabled so it does not overwrite them. Use Reload settings to retry.';
 const EXTENSION_VALUES_UNAVAILABLE = 'Current values are unavailable. These are defaults. Sending this form may change saved settings.';
 const EXTENSION_EDITING_UNREAD = 'You chose to edit without reading the saved values. Review every field before sending.';
 
@@ -340,7 +340,7 @@ export async function renderExtensionSettingsSections(root, sections, { isCurren
                     <div class="form-grid two">${fields.map((field) => renderSafeField(field, values, fieldOptions)).join('')}</div>
                     <div class="settings-extension-actions">
                         <button class="btn btn-primary btn-sm" type="submit"${disabled || failed || unread ? ' disabled' : ''}>${escapeHtml(component.submit_label || component.label || 'Save')}</button>
-                        ${unread ? '<button class="btn btn-secondary btn-sm" type="button" data-extension-settings-edit-anyway>Edit anyway</button>' : ''}
+                        ${unread ? '<button class="btn btn-default btn-sm" type="button" data-extension-settings-edit-anyway>Edit anyway</button>' : ''}
                     </div>
                     <div class="settings-inline-status" data-extension-settings-status${failed ? ` data-tone="${normalizeTone('warn')}"` : ''}>${failed ? escapeHtml(EXTENSION_VALUES_UNREADABLE) : ''}</div>
                 </form>
@@ -527,7 +527,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         onJudged: (clean) => {
             const status = byId('settings-status');
             if (clean && status.dataset.owner === 'validation'
-                    && status.dataset.subject === 'subagents') setStatus('', 'ok');
+                    && status.dataset.subject === 'subagents') { setStatus('', 'ok'); paintDirtyWord(); }
         },
         isOuterDraftClean: () => !settingsDirty,
         onGeneratedApply: () => {
@@ -631,8 +631,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     function setSettingsCleanBaseline() {
         settingsBaseline = snapshotSettingsDraft();
         settingsDirty = false;
-        const indicator = byId('settings-unsaved-indicator');
-        if (indicator) indicator.classList.remove('is-visible');
+        paintDirtyWord();
     }
 
     function updateSettingsDirtyState() {
@@ -640,8 +639,19 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             ? snapshotSettingsDraft() !== settingsBaseline : draftRevision > 0;
         if (nextDirty === settingsDirty) return;
         settingsDirty = nextDirty;
-        const indicator = byId('settings-unsaved-indicator');
-        if (indicator) indicator.classList.toggle('is-visible', settingsDirty);
+        paintDirtyWord();
+    }
+
+    // The unsaved draft is the footer's one word beside Save: it replaces an acknowledgement it would
+    // contradict and leaves a warning, a validation or a load in place; a clean draft takes it away.
+    function paintDirtyWord() {
+        const status = byId('settings-status');
+        if (!status) return;
+        const owner = status.dataset.owner || '';
+        if (settingsDirty) {
+            if (owner || ['warn', 'danger'].includes(status.dataset.tone || '')) return;
+            setStatus('Unsaved changes', 'warn', 'draft');
+        } else if (owner === 'draft') setStatus('', 'ok');
     }
 
     function onSettingsEdited() {
@@ -652,26 +662,14 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
 
     let baselineSettleDisposer = null;
     function armCleanBaselineOnStatusSettle(revision) {
-        // The sections' Claudexor status probe is fire-and-forget, so the
-        // baseline can be taken before the store-gated collectors have their
-        // facts — and their output changes when a snapshot lands (the accounts
-        // facet, the later include-models upgrade). Absent owner edits, no
-        // store arrival may read as an unsaved change; and every owner edit
-        // flips settingsDirty through its own input handler BEFORE any store
-        // notify, so re-baselining while the draft is clean can never mask
-        // one. Deliberately NOT a one-shot on everSettled: an earlier
-        // model-less read may have settled the store long before the upgrade
-        // this page's collectors actually feed on. A BARE subscription, not a
-        // status surface: this observer must react to snapshots the sections'
-        // own surfaces fetch, never arm the polling chain itself.
+        // The Claudexor status probe is fire-and-forget, so the baseline can be taken before the
+        // store-gated collectors have their facts, and their output changes when a snapshot lands.
+        // Absent owner edits no store arrival may read as an unsaved change; every owner edit flips
+        // settingsDirty before any store notify, so re-baselining a CLEAN draft can never mask one,
+        // and a DIRTY draft is never re-baselined. Not a one-shot: a later include-models upgrade
+        // settles the store again. A bare subscription: it never arms the polling chain itself.
         baselineSettleDisposer?.();
         baselineSettleDisposer = claudexorStatus.subscribe(() => {
-            // CLEAN drafts only. A late availability repaint may change status
-            // copy but never the canonical actor draft; re-baselining a DIRTY
-            // page would still absorb the owner's real row edit into the clean
-            // baseline, so it remains forbidden.
-            // After an edit, any availability-only difference remains in the
-            // draft comparison until the next load/save; it cannot absorb edits.
             if (revision === draftRevision && !settingsDirty && settingsLoaded) setSettingsCleanBaseline();
         });
     }
@@ -708,14 +706,10 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             ...slot, inputId: slot.settingsInputId,
         })) });
         applyCheckboxValue('s-auto-grant-reviewed-skills', s.OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS);
-        // Owner-facing mutative-subagents control shows the EFFECTIVE state when it
-        // is binary-representable: an explicit value, or unset in advanced/pro
-        // (every acting surface on = "On"). Unset in LIGHT mode is surface-aware
-        // (external work, including isolated project copies, stays on; own-body copies off — see
-        // config.get_allow_mutative_subagents), so neither Off nor On is truthful
-        // there: it displays as "Auto". Picking Auto saves the empty value
-        // (collectBody maps any non-on/off segment to ''), so the mode default
-        // keeps deciding.
+        // The mutative-subagents control shows the EFFECTIVE state where it is binary: an explicit
+        // value, or unset in advanced/pro ("On"). Unset in LIGHT mode is surface-aware (see
+        // config.get_allow_mutative_subagents), so it displays as "Auto"; picking Auto saves the
+        // empty value (collectBody maps any non-on/off segment to ''), so the mode default decides.
         const rawMutative = String(s.OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS ?? '').trim().toLowerCase();
         const runtimeMode = String(s.OUROBOROS_RUNTIME_MODE || 'advanced').trim().toLowerCase();
         const mutativeInput = byId('s-allow-mutative-subagents');
@@ -789,7 +783,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             // Status first, action right (DESIGN "settings-action-row"). The link keeps its own words; the button
             // carries the address this read drew, so a click after any later read copies that read's address.
             const copy = url ? `<button type="button" class="btn btn-default btn-sm ui-hit-area" data-copy-lan-url="${url}">Copy link</button>` : '';
-            hint.innerHTML = `<div class="settings-action-row"><span>LAN URL: <a href="${url}" target="_blank" rel="noopener">${url}</a>${warning ? ' — <strong>' + warning + '</strong>' : ''}</span>${copy}</div>`;
+            hint.innerHTML = `<div class="ui-action-row"><span>LAN URL: <a href="${url}" target="_blank" rel="noopener">${url}</a>${warning ? ' — <strong>' + warning + '</strong>' : ''}</span>${copy}</div>`;
             hint.dataset.tone = meta.warning ? 'warn' : 'ok';
             hint.hidden = false;
         } else if (meta.reachability === 'host_ip_unknown') {
@@ -828,7 +822,9 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             throw new Error(data?.error || 'The server did not return a settings document.');
         }
         if (restartSequence === restartReadSequence) syncRestartState(data._meta?.restart_state);
-        if (sequence !== loadSequence || revision !== draftRevision) return false;
+        // A newer load took over (null: it reports for both); an owner edit kept the draft (false).
+        if (sequence !== loadSequence) return null;
+        if (revision !== draftRevision) return false;
         currentSettings = data;
         applySettings(data);
         renderCustomSecrets(page, data);
@@ -881,7 +877,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         setStatus('Loading settings...', 'muted', 'load');
         try {
             const applied = await loadSettings();
-            if (!applied && byId('settings-status').dataset.owner === 'load') {
+            if (applied === false && byId('settings-status').dataset.owner === 'load') {
                 setStatus('Settings were not reloaded because your draft changed while loading. Your edits are kept.', 'warn', 'load');
             }
             try {
@@ -1032,7 +1028,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         paintSettingsFieldErrors(page, fields);
         if (byId('settings-status').dataset.owner === 'validation') {
             if (messages.length) setStatus(validationSummary(messages), 'warn', 'validation', subject);
-            else setStatus('', 'ok');
+            else { setStatus('', 'ok'); paintDirtyWord(); }
         }
         return { messages, subject };
     }

@@ -142,7 +142,7 @@ def test_keyboard_choice_focus_ring_and_the_chosen_value_survive_save(direct_ser
             open_behavior()
             press("required", "Enter")
             assert page.locator("#s-task-review-mode").input_value() == "required"
-            expect(page.locator("#settings-unsaved-indicator")).to_have_class(__import__("re").compile("is-visible"))
+            expect(page.locator("#settings-status")).to_have_text("Unsaved changes")
             ring = page.evaluate("""(selector) => {
                 const focused = document.activeElement;
                 const probe = document.createElement('span');

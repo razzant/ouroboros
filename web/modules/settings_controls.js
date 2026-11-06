@@ -4,11 +4,13 @@ export function bindEffortSegments(root) {
         const input = root.querySelector(`#${targetId}`);
         if (!input) return;
         const buttons = Array.from(group.querySelectorAll('[data-effort-value]'));
+        // A group names itself by its own label, else by the title of the section it is the one control of.
         const label = input.previousElementSibling;
-        if (label?.tagName === 'LABEL') {
-            label.id = `${targetId}-label`;
+        const heading = label?.tagName === 'LABEL' ? label : group.closest('.form-section')?.querySelector('h3');
+        if (heading) {
+            heading.id ||= `${targetId}-label`;
             group.setAttribute('role', 'group');
-            group.setAttribute('aria-labelledby', label.id);
+            group.setAttribute('aria-labelledby', heading.id);
         }
 
         function sync() {
@@ -131,4 +133,20 @@ export function settingsWriteFailure(error, label = 'Settings') {
     if (receipt?.saved === true) return { unknown: false, text: `${label} was saved, but a later step failed: ${detail}` };
     if (receipt?.saved === false) return { unknown: false, text: `${label} was not changed: ${detail}` };
     return { unknown: true, text: `${label} outcome is unknown: ${detail}` };
+}
+
+/* The one Settings section recipe (DESIGN.md principle 7; the 06.11 convergence): a title, one authored lead in
+   owner words, the controls, then everything else behind one Details disclosure, where the section's former copy
+   lives unchanged. Quiet actions dock in the title row. Every tab's sections come from here, so Models, Agents and
+   Accounts read as one scheme. `titleId` lets a lone control name itself by the title. */
+export function settingsSection({ title, lead = '', details = '', body = '', actions = '', id = '', titleId = '', className = '', attrs = '' }) {
+    const h3 = `<h3${titleId ? ` id="${titleId}"` : ''}>${title}</h3>`;
+    const head = actions ? `<div class="settings-section-head">${h3}<div class="settings-toolbar">${actions}</div></div>` : h3;
+    return `
+        <div class="form-section ui-card${className ? ` ${className}` : ''}"${id ? ` id="${id}"` : ''}${attrs ? ` ${attrs}` : ''}>
+            ${head}
+            ${lead ? `<p class="settings-section-lead">${lead}</p>` : ''}
+            ${body}
+            ${details ? `<details class="ui-disclosure settings-section-details"><summary>Details</summary><div class="settings-section-copy">${details}</div></details>` : ''}
+        </div>`;
 }

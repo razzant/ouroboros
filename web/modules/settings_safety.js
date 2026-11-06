@@ -7,7 +7,7 @@ import { renderSegmentedField } from './page_header.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { APP_SETTINGS_ORIGIN, apiClient } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
-import { settingsWriteFailure, syncEffortSegments } from './settings_controls.js';
+import { settingsSection, settingsWriteFailure, syncEffortSegments } from './settings_controls.js';
 import { parseModelSource } from './route_editor_primitives.js';
 import { modelRoleMap } from './model_roles.js';
 import { subagentSettingsFingerprint } from './subagents_settings.js';
@@ -24,15 +24,15 @@ export const SAFETY_MODEL_KEY = 'OUROBOROS_MODEL_SAFETY';
 const LEVEL_OPTIONS = SAFETY_LEVELS.map(({ value, label }) => ({ value, label }));
 const LOWERING_TITLE = 'Lowering a level asks for confirmation.';
 
-/** The section body under its title (settings_ui.js keeps the `<h3>`). */
+/** The whole Behavior › Safety Supervisor section (settings_controls.js settingsSection). */
 export function safetySectionHtml() {
-    const notes = SAFETY_LEVELS.map((level) => `<br><code>${escapeHtml(level.label)}</code> &mdash; ${escapeHtml(level.note)}`).join('');
-    return `
-        <div class="settings-section-copy">
-            A second model judges a step before it runs. Your work: what you asked for. Consciousness: what it does on its own, places included.${notes}
-            <br><strong>Configuration authority:</strong> outside Cyber Pro, Ouroboros cannot lower its own checks; Cyber Pro also lets it configure Supervisor coverage. Changes apply on the next task; every step a lower level lets through is recorded.
-        </div>
-        <div class="safety-levels">
+    const notes = SAFETY_LEVELS.map((level) => `<br><strong>${escapeHtml(level.label)}</strong> &mdash; ${escapeHtml(level.note)}`).join('');
+    return settingsSection({
+        title: 'Safety Supervisor',
+        lead: 'Which steps a second model checks before Ouroboros takes them.',
+        details: `A second model judges a step before it runs. Your work: what you asked for. Consciousness: what it does on its own, places included.${notes}
+            <br><strong>Configuration authority:</strong> outside Cyber Pro, Ouroboros cannot lower its own checks; Cyber Pro also lets it configure Supervisor coverage. Changes apply on the next task; every step a lower level lets through is recorded.`,
+        body: `<div class="safety-levels">
             <div class="settings-effort-card">
                 <label>${escapeHtml(SAFETY_KINDS.your_work)}</label>
                 <input id="s-safety-mode" type="hidden" value="full">
@@ -55,7 +55,8 @@ export function safetySectionHtml() {
             <textarea id="s-safety-rules" class="ui-control consciousness-owner-words" rows="3" spellcheck="false" aria-describedby="s-safety-rules-help"></textarea>
             <div class="settings-inline-note ui-field-help" id="s-safety-rules-help">Ouroboros and the Safety Supervisor read these in every task and check. Rules for one place live in that place's notes.</div>
         </div>
-        <div id="s-safety-skip-counter" class="settings-inline-note"></div>`;
+        <div id="s-safety-skip-counter" class="settings-inline-note"></div>`,
+    });
 }
 
 /** The one in-page link to another Settings tab («Change in Models»); the section's binder opens the tab. */

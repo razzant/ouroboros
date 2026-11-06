@@ -5247,8 +5247,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
    tokens, until their screens adopt the class. Inside an object a group or row is a tray: the soft neutral fill with
    the inner radius and no shadow; a tray inside a tray drops its fill, so fills never stack and its rows part by space
    alone. Neither has an edge: the transparent 1px border only keeps each box's size. */
-:is(.settings-shell .form-section, .settings-card, .settings-provider-card, .skills-card,
-    .marketplace-card, .widgets-card, .updates-card, .costs-budget-card, .stat-card, .log-task-card) {
+:is(.skills-card, .marketplace-card, .widgets-card, .updates-card, .costs-budget-card, .stat-card, .log-task-card) {
     border: 1px solid transparent;
     background: var(--surface-object);
     border-radius: var(--radius-object);
@@ -5729,28 +5728,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .evo-empty { display: grid; gap: var(--space-2); justify-items: start; padding: 4px 0 2px; }
 .evo-empty-line { margin: 0; max-width: 62ch; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
 
-.about-body {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    flex: 1;
-    gap: 24px;
-    padding: 40px 20px;
-    text-align: center;
-}
-.about-logo {
-    width: 96px;
-    height: 96px;
-    border-radius: var(--radius-object);
-    object-fit: cover;
-}
-.about-title { font-size: 28px; font-weight: 700; margin: 0; }
-.about-version { color: var(--text-muted); font-size: var(--type-meta); margin: 4px 0 0; }
-.about-desc { max-width: 480px; color: var(--text-secondary); font-size: 14px; line-height: 1.6; }
-.about-credits { display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
-.about-links { display: flex; gap: 16px; justify-content: center; margin-top: 4px; }
-.about-links a { color: var(--accent); text-decoration: none; }
 
 .costs-scroll { overflow-y: auto; flex: 1; padding: 16px 20px; }
 .costs-budget-card {
@@ -10770,30 +10747,6 @@ body.keyboard-open .secret-request-backdrop .secret-request-dialog {
 .chat-bubble .message > :is(p:not(:has(img, video)), ul, ol, blockquote, .md-h1, .md-h2, .md-h3) {
     max-inline-size: 72ch;
 }
-
-/* track-migration:begin — the one field recipe for a .form-field input that has not adopted .ui-control yet (the
-   Settings range sliders are the remaining raw inputs). The Settings lane deletes this block with the last raw field;
-   the skills menu, the photo menu and the kanban select already carry .ui-popup / .ui-control. */
-.form-field input:not(.ui-control):not(.ui-checkbox), .form-field select:not(.ui-control):not(.ui-checkbox) {
-    padding: 8px 12px;
-    border-radius: var(--radius-inner);
-    border: 1px solid var(--field-border);
-    background: var(--bg-secondary);
-    color: var(--text-primary);
-    font-size: 14px;
-    font-family: inherit;
-    outline: none;
-    width: 320px;
-    max-width: 100%;
-    transition: border-color 0.2s, box-shadow 0.2s;
-}
-
-.form-field input:not(.ui-control):not(.ui-checkbox):focus {
-    border-color: var(--focus-accent-border);
-    box-shadow: 0 0 0 3px var(--focus-accent-ring);
-}
-
-/* track-migration:end */
 
 /* Light surfaces keep geometry and domain state semantics unchanged. */
 :root[data-theme="light"] #nav-version { opacity: 1; color: var(--text-meta); }

@@ -178,7 +178,9 @@ test('Accounts renders one card per provider with its Default row, and an added 
     const secrets = html.slice(html.indexOf('data-settings-panel="secrets"'), html.indexOf('data-settings-panel="models"'));
     for (const key of PROVIDER_SECRET_KEYS) assert.doesNotMatch(secrets, new RegExp(`data-secret-setting="${key}"`), key);
     assert.match(secrets, /data-secret-setting="GITHUB_TOKEN"/);
-    assert.match(secrets, /data-secret-setting="OUROBOROS_NETWORK_PASSWORD"/);
+    // The network password has one field, beside the bind host it guards (Accounts › Network Gate), not a second one here.
+    assert.doesNotMatch(secrets, /OUROBOROS_NETWORK_PASSWORD/);
+    assert.equal(html.split('data-secret-setting="OUROBOROS_NETWORK_PASSWORD"').length - 1, 1);
 
     const compatible = PROVIDER_CARDS.find((card) => card.kind === 'openai-compatible');
     const row = connectionRowHtml(compatible, { uid: 'compatible-7', name: 'gigaagent', label: 'GigaAgent', enabled: false,

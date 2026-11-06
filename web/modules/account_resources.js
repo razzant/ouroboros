@@ -213,7 +213,7 @@ const resetLabel = (offer, prior) => offer.kind === 'session_refill'
 function resetMessage(action, busy, prefix = '') {
     const outcome = resetOutcome(action);
     if (!outcome) return '';
-    return `<div class="resource-message settings-action-row" data-tone="${outcome.tone}" role="status">
+    return `<div class="resource-message ui-action-row" data-tone="${outcome.tone}" role="status">
         <div class="settings-action-copy"><strong>${esc(prefix + outcome.title)}</strong><small>${esc(outcome.body)}</small>
             ${note(readableDetail(action.receipt?.detail))}${note(readableDetail(action.receipt?.readback?.detail))}
             ${prefix ? note(action.error) : ''}</div>
