@@ -5256,7 +5256,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
    tokens, until their screens adopt the class. Inside an object a group or row is a tray: the soft neutral fill with
    the inner radius and no shadow; a tray inside a tray drops its fill, so fills never stack and its rows part by space
    alone. Neither has an edge: the transparent 1px border only keeps each box's size. */
-:is(.settings-shell .form-section, .settings-card, .settings-provider-card, .widgets-card,
+:is(.settings-shell .form-section, .settings-card, .settings-provider-card,
     .updates-card, .costs-budget-card, .stat-card, .log-task-card) {
     border: 1px solid transparent;
     background: var(--surface-object);
@@ -7151,51 +7151,21 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
     gap: 4px 8px;
     min-width: 0;
     min-height: 32px;
+    /* A title breaks between its words: the card's own overflow-wrap (anywhere) split it inside one. */
+    overflow-wrap: break-word;
+    hyphens: auto;
 }
 
-/* The menu and the move handle are two quiet icon controls of one box: no body, no outline, the glyph alone, and a
-   hover or a press answers with the quiet tone (DESIGN §3, bible principle 4). The ⋮ is the Skills card menu's own
-   control; only its look inside this head is set here, so the Skills and Sources pages keep theirs. The explicit
-   height leaves the page-body touch minimum (`min-block-size`) to its owner. */
-.widgets-card-tools .skills-card-menu-trigger,
-.widgets-card-drag {
-    flex: 0 0 auto;
-    width: 32px;
-    height: 32px;
-    padding: 0;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    border: 0;
-    border-radius: var(--pill-radius);
-    background: transparent;
-    color: var(--text-secondary);
-    font: inherit;
-    font-size: 18px;
-    font-weight: 700;
-    line-height: 1;
-}
-
-.widgets-card-drag {
-    cursor: grab;
-}
-
-.widgets-card-tools .skills-card-menu-trigger:hover,
-.widgets-card-drag:hover {
-    background: var(--tone-quiet-hover);
-    color: var(--text-primary);
-}
-
-.widgets-card-drag:active {
-    cursor: grabbing;
-}
+/* The menu and the move handle are one quiet icon control twice: the ⋮ of every card menu (its rule is the Skills
+   card menu's) and the ↕ share the shared small capsule without a body (.btn.btn-ghost.btn-sm), its touch reach
+   included (DESIGN §3, bible principle 4). */
+.widgets-card-drag { --control-pad-x: 0; --button-font-size: var(--type-section); width: var(--control-h); cursor: grab; }
+.widgets-card-drag:active { cursor: grabbing; }
 
 /* Framed-card head controls (widgets lifecycle phase 2): status as dot + text
    (docs/DESIGN.md section 4 — the status pair is the semantic contract, not a
-   token migration of this surface), the one primary Start/Stop button, the
-   launch-policy menu on the Skills card menu primitive, and the drag handle.
-   Widgets is not a migrated surface (DESIGN.md section 8): these rules keep
-   the literal sizes and inks the surface already uses, not the type tokens. */
+   token migration of this surface), Start when stopped (Start again, neutral,
+   after a mount that ended by itself), Stop in the card menu, and the drag handle. */
 .widgets-card-controls {
     display: flex;
     align-items: center;
@@ -7223,6 +7193,10 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
     flex: 0 0 auto;
 }
 
+/* A running card's Stop is the card menu's (rare, never the board's loudest word): the head offers Start only. The
+   board's fork, a neutral Stop capsule in the head, is this one rule deleted (widget_card.js marks the button). */
+.widgets-card-run [data-widget-power][data-running] { display: none; }
+
 .widgets-card-tools {
     display: inline-flex;
     flex: 0 0 auto;
@@ -7243,6 +7217,15 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
 .widgets-card-controls .ui-status[data-tone]::before {
     margin-right: 6px;
 }
+
+/* A narrow card (under 360px; widget_reorder.js marks it from the board's plan, a card being no query container of
+   its own width) keeps only ⋮ and ↕ beside its title and puts its lifecycle row under it, so the title keeps the
+   card's width and breaks between words. */
+.widgets-card[data-widget-narrow] .widgets-card-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.widgets-card[data-widget-narrow] .widgets-card-controls { display: contents; }
+.widgets-card[data-widget-narrow] .widgets-card-title { grid-column: 1; grid-row: 1; }
+.widgets-card[data-widget-narrow] .widgets-card-tools { grid-column: 2; grid-row: 1; align-self: start; }
+.widgets-card[data-widget-narrow] .widgets-card-run { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; }
 
 .widgets-menu-heading {
     padding: 4px 10px 6px;
@@ -7670,17 +7653,11 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
     margin-bottom: 10px;
 }
 
-.widget-tab-btn {
-    border: 1px solid rgba(var(--neutral-rgb), 0.08);
-    border-radius: 999px;
-    background: rgba(var(--neutral-rgb), 0.03);
-    color: var(--text-secondary);
-    cursor: pointer;
-    padding: 5px 10px;
-}
+/* A declarative widget's tabs are the shared quiet small capsule (.btn.btn-ghost.btn-sm); the chosen one keeps the
+   accent's wash under the reading ink. */
+.widget-tab-btn { color: var(--text-secondary); }
 
 .widget-tab-btn.active {
-    border-color: var(--accent-35);
     background: var(--accent-12);
     color: var(--text-primary);
 }
