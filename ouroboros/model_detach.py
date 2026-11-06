@@ -40,12 +40,14 @@ def pool_available() -> dict:
 
         return worker_pool_admission_state()
     from ouroboros.config import DATA_DIR
-    from ouroboros.queue_observation import load_queue_document
+    from ouroboros.queue_observation import load_queue_document, pool_observation_status
 
     document = load_queue_document(DATA_DIR)
+    # An unmeasured pool is no availability and no absence: its reason stays ``unknown``, its count null.
+    unknown = pool_observation_status(document) == "unknown"
     started = int(document.get("worker_total") or 0) + int(document.get("lane_carrier_total") or 0) > 0
     disabled = ("queue_document_unreadable" if "_snapshot_invalid" in document or "_snapshot_missing" in document
-                else str(document.get("worker_pool_disabled_reason") or ""))
+                else "unknown" if unknown else str(document.get("worker_pool_disabled_reason") or ""))
     try:
         from supervisor.update_merge import active_update_tx
 
@@ -55,7 +57,7 @@ def pool_available() -> dict:
         update = "managed_update_tx:unreadable"
     reason = disabled or update or ("" if started else "no_workers")
     return {"available": not reason, "reason_code": "" if not reason else "worker_pool_unavailable",
-            "disabled_reason": reason, "worker_count": int(document.get("worker_total") or 0),
+            "disabled_reason": reason, "worker_count": None if unknown else int(document.get("worker_total") or 0),
             "source": "published"}
 
 

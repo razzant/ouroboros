@@ -126,6 +126,81 @@ def test_an_external_body_copy_stays_the_plan_subject_after_a_candidate_is_bound
     assert _governed(env, request)
 
 
+def test_a_nested_named_body_clone_is_the_plan_subject(env):
+    """A workspace may be a containing folder with a separately cloned body inside it."""
+    import shutil
+
+    sub = env.install()
+    container = env.tmp / "workspace-container"
+    nested = container / "nested-body"
+    container.mkdir()
+    shutil.copytree(env.clone, nested)
+    for task_id, locator in (
+        ("t-nested-absolute", str(nested / "ouroboros" / "mod_a.py")),
+        ("t-nested-relative", "nested-body/ouroboros/mod_a.py"),
+    ):
+        ctx = env.ctx(task_id, workspace_root=container, workspace_mode="external")
+        _write(ctx, affected_paths=[locator], ask=["s1", "sess1"])
+        [revision] = _revisions(env, task_id)
+        assert revision["body"] is True
+        assert str(nested.resolve()) in revision["body_note"]
+        request = sub.calls[-1]["request"]
+        assert request.session_root == str(container.resolve())
+        assert "## BIBLE.md (constitution" in _user_text(request.slot_messages["s1"][0]["content"])
+        assert "## Governance pack (this plan touches Ouroboros's own body)" in request.slot_session_tasks["sess1"]
+
+
+def test_nested_probe_reuse_is_local_and_does_not_scan_past_a_body_match(env):
+    from ouroboros import review_body_fact
+
+    container = env.tmp / "container"
+    target = container / "source"
+    target.mkdir(parents=True)
+    ctx = env.ctx("t-probe-reuse", workspace_root=container, workspace_mode="external")
+    probes = []
+    real_git = review_body_fact._git
+
+    def observed_git(root, *args):
+        if args == ("rev-parse", "--show-toplevel"):
+            probes.append(root)
+        return real_git(root, *args)
+
+    env.monkeypatch.setattr(review_body_fact, "_git", observed_git)
+    paths = [str(target / f"new-{i}" / "module.py") for i in range(500)]
+    assert plan_ask.plan_is_body(ctx, paths, system_root=env.serving, active_root=container)[0] is False
+    assert probes == [target.resolve()]
+
+    # The same parent becomes a recognized body repository between calls.
+    # A persistent negative cache would now incorrectly keep the plan core-only.
+    git(target, "init", "-q")
+    git(target, "remote", "add", "origin", str(env.serving))
+    probes.clear()
+    # Unrelated later folders should not be probed after the first body match.
+    paths.extend(str(container / f"other-{i}" / "module.py") for i in range(500))
+    assert plan_ask.plan_is_body(ctx, paths, system_root=env.serving, active_root=container)[0] is True
+    assert probes == [target.resolve()]
+
+
+def test_a_nested_foreign_clone_stays_foreign(env):
+    """Nested discovery uses the repository's remotes, not its folder name."""
+    import shutil
+
+    sub = env.install()
+    container = env.tmp / "foreign-container"
+    nested = container / "nested-body-like-name"
+    container.mkdir()
+    shutil.copytree(env.foreign, nested)
+    ctx = env.ctx("t-nested-foreign", workspace_root=container, workspace_mode="external")
+
+    _write(ctx, affected_paths=[str(nested / "src" / "app.py")], ask=["s1", "sess1"])
+    [revision] = _revisions(env, "t-nested-foreign")
+    assert revision["body"] is False
+    request = sub.calls[0]["request"]
+    assert request.session_root == str(container.resolve())
+    assert "## BIBLE.md (constitution" not in _user_text(request.slot_messages["s1"][0]["content"])
+    assert "## Governance pack (this plan touches Ouroboros's own body)" not in request.slot_session_tasks["sess1"]
+
+
 def test_an_unavailable_unused_candidate_does_not_refuse_the_tasks_workspace(env):
     """The plan never reads the unused candidate, so its vanished checkout refuses nothing there; the
     commit gate, which commits that candidate, keeps refusing it (``review_repo_dirs_for``)."""
