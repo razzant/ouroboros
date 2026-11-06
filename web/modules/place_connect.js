@@ -65,11 +65,15 @@ export function connectListHtml({ connectors = null, places = [], error = '', se
     return `<section class="place-sheet-section"><p class="place-sheet-note">${silentCopy()}</p>
         <div class="place-accounts">${connectors.map((connector) => {
             const n = places.filter((place) => place.connector === connector.connector).length;
+            // The row's facts are its meta line: how many places it has, and its readiness unless it is simply on.
+            const readiness = connector.readiness && connector.readiness.tone !== 'ok' ? connector.readiness : null;
+            const facts = [n ? escapeHtml(fmt(n === 1 ? 'Connected · {n} place' : 'Connected · {n} places', { n })) : '',
+                readiness ? `<span data-tone="${escapeHtml(readiness.tone)}">${escapeHtml(tr(`places.readiness.${readiness.text}`, readiness.text))}</span>` : '']
+                .filter(Boolean).join(' · ');
             return `<div class="harness-account-row place-connector-row">
                 <div class="harness-account-main"><span class="place-glyph" aria-hidden="true">${skillIconHtml(connector.icon, 18)}</span><strong data-i18n-authored>${escapeHtml(connector.label)}</strong></div>
-                ${connector.readiness ? `<div class="harness-account-meta" data-tone="${escapeHtml(connector.readiness.tone)}">${escapeHtml(tr(`places.readiness.${connector.readiness.text}`, connector.readiness.text))}</div>` : ''}
-                <div class="harness-account-actions">${n ? `<span>${escapeHtml(fmt(n === 1 ? 'Connected · {n} place ·' : 'Connected · {n} places ·', { n }))}</span>` : ''}
-                    ${button('choose', n ? tr('places.connect.another', 'Connect another') : tr('places.connect.action', 'Connect'), `data-connector="${escapeHtml(connector.connector)}"`)}</div>
+                ${facts ? `<div class="harness-account-meta">${facts}</div>` : ''}
+                <div class="harness-account-actions">${button('choose', n ? tr('places.connect.another', 'Connect another') : tr('places.connect.action', 'Connect'), `data-connector="${escapeHtml(connector.connector)}"`)}</div>
             </div>`;
         }).join('')}</div></section>`;
 }

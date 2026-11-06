@@ -185,7 +185,8 @@ export function placeSheetBodyHtml(place, ui = {}) {
     ].join('');
 }
 
-export const placeSheetMetaText = (place) => [place.label, placeStateWord(place.state)].filter(Boolean).join(' · ');
+// The sheet's title is the place; its meta line says only what the title does not: the state.
+export const placeSheetMetaText = (place) => placeStateWord(place.state);
 
 export function sheetShell(titleHtml, metaText, modifier = '') {
     const dialog = document.createElement('dialog');
@@ -344,7 +345,7 @@ export function openPlaceSheet(place, { returnFocus = document.activeElement, on
         }
         if (current && history) history.updatePlace(readerPlace());
         const meta = dialog.querySelector('[data-place-meta]');
-        if (meta) meta.innerHTML = `<span data-i18n-authored>${escapeHtml((current || place).label)}</span> · ${escapeHtml(ui.removed ? tr('places.disconnected.word', 'disconnected') : tr(`places.state.${current.state}`, placeStateWord(current.state)))}`;
+        if (meta) meta.textContent = ui.removed ? tr('places.disconnected.word', 'disconnected') : tr(`places.state.${current.state}`, placeStateWord(current.state));
         if (selected && meta) meta.innerHTML = `<span data-i18n-authored>${escapeHtml((current || place).label)}</span>`;
         dialog.querySelector('[data-place-label]').textContent = selected?.label || selected?.address || (current || place).label;
     }

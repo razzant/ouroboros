@@ -246,11 +246,13 @@ textarea.ui-control.consciousness-owner-words {
 
 /* ---- the place sheet and the Connect flow: the document reader's dialog geometry ------------------------------- */
 /* On the desk the Connect list is as tall as its rows (a phone keeps the reader's full sheet). */
-:root[data-layout="docked"] .document-reader.place-connect { height: auto; }
+/* A modal dialog keeps the engine's inset 0, so only fit-content (never auto) sizes it to its rows. */
+:root[data-layout="docked"] .document-reader.place-connect { height: fit-content; }
 :root[data-layout="docked"] .place-connect .document-reader-panel { max-height: min(var(--document-reader-size), calc(100dvh - 2 * var(--space-5))); }
 .place-sheet .document-reader-title { display: flex; align-items: center; gap: var(--space-3); white-space: normal; }
 .place-sheet-body { display: flex; flex-direction: column; gap: var(--space-5); container: placesheet / inline-size; }
-.place-sheet-section { display: flex; flex-direction: column; gap: var(--space-2); width: 100%; max-width: 720px; margin: 0 auto; }
+/* One column under the sheet's head: the sections start where its title starts. */
+.place-sheet-section { display: flex; flex-direction: column; gap: var(--space-2); width: 100%; max-width: 720px; margin: 0; }
 .place-sheet-section > h3 { margin: 0; color: var(--text-primary); font-size: var(--type-section); line-height: var(--line-title); font-weight: 600; }
 .place-sheet-section p { margin: 0; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); overflow-wrap: anywhere; }
 .place-history-plain { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
