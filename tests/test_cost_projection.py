@@ -340,6 +340,8 @@ class TestDisplay:
         assert uncounted_money_text({"reserved_usd": 0.0, "unresolved_upper_bound_usd": None}) == ""
         assert uncounted_money_text(None) == ""
         assert uncounted_money_text({"reserved_usd": 0.004}) == "$0.0040 reserved for calls not yet sent"
+        # A tie rounds up, as the card and Telegram round it.
+        assert uncounted_money_text({"reserved_usd": 0.125}) == "$0.13 reserved for calls not yet sent"
         # A caller asking for more places keeps them (the ledger text prints six).
         assert uncounted_money_text({"reserved_usd": 0.004213}, decimals=6) == "$0.004213 reserved for calls not yet sent"
 
