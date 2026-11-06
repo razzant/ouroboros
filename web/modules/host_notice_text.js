@@ -11,7 +11,7 @@
 import { fmt, tr, tx } from './i18n.js';
 
 export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
-    startup_notice: ['♻️ Restored pending queue: ', '♻️ Settling ', '♻️ The previous server generation restarted itself: '],
+    startup_notice: ['♻️ Restored pending queue: ', '♻️ Settling ', '♻️ The server restarted itself after '],
     command_reply: ['⚠️ Command ignored: ', '✅ Owner chat registered.', '♻️ Restarting.', '⚠️ Restart cancelled: ',
         '🧬 Evolution campaign: ', '🧬 Evolution stayed OFF: ', '🧬 Evolution did not turn on: ',
         '🧠 Background consciousness ', '🧠 Background consciousness:'],

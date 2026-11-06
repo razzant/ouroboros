@@ -195,7 +195,7 @@ HOST_ROW_CLASSES = {
     "skill_lifecycle_pointer": ("owner_act_receipt", 1),
     "skill_notice": ("signed_words", 1),
     "skill_repair": ("owner_act_receipt", 1),  # the owner's Repair; marketplace auto-repair is retired
-    "startup_notice": ("runtime_state", 2),
+    "startup_notice": ("runtime_state", 3),  # the boot notice, the storage switch, the fault boot's recovery facts when the lane refused the turn (RV1 C1)
     "steer_not_delivered": ("not_started", 1),
     "storage_switch_notice": ("runtime_state", 1),
     "storage_free_notice": ("runtime_state", 1),  # the mind's Free receipt is a Main System row

@@ -21,7 +21,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 import uvicorn
 from ouroboros.server_control import (PanicIngress, execute_panic_stop as _execute_panic_stop_impl,
-                                      exit_after_shutdown,
+                                      exit_after_shutdown, panic_termination_requested,
                                       restart_current_process as _restart_current_process_impl)  # noqa: F401 — restart lifecycle binding
 from ouroboros.owned_shutdown import (begin_owned_stop, finish_unconfirmed_stops, start_inherited_import,
                                        stop_owned_work)
@@ -727,10 +727,8 @@ def _run_supervisor(settings: dict) -> None:
         if restored_pending > 0 or interrupted_running or previous_fault:
             st_boot = load_state()
             if st_boot.get("owner_chat_id"):
-                # The second clause states an INTENT, not an outcome: restore only
-                # fences an interrupted task with a durable cancel intent, and
-                # cancellation custody writes its terminal result a watchdog
-                # window later (task_lifecycle._INTENT_WATCHDOG_MIN_AGE_SEC).
+                # The second clause states an INTENT, not an outcome: restore only fences an interrupted task with a
+                # durable cancel intent; cancellation custody writes its terminal a watchdog window later (task_lifecycle._INTENT_WATCHDOG_MIN_AGE_SEC).
                 notice = ["♻️"]
                 if restored_pending > 0:
                     notice.append(f"Restored pending queue: {restored_pending} tasks.")
@@ -832,13 +830,13 @@ def _run_supervisor(settings: dict) -> None:
             rotate_jsonl_log_if_needed(DATA_DIR, "tools.jsonl", "tools")
             rotate_jsonl_log_if_needed(DATA_DIR, "supervisor.jsonl", "supervisor")
             rotate_jsonl_log_if_needed(DATA_DIR, "task_reflections.jsonl", "task_reflections")
-            event_q = get_event_q()  # the bus fact first: no dead worker is handed to the reaper on a dead bus
+            get_event_q()  # the bus fact first: no dead worker is handed to the reaper on a dead bus
             ensure_workers_healthy()
 
             # One BOUNDED events batch (count + time; the remainder waits for the next
             # turn), so a producer that keeps the queue non-empty cannot hide intake.
             backlog = drain_worker_events(
-                event_q, _event_ctx, _loop_liveness, on_restart=_handle_restart_in_supervisor,
+                get_event_q(), _event_ctx, _loop_liveness, on_restart=_handle_restart_in_supervisor,
             )
 
             if _restart_requested.is_set():
@@ -889,13 +887,11 @@ def _run_supervisor(settings: dict) -> None:
                 time.sleep(0.5)  # a turn that hit its events bound drains the backlog at full speed
 
         except Exception as exc:
-            if _supervisor_stop.is_set() or _restart_requested.is_set() or _exit_signalled.is_set():
-                # A shutdown-torn Manager proxy is not a supervisor crash.
+            if _supervisor_stop.is_set() or _restart_requested.is_set() or _exit_signalled.is_set() or panic_termination_requested():
+                # A shutdown-torn Manager proxy is not a supervisor crash; nor is the bus Panic itself killed.
                 log.info("Supervisor loop exiting on shutdown: %s", exc)
                 break
-            # Two causes, one door (server_process.end_generation_on_fault): the task core is lost (the bus fact,
-            # confirmed for a proxy error too; no retries) or the third consecutive failure on a live bus. Readiness
-            # clears, the owner gets one row, the stop latches, this generation ends: no half-alive loop remains.
+            # Two causes, one door (end_generation_on_fault): the core is lost (the bus fact, confirmed for a proxy error too; no retries) or the third consecutive failure on a live bus.
             bus_exitcode = exc.exitcode if isinstance(exc, EventBusLost) else event_bus_exitcode()
             if bus_exitcode is not None:
                 _supervisor_ready.clear()
@@ -1284,7 +1280,7 @@ async def lifespan(app):
                 **_managed_update_pending_kwargs(),
             )
             # Record an explicit shutdown cause so a task interrupted by the shutdown is
-            # never later read as a worker crash storm. Diagnostic, so it runs AFTER the
+            # never later read as a worker death. Diagnostic, so it runs AFTER the
             # custody write: append_jsonl waits up to two seconds for the log lock, and
             # that wait must never spend the force-exit budget on unterminalized workers.
             try:
@@ -1397,7 +1393,7 @@ def _emergency_process_cleanup() -> dict:
         if _restart_requested.is_set():
             # A restart that hung past the uvicorn shutdown timeout still reaches
             # here; finalize running tasks as an honest interrupted-by-restart,
-            # not a worker crash storm.
+            # not a worker death.
             cleanup_status, cleanup_reason = _shutdown_task_cleanup_args(True)
             cleanup_kwargs.update(terminal_status=cleanup_status, result_reason=cleanup_reason,
                                   stop_source="server_shutdown")

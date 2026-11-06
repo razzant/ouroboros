@@ -503,7 +503,13 @@ def _arm_stop_backstop(source: str, action: Optional[Callable[[str], None]] = No
 def _fault_backstop(source: str) -> None:
     """The fault teardown outlived the launcher grace: take the SAME door ``main()`` would, never a bare exit
     that leaves a direct install down. Launcher-managed: exit 1 and the launcher restarts; direct: the
-    pre-exec census and the in-place successor (the exec never returns), a failed successor exits 1."""
+    pre-exec census and the in-place successor (the exec never returns), a failed successor exits 1. An
+    accepted Panic owns the exit: the backstop then does nothing (the Emergency Stop is never a fault)."""
+    from ouroboros.server_control import panic_termination_requested
+
+    if panic_termination_requested():
+        log.info("Fault backstop (%s) defers to the accepted Panic, which owns this process's exit", source)
+        return
     log.critical("Fault stop (%s) did not finish within the launcher grace; taking the fault exit now", source)
     os._exit(fault_exit())
 
@@ -539,27 +545,29 @@ def _saved_running_count() -> int:
     return saved
 
 
-def fault_row_text(cause: str, *, exitcode: Any = None, saved: int = 0) -> str:
-    """The one Main row before a fault exit, in owner words: what happened, what happens next, what is kept.
-    The raw error goes to the server log and the journal row, never to this line (UI audit U013)."""
+def fault_row_text(cause: str) -> str:
+    """The one Main row before a fault exit: ONE fact in the main line, what happened and what happens next (the
+    house rule: one fact in the main view, the rest in details). The exit code, the saved count, the raw error
+    and the daemon note are details: the ``supervisor_generation_fault`` journal row and the server log; the
+    held count reaches the owner in the next start's notice."""
     if cause == FAULT_BUS_LOST:
-        happened = f"🛑 The event-bus process of this server exited (exit {exitcode}). "
-    else:
-        happened = "🛑 The task loop failed three times in a row; the last error is in the server log. "
-    held = ("" if saved <= 0 else " 1 task keeps its saved state." if saved == 1
-            else f" {saved} tasks keep their saved state.")
-    return (happened + "Restarting the server now. Claudexor keeps running and other programs' runs are not "
-            "touched; this server's own runs for the interrupted tasks stop and can be continued." + held)
+        return "🛑 The event-bus process of this server exited; the server is restarting."
+    return "🛑 The task loop failed three times in a row; the server is restarting."
 
 
-def end_generation_on_fault(cause: str, *, exitcode: Any = None, error: Optional[BaseException] = None) -> None:
+def end_generation_on_fault(cause: str, *, exitcode: Any = None, error: Optional[BaseException] = None) -> bool:
     """A ready generation lost its task core or its tick failed three times in a row: one journal row with
     the raw facts, one Main row in owner words, then the latch. The caller clears readiness and leaves its
     loop; the lifespan teardown holds saved work (``retain_saved_work=True``), records the cause in
-    ``shutdown_entry.json`` and ``fault_exit`` is the door."""
+    ``shutdown_entry.json`` and ``fault_exit`` is the door. An accepted Panic owns the exit already: then
+    nothing here happens (no row, no cause, no latch) and False returns."""
+    from ouroboros.server_control import panic_termination_requested
     from supervisor.message_bus import send_with_budget
     from supervisor.state import append_jsonl, load_state
 
+    if panic_termination_requested():
+        log.info("Panic owns this process's exit; the lost bus (%s) is Panic's own kill, not a fault", cause)
+        return False
     saved = _saved_running_count()
     log.critical("Server generation ended: %s (exit code %s): %s", cause, exitcode, error, exc_info=error is not None)
     try:
@@ -571,11 +579,11 @@ def end_generation_on_fault(cause: str, *, exitcode: Any = None, error: Optional
     try:
         st = load_state()
         if st.get("owner_chat_id"):
-            send_with_budget(int(st["owner_chat_id"]), fault_row_text(cause, exitcode=exitcode, saved=saved),
-                             role="system", system_type="supervisor_failure")
+            send_with_budget(int(st["owner_chat_id"]), fault_row_text(cause), role="system", system_type="supervisor_failure")
     except Exception:
         log.debug("Failed to notify the owner about the generation's end", exc_info=True)
     latch_fault_stop(cause)
+    return True
 
 
 _FAULT_CANCEL_REASONS = {
@@ -608,21 +616,22 @@ def _fault_cause_words(cause: str) -> str:
 
 
 def previous_fault_sentence(held: int) -> str:
-    """The startup notice's clause after a fault exit: the previous generation's cause and the held count."""
+    """The startup notice's clause after a fault exit: the cause and the held count, in owner words."""
     previous = previous_fault_entry()
     if not previous:
         return ""
-    kept = (" No task holds saved work." if held <= 0 else " 1 task is held with its saved state." if held == 1
-            else f" {held} tasks are held with their saved state.")
-    return f"The previous server generation restarted itself: {_fault_cause_words(str(previous['cause']))}.{kept}"
+    kept = (" No task holds saved work." if held <= 0 else " 1 task keeps its saved work." if held == 1
+            else f" {held} tasks keep their saved work.")
+    return f"The server restarted itself after {_fault_cause_words(str(previous['cause']))}.{kept}"
 
 
 def held_saved_work_ids(pending: Any) -> List[str]:
-    """The restored queue rows the boot holds under their saved-work hold (``HOLD_SAVED_WORK``), by id."""
-    from supervisor.events_budget import HOLD_SAVED_WORK, budget_hold_fact
+    """The restored queue rows an application stop holds with their saved work (released by Resume), by id: the
+    typed stop policy decides (``work_stop.record_policy``), never a hold's name."""
+    from ouroboros.work_stop import hold_fact, record_policy
 
     return [str(task.get("id") or "") for task in list(pending or ()) if isinstance(task, dict)
-            and str((budget_hold_fact(task) or {}).get("reason") or "") == HOLD_SAVED_WORK]
+            and (hold := hold_fact(task)) is not None and record_policy(hold)["cause"] == "app_stop"]
 
 
 def held_saved_work_count(pending: Any) -> int:
@@ -630,7 +639,7 @@ def held_saved_work_count(pending: Any) -> int:
 
 
 RECOVERY_TRIGGER = "core_lost"  # the ``auto_resume_triggered`` row's trigger for the Fault boot's recovery turn
-_RECOVERY_JOURNAL_TAIL_BYTES = 4_000_000  # how far back the live journal is read for the previous recovery turn
+RECOVERY_RECORD = "core_loss_recovery.json"  # state/: the admitted recovery turn and the generation that admitted it
 
 
 def cancelled_unsaved_roots(root: pathlib.Path, since: str) -> List[str]:
@@ -655,32 +664,45 @@ def cancelled_unsaved_roots(root: pathlib.Path, since: str) -> List[str]:
     return sorted(roots)
 
 
-def open_recovery_turn(root: pathlib.Path) -> str:
-    """The task id of the last core-loss recovery turn whose result is not yet terminal, else ``""``: the fact
-    that bounds the next one. Read from the journal's ``auto_resume_triggered`` rows (``trigger: core_lost``); a
-    turn whose row rotated out of the tail, or whose result is gone, binds nothing; an unreadable result holds."""
+def _recovery_record_path(root: pathlib.Path) -> pathlib.Path:
+    return pathlib.Path(root) / "state" / RECOVERY_RECORD
+
+
+def record_recovery_turn(root: pathlib.Path, task_id: str, cause: str) -> None:
+    """The durable bound of owner decision 2A: the admitted recovery turn's task id and the generation it was
+    admitted in (the shutdown entry carries the same generation id), one record, atomic replace, best effort.
+    The journal row beside it is diagnostic; rotation never changes the decision read from this record."""
+    from ouroboros.delegate_recovery import _PROCESS_GENERATION
+    from ouroboros.utils import atomic_write_json
+
+    try:
+        atomic_write_json(_recovery_record_path(root), {"schema_version": 1, "task_id": str(task_id),
+                                                        "generation": _PROCESS_GENERATION, "cause": str(cause),
+                                                        "admitted_at": utc_now_iso()})
+    except Exception:
+        log.warning("The recovery turn record was not written; the next fault boot admits its own turn", exc_info=True)
+
+
+def open_recovery_turn(root: pathlib.Path, died_generation: str) -> str:
+    """The task id of a recovery turn admitted IN the generation that just died, while that turn's result is not
+    terminal: the fault loop the bound exists for. Any other fault boot gets its own turn (an earlier recovery
+    turn held with saved work is then among the held ids). ``""`` when nothing binds; an unreadable result holds;
+    a result row that is gone binds nothing. No counter, no timer; journal rotation is irrelevant."""
     from ouroboros.task_results import (STATUS_CANCELLED, STATUS_COMPLETED, STATUS_FAILED, STATUS_REJECTED_DUPLICATE,
                                         load_task_result)
-    from ouroboros.utils import iter_jsonl_objects
 
-    last = ""
-    try:
-        for row in iter_jsonl_objects(root / "logs" / "supervisor.jsonl", tail_bytes=_RECOVERY_JOURNAL_TAIL_BYTES):
-            if (row.get("type") == "auto_resume_triggered" and row.get("trigger") == RECOVERY_TRIGGER
-                    and row.get("task_id")):
-                last = str(row["task_id"])
-    except Exception:
-        log.warning("The journal tail is unreadable; no previous recovery turn is known", exc_info=True)
-    if not last:
+    record = read_json_dict(_recovery_record_path(root)) or {}
+    task_id, admitted_in = str(record.get("task_id") or ""), str(record.get("generation") or "")
+    if not task_id or not died_generation or admitted_in != died_generation:
         return ""
     try:
-        result = load_task_result(root, last)
+        result = load_task_result(root, task_id)
     except Exception:
-        return last  # not proven terminal: the bound holds
+        return task_id  # not proven terminal: the bound holds
     if not isinstance(result, dict):
         return ""  # the turn's row is gone: nothing to hold on
     terminal = {STATUS_CANCELLED, STATUS_COMPLETED, STATUS_FAILED, STATUS_REJECTED_DUPLICATE}
-    return "" if str(result.get("status") or "") in terminal else last
+    return "" if str(result.get("status") or "") in terminal else task_id
 
 
 def recovery_turn_text(cause: str, ended_at: str, held: List[str], cancelled: List[str], root: pathlib.Path) -> str:
@@ -705,9 +727,15 @@ def core_loss_recovery_turn(root: Any, chat_id: int, pending: Any, *, admit: Cal
 
     False when the previous generation did not end through the Fault door (Quit, Panic, owner Restart and
     planned restarts start nothing here). Otherwise the boot is handled here and True returns: one turn with
-    the facts (``recovery_turn_text``) is admitted unless a conversation turn is already live, or the previous
-    recovery turn's result is not terminal yet (``open_recovery_turn``): bound by that fact, never a counter
-    or timer. The turn's task id rides the ``auto_resume_triggered`` row (``trigger: core_lost``)."""
+    the facts (``recovery_turn_text``) is admitted unless a conversation turn is already live, or the recovery
+    turn admitted in the generation that just died is not terminal yet (``open_recovery_turn``: a fault loop,
+    bound by that fact, never a counter or timer). An admitted turn is recorded durably (``record_recovery_turn``)
+    and journalled (``auto_resume_triggered``, ``trigger: core_lost``). A REFUSED admission (the repository-writer
+    gate of a managed update, or the lane) is not a consumed turn: no record is written, so a later fault boot
+    admits its own turn, and the facts are posted in Main as a host row the mind meets on its next turn; no
+    other seam retries a refused owner turn (``auto_resume_after_restart`` runs at boot alone and the
+    Restart-pending deferral covers a pending Restart only), so the row is the one path that keeps 2A's promise."""
+    from supervisor.message_bus import send_with_budget
     from supervisor.state import append_jsonl
 
     previous = previous_fault_entry()
@@ -716,15 +744,25 @@ def core_loss_recovery_turn(root: Any, chat_id: int, pending: Any, *, admit: Cal
     root = pathlib.Path(root)
     cause, ended_at = str(previous["cause"]), str(previous.get("entered_at") or "")
     journal = root / "logs" / "supervisor.jsonl"
-    open_turn = open_recovery_turn(root)
+    open_turn = open_recovery_turn(root, str(previous.get("generation") or ""))
     if open_turn or live():
         append_jsonl(journal, {"ts": utc_now_iso(), "type": "auto_resume_skipped", "trigger": RECOVERY_TRIGGER,
                                "reason": "previous_recovery_turn_open" if open_turn else "conversation_turn_live",
                                "task_id": open_turn, "cause": cause})
         return True
     held, cancelled = held_saved_work_ids(pending), cancelled_unsaved_roots(root, ended_at)
-    meta = admit(int(chat_id), recovery_turn_text(cause, ended_at, held, cancelled, root), None)
+    text = recovery_turn_text(cause, ended_at, held, cancelled, root)
+    meta = admit(int(chat_id), text, None)
     task_id = str(((meta or {}).get("task") or {}).get("id") or "") if isinstance(meta, dict) else ""
+    if not task_id:
+        try:
+            send_with_budget(int(chat_id), text, role="system", system_type="startup_notice")
+        except Exception:
+            log.warning("The recovery facts could not be posted in Main after the refused admission", exc_info=True)
+        append_jsonl(journal, {"ts": utc_now_iso(), "type": "auto_resume_skipped", "trigger": RECOVERY_TRIGGER,
+                               "reason": "admission_refused", "facts_posted": True, "cause": cause})
+        return True
+    record_recovery_turn(root, task_id, cause)
     append_jsonl(journal, {"ts": utc_now_iso(), "type": "auto_resume_triggered", "trigger": RECOVERY_TRIGGER,
                            "task_id": task_id, "cause": cause, "ended_at": ended_at, "held": held,
                            "cancelled": cancelled})
@@ -732,6 +770,28 @@ def core_loss_recovery_turn(root: Any, chat_id: int, pending: Any, *, admit: Cal
 
 
 _FAULT_EXIT: Optional[Callable[[], int]] = None  # main() binds the one decision once its port is known
+_FAULT_CENSUS_BOUND_SEC: Optional[float] = None  # tests shorten it; None reads LAUNCHER_STOP_GRACE_SEC
+
+
+def _bounded_census(cleanup: Callable[[], Any]) -> None:
+    """The pre-exec census, bounded by the launcher grace: a teardown stuck while holding the queue lock must
+    not hang the fault door behind it (the backstop runs this concurrently with that teardown). An unfinished
+    census is disclosed and the successor starts over it; the next generation's custody sweep settles the rest."""
+    from ouroboros.runtime_limits import LAUNCHER_STOP_GRACE_SEC
+
+    done = threading.Event()
+
+    def run() -> None:
+        try:
+            cleanup()
+        finally:
+            done.set()
+
+    threading.Thread(target=run, name="fault-census", daemon=True).start()
+    bound = LAUNCHER_STOP_GRACE_SEC if _FAULT_CENSUS_BOUND_SEC is None else _FAULT_CENSUS_BOUND_SEC
+    if not done.wait(bound):
+        log.critical("The pre-exec census did not finish within %ss; the successor starts over it and the next "
+                     "generation's startup sweep settles the remainder", bound)
 _FAULT_EXIT_LOCK = threading.Lock()
 _FAULT_EXIT_CODE: Optional[int] = None  # the decision taken, so main's return and the backstop never take two
 
@@ -750,9 +810,13 @@ def fault_exit() -> int:
     taken once (the first caller, main or the backstop timer, decides and the other reads the same answer,
     so the census and the successor happen once). 0 without a fault; 1 for a fault latched before any
     binding (the launcher reading)."""
+    from ouroboros.server_control import panic_termination_requested
+
     global _FAULT_EXIT_CODE
     if _stop_source not in FAULT_CAUSES or _restart_requested.is_set():
         return 0
+    if panic_termination_requested():
+        return 1  # Panic owns the exit (``exit_after_shutdown`` parks main's return); no census, no successor
     with _FAULT_EXIT_LOCK:
         if _FAULT_EXIT_CODE is None:
             _FAULT_EXIT_CODE = _FAULT_EXIT() if _FAULT_EXIT is not None else 1
@@ -780,7 +844,7 @@ def _decide_fault_exit(host: str, port: int, *, launcher_managed: bool, repo_dir
         log.critical("Server generation ended (%s); exiting 1 for the launcher's restart", _stop_source)
         return 1
     try:
-        cleanup()
+        _bounded_census(cleanup)
         from ouroboros.delegate_recovery import PLANNED_RESTART_TRANSACTION_ENV
 
         os.environ.pop(PLANNED_RESTART_TRANSACTION_ENV, None)

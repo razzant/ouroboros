@@ -380,27 +380,41 @@ def test_only_the_planned_restart_record_triggers_the_boot_auto_resume(tmp_path,
 FAULT_ENDED_AT = "2026-01-01T00:00:00+00:00"  # before any row this test writes
 
 
-def _fault_boot(tmp_path, monkeypatch, *, cause="bus_lost", chat=7, live=False):
-    """A boot whose previous generation's shutdown entry carries ``cause``: the real queue module as the pool,
-    a known owner chat (unless ``chat`` is None), the lane's liveness and admission stubbed."""
+def _fault_boot(tmp_path, monkeypatch, *, cause="bus_lost", chat=7, live=False, generation="g-prev", refuse=False,
+                posted=None):
+    """A boot whose previous generation's shutdown entry carries ``cause`` (and ``generation``, the id that died):
+    the real queue module as the pool, a known owner chat (unless ``chat`` is None), the lane's liveness and
+    admission stubbed (``refuse``: the gate answers None; toggle ``handle_chat_direct.refuse``), Main's host rows
+    recorded in ``posted``."""
     from ouroboros import owned_shutdown
-    from supervisor import worker_chat_lane
+    from supervisor import message_bus, worker_chat_lane
 
     queue, _state, workers = _install_queue(tmp_path, monkeypatch)
     (tmp_path / "logs").mkdir(exist_ok=True)
     (tmp_path / "state").mkdir(exist_ok=True)
     monkeypatch.setattr(workers, "load_state", lambda: {"owner_chat_id": chat} if chat is not None else {})
     monkeypatch.setattr(owned_shutdown._GENERATION_STOP, "previous",
-                        {"cause": cause, "entered_at": FAULT_ENDED_AT, "generation": "g-prev"} if cause else {})
+                        {"cause": cause, "entered_at": FAULT_ENDED_AT, "generation": generation} if cause else {})
     monkeypatch.setattr(worker_chat_lane, "conversation_turn_live", lambda: live)
+    rows = posted if posted is not None else []
+    monkeypatch.setattr(message_bus, "send_with_budget",
+                        lambda chat_id, text, **kw: rows.append((chat_id, text, kw.get("system_type"))))
     turns = []
 
     def admit(chat_id, text, image_data=None, **_kw):
         turns.append((chat_id, text))
+        if admit.refuse:
+            return None
         return {"task": {"id": f"turn-{len(turns)}"}, "worker_id": None}
 
+    admit.refuse = refuse
     monkeypatch.setattr(worker_chat_lane, "handle_chat_direct", admit)
     return queue, workers, turns
+
+
+def _recovery_record(tmp_path):
+    path = tmp_path / "state" / "core_loss_recovery.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
 
 def test_a_fault_boot_starts_one_recovery_turn_with_the_facts_bounded_by_the_previous_turns_result(tmp_path, monkeypatch):
@@ -408,9 +422,13 @@ def test_a_fault_boot_starts_one_recovery_turn_with_the_facts_bounded_by_the_pre
     the auto-resume seam with facts only: the cause, when the previous generation ended, the tasks held with
     saved state and the interrupted roots cancelled without a saved point (``server_shutdown``, Continue-eligible;
     an owner Stop and a child are not listed), and the owner's one decision (the mind resumes or continues and
-    tells once). Its task id rides the ``auto_resume_triggered`` row (``trigger: core_lost``). Bound by a fact:
-    while that result is not terminal a later fault boot starts none (and says so); once terminal, the next one
-    starts. A planned-restart verify record beside the fault adds no second turn."""
+    tells once). Its task id rides the ``auto_resume_triggered`` row (``trigger: core_lost``) and the durable
+    record ``state/core_loss_recovery.json`` with the generation that admitted it (RV1 astra C2). Bound by a
+    fact: when the generation that just died is the one that admitted the turn and that turn is not terminal,
+    the boot starts none (and says so); the journal may be gone (rotated) without changing that; once terminal,
+    the next one starts. A planned-restart verify record beside the fault adds no second turn."""
+    from ouroboros import owned_shutdown
+    from ouroboros.delegate_recovery import _PROCESS_GENERATION
     from supervisor import worker_chat_lane
     from supervisor.events_budget import HOLD_SAVED_WORK, hold_budget_row
     from ouroboros.task_results import write_task_result
@@ -441,17 +459,80 @@ def test_a_fault_boot_starts_one_recovery_turn_with_the_facts_bounded_by_the_pre
     [row] = [row for row in _supervisor_rows(tmp_path) if row["type"] == "auto_resume_triggered"]
     assert row["trigger"] == "core_lost" and row["task_id"] == "turn-1" and row["cause"] == "bus_lost"
     assert row["ended_at"] == FAULT_ENDED_AT and row["held"] == ["held-1"] and row["cancelled"] == ["root-cut"]
+    record = _recovery_record(tmp_path)
+    assert record == {"schema_version": 1, "task_id": "turn-1", "generation": _PROCESS_GENERATION, "cause": "bus_lost",
+                      "admitted_at": record["admitted_at"]}
 
-    # Bound by a fact, not a counter: the turn's result is open, so the next fault boot starts none.
+    # Bound by a fact, not a counter: THIS generation dies by a fault while its recovery turn is open, so the
+    # next boot starts none; the journal's rows are not what decides (rotated away here).
     write_task_result(tmp_path, "turn-1", "running", chat_id=7)
+    monkeypatch.setattr(owned_shutdown._GENERATION_STOP, "previous",
+                        {"cause": "bus_lost", "entered_at": FAULT_ENDED_AT, "generation": _PROCESS_GENERATION})
+    (tmp_path / "logs" / "supervisor.jsonl").unlink()
     worker_chat_lane.auto_resume_after_restart()
     assert len(turns) == 1
     skipped = [row for row in _supervisor_rows(tmp_path) if row["type"] == "auto_resume_skipped"]
-    assert skipped[-1]["reason"] == "previous_recovery_turn_open" and skipped[-1]["task_id"] == "turn-1"
-    # Once it is terminal the bound lifts: the next fault boot gets its own turn.
+    assert skipped == [skipped[0]] and skipped[0]["reason"] == "previous_recovery_turn_open"
+    assert skipped[0]["task_id"] == "turn-1" and _recovery_record(tmp_path) == record
+    # Once it is terminal the bound lifts: the next fault boot gets its own turn, and the record names it.
     write_task_result(tmp_path, "turn-1", "completed", chat_id=7, result="told the owner")
     worker_chat_lane.auto_resume_after_restart()
     assert len(turns) == 2 and "its event-bus process exited" in turns[1][1]
+    assert _recovery_record(tmp_path)["task_id"] == "turn-2"
+
+
+def test_a_fault_boot_of_another_generation_gets_its_own_turn_and_lists_a_held_earlier_one(tmp_path, monkeypatch):
+    """RV1 astra C2, the other direction of the bound: the record names the generation that admitted the turn;
+    a fault boot after ANY other generation gets its own turn even while that earlier turn's result is open (the
+    earlier turn, held with saved work, is then among the held ids the new turn lists). A record that cannot be
+    read binds nothing either. No counter, no timer."""
+    from ouroboros.task_results import write_task_result
+    from ouroboros.utils import atomic_write_json
+    from supervisor import worker_chat_lane
+    from supervisor.events_budget import HOLD_SAVED_WORK, hold_budget_row
+
+    _queue, workers, turns = _fault_boot(tmp_path, monkeypatch, generation="g-prev")
+    atomic_write_json(tmp_path / "state" / "core_loss_recovery.json",
+                      {"schema_version": 1, "task_id": "turn-earlier", "generation": "g-older", "cause": "bus_lost",
+                       "admitted_at": FAULT_ENDED_AT})
+    write_task_result(tmp_path, "turn-earlier", "running", chat_id=7)
+    earlier = {"id": "turn-earlier", "chat_id": 7, "type": "task"}
+    earlier["_budget_pause_hold"] = hold_budget_row(earlier, reason=HOLD_SAVED_WORK)
+    workers.PENDING.append(earlier)
+
+    worker_chat_lane.auto_resume_after_restart()
+    assert len(turns) == 1 and "Tasks held with their saved state (Resume continues each from that state): turn-earlier." in turns[0][1]
+    [row] = [row for row in _supervisor_rows(tmp_path) if row["type"] == "auto_resume_triggered"]
+    assert row["held"] == ["turn-earlier"] and _recovery_record(tmp_path)["task_id"] == "turn-1"
+    assert not [row for row in _supervisor_rows(tmp_path) if row["type"] == "auto_resume_skipped"]
+
+    (tmp_path / "state" / "core_loss_recovery.json").write_text("{not json", encoding="utf-8")
+    worker_chat_lane.auto_resume_after_restart()
+    assert len(turns) == 2 and _recovery_record(tmp_path)["task_id"] == "turn-2"
+
+
+def test_a_refused_recovery_admission_is_not_a_consumed_turn(tmp_path, monkeypatch):
+    """RV1 astra C1. The lane may refuse the admission (the repository-writer gate of a managed update, or the
+    lane itself); no turn ran, so none is recorded as the bound: the journal says ``admission_refused`` and the
+    facts are posted in Main as a host row the mind meets on its next turn (no other seam retries a refused owner
+    turn: the boot resume runs once and the Restart deferral covers a pending Restart only). The other direction:
+    the next fault boot, of the same died generation even, admits its own turn and records it."""
+    from supervisor import worker_chat_lane
+
+    posted = []
+    _queue, _workers, turns = _fault_boot(tmp_path, monkeypatch, refuse=True, posted=posted)
+    worker_chat_lane.auto_resume_after_restart()
+    assert len(turns) == 1 and _recovery_record(tmp_path) is None
+    assert posted == [(7, turns[0][1], "startup_notice")]
+    rows = [row for row in _supervisor_rows(tmp_path) if row["type"] in ("auto_resume_triggered", "auto_resume_skipped")]
+    assert [(row["type"], row.get("reason"), row.get("facts_posted")) for row in rows] == [
+        ("auto_resume_skipped", "admission_refused", True)]
+
+    worker_chat_lane.handle_chat_direct.refuse = False
+    worker_chat_lane.auto_resume_after_restart()
+    assert len(turns) == 2 and len(posted) == 1 and _recovery_record(tmp_path)["task_id"] == "turn-2"
+    assert [row["type"] for row in _supervisor_rows(tmp_path) if row["type"].startswith("auto_resume_")] == [
+        "auto_resume_skipped", "auto_resume_triggered"]
 
 
 @pytest.mark.parametrize("cause", ["launcher_quit", "launcher_gone", "external_signal", "restart_requested",
