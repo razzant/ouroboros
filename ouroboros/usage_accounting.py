@@ -196,10 +196,11 @@ def refresh_root_accounting(
         return cached
 
 def _known_spend_text(summary: Dict[str, Any]) -> str:
-    """A refusal's money: the known spend that decided it, the open holds beside it."""
-    holds = (_number(summary.get("reserved_usd")) or 0.0) + (_number(summary.get("unresolved_upper_bound_usd")) or 0.0)
-    return (f"known=${float(_number(summary.get('settled_usd')) or 0.0):.6f} "
-            f"(open holds ${holds:.6f} not counted as spending)")
+    """A refusal's money: the known spend that decided it, what is not counted beside it, each by its name."""
+    from ouroboros.cost_projection import uncounted_money_text
+
+    beside = uncounted_money_text(summary, decimals=6)
+    return f"known=${float(_number(summary.get('settled_usd')) or 0.0):.6f}" + (f" ({beside}; not counted as spending)" if beside else "")
 
 
 class BudgetExceeded(UsageAccountingError):

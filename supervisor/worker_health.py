@@ -569,7 +569,7 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
             raise TerminalFileRecoveryPending("consumed Resume working source could not be frozen") from exc
     replay_unsafe = (not getattr(w, "active_capacity", True)
                      or has_owner_wait_checkpoint(meta, attempt) or budget_pausing)
-    # Reconstruct cost/rounds from durable llm_usage for any
+    # Reconstruct cost/rounds from the usage ledger for any
     # abnormal-termination rollup below (worker died pre-finalize,
     # so the event would otherwise carry zeros).
     r_cost_fields = _pool().reconstruct_task_cost(task_id, fields=True)

@@ -404,9 +404,24 @@ def _runtime_budget_info(env: Any, task: Dict[str, Any], ctx: Any = None) -> Dic
     return budget_info
 
 
-def storage_fact(data_root: Any) -> Optional[Dict[str, Any]]:
+def disk_view(path: Any, *, observed_at: Optional[str] = None) -> Dict[str, Any]:
+    """Free and total space of the disk holding ``path``, read now through the Storage page's own reader
+    (``storage._volume``): exact bytes, the same decimal GB that page prints (``storage_format.js``), and when
+    it was read. Empty when the volume cannot be read: unknown stays absent, never a zero."""
+    from ouroboros import storage
+
+    volume = storage._volume(path)
+    free, total = volume.get("free_bytes"), volume.get("total_bytes")
+    if free is None or total is None:
+        return {}
+    return {"free_bytes": free, "free_gb": round(free / 1e9, 1), "volume_total_bytes": total,
+            "volume_total_gb": round(total / 1e9, 1), "disk_read_at": observed_at or volume.get("observed_at")}
+
+
+def storage_fact(data_root: Any, *, observed_at: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """What the mind knows about its disk, as one compact fact, every turn: free and total space of the
-    data folder's disk (read fresh, with or without a count); what every retirer holds and why
+    data folder's disk, read fresh with or without a count, in bytes and the Storage page's decimal GB with
+    when it was read (``disk_view``); what every retirer holds and why
     (``holds``: by remover, each class with its count, one example and since when, from the job rows the
     server's five retirer passes and the custody sweep's engine record keep; never an engine call while a
     turn is prepared) and what the last pass of each released; the last finished storage count when there
@@ -416,16 +431,9 @@ def storage_fact(data_root: Any) -> Optional[Dict[str, Any]]:
     cannot be read, nothing holds, nothing was counted and every remover is clean (never a fake zero). No
     threshold, tier or warning stands in for judgment here: the mind reads the numbers and acts through
     ``free_storage`` or the owner's Storage page."""
-    import shutil
-
     from ouroboros import storage, storage_removers
 
-    fact: Dict[str, Any] = {}
-    try:
-        usage = shutil.disk_usage(str(data_root))
-        fact["free_bytes"], fact["volume_total_bytes"] = usage.free, usage.total
-    except OSError:
-        pass  # unknown stays absent, never zero
+    fact: Dict[str, Any] = disk_view(data_root, observed_at=observed_at)
     removers = ""
     try:
         found = storage_removers.place_removers(data_root, engine=False)
@@ -455,9 +463,7 @@ def storage_fact(data_root: Any) -> Optional[Dict[str, Any]]:
             fact["growth_flag"] = count["growth_flag"]  # either count had unreadable items: the growth is qualified
     if removers:
         fact["removers"] = removers
-    if not fact:
-        return None
-    return fact
+    return fact or None
 
 
 # The body's own facts: bounds here are transport and memory limits, never judgments. Each item is one
@@ -819,7 +825,7 @@ def admission_observation(data_root: Any, *, observed_at: str) -> str:
 def body_facts(data_root: Any, *, observed_at: str) -> Dict[str, Any]:
     """The Runtime section's ``storage`` and ``vitals`` keys, each present only with its fact: one call
     site, ``context.build_runtime_section``."""
-    facts = {"storage": storage_fact(data_root),
+    facts = {"storage": storage_fact(data_root, observed_at=observed_at),
              "vitals": vitals_fact(data_root, observed_at=observed_at, captured_at=observed_at)}
     return {key: value for key, value in facts.items() if value is not None}
 

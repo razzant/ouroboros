@@ -152,14 +152,15 @@ def owner_rules_section(*, session: bool = False) -> str:
         rules = str(cfg.runtime_setting(OWNER_RULES_KEY, "") or "")
     except Exception as exc:
         return head + f"Unreadable now ({type(exc).__name__}); they live in {_RULES_ADDRESS}."
+    reach = "every Safety check and delegated session reads them, while my marks reach only my own work"
     if not rules.strip():
-        return head + f"None set: {_RULES_ADDRESS} is empty."
+        return head + f"None set: {_RULES_ADDRESS} is empty" + ("." if session else f"; once set, {reach}.")
     frame = (("The owner of your host set these standing rules for Ouroboros and the work it delegates, this "
               f"session included; verbatim from {_RULES_ADDRESS} as this start was prepared. Within their scope "
               "they outrank general defaults, as permission and as restriction; your assignment's explicit "
               "constraints also bind.") if session else
-             (f"Verbatim from {_RULES_ADDRESS}, as this task's settings hold them; the Safety Supervisor checks "
-              "my calls against the same text. Within their scope they bind in every mode (BIBLE P0) and outrank "
-              "general defaults, as permission and as restriction; a place's notes add rules for that place. "
-              "A change in Settings reaches the next task or turn."))
+             (f"Verbatim from {_RULES_ADDRESS}, as this task's settings hold them; {reach}. Within their scope "
+              "they bind in every mode (BIBLE P0) and outrank general defaults, as permission and as restriction; "
+              "my human's notes in a place add rules for that place. A change in Settings reaches the next task "
+              "or turn."))
     return head + frame + "\n\n" + rules
