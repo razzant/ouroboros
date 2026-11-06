@@ -446,15 +446,16 @@ def serial_resource(item):
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_collection(session):  # noqa: ARG001
-    """Collection imports every test module at once: with the cyclic collector paused it costs a fraction
-    (a whole-tree parse runs 2-3.5x faster, opus_rework N3), and nothing it builds is garbage before it ends.
-    The collected tree is then frozen out of every later collection's reach, so the tests' own garbage
-    collections never rescan it."""
+    """Collection imports every test module at once: with the cyclic collector paused it runs 2-3.5x faster
+    (opus_rework N3). One collection then frees what it dropped (a fifth of the tree's objects, a few seconds)
+    before the rest is frozen out of reach of the tests' own collections. A caller with many files names their
+    directory once: pytest re-collects it per named file, 4.3 GB for 803 while paused (test_bytecode walkers)."""
     gc.disable()
     try:
         yield
     finally:
         gc.enable()
+        gc.collect()
         gc.freeze()
 
 
@@ -832,7 +833,7 @@ def _isolate_restart_generation(monkeypatch):
     """Panic and parent observation belong to one process generation, not later tests;
     so do a returning stop's named queue and the launch/schedule process memory."""
     from ouroboros import delegate_recovery, launcher_bootstrap, server_control
-    from supervisor import queue, schedule_occurrence, worker_assignment
+    from supervisor import queue, schedule_occurrence, worker_assignment, worker_pool_lifecycle
 
     monkeypatch.setattr(server_control, "_restart_successors", [])
     monkeypatch.setattr(server_control, "_restart_stop_requested", False)
@@ -841,6 +842,7 @@ def _isolate_restart_generation(monkeypatch):
     monkeypatch.setattr(queue, "RETURNS_NAMED", {})
     monkeypatch.setattr(schedule_occurrence, "_DEFERRED", {})
     monkeypatch.setattr(worker_assignment, "_COMMITTED_UNSENT", {})
+    monkeypatch.setattr(worker_pool_lifecycle, "_DEMAND_FORECAST", worker_pool_lifecycle._initial_forecast())
 
 
 @pytest.fixture(autouse=True)

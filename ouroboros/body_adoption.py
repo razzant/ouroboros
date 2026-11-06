@@ -30,6 +30,7 @@ exact commit on ``request_restart``; this module carries that one transition.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import pathlib
@@ -67,6 +68,10 @@ def helper_dir(data_dir: Any) -> pathlib.Path:
     return pathlib.Path(data_dir) / "state" / "body_adoption"
 
 
+def _arm_deferred_path(data_dir: Any) -> pathlib.Path:
+    return helper_dir(data_dir) / "arm-deferred.json"
+
+
 def read(data_dir: Any) -> Dict[str, Any]:
     """The current handoff, or ``{}`` when none exists or it cannot be read."""
     try:
@@ -77,8 +82,18 @@ def read(data_dir: Any) -> Dict[str, Any]:
 
 
 def _git(repo: Any, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=str(repo), capture_output=True, text=True,
-                          encoding="utf-8", check=check)
+    from supervisor.git_ops import _run_git_process_bounded, host_git_env
+    from ouroboros.update_channels import get_rescue_git_timeout_sec
+
+    command = ["git", *args]
+    returncode, stdout, stderr = _run_git_process_bounded(
+        command, timeout=get_rescue_git_timeout_sec(), cwd=pathlib.Path(repo),
+        env=host_git_env(), text=True,
+    )
+    result = subprocess.CompletedProcess(command, returncode, stdout=stdout, stderr=stderr)
+    if check and returncode != 0:
+        raise subprocess.CalledProcessError(returncode, command, output=stdout, stderr=stderr)
+    return result
 
 
 def _log(data_dir: Any, kind: str, handoff: Dict[str, Any], **fields: Any) -> None:
@@ -91,8 +106,17 @@ def _log(data_dir: Any, kind: str, handoff: Dict[str, Any], **fields: Any) -> No
 
 
 def _switch_rows(repo: pathlib.Path, old: str, cand: str) -> List[Dict[str, Any]]:
-    raw = subprocess.run(["git", "diff-tree", "-r", "--no-renames", "-z", old, cand], cwd=str(repo),
-                         capture_output=True, check=True).stdout.split(b"\0")
+    from supervisor.git_ops import _run_git_process_bounded, host_git_env
+    from ouroboros.update_channels import get_rescue_git_timeout_sec
+
+    command = ["git", "diff-tree", "-r", "--no-renames", "-z", old, cand]
+    returncode, raw, stderr = _run_git_process_bounded(
+        command, timeout=get_rescue_git_timeout_sec(), cwd=repo,
+        env=host_git_env(), text=False,
+    )
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, command, output=raw, stderr=stderr)
+    raw = raw.split(b"\0")
     rows: List[Dict[str, Any]] = []
     for meta, path in zip(raw[0::2], raw[1::2]):
         old_mode, new_mode, old_sha, new_sha, _status = meta.decode()[1:].split(" ")
@@ -191,7 +215,13 @@ def authorize_row(data_dir: pathlib.Path, row: Dict[str, Any], commit: str, *, r
     old = _git(serving, "rev-parse", "--verify", "HEAD^{commit}").stdout.strip()
     branch = _git(serving, "symbolic-ref", "-q", "--short", "HEAD", check=False).stdout.strip()
     if not branch:
-        raise AdoptionRefused("ADOPTION_DETACHED", "the serving checkout has a detached HEAD; adoption moves a branch.")
+        raise AdoptionRefused(
+            "ADOPTION_DETACHED",
+            "the serving checkout has a detached HEAD; adoption moves a branch. Source/local-dev "
+            "startup can attach a missing branch at a clean, idle HEAD on a remote dev line. "
+            "Otherwise inspect HEAD and local branches: use `git switch -c <new-branch> HEAD` "
+            "with an unused name, or `git switch <existing-branch>` if that is the branch you mean; "
+            "then review the candidate against that branch and retry. Neither command force-resets a branch.")
     base = str(row.get("base_sha") or "")
     based = (old == base or _git(serving, "merge-base", "--is-ancestor", base, old, check=False).returncode == 0)
     if cand == old:
@@ -231,14 +261,6 @@ def authorize_row(data_dir: pathlib.Path, row: Dict[str, Any], commit: str, *, r
             "ADOPTION_SWITCH_SET_DIRTY",
             "the serving checkout has later work at paths this commit changes; it is kept as it is: "
             + dirty.splitlines()[0])
-    from supervisor.update_merge import active_update_tx
-
-    if active_update_tx():
-        raise AdoptionRefused("ADOPTION_UPDATE_ACTIVE", "a managed update owns the checkout; adopt after it settles.")
-    current = read(data_dir)
-    if current.get("phase") in _PENDING and current.get("phase") != "authorized":
-        raise AdoptionRefused(
-            "ADOPTION_PENDING", f"adoption {current.get('id')} is {current.get('phase')}; it must settle first.")
     from ouroboros.preflight_qualification import adoption_test_evidence
 
     # Existing green evidence of exactly this commit; adoption never runs the battery itself. A
@@ -252,28 +274,87 @@ def authorize_row(data_dir: pathlib.Path, row: Dict[str, Any], commit: str, *, r
         qualification = adoption_test_evidence(data_dir, candidate, cand, ctx=ctx, local=local)
     except (ValueError, OSError, subprocess.SubprocessError) as exc:
         raise AdoptionRefused("ADOPTION_TESTS_REQUIRED", str(exc)) from exc
-    directory = helper_dir(data_dir)
-    if directory.exists():
-        _archive(data_dir, current, f"replaced:{current.get('phase')}" if current else "stale_helper")
-    directory.mkdir(parents=True, exist_ok=True)
-    handoff = {
-        "schema": 1, "id": uuid.uuid4().hex[:12], "phase": "authorized", "repo_dir": str(serving.resolve()),
-        "data_dir": str(pathlib.Path(data_dir).resolve()), "branch": branch, "old": old, "cand": cand,
-        "candidate_id": row.get("candidate_id"), "candidate_branch": row.get("branch"),
-        "candidate_path": str(candidate), "task_id": task_id, "reason": str(reason or ""),
-        "created_tag": str((row.get("reviewed_release_tags") or {}).get(cand) or ""),
-        "switch": rows, "deps_command": _dependency_command(serving, rows), "authorized_at": utc_now_iso(),
-        "unreviewed_commits": unreviewed, "attempts": 0, "events": [],
-        "tests": qualification, "official_relation": official_relation(serving, cand, data_dir),
-    }
-    # The helper is captured from the body that is running, never from the candidate.
-    shutil.copyfile(pathlib.Path(body_switch.__file__), directory / "switch.py")
-    from ouroboros import installation_stop
-    shutil.copyfile(pathlib.Path(installation_stop.__file__), directory / "installation_stop.py")
-    _git(serving, "update-ref", f"{PIN_PREFIX}{handoff['id']}", cand)
-    body_switch.record(str(directory), handoff, "authorized", f"restart reason: {reason}")
-    _log(data_dir, "body_adoption_authorized", handoff, branch=branch, paths=len(rows))
-    return handoff
+
+    relation = official_relation(serving, cand, data_dir)  # dated history against the last-checked official tip
+    from supervisor.git_ops import bootstrap_transition_lock
+    try:
+        with bootstrap_transition_lock(data_dir=data_dir):
+            from supervisor.update_merge import active_update_tx, managed_update_lock_held
+
+            if active_update_tx() or managed_update_lock_held(data_dir):
+                raise AdoptionRefused("ADOPTION_UPDATE_ACTIVE", "a managed update owns the checkout; adopt after it settles.")
+            current = read(data_dir)
+            if current.get("phase") in _PENDING and current.get("phase") != "authorized":
+                raise AdoptionRefused(
+                    "ADOPTION_PENDING", f"adoption {current.get('id')} is {current.get('phase')}; it must settle first.")
+            directory = helper_dir(data_dir)
+            # Build the replacement beside the live handoff.  The old valid
+            # handoff remains readable until every new byte and its Git pin
+            # have been prepared; a failed copy/ref/record must not turn a
+            # previous adoption into an empty checkout.
+            if directory.exists() and not current:
+                raise AdoptionRefused(
+                    "ADOPTION_HANDOFF_UNREADABLE",
+                    "an existing body-adoption handoff could not be read; it was kept unchanged.",
+                )
+            staging = directory.with_name(directory.name + f".next-{uuid.uuid4().hex[:12]}")
+            staging.mkdir(parents=True, exist_ok=False)
+            backup = None
+            handoff = {
+                "schema": 1, "id": uuid.uuid4().hex[:12], "phase": "authorized", "repo_dir": str(serving.resolve()),
+                "data_dir": str(pathlib.Path(data_dir).resolve()), "branch": branch, "old": old, "cand": cand,
+                "candidate_id": row.get("candidate_id"), "candidate_branch": row.get("branch"),
+                "candidate_path": str(candidate), "task_id": task_id, "reason": str(reason or ""),
+                "created_tag": str((row.get("reviewed_release_tags") or {}).get(cand) or ""),
+                "switch": rows, "deps_command": _dependency_command(serving, rows), "authorized_at": utc_now_iso(),
+                "unreviewed_commits": unreviewed, "attempts": 0, "events": [],
+                "tests": qualification, "official_relation": relation,
+            }
+            # The helper is captured from the body that is running, never from the candidate.
+            shutil.copyfile(pathlib.Path(body_switch.__file__), staging / "switch.py")
+            from ouroboros import installation_stop
+            shutil.copyfile(pathlib.Path(installation_stop.__file__), staging / "installation_stop.py")
+            _git(serving, "update-ref", f"{PIN_PREFIX}{handoff['id']}", cand)
+            body_switch.record(str(staging), handoff, "authorized", f"restart reason: {reason}")
+            if directory.exists():
+                backup = directory.with_name(directory.name + f".previous-{uuid.uuid4().hex[:12]}")
+                os.replace(directory, backup)
+            try:
+                os.replace(staging, directory)
+            except Exception:
+                if backup is not None and backup.exists() and not directory.exists():
+                    os.replace(backup, directory)
+                raise
+            if backup is not None:
+                _archive(data_dir, current, f"replaced:{current.get('phase')}",
+                         helper_path=backup, remove_pointer=False)
+            _log(data_dir, "body_adoption_authorized", handoff, branch=branch, paths=len(rows))
+            return handoff
+    except AdoptionRefused:
+        with contextlib.suppress(Exception):
+            if 'staging' in locals() and staging.exists():
+                shutil.rmtree(staging)
+        with contextlib.suppress(Exception):
+            if 'backup' in locals() and backup is not None and backup.exists() and not directory.exists():
+                os.replace(backup, directory)
+        with contextlib.suppress(Exception):
+            if 'handoff' in locals() and handoff.get("id"):
+                _git(serving, "update-ref", "-d", f"{PIN_PREFIX}{handoff['id']}", check=False)
+        raise
+    except (OSError, RuntimeError) as exc:
+        with contextlib.suppress(Exception):
+            if 'staging' in locals() and staging.exists():
+                shutil.rmtree(staging)
+        with contextlib.suppress(Exception):
+            if 'backup' in locals() and backup is not None and backup.exists() and not directory.exists():
+                os.replace(backup, directory)
+        with contextlib.suppress(Exception):
+            if 'handoff' in locals() and handoff.get("id"):
+                _git(serving, "update-ref", "-d", f"{PIN_PREFIX}{handoff['id']}", check=False)
+        raise AdoptionRefused(
+            "ADOPTION_TRANSITION_BUSY",
+            f"another Git/bootstrap transition owns the checkout; adoption was not written: {exc}",
+        ) from exc
 
 
 def authorized_base(data_dir: Any, candidate_sha: str, reason: str = "") -> str:
@@ -312,17 +393,22 @@ def authorize_for_task(data_dir: Any, task_id: str, commit_sha: str, reason: str
     return False
 
 
-def _archive(data_dir: Any, handoff: Dict[str, Any], outcome: str) -> None:
+def _archive(data_dir: Any, handoff: Dict[str, Any], outcome: str, *,
+             helper_path: Optional[pathlib.Path] = None, remove_pointer: bool = True) -> bool:
     """Retire the helper directory: pointer and pin removed, the record kept under ``logs/``."""
-    directory = helper_dir(data_dir)
+    directory = helper_path or helper_dir(data_dir)
     repo = pathlib.Path(str(handoff.get("repo_dir") or "")) if handoff else None
     pointer_gone = True
     if repo is not None and repo.is_dir():
-        try:
-            pathlib.Path(body_switch.pointer_path(str(repo))).unlink(missing_ok=True)
-        except Exception:
-            pointer_gone = False
-            log.warning("body adoption pointer could not be removed", exc_info=True)
+        if remove_pointer:
+            try:
+                pathlib.Path(body_switch.pointer_path(str(repo))).unlink(missing_ok=True)
+            except Exception:
+                pointer_gone = False
+                log.warning("body adoption pointer could not be removed", exc_info=True)
+        # Ref retirement is independent from pointer retirement: replacement
+        # swaps the helper directory while the new pointer already targets the
+        # same stable path, but the old candidate pin must still be deleted.
         if handoff.get("id"):
             _git(repo, "update-ref", "-d", f"{PIN_PREFIX}{handoff['id']}", check=False)
     if handoff:
@@ -333,8 +419,13 @@ def _archive(data_dir: Any, handoff: Dict[str, Any], outcome: str) -> None:
         # The hook still finds the pointer: it must read a CLOSED record, never a missing helper
         # (which stops every boot).
         body_switch.record(str(directory), handoff, "closed", outcome)
-        return
-    shutil.rmtree(directory, ignore_errors=True)
+        return False
+    try:
+        shutil.rmtree(directory)
+    except OSError:
+        log.warning("body adoption helper could not be retired", exc_info=True)
+        return False
+    return True
 
 
 def abandon(data_dir: Any, reason: str, *, task_id: str = "", candidate_id: str = "") -> None:
@@ -390,37 +481,88 @@ def arm(data_dir: Any, *, worker_exits: Any, live_children: Any, owned_stop: Any
     Never raises and never waits. Returns the resulting phase ("" when no handoff).
     """
     try:
-        handoff = read(data_dir)
-        if handoff.get("phase") != "authorized" or not handoff.get("restart_bound"):
-            return str(handoff.get("phase") or "")
-        stop = owned_stop if isinstance(owned_stop, dict) else {}
-        census = worker_exits if isinstance(worker_exits, dict) else None
-        blockers = [name for name, blocked in (
-            ("owner_restart", owner_restart),
-            ("worker_exits_unconfirmed", census is None or bool(census.get("unconfirmed"))),
-            ("child_processes_alive", bool(live_children)),
-            ("owned_work_unconfirmed", stop.get("state") != "completed" or bool(stop.get("unconfirmed"))),
-            ("panic_stop", body_switch.installation_panic(data_dir)),
-        ) if blocked]
-        directory = str(helper_dir(data_dir))
-        if blockers:
-            handoff["restart_bound"] = False
-            body_switch.record(directory, handoff, "authorized", _NOT_ARMED + ", ".join(blockers))
-            _log(data_dir, "body_adoption_not_armed", handoff, blockers=blockers)
-            return "authorized"
-        handoff["readers_evidence"] = {"worker_exits": census, "owned_stop": {
-            key: stop.get(key) for key in ("state", "targets", "confirmed")}}
-        pointer = pathlib.Path(body_switch.pointer_path(str(handoff["repo_dir"])))
-        temp = pointer.with_name(pointer.name + ".tmp")
-        temp.write_text(directory + "\n", encoding="utf-8")
-        os.replace(temp, pointer)
-        body_switch.record(directory, handoff, "armed", "old generation's subprocess readers confirmed stopped")
-        _log(data_dir, "body_adoption_armed", handoff)
-        return "armed"
-    except Exception:
+        # ``arm`` runs on the shutdown path, whose contract is cooperative and
+        # must never wait for another writer.  Taking the same transition lock
+        # as detached-HEAD repair/update/evolution, with a zero wait, makes the
+        # ownership decision and pointer publication one serialized choice.
+        from supervisor.git_ops import bootstrap_transition_lock
+
+        with bootstrap_transition_lock(timeout_sec=0.0, data_dir=data_dir):
+            return _arm_locked(
+                data_dir, worker_exits=worker_exits, live_children=live_children,
+                owned_stop=owned_stop, owner_restart=owner_restart,
+            )
+    except Exception as exc:
+        from supervisor.git_ops import BootstrapTransitionBusy
+
+        if isinstance(exc, BootstrapTransitionBusy):
+            # The shutdown contract forbids waiting here. Keep the authorized
+            # handoff intact and leave a durable diagnostic; a later explicit
+            # restart/owner recovery can make the adoption choice again.
+            log.warning("Body adoption arm deferred: bootstrap transition is busy; no wait performed")
+            try:
+                handoff = read(data_dir)
+                if handoff.get("phase") == "authorized":
+                    from ouroboros.utils import atomic_write_json
+
+                    atomic_write_json(
+                        _arm_deferred_path(data_dir),
+                        {"adoption_id": handoff.get("id"), "at": utc_now_iso()},
+                        trailing_newline=True,
+                    )
+                    _log(data_dir, "body_adoption_arm_deferred", handoff)
+            except Exception:
+                log.warning("Could not persist deferred body adoption arm", exc_info=True)
+            try:
+                return str(read(data_dir).get("phase") or "")
+            except Exception:
+                return ""
         log.critical("Body adoption could not be armed; the next generation boots the unchanged tree",
                      exc_info=True)
         return ""
+
+
+def _arm_locked(data_dir: Any, *, worker_exits: Any, live_children: Any,
+                owned_stop: Any, owner_restart: bool) -> str:
+    """Publish an adoption pointer while the bootstrap transition lock is held."""
+    handoff = read(data_dir)
+    if handoff.get("phase") != "authorized" or not handoff.get("restart_bound"):
+        return str(handoff.get("phase") or "")
+    stop = owned_stop if isinstance(owned_stop, dict) else {}
+    census = worker_exits if isinstance(worker_exits, dict) else None
+    blockers = [name for name, blocked in (
+        ("owner_restart", owner_restart),
+        ("worker_exits_unconfirmed", census is None or bool(census.get("unconfirmed"))),
+        ("child_processes_alive", bool(live_children)),
+        ("owned_work_unconfirmed", stop.get("state") != "completed" or bool(stop.get("unconfirmed"))),
+        ("panic_stop", body_switch.installation_panic(data_dir)),
+        ("managed_update_active", _managed_update_active(data_dir)),
+    ) if blocked]
+    directory = str(helper_dir(data_dir))
+    if blockers:
+        handoff["restart_bound"] = False
+        body_switch.record(directory, handoff, "authorized", _NOT_ARMED + ", ".join(blockers))
+        _log(data_dir, "body_adoption_not_armed", handoff, blockers=blockers)
+        return "authorized"
+    handoff["readers_evidence"] = {"worker_exits": census, "owned_stop": {
+        key: stop.get(key) for key in ("state", "targets", "confirmed")}}
+    pointer = pathlib.Path(body_switch.pointer_path(str(handoff["repo_dir"])))
+    temp = pointer.with_name(pointer.name + ".tmp")
+    temp.write_text(directory + "\n", encoding="utf-8")
+    os.replace(temp, pointer)
+    body_switch.record(directory, handoff, "armed", "old generation's subprocess readers confirmed stopped")
+    _log(data_dir, "body_adoption_armed", handoff)
+    return "armed"
+
+
+def _managed_update_active(data_dir: Any) -> bool:
+    """Read update ownership without waiting; unknown ownership blocks arming."""
+    try:
+        from supervisor.update_merge import active_update_tx, managed_update_lock_held
+
+        return bool(active_update_tx() or managed_update_lock_held(pathlib.Path(data_dir)))
+    except Exception:
+        return True
 
 
 def bound_candidate_file(data_dir: Any, rel_path: str) -> Optional[bytes]:
@@ -435,9 +577,15 @@ def bound_candidate_file(data_dir: Any, rel_path: str) -> Optional[bytes]:
         return None
     if not any(row.get("path") == rel_path for row in handoff.get("switch") or []):
         return None
-    shown = subprocess.run(["git", "show", f"{handoff['cand']}:{rel_path}"], cwd=str(handoff["repo_dir"]),
-                           capture_output=True)
-    return shown.stdout if shown.returncode == 0 else None
+    from supervisor.git_ops import _run_git_process_bounded, host_git_env
+    from ouroboros.update_channels import get_rescue_git_timeout_sec
+
+    command = ["git", "show", f"{handoff['cand']}:{rel_path}"]
+    returncode, stdout, _stderr = _run_git_process_bounded(
+        command, timeout=get_rescue_git_timeout_sec(), cwd=pathlib.Path(str(handoff["repo_dir"])),
+        env=host_git_env(), text=False,
+    )
+    return stdout if returncode == 0 else None
 
 
 def holds_checkout(data_dir: Any, repo_dir: Any) -> bool:
@@ -509,6 +657,19 @@ def finalize_on_boot(data_dir: Any, repo_dir: Any, *, supervisor_ready: bool,
     if not handoff or phase in ("armed", "switching", "stuck"):
         return {}
     cand = str(handoff.get("cand") or "")[:12]
+    deferred = {}
+    try:
+        from ouroboros.utils import read_json_dict
+
+        deferred = read_json_dict(_arm_deferred_path(data_dir)) or {}
+    except Exception:
+        deferred = {}
+    if phase == "authorized" and deferred.get("adoption_id") == handoff.get("id"):
+        return _waiting(
+            data_dir, handoff,
+            f"Adoption of {cand} was not armed because another transition was active; "
+            "the handoff is retained for an explicit retry.",
+        )
     if phase == "authorized":  # found at boot: the generation that authorized it is gone
         # Only the exit tail's blockers explain it; the other events quote the caller's reason or mark the binding.
         last = str((handoff.get("events") or [{}])[-1].get("detail") or "")

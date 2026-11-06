@@ -1461,10 +1461,17 @@ def custody_trash_entries(canonical_root: Any) -> List[Tuple[str, List[int]]]:
 def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
     """Delete the drives settlements moved aside: each was fully custodied before its move, and
     nothing serves or references it, so no age or liveness applies. The maintenance child runs this,
-    off the serving process. Returns the count removed, each entry that survived its removal
+    off the serving process. Returns the count removed, stuck and held entries that survived
     (``name -> identity``; the child retries it at its next run, a changed identity makes the job due)
-    and the session scratch its producer retained, left in place (``release_session_scratch``)."""
-    report: Dict[str, Any] = {"removed": 0, "stuck": {}, "retained": []}
+    and ``holds``. An entry goes only once its scratch is released and each record a producer's retention
+    marker keeps (#2708) has moved into its own ``<id>+scratch-<token>/`` entry, held, re-read every run,
+    as ``producer_retained`` (the marker's words, since it was written) until the marker is gone
+    (``session_scratch.release_trash_entry``). A failed release or handoff, or a removal it survived, keeps
+    the entry whole, its records included, as the hold ``removal_failed`` (its name and the failure)."""
+    from ouroboros.session_scratch import aggregate_holds, release_trash_entry
+
+    report: Dict[str, Any] = {"removed": 0, "stuck": {}, "holds": []}
+    held: List[Any] = []
     root = pathlib.Path(canonical_root) / _TRASH_DIR
     try:
         entries = [] if root.is_symlink() else list(root.iterdir())
@@ -1473,21 +1480,29 @@ def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], boo
     for entry in entries:
         if stop is not None and stop():
             break
-        with contextlib.suppress(OSError):
-            if entry.is_dir() and not entry.is_symlink():
-                from ouroboros.workspace_preflight import release_session_scratch
-
-                report["retained"] += release_session_scratch(entry, data_root=canonical_root)
-                if (entry / "data").is_dir() and not (entry / "data").is_symlink():
-                    report["retained"] += release_session_scratch(entry / "data", data_root=canonical_root)
-            _remove_entry(entry)
+        holding, failed = False, ""
+        try:  # the scratch release and every retained record's handoff are the conditions of the removal
+            holding, retained = release_trash_entry(canonical_root, entry)
+        except Exception as exc:  # whatever failed, the entry and every record still in it wait
+            failed = f"{entry.name}: {type(exc).__name__}"
+            held += [(row["class"], row["example"], row["since"]) for row in getattr(exc, "retained", ())]
+            log.warning("Custody trash entry %s kept: its scratch release did not complete", entry.name, exc_info=True)
+        else:
+            held += [(row["class"], row["example"], row["since"]) for row in retained]
+            if not holding:
+                with contextlib.suppress(OSError):
+                    _remove_entry(entry)
         try:
             stat = entry.lstat()
-            report["stuck"][entry.name] = [stat.st_ino, stat.st_mtime_ns]
+            report.setdefault("held" if holding else "stuck", {})[entry.name] = [stat.st_ino, stat.st_mtime_ns]
+            if not holding:
+                held.append(("removal_failed", failed or f"{entry.name}: survived its removal", stat.st_mtime))
         except FileNotFoundError:
             report["removed"] += 1
         except OSError as exc:
             report["stuck"][entry.name] = [type(exc).__name__]
+            held.append(("removal_failed", f"{entry.name}: {type(exc).__name__}", None))
+    report["holds"] = aggregate_holds(held)
     if report["removed"]:  # the bytecode the removed sources left is owed to retirement now
         from ouroboros.maintenance_retirement import artifact_changed
 

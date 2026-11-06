@@ -1124,7 +1124,7 @@
      "because": [
       {
        "code": "queued",
-       "text": "Waiting for a free worker"
+       "text": ""
       }
      ],
      "tails": [],
@@ -1149,7 +1149,7 @@
         "because": [
          {
           "code": "queued",
-          "text": "Waiting for a free worker"
+          "text": ""
          }
         ],
         "tails": []
@@ -3640,7 +3640,7 @@
    "": "Waiting for Project verification"
   },
   "queued": {
-   "": "Waiting for a free worker"
+   "": ""
   },
   "review_work_finishing": {
    "": "Review work finishing"
