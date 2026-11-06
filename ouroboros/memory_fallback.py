@@ -721,12 +721,14 @@ def _parse(text: str, *, part: bool = False) -> Optional[Dict[str, Any]]:
 def _publish(root: pathlib.Path, store: ChronicleStore, unit: FallbackUnit, draft: WriterInput,
              answer: Dict[str, Any], usage: Dict[str, Any], binding: Dict[str, Any]) -> PublishResult:
     from ouroboros.knowledge import observed_route_stamp
-    from ouroboros.tools.chronicle import _quote_resolver
+    from ouroboros.tools.chronicle import _quote_resolver, page_room_label
 
     author = {"kind": "helper", "writer": "fallback_part" if unit.kind == "part" else "fallback_page",
               "route": observed_route_stamp(usage), "attribution": "helper draft, not lived"}
     metadata = {"unit": unit.describe(), "input_sha256": draft.input_sha256, "light_binding": binding,
                 "addressed_rows": list(draft.addressed_rows)}
+    if unit.kind != "part":
+        metadata["room_label"] = page_room_label(root, unit.room_id, unit.segment.rows if unit.segment else ())
     resolver = _quote_resolver(root, row_lineage(root), draft.positions)
     if unit.kind == "part":
         return store.publish_part(room_id=unit.room_id, text=answer["text"], member_ids=list(draft.member_ids),

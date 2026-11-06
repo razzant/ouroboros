@@ -74,8 +74,9 @@ _REPLY_FIELDS = ("address", "chat_id", "task_id", "role", "target_home", "unreso
 # place facts (``place_activity`` reads the event, place and conversation keys) and which name its provider, account,
 # conversation and thread (``dialogue_provenance``, ``RoomLabelResolver.label``), so a row that came over a transport
 # still says so (``_with_transport``, the view's room label); of a nested value, only the keys named here, each whole.
-# The provider's thread copy (``conversation``), the delivered message's details and the event's identity stay in
-# the dialogue row, read by address: on the owner's install they were four fifths of the stored tail.
+# The provider's thread copy (``conversation.thread_history``, its lookups, topic and purpose), the delivered
+# message's details and the event's identity stay in the dialogue row, read by address: on the owner's install they
+# were four fifths of the stored tail. Of ``conversation`` only its name and audience scalars stay (about 70 bytes).
 _TRANSPORT_NESTED = {
     "actor": ("display_name", "username", "platform_actor_id", "id",  # who spoke (``dialogue_speaker``)
               "kind",  # who made a wordless reaction (``row_author``)
@@ -84,11 +85,15 @@ _TRANSPORT_NESTED = {
     "delivery": ("state",  # ``dialogue_provenance``, ``reaction_note``, the view's typed fact, ``place_activity``
                  "presence_provenance"),  # an older receipt's place facts (``place_row_facts``)
     "message": ("reaction",),  # the typed reaction (``reaction_fact``): its words, or a row that is that act alone
+    "origin": ("kind", "task_id"),  # the work that sent my delivered message (``memory_view``'s own-row head)
+    "conversation": ("title", "name", "full_name", "username", "topic_id",  # its own name (``RoomLabelResolver``)
+                     "chat_type", "channel_type", "is_im", "is_mpim", "is_private", "visibility",  # who reads it
+                     "workspace_name"),
 }
 # Bumped when ``row_meta``'s facts change (5: a transport keeps only what its readers read; 6: and the author
-# fact's): a stored prefix of another version is another source, read live until the maintenance job
-# ``memory_tail`` refills it.
-_META_VERSION = 6
+# fact's; 7: the sending work, the conversation's name and audience): a stored
+# prefix of another version is another source, read live until the maintenance job ``memory_tail`` refills it.
+_META_VERSION = 7
 
 Entry = Tuple[Dict[str, Any], Dict[str, Any], int]
 

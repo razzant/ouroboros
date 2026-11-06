@@ -104,7 +104,8 @@ def _period(span: Any, note: str = "") -> str:
 
 
 def room_labeler(root: pathlib.Path) -> Callable[..., str]:
-    """``label(room, sample=None)``: one registry snapshot per capture (``RoomLabelResolver``)."""
+    """``label(room, sample=None)``: one registry snapshot per capture (``RoomLabelResolver``); ``label.warm(rooms)``
+    reads at once what names the rooms a reader is about to label."""
     resolver = RoomLabelResolver(root)
 
     def label(room: Any, sample: Optional[Mapping[str, Any]] = None) -> str:
@@ -117,6 +118,7 @@ def room_labeler(root: pathlib.Path) -> Callable[..., str]:
         facts = {key: value for key, value in _mapping(sample).items() if key in ("transport", "presence_provenance")}
         return resolver.label({"chat_id": chat, **facts})
 
+    label.warm = resolver.warm  # type: ignore[attr-defined]
     return label
 
 
@@ -394,6 +396,8 @@ def _story_pages(store: ChronicleStore, label: Callable[..., str], units: Mappin
     fixes = fix_map(store)
     records = [record for record in store.room_records(room_id, kinds=("page", "part"))
                if not record.get("folded_into")]
+    getattr(label, "warm", lambda _rooms: None)({str(record["room_id"]) for record in records
+                                                if not _mapping(record.get("metadata")).get("room_label")})
     from ouroboros.memory_sealing import capture_terminal_rows, terminal_links
     terminal_cache = terminal(records) if terminal else capture_terminal_rows(store.data_root, records)
     keyed = [((entry.pop("first"), entry["sequence"]), entry) for entry in account_entries(
@@ -422,11 +426,13 @@ class _StorySources:
 
     def __init__(self, root: pathlib.Path, label: Callable[..., str]) -> None:
         # ``route``: None until asked, then its answer in a 1-tuple (an answer may itself be None)
-        self.root, self._label, self.labels, self.starts, self.rows, self.route = root, label, {}, {}, {}, None
+        self.root, self.labels, self.starts, self.rows, self.route = root, {}, {}, {}, None
 
-    def label(self, room: Any) -> str:
-        self.labels[room] = self._label(room)
-        return self.labels[room]
+        def named(room: Any) -> str:
+            self.labels[room] = label(room)
+            return self.labels[room]
+        named.warm = getattr(label, "warm", lambda _rooms: None)  # type: ignore[attr-defined]
+        self.label = named
 
     def terminal(self, records: List[Dict[str, Any]]) -> Dict[Any, Any]:
         from ouroboros.memory_sealing import terminal_starts, writer_terminal_rows
@@ -446,6 +452,7 @@ class _StorySources:
         from ouroboros.memory_sealing import writer_terminal_rows
         from ouroboros.model_slots import get_light_model
 
+        getattr(label, "warm", lambda _rooms: None)(self.labels)
         return (all(label(room) == text for room, text in self.labels.items())
                 and writer_terminal_rows(self.root, self.starts) == self.rows
                 and (self.route is None or self.route == (get_light_model(),)))
@@ -809,9 +816,10 @@ def _live_rooms(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, label
         projects = list_projects(root)
     running = running_by_room(root, by_room, notes, memory_inventory.membership_facts(root).bindings, projects)
     shown = {entry[0]["row_sha256"] for entry in by_room.get(spec.room_id, [])} if spec.room_lanes else set()
-    for room in sorted((set(by_room) | set(notes) | {room for room, kinds in (gaps or {}).items() if kinds}
-                        | {room for room, tasks in running.items() if tasks})
-                       - {spec.room_id}):
+    others = sorted((set(by_room) | set(notes) | {room for room, kinds in (gaps or {}).items() if kinds}
+                     | {room for room, tasks in running.items() if tasks}) - {spec.room_id})
+    getattr(label, "warm", lambda _rooms: None)(others)  # one read names every room no row in hand names
+    for room in others:
         entries = by_room.get(room, [])
         words = []
         if spec.live_rooms == "lines_with_words":

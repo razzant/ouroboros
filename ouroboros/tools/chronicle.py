@@ -303,6 +303,16 @@ def page_covers(root: Any, room_id: Any, *, from_addr: Any = None, to_addr: Any 
     return {"covers": covers, "coverage_facts": facts, "rows": [(address, row) for address, row, _p in rows]}
 
 
+def page_room_label(root: Any, room_id: Any, rows: Iterable[Any] = ()) -> str:
+    """The room's label as it reads now (``memory_view.room_labeler``), recorded on a page at publication
+    (``metadata.room_label``): the story names the room from it even when no row of the room is left open."""
+    from ouroboros.memory_view import room_labeler
+
+    sample = next((row for _address, row, *_pos in reversed(list(rows))
+                   if isinstance(row, dict) and (row.get("transport") or row.get("presence_provenance"))), None)
+    return room_labeler(Path(root))(room_id, sample)
+
+
 def host_stamp(root: Any, task_ids: Iterable[Any], *, rows: Iterable[Any] = ()) -> Dict[str, Any]:
     """The host's facts about each covered task, so a page cannot silently call a failure done.
 
@@ -368,7 +378,8 @@ def _write_page(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, A
     resolver = _quote_resolver(root, lineage, {address["row_sha256"]: pos for address, _r, pos in rows})
     result = store.publish_page(room_id=room, text=a["text"], covers=covers, author=author,
                                 quotes=a["quotes"] or (), host_stamp=stamp, metadata={"coverage_facts": facts,
-                                "terminal_after_pos": max((pos for _a, _r, pos in chat_chain.iter_room_rows(root, room)), default=-1)},
+                                "terminal_after_pos": max((pos for _a, _r, pos in chat_chain.iter_room_rows(root, room)), default=-1),
+                                "room_label": page_room_label(root, room, rows)},
                                 quote_resolver=resolver, expected_sequence=a["expected_sequence"])
     if not result.ok:
         return _published(ctx, result)

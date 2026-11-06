@@ -89,7 +89,7 @@ def test_a_stored_row_says_the_same_author_as_its_whole_row(tmp_path, place):
     for row in rows:
         assert row_author(row_meta(row), owner_accounts=accounts) == row_author(row, owner_accounts=accounts)
     labels = [row_author(row_meta(row), owner_accounts=accounts)["label"] for row in rows]
-    assert labels[0].startswith("a bot: ") and labels[1].startswith("the account I send as: ")
+    assert labels[0].startswith("a bot: ") and labels[1].startswith("Ouroboros [")  # my own account: my event
     assert not labels[2].startswith("my human") and labels[3].startswith("my human: ")
 
 
@@ -123,8 +123,11 @@ def test_row_author_names_my_human_only_from_the_current_confirmation(tmp_path, 
     assert sasha["label"].startswith("Sasha [") and "owner_confirmed" not in sasha
     shared = row_author(_place_row(place.place_id, sends_as="anton"), owner_accounts=accounts)
     assert shared["label"].startswith("my human: Anton [") and shared["owner_confirmed"] is True
-    bot = row_author(_place_row(place.place_id, "ouro-bot", sends_as="ouro-bot", sends_kind="bot"), owner_accounts=accounts)
-    assert bot["label"].startswith("the account I send as: Ouro-Bot [") and "owner_confirmed" not in bot
+    own = _place_row(place.place_id, "ouro-bot", sends_as="ouro-bot", sends_kind="bot")
+    bot = row_author(own, owner_accounts=accounts)  # the account I send as, unconfirmed: my own act, never a person
+    assert bot["kind"] == "ouroboros" and bot["via"] == "own_account" and row_class(own, owner_accounts=accounts)["lane"] == 1
+    unknown = row_author(own)  # without the owner snapshot a shared account cannot be told apart: it stays its fact
+    assert unknown["kind"] == "human" and unknown["label"].startswith("the account I send as: Ouro-Bot [")
     places.edit_place(tmp_path, place.place_id, "revoke_owner_account", author="owner",
                       platform_actor_id="anton", account_id="qa")
     withdrawn = row_author(owner, owner_accounts=place_owner_accounts(tmp_path))

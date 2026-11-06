@@ -63,7 +63,7 @@ def test_people_words_reach_the_wake_whole_with_author_and_address(tmp_path, pla
                                   "Echoed: " + LONG, "Bot report: " + LONG]):
         assert line.endswith(text) and addresses[text] in line, "whole words under their exact address"
     assert "my human: Anton" in lines[2] and lines[2].startswith("- owner message in ")
-    assert "the account I send as: Ouro-Bot" in lines[3] and lines[3].startswith("- message in a place in ")
+    assert "; Ouroboros [" in lines[3] and lines[3].startswith("- message in a place in ")  # my own account: my act
     assert "Sasha [" in lines[1] and "my human" not in lines[1] and "a bot" not in lines[1]
     assert "a bot: Ci-Bot" in lines[4], "a connector-marked bot comes whole with its author fact (owner Q2=A)"
     assert "…[" not in observation.full_text() and TAIL in observation.full_text()

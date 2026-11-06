@@ -764,7 +764,9 @@ def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch:
     empty at activation, or the chronicle is not active) ``pos`` is not needed.
     ``owner_accounts`` (``places.place_owner_accounts``, one read per pass) lets a
     place row from an account its place confirms now read as my human's
-    (``owner_confirmed``), a present-tense label; without it no place row does.
+    (``owner_confirmed``), a present-tense label; without it no place row does. With it,
+    a place row from the account I send as that my human did not confirm is mine
+    (``ouroboros``, ``via="own_account"``): an event of my own act, never a person.
     """
     if _mapping(row.get("host_fact")).get("kind") == "call_open":
         return {"kind": "host", "label": "host", "type": "call_open"}
@@ -779,6 +781,8 @@ def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch:
             return {"kind": "place_fact", "label": dialogue_author(row),
                     "actor_kind": _text(_mapping(_mapping(row.get("transport")).get("actor")).get("kind"))}
         fact = _place_speaker(row, owner_accounts) if row_provenance(row) == "place" else ""
+        if fact == "the account I send as" and owner_accounts is not None:  # my own account's event is my word;
+            return _ouroboros_author(row, via="own_account")  # a shared one my human confirmed stays theirs (above)
         label = dialogue_author(row)
         return {"kind": "human", "label": f"{fact}: {label}" if fact else label,
                 **({"owner_confirmed": True} if fact == "my human" else {})}
@@ -990,14 +994,25 @@ class RoomLabelResolver:
 
     ``chat_id`` is the room authority.  Lineage fields such as ``project_id``
     are deliberately ignored here: a row can retain its original room while
-    its work is later bound to a Project.  The snapshot is read once by the
-    caller for a render/consolidation window, so formatting a line never scans
-    the registry or writes resolver state.
+    its work is later bound to a Project.  The snapshots (projects and places)
+    are read once by the caller for a render/consolidation window, so formatting
+    a line never scans a registry; a place room's label is resolved once per
+    resolver from its own facts (``warm`` reads at once the rooms none in hand names).
     """
 
-    def __init__(self, drive_root: Any = None, *, projects: Any = None) -> None:
+    def __init__(self, drive_root: Any = None, *, projects: Any = None, places: Any = None) -> None:
         self._by_chat: dict[int, str] = {}
         self._ambiguous: set[int] = set()
+        # A place room's label once named from its own facts, and each room's latest inbound transport facts read.
+        self._root, self._named, self._inbound = drive_root, {}, {}
+        if places is None and drive_root is not None:
+            try:
+                from ouroboros.places import place_rows  # D15->D20 is lazy-only
+
+                places = place_rows(drive_root)
+            except Exception:  # an unreadable registry names no place: rooms keep their transport names
+                places = {}
+        self._places = list((places or {}).values())
         if projects is None and drive_root is not None:
             try:
                 from ouroboros.projects_registry import list_reserved_projects
@@ -1069,23 +1084,93 @@ class RoomLabelResolver:
             if name:
                 return f"Project {name} [chat_id={chat_id}]"
             return f"Project name unavailable [chat_id={chat_id}]"
-        # A place room is named only by transport facts that re-derive this exact chat id.
-        # Inbound, initiated and receipt rows carry ``transport``; a turn's summary row carries the
-        # same facts as ``presence_provenance``. One room, one label, whichever row opens a block.
-        from ouroboros.presence_bindings import conversation_key
-        from ouroboros.presence_runner import _stable_numeric_id
-
+        # A place room is named only by transport facts that re-derive this exact chat id. Inbound, initiated
+        # and receipt rows carry ``transport``; a turn's summary row carries the same facts as
+        # ``presence_provenance``; a row without its conversation's own scalars (tail metadata v7) leaves them to
+        # the room's latest inbound row (``warm``). One room, one label, whichever row opens a block.
         facts = next((entry[key] for key in ("transport", "presence_provenance")
                       if isinstance(entry.get(key), Mapping)), {})
-        provider, account, conversation, thread = (
-            str(facts.get(key) or "") for key in ("provider", "account_id", "conversation_id", "thread_id"))
-        if not (provider and conversation) or _stable_numeric_id(
-                "presence-conversation", conversation_key(provider, account, conversation, thread)) != chat_id:
+        if facts and not _derives(facts, chat_id):
             return f"Unknown room [chat_id={chat_id}]"
+        if chat_id not in self._named:
+            if not isinstance(facts.get("conversation"), Mapping):
+                self.warm([chat_id])
+                own = self._inbound.get(chat_id) or {}
+                facts = own if _derives(own, chat_id) else facts
+            if not facts:
+                return f"Unknown room [chat_id={chat_id}]"
+            place_id = _text(_mapping(entry.get("presence_provenance")).get("place_id") or facts.get("place_id"))
+            self._named[chat_id] = self._place_label(facts, place_id, chat_id)
+        return self._named[chat_id]
 
-        clean = lambda value: " ".join(value.replace("[", " ").replace("]", " ").split())[:64]  # noqa: E731
-        topic = f" topic {clean(thread)}" if thread not in {"", "0"} else ""
-        return f"Place {clean(provider)} {clean(conversation)}{topic} [chat_id={chat_id}]"
+    def warm(self, chat_ids: Iterable[Any]) -> None:
+        """Read at once the latest inbound row of each room not yet named (``dialogue_store.latest_inbound``): what
+        names a room whose rows in hand carry no conversation scalars, or that has no open row at all."""
+        wanted = set()
+        for value in chat_ids:
+            chat_id, _unresolved = self._chat_id({"chat_id": value})
+            if chat_id is not None and chat_id not in self._named and chat_id not in self._inbound and chat_id not in (
+                    HIDDEN_CHAT_ID, WEB_UI_CHAT_ID) and chat_id not in self.project_chat_ids:
+                wanted.add(chat_id)
+        if not wanted or self._root is None:
+            return
+        try:
+            from ouroboros import dialogue_store
+
+            found = dialogue_store.latest_inbound(self._root, wanted)
+        except Exception:  # an unreadable dialogue store leaves a room unnamed, never guessed
+            found = {}
+        for chat_id in wanted:
+            row = found.get(chat_id)
+            self._inbound[chat_id] = dict(_mapping(row.row.get("transport"))) if row is not None else {}
+
+    def _place_label(self, facts: Mapping[str, Any], place_id: str, chat_id: int) -> str:
+        """``<my human's label of the place>[ · <the conversation's own name>][ · <audience>][ · thread <id>]``: the
+        registry names a place, the room's own scalars its conversation under an account-wide place and who reads
+        it; a place no record names reads by its provider and conversation."""
+        provider, account, conversation, thread = (
+            _text(facts.get(key)) for key in ("provider", "account_id", "conversation_id", "thread_id"))
+        scalars = _mapping(facts.get("conversation"))
+        clean = lambda value: " ".join(str(value).replace("[", " ").replace("]", " ").split())  # noqa: E731
+        name = next((clean(scalars[key]) for key in ("title", "name", "full_name", "username") if _text(scalars.get(key))), "")
+        place = next((p for p in self._places if p.place_id == place_id), None) or next(
+            (p for p in sorted(self._places, key=lambda p: not p.conversation_id) if p.provider == provider
+             and p.conversation_id in ("", conversation) and p.account_id in ("", account)), None)
+        label = " ".join(place.label.split()) if place is not None else ""
+        if place is not None and label == place.provider:  # ``connect_place``'s default: my human named nothing
+            label = ""
+        own = name or clean(conversation)[:64]
+        if not label:  # no record of mine names the place
+            label = f"Place {clean(provider)[:64]} {own}"
+        elif not place.conversation_id:  # an account-wide place: the conversation names itself under it
+            label = f"{label} · {own}"
+        parts = [label, _audience(scalars), f"thread {clean(thread)[:64]}" if thread not in {"", "0"} else ""]
+        return " · ".join(part for part in parts if part) + f" [chat_id={chat_id}]"
+
+
+def _derives(facts: Mapping[str, Any], chat_id: int) -> bool:
+    """Whether a row's transport facts name this exact place room (``presence_runner._stable_numeric_id``)."""
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_runner import _stable_numeric_id
+
+    provider, account, conversation, thread = (
+        _text(facts.get(key)) for key in ("provider", "account_id", "conversation_id", "thread_id"))
+    return bool(provider and conversation) and _stable_numeric_id(
+        "presence-conversation", conversation_key(provider, account, conversation, thread)) == chat_id
+
+
+def _audience(scalars: Mapping[str, Any]) -> str:
+    """Who reads a conversation, from its own transport scalars: a DM, a group, a channel, public or private."""
+    kind = _text(scalars.get("chat_type") or scalars.get("channel_type")).lower()
+    if scalars.get("is_im") is True or kind in ("private", "im"):
+        return "DM"
+    if scalars.get("is_mpim") is True or kind == "mpim":
+        return "group DM"
+    if scalars.get("is_private") is True:
+        return "private channel"
+    if kind in ("group", "supergroup", "channel"):
+        return kind.replace("supergroup", "group")
+    return _text(scalars.get("visibility")).lower()  # a repository's: public or private
 
 
 

@@ -191,13 +191,15 @@ def test_presence_rows_of_one_room_share_one_label_from_transport_facts():
     initiated = {"chat_id": chat_id, "direction": "in", "transport": dict(base)}
     summary = {"chat_id": chat_id, "direction": "system", "type": "task_summary",
                "presence_provenance": {**base, "binding_id": "1" * 32}}  # the turn's summary row carries no transport
-    expected = f"Place telegram -100 [chat_id={chat_id}]"
-    # One room, four row types, one label: the correspondent-controlled title never enters it.
+    expected = f"Place telegram Aika admin [chat_id={chat_id}]"
+    # One room, four row types, one label: the room's own name (its brackets cleaned) whichever row asks first.
     assert {resolver.label(inbound), resolver.label(receipt), resolver.label(initiated), resolver.label(summary)} == {expected}
+    later = RoomLabelResolver(projects=[])
+    assert [later.label(summary), later.label(inbound)] == [f"Place telegram -100 [chat_id={chat_id}]"] * 2
     assert resolver.label({**summary, "presence_provenance": {**base, "conversation_id": "-101"}}) == f"Unknown room [chat_id={chat_id}]"
     topic_chat = _stable_numeric_id("presence-conversation", conversation_key("telegram", "900", "-100", "42"))
     assert resolver.label({"chat_id": topic_chat, "transport": {**base, "thread_id": "42"}}) == (
-        f"Place telegram -100 topic 42 [chat_id={topic_chat}]"
+        f"Place telegram -100 · thread 42 [chat_id={topic_chat}]"
     )
     # Transport facts that do not re-derive this exact chat id never name the room.
     assert resolver.label({"chat_id": chat_id + 1, "transport": dict(base)}) == f"Unknown room [chat_id={chat_id + 1}]"
@@ -207,6 +209,37 @@ def test_presence_rows_of_one_room_share_one_label_from_transport_facts():
     assert resolver.label({"chat_id": weird_chat, "transport": {**base, "conversation_id": "x]y[z"}}) == (
         f"Place telegram x y z [chat_id={weird_chat}]"
     )
+
+
+def test_a_place_room_reads_by_my_label_of_its_place_its_own_name_and_audience(tmp_path):
+    """The registry names a place; an account-wide place's room names itself from its conversation scalars, with who
+    reads it; a room with no row in hand is named from its latest inbound row, read once for every room asked
+    together; a room no row and no record names stays unknown, never guessed."""
+    from ouroboros import dialogue_store as ds, places
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_runner import presence_chat_id
+
+    exact = places.connect_place(tmp_path, connector="telegram-bot", provider="telegram", account_id="900",
+                                 conversation_id="-100", label="Telegram · Team leads · AIRI")
+    places.connect_place(tmp_path, connector="slack-bridge", provider="slack", account_id="T1", label="Slack")
+    group = presence_chat_id(conversation_key("telegram", "900", "-100", ""))
+    channel = presence_chat_id(conversation_key("slack", "T1", "C7", "1.5"))
+    tg = {"provider": "telegram", "account_id": "900", "conversation_id": "-100", "thread_id": "",
+          "conversation": {"title": "Renamed by a member", "chat_type": "supergroup"}}
+    sl = {"provider": "slack", "account_id": "T1", "conversation_id": "C7", "thread_id": "1.5",
+          "conversation": {"name": "ml-public", "channel_type": "channel", "is_private": False}}
+    resolver = RoomLabelResolver(tmp_path)
+    assert resolver.label({"chat_id": group, "transport": tg, "presence_provenance": {"place_id": exact.place_id}}) == (
+        f"Telegram · Team leads · AIRI · group [chat_id={group}]")  # my label of the place, not a member's title
+    assert resolver.label({"chat_id": channel, "transport": sl}) == (
+        f"Slack · ml-public · channel · thread 1.5 [chat_id={channel}]")
+    ds.append(tmp_path, "chat", {"ts": "2026-11-06T00:00:00+00:00", "chat_id": channel, "direction": "in", "text": "hi",
+                                 "source": "presence:slack",
+                                 "transport": {**sl, "conversation": {**sl["conversation"], "is_im": True}}})
+    fresh = RoomLabelResolver(tmp_path)
+    fresh.warm([channel, group])
+    assert fresh.label({"chat_id": channel}) == f"Slack · ml-public · DM · thread 1.5 [chat_id={channel}]"
+    assert fresh.label({"chat_id": group}) == f"Unknown room [chat_id={group}]"
 
 
 def test_terminal_projection_row_of_a_presence_turn_carries_the_room_facts(tmp_path):

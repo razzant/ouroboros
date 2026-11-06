@@ -799,7 +799,7 @@ def observe_wake(drive_root: Any, *, boundary: Any, since: float, now: float, re
     except Exception as exc:
         registry = []
         gaps.add(f"project names unreadable: {type(exc).__name__}")
-    rooms = RoomLabelResolver(projects=registry)
+    rooms = RoomLabelResolver(root, projects=registry)
     try:
         accounts = place_owner_accounts(root)  # one read: whose place rows are my human's, now
     except PlaceError as exc:

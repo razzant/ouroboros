@@ -405,12 +405,17 @@ def owner_account_matches(owner_accounts: Iterable[OwnerAccount], platform_actor
                                for a in owner_accounts)
 
 
-def place_owner_accounts(drive_root: Any) -> dict[str, tuple[OwnerAccount, ...]]:
-    """Every place's confirmed owner accounts as stored now: one read, never a migration (``load_places``
-    may write). An unreadable document raises ``PlaceError``: unknown, never "no owner"."""
+def place_rows(drive_root: Any) -> dict[str, Place]:
+    """Every place as stored now, by id: one read, never a migration (``load_places`` may write). An
+    unreadable document raises ``PlaceError``: unknown, never "no place"."""
     current = _read(drive_root)
     connections = current.get("connections", {})
-    return {key: _decode(value, connections.get(key)).owner_accounts for key, value in current["places"].items()}
+    return {key: _decode(value, connections.get(key)) for key, value in current["places"].items()}
+
+
+def place_owner_accounts(drive_root: Any) -> dict[str, tuple[OwnerAccount, ...]]:
+    """Every place's confirmed owner accounts as stored now (``place_rows``): unknown, never "no owner"."""
+    return {key: place.owner_accounts for key, place in place_rows(drive_root).items()}
 
 
 def _fields(value: Any, key: str) -> Mapping[str, Any]:
