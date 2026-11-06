@@ -176,17 +176,18 @@ def _stop_interrupted(container, proc) -> None:
     container.terminate_tree(_INTERRUPT_TERM_SEC)
 
 
-def _warm_bytecode(files=(), evidence=None) -> int:
+def _warm_bytecode(files=(), evidence=None) -> None:
     """Warm the run's bytecode prefix once before a battery (ouroboros/test_bytecode.py): compile the checkout into
-    it and collect the tree, or a selection's modules (listed beside the selection's evidence), in as many shards
-    as the run has workers."""
+    it and collect the tree, or a selection's modules (listed beside the selection's evidence), with as many walkers
+    as the run has workers. It decides nothing: a warm that fails or is stopped leaves the passes cold and says so."""
     from ouroboros.test_bytecode import command
 
     files_from = None
     if files:
         files_from = pathlib.Path(evidence) / "warm-files.txt"
         files_from.write_text("\n".join(files) + "\n", encoding="utf-8")
-    return _run("warm", command(sys.executable, REPO, workers=_workers(), files_from=files_from), REPO)
+    if code := _run("warm", command(sys.executable, REPO, workers=_workers(), files_from=files_from), REPO):
+        print(f"=== warm: exit {code} decides nothing; the passes run cold", flush=True)
 
 
 def _node_lane() -> int:
@@ -239,7 +240,7 @@ def _selected(args, evidence) -> int:
     code = _node_lane()
     record["node"] = "success" if code == 0 else "failure"
     if code == 0 or args.keep_going:
-        code = _warm_bytecode(selection.files, root) or code
+        _warm_bytecode(selection.files, root)
     red = code  # with --keep-going a later lane runs on, but never hides an earlier red
     previous = os.environ.get("PYTHONPATH")
     completed = False
@@ -361,7 +362,8 @@ def main(argv: list[str] | None = None) -> int:
     started = time.monotonic()
     print(f"=== full: {sum(1 for _ in (REPO / 'tests').rglob('test_*.py'))} Python modules; "
           "full default suite; complete Node lane", flush=True)
-    code = _node_lane() or _warm_bytecode()
+    if (code := _node_lane()) == 0:
+        _warm_bytecode()
     ran = 0
     for label, command in battery_commands() if code == 0 else []:
         if evidence is not None:
