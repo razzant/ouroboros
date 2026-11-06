@@ -66,7 +66,7 @@ REASON_TEXT = {
     "awaited_helpers_owner": ("1 helper it waits for is paused until you resume it",
                               "{count} helpers it waits for are paused until you resume them"),
     "awaited_helpers_paused": ("1 helper it waits for is paused", "{count} helpers it waits for are paused"),
-    # A preparing direct turn's start step (census ``turn_phase``, supervisor.active_activity.TURN_PHASES).
+    # A turn's start step before its own Main call (census ``turn_phase``, supervisor.active_activity.TURN_PHASES).
     "turn_admitted": "Setting up the turn",
     "turn_started": "Starting the turn",
     "turn_context_building": "Building context",
@@ -190,6 +190,20 @@ def _waits_on(sleep: Any) -> List[str]:
     return [str(task) for task in dict.fromkeys([*(sleep.get("tasks") or ()), *(sleep.get("senders") or ())]) if task]
 
 
+def _start_step(row: Mapping[str, Any]) -> str:
+    """The start step a turn stands at before its own Main call, else ''. An inline executor's row says it by
+    its census phase (``preparing``); a conversation-lane row's phase says only whether a carrier holds it
+    (``conversation_lane.lane_turn_rows``), so a row its carrier holds says it by its frame-fed ``turn_phase``
+    until a call of its own is observed."""
+    step = str(row.get("turn_phase") or "")
+    if step not in _TURN_STEPS:
+        return ""
+    if row.get("phase") == "preparing":
+        return step
+    carried = row.get("phase") == "working" and row.get("carrier") == "worker"
+    return step if carried and not isinstance(row.get("model_activity"), dict) else ""
+
+
 def _call(row: Mapping[str, Any]) -> str:
     """The exact-call word a working member is in (the cards' modelActivityPresentation); a direct turn
     whose own call start precedes its census phase's move says the word that move gives, never more."""
@@ -204,7 +218,7 @@ def _call(row: Mapping[str, Any]) -> str:
         return "preparing"
     if phase == "thinking":
         return "thinking"
-    return "working"
+    return "preparing" if _start_step(row) else "working"
 
 
 def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = None,
@@ -316,8 +330,7 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
         return state
     if phase in {"working", "thinking", "preparing"}:
         state.update(activity="working", call=_call(row), live=True)
-        step = str(row.get("turn_phase") or "")
-        if phase == "preparing" and step in _TURN_STEPS:
+        if step := _start_step(row):
             state["reasons"].append(reason(f"turn_{step}"))
         if raw.get("cancel_pending"):
             state["reasons"].append(reason("stop_requested"))

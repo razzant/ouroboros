@@ -14,7 +14,7 @@ const text = value => String(value ?? '').trim();
 const list = value => (Array.isArray(value) ? value : []).filter(item => item && typeof item === 'object');
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const shortSha = value => (/^[0-9a-f]{12,}$/i.test(text(value)) ? text(value).slice(0, 7) : text(value));
-const SURFACE_LABELS = {
+export const SURFACE_LABELS = {
     commit_gate: 'Code review', change: 'Code review', preflight: 'Early look', result: 'Result review', system: 'System review',
     plan: 'Plan', skill: 'Skill review', review_record: 'Review records', task_acceptance: 'Result review',
 };

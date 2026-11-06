@@ -75,13 +75,17 @@ def presence_turn_event(payload: Any, admission: PresenceAdmission, *,
     authenticated connector's live publication (``places.declared_wake_signals``); a carrier re-admitting the
     Host's event takes them by value, never from its own process's registry.
     """
-    from ouroboros.places import WAKE_FACTS
+    from ouroboros.places import WAKE_FACTS, validate_presence_identity
     from ouroboros.presence_bindings import conversation_key
 
     expected = {"source_event_id", "provider", "account_id", "conversation_id", "thread_id",
                 "conversation_key", "actor", "conversation", "message", "text"}
-    if not isinstance(payload, dict) or set(payload) - {"facts"} != expected:
+    if not isinstance(payload, dict) or set(payload) - {"facts", "identity"} != expected:
         raise PresenceTurnError("presence_event_invalid", "event")
+    try:  # the account the connector reads and sends as, when it negotiated ``presence_identity``
+        identity = validate_presence_identity(payload["identity"]) if "identity" in payload else None
+    except ValueError:
+        raise PresenceTurnError("presence_identity_invalid", "event.identity") from None
     facts, allowed = payload.get("facts"), set(WAKE_FACTS) | set(vouched_facts or ())
     if "facts" in payload and (not isinstance(facts, list) or any(fact not in allowed for fact in facts)):
         raise PresenceTurnError("presence_event_invalid", "event.facts")
@@ -101,7 +105,7 @@ def presence_turn_event(payload: Any, admission: PresenceAdmission, *,
         conversation=dict(payload["conversation"]) if isinstance(payload["conversation"], dict) else {},
         message=dict(payload["message"]) if isinstance(payload["message"], dict) else {},
         text=str(payload["text"] or ""), delivery_reporting_version=reporting_version,
-        continuation_version=continuing, facts=tuple(facts) if facts is not None else None)
+        continuation_version=continuing, facts=tuple(facts) if facts is not None else None, identity=identity)
     if not event.source_event_id or not event.conversation_key or not event.actor:
         raise PresenceTurnError("presence_identity_missing", "event")
     from ouroboros.place_intake import reaction_refusal

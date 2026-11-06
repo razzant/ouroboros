@@ -606,7 +606,7 @@ def configured_actor_finalization_message(
 ) -> str | None:
     """The charter finalization fact for a configured session actor.
 
-    ``None`` = not a configured actor (the legacy nanny message applies);
+    ``None`` = not a configured actor (no charter fact to state);
     ``""`` = clean (succeeded leaf, adoption, or a typed zero-run receipt);
     otherwise the one structural reminder, prefixed ``CONFIGURED_ACTOR_INCOMPLETE``
     for an incomplete fact and ``CONFIGURED_ACTOR_UNKNOWN`` for anything else:

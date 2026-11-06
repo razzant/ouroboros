@@ -769,3 +769,82 @@ def test_equal_unidentified_owner_and_peer_words_keep_both_sources(tmp_path, mon
     assert continuation["owner_sources"]["later"] == [
         {"source": "owner_mailbox", "content": "same words", "msg_id": ""}]
     assert continuation["peer_context"][0]["text"] == "same words"
+
+
+def test_a_predecessor_that_heard_my_human_mid_turn_continues_while_its_mailbox_is_kept(tmp_path, monkeypatch):
+    """#2811: the drain records my human's mid-turn place words under the opening's id, never under their context
+    mailbox row's id. One id is one text and one owner-ness, so Continue admits the predecessor while its mailbox is
+    still kept, and the successor carries their words."""
+    import json
+    from types import SimpleNamespace
+
+    from ouroboros.owner_continue import owner_sources
+    from ouroboros.owner_mailbox import write_task_message
+    from ouroboros.review_evidence_sections import _accept_owner_directives
+    from ouroboros.task_results import load_task_result, write_task_result
+    from supervisor.continuation_admission import admit_continuation
+    from tests.test_place_arrival_wake import _delivered
+
+    _install_queue(tmp_path, monkeypatch)
+    _interrupted(tmp_path, root_phase_checkpoint={}, child_ref_promotion={})
+    words = "Send the status to the leads"
+    assert write_task_message(tmp_path, json.dumps({"event": words}), "pred-1", source_task_id="presence-x",
+                              provenance="place_event", msg_id="place-event:ident-1",
+                              sender_origin={"place_id": "p1", "conversation_key": "chat:a:r"},
+                              place_arrival={"source_event_id": "e1", "message": {}, "wake": True, "owner_words": words})
+    reader = SimpleNamespace(task_id="pred-1", task_attempt=1, task_metadata={}, _loop_mailbox_seen_ids=set(),
+                             _owner_directives=[{"source": "initial_user", "content": "Write the Friday report"}])
+    _delivered(tmp_path, reader)
+    write_task_result(tmp_path, "pred-1", "cancelled", review_evidence=_corpus(
+        *_accept_owner_directives(reader, tmp_path, "pred-1")))
+    sources = owner_sources(tmp_path, load_task_result(tmp_path, "pred-1"), "pred-1")
+    assert sources["gaps"] == [] and [(row["source"], row["content"]) for row in sources["later"]] == [
+        ("place_owner", words)]
+    assert admit_continuation("pred-1", action_nonce=NONCE)["ok"] is True
+
+
+def test_a_late_answer_in_a_kept_mailbox_reaches_the_successor_with_its_card(tmp_path, monkeypatch):
+    """Audit 05.11 item 37: a late answer delivered to a head still reading is my human's words with the card it
+    answers. Continue rebuilds that row from the kept mailbox with the card beside it, never the bare label."""
+    from ouroboros.owner_continue import owner_corpus_rows, owner_sources
+    from ouroboros.owner_mailbox import write_owner_message
+    from ouroboros.task_results import load_task_result
+
+    _install_queue(tmp_path, monkeypatch)
+    _interrupted(tmp_path, root_phase_checkpoint={}, child_ref_promotion={})
+    card = {"quiz_id": "q7", "question": "Publish exactly this reply?", "state": "answered", "answered_index": 0,
+            "options": ["Publish it", "Not now"], "answered_after_terminal": True}
+    assert write_owner_message(tmp_path, "1. Publish it", "pred-1", msg_id="owner-late", late_answer={
+        "task_id": "asker", "quiz_id": "q7", "answer_snapshot": {"task_id": "asker", "quiz": card}})
+    sources = owner_sources(tmp_path, load_task_result(tmp_path, "pred-1"), "pred-1")
+    assert not sources["gaps"]
+    [row] = [row for row in owner_corpus_rows(sources) if row["content"] == "1. Publish it"]
+    assert (row["reply_to"]["author"], row["reply_to"]["text"].split("\n")[0]) == (
+        "Ouroboros, task asker", "Publish exactly this reply?")
+
+
+@pytest.mark.parametrize("shape", ["quiz_row", "late_answer"])
+def test_a_relayed_answer_kept_in_a_mailbox_reaches_the_successor_with_its_card(tmp_path, monkeypatch, shape):
+    """Audit 05.11 item 37: a quoted answer relayed to a work is my human's words with the card it answers. Continue
+    rebuilds that row from the work's kept mailbox with the card beside it (for its Supervisor and its model)."""
+    from ouroboros import dialogue_store
+    from ouroboros.owner_continue import owner_corpus_rows, owner_sources
+    from ouroboros.owner_relay import owner_quote, write_relay
+    from ouroboros.task_results import load_task_result
+
+    _install_queue(tmp_path, monkeypatch)
+    _interrupted(tmp_path, root_phase_checkpoint={}, child_ref_promotion={})
+    card = {"quiz_id": "q7", "question": "Publish exactly this reply?", "state": "answered", "answered_index": 0,
+            "options": ["Publish it", "Not now"]}
+    answer = {"chat_id": 1, "direction": "in", "ts": "2026-10-01T00:01:00Z", "client_message_id": "owner-answer",
+              "text": "1. Publish it", **({"type": "quiz_answer", "task_id": "asker", "quiz": card} if shape == "quiz_row"
+                                           else {"late_answer": {"task_id": "asker", "quiz_id": "q7", "answer_snapshot": {
+                                               "task_id": "asker", "quiz": {**card, "answered_after_terminal": True}}}})}
+    dialogue_store.append(tmp_path, "chat", answer)
+    write_relay(tmp_path, "pred-1", relay_id="r1", note="Please act on it.", quotes=[owner_quote(tmp_path, answer)],
+                chat_id=1, teller_task_id="teller")
+    sources = owner_sources(tmp_path, load_task_result(tmp_path, "pred-1"), "pred-1")
+    assert not sources["gaps"]
+    [row] = [row for row in owner_corpus_rows(sources) if row["content"] == "1. Publish it"]
+    assert (row["reply_to"]["author"], row["reply_to"]["text"].split("\n")[0]) == (
+        "Ouroboros, task asker", "Publish exactly this reply?")

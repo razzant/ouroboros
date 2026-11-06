@@ -374,6 +374,36 @@ def read(root, row_id, *, row_identity=None, purpose=None):
         return {"coverage": {**unknown, "stream": "unavailable"}, "rows": []}
 
 
+def seat_facts(root, seats):
+    """Each review seat's measured answers, silences and mean seconds per surface (``review``, ``plan``; a
+    session row's plan-mode runs count under ``plan`` too) on its current target (``seats`` = ``(row_id,
+    target)`` pairs), for ``## Review seat activity``, with the store's coverage: one display read for the pool
+    (the usage display wait, then unknown); ``"unknown"`` without an observation, never a zero."""
+    from ouroboros.runtime_limits import USAGE_DISPLAY_LOCK_TIMEOUT_SEC
+
+    found, coverage = [{} for _ in seats], {"state": "unknown", "stream": "unavailable"}
+    try:
+        with store.open_store(root, write=False, wait_sec=USAGE_DISPLAY_LOCK_TIMEOUT_SEC) as txn:
+            coverage = (txn.meta(CURSOR) or {}).get("coverage") or {"state": "unknown", "stream": "not_observed"}
+            for measured, (row_id, target) in zip(found, seats):
+                for row in txn.set_rows(set_name("subagent_metrics", row_id)).values():
+                    if row.get("purpose") in ("review", "plan") and (row.get("row_identity") or {}).get("target_id") == target:
+                        seat = measured.setdefault(row["purpose"], {"answered": 0, "no_answer": 0, "n": 0, "sec": 0.0})
+                        samples = row.get("duration_samples") or {}
+                        seat.update(answered=seat["answered"] + int(row.get("answer_received") or 0),
+                                    no_answer=seat["no_answer"] + int(row.get("no_answer") or 0),
+                                    n=seat["n"] + int(samples.get("count") or 0),
+                                    sec=seat["sec"] + float(samples.get("sum_sec") or 0.0))
+    except Exception:
+        log.debug("review seat measurements unavailable", exc_info=True)
+        found, coverage = [{} for _ in seats], {"state": "unknown", "stream": "unavailable"}
+    for measured in found:
+        for seat in measured.values():
+            count, total = seat.pop("n"), seat.pop("sec")
+            seat["mean_sec"] = round(total / count) if count else None
+    return {"coverage": coverage, "seats": [measured or "unknown" for measured in found]}
+
+
 def fact_line(task, *, drive_root):
     """A compact dynamic fact for this task's selected row, outside cached catalogs."""
     from ouroboros.subagent_history import execution_identity

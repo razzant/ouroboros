@@ -285,7 +285,8 @@ def test_facts_line_names_room_money_and_tariff_as_known_or_unknown(tmp_path, mo
     assert "round 2" in second and "own recorded cost $1.23 (total not final)" in second
     assert "Task tree spend: ~$3.00 of $40.00 hard tree cap" in second
     assert "shared wallet unknown (not observed)" in second
-    assert "tariff $2.00/M in, $10.00/M out" in second and "quota unknown" in second
+    # No producer ever filled a quota slot: the line says nothing about quota rather than "quota unknown" every round.
+    assert "tariff $2.00/M in, $10.00/M out" in second and "quota" not in second
     unbound = _ctx(tmp_path)
     unbound.context_fit_plan = None
     assert "input unmeasured" in context_facts_line(unbound, measured=False) and "window unknown" in context_facts_line(unbound, measured=False)

@@ -871,6 +871,7 @@ def _notify_one_root(nt, api, data, monkeypatch, result):
     ({"cost_presentation": _tree_cost(3.42, unpriced=True)}, "✅ Task cost1 done · Tracked: $3.42"),
     ({"cost_presentation": _tree_cost(0.125)}, "✅ Task cost1 done · $0.13"),  # toFixed(2) rounds a tie up
     ({"cost_presentation": _tree_cost(0.0)}, "✅ Task cost1 done · $0.00"),  # a priced zero is a real zero
+    ({"cost_presentation": _tree_cost(0.0004)}, "✅ Task cost1 done · $0.0004"),  # under a cent is not that zero
 ])
 def test_task_notify_shows_the_cost_in_the_cards_words(tmp_path, monkeypatch, result, line):
     """#971: the phone line carries the card's cost words for the root's whole tree."""

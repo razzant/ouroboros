@@ -20,10 +20,10 @@ from ouroboros.gateways import claudexor as cx
 
 from tests._delegated_transport_shared import (  # noqa: F401  (autouse fixture applies on import)
     _HealthStub,
-    _dispatch,
     _gateway,
     _isolation_stub,
     _owned_gateway_uses_each_test_transport,
+    _session_dispatch,
     _started_request,
     _waiting,
     _write_attempt,
@@ -73,21 +73,15 @@ def test_an_engine_without_the_marker_refuses_the_mutating_lane_and_keeps_the_re
 
 def test_the_dispatcher_refuses_the_same_engine_the_nanny_would(monkeypatch):
     """The twin surface. `route_health` is the ONE health reader, so the decision made at
-    DISPATCH — before a token is spent — must agree with the nanny's own. An `auto` child
-    falls back to a NATIVE run with the visible marker (never to an uncontained delegated
-    one); an explicit `harness` pin becomes a typed blocker; read-only is untouched."""
-    from ouroboros.agent import dispatch_executor_note
-
-    old = _HealthStub(engine_version=CLAUDEXOR_MIN_VERSION)
-    res = _dispatch("auto", stub=old, monkeypatch=monkeypatch, acting=True)
-    assert (res.executor, res.reason) == ("native", "engine_rejects_delegated_marker")
-    assert "engine_rejects_delegated_marker" in dispatch_executor_note(res)
-    res = _dispatch("harness", stub=_HealthStub(engine_version=CLAUDEXOR_MIN_VERSION),
-                    monkeypatch=monkeypatch, acting=True)
+    DISPATCH — before a token is spent — must agree with the nanny's own: the session
+    row's pin becomes a typed blocker (never an uncontained delegated run); read-only is
+    untouched."""
+    res = _session_dispatch(stub=_HealthStub(engine_version=CLAUDEXOR_MIN_VERSION),
+                            monkeypatch=monkeypatch, acting=True)
     assert res.blocked and res.reason == "engine_rejects_delegated_marker"
     # A read-only child needs no marker, so the same engine is a healthy substrate.
-    res = _dispatch("auto", stub=_HealthStub(engine_version=CLAUDEXOR_MIN_VERSION),
-                    monkeypatch=monkeypatch)
+    res = _session_dispatch(stub=_HealthStub(engine_version=CLAUDEXOR_MIN_VERSION),
+                            monkeypatch=monkeypatch)
     assert (res.executor, res.reason) == ("harness", "harness_ready")
 
 
