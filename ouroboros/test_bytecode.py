@@ -29,6 +29,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 
 MODULE_PATH = Path(__file__).resolve()
 # The owner starts the root by path, like scripts/run_tests.py starts safe_test: no package import in the way.
@@ -40,7 +41,9 @@ _NOT_FOR_SHARDS = ("PYTHONDONTWRITEBYTECODE", "OUROBOROS_TEST_EVIDENCE_ROOT", "O
                    "PYTEST_XDIST_WORKER", "PYTEST_XDIST_TESTRUNUID", "PYTEST_XDIST_WORKER_COUNT")
 _CHECKOUT_DIRS = ("ouroboros", "supervisor", "tests", "scripts", "devtools")
 SHARD_ENV = "OUROBOROS_TEST_WARM_SHARD"  # a walker's list of its test modules, one checkout-relative path per line
-_WALK_PLUGIN = "ouroboros_warm_walk"  # written beside the shard lists: this file's hook, by path
+# The walkers' plugin, written beside the shard lists under a name of this run: a fixed name could be shadowed by a
+# module of the candidate's own, since the walker's cwd comes before PYTHONPATH.
+_WALK_PLUGIN = "ouroboros_warm_walk_"
 _WALKED: dict[str, set[str]] = {}
 
 
@@ -68,11 +71,11 @@ def shards(files, count: int) -> list[list[str]]:
     return [files[index::count] for index in range(count) if files[index::count]]
 
 
-def walker_command(python: str, shard) -> list[str]:
+def walker_command(python: str, shard, plugin: str) -> list[str]:
     """One walker's argv: the ``tests`` directory as a single argument (its modules outside it by name) and the
-    plugin that keeps the walk to the shard listed under ``SHARD_ENV``."""
+    ``plugin`` that keeps the walk to the shard listed under ``SHARD_ENV``."""
     return [python, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider", "--no-header",
-            "-p", _WALK_PLUGIN, "tests", *[name for name in shard if not name.startswith("tests/")]]
+            "-p", plugin, "tests", *[name for name in shard if not name.startswith("tests/")]]
 
 
 def _key(path) -> str:
@@ -82,7 +85,8 @@ def _key(path) -> str:
 def pytest_ignore_collect(collection_path, config):
     """In a walker, pass over the test modules of the other shards; outside a walker, decide nothing."""
     source = os.environ.get(SHARD_ENV)
-    if not source or not collection_path.name.startswith("test_") or collection_path.suffix != ".py":
+    if (not source or not collection_path.name.startswith("test_") or collection_path.suffix != ".py"
+            or not collection_path.is_file()):
         return None
     if source not in _WALKED:
         base = Path(str(config.invocation_params.dir))
@@ -118,7 +122,8 @@ def run(argv) -> int:
     files = test_files(repo, args.files_from)
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="ouroboros-warm-") as lists:
-        (Path(lists) / f"{_WALK_PLUGIN}.py").write_text(
+        plugin = _WALK_PLUGIN + uuid.uuid4().hex
+        (Path(lists) / f"{plugin}.py").write_text(
             f"import runpy\npytest_ignore_collect = runpy.run_path({str(MODULE_PATH)!r})['pytest_ignore_collect']\n",
             encoding="utf-8")
         walk_env = {**env, "PYTHONPATH": os.pathsep.join(filter(None, (lists, env.get("PYTHONPATH"))))}
@@ -126,7 +131,7 @@ def run(argv) -> int:
         for index, shard in enumerate(shards(files, workers)):
             listed = Path(lists) / f"shard-{index}.txt"
             listed.write_text("".join(name + "\n" for name in shard), encoding="utf-8")
-            walkers.append(subprocess.Popen(walker_command(sys.executable, shard), cwd=repo,
+            walkers.append(subprocess.Popen(walker_command(sys.executable, shard, plugin), cwd=repo,
                                             env={**walk_env, SHARD_ENV: str(listed)},
                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         exits = sorted({walker.wait() for walker in walkers})

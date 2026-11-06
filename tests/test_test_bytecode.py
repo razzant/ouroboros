@@ -34,18 +34,22 @@ def test_a_walker_hands_pytest_one_directory_and_keeps_to_its_shard(tmp_path, mo
     """Handed its modules one by one, pytest re-collects ``tests`` once per module and a walker with the collector
     paused held every discarded node (4.3 GB for a quarter of the tree, run 42126810926): the walker names the
     directory once, a module outside it by name, and its plugin passes over every test module not in its shard."""
-    argv = test_bytecode.walker_command("py", ["tests/test_a.py", "tests/sub/test_b.py", "skills/x/test_c.py"])
-    assert argv[argv.index("--no-header") + 1:] == ["-p", "ouroboros_warm_walk", "tests", "skills/x/test_c.py"]
+    argv = test_bytecode.walker_command("py", ["tests/test_a.py", "tests/sub/test_b.py", "skills/x/test_c.py"], "plug")
+    assert argv[argv.index("--no-header") + 1:] == ["-p", "plug", "tests", "skills/x/test_c.py"]
+    tests = tmp_path / "tests"
+    for name in ("test_a.py", "sub/test_b.py", "test_other.py", "_helper.py", "test_pkg.py/test_inside.py"):
+        (tests / name).parent.mkdir(parents=True, exist_ok=True)
+        (tests / name).write_text("", encoding="utf-8")
     listed = tmp_path / "shard.txt"
-    listed.write_text("tests/test_a.py\ntests/sub/test_b.py\n", encoding="utf-8")
+    listed.write_text("tests/test_a.py\ntests/sub/test_b.py\ntests/test_pkg.py/test_inside.py\n", encoding="utf-8")
     config = SimpleNamespace(invocation_params=SimpleNamespace(dir=tmp_path))
     ignore = test_bytecode.pytest_ignore_collect
-    assert ignore(tmp_path / "tests" / "test_other.py", config) is None  # outside a walker: decides nothing
+    assert ignore(tests / "test_other.py", config) is None  # outside a walker: decides nothing
     monkeypatch.setenv(test_bytecode.SHARD_ENV, str(listed))
-    assert ignore(tmp_path / "tests" / "test_a.py", config) is None
-    assert ignore(tmp_path / "tests" / "sub" / "test_b.py", config) is None
-    assert ignore(tmp_path / "tests" / "test_other.py", config) is True
-    assert ignore(tmp_path / "tests" / "_helper.py", config) is None and ignore(tmp_path / "tests" / "sub", config) is None
+    assert ignore(tests / "test_a.py", config) is None and ignore(tests / "sub" / "test_b.py", config) is None
+    assert ignore(tests / "test_other.py", config) is True
+    assert ignore(tests / "_helper.py", config) is None and ignore(tests / "sub", config) is None
+    assert ignore(tests / "test_pkg.py", config) is None  # a package named like a module stays walkable
 
 
 def test_the_warm_root_compiles_the_checkout_and_collects_the_walked_modules_into_the_runs_prefix(tmp_path):
@@ -59,6 +63,9 @@ def test_the_warm_root_compiles_the_checkout_and_collects_the_walked_modules_int
     (repo / "ouroboros" / "thing.py").write_text("VALUE = 1\n", encoding="utf-8")
     for name in ("test_a.py", "test_b.py", "test_c.py"):
         (repo / "tests" / name).write_text("def test_one():\n    assert True\n", encoding="utf-8")
+    # A candidate module under a fixed plugin name would shadow the walkers' plugin from their cwd and pass over all.
+    (repo / "ouroboros_warm_walk.py").write_text("def pytest_ignore_collect(collection_path, config):\n"
+                                                 "    return True\n", encoding="utf-8")
     prefix = tmp_path / "prefix"
     env = {key: value for key, value in os.environ.items()
            if key not in ("PYTEST_ADDOPTS", "OUROBOROS_TEST_EVIDENCE_ROOT", "OUROBOROS_TEST_DURATIONS")}
