@@ -541,6 +541,7 @@ def _focus_event_source(row, metadata, notes):
 def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, ctx=None, resolved_binding=None):
     """Fixed host evidence, with authorship separate from semantic authorization."""
     from dataclasses import asdict, is_dataclass
+    from ouroboros import owner_relay, owner_words
     from ouroboros.place_guard import call_place_facts
     from ouroboros.places import load_places
     from ouroboros.tool_access import canonical_data_root
@@ -581,7 +582,7 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
         occasion = "owner door"
     directives = getattr(ctx, "_owner_directives", None)
     # User messages are quoted input when the caller has no retained host source; never certify them as owner words.
-    sources = directives if isinstance(directives, list) else [m for m in (messages or []) if m.get("role") == "user"]
+    sources = [*directives, *({"source": "owner_mailbox", "content": owner_relay.owner_text(row), "msg_id": key, **({"reply_to": to} if (to := owner_words.answered_card_reply(*owner_words.answered_card_source(row)) or owner_words.reply_target(canonical_data_root(ctx), row.get("reply_to"))) else {})} for key, row in (getattr(ctx, "_held_owner_messages", None) or {}).items() if isinstance(row, dict) and isinstance(row.get("carried"), dict) and not row["carried"].get("went_to"))] if isinstance(directives, list) else [m for m in (messages or []) if m.get("role") == "user"]
     if isinstance(directives, list):
         sources = [_focus_event_source(row, metadata, notes) for row in sources]
     target = asdict(resolved_binding) if is_dataclass(resolved_binding) else resolved_binding

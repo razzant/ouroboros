@@ -104,6 +104,47 @@ def test_an_owner_answer_reaches_the_supervisor_with_the_card_it_answers(focus, 
     assert shown["content"] == "1. Publish it" and "> Thanks, taking it up." in shown["reply_to"]["text"]
 
 
+def test_a_helper_reads_the_words_carried_to_its_work_and_never_a_siblings(checker, tmp_path):
+    """A helper's Supervisor reads my human's later words the host carried to its work, shaped as the corpus rows it
+    already reads and with the card they answer; a row held as context because it went to a sibling stays out."""
+    import queue
+
+    from ouroboros import dialogue_store, safety
+    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.owner_relay import owner_quote, write_relay
+    from ouroboros.tools.registry import ToolContext
+
+    card = {"quiz_id": "q7", "question": "Publish exactly this reply?", "state": "answered", "answered_index": 0,
+            "options": ["Publish it", "Not now"], "answered_after_terminal": True}
+    answer = {"chat_id": 1, "direction": "in", "ts": "2026-10-04T06:00:00+00:00", "client_message_id": "owner-answer",
+              "text": "1. Publish it", "late_answer": {"task_id": "asker", "quiz_id": "q7",
+                                                       "answer_snapshot": {"task_id": "asker", "quiz": card}}}
+    elsewhere = {"chat_id": 1, "direction": "in", "ts": "2026-10-04T06:01:00+00:00",
+                 "client_message_id": "for-sibling", "text": "The sibling should use the March figures."}
+    helper = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, current_task_type="task")
+    helper.task_id, helper.event_queue, helper._owner_directives = "helper", queue.Queue(), []
+    helper.task_metadata = {"delegation_role": "subagent", "root_task_id": "root", "parent_task_id": "root"}
+    addresses = {}
+    for row, went_to in ((answer, ""), (elsewhere, "sibling")):
+        dialogue_store.append(tmp_path, "chat", row)
+        addresses[went_to] = address = format_address(row_address(row))
+        write_relay(tmp_path, "helper", relay_id=f"{'carry-context' if went_to else 'carry'}:{address}", note="",
+                    quotes=[owner_quote(tmp_path, row, address=address)], chat_id=1, teller_task_id="root",
+                    canonical_root=tmp_path, host_carried={"went_to": went_to})
+    _drain_incoming_messages([], queue.Queue(), tmp_path, "helper", None, set(), owner_ctx=helper)
+    assert not helper._owner_directives  # carried words stay outside the helper's corpus
+    assert {key: row["carried"]["went_to"] for key, row in helper._held_owner_messages.items()} == {
+        addresses[""]: "", addresses["sibling"]: "sibling"}
+    prompt = safety._build_check_prompt("run_command", {"cmd": ["echo", "hello"]}, ctx=helper)
+    sources = json.loads(prompt.split("Host evidence (provenance is not consent):\n", 1)[1]
+                         .split("\nProposed tool call:", 1)[0])["occasion"]["sources"]
+    assert sources == [{"source": "owner_mailbox", "content": "1. Publish it", "msg_id": addresses[""], "reply_to": {
+        "address": "quiz q7 of task asker", "author": "Ouroboros, task asker",
+        "text": "Publish exactly this reply?\n1. Publish it\n2. Not now\n(host record: my human pressed option 1)"}}]
+    assert addresses["sibling"] not in prompt and "March figures" not in prompt
+
+
 def test_each_source_projection_appears_once_and_the_event_is_typed(focus, monkeypatch, checker):
     root, place, _admission, _event = focus
     p.edit_place(root, place.place_id, "add_note", author="owner", text="OWNER NOTE: reply in Russian here.")
