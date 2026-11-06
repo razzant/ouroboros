@@ -570,11 +570,13 @@ def current_costs(sources: Any, drive_root: Any) -> list:
 
 
 def usd_text(amount: float, decimals: int = 2) -> str:
-    """A known dollar amount: ``decimals`` places, four under a cent and ``<$0.0001`` below that, so a
-    positive amount never prints as the priced zero ``$0.00`` (the web card's ``formatUsdKnown``)."""
-    if 0 < amount < 0.0001:
-        return "<$0.0001"
-    return f"${amount:.{4 if 0 < amount < 0.01 else decimals}f}"
+    """A known dollar amount: ``decimals`` places, at least four under a cent and ``<$0.0001`` (at four
+    places) below what they show, so a positive amount never prints as the priced zero ``$0.00`` (the web
+    card's ``formatUsdKnown``); a caller asking for more places keeps them."""
+    places = max(decimals, 4) if 0 < amount < 0.01 else decimals
+    if 0 < amount < 10 ** -places:
+        return f"<${10 ** -places:.{places}f}"
+    return f"${amount:.{places}f}"
 
 
 def uncounted_money_text(summary: Optional[Mapping[str, Any]], *, decimals: int = 2, prefix: str = "") -> str:

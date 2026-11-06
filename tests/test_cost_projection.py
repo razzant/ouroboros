@@ -340,6 +340,8 @@ class TestDisplay:
         assert uncounted_money_text({"reserved_usd": 0.0, "unresolved_upper_bound_usd": None}) == ""
         assert uncounted_money_text(None) == ""
         assert uncounted_money_text({"reserved_usd": 0.004}) == "$0.0040 reserved for calls not yet sent"
+        # A caller asking for more places keeps them (the ledger text prints six).
+        assert uncounted_money_text({"reserved_usd": 0.004213}, decimals=6) == "$0.004213 reserved for calls not yet sent"
 
     def test_an_unknown_amount_says_why_as_far_as_it_is_known(self):
         unpriced = {"scope": "own", "tracked_amount": None, "has_unpriced": True, "tracked_final": False,
