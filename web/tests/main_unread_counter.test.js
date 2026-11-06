@@ -106,6 +106,48 @@ test('a newer revision re-reads the shared cursors, and offers the read decision
     assert.equal(covered.api.mainUnreadCount(), 2);
 });
 
+// The read itself: a revision is written only after a paint made while Main is the room on screen. Main's reader
+// reaching its newest message calls it as well, so the gate is the read's own, not only its callers'.
+function paintHarness({ project = null, hold = false } = {}) {
+    const paints = [], writes = [];
+    let release = () => {};
+    const context = vm.createContext({
+        ...readAhead,
+        console,
+        state: { mainVisibleRevision: 5, mainSeenRevision: 3, mainSeenLoaded: true, activePage: 'chat' },
+        navState: { activeProjectId: project },
+        updateUnreadBadge: () => {},
+        mainChat: { refreshHistory: ({ revision }) => {
+            paints.push(revision);
+            const painted = { read: true, revision };
+            return hold ? new Promise((resolve) => { release = () => resolve(painted); }) : Promise.resolve(painted);
+        } },
+        fetchJson: async (url, init = {}) => {
+            const body = JSON.parse(init.body || '{}');
+            writes.push(body.main_seen_revision);
+            return body;
+        },
+    });
+    vm.runInContext(`let mainPaintRequest = null;\n${['mainOnScreen', 'mergeMainSeenRevision', 'markMainViewed',
+        'acknowledgeMainAfterPaint'].map(lift).join('\n')}\nglobalThis.read = acknowledgeMainAfterPaint;`, context);
+    return { context, paints, writes, release: () => release() };
+}
+
+test('Main is read only by a paint made while it is on screen; a Project over it, or opened meanwhile, takes none', async () => {
+    const shown = paintHarness();
+    await shown.context.read();
+    assert.deepEqual([shown.paints, shown.writes], [[5], [5]], 'Main on screen: its newest revision is read');
+    const covered = paintHarness({ project: 'p1' });
+    await covered.context.read();
+    assert.deepEqual([covered.paints, covered.writes], [[], []], 'a Project over Main: no paint for a read, no write');
+    const opened = paintHarness({ hold: true });
+    const reading = opened.context.read();
+    opened.context.navState.activeProjectId = 'p1';  // a Project opens while Main's paint is under way
+    opened.release();
+    await reading;
+    assert.deepEqual([opened.paints, opened.writes], [[5], []], 'the paint ends under the Project: the read is withheld');
+});
+
 test('the shared cursor only moves forward, and a write keeps what the server answers', async () => {
     const h = harness({ revision: 10, seen: 6, answer: () => ({ main_seen_revision: 8 }) });
     assert.equal(h.api.mergeMainSeenRevision({ main_seen_revision: 4 }), false, 'a stale answer never revives a read number');

@@ -145,7 +145,7 @@
        here once; web/modules/layout.js is the ES-module door everything else reads it
        through (tests/test_shell_layout_static.py).
        Beside it, `html[data-pointer]` carries the primary input: `coarse` where it is a finger (a tablet, a phone, a
-       Mini App), `fine` with a mouse or a trackpad. It never moves the columns; it decides how a room over Main sits:
+       Mini App on either), `fine` with a mouse or a trackpad. It never moves the columns; it decides how a room over Main sits:
        on a docked screen a finger gets the Project in Main's place, a desk keeps it beside Main (owner 06.11). */
     const LAYOUT = Object.freeze({ dockedMinWidth: 720 });
     const layoutQuery = typeof window.matchMedia === 'function'

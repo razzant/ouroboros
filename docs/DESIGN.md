@@ -2938,21 +2938,20 @@ narrower, where the column becomes a drawer. `html[data-layout]` carries the
 choice, set before first paint from the one constant `web/theme.js` exposes and
 `web/modules/layout.js` reads; shell rules key off the attribute, components adapt
 to their own box with container queries, and no page adds a width breakpoint of
-its own. The surface fact sent with a message reads the same switch. On docked,
-the Project panel lies beside Main at its own width over the dimmed room; its
-handle resizes it apart from the sidebar's, and it is never wider than the
-content area.
+its own. The surface fact sent with a message reads the same switch. On docked
+with a mouse or a trackpad, the Project panel lies beside Main at its own width
+over the dimmed room; its handle resizes it apart from the sidebar's, and it is
+never wider than the content area.
 
 **The primary input** is the switch's one other fact, written with it before
-first paint as `html[data-pointer="coarse"|"fine"]` from the one `(pointer: coarse)`
-query and read through the same door. It never moves the columns; it decides how a
-room over Main sits. Where the primary input is a finger (a tablet, a phone held
-sideways, a Mini App on a tablet) a docked Project takes the whole content column
-in Main's place, dressed as the phone's room: no scrim to tap by mistake, no shadow
-or edge over the sidebar, which stays beside it and live, and the same bar with its
-×. A desk with a mouse or a trackpad keeps the panel beside Main (owner 18.10, 4A;
-06.11). While a Project is open Main is not the room on screen, so Main's row counts
-its new messages and ☰'s dot includes them.
+first paint as `html[data-pointer="coarse"|"fine"]` from one `(pointer: coarse)`
+query; the shell reads it through the same door. It never moves the columns; it
+decides how a room over Main sits. Where the primary input is a finger (a tablet,
+a phone held sideways, a Mini App on a tablet) a docked Project takes the whole
+content column in Main's place, dressed as the phone's room: no scrim to tap by
+mistake, no shadow or edge over the sidebar, which stays beside it and live, no
+width handle of its own (it fills the column), and the same bar with its ×. A
+desk with a mouse or a trackpad keeps the panel beside Main.
 
 **Resizing.** A handle drag writes only the dragged box's width, once per
 displayed frame; the sidebar's column, the dimmed room and the panel's edge
@@ -3151,8 +3150,7 @@ capsule is its door. Hover never tints part of an object, and hover paint
 applies only where a pointer can hover (`@media (hover: hover)`).
 
 **Touch and containment.** Under a coarse pointer every target is at least 44 px
-(`--touch-target-min`) and no width handle is offered (a finger cannot aim at its
-8 px strip, and its drag would rewrite the widths every device shares); a control whose look is smaller keeps its look and gains
+(`--touch-target-min`); a control whose look is smaller keeps its look and gains
 the invisible hit area of the one `.ui-hit-area` recipe in `web/ui.css`, which a
 link inside a sentence takes too so the sentence keeps its lines. A chevron is an
 element (the Reviews door's), so a control's `::after` stays the recipe's; a row

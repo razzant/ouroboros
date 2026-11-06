@@ -4,8 +4,10 @@
  * right shell, writes `html[data-layout="docked"|"stack"]`, keeps it current on resize and
  * rotation, and publishes its number once as `window.ouroLayout`. Everything else
  * (app.js, client_surface.js, the layer stack, the drawer drag) asks this module and never
- * writes a media query of its own; the shell's CSS keys off the attribute
- * (tests/test_shell_layout_static.py). */
+ * writes a media query of its own; the shell's CSS keys off the attribute. Beside it the
+ * primary input (`html[data-pointer]`) is read here too; the few components that keep their
+ * own coarse-pointer query (the surface fact, a row's long press, the reader, the Interface
+ * size) are a closed list (tests/test_shell_layout_static.py). */
 
 export const LAYOUTS = Object.freeze(['docked', 'stack']);
 
