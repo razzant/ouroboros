@@ -284,6 +284,8 @@ def test_books_recovery_keeps_the_current_refusal_frame_and_selected_mode(tmp_pa
         record_observation(tmp_path, plan.route_fp, refused=ceiling)
     lmc._reproject_actual_overflow_low(ctx)
     assert ctx.active_context_mode == ctx.tools._ctx.active_context_mode == mode
+    from ouroboros.transcript_prefix import SCOPED_SANCTION_ATTR  # the next send names this rebuild (C2 S4)
+    assert getattr(ctx.tools._ctx, SCOPED_SANCTION_ATTR) == {"system": "low_retry"}
     assert ctx.messages[0] == ctx.context_fit_plan.projection(mode).system_message()
     assert ctx.context_fit_plan.window_record is not None
     assert measure(ctx).measurement.capacity_total_tokens == (ceiling or 1_000_000)

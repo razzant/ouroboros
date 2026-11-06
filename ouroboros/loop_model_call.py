@@ -29,7 +29,7 @@ from ouroboros.loop_llm_call import REBOUND_PHYSICAL_CONTEXT_KEY, REFUSED_CANDID
 from ouroboros.loop_round_limits import _coarsen_memory_view, _run_emergency_address_pass
 from ouroboros.observability import new_execution_id
 from ouroboros.tools.registry import ToolRegistry
-from ouroboros.transcript_prefix import rewrite_epoch
+from ouroboros.transcript_prefix import rewrite_epoch, rewrite_view
 from ouroboros.usage_accounting import PhysicalAttemptContext, PhysicalAttemptPreconditionFailed, invalidate_task_cache_splits
 
 
@@ -357,7 +357,7 @@ def _run_cross_model_fallback_chain(
         if context_fit_plan is not None:  # a failed candidate's view leaves with it (the primary row's resumed one too)
             if fallback_messages is messages:  # a same-family candidate rebound the shared transcript
                 messages[:] = context_fit_plan.reproject_transcript(messages, active_context_mode)
-                invalidate_task_cache_splits(task_id)
+                rewrite_view(tools._ctx, task_id, "fallback_view_restored")
             _adopt_view_facts(tools._ctx, context_fit_plan, active_context_mode)
         _restore_context_fit_usage(accumulated_usage, primary_context_usage)
         if (resident[0] is not None and resident[0] != tool_schemas and fallback_messages is not messages
@@ -365,7 +365,7 @@ def _run_cross_model_fallback_chain(
             # Its ceiling fit left with its transcript copy, notice included; the next route gets the list it had.
             # (A same-family candidate wrote its notice into the shared transcript, so its fit stays with it.)
             tool_schemas[:], tools._ctx._route_left_out_tool_names = resident
-            invalidate_task_cache_splits(task_id)
+            rewrite_view(tools._ctx, task_id, "fallback_tools_restored", scope="tools")
         if _walk_fenced(tools._ctx, accumulated_usage) or (not recovering_output and str(
                 accumulated_usage.get("_last_llm_error_kind") or "") == "llm_output_exhausted"):
             break  # an exhausted candidate replied unusably: its outcome is the round's, no further route is dialed
@@ -627,7 +627,7 @@ def _rebind_context_fit_plan(
     projected_prompt_tokens = rebound.projected_tokens_with_tools(mode, tool_schemas)
     shown = messages[0] if messages else None
     messages[:] = rebound.reproject_transcript(messages, mode)
-    invalidate_task_cache_splits(getattr(tools._ctx, "task_id", ""))
+    rewrite_view(tools._ctx, getattr(tools._ctx, "task_id", ""), "route_rebind")
     tools._ctx.context_fit_plan = rebound
     tools._ctx.messages = messages
     tools._ctx.active_context_mode = mode
@@ -1103,7 +1103,7 @@ def _reproject_actual_overflow_low(ctx: _RoundModelCallContext) -> None:
         measured_input_tokens=fit.measurement.reprojection_input_tokens)
     mode = ctx.context_fit_plan.initial_mode
     ctx.messages[:] = ctx.context_fit_plan.reproject_transcript(ctx.messages, mode)
-    invalidate_task_cache_splits(ctx.task_id)
+    rewrite_view(ctx.tools._ctx, ctx.task_id, "low_retry")
     ctx.active_context_mode = mode
     ctx.tools._ctx.messages = ctx.messages
     ctx.tools._ctx.active_context_mode = mode
@@ -1326,7 +1326,7 @@ def _fit_route_tool_ceiling(ctx: _RoundModelCallContext) -> bool:
     schemas[:], left_out = fit_tool_schemas_to_limit(schemas, limit, keep=earlier | loaded,
                                                      protect=history_tool_names(ctx.messages))
     ctx.tools._ctx._route_left_out_tool_names = earlier | set(left_out)
-    invalidate_task_cache_splits(ctx.task_id)
+    rewrite_view(ctx.tools._ctx, ctx.task_id, "route_tool_ceiling", scope="tools")
     _loop()._append_or_merge_user_message(ctx.messages, route_tool_limit_notice(
         ctx.active_model, limit, total, left_out, selectors=usable_selectors(ctx.tools, schemas)))
     return True
