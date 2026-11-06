@@ -315,12 +315,16 @@ def _stop_owned_work(ctx: Any) -> list:
     ``reconcile_delegate_custody=False``. Tasks actually settled record the
     typed ``owner_restart`` cause (an earlier Stop keeps its own). External
     runs gain no adoption authority from native continuation: request cancellation
-    through the public owner-gone seam over the attach-only gateway, the
-    attested owned-daemon stop exactly as Panic makes it, and finally the
-    generation's one bounded stop of its owned processes (``stop_owned_work``),
-    which the teardown and the restart watcher later join. Between the cancel
-    intents and the daemon stop nothing may call ``ensure_owned_gateway`` — it
-    would start a dead daemon — which is what the prepared transaction and live latch guarantee.
+    of Ouroboros's own delegated runs through the public owner-gone seam over the
+    attach-only gateway (D24), and finally the generation's one bounded stop of its
+    owned processes (``stop_owned_work``), which the teardown and the restart
+    watcher later join. The shared Claudexor daemon is KEPT (owner 3A, 2026-11-06):
+    Restart restarts Ouroboros, other programs' runs on the engine are untouched,
+    and the teardown's one pin rule (``_stop_owned_daemon_for_new_pin``) replaces
+    the engine only for a forward pin; the engine's own restart is the Accounts
+    action. Between the cancel intents and the bounded stop nothing may call
+    ``ensure_owned_gateway`` — it would start a dead daemon — which is what the
+    prepared transaction and live latch guarantee.
 
     Returns the owned live task ids it addressed — captured ONCE, before the
     stop makes them unreadable — so the caller can tell the owner what was
@@ -365,7 +369,6 @@ def _stop_owned_work(ctx: Any) -> list:
     except Exception:
         log.warning("Owner restart: delegated-run cancellation did not complete; custody retained",
                     exc_info=True)
-    _stop_owned_daemon("Owner restart")
     from ouroboros.owned_shutdown import stop_owned_work
 
     stop_owned_work(DATA_DIR)  # unconfirmed records stay stamped for the next start; never a veto
@@ -414,7 +417,7 @@ def arm_owner_restart_transaction() -> str:
 
 
 def _stop_owned_daemon(label: str) -> None:
-    """The attested owned-daemon stop a restart makes; never a veto.
+    """The attested owned-daemon stop a planned restart's pin change makes; never a veto.
 
     An unconfirmed stop was already disclosed by ``stop_outcome`` (critical log
     plus the ``process_stop_unconfirmed`` supervisor row, custody retained); a
@@ -442,23 +445,22 @@ def _stop_owned_daemon(label: str) -> None:
 
 
 def _stop_owned_daemon_for_new_pin() -> None:
-    """A planned restart replaces an off-pin daemon, but never downgrades a newer one.
+    """A restart replaces an off-pin daemon, but never downgrades a newer one.
 
     Runs in the server lifespan teardown of every requested restart (planned
-    self-restart, managed update or rollback; the owner's manual Restart has
-    already stopped the daemon, so nothing answers unless that stop was
-    unconfirmed). It compares the pin the next generation selects —
-    ``load_runtime_pin`` reads the checkout that already landed, not this
-    process's cached pin — with the serving engine's handshake through the
-    attach-only ``read_owned_gateway``. An unprovisioned home, an unpublished or
-    unreadable pin and an unreachable, foreign or stopped daemon leave the
-    existing handoff untouched: the next generation attaches. Except after the
-    owner's Restart, a lower release pin keeps the authenticated newer daemon:
-    its data root may already require that engine's serving floor. This
-    preserves live availability, not cold-start compatibility after that daemon
-    later exits. Other version or build changes make the same attested stop the
-    manual Restart makes, so the next generation spawns the pinned engine; the
-    delegated runs that daemon served end with it, and the next generation's
+    self-restart, managed update or rollback, and the owner's manual Restart,
+    which no longer stops the daemon itself: owner 3A). It compares the pin the
+    next generation selects — ``load_runtime_pin`` reads the checkout that
+    already landed, not this process's cached pin — with the serving engine's
+    handshake through the attach-only ``read_owned_gateway``. An unprovisioned
+    home, an unpublished or unreadable pin and an unreachable, foreign or stopped
+    daemon leave the existing handoff untouched: the next generation attaches. A
+    lower release pin keeps the authenticated newer daemon on every door: its
+    data root may already require that engine's serving floor. This preserves
+    live availability, not cold-start compatibility after that daemon later
+    exits. Other version or build changes make the attested stop
+    (``_stop_owned_daemon``), so the next generation spawns the pinned engine;
+    the delegated runs that daemon served end with it, and the next generation's
     startup sweep and resumed parents close them as absent (no invented spend).
     """
     from ouroboros.claudexor_daemon import owned_daemon_provisioned, read_owned_gateway
@@ -476,7 +478,7 @@ def _stop_owned_daemon_for_new_pin() -> None:
         log.info("Planned restart keeps the owned Claudexor daemon: the engine pin comparison is "
                  "unavailable (%s)", exc)
         return
-    transition = engine_pin_transition(pin, serving, owner_restart=_OWNER_STOP_BEGAN.is_set())
+    transition = engine_pin_transition(pin, serving)
     if transition["action"] == "keep" and transition["direction"] == "backward":
         log.warning("Planned restart keeps newer owned Claudexor %s: checkout pin %s would downgrade "
                     "its data root; cold start still requires a compatible pin", serving[0], pin.version)
