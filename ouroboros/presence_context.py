@@ -656,7 +656,7 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int) -> di
                             **({"owner_address_unverified": True} if owner_address and event.actor.get("authenticated") is False else {}),
                             "owner_confirmed": owner_address and event.actor.get("authenticated") is not False,
                             **({"authenticated": event.actor["authenticated"]} if "authenticated" in event.actor else {}),
-                            "is_bot": event.actor.get("is_bot") is True or "from_bot" in facts},
+                            "is_bot": "from_bot" in facts},
                   "matched_wakes": [w.fact for w in wake_matches(place, facts)],
                   "addressed": bool(set(facts) & {"direct_message", "group_dm", "mention", "reply_to_me",
                                                   "review_requested", "assigned", "legacy_addressed"})},

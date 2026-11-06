@@ -7,7 +7,7 @@ from pathlib import Path
 
 from ouroboros import presence_admission
 from ouroboros.dialogue_provenance import reaction_fact, reaction_words
-from ouroboros.places import PlaceError, get_place, observed_facts, own_account_event, wake_matches
+from ouroboros.places import FACT_FROM_BOT, PlaceError, get_place, observed_facts, own_account_event, wake_matches
 
 # What ``offer_arrival`` did: the reason its settlement records, or the mind's choice to make.
 HANDED_TO_AUTHOR, HANDED_TO_WORK, ROUTE_TO_MIND = "current_author", "conversation_work", "route"
@@ -122,13 +122,14 @@ def decide_attention(root: Path, admission, event) -> tuple[str, dict]:
     if not presence_admission.focus_enabled(root):
         return "silent", {"reason": "off"}
     if own_account_event(place, event):
-        # My own act (a send, an edit, a merge) is heard and kept, never a reason to wake me or to mail my live author.
+        # My own post (through the connector or any tool acting as that account) is heard and kept, never a reason
+        # to wake me or to mail my live author.
         return "silent", {"reason": "own_account"}
     reaction = reaction_fact(event.message)
     if reaction:
         # Context, whatever the wake list, owner or allowance says. A live author of the target's proven
         # conversation may hear it in the background; a bot only under the existing from_bot selection.
-        bot = event.actor.get("is_bot") is True or "from_bot" in facts
+        bot = FACT_FROM_BOT in facts
         resolved = (reaction.get("target") or {}).get("resolution") == "resolved"
         heard = resolved and (not bot or bool(wake_matches(place, facts)))
         return "silent", {"reason": "reaction_context_only", "background": heard}
@@ -177,7 +178,7 @@ def author_hears(decision: str, details: dict, event) -> bool | None:
         return True
     if details.get("reason") == "reaction_context_only":
         return False if details.get("background") else None
-    bot = event.actor.get("is_bot") is True or "from_bot" in (event.facts or ())
+    bot = FACT_FROM_BOT in observed_facts(event)
     if decision != "silent" or details.get("reason") != "no_wake_match" or bot:
         return None
     return _followup_in_scope(event)

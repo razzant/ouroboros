@@ -1088,8 +1088,8 @@ sends as incoming events: from the owner's confirmed account they would read as 
 provider lets you tell them apart (GitHub does), do report the account's other activity (its edits, merges and posts
 made by other tools acting as it): the host settles an event whose actor is `sends_as.id`, not reported
 unauthenticated, as heard with reason `own_account`; it stays in the room and the next own wake and never wakes a
-focus. Where `sends_as` is the owner's confirmed account, its posts are the owner's words and keep the ordinary path;
-other people who post from the sending account are heard as it, not woken on. Bot identities
+focus. Where `sends_as` is the owner's confirmed account, its posts are the owner's words and keep the ordinary path.
+Otherwise, other people who post from the sending account are heard as it, not woken on. Bot identities
 never derive owner status or offer this confirmation. Only the human activates a place, through its sheet or an owner-door Main turn;
 consciousness may still set Silent or Paused.
 

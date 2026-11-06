@@ -402,7 +402,8 @@ def writes_as_owner(place: Place, identity: Mapping[str, Any] | None, account_id
 
 def own_account_event(place: Place, event: Any) -> bool:
     """Written by the account this place writes as (``identity.sends_as``): by me, through the connector or any other
-    tool that acts as that account (my sends, my edits and merges). It stays in the room and my next own wake and
+    tool that acts as that account (my posts; a provider that does not name an edit's or merge's actor reports those
+    without one, and its connector keeps them from reading as replies). It stays in the room and my next own wake and
     never wakes me. Not where that account is my human's own (their posts there are their words), and never for an
     actor the connector reports unauthenticated (a mail From proves nothing) or an event without an identity."""
     identity = getattr(event, "identity", None) or {}
