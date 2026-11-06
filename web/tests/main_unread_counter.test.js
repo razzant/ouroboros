@@ -284,3 +284,35 @@ test("a room beyond the feed counts and asks after another client's read though 
     await flush();
     assert.equal(count.textContent, '');
 });
+
+// Main shown again from another page (DESIGN "Unread"): the room's own page-shown listener claims a plain return to its
+// newest message during the event; while Main is unread the shell's claim after it lands on what came, wherever later
+// rows put it. A Project opening over Main lands on its own room instead.
+function pageHarness({ unread = 0 } = {}) {
+    const claims = [];
+    const context = vm.createContext({
+        state: { activePage: 'files' },
+        navState: { activeProjectId: null, mobileDrawerOpen: false },
+        beforePageLeaveHandlers: [],
+        mainChat: { showLatest(options) { claims.push(options?.arrive === true); }, closeTransient() {} },
+        document: { querySelectorAll: () => [], getElementById: () => null },
+        window: { dispatchEvent(event) { if (event.detail?.page === 'chat') context.mainChat.showLatest(); } },
+        CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init?.detail; } },
+        updateUnreadBadge() {}, acknowledgeMainAfterPaint() {}, closeProjectPanel() {}, syncNavigationState() {},
+        mainUnreadCount: () => unread,
+    });
+    vm.runInContext(`${lift('showPage')}\nglobalThis.show = showPage;`, context);
+    return { context, claims };
+}
+
+test('Main shown again from another page lands on what came while unread; read, or under an opening Project, it does not', async () => {
+    const unread = pageHarness({ unread: 2 });
+    await unread.context.show('chat');
+    assert.deepEqual(unread.claims, [false, true], 'the landing is the last claim, so it supersedes the plain return');
+    const read = pageHarness();
+    await read.context.show('chat');
+    assert.deepEqual(read.claims, [false], 'a read Main returns to its bottom');
+    const opening = pageHarness({ unread: 2 });
+    await opening.context.show('chat', { closeProject: false });
+    assert.deepEqual(opening.claims, [false], 'a Project opening over Main: Main lands when it is shown again');
+});

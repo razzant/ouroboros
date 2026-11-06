@@ -197,6 +197,8 @@ async function showPage(name, options = {}) {
         document.getElementById(`page-${pageName}`)?.classList.add('active');
         state.activePage = pageName;
         window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: pageName } }));
+        // An unread Main shown again lands on what came (DESIGN "Unread"); this claim supersedes the room's plain one.
+        if (pageName === 'chat' && options.closeProject !== false && mainUnreadCount() > 0) void mainChat?.showLatest?.({ arrive: true });
         // Main's number shows only away from Main; showing it offers its read decision.
         updateUnreadBadge();
         if (pageName === 'chat') void acknowledgeMainAfterPaint();
