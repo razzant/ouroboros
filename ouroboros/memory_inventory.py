@@ -52,7 +52,8 @@ from typing import Any, Callable, Dict, FrozenSet, Iterable, Iterator, List, Map
 from ouroboros import chat_chain
 from ouroboros.chronicle_import import legacy_frontier
 from ouroboros.chronicle_store import ChronicleStore, capture, capture_memo, source_time_span
-from ouroboros.dialogue_provenance import in_reading_order, rooms_read_by_time, row_class, row_provenance
+from ouroboros.dialogue_provenance import (in_reading_order, recorded_person, rooms_read_by_time, row_class,
+                                           row_provenance)
 
 # The key of the memory view's last-capture fact in a task's ``llm_trace``.
 VIEW_TRACE_KEY = "memory_view"
@@ -67,15 +68,18 @@ _META_FIELDS = ("chat_id", "ts", "type", "direction", "task_id", "parent_task_id
                 "client_message_id", "subagent_task_id", "delegation_role", "subagent_role", "initiator",
                 "summary_kind", "sender_label", "username", "author", "source", "transport",
                 "status", "outcome", "outcome_phase", "reason_code", "outcome_final", "outcome_authority",
-                "result_ref", "presence", "presence_provenance", "host_fact", "historical_import", "source_order", "terminal_origin")
+                "result_ref", "presence", "presence_provenance", "host_fact", "historical_import", "source_order", "terminal_origin",
+                "wake_summary",  # a finished root's closing sentence: how my other conversations know that turn
+                "fold_read")  # and that its sentence stands for what it read there (``finish_task(fold_read=true)``)
 _MEMBERSHIP_FIELDS = ("chat_id", "ts", "type", "task_id", "parent_task_id", "root_task_id", "source_keys")
 _REPLY_FIELDS = ("address", "chat_id", "task_id", "role", "target_home", "unresolved")
 # What a row's ``transport`` keeps: its scalars, which ``dialogue_provenance.place_row_facts`` spreads as the row's
 # place facts (``place_activity`` reads the event, place and conversation keys) and which name its provider, account,
 # conversation and thread (``dialogue_provenance``, ``RoomLabelResolver.label``), so a row that came over a transport
 # still says so (``_with_transport``, the view's room label); of a nested value, only the keys named here, each whole.
-# The provider's thread copy (``conversation``), the delivered message's details and the event's identity stay in
-# the dialogue row, read by address: on the owner's install they were four fifths of the stored tail.
+# The provider's thread copy (``conversation.thread_history``, its lookups, topic and purpose), the delivered
+# message's details and the event's identity stay in the dialogue row, read by address: on the owner's install they
+# were four fifths of the stored tail. Of ``conversation`` only its name and audience scalars stay (about 70 bytes).
 _TRANSPORT_NESTED = {
     "actor": ("display_name", "username", "platform_actor_id", "id",  # who spoke (``dialogue_speaker``)
               "kind",  # who made a wordless reaction (``row_author``)
@@ -84,11 +88,16 @@ _TRANSPORT_NESTED = {
     "delivery": ("state",  # ``dialogue_provenance``, ``reaction_note``, the view's typed fact, ``place_activity``
                  "presence_provenance"),  # an older receipt's place facts (``place_row_facts``)
     "message": ("reaction",),  # the typed reaction (``reaction_fact``): its words, or a row that is that act alone
+    "origin": ("kind", "task_id"),  # the work that sent my delivered message (``memory_view``'s own-row head)
+    "conversation": ("title", "name", "full_name", "username", "topic_id",  # its own name (``RoomLabelResolver``)
+                     "chat_type", "channel_type", "is_im", "is_mpim", "is_private", "visibility",  # who reads it
+                     "workspace_name"),
 }
 # Bumped when ``row_meta``'s facts change (5: a transport keeps only what its readers read; 6: and the author
-# fact's): a stored prefix of another version is another source, read live until the maintenance job
-# ``memory_tail`` refills it.
-_META_VERSION = 6
+# fact's; 7: the sending work, the conversation's name and audience, a finish's sentence and its fold, a project
+# closure notice's delivery): a stored prefix of another version is another source, read live until the
+# maintenance job ``memory_tail`` refills it.
+_META_VERSION = 7
 
 Entry = Tuple[Dict[str, Any], Dict[str, Any], int]
 
@@ -111,6 +120,8 @@ def row_meta(row: Mapping[str, Any]) -> Dict[str, Any]:
 
         # Canonical terminal projections already carry the verdict before they drop delivery fields.
         meta["quiet_finish"] = (row["quiet_effective"] is True if "quiet_effective" in row else quiet_finish(dict(row)))
+    if row.get("type") == "project_closure" and row.get("delivery_id"):  # the closing page that names it links it
+        meta["delivery_id"] = str(row["delivery_id"])  # (``memory_sealing.closure_notices``)
     quiz = row.get("quiz") if isinstance(row.get("quiz"), dict) else {}
     if isinstance(contact := row.get("presence_contact") or quiz.get("presence_contact"), dict):
         meta["presence_contact"] = dict(contact)  # ``presence_owner_contact.private_main_row`` reads it
@@ -368,12 +379,14 @@ def rows_after_frontier(root: Any) -> List[Entry]:
 
 
 def open_rows_by_room(root: Any, gaps: Optional[Dict[str, set]] = None,
-                      quiet: Optional[Dict[str, List[Entry]]] = None) -> Dict[str, List[Entry]]:
+                      quiet: Optional[Dict[str, List[Entry]]] = None,
+                      sealed: Optional[Dict[str, List[Entry]]] = None) -> Dict[str, List[Entry]]:
     """The open rows of every room that has one: after the frontier, outside the room's sealed set, in
     reading order (``open_room_rows``). ``gaps`` collects, by room, what its rows may lack: a Reply whose
     saved target cannot be read is Main's here and a gap of each Project it could join
     (``room_membership.unknown_target_rooms``). ``quiet`` collects typed quiet finishes, including sealed ones,
-    from the same tail; they can consider earlier human words for liveness, never seal them."""
+    from the same tail; they can consider earlier words of a room, never seal them. ``sealed`` collects each
+    place room's sealed rows in append order: who spoke there before its pages (``memory_view_conversations``)."""
     store = ChronicleStore(root)
     with capture(root):  # one state of the chronicle: its frontier and every room's sealed set
         frontier = _active_frontier(store)
@@ -399,10 +412,12 @@ def open_rows_by_room(root: Any, gaps: Optional[Dict[str, set]] = None,
         rooms: Dict[str, List[Entry]] = {}
         timed = rooms_read_by_time(root, (entry[1] for entry in projected))  # every room at once, sealed rows or not
         for room, entries in grouped.items():
-            sealed = store.sealed_row_refs(room)
-            kept = [entry for entry in entries if entry[0]["row_sha256"] not in sealed]
+            refs = store.sealed_row_refs(room)
+            kept = [entry for entry in entries if entry[0]["row_sha256"] not in refs]
             if kept:
                 rooms[room] = in_reading_order(kept, timed, lambda entry: entry[1])
+            if sealed is not None and refs and len(kept) < len(entries) and row_provenance(entries[-1][1]) == "place":
+                sealed[room] = [entry for entry in entries if entry[0]["row_sha256"] in refs]
     return rooms
 
 
@@ -701,7 +716,7 @@ def story_counts(store: ChronicleStore) -> Dict[str, Any]:
 
 
 def room_facts(store: ChronicleStore, room: str, entries: List[Entry], lineage: Mapping[str, Any],
-               notes: int) -> Dict[str, Any]:
+               notes: int, classes: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """One room's standing facts, counted once for every reader that prints them.
 
     ``entries`` are the room's open rows (``open_room_rows``): ``people`` and ``mine`` are lane 1 by author
@@ -710,16 +725,20 @@ def room_facts(store: ChronicleStore, room: str, entries: List[Entry], lineage: 
     read by time a row received now can read first and an import sent long ago last. ``notes`` are the room's
     notes no page sealed. ``pages`` are the room's acting pages (folded ones too) and ``last_covered`` the latest
     row time among their covers — not a boundary: a page covers a set of rows and an earlier row can stay open, so
-    the gap shows from ``earliest`` beside it and no sealing frontier is computed.
+    the gap shows from ``earliest`` beside it and no sealing frontier is computed. ``classes`` are the rows'
+    ``row_class`` when the caller already has them.
     """
-    spoken = [cls["author"].get("kind") for cls in (row_class(meta, pos=pos, **lineage) for _a, meta, pos in entries)
-              if cls["lane"] == 1]
+    classes = classes if classes is not None else [row_class(meta, pos=pos, **lineage) for _a, meta, pos in entries]
+    authors = [cls["author"] for cls in classes if cls["lane"] == 1]
+    spoken = [author.get("kind") for author in authors]
+    unattributed = sum(1 for author in authors if author.get("unattributed"))
     pages = store.acting_pages(room)
     ends = [page["covered_end"] for page in pages if page["covered_end"]]
     span = source_time_span(meta.get("ts") for _address, meta, _pos in entries)
-    return {"rows": len(entries), "people": spoken.count("human"), "mine": spoken.count("ouroboros"),
-            "task_facts": len(entries) - len(spoken),
+    return {"rows": len(entries), "people": sum(1 for author in authors if recorded_person(author)),
+            "mine": spoken.count("ouroboros"), "task_facts": len(entries) - len(spoken),
             **({"reactions": reactions} if (reactions := spoken.count("place_fact")) else {}),
+            **({"unattributed": unattributed} if unattributed else {}),
             "chars": sum(int(meta.get("text_chars") or 0) for _address, meta, _pos in entries),
             "earliest": str(span["start"] or ""), "latest": str(span["end"] or ""), "notes": notes, "pages": len(pages),
             "last_covered": str(source_time_span(ends).get("end") or "") if ends else "",
@@ -845,7 +864,7 @@ def open_segments(root: Any, store: ChronicleStore, room_id: Any, *,
 @dataclass(frozen=True)
 class ShortageFact:
     """What a task's view showed only by address, when that asks a writer for a page or a part."""
-    kind: str  # "open_rows" | "narrative"
+    kind: str  # "open_rows" | "narrative" | "other_room"
     room_id: str
     newest_addressed_row: Optional[Dict[str, Any]] = None  # open_rows
     pointer_records: Tuple[str, ...] = ()  # narrative
@@ -864,8 +883,9 @@ def shortage_from_trace(trace: Any) -> Optional[ShortageFact]:
     F7) and names the newest addressed row of this room. ``narrative``: it showed old
     narrative by label or pointer (F4, F5l, F5), names those records, and the window alone took
     them (``by_budget == 0``; an owner-selected mode target is no shortage of the window).
-    Fact lines (F1), quiet rooms (F1b), retold pointers (F3) and other rooms' people (F6)
-    alone, a foreign shape or no fact: ``None``.
+    ``other_room``: neither, but the floor folded the words or the line of a room of my other
+    conversations where my human or I spoke (``folded_rooms``, oldest first): the oldest of them.
+    Fact lines (F1), retold pointers (F3) alone, a foreign shape or no fact: ``None``.
     """
     fact = trace.get(VIEW_TRACE_KEY) if isinstance(trace, Mapping) else None
     floor = fact.get("floor") if isinstance(fact, Mapping) else None
@@ -890,6 +910,9 @@ def shortage_from_trace(trace: Any) -> Optional[ShortageFact]:
         records = tuple(dict.fromkeys(str(ident) for ident in pointers if isinstance(ident, str) and ident.strip()))
         if records:
             return ShortageFact("narrative", pointer_records=records, **common)
+    folded = floor.get("folded_rooms")
+    if isinstance(folded, (list, tuple)) and folded and isinstance(folded[0], str) and folded[0].strip():
+        return ShortageFact("other_room", **{**common, "room_id": folded[0]})
     return None
 
 

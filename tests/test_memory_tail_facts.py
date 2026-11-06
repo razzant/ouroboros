@@ -249,7 +249,7 @@ def test_each_focus_holds_in_its_one_capture_the_stored_rows_its_view_shows(tmp_
     entered, index = [], ChronicleStore._index
     monkeypatch.setattr(ChronicleStore, "_index", lambda self: entered.append(1) or index(self))
     task, scoped = {"id": "turn0001", "chat_id": 1}, mv.capture
-    for role, room, scope in (("integrator", "1", "all"), ("presence", "1", "terminal"),
+    for role, room, scope in (("integrator", "1", "all"), ("presence", "1", "all"),  # every integrating focus: all
                               ("child", str(rooms["alpha"]), "terminal"), ("nanny", "1", "terminal")):
         spec = dataclasses.replace(mv.ROLE_DEFAULTS[role], room_id=room)
         monkeypatch.setattr(mv, "capture", scoped)
@@ -370,13 +370,18 @@ def test_a_transport_keeps_the_facts_its_readers_read_and_never_the_thread_copy(
     labels = RoomLabelResolver(tmp_path)
     readers = (row_class, dialogue_provenance, reaction_note, wordless_reaction, labels.label, mv._typed_fact, _place_facts)
     rows = [row for _address, row, _pos in cc.iter_rows(tmp_path) if row.get("chat_id") == chat]
-    assert len(rows) == 8 and labels.label(rows[0]).startswith("Place slack C42")
+    assert len(rows) == 8 and labels.label(rows[0]).startswith("Place slack general · thread ")
     for row in rows:
         meta = ROW_META(row)
         assert [read(meta) for read in readers] == [read(row) for read in readers], row["ts"]
         held = json.dumps(meta["transport"])
         assert "thread line" not in held and "blocks" not in held and "profile" not in held
         assert len(held) * 20 < len(json.dumps(row["transport"]))  # a row's facts stay small whatever its thread
+    assert ROW_META(rows[0])["transport"]["conversation"] == {"title": "general"}  # its name, never its thread copy
+    sent = {"origin": {"kind": "tool", "task_id": "t1", "source_event_id": "ev9"},
+            "conversation": {"name": "ml", "is_private": False, "thread_history": {"m": 1}, "purpose": {"value": "x"}}}
+    assert ROW_META({"transport": sent})["transport"] == {"origin": {"kind": "tool", "task_id": "t1"},
+                                                         "conversation": {"name": "ml", "is_private": False}}
     assert ROW_META({"transport": {}})["transport"] == {}  # an owner's own row stays without transport facts
     flat = {"kind": "telegram", "conversation_id": "5", "sender_label": "Ann"}  # a bridge's flat transport: all scalars
     assert ROW_META({"transport": flat})["transport"] == flat and "transport" not in ROW_META({"text": "x"})
@@ -410,7 +415,7 @@ def test_a_view_reads_the_same_from_whole_transports_and_from_their_facts_stored
         old.setattr(mi, "_META_VERSION", 4)
         assert _fill(tmp_path)["state"] == "done" and not mi.tail_owed(tmp_path)
         before, whole = views(), _tail_meta(tmp_path)
-    assert "Place slack C42" in before["main"][0] and "thumbsup" in before["place"][2] and "delivery failed" in before["place"][2]
+    assert "Place slack general · thread " in before["main"][0] and "thumbsup" in before["place"][2] and "delivery failed" in before["place"][2]
     assert mi.tail_owed(tmp_path) and "memory_tail" in maintenance.due(tmp_path)  # the old form is another source
     assert views() == before  # read live meanwhile
     assert maintenance.run_job(tmp_path, "memory_tail")["state"] == "done" and not mi.tail_owed(tmp_path)
@@ -470,7 +475,7 @@ def test_a_focus_start_sees_the_same_reading_no_thread_copy_no_task_body_and_no_
             txn.conn.execute("UPDATE tasks SET chat_id=NULL")  # each admitted chat read from its task's body
         assert _fill(tmp_path)["state"] == "done"
         reference = views()
-    assert "beta's work, said in Main" in reference["beta"][2] and "Place slack C42" in reference["main"][0]
+    assert "beta's work, said in Main" in reference["beta"][2] and "Place slack general · thread " in reference["main"][0]
     assert hot.run_hot_facts(tmp_path)["state"] == "done" and _fill(tmp_path)["state"] == "done"
     monkeypatch.setattr(chronicle_store, "_TAIL_PAGE", 4)  # the stored tail in many pages
     assert views() == reference
@@ -480,3 +485,15 @@ def test_a_focus_start_sees_the_same_reading_no_thread_copy_no_task_body_and_no_
         txn.conn.execute("UPDATE task_bodies SET body='{' WHERE task_id IN ('t2', 'pturn1', 'conv1')")
     del specs["wake"]
     assert views() == {name: reference[name] for name in specs}
+
+
+def test_a_finished_roots_sentence_and_its_fold_are_tail_facts_and_its_body_is_not():
+    """Task lines and silent lines read a root's closing sentence, and the block its fold, from the stored facts."""
+    finish = {"ts": "2026-09-05T10:00:00+00:00", "direction": "system", "type": "task_summary", "task_id": "r1",
+              "status": "completed", "text": "A long host summary body " * 20, "wake_summary": "Closed the issue.",
+              "fold_read": True}
+    meta = ROW_META(finish)
+    assert (meta["wake_summary"], meta["fold_read"]) == ("Closed the issue.", True)
+    assert "text" not in meta and "A long host summary body" not in json.dumps(meta)
+    plain = ROW_META({key: value for key, value in finish.items() if key not in ("wake_summary", "fold_read")})
+    assert "wake_summary" not in plain and "fold_read" not in plain

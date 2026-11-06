@@ -123,13 +123,17 @@ def measure_core(core, schemas, *, root, window, reserve, mode='max', prepared=N
         if not parts and fallback:
             add(label, fallback)
     gone = dict(level.addressed)
-    for form, rooms in (
-        ('aggregate', [r for r in snapshot.live_rooms if r['room_id'] in {*gone.get('F1b', ()), *gone.get('F6a', ())}]),
-        ('directory', [r for r in snapshot.live_rooms if r['room_id'] in gone.get('F6', ()) and r['room_id'] not in gone.get('F6a', ())]),
-        ('range', [r for r in snapshot.live_rooms if r['room_id'] in gone.get('F6r', ()) and r['room_id'] not in gone.get('F6', ())]),
-        ('whole', [r for r in snapshot.live_rooms if not any(r['room_id'] in gone.get(s, ()) for s in ('F1b', 'F6r', 'F6', 'F6a'))]),
+    from ouroboros import memory_view_conversations as conversations
+    lined, counted = set(gone.get('F6g', ())), bool(gone.get('F6a'))
+    for form, groups in (
+        ('count', [g for g in snapshot.conversations if g['key'] in lined and counted]),
+        ('line', [g for g in snapshot.conversations if g['key'] in lined and not counted]),
+        ('words by address', [g for g in snapshot.conversations if g['key'] not in lined and any(
+            w['id'] in gone.get('F6w', ()) for room in g['rooms'] for w in room['words'])]),
+        ('whole', [g for g in snapshot.conversations if g['key'] not in lined and not any(
+            w['id'] in gone.get('F6w', ()) for room in g['rooms'] for w in room['words'])]),
     ):
-        add('live rooms', mv._live_text(tuple(rooms), gone) if rooms else '', form, len(rooms))
+        add('other conversations', conversations.render(groups, gone) if groups else '', form, len(groups))
     room = snapshot.room or {}
     notes = room.get('notes', [])
     short_notes = [note for note in notes if note['id'] in gone.get('F8', ())]

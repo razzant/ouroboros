@@ -729,9 +729,9 @@ def entries_of(rows):
 
 
 def test_reactions_are_not_people_replies_arrivals_or_answers(room):
-    from ouroboros.dialogue_provenance import row_author
+    from ouroboros.dialogue_provenance import row_author, row_class
     from ouroboros.memory_inventory import place_activity, room_facts
-    from ouroboros.memory_room_activity import unconsidered_people
+    from ouroboros.memory_view_conversations import nobody_considered
     world = room(["any_message"])
     rows = reacted(world)
     entries = entries_of(rows)
@@ -740,7 +740,8 @@ def test_reactions_are_not_people_replies_arrivals_or_answers(room):
     words = sum(1 for row in rows if row.get("text"))
     assert facts["people"] == words  # only the turn's own inbound "hello"
     assert facts["mine"] == 0 and facts["reactions"] == 7
-    assert unconsidered_people(entries, {}, -1) == words
+    spoken = [(entry, cls) for entry in entries if (cls := row_class(entry[1], pos=entry[2]))["lane"] == 1]
+    assert nobody_considered(spoken, -1) == words  # a silent room's count: reactions are no one's words
     activity = place_activity(entries)
     assert activity["arrivals"] == 1 and activity["unanswered_events"] == 1 and activity["answered_events"] == 0
     assert row_author(next(row for row in rows if row.get("type") == "presence_delivery"))["actor_kind"] == "ouroboros"

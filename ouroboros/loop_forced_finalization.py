@@ -130,6 +130,7 @@ def _record_forced_finalization(
     # path (`_handle_budget_exceeded` -> `_forced_fallback_result`).
     ctx.accumulated_usage.setdefault("terminal_origin", TERMINAL_ORIGIN_HOST_NOTICE)
     ctx.accumulated_usage.pop("wake_summary", None)  # Only the accepting exit can publish the author's sentence.
+    ctx.accumulated_usage.pop("fold_read", None)  # and what it folds into it
     # Every rail returns this candidate's bytes. A wake's quiet selection stays
     # internal here too (the pipeline publishes only the host's outcome notice);
     # an ordinary replacement or the host's own fallback text is speech.
@@ -1579,6 +1580,8 @@ def _forced_final_answer(
         if isinstance(request, dict):  # this accepting exit publishes the author's sentence and comparison
             if request.get("wake_summary"):
                 ctx.accumulated_usage["wake_summary"] = request["wake_summary"]
+                if request.get("fold_read") is True:
+                    ctx.accumulated_usage["fold_read"] = True
             from ouroboros.swarm_receipt import retain_comparison
             retain_comparison(tools_ctx)
         return (

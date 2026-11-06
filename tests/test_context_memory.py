@@ -32,17 +32,18 @@ def test_the_open_conversation_starts_after_the_legacy_frontier(tmp_path):
         assert retold not in changing, retold
 
 
-def test_main_sees_other_rooms_as_lines_and_a_project_task_its_own_room(tmp_path):
-    """One mind: Main names every live room in a line; a task bound to a Project works in that room."""
+def test_main_holds_every_other_conversation_and_a_project_task_its_own_room(tmp_path):
+    """One mind: Main holds every other conversation, a Project's open words whole (it is mine, not a place); a task
+    bound to a Project works in that room and holds Main among its other conversations."""
     from tests._memory_view_context import blocks, section, world
 
     env, memory, rooms = world(tmp_path)
     alpha = f"Project Alpha [chat_id={rooms['alpha']}]"
     _a, _b, main, _cap = blocks(env, memory, {"id": "tmain", "chat_id": 1})
-    live = section(main, "## Live rooms")
-    assert alpha in live and f"Project Beta [chat_id={rooms['beta']}]" in live
-    assert "alpha again" not in main and "beta again" not in main  # other rooms' words stay lines
-    assert "] next please" in section(main, "## This room (Main)")
+    block = section(main, "## Other conversations")
+    assert f"### {alpha}" in block and f"### Project Beta [chat_id={rooms['beta']}]" in block
+    assert "] alpha again" in block and "] beta again" in block
+    assert "] next please" in section(main, "## This room (Main)") and "] next please" not in block
 
     _a, identity, bound, _cap = blocks(env, memory, {"id": "bound", "chat_id": 1})  # bound to alpha, written in Main
     room = section(bound, f"## This room ({alpha})")
@@ -50,8 +51,9 @@ def test_main_sees_other_rooms_as_lines_and_a_project_task_its_own_room(tmp_path
     story = section(identity, "## My story")
     for record in ("Alpha began.", "Alpha worked."):
         assert f"\n  {record}" in story and record not in room
-    assert "next please" not in bound and "beta again" not in bound
-    assert "### Main — open" in section(bound, "## Live rooms")
+    other = section(bound, "## Other conversations")
+    assert "### Main\n" in other and "] next please" in other and "] beta again" in other
+    assert "] alpha again" not in other  # this room's words are read here, once
 
 
 def test_low_mode_keeps_the_open_conversation_verbatim(tmp_path, monkeypatch):
@@ -68,7 +70,7 @@ def test_low_mode_keeps_the_open_conversation_verbatim(tmp_path, monkeypatch):
     room = section(changing, "## This room (Main)")
     assert all(f"] fresh-{i}\n" in room + "\n" for i in range(305))
     assert cap["memory_view"]["floor"]["mode"] == "low"
-    assert not {"F2", "F6", "F7"} & set(cap["memory_view"]["floor"]["steps"])
+    assert not {"F2", "F6w", "F7"} & set(cap["memory_view"]["floor"]["steps"])  # nor my other conversations' words
 
 
 def test_project_workpad_and_journal_not_silently_sliced(tmp_path, monkeypatch):

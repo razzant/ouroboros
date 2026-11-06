@@ -104,7 +104,7 @@ def test_real_scale_root_read_only_report(tmp_path, monkeypatch, capsys, stored_
     monkeypatch.setattr(sqlite3, 'connect', connect)
     result = report(root, 1, 92000, 10000)
     assert connected and fingerprint(root) == before
-    assert sum(row['count'] for row in result['blocks'] if row['block'] == 'live rooms') == 228
+    assert sum(row['count'] for row in result['blocks'] if row['block'] == 'other conversations') == 228
     assert sum(row['count'] for row in result['blocks'] if row['block'] == 'this room notes') == 6
     assert any(row['count'] and row['form'] in ('line', 'aggregate') for row in result['blocks']
                if row['block'] == 'this room notes')
