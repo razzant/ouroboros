@@ -167,7 +167,8 @@ function provenanceMarkup(row, payload, resource, action) {
     const clears = (resource?.resets?.value || []).flatMap(offer => (offer.grants || [])
         .map(grant => fact(grant.label, grant.clears.join(', ') || 'Scope not reported'))).join('');
     const receipt = [action.receipt?.detail, action.receipt?.readback?.detail].filter(Boolean).join(' · ');
-    return `<details class="resource-provenance"><summary data-resource-provenance>Source details</summary><dl>${details}${diagnostics}${clears}
+    const plan = row.identity?.plan ? fact('Plan id', String(row.identity.plan)) : '';
+    return `<details class="resource-provenance"><summary data-resource-provenance>Source details</summary><dl>${plan}${details}${diagnostics}${clears}
         ${receipt ? fact('Reset operation', receipt) : ''}</dl></details>`;
 }
 

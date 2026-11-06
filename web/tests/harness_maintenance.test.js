@@ -53,6 +53,13 @@ test('selected version and release baseline stay independent, including external
         'a failed selected-program probe cannot borrow the managed package version');
     assert.match(maintenanceVersionLine(entry(), { inspectionError: 'offline' }), /Last known/);
     assert.match(harnessMaintenanceMarkup(entry()), /Bundled baseline<\/dt><dd>1\.0\.0/);
+    // A program that is not installed has no version to name and is installed, not updated (typed kind, no words guessed).
+    const missing = entry({ selection: { kind: 'missing', binary: null, version: null }, targets: ['latest'] });
+    assert.equal(maintenanceVersionLine(missing), 'Not installed · Latest not checked');
+    assert.match(harnessMaintenanceMarkup(missing), /data-maintenance-action="latest"[^>]*>Install</);
+    assert.doesNotMatch(harnessMaintenanceMarkup(missing), />Update</);
+    assert.equal(maintenanceOperationLine({ state: 'failed' }, { missing: true }), 'Install failed');
+    assert.equal(maintenanceOperationLine({ state: 'failed' }), 'Update failed');
 });
 
 test('engine facts alone determine buttons for all harnesses and unknown future ones', () => {
@@ -854,4 +861,31 @@ test('the cached whole read asked on mount crosses a family check without arriva
                 `${first} asked first, whole ${whole}, family ${family}, ${reversed ? 'reversed' : 'in order'}`);
         }
     }
+});
+
+test('Checking… answers the check the owner asked for, never the cached read a mount starts', async () => {
+    const reads = [];
+    const { controller } = setup({ harnessMaintenanceInventory: (query) => {
+        const pending = deferred();
+        reads.push({ query, pending });
+        return pending.promise;
+    } });
+    const mount = controller.refresh();
+    assert.equal(controller.view('fixture').inspectionPending, false, 'a cached read of every program relabels no card');
+    await flush();
+    reads[0].pending.resolve({ harnesses: [entry()] });
+    await mount;
+    const own = controller.act('fixture', 'inspect');
+    assert.equal(controller.view('fixture').inspectionPending, true, "the pressed card's own check");
+    assert.equal(controller.view('other').inspectionPending, false, 'a neighbour keeps its words');
+    await flush();
+    reads[1].pending.resolve({ harnesses: [entry()] });
+    await own;
+    const all = controller.refresh({ fresh: true });
+    assert.equal(controller.view('other').inspectionPending, true, 'Refresh checks every program');
+    await flush();
+    reads[2].pending.resolve({ harnesses: [entry()] });
+    await all;
+    assert.equal(controller.view('fixture').inspectionPending, false);
+    controller.dispose();
 });

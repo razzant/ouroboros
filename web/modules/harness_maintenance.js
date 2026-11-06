@@ -29,24 +29,28 @@ export function maintenanceVersionLine(entry, { unknownCurrent = false, inspecti
     const selected = entry.selection || {};
     const managed = selected.kind === 'managed';
     const version = unknownCurrent ? null : selected.version;
-    const ownership = managed ? 'Managed' : selected.kind === 'missing' ? 'Not installed' : 'External install';
+    const missing = selected.kind === 'missing';
+    const ownership = managed ? 'Managed' : missing ? 'Not installed' : 'External install';
     const latest = entry.available?.version
         ? `Latest ${entry.available.version}` : 'Latest not checked';
     // The row's own observation: the inventory's top-level time is minted by every read, cached included.
     const observed = absoluteTime(entry.observedAt);
-    return [`Program ${version || 'version unknown'}`, ownership, latest,
+    // A program that is not there has no version to name: the row says so once.
+    return [...(missing ? [] : [`Program ${version || 'version unknown'}`]), ownership, latest,
         ...(inspectionError ? [observed ? `Last known ${observed}` : 'Last known'] : [])].join(' · ');
 }
 
-export function maintenanceOperationLine(operation) {
+/** The operation's state line; for a program that is not installed the operation is an install, not an update. */
+export function maintenanceOperationLine(operation, { missing = false } = {}) {
     if (!operation) return '';
     const version = operation.target?.version || operation.targetVersion;
     const target = version ? ` ${version}` : '';
+    const verb = missing ? 'Install' : 'Update';
     const labels = {
-        queued: `Update queued${target}`,
-        running: operation.phase === 'installing' ? `Installing${target}…` : `Preparing update${target}…`,
+        queued: `${verb} queued${target}`,
+        running: operation.phase === 'installing' ? `Installing${target}…` : `Preparing ${verb.toLowerCase()}${target}…`,
         succeeded: `Operation completed${operation.after?.version ? ` · Version ${operation.after.version}` : ''}`,
-        failed: 'Update failed', cancelled: 'Update cancelled', interrupted: 'Update interrupted',
+        failed: `${verb} failed`, cancelled: `${verb} cancelled`, interrupted: `${verb} interrupted`,
     };
     let line = labels[operation.state] || 'Operation status unknown';
     if (operation.termination === 'unconfirmed') line += ' · Installer may still be running';
@@ -81,6 +85,7 @@ export function harnessMaintenanceMarkup(entry, view = {}) {
     const pending = Boolean(view.request) || maintenanceOperationPending(operation);
     const busy = Boolean(view.busy);
     const targets = entry?.maintainable && !view.inspectionError ? (entry.targets || []) : [];
+    const missing = entry?.selection?.kind === 'missing';
     const canAct = !pending && !busy && !view.inspectionPending;
     const actions = [];
     if (view.request && !operation) {
@@ -91,7 +96,7 @@ export function harnessMaintenanceMarkup(entry, view = {}) {
     } else {
         const checkLabel = entry?.canCheckLatest ? 'Check latest' : 'Check version';
         actions.push(button('inspect', view.inspectionPending ? 'Checking…' : checkLabel, busy || view.inspectionPending));
-        if (targets.includes('latest')) actions.push(button('latest', 'Update', !canAct));
+        if (targets.includes('latest')) actions.push(button('latest', missing ? 'Install' : 'Update', !canAct));
     }
     const extraActions = [];
     if (targets.includes('version')) extraActions.push(button('version', 'Install exact version…', !canAct));
@@ -109,7 +114,7 @@ export function harnessMaintenanceMarkup(entry, view = {}) {
     const engineProblem = problemText(operation?.problem) || problemText(entry?.availableProblem);
     const notice = error || engineProblem;
     const cause = !error && !problemText(operation?.problem) && engineProblem ? 'Latest version not determined' : '';
-    const status = `${view.operationError && operation ? 'Last observed: ' : ''}${maintenanceOperationLine(operation)}`;
+    const status = `${view.operationError && operation ? 'Last observed: ' : ''}${maintenanceOperationLine(operation, { missing })}`;
     const tone = notice || ['failed', 'interrupted'].includes(operation?.state) ? 'warn' : 'muted';
     const selected = entry?.selection || {};
     const facts = [
@@ -186,6 +191,10 @@ export function createHarnessMaintenanceController({
         for (const state of intents.values()) if (state.inspectionProblem) clearInspectionFailure(state);
     }
 
+    // "Checking…" answers a check the owner asked for: this card's own, or a fresh read of every program (Refresh);
+    // the cached read a mount starts changes no card's words (U106).
+    const inspectionPending = (harness) => reads.has(harness) || Boolean(reads.get(WHOLE_INVENTORY)?.current);
+
     function render() {
         if (disposed) return;
         const problem = inspectionProblem();
@@ -201,7 +210,7 @@ export function createHarnessMaintenanceController({
             element.innerHTML = harnessMaintenanceMarkup(rows.get(harness), {
                 ...state, harness, inspectionProblem: problem,
                 inspectionError: state.inspectionError || whole.inspectionError || problem?.message || '',
-                inspectionPending: reads.has(harness) || reads.has(WHOLE_INVENTORY),
+                inspectionPending: inspectionPending(harness),
             });
             if (focused) element.querySelector(focused)?.focus?.();
             element.querySelector('[data-maintenance-details]')?.addEventListener('click', (event) => {
@@ -428,7 +437,7 @@ export function createHarnessMaintenanceController({
         get harnesses() { return [...rows.keys()]; },
         get inspectionProblem() { return inspectionProblem(); },
         view(harness) {
-            return { ...record(harness), entry: rows.get(harness),
+            return { ...record(harness), entry: rows.get(harness), inspectionPending: inspectionPending(harness),
                 inventoryError: record(WHOLE_INVENTORY).inspectionError || '' };
         },
         poll() {
