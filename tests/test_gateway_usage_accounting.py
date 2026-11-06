@@ -121,6 +121,9 @@ def test_cost_breakdown_uses_ledger_not_later_compatibility_events(tmp_path, mon
         # the reserved attempt, the unresolved one, and the external unmetered
         # dispatch whose price is unknown. Only the settled $0.25 row is final.
         "non_final_rows": 3,
+        # Of those, the rows still open: the reserved and the unresolved attempt. The external call
+        # without a price is not open; no price will arrive for it (the Costs page names only these).
+        "accounting_open_rows": 2,
         "attempt_counts": {"reserved": 1, "settled": 2, "unresolved": 1},
         "authority": "physical_attempt_ledger",
         "limit_usd": 7.5,

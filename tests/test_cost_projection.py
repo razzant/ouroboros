@@ -327,6 +327,17 @@ class TestDisplay:
         # Under a cent is not a priced zero: four places, as the card and the review records print it.
         assert cost_display({"cost_usd": 0.0004, "cost_final": True}) == "$0.0004"
 
+    def test_uncounted_money_names_each_part_and_says_nothing_without_one(self):
+        from ouroboros.cost_projection import uncounted_money_text
+
+        both = {"reserved_usd": 2.5063172, "unresolved_upper_bound_usd": 8117.347347}
+        assert uncounted_money_text(both) == (
+            "$2.51 reserved for calls not yet sent; up to $8117.35 for calls without a known price")
+        assert uncounted_money_text({"unresolved_upper_bound_usd": 1.0}) == "up to $1.00 for calls without a known price"
+        assert uncounted_money_text({"global_reserved_usd": 3.0}, prefix="global_") == "$3.00 reserved for calls not yet sent"
+        assert uncounted_money_text({"reserved_usd": 0.0, "unresolved_upper_bound_usd": None}) == ""
+        assert uncounted_money_text(None) == ""
+
     def test_an_unknown_amount_says_why_as_far_as_it_is_known(self):
         unpriced = {"scope": "own", "tracked_amount": None, "has_unpriced": True, "tracked_final": False,
                     "accounting_open": False, "has_rows": True}

@@ -253,7 +253,7 @@ test('cost dashboard distinguishes loading, unavailable, pending, and final zero
     const pending = costDashboardPresentation(base);
     assert.equal(pending.knownLimit, '$0.00 / $10.00');
     // An older payload carries no cause. Say only what is known — never invent "0 open".
-    assert.equal(pending.final, 'Pending');
+    assert.equal(pending.final, 'No');
     assert.equal(pending.calls, '0');
 
     // A flag without its cause is not reconstructible. This exact snapshot — every dollar
@@ -262,11 +262,17 @@ test('cost dashboard distinguishes loading, unavailable, pending, and final zero
     assert.equal(costDashboardPresentation({
         ...base,
         accounting: { ...base.accounting, non_final_rows: 1 },
-    }).final, 'Pending (1 open)');
+    }).final, 'No (1 open)');
     assert.equal(costDashboardPresentation({
         ...base,
         accounting: { ...base.accounting, non_final_rows: 3 },
-    }).final, 'Pending (3 open)');
+    }).final, 'No (3 open)');
+    // Open rows are the ledger's open ones: calls that will never get a price (subscription
+    // work, in non_final_rows) are not "open" (05.11: 3,176 open among 294,141 non-final).
+    assert.equal(costDashboardPresentation({
+        ...base,
+        accounting: { ...base.accounting, non_final_rows: 294141, accounting_open_rows: 3176 },
+    }).final, 'No (3,176 open)');
     // The count never contradicts the flag it explains, and a settled ledger says "Yes".
     assert.equal(costDashboardPresentation({
         ...base,
@@ -278,7 +284,7 @@ test('cost dashboard distinguishes loading, unavailable, pending, and final zero
     assert.equal(costDashboardPresentation({
         ...base,
         accounting: { ...base.accounting, cost_final: false, non_final_rows: 0 },
-    }).final, 'Pending');
+    }).final, 'No');
 
     const final = costDashboardPresentation({
         ...base,
@@ -308,16 +314,16 @@ test('cost dashboard sets the limit against known spend, open holds beside it (#
         ['$1.50', '$0.50', '$4.00', '$20.00']);
 });
 
-test('legacy breakdown buckets disclose unknown and pending zero amounts', () => {
+test('breakdown buckets say unknown and open amounts in the card\'s words, never a free zero', () => {
     assert.equal(costBucketPresentation({
         cost: 0, calls: 1, unknown_unmetered: 1, non_final_rows: 1, cost_final: false,
-    }), 'cost pending (unmetered=1)');
+    }), 'Cost unknown');
     assert.equal(costBucketPresentation({
         cost: 0, calls: 1, unknown_unmetered: 0, non_final_rows: 1, cost_final: false,
-    }), 'cost pending');
+    }), 'up to $0.00');
     assert.equal(costBucketPresentation({
         cost: 0.25, calls: 2, unknown_unmetered: 1, non_final_rows: 1, cost_final: false,
-    }), '$0.25 (pending, unmetered=1)');
+    }), 'Tracked: $0.25');
     assert.equal(costBucketPresentation({
         cost: 0, calls: 1, unknown_unmetered: 0, non_final_rows: 0, cost_final: true,
     }), '$0.00');

@@ -20,18 +20,16 @@ function optionalFiniteNumber(value) {
     return Number.isFinite(number) ? number : null;
 }
 
-/** Render one legacy breakdown bucket without turning an open zero into free. */
+/** Render one breakdown bucket in the task card's money words (`Cost unknown`, `Tracked:`, `up to`), never
+ *  turning an unpriced or open zero into free: a call with no price (subscription work among them) is unknown,
+ *  not "pending" — no price will arrive for it. */
 export function costBucketPresentation(info) {
     const cost = optionalFiniteNumber(info?.cost);
     if (cost === null) return 'unknown';
     const unknown = optionalFiniteNumber(info?.unknown_unmetered) || 0;
-    const nonFinalRows = optionalFiniteNumber(info?.non_final_rows) || 0;
-    const pending = info?.cost_final === false || nonFinalRows > 0 || unknown > 0;
-    if (!pending) return formatUsd2(cost);
-    const unknownLabel = unknown > 0 ? `unmetered=${Math.trunc(unknown)}` : '';
-    const details = [unknownLabel].filter(Boolean).join(', ');
-    if (cost === 0) return details ? `cost pending (${details})` : 'cost pending';
-    return details ? `${formatUsd2(cost)} (pending, ${details})` : `${formatUsd2(cost)} (pending)`;
+    const open = info?.cost_final === false || (optionalFiniteNumber(info?.non_final_rows) || 0) > 0;
+    if (unknown > 0) return cost === 0 ? 'Cost unknown' : `Tracked: ${formatUsd2(cost)}`;
+    return open ? `up to ${formatUsd2(cost)}` : formatUsd2(cost);
 }
 
 // A plain "saved" is an acknowledgement of what the owner just did and ends by itself; anything the owner may still
@@ -78,10 +76,12 @@ export function costDashboardPresentation(data) {
     // A flag without its cause is not reconstructible. `cost_final: false` holds with every
     // dollar bucket at $0.00 and `unknown` at 0 — an ESTIMATED zero, or a dispatched row
     // whose reservation is exactly zero — so the count of open rows rides beside the flag
-    // it explains rather than in a new tile nobody correlates. Absent on an older payload,
-    // and then this says only what it knows instead of inventing a zero.
-    const nonFinal = optionalFiniteNumber(accounting.non_final_rows);
-    const openCause = nonFinal !== null && nonFinal > 0 ? ` (${Math.trunc(nonFinal)} open)` : '';
+    // it explains rather than in a new tile nobody correlates. Open rows are the ledger's
+    // `accounting_open_rows`; `non_final_rows` also counts calls that will never get a price
+    // (subscription work), which "open" would misname. Absent on an older payload, the
+    // older count stands in; with neither this says only what it knows.
+    const openRows = optionalFiniteNumber(accounting.accounting_open_rows ?? accounting.non_final_rows);
+    const openCause = openRows !== null && openRows > 0 ? ` (${Math.trunc(openRows).toLocaleString('en-US')} open)` : '';
     return {
         state: 'available',
         knownLimit: `${formatUsd2(known)} / ${limit > 0 ? formatUsd2(limit) : '∞'}`,
@@ -90,7 +90,7 @@ export function costDashboardPresentation(data) {
         reserved: formatUsd2(reserved),
         unresolved: formatUsd2(unresolved),
         unknown: String(Math.trunc(unknown)),
-        final: accounting.cost_final === true ? 'Yes' : `Pending${openCause}`,
+        final: accounting.cost_final === true ? 'Yes' : `No${openCause}`,
         calls: String(Math.trunc(calls)),
         topModel: models.length > 0 ? models[0][0] : '-',
     };
@@ -112,8 +112,8 @@ export function initCosts({ state, mount }) {
                 <div class="value" id="cost-known-limit">Loading…</div>
                 <div class="costs-lead-facts">
                     <div class="costs-fact"><div class="label">Cost final</div><div class="value" id="cost-final">Loading…</div></div>
-                    <div class="costs-fact"><div class="label">Unresolved upper bound</div><div class="value" id="cost-unresolved">—</div></div>
-                    <div class="costs-fact"><div class="label">Unknown / unmetered</div><div class="value" id="cost-unknown">—</div></div>
+                    <div class="costs-fact"><div class="label">Unresolved upper bound</div><div class="value" id="cost-unresolved">—</div><div class="settings-inline-note ui-field-help">Calls in flight, or ended without a price, at their reserved ceiling: a worst case, not spending.</div></div>
+                    <div class="costs-fact"><div class="label">Calls without a price</div><div class="value" id="cost-unknown">—</div></div>
                 </div>
             </section>
             <div class="costs-stats-grid">

@@ -569,6 +569,18 @@ def current_costs(sources: Any, drive_root: Any) -> list:
     return rows
 
 
+def uncounted_money_text(summary: Optional[Mapping[str, Any]], *, decimals: int = 2, prefix: str = "") -> str:
+    """What a limit does not count as spending, each part under its own name and only when present (P8:
+    known spend, estimates and unresolved charges stay distinct): reservations of calls not yet sent, and
+    the upper bound of calls without a known price (in flight, or ended without one). '' when neither.
+    ``prefix`` reads an axis's fields (``global_reserved_usd``...)."""
+    src = summary if isinstance(summary, Mapping) else {}
+    reserved, unresolved = (_as_amount(src.get(prefix + key)) or 0.0 for key in ("reserved_usd", "unresolved_upper_bound_usd"))
+    return "; ".join(part for part in (
+        f"${reserved:.{decimals}f} reserved for calls not yet sent" if reserved > 0 else "",
+        f"up to ${unresolved:.{decimals}f} for calls without a known price" if unresolved > 0 else "") if part)
+
+
 def cost_display(source: Optional[Mapping[str, Any]], *, decimals: int = 2) -> str:
     """Human rendering of one task's cost. Null NEVER renders as ``$0.00``.
 

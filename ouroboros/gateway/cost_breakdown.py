@@ -70,6 +70,7 @@ _ACCOUNTING_SUMMARY_FIELDS = (
     # `accounting.non_final_rows`), so the reason for a non-final cost never
     # reached the owner at all.
     "non_final_rows",
+    "accounting_open_rows",  # the rows still open, the cause the Costs page names beside a non-final cost
     "attempt_counts",
 )
 

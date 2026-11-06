@@ -1321,8 +1321,9 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list,
             else ledger_breakdown
         )
         spent = float(ledger_projection.get("settled_usd") or 0.0)  # known: what the limit decides on
-        open_holds = float(ledger_projection.get("reserved_usd") or 0.0) + float(
-            ledger_projection.get("unresolved_upper_bound_usd") or 0.0)
+        from ouroboros.cost_projection import uncounted_money_text
+
+        open_holds = uncounted_money_text(ledger_projection)  # each uncounted part by its ledger name (P8)
         pct = (spent / TOTAL_BUDGET_LIMIT * 100.0) if TOTAL_BUDGET_LIMIT > 0 else 0.0
         budget_remaining_usd = (
             float(ledger_projection.get("remaining_known_usd") or 0.0)
@@ -1352,9 +1353,8 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list,
             lines.append(f"spent_usd: ${spent:.2f} ({pct:.1f}% of budget)")
         else:
             lines.append(f"spent_usd: ${spent:.2f}")
-        if open_holds > 0:
-            lines.append(f"open_holds_usd: ${open_holds:.2f} (reservations and unresolved upper bounds; "
-                         "not counted as spending)")
+        if open_holds:
+            lines.append(f"not counted as spending: {open_holds}")
         lines.append(f"spent_calls: {spent_calls}")
         lines.append(
             f"prompt_tokens: {prompt_tokens}, completion_tokens: {completion_tokens}, "
