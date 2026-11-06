@@ -1,5 +1,6 @@
 import json
 import os
+import pathlib
 import threading
 from types import SimpleNamespace
 
@@ -573,7 +574,9 @@ def test_main_fault_exit_restarts_through_the_installs_own_restarter(monkeypatch
         monkeypatch.setattr(module, "_exit_signalled", exit_event)
         monkeypatch.setattr(module, "_supervisor_stop", stop_event)
     monkeypatch.setattr(server_process, "_stop_source", "external_signal")
-    monkeypatch.setattr(server_process, "_arm_stop_backstop", lambda source: calls.append(("backstop", source)))
+    monkeypatch.setattr(server_process, "_arm_stop_backstop", lambda source, action=None: calls.append(("backstop", source)))
+    monkeypatch.setattr(server_process, "_FAULT_EXIT", None)
+    monkeypatch.setattr(server_process, "_FAULT_EXIT_CODE", None)
     census = {"worker_exits": {"unconfirmed": []}, "live_children": [], "owned_stop": {"state": "completed"}}
     monkeypatch.setattr(server, "_emergency_process_cleanup", lambda: calls.append(("cleanup",)) or census)
     monkeypatch.setattr(server.store_switch, "switch_at_restart",
@@ -607,12 +610,55 @@ def test_main_fault_exit_restarts_through_the_installs_own_restarter(monkeypatch
     # A failed successor returns 1: no half-alive process, no false restart code.
     calls.clear()
     exit_event.clear()
+    server_process._FAULT_EXIT_CODE = None  # the next generation's own decision (monkeypatch restores it)
     successor["fails"] = True
     try:
         assert server.main() == 1
     finally:
         _stop_restart_watcher(server)
     assert [call[0] for call in calls] == ["backstop", "cleanup", "restart"]
+
+
+@pytest.mark.parametrize("launcher_managed", [True, False])
+def test_the_fault_backstop_takes_the_same_door_as_mains_return(monkeypatch, launcher_managed):
+    """The backstop that ends a fault teardown outliving the launcher grace IS the fault door, never a bare
+    exit that leaves a direct install down (IMPL-1 open item 1, accepted as a defect). Launcher-managed: exit 1
+    and no census here, the launcher restarts. Direct: the pre-exec census and the successor (the exec never
+    returns; its double does, and a Windows handoff's parent exits 0); a failed successor exits 1. The decision
+    is taken once: main's return and the timer read one answer, so there is one census and one successor.
+    Without a fault the door answers 0 (quiet)."""
+    from ouroboros import server_process
+
+    calls, exits = [], []
+    monkeypatch.setattr(server_process, "_restart_requested", threading.Event())
+    monkeypatch.setattr(server_process, "_FAULT_EXIT", None)
+    monkeypatch.setattr(server_process, "_FAULT_EXIT_CODE", None)
+    monkeypatch.setattr(server_process.os, "_exit", exits.append)
+    successor = {"fails": False}
+
+    def restart(host, port, **kw):
+        calls.append(("restart", host, port, kw["owner_initiated"]))
+        if successor["fails"]:
+            raise OSError("exec refused")
+
+    server_process.bind_fault_exit("127.0.0.1", 8765, launcher_managed=launcher_managed, repo_dir=pathlib.Path("/repo"),
+                                   cleanup=lambda: calls.append(("cleanup",)), restart=restart)
+    monkeypatch.setattr(server_process, "_stop_source", "external_signal")
+    assert server_process.fault_exit() == 0 and calls == []  # no fault: an ordinary return, nothing taken
+    monkeypatch.setattr(server_process, "_stop_source", "bus_lost")
+    server_process._fault_backstop("bus_lost")
+    if launcher_managed:
+        assert exits == [1] and calls == []
+        assert server_process.fault_exit() == 1 and calls == []  # main's return reads the same answer
+        return
+    assert exits == [0] and calls == [("cleanup",), ("restart", "127.0.0.1", 8765, False)]
+    assert server_process.fault_exit() == 0 and len(calls) == 2, "one decision: no second census or successor"
+    server_process._FAULT_EXIT_CODE = None  # another generation: its successor fails
+    calls.clear()
+    exits.clear()
+    successor["fails"] = True
+    server_process._fault_backstop("bus_lost")
+    assert exits == [1] and [call[0] for call in calls] == ["cleanup", "restart"]
 
 
 def test_a_fault_teardown_cancels_unsaved_rows_as_server_shutdown_naming_the_cause(monkeypatch):
@@ -872,7 +918,7 @@ def _supervisor_harness(monkeypatch, tmp_path, steps):
     monkeypatch.setattr(server_process, "_exit_signalled", rec.exit)
     monkeypatch.setattr(server_process, "_supervisor_stop", rec.stop)
     monkeypatch.setattr(server_process, "_stop_source", "external_signal")
-    monkeypatch.setattr(server_process, "_arm_stop_backstop", rec.backstops.append)
+    monkeypatch.setattr(server_process, "_arm_stop_backstop", lambda source, action=None: rec.backstops.append(source))
     monkeypatch.setattr(workers_mod, "event_bus_exitcode", lambda: None)
     monkeypatch.setattr(workers_mod, "RUNNING", {})
     monkeypatch.setattr(workers_mod, "PENDING", [])

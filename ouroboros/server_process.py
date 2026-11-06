@@ -10,6 +10,7 @@ them without importing ``server`` back.
 
 from __future__ import annotations
 
+import functools
 import ipaddress
 import logging
 import os
@@ -489,24 +490,33 @@ def _launcher_stop_backstop(source: str) -> None:
     os._exit(1)
 
 
-def _arm_stop_backstop(source: str) -> None:
-    """One independent exit after the launcher's own grace, for a stop nobody else would end."""
+def _arm_stop_backstop(source: str, action: Optional[Callable[[str], None]] = None) -> None:
+    """One independent timer after the launcher's own grace, for a stop nobody else would end; ``action``
+    is what it does then: the launcher stop's exit 1, or the fault door's own exit decision."""
     from ouroboros.runtime_limits import LAUNCHER_STOP_GRACE_SEC
 
-    backstop = threading.Timer(LAUNCHER_STOP_GRACE_SEC + 5, _launcher_stop_backstop, args=(source,))
+    backstop = threading.Timer(LAUNCHER_STOP_GRACE_SEC + 5, action or _launcher_stop_backstop, args=(source,))
     backstop.daemon = True
     backstop.start()
 
 
+def _fault_backstop(source: str) -> None:
+    """The fault teardown outlived the launcher grace: take the SAME door ``main()`` would, never a bare exit
+    that leaves a direct install down. Launcher-managed: exit 1 and the launcher restarts; direct: the
+    pre-exec census and the in-place successor (the exec never returns), a failed successor exits 1."""
+    log.critical("Fault stop (%s) did not finish within the launcher grace; taking the fault exit now", source)
+    os._exit(fault_exit())
+
+
 def latch_fault_stop(cause: str) -> None:
     """The fault's irreversible stop, exactly as ``request_shutdown`` latches one, without a server handle:
-    ``on_tick`` ends uvicorn, a settings save revives nothing, the backstop ends a teardown that outlives
-    the launcher grace; the lifespan teardown that follows is the SIGTERM path with this cause."""
+    ``on_tick`` ends uvicorn, a settings save revives nothing, the backstop takes the fault exit for a
+    teardown that outlives the launcher grace; the lifespan teardown that follows is the SIGTERM path."""
     global _stop_source
     _stop_source = cause
     _exit_signalled.set()
     _supervisor_stop.set()
-    _arm_stop_backstop(cause)
+    _arm_stop_backstop(cause, _fault_backstop)
 
 
 def _saved_running_count() -> int:
@@ -721,9 +731,37 @@ def core_loss_recovery_turn(root: Any, chat_id: int, pending: Any, *, admit: Cal
     return True
 
 
-def fault_exit(host: str, port: int, *, launcher_managed: bool, repo_dir: pathlib.Path,
-               cleanup: Callable[[], Any], restart: Callable[..., Any]) -> int:
-    """``main()``'s return after a fault latched the stop; 0 when no fault did (an ordinary return).
+_FAULT_EXIT: Optional[Callable[[], int]] = None  # main() binds the one decision once its port is known
+_FAULT_EXIT_LOCK = threading.Lock()
+_FAULT_EXIT_CODE: Optional[int] = None  # the decision taken, so main's return and the backstop never take two
+
+
+def bind_fault_exit(host: str, port: int, *, launcher_managed: bool, repo_dir: pathlib.Path,
+                    cleanup: Callable[[], Any], restart: Callable[..., Any]) -> None:
+    """``main()`` binds the fault door's one exit decision before serving: its own return and the backstop
+    timer take the same one (``fault_exit``), so neither can leave a direct install down."""
+    global _FAULT_EXIT
+    _FAULT_EXIT = functools.partial(_decide_fault_exit, host, port, launcher_managed=launcher_managed,
+                                    repo_dir=repo_dir, cleanup=cleanup, restart=restart)
+
+
+def fault_exit() -> int:
+    """``main()``'s return after a fault latched the stop, and the backstop's exit code: the bound decision,
+    taken once (the first caller, main or the backstop timer, decides and the other reads the same answer,
+    so the census and the successor happen once). 0 without a fault; 1 for a fault latched before any
+    binding (the launcher reading)."""
+    global _FAULT_EXIT_CODE
+    if _stop_source not in FAULT_CAUSES or _restart_requested.is_set():
+        return 0
+    with _FAULT_EXIT_LOCK:
+        if _FAULT_EXIT_CODE is None:
+            _FAULT_EXIT_CODE = _FAULT_EXIT() if _FAULT_EXIT is not None else 1
+        return _FAULT_EXIT_CODE
+
+
+def _decide_fault_exit(host: str, port: int, *, launcher_managed: bool, repo_dir: pathlib.Path,
+                       cleanup: Callable[[], Any], restart: Callable[..., Any]) -> int:
+    """The fault door's exit decision (§2(b)); ``fault_exit`` takes it once.
 
     Launcher-managed installs (desktop, Linux browser fallback, managed Docker, systemd, Android) return 1:
     the launcher's crash path restarts the same code (sleep 2 + 3 s, fuse 5 in 120 s) and spares the shared

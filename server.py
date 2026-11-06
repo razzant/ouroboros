@@ -55,8 +55,8 @@ from ouroboros.server_process import (  # noqa: F401
     _supervisor_stop, _exit_signalled,
     _SignalStopServer, _embedded_uvicorn_server,
     capture_server_source_baseline, server_stop_cause, log,
-    FAULT_BUS_LOST, FAULT_LOOP_FAILED, end_generation_on_fault, fault_cancel_reason, fault_exit,
-    held_saved_work_count, previous_fault_sentence,
+    FAULT_BUS_LOST, FAULT_LOOP_FAILED, bind_fault_exit, end_generation_on_fault, fault_cancel_reason,
+    fault_exit, held_saved_work_count, previous_fault_sentence,
 )
 from ouroboros.server_routing_context import (  # noqa: F401
     _active_direct_roots,
@@ -1548,6 +1548,7 @@ def main() -> int:
                                   server_host_source=host_source) as listener:
             actual_port = listener.getsockname()[1]
             write_port_file(PORT_FILE, actual_port)
+            bind_fault_exit(args.host, actual_port, launcher_managed=_LAUNCHER_MANAGED, repo_dir=REPO_DIR, cleanup=_emergency_process_cleanup, restart=_restart_current_process_impl)  # the fault door: main's return and its backstop
             log.info("Starting Ouroboros server on %s:%d", args.host, actual_port)
             server.run(sockets=[listener])
     finally:
@@ -1555,8 +1556,7 @@ def main() -> int:
         if _restart_requested.is_set():
             restart_thread.join()  # uvicorn returning does not complete cleanup or direct re-exec
 
-    return fault_exit(args.host, actual_port, launcher_managed=_LAUNCHER_MANAGED, repo_dir=REPO_DIR,
-                      cleanup=_emergency_process_cleanup, restart=_restart_current_process_impl)  # 0 without a fault
+    return fault_exit()  # the bound fault decision, taken once; 0 without a fault
 
 
 def executable_main() -> None:
