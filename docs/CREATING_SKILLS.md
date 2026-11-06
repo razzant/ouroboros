@@ -1118,8 +1118,12 @@ Use the connector's ordinary content-hash-bound skill token for:
   advertises canonical output identities and separate producer/child references in
   work polls. `presence_wake_facts` lists accepted provider facts.
   `presence_explicit_completion: 1` advertises that a new completion's outcome comes from
-  its explicit answer, silence or handoff, never from a delivery receipt. An absent key means
-  an older host without this promise: any confirmed tool receipt may suppress its final.
+  its explicit answer, silence or handoff, never from a delivery receipt. Where the event's own
+  connector declares an `effect: message` tool whose targets lie within one conversation (account,
+  its conversation argument, its thread argument), a focus's finish is its record and people hear
+  only what it sends through that tool: the outcome is `silent` and the text stays on the card. A
+  connector without such a tool (a peer URL, mail recipients) keeps the final as its reply. An absent
+  key means an older host without this promise: any confirmed tool receipt may suppress its final.
   `presence_history_import_version: 1` advertises `POST /presence/history` ("Importing
   earlier history" below); `presence_source_order_version: 1` advertises
   `event.message.source_order` on live and history events alike: an integer from 0 to
@@ -1173,13 +1177,15 @@ Use the connector's ordinary content-hash-bound skill token for:
   per message the host reads an author id (`user`, `actor_id`, `author_id`, `platform_actor_id`, or a nested
   `actor`/`author` mapping), a name (`user_profile`/`bot_profile` `real_name`/`display_name`/`name`,
   `author_name`, `display_name`, `username`), a time (`sent_at`, else a numeric `ts`/`timestamp` epoch), the
-  `text` and an id (`message_id`, `id`, `ts`). The newest messages render whole under
-  `FOCUS_THREAD_SNAPSHOT_CHARS` (`ouroboros/config.py`); an omission names its count and the exact readers
-  (the room row's `memory_read(source_ref=…)` address, the connector's thread read tool).
+  `text` and an id (`message_id`, `id`, `ts`). The snapshot renders whole: the connector's capture is
+  already bounded, and the frame never cuts it.
 - Optional `event.message.forward_origin` (any non-empty value): the message carries words another author wrote
   (a forward, or another person's text the event copies under the sender). The host never records such an event as
-  its sender's own words: an addressed message from an account the place confirms as the owner's is the owner's words
-  at a turn's opening, mid-turn and when a focus hands it on; a forward of it is not.
+  its sender's own words. A message from an account the place confirms as the owner's is their words by provenance
+  (said where others can hear) at a turn's opening, mid-turn and when a focus hands it on; a forward of it is not.
+  Provenance is never a verdict: whom the words are for, and whether they ask for work, is the mind's reading. An
+  order exists only where the mind cites their exact words (`owner_words` of `start_task`, `schedule_followup`,
+  `manage_schedules` update) and the host verifies the bytes inside a message of theirs that reached that run.
 - Optional `event.message.reaction` (object with `schema_version: 1`; `text` and files empty; an object
   without that key is not this fact): `change` `add`/`remove`/`replace`/`count`; `old`/`new` lists hold provider
   `{type, value}`; `count` instead has only `counts` entries `{type, value, count}` (non-negative integer),
@@ -1262,8 +1268,11 @@ arrivals alone never do, though the owner's own words in one are owner input its
 its close is acknowledged in its transcript, never read by its model, and starts no round.
 
 A focus, or a root promoted or scheduled from it, uses ordinary `finish_task`, including
-`silent=true`; receipts never choose its outcome. An answer after any send, file or
-reaction is new speech; started work stays `deferred` (empty after silence).
+`silent=true`; receipts never choose its outcome. Where the connector speaks by an in-conversation
+message tool (above) a focus's finish is its record: a send may ride in the same response, a finish
+with words that sent nothing there returns once with the facts, the next is accepted; a Silent or
+Paused place and Advises keep the held draft. Elsewhere, and for a promoted root, an answer after
+any send, file or reaction is new speech; started work stays `deferred` (empty after silence).
 Automatic speech passes the `place_reply` Safety check, which sees the turn's own sends in that conversation
 (receipts and receipt-less calls); a flag returns to the mind with the destination, those sends and silence as a valid finish.
 Silent/Paused/disconnected destinations and Advises autonomy hold the reply
