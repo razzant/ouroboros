@@ -92,6 +92,15 @@ def test_launcher_managed_identity_rejects_copied_or_mismatched_markers(monkeypa
     assert git_ops._is_launcher_managed_repo() is False
     (repo / ".git" / git_ops.MANAGED_REPO_META_NAME).write_text("{}", encoding="utf-8")
     assert git_ops._is_launcher_managed_repo() is False
+    legacy = {"schema_version": 1, "app_version": "7.4.0", "managed_local_branch": "ouroboros"}  # no path before v7.4.1
+    (repo / ".git" / git_ops.MANAGED_REPO_META_NAME).write_text(json.dumps(legacy), encoding="utf-8")
+    assert git_ops._is_launcher_managed_repo() is True  # a launcher that passes no path: its own record
+    monkeypatch.setenv("OUROBOROS_MANAGED_REPO_DIR", str(tmp_path / "another-repo"))
+    assert git_ops._is_launcher_managed_repo() is False  # a launcher that names a path is judged by it
+    monkeypatch.delenv("OUROBOROS_MANAGED_REPO_DIR")
+    (repo / ".git" / git_ops.MANAGED_REPO_META_NAME).write_text(
+        json.dumps({**legacy, "managed_repo_dir": str(tmp_path / "another-repo")}), encoding="utf-8")
+    assert git_ops._is_launcher_managed_repo() is False  # a record copied from another checkout
     (repo / ".git" / git_ops.MANAGED_REPO_META_NAME).write_text(
         json.dumps({"managed_repo_dir": str(repo.resolve())}), encoding="utf-8")
     assert git_ops._is_launcher_managed_repo() is True

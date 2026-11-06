@@ -206,12 +206,17 @@ def launcher_managed_repo_matches(
     if target_matches:
         return True
     # A stale launcher-path environment value must not demote a valid managed
-    # checkout. The metadata witness is path-bound and is the only fallback;
-    # an empty or copied JSON file is not managed authority.
+    # checkout. The metadata witness is path-bound: an empty JSON file, or one
+    # naming another checkout, is not managed authority. A launcher older than
+    # v7.4.1 passes no path and rewrites its pathless record on every start;
+    # under it that non-empty record stays the witness (older launchers start
+    # newer checkouts, docs/architecture/01), so a copy of it is not told apart.
     try:
         raw = json.loads((repo / ".git" / MANAGED_REPO_META_NAME).read_text(encoding="utf-8"))
         recorded = str(raw.get("managed_repo_dir") or "").strip() if isinstance(raw, dict) else ""
-        return bool(recorded) and pathlib.Path(recorded).resolve(strict=False) == repo.resolve(strict=False)
+        if not recorded:
+            return not target and isinstance(raw, dict) and bool(raw)
+        return pathlib.Path(recorded).resolve(strict=False) == repo.resolve(strict=False)
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
         return False
 
