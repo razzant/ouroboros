@@ -9133,9 +9133,10 @@ body.keyboard-open .project-panel {
     object-fit: cover;
 }
 
-/* Touch: actions are always visible (no hover), and big enough for a finger. */
+/* Touch: actions are always visible (no hover), and big enough for a finger. The photo's ••• is a locked .btn, so it
+   takes the minimum through its height token (the lock, ui.css); the attachment's × is a plain button. */
 @media (pointer: coarse) {
-    .chat-photo-actions summary,
+    .chat-photo-actions summary { --control-h: var(--touch-target-min); min-width: var(--touch-target-min); }
     .attach-remove {
         min-width: var(--touch-target-min);
         min-height: var(--touch-target-min);
@@ -9170,12 +9171,12 @@ body.keyboard-open .project-panel {
     z-index: 2;
 }
 
-/* The shared floating capsule (.btn.btn-float) sits over the photo. */
+/* The shared floating capsule (.btn.btn-float.btn-sm) sits over the photo: 30px wide, its dots centred with no inline
+   inset (the inset is the control's token: the lock writes the padding). */
 .chat-photo-actions summary {
+    --control-pad-x: 0;
     display: grid;
     width: 30px;
-    height: 28px;
-    padding: 0;
     place-items: center;
     list-style: none;
 }
@@ -9191,7 +9192,6 @@ body.keyboard-open .project-panel {
     align-items: center;
     width: 100%;
     min-width: 230px;
-    padding: 9px;
     font: inherit;
     text-align: left;
 }
@@ -9394,10 +9394,9 @@ body.keyboard-open .project-panel {
     gap: var(--space-2);
 }
 
-/* The chosen view, in the theme choice's selected paint (ui.css). */
+/* The chosen view: the primary ink on a faint crimson wash (no edge: the lock keeps every control's border clear). */
 .document-reader-views .btn[aria-pressed="true"] {
     color: var(--text-primary);
-    border-color: var(--focus-accent-border);
     background: var(--accent-12);
 }
 

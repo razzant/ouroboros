@@ -93,6 +93,9 @@
     margin-inline-start: auto;
 }
 .chat-card-actions:empty { display: none; }
-.chat-card-action,
-.chat-card-expand { min-height: var(--touch-target-min); }
+/* The actions row wraps on a phone, so under a finger its buttons take the touch minimum as their own height (the
+   control token: the lock writes the box), and no reach covers a neighbour (DESIGN "Touch and containment"). */
+@media (pointer: coarse) {
+    .chat-card-actions { --control-h: var(--touch-target-min); }
+}
 .chat-card-expand { align-self: flex-start; }
