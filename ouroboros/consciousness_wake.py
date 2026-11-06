@@ -409,7 +409,7 @@ _KIND_WORDS = {  # (one, many)
     "card_answer": ("card answer", "card answers"), "task_terminal": ("task terminal", "task terminals"),
     "direct_turn": ("own direct turn ended (counted, not listed: its exchange is the dialogue itself)",
                     "own direct turns ended (counted, not listed: their exchange is the dialogue itself)"),
-    "direct_turn_summary": ("own direct turn ended with its line", "own direct turns ended with their lines"),
+    "direct_turn_summary": ("own direct turn ended, listed", "own direct turns ended, listed"),
     "task_error": ("task runner failure", "task runner failures"),
     "card_state": ("card closed unanswered", "cards closed unanswered"),
     "outstanding_card": ("outstanding card", "outstanding cards"),
@@ -493,11 +493,11 @@ def _event_line(kind: str, row: Dict[str, Any], results: Dict[str, Dict[str, Any
             retained = {"task_id": task_id, "type": "task_summary", "text": "",
                         "presence_recovery": retained_turn_facts(result, task_id),
                         "source_event": presence.get("event"), "source_text": presence.get("observed_text")}
-            return f"- Presence turn {task_id} {status}{where}, {when}; {render_row_text(retained)}{summary}"
+            return f"- Presence turn {task_id} {status}{where}, {when}; {render_row_text(retained)}{summary}{opened}"
         outcome = str(metadata.get("presence_outcome") or "unknown")
         work = str(metadata.get("presence_work_ref") or "")
         return (f"- Presence turn {task_id} {status}{where}, {when}; Presence outcome={outcome}; see get_task_result"
-                + (f"; deferred work={work}" if work else "") + summary)
+                + (f"; deferred work={work}" if work else "") + summary + opened)
     parent = str(row.get("parent_task_id") or result.get("parent_task_id") or "")
     role = str(row.get("delegation_role") or result.get("delegation_role") or "")
     noun = f"child task {task_id} of {parent}" if role == "subagent" and parent else f"task {task_id}"
@@ -651,7 +651,7 @@ class WakeObservation:
         return text + (f"; gaps: {', '.join(self.gaps)}" if self.gaps else "")
 
     def full_text(self) -> str:
-        """The observation when it fits; only direct turns without an authored line stay counted alone."""
+        """The observation when it fits; a direct turn with no authored line and no open Continue stays counted."""
         lines = [self.trigger] if self.trigger else []
         if self.events:
             lines.append(f"Observed since the last accepted wake ({self.composition()}; {self._coverage()}):")

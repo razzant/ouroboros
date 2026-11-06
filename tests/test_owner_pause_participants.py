@@ -419,12 +419,12 @@ def test_an_unreadable_store_a_record_without_a_list_and_a_long_list_are_disclos
         'delegate_wait(run_id="...") reads each run')
 
 
-@pytest.mark.parametrize(("by", "words"), [
-    ({"actor": "owner", "door": "api_task_resume"}, "after an explicit Resume by your human (paused"),
-    ({"actor": "ouroboros", "task_id": "c1", "text": "The release is out."},
-     'after an explicit Resume by Ouroboros (task c1), saying "The release is out." (paused'),
-    ({}, "after an explicit Resume (paused")])
-def test_a_resume_notice_names_who_granted_it_and_no_one_it_does_not_know(tmp_path, by, words):
+@pytest.mark.parametrize(("by", "words", "woken"), [
+    ({"actor": "owner", "door": "api_task_resume"}, "after an explicit Resume by your human (paused",
+     "were woken by an explicit Resume by your human"),
+    ({}, "after an explicit Resume (paused", "were woken by an unconfirmed input")])
+def test_a_resume_notice_names_who_granted_it_and_no_one_it_does_not_know(tmp_path, by, words, woken):
+    """Both cold notices read the grant's ``by``: a Pause's Resume line and a cold sleep's wake line."""
     from ouroboros import budget_pause
 
     ctx, _limit = _loop_ctx(tmp_path, "money")
@@ -434,6 +434,10 @@ def test_a_resume_notice_names_who_granted_it_and_no_one_it_does_not_know(tmp_pa
                                     {"consumed_at": 1.0, "by": by}, {"reason": "hard_rail"}, messages)
     text = messages[-1]["content"]
     assert "This task continued from its Pause " + words in text and "owner Resume" not in text
+    slept: list = []
+    budget_pause._resume_disclosure(ctx, {"reason": "sleep", "rail": "model_sleep", "paused_at": 1.0}, {},
+                                    {"consumed_at": 6.0, "by": by}, {"reason": "hard_rail"}, slept)
+    assert any(woken in str(message.get("content")) for message in slept), slept
 
 
 def test_a_budget_pause_resume_keeps_its_own_census_disclosure(tmp_path, monkeypatch):

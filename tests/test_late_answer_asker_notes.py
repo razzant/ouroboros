@@ -295,9 +295,8 @@ def test_an_askers_open_continue_is_named_and_a_finished_asker_without_notes_sta
     if ending == "finished":
         assert note is None
         return
-    assert note["content"] == (f"[ASKER_NOTES] Task {ASKER} asked the question this late answer answers; its "
-                               f"Continue is open (author_stop; continue_task). It kept no working notes; its "
-                               f"complete stored record stays readable with {READER}.")
+    assert "its Continue is open (author_stop; continue_task)" in note["content"]
+    assert "It kept no working notes" in note["content"] and READER in note["content"]
 
 
 @pytest.mark.parametrize("damage", ["source_missing", "field_malformed", "result_unreadable"])

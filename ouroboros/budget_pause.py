@@ -986,7 +986,7 @@ def enter_owner_pause(limit_ctx: Any) -> None:
                     lambda: consume_warm_resume(ctx))
     # No root argument: ``request_pause`` names the tree the fence above was read from.
     request_pause(limit_ctx, rail=RAIL_OWNER_PAUSE, scope="root",
-                  reason_text="The owner paused this task tree.")
+                  reason_text="This task tree was paused.")
     usage = limit_ctx.accumulated_usage
     published = False
     while wait_member_fence(ctx):
@@ -1337,7 +1337,8 @@ def _resume_disclosure(ctx: Any, row: Dict[str, Any], state: Dict[str, Any], gra
     # Prefer the grant-time re-observation over the checkpoint's pause-time copy;
     # label its age so fresh evidence never appears stale (or vice versa).
     fresh_observation = row.get("external_runs") if isinstance(row.get("external_runs"), dict) else None
-    external_observation = fresh_observation if fresh_observation is not None else (state.get("external_runs") or {})
+    external_observation = fresh_observation if fresh_observation is not None else (
+        state.get("external_runs") or {})
     external_basis = ("re-observed at this Resume" if fresh_observation is not None
                       else "as recorded at the pause, NOT re-observed")
     external = external_observation.get("runs") or []

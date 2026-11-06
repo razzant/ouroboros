@@ -484,8 +484,8 @@ ESCALATE_TOOL_SCHEMA: Dict[str, Any] = {
         "wait_for_answer": {"type": "boolean", "default": False, "description": (
             "Live roots: wait for addressed owner input before another model round. Waiting keeps "
             "this work alive with what it holds — its browser, task-session connections, services "
-            "and, when it holds one, its project's lane — until the answer, the wait bound or another "
-            "ending. Default false: the card stays answerable while the work goes on under its stated "
+            "and, when it holds one, its project's lane — until the answer, the wait bound, a restart or "
+            "another ending. Default false: the card stays answerable while the work goes on under its stated "
             "assumption.")},
         "max_wait_minutes": {"type": "integer", "description": (
             "Optional positive whole-minute bound for wait_for_answer, within the task's "

@@ -901,7 +901,7 @@ def resumer_words(by: Any) -> str:
         return "an explicit Resume by your human"
     if actor != "ouroboros":
         return ""
-    reason = str(by.get("text") or "").strip()[:300]
+    reason = " ".join(str(by.get("text") or "").split())  # whole: a resumer's reason is never cut
     return ("an explicit Resume by Ouroboros" + (f" (task {by['task_id']})" if by.get("task_id") else "")
             + (f', saying "{reason}"' if reason else ""))
 

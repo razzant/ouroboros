@@ -171,7 +171,7 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # keeps the work alive with what it holds, until when, and what the default does; nothing else changed
     # (1a3dfcea... before).
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "3d3638592fadc2c7bb60ddbbc42cf320d9b41fd3298a16308bd8383b46d4347e"
+        "969c7fe6e338a3d8ca1a9935161b9e82c0cada04d9b972b4da458501caf09918"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)
