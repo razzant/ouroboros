@@ -108,7 +108,16 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
                     | {room for room, tasks in running.items() if tasks}) - {str(spec.room_id)})
     linked = linked_rows(root, store, by_room)
     here = {entry[0]["row_sha256"] for entry in by_room.get(str(spec.room_id), ())} if spec.room_lanes else set()
-    getattr(label, "warm", lambda _rooms: None)(rooms)
+    # Labels come from the rows in hand (open and sealed): a room's newest row that came over a transport, whose tail
+    # metadata 7 keeps its conversation's name and audience. Only rooms none of whose rows carries them, and their
+    # conversations, read the newest inbound row's transport, all in one read (``warm``), never a row per room.
+    in_hand = {room: [*sealed.get(room, ()), *by_room.get(room, ())] for room in rooms}
+    samples = {room: next((meta for _address, meta, _pos in reversed(rows) if meta.get("transport")
+                           or meta.get("presence_provenance")), None) for room, rows in in_hand.items()}
+    unnamed = [room for room, meta in samples.items() if _scalars([meta] if meta else []) is None]
+    places = (conversation_of(room, in_hand[room], notes.get(room, []), membership.project_chat_ids)[1]
+              for room in unnamed)
+    getattr(label, "warm", lambda _rooms: None)([*unnamed, *(_conversation_chat(place) for place in places if place)])
     warm_lineage(lineage, ((meta, pos) for entries in sealed.values() for _address, meta, pos in entries))
     groups: Dict[str, Dict[str, Any]] = {}
     shown: List[Tuple[Dict[str, Any], Entry, Dict[str, Any], Any]] = []  # (room, row, author, earlier copy or None)
@@ -139,11 +148,10 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
         retold = max((pos for _a, meta, pos in held if meta.get("wake_summary")), default=-1)
         sentence = next(((meta["wake_summary"], meta.get("ts")) for _a, meta, _p in reversed(held) if meta.get("wake_summary")),
                         None)
-        sample = next((meta for _address, meta, _pos in reversed(held) if meta.get("transport")
-                       or meta.get("presence_provenance")), None)
+        sample = samples[room]
         group = groups.setdefault(key, {"key": key, "rooms": [], "running": [], "latest": "", "place": bool(place)})
         if place and "label" not in group:  # a conversation; its rooms carry their own ids
-            group["label"] = conversation_label(label, place, [meta for _a, meta, _p in held])
+            group["label"] = conversation_label(label, place, [meta for _a, meta, _p in in_hand[room]])
         facts = memory_inventory.room_facts(store, room, entries, lineage, len(notes.get(room, ())),
                                             classes=[cls for _entry, cls in classed])
         latest = str(facts.get("latest") or "")
@@ -203,15 +211,26 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
 def conversation_label(label: Callable[..., str], place: Mapping[str, Any], rows: List[Mapping[str, Any]]) -> str:
     """A place conversation's own name, as each of its rooms' labels begins (``RoomLabelResolver``): its provider,
     account and conversation without a thread, named by the newest of ``rows`` that carries the conversation's scalars."""
+    flow = {**{key: place.get(key) for key in ("provider", "account_id", "conversation_id")}, "thread_id": ""}
+    scalars = _scalars(rows)
+    named = label(_conversation_chat(place), {"transport": {**flow, **({"conversation": scalars} if scalars else {})}})
+    return named.rsplit(" [chat_id=", 1)[0]
+
+
+def _scalars(rows: List[Mapping[str, Any]]) -> Optional[Mapping[str, Any]]:
+    """The conversation's own name and audience (tail metadata 7) from the newest of ``rows`` that carries them."""
+    carried = (row["transport"] for row in reversed(rows) if isinstance(row.get("transport"), Mapping))
+    return next((transport["conversation"] for transport in carried if isinstance(transport.get("conversation"), Mapping)),
+                None)
+
+
+def _conversation_chat(place: Mapping[str, Any]) -> int:
+    """A place conversation's own chat id, without a thread: the room ``conversation_label`` names it by."""
     from ouroboros.presence_bindings import conversation_key
     from ouroboros.presence_runner import presence_chat_id
 
-    flow = {**{key: place.get(key) for key in ("provider", "account_id", "conversation_id")}, "thread_id": ""}
-    scalars = next((row["transport"]["conversation"] for row in reversed(rows)
-                    if isinstance((row.get("transport") or {}).get("conversation"), dict)), None)
-    chat = presence_chat_id(conversation_key(flow["provider"], flow["account_id"], flow["conversation_id"], ""))
-    named = label(chat, {"transport": {**flow, **({"conversation": scalars} if scalars else {})}})
-    return named.rsplit(" [chat_id=", 1)[0]
+    keys = [place.get(key) for key in ("provider", "account_id", "conversation_id")]
+    return presence_chat_id(conversation_key(*keys, ""))
 
 
 def _repeats(rows: List[Entry]) -> Dict[str, Dict[str, Any]]:

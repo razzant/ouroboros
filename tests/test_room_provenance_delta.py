@@ -214,10 +214,10 @@ def test_presence_rows_of_one_room_share_one_label_from_transport_facts():
     )
 
 
-def test_a_place_room_reads_by_my_label_of_its_place_its_own_name_and_audience(tmp_path):
+def test_a_place_room_reads_by_my_label_of_its_place_its_own_name_and_audience(tmp_path, monkeypatch):
     """The registry names a place; an account-wide place's room names itself from its conversation scalars, with who
-    reads it; a room with no row in hand is named from its latest inbound row, read once for every room asked
-    together; a room no row and no record names stays unknown, never guessed."""
+    reads it; a room with no row in hand is named from its latest inbound row's transport, read once for every room
+    asked together and never by decoding the row; a room no row and no record names stays unknown, never guessed."""
     from ouroboros import dialogue_store as ds, places
     from ouroboros.presence_bindings import conversation_key
     from ouroboros.presence_runner import presence_chat_id
@@ -239,8 +239,10 @@ def test_a_place_room_reads_by_my_label_of_its_place_its_own_name_and_audience(t
     ds.append(tmp_path, "chat", {"ts": "2026-11-06T00:00:00+00:00", "chat_id": channel, "direction": "in", "text": "hi",
                                  "source": "presence:slack",
                                  "transport": {**sl, "conversation": {**sl["conversation"], "is_im": True}}})
-    fresh = RoomLabelResolver(tmp_path)
+    fresh, decoded = RoomLabelResolver(tmp_path), []
+    monkeypatch.setattr(ds, "decode", lambda body, _decode=ds.decode: decoded.append(body) or _decode(body))
     fresh.warm([channel, group])
+    assert decoded == []  # the room's transport alone leaves the store: no row is decoded per room
     assert fresh.label({"chat_id": channel}) == f"Slack · ml-public · DM · thread 1.5 [chat_id={channel}]"
     assert fresh.label({"chat_id": group}) == f"Unknown room [chat_id={group}]"
 

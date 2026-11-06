@@ -1135,8 +1135,9 @@ class RoomLabelResolver:
         return self._named[chat_id]
 
     def warm(self, chat_ids: Iterable[Any]) -> None:
-        """Read at once the latest inbound row of each room not yet named (``dialogue_store.latest_inbound``): what
-        names a room whose rows in hand carry no conversation scalars, or that has no open row at all."""
+        """Read at once the transport of the latest inbound row of each room not yet named, never the row itself
+        (``dialogue_store.latest_inbound_transport``): what names a room whose rows in hand carry no conversation
+        scalars, or that has no row in hand at all."""
         wanted = set()
         for value in chat_ids:
             chat_id, _unresolved = self._chat_id({"chat_id": value})
@@ -1148,12 +1149,11 @@ class RoomLabelResolver:
         try:
             from ouroboros import dialogue_store
 
-            found = dialogue_store.latest_inbound(self._root, wanted)
+            found = dialogue_store.latest_inbound_transport(self._root, wanted)
         except Exception:  # an unreadable dialogue store leaves a room unnamed, never guessed
             found = {}
         for chat_id in wanted:
-            row = found.get(chat_id)
-            self._inbound[chat_id] = dict(_mapping(row.row.get("transport"))) if row is not None else {}
+            self._inbound[chat_id] = dict(_mapping(found.get(chat_id)))
 
     def _place_label(self, facts: Mapping[str, Any], place_id: str, chat_id: int) -> str:
         """``<my human's label of the place>[ · <the conversation's own name>][ · <audience>][ · thread <id>]``: the

@@ -946,14 +946,18 @@ def last_inbound(root: Any, chat_id: Optional[int], *, before: Optional[int] = N
     return None if record is None else _row(record)
 
 
-def latest_inbound(root: Any, chat_ids: Iterable[int]) -> Dict[int, Row]:
-    """Each chat's newest inbound row, by chat id, in one read (``dialogue_inbound``: one seek a chat)."""
+def latest_inbound_transport(root: Any, chat_ids: Iterable[int]) -> Dict[int, Dict[str, Any]]:
+    """Each chat's newest inbound row's ``transport``, by chat id, in one read (``dialogue_inbound``: one seek a chat):
+    only that object leaves the store, never the row (what names a room, ``RoomLabelResolver.warm``)."""
     wanted = json.dumps(sorted({int(chat) for chat in chat_ids}))
     with transaction(root, write=False) as conn:
-        page = _page(conn, "WHERE stream='chat' AND seq IN (SELECT (SELECT seq FROM dialogue INDEXED BY dialogue_inbound "
-                     "WHERE stream='chat' AND chat_id=+value AND direction='in' ORDER BY seq DESC LIMIT 1) "
-                     "FROM json_each(?))", (wanted,))
-    return {int(row.row["chat_id"]): row for row in map(_row, _decoded(page)) if row.row.get("chat_id") is not None}
+        page = conn.execute(
+            "SELECT json_group_array(json_array(chat_id, json_extract(body, '$.transport'))) FROM dialogue "
+            "WHERE stream='chat' AND seq IN (SELECT (SELECT seq FROM dialogue INDEXED BY dialogue_inbound "
+            "WHERE stream='chat' AND chat_id=+value AND direction='in' ORDER BY seq DESC LIMIT 1) FROM json_each(?))",
+            (wanted,)).fetchone()[0] or "[]"
+    return {int(chat): transport for chat, transport in json.loads(page)
+            if chat is not None and isinstance(transport, dict)}
 
 
 def newest(root: Any, stream: str, *, limit: int, before: Optional[int] = None) -> List[Row]:
