@@ -485,8 +485,11 @@ ESCALATE_TOOL_SCHEMA: Dict[str, Any] = {
             "without a wait; may be empty when wait_for_answer=true. It is your assumption, "
             "not the human's answer.")},
         "wait_for_answer": {"type": "boolean", "default": False, "description": (
-            "Live roots: wait for addressed owner input before another model round. Default "
-            "false; an unanswered card remains answerable either way.")},
+            "Live roots: wait for addressed owner input before another model round. Waiting keeps "
+            "this work alive with what it holds — its browser, task-session connections, services "
+            "and, when it holds one, its project's lane — until the answer, the wait bound, a restart or "
+            "another ending. Default false: the card stays answerable while the work goes on under its stated "
+            "assumption.")},
         "max_wait_minutes": {"type": "integer", "description": (
             "Optional positive whole-minute bound for wait_for_answer, within the task's "
             "existing lifetime limit. On expiry, resume with a system notice; the card stays "

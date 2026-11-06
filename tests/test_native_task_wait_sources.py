@@ -212,6 +212,9 @@ def test_a_queued_retry_in_the_same_project_keeps_the_lane_check_until_it_runs(t
     refused = _wait_for_task(same, "held", sleep_mode="warm")
     assert "retains the project lane" in refused and not getattr(same, "_pending_task_wait", None)
     assert not getattr(same, "_model_sleep", None), "nothing sleeps on work only its own lane could admit"
+    reply = sleeper(retry["project_id"])  # a room's reply turn holds no lane, so the queued root can start
+    reply.task_metadata["_execution_owner"] = {"kind": "direct", "lane": "conversation"}
+    assert json.loads(_wait_for_task(reply, "held", sleep_mode="warm"))["reason"] == "sleep_armed"
     plain = sleeper(retry["project_id"])
     assert model_sleep.request_sleep(plain, model_sleep.selectors(plain, tasks=["held"]), "warm")[
         "reason"] == "sleep_armed", "an ordinary sleep keeps its own selected row's lane read"
@@ -351,6 +354,25 @@ def test_a_child_proven_queued_before_its_first_result_sleeps_and_losing_that_pr
     lead, _end = json.JSONDecoder().raw_decode(_wait_for_task(torn, "torn", sleep_mode="warm"))
     assert lead["reason"] == "ready" and lead["woke_by"] == "task_wait:unknown:torn"
     assert not getattr(torn, "_pending_task_wait", None) and not getattr(torn, "_model_sleep", None)
+
+
+_LONG_REASON = ("The release waited on the owner's word about the database, which came at 14:05 in the project room. "
+                * 4 + "Only the build check remains, and it must pass on both platforms before anything ships.")
+
+
+@pytest.mark.parametrize(("by", "outcome", "woken"), [
+    ({"actor": "owner", "door": "api_task_resume"}, "control:resume", "an explicit Resume by your human"),
+    ({"actor": "ouroboros", "task_id": "c1", "text": _LONG_REASON}, "",
+     f'an explicit Resume by Ouroboros (task c1), saying "{_LONG_REASON}"'),
+    ({}, "control:resume", "the owner's message or control"),
+    ({"actor": "owner"}, "timeout", "the wake time you chose")])
+def test_a_wake_names_the_resume_that_woke_it_and_only_for_a_control_wake(by, outcome, woken):
+    """A Resume that ended a sleep names who granted it, its reason whole however long (P1: no silent cut); an unnamed
+    control keeps its old words, and a wake time the sleeper chose is never retold as somebody's Resume."""
+    from ouroboros import model_sleep
+
+    text = model_sleep.wake_notice({"mode": "cold"}, outcome, 5.0, by=by)["content"]
+    assert f"were woken by {woken}" in text, text
 
 
 def test_a_wake_before_the_first_result_says_the_queue_holds_the_child(tmp_path):

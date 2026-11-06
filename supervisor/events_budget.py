@@ -445,8 +445,8 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
     confirmed, and the next persisted snapshot or a restore completes it —
     never a fake ``paused``. Also the crash-during-pausing completion path (``source``
     names it), which is why nothing here reads the worker's event body — with
-    ONE exception: a direct owner-chat turn was never in RUNNING, so its event
-    carries the turn's own task record (``task`` beside ``_is_direct_chat``),
+    ONE exception: a direct turn with no RUNNING row parks from its event,
+    which carries the turn's own task record (``task`` beside ``_is_direct_chat``),
     and THAT record is what the SAME task id is parked under (#1196). The row
     check above still decides; the record only supplies the queue row.
 
@@ -619,7 +619,7 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
                 from supervisor.state import reconstruct_task_cost
 
                 reason = str(row.get("reason") or "")
-                cause = {"owner": "owner Pause", "sleep": "model sleep",
+                cause = {"owner": "Pause", "sleep": "model sleep",
                          "authority": str(row.get("rail") or "").replace("_", " ")}.get(reason, "budget")
                 cost_fields = reconstruct_task_cost(task_id, fields=True, drive_root=result_root)
                 write_task_result(
@@ -629,7 +629,7 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
                             + ("; delegated work it had already sent is still running" if unsettled else "")
                             + ". Cumulative spend, rounds and execution time are retained; "
                             + ("the selected wake condition continues the same task." if reason == "sleep" else
-                               "an explicit owner Resume continues the same task.")),
+                               "an explicit Resume continues the same task.")),
                     # An unavailable projection is published too: it carries the
                     # explicit unknown state that must replace any stale amount
                     # write_task_result would otherwise keep merged in.
