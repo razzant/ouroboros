@@ -210,3 +210,30 @@ def test_a_finish_that_folds_what_it_read_stands_for_it_elsewhere_and_leaves_it_
     assert ChronicleStore(tmp_path).sealed_row_refs(beta) == set()  # a fold seals nothing
     own, own_text = _view(tmp_path, {"id": "turn-beta", "type": "task", "chat_id": int(beta)})
     assert "beta reply" in own_text and "read and folded" not in own_text  # the room itself reads every row
+
+
+def test_my_accounts_arrival_considers_nothing_and_my_delivery_there_does(tmp_path):
+    """§3.4 (i): the considered point is my own outward row. An arrival from the account I send as (an operator session
+    or a `gh` call publishing as me) leaves a person's earlier word nobody considered, though it keeps the room one
+    where I spoke; my delivery there considers it."""
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_runner import presence_chat_id
+
+    _install(tmp_path)
+    room = presence_chat_id(conversation_key("github", "me", "repo.1", "i1"))
+    base = {"provider": "github", "account_id": "me", "conversation_id": "repo.1", "thread_id": "i1"}
+    asked = shared.msg(_ts(40), "can you look?", chat_id=room, source="presence:github",
+                       transport={**base, "actor": {"platform_actor_id": "u7"}})
+    mine = shared.msg(_ts(41), "A PR description my account published.", chat_id=room, source="presence:github",
+                      task_id="presence-woken", transport={**base, "actor": {"platform_actor_id": "ouro"},
+                                                           "identity": {"sends_as": {"id": "ouro", "kind": "bot"}}})
+    shared.append(tmp_path / "logs" / "chat.jsonl", asked, mine)
+    snapshot, _text = _view(tmp_path, MAIN_TASK)
+    item = _room(snapshot, str(room))
+    assert item["engaged"] and _rank(snapshot, str(room), asked) == 2  # my account's event is no answer of mine
+    assert any(word["head"].startswith(f"[{mine['ts']}; the account I send as: ") for word in item["words"])
+    answer = shared.msg(_ts(42), "Looking.", chat_id=room, direction="out", type="presence_delivery", task_id="p1",
+                        source="presence:github", transport={**base, "delivery": {"state": "delivered"}})
+    shared.append(tmp_path / "logs" / "chat.jsonl", answer)
+    assert _rank(_view(tmp_path, MAIN_TASK)[0], str(room), asked) == 1  # my delivery there considers it
+

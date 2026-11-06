@@ -118,15 +118,15 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
         classed = [(entry, row_class(entry[1], pos=entry[2], **lineage)) for entry in entries]
         spoken = [(entry, cls) for entry, cls in classed if cls["lane"] == 1]
         key, place = conversation_of(room, held or sealed.get(room, []), notes.get(room, []), membership.project_chat_ids)
-        own = max((entry[2] for entry, cls in spoken if cls["author"]["kind"] == "ouroboros"), default=-1)
-        ours = own >= 0 or any(owner_speech(entry[1], cls["author"]) for entry, cls in spoken)
+        own = max((entry[2] for entry, cls in spoken if _outward(cls["author"])), default=-1)  # §3.4 (i)
+        ours = any(cls["author"]["kind"] == "ouroboros" or owner_speech(entry[1], cls["author"]) for entry, cls in spoken)
         first = entries[0][2] if entries else -1
         for _address, meta, pos in reversed(sealed.get(room, ())):  # newest first: who of ours spoke before the pages
             if ours and pos < first or ours and first < 0:  # older than every open row: it considers none of them
                 break
             author = row_class(meta, pos=pos, **lineage)
             if author["lane"] == 1 and author["author"]["kind"] == "ouroboros":
-                ours, own = True, max(own, pos) if pos > first else own
+                ours, own = True, max(own, pos) if pos > first and _outward(author["author"]) else own
             elif author["lane"] == 1 and owner_speech(meta, author["author"]):
                 ours = True
         engaged = not place or ours or bool(notes.get(room)) or bool(running.get(room))
@@ -204,6 +204,12 @@ def conversation_label(label: Callable[..., str], place: Mapping[str, Any], rows
     chat = presence_chat_id(conversation_key(flow["provider"], flow["account_id"], flow["conversation_id"], ""))
     named = label(chat, {"transport": {**flow, **({"conversation": scalars} if scalars else {})}})
     return named.rsplit(" [chat_id=", 1)[0]
+
+
+def _outward(author: Mapping[str, Any]) -> bool:
+    """My own outward row: a reply or delivery of mine, which considers what came before it; an arrival from my own
+    account (``via == "own_account"``: an operator session or a ``gh`` call publishing as me) considers nothing."""
+    return author.get("kind") == "ouroboros" and author.get("via") != "own_account"
 
 
 def nobody_considered(spoken: List[Tuple[Entry, Mapping[str, Any]]], considered: int) -> int:
