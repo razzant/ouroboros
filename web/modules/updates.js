@@ -581,7 +581,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
                 <p class="updates-hint" id="updates-hint" hidden></p>
                 <div class="updates-attempt" id="updates-attempt" hidden>
                     <details class="ui-disclosure updates-attempt-details" id="updates-attempt-details">
-                        <summary><time id="updates-attempt-time">Last attempt</time><span class="ui-status" id="updates-attempt-headline"></span></summary>
+                        <summary><span class="updates-attempt-line"><time id="updates-attempt-time">Last attempt</time><span class="ui-status" id="updates-attempt-headline"></span></span></summary>
                         <dl class="dashboard-facts" id="updates-attempt-facts"></dl>
                         <details class="ui-disclosure" id="updates-attempt-raw" hidden>
                             <summary id="updates-attempt-raw-label">Raw record</summary>

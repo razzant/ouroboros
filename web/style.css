@@ -8893,6 +8893,10 @@ body.keyboard-open .project-panel {
 /* Words of an outcome that is not a plain success stay in view under the line (a success keeps them in its Details). */
 .updates-attempt > .updates-hint { flex: 1 1 100%; }
 .updates-attempt-details { min-width: 0; }
+/* The summary's words wrap as one line: the time never breaks, and on a narrow card the outcome takes the next line
+   under the words, not under the caret. */
+.updates-attempt-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-2); min-width: 0; }
+.updates-attempt-line > time { white-space: nowrap; }
 .updates-attempt-details[open] { flex: 1 1 100%; }
 .updates-attempt > .btn { margin-inline-start: auto; }
 /* A narrow attempt (under 34rem: a phone, or a window up to about 640px) puts Restore under the summary at its start,
