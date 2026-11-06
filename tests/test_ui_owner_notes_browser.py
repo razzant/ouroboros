@@ -174,8 +174,9 @@ def test_notes_reach_main_activity_and_the_live_banner(direct_server_with_data, 
             waiting = schedules.locator(".activity-row").filter(has_text=LATER)
             waiting.wait_for(state="visible", timeout=30_000)
             assert waiting.locator(".activity-name").inner_text() == LATER
-            assert waiting.locator(".activity-sub[data-i18n-authored]").inner_text() == LATER
-            timing = waiting.locator(".activity-sub").filter(has_text=re.compile(r"^reminder · one-shot · at/after "))
+            # The name already says the note's words: its Details keeps no second copy.
+            assert waiting.locator(".activity-order").count() == 0
+            timing = waiting.locator(".activity-sub").filter(has_text=re.compile(r"^Reminder · Once on "))
             assert timing.count() == 1
             assert timing.locator("time").get_attribute("datetime") == "2999-01-01T09:00:00Z"
             schedules.scroll_into_view_if_needed()

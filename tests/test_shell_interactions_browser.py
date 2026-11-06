@@ -459,6 +459,10 @@ def open_settings_panel_of(page, selector):
     panel = page.evaluate("s => document.querySelector(s)?.closest('[data-settings-panel]')?.dataset.settingsPanel || ''",
                           selector)
     page.locator(f'[data-settings-tab="{panel}"]').first.click()
+    # A section's copy beyond its lead lives behind its Details disclosure: open it as the owner does.
+    summary = page.locator(selector).first.locator("xpath=ancestor::details[1]/summary")
+    if summary.count():
+        summary.click()
     page.locator(selector).first.scroll_into_view_if_needed()
     settle(page)
     return panel

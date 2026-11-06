@@ -760,12 +760,16 @@ def test_projection_names_every_honest_status(describe):
     assert done["status"] == "sleeping"
 
 
-def test_projection_without_a_constructed_clock_is_stopped_not_running(monkeypatch):
+def test_projection_without_a_constructed_clock_says_why_and_is_never_running(monkeypatch):
     import server
 
     monkeypatch.setattr(server, "_consciousness", None)
-    described = server._describe_bg_consciousness_state(True)
-    assert described["status"] == "stopped" and "not constructed" in described["detail"]
+    monkeypatch.setattr(server, "_supervisor_error", None)
+    starting = server._describe_bg_consciousness_state(True)
+    assert starting["status"] == "starting" and starting["detail"] == "Waits for Ouroboros to finish starting."
+    monkeypatch.setattr(server, "_supervisor_error", "Supervisor init failed: boom")
+    failed = server._describe_bg_consciousness_state(True)
+    assert failed["status"] == "stopped" and failed["detail"].endswith("Restart Ouroboros.")
     assert server._describe_bg_consciousness_state(False)["status"] == "disabled"
 
 

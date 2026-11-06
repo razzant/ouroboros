@@ -92,7 +92,7 @@ test('Storage flow previews on its door, polls while listing, reads the whole po
     const door = mount.querySelector('[data-storage-door]');
     assert.equal(door.hidden, false);
     assert.equal(door.textContent, 'Check for files to remove');
-    assert.match(storageTray(mount).textContent, /Not checked/);
+    assert.match(storageTray(mount).textContent, /See what finished work can be removed\./);
     routes.set(previewUrl, (_url, init) => {
         assert.equal(init.method, 'POST');
         return response(freeBody('listing', { total: 2, pool: poolFacts(1, { bytes: null }), started: true }), 202);
@@ -135,7 +135,7 @@ test('Storage flow previews on its door, polls while listing, reads the whole po
     const before = calls.length;
     trayButton(mount, 'data-free-cancel').focus();
     await pressTray(mount, 'data-free-cancel');
-    assert.match(storageTray(mount).textContent, /Not checked/);
+    assert.match(storageTray(mount).textContent, /See what finished work can be removed\./);
     assert.equal(door.hidden, false);
     assert.equal(document.activeElement, door, 'focus lands on the door');
     assert.equal(calls.length, before);
@@ -1175,7 +1175,7 @@ test('Storage flow forgets the copies screen and its choices with the plan, and 
     assert.match(storageTray(mount).textContent, /0 of 2 chosen/, 'nothing carried over');
     await pressTray(mount, 'data-free-manual-back');
     await pressTray(mount, 'data-free-cancel');
-    assert.match(storageTray(mount).textContent, /Not checked/);
+    assert.match(storageTray(mount).textContent, /See what finished work can be removed\./);
     assert.equal(mount.querySelector('[data-storage-door]').hidden, false);
 });
 

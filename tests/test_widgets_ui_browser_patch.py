@@ -457,7 +457,8 @@ def test_ui_smoke_widget_start_never_joins_a_stale_mount(direct_server_with_data
                 assert page.locator("#widgets-list [data-widget-removed]").count() == 0
 
                 # (b) Owner Start of a stopped auto card, source held, then its revision moves.
-                page.locator(f"{card('auto')} [data-widget-power]").click()  # owner Stop
+                page.locator(f"{card('auto')} [data-widget-menu-trigger]").click()  # owner Stop: the card menu's
+                page.get_by_role("menuitem", name="Stop", exact=True).click()
                 wait_power(page, "auto", "Start")
                 assert state(page, "auto")["iframes"] == 0
                 start_held(page, "auto")
@@ -544,9 +545,10 @@ def test_ui_smoke_widget_last_card_removal_keeps_the_owners_stop(direct_server_w
                 page.locator(card("auto")).wait_for(state="visible", timeout=30_000)
                 wait_power(page, "auto", "Stop")
 
-                # The owner stops the auto card: the Stop is kept in this device's
+                # The owner stops the auto card (the card menu's Stop): the Stop is kept in this device's
                 # start ledger, keyed by this card.
-                page.locator(f'{card("auto")} [data-widget-power]').click()
+                page.locator(f'{card("auto")} [data-widget-menu-trigger]').click()
+                page.get_by_role("menuitem", name="Stop", exact=True).click()
                 wait_power(page, "auto", "Start")
                 page.locator(f'{card("auto")} [data-widget-facade]').wait_for(state="visible", timeout=10_000)
 

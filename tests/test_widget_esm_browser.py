@@ -224,8 +224,9 @@ def test_password_network_esm_files(network_server, engine):
             assert client.get(proof['base'] + 'data.bin').status_code == 404
             actual = page.locator(card + ' iframe').element_handle().content_frame()
             fresh = actual.evaluate('window.proof')
-            # Stop completes the existing dispose hook and revokes this mount only.
-            page.locator(card + ' [data-widget-power]').click()
+            # Stop (the card menu's) completes the existing dispose hook and revokes this mount only.
+            page.locator(card + ' [data-widget-menu-trigger]').click()
+            page.get_by_role("menuitem", name="Stop", exact=True).click()
             page.locator(card + ' iframe').wait_for(state='detached')
             page.wait_for_function("async base => (await fetch(base + 'data.bin')).status === 404", arg=fresh['base'])
             assert client.get(f'/api/extensions/{NAME}/count').json()['hits'] >= 1

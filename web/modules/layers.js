@@ -130,6 +130,8 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
         const el = layer.el;
         if (!el || typeof el.focus !== 'function') return;
         if (!el.hasAttribute?.('tabindex')) el.tabIndex = -1;
+        // The root is where the focus lands, never a control: it draws no ring (style.css [data-layer-landing], U122).
+        el.setAttribute?.('data-layer-landing', '');
         try { el.focus({ preventScroll: true }); } catch { /* detached */ }
     }
     // The opener takes back a focus the layer held or that is lost; one the person moved beside a live layer (Main's

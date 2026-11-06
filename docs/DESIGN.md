@@ -657,7 +657,7 @@ needed restart or unconfirmed outcome it announces is kept in its authoritative 
 in-feed history edge) until that fact changes or the owner resolves it. A notice the owner may hide is hidden on the
 notice itself, per browser, never in its record (the Update indicator, owner 1B, 25.10). A plain acknowledgement in
 place may end by itself, but where the line is its fact's only home (Costs' budget save) an error, a warning or a
-needed restart stays until the next save replaces it. A current fact ends with its fact; unread ends when the message
+needed restart stays until the next save, or an edit of what it is about, replaces it. A current fact ends with its fact; unread ends when the message
 is shown; a retained record (Updates, history, the Settings save result, `Input saved`) lives with its record, with
 no timer. Toasts and statuses older than this rule are checked against it when touched.
 
@@ -675,7 +675,7 @@ A consumed one-shot is history whether its task succeeded or failed; the status
 never implies a result. A row is headed by its name; the instruction stays
 readable and expands by touch, and a waiting row says why inline, never in a
 hover-only tooltip. Retained rows (consumed and withdrawn) collapse into one
-History & withdrawn disclosure rather than padding the standing list or
+disclosure named for what it holds (Finished, Withdrawn) rather than padding the standing list or
 disappearing: history the owner can still open, read and act on. A withdrawn
 row says who withdrew it, when and why, and keeps Restore through the retention
 window once no hold remains on it; Restore cancels the withdrawal and brings
@@ -1193,7 +1193,7 @@ preference when it opens and on every reconnect; there is no file watcher.
     table`) whose sides that still hide columns fade. No stacked row cards,
     no guessing a table's purpose from its words, no smaller text to make it
     fit.
-  - A thematic break is a `--surface-border` hairline with section spacing.
+  - A thematic break is a `--divider` hairline with section spacing.
     Inline code keeps the ink of the text around it on its neutral pill.
   - Code is the author's literal text: a fence or code span shows and
     copies exactly what was written (`&amp;`, `<div>`, `**stars**`
@@ -1254,7 +1254,8 @@ preference when it opens and on every reconnect; there is no file watcher.
   name and line (owner 30.10, B); empty activity reserves no band, and a duplicate title is not activity.
   Full narration and Reviews expand independently. A completed child's result is
   its report: `Report to parent`, semibold at the row's size and ink, leads its
-  collapsed line and replaces `[RESULT]` over full text (owner 25.10, A). The root keeps primary title
+  collapsed line and replaces `[RESULT]` over full text (owner 25.10, A). A helper the host could not start has no
+  report: its cause leads the line, the host's notice to its parent stays in details. The root keeps primary title
   ink at weight 500, children secondary ink at 400. Nested frames keep real
   ancestry on an opaque secondary surface, so white tints never accumulate.
 - **An executor label names the helper and states only exceptions.** The
@@ -1982,8 +1983,8 @@ menu and capsule row, a saved reply's actions), and the host draws them: the
 skill's label verbatim, one glyph from the host set, the host's capsule or
 icon control, never the skill's markup. Connector icons may supply reviewed SVG geometry, painted by the host in monochrome currentColor with a fallback glyph and an adjacent visible label. In "+", after Attach file, each skill
 has a section under its name with its items in the owner's order; the host's
-own items close the menu under Ouroboros's name: Add dictation… while no
-engine can dictate here, and Make a button with Ouroboros…, which starts a request in
+own items close the menu under Add to composer: Add dictation… while no
+engine can dictate here, and Make a button…, which starts a request in
 the draft for the owner to finish and send. A chip is one of the row's
 capsules: the skill's name, then the value its source answers in the meta ink
 (24 characters; the rest and its description on the chip's title), with a dot
@@ -2460,10 +2461,11 @@ fade dims a card where the list cuts it.
   the column count changes only where a card is painted; a running widget
   keeps its frame and its state. Keyboard focus keeps the card's original
   position until the window reloads.
-- **Stop holds until Start.** A framed card the owner stopped rests as its
-  facade with Start on this device across reloads, until Start or a launch
-  policy of Auto or Keep running starts it. A card whose last start the page
-  did not outlive rests the same way, with its one line (Skills in the page).
+- **Stop holds until Start.** A running card's Stop is in its ⋮ menu. A card the
+  owner stopped rests as its facade with Start on this device across reloads,
+  until Start or a launch policy of Auto or Keep running starts it. A card whose
+  start the page did not outlive, or whose files went away, rests the same way
+  and says so in one line (Skills in the page).
 - **One arrangement per installation.** Order and widths are owner UI state
   stored on the server, the same for every window and device of the
   installation; when two windows arrange at once the last change wins. A
@@ -2472,10 +2474,10 @@ fade dims a card where the list cuts it.
 
 ### Storage
 
-Storage leads with **Space used by Ouroboros**, its measurement date, growth,
-unreadable count, **Refresh sizes**, the coloured bar and five-group legend (owner
-choice 2026-11-04). **Cleanup** follows: **Can be removed** is unknown until a
-check, never the selection; **Selected** is a separate quieter figure. One
+Storage leads with **Space used by Ouroboros**, its count's age and growth
+(duration and unreadable items in Details), **Refresh sizes**, the coloured bar and
+five-group legend (owner choice 2026-11-04). **Cleanup** follows: a sentence until a
+check, then **Can be removed**, never the selection; **Selected** is a separate quieter figure. One
 **Remove N selected items** waits for the whole list and sends exactly those ids;
 hidden rows keep their choice. Copies not verified saved and saved groups have
 one compact row each, deliberately opened, unchecked, with their whole-loss
@@ -2524,12 +2526,13 @@ an explicit store failure in view, metrics under Diagnostics and exact program t
 Details.
 A rule every row shares is said once for the section, an unsaved draft once by the editor
 or its host page, and a checked box is not re-said beside it. A conditional line never
-moves the control that caused it: controls own stable slots, and a line an edit toggles
-opens beside or below them.
+moves the control that caused it.
 
-In a result/action row, the result has readable space. The action docks right
-when it fits, otherwise below, by the row's width. Long content stays whole.
-Field actions (Show/Clear) keep the field's height, not the compact result-row size.
+The result of an action sits in the row of its control, right after it, on a line
+the row keeps for it, so a late result moves nothing: never glued under the button,
+never at the far end; a row too narrow for both gives it its own line, the row's gap
+apart. It ends as §4 says, and an edit in the same subject clears it.
+Long content stays whole.
 
 Rows of the same kind are equivalent: no row gets extra visual weight for
 being first, default, or native. Grouping and section-level actions express
@@ -2650,44 +2653,7 @@ stops clear of them.
 
 The panels a new owner opens first (Models, Providers, Agents, Behavior) show only what an owner touches in the first week. Anything a typical owner never needs or must look up to use safely lives under Advanced: deployment plumbing (bind hosts, process pools, runtime limits), transport and trust knobs such as the extra CA bundle, MCP servers, and the rarely used provider cards, which stay on the Providers page but fold under "More providers". A control needing a paragraph of explanation to be safe is Advanced by definition. Seams: the `advanced` settings panel and the `advanced: true` flag in `web/modules/settings_provider_cards.js` (DEVELOPMENT "Onboarding and Settings surfaces").
 
-## 8. Migration state
-
-The scale is applied to complete component families and declared page regions.
-Using a migrated field inside a historical page does not claim the whole page
-has migrated. Migrated today:
-
-- `web/ui.css` (shared palette, fields, buttons, status/chip recipes and
-  menu/chooser chrome, used by both top-level documents and optional author pages)
-- `web/settings.css` (settings shell, model/effort cards, MCP cards)
-- `web/onboarding.css` (the whole first-run wizard)
-- `web/model_roles.css` (shared role editor)
-- `web/room_work.css` (room work disclosure, rows and reading return)
-- `web/cards.css` (living cards in the feed)
-- `web/style.css` regions paired by `design-system:migrated-begin` /
-  `design-system:migrated-end`: harness accounts; Dashboard → Updates (status
-  card, one action row, collapsed Recovery with one restore list), Storage and
-  Evolution;
-  the Skills page (Installed, Browse, Sources, the detail sheet, its dialogs);
-  chat typography, foreground and status colour. Chat geometry retains local
-  literals per the viewport reserve contract; shared palette channels keep
-  translucent glass coherent across themes.
-- the global `.muted`, `.form-section h3` and shared `.ui-status` tone rules
-
-The remaining page-specific typography in widgets and logs is
-historical. Their adopted common controls follow the shared
-family; unrelated page rules keep their literals until their own pass. Migrate
-each selected family completely and remove its replaced recipes in the same
-change. Do not introduce a half-tokenised second field family or describe a
-control adoption as an all-page redesign. The semantic status/action/notification
-contract already applies everywhere.
-
-`tests/test_web_typography_static.py` guards the migrated set only. Extending
-the guard and migrating the corresponding family or region are the same commit.
-The bible's materials (objects, trays, sheets and the three capsule tones) reach
-every page in both themes through the "Airy dopamine" blocks of ui.css, style.css and
-the page sheets; that mapping is not a typography migration of those pages.
-
-### Author freedom
+## 8. Author freedom
 
 An extension may use the optional shared buttons, fields and status functions
 inside its own module or route-iframe page, override them, or design a completely
@@ -3106,7 +3072,7 @@ state; a desk's panel beside Main keeps the chip's word. Panic and ×
 never yield (audit №2, owner 2026-10-28T22:09Z; sidebar names wait for the navigation decision).
 Navigation sharing a toolbar also returns below the bar when the
 content column is too narrow, including while the sidebar is resized; the toolbar wraps in its
-own row. Files' location and actions return above the list, folder names fit and actions wrap.
+own row. Files' location and its actions return above the list on one row; folder names fit, actions wrap.
 Files shows the folder's list and the chosen file side by side while its own width holds both (the `files`
 container, 700 px); narrower, the list comes first and a chosen file replaces it under `Back to folder`, which
 keeps an unsaved draft: the file's row says `unsaved` (a new file's draft has its own row at the top) and reopens
@@ -3154,11 +3120,11 @@ applies only where a pointer can hover (`@media (hover: hover)`).
 the invisible hit area of the one `.ui-hit-area` recipe in `web/ui.css`, which a
 link inside a sentence takes too so the sentence keeps its lines. A chevron is an
 element (the Reviews door's), so a control's `::after` stays the recipe's; a row
-that wraps on a phone (a question's recovery) gives its buttons the minimum as
-their own height, so no reach covers a neighbour (audit №4, owner
-2026-10-28T22:09Z). Inside a strip
-that scrolls (a capsule's open levels on a narrow phone) a value keeps only its drawn
-height, since the strip clips that reach. Nothing that acts is hidden until hover
+that wraps on a phone (a question's recovery, an account's actions) and a strip of
+tabs or chips that scrolls give their controls the minimum as their own height, so no
+reach covers a neighbour or is clipped (audit №4, owner 2026-10-28T22:09Z); so do a
+disclosure's summary and a field. In a capsule's open levels on a narrow phone a value
+keeps only its drawn height. Nothing that acts is hidden until hover
 there (a Project row's menu is reached by its long press).
 No page scrolls sideways at any width; only code, tables, tab strips and a bar's
 Files location scroll sideways, inside themselves, with a fade where content

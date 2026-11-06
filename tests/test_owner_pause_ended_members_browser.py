@@ -69,7 +69,7 @@ ACTIVITY_FACTS = """() => {
         const button = row.querySelector('[data-act="task-control"]');
         return {name: text(row.querySelector('.activity-name')), sub: text(row.querySelector('.activity-sub')),
                 chip: text(row.querySelector('[data-activity-phase]')),
-                trigger: button ? {id: button.dataset.id, root: button.dataset.root || '',
+                trigger: button ? {id: button.dataset.id, root: button.dataset.root || '', label: text(button),
                                    budgetPaused: button.dataset.budgetPaused || '', resume: button.dataset.resume || ''}
                     : null,
                 html: row.outerHTML};
@@ -78,6 +78,12 @@ ACTIVITY_FACTS = """() => {
 }"""
 MENU = """() => { const menu = document.querySelector('body > .task-control-menu');
     return menu ? [...menu.querySelectorAll('[data-task-control]')].map((item) => item.dataset.taskControl) : null; }"""
+# An Activity control with one offered action is that action (its label names it); its press opens the shared
+# confirmation instead of a menu of one item.
+DIRECT = """() => document.querySelector('.confirm-dialog')
+    ? document.querySelector('[data-act="task-control"][data-task-control-direct="1"]')?.textContent.trim() || null : null"""
+DIRECT_ACTIONS = {"Stop now": "stop_now", "Stop earlier attempt": "stop_earlier", "Pause": "pause", "Resume": "resume",
+                  "Wrap up": "finalize", "Hurry up": "hurry"}
 
 
 def _world(tmp_path, monkeypatch, case):
@@ -201,6 +207,8 @@ def test_activity_says_the_works_truth_and_offers_only_its_controls(tmp_path, mo
                     page.locator('[data-act="task-control"]').first.click()
                     page.wait_for_timeout(600)
                     menu = page.evaluate(MENU)
+                    if menu is None and (label := page.evaluate(DIRECT)):
+                        menu = [DIRECT_ACTIONS[label]]
                     page.screenshot(path=str(evidence / f"{case}-menu.png"))
                 facts = {"case": case, "engine": engine, **shown, "menu": menu, "posts": posts, "errors": errors}
                 (evidence / f"{case}-facts.json").write_text(json.dumps(facts, indent=1, ensure_ascii=False),

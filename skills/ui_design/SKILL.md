@@ -1,13 +1,13 @@
 ---
 name: ui_design
-version: 2.0.3
+version: 2.0.4
 type: instruction
 os: any
 permissions: []
 description: "Design, change or show anything people look at (app UI, widget, mockup, HTML page or report, chart, icon): it fits the existing system, uses real content and states, and is judged by eye at the viewer's real size."
 when_to_use: "Before designing or changing how something looks, judging screenshots of such work, putting visual variants before a person, or briefing another model that will draw. Not software architecture."
 model_experience:
-  what_model_sees: "A few lines of metadata while enabled. On read: a one-screen playbook; references hold the craft floor, the render-and-measure recipe, the author brief, a one-file comparison page and two browser-side snippets (measure.js, freeze.js). No tools."
+  what_model_sees: "A few lines of metadata while enabled. On read: a one-screen playbook; references hold the craft floor, the render-and-measure recipe, the author brief, a one-file comparison page and two browser-side snippets (measure.js, freeze.js), and an optional read-only stand for Ouroboros's own interface (live_stand.py). No tools."
   token_effect: "A few context lines while enabled. The body costs about two and a half thousand tokens when read; each reference costs tokens only when opened."
 ---
 

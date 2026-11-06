@@ -8,7 +8,9 @@ test('only a successful extension form Save announces changed settings', async (
     win.addEventListener('ouro:settings-updated', event => changed.push(event.detail));
     globalThis.window = win;
     let submit;
-    const status = { dataset: {}, textContent: '' }, button = {};
+    // A failed Save's result carries its raw text behind a Details disclosure (setResult), so the double makes one.
+    const element = () => ({ className: '', textContent: '', append() {} });
+    const status = { dataset: {}, textContent: '', ownerDocument: { createElement: element }, append() {} }, button = {};
     const form = { dataset: { skill:'test-skill', route:'save', extensionSettingsKey:'test-skill:save' },
         addEventListener(name, handler) { if (name === 'submit') submit = handler; },
         querySelector: selector => selector === '[data-extension-settings-status]' ? status
