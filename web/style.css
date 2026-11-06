@@ -4114,7 +4114,7 @@ html[data-layout="stack"] #primary-sidebar {
    as its own scroller. */
 html[data-layout="stack"] :is(#chat-messages, .chat-messages, .files-list, .files-sidebar, .files-preview-content,
     .skills-scroll, .widgets-scroll, .settings-scroll, .costs-scroll, .activity-scroll,
-    #log-entries, .updates-scroll) {
+    #log-entries, .dashboard-body) {
     touch-action: pan-y pinch-zoom;
 }
 /* Outside the scrollers too (a header, the composer's row of capsules, the attach button): the page itself only pans
@@ -5239,7 +5239,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
    the inner radius and no shadow; a tray inside a tray drops its fill, so fills never stack and its rows part by space
    alone. Neither has an edge: the transparent 1px border only keeps each box's size. */
 :is(.settings-shell .form-section, .settings-card, .settings-provider-card, .skills-card,
-    .marketplace-card, .widgets-card, .updates-card, .costs-budget-card, .stat-card, .log-task-card) {
+    .marketplace-card, .widgets-card, .log-task-card) {
     border: 1px solid transparent;
     background: var(--surface-object);
     border-radius: var(--radius-object);
@@ -5282,21 +5282,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     border: 1px solid transparent;
     background: var(--ui-modal-bg);
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
-}
-
-.stat-card .label {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-secondary);
-    margin-bottom: 8px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-
-.stat-card .value {
-    font-size: 20px;
-    font-weight: 700;
 }
 
 .section-title {
@@ -5749,87 +5734,22 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .about-links { display: flex; gap: 16px; justify-content: center; margin-top: 4px; }
 .about-links a { color: var(--accent); text-decoration: none; }
 
+/* The scroller Evolution and Storage still mount (evolution.js, storage.js); Costs is on the shared Dashboard tab body. */
 .costs-scroll { overflow-y: auto; flex: 1; padding: 16px 20px; }
-.costs-budget-card {
-    margin-bottom: 20px;
-}
-.costs-budget-title { font-size: 15px; font-weight: 600; margin: 0; color: var(--text-primary); }
-/* Budget card head row hosts title plus embedded Refresh. */
-.costs-budget-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
-.costs-budget-refresh { flex: 0 0 auto; }
-.costs-budget-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px 20px; margin-bottom: 16px; }
-.costs-budget-fields .form-field { min-width: 0; }
-.costs-budget-fields input { width: 100%; min-width: 0; }
-.costs-budget-save { margin-top: 4px; }
-/* The known spend leads and what leaves it incomplete stands in the same card; the composition and the open hold step
-   down one size, the technical facts one more (DESIGN §2: one primary thing in a card). */
-.costs-lead {
-    display: grid;
-    gap: var(--space-1);
-    padding: var(--space-4) var(--space-5);
-    margin-bottom: var(--space-3);
-}
-.costs-lead-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
-.costs-lead-head > .label { margin: 0; }
-.costs-lead > .value {
-    color: var(--text-primary);
-    font-size: var(--type-page);
-    line-height: var(--line-title);
-    font-weight: 650;
-    overflow-wrap: anywhere;
-}
-/* The page's own width decides the columns (the viewport does not know the content column): a narrow page reads each
-   open fact as one label-and-value row and the breakdown in two columns, a wide one in three. */
-#page-costs .costs-scroll { container: costs / inline-size; }
-.costs-lead-facts { display: grid; gap: var(--space-2); margin-top: var(--space-3); }
-.costs-fact { min-width: 0; display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); }
-.costs-fact > .label { margin: 0; font-size: var(--type-meta); line-height: var(--line-meta); }
-.costs-fact > .value {
-    color: var(--text-primary);
-    font-size: var(--type-body);
-    line-height: var(--line-body);
-    font-weight: 600;
-    text-align: end;
-    overflow-wrap: anywhere;
-}
-.costs-stats-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: var(--space-3);
-    margin-bottom: var(--space-5);
-}
-.costs-stats-grid > .stat-card { padding: var(--space-3) var(--space-4); }
-.costs-stats-grid > .costs-technical:last-child { grid-column: span 2; }
-@container costs (min-width: 560px) {
-    .costs-lead-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-4); }
-    .costs-fact { display: block; }
-    .costs-fact > .label { display: block; margin-bottom: 2px; }
-    .costs-fact > .value { text-align: start; }
-    .costs-stats-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-}
-.costs-tables-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
-    gap: 20px;
-}
-.costs-stats-grid > *, .costs-tables-grid > * { min-width: 0; }
-.costs-tables-grid > * { overflow-x: auto; }
-.costs-stats-grid .value {
-    font-size: var(--type-section);
-    line-height: var(--line-title);
-    font-weight: 600;
-    overflow-wrap: anywhere;
-}
-.costs-stats-grid .costs-technical .value { font-size: var(--type-body); line-height: var(--line-body); }
-.costs-table-label { font-size: 14px; color: var(--text-secondary); margin: 0 0 8px; }
-.cost-cell-name { font-size: 12px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cost-cell-right { text-align: right; }
-.costs-stats-grid .cost-top-model { font-size: var(--type-meta); line-height: var(--line-meta); }
-.cost-bar-cell { width: 60px; }
-.cost-bar { width: 60px; height: 6px; border: 0; border-radius: var(--pill-radius); overflow: hidden; opacity: 0.7; }
-.cost-bar::-webkit-progress-bar { background: rgba(var(--neutral-rgb), 0.08); }
-.cost-bar::-webkit-progress-value { background: var(--accent); }
-.cost-bar::-moz-progress-bar { background: var(--accent); }
+/* Dashboard › Costs (costs.js) on the Dashboard tab body: the known spend of the limit leads with its share as a thin
+   bar under it (amber only when the limit is reached, the owner's move); the budget form is the tab's action row; the
+   four breakdowns are cards of their own, two side by side where they fit, each a short list with "Show all (N)". */
+.costs-spend-bar { height: 4px; border-radius: var(--pill-radius); background: var(--status-neutral-bg); overflow: hidden; }
+.costs-spend-bar > i { display: block; width: var(--spend-share, 0%); height: 100%; border-radius: inherit; background: var(--text-meta); }
+.costs-spend-bar[data-reached="1"] > i { background: var(--amber); }
+.costs-details { margin-top: var(--space-3); }
+.costs-budget, .costs-table-card { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+.costs-budget-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: var(--space-3) var(--space-5); align-items: start; }
+.costs-copy { margin: 0; max-width: 72ch; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.costs-tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: var(--space-4); align-items: start; }
+.cost-cell-name { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cost-table .cost-cell-right { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.status-mark.cost-open { margin-inline-start: var(--space-1); vertical-align: middle; }
 .cost-empty-cell { color: var(--text-muted); text-align: center; }
 
 /* Dashboard Storage (the owner-started count and the free-space tray): shared card, type, spacing
@@ -6172,6 +6092,29 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 @container dashboard (max-width: 480px) {
     .dashboard-hero-actions { grid-column: 1; grid-row: auto; align-self: start; }
+}
+/* foundation-request: a card's title role (16/600) and a list of facts (label, value) belong in ui.css with the other
+   shared parts (U136); until they move there, the Dashboard tabs' cards share these two. */
+.dashboard-card-title { margin: 0; color: var(--text-primary); font-size: var(--type-section); line-height: var(--line-title); font-weight: 600; }
+.dashboard-facts {
+    display: grid;
+    grid-template-columns: fit-content(14rem) minmax(0, 1fr);
+    gap: var(--space-1) var(--space-4);
+    margin: 0;
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+}
+.dashboard-facts dd { margin: 0; color: var(--text-primary); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+/* A narrow tab body reads each fact as its label over its value. */
+@container dashboard (max-width: 480px) {
+    .dashboard-facts { grid-template-columns: minmax(0, 1fr); row-gap: 0; }
+    .dashboard-facts dd { margin-bottom: var(--space-1); }
+}
+/* Under a finger every control and summary reaches out to the touch minimum (ui.css "Touch reach"); a disclosure that
+   follows the headline's actions (or the letter's last line) keeps the two reaches apart, so neither covers the other. */
+@media (pointer: coarse) {
+    .dashboard-hero + .ui-disclosure, .updates-letter-details { margin-top: var(--space-5); }
 }
 
 /* P4: Activity subtab — cron schedules, running/queued tasks, background status. */
@@ -7753,11 +7696,6 @@ button.skills-mark { cursor: pointer; min-height: 0; }
         overflow-x: hidden;
     }
 
-    .costs-budget-fields,
-    .costs-tables-grid {
-        grid-template-columns: 1fr;
-    }
-
     .costs-scroll {
         padding: 12px 12px;
     }
@@ -8888,92 +8826,34 @@ body.keyboard-open .project-panel {
 .harness-advanced[open] summary { margin-bottom: 6px; }
 .harness-advanced p { margin: 4px 0; }
 
-/* --- Dashboard -> Updates tab (migrated surface, DESIGN.md section 8) ---
-   One card: status line (dot + headline), meta hint, chips, a single
-   action row (status left, one primary action right), and a collapsed
-   Recovery section holding the destructive/rare controls. */
-.updates-scroll {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-4);
-}
-.updates-card-title {
-    font-size: var(--type-section);
-    line-height: var(--line-title);
-    font-weight: 600;
-    color: var(--text-primary);
-    margin-bottom: var(--space-3);
-}
-.updates-status {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    min-width: 0;
-}
-.updates-status-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 999px;
-    background: currentColor;
-    flex: none;
-}
-.updates-status-dot[data-tone="neutral"] { color: var(--status-neutral-fg); }
-.updates-status-dot[data-tone="ok"] { color: var(--status-ok-fg); }
-.updates-status-dot[data-tone="warn"] { color: var(--status-warn-fg); }
-.updates-status-dot[data-tone="error"] { color: var(--status-error-fg); }
-.updates-status-dot[data-tone="disabled"] { color: var(--text-disabled); }
-.updates-headline {
-    font-size: var(--type-body);
-    line-height: var(--line-body);
-    font-weight: 600;
-    color: var(--text-primary);
-    overflow-wrap: break-word;
-    min-width: 0;
-}
+/* --- Dashboard › Updates (updates.js, update_versions.js) on the Dashboard tab body ---
+   One card: the channel's state as the tab's headline (its one status mark, its facts on one line, one next action
+   beside it), then the last attempt, the record's facts, the description and Recovery, each behind its disclosure. */
+.updates-card { display: flex; flex-direction: column; gap: var(--space-3); }
 .updates-hint {
+    margin: 0;
     font-size: var(--type-meta);
     line-height: var(--line-meta);
     color: var(--text-meta);
-    margin-top: var(--space-1);
 }
-.updates-attempt {
-    margin-top: var(--space-3);
-    padding-top: var(--space-3);
-    border-top: 1px solid var(--divider);
-    container-type: inline-size;
-    container-name: updatesattempt;
+/* The last attempt is one quiet line of the record; open, it takes the row, and its Restore keeps its end. */
+.updates-attempt { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); container: updatesattempt / inline-size; }
+/* Words of an outcome that is not a plain success stay in view under the line (a success keeps them in its Details). */
+.updates-attempt > .updates-hint { flex: 1 1 100%; }
+.updates-attempt-details { min-width: 0; }
+/* The summary's words wrap as one line: the time never breaks, and on a narrow card the outcome takes the next line
+   under the words, not under the caret. */
+.updates-attempt-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-2); min-width: 0; }
+.updates-attempt-line > time { white-space: nowrap; }
+.updates-attempt-details[open] { flex: 1 1 100%; }
+.updates-attempt > .btn { margin-inline-start: auto; }
+/* A narrow attempt (under 34rem: a phone, or a window up to about 640px) puts Restore under the summary at its start,
+   closed or open (approved A). */
+@container updatesattempt (max-width: 34rem) {
+    .updates-attempt-details { flex-basis: 100%; }
+    .updates-attempt > .btn { margin-inline-start: 0; }
 }
-.updates-attempt-headline {
-    font-size: var(--type-body);
-    line-height: var(--line-body);
-    color: var(--text-primary);
-    overflow-wrap: anywhere;
-    min-width: 0;
-}
-.updates-attempt-foot {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: var(--space-2);
-}
-/* The attempt's facts and its after-update samples (owner 25.10: A): label in the disclosure's meta ink, value
-   primary (DESIGN section 2); the label column stops at 12rem, so a long label wraps instead of pushing values. */
-.updates-attempt-facts {
-    display: grid;
-    grid-template-columns: fit-content(12rem) minmax(0, 1fr);
-    gap: var(--space-1) var(--space-3);
-    margin: var(--space-2) 0 0;
-}
-.updates-attempt-facts dd {
-    margin: 0;
-    color: var(--text-primary);
-    font-variant-numeric: tabular-nums;
-}
-/* A group heading inside the list (Before / After the update): the list's meta size and ink, semibold. */
+/* A group heading inside a facts list (Before / After the update): the list's meta ink, semibold. */
 .updates-facts-head {
     grid-column: 1 / -1;
     color: var(--text-meta);
@@ -8981,103 +8861,15 @@ body.keyboard-open .project-panel {
     margin-top: var(--space-2);
 }
 .updates-facts-head:first-child { margin-top: 0; }
-/* The exact recorded stamp, under its local time. */
-.updates-fact-raw {
-    display: block;
-    color: var(--text-meta);
-}
-/* Open, the list takes the whole row. Restore, the attempt's one button (the notice closes itself), keeps its side
-   on the row below: the end of a wide attempt, as approved A placed it. */
-.updates-attempt-details[open] { flex: 1 1 100%; }
-.updates-attempt-foot > .btn { margin-inline-start: auto; }
-:is(.updates-attempt-details, .updates-letter-details, .updates-recovery) summary:focus-visible {
-    outline: 2px solid var(--focus-accent-border);
-    outline-offset: 2px;
-}
-.updates-attempt-details summary {
-    min-height: var(--touch-target-min);
-    align-content: center;
-    padding-block: var(--space-2);
-}
-/* The exact record under the rows, in the code face on a tray; wrapped, so neither it nor the card scrolls sideways. */
-.updates-raw { margin-top: var(--space-2); }
-.updates-raw-text {
-    margin: var(--space-1) 0 0;
-    padding: var(--space-2) var(--space-3);
-    background: var(--surface-tray);
-    border-radius: var(--radius-inner);
-    color: var(--text-primary);
-    font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
-    font-size: var(--type-meta);
-    line-height: var(--line-meta);
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    tab-size: 2;
-}
-/* A narrow attempt (a phone) stacks each label over its value, and Restore under the summary at its start, closed or
-   open; 34rem is what a 640px phone window leaves it. */
-@container updatesattempt (max-width: 34rem) {
-    .updates-attempt-facts { grid-template-columns: minmax(0, 1fr); }
-    .updates-attempt-facts dt { margin-top: var(--space-1); }
-    .updates-attempt-facts .updates-facts-head { margin-top: var(--space-3); }
-    .updates-attempt-details { flex-basis: 100%; }
-    .updates-attempt-foot > .btn { margin-inline-start: 0; }
-}
-.updates-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-2);
-    margin-top: var(--space-3);
-}
-/* Local chip/dot primitives on purpose: the shared .ui-chip alias group
-   carries page palettes (skills/marketplace) and .ui-status recolors the
-   sentence itself — neither covers a label:value fact chip with a dot-status
-   sibling (checklist item 26 one-line statement). DESIGN section 2: label at
-   meta ink, the value is the primary thing. */
-.updates-chip {
-    font-size: var(--type-meta);
-    line-height: var(--line-meta);
-    color: var(--text-primary);
-    background: var(--surface-tray);
-    border: 1px solid transparent;
-    border-radius: var(--radius-inner);
-    padding: 2px var(--space-2);
-}
-.updates-chip strong {
-    color: var(--text-meta);
-    font-weight: 500;
-}
-.updates-chip-link {
-    cursor: pointer;
-    font-family: inherit;
-    text-align: left;
-}
-.updates-chip-link:hover {
-    background: var(--tone-quiet-hover);
-}
-.updates-action-row {
-    margin-top: var(--space-4);
-}
-.updates-action-note {
-    font-size: var(--type-meta);
-    color: var(--text-meta);
-}
 .updates-recovery {
-    margin-top: var(--space-5);
     border-top: 1px solid var(--divider);
     padding-top: var(--space-3);
-}
-.updates-recovery summary {
-    font-size: var(--type-body);
-    font-weight: 600;
-    color: var(--text-primary);
-    cursor: pointer;
 }
 .updates-recovery-copy {
     font-size: var(--type-meta);
     line-height: var(--line-meta);
     color: var(--text-meta);
-    margin: var(--space-2) 0 var(--space-3);
+    margin: 0 0 var(--space-3);
 }
 .updates-recovery-actions {
     display: flex;
@@ -9088,7 +8880,7 @@ body.keyboard-open .project-panel {
 .updates-branch {
     font-size: var(--type-meta);
     color: var(--text-meta);
-    margin-bottom: var(--space-2);
+    margin: 0 0 var(--space-2);
 }
 .updates-subhead {
     font-size: var(--type-body);
@@ -9148,19 +8940,18 @@ body.keyboard-open .project-panel {
 
 /* The update description: Ouroboros's own account of the update this panel
    offers, kept after it lands as "What changed in this version". A fact block,
-   so it is separated from the action row the way Recovery is — a rule, not a
+   so it is separated from the headline the way Recovery is — a rule, not a
    card, with two small actions: Check (facts only) and Write/Rewrite (an
    ordinary task that authors it). */
 .updates-letter {
     display: flex;
     flex-direction: column;
     gap: var(--space-1);
-    margin-top: var(--space-4);
     border-top: 1px solid var(--divider);
     padding-top: var(--space-3);
 }
 /* The heading and the actions share a row while both fit; otherwise (a phone) the actions
-   follow on their own, so the date and range keep the width instead of a column beside them. */
+   follow on their own, so the date keeps the width instead of a column beside it. */
 .updates-letter-head {
     display: flex;
     flex-wrap: wrap;
@@ -9207,40 +8998,35 @@ body.keyboard-open .project-panel {
     line-height: var(--line-meta);
     color: var(--text-meta);
 }
-.updates-letter-details,
-.updates-attempt-details {
+.updates-letter-details {
+    margin-top: var(--space-3);
     font-size: var(--type-meta);
     line-height: var(--line-meta);
     color: var(--text-meta);
-    margin-top: var(--space-2);
     overflow-wrap: anywhere;
-}
-.updates-letter-details summary,
-.updates-attempt-details summary {
-    cursor: pointer;
-    width: fit-content;
 }
 .updates-letter-details p {
     margin: var(--space-2) 0 0;
 }
+/* The letter opens at its first part (about eight lines); "Read all" opens the rest in place. */
 .updates-letter-body {
     font-size: var(--type-body);
     line-height: var(--line-body);
     color: var(--text-primary);
     margin-top: var(--space-2);
 }
-/* A markdown heading inside the letter is a subsection label, never a page
-   title — same clamp the chat bubble applies to rendered markdown, declared
-   after the global .md-h* block it narrows. */
-.updates-letter-body .md-h1,
-.updates-letter-body .md-h2,
-.updates-letter-body .md-h3 {
-    font-size: var(--type-body);
-    line-height: var(--line-body);
+.updates-letter-body:not(.is-open) { max-height: calc(8 * var(--line-body) * 1em); overflow: hidden; }
+/* A long reading text keeps its structure: the title one size up, a section as a label with room above it, a
+   subsection in the secondary ink — declared after the global .md-h* block it narrows. */
+.updates-letter-body :is(.md-h1, .md-h2, .md-h3) {
+    line-height: var(--line-title);
     color: var(--text-primary);
     font-weight: 600;
     margin: var(--space-2) 0 var(--space-1);
 }
+.updates-letter-body .md-h1 { font-size: var(--type-section); }
+.updates-letter-body .md-h2 { font-size: var(--type-body); margin-top: var(--space-4); }
+.updates-letter-body .md-h3 { font-size: var(--type-body); font-weight: 500; color: var(--text-secondary); }
 
 
 /* The child card's effort chip: one text part of the meta line; a pinned level wears the pin glyph. */

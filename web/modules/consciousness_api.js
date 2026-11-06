@@ -5,6 +5,11 @@
 // send exactly the contract's request keys.
 import { extensionRoutePath, extensionRoutePrefix, fetchJson, jsonPost, readStateJson } from './api_client.js';
 import { tr } from './i18n.js';
+import { errorWords } from './ui_primitives.js';
+
+/** A read or write that never reached Ouroboros in owner words (errorWords); a server's answer keeps its own words. */
+export const failureText = (error) => (error instanceof TypeError && error.response === undefined
+    ? errorWords(error).text : error?.message || String(error));
 
 /** Raised on window after a place write the server confirmed: `{place}` or `{placeId, removed: true}`. */
 export const PLACES_CHANGED_EVENT = 'ouro:places-changed';

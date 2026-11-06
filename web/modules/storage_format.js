@@ -1,7 +1,8 @@
-// The one set of number, size, date and duration formats of the Storage tab (the gauge and the
-// free-space tray): decimal units, a fixed English date and time inside the sentence (never the
-// browser's locale, which mixed languages in one line), counts like the rest of the app; and the one
-// "Largest parts" list a place and a deleted project's folder both open.
+// The one set of number, money, size, date and duration formats of the Dashboard tabs (Storage's gauge and
+// free-space tray, Costs, Consciousness, the Updates record): decimal units, a fixed English date and time
+// inside the sentence (never the browser's locale, which mixed languages in one line), counts and money
+// grouped like the rest of the app; and the one "Largest parts" list a place and a deleted project's folder
+// both open.
 
 import { fmt } from './i18n.js';
 import { statusMarkHtml } from './status_mark.js';
@@ -9,6 +10,16 @@ import { escapeHtmlAttr, escapeHtmlText } from './utils.js';
 
 /** Counts in one fixed format, like the file counts of result_files.js. */
 export const number = (n) => Number(n || 0).toLocaleString('en-US');
+
+/** Money grouped like a count ($29,438.20); four decimals below a cent, so a real cost never reads $0.00; an absent
+ *  amount is the dash, never $0.00. */
+export function formatUsd(value) {
+    if (value === null || value === undefined || value === '') return '—';
+    const amount = Number(value);
+    if (!Number.isFinite(amount)) return '—';
+    const digits = amount > 0 && amount < 0.01 ? 4 : 2;
+    return `$${amount.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
+}
 
 export const plural = (n, one, many) => (Number(n) === 1 ? fmt(one, { n }) : fmt(many, { n, count: number(n) }));
 

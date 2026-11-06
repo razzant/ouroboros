@@ -521,18 +521,21 @@ test('an older failed backfill cannot overwrite a newer complete reconnect resul
     assert.equal(mount.querySelector('#log-entries').children.length, 1);
 });
 
-test('Costs numeric inputs have visible associated names and the task cap description', (t) => {
+test('Costs numeric inputs have visible associated names and one line of owner help each', (t) => {
     const { mount } = setup(t);
     initCosts({ mount, state: {} });
-    for (const [id, label] of [['s-budget', 'Total Budget ($)'], ['s-per-task-cost', 'Per-task Cost Cap ($)']]) {
+    for (const [id, label, help] of [['s-budget', 'Total budget ($)', /Paid work stops/],
+        ['s-per-task-cost', 'Per-task cap ($)', /A task and its helpers stop/]]) {
         const field = mount.querySelector(`#${id}`);
         assert.ok(field);
         assert.equal(mount.querySelector(`[for="${id}"]`).textContent, label);
         assert.equal(field.classList.contains('ui-control'), true);
+        const description = mount.querySelector(`#${field.getAttribute('aria-describedby')}`);
+        assert.match(description.textContent, help);
+        assert.doesNotMatch(description.textContent, /root task tree|auto-resume/, 'the mechanism lives under its disclosure');
     }
-    const input = mount.querySelector('#s-per-task-cost');
-    const description = mount.querySelector(`#${input.getAttribute('aria-describedby')}`);
-    assert.match(description.textContent, /whole root task tree/);
+    // The mechanism is one disclosure away, never under one field only.
+    assert.match(mount.querySelector('.costs-budget').querySelector('.ui-disclosure').textContent, /whole tree/);
 });
 
 test('Dashboard binds stored, keyboard and programmatic selection to the same named panels', async (t) => {

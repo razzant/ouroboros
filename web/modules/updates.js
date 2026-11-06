@@ -1,8 +1,10 @@
 import { escapeHtmlAttr as escapeHtml, lastAppVersion, watchAppVersion } from './utils.js';
+import { paintStatusMark, statusMarkHtml } from './status_mark.js';
+import { mountVersionList } from './update_versions.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { showToast } from './toast.js';
 import { apiClient, apiFetch } from './api_client.js';
-import { RECOVERY_RETRY, UPDATE_STAGE_LABELS, afterUpdateRows, assistedUpdatePhase, attemptOutcome, attemptTime, bindPreflightDescription, preflightDescription, preflightEvidenceRows, unfinishedRecovery, updateAttemptView, verifiedUpdatePlan } from './update_status.js';
+import { RECOVERY_RETRY, UPDATE_STAGE_LABELS, afterUpdateRows, assistedUpdatePhase, attemptOutcome, attemptTime, bindPreflightDescription, failureWords, preflightDescription, preflightEvidenceRows, unfinishedRecovery, updateAttemptView, verifiedUpdatePlan } from './update_status.js';
 import { destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
 import { updateEffectsText } from './update_effects.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
@@ -10,6 +12,9 @@ import { openTaskReference, taskReferenceHtml } from './task_reference.js';
 // Known non-state warnings are folded into their verdict states; everything
 // else is surfaced verbatim so a backend warning class can never vanish.
 const STATE_WARNINGS = new Set(['official_status_requires_check', 'managed_updates_unavailable']);
+// The headline's one mark per tone (status_mark.js), and the facts said beside it; the rest is the card's Details.
+const TONE_MARKS = { ok: 'ok', warn: 'owner', error: 'failed' };
+const HEADLINE_FACTS = new Set(['App', 'Official repo', 'Channel']);
 
 // ONE relative-time vocabulary for this panel: the same four buckets carry the
 // "checked …" age on the action row and the "written …" age on the letter, so
@@ -90,7 +95,7 @@ function progressVerdict(data, base) {
 
 export function applyFailureText(err) {
     const body = err?.body || {};
-    const parts = [String(err.message || err)];
+    const parts = [failureWords(err)];
     if (body.reason) parts.push(`reason: ${body.reason}`);
     if (Array.isArray(body.blockers) && body.blockers.length) {
         parts.push(`blocked by: ${body.blockers.slice(0, 5).join(', ')}`);
@@ -254,28 +259,33 @@ export function updateVerdict(data = {}, phase = '', appVersion = '') {
             action: { id: 'check', label: 'Check for updates' },
         };
     }
+    // A failure says so in words, its codes are the record's (Details); the button keeps the name it had.
     if (data.check_ok === false) {
+        const lastGood = relativeAge(data.checked_at);
         return {
-            ...base,
+            ...base, checkedAgo: '', codes: warnings,
             state: 'check_failed', tone: 'error',
             headline: 'Could not check the official update channel.',
-            hint: warnings.length ? warnings.join(' · ') : 'Try again when the network is available.',
+            hint: lastGood ? `The last good check was ${lastGood}.` : 'Try again when the network is available.',
             warnings: [],
-            action: { id: 'check', label: 'Check for updates' },
+            action: { id: 'check', label: data.checked_at ? 'Check again' : 'Check for updates' },
         };
     }
+    // The versions are the headline; the commits they name are the record's.
     const currentVersion = data.current_version || 'unknown';
-    const currentSha = data.current_short_sha || '?';
+    if (data.current_short_sha) chips.push({ label: 'Running commit', value: data.current_short_sha });
     if (data.available) {
         const latestVersion = data.latest_version || 'unknown';
-        const latestSha = data.latest_short_sha || '?';
         const unsafe = !data.safe_to_apply;
+        if (data.latest_short_sha) chips.push({ label: 'Update commit', value: data.latest_short_sha });
         if (data.latest_message) chips.push({ label: 'Latest', value: data.latest_message });
+        const target = latestVersion !== currentVersion ? `${currentVersion} → ${latestVersion}`
+            : data.behind ? `${data.behind} new ${data.behind === 1 ? 'change' : 'changes'}` : latestVersion;
         return {
             ...base,
             state: unsafe ? 'available_unsafe' : 'available',
             tone: unsafe ? 'warn' : 'ok',
-            headline: `Update available: ${currentVersion} (${currentSha}) -> ${latestVersion} (${latestSha})`,
+            headline: `Update available: ${target}`,
             hint: unsafe ? unsafeUpdateHint(data) : '',
             action: { id: 'update', label: `Update to ${latestVersion}` },
         };
@@ -286,16 +296,16 @@ export function updateVerdict(data = {}, phase = '', appVersion = '') {
         return {
             ...base,
             state: 'current', tone: 'ok',
-            headline: `Ouroboros is up to date at ${currentVersion} (${currentSha}).`,
+            headline: `Up to date · ${currentVersion}`,
             hint: '',
             action: { id: 'check', label: 'Check again' },
         };
     }
     return {
-        ...base,
+        ...base, codes: warnings,
         state: 'unknown', tone: 'neutral',
         headline: 'Update status is unknown.',
-        hint: warnings.length ? warnings.join(' · ') : 'Run a check to get the official status.',
+        hint: 'Run a check to get the official status.',
         warnings: [],
         action: { id: 'check', label: 'Check for updates' },
     };
@@ -553,46 +563,40 @@ export function bindAppVersionRender({ getStatus, render }) {
 }
 
 export function initUpdates({ mount, state, ws, openSettingsTab }) {
+    // The tab's one root and scroller (style.css "The Dashboard tab body"): the state of the channel leads as the
+    // tab's headline with its facts and one next action; the last attempt, the record's facts, the description and
+    // Recovery follow, each behind its own disclosure.
     const page = document.createElement('div');
     page.id = 'page-updates';
-    page.className = 'settings-embedded-content';
+    page.className = 'dashboard-body scroll-fade-y';
     page.innerHTML = `
-        <div class="updates-scroll">
-            <section class="updates-card" id="updates-status-card">
-                <div class="updates-card-title">Official Updates</div>
-                <div class="updates-status">
-                    <span class="updates-status-dot" id="updates-dot" data-tone="neutral"></span>
-                    <span class="updates-headline" id="updates-summary">Loading update status...</span>
+            <section class="ui-card updates-card" id="updates-status-card">
+                <div class="dashboard-hero">
+                    <p class="dashboard-hero-kicker">Official updates</p>
+                    <p class="dashboard-hero-figure"><span id="updates-summary">Loading update status…</span>${statusMarkHtml('consciousness-mark updates-mark')}</p>
+                    <p class="dashboard-hero-meta" id="updates-meta"></p>
+                    <p class="dashboard-hero-meta" id="updates-action-note"></p>
+                    <div class="dashboard-hero-actions"><button type="button" class="btn btn-primary" id="btn-update-primary" hidden></button></div>
                 </div>
-                <div class="updates-hint" id="updates-hint" hidden></div>
-                <section class="updates-attempt" id="updates-attempt" aria-labelledby="updates-attempt-headline" hidden>
-                    <div class="updates-status">
-                        <span class="updates-status-dot" id="updates-attempt-dot" data-tone="neutral"></span>
-                        <span class="updates-attempt-headline" id="updates-attempt-headline"></span>
-                    </div>
-                    <div class="updates-hint" id="updates-attempt-text"></div>
-                    <div class="updates-attempt-foot">
-                        <details class="updates-attempt-details" id="updates-attempt-details">
-                            <summary><time id="updates-attempt-time">Last attempt</time></summary>
-                            <dl class="updates-attempt-facts" id="updates-attempt-facts"></dl>
-                            <details class="updates-raw" id="updates-attempt-raw" hidden>
-                                <summary id="updates-attempt-raw-label">Raw record</summary>
-                                <pre class="updates-raw-text" id="updates-attempt-raw-text"></pre>
-                            </details>
+                <p class="updates-hint" id="updates-hint" hidden></p>
+                <div class="updates-attempt" id="updates-attempt" hidden>
+                    <details class="ui-disclosure updates-attempt-details" id="updates-attempt-details">
+                        <summary><span class="updates-attempt-line"><time id="updates-attempt-time">Last attempt</time><span class="ui-status" id="updates-attempt-headline"></span></span></summary>
+                        <dl class="dashboard-facts" id="updates-attempt-facts"></dl>
+                        <details class="ui-disclosure" id="updates-attempt-raw" hidden>
+                            <summary id="updates-attempt-raw-label">Raw record</summary>
+                            <pre class="ui-result-details" id="updates-attempt-raw-text"></pre>
                         </details>
-                        <button type="button" class="btn btn-default btn-sm" id="updates-attempt-restore" hidden>Restore previous version</button>
-                    </div>
-                </section>
-                <div class="updates-meta" id="updates-meta"></div>
-                <div class="settings-action-row updates-action-row">
-                    <span class="updates-action-note" id="updates-action-note"></span>
-                    <button class="btn btn-primary" id="btn-update-primary" hidden></button>
+                    </details>
+                    <button type="button" class="btn btn-default btn-sm" id="updates-attempt-restore" hidden>Restore previous version</button>
+                    <p class="updates-hint" id="updates-attempt-text"></p>
                 </div>
+                <details class="ui-disclosure updates-facts" id="updates-facts-more" hidden><summary>Details</summary><dl class="dashboard-facts" id="updates-facts"></dl></details>
                 <section class="updates-letter" id="updates-letter" aria-labelledby="updates-letter-label" hidden>
                     <div class="updates-letter-head">
                         <div class="updates-letter-heading">
                             <h4 class="updates-letter-label" id="updates-letter-label"></h4>
-                            <span class="updates-letter-meta"><time id="updates-letter-meta"></time><span id="updates-letter-covers"></span></span>
+                            <span class="updates-letter-meta"><time id="updates-letter-meta"></time></span>
                         </div>
                         <div class="updates-letter-actions">
                             <button type="button" class="btn btn-ghost btn-sm updates-letter-refresh" id="updates-letter-refresh"
@@ -605,28 +609,29 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
                     </div>
                     <div class="updates-letter-note" id="updates-letter-note-line" hidden><span id="updates-letter-note" role="status" aria-live="polite"></span> <span id="updates-letter-task"></span></div>
                     <div class="updates-letter-body ui-rich-content" id="updates-letter-body"></div>
-                    <details class="updates-letter-details" id="updates-letter-details">
+                    <button type="button" class="btn btn-ghost btn-sm ui-list-more" id="updates-letter-more" hidden>Read all</button>
+                    <details class="ui-disclosure updates-letter-details" id="updates-letter-details">
                         <summary>Details</summary>
                         <p id="updates-letter-provenance"></p>
                         <p id="updates-letter-error" hidden></p>
                         <p id="updates-letter-resources">Check reads the official channel and never writes a description. Writing runs one ordinary Ouroboros task on your Main model, which can read the changes themselves; it may use subscription limits, local resources, or API budget.</p>
                     </details>
                 </section>
-                <details class="updates-recovery">
+                <details class="ui-disclosure updates-recovery">
                     <summary>Recovery</summary>
                     <p class="updates-recovery-copy">Replace the active checkout with the exact official version from the selected channel. A rescue copy is saved first, but this is intentionally more destructive than an ordinary update.</p>
                     <div class="updates-recovery-actions">
-                        <button class="btn btn-danger btn-sm" id="btn-update-replace">Replace with Official Version (Recovery)</button>
-                        <button class="btn btn-default btn-sm" id="updates-promote">Save recovery point</button>
+                        <button type="button" class="btn btn-danger btn-sm" id="btn-update-replace">Replace with the official version</button>
+                        <button type="button" class="btn btn-default btn-sm" id="updates-promote">Save recovery point</button>
                     </div>
-                    <div class="updates-branch" id="updates-current"></div>
-                    <h4 class="updates-subhead">Restore a previous version</h4>
+                    <p class="updates-branch" id="updates-current"></p>
+                    <h4 class="updates-subhead">Restore an earlier version</h4>
                     <div id="updates-commits" class="updates-restore-list"></div>
+                    <button type="button" class="btn btn-ghost btn-sm ui-list-more" id="updates-commits-more" hidden></button>
                     <h4 class="updates-subhead">Official releases</h4>
                     <div id="updates-official-tags" class="updates-restore-list"></div>
                 </details>
             </section>
-        </div>
     `;
     mount.appendChild(page);
 
@@ -634,11 +639,12 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     let restartNeeded = false;  // panel-lifetime restart continuation (no durable marker exists for fence/rollback refusals)
     let replaceInFlight = false; // latch: a pending recovery request keeps Replace disabled across re-renders (tab reopen included)
     const replaceBtn = page.querySelector('#btn-update-replace');
-    const dot = page.querySelector('#updates-dot');
+    const dot = page.querySelector('.updates-mark');
     const summary = page.querySelector('#updates-summary');
     const hint = page.querySelector('#updates-hint');
+    const factsMore = page.querySelector('#updates-facts-more');
+    const facts = page.querySelector('#updates-facts');
     const attemptSection = page.querySelector('#updates-attempt');
-    const attemptDot = page.querySelector('#updates-attempt-dot');
     const attemptHeadline = page.querySelector('#updates-attempt-headline');
     const attemptWhen = page.querySelector('#updates-attempt-time');
     const attemptText = page.querySelector('#updates-attempt-text');
@@ -651,11 +657,12 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     const actionNote = page.querySelector('#updates-action-note');
     const current = page.querySelector('#updates-current');
     const commitsDiv = page.querySelector('#updates-commits');
+    const commitsMore = page.querySelector('#updates-commits-more');
     const officialTagsDiv = page.querySelector('#updates-official-tags');
     const letterSection = page.querySelector('#updates-letter');
     const letterLabel = page.querySelector('#updates-letter-label');
     const letterMeta = page.querySelector('#updates-letter-meta');
-    const letterCovers = page.querySelector('#updates-letter-covers');
+    const letterMore = page.querySelector('#updates-letter-more');
     const letterWrite = page.querySelector('#updates-letter-write');
     const letterNote = page.querySelector('#updates-letter-note');
     const letterNoteLine = page.querySelector('#updates-letter-note-line');
@@ -678,21 +685,13 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     let restartReconcileQueued = false;
     let restartReconcileAfterBootNotice = false;
 
-    function chipHtml(chip) {
-        const body = `<strong>${escapeHtml(chip.label)}:</strong> ${escapeHtml(chip.value)}`;
-        if (chip.link === 'settings-advanced') {
-            return `<button type="button" class="updates-chip updates-chip-link" data-open-settings-advanced title="Change in Settings -> Advanced">${body}</button>`;
-        }
-        return `<span class="updates-chip">${body}</span>`;
-    }
-
-    // One row of the Last attempt list: a group heading spans both columns; an exact stamp sits under its value.
-    function factRowHtml(row) {
-        if (row.head) return `<dt class="updates-facts-head">${escapeHtml(row.head)}</dt>`;
-        const exact = row.exact
-            ? `<time class="updates-fact-raw" datetime="${escapeHtml(row.exact)}">${escapeHtml(row.exact)}</time>` : '';
-        return `<dt>${escapeHtml(row.label)}</dt><dd>${escapeHtml(row.value)}${exact}</dd>`;
-    }
+    // The headline's facts are one flat line (the app, the official repository, the channel, a door to change it); the
+    // rest of the record is the card's Details. A group heading spans both columns of a facts list.
+    const factLine = (chip) => chip.link === 'settings-advanced'
+        ? `<button type="button" class="consciousness-inline-link ui-hit-area" data-open-settings-advanced title="Change in Settings › Advanced">${escapeHtml(chip.value)} channel</button>`
+        : escapeHtml(chip.label === 'App' ? `App ${chip.value}` : chip.value);
+    const factRowHtml = (row) => (row.head ? `<dt class="updates-facts-head">${escapeHtml(row.head)}</dt>`
+        : `<dt>${escapeHtml(row.label)}</dt><dd>${escapeHtml(row.value)}</dd>`);
 
     // The letter body hosts rendered markdown, so its enhancement owns real
     // resources (Chart instances, mermaid timers, a click handler). Release
@@ -744,12 +743,11 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         letterSection.hidden = false;
         letterSection.setAttribute('aria-busy', String(letterRefreshing || letterRequesting || Boolean(view.request?.live)));
         letterLabel.textContent = view.label;
+        // When it was written is the heading's one fact; the range it covers is its provenance (Details).
         const written = view.markdown ? attemptTime(view.meta.writtenAt) : '';
         letterMeta.textContent = written ? `Written ${written}` : '';
         letterMeta.dateTime = view.meta.writtenAt;
         letterMeta.hidden = !written;
-        letterCovers.textContent = view.covers ? `${written ? ' · ' : ''}covers ${view.covers}` : '';
-        letterCovers.hidden = !view.covers;
         // One control per intent: when the primary action already checks, the section adds none.
         letterRefresh.hidden = updateVerdict(latestStatus || {}, phase).action?.id === 'check';
         letterRefresh.disabled = letterRefreshing || LETTER_BUSY_PHASES.has(phase);
@@ -758,9 +756,9 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         letterWrite.hidden = !view.write;
         letterWrite.disabled = !view.write || view.write.disabled || letterRequesting || letterRefreshing;
         letterWrite.textContent = letterRequesting ? 'Requesting…' : (view.write?.label || '');
+        // A failed check is said once, by the headline; the description it left alone needs no second line.
         const note = letterRefreshing ? (view.markdown ? 'Checking the official channel; the description stays as it is.' : 'Checking the official channel…')
-            : letterRequestError ? `Could not request a description: ${letterRequestError.text}`
-                : letterRefreshError ? 'Could not check for updates. The description is unchanged.' : view.note;
+            : letterRequestError ? `Could not request a description: ${letterRequestError.text}` : view.note;
         letterNote.textContent = note;
         letterNoteLine.hidden = !note;
         // A running request's own note opens its task's card in Main; rewritten only when the task changes,
@@ -792,8 +790,13 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         releaseLetterBody();
         letterKey = nextKey;
         letterBody.hidden = !view.markdown;
+        // A new text opens at its first part; "Read all" offers the rest only when there is more than that part.
+        letterBody.classList.remove('is-open');
+        letterMore.textContent = 'Read all';
+        letterMore.hidden = true;
         mountChatMarkdown(letterBody, view.markdown || '');
         if (!view.markdown) return;
+        requestAnimationFrame(() => { letterMore.hidden = letterBody.scrollHeight <= letterBody.clientHeight + 1; });
         // No anchored scroll to protect on this page, so markdown's deferred
         // writes (highlight, latex, mermaid, charts) run directly.
         // The authored body keeps no controls of its own. The shared
@@ -867,15 +870,17 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         const above = !view?.terminal && ['updating', 'restarting', 'restart_required'].includes(verdict.state);
         attemptSection.hidden = !view || (above && !view.text);
         if (attemptSection.hidden) return;
-        attemptDot.dataset.tone = view.tone;
+        // One quiet line of the record: when, and how it ended with its tone; the rest opens under it.
+        attemptHeadline.dataset.tone = view.tone;
         attemptHeadline.textContent = view.headline;
         attemptHeadline.hidden = above || view.headline === verdict.headline;
-        attemptDot.hidden = attemptHeadline.hidden;
         const when = attemptTime(view.when);
         attemptWhen.textContent = when ? `Last attempt · ${when}` : 'Last attempt';
         attemptWhen.dateTime = view.when;
         attemptText.textContent = view.text;
         attemptText.hidden = !view.text;
+        // A confirmed success's words are the record's (in its Details); any other outcome's stay in view under the line.
+        if (view.tone === 'ok') attemptFacts.before(attemptText); else if (attemptText.parentElement !== attemptSection) attemptSection.append(attemptText);
         // The retained samples (after_update) join the rows only of the attempt they name, so they appear with this
         // section, which stays hidden while an update runs (owner 25.10: A). A record of another operation is never
         // read as this attempt's: it keeps only its exact text below, labelled so.
@@ -895,17 +900,23 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
 
     function render() {
         const verdict = updateVerdict(latestStatus || {}, phase, lastAppVersion());
-        dot.dataset.tone = verdict.tone;
+        paintStatusMark(dot, { shape: TONE_MARKS[verdict.tone] ? 'dot' : 'none', hue: TONE_MARKS[verdict.tone] || 'ink' });
         summary.textContent = verdict.headline;
         const hintText = [verdict.hint, ...(verdict.warnings || []).map((w) => `Warning: ${w}`)]
             .filter(Boolean).join(' · ');
         hint.textContent = hintText;
         hint.hidden = !hintText;
-        meta.innerHTML = (verdict.chips || []).map(chipHtml).join('');
+        const chips = verdict.chips || [];
+        meta.innerHTML = chips.filter((chip) => HEADLINE_FACTS.has(chip.label)).map(factLine).join(' · ');
+        const rows = [...chips.filter((chip) => !HEADLINE_FACTS.has(chip.label)),
+            ...(verdict.codes || []).map((code) => ({ label: 'Reported', value: code }))];
+        facts.innerHTML = rows.map(factRowHtml).join('');
+        factsMore.hidden = !rows.length;
         actionNote.textContent = verdict.checkedAgo || '';
-        const actionRow = actionNote.parentElement;
-        actionRow.hidden = !verdict.action && !verdict.checkedAgo;
+        actionNote.hidden = !verdict.checkedAgo;
         if (verdict.action) {
+            // The crimson is this place's own action, an update; a check or a restart is a neutral capsule.
+            primaryBtn.className = `btn ${verdict.action.id === 'update' ? 'btn-primary' : 'btn-default'}`;
             primaryBtn.hidden = false;
             primaryBtn.disabled = Boolean(verdict.action.disabled);
             primaryBtn.textContent = verdict.action.label;
@@ -992,7 +1003,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
                     // The explicit check owns release discovery. A queued progress
                     // refresh has no tags and must not erase that successful read.
                     if (options.fetchRemote || officialTagsDiv.childElementCount === 0) {
-                        renderOfficialTags(data.official_tags || []);
+                        versions.renderReleases(data.official_tags || []);
                     }
                     if (statusRefreshNext) continue; // A newer notice owns the next read.
                     latestStatus = options.preservePhase && phase === 'preflighting' && latestStatus?.preflight_range
@@ -1016,79 +1027,16 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         return statusRefreshPromise;
     }
 
-    function renderRestoreRow({ label, date, message, target, restorable }) {
-        const row = document.createElement('div');
-        row.className = 'updates-restore-row';
-        const when = (date || '').slice(0, 16).replace('T', ' ');
-        row.innerHTML = `
-            <span class="updates-restore-label">${escapeHtml(label)}</span>
-            <span class="updates-restore-date">${escapeHtml(when)}</span>
-            <span class="updates-restore-msg">${escapeHtml((message || '').slice(0, 96))}</span>
-            ${restorable ? `<button class="btn btn-danger btn-xs" data-target="${escapeHtml(target)}">Restore</button>` : ''}
-        `;
-        if (restorable) row.querySelector('button').addEventListener('click', () => rollback(target));
-        return row;
-    }
+    // The Recovery list of earlier versions and official releases (update_versions.js); a Restore press confirms here.
+    const versions = mountVersionList({ commits: commitsDiv, more: commitsMore, releases: officialTagsDiv,
+        branch: current, onRestore: rollback });
 
-    function renderOfficialTags(tags) {
-        officialTagsDiv.innerHTML = '';
-        (tags || []).forEach((tag) => {
-            officialTagsDiv.appendChild(renderRestoreRow({
-                label: tag.tag || '', date: '', message: (tag.sha || '').slice(0, 12),
-                target: '', restorable: false,
-            }));
-        });
-        if (!tags?.length) officialTagsDiv.innerHTML = '<div class="updates-empty">Run a check to load official releases.</div>';
-    }
-
-    async function loadVersions() {
-        try {
-            const resp = await apiFetch('/api/git/log', { cache: 'no-store' });
-            if (!resp.ok) throw new Error('Git log API error ' + resp.status);
-            const data = await resp.json();
-            current.textContent = `Branch: ${data.branch || '?'} @ ${data.sha || '?'}`;
-            // One restore list (owner decision 2026-08-31): tags that point at a
-            // listed commit become labels on that commit's row; tags whose
-            // target is older than the listed window keep their own row.
-            const tagsBySha = new Map();
-            (data.tags || []).forEach((tag) => {
-                if (!tag.sha) return;
-                const rows = tagsBySha.get(tag.sha) || [];
-                rows.push(tag);
-                tagsBySha.set(tag.sha, rows);
-            });
-            commitsDiv.innerHTML = '';
-            const seenTagShas = new Set();
-            (data.commits || []).forEach((commit) => {
-                const tagged = tagsBySha.get(commit.sha) || [];
-                tagged.forEach((tag) => seenTagShas.add(tag.sha));
-                const tagNames = tagged.map((tag) => tag.tag).join(', ');
-                commitsDiv.appendChild(renderRestoreRow({
-                    label: tagNames || commit.short_sha || commit.sha?.slice(0, 8) || '?',
-                    date: commit.date,
-                    message: commit.message,
-                    target: commit.sha,
-                    restorable: true,
-                }));
-            });
-            (data.tags || []).forEach((tag) => {
-                if (tag.sha && seenTagShas.has(tag.sha)) return;
-                commitsDiv.appendChild(renderRestoreRow({
-                    label: tag.tag, date: tag.date, message: tag.message,
-                    target: tag.tag, restorable: true,
-                }));
-            });
-            if (!commitsDiv.children.length) commitsDiv.innerHTML = '<div class="updates-empty">No commits found</div>';
-        } catch (err) {
-            commitsDiv.innerHTML = `<div class="updates-empty updates-empty-error">Failed to load: ${escapeHtml(err.message || err)}</div>`;
-            current.textContent = 'Branch: unknown';
-        }
-    }
-
-    async function rollback(target) {
+    // The owner decides by a version's name and date; the exact commit is the confirmation's Details.
+    async function rollback({ target, label = target, when = '' }) {
         const confirmed = await openConfirmDialog({
-            title: 'Restore version',
-            body: `Restore ${target} locally?\n\nRunning work will be interrupted, a rescue snapshot will be saved, and the server will restart. Nothing will be pushed. Engine data cannot be downgraded.`,
+            title: 'Restore an earlier version',
+            body: `Go back to ${label}${when ? ` from ${when}` : ''}?\n\nRunning work will be interrupted, a rescue snapshot will be saved, and the server will restart. Nothing will be pushed. Engine data cannot be downgraded.`,
+            details: { summary: 'Details', rows: [{ label: 'Exact target', value: target }] },
             confirmLabel: 'Restore',
             danger: true,
         });
@@ -1117,7 +1065,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
                 if (data.restart_required) { restartNeeded = true; setPhase('restart_needed'); }
             }
         } catch (err) {
-            showToast('Rollback failed: ' + (err.message || err), 'error');
+            showToast(`Rollback failed: ${failureWords(err)}`, 'error');
         }
     }
 
@@ -1214,7 +1162,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         } catch (err) {
             const restartRequired = Boolean(err?.body?.restart_required);
             const suffix = restartRequired ? ' Runtime shutdown was incomplete; restart Ouroboros before retrying.' : '';
-            showToast('Recovery failed: ' + (err.message || err) + suffix, 'error');
+            showToast(`Recovery failed: ${failureWords(err)}${suffix}`, 'error');
             if (restartRequired) restartNeeded = true;
             // Fail-closed: ANY replace failure (the tx-active 409 included)
             // re-reads durable state, and render() alone owns the Replace
@@ -1238,7 +1186,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
             showToast('Restart requested.', 'success');
             enterRestarting();
         } catch (err) {
-            showToast('Restart failed: ' + (err.message || err), 'error');
+            showToast(`Restart failed: ${failureWords(err)}`, 'error');
             primaryBtn.disabled = false;
         }
     }
@@ -1247,7 +1195,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         const action = primaryBtn.dataset.action;
         if (action === 'check') {
             loadStatus({ fetchRemote: true });
-            loadVersions();
+            versions.load();
         } else if (action === 'update') {
             applyUpdate();
         } else if (action === 'restart') {
@@ -1255,7 +1203,10 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         }
     });
     replaceBtn.addEventListener('click', replaceWithOfficial);
-    attemptRestore.addEventListener('click', () => rollback(attemptRestore.dataset.target));
+    attemptRestore.addEventListener('click', () => rollback({ target: attemptRestore.dataset.target, label: 'the version before this update' }));
+    letterMore.addEventListener('click', () => {
+        letterMore.textContent = letterBody.classList.toggle('is-open') ? 'Show less' : 'Read all';
+    });
     meta.addEventListener('click', (event) => {
         if (event.target.closest?.('[data-open-settings-advanced]')) {
             openSettingsTab?.('advanced');
@@ -1274,10 +1225,10 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
             if (data.status === 'ok') {
                 showToast(data.message, 'success');
             } else {
-                showToast('Error: ' + (data.error || 'unknown'), 'error');
+                showToast(`Could not save the recovery point${data.error ? `: ${data.error}` : '.'}`, 'error');
             }
         } catch (err) {
-            showToast('Failed: ' + (err.message || err), 'error');
+            showToast(`Could not save the recovery point: ${failureWords(err)}`, 'error');
         }
     });
 
@@ -1294,6 +1245,6 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     window.addEventListener('ouro:dashboard-subtab-shown', (event) => {
         if (event.detail?.tab !== 'updates' || state.activePage !== 'dashboard') return;
         loadStatus({ fetchRemote: false });
-        loadVersions();
+        versions.load();
     });
 }

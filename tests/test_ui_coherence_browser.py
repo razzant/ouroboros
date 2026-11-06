@@ -238,7 +238,7 @@ def test_settings_footer_controls_are_reachable_at_content_breakpoints(subscript
                     setup_browser.capture(page, f"shell-footer-{width}-{name}")
 
 
-def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_local_table_overflow(subscription_ui):
+def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_their_tables_inside(subscription_ui):
     ui = subscription_ui
     page = ui["page"]
     projects = [{"id": f"project-{i}", "name": f"Project {i} with a descriptive title", "chat_id": 100+i,
@@ -285,27 +285,26 @@ def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_local_table_over
     page.set_viewport_size({"width": 844, "height": 320})
     page.locator('[data-nav-page="dashboard"]').click()
     page.locator('[data-dashboard-tab="costs"]').click()
-    page.wait_for_function("document.querySelector('#cost-confirmed').textContent==='$25.00'")
+    page.wait_for_function("document.querySelector('#cost-known-limit').textContent==='$25.00 of $200.00'")
     for width in [390, 641, 768, 981]:
         page.set_viewport_size({"width": width, "height": 600})
         if width <= 640:
             setup_browser.wait_drawer_closed(page)
-        for card in page.locator(".costs-stats-grid > .stat-card").all():
+        for card in page.locator("#page-costs .ui-card").all():
             card.scroll_into_view_if_needed()
             box = hit_box(card)
             valid = box["reachable"] and box["x"] >= 0 and box["right"] <= width + 1
             if not valid:
                 setup_browser.capture(page, f"shell-cost-failure-{width}")
             assert valid, json.dumps([width, box])
-        for table in page.locator(".costs-tables-grid > div").all():
-            assert table.evaluate("el=>getComputedStyle(el).overflowX") == "auto"
+        for table in page.locator(".costs-table-card").all():
+            # The cell is the amount; a long name ends in an ellipsis inside its card, so nothing scrolls sideways.
+            assert table.evaluate("el=>el.scrollWidth<=el.clientWidth+1"), width
             assert table.evaluate("el=>el.getBoundingClientRect().right<=innerWidth+1")
-        if width == 390:
-            first = page.locator("#cost-by-model").locator("..")
-            assert first.evaluate("el => el.scrollWidth > el.clientWidth"), "long table should scroll locally"
-            first.evaluate("el=>el.scrollLeft=el.scrollWidth")
-            assert first.evaluate("el=>el.scrollLeft>0")
-        page.locator(".costs-stats-grid").scroll_into_view_if_needed()
+        name = page.locator("#cost-by-model .cost-cell-name").first
+        assert name.evaluate("el=>getComputedStyle(el).textOverflow") == "ellipsis"
+        assert name.get_attribute("title") == "provider/a-long-model-name-for-real-table-overflow"
+        page.locator("#page-costs .ui-card").first.scroll_into_view_if_needed()
         setup_browser.capture(page, f"shell-costs-{width}")
 
 
