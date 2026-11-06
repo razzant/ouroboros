@@ -848,4 +848,3 @@ def test_a_relayed_answer_kept_in_a_mailbox_reaches_the_successor_with_its_card(
     [row] = [row for row in owner_corpus_rows(sources) if row["content"] == "1. Publish it"]
     assert (row["reply_to"]["author"], row["reply_to"]["text"].split("\n")[0]) == (
         "Ouroboros, task asker", "Publish exactly this reply?")
-
