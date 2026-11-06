@@ -504,25 +504,34 @@ def test_focus_frame_states_provider_facts_and_mentions_never_a_verdict(focus, f
         assert words not in rendered, words
 
 
-@pytest.mark.parametrize("shape", ["slack", "generic"])
+@pytest.mark.parametrize("shape", ["slack", "generic", "directory"])
 def test_focus_frame_renders_the_connector_thread_snapshot_with_marks_and_a_named_omission(focus, monkeypatch, shape):
     from ouroboros import config
     from ouroboros.presence_context import focus_frame_sources
+    identity, authors = BOT, {}
     if shape == "slack":
         rows = [{"user": "B1", "ts": "1700000000.1", "bot_profile": {"name": "Bot"}, "text": "root " * 10},
                 {"user": "U2", "ts": "1700000001.2", "user_profile": {"real_name": "Ann"}, "text": "a reply " * 10},
                 {"user": "U3", "ts": "1700000002.3", "user_profile": {"real_name": "Pat"}, "text": "the waking words"}]
         message = {"message_id": "1700000002.3", "sent_at": "2023-11-14T22:13:22+00:00"}
-    else:
+    elif shape == "generic":
         rows = [{"id": "m1", "actor_id": "B1", "author_name": "Bot", "text": "root " * 10},
                 {"id": "m2", "actor_id": "U2", "display_name": "Ann", "text": "a reply " * 10},
                 {"id": "m3", "actor_id": "U3", "author": {"display_name": "Pat"}, "text": "the waking words"}]
         message = {"message_id": "m3"}
-    conversation = {"thread_history": {"status": "available", "observed_at": "2023-11-14T22:13:23+00:00",
+    else:  # names and the you-mark come from the connector's author directory alone (no identity, bare ids)
+        rows = [{"id": "m1", "actor_id": "B1", "text": "root " * 10}, {"id": "m2", "actor_id": "U2", "text": "a reply " * 10},
+                {"id": "m3", "actor_id": "U3", "text": "the waking words"}]
+        message = {"message_id": "m3", "provider_facts": {"mentioned_user_ids": ["U2", "B1"]}}
+        identity, authors = None, {"authors": [{"id": "B1", "name": "Bot", "is_self": True}, {"id": "U2", "name": "Ann", "is_self": False},
+                                               {"id": "U3", "name": "Pat", "is_self": False}]}
+    conversation = {"thread_history": {"status": "available", "observed_at": "2023-11-14T22:13:23+00:00", **authors,
                                        "data": {"messages": rows, "complete": True}}}
-    _task, bare = _frame(focus, facts=("my_thread",), message=message, conversation={})
+    _task, bare = _frame(focus, facts=("my_thread",), message=message, conversation={}, identity=identity)
     assert "The thread as the connector captured it" not in bare  # no snapshot, no thread section
-    task, rendered = _frame(focus, facts=("my_thread",), message=message, conversation=conversation)
+    task, rendered = _frame(focus, facts=("my_thread",), message=message, conversation=conversation, identity=identity)
+    if shape == "directory":  # the directory also names mentioned ids and marks you when provider_facts give only ids
+        assert "It mentions: Ann (id U2) — not you; Bot (id B1) — you." in rendered
     thread = rendered.split("The thread as the connector captured it (3 message(s), observed at 2023-11-14T22:13:23+00:00):\n", 1)[1]
     lines = thread.split("\n\nAnswer or stay silent first", 1)[0].splitlines()
     assert lines[0].startswith("- Bot (B1) [you] at ") and lines[0].endswith(json.dumps("root " * 10))
@@ -534,16 +543,16 @@ def test_focus_frame_renders_the_connector_thread_snapshot_with_marks_and_a_name
     assert focus_frame_sources(task["metadata"], rendered)["event"]["conversation"] == conversation
     # Over the named physical bound the newest lines render whole; the rest is counted and given its exact reader.
     monkeypatch.setattr(config, "FOCUS_THREAD_SNAPSHOT_CHARS", len(lines[2]) + 1)
-    _task, bounded = _frame(focus, facts=("my_thread",), message=message, conversation=conversation)
+    _task, bounded = _frame(focus, facts=("my_thread",), message=message, conversation=conversation, identity=identity)
     assert lines[2] in bounded and lines[0] not in bounded and lines[1] not in bounded
     assert ("(2 earlier message(s), " + str(len(lines[0]) + len(lines[1]) + 2) + " characters, are not shown here: the room row of "
             "this message carries their exact memory_read(source_ref=…) address, and the connector's thread read tool reads "
             "the thread live.)") in bounded
     monkeypatch.setattr(config, "FOCUS_THREAD_SNAPSHOT_CHARS", 1)  # even one line over the bound renders the newest whole
-    assert lines[2] in _frame(focus, facts=("my_thread",), message=message, conversation=conversation)[1]
+    assert lines[2] in _frame(focus, facts=("my_thread",), message=message, conversation=conversation, identity=identity)[1]
     conversation["thread_history"]["data"]["complete"] = False
     assert "3 message(s), the connector reports it incomplete, observed at" in _frame(
-        focus, facts=("my_thread",), message=message, conversation=conversation)[1]
+        focus, facts=("my_thread",), message=message, conversation=conversation, identity=identity)[1]
 
 
 # --- a refused automatic reply returns with the facts the mind decides on --------------------------------------------

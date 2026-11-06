@@ -671,9 +671,18 @@ def _self_ids(focus: Mapping[str, Any], event: Mapping[str, Any]) -> tuple[str, 
     return tuple(dict.fromkeys(value for value in own if value))
 
 
+def _author_directory(event: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    """The connector's directory of the thread snapshot's authors (``thread_history.authors``: id, name, is_self), by id."""
+    conversation = event.get("conversation") if isinstance(event.get("conversation"), Mapping) else {}
+    history = conversation.get("thread_history") if isinstance(conversation.get("thread_history"), Mapping) else {}
+    rows = history.get("authors") if isinstance(history.get("authors"), list) else []
+    return {str(row["id"]): row for row in rows if isinstance(row, Mapping) and row.get("id")}
+
+
 def _mentions(event: Mapping[str, Any], self_ids: tuple[str, ...]) -> list[dict[str, Any]] | None:
     """Whom the message mentions, by platform id: the connector's ``message.mentions`` rows when it supplies them,
-    else its ``provider_facts.mentioned_user_ids`` with ``is_self`` by id equality; None when it reports neither."""
+    else its ``provider_facts.mentioned_user_ids`` named through the thread's author directory where it has them,
+    with ``is_self`` by id equality; None when it reports neither."""
     message = event.get("message") if isinstance(event.get("message"), Mapping) else {}
     rows = message.get("mentions")
     if isinstance(rows, list):
@@ -683,7 +692,15 @@ def _mentions(event: Mapping[str, Any], self_ids: tuple[str, ...]) -> list[dict[
     ids = facts.get("mentioned_user_ids")
     if not isinstance(ids, list):
         return None
-    return [{"id": str(value), "name": None, "is_self": str(value) in self_ids} for value in ids if str(value or "")]
+    directory = _author_directory(event)
+    return [{"id": str(value), "name": _directory_name(directory.get(str(value))),
+             "is_self": str(value) in self_ids or bool((directory.get(str(value)) or {}).get("is_self"))}
+            for value in ids if str(value or "")]
+
+
+def _directory_name(row: Mapping[str, Any] | None) -> str | None:
+    name = (row or {}).get("name")
+    return name if isinstance(name, str) and name.strip() else None
 
 
 def _facts_line(focus: Mapping[str, Any], event: Mapping[str, Any]) -> str:
@@ -735,7 +752,8 @@ def _thread_time(message: Mapping[str, Any]) -> str:
 
 def _thread_snapshot(focus: Mapping[str, Any], event: Mapping[str, Any]) -> str:
     """The thread as the connector captured it (``event.conversation.thread_history``), one line per message
-    with its author, a ``[you]`` mark by id, a ``[this message]`` mark on the waking message and its time. The
+    with its author (named through ``thread_history.authors`` first), a ``[you]`` mark by that directory or by id, a
+    ``[this message]`` mark on the waking message and its time. The
     newest lines render whole under ``FOCUS_THREAD_SNAPSHOT_CHARS``; an omission names its count and exact reader.
     Lines the room already shows are not filtered (matching them is a store read the frame does not make)."""
     from ouroboros import config
@@ -747,13 +765,16 @@ def _thread_snapshot(focus: Mapping[str, Any], event: Mapping[str, Any]) -> str:
     status = str(history.get("status") or "")
     if messages is None:
         return f"The connector's thread snapshot holds no messages (status {status or 'unknown'})."
-    own = _self_ids(focus, event)
+    own, directory = _self_ids(focus, event), _author_directory(event)
     current = event.get("message") if isinstance(event.get("message"), Mapping) else {}
     waking = {str(value) for value in (current.get("message_id"), current.get("id"), current.get("ts")) if value}
     lines = []
     for row in messages:
         identity, name = _thread_author(row)
-        marks = (" [you]" if identity and identity in own else "") + (
+        known = directory.get(identity) if identity else None
+        name = _directory_name(known) or name  # the connector's directory first, its per-message fields next
+        mine = bool(identity) and (identity in own or bool((known or {}).get("is_self")))
+        marks = (" [you]" if mine else "") + (
             " [this message]" if waking & {str(value) for value in (row.get("message_id"), row.get("id"), row.get("ts")) if value} else "")
         who = f"{name} ({identity})" if name and identity else name or identity or "unknown author"
         lines.append(f"- {who}{marks} at {_thread_time(row)}: {json.dumps(str(row.get('text') or ''), ensure_ascii=False)}")

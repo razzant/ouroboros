@@ -1164,9 +1164,12 @@ Use the connector's ordinary content-hash-bound skill token for:
   `message.provider_facts.mentioned_user_ids` with `is_self` from `provider_facts.self_user_id` and names
   unknown; a connector that reports neither renders no mention line. `provider_facts.self_user_id` also
   names the focus's own account when the event carries no credential identity.
-- Optional thread snapshot `event.conversation.thread_history`: `{status, observed_at?, data: {messages:
-  [...], complete?}}`, the conversation as the provider served it at capture. The frame renders each
-  message as author, a `[you]` mark by id, a `[this message]` mark on the waking message, its time and text;
+- Optional thread snapshot `event.conversation.thread_history`: `{status, observed_at?, authors?, data:
+  {messages: [...], complete?}}`, the conversation as the provider served it at capture. Optional `authors`
+  is the connector's directory of the snapshot's authors, `[{"id": str, "name": str|null, "is_self": bool}]`,
+  the same shape as `message.mentions`; the frame takes names and the you-mark from it first (and names
+  mentioned ids through it when `message.mentions` is absent). The frame renders each
+  message as author, a `[you]` mark, a `[this message]` mark on the waking message, its time and text;
   per message the host reads an author id (`user`, `actor_id`, `author_id`, `platform_actor_id`, or a nested
   `actor`/`author` mapping), a name (`user_profile`/`bot_profile` `real_name`/`display_name`/`name`,
   `author_name`, `display_name`, `username`), a time (`sent_at`, else a numeric `ts`/`timestamp` epoch), the
