@@ -279,6 +279,26 @@ def test_a_cleared_field_stays_cleared_while_a_record_before_the_field_reads_its
     assert predecessor_notes_message(_continue_of_asker(), drive_root=tmp_path)["content"].endswith(legacy)
 
 
+@pytest.mark.parametrize("ending", ["stopped", "finished"])
+def test_an_askers_open_continue_is_named_and_a_finished_asker_without_notes_stays_silent(tmp_path, ending):
+    """An asker that stopped with work left names its open Continue in the lead, even without notes to show; a finished
+    asker's Continue is closed, so its lead stays plain and, with no notes kept, no row is added."""
+    from ouroboros.main_context_authority import late_answer_notes_message
+    from ouroboros.task_results import write_task_result
+
+    stop = {"lifecycle": {"status": "completed"}, "objective": {"status": "fail", "source": "task_completion",
+                                                                "reason": "author_stop"},
+            "execution": {"status": "ok", "task_completion": {"action": "stop", "rationale": "The choice is open."}}}
+    axes = stop if ending == "stopped" else {"lifecycle": {"status": "completed"}, "execution": {"status": "ok"}}
+    write_task_result(tmp_path, ASKER, "completed", result=FINAL, outcome_axes=axes)
+    note = late_answer_notes_message(_late_head(), drive_root=tmp_path)
+    if ending == "finished":
+        assert note is None
+        return
+    assert "its Continue is open (author_stop; continue_task)" in note["content"]
+    assert "It kept no working notes" in note["content"] and READER in note["content"]
+
+
 @pytest.mark.parametrize("damage", ["source_missing", "field_malformed", "result_unreadable"])
 def test_an_unreadable_asker_source_is_a_typed_gap_row_and_nothing_is_inferred(tmp_path, damage):
     from ouroboros.artifacts import task_artifact_dir_path

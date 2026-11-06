@@ -169,6 +169,8 @@ def test_two_completed_tasks_read_their_card_outcomes_not_a_bare_lifecycle(tmp_p
     direct = [wake._event_line("task_terminal", {"task_id": tid, "ts": _iso(since)}, results, RoomLabelResolver(projects=[]),
                                {}, T0) for tid in ("done1", "stop1")]
     assert direct[0].startswith("- task done1 Done") and "The API stayed down" in direct[1]
+    assert stopped.endswith(" · Continue open (author_stop)") and direct[1].endswith(" · Continue open (author_stop)")
+    assert "Continue open" not in done and "Continue open" not in direct[0], "a finished root offers no Continue"
 
 
 @pytest.mark.parametrize("synthesis", ["pending_once", "running", "completed"])

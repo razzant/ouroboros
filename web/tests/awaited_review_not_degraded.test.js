@@ -37,7 +37,7 @@ test('the awaited fact is the cause sentence of a clean card only', () => {
     const execution = { status: 'ok', reason_code: 'final_message', plan_review: 'awaiting' };
     const warned = done({ execution, objective: { status: 'not_evaluated', warning: 'residual_tool_errors_without_review' } });
     assert.equal(taskOutcomeSeverity(warned), 'warn');
-    assert.equal(taskReasonDetail(warned), 'Tool errors remain in the record; no review checked the result.');
+    assert.equal(taskReasonDetail(warned), 'Tool errors remain in the record.');
     const failed = done({ execution, artifacts: { status: 'missing' } });
     assert.equal(taskOutcomeSeverity(failed), 'error');
     assert.equal(taskReasonDetail(failed), 'Some result files are missing or could not be preserved.');

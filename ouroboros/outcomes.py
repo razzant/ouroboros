@@ -45,6 +45,7 @@ from ouroboros._outcome_tool_errors import (  # explicit re-exports, one stateme
     _RECOVERY_TOOL_NAMES as _RECOVERY_TOOL_NAMES,
     _ROOT_WRITE_TOOLS as _ROOT_WRITE_TOOLS,
     _unresolved_tool_errors as _unresolved_tool_errors,
+    warns_without_review as warns_without_review,
     _user_file_basenames as _user_file_basenames,
 )
 from ouroboros.headless import (
@@ -209,7 +210,7 @@ ACCEPTANCE_BYPASS_REASON_BY_RAIL = {
 ACCEPTANCE_ACCEPTED = "accepted"
 ACCEPTANCE_FINALIZED_UNACCEPTED = "finalized_unaccepted"
 
-# When unresolved or cosmetic errors exist but no review of the result ran, the
+# When unresolved or cosmetic errors other than failed reads exist but no review of the result ran, the
 # execution axis is OK yet "did it actually work?" was never judged: surface a
 # structural warning so a default-`auto` overclaim isn't displayed as clean.
 WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW = "residual_tool_errors_without_review"
@@ -880,8 +881,8 @@ def normalize_outcome_axes(result: Dict[str, Any]) -> Dict[str, Any]:
             normalized[key] = value
     # Delivery/deferred-work states are no review verdict. Keep the warning when
     # normalization restores their objective to not_evaluated.
-    if normalized["objective"].get("status") == OBJECTIVE_NOT_EVALUATED and (
-        normalized["execution"].get("unresolved_tool_errors") or normalized["execution"].get("cosmetic_tool_errors")
+    if normalized["objective"].get("status") == OBJECTIVE_NOT_EVALUATED and warns_without_review(
+        normalized["execution"].get("unresolved_tool_errors"), normalized["execution"].get("cosmetic_tool_errors"),
     ):
         _merge_objective_warning(normalized["objective"], WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW)
     return normalized
@@ -1172,7 +1173,7 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
     # failure-evidence projection below), deliberately never a structural veto.
     # Unjudged objectives retain a structural tool-error warning, never an inferred
     # failure or an automatic review. Any recorded critic already judged its subject.
-    if (cosmetic_tool_errors or tool_errors) and objective.get("status") == OBJECTIVE_NOT_EVALUATED:
+    if warns_without_review(cosmetic_tool_errors, tool_errors) and objective.get("status") == OBJECTIVE_NOT_EVALUATED:
         _merge_objective_warning(objective, WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW)
     final_answer_payload = selected_final_answer(text, llm_trace)
     headline_reason = reason_code

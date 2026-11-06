@@ -55,6 +55,8 @@ _FEED_FACTS = """({feed, taskId, notice, answer}) => {
         task: node.dataset.taskId || '',
         sender: node.querySelector(':scope > .sender')?.textContent.trim() || '',
         text: node.querySelector(':scope > .message')?.innerText || '',
+        // The Project reference under a row of that Project's work (audit 05.11, item 4).
+        project: node.querySelector('[data-intent="open-project"]')?.getAttribute('aria-label') || '',
     }));
     const cards = [...root.querySelectorAll(`.chat-live-card[data-task-id="${taskId}"]`)];
     const text = root.innerText || '';
@@ -345,6 +347,7 @@ def test_project_root_main_notice_is_one_message_in_main_and_its_project(
                     assert "assistant" in bubble["classes"].split(), bubble
                     assert bubble["type"] == "main_notice" and bubble["task"] == task_id, bubble
                     assert bubble["sender"] == "Ouroboros", bubble
+                    assert bubble["project"] == "Open project Main notice room", bubble
                     assert main_live["cards"] == 0 and not main_live["answer_anywhere"], main_live
                     page.wait_for_function(
                         "() => (document.querySelector('#nav-projects-count')?.textContent.trim() || '') === ''",
@@ -365,6 +368,7 @@ def test_project_root_main_notice_is_one_message_in_main_and_its_project(
                     project_held = _feed(page, project_feed, task_id, notice_mark, answer_mark)
                     assert project_held["card_finished"] == "0", project_held
                     assert project_held["cards"] == 1 and len(project_held["notice_bubbles"]) == 1, project_held
+                    assert project_held["notice_bubbles"][0]["project"] == "", "its own room needs no door to itself"
                     assert not project_held["answer_anywhere"], project_held
                     capture.checkpoint("project_held:panel_cover")
                     _panel_cover(page)
@@ -441,6 +445,7 @@ def test_project_root_main_notice_is_one_message_in_main_and_its_project(
                         has_text=notice_mark).wait_for(timeout=30_000)
                     main_reloaded = _feed(page, main_feed, task_id, notice_mark, answer_mark)
                     assert len(main_reloaded["notice_bubbles"]) == 1 and not main_reloaded["answer_anywhere"], main_reloaded
+                    assert main_reloaded["notice_bubbles"][0]["project"] == "Open project Main notice room", main_reloaded
                     main_history = _history(page, 1)
                     project_history = _history(page, project_chat)
 

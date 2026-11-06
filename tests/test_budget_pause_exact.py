@@ -116,7 +116,7 @@ def test_direct_turn_pause_event_parks_the_carried_record_in_pending(tmp_path, m
             "metadata": {"origin_message_ref": {"chat_id": 7}}}
     persisted, pushed = [], []
     sctx = _supervisor_ctx(tmp_path, workers, queue, persisted, pushed)
-    assert workers.RUNNING == {}  # a direct turn is never in RUNNING
+    assert workers.RUNNING == {}  # this direct turn has no RUNNING row: its event carries its record
     _handle_budget_pause(budget_pause.pause_event(task, raised.value.pause), sctx)
     parked = workers.PENDING[0]
     assert parked["id"] == "direct-2" and parked["_is_direct_chat"] is True

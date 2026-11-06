@@ -417,7 +417,10 @@ ESCALATE_TOOL_SCHEMA: Dict[str, Any] = {
         "Escalate one decision up the responsibility chain instead of guessing. "
         "A root task asks its human through a quiz card; a subagent asks its parent "
         "through a typed mailbox frame, which the parent answers with forward_to_worker "
-        "or escalates higher verbatim.\n\n"
+        "or escalates higher verbatim. From Presence work that answers a place conversation the card goes privately to Main, not "
+        "into that conversation; when your human is the person you are talking with there, tell them there in one line, through the "
+        "place's connector tool and in the same tool batch (a wait begins right after it), what you asked and where, so they are "
+        "not left in silence.\n\n"
         "The card may be the only thing your human sees. It may be read later, outside "
         "this room, by someone who remembers the purpose of the work without remembering "
         "its mechanisms or your earlier discussion. Issue, specification and question "
@@ -482,8 +485,11 @@ ESCALATE_TOOL_SCHEMA: Dict[str, Any] = {
             "without a wait; may be empty when wait_for_answer=true. It is your assumption, "
             "not the human's answer.")},
         "wait_for_answer": {"type": "boolean", "default": False, "description": (
-            "Live roots: wait for addressed owner input before another model round. Default "
-            "false; an unanswered card remains answerable either way.")},
+            "Live roots: wait for addressed owner input before another model round. Waiting keeps "
+            "this work alive with what it holds — its browser, task-session connections, services "
+            "and, when it holds one, its project's lane — until the answer, the wait bound, a restart or "
+            "another ending. Default false: the card stays answerable while the work goes on under its stated "
+            "assumption.")},
         "max_wait_minutes": {"type": "integer", "description": (
             "Optional positive whole-minute bound for wait_for_answer, within the task's "
             "existing lifetime limit. On expiry, resume with a system notice; the card stays "
