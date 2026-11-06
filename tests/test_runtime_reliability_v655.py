@@ -724,8 +724,8 @@ def test_engine_pool_line_reads_snapshot_counts(tmp_path):
     }
     (state / "queue_snapshot.json").write_text(json.dumps(snap), encoding="utf-8")
     note = engine_pool_line(ctx.drive_root)
-    assert "active 4" in note and "total 8" in note
-    assert "assignable idle 2" in note and "pending 3" in note
+    assert "dispatch-enabled 4" in note and "total 8" in note
+    assert "assignable idle 2" in note and "pending rows 3" in note
     assert "tree slots" not in note
 
 

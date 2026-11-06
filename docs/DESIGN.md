@@ -1427,7 +1427,8 @@ that saved no choice reads `until it is woken`), unless a helper its sleep chose
 that helper (`… until Ouroboros resumes it` only when this episode may ask for it,
 or `until you resume it` after Panic; a Continue's earlier helper is just
 `paused`), with no new control or turn; helpers an earlier attempt left running
-read as `Working`, with their count; an
+read as `Working`, with their count; `Queued` carries no cause when the scheduler
+recorded none, never a free-worker claim; an
 access wait is not an answer wait, and unknown stays unknown. Under the state a
 live work shows its authored focus (`update_focus`: stage · done · left), led by its time,
 quiet, at most two lines. A finished row shows the author’s closing sentence,

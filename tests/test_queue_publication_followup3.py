@@ -101,6 +101,67 @@ def test_the_telegram_health_line_counts_every_started_process(published, monkey
     assert telegram_health._started_processes(snap) == 1
 
 
+# ---- a failed pool measurement is published as unknown, never as an empty pool -------------------
+
+def test_a_failed_pool_measurement_publishes_unknown_and_every_reader_keeps_it_unknown(published, monkeypatch):
+    from ouroboros import config, utils
+    from ouroboros.context_runtime_facts import _queue_context_fact
+    from ouroboros.engine_facts import engine_pool_line
+    from ouroboros.model_detach import pool_available
+    from ouroboros.tools.control_events import _promotion_pool_disabled_from_snapshot
+    from supervisor import worker_pool_lifecycle
+
+    root, _now = published
+    _idle_pool(monkeypatch)
+
+    def broken(*_a, **_kw):
+        raise RuntimeError("pool table mid-rebind")
+
+    with monkeypatch.context() as failing:
+        failing.setattr(worker_pool_lifecycle, "pool_slot_counts", broken)
+        assert queue.persist_queue_snapshot("introspection_failed") is True
+    document = _read(root, "queue_snapshot.json")
+    assert document["pool_observation_status"] == "unknown"
+    assert all(document[key] is None for key in queue_publication._POOL_COUNT_KEYS), "never zeros"
+    assert document["project_demand"]["status"] == "unknown"
+    # The control projections refuse as the old zero-count form did, under the honest reason.
+    ctx = types.SimpleNamespace(drive_root=root, budget_drive_root="")
+    assert _promotion_pool_disabled_from_snapshot(ctx) == "unknown"
+    with monkeypatch.context() as carrier:  # a conversation carrier reads the published document
+        carrier.setattr(utils, "in_worker_process", lambda: True)
+        carrier.setattr(config, "DATA_DIR", root)
+        state = pool_available()
+    assert (state["available"], state["disabled_reason"], state["worker_count"]) == (False, "unknown", None)
+    fact = _queue_context_fact({"budget_drive_root": str(root)})
+    assert (fact["pool_observation_status"], fact["free_worker_slots"], fact["free_worker_slots_basis"],
+            fact["worker_total"]) == ("unknown", None, "unknown_pool_observation", None)
+    assert ": unknown (introspection failed)" in engine_pool_line(root)
+    # The measurement back: an observed idle pool again.
+    assert queue.persist_queue_snapshot("measured") is True
+    assert _read(root, "queue_snapshot.json")["pool_observation_status"] == "observed"
+    assert _promotion_pool_disabled_from_snapshot(ctx) == ""
+
+
+def test_a_document_from_before_the_status_reads_its_failed_measurement_as_unknown(tmp_path):
+    """The earlier publisher's failure form: zeros with ``worker_pool_disabled_reason: unknown``."""
+    from ouroboros.context_runtime_facts import _queue_context_fact
+    from ouroboros.queue_observation import pool_observation_status
+    from ouroboros.tools.control_events import _promotion_pool_disabled_from_snapshot
+
+    legacy = {"running": [], "pending": [], "pending_count": 0, "running_count": 0, "worker_total": 0,
+              "active_worker_count": 0, "assignable_idle_workers": 0, "lane_carrier_total": 0,
+              "worker_pool_disabled_reason": "unknown"}
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "queue_snapshot.json").write_text(json.dumps(legacy), encoding="utf-8")
+    assert pool_observation_status(legacy) == "unknown"
+    assert pool_observation_status({**legacy, "worker_pool_disabled_reason": ""}) == "observed"
+    assert _promotion_pool_disabled_from_snapshot(types.SimpleNamespace(drive_root=tmp_path, budget_drive_root="")) \
+        == "unknown"
+    fact = _queue_context_fact({"budget_drive_root": str(tmp_path)})
+    assert fact["free_worker_slots"] is None
+    assert all(fact[key] is None for key in ("worker_total", "active_worker_count", "reaping_count", "lane_carrier_total"))
+
+
 # ---- N9: a failed publication is retried; the stale document is never re-certified ---------------
 
 def test_a_failed_census_publication_is_retried_and_never_recertified_meanwhile(published, monkeypatch):

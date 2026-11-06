@@ -462,14 +462,14 @@ def test_main_rows_say_each_census_state_with_its_own_tone_and_controls(room_ui)
         "rw-pausing": ("Pausing…", "", "held"),
         "rw-failfin": ("Failed", "Finalizing…", "failed"),
         "rw-unknown": ("Activity unconfirmed", "", "unknown"),
-        "rw-queued": ("Queued", "Waiting for a free worker", "queued"),
+        "rw-queued": ("Queued", "", "queued"),
         "rw-ask": ("Waiting for your answer", "", "wait"),
     }
     for task_id, (word, secondary, tone) in expect.items():
         assert (by[task_id]["word"], by[task_id]["secondary"], by[task_id]["tone"]) == (word, secondary, tone), by[task_id]
     focus_lines = page.evaluate("""() => Object.fromEntries([...document.querySelectorAll('#page-chat .rw-row')]
         .map(r => [r.dataset.id, (r.querySelector('.rw-focus:not([hidden])')?.textContent || '').trim()]))""")
-    assert focus_lines["rw-live"] == focus_text and focus_lines["rw-queued"] == "", focus_lines
+    assert focus_text in focus_lines["rw-live"] and focus_lines["rw-queued"] == "", focus_lines
     # An access wait is not an answer wait: only the waited question offers View question.
     assert [item["id"] for item in opened["rows"] if item["question"]] == ["rw-ask"]
     assert by["rw-ask"]["name"].startswith("Reply to “Please check which evidence"), by["rw-ask"]
