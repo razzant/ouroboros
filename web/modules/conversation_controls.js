@@ -72,6 +72,7 @@ function reserveEntry(page, store) {
     settle();
     return {
         claim() { const shown = reserved; if (shown) end(); return shown; },
+        release,
         remember(next) { writeEntry(next); if (!next?.html) release(); },
         dispose() {
             painted?.disconnect(); staged?.disconnect();
@@ -95,6 +96,8 @@ export function bindConversationControls({ composer, page, chatId, ws, contribut
         if (typeof provider?.impl.mountRoom === 'function')
             active = provider.impl.mountRoom({ page, chatId, ws, composer, openSettings, rememberEntry: entry.remember, claimEntry: entry.claim,
                 onScreen: () => page.getClientRects().length > 0, ...roomOptions({ page, chatId }) });
+        // A feature takes the face over while it mounts; one that did not (an older one) paints its own, from Send.
+        if (provider) entry.release();
     } };
     rooms.add(room); room.sync();
     return () => { rooms.delete(room); active?.destroy(); entry.dispose(); composer.hasPendingWork = priorPending; };

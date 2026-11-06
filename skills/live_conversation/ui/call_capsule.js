@@ -262,10 +262,11 @@ export function createCallCapsule({ page, env = globalThis, visual, light, style
     };
     let copy = adopted;
     function renderEntry() {
-        if (!dressed) return;
         const mode = entryMode();
         if (mode === 'talk') {
-            // Built once per face: the chat writes its own label over it when it needs the button.
+            // Built once per face and only with its own look; the chat writes its own label over it
+            // when it needs the button.
+            if (!dressed) return;
             if (copy || !send.querySelector(':scope > .call-entry-word')) {
                 copy = false;
                 send.replaceChildren(mark, talkWord());
@@ -274,6 +275,7 @@ export function createCallCapsule({ page, env = globalThis, visual, light, style
                 measureEntry();
             }
         } else if (copy || send.dataset.callEntry === 'talk') {
+            // At once, before the stylesheet too: a draft or a staged file is never sent under a Talk label.
             copy = false;
             send.dataset.callEntry = 'send';
             if (mode !== 'busy') { send.textContent = 'Send'; send.title = 'Send message'; }

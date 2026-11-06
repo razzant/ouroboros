@@ -101,12 +101,16 @@ function entryRoom({ remembered = null, value = '', store = null } = {}) {
     return { storage, send, field, preview, listeners, page, contributions, changed };
 }
 
-function bindRoom(room, provider = null) {
-    let options = null;
-    const entry = provider || { impl: { mountRoom(value) { options = value; return { destroy() {} }; } } };
-    startConversations({ hosts: { onProvidersChange() {}, clientProviders: () => [entry] }, openSettings() {} });
+// The room binds before the feature's module has loaded; `mount()` loads it. A feature of this version takes the face over
+// while it mounts (`claims`); an older one does not know the hand-over.
+function bindRoom(room, { claims = true } = {}) {
+    let options = null, claimed = null, available = [];
+    const changed = [];
+    const provider = { impl: { mountRoom(value) { options = value; claimed = claims ? value.claimEntry() : null; return { destroy() {} }; } } };
+    startConversations({ hosts: { onProvidersChange: (fn) => changed.push(fn), clientProviders: () => available }, openSettings() {} });
     const dispose = bindConversationControls({ composer: { hasPendingWork: () => false }, page: room.page, chatId: 1, contributions: room.contributions });
-    return { options: () => options, dispose };
+    const mount = () => { available = [provider]; changed.forEach((fn) => fn()); return options; };
+    return { mount, claimed: () => claimed, dispose };
 }
 
 test('a room paints the face its conversation feature last asked for from the first frame, and Send without one', () => {
@@ -117,8 +121,8 @@ test('a room paints the face its conversation feature last asked for from the fi
             assert.equal(talk.send.innerHTML, FACE.html, 'the remembered face is painted before the feature mounts');
             assert.equal(talk.send.title, FACE.title);
             assert.equal(talk.send.getAttribute('aria-disabled'), 'true', 'a press cannot start a call before the mount');
-            const options = bound.options();
-            assert.equal(options.claimEntry(), true, 'the feature takes the shown face over');
+            const options = bound.mount();
+            assert.equal(bound.claimed(), true, 'the feature takes the shown face over');
             assert.equal(talk.send.innerHTML, FACE.html, 'handing over changes no pixel');
             assert.equal(talk.send.getAttribute('aria-disabled'), null);
             assert.equal(talk.send.dataset.entryReserved, undefined);
@@ -136,7 +140,8 @@ test('a room paints the face its conversation feature last asked for from the fi
             try {
                 assert.equal(room.send.innerHTML, 'Send', `${why}: the first frame is Send`);
                 assert.equal(room.send.getAttribute('aria-disabled'), null, why);
-                assert.equal(plain.options().claimEntry(), false, `${why}: nothing to hand over`);
+                plain.mount();
+                assert.equal(plain.claimed(), false, `${why}: nothing to hand over`);
             } finally { plain.dispose(); }
         }
     } finally { delete globalThis.localStorage; delete globalThis.MutationObserver; }
@@ -155,7 +160,8 @@ test('a reserved face gives way to Send when the composer fills or no feature wi
                 assert.equal(room.send.textContent, 'Send', `${how}: Send`);
                 assert.equal(room.send.title, 'Send message');
                 assert.equal(room.send.getAttribute('aria-disabled'), null);
-                assert.equal(bound.options().claimEntry(), false, 'the feature starts from its own read');
+                bound.mount();
+                assert.equal(bound.claimed(), false, 'the feature starts from its own read');
                 assert.equal(room.storage.has('ouro:conversation-entry'), true, 'the owner filling the composer is not the feature\'s answer');
             } finally { bound.dispose(); }
         }
@@ -179,7 +185,16 @@ test('a reserved face gives way to Send when the composer fills or no feature wi
             repainted.changed(repainted.send);
             assert.equal(repainted.send.textContent, 'Saving', 'another paint is never overwritten');
             assert.equal(repainted.send.getAttribute('aria-disabled'), null);
-            assert.equal(boundRepainted.options().claimEntry(), false);
+            boundRepainted.mount();
+            assert.equal(boundRepainted.claimed(), false);
         } finally { boundRepainted.dispose(); }
+        const older = entryRoom({ remembered: FACE });
+        const boundOlder = bindRoom(older, { claims: false });
+        try {
+            boundOlder.mount();
+            assert.equal(older.send.textContent, 'Send', 'a feature that does not take the face over paints its own, from Send');
+            assert.equal(older.send.getAttribute('aria-disabled'), null);
+            assert.equal(older.storage.has('ouro:conversation-entry'), true, 'its version is not the feature\'s answer');
+        } finally { boundOlder.dispose(); }
     } finally { delete globalThis.localStorage; delete globalThis.MutationObserver; }
 });
