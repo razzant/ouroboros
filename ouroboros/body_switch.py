@@ -107,7 +107,7 @@ def _git(root, *args, data=None, check=True):
     for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
         env.pop(key, None)
     proc = subprocess.run(["git", *args], cwd=root, env=env, input=data,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=_DEPS_TIMEOUT_SEC)
     if check and proc.returncode != 0:
         raise RuntimeError("git %s failed rc=%d: %s" % (
             " ".join(args[:2]), proc.returncode, proc.stderr.decode("utf-8", "replace").strip()))
