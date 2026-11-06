@@ -154,6 +154,7 @@ def test_the_tool_emits_the_control_event_and_returns_the_receipt_it_finds(tmp_p
     ({"state": "done", "outcome": {"removed": 2, "removed_bytes": 10 ** 9, "kept": []}}, "done", True),
     ({"state": "failed", "refusal": "busy"}, "refused", False),
     ({"state": "done", "preview": {"pool": {"count": 0}}}, "done", True),
+    ({"state": "done", "refusal": "busy", "preview": {"pool": {"count": 1}}, "finished_at": "T"}, "refused", False),
 ])
 def test_the_tools_answer_follows_the_receipt(tmp_path, monkeypatch, receipt, status, ok):
     """A failed or stopped run is said so at the top of the answer, never ok and done; a finished one is both;
@@ -173,8 +174,9 @@ def test_the_tools_answer_follows_the_receipt(tmp_path, monkeypatch, receipt, st
     answer = json.loads(control_storage._free_storage(ctx, wait_sec=5))
     assert (answer["status"], answer["ok"]) == (status, ok)
     assert answer["receipt"]["state"] == receipt["state"]
-    assert ("reported to the owner in Main" in answer["note"]) == (receipt.get("refusal") != "busy")
-    assert receipt.get("refusal") != "busy" or "only this refusal receipt" in answer["note"]
+    told = receipt.get("refusal") != "busy" or "finished_at" in receipt  # a refusal after the preview reaches Main
+    assert ("reported to the owner in Main" in answer["note"]) == told
+    assert told or "only this refusal receipt" in answer["note"]
     assert ("storage_free event with actor" in answer["note"]) == bool(receipt.get("outcome")), "only a run is an event"
 
 
