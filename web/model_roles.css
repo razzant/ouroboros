@@ -8,8 +8,9 @@
 .model-role-group {
     min-width: 0;
     padding: var(--space-2);
-    border: 1px solid var(--surface-border);
-    border-radius: var(--radius-sm);
+    border: 1px solid transparent;
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
 }
 .model-role-head,
 .model-role-controls,

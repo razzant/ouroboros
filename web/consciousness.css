@@ -22,7 +22,7 @@
     font-weight: 600;
     text-align: start;
     cursor: pointer;
-    border-radius: var(--radius-xs);
+    border-radius: var(--radius-inner);
 }
 .consciousness-inline-link:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 /* The shells give every button a finger's minimum box; a link inside a sentence keeps the sentence's lines and
@@ -93,7 +93,7 @@ textarea.ui-control.consciousness-owner-words {
 .cx-wake-outcome { font-size: var(--type-meta); color: var(--text-meta); }
 .cx-doors { display: flex; flex-wrap: wrap; gap: var(--space-4); margin-top: var(--space-2); }
 .cx-door {
-    padding: 0; border: 0; border-radius: var(--radius-xs); background: transparent; cursor: pointer;
+    padding: 0; border: 0; border-radius: var(--pill-radius); background: transparent; cursor: pointer;
     font: inherit; font-size: var(--type-body); line-height: var(--line-body); font-weight: 600; color: var(--tone-crimson-word);
 }
 .cx-door:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
@@ -164,11 +164,11 @@ textarea.ui-control.consciousness-owner-words {
     gap: 2px;
     margin-top: var(--space-3);
     padding-top: var(--space-3);
-    border-top: 1px solid var(--surface-border-soft);
+    border-top: 1px solid var(--divider);
 }
 .consciousness-summary-foot .storage-meta { margin: 0; }
 .consciousness-causes { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
-.consciousness-card { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-4); }
+.consciousness-card { display: flex; flex-direction: column; gap: var(--space-3); }
 .consciousness-wake-group { display: flex; flex-direction: column; gap: var(--space-3); }
 .consciousness-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
 .consciousness-card-head-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
@@ -226,7 +226,7 @@ textarea.ui-control.consciousness-owner-words {
     align-items: start;
     padding: var(--space-3) 0;
 }
-.consciousness-wake + .consciousness-wake { border-top: 1px solid var(--surface-border-soft); }
+.consciousness-wake + .consciousness-wake { border-top: 1px solid var(--divider); }
 .consciousness-wake-time::after { content: " ·"; }
 .consciousness-wake-time { color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); font-variant-numeric: tabular-nums; }
 .consciousness-wake-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
@@ -240,7 +240,7 @@ textarea.ui-control.consciousness-owner-words {
 .consciousness-wake-checks { display: flex; flex-wrap: wrap; gap: var(--space-1); }
 .consciousness-wake-checks .skills-chip { white-space: normal; overflow-wrap: anywhere; }
 .consciousness-wake-more { min-width: 0; font-size: var(--type-body); line-height: var(--line-body); }
-.consciousness-wake-more > summary { display: list-item; width: fit-content; margin-inline-start: 1em; color: var(--text-meta); cursor: pointer; border-radius: var(--radius-xs); }
+.consciousness-wake-more > summary { display: list-item; width: fit-content; margin-inline-start: 1em; color: var(--text-meta); cursor: pointer; border-radius: var(--radius-inner); }
 .consciousness-wake-more > summary:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 .consciousness-wake-note-label { margin: var(--space-2) 0 var(--space-1); color: var(--text-meta); font-size: var(--type-meta); font-weight: 600; }
 .consciousness-wake-note { overflow-wrap: anywhere; color: var(--text-primary); }

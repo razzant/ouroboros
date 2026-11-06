@@ -942,9 +942,9 @@ textarea::placeholder {
   flex-direction: column;
   gap: var(--space-2);
   padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--panel-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-inner);
+  background: var(--surface-tray);
   container: subagentcard / inline-size;
 }
 
@@ -1503,7 +1503,7 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
 .skills-starter-scroll[data-scroll-below] { --starter-fade-bottom: 32px; }
 .skills-starter-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
 .skills-starter-scroll::-webkit-scrollbar-track { background: transparent; }
-.skills-starter-scroll::-webkit-scrollbar-thumb { background: rgba(var(--neutral-rgb), 0.16); border-radius: var(--radius-xs); }
+.skills-starter-scroll::-webkit-scrollbar-thumb { background: rgba(var(--neutral-rgb), 0.16); border-radius: var(--pill-radius); }
 .skills-starter-group + .skills-starter-group { margin-top: var(--space-4); }
 .skills-starter-group h4 { margin: 0 0 var(--space-2); color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-title); font-weight: 600; }
 .skills-starter-group h4 span { margin-left: var(--space-2); color: var(--text-meta); font-weight: 400; }

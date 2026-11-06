@@ -461,7 +461,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
 
 .task-control-item {
     border: none;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
     background: transparent;
     /* Each item is an action the owner can take: legible at rest, on the body size. */
     color: var(--text-primary);
@@ -916,7 +916,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
     border: none;
     background: transparent;
     color: var(--text-primary);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-inner);
     padding: 10px 12px;
     cursor: pointer;
     text-align: left;
@@ -1035,7 +1035,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
     max-width: 100%;
     max-height: 100%;
     margin: 0 auto;
-    border-radius: var(--radius);
+    border-radius: var(--radius-inner);
     box-shadow: 0 18px 50px rgba(0, 0, 0, 0.28);
 }
 
@@ -1043,7 +1043,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
     width: 100%;
     min-height: 70vh;
     border: 1px solid var(--divider);
-    border-radius: var(--radius);
+    border-radius: var(--radius-inner);
     background: #111827;
 }
 
@@ -1065,7 +1065,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
 
 .files-drop-card {
     padding: 22px 28px;
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-object);
     border: 1px dashed var(--accent-55);
     background: var(--accent-10);
     color: var(--text-primary);
@@ -1504,7 +1504,7 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     width: 100%;
     height: 2px;
     border-radius: 1px;
-    background: var(--surface-border);
+    background: var(--status-neutral-bg);
     overflow: hidden;
 }
 
@@ -1671,7 +1671,7 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     width: min(460px, calc(100vw - 32px));
     padding: 24px;
     border: 1px solid var(--divider);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
     background: var(--bg-secondary);
     color: var(--text-primary);
     box-shadow: 0 24px 80px rgba(0, 0, 0, 0.38);
@@ -1816,9 +1816,9 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     max-width: min(80%, 520px);
     min-width: 0;
     padding: var(--space-3) var(--space-4);
-    border: 1px solid var(--surface-border);
-    border-radius: var(--radius-lg);
-    background: var(--bg-hover);
+    border: 1px solid transparent;
+    border-radius: var(--radius-object);
+    background: var(--surface-object);
     overflow-wrap: anywhere;
 }
 .chat-empty-welcome-label {
@@ -1891,13 +1891,13 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 
 .chat-photo {
     max-width: 100%;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
     cursor: pointer;
 }
 
 .chat-video {
     max-width: 100%;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
 }
 
 .chat-bubble.user .message { color: var(--user-text); }
@@ -2413,7 +2413,7 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     padding: 2px 8px;
     border-radius: 999px;
     border: 1px solid transparent;
-    background: var(--surface-control);
+    background: var(--status-neutral-bg);
     color: var(--text-secondary);
     font-size: var(--type-meta);
     font-weight: 600;
@@ -3131,7 +3131,7 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     margin-top: var(--space-2);
     overflow-y: auto;
     overscroll-behavior: contain;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
 }
 
 .review-facts-list {
@@ -3441,7 +3441,7 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 .chat-live-line.expandable {
     /* The whole non-interactive row surface toggles the line (v6.71.0). */
     cursor: pointer;
-    border-radius: var(--radius);
+    border-radius: var(--radius-inner);
     transition: background 0.18s ease;
 }
 
@@ -3665,8 +3665,8 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 .chat-bubble .message .inline-code {
     background: rgba(var(--neutral-rgb), 0.08);
     padding: 1px 5px;
-    border: 1px solid var(--surface-border);
-    border-radius: var(--radius-xs);
+    border: 1px solid transparent;
+    border-radius: var(--radius-inner);
     color: inherit;
     font-size: var(--type-body);
 }
@@ -3703,9 +3703,9 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     align-items: center;
     justify-content: center;
     margin-top: 1px;
-    border: 1px solid var(--surface-border);
-    border-radius: var(--radius-xs);
-    background: var(--surface-control);
+    border: 1px solid var(--field-border);
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
     color: var(--status-ok-fg);
     font-size: var(--type-body);
     font-weight: 700;
@@ -3720,7 +3720,7 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     margin: var(--space-3) 0;
     padding: var(--space-2) var(--space-3);
     border-left: 3px solid var(--accent);
-    background: var(--surface-card-soft);
+    background: var(--surface-tray);
     color: var(--text-meta);
 }
 /* The markdown renderer emits .md-table everywhere it runs — live activity
@@ -3740,7 +3740,7 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 .md-table th,
 .md-table td {
     padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--surface-border);
+    border-bottom: 1px solid var(--divider);
     text-align: start;
     vertical-align: top;
     /* Words stay whole: the bubble's `anywhere` or a timeline row's
@@ -3843,7 +3843,7 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 .ui-rich-content hr {
     height: 0;
     border: 0;
-    border-top: 1px solid var(--surface-border);
+    border-top: 1px solid var(--divider);
     margin-block: var(--space-5);
 }
 .md-li {
@@ -3864,7 +3864,7 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
     max-width: 100%;
-    scrollbar-color: var(--text-disabled) var(--surface-card-soft);
+    scrollbar-color: var(--text-disabled) var(--surface-tray);
     --table-fade-start: 0px;
     --table-fade-end: 0px;
 }
@@ -3895,8 +3895,8 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     min-width: 0;
     margin: var(--space-4) 0;
     overflow: hidden;
-    border: 1px solid var(--surface-border);
-    border-radius: var(--radius);
+    border: 1px solid transparent;
+    border-radius: var(--radius-inner);
     background: var(--code-bg);
     color: var(--text-primary);
 }
@@ -3918,7 +3918,7 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     display: block;
     min-height: 34px;
     padding: 9px 76px 0 var(--space-4);
-    border-bottom: 1px solid var(--surface-border-soft);
+    border-bottom: 1px solid var(--divider);
     color: var(--text-meta);
     font: var(--type-meta)/var(--line-meta) 'SF Mono', 'Fira Code', Consolas, monospace;
 }
@@ -3968,8 +3968,8 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     margin: var(--space-4) 0;
     padding: var(--space-4);
     overflow: auto;
-    border: 1px solid var(--surface-border);
-    border-radius: var(--radius);
+    border: 1px solid transparent;
+    border-radius: var(--radius-inner);
     background: var(--diagram-bg);
     color: var(--text-primary);
 }
@@ -4013,7 +4013,7 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 .md-mermaid-error { border-color: var(--status-error-fg); }
 .md-diagram-error-note {
     padding: var(--space-2) var(--space-4);
-    border-bottom: 1px solid var(--surface-border);
+    border-bottom: 1px solid var(--divider);
     color: var(--status-error-fg);
     font-size: var(--type-meta);
     line-height: var(--line-meta);
@@ -4638,7 +4638,7 @@ html[data-layout="stack"] .chat-page-note {
     border: 1px solid var(--accent-35);
     backdrop-filter: blur(8px);
     -webkit-backdrop-filter: blur(8px);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
     font-size: var(--type-meta);
     color: var(--text-primary);
     max-width: 100%;
@@ -4969,7 +4969,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
    project fuchsia). Subagents' strip is the same mode strip (--mode-ink, --mode-fill), below. */
 .chat-context-mode {
     --mode-ink: var(--accent-light);
-    --mode-fill: var(--accent-dim);
+    --mode-fill: var(--accent-14);
 }
 .chat-context-mode[data-context-mode="low"] {
     --mode-ink: var(--status-neutral-fg);
@@ -5045,7 +5045,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
    apart (owner 28.10); Settings-off adds a small lock. Open, the hint above it says what the value means (ui_hint.js). */
 .chat-subagents-mode {
     --mode-ink: var(--accent-light);
-    --mode-fill: var(--accent-dim);
+    --mode-fill: var(--accent-14);
 }
 .chat-subagents-mode[data-mode="off"] {
     --mode-ink: var(--status-neutral-fg);
@@ -5261,6 +5261,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     background: var(--surface-object);
     border-radius: var(--radius-object);
     box-shadow: var(--elev-rest);
+    padding: var(--card-pad);
 }
 :is(.agent-family-card, .harness-account-row, .harness-login-card, .settings-effort-card,
     .settings-model-card, .settings-custom-secret-row, .settings-extension-section, .mcp-server-card) {
@@ -5289,13 +5290,9 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     width: 100%;
     display: flex;
     flex-direction: column;
-    border: 1px solid var(--surface-border);
+    border: 1px solid transparent;
     background: var(--ui-modal-bg);
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
-}
-
-.stat-card {
-    padding: 16px 20px;
 }
 
 .stat-card .label {
@@ -5399,23 +5396,23 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     line-height: 1.55;
     background: rgba(var(--neutral-rgb), 0.02);
     margin: 0 12px 12px;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
 }
 
+/* A log row is a tray inside the Logs object: the soft neutral fill, the inner radius, no outline. */
 .log-entry {
     padding: 10px 12px;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
     display: flex;
     flex-direction: column;
     gap: 6px;
-    border: 1px solid rgba(var(--neutral-rgb), 0.04);
-    background: rgba(var(--neutral-rgb), 0.015);
+    border: 1px solid transparent;
+    background: var(--surface-tray);
     margin-bottom: 8px;
 }
 
 .log-entry:hover {
-    background: rgba(var(--neutral-rgb), 0.03);
-    border-color: rgba(var(--neutral-rgb), 0.08);
+    background: var(--tone-quiet-hover);
 }
 
 .log-main {
@@ -5492,25 +5489,26 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     justify-content: flex-end;
 }
 
+/* Raw is a quiet capsule: no body, no outline, the quiet tone on hover (it adopts .btn.btn-ghost.btn-sm in the Logs lane). */
 .log-raw-toggle {
-    border: 1px solid rgba(var(--neutral-rgb), 0.08);
+    border: 1px solid transparent;
     background: transparent;
     color: var(--text-muted);
-    border-radius: 6px;
+    border-radius: var(--pill-radius);
     padding: 3px 8px;
-    font-size: 11px;
+    font-size: var(--type-meta);
     cursor: pointer;
 }
 
 .log-raw-toggle:hover {
     color: var(--text-primary);
-    border-color: rgba(var(--neutral-rgb), 0.14);
+    background: var(--tone-quiet-hover);
 }
 
 .log-raw {
     margin: 0;
     padding: 10px;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
     background: rgba(0, 0, 0, 0.25);
     color: var(--text-secondary);
     overflow-x: auto;
@@ -5535,7 +5533,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     margin-top: 8px;
     padding: 8px 10px;
     border: 1px solid rgba(var(--neutral-rgb), 0.06);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
     background: rgba(0,0,0,0.14);
 }
 
@@ -5560,7 +5558,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 .log-task-event {
     padding: 8px 10px;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
     background: rgba(0, 0, 0, 0.16);
     border: 1px solid rgba(var(--neutral-rgb), 0.04);
     display: flex;
@@ -5574,7 +5572,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-corner { background: transparent; }
 /* A scrollbar is the room's furniture: neutral, never the accent (DESIGN.md design bible). */
-::-webkit-scrollbar-thumb { background: rgba(var(--neutral-rgb), 0.16); border-radius: var(--radius-xs); }
+::-webkit-scrollbar-thumb { background: rgba(var(--neutral-rgb), 0.16); border-radius: var(--pill-radius); }
 ::-webkit-scrollbar-thumb:hover { background: rgba(var(--neutral-rgb), 0.28); }
 
 .cost-table {
@@ -5600,21 +5598,17 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 /* Settings LAN reachability hint. */
+/* The hint is a tray with its words in their own ink: a warning takes the hue's word, nothing takes an outline. */
 .settings-lan-hint {
     margin-top: 8px;
     padding: 8px 12px;
-    border-radius: var(--radius-sm);
-    font-size: 0.84em;
-    background: rgba(var(--neutral-rgb), 0.04);
-    border: 1px solid rgba(var(--neutral-rgb), 0.08);
-    color: var(--text-secondary, rgba(var(--neutral-rgb), 0.65));
+    border-radius: var(--radius-inner);
+    font-size: var(--type-meta);
+    background: var(--surface-tray);
+    border: 1px solid transparent;
+    color: var(--text-secondary);
 }
-.settings-lan-hint[data-tone="ok"] { border-color: var(--status-ok-border); }
-.settings-lan-hint[data-tone="warn"] {
-    border-color: var(--status-warn-border);
-    color: var(--status-warn-word, var(--text-secondary, rgba(var(--neutral-rgb), 0.65)));
-}
-.settings-lan-hint[data-tone="info"] { border-color: var(--status-neutral-border); }
+.settings-lan-hint[data-tone="warn"] { color: var(--status-warn-word, var(--text-secondary)); }
 .settings-lan-hint a { color: inherit; text-decoration: underline; opacity: 0.9; }
 /* === design-system:migrated-begin (Dashboard Evolution tab) === */
 /* Dashboard Evolution (evolution.js): the campaign object, then one time line of versions with the chosen version
@@ -5652,7 +5646,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 /* How Ouroboros changed: the head, one measure at a time, the chart, its caption and the chosen version. */
-.evo-story { display: flex; flex-direction: column; gap: 10px; padding: 16px 20px 18px; min-width: 0; }
+.evo-story { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .evo-story-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3) var(--space-4); flex-wrap: wrap; }
 .evo-story-words { display: grid; gap: 2px; min-width: 0; }
 .evo-story-body { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
@@ -5758,7 +5752,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .about-logo {
     width: 96px;
     height: 96px;
-    border-radius: var(--radius-xl);
+    border-radius: var(--radius-object);
     object-fit: cover;
 }
 .about-title { font-size: 28px; font-weight: 700; margin: 0; }
@@ -5770,7 +5764,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 .costs-scroll { overflow-y: auto; flex: 1; padding: 16px 20px; }
 .costs-budget-card {
-    padding: 20px 24px;
     margin-bottom: 20px;
 }
 .costs-budget-title { font-size: 15px; font-weight: 600; margin: 0; color: var(--text-primary); }
@@ -5846,7 +5839,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .cost-cell-right { text-align: right; }
 .costs-stats-grid .cost-top-model { font-size: var(--type-meta); line-height: var(--line-meta); }
 .cost-bar-cell { width: 60px; }
-.cost-bar { width: 60px; height: 6px; border: 0; border-radius: var(--radius-xs); overflow: hidden; opacity: 0.7; }
+.cost-bar { width: 60px; height: 6px; border: 0; border-radius: var(--pill-radius); overflow: hidden; opacity: 0.7; }
 .cost-bar::-webkit-progress-bar { background: rgba(var(--neutral-rgb), 0.08); }
 .cost-bar::-webkit-progress-value { background: var(--accent); }
 .cost-bar::-moz-progress-bar { background: var(--accent); }
@@ -5856,7 +5849,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 /* Dashboard Storage (the owner-started count and the free-space tray): shared card, type, spacing
    and tone tokens; only the bar's measured share arrives at runtime (--storage-share). */
 .storage-root { min-height: 0; display: flex; flex-direction: column; gap: var(--space-3); }
-.storage-summary, .storage-panel { padding: var(--space-4); }
 .storage-summary-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); }
 .storage-summary-text { min-width: 0; }
 /* The tab's one live region: screen readers hear its phase sentence; sighted owners read the summary. */
@@ -5905,7 +5897,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 /* The bar: five group shares of a finished count, a 2 px surface gap between neighbours (a 1 px
    card-colour border is invisible in light), no track: a finished count fills it. */
-.storage-bar { display: flex; width: 100%; min-height: 14px; gap: 2px; margin-top: var(--space-3); overflow: hidden; border-radius: var(--radius-sm); }
+.storage-bar { display: flex; width: 100%; min-height: 14px; gap: 2px; margin-top: var(--space-3); overflow: hidden; border-radius: var(--pill-radius); }
 .storage-bar-seg { flex: 0 1 calc(var(--storage-share, 0) * 1%); min-width: 2px; background: var(--accent); }
 .storage-key { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
 :is(.storage-bar-seg, .storage-key)[data-group="records"] { background: var(--project); }
@@ -5915,7 +5907,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 :is(.storage-bar-seg, .storage-key)[data-group="other"] { background: var(--text-secondary); }
 
 /* The deleted projects' fold: a head row (name · size · growth) over its places. */
-.storage-group { padding: var(--space-3) 0; border-top: 1px solid var(--surface-border-soft); }
+.storage-group { padding: var(--space-3) 0; border-top: 1px solid var(--divider); }
 .storage-group:first-child { border-top: 0; }
 .storage-group-head,
 .storage-place {
@@ -5934,7 +5926,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .storage-place-remover { grid-column: 2 / -1; }
 .storage-place-why { overflow-wrap: anywhere; }  /* the server's reason can name an unbroken absolute path */
 .storage-group-places { display: grid; margin: var(--space-2) 0 0 calc(8px + var(--space-2)); padding: 0; list-style: none; }
-.storage-place.is-member { grid-template-columns: minmax(0, 1fr) auto minmax(56px, auto); padding-block: var(--space-2); border-top: 1px solid var(--surface-border-soft); }
+.storage-place.is-member { grid-template-columns: minmax(0, 1fr) auto minmax(56px, auto); padding-block: var(--space-2); border-top: 1px solid var(--divider); }
 .storage-group-places > .storage-place:first-child { border-top: 0; }
 /* A group folds under its head and one line; the caret is drawn because the row's own layout drops the native marker. */
 .storage-group-fold > summary { position: relative; display: block; padding-inline-end: 20px; list-style: none; cursor: pointer; }
@@ -5951,7 +5943,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     transform: rotate(-45deg);
 }
 .storage-group-fold[open] > summary::after { transform: rotate(45deg); }
-.storage-group-fold > summary:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; border-radius: var(--radius-sm); }
+.storage-group-fold > summary:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; border-radius: var(--radius-inner); }
 .storage-group-said { display: block; margin: 2px 0 0 calc(8px + var(--space-2)); color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .storage-group-open { margin-top: var(--space-2); }
 .storage-group-open > .storage-group-places { margin-top: 0; }
@@ -5980,11 +5972,11 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 /* A row's opened parts keep their sizes in the row's size column. */
 .storage-deleted .storage-parts-list { padding-inline-end: calc(56px + var(--space-2)); }
 .storage-deleted .storage-place:focus { outline: none; }
-.storage-deleted .storage-place:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; border-radius: var(--radius-sm); }
+.storage-deleted .storage-place:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; border-radius: var(--radius-inner); }
 
 /* Free temporary space: the flow under the free-space reading in the first card. */
 .storage-auto { margin: var(--space-3) 0 0; color: var(--text-secondary); font-size: var(--type-meta); line-height: var(--line-meta); }
-.storage-tray { display: grid; gap: var(--space-2); margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--surface-border); }
+.storage-tray { display: grid; gap: var(--space-2); margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--divider); }
 .storage-tray:empty { display: none; }
 .storage-tray p { margin: 0; }
 .storage-tray-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--space-1) var(--space-3); }
@@ -5998,7 +5990,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     row-gap: 2px;
     align-items: baseline;
     padding-block: var(--space-2);
-    border-top: 1px solid var(--surface-border-soft);
+    border-top: 1px solid var(--divider);
 }
 /* The checkbox sits on the name's first line, also when the name wraps. */
 .storage-free-group > .ui-checkbox { grid-column: 1; grid-row: 1; align-self: start; margin-top: calc((var(--type-body) * var(--line-body) - 14px) / 2); }
@@ -6073,13 +6065,13 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .storage-legend b { color:var(--text-primary); font-weight:600; font-variant-numeric:tabular-nums; }
 .storage-folders { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); column-gap:var(--space-5); margin-top:var(--space-2); }
 .storage-folders > ul { padding:0; margin:0; list-style:none; }
-.storage-folder { border-top:1px solid var(--surface-border-soft); }
+.storage-folder { border-top:1px solid var(--divider); }
 .storage-folder-fold > summary { position:relative; display:grid; grid-template-columns:8px minmax(0,1fr) auto 64px; align-items:center; column-gap:var(--space-2); min-height:32px; padding:4px 18px 4px 0; list-style:none; cursor:pointer; }
 .storage-folder-fold .storage-place-label { grid-column:2; }
 .storage-folder-fold > summary::-webkit-details-marker { display:none; }
 .storage-folder-fold > summary::after { content:''; position:absolute; right:4px; top:50%; width:5px; height:5px; margin-top:-4px; border-right:1.5px solid var(--text-meta); border-bottom:1.5px solid var(--text-meta); transform:rotate(-45deg); }
 .storage-folder-fold[open] > summary::after { transform:rotate(45deg); }
-.storage-folder-fold > summary:focus-visible { outline:2px solid var(--focus-accent-border); outline-offset:2px; border-radius:var(--radius-sm); }
+.storage-folder-fold > summary:focus-visible { outline:2px solid var(--focus-accent-border); outline-offset:2px; border-radius:var(--radius-inner); }
 .storage-folder-open { display:grid; gap:2px; padding:0 0 var(--space-2) calc(8px + var(--space-2)); }
 .storage-folder-open > * { grid-column:1 / -1; }
 .storage-disk { margin-top:var(--space-3); }
@@ -6093,10 +6085,10 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .storage-cleanup.has-door { display:grid; grid-template-columns:minmax(0,1fr) auto; column-gap:var(--space-4); }
 .storage-cleanup.has-door > :is(.storage-card-title,.storage-auto) { grid-column:1 / -1; }
 .storage-cleanup.has-door > .storage-cleanup-door { align-self:center; }
-.storage-decisions { margin-top:var(--space-3); padding-top:var(--space-3); border-top:1px solid var(--surface-border-soft); }
+.storage-decisions { margin-top:var(--space-3); padding-top:var(--space-3); border-top:1px solid var(--divider); }
 .storage-decisions > .storage-free-sub { margin-top:0; }
 .storage-decision-rows { margin:var(--space-1) 0 0; padding:0; list-style:none; }
-.storage-decision-row { display:grid; grid-template-columns:minmax(0,1fr) auto auto; align-items:center; gap:var(--space-1) var(--space-3); padding-block:var(--space-2); border-bottom:1px solid var(--surface-border-soft); }
+.storage-decision-row { display:grid; grid-template-columns:minmax(0,1fr) auto auto; align-items:center; gap:var(--space-1) var(--space-3); padding-block:var(--space-2); border-bottom:1px solid var(--divider); }
 .storage-decision-label { display:grid; min-width:0; color:var(--text-primary); font-size:var(--type-body); line-height:var(--line-body); font-weight:500; overflow-wrap:anywhere; }
 .storage-decision-label > .storage-meta { margin:0; font-weight:400; }
 .storage-decision-size { color:var(--text-primary); font-size:var(--type-body); white-space:nowrap; font-variant-numeric:tabular-nums; }
@@ -6182,10 +6174,10 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     justify-content: space-between;
     gap: var(--space-2) var(--space-3);
     padding: var(--space-3);
-    border: 1px solid rgba(var(--neutral-rgb), 0.07);
-    border-radius: 8px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-inner);
     margin-bottom: var(--space-2);
-    background: rgba(var(--neutral-rgb), 0.02);
+    background: var(--surface-tray);
 }
 
 .activity-row.off {
@@ -6365,7 +6357,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .skills-card-menu-trigger {
     width: 32px;
     min-height: 32px;
-    border-radius: var(--radius-sm);
+    border-radius: var(--pill-radius);
     border: 1px solid rgba(var(--neutral-rgb), 0.08);
     background: rgba(var(--neutral-rgb), 0.04);
     color: var(--text-secondary);
@@ -6407,7 +6399,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .toast {
     max-width: min(420px, calc(100vw - 112px));
     padding: 11px 14px;
-    border-radius: var(--radius);
+    border-radius: var(--radius-object);
     border: 1px solid rgba(var(--neutral-rgb), 0.10);
     background: rgba(var(--modal-rgb), 0.94);
     color: var(--text-primary);
@@ -6501,7 +6493,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 .skills-card {
     container: skillcard / inline-size;
-    padding: var(--space-4) 18px;
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
@@ -6703,7 +6694,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 }
 .skills-detail-label { min-width: 72px; color: var(--text-primary); font-size: var(--type-meta); font-weight: 600; }
 .skills-detail-value { min-width: 0; flex: 1 1 240px; overflow-wrap: anywhere; }
-.skills-detail-row code { padding: 1px 6px; border-radius: var(--radius-xs); background: rgba(var(--neutral-rgb), 0.05); font-size: var(--type-meta); }
+.skills-detail-row code { padding: 1px 6px; border-radius: var(--radius-inner); background: rgba(var(--neutral-rgb), 0.05); font-size: var(--type-meta); }
 .skills-review-block { display: grid; gap: var(--space-1); color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .skills-review-block:empty { display: none; }
 .skills-review-current { color: var(--text-meta); font-size: var(--type-meta); }
@@ -6935,7 +6926,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     max-height: min(42vh, 380px);
     overflow-y: auto;
     padding: 2px 12px 2px 0;
-    border-bottom: 1px solid var(--surface-border);
+    border-bottom: 1px solid var(--divider);
 }
 
 .confirm-dialog-content:focus-visible {
@@ -6960,7 +6951,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 }
 
 .confirm-dialog-details {
-    border-top: 1px solid var(--surface-border);
+    border-top: 1px solid var(--divider);
     padding-top: 10px;
 }
 
@@ -7038,7 +7029,6 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     top: 0;
     width: var(--masonry-w, auto);
     transform: translate(var(--masonry-x, 0px), var(--masonry-y, 0px));
-    padding: 14px;
 }
 
 .widgets-card.dragging {
@@ -7075,7 +7065,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     width: 8px;
     padding: 0;
     border: 0;
-    border-radius: 0 var(--radius) var(--radius) 0;
+    border-radius: 0 var(--radius-object) var(--radius-object) 0;
     background: transparent;
     cursor: col-resize;
     touch-action: none;
@@ -7280,7 +7270,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     height: var(--widget-frame-height, 320px);
     min-height: 320px;
     border: 1px solid rgba(var(--neutral-rgb), 0.08);
-    border-radius: var(--radius);
+    border-radius: var(--radius-inner);
     background: rgba(var(--shell-rgb), 0.88);
     color: var(--text-primary);
     text-align: center;
@@ -7319,7 +7309,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     min-height: 320px;
     display: block;
     border: 1px solid rgba(var(--neutral-rgb), 0.08);
-    border-radius: var(--radius);
+    border-radius: var(--radius-inner);
     background: rgba(var(--shell-rgb), 0.88);
 }
 
@@ -7363,7 +7353,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     margin: var(--space-3) 0;
     padding: var(--space-2) var(--space-3);
     border-left: 3px solid var(--accent);
-    background: var(--surface-card-soft);
+    background: var(--surface-tray);
     color: var(--text-meta);
 }
 .widget-markdown table {
@@ -7376,7 +7366,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 .widget-markdown th,
 .widget-markdown td {
     padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--surface-border);
+    border-bottom: 1px solid var(--divider);
     color: var(--text-primary);
     text-align: left;
 }
@@ -7428,7 +7418,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 
 .widget-group {
     border: 1px solid rgba(var(--neutral-rgb), 0.07);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
     padding: 10px;
 }
 
@@ -7458,11 +7448,13 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     grid-column: 1 / -1;
 }
 
+/* A metric or callout is a tray; its one rail at the start takes the tone's hue below, the rest has no outline. */
 .widget-metric,
 .widget-callout {
-    border: 1px solid rgba(var(--neutral-rgb), 0.08);
+    border: 1px solid transparent;
     border-left-width: 3px;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
     padding: 9px 10px;
 }
 
@@ -7518,7 +7510,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 .widget-media img,
 .widget-media video {
     max-width: 100%;
-    border-radius: var(--radius);
+    border-radius: var(--radius-inner);
 }
 
 .widget-media audio {
@@ -7534,7 +7526,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 /* Host-owned map/calendar/kanban defaults without extra dependencies. */
 .widget-map {
     border: 1px solid rgba(var(--neutral-rgb), 0.06);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
     padding: 10px;
     background: rgba(var(--neutral-rgb), 0.02);
 }
@@ -7560,7 +7552,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 .widget-kanban-col {
     align-self: start;
     background: rgba(var(--neutral-rgb), 0.03);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
     padding: 10px;
     min-height: 120px;
 }
@@ -7601,7 +7593,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 .widget-code pre {
     margin: 0;
     padding: 10px;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
     background: rgba(0, 0, 0, 0.24);
     overflow-x: auto;
 }
@@ -7710,7 +7702,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     .widget-table thead { display: none; }
     .widget-table tr {
         border: 1px solid rgba(var(--neutral-rgb), 0.07);
-        border-radius: var(--radius-sm);
+        border-radius: var(--radius-inner);
         margin-bottom: 8px;
         padding: 5px 8px;
     }
@@ -7956,7 +7948,7 @@ body.keyboard-open .chat-instance-panel .chat-input-area {
     grid-template-columns: minmax(0, 1fr) var(--nav-kebab-w);
     align-items: center;
     width: 100%;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
 }
 
 /* Pinned Projects lead the same list: the first row shown after them keeps one step of air, the way the sidebar's
@@ -7972,7 +7964,7 @@ body.keyboard-open .chat-instance-panel .chat-input-area {
     color: var(--text-secondary);
     padding-left: var(--nav-label-x);
     padding-right: var(--space-1);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
     /* One trailing column per row for its one status mark, always reserved (the global [hidden] rule removes a row's
        mark at rest from layout, so the track, not the child, holds the slot): every mark keeps one x across rows,
        whatever the name length and while the sibling ⋯ (the item's own column) is hovered or focused. 18px is the
@@ -8112,7 +8104,7 @@ body.keyboard-open .chat-instance-panel .chat-input-area {
     align-items: center;
     justify-content: center;
     border: none;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
     background: transparent;
     color: var(--text-meta);
     cursor: pointer;
@@ -8148,7 +8140,7 @@ body.keyboard-open .chat-instance-panel .chat-input-area {
     background: transparent;
     color: var(--text-meta);
     cursor: pointer;
-    border-radius: var(--radius-sm);
+    border-radius: var(--pill-radius);
 }
 
 .nav-project-kebab > svg {
@@ -8246,7 +8238,7 @@ body.keyboard-open .chat-instance-panel .chat-input-area {
     margin: 0 0 var(--space-3);
     padding: var(--space-2) var(--space-3);
     border: 1px solid var(--divider);
-    border-radius: var(--radius-md, 8px);
+    border-radius: var(--radius-inner);
     font-size: 13px;
 }
 
@@ -8271,7 +8263,7 @@ body.keyboard-open .chat-instance-panel .chat-input-area {
 
 .new-project-browser {
     border: 1px solid var(--divider);
-    border-radius: var(--radius-md, 8px);
+    border-radius: var(--radius-inner);
     margin-bottom: var(--space-2);
     overflow: hidden;
 }
@@ -8321,7 +8313,7 @@ body.keyboard-open .chat-instance-panel .chat-input-area {
 .new-project-trust-note {
     padding: 8px 10px;
     border: 1px solid var(--status-warn-border);
-    border-radius: var(--radius-md, 8px);
+    border-radius: var(--radius-inner);
     color: var(--status-warn-word, var(--text-primary));
     font-size: 12.5px;
     margin: 0 0 var(--space-2);
@@ -8616,7 +8608,7 @@ body.keyboard-open .project-panel {
     align-items: baseline;
     padding: 10px 0;
     border: 1px solid transparent;
-    border-radius: var(--radius);
+    border-radius: var(--radius-inner);
     background: transparent;
 }
 /* The banner's row (owner, refined A 21.10): the verdict, the engine version as a quiet fact beside it, and
@@ -8887,7 +8879,7 @@ body.keyboard-open .project-panel {
     font-size: var(--type-meta);
     padding: 8px 10px;
     border-radius: 8px;
-    background: var(--surface-control);
+    background: var(--surface-tray);
     overflow-x: auto;
     user-select: all;
     white-space: pre-wrap;
@@ -8927,9 +8919,6 @@ body.keyboard-open .project-panel {
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
-}
-.updates-card {
-    padding: var(--space-5);
 }
 .updates-card-title {
     font-size: var(--type-section);
@@ -9069,9 +9058,9 @@ body.keyboard-open .project-panel {
     font-size: var(--type-meta);
     line-height: var(--line-meta);
     color: var(--text-primary);
-    background: var(--ui-card-bg-soft);
-    border: 1px solid var(--surface-border-soft);
-    border-radius: var(--radius-sm);
+    background: var(--surface-tray);
+    border: 1px solid transparent;
+    border-radius: var(--radius-inner);
     padding: 2px var(--space-2);
 }
 .updates-chip strong {
@@ -9084,7 +9073,7 @@ body.keyboard-open .project-panel {
     text-align: left;
 }
 .updates-chip-link:hover {
-    background: var(--bg-hover);
+    background: var(--tone-quiet-hover);
 }
 .updates-action-row {
     margin-top: var(--space-4);
@@ -9141,11 +9130,11 @@ body.keyboard-open .project-panel {
     font-size: var(--type-meta);
     line-height: var(--line-meta);
     padding: var(--space-1) var(--space-2);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
     min-width: 0;
 }
 .updates-restore-row:hover {
-    background: var(--bg-hover);
+    background: var(--tone-quiet-hover);
 }
 .updates-restore-label {
     color: var(--text-primary);
@@ -9342,9 +9331,9 @@ body.keyboard-open .project-panel {
     min-width: 0;
     margin: 0;
     overflow: hidden;
-    border: 1px solid var(--ui-card-border);
-    border-radius: var(--radius-sm);
-    background: var(--ui-card-bg);
+    border: 1px solid transparent;
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
 }
 
 /* Whole images on both sides (owner choice): a tile letterboxes, never crops. */
@@ -9438,7 +9427,7 @@ body.keyboard-open .project-panel {
     flex: 0 0 auto;
     width: var(--chat-attach-thumb-size);
     height: var(--chat-attach-thumb-size);
-    border-radius: var(--radius-xs);
+    border-radius: var(--radius-inner);
     object-fit: cover;
 }
 
@@ -9512,7 +9501,7 @@ body.keyboard-open .project-panel {
 .chat-file-glyph {
     width: 48px;
     height: 48px;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
 }
 
 .chat-file-thumb { object-fit: cover; }
@@ -9555,8 +9544,8 @@ body.keyboard-open .project-panel {
 .chat-file-dialog,
 .document-reader {
     padding: 0;
-    border: 1px solid var(--ui-card-border);
-    border-radius: var(--radius-lg);
+    border: 1px solid transparent;
+    border-radius: var(--radius-sheet);
     background: var(--ui-modal-bg);
     color: var(--text-primary);
     box-shadow: 0 18px 44px rgba(0, 0, 0, 0.34);
@@ -9585,9 +9574,9 @@ body.keyboard-open .project-panel {
    field's hairline. */
 .chat-media-rate-menu {
     min-height: 32px;
-    border: 1px solid var(--surface-border);
-    border-radius: var(--radius-sm);
-    background: var(--surface-control);
+    border: 1px solid var(--field-border);
+    border-radius: var(--radius-inner);
+    background: var(--bg-secondary);
     color: var(--text-primary);
     cursor: pointer;
 }
@@ -9627,7 +9616,7 @@ body.keyboard-open .project-panel {
     align-items: center;
     gap: var(--space-2);
     padding: var(--space-3) var(--space-4) var(--space-3) var(--space-5);
-    border-bottom: 1px solid var(--surface-border);
+    border-bottom: 1px solid var(--divider);
 }
 
 /* Name, type and size are selectable text like the document: declared, so the macOS window's
@@ -9835,8 +9824,8 @@ body.keyboard-open .project-panel {
     /* Structural markup (see .chat-gallery-grid): no phantom lines between the
        stage and the control row. */
     white-space: normal;
-    border: 1px solid var(--ui-card-border);
-    border-radius: var(--radius);
+    border: 1px solid transparent;
+    border-radius: var(--radius-inner);
     background: var(--ui-modal-bg);
 }
 
@@ -9886,7 +9875,7 @@ body.keyboard-open .project-panel {
     height: 4px;
     appearance: none;
     border-radius: var(--pill-radius);
-    background: linear-gradient(to right, var(--accent-light) var(--media-progress), var(--surface-border) var(--media-progress));
+    background: linear-gradient(to right, var(--accent-light) var(--media-progress), var(--status-neutral-bg) var(--media-progress));
     cursor: pointer;
 }
 
@@ -9916,7 +9905,7 @@ body.keyboard-open .project-panel {
     min-width: 220px;
     padding: 10px 12px;
     border: 1px solid var(--focus-accent-border);
-    border-radius: var(--radius-sm);
+    border-radius: var(--pill-radius);
     background: var(--accent-08);
     color: var(--accent-light);
     font-weight: 600;
@@ -9943,9 +9932,9 @@ body.keyboard-open .project-panel {
     min-width: min(260px, 100%);
     max-width: 560px;
     padding: var(--space-3, 12px);
-    border: 1px solid var(--ui-card-border);
-    border-radius: var(--radius);
-    background: var(--ui-card-bg);
+    border: 1px solid transparent;
+    border-radius: var(--radius-object);
+    background: var(--surface-object);
 }
 /* The head is one row in every room: `[Question] ● status … ×`, every item centred on one 28px row. It never
    wraps: on a very narrow card the status takes a second line inside its own slot, so its words stay whole. */
@@ -10089,9 +10078,9 @@ body.keyboard-open .project-panel {
     justify-content: flex-end;
     gap: var(--space-2);
     padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3);
-    border: 1px solid var(--ui-card-border);
+    border: 1px solid transparent;
     border-radius: var(--radius-inner);
-    background: var(--ui-card-bg-soft);
+    background: var(--surface-tray);
     transition: border-color 0.12s ease, box-shadow 0.12s ease;
 }
 .chat-quiz-comment-box:has(> .chat-quiz-comment:focus) {
@@ -10275,7 +10264,7 @@ body.keyboard-open .secret-request-backdrop .secret-request-dialog {
     height: var(--space-5);
     padding: 0;
     border: 1px solid transparent;
-    border-radius: var(--radius-sm);
+    border-radius: var(--pill-radius);
     background: transparent;
     color: var(--text-meta);
     font-size: var(--type-meta);
@@ -10311,7 +10300,7 @@ body.keyboard-open .secret-request-backdrop .secret-request-dialog {
 .chat-message-reply:focus-visible { opacity: 1; }
 .chat-message-action:hover,
 .chat-message-copy:hover,
-.chat-message-reply:hover { background: var(--surface-control); }
+.chat-message-reply:hover { background: var(--tone-quiet-hover); }
 /* An action that is on now (Read aloud while it speaks) has no body, so it wears the crimson tone's word. */
 .chat-message-action[aria-pressed="true"] { color: var(--tone-crimson-word); }
 .chat-message-action:focus-visible,
@@ -10348,11 +10337,11 @@ body.keyboard-open .secret-request-backdrop .secret-request-dialog {
    the quoted message; a relay shows the owner's complete words, clamped to six lines, `Show all` in its head. */
 .chat-quote {
     --quote-ink: var(--text-meta);
-    --quote-tint: var(--ui-card-bg-soft);
+    --quote-tint: var(--surface-tray);
     position: relative;
     display: block;
     margin: 0 0 var(--space-2);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
     background: linear-gradient(var(--quote-tint), var(--quote-tint)), var(--quote-glass);
     overflow: hidden;
 }
@@ -10396,9 +10385,9 @@ body.keyboard-open .secret-request-backdrop .secret-request-dialog {
     display: block;
     width: var(--chat-attach-thumb-size);
     height: var(--chat-attach-thumb-size);
-    border-radius: var(--radius-xs);
+    border-radius: var(--radius-inner);
     object-fit: cover;
-    background: var(--surface-control);
+    background: var(--surface-tray);
 }
 .chat-quote-main:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: -2px; }
 .chat-quote-head {
@@ -10699,7 +10688,7 @@ body.keyboard-open .secret-request-backdrop .secret-request-dialog {
 .chat-quote--composer::before {
     inset-block: var(--space-2);
     inset-inline-start: var(--space-3);
-    border-radius: var(--radius-xs);
+    border-radius: var(--pill-radius);
 }
 .chat-quote-cancel {
     flex: none;
@@ -10764,7 +10753,7 @@ body.keyboard-open .secret-request-backdrop .secret-request-dialog {
     margin: 0;
     min-width: 160px;
     padding: 6px;
-    border-radius: var(--radius);
+    border-radius: var(--radius-object);
     border: 1px solid rgba(var(--neutral-rgb), 0.08);
     background: rgba(var(--modal-rgb), 0.96);
     color: var(--text-primary);
@@ -10777,7 +10766,7 @@ body.keyboard-open .secret-request-backdrop .secret-request-dialog {
     border: 0;
     background: transparent;
     color: var(--text-secondary);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
     padding: 9px 10px;
     text-align: left;
     cursor: pointer;
@@ -10811,8 +10800,8 @@ body.keyboard-open .secret-request-backdrop .secret-request-dialog {
     width: max-content;
     min-width: 160px;
     overflow: hidden;
-    border: 1px solid var(--ui-card-border);
-    border-radius: var(--radius-sm);
+    border: 1px solid transparent;
+    border-radius: var(--radius-object);
     background: var(--ui-modal-bg);
     box-shadow: 0 18px 44px rgba(0, 0, 0, 0.34);
 }
@@ -10837,8 +10826,8 @@ body.keyboard-open .secret-request-backdrop .secret-request-dialog {
 
 .form-field input:not(.ui-control):not(.ui-checkbox), .form-field select:not(.ui-control):not(.ui-checkbox) {
     padding: 8px 12px;
-    border-radius: var(--radius-sm);
-    border: 1px solid var(--divider);
+    border-radius: var(--radius-inner);
+    border: 1px solid var(--field-border);
     background: var(--bg-secondary);
     color: var(--text-primary);
     font-size: 14px;

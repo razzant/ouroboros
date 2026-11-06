@@ -15,7 +15,6 @@
     --control-disabled-opacity: 0.55;
     --bg-primary: #0f0f11;
     --bg-secondary: #1a1b1c;
-    --bg-hover: rgba(var(--neutral-rgb), 0.08);
     /* Type scale + foreground semantics: docs/DESIGN.md. Four sizes, no fifth. */
     --type-meta: 12px;
     --type-body: 14px;
@@ -35,7 +34,6 @@
     --text-muted: var(--text-disabled);  /* legacy alias */
     --accent: #f45152;
     --accent-light: #fe7d85;
-    --accent-dim: rgba(201, 53, 69, 0.15);
     /* Accent alpha tokens; keep future tweaks off hardcoded rgba literals. */
     --accent-08: rgba(201, 53, 69, 0.08);
     --accent-10: rgba(201, 53, 69, 0.10);
@@ -84,12 +82,12 @@
     --green-dim: rgba(255, 255, 255, 0.07);
     --red: #ef4444;
     --red-dim: rgba(255, 255, 255, 0.07);
+    /* A rule only where a table or a section needs one; a field's hairline (the one edge the bible keeps, principle 2).
+       --surface-border survives for one reader, the living cards' `--ouro-border` (card_frames.js); the Cards lane
+       repoints it to --field-border and deletes it. */
     --divider: rgba(var(--neutral-rgb), 0.06);
-    --surface-border: rgba(var(--neutral-rgb), 0.08);
-    --surface-border-soft: rgba(var(--neutral-rgb), 0.06);
-    --surface-card: rgba(var(--neutral-rgb), 0.03);
-    --surface-card-soft: rgba(var(--neutral-rgb), 0.025);
-    --surface-control: rgba(var(--neutral-rgb), 0.04);
+    --field-border: rgba(var(--neutral-rgb), 0.08);
+    --surface-border: var(--field-border);
     /* Chart chrome (grid lines, tick/legend text) and the four default series of a
        chart the host draws (widgets, living cards), in the owner's order; a fifth
        series takes the first again. Chart.js paints to a canvas and cannot read CSS,
@@ -113,9 +111,6 @@
     --diagram-line: #989898;
     --diagram-secondary: #28292a;
     --diagram-tertiary: #151617;
-    --ui-card-bg: var(--surface-card);
-    --ui-card-bg-soft: var(--surface-card-soft);
-    --ui-card-border: var(--surface-border);
     --ui-modal-bg: rgba(var(--modal-rgb), 0.98);
     /* Status triples: fg/bg/border named together, never derived
        (docs/DESIGN.md "Status and chips"). The fg tints are readable at 12px on the dark room, where a status body
@@ -153,13 +148,6 @@
     --panic-fill-hover: var(--chip-float-hover);
     --focus-accent-border: #fe7d85;
     --focus-accent-ring: rgba(211, 45, 67, 0.28);
-    --radius-xs: 3px;
-    --radius-sm: 8px;
-    /* In-between radius used by chips, counters, and fade rules. */
-    --radius-md: 10px;
-    --radius: 12px;
-    --radius-lg: 16px;
-    --radius-xl: 20px;
     --page-header-padding-y: 10px;
     --page-header-padding-x: 20px;
     --page-header-padding-bottom: 6px;
@@ -190,6 +178,8 @@
     --radius-object: 18px;
     --radius-inner: 12px;
     --radius-sheet: 24px;
+    /* One inset for every card on the room (block, inline; the board picks 16/24 or 16/18). */
+    --card-pad: 16px 24px;
     --surface-object: rgba(255, 255, 255, 0.055);
     /* The object's colour as one opaque paint (its veil over --bg-primary), for marks that must cover what they
        cross: a chart's label halos and dot rings. */
@@ -490,11 +480,6 @@
     --surface-capsule: #8f263a;
     --surface-capsule-hover: #9e3044;
     --surface-tray: #832336;
-    --surface-card: var(--surface-tray);
-    --surface-card-soft: var(--surface-tray);
-    --surface-control: var(--surface-tray);
-    --ui-card-bg: var(--surface-card);
-    --ui-card-bg-soft: var(--surface-card-soft);
     --status-neutral-bg: var(--surface-capsule);
     --status-neutral-fg: var(--text-secondary);
     --tone-quiet-hover: var(--surface-capsule);
@@ -532,7 +517,7 @@
     --text-muted: var(--text-disabled);
 }
 /* Code stays on the room's neutral material inside either voice. */
-.md-code-block { --tone-quiet-hover: var(--bg-hover); }
+.md-code-block { --tone-quiet-hover: var(--menu-item-hover); }
 
 .ouro-ui { font-family: var(--font-sans); color-scheme: var(--native-color-scheme); }
 .muted { color: var(--text-meta); }
@@ -748,6 +733,7 @@
     background: var(--surface-object);
     border-radius: var(--radius-object);
     box-shadow: var(--elev-rest);
+    padding: var(--card-pad);
 }
 
 /* ---- The control box lock (owner decision 06.11.2026, Q1 = A) ---------------------------------------------------
@@ -903,8 +889,8 @@
     min-width: 0;
     max-width: 100%;
     padding: var(--space-2) var(--space-3);
-    border: 1px solid var(--surface-border);
-    border-radius: var(--radius);
+    border: 1px solid var(--field-border);
+    border-radius: var(--radius-inner);
     background-color: var(--bg-secondary);
     color: var(--text-primary);
     font-family: var(--font-sans);
@@ -986,7 +972,7 @@ textarea.ui-control { resize: vertical; }
 }
 .ui-model-option, .ui-model-empty {
     padding: var(--space-2) var(--space-3);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
     font-size: var(--type-body);
     line-height: var(--line-body);
     overflow-wrap: anywhere;
@@ -1010,7 +996,7 @@ textarea.ui-control { resize: vertical; }
     margin: 0;
     padding: var(--space-2) var(--space-3);
     border: none;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
     background: transparent;
     color: var(--text-primary);
     font-family: var(--font-sans);
@@ -1063,7 +1049,7 @@ textarea.ui-control { resize: vertical; }
     max-height: var(--ui-hint-room, none);
     padding: var(--space-2) var(--space-3);
     border: 1px solid transparent;
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-object);
     background: var(--popup-float);
     box-shadow: var(--elev-float);
     -webkit-backdrop-filter: var(--glass);
@@ -1094,7 +1080,7 @@ textarea.ui-control { resize: vertical; }
     font-weight: 600;
     cursor: pointer;
 }
-.ui-hint-action:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; border-radius: var(--radius-sm); }
+.ui-hint-action:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; border-radius: var(--radius-inner); }
 .ui-hint:not([hidden]) { animation: ui-hint-in var(--motion-fade) var(--ease-sheet); }
 @keyframes ui-hint-in { from { opacity: 0; transform: translateY(3px); } }
 @media (prefers-reduced-motion: reduce) {
@@ -1140,7 +1126,7 @@ textarea.ui-control { resize: vertical; }
     margin: calc(-1 * var(--chrome-inset));
     padding: var(--space-1);
     border: 1px solid transparent;
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-object);
 }
 .ui-chrome-control {
     box-sizing: border-box;

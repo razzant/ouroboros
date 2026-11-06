@@ -183,7 +183,7 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
 .rw-extras > :is(.chat-header-btn, .chat-budget-pill).ui-chrome-control {
     display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: var(--space-3);
     width: 100%; height: auto; min-height: var(--touch-target-min); padding: 0 var(--space-3);
-    border-radius: var(--radius-md); background: transparent; box-shadow: none;
+    border-radius: var(--radius-inner); background: transparent; box-shadow: none;
     -webkit-backdrop-filter: none; backdrop-filter: none;
     color: var(--text-primary); font-size: var(--type-body); font-weight: 400; text-align: start;
 }
@@ -236,7 +236,7 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
     align-items: center;
     min-width: 0;
     padding: 9px var(--space-1) 9px var(--space-2);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
     cursor: default;
     -webkit-user-select: text;
     user-select: text;
@@ -372,7 +372,7 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
 .rw-detail {
     margin: 0 var(--space-1) var(--space-2) var(--space-2);
     padding: var(--space-2) var(--space-3);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-inner);
     background: rgba(var(--neutral-rgb), 0.05);
     font-size: var(--type-meta);
     line-height: var(--line-meta);

@@ -53,7 +53,6 @@
     display: flex;
     flex-direction: column;
     gap: 14px;
-    padding: 18px;
 }
 
 .settings-shell .form-section {
@@ -114,7 +113,7 @@
 .settings-provider-toggle:focus-visible {
     outline: 2px solid var(--focus-accent-border);
     outline-offset: 4px;
-    border-radius: var(--radius-xs);
+    border-radius: var(--radius-inner);
 }
 
 .settings-provider-head > .btn { flex: 0 0 auto; }
@@ -376,8 +375,9 @@
 .mcp-server-status-muted { color: var(--status-neutral-fg); }
 
 .mcp-tools-disclosure {
-    border-radius: 12px;
-    border: 1px solid rgba(var(--neutral-rgb), 0.06);
+    border-radius: var(--radius-inner);
+    border: 1px solid transparent;
+    background: var(--surface-tray);
     padding: 10px 12px;
 }
 
@@ -424,14 +424,14 @@
 .local-model-progress-wrap {
     margin-top: 8px;
     height: 6px;
-    border-radius: var(--radius-xs);
+    border-radius: var(--pill-radius);
     background: rgba(var(--neutral-rgb), 0.08);
     overflow: hidden;
 }
 
 .local-model-progress-bar {
     height: 100%;
-    border-radius: var(--radius-xs);
+    border-radius: var(--pill-radius);
     background: var(--accent);
     width: 0%;
     transition: width 0.4s ease;
@@ -615,9 +615,9 @@
     flex-direction: column;
     gap: var(--space-2);
     padding: var(--space-3);
-    border: 1px solid var(--surface-border);
-    border-radius: var(--radius);
-    background: var(--surface-card-soft);
+    border: 1px solid transparent;
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
     container: subagentcard / inline-size;
 }
 
@@ -1099,10 +1099,6 @@
         border-radius: 999px;
     }
 
-    .settings-shell .form-section {
-        padding: 14px;
-    }
-
     .settings-provider-head,
     .settings-more-providers > summary {
         padding: 14px 14px;
@@ -1126,7 +1122,7 @@
     min-width: 0;
     padding: 10px 12px;
     border-radius: 12px;
-    border: 1px solid var(--surface-border);
+    border: 1px solid var(--field-border);
     background: rgba(var(--composer-rgb), 0.88);
     color: var(--text-primary);
     font-size: var(--type-body);
@@ -1176,7 +1172,6 @@
 .account-resource-panel {
     grid-column: 1 / -1;
     margin-top: var(--space-3);
-    padding: var(--space-4);
     background: var(--bg-primary);
     color: var(--text-primary);
     font-size: var(--type-body);
@@ -1239,8 +1234,8 @@
 }
 .resource-track {
     height: var(--space-1);
-    border-radius: var(--radius-xs);
-    background: var(--bg-hover);
+    border-radius: var(--pill-radius);
+    background: var(--surface-tray);
     overflow: hidden;
     margin-bottom: var(--space-1);
 }
@@ -1248,7 +1243,7 @@
     width: var(--resource-used);
     height: 100%;
     background: var(--text-meta);
-    border-radius: var(--radius-xs);
+    border-radius: var(--pill-radius);
 }
 .resource-window[data-spent="true"] .resource-fill {
     background: var(--amber);
@@ -1256,7 +1251,7 @@
 .resource-reset-section {
     margin-top: var(--space-4);
     padding-top: var(--space-4);
-    border-top: 1px solid var(--surface-border);
+    border-top: 1px solid var(--divider);
 }
 .resource-reset-section > h6 {
     font-size: var(--type-body);
@@ -1272,7 +1267,7 @@
     padding: var(--space-3) 0;
 }
 .resource-offer + .resource-offer {
-    border-top: 1px solid var(--surface-border);
+    border-top: 1px solid var(--divider);
 }
 .resource-offer-title {
     font-size: var(--type-body);
@@ -1291,8 +1286,8 @@
 .resource-message {
     padding: var(--space-3);
     margin-bottom: var(--space-4);
-    border-radius: var(--radius-sm);
-    background: var(--bg-hover);
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
     color: var(--text-primary);
     font-size: var(--type-body);
     line-height: var(--line-body);
@@ -1320,12 +1315,12 @@
 }
 
 .resource-reset-offer + .resource-reset-offer {
-    border-top: 1px solid var(--surface-border);
+    border-top: 1px solid var(--divider);
     padding-top: var(--space-3);
     margin-top: var(--space-3);
 }
 .harness-account-actions [data-resources][aria-expanded="true"] {
-    background: var(--bg-hover);
+    background: var(--surface-capsule-hover);
 }
 @media (max-width: 980px) {
     .account-resource-panel {
@@ -1336,7 +1331,7 @@
         gap: var(--space-2);
     }
     .resource-section + .resource-section {
-        border-top: 1px solid var(--surface-border);
+        border-top: 1px solid var(--divider);
         padding-top: var(--space-3);
     }
     .resource-offer {
