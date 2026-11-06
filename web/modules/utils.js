@@ -329,8 +329,9 @@ export function decodeHtmlEntities(value) {
 }
 
 export function formatUsdWhole(value) {
+    // Whole dollars with digit groups, as every other money line ("$30,034"; owner, board of 06.11).
     const num = Number(value);
-    return Number.isFinite(num) ? `$${num.toFixed(0)}` : '$0';
+    return Number.isFinite(num) ? `$${Math.round(num).toLocaleString('en-US')}` : '$0';
 }
 
 export function formatUsd2(value) {
