@@ -1095,7 +1095,8 @@ def place_rows_into_runs(ctx: ToolContext) -> List[str]:
     but never answered) replays its recorded bytes under the same message id; ``not_active`` or ``not_found`` on a
     run the census still holds open is placed again under a new id; ``unsupported`` ends it, a route with no live
     input (or an engine without the operation) recording that frame without a POST. One handshake and one
-    capability read per run, under the message deadline; a read that fails leaves the run for the next round.
+    capability read per run, under the message deadline; an engine that cannot be discovered or reached, or a
+    read that fails, leaves the run for the next round (the starter's own round goes on: nothing here raises).
     Returns the host fact lines for the starter's own context: one per row and run whose outcome changed."""
     from ouroboros.delegate_continuation import line_start_bodies
     from ouroboros.delegate_custody import custody_root
@@ -1126,7 +1127,11 @@ def place_rows_into_runs(ctx: ToolContext) -> List[str]:
         if not owed:
             continue
         deadline = time.monotonic() + _MESSAGE_DEADLINE_SEC
-        gateway = ClaudexorGateway()
+        try:  # a missing or unreadable daemon descriptor is the engine's absence this round, never the task's end
+            gateway = ClaudexorGateway()
+        except ClaudexorUnavailable:
+            log.warning("owner words placement into run %s waits: engine not discovered", run.run_id, exc_info=True)
+            continue
         try:
             gateway.handshake(timeout_sec=poll_bound(min(_MESSAGE_DEADLINE_SEC, _ANSWER_HANDSHAKE_MAX_SEC)))
         except ClaudexorUnavailable:
@@ -1157,7 +1162,7 @@ def place_rows_into_runs(ctx: ToolContext) -> List[str]:
                 facts = {"run_id": run.run_id, "message_id": record["frame"]["message_id"], "text_chars": len(text),
                          "text_sha256": hashlib.sha256(text.encode("utf-8", "replace")).hexdigest(),
                          "frame": record["frame"]}
-                if reason:
+                if reason and not replay:  # a replay always reaches the engine: its bytes may already be delivered
                     verdict: Dict[str, Any] = dict(outcome="unsupported", reason=reason, host_code=SUBSTRATE_REFUSAL_CODE,
                                                    detail=detail, live_input=live_input)
                 else:
@@ -1165,7 +1170,7 @@ def place_rows_into_runs(ctx: ToolContext) -> List[str]:
                 _message_result(ctx, facts, **verdict)
                 if verdict["outcome"] != str((prior or {}).get("outcome") or ""):
                     why = f" ({verdict['reason']})" if verdict.get("reason") else ""
-                    lines.append(f"[Host fact: my human's row {address} was placed into session run {run.run_id}: "
+                    lines.append(f"[Host fact: my human's row {address} for session run {run.run_id}: "
                                  f"{verdict['outcome']}{why}]")
         finally:
             gateway.close()

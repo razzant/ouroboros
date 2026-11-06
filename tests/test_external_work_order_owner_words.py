@@ -273,6 +273,12 @@ def test_a_session_tasks_work_order_is_a_function_of_its_record_and_its_first_st
     assert "A later room row" in tail and "See the file" in tail and "quota.png (image/png, 1234 bytes)" in tail
     assert f"\n{LATEST}\n" in tail  # the carried row the nanny holds since its scheduling rides too
     assert sibling not in tail and ASKED not in tail and LATER not in tail  # the body holds these: never twice
+    with monkeypatch.context() as room_down:  # an unreadable room: the rows that could be read ride, the gap is named
+        room_down.setattr(chat_chain, "room_rows", lambda *_a, **_k: (_ for _ in ()).throw(OSError("store down")))
+        gapped = session_host_references(nanny, target_root=str(tmp_path), source_root=str(tmp_path), start_body=body)
+    assert gapped.endswith(f"[Host fact: my human's rows of room {room} could not be read here (OSError); "
+                           f"chat_history reads that room.]\n\n{START_TAIL_FACT}") and f"\n{LATEST}\n" in gapped
+    assert "A later room row" not in gapped and "could not be read" not in with_tail
     assert session_host_references(nanny, target_root=str(tmp_path), source_root=str(tmp_path), start_body=None) == plain
     assert session_host_references(nanny, target_root=str(tmp_path), source_root=str(tmp_path),
                                    start_body=body + tail) == plain  # every row held: no tail

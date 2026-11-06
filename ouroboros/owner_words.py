@@ -53,8 +53,9 @@ log = logging.getLogger(__name__)
 OWNER_SOURCES = frozenset({"initial_user", "owner_mailbox", "owner_quiz_answer", "origin_message",
                            "owner_corpus", "direct_incoming", "place_owner"})
 FIELD, ABSENT_FIELD = "governing_owner_words", "governing_owner_words_absent"
-# A session task's record alone: the bound room's rows it was scheduled with, by value, read by its work order
-# only (never inherited, carried or read by a Safety check); its presence tells a work order rendered after it.
+# A session task's record alone: the rows ``_live_words`` read at its scheduling (the bound room's rows, the
+# Project's origin rows and the marked rows), by value, read by its work order only (never inherited, carried or
+# read by a Safety check); its presence tells a work order rendered after it.
 ROOM_FIELD = "work_order_room_words"
 NOT_RECORDED = "not_recorded"
 REPLY_TARGET = "reply_target"  # the message my human replied to: its author's words beside theirs, never theirs
@@ -588,9 +589,10 @@ def governing_words_for_schedule(ctx: Any, *, session: bool = False) -> Dict[str
     """``{FIELD: rows}`` or ``{ABSENT_FIELD: marker}`` for the helper this run is about to schedule: the rows
     addressed to the tree, by value (``_tree_words``). A helper passes on what it inherited and what reached it
     since; the room, the origins and the marked rows are read live at the helper's own start (``work_words``).
-    ``session`` (the helper compiles an external work order): the bound room's rows as read here ride beside them
-    under ``ROOM_FIELD``, by value (an empty list when the room has none), so that work order stays a function of
-    the helper's record; a room that cannot be read gives the rows that could be, and its gap is logged."""
+    ``session`` (the helper compiles an external work order): the rows ``_live_words`` reads at this handoff (the
+    bound room's rows, the Project's origin rows and the marked rows) ride beside them under ``ROOM_FIELD``, by
+    value (an empty list when none), so that work order stays a function of the helper's record; a store that
+    cannot be read gives the rows that could be, and its gap is logged."""
     rows = _tree_words(ctx)[0]
     facts: Dict[str, Any] = {FIELD: rows} if rows else {ABSENT_FIELD: _absent(ctx)}
     if session:

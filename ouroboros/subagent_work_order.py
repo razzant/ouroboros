@@ -515,21 +515,23 @@ CONTINUATION_TAIL_FACT = ("[Host fact: these rows of my human's stand in no earl
 def unseen_words_section(ctx: Any, text: str, fact: str) -> str:
     """My human's rows of the starter's set at this handoff (``words_unseen_in``: the room read live) whose
     identity ``text`` does not hold, each with the reply target that follows it in the set (another author's
-    words beside theirs, under its own stamp), under the session heading with ``fact`` as the host's closing
-    line; "" when ``text`` holds them all. A text with no stamp holds none: every row rides."""
+    words beside theirs, under its own stamp), under the session heading, the gap line of a store that could
+    not be read (``work_words``) and ``fact`` as the host's closing lines; "" when ``text`` holds them all. A text
+    with no stamp holds none: every row rides."""
     from ouroboros.owner_words import REPLY_TARGET, render_owner_words, words_unseen_in, work_words
 
     unseen = words_unseen_in(ctx, text)
     if not unseen:
         return ""
     rows, take = [], False
-    for row in work_words(ctx)[0]:
+    rows_all, _marker, gaps = work_words(ctx)
+    for row in rows_all:
         take = take if row.get("source") == REPLY_TARGET else row in unseen
         if take:
             rows.append(row)
     meta = getattr(ctx, "task_metadata", None)
     root = str((meta.get("root_task_id") if isinstance(meta, Mapping) else "") or getattr(ctx, "task_id", "") or "")
-    return render_owner_words(rows, audience="session", root_task_id=root, gaps=[fact])
+    return render_owner_words(rows, audience="session", root_task_id=root, gaps=[*gaps, fact])
 
 
 def session_host_references(ctx: Any, *, target_root: str, source_root: str,

@@ -1287,11 +1287,15 @@ def _placed(stub):
 def test_placement_follows_the_outcome_rules_and_never_a_review_a_settled_or_another_tasks_run(tmp_path, monkeypatch):
     """Each row of the rows the starter carries reaches each session it holds open once: delivered, accepted and
     rejected end a row for that run; delivery_unknown replays the same frame under its message id; not_active on
-    a run still open places it again under a new id; a route with no live input ends it with a frame and no
-    POST; a capability read that fails leaves no frame and the run for the next round. A review's run, a settled
-    run and another task's run hear nothing."""
+    a run still open places it again under a new id at each round, k rounds leaving one fact line; a route with
+    no live input ends it with a frame and no POST; a capability read that fails, and an engine that cannot be
+    discovered, leave no frame and the run for the next round. The message my human replied to rides inside the
+    row's text and is never a frame of its own. A review's run, a settled run and another task's run hear
+    nothing."""
     from ouroboros import delegate_message_store as frames
+    from ouroboros.chat_chain import format_address, row_address
     from ouroboros.delegate_interactions import place_rows_into_runs
+    from ouroboros.gateways import claudexor as gw
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
     _durable_run(tmp_path, "run-open")
@@ -1300,20 +1304,27 @@ def test_placement_follows_the_outcome_rules_and_never_a_review_a_settled_or_ano
     _durable_run(tmp_path, "run-foreign", task_id="t-other")
     a, b = _owner_row("Build it", "msg-a"), _owner_row("Add the charts too", "msg-b", ts="2026-10-04T06:00:00+00:00")
     ctx = _starter(tmp_path, a, b)
+    target = {"address": "row:1@2026-10-04T06:10:00+00:00#0123456789ab", "author": "Ouroboros", "text": "Which charts?"}
+    held = {"direction": "in", "chat_id": 1, "ts": "2026-10-04T06:20:00+00:00", "text": "Bar charts", "task_id": "",
+            "client_message_id": "msg-h", "reply_to": target}  # a held row replying to my message: context beside it
+    ctx._held_owner_messages = {format_address(row_address(held)): held}
     stub = _install(monkeypatch, _Stub(result={"outcome": "delivered", "reason": ""}))
     lines = place_rows_into_runs(ctx)
     placed = _placed(stub)
-    assert [run for run, _addr, _line in placed] == ["run-open", "run-open"]
+    assert [run for run, _addr, _line in placed] == ["run-open"] * 3
     assert all(line.startswith("[Owner words quoted verbatim; 2026-10-04T0") and "carried to this work by the host "
                "(reached this work); handle row:1@" in line for _run, _addr, line in placed)
-    assert [wire["text"].split("\n")[1] for wire in (json.loads(p["text"]) for p in stub.posts)] == [a["text"], b["text"]]
-    assert len(lines) == 2 and all(line.startswith("[Host fact: my human's row row:1@") and
-                                   "placed into session run run-open: delivered]" in line for line in lines)
-    assert [row["outcome"] for row in frames.placed_words(ctx, "run-open")] == ["delivered", "delivered"]
+    texts = [json.loads(p["text"])["text"] for p in stub.posts]
+    assert [text.split("\n")[1] for text in texts] == [a["text"], b["text"], "Bar charts"]
+    assert ("[Host reference: the message these owner words reply to; context, not the owner's words]\n"
+            + json.dumps(target, ensure_ascii=False)) in texts[2] and "Which charts?" not in "".join(texts[:2])
+    assert len(lines) == 3 and all(line.startswith("[Host fact: my human's row row:1@") and
+                                   "for session run run-open: delivered]" in line for line in lines)
+    assert [row["outcome"] for row in frames.placed_words(ctx, "run-open")] == ["delivered"] * 3
     assert frames.placed_words(ctx, "run-review") == [] and frames.placed_words(ctx, "run-settled") == []
     receipts = _receipts(tmp_path)
-    assert len(receipts) == 2 and {r["run_id"] for r in receipts} == {"run-open"}
-    assert place_rows_into_runs(ctx) == [] and len(stub.posts) == 2  # ended: nothing again
+    assert len(receipts) == 3 and {r["run_id"] for r in receipts} == {"run-open"}
+    assert place_rows_into_runs(ctx) == [] and len(stub.posts) == 3  # ended: nothing again, no frame for the target
     # delivery_unknown replays the SAME frame under the SAME key; delivered then ends it.
     c = _owner_row("A third word", "msg-c", ts="2026-10-04T07:00:00+00:00")
     ctx = _starter(tmp_path, a, b, c)
@@ -1321,46 +1332,70 @@ def test_placement_follows_the_outcome_rules_and_never_a_review_a_settled_or_ano
     assert [line for line in place_rows_into_runs(ctx) if "run-open: delivery_unknown (daemon_unreachable)]" in line]
     first = lost.posts[0]
     assert len(lost.posts) == 1 and frames.placed_words(ctx, "run-open")[-1]["outcome"] == "delivery_unknown"
-    again = _install(monkeypatch, _Stub(error=ClaudexorUnavailable("daemon_unreachable", "reset", status_code=503)))
+    again = _install(monkeypatch, _Stub(error=ClaudexorUnavailable("daemon_unreachable", "reset", status_code=503),
+                                        harnesses=[_row(live_input="none")]))  # the route's row changed under the run
     assert place_rows_into_runs(ctx) == []  # the same outcome: no new fact line
-    assert again.posts == [first] and len(frames.placed_words(ctx, "run-open")) == 3  # replayed, not re-prepared
+    assert again.posts == [first] and len(frames.placed_words(ctx, "run-open")) == 4  # replayed, never re-gated
     delivered = _install(monkeypatch, _Stub(result={"outcome": "delivered", "reason": ""}))
     assert [line for line in place_rows_into_runs(ctx) if "delivered" in line]
     assert delivered.posts == [first] and frames.placed_words(ctx, "run-open")[-1]["outcome"] == "delivered"
-    # not_active on a run the census still holds open: placed again under a NEW id; rejected ends it.
+    # not_active on a run the census still holds open: placed again under a NEW id at each round, k rounds leaving
+    # ONE fact line; rejected ends it.
     d = _owner_row("A fourth word", "msg-d", ts="2026-10-04T08:00:00+00:00")
     ctx = _starter(tmp_path, a, b, c, d)
     idle = _install(monkeypatch, _Stub(result={"outcome": "not_active", "reason": "between_turns"}))
     assert [line for line in place_rows_into_runs(ctx) if "not_active (between_turns)" in line]
+    assert place_rows_into_runs(ctx) == [] and len(idle.posts) == 2  # the same outcome again: a new POST, no new line
+    assert len({post["key"] for post in idle.posts}) == 2  # two frames of one row, each under its own id
     rejected = _install(monkeypatch, _Stub(result={"outcome": "rejected", "reason": "payload_too_large"}))
     assert [line for line in place_rows_into_runs(ctx) if "rejected (payload_too_large)" in line]
-    assert len(idle.posts) == len(rejected.posts) == 1 and idle.posts[0]["key"] != rejected.posts[0]["key"]
-    assert json.loads(idle.posts[0]["text"])["text"] == json.loads(rejected.posts[0]["text"])["text"]
+    assert len(rejected.posts) == 1 and rejected.posts[0]["key"] not in {post["key"] for post in idle.posts}
+    assert len({json.loads(post["text"])["text"] for post in [*idle.posts, *rejected.posts]}) == 1  # the same words
     silent = _install(monkeypatch, _Stub())
     assert place_rows_into_runs(ctx) == [] and silent.posts == []  # rejected ended it
-    # A route with no live input: the frame records unsupported with no POST, once; a failed read: nothing at all.
+    # A route with no live input: the frame records unsupported with no POST, once; accepted ends a row as
+    # delivered does (the harness holds it); a failed read: nothing at all.
     _durable_run(tmp_path, "run-deaf", route_id="deaf-route")
     e = _owner_row("A fifth word", "msg-e", ts="2026-10-04T09:00:00+00:00")
     ctx = _starter(tmp_path, a, b, c, d, e)
-    deaf = _install(monkeypatch, _Stub(result={"outcome": "delivered", "reason": ""},
+    deaf = _install(monkeypatch, _Stub(result={"outcome": "accepted", "reason": ""},
                                        harnesses=[_row(), _row("deaf-route", live_input="none")]))
     lines = place_rows_into_runs(ctx)
     assert sorted(line.split("run ")[1] for line in lines) == (  # one fact per row and run: five rows never heard
-        ["run-deaf: unsupported (route_live_input_none)]"] * 5 + ["run-open: delivered]"])
+        ["run-deaf: unsupported (route_live_input_none)]"] * 5 + ["run-open: accepted]"])
     assert [run for run, _a, _l in _placed(deaf)] == ["run-open"]
     assert [row["outcome"] for row in frames.placed_words(ctx, "run-deaf")] == ["unsupported"] * 5
+    held_by_harness = _install(monkeypatch, _Stub())
+    assert place_rows_into_runs(ctx) == [] and held_by_harness.posts == []  # accepted ended it
     before = len(frames.placed_words(ctx, "run-open"))
     f = _owner_row("A sixth word", "msg-f", ts="2026-10-04T10:00:00+00:00")
     ctx = _starter(tmp_path, a, b, c, d, e, f)
     blind = _install(monkeypatch, _Stub(capability_error=OSError("down")))
     assert place_rows_into_runs(ctx) == [] and blind.posts == []
     assert len(frames.placed_words(ctx, "run-open")) == before and len(frames.placed_words(ctx, "run-deaf")) == 5
+    # An engine whose descriptor is missing is the engine's absence this round: the drain returns, the loop goes on,
+    # nothing is appended or framed; the next round places the row once.
+
+    def _undiscovered(*_a, **_k):
+        raise ClaudexorUnavailable("daemon_not_discovered", "control-api.json not found")
+
+    monkeypatch.setattr(gw, "ClaudexorGateway", _undiscovered)
+    assert place_rows_into_runs(ctx) == []
+    assert len(frames.placed_words(ctx, "run-open")) == before and len(frames.placed_words(ctx, "run-deaf")) == 5
+    found = _install(monkeypatch, _Stub(result={"outcome": "delivered", "reason": ""},
+                                        harnesses=[_row(), _row("deaf-route", live_input="none")]))
+    assert sorted(line.split("run ")[1] for line in place_rows_into_runs(ctx)) == [
+        "run-deaf: unsupported (route_live_input_none)]", "run-open: delivered]"]
+    assert [run for run, _a, _l in _placed(found)] == ["run-open"]
+    assert json.loads(found.posts[0]["text"])["text"].split("\n")[1] == f["text"]
+    assert len(frames.placed_words(ctx, "run-open")) == before + 1 and len(frames.placed_words(ctx, "run-deaf")) == 6
 
 
 def test_placement_runs_from_the_round_top_drain_alone_and_skips_the_rows_a_start_body_holds(tmp_path, monkeypatch):
     """The one caller that places is the loop's round-top drain (``place_live_runs=True`` on that line alone);
     a drain at a delivery close, a completed stop, a forced finalization or a live call places nothing. A row
-    whose stamp stands in a START body of the run's line is never placed; the others are, and the fact lines
+    whose stamp stands in a START body of the run's line is never placed, under either reference it has printed
+    (its room reference now, its pre-update mailbox ``msg <id>`` before); the others are, and the fact lines
     reach the starter's own context."""
     import pathlib
     import queue
@@ -1376,18 +1411,21 @@ def test_placement_runs_from_the_round_top_drain_alone_and_skips_the_rows_a_star
     _durable_run(tmp_path, "run-open")
     a, b = _owner_row("Build it", "msg-a"), _owner_row("Add the charts too", "msg-b", ts="2026-10-04T06:00:00+00:00")
     ctx = _starter(tmp_path, a, b)
+    ctx._owner_directives = [{"source": "owner_mailbox", "content": "Keep the API", "msg_id": "mail-c", "chat_id": "1",
+                              "client_message_id": "msg-c", "ts": "2026-10-04T04:00:00+00:00"}]  # prints chat 1 / msg-c now
     stub = _install(monkeypatch, _Stub(result={"outcome": "delivered", "reason": ""}))
     monkeypatch.setattr(delegate_continuation, "line_start_bodies", lambda _root, _run: [
-        "OBJECTIVE\nx\n\n[2026-10-04T05:00:00+00:00 · owner · owner_mailbox of task t-root · chat 1 / msg-a]\nBuild it"])
+        "OBJECTIVE\nx\n\n[2026-10-04T05:00:00+00:00 · owner · owner_mailbox of task t-root · chat 1 / msg-a]\nBuild it\n"
+        "[2026-10-04T04:00:00+00:00 · owner · owner_mailbox of task t-nanny · msg mail-c]\nKeep the API"])
     messages = [{"role": "user", "content": "the assignment"}]
     _drain_incoming_messages(messages, queue.Queue(), tmp_path, ctx.task_id, None, set(), owner_ctx=ctx)
     assert stub.posts == [] and len(messages) == 1  # a drain without the flag: a delivery close, a live call
     _drain_incoming_messages(messages, queue.Queue(), tmp_path, ctx.task_id, None, set(), owner_ctx=ctx,
                              place_live_runs=True)
     assert [line for _run, _addr, line in _placed(stub)] and len(stub.posts) == 1
-    assert json.loads(stub.posts[0]["text"])["text"].split("\n")[1] == b["text"]  # a's stamp stands in the body
-    assert len(messages) == 2 and "placed into session run run-open: delivered]" in str(messages[1]["content"])
-    assert "Build it" not in str(messages[1]["content"])
+    assert json.loads(stub.posts[0]["text"])["text"].split("\n")[1] == b["text"]  # a's and c's stamps stand in the body
+    assert len(messages) == 2 and "for session run run-open: delivered]" in str(messages[1]["content"])
+    assert "Build it" not in str(messages[1]["content"]) and "Keep the API" not in str(messages[1]["content"])
     _drain_incoming_messages(messages, queue.Queue(), tmp_path, ctx.task_id, None, set(), owner_ctx=ctx,
                              place_live_runs=True)
     assert len(stub.posts) == 1 and len(messages) == 2  # once
