@@ -177,6 +177,7 @@ ouroboros/ — agent core and shared runtime (§6)
   _usage_cache_splits.py — process-local cache split by task/provider/route/review; a missing entry prices a full cache write (§6)
   _usage_settlement.py — usage/price evidence projected outside the ledger transaction (§6 Budget tracking)
   usage_store.py, usage_journal.py, openrouter_cost.py — `state/usage.sqlite`, its journal import and explicit OpenRouter price receipts (USAGE_STORE.md)
+  usage_origin.py — task usage scopes and immutable billing/cause attribution in the usage ledger (§6 Budget tracking; USAGE_STORE.md)
   store.py, store_capture.py, store_empty.py, store_journal.py, store_task_cards.py, store_timing.py, store_import.py, store_switch.py, install_identity.py, dialogue_store.py, dialogue_retry.py, dialogue_import.py, dialogue_positions.py — shared SQLite core (USAGE_STORE.md): `state/current.sqlite` (atomic `meta.commit_seq`; boot import/reconcile §2, export before storeless switches §9), `state/dialog.sqlite` (chat/progress rows by chain coordinate, ordinals, import intervals; one `append` seam; cutover, archive import, rollback export; PERSISTENCE.md)
   cost_projection.py — the one task-cost projection for every producer: `accounted_upper_bound_usd`, null as None and never $0.00 (§6 Budget tracking)
   storage.py, storage_deleted.py, storage_free.py, storage_free_view.py, storage_removers.py — Dashboard counts, temporary space, paged views (§3)
@@ -201,9 +202,9 @@ ouroboros/ — agent core and shared runtime (§6)
   llm_probe.py — oversized-context probe and Provider Test transport; no retry, fallback or learning
   merge_receipts.py — task-owned PR merge intent, GitHub readback, durable receipt (§6)
   upgrade_notices.py, notice_receipts.py — once-only owner notices with chat receipts (§7)
-  mcp_client.py — identity, token masking, `mcp_<server>__<tool>` names, launch admission, credential origin guard (§6 MCP)
-  mcp_schema.py — literal-safe schema/metadata; mcp_catalog.py — published catalogs
-  mcp_headers.py, mcp_import.py — header validation/masks/restoration; draft-only import preview (§6 MCP)
+  mcp_client.py — identity, token masking, `mcp_<server>__<tool>` names, launch admission (§6 MCP)
+  mcp_schema.py — literal-safe schema/metadata; mcp_catalog.py — published catalogs; mcp_oauth.py — sign-in
+  mcp_headers.py, mcp_import.py — header validation/masks/restoration, origin guard; draft-only import preview (§6 MCP)
   mcp_task_session.py, mcp_browser_guard.py — stdio session per live task loop; browser-policy callback (§6 MCP)
   safety.py — Safety Supervisor call (typed outcomes: §6 Safety Supervisor outcomes)
   safety_config.py — independent coverage per kind (your work, consciousness), the resolved checker and the one-time settings migration
@@ -211,6 +212,7 @@ ouroboros/ — agent core and shared runtime (§6)
   ouroboros/gateway/safety_settings.py — owner Safety level, rules and checker endpoints
   consciousness.py, consciousness_wake.py — the background alarm admitting an ordinary Main turn through the supervisor tick; the wake input and `wake_task_metadata` envelope (§6 Background consciousness)
   consciousness_authority.py, consciousness_allowance.py — dispatch-bound autonomy ceilings and the rolling 24-hour allowance (§6 Background consciousness and Evolution)
+  consciousness_view.py — read-only consciousness facts: places, counted roots and bounded recent wakes (§6 Background consciousness)
   chat_chain.py, chat_references.py, chronicle_store.py, chronicle_quotes.py — addressed dialogue reads: content identities, legacy `(gen, line)` hints, Reply facts, `retain_memory_source`; append-only chronicle: pages/parts, version-bound accounts, separate common-view selections, disposable index (§6)
   mark_anchors.py — a mark tied to a tool (optional call text) or a path trails that call's result once per task (§6 Post-task work)
   chronicle_import.py, memory_nomination_receipts.py, memory_inventory.py — one model-free import of prior dialogue memory as `legacy` records; nominations imported once as marks; what is open or folded (§6)
@@ -417,10 +419,12 @@ ouroboros/ — agent core and shared runtime (§6)
     claudexor_run_events.py, claudexor_observation.py — Catalog-negotiated, bounded run-journal SSE frames and durable seq cursors, no polling owner; the run observation adapter (§6 Delegated subagents)
     claudexor_routing.py — Catalog-negotiated passive read of the engine's account/model marks (§3 Agent accounts)
     claudexor_route_health.py — Catalog-negotiated passive read of the engine's per-route failure shares (§9)
+    claudexor_live_runs.py — Passive read of the engine's live runs (§3)
   claudexor_runtime.py, claudexor_runtime_retention.py, claudexor_node_seed.py — Reviewed next-spawn pin in `data/state/cx`: seed/fetch, verify/probe, atomic promote; no mutable current; override `OUROBOROS_CLAUDEXOR_BIN` (§6); unpinned non-serving copies retire (§5)
   claudexor_exit_facts.py — Bounded saved exits; live memory/loop/store/admission facts, dated capacity snapshots, route-health rows and the newest one's file, without lifecycle policy (§9)
   claudexor_daemon.py, claudexor_harness_install.py — Owned `data/claudexor`: lazy start, authenticated attach, `stop_outcome`, failed-start latch; vendor-CLI repair by the pinned installer (§9)
   claudexor_startup_failure.py — Stdlib `ExitFact`; `failed_without_control` drives spawn latch; diagnostic-only log labels and latch record (§9)
+  claudexor_restart.py — Restart Claudexor: runs by owner, then `stop_outcome` and the ordinary start (§3)
   gateway/ — Gateway Boundary v1 (below): browser-facing route ownership and the frontend contract SSOT
     contracts.py — Active WS/HTTP envelope contract owner
     reference_contracts.py — stored-row identity (`row_address`, `reply_to`) shared by live chat and attachment frames
@@ -491,6 +495,7 @@ ouroboros/ — agent core and shared runtime (§6)
     git.py, git_plumbing.py, git_repo_edit.py, git_vcs_ops.py, vcs_read.py, git_review_cycle.py, git_managed_postcommit.py, git_evolution.py — Git/write tools with the deterministic, test and one-wave review commit gates and the author's optional preflight; its leaves: plumbing, repo write/edit, VCS inspection and rollback, the reviewed-commit cycle, managed-merge post-commit gates, evolution-campaign authority (§6 Git and commit review)
     search.py — `web_search`, one leg per Source/Model of `ouroboros/search_routes.py` (§6 Web access mechanisms)
     browser.py — Playwright tools; per-ToolContext lifecycle, thread affinity (§6 MCP)
+    mcp_sign_in.py — the mind's MCP sign-in (§6 MCP)
     imagegen.py — list_image_models/generate_image/recover_image; explicit routes, artifacts first, separate view/send (docs/IMAGE_GENERATION.md)
     vision.py — Vision LLM tools for browser screenshots and uploaded images
     vision_process.py — Tracked vision-child IPC: validated receipts, result recovery, parent-owned cancellation
@@ -729,7 +734,7 @@ Default root (overrides: §7). This tree orients; `docs/PERSISTENCE.md` register
 │   │   ├── WORLD.md               ← my world map
 │   │   ├── knowledge/             ← topic files (patterns.md, improvement-backlog.md: ordinary notes)
 │   │   ├── deep_review.md         ← deep-self-review output
-│   │   ├── registry.md            ← memory awareness map
+│   │   ├── registry.md            ← optional hand-written source registry (`memory_map`); absent means nothing was recorded
 │   │   └── owner_mailbox/         ← per-task owner messages
 │   ├── projects/<id>/knowledge/   ← per-project facts with provenance sidecars
 │   ├── observability/             ← private forensic ledger: blobs/, calls/<task_id>/, packs/<task>.xz

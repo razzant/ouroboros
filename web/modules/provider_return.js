@@ -1,5 +1,5 @@
-/** Passive provider navigation, followed by the owning skill's same-origin exchange.
- * The skill owns pending state, PKCE and credentials. This page owns no tokens or grants.
+/** Passive provider navigation, followed by the owner's same-origin exchange: a skill's, or the core's own
+ * for a remote MCP server. The owner holds pending state, PKCE and credentials. This page owns no tokens or grants.
  */
 import { apiFetch } from './api_client.js';
 import { bootLanguage, tr } from './i18n.js';
@@ -22,16 +22,23 @@ export function completionRequest(href) {
     } catch {
         throw new Error('The sign-in return address is not valid. Start again from Ouroboros.');
     }
-    const skill = envelope?.skill;
-    // This is route syntax, not permission. Only the skill can verify its issued state.
+    // A skill's sign-in (`skill`) or a remote MCP server's (`mcp`, the core's own). This is route syntax,
+    // not permission: only the recipient can verify its issued state.
+    const recipient = envelope?.mcp ?? envelope?.skill;
     if (envelope?.v !== 1 || typeof envelope.nonce !== 'string' || !envelope.nonce
-        || typeof skill !== 'string' || !/^[\p{L}\p{N}_.-]{1,64}$/u.test(skill)
-        || skill !== skill.replace(/^[._]+|[._]+$/g, '')) {
+        || (envelope.mcp !== undefined && envelope.skill !== undefined)
+        || typeof recipient !== 'string' || !/^[\p{L}\p{N}_.-]{1,64}$/u.test(recipient)
+        || recipient !== recipient.replace(/^[._]+|[._]+$/g, '')) {
         throw new Error('The sign-in return recipient is not valid.');
     }
     const prefix = url.pathname.slice(0, -RETURN_PATH.length);
     const body = error ? { state, error, error_description: url.searchParams.get('error_description') || '' } : { state, code };
-    return { url: `${url.origin}${prefix}/api/extensions/${encodeURIComponent(skill)}/oauth/complete`,
+    // RFC 9207: the issuer the provider names, for the recipient to compare with the one it asked.
+    if (url.searchParams.has('iss')) body.iss = url.searchParams.get('iss');
+    if (envelope.mcp !== undefined) body.action = 'complete';
+    const target = envelope.mcp !== undefined ? '/api/mcp/sign-in'
+        : `/api/extensions/${encodeURIComponent(recipient)}/oauth/complete`;
+    return { url: `${url.origin}${prefix}${target}`,
         home: `${url.origin}${prefix}/`, cleanUrl: `${url.origin}${url.pathname}`,
         init: { method: 'POST', credentials: 'same-origin', redirect: 'error', cache: 'no-store',
             headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } };
@@ -62,7 +69,7 @@ export async function mountProviderReturn(root, { href = globalThis.location.hre
         }
         status.dataset.tone = 'ok';
         status.textContent = translate('provider_return.connected', 'Account connected');
-        const label = result.email || result.label || result.account?.label;
+        const label = result.email || result.label || result.account?.label || result.server;
         if (typeof label === 'string' && label) { account.textContent = label; account.hidden = false; }
         detail.textContent = translate('provider_return.done', 'Return to Ouroboros to use this account. You can close this tab.');
     } catch (error) {

@@ -301,9 +301,9 @@ def test_pause_notice_translation_and_historical_wake_status(direct_server_with_
             for next_status, label in (("wake_paused", "приостановлено"), ("wake_outcome_unknown", "исход неизвестен")):
                 status = next_status
                 page.evaluate("() => window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', {detail: {tab: 'evolution'}}))")
-                expect(sentence).to_have_text(f"Consciousness {label}")
+                expect(sentence).to_have_text(f"Consciousness: {label} ›")
                 expect(sentence).to_have_attribute("data-tone", "neutral")  # goes on by itself: never the owner's amber
-                expect(page.locator("#evo-consciousness-detail")).to_contain_text(details[status])
+                expect(page.locator("#evo-consciousness-detail")).to_have_count(0)  # its detail is the Consciousness tab's
                 page.screenshot(path=str(diagnostic_directory(root.parent, "task-evidence") / f"evolution-{status}.png"), full_page=True)
         finally:
             browser.close()

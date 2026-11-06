@@ -53,6 +53,13 @@ test('selected version and release baseline stay independent, including external
         'a failed selected-program probe cannot borrow the managed package version');
     assert.match(maintenanceVersionLine(entry(), { inspectionError: 'offline' }), /Last known/);
     assert.match(harnessMaintenanceMarkup(entry()), /Bundled baseline<\/dt><dd>1\.0\.0/);
+    // A program that is not installed has no version to name and is installed, not updated (typed kind, no words guessed).
+    const missing = entry({ selection: { kind: 'missing', binary: null, version: null }, targets: ['latest'] });
+    assert.equal(maintenanceVersionLine(missing), 'Not installed · Latest not checked');
+    assert.match(harnessMaintenanceMarkup(missing), /data-maintenance-action="latest"[^>]*>Install</);
+    assert.doesNotMatch(harnessMaintenanceMarkup(missing), />Update</);
+    assert.equal(maintenanceOperationLine({ state: 'failed' }, { missing: true }), 'Install failed');
+    assert.equal(maintenanceOperationLine({ state: 'failed' }), 'Update failed');
 });
 
 test('engine facts alone determine buttons for all harnesses and unknown future ones', () => {
@@ -387,7 +394,7 @@ test('disposed view retains late acceptance without rendering or refreshing unre
 
 
 function preparationError(status = 409) {
-    return Object.assign(new Error('Environment preparation complete; CLI update not started. Use Restart in the chat header, then repeat Update.'), {
+    return Object.assign(new Error('Environment preparation complete; CLI update not started. Use Restart Claudexor in Accounts, then repeat Update.'), {
         status, body: { error: { code: 'maintenance_restart_required', context: {
             acceptance: 'not_submitted', scope: 'this_attempt', preparation: 'ready', restartRequired: true,
         } } },
@@ -406,7 +413,7 @@ test('preparation-only result enables a later explicit Update and never claims a
     assert.equal(view.request, null);
     assert.equal(view.operation, null);
     assert.notEqual(view.unknownCurrent, true);
-    assert.match(harnessMaintenanceMarkup(entry(), view), /preparation complete.*Use Restart in the chat header/);
+    assert.match(harnessMaintenanceMarkup(entry(), view), /preparation complete.*Use Restart Claudexor in Accounts/);
     assert.match(harnessMaintenanceMarkup(entry(), view), />Update</);
     assert.doesNotMatch(harnessMaintenanceMarkup(entry(), view), /Cancel update|Operation completed|acceptance unconfirmed/);
     assert.equal(calls.filter(([kind]) => kind === 'read' || kind === 'cancel').length, 0);
@@ -673,7 +680,8 @@ test('the banner explains once, conditionally, with the exact text under Diagnos
     assert.equal(line.tone, 'warn');
     assert.match(line.text, /^Claudexor running · The executable reported by the last program inspection is no longer present\./);
     assert.match(line.text, /Versions below are last known\./);
-    assert.match(line.text, /If the app was moved or replaced, Restart in the chat header may help; it interrupts engine sessions, and success is not guaranteed\./);
+    assert.match(line.text, /If the app was moved or replaced, Restart Claudexor in Accounts may help; it ends every run on the engine, and success is not guaranteed\./);
+    assert.doesNotMatch(line.text, /chat header/, 'the header Restart keeps the engine');
     assert.doesNotMatch(line.text, /ENOENT|Moved\.app/);
     const facts = Object.fromEntries(line.facts);
     assert.match(facts['Last program inspection'], new RegExp(`ENOENT: spawn ${MISSING} ENOENT$`));
@@ -854,4 +862,42 @@ test('the cached whole read asked on mount crosses a family check without arriva
                 `${first} asked first, whole ${whole}, family ${family}, ${reversed ? 'reversed' : 'in order'}`);
         }
     }
+});
+
+test('Checking… answers the check the owner asked for, never the cached read a mount starts', async () => {
+    const reads = [];
+    const { controller } = setup({ harnessMaintenanceInventory: (query) => {
+        const pending = deferred();
+        reads.push({ query, pending });
+        return pending.promise;
+    } });
+    const mount = controller.refresh();
+    assert.equal(controller.view('fixture').inspectionPending, false, 'a cached read of every program relabels no card');
+    await flush();
+    reads[0].pending.resolve({ harnesses: [entry()] });
+    await mount;
+    const own = controller.act('fixture', 'inspect');
+    assert.equal(controller.view('fixture').inspectionPending, true, "the pressed card's own check");
+    assert.equal(controller.view('other').inspectionPending, false, 'a neighbour keeps its words');
+    await flush();
+    reads[1].pending.resolve({ harnesses: [entry()] });
+    await own;
+    const all = controller.refresh({ fresh: true });
+    assert.equal(controller.view('other').inspectionPending, true, 'Refresh checks every program');
+    await flush();
+    reads[2].pending.resolve({ harnesses: [entry()] });
+    await all;
+    assert.equal(controller.view('fixture').inspectionPending, false);
+    controller.dispose();
+});
+
+test('a program read the transport lost is said in owner words; an engine sentence stays as it is', async () => {
+    const { controller } = setup({ harnessMaintenanceInventory: async () => { throw new TypeError('Load failed'); } });
+    await controller.refresh({ fresh: true });
+    assert.equal(controller.view('fixture').inventoryError, "Program inspection unavailable: Couldn't reach Ouroboros.");
+    assert.doesNotMatch(controller.view('fixture').inventoryError, /Load failed/);
+    const engine = setup({ harnessMaintenanceInventory: async () => { throw Object.assign(new Error('child timed out'), { status: 502 }); } });
+    await engine.controller.refresh({ fresh: true });
+    assert.equal(engine.controller.view('fixture').inventoryError, 'Program inspection unavailable: child timed out');
+    controller.dispose(); engine.controller.dispose();
 });

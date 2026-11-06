@@ -533,12 +533,14 @@ test('focus goes into the layer on open and back to the opener on close', () => 
     w.layers.push({ id: 'drawer', el: w.sidebar, onClose() {} });
     assert.equal(w.sidebar.tabIndex, -1, 'a plain container becomes focusable');
     assert.equal(w.doc.activeElement, w.sidebar);
+    assert.ok('data-layer-landing' in w.sidebar.attrs, 'a landing point, never a control: it draws no ring (U122)');
     w.layers.remove('drawer');
     assert.equal(w.doc.activeElement, opener);
     // A custom focus target, and an opener the page itself made inert meanwhile is not focused.
     const field = w.node('input', w.panel);
     w.layers.push({ id: 'project', el: w.panel, modal: false, focus: () => field.focus(), onClose() {} });
     assert.equal(w.doc.activeElement, field);
+    assert.equal('data-layer-landing' in w.panel.attrs, false, 'a layer that names its own focus target is not marked');
     w.content.inert = true;
     w.layers.remove('project');
     assert.equal(w.doc.activeElement, field, 'no focus into an inert opener');

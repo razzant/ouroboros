@@ -1864,8 +1864,11 @@ An opaque widget's `location.origin` is `null`: use the host-bridged begin reque
 
 Encode OAuth `state` as base64url UTF-8 JSON `{v:1,skill:<canonical name>,nonce:<random>}` and retain it with PKCE
 in your state directory. Register POST `oauth/complete`; the page forwards `{state,code}` or
-`{state,error,error_description}` to that same-origin skill route, retaining its deployment prefix. The skill validates
-its issued state, handles denial, exchanges credentials and stores tokens. The page neither validates grants nor owns tokens.
+`{state,error,error_description}` to that same-origin skill route, retaining its deployment prefix, plus `iss` when the
+provider sent one. The skill validates its issued state, compares a present `iss` with the issuer it asked (RFC 9207;
+a provider that advertises `authorization_response_iss_parameter_supported` must send it), handles denial, exchanges
+credentials and stores tokens. The page neither validates grants nor owns tokens. A state `{v:1,mcp:<server>,nonce}` is
+the core's own remote MCP sign-in (`ouroboros/mcp_oauth.py`), posted to `/api/mcp/sign-in`.
 Reply `{ok:true,email}` (or a human-readable `label`) only on confirmed connection; failures use `{ok:false,code,error}`.
 The page shows unconfirmed outcomes without automatic replay and clears its query from history when supported.
 Use separate local disconnect and provider-wide revoke semantics; shared client configuration does not imply independent grants.

@@ -760,7 +760,7 @@ export function summarizeLogEvent(evt) {
                 ],
             });
         }
-        return view('progress', narration.preview || 'Progress update', { meta: ['task'] });
+        return view('progress', narration.preview || 'Progress update', { meta: taskMeta() });
     }
 
     if (t === 'task_started') {

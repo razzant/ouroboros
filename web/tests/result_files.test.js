@@ -52,10 +52,10 @@ test('the Files row renders real links and a folder tooltip, never a nested file
     assert.match(html, /data-result-files/);
     assert.match(html, /<span class="chat-live-line-time">6 files<\/span>/);
     assert.match(html, /<a class="md-link" href="\/api\/tasks\/task-files\/artifacts\/report\.md" download="report\.md">report\.md<\/a> · 2\.1 KB/);
-    assert.match(html, /notes\.md · 10 B · missing/);
-    assert.match(html, /listed\.txt<\/a> · 5 B · unverified/);
-    assert.match(html, /<span title="repo\/README\.md\nrepo\/src\/app\.py"><a class="md-link" href="\/api\/tasks\/task-files\/artifacts\/repo\.zip\?archive=repo" download="repo\.zip">repo\/<\/a> · folder · 1 file · 500 B · 1 not archived<\/span>/);
-    assert.match(html, /<span title="venv\/lib\/json\.py">venv\/ · folder · 1 file · 1000 B · no archive<\/span>/);
+    assert.match(html, /notes\.md · 10 bytes · missing/);
+    assert.match(html, /listed\.txt<\/a> · 5 bytes · unverified/);
+    assert.match(html, /<span title="repo\/README\.md\nrepo\/src\/app\.py"><a class="md-link" href="\/api\/tasks\/task-files\/artifacts\/repo\.zip\?archive=repo" download="repo\.zip">repo\/<\/a> · folder · 1 file · 500 bytes · 1 not archived<\/span>/);
+    assert.match(html, /<span title="venv\/lib\/json\.py">venv\/ · folder · 1 file · 1\.0 KB · no archive<\/span>/);
     assert.equal((html.match(/href=/g) || []).length, 3);
     assert.doesNotMatch(html, /artifacts\/json\.py|artifacts\/README|relpath=/, 'no bare or nested member address');
 });

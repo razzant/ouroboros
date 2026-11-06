@@ -11,7 +11,7 @@ import test from 'node:test';
 import { readExtensionFormValues, renderExtensionSettingsSections } from '../modules/settings.js';
 
 const UNREADABLE_NOTE = 'Current values could not be read; Save is disabled so it does not overwrite them. '
-    + 'Use Reload Settings to retry.';
+    + 'Use Reload to retry.';
 const UNAVAILABLE_NOTE = 'Current values are unavailable. These are defaults. Sending this form may change saved settings.';
 
 const FORM = {

@@ -800,9 +800,8 @@ export function trayHtml(free, ui, days = 7, { volume = null, now = new Date() }
     // Every other phase is the server's; a notice of the owner's last attempt stands before it.
     const notice = attemptHtml(held);
     if (state === 'listing') return notice + listingHtml(free);
-    if (state === 'empty') {
-        return `${notice}${figure('Can be removed', fmt('Nothing right now'), fmt('No files of finished work are waiting.'))}`;
-    }
+    // Not knowing a size yet, or having none to offer, is a sentence beside the door, never a figure (U070).
+    if (state === 'empty') return `${notice}<p class="storage-tray-text">${text(fmt('No files of finished work are waiting.'))}</p>`;
     if (state === 'running') return notice + runningHtml(free);
     if (state === 'done') return notice + resultHtml(free, held, volume, now);
     if (state === 'failed') {
@@ -810,7 +809,7 @@ export function trayHtml(free, ui, days = 7, { volume = null, now = new Date() }
         return `${notice}<p class="ui-status storage-status" data-tone="warn" data-i18n-fmt="storage.free.failed">${text(fmt('Temporary space could not be listed: {reason}. Nothing was removed.', { reason }))}</p>
             <div class="storage-actions">${button('Try again', 'data-free-preview')}</div>`;
     }
-    return `${notice}${figure('Can be removed', fmt(free.run ? 'Not checked since the last removal' : 'Not checked yet'), fmt('A check lists files of finished work and their size. Nothing is removed until you choose.'))}`;
+    return `${notice}<p class="storage-tray-text">${text(fmt(free.run ? 'Not checked since the last removal.' : 'See what finished work can be removed.'))}</p>`;
 }
 
 /** The summary card's door stands alone at rest and beside an empty answer; every other phase holds it back,

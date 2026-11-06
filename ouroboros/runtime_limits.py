@@ -88,6 +88,10 @@ MCP_BROWSER_GUARD_WORKERS = 16
 MCP_BROWSER_GUARD_PENDING = 64
 MCP_STDIO_STDERR_TAIL_BYTES = 64 * 1024
 MCP_STDIO_STDERR_NOTE_BYTES = 2 * 1024  # the last words a failure shows; the log keeps the longer tail
+# A remote MCP sign-in (mcp_oauth): one authorization-server request is bounded by HTTP_TIMEOUT; a refresh holds
+# its server's lock for one such request, so a second process waits at most LOCK_WAIT before it is told.
+MCP_OAUTH_HTTP_TIMEOUT_SEC = 30.0
+MCP_OAUTH_LOCK_WAIT_SEC = 45.0
 
 
 # Worker-pool spawn bounds (structural constants, not env knobs). Grace after a full-pool spawn before the crash
@@ -99,7 +103,7 @@ WORKER_SPAWN_GRACE_SEC = 90.0
 # Readiness is a contract distinct from process liveness
 # (`proc.is_alive`, worker_health.py) and from the task idle rail (queue_timeouts.py): a deadlocked child is alive.
 WORKER_READY_WINDOW_SEC = 90.0
-# Consecutive readiness failures of one slot before it is parked and reported (three strikes, like the crash-storm fence).
+# Consecutive readiness failures of one slot before it is parked and reported (three strikes).
 WORKER_READY_MAX_ATTEMPTS = 3
 # One extension for a child that wrote its own entry progress, measured from birth, never from the last poll.
 WORKER_READY_CEILING_SEC = 300.0

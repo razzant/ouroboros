@@ -187,6 +187,14 @@ def test_account_routes_refuse_malformed_input_in_their_published_shapes(client)
     assert set(status.json()["reads"]) == {"catalog", "accounts", "quota"}
     quota = client.get("/api/claudexor/status?view=quota")
     assert assert_bound("GET /api/claudexor/status", quota) == "ClaudexorQuotaResponse"
+    preview = client.get("/api/claudexor/restart")
+    assert assert_bound("GET /api/claudexor/restart", preview) == "ClaudexorRestartPreview"
+    assert preview.json()["engine"]["state"] == "not_started" and preview.json()["runs"]["total"] == 0
+    tokenless = client.post("/api/claudexor/restart", json={})
+    assert tokenless.status_code == 400 and assert_bound("POST /api/claudexor/restart", tokenless) == "ErrorResponse"
+    stale = client.post("/api/claudexor/restart", json={"token": "not this preview"})
+    assert stale.status_code == 409 and assert_bound("POST /api/claudexor/restart", stale) == "ClaudexorRestartProblem"
+    assert stale.json()["code"] == "restart_preview_stale" and stale.json()["preview"]["token"] == preview.json()["token"]
     refresh = client.post("/api/claudexor/quota/refresh", json={"target": {"harness": ""}})
     assert refresh.status_code == 400 and assert_bound("POST /api/claudexor/quota/refresh", refresh) == "ErrorResponse"
     keyless = client.post("/api/claudexor/account-resets",
@@ -375,7 +383,7 @@ def test_recent_wake_rows_match_the_typed_contract(client, monkeypatch, with_sum
     assert row["cost_presentation"] == document["cost_presentation"]
     assert row["note"] == document["result"]
     assert ("summary" in row) is with_summary and ("said_owner" in row) is with_summary
-    assert panel["recent_wakes_coverage"] == "wakes that reached a model call in the last 48 h"
+    assert panel["recent_wakes_coverage"] == "Wakes that reached a model call in the last 48 h"
     history = {key: panel[key] for key in _declared("RecentWakesView")}
     assert not validate_ingress(history, contract_typed_dict("RecentWakesView"))
     for field, invalid in (("live", "false"), ("phase", "completed"), ("cause", "own_clock"), ("ended_at", 7),

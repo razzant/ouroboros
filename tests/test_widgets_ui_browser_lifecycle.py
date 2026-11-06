@@ -561,8 +561,9 @@ def test_ui_smoke_widget_launch_policy_and_ordered_stop(direct_server_with_data,
                 assert frame_count(page, "hang") == 1
                 assert page.evaluate("window.__maxHangFrames") == 1
 
-                # Owner Stop → facade; the Stop is remembered across leave/return until Start.
-                page.locator(f"{card('auto')} [data-widget-power]").click()
+                # Owner Stop (the card menu's) → facade; the Stop is remembered across leave/return until Start.
+                page.locator(f"{card('auto')} [data-widget-menu-trigger]").click()
+                page.get_by_role("menuitem", name="Stop", exact=True).click()
                 wait_frame(page, "auto", False)
                 page.locator(f"{card('auto')} [data-widget-facade]").wait_for(state="visible", timeout=5_000)
                 assert page.locator(f"{card('auto')} [data-widget-power]").inner_text() == "Start"
@@ -828,8 +829,9 @@ def test_ui_smoke_widget_retain_keeps_running_across_pages(direct_server_with_da
                 assert kept_frame(page).evaluate("() => window.__keptMark ?? null") is None
                 assert frame_count(page, "kept") == 1
 
-                # Owner Stop frees the frame; nothing of it keeps talking.
-                page.locator(f"{card('kept')} [data-widget-power]").click()
+                # Owner Stop (the card menu's) frees the frame; nothing of it keeps talking.
+                page.locator(f"{card('kept')} [data-widget-menu-trigger]").click()
+                page.get_by_role("menuitem", name="Stop", exact=True).click()
                 wait_frame(page, "kept", False)
                 page.locator(f"{card('kept')} [data-widget-facade]").wait_for(state="visible", timeout=5_000)
                 assert page.locator(f"{card('kept')} [data-widget-power]").inner_text() == "Start"

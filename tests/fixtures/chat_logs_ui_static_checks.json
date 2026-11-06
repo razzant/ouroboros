@@ -381,12 +381,6 @@
     "id": "test_styles_cover_chat_header_controls_and_grouped_cards",
     "path": "web/style.css",
     "kind": "contains",
-    "value": ".chat-live-card[data-finished=\"1\"] {"
-  },
-  {
-    "id": "test_styles_cover_chat_header_controls_and_grouped_cards",
-    "path": "web/style.css",
-    "kind": "contains",
     "value": ".chat-live-timeline {"
   },
   {
@@ -412,12 +406,6 @@
     "path": "web/style.css",
     "kind": "regex",
     "value": "\\.chat-live-card\\[data-expanded=\"1\"\\] > \\.chat-live-timeline(?:,[^{,]+)*\\s*\\{\\s*display: flex;"
-  },
-  {
-    "id": "test_styles_cover_chat_header_controls_and_grouped_cards",
-    "path": "web/style.css",
-    "kind": "contains",
-    "value": ".log-task-card {"
   },
   {
     "id": "test_styles_cover_chat_header_controls_and_grouped_cards",
@@ -615,19 +603,19 @@
     "id": "test_costs_uses_css_classes_not_inline",
     "path": "web/modules/costs.js",
     "kind": "contains",
-    "value": "class=\"costs-stats-grid\""
+    "value": "class=\"dashboard-hero\""
   },
   {
     "id": "test_costs_uses_css_classes_not_inline",
     "path": "web/modules/costs.js",
     "kind": "contains",
-    "value": "class=\"costs-tables-grid\""
+    "value": "class=\"costs-tables\""
   },
   {
     "id": "test_costs_uses_css_classes_not_inline",
     "path": "web/modules/costs.js",
     "kind": "contains",
-    "value": "class=\"costs-table-label\""
+    "value": "class=\"dashboard-card-title\""
   },
   {
     "id": "test_costs_uses_css_classes_not_inline",
@@ -639,7 +627,7 @@
     "id": "test_costs_uses_css_classes_not_inline",
     "path": "web/modules/costs.js",
     "kind": "contains",
-    "value": "className = 'cost-bar'"
+    "value": "class=\"costs-spend-bar\""
   },
   {
     "id": "test_costs_uses_css_classes_not_inline",
@@ -657,7 +645,7 @@
     "id": "test_costs_uses_css_classes_not_inline",
     "path": "web/modules/costs.js",
     "kind": "contains",
-    "value": "bar.value"
+    "value": "--spend-share"
   },
   {
     "id": "test_evolution_history_escapes_untrusted_tag_names_and_release_words",

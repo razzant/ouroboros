@@ -378,6 +378,8 @@ function navigationHarness({ pendingWork, exitAtOnce = true }) {
         showPage: async () => true, isStackLayout: () => false, createChatInstance: instance,
         syncNavigationState() { if (exitAtOnce) for (const [pid, inst] of [...context.rooms.retiring]) context.rooms.settle(pid, inst); },
         markProjectViewed: async (id, revision) => { acked.push([id, revision]); },
+        mainReads: 0, acknowledgeMainAfterPaint() { context.mainReads += 1; },  // Main's read decision (its own tests)
+        mainUnread: 0, mainUnreadCount: () => context.mainUnread,
         console: { error() {} }, createRoomRetirement,
     });
     vm.runInContext(`let projectNavigationGeneration = 0, projectPanelOpeningSince = 0;
@@ -460,18 +462,27 @@ test('a reference opens what the registry answers for its id, a superseded read 
 
 test('leaving a Project for Main returns Main to its newest message', async () => {
     const h = navigationHarness({ pendingWork: false });
-    const main = { latestShown: 0, showLatest() { this.latestShown += 1; } };
+    const main = { latestShown: 0, arrivals: [],
+        showLatest(options) { this.latestShown += 1; this.arrivals.push(options?.arrive === true); } };
     Object.assign(h.context, { mainChat: main });
     h.context.state.activePage = 'chat';
+    h.context.mainUnread = 2;  // Main's news came while the Project covered it
     await h.api.open();
     h.api.close();
     assert.equal(main.latestShown, 1, 'the panel closed over Main: Main opens at its newest message');
+    assert.deepEqual(main.arrivals, [true], 'unread: it lands on what came, wherever later rows put it (DESIGN "Unread")');
+    assert.equal(h.context.mainReads, 1, 'and what came while it was covered is offered its read (owner 06.11)');
     h.api.close();
     assert.equal(main.latestShown, 1, 'closing with no Project open moves nothing');
+    assert.equal(h.context.mainReads, 1);
+    h.context.mainUnread = 0;
+    await h.api.open();
+    h.api.close();
+    assert.deepEqual(main.arrivals, [true, false], 'a read Main opens at the bottom');
     h.context.state.activePage = 'settings';
     await h.api.open();
     h.api.close();
-    assert.equal(main.latestShown, 1, 'on another page Main moves when Chat is shown again, not before');
+    assert.equal(main.latestShown, 2, 'on another page Main moves when Chat is shown again, not before');
 });
 
 for (const pendingWork of [true, false]) {

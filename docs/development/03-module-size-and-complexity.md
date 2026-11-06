@@ -29,15 +29,26 @@ ARCHITECTURE §6 "Commit preflight").
 
 ### Paying down a size cap
 
-A change that runs into a band, the hard cap, the function gate or the byte debt pays it
-down by simplifying where the change lives (simpler control and data flow, dead code and
-duplicates removed, an existing SSOT reused, prose made compact), so the module reads
-better. Extraction is the last resort and counts only for a natural boundary that would
+A change that runs into a band, the hard cap, the function gate, the byte debt, or the size
+of a book, BIBLE.md or the prompts pays where the change lives by removing what its reader
+no longer needs, so what stays reads better. In code the reader then holds fewer concepts,
+branches and state: simpler control and data flow, dead code and duplicates removed (a
+re-export no consumer reads through its module is dead; a test that only pins its presence
+is not a consumer), an existing SSOT reused. In a book, BIBLE.md or a prompt a statement
+leaves for its owner: the touched node's old description, history, a fact another document
+owns, mechanism detail moved into its module's docstring or test. Rewording a statement
+that stays is judged by whether it reads better with every fact, reason and qualifier kept,
+never by the bytes it saves; a chapter introduction, the book's Low/Nano view, is never cut
+to pay. Extraction is the last resort and counts only for a natural boundary that would
 stay correct with the parent far below the cap: its own reason to change, an explicit
-contract, a real caller. A cap-driven bucket, a one-caller passthrough, or bytes bought by
-deleting contract-bearing comments, docstrings, messages or tests is a defect to report,
-not paydown (BIBLE P7 «first simplify what exists»). Enforcement: CHECKLISTS item 27
-`size_cap_paydown`, advisory when applicable.
+contract, a real caller, no import back into the parent. The same logic in fewer lines, a
+cap-driven bucket, a one-caller passthrough, or bytes bought by losing a fact (a
+contract-bearing comment, docstring, message or test; a book's reason or qualifier) is a
+defect to report, not paydown (BIBLE P7 «first simplify what exists»). When nothing honest
+fits, the record says so: a band entry with its reason, or the owner's `book-growth` label;
+the hard cap, the function gate and the byte debt take no new record, so a change or merge
+that crosses one pays as above. Enforcement: CHECKLISTS item 27 `size_cap_paydown`,
+advisory when applicable.
 
 ### Pragmatic SOLID
 

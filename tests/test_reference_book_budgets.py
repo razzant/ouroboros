@@ -4,7 +4,7 @@ Each book is measured as the UTF-8 length of its COMPOSED text (the entrypoint a
 listed chapter, ``reference_books.compose_book``) at this change's tip and at its event base;
 BIBLE.md, and the prompt files together, as their UTF-8 bytes (``reference_books.RULED_TEXTS``).
 The rule is pairwise: there is no stored number and no reserve, so text a change adds to a
-book is paid by shortening the same book in the same change.
+book is paid in the same book in the same change (DEVELOPMENT "Paying down a size cap").
 
 The opt-in ``size_ratchet`` lane is excluded from default local runs. Manual/tag CI
 has no per-change base, so this comparison skips there. Local qualification supplies
@@ -84,7 +84,8 @@ def book_growth_verdict(book_id: str, base: int | None, tip: int, mode: str) -> 
         return True, (f"{name} grows by {tip - base} bytes; advisory for outside contributors and forks. "
                       "Official maintainers will make room at integration.")
     return False, (f"{name} grew by {tip - base} bytes ({base} -> {tip}); a change ends each book, BIBLE.md "
-                   "and the prompts no larger than at its base, so shorten the same text in this change "
+                   "and the prompts no larger than at its base, so pay in the same text as DEVELOPMENT "
+                   "\"Paying down a size cap\" says "
                    "(the owner's book-growth label on the PR is the only exception).")
 
 
