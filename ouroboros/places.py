@@ -407,7 +407,7 @@ def own_account_event(place: Place, event: Any) -> bool:
     actor the connector reports unauthenticated (a mail From proves nothing) or an event without an identity."""
     identity = getattr(event, "identity", None) or {}
     sender = str((identity.get("sends_as") or {}).get("id") or "").strip()
-    actor = str(event.actor.get("platform_actor_id") or "").strip()
+    actor = str(event.actor.get("platform_actor_id") or event.actor.get("id") or "").strip()
     return (bool(sender) and actor == sender and event.actor.get("authenticated") is not False
             and not writes_as_owner(place, identity, event.account_id))
 

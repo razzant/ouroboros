@@ -27,6 +27,8 @@ def test_own_account_event_is_heard_and_another_actor_still_wakes(focus):
     assert (decision, details) == ("silent", {"reason": "own_account"})  # the place selected `mention`: still quiet
     assert author_hears(decision, details, _own(event)) is None  # nor mailed to a live author of the conversation
     assert decide_attention(root, admission, replace(event, identity=ME))[0] == "focus"  # someone else, same place
+    legacy_shape = replace(event, identity=ME, actor={"id": "me"})  # an actor named by `id`, as other readers accept
+    assert decide_attention(root, admission, legacy_shape) == ("silent", {"reason": "own_account"})
 
 
 def test_only_a_proven_own_account_is_mine(focus):
