@@ -42,11 +42,15 @@
     flex: 0 1000 auto; min-width: var(--touch-target-min); max-width: 100%; justify-content: center;
     margin-inline-start: 6px; padding-inline: 12px;
 }
-:is(.chat-page-header, .project-panel-bar) .app-page-title-row > .rw-trigger:has(> .rw-caret:not([hidden])) {
+:is(.chat-page-header, .project-panel-bar) .app-page-title-row > .rw-trigger:not([data-word="off"]):has(> .rw-caret:not([hidden])) {
     min-width: max(var(--touch-target-min), 60px);
 }
+/* A word that went keeps no room of its own (U117): the control closes round its mark and caret, so the name it gave
+   way to takes the freed width; the whole title capsule stays its target. */
 :is(.chat-page-header, .project-panel-bar) .app-page-title-row > .rw-trigger[data-word="off"] {
     flex-shrink: 0;
+    min-width: 0;
+    padding-inline: var(--space-2);
 }
 html[data-layout="docked"] .chat-page-header .app-page-title-row > .rw-trigger {
     margin-inline-start: 0;
@@ -108,6 +112,9 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
 .rw-trigger:is([data-tone="queued"], [data-tone="held"], [data-tone="starting"]) { color: var(--text-meta); }
 .rw-trigger[data-tone="unknown"] { color: var(--status-neutral-fg); }
 .rw-trigger[data-tone="online"] { color: var(--status-ok-fg); }
+/* A start that failed is the failure's word beside its red dot (host_starting_status.js), and the control stays
+   pressable: its list says why, with Restart beside it. */
+.rw-trigger[data-tone="failed"] { color: var(--status-error-fg); }
 .rw-trigger[data-tone="offline"] { color: var(--text-secondary); }
 /* The whole title capsule opens the work list; its state layer covers that same target. */
 .app-page-title-row:has(> .rw-trigger:not(:disabled):not([hidden])) { cursor: pointer; transition: var(--motion-tone); }
@@ -384,6 +391,12 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
 .rw-detail-label { margin-right: 6px; color: var(--text-primary); font-weight: 600; }
 .rw-note { margin: 0; padding: var(--space-1) var(--space-4) 10px; font-size: var(--type-meta); line-height: var(--line-meta); color: var(--text-meta); }
 .rw-note[hidden] { display: none; }
+/* A failed start heads the list: its line and Restart in one row, the boot document's cause behind Details. The
+   narrow bar's own Restart row waits meanwhile, so the list offers Restart once. */
+.rw-failure { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3) var(--space-4); }
+.rw-failure[hidden], .rw-failure details[hidden] { display: none; }
+.rw-failure-lead { margin: 0; color: var(--status-error-fg); font-size: var(--type-body); font-weight: 500; }
+.rw-failure:not([hidden]) ~ .rw-extras > [data-chat-command="restart"] { display: none; }
 
 /* ---- Back to reading: the same baseline as ↓ "Scroll to latest message", both quiet navigation -------- */
 .rw-back {

@@ -154,7 +154,7 @@ def test_dictation_mic_appears_once_chosen_records_and_puts_words_at_the_caret(s
     menu = page.locator(".chat-plus-menu:not([data-leaving])")
     menu.wait_for()
     items = [text.strip() for text in menu.locator("[role=menuitem]").all_inner_texts()]
-    assert items[-2:] == ["Add dictation…", "Make a button with Ouroboros…"], items
+    assert items[-2:] == ["Add dictation…", "Make a button…"], items
     menu.locator("[data-plus-item='dictation']").click()
     chooser = page.locator(".voice-chooser:not([data-leaving])")
     chooser.wait_for()

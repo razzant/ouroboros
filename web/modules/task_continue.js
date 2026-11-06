@@ -14,7 +14,7 @@ import { ensureLiveActionsEl, ownLiveActionsEl } from './chat_activity.js';
 import { fmt, tr, tx } from './i18n.js';
 import { taskDoneIsTerminal, taskReasonPhrase } from './log_events.js';
 import { showToast } from './toast.js';
-import { setInlineStatus } from './ui_primitives.js';
+import { errorWords, setInlineStatus } from './ui_primitives.js';
 
 const NONCE_KEY = 'ouro_continue_nonce:';
 const inFlight = new Set();
@@ -97,10 +97,11 @@ export async function continueTaskAction(taskId, { request = continueTask, stora
             return String(body.successor_task_id);
         }
         if (body.state === 'bound' && body.action_nonce) continueNonce(id, storage, body.action_nonce);
-        // The same nonce stays: pressing again retries this very admission.
-        const reason = body.reason_code === 'hard_limit_reached' && body.cause
-            ? taskReasonPhrase(body.cause) : exc?.message || exc;
-        toast(`Continue not confirmed: ${reason}`, 'error');
+        // The same nonce stays: pressing again retries this very admission. A typed hard limit says itself; any other
+        // failure is said in the shared failure words (U131), its raw text kept for the log.
+        const limit = body.reason_code === 'hard_limit_reached' && body.cause ? taskReasonPhrase(body.cause) : '';
+        if (!limit) console.warn('Continue not confirmed', exc);
+        toast(limit ? `Continue not confirmed: ${limit}` : `Continue not confirmed. ${errorWords(exc).text}`, 'error');
         return '';
     } finally {
         inFlight.delete(id);

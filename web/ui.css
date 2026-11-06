@@ -82,12 +82,9 @@
     --green-dim: rgba(255, 255, 255, 0.07);
     --red: #ef4444;
     --red-dim: rgba(255, 255, 255, 0.07);
-    /* A rule only where a table or a section needs one; a field's hairline (the one edge the bible keeps, principle 2).
-       --surface-border survives for one reader, the living cards' `--ouro-border` (card_frames.js); the Cards lane
-       repoints it to --field-border and deletes it. */
+    /* A rule only where a table or a section needs one; a field's hairline (the one edge the bible keeps, principle 2). */
     --divider: rgba(var(--neutral-rgb), 0.06);
     --field-border: rgba(var(--neutral-rgb), 0.08);
-    --surface-border: var(--field-border);
     /* Chart chrome (grid lines, tick/legend text) and the four default series of a
        chart the host draws (widgets, living cards), in the owner's order; a fifth
        series takes the first again. Chart.js paints to a canvas and cannot read CSS,

@@ -20,7 +20,7 @@ export function renderConfirmDialogDetails(details) {
             <dt>${escapeHtml(String(row.label ?? 'Detail'))}</dt>
             <dd>${escapeHtml(String(row.value ?? ''))}</dd>
         </div>`).join('');
-    return `<details class="confirm-dialog-details ui-rich-content">
+    return `<details class="confirm-dialog-details ui-disclosure">
         <summary>${escapeHtml(String(details.summary ?? 'Show details'))}</summary>
         <dl class="confirm-dialog-detail-list">${renderedRows}
         </dl>
@@ -39,9 +39,10 @@ export function openConfirmDialog({
     initialValue = '',
     // [{value, label}] makes the input a <select>; the result shape is unchanged.
     choices = null,
-    // Alert mode (v6.90.3): one OK-style button, no cancel button. Escape,
-    // backdrop, and the header Close still resolve the promise (false), same
-    // as a cancelled confirm — callers treat any resolution as "seen".
+    // Alert mode (v6.90.3): one OK-style button, no cancel button. Escape and
+    // the backdrop still resolve the promise (false), same as a cancelled
+    // confirm — callers treat any resolution as "seen". The head carries no
+    // Close: the foot's Cancel (or OK) is the dialog's one way out (U024).
     alert = false,
     confirmLabel = alert ? 'OK' : 'Continue',
     cancelLabel = 'Cancel',
@@ -55,7 +56,6 @@ export function openConfirmDialog({
             <div class="marketplace-modal confirm-dialog${content?.mount ? ' has-content' : ''}" role="dialog" aria-modal="true" aria-labelledby="confirm-dialog-title">
                 <div class="marketplace-modal-head">
                     <h3 id="confirm-dialog-title">${escapeHtml(title || 'Confirm action')}</h3>
-                    <button type="button" class="btn btn-default btn-sm" data-confirm-cancel aria-label="Close">Close</button>
                 </div>
                 <div class="marketplace-modal-body">
                     ${content?.mount ? `<section class="confirm-dialog-content" data-confirm-content tabindex="0" aria-label="${escapeHtml(String(content.label || 'Details'))}"></section>` : ''}

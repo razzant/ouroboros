@@ -475,7 +475,7 @@ def test_composer_inserted_text_restores_send(subscription_ui, monkeypatch, widt
     talk = page.locator("#page-chat [data-call-entry='talk']")
     talk.wait_for()
     page.locator("#page-chat [data-composer-plus]").click()
-    page.get_by_role("menuitem", name="Make a button with Ouroboros…").click()
+    page.get_by_role("menuitem", name="Make a button…").click()
     expect(page.locator("#chat-input")).not_to_have_value("")
     expect(page.locator("#page-chat .chat-send-inline")).to_have_text("Send")
     assert not posts
