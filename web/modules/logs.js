@@ -380,7 +380,10 @@ export function initLogs({ ws, state, mount }) {
         record.wake = wake;
         record.taskType = taskType;
         record.entry.dataset.category = category;
-        record.ts.textContent = ts;
+        // The card's time is its newest event's: an older frame that history delivers later never dates it back.
+        const time = Date.parse(evt.ts || evt.timestamp || '') || Date.now();
+        const newest = Math.max(time, Number(record.entry.dataset.logTime) || 0);
+        if (time >= newest) record.ts.textContent = ts;
         record.kind.textContent = kindLabel;
         record.kind.className = `log-type ${category}`;
         // The card's headline settles only on the typed task_done frame. The bus
@@ -450,8 +453,7 @@ export function initLogs({ ws, state, mount }) {
         renderTaskTimeline(record);
         updateVisibility(record.entry);
         // A card stands where its newest event does; an older event (history) never moves it later.
-        const time = Date.parse(evt.ts || evt.timestamp || '') || Date.now();
-        placeEntry(record.entry, Math.max(time, Number(record.entry.dataset.logTime) || 0));
+        placeEntry(record.entry, newest);
         trimEntries();
         updateEmptyState();
         if (state.activeFilters[category] && pinned) scrollToLatest();

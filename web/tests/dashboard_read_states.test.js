@@ -594,6 +594,11 @@ test('Logs prints an event\'s name once and names a task card by its short id wi
     assert.ok(!pills.some((pill) => pill.startsWith('task=') || pill === 'task'), `no repeated id: ${pills}`);
     const timeline = card.querySelector('[data-task-timeline]').querySelectorAll('.log-pill').map((pill) => pill.textContent);
     assert.ok(timeline.includes('task=55d180783850458f'), 'the timeline keeps the full id');
+    // An older frame delivered later (history after the live stream) neither dates the card back nor moves it.
+    const shownAt = card.querySelector('[data-task-ts]').textContent;
+    ws.emit('log', { data: { type: 'task_heartbeat', task_id: '55d180783850458f', phase: 'running', ts: '2026-09-16T11:59:00Z' } });
+    assert.equal(card.querySelector('[data-task-ts]').textContent, shownAt);
+    assert.equal(card.dataset.logTime, String(Date.parse('2026-09-16T12:00:02Z')));
 });
 
 test('Logs catches unavailable and malformed sources while retaining later live events', async (t) => {
