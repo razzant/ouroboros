@@ -141,11 +141,10 @@ def test_the_platform_binary_leftover_is_ended_even_when_its_marker_is_hidden(tm
 
 
 def test_a_non_platform_child_carries_the_task_marker_and_a_setsid_escape_is_still_ended(tmp_path):
-    node = _pl.resolve_bundled_node()
-    if not node:
-        pytest.skip("no bundled node for the marker-visible child")
-    # The runaway leaves the command's group (setsid): only the marker names it.
-    script = (f"import subprocess; p=subprocess.Popen([{node!r},'-e','setTimeout(()=>{{}},120000)'],"
+    # The runaway leaves the command's group (setsid): only the marker names it. It runs this test's own
+    # interpreter, whose environment every POSIX host shows (as ``_marker_child``'s does), so the case needs no
+    # bundled payload and runs wherever this module runs, CI included.
+    script = ("import subprocess, sys; p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(120)'],"
               "start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); print(p.pid)")
     res = _run(tmp_path, "t-marker", f"{sys.executable} -c {subprocess.list2cmdline([script])}")
     pid = int(res.stdout.strip().splitlines()[-1])
