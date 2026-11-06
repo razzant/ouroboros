@@ -61,9 +61,9 @@ def test_definite_configured_session_start_refusal_terminalizes_before_llm(
 
 
 def test_a_refused_start_is_recorded_blocked_not_as_an_unused_substrate(monkeypatch, tmp_path):
-    """Audit 05.11 item 5: refused starts were recorded ``harness`` with their route, so the completion seam
-    read their zero runs as ``delegated_substrate_unused``. A refused start writes the dispatch-time block's
-    record (``blocked``, empty route, the refusal in the delta); a started leaf keeps its own."""
+    """Audit 05.11 item 5: refused starts were recorded ``harness``, so the completion seam read their zero runs
+    as ``delegated_substrate_unused``. A refused start records ``blocked`` with the refusal in the delta and
+    keeps the route that refused (the finished card's terminal frame reads it); a started leaf keeps its own."""
     import ouroboros.subagent_runtime as runtime
     from ouroboros.agent_dispatch import _blocked_executor_terminal
     from ouroboros.subagent_bootstrap import bootstrap_before_context
@@ -88,12 +88,12 @@ def test_a_refused_start_is_recorded_blocked_not_as_an_unused_substrate(monkeypa
     assert bootstrap_before_context(ctx, task, dispatch) == ""
     cap_info = {}
     _fill_executor_blocked_caps(ctx, cap_info, dispatch, task)
-    assert (task["effective_executor"], task["executor_route"]) == ("blocked", "")
+    assert (task["effective_executor"], task["executor_route"]) == ("blocked", "codex")
     assert task["capability_delta"]["reduced"] is True
     assert task["capability_delta"]["reduction_reasons"] == ["credential_pool_exhausted"]
-    assert cap_info["executor_blocked_route"] == "codex"  # the card still names the route that refused
+    assert cap_info["executor_blocked_route"] == "codex"  # the live frame names the route that refused
     envelope = envelope_from_task(task, status="failed")
-    assert envelope["effective_executor"] == "blocked"
+    assert (envelope["effective_executor"], envelope["executor_route"]) == ("blocked", "codex")
     assert "delegated_substrate_unused" not in (envelope["capability_delta"].get("substrate_disclosures") or [])
     text, usage, _trace = _blocked_executor_terminal(cap_info, task)
     assert "the route refused this start" in text and "api-scout" in text and "NOT run" in text

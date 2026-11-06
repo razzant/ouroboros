@@ -39,10 +39,10 @@ def _fill_executor_blocked_caps(ctx: Any, cap_info: Dict[str, Any], dispatch: An
     pre-start of a configured session leaf DEFINITELY refused before the first
     model round (typed refusal, no custody handle). Callers gate on an empty
     startup wake — a non-empty wake means a fence/receipt episode owns the
-    facts instead. A refused start rewrites ``task``'s record the way a
-    dispatch-time block writes it (``blocked``, empty route, the refusal in the
-    delta), so the completion seam never reads its zero runs as an unused
-    substrate (``agent._record_executor_facts``)."""
+    facts instead. A refused start records ``blocked`` with the refusal in the
+    delta and keeps the route that refused, so the finished card still says
+    ``{harness} · blocked`` and the completion seam never reads its zero runs as
+    an unused substrate (that disclosure is for ``harness`` only)."""
     if dispatch is not None and dispatch.blocked:
         res = dispatch.executor_resolution
         cap_info["executor_blocked_reason"] = str(
@@ -71,7 +71,7 @@ def _fill_executor_blocked_caps(ctx: Any, cap_info: Dict[str, Any], dispatch: An
             reasons = [str(item) for item in (delta.get("reduction_reasons") or []) if str(item) != reason] + [reason]
             delta.update(effective_executor="blocked", reduced=True, reduction_reasons=reasons,
                          reason=derive_capability_reason(reasons, delta.get("substrate_disclosures") or ()))
-            task.update(effective_executor="blocked", executor_route="", capability_delta=delta)
+            task.update(effective_executor="blocked", capability_delta=delta)
 
 # The v7 adoption keeps ONE home for the dispatch-note pair (MIGRATION rows
 # 3935-3936): the bodies live in ouroboros/agent_dispatch.py; this module keeps
