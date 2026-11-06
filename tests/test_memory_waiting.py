@@ -56,6 +56,13 @@ def test_counts_include_foreign_reviews_notes_and_only_open_projects_and_fall_af
     assert "covers (notes): 0 rows" in _memory_read(ctx, node_id=page["node_id"])
     for project in pr.list_projects(tmp_path):
         pr.update_project(tmp_path, project["id"], closed={"at": "2026-10-29T00:00:00Z", "by": "mind", "note": "completed"})
+    from ouroboros.memory_view_conversations import owed
+    debts = owed(view(tmp_path).conversations)
+    assert view(tmp_path).waiting["conversations"]["count"] == len(debts) > 0  # a closed state seals no words
+    for item in debts:  # the class's own act: a page over each room's open words
+        for room in item["rooms"]:
+            assert json.loads(_chronicle_write(ctx, kind="page", room_id=room["room_id"], text="Read and closed.",
+                                               covers={"to": room["newest"]}))["ok"]
     assert all(f["count"] == 0 for f in view(tmp_path).waiting.values())
     assert review not in _memory_read(ctx, room_id="late_reviews") and note not in _memory_read(ctx, room_id="notes")
     assert {m["id"] for m in ChronicleStore(tmp_path).active_marks(None)} == {ordinary}

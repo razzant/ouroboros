@@ -10,6 +10,8 @@ comes first: one room's oldest run of unfolded pages, whoever wrote them, folded
    later one when an older one is unreadable to the helper or already refused).
 2. Else the view showed old narrative only by pointer (``narrative``): adjacent unfolded
    runs of one kind of one room among those pointers, oldest first, folded into a part.
+2b. Else the view folded the words or the line of a room of my other conversations where my human or
+   I spoke (``other_room``): the oldest such room's oldest open segment.
 3. Else, only after a root that was not a direct turn (the late phase of a direct turn
    blocks the owner's next message), the oldest unfolded period of the old memory,
    blocks 1-22 (block 0 is already a retelling of two months the mind folds itself):
@@ -286,7 +288,7 @@ def candidate_units(root: Any, store: ChronicleStore, shortage: Optional[Shortag
                     allow_legacy: bool) -> Iterator[FallbackUnit]:
     """Units in consideration order: the shortage's disjoint runs, then old periods."""
     root = pathlib.Path(root)
-    if shortage is not None and shortage.kind == "open_rows":
+    if shortage is not None and shortage.kind in ("open_rows", "other_room"):
         # Oldest run first; a later run only when an older one has no readable input or a receipt.
         for segment in memory_inventory.open_segments(root, store, shortage.room_id,
                                                       until=shortage.newest_addressed_row):

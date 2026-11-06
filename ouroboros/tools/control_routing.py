@@ -513,7 +513,36 @@ def _close_project(ctx: ToolContext, project_id: str, note: str, reopen: bool = 
         delivery = outbox.ENQUEUE_UNAVAILABLE
     suffix = ("Room notice queued." if delivery in {outbox.ENQUEUE_QUEUED, outbox.ENQUEUE_ALREADY_DELIVERED}
               else f"Room notice delivery is {delivery}; the project change is saved.")
-    return f"OK: project {project['id']} is {state}. {suffix}"
+    page = "" if reopen else _closing_page(ctx, root, project, note.strip())
+    return f"OK: project {project['id']} is {state}. {suffix}{page}"
+
+
+def _closing_page(ctx: ToolContext, root: Any, project: Dict[str, Any], note: str) -> str:
+    """S2: closing a project writes its room's last page from the closing note, over the room's open rows, as
+    ``chronicle_write(kind='page', covers={'to': …})`` writes one (``tools.chronicle.publish_covered_page``). Nothing
+    open writes none; a page the store refuses, or memory not yet active, leaves the closure standing and says why."""
+    from ouroboros import chat_chain, memory_inventory
+    from ouroboros.tools.chronicle import _activated, _NotActivated, _signed_author, publish_covered_page
+
+    room = str(project["chat_id"])
+    try:
+        entries = memory_inventory.open_room_rows(root, room)
+        if not entries:
+            return " Nothing is open in its room: no page."
+        author, role = _signed_author(ctx, "page")
+        if author is None:
+            return f" No page: a {role} drafts no project's last page."
+        newest = chat_chain.format_address(max(entries, key=lambda entry: entry[2])[0])
+        result, covers, _facts, _stamp = publish_covered_page(root, _activated(root), author, room, note, {"to": newest},
+                                                              closes_project=str(project["id"]))
+    except _NotActivated:
+        return " No page: my memory is not active yet; the closure stands."
+    except Exception as exc:  # a store refusal path or an unreadable room never undoes the closure
+        log.warning("Project closure page not written", exc_info=True)
+        return f" Its page was not written ({type(exc).__name__}: {exc}); the closure stands."
+    if not result.ok:
+        return f" Its page was not written ({result.reason}); the closure stands."
+    return f" The closing note is its room's page {result.record['id']}, sealing {covers['count']} open rows."
 
 
 def _cause_words(code: str) -> str:

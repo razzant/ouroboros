@@ -68,7 +68,8 @@ _META_FIELDS = ("chat_id", "ts", "type", "direction", "task_id", "parent_task_id
                 "summary_kind", "sender_label", "username", "author", "source", "transport",
                 "status", "outcome", "outcome_phase", "reason_code", "outcome_final", "outcome_authority",
                 "result_ref", "presence", "presence_provenance", "host_fact", "historical_import", "source_order", "terminal_origin",
-                "wake_summary")  # a finished root's closing sentence: how my other conversations know that turn
+                "wake_summary",  # a finished root's closing sentence: how my other conversations know that turn
+                "fold_read")  # and that its sentence stands for what it read there (``finish_task(fold_read=true)``)
 _MEMBERSHIP_FIELDS = ("chat_id", "ts", "type", "task_id", "parent_task_id", "root_task_id", "source_keys")
 _REPLY_FIELDS = ("address", "chat_id", "task_id", "role", "target_home", "unresolved")
 # What a row's ``transport`` keeps: its scalars, which ``dialogue_provenance.place_row_facts`` spreads as the row's
@@ -92,7 +93,7 @@ _TRANSPORT_NESTED = {
                      "workspace_name"),
 }
 # Bumped when ``row_meta``'s facts change (5: a transport keeps only what its readers read; 6: and the author
-# fact's; 7: the sending work, the conversation's name and audience): a stored
+# fact's; 7: the sending work, the conversation's name and audience, a finish's sentence and its fold): a stored
 # prefix of another version is another source, read live until the maintenance job ``memory_tail`` refills it.
 _META_VERSION = 7
 
@@ -856,7 +857,7 @@ def open_segments(root: Any, store: ChronicleStore, room_id: Any, *,
 @dataclass(frozen=True)
 class ShortageFact:
     """What a task's view showed only by address, when that asks a writer for a page or a part."""
-    kind: str  # "open_rows" | "narrative"
+    kind: str  # "open_rows" | "narrative" | "other_room"
     room_id: str
     newest_addressed_row: Optional[Dict[str, Any]] = None  # open_rows
     pointer_records: Tuple[str, ...] = ()  # narrative
@@ -875,8 +876,9 @@ def shortage_from_trace(trace: Any) -> Optional[ShortageFact]:
     F7) and names the newest addressed row of this room. ``narrative``: it showed old
     narrative by label or pointer (F4, F5l, F5), names those records, and the window alone took
     them (``by_budget == 0``; an owner-selected mode target is no shortage of the window).
-    Fact lines (F1), retold pointers (F3) and my other conversations (F6w, F6g, F6a) alone, a
-    foreign shape or no fact: ``None``.
+    ``other_room``: neither, but the floor folded the words or the line of a room of my other
+    conversations where my human or I spoke (``folded_rooms``, oldest first): the oldest of them.
+    Fact lines (F1), retold pointers (F3) alone, a foreign shape or no fact: ``None``.
     """
     fact = trace.get(VIEW_TRACE_KEY) if isinstance(trace, Mapping) else None
     floor = fact.get("floor") if isinstance(fact, Mapping) else None
@@ -901,6 +903,9 @@ def shortage_from_trace(trace: Any) -> Optional[ShortageFact]:
         records = tuple(dict.fromkeys(str(ident) for ident in pointers if isinstance(ident, str) and ident.strip()))
         if records:
             return ShortageFact("narrative", pointer_records=records, **common)
+    folded = floor.get("folded_rooms")
+    if isinstance(folded, (list, tuple)) and folded and isinstance(folded[0], str) and folded[0].strip():
+        return ShortageFact("other_room", **{**common, "room_id": folded[0]})
     return None
 
 

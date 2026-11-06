@@ -1,6 +1,7 @@
 """A room's considered point and its running work, from captured rows and indexed task facts; no history scan,
 no sealing authority. What considers a room is an act of mine there (``memory_view_conversations``): my own
-words, a quiet finish, a note; never a time and never a wake's bare boundary."""
+words, a quiet finish, a finish that folded what it read (``fold_read``), a note; never a time and never a wake's
+bare boundary."""
 from ouroboros.dialogue_provenance import row_class
 
 

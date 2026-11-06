@@ -721,7 +721,13 @@ def _capture_room(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
                              "facts": _with_gaps(memory_inventory.room_facts(store, room, entries, lineage,
                                                                              len(notes.get(room, ()))), gaps, room),
                              "legacy": [], "under_parts": [], "notes": [], "origins": [], "since": "",
-                             "lane1": [], "lane2": [], "told": []}
+                             "lane1": [], "lane2": [], "told": [], "newest": "", "sealed_by": []}
+    if entries and spec.role not in DELEGATED_FOCUS_ROLES:  # S1: what a page in my finishing response covers here
+        facts["newest"] = chat_chain.format_address(max(entries, key=lambda entry: entry[2])[0])
+    facts["sealed_by"] = [  # S3: a conversation page another room holds seals rows here too
+        {"id": record["id"], "label": str(_mapping(record.get("metadata")).get("room_label") or label(record["room_id"]))}
+        for record in store.room_records(None, kinds=("page",))
+        if str(record["room_id"]) != room and room in _mapping(_mapping(record.get("covers")).get("rooms"))]
     if spec.room_page:
         units = {unit.record_id: unit for unit in memory_inventory.legacy_units(store, root)}
         retold = [record for record in records if record["kind"] in ("legacy", "gap")]
@@ -851,7 +857,6 @@ def _capture_live(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
     marks = store.active_marks(None) if spec.marks != "none" or integrating else []
     waiting, projects = {}, None
     if integrating or spec.other_conversations:
-        from ouroboros.memory_waiting import measure
         from ouroboros.projects_registry import list_projects
         from ouroboros.store import StoreError
 
@@ -861,10 +866,13 @@ def _capture_live(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
             # An unavailable project census does not make readable room history unavailable.
             log.warning("memory view: project waiting facts unavailable (%s)", type(exc).__name__)
             projects = None
-        if integrating:
-            waiting = measure(marks, notes, [p for p in projects if "closed" not in p] if projects is not None else None)
     groups = (conversations.capture(store, root, spec, label, by_room, notes, lineage, quiet=quiet, sealed=sealed,
                                     gaps=gaps, projects=projects or []) if spec.other_conversations else [])
+    if integrating:
+        from ouroboros.memory_waiting import measure
+
+        waiting = measure(marks, notes, [p for p in projects if "closed" not in p] if projects is not None else None,
+                          groups)
     return room, groups, _capture_marks(store, spec, label, marks), waiting
 
 
@@ -1262,6 +1270,11 @@ def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]]) -> str:
     if len(lines) == 1:
         lines += ["", "Nothing open, retold or noted in this room."]
     lines += ["", "### This room now", _facts_text(room["facts"])]
+    lines += [f"- sealed with the page {item['id']} of {item['label']}: memory_read(node_id='{item['id']}')"
+              for item in room.get("sealed_by") or ()]
+    if room.get("newest"):  # S1: the act a finishing response that changed, learned or closed something takes here
+        lines.append(f"A page with covers={{'to': '{room['newest']}'}} seals this room's open rows, the earlier turns' with "
+                     "mine; my task's later terminal rows are linked below it.")
     return "\n".join(lines)
 
 

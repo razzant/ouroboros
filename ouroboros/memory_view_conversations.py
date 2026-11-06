@@ -30,7 +30,7 @@ import datetime
 from collections import Counter
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
-from ouroboros import memory_inventory
+from ouroboros import chat_chain, memory_inventory
 from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
 from ouroboros.dialogue_provenance import owner_speech, place_row_facts, row_class, warm_lineage
 
@@ -51,8 +51,8 @@ def _instant(value: Any) -> Optional[datetime.datetime]:
     return moment if moment.tzinfo else moment.replace(tzinfo=datetime.timezone.utc)
 
 
-def _conversation(room: str, entries: List[Entry], notes: List[Dict[str, Any]],
-                  projects: Iterable[int]) -> Tuple[str, Dict[str, Any]]:
+def conversation_of(room: str, entries: List[Entry], notes: List[Dict[str, Any]],
+                    projects: Iterable[int]) -> Tuple[str, Dict[str, Any]]:
     """``(key, place facts)``: a place conversation is its provider, account and conversation, without the thread;
     Main and each Project are their own; any other room is its own too."""
     if room == MAIN:
@@ -103,7 +103,7 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
     running = running_by_room(root, by_room, notes, membership.bindings, projects or [])
     rooms = sorted((set(by_room) | set(notes) | {room for room, kinds in gaps.items() if kinds}
                     | {room for room, tasks in running.items() if tasks}) - {str(spec.room_id)})
-    linked = linked_rows(root, store)
+    linked = linked_rows(root, store, by_room)
     here = {entry[0]["row_sha256"] for entry in by_room.get(str(spec.room_id), ())} if spec.room_lanes else set()
     getattr(label, "warm", lambda _rooms: None)(rooms)
     warm_lineage(lineage, ((meta, pos) for entries in sealed.values() for _address, meta, pos in entries))
@@ -112,9 +112,11 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
     for room in rooms:
         held = by_room.get(room, [])
         entries = [entry for entry in held if entry[0]["row_sha256"] not in linked]
+        if held and not entries and not notes.get(room) and not running.get(room) and not gaps.get(room):
+            continue  # all that is open here are pages' own later rows, linked below them: nothing waits here
         classed = [(entry, row_class(entry[1], pos=entry[2], **lineage)) for entry in entries]
         spoken = [(entry, cls) for entry, cls in classed if cls["lane"] == 1]
-        key, place = _conversation(room, held or sealed.get(room, []), notes.get(room, []), membership.project_chat_ids)
+        key, place = conversation_of(room, held or sealed.get(room, []), notes.get(room, []), membership.project_chat_ids)
         own = max((entry[2] for entry, cls in spoken if cls["author"]["kind"] == "ouroboros"), default=-1)
         ours = own >= 0 or any(owner_speech(entry[1], cls["author"]) for entry, cls in spoken)
         first = entries[0][2] if entries else -1
@@ -127,7 +129,9 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
             elif author["lane"] == 1 and owner_speech(meta, author["author"]):
                 ours = True
         engaged = not place or ours or bool(notes.get(room)) or bool(running.get(room))
-        considered = max(own, considered_through(quiet.get(room, ()), lineage))
+        fold = max(((pos, meta) for _a, meta, pos in held if meta.get("fold_read") is True and meta.get("wake_summary")),
+                   key=lambda pair: pair[0], default=None)  # S5: a finish that read here folded it into its sentence
+        considered = max(own, considered_through(quiet.get(room, ()), lineage), fold[0] if fold else -1)
         noted = max((_instant(note.get("ts")) for note in notes.get(room, ()) if _instant(note.get("ts"))), default=None)
         retold = max((pos for _a, meta, pos in held if meta.get("wake_summary")), default=-1)
         sentence = next(((meta["wake_summary"], meta.get("ts")) for _a, meta, _p in reversed(held) if meta.get("wake_summary")),
@@ -135,23 +139,18 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
         sample = next((meta for _address, meta, _pos in reversed(held) if meta.get("transport")
                        or meta.get("presence_provenance")), None)
         group = groups.setdefault(key, {"key": key, "rooms": [], "running": [], "latest": "", "place": bool(place)})
-        if place and "label" not in group:
-            flow = {**{k: place.get(k) for k in ("provider", "account_id", "conversation_id")}, "thread_id": ""}
-            scalars = next((meta["transport"]["conversation"] for _a, meta, _p in reversed(held)
-                            if isinstance((meta.get("transport") or {}).get("conversation"), dict)), None)
-            from ouroboros.presence_bindings import conversation_key
-            from ouroboros.presence_runner import presence_chat_id
-
-            chat = presence_chat_id(conversation_key(flow["provider"], flow["account_id"], flow["conversation_id"], ""))
-            named = label(chat, {"transport": {**flow, **({"conversation": scalars} if scalars else {})}})
-            group["label"] = named.rsplit(" [chat_id=", 1)[0]  # a conversation; its rooms carry their own ids
+        if place and "label" not in group:  # a conversation; its rooms carry their own ids
+            group["label"] = conversation_label(label, place, [meta for _a, meta, _p in held])
         facts = memory_inventory.room_facts(store, room, entries, lineage, len(notes.get(room, ())),
                                             classes=[cls for _entry, cls in classed])
         latest = str(facts.get("latest") or "")
         group["latest"] = max(group["latest"], latest)
         group["running"] = sorted({*group["running"], *running.get(room, ())})
+        newest = max(entries, key=lambda entry: entry[2]) if entries else None
         item: Dict[str, Any] = {"room_id": room, "label": label(room, sample), "engaged": engaged, "facts": facts,
-                                "first": first, "notes": [], "words": [], "tasks": [], "silent": ""}
+                                "first": first, "notes": [], "words": [], "tasks": [], "silent": "", "folded": {},
+                                "newest": chat_chain.format_address(newest[0]) if newest else "",
+                                "last": newest[2] if newest else -1}
         group.setdefault("label", item["label"])
         group["rooms"].append(item)
         unconsidered = nobody_considered(spoken, considered)
@@ -164,6 +163,12 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
             continue
         item["notes"] = list(notes.get(room, ()))
         for entry, cls in (pair for pair in spoken if pair[0][0]["row_sha256"] not in here):  # once, in this room
+            if fold and entry[2] <= fold[0] and not owner_speech(entry[1], cls["author"]):  # my human's stay whole
+                folded = item["folded"] or {"sentence": str(fold[1]["wake_summary"]), "ts": str(fold[1].get("ts") or ""),
+                                            "count": 0, "chars": 0, "from": chat_chain.format_address(entry[0])}
+                item["folded"] = {**folded, "count": folded["count"] + 1, "to": chat_chain.format_address(entry[0]),
+                                  "chars": folded["chars"] + int(entry[1].get("text_chars") or 0)}
+                continue
             rank = 0 if entry[2] <= retold else 1 if entry[2] <= considered or (
                 noted is not None and (_instant(entry[1].get("ts")) or noted) <= noted) else 2
             shown.append((item, entry, {**cls["author"], "rank": rank}))
@@ -184,6 +189,20 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
     for group in groups.values():
         group["rooms"].sort(key=lambda room: (room["first"] if room["first"] >= 0 else 1 << 62, room["room_id"]))
     return [groups[key] for key in sorted(groups)]
+
+
+def conversation_label(label: Callable[..., str], place: Mapping[str, Any], rows: List[Mapping[str, Any]]) -> str:
+    """A place conversation's own name, as each of its rooms' labels begins (``RoomLabelResolver``): its provider,
+    account and conversation without a thread, named by the newest of ``rows`` that carries the conversation's scalars."""
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_runner import presence_chat_id
+
+    flow = {**{key: place.get(key) for key in ("provider", "account_id", "conversation_id")}, "thread_id": ""}
+    scalars = next((row["transport"]["conversation"] for row in reversed(rows)
+                    if isinstance((row.get("transport") or {}).get("conversation"), dict)), None)
+    chat = presence_chat_id(conversation_key(flow["provider"], flow["account_id"], flow["conversation_id"], ""))
+    named = label(chat, {"transport": {**flow, **({"conversation": scalars} if scalars else {})}})
+    return named.rsplit(" [chat_id=", 1)[0]
 
 
 def nobody_considered(spoken: List[Tuple[Entry, Mapping[str, Any]]], considered: int) -> int:
@@ -274,6 +293,11 @@ def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str]
         lines.append(f"{'' if single else '#### ' + title + ' — '}{_facts_text(room['facts'], 'that room')}; "
                      f"memory_read(room_id='{room['room_id']}', rows=true)")
         lines += _note_lines(room["notes"])
+        if room.get("folded"):
+            fold = room["folded"]
+            lines.append(f"«{fold['sentence']}» ({fold['ts'][:10]}): {fold['count']} words up to it read and folded into "
+                         f"that sentence; memory_read(room_id='{room['room_id']}', rows=true, from='{fold['from']}', "
+                         f"to='{fold['to']}')")
         addressed = [word for word in room["words"] if word["id"] in gone or word["id"] in owners_gone]
         if addressed:
             lines.append(_words_line(room, addressed))
@@ -306,6 +330,29 @@ def render(groups: Iterable[Mapping[str, Any]], gone: Mapping[str, Iterable[str]
     lines += ["", f"{len(groups)} other conversations, {kinds['engaged']} rooms where my human or I spoke, "
                   f"{kinds['silent']} other rooms; memory_read(room_id='*') lists every open room."]
     return "\n".join(lines)
+
+
+def owed(groups: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """The conversations whose words no page holds (S4): each group with a room where my human or I spoke that has open
+    words, oldest open word first, with those rooms and their open characters (``memory_waiting``'s class)."""
+    found = []
+    for group in groups:
+        rooms = [room for room in group["rooms"] if room["engaged"] and (room["words"] or room.get("folded"))]
+        if rooms:  # a conversation page seals all its rooms up to its newest row: the act names that row
+            newest = max(group["rooms"], key=lambda room: room["last"])
+            found.append({"group": group, "rooms": rooms, "chars": sum(int(room["facts"].get("chars") or 0) for room in rooms),
+                          "earliest": min(str(room["facts"].get("earliest") or "") for room in rooms),
+                          "newest": (newest["room_id"], newest["newest"])})
+    return sorted(found, key=lambda item: (item["earliest"], item["group"]["key"]))
+
+
+def folded_rooms(groups: Iterable[Mapping[str, Any]], gone: Mapping[str, Iterable[str]]) -> List[str]:
+    """The rooms where my human or I spoke whose words (F6w) or group (F6g) a floor level shows only by address,
+    oldest open row first: what a writer may seal where consciousness is off (``memory_inventory.shortage_from_trace``)."""
+    words, lined = set(gone.get("F6w", ())), set(gone.get("F6g", ()))
+    return [room for _first, room in sorted(
+        (item["first"], item["room_id"]) for group in groups for item in group["rooms"] if item["engaged"] and item["words"]
+        and (group["key"] in lined or any(word["id"] in words for word in item["words"])))]
 
 
 def owner_items(groups: Iterable[Mapping[str, Any]]) -> Dict[str, Mapping[str, Any]]:

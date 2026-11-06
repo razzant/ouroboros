@@ -587,6 +587,7 @@ def view_facts(snapshot: mv.MemoryViewSnapshot, level: mv.FloorLevel, *, window_
                       "target_tokens": target_tokens, "budget_allowance_tokens": allowances.get("budget"),
                       "by_budget": level.by_budget, "mode_switch": {"from": lowered_from, "to": mode} if lowered_from else None,
                       "newest_addressed_row": parse_address(max(rows)[1]) if rows else None,
+                      "folded_rooms": conversations.folded_rooms(snapshot.conversations, gone),
                       "pointer_records": [ident for step, ids in level.addressed if step in ("F4", "F5l", "F5") for ident in ids]},
             "story_status": {"folded": status.get("folded", 0), "total": status.get("total", 0)}}
 

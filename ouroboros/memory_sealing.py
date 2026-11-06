@@ -63,11 +63,28 @@ def writer_terminal_rows(root, starts):
     return grouped
 
 
-def linked_rows(root, store):
-    """The ``row_sha256`` of every writer's later terminal row its page links below it (``terminal_links``): that
-    page's, never read as an open row of my other conversations (``memory_view_conversations``) or a debt."""
-    grouped = capture_terminal_rows(root, store.room_records(None, kinds=("page",)))
-    return {address["row_sha256"] for rows in grouped.values() for address, _facts, _pos in rows}
+def linked_rows(root, store, by_room):
+    """The ``row_sha256`` of every writer's later terminal row its page links below it (``terminal_links``), and of
+    each closing page's own closure notice among the open rows ``by_room`` (``closure_notices``): that page's, never
+    read as an open row of my other conversations (``memory_view_conversations``) or a debt."""
+    pages = store.room_records(None, kinds=("page",))
+    grouped = capture_terminal_rows(root, pages)
+    return {address["row_sha256"] for rows in grouped.values() for address, _facts, _pos in rows} | closure_notices(
+        pages, by_room)
+
+
+def closure_notices(pages, by_room):
+    """``close_project`` writes the room's page from its closing note, then the host posts that closure's System row
+    there (``project_closure``, delivered after the page): the first such open row after a closing page is the same
+    act's, linked below it; a later reopening notice is not."""
+    found = set()
+    for page in sorted((page for page in pages if (page.get("metadata") or {}).get("closes_project")), key=_terminal_after):
+        notice = next((address for address, meta, pos in by_room.get(str(page["room_id"]), ())
+                       if meta.get("type") == "project_closure" and pos > _terminal_after(page)
+                       and address["row_sha256"] not in found), None)
+        if notice is not None:
+            found.add(notice["row_sha256"])
+    return found
 
 
 def terminal_links(root, record, cache=None):
