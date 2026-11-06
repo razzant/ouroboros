@@ -105,7 +105,6 @@ def test_consumed_worker_death_obeys_the_ordinary_crash_retry_limit(host, monkey
     jobs = stdqueue.Queue()
     worker.reaping = False
     monkeypatch.setattr(workers, '_LAST_SPAWN_TIME', 0)
-    monkeypatch.setattr(workers, 'CRASH_TS', [])
     monkeypatch.setattr(queue, '_reap_queue', jobs)
     monkeypatch.setattr(queue, '_ensure_reaper_started', lambda: None)
     workers.ensure_workers_healthy()

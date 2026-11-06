@@ -18,13 +18,13 @@ export function bootPhase(data) {
 // The Starting… header's words for a boot phase: the chat accepts messages while the
 // background tasks are still being restored, or the start failed. A failed start is its own
 // state (U001): the failure's tone, so the room's capsule draws the red dot and stays
-// pressable, and its cause (the boot document's text, a record's words) rides the title for
+// pressable; its cause is the step a short bar drops before the word, and rides the title for
 // the Shade's Details. Nothing known about the phase keeps the plain Starting….
 export const START_FAILED_LEAD = 'Ouroboros could not finish starting.';
 export function startingStatus(boot) {
     const failedStep = Array.isArray(boot?.steps) ? boot.steps.find((step) => step?.state === 'failed') : null;
     const title = String(boot?.error || (failedStep ? `${failedStep.name}: ${failedStep.error || ''}` : '') || '');
-    if (boot?.phase === 'failed') return { kind: 'failed', text: 'Start failed', tone: 'failed', title };
+    if (boot?.phase === 'failed') return { kind: 'failed', text: 'Start failed', tone: 'failed', step: title, title };
     if (boot?.dialogue_ready === true) {
         return { kind: 'starting', text: 'Chat ready, restoring background tasks', title };
     }

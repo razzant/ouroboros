@@ -1,9 +1,10 @@
 """One host service for owner HTTP and authorized native CLI-maintenance tools.
 
 Claudexor owns vendor version selection, installation, custody and job state.
-The host may prepare its Node/npm runtime before submission and ask for the
-owner's header Restart. Accepted operations and engine refusals pass through;
-the host never stores or retries a job.
+The host may prepare its Node/npm runtime before submission and ask the owner to
+restart the engine (Restart Claudexor in Accounts; the header Restart keeps the
+engine). Accepted operations and engine refusals pass through; the host never
+stores or retries a job.
 """
 from __future__ import annotations
 
@@ -58,7 +59,7 @@ def _explain_missing_executable(error: ClaudexorUnavailable, gateway) -> None:
     Only for inventory GETs: a retained operation's problem is history, and its path
     stays missing after a healthy replacement, so it must never source this advice.
     "Reported" is deliberate: neither a path nor a version proves whose executable it
-    is or why it went. Restart is the owner's choice, so requiredActions stay as received.
+    is or why it went. Restarting the engine is the owner's choice, so requiredActions stay as received.
     """
     from ouroboros.review_run_isolation import attach_home
 
@@ -69,7 +70,7 @@ def _explain_missing_executable(error: ClaudexorUnavailable, gateway) -> None:
     if match is None or not os.path.isabs(match.group(1)):
         return
     if attach_home() is not None or os.environ.get("OUROBOROS_CLAUDEXOR_BIN"):
-        return  # A selected external engine is not this host's Restart to suggest.
+        return  # A selected external engine is not this host's to restart.
     try:
         os.stat(match.group(1))
         return
@@ -84,7 +85,7 @@ def _explain_missing_executable(error: ClaudexorUnavailable, gateway) -> None:
         "engineVersion": getattr(gateway, "engine_version", "") or None,
         "engineBuildSha": getattr(gateway, "engine_build_sha", "") or None,
         "remedy": ("The executable reported by this inspection is no longer present. If the app was moved "
-                   "or replaced, Restart in the chat header may help; it interrupts engine sessions, "
+                   "or replaced, Restart Claudexor in Accounts may help; it ends every run on the engine, "
                    "and success is not guaranteed."),
     }}
 
@@ -143,7 +144,7 @@ def _prepare_update(gateway, request: dict, request_id: str) -> None:
         return
     row = next((item for item in checked.get("harnesses", []) if item.get("harness") == harness), {})
     if (row.get("availableProblem") or {}).get("code") != "embedded_npm_missing":
-        return  # Unknown or other failures are not evidence that Restart is needed.
+        return  # Unknown or other failures are not evidence that an engine restart is needed.
     from ouroboros.review_run_isolation import attach_home
     from ouroboros.claudexor_runtime import ClaudexorRuntimeError, get_runtime_manager
 
@@ -153,14 +154,14 @@ def _prepare_update(gateway, request: dict, request_id: str) -> None:
         node = get_runtime_manager().prepare_node_toolchain()
         code, preparation = "maintenance_restart_required", "ready"
         message = ("Environment preparation complete; CLI update not started. "
-                   "Use Restart in the chat header, then repeat Update. Restart interrupts engine sessions; "
-                   "saved work follows the existing recovery rules.")
+                   "Use Restart Claudexor in Accounts, then repeat Update. It ends every run on the engine; "
+                   "its confirmation says how many and whose.")
         cause = None
     except ClaudexorRuntimeError as exc:
         node, code, preparation, cause = "", "maintenance_preparation_failed", "failed", exc.code
         message = f"Environment preparation failed; this attempt did not submit a CLI update: {exc}"
     error = ClaudexorUnavailable(code, message, status_code=409)
-    error.problem = {"code": code, "message": message, "requiredActions": ["restart"] if node else [],
+    error.problem = {"code": code, "message": message, "requiredActions": ["restart_claudexor"] if node else [],
                      "context": {"requestId": request_id, "acceptance": "not_submitted", "scope": "this_attempt",
                                  "preparation": preparation, "restartRequired": bool(node),
                                  "node": node or None, "cause": cause}}
