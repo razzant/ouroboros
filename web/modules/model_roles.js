@@ -267,7 +267,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         element.innerHTML = (showContext ? `<section class="model-role-group"><label class="ui-field">Processing
             ${processingSelectHtml('data-global-processing aria-label="Global processing"', processingPreference, { global: true })}</label>
             <p class="model-role-copy">Applies to new tasks. Fast permits accelerated paid service within existing limits. Economy may fall back to the ordinary rate. Model and reasoning effort stay the same.</p>
-            <div class="ui-field-help">Keep route defaults preserves existing native choices. Explicit native service choices take precedence; the requested mode is not proof of the mode served.</div></section>` : '') + slots.map((slot) => {
+            <details class="model-role-details ui-disclosure"><summary>Details</summary><div class="ui-field-help">Keep route defaults preserves existing native choices. Explicit native service choices take precedence; the requested mode is not proof of the mode served.</div></details></section>` : '') + slots.map((slot) => {
             const matching = rows.filter((row) => row.slot.slot === slot.slot);
             const local = matching[0]?.local || false;
             return `<section class="model-role-group" data-model-role-group="${escapeHtml(slot.slot)}">

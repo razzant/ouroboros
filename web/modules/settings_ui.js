@@ -745,8 +745,8 @@ export function renderSettingsPage() {
             <!-- The footer is one action row: the two actions, then the one result right after them (ui.css
                  .ui-action-row). A pending restart is its own action with its own result in the same row. -->
             <div class="settings-footer ui-action-row" data-draft="clean">
-                <button type="button" class="btn btn-default" id="btn-reload-settings">Reload settings</button>
-                <button class="btn btn-save" id="btn-save-settings">Save settings</button>
+                <button type="button" class="btn btn-default" id="btn-reload-settings">Reload</button>
+                <button class="btn btn-save" id="btn-save-settings">Save</button>
                 <span id="settings-status" class="ui-result" role="status" aria-live="polite" aria-atomic="true"></span>
                 <button type="button" class="btn btn-default" id="btn-restart-now" hidden
                     title="Restart the agent process">Restart now</button>
