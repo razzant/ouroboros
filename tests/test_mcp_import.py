@@ -534,8 +534,10 @@ def import_journey(document, tmp_path, settings_client, monkeypatch):  # noqa: F
     mcp_client.reset_manager_for_tests()
     try:
         port = start_asgi(app, running, "mcp-import-journey")
+        # The journey writes UTF-8 JSON (the Settings copy says "task’s"); decode it as UTF-8, not with the locale's codec.
         answer = subprocess.run([_node_bin(), "--input-type=module", "-e", IMPORT_JOURNEY, f"http://127.0.0.1:{port}", document],
-                                cwd=pathlib.Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=60)
+                                cwd=pathlib.Path(__file__).resolve().parents[1], capture_output=True, text=True,
+                                encoding="utf-8", timeout=60)
         assert answer.returncode == 0, answer.stderr
         return json.loads(answer.stdout), on_disk
     finally:
