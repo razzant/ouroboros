@@ -4736,7 +4736,9 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     opacity: 1;
     display: flex;
     align-items: center;
+    gap: 6px;  /* a sign and its word (Talk) sit alike before and after the feature's stylesheet */
 }
+.chat-send-inline svg { display: block; }
 .chat-send-inline:not(:disabled):hover { background: var(--tone-crimson-hover); }
 .chat-send-inline:not(:disabled):active { filter: var(--press); }
 .chat-send-inline:disabled { box-shadow: none; }
