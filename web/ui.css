@@ -577,6 +577,9 @@
     padding: var(--control-pad-y) var(--control-pad-x);
     border-radius: var(--control-radius);
     border: 1px solid transparent;
+    /* Without a tone a button is quiet (no body, the primary ink), never the engine's own grey. */
+    background: transparent;
+    color: var(--text-primary);
     font-size: var(--button-font-size);
     font-weight: 600;
     font-family: var(--font-sans);

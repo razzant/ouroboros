@@ -81,7 +81,10 @@
     gap: 14px;
 }
 
+/* A provider card's inset lives in its head and body (the disclosure's summary is the head), so the card itself
+   has none: the inset token is set to nothing on this scope, never the padding property. */
 .settings-provider-card {
+    --card-pad: 0;
     overflow: hidden;
 }
 
