@@ -1492,8 +1492,8 @@ class OuroborosAgent:
         the route the pin named and the resolution refused, from the cap_info
         projection `_fill_executor_blocked_caps` wrote, so the child's card can
         say `{harness} · blocked` beside its typed `subagent_executor_unavailable`
-        terminal; the durable record keeps its empty route (the completion-seam
-        evidence gate must stay closed for a child that never ran). A blocked
+        terminal; a pin blocked at dispatch keeps an empty durable route, a refused
+        start keeps its route with ``blocked`` (only ``harness`` is audited). A blocked
         API-model actor names no route and stays chip-less.
         """
         if not isinstance(self._current_task_metadata, dict):
