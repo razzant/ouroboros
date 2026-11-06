@@ -366,3 +366,24 @@ def test_my_humans_words_of_other_conversations_keep_the_work_room_while_this_ro
     pressed = mf.fit_memory_view(alone, {"margin": whole // 2, "physical": whole - 100, "budget": None})
     assert dict(pressed.addressed)["F7"] == (rows[0]["address"],)  # and physics folds them, oldest first
 
+
+
+def test_the_last_rung_keeps_my_humans_folded_words_of_other_conversations_by_their_addresses():
+    """At the last rung (F6a, the groups to one count) my human's words of my other conversations that F7 folded keep
+    their addresses, and one F7 did not fold stays whole. With a margin below the counted form, the addresses stay
+    above it: they occupy the work room up to the physical bound, and no rung deletes them."""
+    groups = [syn.conversation(i, words=6, word_chars=2_000, owner=True) for i in range(8)]
+    snapshot = syn.snapshot(room_facts=syn.room(), conversations=groups)
+    words = [word for group in groups for word in group["rooms"][0]["words"]]
+    keys = tuple(group["key"] for group in groups)
+    counted = mv.FloorLevel((("F6g", keys), ("F7", tuple(word["id"] for word in words)), ("F6a", ("conversations",))))
+    full = tokens(snapshot)
+    level = mf.fit_memory_view(snapshot, {"margin": tokens(snapshot, counted) - 1, "physical": full + 10, "budget": None})
+    text = mv.render_room(snapshot, level)
+    assert dict(level.steps).get("F6a") and len(dict(level.addressed)["F7"]) == len(words)  # the last rung was taken
+    assert all(mv._row_pointer(word, "words") in text for word in words)  # every folded word keeps its address
+    assert tokens(snapshot, counted) - 1 < tokens(snapshot, level) <= full + 10  # above the margin, in the window
+    half = mv.FloorLevel((("F6g", keys), ("F7", tuple(word["id"] for word in words[:24])), ("F6a", ("conversations",))))
+    shown = mv.render_room(snapshot, half)
+    assert all(mv._row_pointer(word, "words") in shown for word in words[:24])
+    assert all(word["line"] in shown for word in words[24:])  # one F7 did not fold stays whole

@@ -367,8 +367,9 @@ def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str]
 
 
 def render(groups: Iterable[Mapping[str, Any]], gone: Mapping[str, Iterable[str]]) -> str:
-    """``## Other conversations`` at a floor level: the authority sentence first, then every group in its form."""
-    from ouroboros.memory_view import _rooms_line
+    """``## Other conversations`` at a floor level: the authority sentence first, then every group in its form; at the
+    last rung (F6a) my human's words of the counted groups stay, whole or by the address F7 folded them to."""
+    from ouroboros.memory_view import _rooms_line, _row_pointer
 
     groups = list(groups)
     if not groups:
@@ -379,8 +380,8 @@ def render(groups: Iterable[Mapping[str, Any]], gone: Mapping[str, Iterable[str]
     if counted:
         rooms = [room for group in counted for room in group["rooms"]]
         lines += ["", f"{len(counted)} conversations by count (the window's last rung): " + _rooms_line(rooms)]
-        lines += [word["line"] for group in counted for room in group["rooms"]  # my human's words, whole while they fit
-                  for word in room["words"] if word["owner_side"] and word["id"] not in owners]
+        lines += [_row_pointer(word, "words") if word["id"] in owners else word["line"] for group in counted
+                  for room in group["rooms"] for word in room["words"] if word["owner_side"]]
     keys = {group["key"] for group in counted}
     for group in groups:
         if group["key"] in keys:
