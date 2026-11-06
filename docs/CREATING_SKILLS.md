@@ -1261,7 +1261,8 @@ its close is acknowledged in its transcript, never read by its model, and starts
 A focus, or a root promoted or scheduled from it, uses ordinary `finish_task`, including
 `silent=true`; receipts never choose its outcome. An answer after any send, file or
 reaction is new speech; started work stays `deferred` (empty after silence).
-Automatic speech passes the `place_reply` Safety check; a flag returns to the mind.
+Automatic speech passes the `place_reply` Safety check, which sees the turn's own sends in that conversation
+(receipts and receipt-less calls); a flag returns to the mind with the destination, those sends and silence as a valid finish.
 Silent/Paused/disconnected destinations and Advises autonomy hold the reply
 with a System fact. Cached replies, continuation envelopes and work polls apply the
 current place state without another generation or paid check. A held projection keeps

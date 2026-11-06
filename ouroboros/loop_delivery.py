@@ -1473,10 +1473,10 @@ def _no_tool_final_answer(
         record_stopped_completion(tools, limit_ctx, llm_trace, request, candidate)
         if not _seal_admission_before_delivery(tools, limit_ctx, llm_trace):
             return held("admission_seal")
-    from ouroboros.place_reply import prepare_focus_reply
+    from ouroboros.place_reply import prepare_focus_reply, refusal_facts
     allowed, refusal = prepare_focus_reply(tools._ctx, str(content or ""), quiet=bool(getattr(candidate, "quiet", False)))
-    if not allowed:
-        messages.append({"role": "user", "content": refusal})
+    if not allowed:  # the flag returns with the host facts the mind decides on: destination, its own sends, silence
+        messages.append({"role": "user", "content": refusal + refusal_facts(tools._ctx)})
         _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
         solving_again()
         return held("focus_reply_refused")

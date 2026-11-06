@@ -247,14 +247,16 @@ def _started_work_section(drive_root: Path, value: Mapping[str, Any], task_id: s
     )
 
 
-def presence_send_facts(drive_root: Path, task_id: str, value: Any) -> str:
-    """Transport sends of this task confirmed so far in its own conversation, or honest unknown."""
+def presence_send_record(drive_root: Path, task_id: str, value: Any) -> dict[str, Any] | None:
+    """The host receipts of this task's transport sends in its own conversation: ``{"sent": [confirmed texts],
+    "uncertain": parts whose latest receipt is uncertain, "partial": no inbound row covers the trace, "actions":
+    typed reaction receipts}``; None when the transport reports no receipts (unknown, never none)."""
     from ouroboros.presence_runner import _live_task_rows, _turn_actions, _turn_sends
 
     value = value if isinstance(value, Mapping) else {}
     key = str((value.get("event") or {}).get("conversation_key") or "")
     if not key or value.get("delivery_reporting_version") != 1:
-        return "unknown (this transport reports no delivery receipts)"
+        return None
     rows = _live_task_rows(Path(drive_root), str(task_id or ""), key)
     sent, uncertain = _turn_sends(rows)
     partial = sent is None
@@ -262,10 +264,20 @@ def presence_send_facts(drive_root: Path, task_id: str, value: Any) -> str:
         # No inbound row of this task in the live log (a promoted root never logs one): its receipts
         # there are still observed, but earlier ones may sit in rotated history this read does not cover.
         sent, uncertain = _turn_sends(rows, same_generation=True)
-    said = " / ".join(json.dumps(text, ensure_ascii=False) for text in sent if text) or "none"
-    if partial:
+    return {"sent": [text for text in sent if text], "uncertain": uncertain, "partial": partial,
+            "actions": _turn_actions(rows, same_generation=partial)}
+
+
+def presence_send_facts(drive_root: Path, task_id: str, value: Any) -> str:
+    """Transport sends of this task confirmed so far in its own conversation, or honest unknown."""
+    record = presence_send_record(drive_root, task_id, value)
+    if record is None:
+        return "unknown (this transport reports no delivery receipts)"
+    said = " / ".join(json.dumps(text, ensure_ascii=False) for text in record["sent"]) or "none"
+    if record["partial"]:
         said += " (live chat log only; receipts rotated into archived history are not covered, so there may be more)"
-    actions = "".join(f"; {action}" for action in _reaction_actions(_turn_actions(rows, same_generation=partial)))
+    actions = "".join(f"; {action}" for action in _reaction_actions(record["actions"]))
+    uncertain = record["uncertain"]
     return said + (f"; {uncertain} more part(s) have an uncertain outcome and may have landed" if uncertain else "") + actions
 
 
@@ -607,7 +619,7 @@ def _conversation_now(root: Path, value: Mapping[str, Any], task_id: str) -> dic
 
 __all__ = [
     "build_presence_context_section", "frame_presence_user_content",
-    "presence_finish_not_accepted_note", "presence_send_facts",
+    "presence_finish_not_accepted_note", "presence_send_facts", "presence_send_record",
 ]
 
 

@@ -135,6 +135,26 @@ def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, s
     return True, ""
 
 
+def refusal_facts(ctx) -> str:
+    """Host facts beside a refused automatic reply, for the round that follows: where a non-silent finish would be
+    posted and to whom, what this turn already sent there (receipts and its own receipt-less calls), and that a
+    silent finish is valid. Facts only; whether to post, rewrite or stay silent is the mind's decision."""
+    from ouroboros.place_guard import this_turn_sends
+    from ouroboros.presence_context import _source_conversation
+    metadata = getattr(ctx, "task_metadata", {}) or {}
+    carrier = reply_carrier(metadata)
+    if not carrier:
+        return ""
+    label, route = _source_conversation(metadata.get("presence") or {})
+    sends = this_turn_sends(ctx, carrier["conversation_key"])
+    pending = "; ".join(f"{row.get('tool')} at {row.get('at')}" + (f": {json.dumps(row['text'], ensure_ascii=False)}" if "text" in row else "")
+                        for row in sends["calls_without_receipt"]) or "none"
+    return (f"\n[FOCUS_REPLY_REFUSED] This answer was not posted. A non-silent finish_task answer is posted as a new message "
+            f"in {label} (route {route}) to the people there, in your own voice. Confirmed sent there by this turn: "
+            f"{sends['confirmed']}. Your own send calls there without a receipt yet: {pending}. Silence is valid: "
+            "finish_task(action=\"finish\", silent=true) keeps the answer as your internal note; summary reaches your human only.")
+
+
 def record_late_delivery(root, skill: str, payload: dict, client_id: str):
     """Receipts are evidence even when the destination is now closed to writes."""
     if payload["state"] not in {"accepted", "delivered"}:
