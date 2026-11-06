@@ -280,6 +280,37 @@ def test_the_owners_own_app_signs_in_with_its_secret_and_sign_out_revokes(signin
     assert _sign_in_row(manager)["reason"] == "signed_out"
 
 
+def test_the_minds_sign_in_hands_the_new_listing_to_the_server_process(signin, monkeypatch):
+    import queue
+    import types
+
+    from ouroboros.tools.mcp_sign_in import _mcp_sign_in
+    from supervisor.events_worker_reports import _handle_mcp_signed_in
+
+    provider, manager, cfg, settings = signin()
+    monkeypatch.setattr(config, "load_settings", lambda: settings)
+    events = queue.Queue()
+    ctx = types.SimpleNamespace(event_queue=events)
+    began = json.loads(_mcp_sign_in(ctx, action="begin", server="docs"))
+    assert began["server"] == "docs" and began["url"].startswith(provider.base) and "note" in began
+    location = httpx.get(began["url"], follow_redirects=False, timeout=10).headers["location"]
+    done = json.loads(_mcp_sign_in(ctx, action="complete", returned_url=location))
+    assert done["ok"] is True and done["catalog_refresh"] == "queued_for_host"
+    handed = events.get_nowait()
+    assert handed == {"type": "mcp_signed_in", "server_id": "docs"}
+
+    _handle_mcp_signed_in(handed, None)  # the server process lists that server on its own thread
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline and not any(
+            row["id"] == "docs" and row.get("tool_count") for row in manager.status_payload()["servers"]):
+        time.sleep(0.05)
+    assert next(row for row in manager.status_payload()["servers"] if row["id"] == "docs")["tool_count"] == 1
+    refused = _mcp_sign_in(ctx, action="complete", returned_url="https://elsewhere.example/?state=x")
+    assert "TOOL_ARG_ERROR" in refused  # no code: not a provider's return
+    out = json.loads(_mcp_sign_in(ctx, action="sign_out", server="docs"))
+    assert out["ok"] is True and _sign_in_row(manager)["reason"] == "signed_out"
+
+
 def test_a_bare_401_without_a_bearer_challenge_stays_an_ordinary_error(tmp_path, monkeypatch):
     from tests.test_mcp_headers_loopback import start_asgi
 

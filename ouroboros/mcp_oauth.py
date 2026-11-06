@@ -451,7 +451,7 @@ async def begin(cfg: Any, *, return_base: str = "", client_id: str = "", client_
                           "issuer": str(metadata.issuer), "resource": resource, "metadata": kept,
                           "started": utc_now_iso()}
         _save(cfg, doc)
-    return {"server": cfg.id, "url": f"{metadata.authorization_endpoint}?{urllib.parse.urlencode(params)}",
+    return {"server": cfg.id, "url": f"{_checked(str(metadata.authorization_endpoint))}?{urllib.parse.urlencode(params)}",
             "redirect_uri": client["redirect_uri"]}
 
 
