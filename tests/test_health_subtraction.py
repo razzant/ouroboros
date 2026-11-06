@@ -24,8 +24,24 @@ def test_a_quiet_install_renders_facts_without_ok_lines_or_cost_verdicts(tmp_pat
     text = context_health.build_health_invariants(env)
     assert "identity.md last updated 0.0 h ago" in text
     for gone in ("OK:", "HIGH-COST", "high-cost", "STALE IDENTITY", "THIN IDENTITY", "SCRATCHPAD", "version sync",
-                 "budget drift within"):
+                 "budget drift within", "COST ACCOUNTING UNAVAILABLE"):
         assert gone not in text, gone
+
+
+def test_the_drift_line_reads_the_saved_drift_pair_and_never_the_usage_store(tmp_path, monkeypatch):
+    from ouroboros import usage_accounting
+
+    def no_usage_read(*_a, **_k):
+        raise AssertionError("a context build must not open the usage store for the drift line")
+
+    monkeypatch.setattr(usage_accounting, "usage_breakdown", no_usage_read)
+    env = _make_health_env(tmp_path)
+    assert "BUDGET DRIFT" not in context_health.build_health_invariants(env)  # no alert: no line, no read
+    (tmp_path / "state" / "state.json").write_text(json.dumps({
+        "budget_drift_alert": True, "budget_drift_pct": 63.2, "openrouter_total_usd": 150.0,
+        "openrouter_checked_ledger_settled_usd": 100.0}), encoding="utf-8")
+    line = next(row for row in context_health.build_health_invariants(env).splitlines() if "BUDGET DRIFT" in row)
+    assert "63.2%" in line and "$100.00" in line and "$150.00" in line
 
 
 def test_counts_and_obligations_with_an_action_stay(tmp_path):

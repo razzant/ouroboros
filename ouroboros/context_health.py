@@ -411,15 +411,16 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
     except Exception:
         pass
 
-    try:
-        state_data = read_json_dict(env.drive_path("state/state.json")) or {}
-        from ouroboros.usage_accounting import usage_breakdown
-
-        accounted = float(usage_breakdown(env.drive_root).get("accounted_usd") or 0.0)
-        if state_data.get("budget_drift_alert"):
-            checks.append(f"WARNING: BUDGET DRIFT {state_data.get('budget_drift_pct', 0):.1f}% — tracked=${accounted:.2f} vs OpenRouter=${state_data.get('openrouter_total_usd', 0):.2f}")
-    except Exception:
-        checks.append("WARNING: COST ACCOUNTING UNAVAILABLE — budget drift check skipped")
+    # The drift check saved its own like-for-like pair (supervisor.state._apply_openrouter_ground_truth): no
+    # usage-store read on a context build for a line printed only under its alert.
+    state_data = read_json_dict(env.drive_path("state/state.json")) or {}
+    if state_data.get("budget_drift_alert"):
+        try:
+            checks.append(f"WARNING: BUDGET DRIFT {float(state_data.get('budget_drift_pct') or 0):.1f}% — the ledger's "
+                          f"OpenRouter spend ${float(state_data.get('openrouter_checked_ledger_settled_usd') or 0):.2f} "
+                          f"vs the key's usage ${float(state_data.get('openrouter_total_usd') or 0):.2f} at the last check")
+        except (TypeError, ValueError):
+            checks.append("WARNING: BUDGET DRIFT — the saved drift figures are unreadable (state/state.json)")
 
     checks.extend(filter(None, [_identity_age_line(env)]))
 
