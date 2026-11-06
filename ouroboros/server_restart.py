@@ -37,6 +37,19 @@ def agent_restart_pending() -> bool:
     return _AGENT_RESTART.get("status") in {"awaiting", "accepted", "ready"}
 
 
+def agent_restart_draining() -> bool:
+    """The physical restart: the requester finished and the bounded drain runs (``ready``), not a stored evolution event."""
+    return _AGENT_RESTART.get("status") == "ready"
+
+
+def note_started_restart_work(task: dict) -> None:
+    """Under Q, at an owner door that admitted a turn while this request is pending: the turn joins the request's started
+    work, so its own subagents are not held as new independent work (``agent_restart_holds``). The owner's dialogue never
+    waits for another task's request; only the physical drain saves new text (BIBLE P5)."""
+    if agent_restart_pending() and str(task.get("id") or ""):
+        _AGENT_RESTART.setdefault("started", {})[str(task["id"])] = str(task.get("root_task_id") or task["id"])
+
+
 def agent_restart_snapshot() -> dict:
     """Host ACK over the existing queue publication; never restored as admission authority."""
     return {key: _AGENT_RESTART[key] for key in
@@ -175,7 +188,9 @@ def _accept_agent_restart(ctx) -> bool:
             if queue.RETURNS_NAMED or _restart_requested.is_set() or not valid:
                 _AGENT_RESTART.update(status="refused", refusal="requester_not_active_or_intake_closed")
             else:
-                _AGENT_RESTART.update(status="accepted", started=_started_restart_work())
+                # Merge: an owner turn admitted while awaiting may already have finished, its child still queued.
+                _AGENT_RESTART.update(status="accepted",
+                                      started={**(_AGENT_RESTART.get("started") or {}), **_started_restart_work()})
             queue.publish_queue_snapshot(reason="agent_restart_intent")  # the receipt the requester polls
             return _AGENT_RESTART.get("status") == "accepted"
         finally:
@@ -255,8 +270,7 @@ def _perform_owner_restart(ctx: Any, reply=None) -> tuple[bool, str]:
             notice = ("Stopping active task. New settings apply to the next message."
                       if stopped_task_ids else "New settings apply to the next message.")
             if returning:
-                notice += (f" {returning} task{'' if returning == 1 else 's'} will continue from "
-                           f"{'its' if returning == 1 else 'their'} saved state after the restart.")
+                notice += f" {returning} task{'' if returning == 1 else 's'} will continue after the restart."
             if held:
                 notice += (f" {held} queued task{'' if held == 1 else 's'} held until you resume "
                            f"{'it' if held == 1 else 'them'}.")
@@ -800,10 +814,12 @@ def _handle_restart_in_supervisor(server, evt: Dict[str, Any], ctx: Any) -> None
             "evolution_restart": bool(evt.get("evolution_restart")),
         })
         if st.get("owner_chat_id"):
+            # The owner reads how many tasks it waits for; their ids belong to the log.
+            log.info("Restart drain waits for %s", ", ".join(sorted(live)))
             ctx.send_with_budget(
                 int(st["owner_chat_id"]),
-                f"⏳ Restart drain: waiting up to {max_wait}s for running task(s) "
-                f"{', '.join(sorted(live))} to finish.",
+                f"⏳ Restart drain: waiting up to {max_wait}s for {len(live)} running "
+                f"task{'' if len(live) == 1 else 's'} to finish.",
                 role="system", system_type="restart_notice")
         return
     server._perform_supervisor_restart(

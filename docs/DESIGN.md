@@ -997,8 +997,8 @@ this Project" came to be drawn six ways. The rule is therefore about intents.
   the glyph and the arrow say in pixels (`Open project <name>`); nothing depends
   on hover.
 - **Two forms, one recipe.** The reference is a capsule: it leads a Project-bound work card's action
-  row at that row's 28px height and meta size, and sits everywhere else: under a mirrored answer or a
-  System lifecycle row (in the shared `createSystemMessageActions` row, token spacing, wrapping,
+  row at that row's 28px height and meta size, and sits everywhere else: under a mirrored answer, a
+  Main notice of a Project's work or a System lifecycle row (in the shared `createSystemMessageActions` row, token spacing, wrapping,
   focus-ring clearance), ending an owner message's one receipt line ("Passed on to «work…» in": the
   owner asked for it compact on 27.10, the name stays stored whole; "Started as a task in"), and in a
   Main question copy's voice line beside `Ouroboros`, at that line's 28px height and meta size
@@ -1741,7 +1741,7 @@ A chat transport shows such a request as the host's note on where to enter it, w
 
 **Project question mirror.** A Project question's Main copy is its own `buildQuizCard` card, whole as anatomized above, in an assistant bubble at its ask time in the feed, not a section of its own; the Project reference in its voice line opens the exact original, and answers, materials and recovery controls work in Main. It uses the shared ring and `--project` tints; names ellipsize (full titles); the head stays the room's row. History, live pointers and the census share one task/quiz card and lifecycle wording; the canonical current questions only confirm or settle copies the feed holds, never mount them, and an incomplete read withholds only what its typed gaps name. Optional, resumed and terminal-author questions stay answerable until answered or closed; no display/history cap drops them. Replaced questions stay read-only. The owner closes from the card, a model its own or a host-proven continued task line's question, or a finished task's, always with its own reason. Closure records a reason, never an answer/approval. A late answer left delivery-unknown by a restart offers Remove from pending (no resend, never marked delivered). Publication destination stays fixed across Project conversion; current room membership controls display. Explicit materials use registered task artifacts and the existing reader.
 
-A task that cannot continue without the owner is one System message in the feed, stamped when first seen: the task, one sentence, its own controls (revision-bound model access, Resume/Stop, children's included; activity counts each work once, its helpers within it). Sign-in, unobservable automatic access, disabled automatic continuation, budget pauses and Resume-only holds qualify; viable automatic account/quota recovery, queues, self-waking sleep, background scope verification and own Pause stay quiet. Deduplicate the same quiz/wait identity, not all waits on a task; the message leaves when a complete census drops the row. Missing action evidence stays unavailable; visibility never authorizes login, budget changes or automatic Resume.
+A task that cannot continue without the owner is one System message in the feed, stamped when first seen: the task, one sentence (none where its own control already says it: a plain resume pause beside Resume), its own controls (revision-bound model access, Resume/Stop, children's included; activity counts each work once, its helpers within it). Sign-in, unobservable automatic access, disabled automatic continuation, budget pauses and Resume-only holds qualify; viable automatic account/quota recovery, queues, self-waking sleep, background scope verification and own Pause stay quiet. Deduplicate the same quiz/wait identity, not all waits on a task; the message leaves when a complete census drops the row. Missing action evidence stays unavailable; visibility never authorizes login, budget changes or automatic Resume.
 
 One amber pill among the composer's pills (their row, height and type, at its end; `--status-warn-*`) counts the unanswered questions and owner actions — `1 question`, `3 questions`, `1 action`, `4 waiting` — and shows only while one of them is off screen; a narrow row keeps the glyph and number. Each press shows the next, oldest first, cycling: the card head lands under the chat header and the question text takes focus, never the answer field, so no touch keyboard opens. A question outside the loaded history mounts at its own date under the existing history note; there is no history seek.
 
@@ -2199,7 +2199,8 @@ A task that ends with a cause states it on the collapsed line in the
 owner's words (the sentence of the durable row and the expanded body), so a
 `Done with warnings` chip never stands beside an unrelated last action; a clean
 ending's own summary replaces the last narration (owner 01.11 10:52, A). Residual tool
-errors name the first recorded failure in plain words (a noun for the step and
+errors warn unless the failed tool is a known pure read: a failed read or search stays in the details,
+while an effect or command that failed, or a tool of unknown kind, warns. They name the first such failure in plain words (a noun for the step and
 what happened, never a tool name, its result text or a path) and count the rest (`tool_error_words`). Successful tool calls are not rows: they fold
 into ONE evidence row per block (`N tool calls`, `N tool calls · M errors` once
 a call failed) at the first call's position and time, patched in place; Expand
@@ -2265,8 +2266,9 @@ status and wait controls but no title or conversion until the first work row
 adds one.
 
 The compact meta line names executor/model (roots: observed solve model, else
-agent model), duration, cost, exceptions and running narration's `updated`
-(in a root's head).
+agent model; a Claudexor route by its model), duration, cost, exceptions (tool
+errors only under a chip that warns or fails; under Done the block's own rows
+name them) and running narration's `updated` (in a root's head).
 One positive task-local tool-call count joins that line and remains after Done
 (owner 22.10, A). Helpers are not aggregated. Rounds (usable solve responses)
 and known zero calls stay in Details, making no work or footer row; missing
@@ -2616,7 +2618,8 @@ leaves later configuration to Settings. Summary names exactly the assignments
 the one atomic Finish saves, including deep self-review. Reviewers remain
 editable with the same controls as Settings. A subscription-only Budget step leads with quota/reset facts and keeps
 optional API spending fields collapsed. "No API key" never claims unlimited free
-work or that paid provider credits were enabled.
+work or that paid provider credits were enabled. When a subscription serves a model, Summary says
+what an exhausted quota does: a set Fallback is tried first, then the work waits for the reset.
 
 Before the first completion, Summary offers Consciousness as an unchecked choice. Its
 row names the autonomy, daily allowance and own-task limit consciousness runs under

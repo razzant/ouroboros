@@ -273,3 +273,28 @@ def test_head_and_target_moving_after_the_check_never_reuse_the_cached_fact(mana
     assert passive["safe_to_apply"] is False
     # The runtime fact describes only the HEAD the check saw.
     assert official_update_projection(moved, drive_root=drive, state=managed.state)["local_changes"] == "unknown"
+
+
+def test_a_commit_of_its_own_on_the_tip_stays_visible_with_nothing_incoming(managed, monkeypatch):
+    """A local adoption on top of the official tip leaves nothing incoming, yet the install now runs history and
+    content the official line lacks: the passive read (the Updates panel) keeps showing that relation, while a clean
+    checkout at the tip shows none. When the check described this very HEAD its content fact is reused, not recomputed."""
+    import supervisor.git_ops_updates as updates
+
+    def passive():
+        with monkeypatch.context() as read_only:  # only this read is forbidden to fetch or write
+            return _passive(read_only)
+
+    _check()
+    clean = passive()
+    assert clean["available"] is False and (clean["ahead"], clean["behind"]) == (0, 0)
+    assert clean["local_changes"] == "absent"
+    own = _commit(managed.local, "a commit of its own", **{"app.py": "A = 9\nB = 2\n"})
+    moved = passive()
+    assert moved["current_sha"] == own and moved["available"] is False
+    assert (moved["ahead"], moved["behind"]) == (1, 0)
+    assert moved["local_changes"] == "present" and moved["local_changes_base"] == managed.base
+    _check()  # the boot after an adoption checks this HEAD
+    monkeypatch.setattr(updates, "local_changes_since_shared_base", lambda *a: pytest.fail("recomputed a checked fact"))
+    again = passive()
+    assert (again["ahead"], again["behind"], again["local_changes"]) == (1, 0, "present")

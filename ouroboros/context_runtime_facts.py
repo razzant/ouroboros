@@ -242,6 +242,13 @@ def _queue_context_fact(task: Dict[str, Any]) -> Dict[str, Any]:
         rows = snapshot.get(key)
         fact[key + "_count"] = sum(isinstance(row, dict) and execution_kind(row.get("task") or {}) != "presence"
                                    for row in rows) if isinstance(rows, list) else None
+    intent = snapshot.get("restart_intent")
+    if isinstance(intent, dict) and intent.get("status") in {"awaiting", "accepted", "ready"}:
+        # The host's restart request at this snapshot (``awaiting`` until its ACK; ``server_restart.agent_restart_snapshot``);
+        # the reason is the requester's own words. Until its task finishes nothing restarts; ``ready`` is the bounded drain.
+        fact["pending_restart"] = {
+            "requested_by_task": intent.get("task_id"), "phase": "draining" if intent["status"] == "ready" else "requested",
+            **({"requester_reason": intent["reason"]} if intent.get("reason") else {})}
     pending_rows = [row for row in snapshot.get("pending") or () if isinstance(row, dict)
                     and execution_kind(row.get("task") or {}) != "presence"]
     budget_fences = {str(fence.get("root_task_id") or ""): fence

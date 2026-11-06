@@ -48,7 +48,7 @@ def test_an_owner_pause_names_the_author_its_fence_declared(tmp_path, declared, 
     assert {k: v for k, v in wait.items() if k not in {"text", "reason", "release"}} == {"kind": "owner_pause", "state": "paused", "since": "2026-10-13T12:40:00Z",
                     **({"by": by} if by else {})}
     note = render_roster_note(independent_roots(tmp_path))
-    assert "owner Pause (" in note and "release=resume" in note
+    assert "Pause (" in note and "owner Pause" not in note and "release=resume" in note  # who declared it is by=
     if by:
         assert f"by={by}" in note
     assert wait["release"] == "resume"

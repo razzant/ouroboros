@@ -370,7 +370,7 @@ class TestSetPlaywrightBrowsersPathIfBundled:
         monkeypatch.setitem(sys.modules, "playwright",
                             types.SimpleNamespace(__file__=str(tmp_path / "playwright" / "__init__.py")))
 
-        def install(root, pin):
+        def install(root, pin, **_):
             installs.append(pathlib.Path(root))
             return _pinned_layout(pathlib.Path(root))
 
@@ -397,11 +397,141 @@ class TestSetPlaywrightBrowsersPathIfBundled:
                             types.SimpleNamespace(__file__=str(tmp_path / "playwright" / "__init__.py")))
         installs = []
         monkeypatch.setattr(chromium_runtime, "install",
-                            lambda root, pin: installs.append(pathlib.Path(root)) or _pinned_layout(pathlib.Path(root)))
+                            lambda root, pin, **_: installs.append(pathlib.Path(root)) or _pinned_layout(pathlib.Path(root)))
 
         bmod._ensure_playwright_installed(engine="chromium")
 
         assert installs == [operator] and not (tmp_path / "data" / "playwright-browsers").exists()
+
+    def test_a_slow_pin_install_runs_once_beside_the_calls_and_each_answers_within_its_window(self, monkeypatch, tmp_path,
+                                                                                               caplog):
+        import logging
+        import threading
+
+        import ouroboros.tools.browser as bmod
+        from ouroboros import tool_custody
+        from ouroboros.model_wait import execution_deadline_scope, monotonic_now
+        from ouroboros.runtime_limits import NESTED_SETTLEMENT_MARGIN_SEC
+        from ouroboros.tools.tool_result import LegacyTextResultAdapter
+
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "0")
+        monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path / "data"))
+        monkeypatch.setattr(bmod, "_playwright_browsers_path_managed", False)
+        monkeypatch.setattr(bmod.subprocess, "check_call", lambda cmd: None)
+        monkeypatch.setitem(sys.modules, "playwright",
+                            types.SimpleNamespace(__file__=str(tmp_path / "playwright" / "__init__.py")))
+        release, installs, refusals, holds = threading.Event(), [], [], []
+        monkeypatch.setattr(tool_custody, "hold_invocation",
+                            lambda: holds.append("held") or (lambda: holds.append("released")))
+
+        def install(root, pin, progress=None):
+            installs.append(root)
+            if len(installs) == 1:
+                raise RuntimeError("download failed")  # a failed install is never sticky
+            progress["bytes"] = 1234
+            assert release.wait(10)
+            return _pinned_layout(pathlib.Path(root))
+
+        monkeypatch.setattr(chromium_runtime, "install", install)
+        with caplog.at_level(logging.WARNING, logger="ouroboros.tools.browser"), pytest.raises(
+                RuntimeError, match="download failed"):
+            bmod._ensure_playwright_installed()
+        assert holds == ["held", "released"]
+        assert any("download failed" in row.getMessage() for row in caplog.records)  # traced with or without waiters
+
+        def call():  # today each call downloads inside itself until the outer timeout
+            with execution_deadline_scope(monotonic_now() + NESTED_SETTLEMENT_MARGIN_SEC + 0.3):
+                with pytest.raises(chromium_runtime.ChromiumRefusal) as refused:
+                    bmod._ensure_playwright_installed()
+            refusals.append(refused.value)
+
+        callers = [threading.Thread(target=call) for _ in range(2)]
+        for caller in callers:
+            caller.start()
+        for caller in callers:
+            caller.join(5)
+        assert len(installs) == 2 and len(refusals) == 2  # one download for both calls
+        assert all(r.code == chromium_runtime.PREPARING and "1234 of" in str(r) for r in refusals)
+        typed = LegacyTextResultAdapter.from_text("browse_page", refusals[0].tool_text())  # the refusal it is
+        assert (typed.status, typed.code) == ("unavailable", "LEGACY_UNAVAILABLE")
+        assert holds == ["held", "released", "held"]  # the starter's call ends with the install, not before
+        release.set()
+        with execution_deadline_scope(monotonic_now() + NESTED_SETTLEMENT_MARGIN_SEC + 10):
+            executable = bmod._ensure_playwright_installed()  # within its window: the browser itself
+        pin = chromium_runtime.host_pin()
+        assert executable == str(tmp_path / "data" / "playwright-browsers" / pin.directory / pin.executable)
+        for worker in [th for th in threading.enumerate() if th.name.startswith("browser-install")]:
+            worker.join(5)
+        assert len(installs) == 2 and holds[-1] == "released"
+
+    def test_another_process_installing_the_pin_is_awaited_not_duplicated(self, monkeypatch, tmp_path):
+        import ouroboros.tools.browser as bmod
+        from ouroboros.model_wait import execution_deadline_scope, monotonic_now
+        from ouroboros.platform_layer import file_lock_exclusive, file_unlock
+        from ouroboros.runtime_limits import NESTED_SETTLEMENT_MARGIN_SEC
+
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "0")
+        monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path / "data"))
+        monkeypatch.setattr(bmod, "_playwright_browsers_path_managed", False)
+        monkeypatch.setattr(bmod.subprocess, "check_call", lambda cmd: None)
+        monkeypatch.setitem(sys.modules, "playwright",
+                            types.SimpleNamespace(__file__=str(tmp_path / "playwright" / "__init__.py")))
+        pin, downloads = chromium_runtime.host_pin(), []
+
+        def install(root, pin_, progress=None):  # the real install returns a published pin before any fetch
+            found = chromium_runtime.installed_executable(pathlib.Path(root), pin_)
+            return found if found is not None else downloads.append(root) or _pinned_layout(pathlib.Path(root))
+
+        monkeypatch.setattr(chromium_runtime, "install", install)
+        cache = tmp_path / "data" / "playwright-browsers"
+        cache.mkdir(parents=True)
+        with open(cache / f".{pin.directory}.lock", "a+b") as peer:  # another worker process installs
+            file_lock_exclusive(peer.fileno())
+            with execution_deadline_scope(monotonic_now() + NESTED_SETTLEMENT_MARGIN_SEC + 0.3):
+                with pytest.raises(chromium_runtime.ChromiumRefusal, match="another Ouroboros process"):
+                    bmod._ensure_playwright_installed()
+            _pinned_layout(cache)  # the peer publishes, then lets go
+            file_unlock(peer.fileno())
+        with execution_deadline_scope(monotonic_now() + NESTED_SETTLEMENT_MARGIN_SEC + 10):
+            executable = bmod._ensure_playwright_installed()
+        assert executable == str(cache / pin.directory / pin.executable) and downloads == []
+
+    def test_an_unlockable_root_or_an_unstartable_thread_never_strands_the_install(self, monkeypatch, tmp_path):
+        import threading
+
+        import ouroboros.tools.browser as bmod
+        from ouroboros import platform_layer, tool_custody
+
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "0")
+        monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path / "data"))
+        monkeypatch.setattr(bmod, "_playwright_browsers_path_managed", False)
+        monkeypatch.setattr(bmod.subprocess, "check_call", lambda cmd: None)
+        monkeypatch.setitem(sys.modules, "playwright",
+                            types.SimpleNamespace(__file__=str(tmp_path / "playwright" / "__init__.py")))
+        installs, holds = [], []
+        monkeypatch.setattr(chromium_runtime, "install",
+                            lambda root, pin, **_: installs.append(root) or _pinned_layout(pathlib.Path(root)))
+        monkeypatch.setattr(tool_custody, "hold_invocation",
+                            lambda: holds.append("held") or (lambda: holds.append("released")))
+
+        class Unstartable(threading.Thread):
+            def start(self):
+                raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(bmod, "threading", types.SimpleNamespace(Thread=Unstartable, Lock=threading.Lock))
+        with pytest.raises(RuntimeError, match="start new thread"):
+            bmod._ensure_playwright_installed()
+        assert holds == ["held", "released"] and not bmod._installs  # nothing for later calls to wait on
+        monkeypatch.setattr(bmod, "threading", threading)
+
+        def no_locks(_fd):  # a filesystem without locks installs unlocked, as before the lock existed
+            raise OSError(45, "Operation not supported")
+
+        monkeypatch.setattr(platform_layer, "file_lock_exclusive", no_locks)
+        pin = chromium_runtime.host_pin()
+        executable = bmod._ensure_playwright_installed()
+        assert executable == str(tmp_path / "data" / "playwright-browsers" / pin.directory / pin.executable)
+        assert len(installs) == 1
 
     def test_readonly_chromium_without_the_pin_refuses_without_installing(self, monkeypatch, tmp_path):
         import ouroboros.tools.browser as bmod

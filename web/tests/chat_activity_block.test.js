@@ -744,20 +744,25 @@ test('the header keeps the census verdict beside a block: Thinking… for a dire
 });
 
 test('a recovered tool error on replay keeps a block that names the error', async () => {
-    const f = fixture([
-        { role: 'user', text: 'steer it', ts: TS, chat_id: 1 },
-        { ...final, ts: '2026-09-15T12:00:05Z', chat_id: 1 },
-        { ...final, role: 'system', system_type: 'task_summary', text: 'One step failed and was retried.',
-            rounds: 3, tool_calls: 2, tool_errors: 1, tool_call_counts: { steer_task: 2 },
-            ts: '2026-09-15T12:00:06Z', chat_id: 1 },
-    ]);
-    try {
-        await f.instance.refreshHistory({ revision: 1 });
-        assert.ok(f.card());
-        assert.match(f.rows()[0].innerHTML, /2 tool calls · 1 error/);
-        assert.ok(f.rows()[0].classList.contains('warn'));
-        assert.match(f.meta(), /1 error/);
-    } finally { f.close(); }
+    // The block's row names the error either way; the compact line repeats it only under a chip that warns (audit
+    // 05.11, S2): a green Done already says the work recovered (DESIGN principle 7).
+    for (const warned of [false, true]) {
+        const outcome = warned ? { outcome_axes: { execution: { status: 'degraded' } } } : {};
+        const f = fixture([
+            { role: 'user', text: 'steer it', ts: TS, chat_id: 1 },
+            { ...final, ...outcome, ts: '2026-09-15T12:00:05Z', chat_id: 1 },
+            { ...final, ...outcome, role: 'system', system_type: 'task_summary', text: 'One step failed and was retried.',
+                rounds: 3, tool_calls: 2, tool_errors: 1, tool_call_counts: { steer_task: 2 },
+                ts: '2026-09-15T12:00:06Z', chat_id: 1 },
+        ]);
+        try {
+            await f.instance.refreshHistory({ revision: 1 });
+            assert.ok(f.card());
+            assert.match(f.rows()[0].innerHTML, /2 tool calls · 1 error/);
+            assert.ok(f.rows()[0].classList.contains('warn'));
+            assert.equal(/1 error/.test(f.meta()), warned, `warned=${warned}`);
+        } finally { f.close(); }
+    }
 });
 
 // The old client forced a card whenever a terminal summary looked warn, error
@@ -1029,7 +1034,7 @@ test('a refused promote keeps a block with exactly one error row live and on rel
         assert.equal(f.rows().length, 3, 'the folded count, the call\'s own error row and the terminal note');
         assert.equal(f.rows().filter((n) => /promote_chat_to_task/.test(n.innerHTML)).length, 1,
             'the failure is explained once; the fold only counts it');
-        assert.match(f.meta(), /1 error/);
+        assert.doesNotMatch(f.meta(), /1 error/, 'a Done chip: the rows name the error, the compact line does not');
     } finally { f.close(); }
     const g = fixture([
         { ...ownerRow, chat_annotation: refused },
@@ -1044,7 +1049,7 @@ test('a refused promote keeps a block with exactly one error row live and on rel
         const errorRows = g.rows().filter((n) => /1 tool call · 1 error/.test(n.innerHTML));
         assert.equal(errorRows.length, 1);
         assert.ok(errorRows[0].classList.contains('warn'));
-        assert.match(g.meta(), /1 error/);
+        assert.doesNotMatch(g.meta(), /1 error/, 'a Done chip: the rows name the error, the compact line does not');
         const owner = g.messages.children.find((n) => n.dataset.clientMessageId === 'owner-1');
         assert.equal(owner?.querySelector('.msg-routing-annotation')?.textContent, cause);
     } finally { g.close(); }
@@ -1383,7 +1388,7 @@ for (const legacy of [false, true]) test(`Chat history keeps a known error when 
             }
             assert.ok(f.card(), 'an addressing-only row with a known error stays visible');
             assert.match(f.rows().map(row => row.innerHTML).join(' '), /1 error/);
-            assert.match(f.meta(), /1 error/);
+            assert.doesNotMatch(f.meta(), /1 error/, 'under a Done chip the rows keep it, the compact line does not');
         }
     } finally { f.close(); }
 });

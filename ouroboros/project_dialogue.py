@@ -816,7 +816,7 @@ TASK_CAUSE_PHRASES = {
     "tool_failure": "A tool this task used failed and nothing recovered it",
     "receipt_absent": "No host verification receipt was recorded; this does not establish whether other checks ran.",
     "expected_output_ungrounded": "A retired check recorded no tool calls or structured answer; it does not assess the written result.",
-    "residual_tool_errors_without_review": "Tool errors remain in the record; no review checked the result.",
+    "residual_tool_errors_without_review": "Tool errors remain in the record.",
     "artifacts_unavailable": "Some result files are missing or could not be preserved.",
     "partial_result": "The result is partial; remaining work is described in task details.",
     "task_exception": "The task stopped on an internal error",

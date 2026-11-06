@@ -376,7 +376,7 @@
       },
       {
         "copy": "Review subscription quotas and optional API spending limits.",
-        "footer": "When subscription quota is exhausted, work waits for renewal or your choice of another account or model. This integration does not enable paid provider credits.",
+        "footer": "",
         "id": "budget",
         "railCopy": "Quota + API budget",
         "title": "Review limits"

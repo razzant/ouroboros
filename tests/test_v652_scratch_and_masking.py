@@ -181,20 +181,30 @@ def test_verify_and_record_sets_masking_flag_on_receipt(tmp_path, monkeypatch):
 
     registry, repo, data, _desktop = _reg(tmp_path, monkeypatch)
     # masked: `echo hi | tail -1` exits 0 (tail), masking any upstream failure; expected matches.
-    registry.execute(
+    out = str(registry.execute(
         "verify_and_record",
         {"contract_kind": "explicit_command", "check": ["sh", "-c", "echo hi | tail -1"], "expected": "hi", "cwd": str(repo)},
-    )
+    ))
     rec = read_verification_receipts(data, "task1")[-1]
     assert rec["status"] == "pass"  # FLAG-ONLY: masking does not flip the verdict
     assert rec.get("check_exit_masking") is True
     assert "pipeline_tail" in (rec.get("check_exit_masking_reasons") or [])
-    # clean check: no masking flag at all
-    registry.execute(
+    # The author reads it at call time, in run_command's words, not only at the pre-final check.
+    assert "EXIT_MASKING_NOTE: exit_code=0 belongs to the last stage (pipeline_tail)" in out
+    # clean check: no masking flag, no note
+    out = str(registry.execute(
         "verify_and_record",
         {"contract_kind": "explicit_command", "check": ["sh", "-c", "echo hi"], "expected": "hi", "cwd": str(repo)},
-    )
+    ))
     assert not read_verification_receipts(data, "task1")[-1].get("check_exit_masking")
+    assert "EXIT_MASKING_NOTE" not in out
+    # A non-zero exit already says what happened: the flag stays on the receipt, the note does not repeat it.
+    out = str(registry.execute(
+        "verify_and_record",
+        {"contract_kind": "explicit_command", "check": ["sh", "-c", "echo hi | tail -1; exit 3"], "cwd": str(repo)},
+    ))
+    assert read_verification_receipts(data, "task1")[-1].get("check_exit_masking") is True
+    assert "EXIT_MASKING_NOTE" not in out
 
 
 @pytest.mark.parametrize("head", ["sh", "bash", "zsh", "dash", "ash"])

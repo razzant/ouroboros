@@ -27,7 +27,8 @@ from ouroboros.late_tool_results import late_watch_fields, record_call_id
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_call_log import (
     CALL_STARTED, CALL_SETTLED, CALL_WAIT_ENDED, append_call_row, append_failed, claim_settlement,
-    elapsed_ms, invocation_fields, new_invocation, start_log_field, persist_dispatch_source,
+    elapsed_ms, invocation_fields, new_invocation, start_log_field, persist_dispatch_source, worker_phrase,
+    worker_position,
 )
 from ouroboros.tool_capabilities import (
     FOREGROUND_MUTATIVE_TOOLS, PARALLEL_SAFE_ENQUEUE_TOOLS,
@@ -856,7 +857,8 @@ def _make_timeout_result(
     except Exception:
         pass
 
-    result = tool_timeout_text(fn_name, timeout_sec, reset_msg)
+    position = worker_position(invocation)  # P1: where the abandoned worker stands
+    result = tool_timeout_text(fn_name, timeout_sec, reset_msg) + worker_phrase(position)
     tool_result = ToolResult(
         status="timeout",
         code="TOOL_TIMEOUT",
@@ -884,7 +886,7 @@ def _make_timeout_result(
                 "args_redacted_preview": args_for_log,
                 "result": result,
                 "result_meta": result_meta,
-                **frozen,
+                **frozen, **position,
             },
             manifest={
                 "execution_id": corr.get("execution_id"),
@@ -916,7 +918,7 @@ def _make_timeout_result(
         **(live or {}), "ts": utc_now_iso(), "type": CALL_WAIT_ENDED, "tool": fn_name, "task_id": task_id,
         "args": args_for_log, "timeout_sec": timeout_sec, "waited_ms": elapsed_ms(invocation),
         "result_preview": result, "result_ref": result_ref, **invocation_fields(invocation),
-        **start_log_field(invocation),
+        **start_log_field(invocation), **{k: v for k, v in position.items() if k != "worker_stack"},
     }, corr, tool_call_id=tool_call_id)
     wait_log = _append_tool_log(tools, drive_logs, dict(row))
     if live is not None:  # the live frame also names a failed append of this very row

@@ -917,12 +917,15 @@ def assign_tasks() -> None:
                 if cost_fields.get("cost_accounting_status") != "available":
                     log.error("Budget pause blocked: task attempt history unavailable for %s", task_id)
                     return
+                from supervisor.restart_retention import returned_before_body
+
+                seed = bool((returned_before_body(task) or {}).get("seed_return"))  # D5: its given-back attempt never put
                 retry_lineage = bool(
-                    int(task.get("_attempt") or 1) > 1
+                    int(task.get("_attempt") or 1) > 1 and not seed
                     or task.get("original_task_id") or task.get("timeout_retry_from")
                 )
                 replay_safe = (
-                    (task.get("admitted_dispatch") == "none" or _unsent(task) is not None)  # never put here
+                    (task.get("admitted_dispatch") == "none" or _unsent(task) is not None or seed)  # never put here
                     and int(cost_fields.get("total_rounds") or 0) == 0
                     and not bool(cost_fields.get("ledger_integrity_degraded"))
                     and not retry_lineage

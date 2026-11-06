@@ -228,6 +228,7 @@ def acting_tool_names_for_context(ctx: object, registered_names: Iterable[str]) 
     return ACTING_SUBAGENT_TOOL_NAMES | schema_selection_tools_for_context(ctx)
 
 
+# Also the known pure reads whose failure stays in a card's details (_outcome_tool_errors.warns_without_review).
 READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
     "inspect_harness",
     "inspect_subagent",
