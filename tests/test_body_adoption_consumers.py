@@ -534,7 +534,8 @@ def test_request_restart_reply_quotes_the_reason_as_the_callers_own_words(scene,
     reply = registry.execute("request_restart", {"reason": reason, **adopt})
 
     host = {"adopt": f" It adopts candidate commit {scene.cand[:12]} onto ouroboros once this generation's "
-                     "readers have stopped.",
+                     "readers have stopped. Its distance from the official line is unknown: no official Update "
+                     "check is on record.",
             "plain": " The candidate is NOT adopted by this restart; it stays retained.", "unbound": ""}[mode]
     words = (f" Reason (the caller's own words): {json.dumps(stated, ensure_ascii=False)}." if stated
              else " No reason was given; the host default agent_requested_restart is recorded.")

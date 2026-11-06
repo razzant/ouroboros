@@ -188,3 +188,14 @@ test('restart verdicts are true for an applied update and for a deferred store-l
         assert.equal(view.action?.id, 'restart');
     }
 });
+
+
+test('a checkout only ahead of the official tip shows its own commits beside "up to date" (audit 05.11, item 6)', () => {
+    // The passive read now carries ahead/local_changes when the cached tip validates, incoming or not.
+    const verdict = updateVerdict({ managed: true, check_ok: true, available: false, behind: 0, ahead: 2,
+        local_changes: 'present', local_changes_base: 'c0ffee0123456789', current_version: '1',
+        current_short_sha: 'aaaa' }, '');
+    assert.equal(verdict.state, 'current');
+    assert.equal(verdict.chips.find((chip) => chip.label === 'Commits').value, '2 local');
+    assert.equal(verdict.chips.find((chip) => chip.label === 'Local changes').value, 'present since c0ffee01');
+});

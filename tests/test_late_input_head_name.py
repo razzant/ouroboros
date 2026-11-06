@@ -579,6 +579,7 @@ def test_a_refused_head_leaves_no_row_and_a_deferred_one_is_saved_with_its_name(
     monkeypatch.setattr(runtime.workers, "send_with_budget", lambda *a, **k: notices.append(a[1]))
     monkeypatch.setattr(runtime.workers, "_get_chat_agent", lambda: pytest.fail("the head must not run"))
     monkeypatch.setattr(server_restart, "agent_restart_pending", lambda: True)
+    monkeypatch.setattr(server_restart, "agent_restart_draining", lambda: True)  # only the drain saves a turn
     if returns_named:
         monkeypatch.setitem(runtime.queue.RETURNS_NAMED, "door", "managed_update")
     before = {row["task_id"] for row in list_task_results(root)}
@@ -602,7 +603,7 @@ def test_a_refused_head_leaves_no_row_and_a_deferred_one_is_saved_with_its_name(
 
 
 def test_a_head_saved_for_restart_keeps_its_name_through_the_real_return(runtime, monkeypatch):  # noqa: F811
-    """A late answer arriving after a Restart was accepted is saved for after it; the real Restart writes the queue
+    """A late answer arriving while an accepted Restart drains is saved for after it; the real Restart writes the queue
     snapshot, the next generation restores it and returns the head to a worker, whose real start records it. Its
     admission name rides every hop: the works list names the running head, its RUNNING record keeps it, and the
     asker's next answer, joining it, is received under that name live and after a reload. A row saved without a
@@ -623,7 +624,9 @@ def test_a_head_saved_for_restart_keeps_its_name_through_the_real_return(runtime
     monkeypatch.setattr(runtime.workers, "send_with_budget", lambda *a, **k: None)
     _answer(lane, "q1", 1, "r1")
     [(args, kwargs)] = _intake(root, monkeypatch, lane.bridge)
-    handle_chat_direct(*args, **kwargs)
+    with monkeypatch.context() as drain:
+        drain.setattr("ouroboros.server_restart.agent_restart_draining", lambda: True)  # it arrives in the drain
+        handle_chat_direct(*args, **kwargs)
     saved = runtime.queue.PENDING[-1]
     enqueue(runtime, "older-1", chat_id=1)
 
