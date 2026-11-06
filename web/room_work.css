@@ -42,11 +42,15 @@
     flex: 0 1000 auto; min-width: var(--touch-target-min); max-width: 100%; justify-content: center;
     margin-inline-start: 6px; padding-inline: 12px;
 }
-:is(.chat-page-header, .project-panel-bar) .app-page-title-row > .rw-trigger:has(> .rw-caret:not([hidden])) {
+:is(.chat-page-header, .project-panel-bar) .app-page-title-row > .rw-trigger:not([data-word="off"]):has(> .rw-caret:not([hidden])) {
     min-width: max(var(--touch-target-min), 60px);
 }
+/* A word that went keeps no room of its own (U117): the control closes round its mark and caret, so the name it gave
+   way to takes the freed width; the whole title capsule stays its target. */
 :is(.chat-page-header, .project-panel-bar) .app-page-title-row > .rw-trigger[data-word="off"] {
     flex-shrink: 0;
+    min-width: 0;
+    padding-inline: var(--space-2);
 }
 html[data-layout="docked"] .chat-page-header .app-page-title-row > .rw-trigger {
     margin-inline-start: 0;
