@@ -813,6 +813,7 @@ Connected coding subscriptions use Claudexor. Its API v2 objects (`job`, mainten
 **MCP servers:**
 - `GET /api/mcp/status` lists the configured servers and their last listed tools; it makes no network call.
 - `POST /api/mcp/refresh` lists one server's tools (`{server_id}`) or every server's (`{}`); it is safe to repeat.
+- `POST /api/mcp/sign-in` runs one step of a remote server's sign-in: `{action: "begin", server_id}` returns the provider's `url` and the `redirect_uri` it returns to (an owner's own app adds `client_id`, `client_secret`); `{action: "complete", state, code|error, iss}` (or `returned_url`, the address the browser stopped on) finishes it and lists the server; `{action: "sign_out", server_id}` forgets the tokens, with `revoked` saying what the provider confirmed. A refusal is 200 with `ok: false`, `code: "MCP_AUTH_REQUIRED"` and its `reason`.
 - `POST /api/mcp/test` connects once to a draft server (`{server}`, with `server_id` to fill masked secrets from that saved server) and saves nothing. A failed test is 200 with `ok: false`.
 - `POST /api/mcp/import/preview` requires `{text, servers}` and turns pasted configuration into draft rows without saving. `servers` is the editor's current draft matching metadata; send `[]` for an empty editor. An invalid request shape answers `400`; syntactically invalid pasted configuration answers `200` with `ok:false`, `error` and no entries. HTTP success alone is not a usable preview.
 

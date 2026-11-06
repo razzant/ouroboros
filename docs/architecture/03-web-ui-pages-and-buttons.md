@@ -228,7 +228,7 @@ Each key row's **Test** (`POST /api/providers/test`, §4) is one bounded, physic
 
 A directory or separately hosted builtin client offers outside-frame recovery via `?builtin=1`; the builtin main page omits it (`ws.pageOwnedByCore`). macOS `launcher_onboarding.setup_recovery_menu` opens it without page JS. Completion writes starter skills; previews write nothing.
 
-`web/provider-return.html`, `provider-return.css` and `modules/provider_return.js` finish provider navigation on builtin `/onboarding/static/`, then POST to the owning skill. They keep the deployment prefix and report confirmed/denied/unconfirmed outcomes; credential custody and the protocol belong to CREATING_SKILLS “Provider sign-in return”.
+`web/provider-return.html`, `provider-return.css` and `modules/provider_return.js` finish provider navigation on builtin `/onboarding/static/`, then POST to the state's owner (a skill, or `/api/mcp/sign-in`). They keep the deployment prefix and report confirmed/denied/unconfirmed outcomes; custody and protocol: CREATING_SKILLS “Provider sign-in return”.
 
 #### Agent accounts
 

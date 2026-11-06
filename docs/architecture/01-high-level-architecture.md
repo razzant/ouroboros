@@ -201,9 +201,9 @@ ouroboros/ — agent core and shared runtime (§6)
   llm_probe.py — oversized-context probe and Provider Test transport; no retry, fallback or learning
   merge_receipts.py — task-owned PR merge intent, GitHub readback, durable receipt (§6)
   upgrade_notices.py, notice_receipts.py — once-only owner notices with chat receipts (§7)
-  mcp_client.py — identity, token masking, `mcp_<server>__<tool>` names, launch admission, credential origin guard (§6 MCP)
-  mcp_schema.py — literal-safe schema/metadata; mcp_catalog.py — published catalogs
-  mcp_headers.py, mcp_import.py — header validation/masks/restoration; draft-only import preview (§6 MCP)
+  mcp_client.py — identity, token masking, `mcp_<server>__<tool>` names, launch admission (§6 MCP)
+  mcp_schema.py — literal-safe schema/metadata; mcp_catalog.py — published catalogs; mcp_oauth.py — sign-in
+  mcp_headers.py, mcp_import.py — header validation/masks/restoration, origin guard; draft-only import preview (§6 MCP)
   mcp_task_session.py, mcp_browser_guard.py — stdio session per live task loop; browser-policy callback (§6 MCP)
   safety.py — Safety Supervisor call (typed outcomes: §6 Safety Supervisor outcomes)
   safety_config.py — independent coverage per kind (your work, consciousness), the resolved checker and the one-time settings migration
@@ -491,6 +491,7 @@ ouroboros/ — agent core and shared runtime (§6)
     git.py, git_plumbing.py, git_repo_edit.py, git_vcs_ops.py, vcs_read.py, git_review_cycle.py, git_managed_postcommit.py, git_evolution.py — Git/write tools with the deterministic, test and one-wave review commit gates and the author's optional preflight; its leaves: plumbing, repo write/edit, VCS inspection and rollback, the reviewed-commit cycle, managed-merge post-commit gates, evolution-campaign authority (§6 Git and commit review)
     search.py — `web_search`, one leg per Source/Model of `ouroboros/search_routes.py` (§6 Web access mechanisms)
     browser.py — Playwright tools; per-ToolContext lifecycle, thread affinity (§6 MCP)
+    mcp_sign_in.py — the mind's MCP sign-in (§6 MCP)
     imagegen.py — list_image_models/generate_image/recover_image; explicit routes, artifacts first, separate view/send (docs/IMAGE_GENERATION.md)
     vision.py — Vision LLM tools for browser screenshots and uploaded images
     vision_process.py — Tracked vision-child IPC: validated receipts, result recovery, parent-owned cancellation

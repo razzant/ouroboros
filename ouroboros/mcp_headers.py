@@ -198,7 +198,7 @@ class _CredentialOriginGuard:
     timeouts and the transport keeps the client's lifetime.
     """
 
-    def __init__(self, cfg: MCPServerConfig) -> None:
+    def __init__(self, cfg: Any) -> None:  # an MCPServerConfig
         self.cfg = cfg
         self.refusal: Optional[MCPRedirectRefused] = None
 
