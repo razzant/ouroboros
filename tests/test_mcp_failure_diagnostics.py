@@ -242,9 +242,11 @@ def test_a_long_running_servers_stderr_is_logged_as_a_bounded_tail_with_every_se
     pieces = [secret[i:i + 5] for i in range(len(secret) - 4) if "\n" not in secret[i:i + 5]]
 
     def logged(text):
+        # The host's own kind of file; only the server's process writes it, as bytes past the host's text wrapper
+        # (whose newline translation would turn every "\n" into "\r\n" on Windows).
         with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as stderr:
-            stderr.write(text)
-            stderr.flush()
+            stderr.buffer.write(text.encode())
+            stderr.buffer.flush()
             return mcp_schema._stderr_diagnostic(stderr, cfg, 1000)
 
     assert logged(f"BOOT {secret} READY\n") == "BOOT *** READY\n"  # within the bound: whole, as before
@@ -255,8 +257,8 @@ def test_a_long_running_servers_stderr_is_logged_as_a_bounded_tail_with_every_se
         assert len(record.encode()) < 1200 and not any(piece in record for piece in pieces), (at, record[:200])
 
     async def chatty_child():  # the real wrapper around an owned child that writes past the bound and exits
-        params = StdioServerParameters(command=sys.executable, args=[
-            "-c", "import sys; sys.stderr.write('Z' * 5000 + '\\nLAST\\n'); sys.stderr.flush()"])
+        params = StdioServerParameters(command=sys.executable, args=[  # these 5006 bytes on every OS: no text stderr
+            "-c", "import sys; sys.stderr.buffer.write(b'Z' * 5000 + b'\\nLAST\\n'); sys.stderr.buffer.flush()"])
         async with mcp_client._stdio_with_diagnostics(params, cfg):
             pass
     monkeypatch.setattr(mcp_client, "MCP_STDIO_STDERR_TAIL_BYTES", 1000)
