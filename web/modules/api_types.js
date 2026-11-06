@@ -15,8 +15,8 @@
  */
 /** @typedef {Object} StateResponse
  * @property {number} uptime
- * @property {number} workers_alive
- * @property {number} workers_total
+ * @property {number} workers_alive  // live worker slots of both lanes; inline carriers may be thread-backed
+ * @property {number} workers_total  // every slot of both lanes; never the project ceiling or assignable capacity
  * @property {number} pending_count
  * @property {number} running_count
  * @property {?number} spent_usd
@@ -45,6 +45,7 @@
  * @property {boolean} github_token_configured
  * @property {Object} accounting  // physical-attempt ledger projection
  * @property {Array<ProjectEntry>} projects  // active/deleting sidebar projection
+ * @property {?number} project_listable_count
  * @property {Array<number>} project_chat_ids  // complete (uncapped) project chat_ids — WS fan-out isolation SSOT (v6.32.0)
  * @property {?number=} main_visible_revision  // Main's room revision (its standalone messages, as a Project's visible_revision counts); null while unreadable
  * @property {?Object<string, {project_id: string, chat_id: number, origin_bound?: boolean}>} task_bindings  // null only when task_bindings_unchanged; bound task -> its project: suppress the stray "turn into project" button (v6.33.0 P2) + render a pointer that opens the project panel (v6.33.0 F4). origin_bound marks a task the host included because its OWNER MESSAGE already has a project (#902), so one message cannot keep a second convertible card
@@ -583,7 +584,6 @@
  * @property {string} label
  * @property {string} url
  */
-
 /** @typedef {Object} LinksOutbound
  * @property {"links"} type
  * @property {"assistant"} role
@@ -1184,28 +1184,7 @@
  * @property {Object=} queue
  * @property {string=} error
  */
-/**
- * Read-time "where did the money go" projection on GET /api/tasks/{task_id}
- * (ROOT tasks only; computed from the physical-attempt ledger at read time,
- * never persisted). own + children + unattributed == subtree. When the object
- * is present every key is present; the WHOLE object is absent — never a
- * confident $0 — when accounting is unavailable or holds no attributable row
- * for the subtree, and on non-root task details.
- * @typedef {Object} TaskCostBreakdown
- * @property {number} own_usd
- * @property {number} children_usd
- * @property {number} unattributed_usd
- * @property {number} delegated_disclosed_usd
- * @property {number} accounted_upper_bound_usd
- *   C2: the explicit subtree total under its honest name — an accounted UPPER
- *   BOUND (own + children + unattributed), not a settled receipt.
- * @property {number} subscription_sessions
- * @property {number} unknown_unmetered
- * @property {number} non_final_rows
- * @property {boolean} cost_final
- * @property {?CostCustody} cost_custody
- * @property {"physical_attempt_ledger"} authority
- */
+/** @typedef {import('./client_contract_types.js').TaskCostBreakdown} TaskCostBreakdown */
 /**
  * GET /api/tasks/{task_id} — the public task-result envelope (open shape;
  * stored task-result keys pass through) plus additive typed projections.

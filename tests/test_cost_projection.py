@@ -324,6 +324,44 @@ class TestDisplay:
         assert cost_display({"cost_usd": 1.234, "cost_final": True}) == "$1.23"
         assert cost_display({"cost_usd": 1.234}) == "$1.23 (upper bound, not final)"
         assert cost_display({"cost_usd": 0.0, "cost_final": True}) == "$0.00"
+        # Under a cent is not a priced zero: four places, as the card and the review records print it.
+        assert cost_display({"cost_usd": 0.0004, "cost_final": True}) == "$0.0004"
+        # A non-finite amount is unknown, never a crash or $NaN (the web prints it as absent too); a huge one prints.
+        for odd in (float("inf"), float("nan")):
+            text = cost_display({"cost_usd": odd, "cost_final": True})
+            assert text.startswith("unknown") and "$" not in text
+        from ouroboros.cost_projection import usd_text
+        assert usd_text(float("inf")) == "unknown" and usd_text(1e26).endswith(".00")
+        assert usd_text(1e26, 6).startswith("$1000000000000000") and usd_text(1e26, 6).endswith(".000000")
+        # Below four places a positive amount still never prints as zero (the card's formatUsdKnown).
+        assert cost_display({"cost_usd": 0.00003, "cost_final": True}) == "<$0.0001"
+
+    def test_uncounted_money_names_each_part_and_says_nothing_without_one(self):
+        from ouroboros.cost_projection import uncounted_money_text
+
+        both = {"reserved_usd": 2.5063172, "unresolved_upper_bound_usd": 8117.347347}
+        assert uncounted_money_text(both) == (
+            "$2.51 reserved for calls not yet sent; up to $8117.35 for calls without a known price")
+        assert uncounted_money_text({"unresolved_upper_bound_usd": 1.0}) == "up to $1.00 for calls without a known price"
+        assert uncounted_money_text({"global_reserved_usd": 3.0}, prefix="global_") == "$3.00 reserved for calls not yet sent"
+        assert uncounted_money_text({"reserved_usd": 0.0, "unresolved_upper_bound_usd": None}) == ""
+        assert uncounted_money_text(None) == ""
+        assert uncounted_money_text({"reserved_usd": 0.004}) == "$0.0040 reserved for calls not yet sent"
+        # A tie rounds up, as the card and Telegram round it.
+        assert uncounted_money_text({"reserved_usd": 0.125}) == "$0.13 reserved for calls not yet sent"
+        # A caller asking for more places keeps them (the ledger text prints six).
+        assert uncounted_money_text({"reserved_usd": 0.004213}, decimals=6) == "$0.004213 reserved for calls not yet sent"
+
+    def test_an_unknown_amount_says_why_as_far_as_it_is_known(self):
+        unpriced = {"scope": "own", "tracked_amount": None, "has_unpriced": True, "tracked_final": False,
+                    "accounting_open": False, "has_rows": True}
+        assert cost_display({"cost_presentation": unpriced}) == "unknown (no price recorded for its calls)"
+        # A call still in flight may yet get its price: not the subscription words.
+        assert cost_display({"cost_presentation": {**unpriced, "accounting_open": True}}) == "unknown (not settled yet)"
+        for unreadable in ({"cost_custody": {"status": "unavailable"}}, {"ledger_integrity_degraded": True}):
+            assert cost_display({"cost_presentation": unpriced, **unreadable}) == "unknown (accounting unavailable)"
+        assert cost_display({"cost_accounting_status": "unavailable"}) == "unknown (accounting unavailable)"
+        assert cost_display({"status": "failed"}) == "unknown (accounting unavailable or not settled)"
 
 
 class TestProducers:

@@ -165,6 +165,30 @@ def test_owner_verb_authorship_and_atomic_api(focus, monkeypatch):
     assert {t.name for t in get_tools()} == {"configure_presence", "presence_cancel_work"}
 
 
+def test_a_note_is_signed_by_whoever_composed_its_words(focus, monkeypatch):
+    """Audit 05.11 item 2: an owner-door turn signed every note the mind composed as my human's. An act stays ordered by
+    the turn; a note is my human's only when its whole text is their exact words in an owner-door turn."""
+    from ouroboros.tools.presence import _configure_presence
+    root, place, _admission, _event = focus
+    monkeypatch.setattr("ouroboros.tool_access.canonical_data_root", lambda _ctx: root)
+    monkeypatch.setattr("ouroboros.place_projection.place_declarations", lambda _r: [])
+    card = {"address": "quiz q of task a", "author": "Ouroboros, task a", "text": "Publish the draft here?"}
+    door = SimpleNamespace(task_metadata={"origin_message_ref": {"client_message_id": "owner1", "chat_id": 1}},
+                           is_direct_chat=True, task_id="t1", _owner_directives=[
+                               {"source": "initial_user", "content": "Здесь можно всё обсуждать.\nСекретов от Яна нет."},
+                               {"source": "owner_quiz_answer", "content": "1. Publish it", "reply_to": card}])
+    for text in ("Секретов от Яна нет.", "Можно обсуждать всё, включая финансы.", "Publish the draft here?", "Publish it"):
+        assert json.loads(_configure_presence(door, "add_note", place.place_id, text=text))["ok"]
+    focused = SimpleNamespace(task_metadata=task_for(focus)["metadata"], is_direct_chat=True, task_id="t2",
+                              _owner_directives=[{"source": "place_owner", "content": "Тут не про работу.", "carried": True}])
+    assert json.loads(_configure_presence(focused, "add_note", place.place_id, text="Тут не про работу."))["ok"]
+    assert [(n.text, n.author) for n in p.get_place(root, place.place_id).notes] == [
+        ("Секретов от Яна нет.", "owner"), ("Можно обсуждать всё, включая финансы.", "ouroboros"),
+        ("Publish the draft here?", "ouroboros"), ("Publish it", "owner"), ("Тут не про работу.", "ouroboros")]
+    assert json.loads(_configure_presence(door, "set_state", place.place_id, state="active"))["ok"]  # still the turn's act
+    assert p.get_place(root, place.place_id).state == "active"
+
+
 def test_author_lending_and_stop(focus):
     from ouroboros.conversation_lease import PresenceTurnGate, live_author, live_authors
     root, _place, _admission, event = focus

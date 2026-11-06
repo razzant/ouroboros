@@ -41,7 +41,8 @@ def test_manual_and_release_callers_share_one_full_browser_lane():
     push_path = REPO_ROOT / ".github" / "workflows" / "ui-browser-push.yml"
     caller = _workflow()["jobs"]["ui-smoke"]
     assert " ".join(caller["if"].split()) == (
-        "github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')"
+        "(github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))"
+        " && inputs.scope != 'tests'"
     )
     assert caller["uses"] == "./.github/workflows/ui-browser.yml"
     assert "steps" not in caller, "the browser steps belong to the shared lane"
@@ -102,7 +103,8 @@ def test_the_lane_runs_only_on_a_dispatch_or_a_release_tag():
     job = _workflow()["jobs"][JOB]
     condition = " ".join(str(job["if"]).split())
     assert condition == (
-        "github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')"
+        "(github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))"
+        " && inputs.scope != 'tests'"
     )  # a release tag joins the lane to the release bar (batch №13 item 4); push/PR never, condition
     assert job["runs-on"] == "ubuntu-latest"
     # The budget must clear the suite, not merely exist. `> 0` accepted

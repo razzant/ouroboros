@@ -249,8 +249,17 @@ def inventory(root: pathlib.Path, task_id: str, row: Dict[str, Any]) -> Tuple[Li
             continue
         for entry in entries:
             try:
-                if str(_json(entry / marker).get("task_id") or "") == task_id:
-                    places.append(str(entry))
+                if str(_json(entry / marker).get("task_id") or "") != task_id:
+                    continue
+                places.append(str(entry))
+                if kind == "review_seats":  # the seat's own scratch, held by its home beside the copy
+                    for owner in (sorted((entry / SESSION_SCRATCH_DIRNAME).iterdir())
+                                  if (entry / SESSION_SCRATCH_DIRNAME).is_dir() else ()):
+                        with contextlib.suppress(FileNotFoundError):
+                            scratch = str(_json(owner / "scratch.json").get("path") or "")
+                            places.append(scratch)
+                            if scratch:
+                                pins[scratch] = str(owner / "scratch.json")
             except FileNotFoundError:
                 continue  # made before its marker: owned through a recorded round, never this task's by name
             except (OSError, ValueError):

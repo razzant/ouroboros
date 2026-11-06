@@ -35,13 +35,14 @@ def require_delegated_review_threads(gateway: Any) -> None:
 def ensure_review_thread(
     gateway: Any, custody: Any, thread_id: str, *, route: Any, root: str,
     surface: str, slot_id: str, task_id: str, access: str = "readonly",
-    workspace_root: str = "",
+    workspace_root: str = "", ephemeral: bool = False,
 ) -> str:
     """Keep author identity separate from a persistent delegated checking copy.
 
     The host owns the writable copy and its evidence. The thread binds that
     copy at creation; subsequent turns never retarget it or recreate the thread.
-    Read-only seats retain the in-place Ask path.
+    Read-only seats retain the in-place Ask path. ``ephemeral``: the root is
+    host-minted and registers nothing (``delegate_registration_policy.resolve_registration``).
     """
     writable = access != "readonly"
     if writable:
@@ -65,19 +66,20 @@ def ensure_review_thread(
         return ensure_execution_thread(
             gateway, route=route, root=root, mode="agent" if writable else "ask",
             access=access, workspace_root=workspace_root if writable else "",
-            title=f"Ouroboros {surface} · {slot_id}", idempotency_key=key)
+            title=f"Ouroboros {surface} · {slot_id}", idempotency_key=key, ephemeral=ephemeral)
     except ValueError as exc:
         from ouroboros.review_execution import ReviewRouteUnavailable
 
         raise ReviewRouteUnavailable(str(exc), code="review_thread_id_missing") from exc
 
 
-def ensure_execution_thread(gateway: Any, *, route: Any, root: str, mode: str,
-                            access: str, workspace_root: str, title: str, idempotency_key: str) -> str:
-    """Create a thread binding one stable project and, when supplied, its private copy."""
+def ensure_execution_thread(gateway: Any, *, route: Any, root: str, mode: str, access: str,
+                            workspace_root: str, title: str, idempotency_key: str, ephemeral: bool = False) -> str:
+    """Create a thread binding one stable project and, when supplied, its private copy; on a
+    host-minted root (``ephemeral``) the engine registers nothing and keeps it in its global partition."""
     request: Dict[str, Any] = {
         "title": title,
-        "scope": {"kind": "project", "root": root},
+        "scope": {"kind": "project", "root": root, **({"ephemeral": True} if ephemeral else {})},
         "mode": mode,
         "workspace": "delegated" if workspace_root else "in_place",
         "authPreference": "subscription",

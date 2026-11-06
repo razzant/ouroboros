@@ -39,6 +39,11 @@ def _rs():
 
 
 _ACTIVE_REVIEW_OPERATION_STATES = frozenset({"in_flight", "custody_lost"})
+# A row that names its operation and whose state says that operation settled: a collector projects ``late_settled``
+# only when no invocation is pending (``review_custody.finalize_review_actor``) and the start checkpoint never binds a
+# settled row, so a start token such a row still carries is a lease nobody released, never custody (#2710). An
+# outcome merged without an operation (``review_change_custody._merge_seat``) proves nothing: its row keeps the token.
+_CLOSED_OPERATION_STATES = frozenset({"settled", "late_settled"})
 # How long a seat launch waits for the shared review-state lock before binding its start token
 # (``checkpoint_pending_review_invocation``). That binding is bookkeeping before a paid start, so
 # other writers of the file are waited out instead of refusing the seat. A transport bound, not a
@@ -68,16 +73,26 @@ def _attempt_review_roster_rows(item: "CommitAttemptRecord") -> List[Dict[str, A
     return rows
 
 
+def _start_token_open(row: Dict[str, Any]) -> bool:
+    """Whether the row's start token still holds custody: it is there and the row's own named operation has not
+    settled (``_CLOSED_OPERATION_STATES``). Every reading of a row's token goes through here."""
+    return bool(str(row.get("pending_invocation_id") or "").strip()) and not (
+        str(row.get("operation_id") or "").strip() and str(row.get("operation_state") or "") in _CLOSED_OPERATION_STATES)
+
+
 def _review_roster_row_is_pending(row: Dict[str, Any]) -> bool:
+    """A seat still owed: its start token holds (``_start_token_open``), its own late flag is up, or its operation is
+    in flight or lost."""
     return bool(
-        str(row.get("pending_invocation_id") or "").strip()
+        _start_token_open(row)
         or row.get("late_result_pending")
         or str(row.get("operation_state") or "") in _ACTIVE_REVIEW_OPERATION_STATES
     )
 
 
 def _attempt_has_active_review_custody(item: "CommitAttemptRecord") -> bool:
-    """One SSOT for overlap, startup, eviction, and payload compaction."""
+    """One SSOT for overlap, startup, eviction, and payload compaction. Pure and in memory: it runs under the
+    state lock on every save (the ledger's exact repair runs outside it, ``review_change_custody``)."""
     if str(getattr(item, "status", "") or "") == "reviewing" or bool(
         getattr(item, "late_result_pending", False)
     ):
@@ -85,9 +100,10 @@ def _attempt_has_active_review_custody(item: "CommitAttemptRecord") -> bool:
     # A terminal lifecycle projection can still race a live delegated/API row;
     # preserve that exact roster. A synthetic malformed-container
     # ``custody_lost`` row on a historical terminal attempt is forensic damage,
-    # not reopened physical work, so it does not make the old attempt active.
+    # not reopened physical work, so it does not make the old attempt active;
+    # neither does a settled row's leftover start token.
     return any(
-        str(row.get("pending_invocation_id") or "").strip()
+        _start_token_open(row)
         or str(row.get("operation_state") or "") == "in_flight"
         for row in _attempt_review_roster_rows(item)
     )
@@ -108,7 +124,7 @@ def attempt_counted_seats_closed(item: "CommitAttemptRecord") -> bool:
     rows = _attempt_review_roster_rows(item)
     counted = counted_roster_rows(rows)
     return bool(counted) and item.status != "reviewing" and not counted_pending(rows) and not any(
-        _row_is_pending(row) or row.get("pending_invocation_id") for row in counted)
+        _row_is_pending(row) or _start_token_open(row) for row in counted)
 
 
 def _row_operation(row: Dict[str, Any]) -> tuple:
@@ -305,7 +321,7 @@ def settle_completed_round(
         return None
     if (record.get("verdict") or {}).get("aggregate") in (VERDICT_PASS, VERDICT_FAIL):
         return attempt
-    if record.get("state") != STATE_SETTLED or any(_row_is_pending(row) or row.get("pending_invocation_id") for row in rows):
+    if record.get("state") != STATE_SETTLED or any(_row_is_pending(row) or _start_token_open(row) for row in rows):
         return None  # retiring replays needs the whole wave closed, its additional seats included
     operations = {str(row.get("operation_id") or "") for row in rows} - {""}
     settled = getattr(usage_ctx, "_review_settled_attempts", None)

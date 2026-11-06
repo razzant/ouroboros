@@ -266,6 +266,7 @@ def _write_evolution_campaign(
 ) -> bool:
     path = _evolution_campaign_path()
     from supervisor import state
+    from supervisor import git_ops
 
     state.assert_test_data_path(path)
     lock_fd = None
@@ -276,35 +277,39 @@ def _write_evolution_campaign(
         if lock_fd is None:
             return False
     try:
-        current = read_json_dict(path)
-        if current is None and path.is_file():   # present but unreadable is NOT "no campaign"
-            log.warning("Refusing evolution campaign write: %s exists but is unreadable", path)
-            return False
-        current = current or {}
-        current_id = str(current.get("id") or "")
-        data_id = str(data.get("id") or "")
-        expected_id = data_id if expected_campaign_id is None else str(expected_campaign_id or "")
-        if current_id and current_id != expected_id:
-            log.warning(
-                "Refusing stale evolution campaign write: current=%s expected=%s",
-                current_id, expected_id,
-            )
-            return False
-        if (
-            current_id == data_id
-            and current.get("status") not in {"active", "paused"}
-            and data.get("status") in {"active", "paused"}
-        ):
-            log.warning("Refusing stale resurrection of terminal evolution campaign %s", data_id)
-            return False
-        if expected_active_transaction is not None:
-            current_tx = current.get("active_transaction", {})
-            if current_tx != expected_active_transaction:
-                log.warning("Refusing stale evolution transaction write for campaign %s", data_id)
+        with git_ops.bootstrap_transition_lock(timeout_sec=float(_lock_timeout_sec)):
+            current = read_json_dict(path)
+            if current is None and path.is_file():   # present but unreadable is NOT "no campaign"
+                log.warning("Refusing evolution campaign write: %s exists but is unreadable", path)
                 return False
-        path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_json(path, data, trailing_newline=True)
-        return True
+            current = current or {}
+            current_id = str(current.get("id") or "")
+            data_id = str(data.get("id") or "")
+            expected_id = data_id if expected_campaign_id is None else str(expected_campaign_id or "")
+            if current_id and current_id != expected_id:
+                log.warning(
+                    "Refusing stale evolution campaign write: current=%s expected=%s",
+                    current_id, expected_id,
+                )
+                return False
+            if (
+                current_id == data_id
+                and current.get("status") not in {"active", "paused"}
+                and data.get("status") in {"active", "paused"}
+            ):
+                log.warning("Refusing stale resurrection of terminal evolution campaign %s", data_id)
+                return False
+            if expected_active_transaction is not None:
+                current_tx = current.get("active_transaction", {})
+                if current_tx != expected_active_transaction:
+                    log.warning("Refusing stale evolution transaction write for campaign %s", data_id)
+                    return False
+            path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(path, data, trailing_newline=True)
+            return True
+    except (OSError, RuntimeError, TimeoutError) as exc:
+        log.warning("Refusing evolution campaign write while bootstrap transition owns checkout: %s", exc)
+        return False
     finally:
         if lock_fd is not None:
             state.release_file_lock(state.STATE_LOCK_PATH, lock_fd)

@@ -785,7 +785,7 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
         # outbox BEFORE the history salvage below can replace the preserved copy
         # a held host salvage points at (both live at salvaged/<task>.txt).
         adopted_answer = _adopt_held_answer(_q, task, task_id, attempt, terminal_reason)
-        # 3. Reconstruct real cost/rounds from durable llm_usage (the killed worker never
+        # 3. Reconstruct real cost/rounds from the usage ledger (the killed worker never
         #    finalized; the event would otherwise carry zeros and understate metrics).
         #    A failure here cannot abort teardown before the slot is respawned.
         try:

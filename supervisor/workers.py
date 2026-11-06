@@ -1233,6 +1233,10 @@ def spawn_workers(n: int = 0) -> None:
                 "spawn_workers requires an empty pool; stop the current workers "
                 "or use respawn_worker for one slot"
             )
+    from supervisor.worker_pool_lifecycle import record_demand_forecast
+
+    # A new generation: no pass of it has computed demand yet (an in-process restart keeps the module).
+    record_demand_forecast(None, reason="new_pool_generation", assignment_pass=False)
     # Never hold the queue's process-local threading.RLock across fork: a child
     # would inherit it owned by a vanished thread.  The dedicated lifecycle lock
     # is not used by worker code and serializes competing full-pool starts/kills.
@@ -1306,12 +1310,17 @@ def _partition_slots_for_stop(lanes: Optional[frozenset]) -> List[Worker]:
     """Under the lifecycle serializer, then Q (``kill_workers``' order): the slots a stop owns, marked ``reaping``.
 
     ``lanes`` None owns every slot and ends the generation (no carrier grows behind the stop).
+    A stop owning the project slots also leaves the growth forecast unknown: it described them.
     """
     doomed = [w for w in WORKERS.values() if lanes is None or getattr(w, "lane", LANE_PROJECT) in lanes]
     if lanes is None:
         from supervisor import conversation_lane
 
         conversation_lane.arm(None)
+    if lanes is None or LANE_PROJECT in lanes:
+        from supervisor.worker_pool_lifecycle import record_demand_forecast
+
+        record_demand_forecast(None, reason="pool_stopped", assignment_pass=False)
     for w in doomed:
         # The timeout reaper's ownership mark: assignment, the health check
         # and the crash detector skip the slot while it is torn down.

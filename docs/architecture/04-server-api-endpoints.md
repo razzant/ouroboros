@@ -174,7 +174,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | GET | `/api/storage/free/items` | `StorageFreeItemsResponse`: one `view=` page: `pool`, `excluded`, `manual` or `outcomes` |
 | POST | `/api/storage/free/cancel` | stop preview/run; freed stays freed |
 | GET | `/api/evolution-data` | |
-| GET | `/api/projects` | optional `chat_id`: that active room from the full registry, beyond sidebar limits (missing → empty `projects`; unreadable → error) |
+| GET | `/api/projects` | 200 rows; `all=1` all; `id` (active/deleting) or `chat_id` (active): one room (missing → none; unreadable → error) |
 | POST | `/api/projects` | |
 | POST | `/api/projects/from-task` | |
 | POST | `/api/projects/{project_id}/update` | |

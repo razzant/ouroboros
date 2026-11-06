@@ -337,9 +337,6 @@ def inspection_registry(root: str, drive_root: Any, task_id: str = "") -> tuple[
     ctx.task_metadata["native_data_root"] = str(drive_root)
     registry.set_context(ctx)
     schemas = [schema for schema in (registry.get_schema_by_name(name) for name in _INSPECTION_TOOL_NAMES) if schema]
-    if not any(s["function"]["name"] == "compact_context" for s in schemas):
-        from ouroboros.tools.compact_context import get_tools
-        schemas.append({"type": "function", "function": get_tools()[0].schema})
     if not schemas:
         raise ReviewRouteUnavailable(
             "no inspection tool schemas are projectable for the native "
