@@ -582,7 +582,6 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
                 <div class="updates-attempt" id="updates-attempt" hidden>
                     <details class="ui-disclosure updates-attempt-details" id="updates-attempt-details">
                         <summary><time id="updates-attempt-time">Last attempt</time><span class="ui-status" id="updates-attempt-headline"></span></summary>
-                        <p class="updates-hint" id="updates-attempt-text"></p>
                         <dl class="dashboard-facts" id="updates-attempt-facts"></dl>
                         <details class="ui-disclosure" id="updates-attempt-raw" hidden>
                             <summary id="updates-attempt-raw-label">Raw record</summary>
@@ -590,6 +589,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
                         </details>
                     </details>
                     <button type="button" class="btn btn-default btn-sm" id="updates-attempt-restore" hidden>Restore previous version</button>
+                    <p class="updates-hint" id="updates-attempt-text"></p>
                 </div>
                 <details class="ui-disclosure updates-facts" id="updates-facts-more" hidden><summary>Details</summary><dl class="dashboard-facts" id="updates-facts"></dl></details>
                 <section class="updates-letter" id="updates-letter" aria-labelledby="updates-letter-label" hidden>
@@ -879,6 +879,8 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         attemptWhen.dateTime = view.when;
         attemptText.textContent = view.text;
         attemptText.hidden = !view.text;
+        // A confirmed success's words are the record's (in its Details); any other outcome's stay in view under the line.
+        if (view.tone === 'ok') attemptFacts.before(attemptText); else if (attemptText.parentElement !== attemptSection) attemptSection.append(attemptText);
         // The retained samples (after_update) join the rows only of the attempt they name, so they appear with this
         // section, which stays hidden while an update runs (owner 25.10: A). A record of another operation is never
         // read as this attempt's: it keeps only its exact text below, labelled so.

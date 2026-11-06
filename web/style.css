@@ -6114,6 +6114,11 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     .dashboard-facts { grid-template-columns: minmax(0, 1fr); row-gap: 0; }
     .dashboard-facts dd { margin-bottom: var(--space-1); }
 }
+/* Under a finger every control and summary reaches out to the touch minimum (ui.css "Touch reach"); a disclosure that
+   follows the headline's actions (or the letter's last line) keeps the two reaches apart, so neither covers the other. */
+@media (pointer: coarse) {
+    .dashboard-hero + .ui-disclosure, .updates-letter-details { margin-top: var(--space-5); }
+}
 
 /* P4: Activity subtab — cron schedules, running/queued tasks, background status. */
 .activity-scroll {
@@ -8884,12 +8889,15 @@ body.keyboard-open .project-panel {
     color: var(--text-meta);
 }
 /* The last attempt is one quiet line of the record; open, it takes the row, and its Restore keeps its end. */
-.updates-attempt { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
+.updates-attempt { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); container: updatesattempt / inline-size; }
+/* Words of an outcome that is not a plain success stay in view under the line (a success keeps them in its Details). */
+.updates-attempt > .updates-hint { flex: 1 1 100%; }
 .updates-attempt-details { min-width: 0; }
 .updates-attempt-details[open] { flex: 1 1 100%; }
 .updates-attempt > .btn { margin-inline-start: auto; }
-/* A narrow tab body (a phone) puts Restore under the summary at its start, closed or open (approved A). */
-@container dashboard (max-width: 480px) {
+/* A narrow attempt (under 34rem: a phone, or a window up to about 640px) puts Restore under the summary at its start,
+   closed or open (approved A). */
+@container updatesattempt (max-width: 34rem) {
     .updates-attempt-details { flex-basis: 100%; }
     .updates-attempt > .btn { margin-inline-start: 0; }
 }
@@ -9039,6 +9047,7 @@ body.keyboard-open .project-panel {
     color: var(--text-meta);
 }
 .updates-letter-details {
+    margin-top: var(--space-3);
     font-size: var(--type-meta);
     line-height: var(--line-meta);
     color: var(--text-meta);

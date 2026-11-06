@@ -454,7 +454,8 @@ def test_the_notice_closes_itself_and_leaves_the_last_attempt_whole(updates_ui, 
     assert [request for request in transport.requests[sent:] if request[0] != "GET"] == [], transport.requests[sent:]
     refresh(page, transport, reads)
     kept = facts(page)
-    assert not kept["notice"]["shown"] and kept["rawText"] == shown["rawText"] and len(kept["pairs"]) == 8, kept
+    # Six recorded rows before the update (its unrecorded duty overruns leave their row) and the after side's one line.
+    assert not kept["notice"]["shown"] and kept["rawText"] == shown["rawText"] and len(kept["pairs"]) == 7, kept
     capture(page, f"notice-{theme}-{width}-closed", "#updates-attempt-details > summary")
 
     # The next attempt is a confirmed success: nothing to close, and its samples are the panel's.
@@ -463,7 +464,8 @@ def test_the_notice_closes_itself_and_leaves_the_last_attempt_whole(updates_ui, 
     refresh(page, transport, reads)
     success = facts(page)
     assert not success["notice"]["shown"] and success["attemptHeadline"] == "Update completed."
-    assert len(success["heads"]) == 2 and len(success["pairs"]) == 14 and success["rawLabel"] == "Raw record"
+    # Both sides recorded; the before side has no duty overruns, so its row leaves (13 rows, not 14).
+    assert len(success["heads"]) == 2 and len(success["pairs"]) == 13 and success["rawLabel"] == "Raw record"
     evidence(f"notice-{theme}-{width}", {"unconfirmed": shown, "noticeClosed": hidden, "refreshed": kept,
                                          "nextSuccess": success, "console": transport.console})
 
@@ -496,7 +498,7 @@ def test_a_frame_without_the_record_is_kept_as_a_negative_control_not_coverage(u
     current["status"] = status(record())
     refresh(page, transport, reads)
     populated = facts(page)
-    assert len(populated["heads"]) == 2 and len(populated["pairs"]) == 14
+    assert len(populated["heads"]) == 2 and len(populated["pairs"]) == 13  # the before side records no duty overruns
     evidence("negative-control", {
         "without_after_update": {"rows_painted": len(without["pairs"]), "counts_as_coverage": False, "facts": without},
         "with_after_update": {"rows_painted": len(populated["pairs"]), "counts_as_coverage": True}})

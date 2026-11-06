@@ -248,7 +248,8 @@ def test_write_check_and_apply_read_the_description_as_prose(engine, width, heig
                 assert "##" not in rendered and "**" not in rendered, "Markdown renders, never shows raw"
                 assert body.locator("li").count() >= 12
                 assert page.locator("#updates-letter-label").inner_text() == "What's new"
-                covers = page.locator("#updates-letter-covers").inner_text()
+                # The range the text covers is its provenance, in the letter's Details (the heading keeps its date).
+                covers = page.locator("#updates-letter-provenance").text_content()
                 assert f"{large['key']['base_sha'][:8]} → {large['key']['target_sha'][:8]}" in covers
                 assert page.locator("#updates-letter-write").inner_text() == "Rewrite"
                 assert page.locator("#updates-letter-note").is_hidden()
@@ -330,7 +331,7 @@ def test_write_check_and_apply_read_the_description_as_prose(engine, width, heig
                 current["preflight"] = _preflight(small)
                 current["status"] = _status(small, _letter(small, "ready"))
                 page.evaluate("window.__wsHandlers.get('update_progress_changed')()")
-                page.wait_for_function(f"document.querySelector('#updates-letter-covers').textContent.includes('{small['key']['target_sha'][:8]}')")
+                page.wait_for_function(f"document.querySelector('#updates-letter-provenance').textContent.includes('{small['key']['target_sha'][:8]}')")
                 page.locator("#btn-update-primary").click()
                 dialog.wait_for()
                 small_text = dialog.locator("[data-confirm-content]").inner_text()
