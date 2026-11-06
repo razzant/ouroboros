@@ -1060,7 +1060,7 @@ class MCPManager:
         runtime.last_error = attempt.get("error", "") or ("; ".join(notes) if envelope else "")
 
     def rebind(self, *, skill: str = "", server_id: str = "", event_queue: Any = None) -> List[str]:
-        """Re-derive skill bindings, retiring changed sessions; return ready servers without catalog evidence.
+        """Re-derive skill bindings, retire changed sessions and adopt catalogs; return unlisted ready servers.
         Passive reads leave discovery owed until an attempt; a worker's event queue asks the lister for it."""
         from ouroboros.mcp_task_session import retire_changed
         from ouroboros.skill_mcp import bind_config
@@ -1078,17 +1078,6 @@ class MCPManager:
                     self._servers[cfg.id] = runtime = MCPServerRuntime(config=cfg)
                 runtime.config = cfg
                 retire_changed([rt.config for rt in self._servers.values()] if self._enabled else [])
-            if fresh:
-                self.reload_catalogs()
-            unlisted = [cfg.id for _, cfg in fresh if self._enabled and cfg.enabled and not cfg.skill_error
-                        and (rt := self._servers.get(cfg.id)) is not None and rt.config == cfg and rt.catalog is None]
-        if unlisted and event_queue is not None and not self.is_lister:
-            event_queue.put_nowait({"type": "mcp_configuration_changed", "reason": "mcp_dispatch", "skill": skill})
-        return unlisted
-
-    def reload_catalogs(self) -> None:
-        """Adopt changed published files, without modifying any resident request array."""
-        with self._lock:
             for runtime in self._servers.values():
                 envelope = self._catalog_reader.load(runtime.config)
                 # A failed publication retains the local listing until disk changes.
@@ -1098,6 +1087,15 @@ class MCPManager:
                     runtime.publication_error = ""
                 if envelope is not runtime.catalog:
                     self._adopt_catalog(runtime, envelope)
+            unlisted = [cfg.id for _, cfg in fresh if self._enabled and cfg.enabled and not cfg.skill_error
+                        and (rt := self._servers.get(cfg.id)) is not None and rt.config == cfg and rt.catalog is None]
+        if unlisted and event_queue is not None and not self.is_lister:
+            event_queue.put_nowait({"type": "mcp_configuration_changed", "reason": "mcp_dispatch", "skill": skill})
+        return unlisted
+
+    def reload_catalogs(self) -> None:
+        """Rebind before validating published identities; never discover or modify resident request arrays."""
+        self.rebind()
 
     def configuration_changed(self, settings: dict, *, reason: str) -> None:
         """Server-owned boot/save/mtime event: prune, then schedule the latest pass."""

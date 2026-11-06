@@ -339,6 +339,75 @@ def test_accepted_update_relists_and_retires_sessions_while_a_disabled_row_stays
     assert "disabled" in off.text and "MCP_SKILL_UNAVAILABLE" not in off.text
 
 
+@pytest.mark.parametrize("initial_state", ["accepted_v1", "review_pending", "skill_disabled"])
+def test_registry_worker_adopts_published_skill_catalog_before_admission(world, manager, monkeypatch, initial_state):
+    """A long-lived worker must admit the lister's new revision without a direct-call rebind."""
+    from unittest.mock import Mock
+    from ouroboros.tools.registry import ToolRegistry
+
+    (world.skill_dir / "SKILL.md").write_text(_manifest('[{"id": "chrome_browser", "entry": "scripts/server.mjs"}]'))
+    world.blockers = [] if initial_state == "accepted_v1" else [initial_state]
+    path = _write_settings(world, _settings(_bound_row(task_session=False, browser_policy=False)))
+    saved = path.stat().st_mtime_ns, path.read_bytes()
+    settings = config.load_settings()
+    lister, worker = manager, mcp_client.MCPManager()
+    lister.become_lister()
+    monkeypatch.setattr(lister, "refresh_all_background", lambda *, reason: lister.refresh_all())
+    lister.configuration_changed(settings, reason="startup")
+    worker.reconfigure(settings, settings_mtime_ns=saved[0])
+    monkeypatch.setattr(mcp_client, "get_manager", lambda: worker)
+    worker._async_list_tools = Mock(side_effect=AssertionError("a worker must never discover tools"))
+    dispatched = []
+
+    async def call(cfg, name, _args, _timeout):
+        dispatched.append((cfg, name))
+        return mcp_client.ToolResult(status="ok", code="OK", text="called")
+
+    worker._async_call_tool = call
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_kw: (True, ""))
+    registry = ToolRegistry(repo_dir=world.data, drive_root=world.data)
+    registry._ctx.event_queue = queue.Queue()
+    name = "mcp_chrome_browser__browser_snapshot"
+    initial = registry.execute_result(name, {})
+    if initial_state == "accepted_v1":
+        assert initial.status == "ok" and len(dispatched) == 1
+    else:
+        assert initial.code == "MCP_CATALOG_UNAVAILABLE" and not dispatched
+        assert initial_state in worker._servers["chrome_browser"].config.skill_error
+    old = worker._servers["chrome_browser"].config
+
+    (world.skill_dir / "scripts" / "server.mjs").write_text("// server v2 (accepted)\n")
+    world.blockers = []
+    revision = load_skill(world.skill_dir, world.data).content_hash
+
+    async def list_updated(cfg, _timeout):
+        lister.listed_calls.append(cfg)
+        return [{"name": raw, "description": raw, "inputSchema": {"type": "object"}}
+                for raw in ("browser_snapshot", "browser_new")]
+
+    lister._async_list_tools = list_updated
+    with monkeypatch.context() as server:
+        server.setattr(mcp_client, "get_manager", lambda: lister)
+        skill_mcp.lifecycle_settled("chrome_browser", reason="skill_review")
+    assert lister.listed_calls[-1].skill_revision == revision != old.skill_revision
+    assert worker._servers["chrome_browser"].config is old, "the worker has not observed the lifecycle event"
+    catalog = mcp_catalog.catalog_path("chrome_browser")
+    published = catalog.stat().st_mtime_ns, catalog.read_bytes()
+    assert json.loads(published[1])["identity"] == mcp_catalog.identity(lister.listed_calls[-1])
+    listed, retired, called = len(lister.listed_calls), len(manager.retired), len(dispatched)
+
+    # No worker.rebind(), schema read, settings write or restart between publication and real admission.
+    results = [registry.execute_result(tool, {}) for tool in (name, name, "mcp_chrome_browser__browser_new")]
+    assert [result.code for result in results] == ["OK"] * 3, [result.text for result in results]
+    assert [raw for _, raw in dispatched[called:]] == ["browser_snapshot", "browser_snapshot", "browser_new"]
+    assert all(cfg.skill_revision == revision and not cfg.skill_error for cfg, _ in dispatched[called:])
+    assert len(manager.retired) > retired and manager.retired[-1][0].skill_revision == revision
+    worker._async_list_tools.assert_not_called()
+    assert not worker.is_lister and len(lister.listed_calls) == listed and registry._ctx.event_queue.empty()
+    assert (path.stat().st_mtime_ns, path.read_bytes()) == saved
+    assert (catalog.stat().st_mtime_ns, catalog.read_bytes()) == published
+
+
 def test_lister_answers_a_worker_report_without_restart_refresh_or_incidental_reads(world, manager, monkeypatch):
     lister, worker = manager, mcp_client.MCPManager()
     lister.become_lister()
