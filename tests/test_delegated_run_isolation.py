@@ -1562,6 +1562,26 @@ class TestAmbiguityAcknowledgment:
         custody._CUSTODY.clear()
 
 
+    def test_a_busy_target_is_not_started_and_the_same_run_integrates_later(self, tmp_path, monkeypatch):
+        # #2889, both directions: a target another git step holds answers INTEGRATE_NOT_STARTED naming the run
+        # and the target, with no conflict verdict; once free, the same run applies.
+        from ouroboros.tools import subagent_integration as si
+
+        target, ctx, handle, drive = self._settled_run(
+            tmp_path, monkeypatch, snapshot_id="snapBusy", run_id="run-busy")
+        with monkeypatch.context() as patched:
+            patched.setattr(si, "_locked_apply", lambda *a, **k: {
+                "proc": None, "drifted": [], "drift_error": "", "staging_failure": "", "reverted": False,
+                "lock_error": "TimeoutError: held by task other"})
+            out = si._integrate_delegated_patch(ctx, "run-busy", "apply", "")
+        assert "INTEGRATE_NOT_STARTED: run run-busy into" in out and "the target is busy" in out, out
+        assert "CONFLICT" not in out and "LOCK_TIMEOUT" not in out, out
+        custody._CUSTODY.clear()
+        out = si._integrate_delegated_patch(ctx, "run-busy", "apply", "")
+        assert "✅ Integrated" in out, out
+        custody._CUSTODY.clear()
+
+
 class TestRootMutationAuthority:
     def test_external_workspace_root_derives_the_mutating_shape(self, tmp_path):
         # B5 (owner 2=A): the ROOT of an external-workspace task holds no acting

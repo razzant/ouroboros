@@ -118,12 +118,13 @@ def test_continue_brief_survives_overflow_relocation(tmp_path, monkeypatch, fore
     for index, request in enumerate(inputs):
         system = json.dumps([m for m in request["messages"] if m["role"] == "system"])
         assert "PREDECESSOR-CONTRACT-SENTINEL" not in system and "predecessor_authority" in system
-        # Low projects books as navigation, and a confirmed Max overflow retries in task-local
-        # Low; the stored inclusion choice survives that rendering policy. User content may be blocks.
+        # Low projects books as navigation. A Max overflow without numbers narrows memory first and keeps the books
+        # (owner order 7A: memory before books, which wait for a further refusal; 06.11), so the stored inclusion
+        # choice keeps the whole handbook in every Max request here. User content may be blocks.
         assert sum(block.get("text", "").startswith("## DEVELOPMENT.md\n")
                    for m in request["messages"] if m["role"] == "system"
-                   for block in m["content"]) == int(flag is True and mode == "max" and index < 2)
-        if mode == "low" or index == 2:
+                   for block in m["content"]) == int(flag is True and mode == "max")
+        if mode == "low" or (index == 2 and flag is not True):
             assert "## DEVELOPMENT.md (navigation map)" in system
         users = json.dumps([m for m in request["messages"] if m["role"] == "user"], ensure_ascii=False)
         assert json.dumps(task["text"], ensure_ascii=False)[1:-1] in users
@@ -133,7 +134,7 @@ def test_continue_brief_survives_overflow_relocation(tmp_path, monkeypatch, fore
     assert len({request["model"] for request in inputs}) == 1
     assert inputs[1]["reasoning_effort"] == inputs[2]["reasoning_effort"]
     refused_read = next(m for m in inputs[1]["messages"] if m.get("tool_call_id") == "read-evidence")
-    # Books (Max) or retained host sections (Low) pay before the just-chosen read.
+    # Memory (Max) or retained host sections (Low) pay before the just-chosen read.
     assert refused_read in inputs[2]["messages"]
     assert not [m for m in registry._ctx.messages if _capsule_metadata(m)[1]]
     if mode == "low":

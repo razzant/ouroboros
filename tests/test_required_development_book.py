@@ -547,7 +547,8 @@ def test_neither_refusal_pass_pays_for_the_book(monkeypatch, passes, book, targe
     ctx, measured = _pass_context(None, book)
     steps = lmc.REFUSAL_PASSES[passes]
     assert lmc._apply_refusal_pass(ctx, steps, measured, target, slack) is False
-    assert [name for name, _ in calls] == (list(steps) if runs else [])
+    rest = ["memory_rest"] if "unseen_bodies" in steps else []  # memory's rest before a just-chosen body (2A)
+    assert [name for name, _ in calls] == (list(steps) + rest if runs else [])
     if runs and target:
         assert calls[0][1] == target - book
 

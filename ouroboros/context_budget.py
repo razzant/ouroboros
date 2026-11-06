@@ -88,7 +88,11 @@ NANO_MIN_HEADROOM_TOKENS = 8_192
 RECLAIM_LOW_WATER_DIVISOR = 8
 #: An unknown reclaim target: the step takes everything its category can give (the refusal passes).
 WHOLE_CATEGORY = 2**31 - 1
-REFUSAL_PASSES = (("host_copies", "bodies"), ("floor", "books", "unseen_bodies"))
+# The owner's order (7A, 09.10.2026), sized step by step: superseded host rows, then bodies already shown, oldest
+# first, for the measured excess only, then memory detail for the rest and the return-after-fold slack (its floor
+# lowers the books only where memory cannot make room, BIBLE P1); books and unseen bodies after a further refusal,
+# then memory's rest and a just-chosen body last (owner 2A, ``loop_model_call._apply_refusal_pass``).
+REFUSAL_PASSES = (("host_copies", "bodies", "floor"), ("books", "unseen_bodies"))
 # A physical unfit of a directly required handbook is its owner's or caller's to resolve; the host switches nothing.
 # ``{}`` takes "; a Continue keeps it" exactly where that terminal's cause offers Continue (``owner_continue``).
 REQUIRED_BOOK_CHOICES = ("The choices are a route with a larger window, the owner's Context mode, or a new task "
