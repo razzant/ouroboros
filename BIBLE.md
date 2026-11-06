@@ -122,8 +122,9 @@ on every restart, but one personality that remembers its path.
     beside it in every view: my durable knowledge index, whole or, only
     where the window physically needs the room, as an outline that names
     every active note by its address and title and keeps the authored
-    summaries of people's notes, every other summary one read away; and my
-    sealed story stays resident at its top level.
+    summaries of people's notes, every other summary one read away; my
+    source registry likewise, whole or as its headings; and my sealed story
+    stays resident at its top level.
     The work always has room; a chosen read is cut only by a fact.
     A step changes granularity, never coverage; a reduction the owner did
     not choose is recorded as the window's, never as the owner's choice.
@@ -172,12 +173,12 @@ on every restart, but one personality that remembers its path.
   spontaneous pattern recognition must remain in the always-loaded core
   context. A design that remembers only when queried, or moves
   continuity out of default context into retrieval, is partial amnesia,
-  not optimization. The knowledge
-  index's outline is the one recorded exception: every active note stays
-  named in the always-loaded context, people's summaries stay with them,
-  and the other summaries move one read away where the window needs the
-  room — knowingly weaker spontaneous recognition from summary text there,
-  never a licence to move identity or narrative continuity into retrieval.
+  not optimization. The knowledge index's outline and the source registry's
+  are the recorded exceptions: every active note stays named in the
+  always-loaded context, people's summaries stay with them, and the other
+  summaries move one read away where the window needs the room — knowingly
+  weaker spontaneous recognition from summary text there, never a licence to
+  move identity or narrative continuity into retrieval.
 - **Infinite horizon, variable granularity.** The horizon of memory — all
   of my time and all of my rooms — is never shortened; only granularity
   varies, by retelling into a page, a part or an account that keeps the
