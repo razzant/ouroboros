@@ -111,6 +111,7 @@ def _prepare_self_change(ctx: ToolContext, resume: str = "", in_place: bool = Fa
         "an exact reviewed commit is adopted with request_restart(adopt_commit=...), or published through the Git/PR tools."
         + (f" The earlier checkout of this task was gone; its commits remain on branch {bound['previous_branch']}."
            if bound.get("previous_branch") else "") + body_candidate.attribution_note(bound.get("attribution"))
+        + (f"\n{neighbours}" if (neighbours := body_candidate.neighbour_note(ctx, with_ended=True)) else "")
     )
 
 
@@ -231,8 +232,9 @@ def self_change_tool_entries() -> list:
                 "never reaches the files the live server imports. Body file writes and acting self_worktree "
                 "children prepare it automatically; processes do not, so call this first for process-first work. "
                 "Idempotent. resume deliberately continues ONE exact retained candidate (its id, owner task or "
-                "branch) whose previous owner has ended. in_place is Cyber Pro's explicit decision to edit the "
-                "serving checkout directly instead."),
+                "branch) whose previous owner has ended. The receipt, like the first automatic bind, names other open "
+                "candidates with the paths they have changed, read at that moment. in_place is Cyber Pro's explicit "
+                "decision to edit the serving checkout directly instead."),
             "parameters": {"type": "object", "properties": {
                 "resume": {"type": "string", "description": "Exact retained candidate to continue; omit for this task's own."},
                 "in_place": {"type": "boolean", "description": "Cyber Pro only: author the serving checkout directly."},
