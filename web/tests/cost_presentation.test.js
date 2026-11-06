@@ -315,13 +315,13 @@ test('cost dashboard sets the limit against known spend, open holds beside it (#
 });
 
 test('breakdown buckets say open and unpriced amounts in the card\'s words, never a free zero', () => {
-    // Subscription calls settle without a price: none will arrive, so not pending.
+    // Subscription calls settle without a price: none will arrive, so not pending; a session row may have no call.
     assert.equal(costBucketPresentation({
-        cost: 0, calls: 1, unknown_unmetered: 1, non_final_rows: 1, accounting_open_rows: 0, cost_final: false,
-    }), 'Cost not priced');
+        cost: 0, calls: 0, unknown_unmetered: 3, non_final_rows: 3, accounting_open_rows: 0, cost_final: false,
+    }), 'Cost not priced · 3 without a price');
     assert.equal(costBucketPresentation({
         cost: 0, calls: 1, unknown_unmetered: 1, non_final_rows: 1, accounting_open_rows: 1, cost_final: false,
-    }), 'Cost pending');
+    }), 'Cost pending · 1 without a price');
     assert.equal(costBucketPresentation({
         cost: 0, calls: 1, unknown_unmetered: 0, non_final_rows: 1, accounting_open_rows: 1, cost_final: false,
     }), 'Cost pending');
@@ -336,7 +336,7 @@ test('breakdown buckets say open and unpriced amounts in the card\'s words, neve
     }), '$0.25 (pending)');
     // An older payload without the open count: its non-final rows past the unpriced ones are the open ones.
     assert.equal(costBucketPresentation({ cost: 0, calls: 1, unknown_unmetered: 1, non_final_rows: 1, cost_final: false }),
-        'Cost not priced');
+        'Cost not priced · 1 without a price');
     assert.equal(costBucketPresentation({
         cost: 0, calls: 1, unknown_unmetered: 0, non_final_rows: 0, cost_final: true,
     }), '$0.00');

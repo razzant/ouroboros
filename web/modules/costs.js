@@ -30,8 +30,9 @@ function optionalFiniteNumber(value) {
 
 /** Render one breakdown bucket in the task card's words: `Cost pending` while a call of it is still open and
  *  nothing is priced, `Cost not priced` once its calls settled without a price (subscription work among
- *  them: no price will arrive), `Tracked:` before a priced subtotal beside unpriced calls with their count,
- *  and `(pending)` after an amount more may join. Never an unpriced or open zero as free. */
+ *  them: no price will arrive), `Tracked:` before a priced subtotal beside unpriced calls, and `(pending)`
+ *  after an amount more may join; a row with calls without a price counts them (a subscription row may have
+ *  no physical call). Never an unpriced or open zero as free. */
 export function costBucketPresentation(info) {
     const cost = optionalFiniteNumber(info?.cost);
     if (cost === null) return 'unknown';
@@ -39,8 +40,8 @@ export function costBucketPresentation(info) {
     const nonFinal = optionalFiniteNumber(info?.non_final_rows) || 0;
     // Rows that can still settle; an older payload without the count has its non-final rows past the unpriced ones.
     const open = (optionalFiniteNumber(info?.accounting_open_rows) ?? nonFinal - unknown) > 0;
-    if (cost === 0 && (open || unknown > 0)) return open ? 'Cost pending' : 'Cost not priced';
-    const amount = `${unknown > 0 ? 'Tracked: ' : ''}${formatUsdKnown(cost)}${open ? ' (pending)' : ''}`;
+    const amount = cost === 0 && (open || unknown > 0) ? (open ? 'Cost pending' : 'Cost not priced')
+        : `${unknown > 0 ? 'Tracked: ' : ''}${formatUsdKnown(cost)}${open ? ' (pending)' : ''}`;
     return unknown > 0 ? `${amount} · ${Math.trunc(unknown).toLocaleString('en-US')} without a price` : amount;
 }
 

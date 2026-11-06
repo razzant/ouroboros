@@ -45,6 +45,13 @@ def test_the_drift_line_reads_the_saved_drift_pair_and_never_the_usage_store(tmp
     line = next(row for row in context_health.build_health_invariants(env).splitlines() if "BUDGET DRIFT" in row)
     assert "76.1%" in line and "$6.41" in line and "$26.79" in line
     assert "29331" not in line and "30176" not in line
+    # A state written before the checked field keeps its older ledger field (/status reads the same).
+    (tmp_path / "state" / "state.json").write_text(json.dumps({
+        "budget_drift_alert": True, "budget_drift_pct": 76.1, "openrouter_total_usd": 30176.79,
+        "session_total_snapshot": 30150.0, "openrouter_ledger_settled_usd": 29331.41,
+        "session_openrouter_settled_snapshot": 29325.0}), encoding="utf-8")
+    line = next(row for row in context_health.build_health_invariants(env).splitlines() if "BUDGET DRIFT" in row)
+    assert "$6.41" in line and "$26.79" in line
 
 
 def test_counts_and_obligations_with_an_action_stay(tmp_path):
