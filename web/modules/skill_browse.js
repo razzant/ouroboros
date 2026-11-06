@@ -99,7 +99,7 @@ function installedHere(item, row) {
  * catalog item, its source, the installed listing (`listed`: it has been read)
  * and the installs started here.
  */
-export function browseCardState(item, { source = null, installed = null, listed = true, pending = null, failure = '', reviewing = false } = {}) {
+export function browseCardState(item, { source = null, installed = null, listed = true, pending = null, failure = '', reviewing = false, pageModules = {} } = {}) {
     const id = escapeHtml(item.id);
     const act = (label, action, tone = 'default', extra = '') => buttonHtml(label, { tone, attrs: `data-browse-action="${action}" data-item="${id}"${extra ? ` ${extra}` : ''}` });
     if (pending && !installed?.lifecycle_virtual) {
@@ -131,11 +131,11 @@ export function browseCardState(item, { source = null, installed = null, listed 
             const other = installed.install?.source?.name || 'another source';
             return { status: statusHtml(`You have another “${escapeHtml(item.name)}” (from ${escapeHtml(other)})`, 'warn'), action: act('Compare…', 'compare') };
         }
-        const model = installedSkillModel(installed, { reviewing });
+        const model = installedSkillModel(installed, { reviewing, pageModules });
         const v = escapeHtml(versionText(installed.version));
         const update = installed.install?.update_available;
         const retryUpdate = update && installed.install?.update_rejected;
-        if (model.modified && !retryUpdate) return { status: statusHtml(`Installed · modified here`, 'muted'), action: act('Details', 'open', 'ghost') };
+        if (model.modified && !retryUpdate && !model.needs) return { status: statusHtml(`Installed · modified here`, 'muted'), action: act('Details', 'open', 'ghost') };
         if (installed.lifecycle_pending) return { status: statusHtml(escapeHtml(installed.lifecycle_kind === 'update' ? 'Updating…' : 'Working…'), 'muted', { work: true }), action: '' };
         if (/Reviewing/.test(model.chip)) {
             return { status: statusHtml('Reviewing · you can skip', 'muted', { work: true }), action: skipReviewButtonHtml(`data-browse-action="skip" data-item="${id}"`) };
@@ -303,11 +303,13 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
 
     function stateFor(item) {
         const listing = host.installedByName();
+        const pageModules = host.pageModuleFacts?.() || {};
         const pending = state.pending.get(item.id) || null;
         return browseCardState(item, {
             source: sourceById().get(item.source_id) || null,
             installed: listing?.get(item.name) || null, listed: Boolean(listing),
             pending, failure: state.failures.get(item.id) || '',
+            pageModules,
         });
     }
 

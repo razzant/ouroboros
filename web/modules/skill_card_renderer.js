@@ -18,6 +18,7 @@ import {
     safeExternalHrefAttr as safeExternalUrl,
 } from './utils.js';
 import { installedTime } from './ui_helpers.js';
+import { HELD_LINES } from './holds.js';
 import { hasSemanticVerdict, lifecycleMeta } from './review_presentation.js';
 import {
     buttonHtml, canUpdateWithoutReview, chipHtml, connectsServices, connectsText, countsAsYoursText, grantPhrases, officialMarkHtml, permissionWords,
@@ -197,7 +198,7 @@ const skipButton = (name, label = 'Skip review') => skipReviewButtonHtml(actionA
  * trays (one sentence + actions each), whether it needs the owner, whether an
  * update waits, and why the switch is locked. Pure over the listing row.
  */
-export function installedSkillModel(skill, { reviewing = false, repairing = false, live = {} } = {}) {
+export function installedSkillModel(skill, { reviewing = false, repairing = false, live = {}, pageModules = {} } = {}) {
     const name = String(skill.name || '');
     const install = installFacts(skill);
     const modified = modifiedFacts(skill);
@@ -207,6 +208,9 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
     const conflict = skillConflictReason(skill);
     const reviewRunning = reviewRunningNow(skill, reviewing);
     const didNotFinish = reviewDidNotFinish(skill);
+    const pageFaults = (pageModules.faults || []).filter((fault) => fault.current !== false && fault.skill === name);
+    const pageHolds = (pageModules.held || []).filter((hold) => hold.skill === name);
+    const pageRuntimeStopped = Boolean(pageModules.stopped);
     // Continuing saved work is its own choice beside a new review, never folded into Try again.
     const resume = continuableReview(skill) ? smallButton('Continue review', name, 'continue_review') : '';
     const resumeNote = resume ? 'A reviewer stopped with work it can continue from where it stopped.' : '';
@@ -214,6 +218,14 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
     let chip = '';
     let needs = false;
     let lockReason = '';
+    const pageTray = (kind, page) => kind === 'fault'
+        ? trayHtml({ tone: 'warn', sentence: `Its page module stopped in this window: ${escapeHtml(boundedText(page.reason || 'unknown error', 240))}.`,
+            note: 'The skill stays installed; reload or update it to try again.' })
+        : pageRuntimeStopped
+            ? trayHtml({ tone: 'warn', sentence: `Its page module is held in this window (${escapeHtml(HELD_LINES[page.reason] || 'Held back in this window.')})`,
+                note: 'Reload this page to restore it.' })
+            : trayHtml({ tone: 'warn', sentence: `Its page module is held in this window (${escapeHtml(HELD_LINES[page.reason] || 'Held back in this window.')})`,
+                actions: smallButton('Start it', name, 'start_host_module', `data-host-module-key="${escapeHtml(page.key)}"`) });
 
     // An in-flight lifecycle job (serialized lane) takes precedence, so the card
     // shows "Turning off…" instead of the stale persisted state. A job in flight
@@ -234,7 +246,7 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
     if (repairing) chip = chipHtml('Asking Ouroboros…', 'neutral', { work: true });
 
     if (skill.lifecycle_virtual) {
-        return { chip, trays, needs, update: false, withdrawn: false, lockReason: '', sourceName, modified, install };
+        return { chip, trays, overflow: [], needs, update: false, withdrawn: false, lockReason: '', sourceName, modified, install };
     }
 
     if (install?.pending_update) {
@@ -342,9 +354,21 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
         trays.push(trayHtml({ sentence: `No longer in ${escapeHtml(sourceName)}. It keeps working; it won’t get updates.` }));
     }
 
+    const pageTrays = [];
+    if (pageFaults.length) {
+        chip = chipHtml('Off in this window', 'warn');
+        needs = true;
+        pageFaults.forEach((fault) => pageTrays.push(pageTray('fault', fault)));
+    }
+    if (pageHolds.length) {
+        chip = chipHtml('Held in this window', 'warn');
+        needs = true;
+        pageHolds.forEach((hold) => pageTrays.push(pageTray('hold', hold)));
+    }
     if (!skill.enabled && !lockReason && conflict) lockReason = `Conflicts with ${conflict}.`;
+    const allTrays = [...pageTrays, ...trays];
     return {
-        chip, trays, needs, lockReason: skill.enabled ? '' : lockReason, sourceName, modified, install,
+        chip, trays: allTrays.slice(0, 2), overflow: allTrays.slice(2), needs, lockReason: skill.enabled ? '' : lockReason, sourceName, modified, install,
         update: Boolean(update || withdrawn || install?.update_rejected || install?.pending_update), withdrawn: Boolean(withdrawn),
         widgets: skill.enabled && skill.type === 'extension' && skill.live_loaded && hasSkillUiTab(skill, live),
     };
@@ -634,7 +658,7 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
     const safeName = escapeHtml(skill.name);
     const reviewing = reviewingSkills.has(skill.name);
     const repairing = repairingSkills.has(skill.name);
-    const model = installedSkillModel(skill, { reviewing, repairing, live });
+    const model = installedSkillModel(skill, { reviewing, repairing, live, pageModules: options.pageModules });
     const description = skill.lifecycle_virtual && [skill.lifecycle_error, skill.load_error].includes(skill.description) ? '' : skill.description;
     const submit = submitHubReady(skill, options.githubTokenConfigured);
     const lockReason = model.lockReason;
@@ -666,6 +690,7 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
         <div class="skills-details-body">
             <div class="skills-details-facts" data-skill-detail-review>${detailRow('Review', `${escapeHtml(reviewSentence(skill))} ${statusBadge(skill.review_status, skill.review_gate, skill.review_profile)}`)}</div>
             <div class="skills-review-block" data-review-key="${escapeHtml(reviewBlockKey(skill))}">${reviewHistory(skill)}${reviewFindings(skill)}</div>
+            <div class="skills-details-overflow" data-skill-detail-overflow>${(model.overflow || []).join('')}</div>
             <div class="skills-details-facts" data-skill-detail-facts>
                 ${detailRow('Can use', escapeHtml(permissionWords(skill.permissions).join(' · ') || 'Nothing beyond its own folder'))}
                 ${accessRows(skill)}
@@ -714,7 +739,7 @@ export function patchInstalledSkillEnrichment(card, skill, reviewing, repairing,
         else card.removeAttribute(name);
     }
     for (const selector of ['.skills-card-status', '[data-skill-trays]', '[data-skill-errors]', '.skills-card-who', '.skills-card-marks', '.skills-card-purpose',
-        '[data-skill-detail-review]', '[data-skill-detail-facts]']) {
+        '[data-skill-detail-review]', '[data-skill-detail-overflow]', '[data-skill-detail-facts]']) {
         const target = card.querySelector(selector), source = next.querySelector(selector);
         if (!target && source) {
             if (selector === '.skills-card-purpose') card.querySelector('.skills-head-title')?.after(source);
