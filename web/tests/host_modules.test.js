@@ -64,7 +64,11 @@ async function setup({ items = [], modules = {}, href = 'http://127.0.0.1:8765/#
     const holds = createHolds({ win: { location: win.location, localStorage: local, sessionStorage: session }, now: () => clock.now });
     const runtime = createHostModules({ store, win, doc, holds, mountTimeoutMs: 40, settleMs: 10,
         draft: { insert: (text) => { drafts.push(text); return true; } },
-        notice: (text, tone, options = {}) => notices.push({ text, tone, ...options }),
+        notice: (text, tone, options = {}) => {
+            const entry = { text, tone, ...options, disposed: false, dispose() { entry.disposed = true; } };
+            notices.push(entry);
+            return entry;
+        },
         importModule: async (url) => {
             imported.push(url);
             ledgerAtImport.push({ ...ledger(local), ...ledger(session) });
@@ -151,9 +155,15 @@ test('held recovery refuses after the page has stopped', async () => {
     const item = hostItem('demo:voice', { runtime: 'client', provides: 'tts' });
     const local = seeded({ [`module:${item.key}`]: { reason: 'start', rev: 'r1', at: 1 } });
     const h = await setup({ items: [item], local, modules: { [item.render.url]: { mount: () => ({ dispose() {} }) } } });
+    let factChanges = 0;
+    const off = h.runtime.onFactsChange(() => { factChanges += 1; });
     h.runtime.stop();
     assert.equal(h.runtime.startHeldModule(item.key), false);
     assert.equal(h.runtime.pageModuleFacts().held[0].key, item.key, 'the hold stays available for a fresh page');
+    assert.equal(h.runtime.pageModuleFacts().stopped, true, 'the consumer can distinguish a stopped page runtime');
+    assert.ok(factChanges >= 1, 'stopping the page repaints Skills consumers');
+    assert.equal(h.notices[0].disposed, true, 'stopping the page removes the dead toast recovery action');
+    off();
     h.runtime.destroy();
 });
 

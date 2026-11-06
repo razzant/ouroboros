@@ -209,6 +209,7 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
     const didNotFinish = reviewDidNotFinish(skill);
     const pageFault = (pageModules.faults || []).find((fault) => fault.current !== false && fault.skill === name);
     const pageHold = !pageFault && (pageModules.held || []).find((hold) => hold.skill === name);
+    const pageRuntimeStopped = Boolean(pageModules.stopped);
     // Continuing saved work is its own choice beside a new review, never folded into Try again.
     const resume = continuableReview(skill) ? smallButton('Continue review', name, 'continue_review') : '';
     const resumeNote = resume ? 'A reviewer stopped with work it can continue from where it stopped.' : '';
@@ -219,8 +220,11 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
     const pageTray = (kind, page) => kind === 'fault'
         ? trayHtml({ tone: 'warn', sentence: `Its page module stopped in this window: ${escapeHtml(boundedText(page.reason || 'unknown error', 240))}.`,
             note: 'The skill stays installed; reload or update it to try again.' })
-        : trayHtml({ tone: 'warn', sentence: `Its page module is held in this window (${escapeHtml(HELD_LINES[page.reason] || 'Held back in this window.')})`,
-            actions: smallButton('Start it', name, 'start_host_module', `data-host-module-key="${escapeHtml(page.key)}"`) });
+        : pageRuntimeStopped
+            ? trayHtml({ tone: 'warn', sentence: `Its page module is held in this window (${escapeHtml(HELD_LINES[page.reason] || 'Held back in this window.')})`,
+                note: 'Reload this page to restore it.' })
+            : trayHtml({ tone: 'warn', sentence: `Its page module is held in this window (${escapeHtml(HELD_LINES[page.reason] || 'Held back in this window.')})`,
+                actions: smallButton('Start it', name, 'start_host_module', `data-host-module-key="${escapeHtml(page.key)}"`) });
 
     // An in-flight lifecycle job (serialized lane) takes precedence, so the card
     // shows "Turning off…" instead of the stale persisted state. A job in flight

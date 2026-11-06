@@ -40,6 +40,7 @@ export function createHostModules({ store, draft = null, win = globalThis.window
     const factListeners = new Set();
     const disposers = [];
     const announced = new Set();  // `key@revision` of held modules a notice already named
+    const heldNotices = new Set();  // persistent recovery notices owned by this page runtime
     let mode = 'idle';  // idle → running → stopped (Panic, unload, destroy)
 
     const live = (rec) => mounts.get(rec.item.key) === rec && (rec.status === 'mounting' || rec.status === 'mounted');
@@ -174,9 +175,10 @@ export function createHostModules({ store, draft = null, win = globalThis.window
             const text = reason === 'all' ? fmt('{names} did not start: this page was opened with everything held.', { names })
                 : labels.length > 1 ? fmt('{names} did not start: the page stopped while they were starting last time.', { names })
                     : fmt('{names} did not start: the page stopped while it was starting last time.', { names });
-            notice(text, 'warn', { ttl: 0, action: { label: tr('holds.start_it', 'Start it'), run() {
+            const toast = notice(text, 'warn', { ttl: 0, action: { label: tr('holds.start_it', 'Start it'), run() {
                 group.forEach((item) => startHeldModule(item.key));
             } } });
+            if (toast?.dispose) heldNotices.add(toast);
         }
     }
 
@@ -195,7 +197,7 @@ export function createHostModules({ store, draft = null, win = globalThis.window
         const held = entries.filter((item) => holds.reason(moduleHoldKey(item), item.revision))
             .map((item) => ({ key: item.key, skill: item.skill, skill_label: item.skill_label, label: item.label,
                 revision: item.revision, reason: holds.reason(moduleHoldKey(item), item.revision) }));
-        return { faults, held };
+        return { faults, held, stopped: mode === 'stopped' };
     }
 
     function sync() {
@@ -216,6 +218,9 @@ export function createHostModules({ store, draft = null, win = globalThis.window
         if (mode === 'stopped') return;
         mode = 'stopped';
         for (const rec of [...mounts.values()]) retire(rec);
+        for (const notice of heldNotices) notice.dispose?.();
+        heldNotices.clear();
+        notifyFacts();
     }
 
     function onPageHide(event) {

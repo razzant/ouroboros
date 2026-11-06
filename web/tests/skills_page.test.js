@@ -70,6 +70,17 @@ test('page-module faults participate in Installed filters and Browse state', () 
     assert.match(browse.status, /needs you/);
 });
 
+test('a held page module after Panic explains reload instead of offering a dead Start it action', () => {
+    const telegram = byName('telegram');
+    const model = installedSkillModel(telegram, {
+        pageModules: { faults: [], held: [{ key: 'module:telegram', skill: telegram.name, reason: 'start' }], stopped: true },
+    });
+    const html = model.trays.join('');
+    assert.equal(model.needs, true);
+    assert.match(html, /Reload this page to restore it/);
+    assert.doesNotMatch(html, /start_host_module/);
+});
+
 test('«Update all» covers only unmodified updates installed through trust from a row still trusted', () => {
     const list = rows();
     assert.deepEqual(updateAllCandidates(list, SOURCES).map((skill) => skill.name), ['weather']);
