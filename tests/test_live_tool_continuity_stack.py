@@ -895,9 +895,12 @@ def test_an_unanswered_result_stays_owed_across_successive_fresh_losses(host_wor
             await live.wait(lambda: live.host.connection_number == 3 and live.call.connected.is_set(), 30)
             third = live.wire
             pointers = lambda: sum(POINTER in json.dumps(v) for v in third.sent)
-            deadline = time.monotonic() + 1  # an owed pointer is offered at the first quiet moment
-            while time.monotonic() < deadline and not pointers():
-                await asyncio.sleep(.01)
+            if answered:  # nothing is owed: a bounded look at the fresh session finds no pointer
+                deadline = time.monotonic() + 1
+                while time.monotonic() < deadline and not pointers():
+                    await asyncio.sleep(.01)
+            else:  # the owed pointer waits for the first quiet moment, however late a loaded host reaches it
+                await live.wait(pointers, 30)
             await asyncio.sleep(.05)
             assert pointers() == int(not answered), (engine, thinking, answered, pointers())
             assert not third.spoken, 'a settled answer is never asked for again'
