@@ -713,20 +713,27 @@ def test_skill_preflight_timeout_reports_no_returncode_instead_of_fake_minus_nin
     Windows too, where a host kill produces no signal at all. The honest record
     is no returncode plus the typed kill facts."""
     import ouroboros.tools.skill_preflight as preflight
+    from ouroboros.tools import shell_process
 
     class _FakeProc:
         returncode = None
         stdout = None
         stderr = None
 
+        def poll(self):
+            return self.returncode
+
         def communicate(self, timeout=None):
             raise subprocess.TimeoutExpired(cmd="node", timeout=timeout or 1)
 
-    monkeypatch.setattr(preflight, "Popen", lambda *_a, **_k: _FakeProc())
+    proc, registry = _FakeProc(), set()
+    monkeypatch.setattr(shell_process, "_active_subprocesses", registry)
+    monkeypatch.setattr(preflight, "Popen", lambda *_a, **_k: proc)
     monkeypatch.setattr(preflight, "_kill_process_group", lambda _p: None)
     result = preflight._run_check(["node", "--check", "x.js"], cwd=tmp_path)
     assert result["returncode"] is None
     assert result["timeout"] is True and result["killed_by_host"] is True
+    assert registry == {proc}, "a validator whose exit was never observed stays named for Panic and the stop"
     facts = consume_last_process_facts()
     assert facts["timed_out"] is True and facts["killed_by_host"] is True
     assert "exit_code" not in facts and "signal" not in facts
