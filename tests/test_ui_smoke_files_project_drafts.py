@@ -230,7 +230,7 @@ def test_files_retains_document_and_submits_one_write(direct_server_with_data, e
             page.locator("#files-new-dir").click()
             page.locator("[data-confirm-input]").fill("created-dir")
             page.get_by_role("button", name="Create", exact=True).click()
-            expect(page.locator("#files-preview-status")).to_contain_text("Directory created-dir created")
+            expect(page.locator("#files-preview-status")).to_contain_text("Folder created-dir created")
             _same_draft(page, "Draft before save\nKeep this text.", [2, 8])
             assert fixture["directories"] == [{"path": ".", "name": "created-dir"}]
 

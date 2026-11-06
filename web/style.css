@@ -873,6 +873,8 @@ html[data-layout="stack"] .resize-handle { display: none; }
 }
 
 .files-browser-header > .files-browser-actions { flex-wrap: wrap; flex-shrink: 1; min-width: 0; }
+/* On a phone (the stack layout) the location shares its row with its actions: its folders wrap beside them. */
+html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis: 0; }
 
 .files-crumb {
     border: none;
@@ -906,7 +908,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
 .files-entry {
     width: 100%;
     display: grid;
-    grid-template-columns: 20px minmax(0, 1fr) auto;
+    grid-template-columns: 20px minmax(0, 1fr) auto 16px;
     gap: 10px;
     align-items: center;
     border: none;
@@ -916,6 +918,11 @@ html[data-layout="stack"] .resize-handle { display: none; }
     padding: 10px 12px;
     cursor: pointer;
     text-align: left;
+    /* A row is a control: pressing or right-clicking it never selects its name (the preview keeps selection). */
+    -webkit-user-select: none;
+    user-select: none;
+    /* Rows touch, so no reach can stand out past them: a row is the touch minimum tall (44px under a finger). */
+    min-height: var(--touch-target-min);
 }
 
 .files-entry:hover {
@@ -926,15 +933,14 @@ html[data-layout="stack"] .resize-handle { display: none; }
     opacity: 0.88;
 }
 
-.files-entry.selected {
-    background: var(--accent-10);
-    box-shadow: inset 0 0 0 1px var(--accent-22);
-}
+/* The selected file keeps its own ink on the accent's faint wash, with no ring (DESIGN principle 4). */
+.files-entry.selected { background: var(--accent-10); }
 
-.files-entry-icon {
-    color: var(--accent);
-    font-size: 12px;
-}
+.files-entry-icon,
+.files-entry-chevron { display: inline-flex; align-items: center; justify-content: center; color: var(--text-secondary); }
+.files-entry-chevron { color: var(--text-muted); }
+.files-entry-icon svg { width: 16px; height: 16px; }
+.files-entry-chevron svg { width: 14px; height: 14px; }
 
 .files-entry-name {
     min-width: 0;
@@ -974,6 +980,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
     flex-shrink: 0;
 }
 
+.files-preview-header[hidden] { display: none; }
 .files-preview-header > :first-child { flex: 1 1 220px; min-width: 0; }
 .files-preview-actions {
     display: flex;
@@ -987,7 +994,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
     font-size: 14px;
     font-weight: 600;
     color: var(--text-primary);
-    word-break: break-all;
+    overflow-wrap: anywhere;
 }
 
 .files-preview-meta {
@@ -1011,6 +1018,8 @@ html[data-layout="stack"] .resize-handle { display: none; }
     white-space: pre-wrap;
     word-break: break-word;
 }
+/* The preview's own sentence (nothing chosen, no preview for this kind of file) reads in the system face. */
+.files-preview-content > .files-empty { padding: 0; font-family: var(--font-sans); white-space: normal; }
 
 .files-editor-shell {
     display: flex;
@@ -1281,7 +1290,7 @@ html[data-layout="docked"] .app-page-lead .app-tab { pointer-events: auto; }
    ink. A location longer than the bar's start scrolls inside it as a tab strip does, fading where folders hide: it
    rests at its end (files.js), so the folders above give way first, and no folder is wider than the strip less one
    fade, so the one you are in rests clear of it (a longer name ellipsizes; its words stay its accessible name). Its
-   own actions (Paste, + File, + Dir) join Refresh at the bar's end. */
+   own actions (Paste, + File, + Folder) join Refresh at the bar's end. */
 html[data-layout="docked"] .app-page-lead > .files-breadcrumb {
     flex: 1 1 auto;
     flex-wrap: nowrap;
