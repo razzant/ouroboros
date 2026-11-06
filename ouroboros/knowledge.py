@@ -651,8 +651,9 @@ def _recorded_version(journal: Path, address: KnowledgeAddress, text: str) -> di
     """The memory reader's address of this note's newest captured row, when its ``new_content`` is ``text``.
 
     Read under the shelf lock every writer of the journal holds. ``None`` keeps ``text`` inline: an
-    empty text, a newest row that holds other text or none (an outside edit, a failed publication, a
-    digest-era row), no row within the journal's tail, or an unreadable journal.
+    empty text, a newest row that holds other text or none (an outside edit, a write whose source
+    never landed, a digest-era row), no row within the journal's tail, or an unreadable journal. A
+    row whose source landed holds a real version even when its index failed, so it is named.
     """
     if not text:
         return None

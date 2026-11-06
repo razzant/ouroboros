@@ -374,6 +374,25 @@ def test_index_publication_failure_reports_actual_new_source_and_retains_capture
     assert replaced(tmp_path, history(target)[-1]) == original.text
     assert history(target)[-1]["new_content"] == result.current.text
     assert result.delta == history(target)[-1]["delta"]
+    # The source landed, so that row holds a real version: the next write names it, byte for byte.
+    monkeypatch.undo()
+    later = store.write_knowledge_note(target, "Later state.", expected_revision=result.current.revision)
+    assert later.ok and "old_content" not in history(target)[-1]
+    assert replaced(tmp_path, history(target)[-1]) == result.current.text
+    # A write whose source never landed holds a version nobody published: the next row keeps the text inline.
+    real_write = store.write_bytes_atomic
+
+    def fail_source(path, data):
+        if path == target.path:
+            raise OSError("disk")
+        return real_write(path, data)
+
+    monkeypatch.setattr(store, "write_bytes_atomic", fail_source)
+    lost = store.write_knowledge_note(target, "Never landed.", expected_revision=later.current.revision)
+    assert not lost.ok and target.path.read_bytes() == later.current.raw
+    monkeypatch.undo()
+    store.write_knowledge_note(target, "After the failure.", expected_revision=later.current.revision)
+    assert history(target)[-1]["old_content"] == later.current.text
 
 
 def test_overwrite_malformed_legacy_source_discloses_unknown_heading_delta(tmp_path):
