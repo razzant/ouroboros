@@ -83,8 +83,10 @@ def test_a_child_loads_knowledge_only_when_its_view_holds_it(tmp_path, monkeypat
 def test_a_parents_memory_view_field_rides_the_schedule_to_the_view_its_child_builds(tmp_path, monkeypatch):
     """The producer end to end: ``schedule_subagent(memory_view=…)`` is carried by the schedule's record and
     the supervisor's payload to the start the worker builds. A field the view knows widens the child (the
-    whole knowledge base at its birth, no outline); one it does not know is carried too, refused at the start
-    with the role default and one event, and the child is born as any child."""
+    whole knowledge base at its birth, no outline); a value it does not know is carried too, refused at the start
+    with the role default and one event, and the child is born as any child. The field only widens: a view that
+    turns my human's words or the marks off, or names a field the description does not offer, is refused where it
+    enters and nothing is queued; a plain call still births a child holding the words."""
     import dataclasses
     import json
     import queue
@@ -106,11 +108,15 @@ def test_a_parents_memory_view_field_rides_the_schedule_to_the_view_its_child_bu
                                 "---\ntitle: people/owner\nsummary: WHOLE_INDEX_SUMMARY\n---\n# Owner\n").ok
     parent = ToolContext(repo_dir=env.repo_dir, drive_root=root, current_task_type="task", current_chat_id=1)
     parent.task_id, parent.event_queue = "root0001", queue.Queue()
-    parent.task_metadata = {"root_task_id": "root0001"}
+    parent.task_metadata = {"root_task_id": "root0001",
+                            "governing_owner_words": [{"text": "OWNER_ASKED", "source": "initial_user", "task_id": "root0001"}]}
+
+    def call(**extra):
+        return _schedule_task(parent, subagent_id="api-builder", objective="Count shelf one",
+                              expected_output="a list", memory_mode="forked", **extra)
 
     def scheduled(**extra):
-        result = _schedule_task(parent, subagent_id="api-builder", objective="Count shelf one",
-                                expected_output="a list", memory_mode="forked", **extra)
+        result = call(**extra)
         assert not result.startswith("⚠️"), result
         event = parent.event_queue.get_nowait()
         return build_scheduled_task_payload({**event, "tid": event["task_id"], "parent_id": parent.task_id,
@@ -121,7 +127,8 @@ def test_a_parents_memory_view_field_rides_the_schedule_to_the_view_its_child_bu
         return messages[0]["content"][-1]["text"], cap["memory_view"]["spec"]
 
     def refusals():
-        rows = [json.loads(line) for line in (root / "logs" / "events.jsonl").read_text().splitlines() if line.strip()]
+        rows = [json.loads(line) for line in (root / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()]
         return [row for row in rows if row.get("type") == "context_memory_view_spec_refused"]
 
     plain = scheduled()
@@ -133,14 +140,24 @@ def test_a_parents_memory_view_field_rides_the_schedule_to_the_view_its_child_bu
     assert spec["knowledge"] is True and "WHOLE_INDEX_SUMMARY" in changing and "## Knowledge base" in changing
     assert "## Knowledge outline" not in changing and "knowledge (overview, index, project journal and workpad)" in changing
     assert refusals() == []
-    # The other direction: a field the view does not know rides the same way and is refused where it is read.
-    malformed = scheduled(memory_view={"stories": False})
-    assert malformed["memory_view"] == {"stories": False}  # carried as given: the start, not the schedule, judges it
+    # The other direction: a value the view does not know rides the same way and is refused where it is read.
+    malformed = scheduled(memory_view={"knowledge": "yes"})
+    assert malformed["memory_view"] == {"knowledge": "yes"}  # carried as given: the start, not the schedule, judges it
     assert mv.view_spec_for_task(malformed, root) == mv.view_spec_for_task(plain, root)
-    assert [(row["task_id"], row["reason"]) for row in refusals()] == [(malformed["id"], "unknown ViewSpec field(s): stories")]
+    assert [(row["task_id"], row["reason"]) for row in refusals()] == [(malformed["id"], "knowledge is true or false")]
     changing, spec = born(malformed)
     assert spec == born(plain)[1] and "## Knowledge outline" in changing and "## Knowledge base" not in changing
     assert len(refusals()) == 2 and refusals()[-1]["task_id"] == malformed["id"]  # the start: one more event, no more
+    # Refused where the field enters: a view that turns my human's words or the marks off (the field only widens), or
+    # names a field the description does not offer (a role, a room, a work room level); nothing is queued by any of them.
+    for view, reason in (({"owner_words": False}, "only widens a child's view; it keeps my human's words and the marks"),
+                         ({"marks": "none"}, "only widens"), ({"work_room_levels": "two"}, "fields are story, room_page")):
+        refused = call(memory_view=view)
+        assert refused.startswith("⚠️ TOOL_ARG_ERROR (schedule_subagent): memory_view") and reason in refused, view
+        assert parent.event_queue.empty(), view
+    changing, spec = born(plain)  # a plain call births a child holding the words and the marks in force
+    assert spec["owner_words"] is True and spec["marks"] == "room_and_global" and "OWNER_ASKED" in changing, spec
+    assert len(refusals()) == 2
 
 
 def test_selected_runtime_omits_other_task_narratives_but_keeps_authority(tmp_path, monkeypatch):

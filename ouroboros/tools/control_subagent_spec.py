@@ -12,6 +12,8 @@ from typing import Any, Dict
 
 
 VALID_SUBTASK_MEMORY_MODES = frozenset({"forked", "empty"})
+# The fields a parent may widen a child's memory view by: the ones its description offers, no other ViewSpec field.
+MEMORY_VIEW_FIELDS = ("story", "room_page", "room_lanes", "origin_words", "live_rooms", "marks", "knowledge", "owner_words")
 
 
 def schedule_subagent_properties() -> Dict[str, Any]:
@@ -81,8 +83,10 @@ def schedule_subagent_properties() -> Dict[str, Any]:
             "description": (
                 "Optional widening of the child's memory view by field, e.g. {\"knowledge\": true} starts it with the whole "
                 "knowledge base instead of the outline. Fields: story, room_page, room_lanes, origin_words, live_rooms "
-                "(none|lines|lines_with_words|directory), marks (all|room_and_global|none), knowledge, owner_words. Omitted: the "
-                "role's default view. A field or value the view does not know is refused at the child's start with the role default and one event."),
+                "(none|lines|lines_with_words|directory), marks (all|room_and_global), knowledge, owner_words. It only widens: "
+                "my human's words and the marks in force can be turned on, never off (owner_words false and marks none are refused), "
+                "and any other field is refused here. Omitted: the role's default view. A value the view does not know is refused "
+                "at the child's start with the role default and one event."),
         },
         "memory_mode": {
             "type": "string",
@@ -354,6 +358,13 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None) -> tu
         if subset_only and not set(origins).issubset(resource_policy.get("allowed_origins", [])):
             return {}, "⚠️ BROWSER_ORIGIN_NOT_GRANTED: this caller may only narrow its inherited allowed_origins."
         resource_policy["allowed_origins"] = origins
+    view = params.get("memory_view")
+    if isinstance(view, dict) and (view.get("owner_words") is False or view.get("marks") == "none"):
+        return {}, ("⚠️ TOOL_ARG_ERROR (schedule_subagent): memory_view only widens a child's view; "
+                    "it keeps my human's words and the marks in force.")
+    if isinstance(view, dict) and not set(view) <= set(MEMORY_VIEW_FIELDS):
+        return {}, ("⚠️ TOOL_ARG_ERROR (schedule_subagent): memory_view fields are "
+                    f"{', '.join(MEMORY_VIEW_FIELDS)} (got: {', '.join(sorted(map(str, set(view) - set(MEMORY_VIEW_FIELDS))))}).")
     return {
         "deadline_at": deadline_at, "objective": objective, "expected_output": expected_output,
         "role": str(params.get("role") or "").strip(),
@@ -362,7 +373,7 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None) -> tu
         "memory_mode": memory_mode, "may_mutate": params.get("may_mutate", False),
         "requested_effort": requested_effort,
         **({"delegated_mode": params["mode"]} if params.get("mode") is not None else {}),
-        **({"memory_view": params["memory_view"]} if params.get("memory_view") is not None else {}),  # checked at the child's start
+        **({"memory_view": view} if view is not None else {}),  # its values are checked at the child's start
         "acceptance_claims": acceptance_claims,
         "resource_policy": resource_policy,
         "parent_contract": parent,

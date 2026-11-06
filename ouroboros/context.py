@@ -636,7 +636,7 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, sc
 
 
 from ouroboros.context_sections import (  # noqa: E402,F401 — existing public builder surface
-    build_knowledge_sections, knowledge_navigation_sections, helper_navigation_sections, _build_registry_section,
+    build_knowledge_sections, knowledge_navigation_sections, _build_registry_section,
     _build_installed_skills_section, _drive_state_section, runtime_host_section,
     _SHARED_UNDERSTANDING_GAP,
 )
@@ -846,6 +846,7 @@ def _capture_context_core(
         drive_path=lambda rel: (canonical_root / safe_relpath(rel)).resolve(),
     )
 
+    from ouroboros.context_sections import helper_navigation_sections  # this builder's own read, not a facade name
     from ouroboros.project_facts import resolve_project_id
 
     task_metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}

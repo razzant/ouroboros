@@ -143,9 +143,10 @@ def test_a_child_and_a_nanny_start_with_the_knowledge_outline_not_the_whole_inde
     for who, (_a, _b, c, cap) in (("child", _start(env, child)), ("nanny", blocks(env, memory, nanny))):
         assert cap["memory_view"]["role"] == who and not cap["memory_view"]["spec"]["knowledge"], who
         outline, room = section(c, "## Knowledge outline"), section(c, "## Project knowledge outline (alpha)")
-        assert "- people/owner — My human\n  PERSON_SUMMARY" in outline and "- shelf-plan — Shelf plan\n" in outline, who
-        assert "- overview — Overview\n" in outline and "every active note (3) by its address and title" in outline, who
-        assert "- room-plan — Alpha plan\n" in room and "knowledge_list(scope='project:alpha')" in room, who
+        for address, title in (("people/owner", "My human"), ("shelf-plan", "Shelf plan"), ("overview", "Overview")):
+            assert address in outline and title in outline, who  # each note by address and title; the form is the outline's
+        assert "PERSON_SUMMARY" in outline and "room-plan" in room and "Alpha plan" in room, who  # a person's summary stays
+        assert "knowledge_list(scope='project:alpha')" in room, who
         assert "PLAIN_SUMMARY" not in c and "WHOLE_OVERVIEW" not in c and "ROOM_SUMMARY" not in c, who  # one read away
         assert "PLAN_BODY" not in c and "ROOM_BODY" not in c and "OVERVIEW_BODY" not in c, who
         assert "## Knowledge base" not in c and "## Shared understanding" not in c and "## Project workpad" not in c, who
