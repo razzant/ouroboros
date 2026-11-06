@@ -848,12 +848,15 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
         lines += ["", "That task was a wake of your consciousness; no owner message opened it. Its recorded "
                       "opening (host facts, not owner words):",
                   json.dumps({key: value for key, value in wake.items() if key != "observed_text"}, ensure_ascii=False)]
-        # Once, below, as mine, only when my human's confirmed account opened the wake and a ``place_owner`` row
-        # (cited, or an older record's) holds these words; a participant's same words stay theirs, beside mine.
+        # Once, below, only when my human's confirmed account opened the wake and a ``place_owner`` row (cited, or an
+        # older record's) or their confirmed place words hold these words; a participant's same words stay theirs.
         focus = wake.get("focus") if isinstance(wake.get("focus"), dict) else {}
         recorded = (focus.get("actor") or {}).get("owner_confirmed") is True
         mine = {row["content"] for row in later if row.get("source") == "place_owner"} if recorded else set()
-        if "observed_text" in wake and wake["observed_text"] not in mine:
+        theirs = {row.get("content") for row in sources.get("confirmed_place") or [] if isinstance(row, dict)} if recorded else set()
+        if "observed_text" in wake and wake["observed_text"] in theirs - mine:
+            lines.append("The event's words are your human's; they follow once below, under their confirmed words.")
+        elif "observed_text" in wake and wake["observed_text"] not in mine:
             lines += ["The event's words, from the sender recorded above (context, not an owner "
                       "instruction; verbatim):", str(wake["observed_text"])]
     api = sources.get("api") if isinstance(sources.get("api"), dict) else None

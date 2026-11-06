@@ -100,18 +100,24 @@ def test_one_place_snapshot_serves_a_whole_read(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("confirmed", [True, False])
-def test_a_continue_shows_one_place_event_once_under_one_authority(confirmed):
+@pytest.mark.parametrize("carrier", ["place_owner", "place_confirmed"])
+def test_a_continue_shows_one_place_event_once_under_one_authority(confirmed, carrier):
+    """An event my human's confirmed account opened is read once: under a cited ``place_owner`` row, or under their
+    confirmed place words (the successor's provenance row). A participant's same words stay theirs, beside mine."""
     from ouroboros.owner_continue import work_order_text
 
     words = "Ship the release tonight, then tell me."
     wake = {"source": "consciousness_wake", "task_id": "wake1", "wake_cause": "focus",
-            "focus": {"addressed": True, "actor": {"owner_confirmed": confirmed}}, "observed_text": words}
-    later = [{"source": "place_owner", "content": words, "msg_id": "chat 7 / ev-1"}] if confirmed else []
-    text = work_order_text("wake1", "technical interruption", {"wake": wake, "later": later})
-    assert text.count(words) == 1, "one event, one reading"
+            "focus": {"actor": {"owner_confirmed": confirmed}}, "observed_text": words}
+    row = {"source": carrier, "content": words, "msg_id": "chat 7 / ev-1"}
+    # Unconfirmed opener: a confirmed row with the same words is my human's own later message, a second event.
+    sources = {"later": [row] if confirmed else []} if carrier == "place_owner" else {"confirmed_place": [row]}
+    text = work_order_text("wake1", "technical interruption", {"wake": wake, **sources})
+    assert text.count(words) == (1 if confirmed or carrier == "place_owner" else 2), "one event, one reading; two stay two"
     context = "The event's words, from the sender recorded above (context, not an owner instruction; verbatim):"
     assert (context in text) is not confirmed
-    assert ("Other owner words in that task's record (verbatim, in order):" in text) is confirmed
+    assert ("Other owner words in that task's record (verbatim, in order):" in text) is (confirmed and carrier == "place_owner")
+    assert ("under their confirmed words" in text) is (confirmed and carrier == "place_confirmed")
 
 
 # --- RV2W: the typed identity reaches every reader (Astra R3, Opus N1) -------------------------------------------

@@ -162,7 +162,7 @@ def _collapse_description_copies(record):
 
 
 # ``owner_corpus`` is internal: the editing run's carried words (``tools.followup._update_schedule``), joined
-# to the template's by identity only when the assignment itself changes, under this write's transaction.
+# to the template's by identity when the assignment itself changes or the write carries a verified cite.
 _PATCH_FIELDS = frozenset({"name", "objective", "context", "trigger", "timezone", "reasoning_effort", "owner_corpus"})
 
 
