@@ -51,6 +51,27 @@ def test_a_preparing_direct_turn_says_the_start_step_it_stands_at(turn_phase, te
     assert state["reasons"] == [{"code": f"turn_{turn_phase}", "text": text}]
 
 
+@pytest.mark.parametrize("kind", ["direct_chat", "presence"])
+def test_a_carried_turn_says_its_start_step_until_its_own_call(kind):
+    # A conversation-lane row reads `working` once a carrier holds it (conversation_lane.lane_turn_rows); its
+    # frame-fed start step is still a start step (lost on that path with #2654, 02.11).
+    def carried(**extra):
+        return row("d", "working", kind=kind, carrier="worker", **extra)
+
+    for step, text in (("started", "Starting the turn"), ("context_building", "Building context"),
+                       ("context_built", "Context ready")):
+        state = ws.classify_member(carried(turn_phase=step))
+        assert (state["activity"], state["call"], state["live"]) == ("working", "preparing", True), step
+        assert state["reasons"] == [{"code": f"turn_{step}", "text": text}], step
+    # Its own call started or observed, no start fact yet, or a carrier still awaited: no start step from this rule.
+    for done in (carried(turn_phase="requested"), carried(turn_phase="dispatched"),
+                 carried(turn_phase="context_built", model_activity={"phase": "awaiting_response"}), carried()):
+        state = ws.classify_member(done)
+        assert state["reasons"] == [] and state["call"] in {"working", "sending"}, done
+    awaiting = ws.classify_member(row("d", "preparing", kind=kind, carrier="awaiting"))
+    assert (awaiting["call"], awaiting["reasons"]) == ("preparing", [])
+
+
 def test_a_start_step_speaks_only_while_preparing_and_a_started_call_reads_the_census_move():
     # Its own Main call started before its census phase moved: the word that move gives, never Sending ahead of it.
     for step in ("requested", "dispatched"):
