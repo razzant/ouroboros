@@ -675,7 +675,7 @@ function closeProjectPanel({ sync = true, reveal = false } = {}) {
     // Leaving a Project for Main is a return to Main: its newest message (owner
     // decision 2026-10-05). Another page shows Main later through `ouro:page-shown`.
     if (activeId && state.activePage === 'chat' && !reveal) {
-        void mainChat?.showLatest?.();
+        void mainChat?.showLatest?.({ arrive: mainUnreadCount() > 0 });  // unread: it lands on what came (DESIGN "Unread")
         void acknowledgeMainAfterPaint();  // Main is the room on screen again: what came while it was covered is read now
     }
 }
