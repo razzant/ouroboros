@@ -94,6 +94,7 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     "asker_not_reading": (False, "question_answers.py: no living asker or successor holds the answer, so it goes to named ingress in its room (the asker's live late-answer head, else a fresh head); a delivery fact, never a task terminal"),
     "promotion_not_started": (False, "promotion_intent.py: boot reconciliation of a start_task intent proven never admitted; that separate work never ran (explicit retry), so nothing was truncated and it is never a trial root's code"),
     "migrating": (False, "gateway/_helpers.py: a write door (create, Cancel, Pause, Presence) answered 503 inside the boot import window of state/current.sqlite (retry); no task attempt was truncated"),
+    "boot_changed": (False, "gateway/control.py: a command whose if_boot names an earlier boot.since reached a restarted server; HTTP 409 with accepted=false before anything was queued, never a task terminal"),
     "budget_pausing_no_extraction": (False, "review_verdict_extraction.py: Light verdict extraction refused while the task's exact budget pause is closing dispatch (#1196); the review row stays undispatched and the attempt is paused, not truncated"),
     "owner_pause": (False, "tools/skill_publish.py: publication tool returns its completed stages after owner Pause interrupts the formatter; the task is retained for Resume, not terminalized or scored"),
     "action_not_found": (False, "gateway/card_decision.py: a press names a control the card does not have now; HTTP 404 on the card ingress, never a task terminal"),
