@@ -170,7 +170,7 @@ def worker_position(invocation: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         return {"worker_started": False}
     stack = _loop_thread_stack(ident, limit=sys.getrecursionlimit())
     if invocation.get("_worker_done"):  # read after the capture: its thread may already serve another call
-        return {"worker_at": "settled before its wait ended"}
+        return {"worker_at": "settled as its wait ended"}
     if not stack:
         return {"worker_at": "unknown (its stack could not be read)"}
     own = _innermost_repo_frame(stack)

@@ -478,6 +478,6 @@ def test_a_worker_position_states_only_what_it_saw(monkeypatch):
     assert worker_position(live)["worker_stack"] == ["ouroboros/next.py:1 in other"]
     assert worker_phrase(worker_position(live)).startswith(" Its worker was at ")
     settled = worker_position({**live, "_worker_done": True})
-    assert settled == {"worker_at": "settled before its wait ended"}
-    assert worker_phrase(settled) == " Its worker stood: settled before its wait ended."
+    assert settled == {"worker_at": "settled as its wait ended"}
+    assert worker_phrase(settled) == " Its worker stood: settled as its wait ended."
     assert worker_position({}) == {"worker_started": False} and worker_position(None) == {}
