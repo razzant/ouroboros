@@ -167,8 +167,10 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # is relative to the active workspace or absolute; nothing else changed (c624c58e... before).
     # Rolled again for #2633: send_photo, send_video, send_file, send_links and show_card name this work's
     # room and say that for Presence-bound work it is local, not the place conversation.
+    # Rolled for owner answer 3A (#2811): escalate's description says a card from Presence work goes privately to
+    # Main and asks for one line in the conversation when the human is the person talked with there.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "1a3dfcea20968da1ea9dc84a81abba50de7f449867bdf43800a44076891a84a8"
+        "782312c26aed94ce8ed293c0f0fcef48c8cebf558742a8395bc21cc940afa98a"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)
