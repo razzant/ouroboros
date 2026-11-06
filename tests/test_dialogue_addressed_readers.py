@@ -359,6 +359,18 @@ def test_legacy_owner_binding_keeps_the_missing_chat_id_convention(tmp_path, nam
     ref = build_owner_message_ref(chat_id=1, client_message_id="", ts=row["ts"] if named_time else "", text=row["text"])
     assert resolve_owner_message_source(tmp_path, ref) == row
     assert resolve_owner_message_source(tmp_path, {**ref, "text_sha256": "0" * 64}) is None
+    # A later card may repeat these words (even in the same clock tick). It has its
+    # own identity and must not shadow a pre-identity inbound source or its corpus.
+    quiz = {"ts": row["ts"], "chat_id": 1, "direction": "out", "type": "quiz_answer",
+            "source": "owner_quiz_answer", "client_message_id": "quiz_answer:asker:choice",
+            "text": "host answer frame", "quiz": {"state": "answered", "comment": row["text"]}}
+    ds.append(tmp_path, "chat", quiz)
+    assert resolve_owner_message_source(tmp_path, ref) == row
+    words = owner_words._message_rows(tmp_path, "legacy-task", None, ref, "origin_message")
+    assert [word["text"] for word in words] == [row["text"]]
+    exact_quiz = build_owner_message_ref(chat_id=1, client_message_id=quiz["client_message_id"],
+                                         ts=quiz["ts"], text=row["text"])
+    assert resolve_owner_message_source(tmp_path, exact_quiz) == quiz
 
 
 def test_mismatched_import_is_not_coverage_or_absence(tmp_path):
