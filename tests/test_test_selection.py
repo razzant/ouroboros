@@ -336,3 +336,14 @@ def test_a_bound_candidates_post_commit_and_forced_runs_stay_selected_with_its_q
     assert selection.commit_test_options(ctx, post_commit=True) == {"selected": True, **scoped}
     assert selection.commit_test_options(ctx, force=True, post_commit=True) == {"selected": True, **scoped}
     assert selection.commit_test_options(SimpleNamespace(), force=True, post_commit=True) == {}  # never requested
+
+
+def test_extra_tests_the_preflight_cannot_run_are_skipped_with_a_note_not_a_refusal(repo):
+    """06.11: the schema names what the tests preflight runs; another entry is disclosed, never a refused commit."""
+    skipped = []
+    kept = selection.validate_widening(repo, ["tests/test_direct.py", "web/tests/chat.test.js", "tests/test_missing.py"],
+                                       reason="consumers", skipped=skipped)
+    assert kept == ("tests/test_direct.py",) and skipped == ["web/tests/chat.test.js", "tests/test_missing.py"]
+    with pytest.raises(ValueError):  # a caller without ``skipped`` refuses, as before
+        selection.validate_widening(repo, ["web/tests/chat.test.js"], reason="consumers")
+
