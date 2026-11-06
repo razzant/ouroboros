@@ -50,7 +50,8 @@ def running_project_ids(running: Iterable[Any]) -> Set[str]:
     """Project ids currently holding a writer lease.
 
     ``running`` is the supervisor's RUNNING mapping values (or any iterable of
-    task dicts); read under the queue lock by the caller.
+    task dicts); read under the queue lock by the caller. A conversation-lane
+    turn is known by its RUNNING row's ``lane``: a bare task dict always counts.
     """
     out: Set[str] = set()
     for task in running or ():

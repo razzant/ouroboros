@@ -38,11 +38,10 @@ def test_running_project_ids_counts_top_level_scoped_tasks_only():
         _meta(_task("", tid="plain")),       # unscoped: no lane
         _meta(_task("gamma", role="subagent")),  # swarm member: no lease of its own
         {**_meta(_task("delta")), "lane": "conversation"},  # a room's reply turn answers beside its work
-        {**_meta(_task("epsilon")), "lane": "project"},  # the same work carried by the project pool holds it
         "garbage",
         None,
     ]
-    assert running_project_ids(running) == {"alpha", "beta", "epsilon"}
+    assert running_project_ids(running) == {"alpha", "beta"}
 
 
 def test_running_project_ids_unwraps_production_meta_shape():

@@ -445,8 +445,8 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
     confirmed, and the next persisted snapshot or a restore completes it —
     never a fake ``paused``. Also the crash-during-pausing completion path (``source``
     names it), which is why nothing here reads the worker's event body — with
-    ONE exception: a direct owner-chat turn parks from its event, which
-    carries the turn's own task record (``task`` beside ``_is_direct_chat``),
+    ONE exception: a direct turn with no RUNNING row parks from its event,
+    which carries the turn's own task record (``task`` beside ``_is_direct_chat``),
     and THAT record is what the SAME task id is parked under (#1196). The row
     check above still decides; the record only supplies the queue row.
 
