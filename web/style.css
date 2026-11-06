@@ -68,8 +68,8 @@ body {
    chrome height on a desk and the touch minimum in the stack layout. Material: the "Airy dopamine" tail. */
 .shell-icon-control {
     flex: 0 0 auto;
-    width: var(--chrome-control-h);
-    height: var(--chrome-control-h);
+    width: var(--control-h-float);
+    height: var(--control-h-float);
     padding: 0;
     display: inline-flex;
     align-items: center;
@@ -1231,9 +1231,10 @@ html[data-layout="docked"] .app-page-header[data-empty] {
 /* Under a finger every header action is one of the header's controls: the chrome height, which ui.css raises to
    the touch minimum on a coarse pointer (Refresh, a Project's ×, the bars' icon controls alike). */
 @media (pointer: coarse) {
-    .app-page-toolbar :is(.btn, button),
+    .app-page-toolbar { --control-h: var(--control-h-float); }
+    .app-page-toolbar button,
     .app-page-trailing button {
-        min-height: var(--chrome-control-h);
+        min-height: var(--control-h-float);
     }
 }
 
@@ -1271,7 +1272,7 @@ html[data-layout="docked"] .app-page-header[data-lead] {
    keeping the tabs' 16px of shadow room (at 100 % they are the 10px and 26px above; once the band is shorter than a
    control the row grows below the band). */
 :root[data-window-chrome="integrated"][data-layout="docked"] .app-page-header[data-lead] {
-    --lead-inset: min(10px, max(0px, calc((var(--window-chrome-top) - var(--chrome-control-h)) / 2)));
+    --lead-inset: min(10px, max(0px, calc((var(--window-chrome-top) - var(--control-h-float)) / 2)));
     min-height: var(--window-chrome-top);
 }
 :root[data-window-chrome="integrated"][data-layout="docked"] .app-page-lead .app-tab-strip {
@@ -1279,9 +1280,10 @@ html[data-layout="docked"] .app-page-header[data-lead] {
     padding-bottom: calc(16px + var(--lead-inset));
 }
 html[data-layout="docked"] .app-page-header[data-lead] > .app-page-leading { display: none; }
-html[data-layout="docked"] .app-page-header[data-lead] > .app-page-toolbar :is(.btn, button) {
-    height: var(--chrome-control-h);
-    min-height: var(--chrome-control-h);
+html[data-layout="docked"] .app-page-header[data-lead] > .app-page-toolbar { --control-h: var(--control-h-float); }
+html[data-layout="docked"] .app-page-header[data-lead] > .app-page-toolbar button {
+    height: var(--control-h-float);
+    min-height: var(--control-h-float);
     padding-block: 0;
 }
 html[data-layout="docked"] .app-page-lead .app-tab-strip {
@@ -1291,11 +1293,8 @@ html[data-layout="docked"] .app-page-lead .app-tab-strip {
     scroll-padding-inline: var(--space-1);
     pointer-events: none;
 }
-html[data-layout="docked"] .app-page-lead .app-tab {
-    height: var(--chrome-control-h);
-    padding-block: 0;
-    pointer-events: auto;
-}
+html[data-layout="docked"] .app-page-lead { --control-h: var(--control-h-float); }
+html[data-layout="docked"] .app-page-lead .app-tab { pointer-events: auto; }
 /* Files: the folder's location starts the bar at reading size, each folder by its name, the one you are in in primary
    ink. A location longer than the bar's start scrolls inside it as a tab strip does, fading where folders hide: it
    rests at its end (files.js), so the folders above give way first, and no folder is wider than the strip less one
@@ -1323,7 +1322,7 @@ html[data-layout="docked"] .app-page-lead > .files-breadcrumb[data-scroll-end] {
 html[data-layout="docked"] .app-page-lead .files-crumb {
     flex: none;
     max-width: min(360px, calc(100% - var(--space-4)));
-    min-height: var(--chrome-control-h);
+    min-height: var(--control-h-float);
     padding: 0 var(--space-1);
     font-size: var(--type-body);
     font-weight: 500;
@@ -5659,8 +5658,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .evo-campaign-side .ui-status { margin: 0; }
 .evo-campaign-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); max-width: 100%; margin-inline-start: auto; }
 /* Long translated labels can grow; the Dashboard still supplies the larger touch minimum. */
-.evo-campaign .evo-campaign-actions .btn { height: auto; min-block-size: max(32px, var(--page-control-min, 0px)); max-width: 100%;
-    padding: 6px 16px; white-space: normal; overflow-wrap: anywhere; }
+.evo-campaign .evo-campaign-actions .btn { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .evo-campaign :is(.evo-meta, .ui-status) { overflow-wrap: anywhere; }
 @container (max-width: 420px) {
     .evo-campaign { padding: 14px 16px; }
@@ -6282,7 +6280,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .update-notice { position: relative; display: inline-flex; align-items: center; min-width: 0; max-width: 100%; margin: 6px 4px 6px 8px; }
 .update-notice[hidden] { display: none; }
 .update-notice > .update-pill { min-width: 0; max-width: 100%; margin: 0; overflow: hidden; text-overflow: ellipsis; }
-.update-notice > .update-pill.has-close { padding-right: 30px; }
+.update-notice > .update-pill.has-close { --control-pad-x: var(--space-3) 30px; }
 .update-notice-close {
     position: absolute; right: 4px; top: 50%; width: 24px; height: 24px; margin-top: -12px; padding: 0;
     display: inline-flex; align-items: center; justify-content: center;
@@ -6304,12 +6302,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     min-height: 0;
     flex-direction: column;
     overflow: hidden;
-}
-
-.btn-xs {
-    padding: 2px 8px;
-    font-size: 11px;
-    min-height: 22px;
 }
 
 /* Skills page. */
@@ -6746,11 +6738,10 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 .skills-category-strip { margin: 0 0 var(--space-3) calc(-1 * var(--space-2)); }
 .skills-category-strip[hidden] { display: none; }
 .filter-chip.skills-category {
+    --control-pad-x: var(--space-2);
     display: inline-flex;
     align-items: baseline;
     gap: var(--space-1);
-    padding: 6px var(--space-2);
-    font-size: var(--pill-font-size);
     font-weight: 600;
     line-height: var(--line-title);
     color: var(--text-secondary);
@@ -6882,7 +6873,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 .skills-first-name strong { color: var(--text-primary); font-size: var(--type-body); font-weight: 600; }
 .skills-first-about { flex-basis: 100%; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .skills-trust-segments { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); }
-.skills-trust-segments .ui-segment { min-height: 34px; padding: 6px 10px; font-size: var(--type-meta); }
+.skills-trust-segments .ui-segment { --button-font-size: var(--type-meta); }
 .skills-mark-popup {
     max-width: min(360px, var(--ui-popup-max-width, 360px));
     padding: var(--space-3) var(--space-4);
@@ -9527,7 +9518,9 @@ body.keyboard-open .project-panel {
     font: inherit;
     text-align: left;
 }
-.chat-file-card { border-radius: var(--radius-inner); font-weight: inherit; }
+/* A button that carries a paragraph is a card (DESIGN.md principle 4): its own height and inset, the inner radius, the
+   bubble's text size — chosen through the control tokens, never by writing the box. */
+.chat-file-card { --control-h: auto; --control-pad-y: 9px; --control-pad-x: 9px; --control-radius: var(--radius-inner); --button-font-size: 1em; font-weight: inherit; }
 
 .chat-file-thumb,
 .chat-file-glyph {
@@ -10660,7 +10653,7 @@ body.keyboard-open .secret-request-backdrop .secret-request-dialog {
     overflow: hidden;
 }
 .chat-clamp[data-expanded="1"] { display: block; -webkit-line-clamp: unset; line-clamp: unset; overflow: visible; }
-.chat-clamp-toggle { flex: none; margin-inline-start: auto; min-height: var(--space-5); padding-block: 0; }
+.chat-clamp-toggle { flex: none; margin-inline-start: auto; }
 /* The files that came with the owner's relayed words: named, not served again. */
 .chat-quote-files {
     margin-top: var(--space-1);

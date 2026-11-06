@@ -46,7 +46,7 @@
 .model-role-controls > select { flex: 1 1 170px; min-width: 0; }
 .model-role-controls > [data-model-role-account] { flex-basis: 220px; }
 .model-role-order { flex: 0 0 auto; }
-.model-role-order .btn { padding-inline: var(--space-2); }
+.model-role-order .btn { --control-pad-x: var(--space-2); }
 .model-role-details { margin-top: var(--space-1); }
 /* The context/processing override is a disclosure, not a note. `display`
    other than list-item drops the native ::marker, so the house ▸/▾ pair is

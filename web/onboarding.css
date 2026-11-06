@@ -1079,11 +1079,6 @@ textarea::placeholder {
   overflow-wrap: anywhere;
 }
 
-.available-subagent-actions .btn-default {
-  min-height: 34px;
-  padding: 0 11px;
-}
-
 .available-subagent-reviewer {
   display: inline-flex;
   align-items: center;

@@ -67,7 +67,7 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row > .rw-trigger {
 :is(.chat-page-header, .project-panel-bar) .app-page-title-row {
     box-sizing: border-box;
     display: inline-flex; align-items: center; gap: 0; max-width: 100%; min-width: 0;
-    height: var(--chrome-control-h); padding-inline: 14px 4px; border-radius: var(--pill-radius);
+    height: var(--control-h-float); padding-inline: 14px 4px; border-radius: var(--pill-radius);
     background: var(--chip-float); box-shadow: var(--elev-rest);
     -webkit-backdrop-filter: var(--glass); backdrop-filter: var(--glass);
 }
@@ -415,7 +415,7 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
 
 /* A coarse pointer (a phone) raises the list's own targets with the header family (ui.css). */
 @media (pointer: coarse) {
-    .rw-surface { --rw-more: var(--touch-target-min); --rw-pill-h: var(--chrome-control-h); }
+    .rw-surface { --rw-more: var(--touch-target-min); --rw-pill-h: var(--control-h-float); }
     .rw-back { min-height: var(--touch-target-min); }
 }
 @media (max-width: 900px) {

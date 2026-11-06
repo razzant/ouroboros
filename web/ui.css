@@ -163,17 +163,21 @@
     --page-header-padding-y: 10px;
     --page-header-padding-x: 20px;
     --page-header-padding-bottom: 6px;
-    --pill-padding-y: 7px;
     --pill-padding-x: 14px;
-    --pill-font-size: 13px;
     --pill-radius: 999px;
-    --button-padding-y: 8px;
-    --button-padding-x: 16px;
+    /* The control box (DESIGN.md principle 4; owner 06.11.2026, Q1 = A): one height for a control at rest, one for a
+       control inside a row, one for floating chrome (the header's capsules; a coarse pointer raises it to the touch
+       minimum, below). A page picks a size by setting --control-h on a scope, never by writing the box: the lock
+       after the control recipes makes a page's box declaration on a shared control do nothing. The inset, the corner
+       and the text are tokens the same way; the text stays one token until the board picks 13 or 14 px. */
+    --control-h: 34px;
+    --control-h-sm: 28px;
+    --control-h-float: 30px;
+    --control-pad-x: var(--space-4);
+    --control-pad-y: 0px;
+    --control-radius: var(--pill-radius);
     --button-font-size: 13px;
-    --button-min-height: 34px;
-    /* Floating chrome (the recipe at the end): one height for a floating group's text controls, and the
-       group's inset, which its negative margin cancels so grouping moves no control. */
-    --chrome-control-h: 30px;
+    /* A floating group's inset, which its negative margin cancels so grouping moves no control. */
     --chrome-inset: calc(var(--space-1) + 1px);
     /* Airy dopamine seed (DESIGN.md design bible): the dark values; the light theme's follow in its block. One set of
        recipes reads them in both themes. The dark theme draws the same roles its own way: a deep graphite room, each
@@ -546,14 +550,15 @@
     align-items: center;
     justify-content: center;
     text-align: center;
-    min-height: 38px;
+    box-sizing: border-box;
+    height: var(--control-h);
     line-height: 1.2;
     border: 1px solid transparent;
-    border-radius: var(--pill-radius);
+    border-radius: var(--control-radius);
     background: var(--surface-capsule);
     color: var(--text-secondary);
     box-shadow: var(--elev-rest);
-    padding: 10px 16px;
+    padding: var(--control-pad-y) var(--control-pad-x);
     cursor: pointer;
     font-family: var(--font-sans);
     font-size: var(--button-font-size);
@@ -583,8 +588,9 @@
    and no outline; an author frame may override any of it with its own CSS after this sheet. */
 .btn {
     box-sizing: border-box;
-    padding: var(--button-padding-y) var(--button-padding-x);
-    border-radius: var(--pill-radius);
+    height: var(--control-h);
+    padding: var(--control-pad-y) var(--control-pad-x);
+    border-radius: var(--control-radius);
     border: 1px solid transparent;
     font-size: var(--button-font-size);
     font-weight: 600;
@@ -594,7 +600,6 @@
     align-items: center;
     justify-content: center;
     gap: 6px;
-    min-height: var(--button-min-height);
     text-align: center;
     transition: var(--motion-tone);
 }
@@ -616,10 +621,8 @@
 .btn-primary:not(:disabled):hover { background: var(--tone-crimson-hover); }
 /* An action the owner can take is legible at rest (docs/DESIGN.md section 6): a neutral button carries the primary
    ink, since a label parked at secondary ink reads as disabled next to the one beside it. */
-.btn-default,
-.btn-secondary { background: var(--surface-capsule); color: var(--text-primary); box-shadow: var(--elev-rest); }
-.btn-default:not(:disabled):hover,
-.btn-secondary:not(:disabled):hover { background: var(--surface-capsule-hover); }
+.btn-default { background: var(--surface-capsule); color: var(--text-primary); box-shadow: var(--elev-rest); }
+.btn-default:not(:disabled):hover { background: var(--surface-capsule-hover); }
 .btn-ghost { background: transparent; color: var(--text-primary); box-shadow: none; }
 .btn-ghost:not(:disabled):hover { background: var(--tone-quiet-hover); }
 .btn-danger { background: var(--tone-red); color: var(--status-error-fg); box-shadow: var(--elev-rest); }
@@ -635,28 +638,26 @@
     .btn-float:not(:disabled):hover { filter: var(--press); }
 }
 .btn-float:not(:disabled):active { filter: var(--press) var(--press); }
-/* A control inside a row is the small capsule. */
-.btn-sm {
-    padding: calc(var(--button-padding-y) - 4px) calc(var(--button-padding-x) - 4px);
-    font-size: calc(var(--button-font-size) - 1px);
-    min-height: 28px;
-}
+/* A control inside a row is the small capsule: the row height, a tighter inset, the meta text size. */
+.btn-sm { --control-h: var(--control-h-sm); --control-pad-x: var(--space-3); --button-font-size: var(--type-meta); }
 
 /* Tabs (DESIGN.md design bible): a tab is a neutral capsule with the secondary ink; the chosen tab (a place) takes the
    crimson tone and stays standing; a press deepens the colour, nothing changes height. The strip that scrolls them is
    the page's (style.css .app-tab-strip). */
 .app-tab {
+    --control-pad-x: var(--pill-padding-x);
     flex: 0 0 auto;
     white-space: nowrap;
-    min-block-size: var(--page-control-min, 0px);
+    box-sizing: border-box;
+    height: var(--control-h);
     border: 1px solid transparent;
     background: var(--surface-capsule);
     color: var(--text-secondary);
     box-shadow: var(--elev-rest);
-    border-radius: var(--pill-radius);
-    padding: var(--pill-padding-y) var(--pill-padding-x);
+    border-radius: var(--control-radius);
+    padding: var(--control-pad-y) var(--control-pad-x);
     font: inherit;
-    font-size: var(--pill-font-size);
+    font-size: var(--button-font-size);
     font-weight: 600;
     cursor: pointer;
     transition: var(--motion-tone);
@@ -688,13 +689,17 @@
 
 /* Filters are quiet controls: no body, so no shadow; a chosen filter takes the soft crimson. */
 .filter-chip {
-    padding: 4px 12px;
-    border-radius: var(--pill-radius);
+    --control-pad-x: var(--space-3);
+    --button-font-size: var(--type-meta);
+    box-sizing: border-box;
+    height: var(--control-h);
+    padding: var(--control-pad-y) var(--control-pad-x);
+    border-radius: var(--control-radius);
     border: 1px solid transparent;
     background: transparent;
     color: var(--text-secondary);
     box-shadow: none;
-    font-size: 12px;
+    font-size: var(--button-font-size);
     font-family: inherit;
     cursor: pointer;
     transition: var(--motion-tone);
@@ -709,18 +714,20 @@
    outline. Hover and press change colour, never height. A word longer than its column (a translated label) breaks
    rather than overflowing, so a segment keeps a minimum height, not a fixed one. A setting's value is never amber. */
 .ui-segment {
+    --control-pad-x: var(--space-3);
     display: inline-flex;
     align-items: center;
     justify-content: center;
     text-align: center;
-    min-height: 38px;
+    box-sizing: border-box;
+    min-height: var(--control-h);
     line-height: 1.2;
     border: 1px solid transparent;
-    border-radius: var(--pill-radius);
+    border-radius: var(--control-radius);
     background: var(--surface-capsule);
     color: var(--text-secondary);
     box-shadow: var(--elev-rest);
-    padding: 10px 12px;
+    padding: var(--space-1) var(--control-pad-x);
     cursor: pointer;
     font-size: var(--button-font-size);
     font-weight: 600;
@@ -741,6 +748,44 @@
     background: var(--surface-object);
     border-radius: var(--radius-object);
     box-shadow: var(--elev-rest);
+}
+
+/* ---- The control box lock (owner decision 06.11.2026, Q1 = A) ---------------------------------------------------
+   Why it exists: one button had eight heights (18–39 px) because any page sheet could write height, padding, radius,
+   border or font-size on a shared control and win by specificity, and nothing but a screenshot noticed. The 06.11
+   cleanup deleted those rules; this lock keeps them from returning by construction: in the product documents a page
+   declaration on the box of these roles does nothing, so the next author reaches for the token. It holds only the
+   box; material, words and places are held by deletion, review and the owner's eye (his 2C of 05.11).
+   How to pick a size: set a token on a scope, never the property —
+     --control-h: var(--control-h-sm)      a control inside a row (.btn-sm does this)
+     --control-h: var(--control-h-float)   floating chrome (the docked header toolbar scope does this)
+     --control-h: auto                     a control that carries a paragraph (style.css .chat-file-card), with
+     --control-pad-y                       its block inset, --control-pad-x its inline inset (one or two values),
+     --control-radius                      its corner (the pill, or --radius-inner for a card),
+     --button-font-size                    its text (one token until the board picks 13 or 14 px).
+   How to add a role: give its class the token values it needs (as .btn-sm does), add it to the :is() lists below and
+   to the touch-reach family, and name it in DESIGN.md principle 4.
+   Scope: the product documents only (their root is .ouro-ui: the app, setup, login). An author frame loads this sheet
+   under its own root and keeps the overridable recipes above. */
+:root:where(.ouro-ui) :is(.btn, .app-tab, .filter-chip, .theme-choice) {
+    box-sizing: border-box !important;
+    height: var(--control-h) !important;
+    min-height: 0 !important;
+    padding-block: var(--control-pad-y) !important;
+    padding-inline: var(--control-pad-x) !important;
+    border: 1px solid transparent !important;
+    border-radius: var(--control-radius) !important;
+    font-size: var(--button-font-size) !important;
+}
+:root:where(.ouro-ui) .ui-segment {
+    box-sizing: border-box !important;
+    height: auto !important;
+    min-height: var(--control-h) !important;
+    padding-block: var(--space-1) !important;
+    padding-inline: var(--control-pad-x) !important;
+    border: 1px solid transparent !important;
+    border-radius: var(--control-radius) !important;
+    font-size: var(--button-font-size) !important;
 }
 
 
@@ -1064,7 +1109,7 @@ textarea.ui-control { resize: vertical; }
    never as a box glued to one control or one group. */
 @media (pointer: coarse) {
     /* A coarse pointer (a phone) raises the shared touch minimum to a finger's 44px, and the whole family with it. */
-    :root { --touch-target-min: 44px; --chrome-control-h: var(--touch-target-min); }
+    :root { --touch-target-min: 44px; --control-h-float: var(--touch-target-min); }
 }
 /* ---- Touch hit extension ----------------------------------------------------------------------------------------
    A small control keeps its look and, under a finger, gains an invisible hit area centred on it and at least the
@@ -1098,7 +1143,7 @@ textarea.ui-control { resize: vertical; }
     align-items: center;
     justify-content: center;
     flex: 0 0 auto;
-    height: var(--chrome-control-h);
+    height: var(--control-h-float);
     padding: 0 var(--pill-padding-x);
     border-radius: var(--pill-radius);
     line-height: 1;

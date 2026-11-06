@@ -739,11 +739,6 @@
     overflow-wrap: anywhere;
 }
 
-.available-subagent-actions .btn-default {
-    min-height: 34px;
-    padding: 0 11px;
-}
-
 .available-subagent-reviewer {
     display: inline-flex;
     align-items: center;
@@ -1099,7 +1094,7 @@
         flex: 0 0 auto;
         min-height: 38px;
         padding: 8px 14px;
-        font-size: var(--pill-font-size);
+        font-size: var(--button-font-size);
         white-space: nowrap;
         border-radius: 999px;
     }

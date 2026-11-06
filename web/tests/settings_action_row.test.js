@@ -20,7 +20,7 @@ test('neutral controls have one shared button role in both UI shells', () => {
     assert.match(indexHtml, /href="\/static\/ui\.css"/);
     assert.match(wizardHtml, /href="\/onboarding\/static\/ui\.css"/);
     assert.doesNotMatch(onboardingCss, /(?:^|\n)\.btn-default\s*\{/);
-    assert.match(sharedCss, /--button-min-height:\s*34px/);
+    assert.match(sharedCss, /--control-h:\s*34px/);
     assert.doesNotMatch(settingsCss, /settings-ghost-btn/);
     assert.doesNotMatch(onboardingCss, /settings-ghost-btn/);
 });
