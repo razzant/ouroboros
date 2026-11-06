@@ -171,8 +171,10 @@ def test_public_list_and_detail_keep_summary_but_not_swarm_storage_evidence(tmp_
     request = SimpleNamespace(path_params={"task_id": "root"},
                               app=SimpleNamespace(state=SimpleNamespace(drive_root=tmp_path)))
     detail = json.loads(tasks._task_get_response(request).body)
+    assert "swarm_fanout_rollup" in stored, "the stored base is durable; only the public projection omits it"
     for public in (listed, detail):
         assert "swarm_fanouts" not in public and "swarm_fanout_basis" not in public
+        assert "swarm_fanout_rollup" not in public
         assert public["owner_extension"] == unknown
         assert public["swarm_efficiency"] == stored["swarm_efficiency"]
         assert public["swarm_receipt"] == stored["swarm_receipt"]
