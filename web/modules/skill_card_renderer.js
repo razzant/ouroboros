@@ -320,7 +320,8 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
             trays.push(trayHtml({ sentence: 'It brings tools that tasks can use. Connect them to turn them on.',
                 actions: smallButton('Connect tools', name, 'connect_tools') }));
         } else if (failed) {
-            trays.push(trayHtml({ tone: 'danger', sentence: `Its tools are configured but can’t be used now: ${escapeHtml(boundedText(failed.error, 240))}` }));
+            // The host's refusal is a diagnostic (codes, ids, readiness tokens): it stays in Details.
+            trays.push(trayHtml({ tone: 'danger', sentence: 'Its tools are configured but can’t be used now.', note: 'Details say why.' }));
         }
     }
 
@@ -530,7 +531,10 @@ function toolsRow(skill) {
     const line = (server) => `${escapeHtml(server.title || server.id)}: ${!server.configured ? 'not connected'
         : server.error ? 'configured · unavailable now' : server.listed ? `configured · ${escapeHtml(plural(server.tool_count, 'tool'))} listed`
             : 'configured · listing tools…'}`;
-    return servers.length ? detailRow('Tools', `${servers.map(line).join('; ')}. The skill’s own instructions say what else its tools need.`) : '';
+    const why = servers.filter((server) => server.configured && server.error).map((server) =>
+        `${servers.length > 1 ? `${escapeHtml(server.title || server.id)}: ` : ''}${escapeHtml(server.error)}`);
+    return servers.length ? detailRow('Tools', `${servers.map(line).join('; ')}. The skill’s own instructions say what else its tools need.`)
+        + (why.length ? detailRow('Why unavailable', why.join(' ')) : '') : '';
 }
 
 function detailRow(label, valueHtml) {

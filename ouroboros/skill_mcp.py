@@ -50,6 +50,8 @@ def _derive_launch(skill: Any, decl: Dict[str, Any]) -> Tuple[Optional[Dict[str,
     entry = (root / decl["entry"]).resolve()
     if not entry.is_relative_to(root) or not entry.is_file():
         return None, f"its entry {decl['entry']!r} is not a file inside the skill"
+    if any(part in _SKILL_DIR_CACHE_NAMES for part in entry.relative_to(root).parts):
+        return None, f"its entry {decl['entry']!r} resolves into a cache or dependency folder, outside the reviewed files"
     binary, why = _resolve_runtime_binary(decl["runtime"])
     if not binary:
         return None, f"no usable {decl['runtime']} runtime was found" + (f" ({why})" if why else "")
@@ -64,7 +66,11 @@ def _not_ready(drive_root: pathlib.Path, skill: Any) -> List[str]:
         return [f"load_error: {skill.load_error}"]
     if not (skill.manifest.is_script() or skill.manifest.is_extension()):
         return ["only script and extension skills run servers"]
-    return list(skill_readiness_for_execution(drive_root, skill).blockers)
+    from ouroboros.config import get_skills_repo_path
+    from ouroboros.skill_peer_inventory import discover_conflict_peers
+
+    peers = list(discover_conflict_peers(drive_root, skill.name, repo_path=get_skills_repo_path()))
+    return list(skill_readiness_for_execution(drive_root, skill, skills=peers).blockers)
 
 
 def _find(drive_root: pathlib.Path, name: str) -> Any:

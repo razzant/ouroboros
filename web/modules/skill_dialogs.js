@@ -187,9 +187,15 @@ export async function connectSkillTools(skill, { dialog = openConfirmDialog, api
     const servers = preview.servers || [];
     const conflict = servers.find((server) => server.change === 'conflict');
     if (!preview.ready || conflict) {
+        // The host's blockers are readiness tokens and launch diagnostics: the body says the outcome, Details keep them.
+        const blockers = preview.blockers || [];
         await dialog({ title: `${skillTitle(skill)} can’t connect its tools yet`, alert: true,
             body: conflict ? `${conflict.conflict}. Remove or rename that server in Settings → Advanced → MCP Servers.`
-                : `${(preview.blockers || []).join('; ')}. ${preview.next_action || ''}`.trim() });
+                : 'It can’t run them now, so nothing was changed.',
+            details: conflict ? null : { summary: 'What stops it', rows: [
+                ...(blockers.length ? [{ label: blockers.length > 1 ? 'Reasons' : 'Reason', value: blockers.join('; ') }] : []),
+                ...(preview.next_action ? [{ label: 'Next step', value: preview.next_action }] : []),
+            ] } });
         return null;
     }
     if (!preview.changed) return { ok: true, saved: false, changed: false };

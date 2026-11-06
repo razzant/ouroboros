@@ -144,6 +144,8 @@ def prune_catalogs(configs: list) -> None:
 
 def catalog_notice(runtime: Any) -> str:
     """Absolute listing provenance, outside the cached tool schema prefix."""
+    if getattr(runtime.config, "skill_error", ""):
+        return runtime.config.skill_error
     envelope = runtime.catalog or {}
     listed = envelope.get("listed_at")
     attempt = envelope.get("latest_attempt") or {}

@@ -18,6 +18,18 @@ except ImportError:  # pragma: no cover - CI supports Python 3.10.
 
 # --- Skills and extensions ---------------------------------------------------------------------
 
+class SkillMcpServerFact(TypedDict):
+    """One declared server's passive state in an installed skill's ``mcp_servers`` list."""
+
+    id: str
+    title: str
+    conflict: bool
+    configured: bool
+    tool_count: int
+    listed: bool
+    error: str
+
+
 class InstalledSkill(TypedDict, total=False):
     """One ``GET /api/extensions`` ``skills`` row, sorted by name; a name two skills claim gives one
     not-live row each (``identity_collision``). ``live_reason`` says why a skill is or is not live."""
@@ -58,6 +70,7 @@ class InstalledSkill(TypedDict, total=False):
     review_findings: List[Dict[str, Any]]
     skill_review: Dict[str, Any]  # {} or {current, history, history_omitted}
     grants: Dict[str, Any]  # requested/granted/missing keys and permissions, all_granted, usable
+    mcp_servers: List[SkillMcpServerFact]  # absent on identity-collision rows
     published: Optional[Dict[str, Any]]
     published_malformed: bool
     presence_runtime: Dict[str, Any]  # a reviewed presence profile's runtime choice
@@ -761,6 +774,8 @@ class McpServerStatus(TypedDict, total=False):
     schemas_at_start: bool  # the owner's pin: call schemas in every request from task start
     task_session: bool  # stdio: one task loop's calls share one session (listings stay per call)
     browser_policy: bool  # that session's process may ask the host's browser policy per request
+    skill: str  # owning skill name, or "" for a server configured directly
+    skill_error: str  # why the skill-owned server is unavailable, or ""
     instructions: str  # the server's own usage text from initialize, untrusted
     map_tokens: int  # this server's part of the connections map (Main, Low/Max)
     schema_tokens: int  # all its call schemas, loaded or not
@@ -1038,7 +1053,7 @@ class CostBreakdownResponse(TypedDict, total=False):
 
 
 __all__ = [
-    "InstalledSkill", "ExtensionsIndexResponse", "ExtensionManifestResponse", "ExtensionSettingsSectionResponse",
+    "SkillMcpServerFact", "InstalledSkill", "ExtensionsIndexResponse", "ExtensionManifestResponse", "ExtensionSettingsSectionResponse",
     "SkillToggleRequest", "SkillRevisionRequest", "SkillReviewRequest", "SkillGrantRequest", "SkillDeleteRequest",
     "SkillToggleResponse", "SkillActionRefusal", "SkillDaemonsResponse", "SkillLifecycleJob",
     "SkillLifecycleQueueResponse",

@@ -5,6 +5,7 @@ import {
     updateWithoutReview,
 } from '../modules/skill_dialogs.js';
 import { skillSourcesApi } from '../modules/api_client.js';
+import { renderConfirmDialogDetails } from '../modules/confirm_dialog.js';
 
 test('rejected update confirms its exact version and sends only that release after literal confirmation', async () => {
     const skill = { name: 'demo', install: { update_rejected: { version: '2.0', digest: 'd'.repeat(64), reason: 'review_blockers' },
@@ -170,17 +171,26 @@ test('Connect tools: one confirmation names what runs and the servers MCP starts
         assert.deepEqual(result, decision === true ? { ok: true, saved: true } : null);
     }
     const alerts = [];
-    for (const blocked of [{ ...preview, ready: false, blockers: ['skill_disabled'], next_action: 'Finish setup.' },
-        { ...preview, servers: [{ ...server, change: 'conflict', conflict: 'Settings already has server id chrome_browser added by hand' }] }]) {
+    for (const blocked of [{ ...preview, ready: false, blockers: ['review_stale', "server 'chrome_browser': no usable node runtime was found"],
+        next_action: 'Finish setup.' }, { ...preview, ready: false, blockers: ['skill_disabled'], next_action: '' },
+    { ...preview, servers: [{ ...server, change: 'conflict', conflict: 'Settings already has server id chrome_browser added by hand' }] }]) {
         const result = await connectSkillTools({ name: 'chrome' }, {
             api: { skillMcpConnectPreview: async () => blocked, skillMcpConnect: () => assert.fail('nothing is confirmed') },
             dialog: async (model) => { alerts.push(model); return true; },
         });
         assert.equal(result, null);
     }
-    assert.ok(alerts.every((model) => model.alert === true));
-    assert.match(alerts[0].body, /skill_disabled\. Finish setup\./);
-    assert.match(alerts[1].body, /added by hand\. Remove or rename that server/);
+    assert.ok(alerts.every((model) => model.alert === true && model.title === 'chrome can’t connect its tools yet'));
+    // Not ready: the outcome in words; the host's readiness tokens and launch diagnostics, whole, under Details.
+    assert.equal(alerts[0].body, 'It can’t run them now, so nothing was changed.');
+    assert.doesNotMatch(alerts[0].body + alerts[1].body, /review_stale|skill_disabled|chrome_browser|Finish setup/);
+    assert.deepEqual(alerts[0].details, { summary: 'What stops it', rows: [
+        { label: 'Reasons', value: "review_stale; server 'chrome_browser': no usable node runtime was found" },
+        { label: 'Next step', value: 'Finish setup.' }] });
+    assert.deepEqual(alerts[1].details.rows, [{ label: 'Reason', value: 'skill_disabled' }]);
+    assert.match(renderConfirmDialogDetails(alerts[0].details), /<summary>What stops it<\/summary>[\s\S]*<dd>review_stale; server &#39;chrome_browser&#39;: no usable node runtime was found<\/dd>/);
+    assert.match(alerts[2].body, /added by hand\. Remove or rename that server/);
+    assert.equal(alerts[2].details, null);
     const unchanged = await connectSkillTools({ name: 'chrome' }, {
         api: { skillMcpConnectPreview: async () => ({ ...preview, changed: false }), skillMcpConnect: () => assert.fail('no write') },
         dialog: () => assert.fail('nothing to confirm'),

@@ -444,8 +444,7 @@ class _SavedDocumentFields:
 def _as_saved(document: Dict[str, Any]) -> Dict[str, Any]:
     """``document`` as saved, read again under the same lock: a value the read only re-typed
     (``config.coerce_settings_raw``) keeps its exact saved form (a saved ``false`` stays ``false`` where the key's
-    default is text), and a key absent on disk whose value is what the read derives from an empty document (a
-    default or a seed of one) is not authored. A value a migration changed or derived from saved keys stays."""
+    default is text). A value a migration changed or derived from saved keys stays."""
     from ouroboros import config as _config
 
     try:
@@ -455,9 +454,8 @@ def _as_saved(document: Dict[str, Any]) -> Dict[str, Any]:
         return document
     if not isinstance(saved, dict):
         return document
-    blank = _config.normalize_settings_raw({})
     return {key: saved[key] if key in saved and _config.coerce_settings_raw({key: saved[key]})[key] == value else value
-            for key, value in document.items() if key in saved or blank.get(key, _ABSENT) != value}
+            for key, value in document.items()}
 
 
 def fields_on_saved_document(changes: Dict[str, Any],
