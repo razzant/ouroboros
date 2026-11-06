@@ -100,7 +100,7 @@ _SCHEMA = {
         "first reading of declared body work is seated like a body plan's first ask. "
         "Participants answer in parallel the first time and see each other's answers on later "
         "asks; each receives the plan or its delta, the council so far, its own open objections, your message and your "
-        "attachments. Each answer reaches you at your next step and before your final; the mailbox gets one frame "
+        "attachments. Each answer reaches you at your next step and before an unhurried finish; the mailbox gets one frame "
         "when every counted participant has settled, answered or not. READ (no arguments, free) shows the current revision, every open "
         "objection with who raised it, who saw which revision, the latest contributions and the pending asks. An "
         "objection stands until the participant who raised it withdraws it (ask that participant again after you "

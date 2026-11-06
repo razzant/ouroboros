@@ -872,9 +872,9 @@ class OuroborosAgent:
         _delta_block = capability_delta_prompt_block(dispatch)
         if _delta_block:
             messages.append({"role": "user", "content": _delta_block})
-        # The executor note tells a harness child it is a NANNY (delegate_start/delegate_wait,
-        # not metered thinking), and an `auto` child that fell back to metered spend
-        # must be able to say so before spending.
+        # The executor note tells a configured session child it is a NANNY
+        # (delegate_start/delegate_wait, not metered thinking); a child without a
+        # configured row runs natively and gets no note.
         _exec_note = dispatch_executor_note(
             dispatch.executor_resolution if dispatch is not None else None,
             lane=dispatch.lane if dispatch is not None else None,

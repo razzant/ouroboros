@@ -232,11 +232,11 @@ def get_subagent_harness() -> DelegationRoute | None:
     route = parse_subagent_harness(raw)
     if route is None and raw and raw.lower() != "off":
         # A non-empty value that parses to nothing ("=opus") is a typo, not a
-        # decision — silently equal to "never configured" it moved ALL delegation
-        # onto metered API children with no trace. Say so where the operator looks.
+        # decision; silently equal to "never configured" it would leave no trace.
+        # Say so where the operator looks.
         log.warning(
             "OUROBOROS_SUBAGENT_HARNESS is set but unparseable (%r) — "
-            "delegation is OFF until it reads harness[=model][:effort]", raw,
+            "the review session fallback is OFF until it reads harness[=model][:effort]", raw,
         )
     if route is None:
         return None
