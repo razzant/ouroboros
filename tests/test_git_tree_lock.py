@@ -60,27 +60,136 @@ def test_a_live_holder_older_than_the_stale_age_is_never_evicted_and_a_dead_ones
     git_plumbing._release_git_lock(taken)
 
 
+ANSWERED = "2026-11-06T12:00:00+00:00"  # when the model answer these calls ride with was recorded
+
+
+def _attempt(n, phase, fingerprint, updated):
+    return SimpleNamespace(tool_name="commit_reviewed", attempt=n, phase=phase, pre_review_fingerprint=fingerprint,
+                           updated_ts=updated, finished_ts="", started_ts="", ts="")
+
+
+def _continuation_ctx(tmp_path, monkeypatch, attempts, *, enforcement="advisory"):
+    from ouroboros import config, review_state
+
+    monkeypatch.setattr(review_state, "_load_state_unlocked", lambda *_a, **_kw: SimpleNamespace(
+        filter_attempts=lambda **_kw: list(attempts)))
+    monkeypatch.setattr(config, "get_review_enforcement", lambda: enforcement)
+    monkeypatch.setattr(config, "get_runtime_mode", lambda: "advanced")
+    return SimpleNamespace(repo_dir=str(tmp_path), drive_root=str(tmp_path), task_id="t1", _commit_call_notes=[],
+                           _current_llm_call_meta={"ts": ANSWERED})
+
+
+DECISION = {"disposition": "accepted", "rationale": "Read the panel."}
+
+
 def test_a_decision_without_a_reference_takes_this_copys_latest_returned_review(tmp_path, monkeypatch):
-    from ouroboros import review_state
     from ouroboros.tools import review_collection as rc
 
     attempts = []
-    monkeypatch.setattr(review_state, "_load_state_unlocked", lambda *_a, **_kw: SimpleNamespace(
-        filter_attempts=lambda **_kw: list(attempts)))
-    ctx = SimpleNamespace(repo_dir=str(tmp_path), drive_root=str(tmp_path), task_id="t1", _commit_call_notes=[])
-    decision = {"disposition": "accepted", "rationale": "Read the panel."}
-    assert rc.default_commit_continuation(ctx, None, decision, None) == (None, None)  # none returned: ask first
+    ctx = _continuation_ctx(tmp_path, monkeypatch, attempts)
+    call = {"author_disposition": DECISION}
+    assert rc.default_commit_continuation(ctx, call) == "" and call["author_disposition"] is None  # none: ask first
     assert "no review of this copy was returned yet" in ctx._commit_call_notes[0]
-    attempts.extend(SimpleNamespace(tool_name="commit_reviewed", attempt=n, phase=phase, pre_review_fingerprint=fp)
+    attempts.extend(_attempt(n, phase, fp, f"2026-11-06T11:5{n}:00+00:00")
                     for n, phase, fp in ((1, "review_only", "a"), (2, "committed", "b"), (3, "late_wait", "c")))
-    reference, kept = rc.default_commit_continuation(ctx, None, decision, None)
-    assert kept == decision and (reference["attempt"], reference["pre_review_fingerprint"]) == (3, "c")
-    named = {"surface": "commit", "attempt": 1}
-    assert rc.default_commit_continuation(ctx, named, decision, None) == (named, decision)  # a named one stays
+    call = {"author_disposition": DECISION}
+    assert rc.default_commit_continuation(ctx, call) == "" and call["author_disposition"] == DECISION
+    assert (call["review_reference"]["attempt"], call["review_reference"]["pre_review_fingerprint"]) == (3, "c")
+    named = {"surface": "commit", "tool_name": "commit_reviewed", "attempt": 1}
+    call = {"author_disposition": DECISION, "review_reference": named}
+    assert rc.default_commit_continuation(ctx, call) == "" and call["review_reference"] is named  # a named one stays
+
+
+@pytest.mark.parametrize("named", [False, True])
+def test_a_decision_waits_for_an_outcome_recorded_after_the_answer_it_rides_with(tmp_path, monkeypatch, named):
+    """Owner 11.10, both directions, named or defaulted: an outcome recorded in this same turn (or changed by a late
+    reviewer since the answer) is not shown yet, so the decision refuses without staging; the next answer decides."""
+    from ouroboros.tools import review_collection as rc
+
+    ctx = _continuation_ctx(tmp_path, monkeypatch, [_attempt(4, "review_only", "d", "2026-11-06T12:00:05+00:00")])
+    reference = {"surface": "commit", "tool_name": "commit_reviewed", "attempt": 4} if named else None
+    refusal = rc.default_commit_continuation(ctx, {"author_disposition": DECISION, "review_reference": reference})
+    assert "attempt 4" in refusal and "not shown yet" in refusal and "Nothing was staged or committed" in refusal
+    ctx._current_llm_call_meta = {"ts": "2026-11-06T12:01:00+00:00"}  # the next answer read it
+    call = {"author_disposition": DECISION, "review_reference": reference}
+    assert rc.default_commit_continuation(ctx, call) == "" and call["review_reference"]["attempt"] == 4
+
+
+def test_the_continuation_texts_name_the_step_their_cause_leaves(tmp_path, monkeypatch):
+    """06.11: Blocking says its review decides and lands a passing commit; Advisory names collecting a running wave,
+    else the returned outcome; an unreadable state names the reference instead of buying a review."""
+    from ouroboros import review_state
+    from ouroboros.tools import review_collection as rc
+
+    blocking = _continuation_ctx(tmp_path, monkeypatch, [], enforcement="blocking")
+    call = {"author_disposition": DECISION}
+    assert rc.default_commit_continuation(blocking, call) == "" and call["author_disposition"] is None
+    assert "under Blocking enforcement this call's review decides" in blocking._commit_call_notes[0]
+    assert "a passing review lands the commit" in rc.continuation_refusal(ValueError("requires Advisory"))
+    monkeypatch.setattr("ouroboros.config.get_review_enforcement", lambda: "advisory")
+    assert "collect that outcome" in rc.continuation_refusal(rc.ContinuationWaits("reviewers are still running"))
+    assert "decide on the outcome the last commit_reviewed call returned" in rc.continuation_refusal(ValueError("x"))
+
+    def unreadable(*_a, **_kw):
+        raise OSError("state locked away")
+    monkeypatch.setattr(review_state, "_load_state_unlocked", unreadable)
+    text = rc.default_commit_continuation(blocking, {"author_disposition": DECISION})
+    assert "unreadable (state locked away)" in text and "Next: name review_reference" in text
+    assert rc.default_commit_continuation(blocking, {"author_disposition": DECISION, "review_reference": {}}) == ""
+
+
+def test_a_continuation_sets_aside_the_fields_of_another_step_and_a_new_ask_keeps_them():
+    from ouroboros.tools import review_collection as rc
+
+    ctx = SimpleNamespace(_commit_call_notes=[], _review_since="record-1")
+    assert rc.set_aside_wrong_step_fields(ctx, False, "mail") == "mail" and ctx._review_since == "record-1"
+    assert rc.set_aside_wrong_step_fields(ctx, True, "mail") is None and ctx._review_since == ""
+    assert [note.split(" was set aside")[0] for note in ctx._commit_call_notes] == ["wake_on", "since_review"]
+
+
+def test_a_revert_takes_the_lock_of_the_tree_it_writes(tmp_path, monkeypatch):
+    """Review 06.11, both directions with real git: a revert of a linked worktree waits for that tree's lock and
+    lands nothing, while a held lock of the serving checkout does not stop it."""
+    from functools import partial
+    from ouroboros.tools import git, git_vcs_ops
+
+    def run(repo, *args):
+        return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, check=True).stdout.strip()
+
+    serving = _repo(tmp_path / "serving")
+    run(serving, "config", "user.email", "t@t")
+    run(serving, "config", "user.name", "t")
+    (serving / "f.txt").write_text("one\n", encoding="utf-8")
+    run(serving, "add", "f.txt")
+    run(serving, "commit", "-qm", "one")
+    target = tmp_path / "linked"
+    run(serving, "worktree", "add", "-qb", "target", str(target))
+    (target / "f.txt").write_text("two\n", encoding="utf-8")
+    run(target, "commit", "-qam", "two")
+    head = run(target, "rev-parse", "HEAD")
+    ctx = _ctx(tmp_path, serving)
+    ctx.task_metadata, ctx.drive_root = {}, tmp_path / "drive"
+    monkeypatch.setattr(git, "_acquire_git_lock", partial(git_plumbing._acquire_git_lock, timeout_sec=1))
+    binding = SimpleNamespace(operation="vcs", root="active_workspace", base_path=target, target_path=target,
+                              repository_path=target)
+    held = git_plumbing._acquire_git_lock(ctx, repo_dir=target, timeout_sec=1)
+    try:
+        with pytest.raises(TimeoutError):
+            git_vcs_ops._revert_commit(ctx, head, confirm=True, _resolved_binding=binding)
+        assert run(target, "rev-parse", "HEAD") == head  # nothing landed under another holder
+    finally:
+        git_plumbing._release_git_lock(held)
+    serving_lock = git_plumbing._acquire_git_lock(ctx, timeout_sec=1)
+    try:
+        assert "New revert commit created" in git_vcs_ops._revert_commit(ctx, head, confirm=True,
+                                                                           _resolved_binding=binding)
+        assert run(target, "rev-parse", "HEAD") != head
+    finally:
+        git_plumbing._release_git_lock(serving_lock)
 
 
 def test_a_body_copy_younger_than_its_task_baseline_is_a_moved_base_that_names_its_paths(tmp_path):
-    from ouroboros.mutation_attribution import resolve_attributed_git_paths
+    from ouroboros.mutation_attribution import resolve_attributed_git_paths, selection_disclosure
     from ouroboros.task_results import write_task_result
 
     repo = _repo(tmp_path / "copy")
@@ -91,7 +200,12 @@ def test_a_body_copy_younger_than_its_task_baseline_is_a_moved_base_that_names_i
     write_task_result(drive, "t1", "running", mutation_evidence={"baseline": {"surfaces": []}})
     selected, _facts, error = resolve_attributed_git_paths(drive, "t1", repo, None, candidate_root=True)
     assert selected == [] and "baseline_surface_missing" in error and 'paths=["a.txt"]' in error
+    assert "moved base" not in error and "with this gap disclosed" in error
     selected, facts, error = resolve_attributed_git_paths(drive, "t1", repo, ["a.txt"], candidate_root=True)
     assert not error and selected == ["a.txt"] and facts["selection"]["gaps"] == ["baseline_surface_missing"]
+    disclosed = selection_disclosure(facts["selection"])  # the reviewers read a missing baseline, not a moved HEAD
+    assert "no recorded task baseline" in disclosed and "HEAD moved" not in disclosed
+    moved = selection_disclosure({"gaps": ["baseline_stale"], "base_commit": "abcdef1234567890"})
+    assert "HEAD moved from the recorded base abcdef123456" in moved and "no recorded task baseline" not in moved
     selected, _facts, error = resolve_attributed_git_paths(drive, "t1", repo, ["a.txt"])  # not a body copy: as before
     assert selected == [] and "GIT_ATTRIBUTION_BLOCKED" in error

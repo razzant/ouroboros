@@ -350,12 +350,13 @@ def _drain_incoming_messages(
     return controls
 
 
-def _context_overflow_retries(tool_ctx: Any) -> set[Tuple[str, str]]:
-    """Per-task ``(round_id, pass)`` record of the refusal passes (``REFUSAL_PASSES``): once per round, any route."""
-    retries = getattr(tool_ctx, "_context_overflow_retries", None)
+def _context_overflow_retries(tool_ctx: Any, record: str = "_context_overflow_retries") -> set:
+    """Per-task ``(round_id, pass)`` record of the refusal passes (``REFUSAL_PASSES``): once per round, any route.
+    ``_context_overflow_changed`` keeps the rounds a pass changed the candidate in (owner 2A, a fallback's re-entry)."""
+    retries = getattr(tool_ctx, record, None)
     if not isinstance(retries, set):
         retries = set()
-        tool_ctx._context_overflow_retries = retries
+        setattr(tool_ctx, record, retries)
     return retries
 
 
@@ -1205,7 +1206,8 @@ def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, sl
     The view saves the measured ``saving`` (else the capacity
     deficit, else at least one element) from the level it shows (no target or working margin
     reapplied, nothing addressed unfolds). ``slack`` asks the return-after-fold room beyond it, which only
-    memory detail and ordinary host forms pay (``ContextFitPlan.reproject_for_route``)."""
+    memory detail and ordinary host forms pay (``ContextFitPlan.reproject_for_route``): a zero ``saving``
+    beside it is no excess, so no whole-or-outline section pays."""
     plan = ctx.context_fit_plan
     measurement = fit.measurement
     if plan is None or getattr(plan, "core", None) is None:
@@ -1218,7 +1220,8 @@ def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, sl
         ratio=measurement.measurement_density,
         output_reserve=int(plan.output_reserve_tokens), tool_schemas=ctx.tool_schemas, start_mode=mode,
         current_messages=ctx.messages, measured_input_tokens=measurement.reprojection_input_tokens,
-        refused_tokens=max(1, int(saving or measurement.capacity_deficit_tokens or 0)),
+        refused_tokens=(int(saving) if saving or (saving == 0 and slack)  # a slack-only ask states no excess
+                        else max(1, int(measurement.capacity_deficit_tokens or 0))),
         **({"slack_tokens": int(slack)} if slack else {}),
     )
     selected_mode = rebound.initial_mode

@@ -171,7 +171,7 @@ def test_bodies_pay_the_excess_memory_the_slack_and_books_wait_for_a_further_ref
     stated = _ctx("This model's maximum context length is 400,000 tokens.")  # slack 50,000
     sizes[:] = [830_000]  # after memory narrowed
     assert lmc._apply_refusal_pass(stated, first, _fit(900_000, accepted=None), 70_000, 50_000) is True
-    assert calls == [("host_copies", None), ("bodies", 20_000), ("floor", 1, 50_000)]
+    assert calls == [("host_copies", None), ("bodies", 20_000), ("floor", 0, 50_000)]  # slack alone: no excess
     assert stated.active_context_mode == "max"  # books stay through the first pass
     calls.clear()
     sizes[:] = [880_000, 830_000]  # before and after the books step
@@ -182,12 +182,18 @@ def test_bodies_pay_the_excess_memory_the_slack_and_books_wait_for_a_further_ref
     calls.clear()
     sizes[:] = [800_000]
     assert lmc._apply_refusal_pass(_ctx(), first, unsized, None) is True
-    assert calls == [("host_copies", None), ("bodies", None), ("floor", lmc.WHOLE_CATEGORY, 0)]  # unknown: whole
+    # Unknown: memory's detail pays all it can, a whole-or-outline section nothing without a measured excess.
+    assert calls == [("host_copies", None), ("bodies", None), ("floor", 0, lmc.WHOLE_CATEGORY)]
+    calls.clear()
+    sizes[:] = [800_000, 790_000, 780_000]  # the books step's before and after, then memory's rest
+    assert lmc._apply_refusal_pass(_ctx(), second, unsized, None) is True
+    # After a further refusal memory's rest may take everything, whole-or-outline sections included.
+    assert calls == [("books",), ("unseen_bodies", None), ("floor", lmc.WHOLE_CATEGORY, 0)]
     calls.clear()
     sizes[:] = [800_000]
     known = SimpleNamespace(measurement=SimpleNamespace(**{**vars(unsized.measurement), "capacity_deficit_tokens": 18_887}))
     assert lmc._apply_refusal_pass(_ctx(), first, known, None) is True
-    assert calls[-1] == ("floor", 18_887, 0)  # no target, but a known window's deficit sizes memory
+    assert calls[-1] == ("floor", 18_887, 0)  # no target, but a known window's deficit sizes memory (no slack here)
 
 
 def test_a_failed_candidates_walk_keeps_the_rounds_refusal_and_the_conversation_facts():

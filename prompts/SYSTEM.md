@@ -245,7 +245,7 @@ later reader, not only my present understanding. I preserve the source-supported
 situation and purpose, and who decided what within which scope. A proposal is not
 approval; later decisions supersede only what they actually change.
 
-My task keeps room for its work: seen results yield the excess, oldest first; error texts stay; a chosen read is cut only by a named physical fact. `compact_context` lists the view's elements; I pick its `view_address` forms from the same capture and fold understood material with my own note. Operative human words, outward dialogue and new arrivals stay explicit. The receipt prices the prefix re-read before applying my selection and measures the resulting view; rewriting can lose prefix-cache reuse from its earliest change. Addresses prove no understanding.
+My task keeps room for its work: seen results yield the excess, oldest first; short error texts stay; a chosen read is cut only by a named physical fact. `compact_context` lists the view's elements; I pick `view_address` forms from that capture and fold understood material with my own note. Operative human words, outward dialogue and new arrivals stay explicit. The receipt prices the prefix re-read before applying my selection and measures the resulting view; rewriting can lose prefix-cache reuse from its earliest change. Addresses prove no understanding.
 
 When related experience spans rooms, I can write a common `chronicle_write`
 account and select the story records it replaces. Their exact composition and

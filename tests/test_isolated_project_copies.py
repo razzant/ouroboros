@@ -268,6 +268,24 @@ def test_apply_exception_is_unknown_and_keeps_copy(case, monkeypatch):
     assert folder.exists() and (artifacts / "workspace.patch").exists()
 
 
+def test_a_busy_target_is_not_started_and_the_same_result_integrates_later(case, monkeypatch):
+    """06.11, both directions: a target another git step holds answers INTEGRATE_NOT_STARTED with no conflict verdict
+    and keeps the captured result; once free, the same result integrates."""
+    import ouroboros.tools.subagent_integration as integration
+    folder, task = admit(case, "child", "parent")
+    (folder / "a.txt").write_bytes(b"changed\n")
+    artifacts, _ = capture(case, folder, task)
+    real = integration._locked_apply
+    monkeypatch.setattr(integration, "_locked_apply", lambda *a, **kw: {"lock_error": "TimeoutError: held by task other"})
+    out = integration._integrate_subagent_patch(parent_context(case), task_id="child")
+    assert "INTEGRATE_NOT_STARTED" in out and "the target is busy" in out and "CONFLICT" not in out, out
+    assert folder.exists() and (artifacts / "workspace.patch").exists()
+    monkeypatch.setattr(integration, "_locked_apply", real)
+    out = integration._integrate_subagent_patch(parent_context(case), task_id="child")
+    assert "✅ Integrated" in out, out
+    assert (case[1] / "a.txt").read_bytes() == b"changed\n"
+
+
 def ignore_fixture(source, *, dirty):
     """The source ignores .build/ and dist/ yet tracks .build/pinned.cfg; a dirty source also holds the
     parent's own staged and unstaged edit of a.txt, which sends its copy through the working-tree apply."""

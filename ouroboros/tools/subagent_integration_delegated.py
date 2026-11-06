@@ -889,8 +889,8 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
     if outcome.get("lock_error"):
         custody.record_patch_apply_resolved(drive, entry, reason="lock_error")
         return (
-            "⚠️ INTEGRATE_LOCK_TIMEOUT: could not acquire the repo git lock: "
-            f"{outcome['lock_error']}."
+            f"⚠️ INTEGRATE_NOT_STARTED: run {rid} into {target}: the target is busy "
+            f"({outcome['lock_error']}). Retry later."
         )
     proc = outcome["proc"]
     drifted = outcome["drifted"]

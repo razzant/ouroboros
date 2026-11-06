@@ -594,13 +594,57 @@ def note_commit_call(ctx, text):
         notes.append(text)
 
 
-def default_commit_continuation(ctx, review_reference, author_disposition, continue_seats):
-    """``(review_reference, author_disposition)`` of a commit call: a decision without a reference decides on the
-    latest outcome returned for this copy, as ``skill_review`` reads its own; with none returned yet the call asks
-    for the review the decision follows (the review comes first, owner 11.10)."""
-    if author_disposition is None or review_reference is not None or continue_seats is not None:
-        return review_reference, author_disposition
+class ContinuationWaits(ValueError):
+    """A returned commit outcome whose reviewers are still running: the author's decision waits for them."""
+
+
+def continuation_refusal(exc: Exception) -> str:
+    """A refused author continuation names the next call its cause leaves (06.11)."""
+    from ouroboros.config import get_review_enforcement
+    from ouroboros.tools.review_helpers import review_enforcement_blocks
+
+    if review_enforcement_blocks(get_review_enforcement()):
+        step = ("under Blocking enforcement a passing review lands the commit: call commit_reviewed without "
+                "author_disposition and review_reference.")
+    elif isinstance(exc, ContinuationWaits):
+        step = ("collect that outcome (its review_reference, no author_disposition) once its reviewers answer, "
+                "then decide.")
+    else:
+        step = ("decide on the outcome the last commit_reviewed call returned (omit review_reference for that one), "
+                "or call without author_disposition to review the current bytes.")
+    return f"ERROR: REVIEW_AUTHOR_CONTINUATION_INVALID: {exc}. Nothing was staged or committed. Next: {step}"
+
+
+def _stamp(value):
+    import datetime
+
+    try:
+        stamp = datetime.datetime.fromisoformat(str(value or ""))
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=datetime.timezone.utc)
+
+
+def _shown(ctx, attempt) -> bool:
+    """Whether the attempt's outcome, as last recorded, predates the model answer whose calls run now: a result
+    of this same turn, or one a late reviewer changed since, is delivered only after this batch."""
+    answered = _stamp((getattr(ctx, "_current_llm_call_meta", None) or {}).get("ts"))
+    recorded = _stamp(attempt.updated_ts or attempt.finished_ts or attempt.started_ts or attempt.ts)
+    return answered is None or recorded is None or recorded < answered  # unordered stamps never hold a call
+
+
+def default_commit_continuation(ctx, kwargs) -> str:
+    """Fill a commit call's continuation in ``kwargs``; a refusal text when the call must not run, else "".
+
+    A decision without a reference decides on the latest outcome returned for this copy, as ``skill_review`` reads
+    its own; with none returned yet the call asks for the review the decision follows. A decision waits for an
+    outcome recorded after the answer it rides with: that outcome is not shown yet (the review comes first, 11.10)."""
+    reference = kwargs.get("review_reference")
+    if kwargs.get("author_disposition") is None or kwargs.get("continue_seats") is not None:
+        return ""
+    from ouroboros.config import get_review_enforcement
     from ouroboros.review_state import _load_state_unlocked, make_repo_key
+    from ouroboros.tools.review_helpers import review_enforcement_blocks
 
     repo_key, task_id = make_repo_key(pathlib.Path(ctx.repo_dir)), str(getattr(ctx, "task_id", "") or "")
     try:
@@ -608,16 +652,33 @@ def default_commit_continuation(ctx, review_reference, author_disposition, conti
         returned = [attempt for attempt in state.filter_attempts(repo_key=repo_key, task_id=task_id)
                     if attempt.tool_name in {"commit_reviewed", "vcs_commit_reviewed"}
                     and attempt.phase in {"review_only", "late_wait"} and attempt.pre_review_fingerprint]
-    except (OSError, ValueError):
-        returned = []
+        if reference is not None:  # a named outcome: the resolver judges its identity, this call only its turn
+            returned = [attempt for attempt in returned if isinstance(reference, dict)
+                        and (attempt.tool_name, attempt.attempt) == (reference.get("tool_name"), reference.get("attempt"))]
+            if not returned or _shown(ctx, returned[-1]):
+                return ""
+    except (OSError, ValueError) as exc:
+        return "" if reference is not None else (
+            f"ERROR: REVIEW_AUTHOR_CONTINUATION_INVALID: this copy's review state is unreadable ({exc}). Nothing "
+            "was staged or committed. Next: name review_reference, or call without author_disposition.")
     if not returned:
-        note_commit_call(ctx, "author_disposition was set aside: no review of this copy was returned yet, so this "
-                         "call asks for it; decide after its outcome.")
-        return None, None
+        kwargs["author_disposition"] = None
+        note_commit_call(ctx, "author_disposition was set aside: " + (
+            "under Blocking enforcement this call's review decides, and a passing review lands the commit."
+            if review_enforcement_blocks(get_review_enforcement()) else
+            "no review of this copy was returned yet, so this call asks for it; decide after its outcome."))
+        return ""
     latest = returned[-1]
+    if not _shown(ctx, latest):
+        return (f"ERROR: REVIEW_AUTHOR_CONTINUATION_INVALID: the outcome of this copy's review (attempt "
+                f"{latest.attempt}) was recorded after the answer this call rides with, so it is not shown yet. "
+                "Nothing was staged or committed. Next: decide in a new call once that outcome is shown (a late one "
+                "is collected with its review_reference and no author_disposition).")
     note_commit_call(ctx, f"review_reference: the latest outcome returned for this copy (attempt {latest.attempt}).")
-    return {"surface": "commit", "repo_key": repo_key, "task_id": task_id, "tool_name": latest.tool_name,
-            "attempt": latest.attempt, "pre_review_fingerprint": latest.pre_review_fingerprint}, author_disposition
+    kwargs["review_reference"] = {"surface": "commit", "repo_key": repo_key, "task_id": task_id, "tool_name":
+                                  latest.tool_name, "attempt": latest.attempt,
+                                  "pre_review_fingerprint": latest.pre_review_fingerprint}
+    return ""
 
 
 def set_aside_wrong_step_fields(ctx, continuation, wake_on):

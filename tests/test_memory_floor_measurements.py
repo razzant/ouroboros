@@ -146,3 +146,38 @@ def test_a_shortest_walk_measures_no_form_its_text_settles(tmp_path, monkeypatch
         sent, lambda level: ties.append(level.addressed) or measure(level)))
     assert scale.build(tmp_path, monkeypatch).initial_mode == 'nano'
     assert walks == ['nano'] * 4 and ties == []
+
+
+@pytest.mark.parametrize("target, outlined", [(12_500, []), (25_000, ["knowledge_index"])])
+def test_the_slack_alone_never_outlines_the_knowledge_index(tmp_path, monkeypatch, target, outlined):
+    """BIBLE P1, both directions, on the real floor (review 06.11): when the measured excess is paid and only the
+    return-after-fold slack remains, memory and ordinary host forms pay it and the index stays whole; a measured
+    excess the host forms cannot pay outlines it."""
+    from ouroboros import loop, loop_model_call as lmc
+
+    index = HostSection("knowledge_index", "## knowledge\n\n" + "k" * 10000, "## knowledge\n\nOutline.")
+    core = cf.ContextCore(base_prompt="SYSTEM", bible_md="BIBLE",
+        architecture_md="# Architecture", development_md="", docs_need_development=False,
+        semi_stable_text="IDENTITY", dynamic_text="", dynamic_head_text=index,
+        dynamic_sections=(), dynamic_head_sections=(index,),
+        user_content_json=json.dumps("Continue."), section_root=str(tmp_path), section_task_id="slack-probe")
+    monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *a, **kw: 1.0)
+    monkeypatch.setattr(cf, "main_output_reserve_tokens", lambda **kw: 2000)
+    evidence = SimpleNamespace(route_fp="probe", status="confirmed", stale=False, window_tokens=100000, source="synthetic")
+    plan = cf.build_context_fit_plan(SimpleNamespace(drive_root=tmp_path), core,
+        {"id": "slack-probe", "_is_direct_chat": True}, preferred_mode="max",
+        route_resolver=lambda *a, **kw: ({"provider": "test", "model": "synthetic"}, evidence))
+    initial = plan.projection(plan.initial_mode)
+    assert not initial.memory_facts.get("host_sections_addressed")
+    fit = SimpleNamespace(measurement=SimpleNamespace(capacity_total_tokens=100000, measurement_density=1.0,
+        reprojection_input_tokens=None, estimated_input_tokens=initial.calibrated_tokens,
+        capacity_deficit_tokens=0, route_fp="probe"))
+    ctx = SimpleNamespace(context_fit_plan=plan, active_context_mode=plan.initial_mode,
+        tools=SimpleNamespace(_ctx=SimpleNamespace()), tool_schemas=[],
+        messages=[initial.system_message(), {"role": "user", "content": "Continue."}],
+        task_id="slack-probe", event_queue=None, drive_logs=tmp_path, round_idx=1)
+    monkeypatch.setattr(loop, "_measure_round_main_fit", lambda *a, **kw: fit)
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *a, **kw: None)
+    lmc._apply_refusal_step(ctx, "floor", fit, target, 12_500)  # the target holds the 12,500 slack
+    hosts = ctx.context_fit_plan.projection(ctx.active_context_mode).memory_facts.get("host_sections_addressed", [])
+    assert [row["section_id"] for row in hosts] == outlined

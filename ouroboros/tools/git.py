@@ -1062,8 +1062,8 @@ def _commit_reviewed(ctx: ToolContext, commit_message: str = "", *args: Any, **k
     if error := bind_commit_test_request(ctx, kwargs):
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=error))
     from ouroboros.tools.review_collection import default_commit_continuation, publish_commit_delivery
-    kwargs["review_reference"], kwargs["author_disposition"] = default_commit_continuation(  # the review comes first
-        ctx, kwargs.get("review_reference"), kwargs.get("author_disposition"), kwargs.get("continue_seats"))
+    if refusal := default_commit_continuation(ctx, kwargs):  # the review comes first, its outcome shown (owner 11.10)
+        return publish_commit_delivery(ctx, _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=refusal)))
     return publish_commit_delivery(ctx, name_review_record(ctx, _repo_commit_push(ctx, commit_message, *args, **kwargs)))
 
 

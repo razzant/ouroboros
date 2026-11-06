@@ -121,8 +121,10 @@ def test_git_catalog_schema_bytes_and_handler_owners_are_stable():
     # #2680: both aliases' paths say omitted paths with author_disposition mean the reviewed paths, and their
     # author_disposition accepts the candidate the call stages (omitted paths: the reviewed ones), not the current
     # attributed candidate; those two descriptions are the only change from aa615be1….
+    # 06.11: extra_tests says which entries the tests preflight runs and that it skips others with a note; that
+    # description is the only change from a4ff0c92….
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "a4ff0c92cbb238357007db0ea605c81b2188b349fda7ee2d3e29e3c4daef5770"
+        "e7ad640f7fc3a806bcdca365c58247423cdab89d31ba0e9c032f27ac4a78bf57"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)

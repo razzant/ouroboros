@@ -340,7 +340,7 @@ def test_each_pass_earns_one_retry_and_the_second_pass_runs_only_after_a_refused
     msg, _cost, mode = loop._call_round_model(context)
     assert msg["content"] == "fits" and mode == "max"
     assert len(sends) == (3 if second_refused else 2)
-    expected = ["host_copies", "bodies", "floor"] + (["books", "unseen_bodies"] if second_refused else [])
+    expected = ["host_copies", "bodies", "floor"] + (["books", "unseen_bodies", "memory_rest"] if second_refused else [])
     assert [step for step, _target in steps] == expected
     assert all(target is None for _step, target in steps)  # a cold first request measures no target
     assert context.tools._ctx._context_overflow_retries == ({PASS_ONE, PASS_TWO} if second_refused else {PASS_ONE})
@@ -351,7 +351,7 @@ def test_a_pass_that_changes_nothing_earns_no_retry_and_the_next_pass_still_runs
 
     context = _ctx(tmp_path)
     monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit()]))
-    steps = _steps_applied(monkeypatch, outcome=lambda step: step in ("floor", "unseen_bodies"))
+    steps = _steps_applied(monkeypatch, outcome=lambda step: step in ("books", "unseen_bodies"))
     sends = []
 
     def dispatch(ctx, disposition, *, candidate_predicate=None, **_kwargs):
@@ -366,7 +366,7 @@ def test_a_pass_that_changes_nothing_earns_no_retry_and_the_next_pass_still_runs
     monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: _failed_capture())
     msg, _cost, _mode = loop._call_round_model(context)
     assert msg["content"] == "fits" and len(sends) == 2  # no retry was bought for the unchanged candidate
-    assert [step for step, _target in steps] == ["host_copies", "bodies", "floor", "books", "unseen_bodies"]
+    assert [step for step, _target in steps] == ["host_copies", "bodies", "floor", "books", "unseen_bodies", "memory_rest"]
     assert context.tools._ctx._context_overflow_retries == {PASS_ONE, PASS_TWO}
 
 
@@ -410,6 +410,72 @@ def test_the_rounds_first_failure_decides_whether_a_just_chosen_body_pays_last(t
     assert context.tools._ctx._context_overflow_retries == {PASS_ONE, PASS_TWO}
     # Pass 2 measures the predicted retry (30,000 over); the books took 5,000 of it.
     assert chosen == ([("chosen_bodies", 25_000)] if started_by == "numbered_refusal" else [])
+
+
+@pytest.mark.parametrize("memory_pays", [True, False])
+def test_memory_pays_the_rest_before_a_just_chosen_body(tmp_path, monkeypatch, memory_pays):
+    """Owner 2A, both directions: after a further numbered refusal the books, unseen bodies and then memory's rest
+    pay; a just-chosen body pays only what memory could not, and nothing when memory paid it all."""
+    from ouroboros import capability_evidence as ce, loop, loop_model_call
+
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    context = _ctx(tmp_path)
+    monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit(estimated_input=520_000)]))
+    asked = []
+
+    def apply(ctx, step, fit, target, slack=None):
+        asked.append((step, target))
+        if step == "memory_rest":  # memory's detail pays all that is left, or has nothing more to give
+            return target if memory_pays else None
+        return {"host_copies": 10_000, "books": 5_000}.get(step)
+
+    monkeypatch.setattr(loop_model_call, "_apply_refusal_step", apply)
+    chosen = []
+    monkeypatch.setattr(loop_model_call, "_run_emergency_address_pass", lambda ctx, fit, *, rung, goal_tokens=None: (
+        chosen.append((rung, goal_tokens)) or SimpleNamespace(status="applied")))
+    sends = []
+
+    def dispatch(ctx, disposition, *, candidate_predicate=None, **_kwargs):
+        sends.append(candidate_predicate)
+        if len(sends) == 3:
+            return {"role": "assistant", "content": "fits", "tool_calls": []}, 0.0
+        ctx.accumulated_usage.update({"_last_llm_error_kind": "context_overflow", "_last_llm_provider_message": STATED})
+        return None, 0.0
+
+    monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
+    monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: _failed_capture())
+    msg, _cost, _mode = loop._call_round_model(context)
+    assert msg["content"] == "fits" and len(sends) == 3
+    assert [step for step, _target in asked][-3:] == ["books", "unseen_bodies", "memory_rest"]
+    rest = dict(asked)["memory_rest"]  # the measured target the books and unseen bodies left
+    assert rest > 0 and chosen == ([] if memory_pays else [("chosen_bodies", rest)])
+
+
+@pytest.mark.parametrize("first_entry", ["pass_changed", "wake_retry"])
+def test_a_fallbacks_reentry_reads_whether_the_round_already_changed_the_candidate(tmp_path, monkeypatch, first_entry):
+    """Owner 2A across a fallback, both directions: a round whose first pass changed the candidate keeps an unknown
+    refusal on the fallback from cutting a just-chosen body; a round that changed nothing still lets it go last."""
+    from ouroboros import loop, loop_model_call as lmc
+
+    context = _ctx(tmp_path)
+    fit = _fit()
+    monkeypatch.setattr(loop, "_measure_round_main_fit", lambda *a, **k: fit)
+    monkeypatch.setattr(lmc, "_refusal_target", lambda *a, **k: (None, 0))
+    changes = {"pass_changed": True, "wake_retry": False}[first_entry]
+    monkeypatch.setattr(lmc, "_apply_refusal_step", lambda ctx, step, *a, **k: 1 if changes and step == "floor" else None)
+    rescues = []
+    monkeypatch.setattr(lmc, "_run_emergency_address_pass", lambda *a, **k: (
+        rescues.append(k["rung"]) or SimpleNamespace(status="applied")))
+
+    def dispatch(ctx, *a, **k):  # the primary's retry ends on another kind: the round goes to its fallback
+        ctx.accumulated_usage["_last_llm_error_kind"] = "network"
+        return None, 0
+
+    monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
+    lmc._recover_context_overflow(context, _failed_capture(), 0, prepared=first_entry == "wake_retry")
+    assert not rescues
+    lmc._recover_context_overflow(replace(context, active_model="fallback"), _failed_capture(size=900), 0)
+    assert rescues == ([] if changes else ["chosen_bodies"])
 
 
 def test_unchanged_candidate_after_every_pass_gets_no_retry(tmp_path, monkeypatch):

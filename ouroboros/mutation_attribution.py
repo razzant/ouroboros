@@ -773,7 +773,7 @@ def resolve_attributed_git_paths(
             "⚠️ GIT_ATTRIBUTION_BLOCKED: clean task attribution is unavailable "
             f"({', '.join(blockers)}). Automatic staging is disabled; preserve the "
             "unattributed changes and resolve the evidence conflict before review."
-            + (" To send this body candidate's composition to review with the moved base "
+            + (" To send this body candidate's composition to review with this gap "
                f"disclosed, name its paths explicitly{named}." if gaps else "")
         )
     candidates = [str(item) for item in evidence.get("candidates") or [] if str(item)]
@@ -822,7 +822,9 @@ def selection_disclosure(selection: Mapping[str, Any] | None) -> str:
         notes.append(f"the copy's baseline is {kind} from {basis.get('source') or 'an earlier record'}: changes "
                      "made in it since then count as this continued work, which does not prove that each "
                      "line was written by this task")
-    if selection.get("gaps"):
+    if "baseline_surface_missing" in (selection.get("gaps") or ()):
+        notes.append("the copy has no recorded task baseline, so which of its changes this task made is unknown")
+    elif selection.get("gaps"):
         notes.append(f"its HEAD moved from the recorded base {str(selection.get('base_commit') or '')[:12]} over "
                      "paths it changes, and this explicit selection was not re-anchored")
     for key, label in (("uncertain", "selected with uncertain attribution"), ("left_out", "left out as uncertain")):
