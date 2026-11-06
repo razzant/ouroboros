@@ -497,6 +497,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
 .system-message-actions {
     display: flex;
     flex-wrap: wrap;
+    align-items: center;
     gap: var(--space-3);
     padding-block: var(--space-3);
 }
@@ -539,10 +540,15 @@ html[data-layout="stack"] .resize-handle { display: none; }
     flex: 0 1 auto;
     min-width: 0;
     max-width: 100%;
-    min-height: var(--touch-target-min);
-    padding: var(--space-1) var(--space-3);
+    /* A row's control height and the meta size, as the footer form and a question's voice line have it (U011); a
+       finger keeps the touch minimum through .ui-hit-area. */
+    min-height: var(--control-h-sm);
+    padding: 0 var(--space-3);
+    gap: 6px;
     border-radius: var(--pill-radius);
     box-shadow: var(--elev-rest);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
 }
 .chat-quiz-project.chat-live-project-card-btn:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 
@@ -566,14 +572,6 @@ html[data-layout="stack"] .resize-handle { display: none; }
     .chat-bubble-voice:has(> .ui-hit-area) { padding-inline-end: var(--touch-target-min); }
 }
 .chat-bubble > .chat-bubble-voice > .sender { flex: none; margin: 0; }
-.chat-bubble-voice > .chat-quiz-project.chat-live-project-card-btn {
-    min-height: var(--quiz-row-height);
-    padding: 0 var(--space-3);
-    gap: 6px;
-    font-size: var(--type-meta);
-    line-height: var(--line-meta);
-}
-.chat-bubble-voice > .chat-quiz-project .chat-live-project-name { font-weight: 600; }
 
 /* The footer form: a work portal (work_portal.js) leads its one action row with the capsule, its controls at the
    row's end (owner 26.10, B). It takes that row's 28px control height and the meta size, as a question's voice line
@@ -583,7 +581,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
     flex: 0 1 auto;
     min-width: 0;
     max-width: 100%;
-    min-height: calc(var(--space-5) + var(--space-1));
+    min-height: var(--control-h-sm);
     margin-inline-end: auto;
     padding: 0 var(--space-3);
     gap: 6px;
@@ -593,7 +591,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
     line-height: var(--line-meta);
 }
 .chat-live-bound-pointer:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
-.chat-live-bound-pointer .chat-live-project-name { font-weight: 600; }
+:is(.chat-quiz-project, .chat-live-bound-pointer) .chat-live-project-name { font-weight: 600; }
 
 /* A Project root's final answer in Main is an ordinary Ouroboros message (docs/DESIGN.md
    "Project completion mirror"): folded when it is long, with the Project chip under it. The
@@ -629,7 +627,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
 .chat-bubble.project-answer > :is(.system-message-actions, .msg-time) { position: relative; z-index: 1; }
 .chat-bubble.project-answer > .message > :first-child { margin-top: 0; }
 .chat-bubble.project-answer > .system-message-actions,
-.chat-bubble.assistant > .system-message-actions { align-items: center; padding-block: var(--space-2) var(--space-1); }
+.chat-bubble.assistant > .system-message-actions { padding-block: var(--space-2) var(--space-1); }
 .project-answer-limitation { color: var(--text-meta); white-space: normal; overflow-wrap: anywhere; }
 /* A Project ending with no authored answer (project_answer.js paintEnding): the work's name and true outcome, then its
    cause, recorded details and labelled preserved output, in the System voice at reading size; the Project's name is the
@@ -1702,6 +1700,10 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
        must respond to this column's width, not to the outer viewport. */
     container-type: inline-size;
     container-name: chatcol;
+    /* One measure for every object of the left voice (U009): Ouroboros' bubbles, System rows, work and living cards
+       end on one right edge — 760px at most, the 80% gutter only while 80% is still 620px or more, the whole column
+       from 620px down. Resolved against each object's own column. */
+    --feed-measure: min(760px, max(80%, min(100%, 620px)));
 }
 
 /* The transcript is a scrolling column, so rows must keep their natural
@@ -1742,10 +1744,12 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     flex: 0 0 calc(var(--chat-input-reserve, 108px) - 8px);
 }
 
-/* Quiet transcript navigation, centered above the complete two-row composer. */
+/* Quiet transcript navigation: ↓ latest stands at the composer's end, right above the waiting pill (main_waiting.js,
+   the end of the capsule row), so every way down the feed is one stack in one place and never floats over the text
+   in the middle of the column (U016). */
 .chat-scroll-bottom-btn {
     position: absolute;
-    left: 50%;
+    right: var(--space-2);
     bottom: calc(100% + var(--space-2));
     z-index: 6;
     width: var(--composer-control-height);
@@ -1762,19 +1766,16 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     box-shadow: var(--elev-float);
     cursor: pointer;
     opacity: 0;
-    transform: translate(-50%, 8px);
+    transform: translateY(8px);
     pointer-events: none;
     transition: opacity 0.18s ease, transform 0.18s ease, border-color 0.18s ease, background 0.18s ease, color 0.18s ease;
 }
 .chat-scroll-bottom-btn.visible {
     opacity: 1;
-    transform: translate(-50%, 0);
+    transform: none;
     pointer-events: auto;
 }
-.chat-scroll-bottom-btn:hover {
-    color: var(--text-primary);
-    transform: translate(-50%, 0);
-}
+.chat-scroll-bottom-btn:hover { color: var(--text-primary); }
 .chat-scroll-bottom-btn:not(:disabled):hover { background: var(--surface-capsule-hover); }
 .chat-scroll-bottom-btn:not(:disabled):active { filter: var(--press); }
 .chat-scroll-bottom-btn:disabled { box-shadow: none; }
@@ -1842,14 +1843,14 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     border: 1px solid transparent;
     box-shadow: var(--elev-rest);
     align-self: flex-start;
-    margin-right: 20%;
+    max-width: var(--feed-measure);
 }
 
 .chat-bubble.system {
     background: var(--system-bubble-bg);
     box-shadow: var(--elev-rest);
     align-self: flex-start;
-    margin-right: 20%;
+    max-width: var(--feed-measure);
 }
 
 .chat-bubble .sender {
@@ -2131,8 +2132,7 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 /* Subdued progress messages. */
 .chat-bubble.progress {
     border-left: 2px solid var(--accent-18);
-    max-width: min(100%, 760px);
-    margin-right: 0;
+    max-width: var(--feed-measure);
     opacity: 0.72;
 }
 
@@ -2149,12 +2149,9 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 
 .chat-live-card {
     align-self: flex-start;
-    width: min(100%, 760px);
-    /* The 80% gutter holds only while 80% is still >= 620px; below that the card
-       takes up to 620px, the chatcol breakpoint, so the width stays monotonic
-       across it and the internal narrow regime (<= 560px) starts only when the
-       COLUMN itself is narrow. */
-    max-width: max(80%, min(100%, 620px));
+    /* The left voice's one measure (#chat-messages --feed-measure): monotonic across the 620px column, so the card's
+       internal narrow regime (<= 560px) starts only when the COLUMN itself is narrow. */
+    width: var(--feed-measure);
     padding: 0;
     border-radius: var(--radius-object);
     border: 1px solid transparent;
@@ -2609,7 +2606,8 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     flex-direction: row;
     flex-wrap: wrap;
     align-items: center;
-    gap: var(--space-1) var(--space-4);
+    /* Wrapped, the commands stand a row's air under the facts (U121). */
+    gap: var(--space-3) var(--space-4);
     min-height: calc(var(--space-5) + var(--space-1));
     padding-top: 0;
     padding-bottom: var(--space-4);
@@ -3237,16 +3235,6 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
         margin-inline-start: 0;
     }
 
-    .chat-bubble.assistant,
-    .chat-bubble.system {
-        margin-inline-end: 0;
-    }
-
-    .chat-live-card {
-        width: 100%;
-        max-width: 100%;
-    }
-
     /* The question card takes the narrow column's full width like every other bubble, so a column of
        bubbles shares one right edge (DESIGN §5). Two classes: the base 560px rule comes later in the file. */
     .chat-bubble > .chat-quiz-card {
@@ -3470,11 +3458,15 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     outline-offset: -2px;
 }
 
+/* The row's title, then its repeat count and its time in columns of their own on the title's first line, so a title of
+   two lines never pushes its time onto a third (U017). */
 .chat-live-line-head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
+    display: grid;
+    grid-auto-flow: column;
+    grid-template-columns: minmax(0, 1fr);
+    grid-auto-columns: max-content;
+    align-items: baseline;
+    column-gap: var(--space-2);
     flex: 1;
     min-width: 0;
 }
@@ -3495,9 +3487,9 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 }
 
 .chat-live-line-time {
-    margin-left: auto;
     color: var(--text-muted);
     font-size: var(--type-meta);
+    white-space: nowrap;
 }
 
 .chat-live-line-expand-label {
