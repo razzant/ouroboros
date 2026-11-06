@@ -113,8 +113,10 @@ def test_project_pool_without_a_lane_spare_keeps_its_last_idle_worker(pool, monk
     assert pool.original.in_q.empty()  # the sole slot of the table is never probed away
 
 
-def test_storm_capture_and_project_fence_spare_the_lane(pool, monkeypatch):
-    """Three dead project workers fence the project pool; the live lane carrier and its row survive."""
+def test_three_project_deaths_fence_nothing_and_the_exhaustion_fence_spares_the_lane(pool, monkeypatch):
+    """Three dead project workers are three recoveries, no fence (CANDIDATE_v2 §2(e): the crash-storm fence is
+    gone); the live lane carrier and its row survive them. The one project fence left, readiness exhaustion,
+    still spares the lane: its stop owns project slots only and the lane's spare is replenished under the latch."""
     monkeypatch.setattr(workers, "_LAST_SPAWN_TIME", 0.0)
     monkeypatch.setattr(workers, "send_with_budget", lambda *a, **k: None)
     monkeypatch.setattr(workers, "load_state", lambda: {"owner_chat_id": 1})
@@ -124,29 +126,26 @@ def test_storm_capture_and_project_fence_spare_the_lane(pool, monkeypatch):
     monkeypatch.setattr(workers, "reconstruct_task_cost", lambda *a, **k: {
         "cost_accounting_status": "unavailable", "cost_final": False})
     workers.RUNNING.clear()
-    dead = []
     for wid in (0, 1, 2):
         slot = workers.WORKERS.get(wid) or add_slot(wid, lane=LANE_PROJECT)
         slot.busy_task_id = f"p{wid}"
         slot.proc.alive, slot.proc.exitcode = False, -9
         workers.RUNNING[f"p{wid}"] = {"task": task(f"p{wid}"), "worker_id": wid, "attempt": 1,
                                       "started_at": time.time(), "last_heartbeat_at": time.time()}
-        dead.append(slot)
     carrier = add_slot(7, lane=LANE_CONVERSATION, busy="turn")
     workers.RUNNING["turn"] = {"task": task("turn", _is_direct_chat=True), "worker_id": 7, "attempt": 1,
                                "started_at": time.time(), "last_heartbeat_at": time.time(),
                                "lane": LANE_CONVERSATION}
-    workers.CRASH_TS.extend([time.time(), time.time()])
     _ids, disabled = workers._ensure_workers_healthy_locked(queue)
-    assert disabled and workers._WORKER_POOL_DISABLED_REASON == "worker_crash_storm"
+    assert not disabled and workers._WORKER_POOL_DISABLED_REASON == ""
     jobs = []
     while not queue._reap_queue.empty():
         jobs.append(queue._reap_queue.get_nowait())
-    storm = next(job for job in jobs if job["kind"] == "worker_crash_storm")
-    assert {wid for wid, _slot in storm["workers"]} == {0, 1, 2}  # the lane carrier is not the storm's
+    assert [job["kind"] for job in jobs] == ["confirmed_dead_worker"] * 3  # three recoveries, no stop job
+    assert {job["worker_id"] for job in jobs} == {0, 1, 2} and not any(job.get("skip_respawn") for job in jobs)
     assert carrier.busy_task_id == "turn" and not carrier.reaping
-    # The fence's stop owns project slots only: the lane carrier and its row stay.
-    assert workers.kill_workers(disable_reason="worker_crash_storm", lanes=frozenset({LANE_PROJECT}))
+    # The exhaustion fence's stop owns project slots only: the lane carrier and its row stay.
+    assert workers.kill_workers(disable_reason="worker_readiness_exhausted", lanes=frozenset({LANE_PROJECT}))
     assert set(workers.WORKERS) == {7} and workers.WORKERS[7] is carrier
     assert set(workers.RUNNING) == {"turn"}
     # The project fence never blocks the lane: its spare is replenished under the latch.
@@ -274,7 +273,7 @@ def test_a_lane_turn_admitted_during_a_project_stops_teardown_survives_the_stop(
                                     "started_at": time.time(), "lane": LANE_CONVERSATION}
 
     monkeypatch.setattr(workers, "_tear_down_slots", teardown_then_hello)
-    assert workers.kill_workers(disable_reason="worker_crash_storm", lanes=frozenset({LANE_PROJECT}))
+    assert workers.kill_workers(disable_reason="worker_readiness_exhausted", lanes=frozenset({LANE_PROJECT}))
     assert "p0" not in workers.RUNNING
     assert "hello" in workers.RUNNING and workers.RUNNING["hello"]["worker_id"] is None  # still awaiting its carrier
     assert (load_task_result(pool.root, "hello") or {}).get("status") != "failed"

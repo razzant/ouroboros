@@ -1,10 +1,13 @@
 """Crash detection and the terminal a host-side teardown publishes.
 
 Distinguishes a worker that died from one that is merely slow, respects the spawn
-grace window so a booting pool is not read as a crash storm, and publishes the
-task_done the dying task can no longer publish for itself. A crash storm freezes the
-captured membership, suppresses respawn until terminal sources settle, then fences
-pooled admission; direct chat is spared.
+grace window so a booting pool is not read as dead, and publishes the task_done
+the dying task can no longer publish for itself. Only a recorded stop terminalizes
+a task; any unrecorded death, a signal's included, takes the one bounded retry from
+saved state (``QUEUE_MAX_RETRIES``), then ``worker_crash_retry_exhausted``. There is
+no crash-storm fence: a pool dying repeatedly costs each task its retry and nothing
+else, boot-death loops stay fenced by readiness exhaustion, and a lost event bus ends
+the generation (``workers.EventBusLost``). Direct chat keeps its own lane.
 """
 
 from __future__ import annotations
@@ -144,7 +147,7 @@ def ensure_workers_healthy() -> None:
     if (time.time() - _pool()._LAST_SPAWN_TIME) < _pool()._SPAWN_GRACE_SEC:
         return
     queue._ensure_reaper_started()
-    # Do not capture a storm membership halfway through a serialized spawn/retire.
+    # Do not read the membership halfway through a serialized spawn/retire.
     # Health intake retries next tick rather than waiting behind native teardown.
     from supervisor.worker_pool_lifecycle import _WORKER_LIFECYCLE_LOCK
     if not _WORKER_LIFECYCLE_LOCK.acquire(blocking=False):
@@ -164,15 +167,11 @@ _DEATHS_RECORDED: Dict[int, Any] = {}
 def _ensure_workers_healthy_locked(queue: Any) -> tuple[List[int], bool]:
     """Capture exact task/slot ownership before handing off any dead worker.
 
-    Every slot's death is recovered alike; only PROJECT deaths feed the crash-storm
-    clock and the storm's captured membership (owner decision 1A: the conversation
-    lane is outside the project pool's crash fuse, so an owner's turn is admitted
-    and dispatched while the project pool is fenced)."""
+    Every slot's death is recovered alike, project and conversation lane (owner
+    decision 1A: the lane is outside every project fence). The second value is the
+    retired pool-disable verdict, always False: no death fences the pool."""
     from supervisor.worker_pool_lifecycle import is_project_slot
 
-    busy_crashes = 0
-    project_deaths = 0
-    crashed_tasks = []
     jobs = []
     for wid, w in list(_pool().WORKERS.items()):
         meta = _pool().RUNNING.get(w.busy_task_id) if w.busy_task_id else None
@@ -187,8 +186,6 @@ def _ensure_workers_healthy_locked(queue: Any) -> tuple[List[int], bool]:
         attempt = int((meta or {}).get("attempt") or task.get("_attempt") or 1)
         exitcode = w.proc.exitcode
         project = is_project_slot(w)
-        project_deaths += int(project)
-        busy_crashes += int(project and w.busy_task_id is not None)
         recorded, _DEATHS_RECORDED[wid] = _DEATHS_RECORDED.get(wid) is w.proc, w.proc
         if not recorded:
             _pool().append_jsonl(_pool().DRIVE_ROOT / "logs" / "supervisor.jsonl", {
@@ -199,8 +196,6 @@ def _ensure_workers_healthy_locked(queue: Any) -> tuple[List[int], bool]:
                 "attempt": (meta or {}).get("attempt"),
                 "signal": -exitcode if isinstance(exitcode, int) and exitcode < 0 else None,
             })
-        if task and project:
-            crashed_tasks.append({"task_id": w.busy_task_id, "task_type": task.get("type")})
         if task and project and not recorded:
             _pool().append_jsonl(_pool().DRIVE_ROOT / "logs" / "supervisor.jsonl", {
                 "ts": _pool().utc_now_iso(), "type": "worker_crash_task_dump", "worker_id": wid,
@@ -212,19 +207,6 @@ def _ensure_workers_healthy_locked(queue: Any) -> tuple[List[int], bool]:
             "task_id": str(w.busy_task_id or ""), "meta": meta, "task": task,
             "attempt": attempt, "exitcode": exitcode, "drive_root": str(_pool().DRIVE_ROOT),
         })
-    disable_pool = bool(project_deaths) and _pool()._worker_crash_storm_detected(
-        busy_crashes=busy_crashes, dead_detections=project_deaths, crashed_tasks=crashed_tasks,
-    )
-    for job in jobs:
-        job["skip_respawn"] = disable_pool and is_project_slot(job["worker"])
-    if disable_pool:
-        # Freeze the exact captured PROJECT membership for its stop: under this latch no
-        # project slot starts or is forgotten (``respawn_worker``), so only a generation
-        # change, whose own stop or start then owns the fence, can make the stop a no-op.
-        _pool()._WORKER_POOL_DISABLED_REASON = "worker_crash_storm"
-        jobs.append({"kind": "worker_crash_storm",
-                     "workers": tuple((wid, w) for wid, w in _pool().WORKERS.items() if is_project_slot(w)),
-                     "drive_root": str(_pool().DRIVE_ROOT)})
     for index, job in enumerate(jobs):
         try:
             queue._reap_queue.put(job)
@@ -234,12 +216,9 @@ def _ensure_workers_healthy_locked(queue: Any) -> tuple[List[int], bool]:
                 worker = unsent.get("worker")
                 if worker is not None and _pool().WORKERS.get(unsent["worker_id"]) is worker:
                     worker.reaping = False
-            if disable_pool:
-                # The latch never outlives its stop: an unsent stop waits with the reaper's retries.
-                _reaper()._deferred_reap_jobs.append(jobs[-1])
             raise
-    # Kept for private callers; all replacements/storm stops are queued now.
-    return [], disable_pool
+    # Kept for private callers; every replacement is queued now.
+    return [], False
 
 
 def _dead_job_is_current(job: dict) -> bool:
@@ -507,9 +486,10 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
     wid, exitcode = job["worker_id"], job["exitcode"]
     root = pathlib.Path(job["drive_root"])
     task_type = str(task.get("type") or "")
-    # Signal crashes are terminal infrastructure failures for every task type.
-    is_crash_signal = isinstance(exitcode, int) and exitcode < 0
-    crash_signal = -exitcode if is_crash_signal else None
+    # A signal death is an unrecorded death like any other: the same one retry from saved state
+    # (D24: its delegated leaf settles as on abrupt loss, no handoff is reserved); only the retry
+    # bound and replay-unsafe states are terminal. ``worker_crash_signal`` stays readable for old rows.
+    crash_signal = -exitcode if isinstance(exitcode, int) and exitcode < 0 else None
     # The crash toast is a DIRECT send - nothing re-addresses it downstream - so
     # the task's durable project binding has to win here, or a task converted
     # into a project mid-run is told about its crash in the chat it was born in.
@@ -578,9 +558,7 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
             return
 
     terminal_event = None
-    if (is_crash_signal or attempt > _pool().QUEUE_MAX_RETRIES
-          or replay_unsafe):
-        deep = task_type == "deep_self_review"
+    if attempt > _pool().QUEUE_MAX_RETRIES or replay_unsafe:
         if budget_pausing:
             result_text = (
                 "Worker process died with budget-continuation evidence. The checkpoint was "
@@ -594,22 +572,6 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
                 "source is retained; completed actions were not retried."
             )
             reason_code = "worker_crash_owner_wait"
-        elif is_crash_signal:
-            log.warning(
-                "Task %s worker crashed with signal %s — terminal (no retry)",
-                task_id, crash_signal,
-            )
-            result_text = (
-                f"❌ {'Deep self-review ' if deep else ''}worker process crashed "
-                f"(signal {crash_signal}). This is an infrastructure/platform crash "
-                "and is not retried automatically. "
-                + (
-                    "Use /restart and then /review to retry after a clean restart."
-                    if deep else
-                    "Use /restart and try again; if it recurs it is a platform-level issue."
-                )
-            )
-            reason_code = "worker_crash_signal"
         else:
             log.warning(
                 "Task %s exceeded crash retry limit (%d/%d) — marking failed",
@@ -641,17 +603,6 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
         try:
             if replay_unsafe:
                 user_msg = result_text
-            elif is_crash_signal and deep:
-                user_msg = (
-                    f"❌ Deep self-review failed: worker process crashed (signal {crash_signal}). "
-                    "This is a known platform fork-safety limitation. "
-                    "Please use `/restart` and then `/review` to retry with a fresh process."
-                )
-            elif is_crash_signal:
-                user_msg = (
-                    f"❌ Task `{task_id[:8]}` failed: worker process crashed "
-                    f"(signal {crash_signal}). This is an infrastructure crash and was not retried."
-                )
             else:
                 user_msg = (
                     f"❌ Task `{task_id[:8]}` failed after {attempt} crash(es). "
@@ -719,7 +670,8 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
             from ouroboros.task_results import STATUS_INTERRUPTED, write_task_result
             write_task_result(
                 root, task_id, STATUS_INTERRUPTED,
-                result=f"Worker process died mid-task (attempt {attempt}). Retrying.",
+                result=(f"Worker process died mid-task (attempt {attempt}"
+                        f"{f', signal {crash_signal}' if crash_signal else ''}). Retrying."),
                 **r_cost_fields,
             )
         except Exception:

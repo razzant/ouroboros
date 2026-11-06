@@ -40,8 +40,7 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
         '⚠️ Your message was not saved: '],
     terminal_incident: ['🔌 Task ', '⚠️ Sending a message for task '],
     task_reaper_notice: ['⚠️ A timed-out worker (task '],
-    worker_failure: ['⚠️ Frequent worker crashes.', '❌ worker process crashed ',
-        '❌ Deep self-review failed: worker process crashed ', '❌ Task failed after ', '❌ Task `'],
+    worker_failure: ['❌ Task failed after ', '❌ Task `'],
     worker_readiness_notice: ['⚠️ Worker checkout sampled after initialization ', '⚠️ Worker slot '],
     // Progress rows: a task card's timeline line (`log_events.summarizeChatLiveEvent`).
     task_scheduled: ['🗓️ Scheduled subagent ', '🗓️ Scheduled task '],
@@ -60,6 +59,8 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
 // display (host_notice_text.test.js pins that none of them is written again).
 export const RETIRED_HOST_NOTICE_PREFIXES = new Map(Object.entries({
     startup_notice: ['♻️ Restored pending queue from snapshot: ', '♻️ Cancelling '],
+    worker_failure: ['⚠️ Frequent worker crashes.', '❌ worker process crashed ',
+        '❌ Deep self-review failed: worker process crashed '],
     attachment_notice: ['📎 Attachment staging report for ', '⚠️ Task not started: every attachment was rejected.',
         '⚠️ Some declared attachments could not be staged; '],
     cancellation_notice: ['❌ cancel '],

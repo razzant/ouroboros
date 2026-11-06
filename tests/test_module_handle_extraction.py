@@ -134,19 +134,17 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "REPO_DIR",
     })),
     "supervisor/worker_health.py": ("supervisor/workers.py", "_pool", frozenset({
-        # Runtime707: health hands off recovery; the reaper owns storm/respawn.
+        # Runtime707: health hands off recovery; the reaper owns the respawn.
         "DRIVE_ROOT", "QUEUE_MAX_RETRIES", "RUNNING", "WORKERS",
         "_LAST_SPAWN_TIME", "_SPAWN_GRACE_SEC", "_emit_task_done_terminal",
         # #1196: completing a saved exact budget pause after a worker death re-parks
         # the row into the pool's PENDING through the same handle.
         "PENDING",
         "_ensure_workers_healthy_locked", "_reconcile_confirmed_dead_review_owner",
-        "_worker_crash_storm_detected", "append_jsonl", "coerce_chat_identity",
+        "append_jsonl", "coerce_chat_identity",
         "disable_exhausted_worker_pool", "get_event_q", "load_state", "reconstruct_task_cost",
         "send_with_budget", "terminal_task_metadata",
         "utc_now_iso",
-        # A crash storm latches the disable reason that freezes demand elasticity.
-        "_WORKER_POOL_DISABLED_REASON",
     })),
     # D10 lane rows (oracle ouroboros_v7_wip @ 9f691656). git_ops leaves carry
     # the reference's G1 `_go()` sets re-derived on tip bytes (safe_restart and

@@ -15,7 +15,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union  # noqa: F401
 
-from supervisor.state import load_state, append_jsonl, reconstruct_task_cost
+from supervisor.state import append_jsonl, reconstruct_task_cost
+from supervisor.state import load_state  # noqa: F401 -- the assignment, health and lifecycle leaves read it via _pool()
 from supervisor.message_bus import send_with_budget
 from supervisor.message_bus import coerce_chat_identity  # noqa: F401 -- worker_health leaf reads it via the _pool() handle
 from ouroboros.config import DATA_DIR, REPO_DIR as CONFIG_REPO_DIR, WORKER_SPAWN_GRACE_SEC
@@ -100,7 +101,7 @@ class Worker:
     retiring: bool = False  # intentional, charged until observed dead; never crash recovery
     resume_hold: str = ""  # this tick's authorized warm Resume: held idle slot, or the parked author
     # The pool slots this worker serves: ``project`` (queued work, counted against MAX_WORKERS,
-    # fenced by the crash storm and readiness exhaustion) or ``conversation`` (the lane that carries
+    # fenced by readiness exhaustion) or ``conversation`` (the lane that carries
     # owner turns, wakes and Presence bodies; outside every project fence and count).
     lane: str = LANE_PROJECT
     # ``worker``: a custodied child process. The disclosed inline executors (``inline_degraded``,
@@ -202,7 +203,6 @@ def event_queue_generation() -> str:
 WORKERS: Dict[int, Worker] = {}
 PENDING: List[Dict[str, Any]] = []
 RUNNING: Dict[str, Dict[str, Any]] = {}
-CRASH_TS: List[float] = []
 QUEUE_SEQ_COUNTER_REF: Dict[str, int] = {"value": 0}
 
 # Shared queue lock; queue.py owns the canonical definition.
@@ -1312,7 +1312,7 @@ def _confirm_dead_slots(doomed: List[Worker]) -> tuple:
 def kill_workers(
     force: bool = True,
     *,
-    result_reason: str = "Worker process crashed (crash storm). Task was not completed.",
+    result_reason: str = "Worker process was stopped before this task finished. Task was not completed.",
     terminal_status: str = "",
     archive_service_logs: bool = True,
     disable_reason: str = "",
@@ -1327,7 +1327,7 @@ def kill_workers(
 ) -> bool:
     """Stop the pool's workers and settle the rows they carried.
 
-    ``lanes`` scopes a PROJECT fence (the crash storm, readiness exhaustion) to the
+    ``lanes`` scopes a PROJECT fence (readiness exhaustion) to the
     project slots: conversation carriers, and the rows they or an awaited carrier
     own, are partitioned out of the sweep under Q and restored at its end, so a
     project-pool fence never terminalises an owner's turn (owner decision 1A).
@@ -1348,7 +1348,7 @@ def kill_workers(
                 log.warning("Failed to persist worker-pool disable fence", exc_info=True)
             if not fence_persisted:
                 # No worker or queue mutation happened yet: restore the prior fence (an aborted
-                # update reopens an enabled pool; a crash-storm latch keeps its membership frozen).
+                # update reopens an enabled pool; a prior fence keeps its membership frozen).
                 _WORKER_POOL_DISABLED_REASON = previous_disable_reason
                 log.error("Worker shutdown blocked: disable fence was not durable")
                 return False
@@ -2291,49 +2291,6 @@ def _assignment_depth_reservation_admits(candidate: dict, running=None) -> bool:
         and str(meta["task"].get("parent_task_id") or "").strip() == parent_id
     )
     return direct_running_children < 1
-
-
-def _worker_crash_storm_detected(
-    *, busy_crashes: int, dead_detections: int, crashed_tasks: List[Dict[str, Any]]
-) -> bool:
-    now = time.time()
-    alive_now = sum(1 for worker in WORKERS.values()
-                    if getattr(worker, "lane", LANE_PROJECT) != LANE_CONVERSATION and worker.proc.is_alive())
-    if dead_detections:
-        # Only count busy crashes or all-workers-dead as storm signals.
-        if busy_crashes > 0 or alive_now == 0:
-            CRASH_TS.extend([now] * max(1, dead_detections))
-        else:
-            CRASH_TS.clear()
-
-    CRASH_TS[:] = [stamp for stamp in CRASH_TS if (now - stamp) < 60.0]
-    if len(CRASH_TS) < 3:
-        return False
-
-    # Do not execv on crash storms; the conversation lane stays open on its own slots.
-    st = load_state()
-    append_jsonl(
-        DRIVE_ROOT / "logs" / "supervisor.jsonl",
-        {
-            "ts": utc_now_iso(),
-            "type": "crash_storm_detected",
-            "crash_count": len(CRASH_TS),
-            "worker_count": len(WORKERS),
-            "crashed_tasks": crashed_tasks,
-        },
-    )
-    if st.get("owner_chat_id"):
-        send_with_budget(
-            int(st["owner_chat_id"]),
-            "⚠️ Frequent worker crashes. Project workers are disabled until Restart; "
-            "the conversation keeps its own lane.",
-            is_progress=True,
-            progress_meta={
-                "task_incident": "worker_crash_storm",
-                "toast_once": f"worker-crash-storm:{int(min(CRASH_TS) if CRASH_TS else now)}",
-            },
-            role="system", system_type="worker_failure")
-    return True
 
 
 # v7next F1 (D08): moved spans live in their owner leaves; re-exported here

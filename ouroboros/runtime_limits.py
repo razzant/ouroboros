@@ -98,7 +98,7 @@ WORKER_SPAWN_GRACE_SEC = 90.0
 # Readiness is a contract distinct from process liveness
 # (`proc.is_alive`, worker_health.py) and from the task idle rail (queue_timeouts.py): a deadlocked child is alive.
 WORKER_READY_WINDOW_SEC = 90.0
-# Consecutive readiness failures of one slot before it is parked and reported (three strikes, like the crash-storm fence).
+# Consecutive readiness failures of one slot before it is parked and reported (three strikes).
 WORKER_READY_MAX_ATTEMPTS = 3
 # One extension for a child that wrote its own entry progress, measured from birth, never from the last poll.
 WORKER_READY_CEILING_SEC = 300.0

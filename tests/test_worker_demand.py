@@ -201,7 +201,7 @@ def test_unconfirmed_retirement_keeps_reservation_and_never_becomes_crash(assign
     assert queue._reap_queue.empty()
 
 
-@pytest.mark.parametrize("reason", ["owner_stop", "managed_update", "worker_crash_storm"])
+@pytest.mark.parametrize("reason", ["owner_stop", "managed_update", "worker_readiness_exhausted"])
 def test_elasticity_does_not_reopen_disabled_pool(assigning, monkeypatch, reason):
     monkeypatch.setattr(workers, "MAX_WORKERS", 3)
     monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", reason)
@@ -210,59 +210,14 @@ def test_elasticity_does_not_reopen_disabled_pool(assigning, monkeypatch, reason
     assert not assigning.created
 
 
-def test_pending_storm_stop_keeps_membership_and_still_runs(assigning, monkeypatch):
-    from supervisor.task_reaper import _stop_crashed_worker_pool
-    monkeypatch.setattr(workers, "MAX_WORKERS", 3)
-    workers.RUNNING.clear()
-    assigning.original.busy_task_id = None
-    assigning.original.proc.alive = False
-    monkeypatch.setattr(workers, "_worker_crash_storm_detected", lambda **kw: True)
-    workers._ensure_workers_healthy_locked(queue)
-    queue._reap_queue.get_nowait()  # empty dead slot, no terminal custody
-    storm = queue._reap_queue.get_nowait()
-    workers.PENDING.append(task("queued"))
-    workers.assign_tasks()
-    assert not assigning.created
-    stopped = []
-    monkeypatch.setattr(workers, "kill_workers", lambda **kw: stopped.append(kw) or True)
-    _stop_crashed_worker_pool(storm)
-    assert stopped == [{"disable_reason": "worker_crash_storm", "lanes": frozenset({"project"})}]
-
-
-@pytest.mark.parametrize("prior", ["", "worker_crash_storm"])
+@pytest.mark.parametrize("prior", ["", "worker_readiness_exhausted"])
 def test_failed_disable_fence_restores_the_prior_admission_state(assigning, monkeypatch, prior):
-    """An enabled pool reopens after an aborted shutdown; a storm latch stays closed."""
+    """An enabled pool reopens after an aborted shutdown; an exhaustion latch stays closed."""
     monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", prior)
     monkeypatch.setattr(queue, "persist_queue_snapshot", lambda **kw: False)
     assert workers.kill_workers(disable_reason=prior or "managed_update") is False
     assert workers._WORKER_POOL_DISABLED_REASON == prior
     assert workers.WORKERS == {0: assigning.original} and assigning.original.proc.is_alive()
-
-
-def test_failed_storm_snapshot_keeps_the_latch_so_growth_cannot_void_the_stop(assigning, monkeypatch):
-    """Reviewer counterexample: real health -> failed snapshot -> growth -> storm no-op."""
-    from supervisor.task_reaper import TerminalFileRecoveryPending, _stop_crashed_worker_pool
-    monkeypatch.setattr(workers, "MAX_WORKERS", 3)
-    workers.RUNNING.clear()
-    assigning.original.busy_task_id = None
-    assigning.original.proc.alive = False
-    monkeypatch.setattr(workers, "_worker_crash_storm_detected", lambda **kw: True)
-    durable = [False]
-    monkeypatch.setattr(queue, "persist_queue_snapshot", lambda **kw: durable[0])
-    workers._ensure_workers_healthy_locked(queue)
-    queue._reap_queue.get_nowait()  # the dead idle slot owes no terminal
-    storm = queue._reap_queue.get_nowait()
-    with pytest.raises(TerminalFileRecoveryPending):
-        _stop_crashed_worker_pool(storm)
-    assert workers._WORKER_POOL_DISABLED_REASON == "worker_crash_storm"
-    workers.PENDING.append(task("queued"))
-    workers.assign_tasks()
-    assert not assigning.created and set(workers.WORKERS) == {0}
-    durable[0] = True
-    stopped = []
-    monkeypatch.setattr(workers, "kill_workers", lambda **kw: stopped.append(kw) or True)
-    _stop_crashed_worker_pool(storm)
-    assert stopped == [{"disable_reason": "worker_crash_storm", "lanes": frozenset({"project"})}]
 
 
 def test_active_work_buys_no_spare_and_retires_an_acknowledged_idle_resident(assigning, monkeypatch):
@@ -467,27 +422,6 @@ def _timed_out_dead_slot(assigning):
     return slot
 
 
-def test_captured_timeout_after_a_storm_latch_starts_no_child_and_the_stop_keeps_its_membership(
-        assigning, monkeypatch):
-    """Reviewer counterexample (F1): the replacement started after the latch, then its rejected child lost custody."""
-    from supervisor import task_reaper
-    monkeypatch.setattr(workers, "MAX_WORKERS", 3)
-    timed_out = _timed_out_dead_slot(assigning)
-    crashed = affirm_ready(workers.Worker(1, Process(43), InputQueue()))
-    crashed.proc.alive = False
-    workers.WORKERS[1] = crashed
-    monkeypatch.setattr(workers, "_worker_crash_storm_detected", lambda **kw: True)
-    workers._ensure_workers_healthy_locked(queue)  # the real owner latches while the timeout is off-loop
-    queue._reap_queue.get_nowait()  # the crashed idle slot owes no terminal
-    storm = queue._reap_queue.get_nowait()
-    task_reaper._respawn_after_reap(queue, workers, 0, expected_worker=timed_out)
-    assert assigning.created == [] and workers.WORKERS == {0: timed_out, 1: crashed}
-    stopped = []
-    monkeypatch.setattr(workers, "kill_workers", lambda **kw: stopped.append(kw) or True)
-    task_reaper._stop_crashed_worker_pool(storm)
-    assert stopped == [{"disable_reason": "worker_crash_storm", "lanes": frozenset({"project"})}]
-
-
 def test_enabled_pool_still_replaces_a_captured_dead_slot(assigning):
     from supervisor import task_reaper
     timed_out = _timed_out_dead_slot(assigning)
@@ -497,7 +431,7 @@ def test_enabled_pool_still_replaces_a_captured_dead_slot(assigning):
     assert fresh.booting and fresh.reaping and fresh.active_capacity
 
 
-@pytest.mark.parametrize("reason", ["worker_crash_storm", "worker_readiness_exhausted"])
+@pytest.mark.parametrize("reason", ["worker_readiness_exhausted", "managed_update"])
 def test_a_fenced_pool_still_runs_queue_hygiene_but_assigns_and_grows_nothing(assigning, monkeypatch, reason):
     """Under a fence only assignment and growth wait for Restart: a pending task the owner
     cancels is still settled, terminalization retries and Project holds still run."""
@@ -514,7 +448,7 @@ def test_a_fenced_pool_still_runs_queue_hygiene_but_assigns_and_grows_nothing(as
     assert [row["id"] for row in workers.PENDING] == ["queued"] and not assigning.created
 
 
-@pytest.mark.parametrize("reason", ["worker_crash_storm", "managed_update", "worker_readiness_exhausted"])
+@pytest.mark.parametrize("reason", ["managed_update", "worker_readiness_exhausted"])
 def test_a_fence_leaves_a_dead_lent_slot_to_its_stop_owner(assigning, monkeypatch, reason):
     park(assigning)
     assigning.original.proc.alive = False
@@ -522,96 +456,6 @@ def test_a_fence_leaves_a_dead_lent_slot_to_its_stop_owner(assigning, monkeypatc
     assert not workers.respawn_worker(0)
     assert workers.WORKERS == {0: assigning.original} and not assigning.created
 
-
-def test_a_lent_timeout_reaped_ahead_of_the_storm_stop_cannot_void_it(assigning, monkeypatch):
-    """Reviewer counterexample: the timeout job ahead of the storm job forgot its dead lent slot,
-    so the captured membership never matched and the latch outlived a stop that never ran."""
-    import json
-
-    from supervisor import task_reaper
-    monkeypatch.setattr(workers, "MAX_WORKERS", 3)
-    timed_out = _timed_out_dead_slot(assigning)
-    timed_out.active_capacity = False  # an owner-wait park lent this slot
-    crashed = affirm_ready(workers.Worker(1, Process(43), InputQueue()))
-    crashed.proc.alive = False
-    workers.WORKERS[1] = crashed
-    monkeypatch.setattr(workers, "_worker_crash_storm_detected", lambda **kw: True)
-    workers._ensure_workers_healthy_locked(queue)
-    queue._reap_queue.get_nowait()  # the crashed idle slot owes no terminal
-    storm = queue._reap_queue.get_nowait()
-    task_reaper._respawn_after_reap(queue, workers, 0, expected_worker=timed_out)
-    assert workers.WORKERS == {0: timed_out, 1: crashed} and not assigning.created
-    task_reaper._stop_crashed_worker_pool(storm)  # the real stop, not a stub
-    assert workers.WORKERS == {} and workers._WORKER_POOL_DISABLED_REASON == "worker_crash_storm"
-    assert json.loads(queue.QUEUE_SNAPSHOT_PATH.read_text())["worker_pool_disabled_reason"] == "worker_crash_storm"
-
-
-@pytest.mark.parametrize("failed_put", ["worker_crash_storm", "confirmed_dead_worker"])
-def test_an_unsent_storm_stop_waits_with_the_reaper_retries_so_its_latch_keeps_an_owner(
-        assigning, monkeypatch, failed_put):
-    from supervisor import task_reaper
-    monkeypatch.setattr(task_reaper, "_deferred_reap_jobs", [])
-    monkeypatch.setattr(workers, "MAX_WORKERS", 3)
-    workers.RUNNING.clear()
-    assigning.original.busy_task_id = None
-    second = affirm_ready(workers.Worker(1, Process(43), InputQueue()))
-    workers.WORKERS[1] = second
-    for slot in workers.WORKERS.values():
-        slot.proc.alive = False
-    monkeypatch.setattr(workers, "_worker_crash_storm_detected", lambda **kw: True)
-    put = queue._reap_queue.put
-
-    def refuse(job, *args, **kwargs):
-        if job["kind"] == failed_put:
-            raise OSError("reaper queue unavailable")
-        put(job, *args, **kwargs)
-
-    monkeypatch.setattr(queue._reap_queue, "put", refuse)
-    with pytest.raises(OSError):
-        workers._ensure_workers_healthy_locked(queue)
-    assert workers._WORKER_POOL_DISABLED_REASON == "worker_crash_storm"
-    assert [job["kind"] for job in task_reaper._deferred_reap_jobs] == ["worker_crash_storm"]
-    handed = {job["worker_id"] for job in list(queue._reap_queue.queue)}
-    assert all(slot.reaping == (wid in handed) for wid, slot in workers.WORKERS.items()), \
-        "a slot whose job was never handed off stays visible to the next health tick"
-    task_reaper._retry_deferred_reap_jobs()  # the next tick's hand-off may fail again
-    assert len(task_reaper._deferred_reap_jobs) == int(failed_put == "worker_crash_storm")
-    monkeypatch.setattr(queue._reap_queue, "put", put)
-    task_reaper._retry_deferred_reap_jobs()
-    storm, = [job for job in queue._reap_queue.queue if job["kind"] == "worker_crash_storm"]
-    assert task_reaper._deferred_reap_jobs == []
-    task_reaper._stop_crashed_worker_pool(storm)  # dead idle slots owe no terminal
-    assert workers.WORKERS == {} and workers._WORKER_POOL_DISABLED_REASON == "worker_crash_storm"
-
-
-
-def test_a_storm_latch_keeps_its_captured_membership_through_every_own_door(assigning, monkeypatch):
-    """Under the latch only its stop changes membership: no own caller forgets or starts a slot."""
-    from supervisor import task_reaper, worker_owner_wait
-    monkeypatch.setattr(workers, "MAX_WORKERS", 3)
-    workers.RUNNING.clear()
-    lent = assigning.original
-    lent.busy_task_id, lent.active_capacity = None, False  # a lent slot whose author has ended
-    retiring = affirm_ready(workers.Worker(1, Process(43), InputQueue()))
-    workers.WORKERS[1] = retiring
-    acknowledge(retiring)
-    assert lifecycle.retire_quiescent_worker(retiring)
-    job = queue._reap_queue.get_nowait()
-    lent.proc.alive = retiring.proc.alive = False
-    monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "worker_crash_storm")
-    captured = dict(workers.WORKERS)
-    lifecycle.reap_idle_worker(job)
-    worker_owner_wait.maintain_owner_wait_capacity()
-    task_reaper._respawn_after_reap(queue, workers, 0, expected_worker=lent)
-    assert not lifecycle.retire_worker(0, lent) and not lifecycle.retire_or_replace_worker(1, retiring)
-    workers.assign_tasks()
-    assert workers.WORKERS.keys() == captured.keys() and not assigning.created
-    assert all(workers.WORKERS[wid] is slot for wid, slot in captured.items())
-    stopped = []
-    monkeypatch.setattr(workers, "kill_workers", lambda **kw: stopped.append(kw) or True)
-    task_reaper._stop_crashed_worker_pool({"kind": "worker_crash_storm", "workers": tuple(captured.items()),
-                                           "drive_root": str(assigning.root)})
-    assert stopped == [{"disable_reason": "worker_crash_storm", "lanes": frozenset({"project"})}]
 
 def test_growth_ledgers_each_fresh_child_once_off_the_loop_and_retirement_ledgers_nothing(assigning, monkeypatch):
     """Reviewer measurements: each spawn re-ledgered every worker, each retirement every survivor (A1);
@@ -822,7 +666,7 @@ def test_owner_pause_resume_or_stop_at_cap_keeps_the_pool_dispatching(assigning,
     assert list(workers.RUNNING) == ["next-independent"] and len(assigning.created) == 1
 
 
-@pytest.mark.parametrize("reason", ["worker_crash_storm", "managed_update"])
+@pytest.mark.parametrize("reason", ["worker_readiness_exhausted", "managed_update"])
 def test_a_fence_never_refills_the_last_retiring_member(assigning, monkeypatch, reason):
     replacement, job = _resume_reserving_the_last_spare(assigning)
     _stop_parked_author(assigning)
