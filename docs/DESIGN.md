@@ -2197,7 +2197,8 @@ A task that ends with a cause states it on the collapsed line in the
 owner's words (the sentence of the durable row and the expanded body), so a
 `Done with warnings` chip never stands beside an unrelated last action; a clean
 ending's own summary replaces the last narration (owner 01.11 10:52, A). Residual tool
-errors name the first recorded failure in plain words (a noun for the step and
+errors warn unless the failed tool is a known pure read: a failed read or search stays in the details,
+while an effect or command that failed, or a tool of unknown kind, warns. They name the first such failure in plain words (a noun for the step and
 what happened, never a tool name, its result text or a path) and count the rest (`tool_error_words`). Successful tool calls are not rows: they fold
 into ONE evidence row per block (`N tool calls`, `N tool calls · M errors` once
 a call failed) at the first call's position and time, patched in place; Expand
