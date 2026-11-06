@@ -64,10 +64,6 @@
     margin-top: 0;
 }
 
-.settings-shell .form-section.danger {
-    border-color: rgba(220, 38, 38, 0.18);
-    background: rgba(239, 68, 68, 0.05);
-}
 
 .settings-shell .form-section h3 {
     margin-bottom: 0;
@@ -496,7 +492,6 @@
     gap: var(--space-3);
     padding: var(--space-3) 2px 0;
     border-top: 1px solid rgba(var(--neutral-rgb), 0.06);
-    background: linear-gradient(180deg, rgba(var(--shell-rgb), 0), rgba(var(--shell-rgb), 0.92) 55%);
 }
 
 .settings-footer-actions,
@@ -943,12 +938,6 @@
     outline-offset: 2px;
 }
 
-.settings-effort-btn.active,
-.settings-effort-btn:hover {
-    color: var(--text-primary);
-    border-color: rgba(232, 93, 111, 0.35);
-    background: rgba(232, 93, 111, 0.12);
-}
 
 /* Shared disabled segmented-button style. */
 .settings-effort-btn:disabled {
@@ -962,12 +951,6 @@
     transform: none;
 }
 
-[data-enforcement-group] .settings-effort-btn[data-effort-value="blocking"].active,
-[data-enforcement-group] .settings-effort-btn[data-effort-value="blocking"]:hover {
-    color: var(--text-primary);
-    border-color: rgba(232, 93, 111, 0.5);
-    background: var(--accent-18);
-}
 
 /* The local toggle's checkbox and gap: one pair of dimensions for the toggles and for the
    notes that line up with their label text (Startup & background). */

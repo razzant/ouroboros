@@ -346,10 +346,8 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
 .rw-row .rw-pill:disabled { opacity: 0.55; cursor: default; }
 /* View question is warm: it is the owner's turn. It goes to the question and never answers it. */
 .rw-row .rw-pill-question { background: var(--status-warn-bg); border-color: var(--status-warn-border); color: var(--status-warn-fg); font-weight: 600; }
-.rw-row .rw-pill-question:hover { background: var(--status-warn-bg); border-color: var(--status-warn-fg); }
 /* Resume is neutral: safe, and not urgent. */
 .rw-row .rw-pill-resume { background: rgba(var(--neutral-rgb), 0.05); border-color: rgba(var(--neutral-rgb), 0.16); color: var(--text-primary); }
-.rw-row .rw-pill-resume:hover { background: rgba(var(--neutral-rgb), 0.1); border-color: rgba(var(--neutral-rgb), 0.26); }
 .rw-more {
     box-sizing: border-box;
     display: inline-flex;
@@ -359,7 +357,6 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
     height: var(--rw-more);
     padding: 0;
     border: 0;
-    border-radius: var(--radius-sm);
     background: transparent;
     color: var(--text-primary);
     cursor: pointer;
@@ -396,17 +393,14 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
     align-items: center;
     gap: 6px;
     padding: 6px var(--space-3);
-    border: 1px solid var(--surface-border);
+    border: 1px solid transparent;
     border-radius: var(--pill-radius);
-    background: var(--bg-secondary);
     color: var(--text-primary);
     font: inherit;
     font-size: var(--type-meta);
-    box-shadow: var(--chrome-navigation-shadow);
     cursor: pointer;
 }
 .rw-back[hidden] { display: none; }
-.rw-back:hover { background: var(--bg-hover); }
 .rw-back:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 .rw-back-glyph { display: inline-flex; }
 

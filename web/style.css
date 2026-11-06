@@ -424,7 +424,6 @@ html[data-layout="stack"] .resize-handle { display: none; }
 .chat-live-foot-end > .chat-live-actions {
     flex: 0 1 auto;
     margin-inline-start: auto;
-    padding: 0;
 }
 
 /* S3 (Q2/HQ1): the three-action task stop/hurry dropdown (Chat + Activity). */
@@ -664,7 +663,6 @@ html[data-layout="stack"] .resize-handle { display: none; }
     cursor: pointer;
 }
 .chat-question-nav[hidden] { display: none; }
-.chat-question-nav:hover { border-color: var(--status-warn-fg); }
 .chat-question-nav:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 .chat-question-nav-arrow.down { transform: rotate(180deg); }
 .chat-toolbar-row[data-owner-solo] .chat-question-nav { display: none; }
@@ -689,7 +687,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
     color: var(--text-meta);
     cursor: pointer;
 }
-.chat-quiz-close:hover:not(:disabled) { color: var(--text-primary); border-color: var(--focus-accent-border); }
+.chat-quiz-close:hover:not(:disabled) { color: var(--text-primary); }
 .chat-quiz-close:disabled { color: var(--text-disabled); cursor: default; }
 .chat-quiz-close:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 /* An owner-required action is a System message: the task, one sentence, the task's own controls. */
@@ -1353,15 +1351,6 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
 }
 
-.app-tab:hover { background: var(--menu-item-hover); }
-
-.app-tab.active,
-.app-tab.is-active {
-    color: var(--text-primary);
-    border-color: var(--focus-accent-border);
-    background: var(--accent-12);
-}
-
 /* A tab's count (Skills: the jobs in flight) is a neutral count pill on the shared type scale: it says how many,
    while amber would say the owner has a move to make. */
 .app-tab-pill {
@@ -1491,13 +1480,6 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     color: var(--status-error-fg);
 }
 
-@media (hover: hover) {
-    .chat-header-btn.danger:hover {
-        border-color: rgba(239, 68, 68, 0.40);
-        background: rgba(239, 68, 68, 0.08);
-    }
-}
-
 /* The budget: a neutral fact (spent / limit and its bar). It turns amber only while a task the spending limit
    stopped waits for the owner (data-attention, from Main's attention rows): then the money is the owner's move. */
 .chat-budget-pill {
@@ -1607,7 +1589,6 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 }
 .chat-load-older-btn:hover:not(:disabled) {
     color: var(--text-primary);
-    border-color: var(--accent);
 }
 .chat-load-older-btn:disabled { opacity: 0.6; cursor: default; }
 
@@ -1806,8 +1787,6 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 }
 .chat-scroll-bottom-btn:hover {
     color: var(--text-primary);
-    background: var(--bg-hover);
-    border-color: rgba(var(--neutral-rgb), 0.16);
     transform: translate(-50%, 0);
 }
 .chat-scroll-bottom-btn:focus-visible {
@@ -1955,7 +1934,6 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 .ui-rich-content p:last-child { margin-block-end: 0; }
 
 .chat-bubble.system.chat-skill-review {
-    padding: 0;
     overflow: hidden;
 }
 
@@ -2146,9 +2124,6 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 .msg-swarm :is(.chat-subagents-core, .chat-subagents-helper, .chat-subagents-link) { color: currentColor; }
 .msg-swarm-sep { margin-inline: var(--space-1); }
 
-.chat-bubble:hover .msg-time {
-    opacity: 0.8;
-}
 
 .chat-bubble.user .msg-time {
     text-align: right;
@@ -2165,7 +2140,6 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 /* Subdued progress messages. */
 .chat-bubble.progress {
     border-left: 2px solid var(--accent-18);
-    padding-left: 14px;
     max-width: min(100%, 760px);
     margin-right: 0;
     opacity: 0.72;
@@ -2421,25 +2395,21 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 
 .chat-live-phase[data-chip-tone="live"] {
     color: var(--status-live-fg);
-    border-color: var(--accent-25);
     background: var(--status-live-bg);
 }
 
 .chat-live-phase[data-chip-tone="owner"] {
     color: var(--status-warn-fg);
-    border-color: var(--status-warn-border);
     background: var(--status-warn-bg);
 }
 
 .chat-live-phase[data-chip-tone="ok"] {
     color: var(--status-ok-fg);
-    border-color: var(--status-ok-border);
     background: var(--status-ok-bg);
 }
 
 .chat-live-phase[data-chip-tone="failed"] {
     color: var(--status-error-fg);
-    border-color: var(--status-error-border);
     background: var(--status-error-bg);
 }
 
@@ -3359,12 +3329,8 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 
 /* An opaque secondary surface prevents translucent tints accumulating at depth.
    Nested frames and parent-child rails remain the hierarchy cue. */
-.chat-live-card.subagent .chat-live-summary-button {
-    padding: var(--space-2) var(--space-3) 0;
-}
-
 .chat-live-card.subagent > .chat-live-foot {
-    padding: var(--space-1) var(--space-3) var(--space-2);
+    padding-block: var(--space-1) var(--space-2);
 }
 
 /* A child with nothing for its foot (no meta, no count, no control) closes on its summary. */
@@ -4362,8 +4328,6 @@ html[data-layout="stack"] .chat-page-note {
 .chat-field:focus-within {
     outline-width: 2px;
     outline-offset: -2px;
-    background: rgba(var(--composer-rgb), 0.86);
-    box-shadow: inset 0 1px 0 rgba(var(--neutral-rgb), 0.04), 0 0 0 1px var(--focus-accent-border), 0 0 0 4px var(--accent-10);
 }
 
 /* "+", the words, the mic and Send: the controls ride on the words' last line (flex-end), never on their middle. */
@@ -4716,15 +4680,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     display: flex;
     align-items: center;
 }
-.chat-send-inline:hover {
-    opacity: 1;
-    background: var(--accent-18);
-    border-color: var(--accent-45);
-}
-.chat-send-inline:active {
-    background: var(--accent-18);
-    opacity: 1;
-}
 
 /* Owner capsules (DESIGN "Composer owner controls"): Context and Effort, each a glass capsule of
    the pills' height (ring glyph · name · value) that opens inline into its strip. Siblings of the
@@ -4759,12 +4714,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     letter-spacing: 0;
     white-space: nowrap;
     transition: border-color 0.18s, background 0.18s, box-shadow 0.18s;
-}
-.chat-capsule[data-open="true"] {
-    border-color: var(--accent-35);
-}
-.chat-capsule:is([data-saving="true"], [data-disabled="true"]) {
-    box-shadow: var(--composer-control-shadow), 0 0 0 3px var(--accent-10);
 }
 /* The head: ring, name, value. Closed it is the whole capsule; open, the value gives way to the
    strip and the name stays unless the strip needs its room. */
@@ -5388,12 +5337,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     font-family: inherit;
     cursor: pointer;
     transition: all 0.15s;
-}
-
-.filter-chip.active {
-    border-color: var(--accent);
-    color: var(--accent);
-    background: var(--accent-dim);
 }
 
 #log-entries {
@@ -8588,8 +8531,6 @@ html[data-layout="stack"] .project-panel {
     width: 100%;
     z-index: var(--z-project-layer);
     border-left: none;
-    /* A full-screen room must occlude Main, not show its text through glass. */
-    background: var(--bg-primary);
     /* Pushed aside from its left edge, open or not: with the origin only on .open, a Project card closing at
        scale(.96) pivoted about its centre and jumped 8px the frame it lost the class. */
     transform-origin: 0 50%;

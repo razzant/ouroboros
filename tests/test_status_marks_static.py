@@ -33,9 +33,8 @@ owner | web/ui.css | .status-mark[data-hue="owner"] | color
 owner | web/style.css | .chat-budget-pill[data-attention="1"] .chat-budget-bar | background
 owner | web/style.css | .chat-budget-pill[data-attention="1"] .chat-budget-bar-fill | background
 owner | web/style.css | .chat-budget-pill[data-attention="1"] .chat-budget-text | color
-owner | web/style.css | .chat-live-phase[data-chip-tone="owner"] | background, border-color, color
+owner | web/style.css | .chat-live-phase[data-chip-tone="owner"] | background, color
 owner | web/style.css | .chat-question-nav | background, border, color
-owner | web/style.css | .chat-question-nav:hover | border-color
 owner | web/style.css | .skills-trust-value.is-suggested | color
 owner | web/style.css | :root[data-theme] .update-pill:is(.has-local, [data-tone="warn"]):not(:disabled) | background, color
 owner | web/style.css | @media (hover: hover) » :root[data-theme] .update-pill:is(.has-local, [data-tone="warn"]):not(:disabled):hover | background
@@ -45,7 +44,6 @@ owner | web/style.css | :root[data-theme] .chat-question-nav:hover | background
 owner | web/style.css | @media (hover: hover) » :root[data-theme] .chat-budget-pill.ui-chrome-control[data-attention="1"]:hover | background
 owner | web/model_wait.css | .model-wait-row[data-owner="1"] | background, border-color
 owner | web/room_work.css | .rw-row .rw-pill-question | background, border-color, color
-owner | web/room_work.css | .rw-row .rw-pill-question:hover | background, border-color
 owner | web/room_work.css | .rw-row[data-tone="wait"] .rw-state | color
 owner | web/room_work.css | .rw-trigger[data-tone="wait"] | color
 owner | web/room_work.css | :root[data-theme] .rw-row .rw-pill-question | background, color
@@ -54,7 +52,7 @@ owner | web/room_work.css | :root[data-theme] .rw-row .rw-pill-question:not(:dis
 # work, Logs events, widget tones, account quota and spent windows, unsaved settings and file drafts.
 warning | web/ui.css | .settings-inline-status[data-tone="warn"] | color
 warning | web/ui.css | .settings-test-result[data-tone="warn"] | color
-warning | web/ui.css | .ui-chip[data-tone="warn"] | background, border-color, color
+warning | web/ui.css | .ui-chip[data-tone="warn"] | background, color
 warning | web/ui.css | .ui-status[data-tone="warn"] | color
 warning | web/ui.css | :is(.ui-status, .settings-inline-status, .wizard-runtime-status)[data-tone="warn"]:not(:empty)::before | background
 warning | web/style.css | .chat-composer-chip[data-tone="warn"] .chat-chip-dot | background

@@ -160,15 +160,7 @@ textarea::placeholder {
   gap: 6px;
 }
 
-.wizard-step.active {
-  border-color: var(--border-strong);
-  background: var(--accent-08);
-  box-shadow: inset 0 0 0 1px var(--accent-12);
-}
 
-.wizard-step.done {
-  border-color: rgba(34, 197, 94, 0.22);
-}
 
 .wizard-step-index {
   display: inline-flex;
@@ -388,15 +380,7 @@ textarea::placeholder {
   transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
 }
 
-.selection-pill:hover {
-  border-color: rgba(var(--neutral-rgb), 0.24);
-  transform: translateY(-1px);
-}
 
-.selection-pill.active {
-  background: var(--accent-dim);
-  border-color: var(--border-strong);
-}
 
 .wizard-collapse {
   overflow: hidden;
@@ -452,10 +436,6 @@ textarea::placeholder {
   transform: translateY(-1px);
 }
 
-.wizard-choice.active {
-  border-color: var(--border-strong);
-  background: var(--accent-08);
-}
 
 /* Choice-card chip: neutral by default, so no chip renders as bare white text. A setting's value is never
    amber, so Advisory keeps the neutral chip; only Blocking declares a pair. */
@@ -1147,9 +1127,7 @@ textarea::placeholder {
   align-items: flex-start;
   gap: 10px;
   padding: 14px 16px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--panel-2);
+  border: 1px solid transparent;
 }
 
 .harness-login-card h4 {

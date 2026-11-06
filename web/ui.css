@@ -180,7 +180,6 @@
     /* Floating chrome (the recipe at the end): one height for a floating group's text controls, and the
        group's inset, which its negative margin cancels so grouping moves no control. */
     --chrome-control-h: 30px;
-    --chrome-navigation-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
     --chrome-inset: calc(var(--space-1) + 1px);
     /* Airy dopamine seed (DESIGN.md design bible): the dark values; the light theme's follow in its block. One set of
        recipes reads them in both themes. The dark theme draws the same roles its own way: a deep graphite room, each
@@ -565,12 +564,7 @@
     font-size: var(--button-font-size);
     font-weight: 600;
 }
-.theme-choice:hover,
-.theme-choice[aria-checked="true"] {
-    color: var(--text-primary);
-    border-color: var(--focus-accent-border);
-    background: var(--accent-12);
-}
+.theme-choice:hover { color: var(--text-primary); }
 .theme-choice:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 .theme-choice-label {
     display: block;
@@ -604,15 +598,6 @@
     outline-offset: 2px;
 }
 
-.btn:hover {
-    transform: scale(1.02);
-}
-
-.btn:active {
-    transform: scale(0.98);
-    box-shadow: 0 0 0 3px var(--accent-08);
-}
-
 .btn:disabled {
     cursor: not-allowed;
     opacity: var(--control-disabled-opacity);
@@ -625,10 +610,6 @@
     color: var(--accent-light);
     border-color: var(--accent-18);
 }
-.btn-primary:hover {
-    background: var(--accent-25);
-    border-color: var(--accent-35);
-}
 /* An action the owner can take is legible at rest (docs/DESIGN.md section 6):
    a button label parked at secondary ink reads as disabled next to the one
    beside it. */
@@ -637,39 +618,26 @@
     color: var(--text-primary);
     border-color: rgba(var(--neutral-rgb), 0.10);
 }
-.btn-secondary:hover {
-    background: rgba(var(--neutral-rgb), 0.07);
-    border-color: var(--accent-25);
-}
 .btn-ghost {
     background: transparent;
     color: var(--text-primary);
     border-color: rgba(var(--neutral-rgb), 0.08);
-}
-.btn-ghost:hover {
-    background: rgba(var(--neutral-rgb), 0.04);
 }
 .btn-danger {
     background: rgba(220, 38, 38, 0.2);
     color: var(--status-error-fg);
     border: 1px solid rgba(220, 38, 38, 0.3);
 }
-.btn-danger:hover { background: rgba(220, 38, 38, 0.35); }
 
 .btn-save {
     background: var(--green-dim);
     color: var(--status-ok-fg);
     border-color: rgba(34, 197, 94, 0.22);
 }
-.btn-save:hover { background: rgba(34, 197, 94, 0.25); }
 .btn-default {
     background: var(--bg-card);
     color: var(--text-primary);
     border-color: rgba(var(--neutral-rgb), 0.08);
-}
-.btn-default:hover {
-    background: var(--bg-hover);
-    border-color: rgba(var(--neutral-rgb), 0.14);
 }
 
 
@@ -709,24 +677,20 @@
 .ui-chip[data-tone="ok"] {
     color: var(--status-ok-fg);
     background: var(--status-ok-bg);
-    border-color: var(--status-ok-border);
 }
 .ui-chip[data-tone="warn"] {
     color: var(--status-warn-fg);
     background: var(--status-warn-bg);
-    border-color: var(--status-warn-border);
 }
 .ui-chip[data-tone="danger"],
 .ui-chip[data-tone="error"] {
     color: var(--status-error-fg);
     background: var(--status-error-bg);
-    border-color: var(--status-error-border);
 }
 .ui-chip[data-tone="neutral"],
 .ui-chip[data-tone="muted"] {
     color: var(--status-neutral-fg);
     background: var(--status-neutral-bg);
-    border-color: var(--status-neutral-border);
 }
 
 .ui-status[data-tone="ok"],
@@ -838,7 +802,6 @@ textarea.ui-control { resize: vertical; }
 }
 @media (prefers-reduced-motion: reduce) {
     .btn, .ui-control { transition: none; }
-    .btn:hover, .btn:active { transform: none; }
 }
 
 /* Measured popup placement and its floating material are shared; menu/listbox interaction stays separate. The paint
