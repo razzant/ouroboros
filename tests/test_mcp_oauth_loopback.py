@@ -561,3 +561,109 @@ def test_the_sign_in_tool_honours_the_tasks_network_contract(tmp_path):
     ctx.task_metadata["task_contract"]["allowed_resources"]["network"] = True
     assert registry.get_schema_by_name("remote_mcp_sign_in") is not None
     assert registry_guards._capability_resource_guard_result(ctx, "remote_mcp_sign_in", args) is None
+
+
+# -- review findings (MCP_RV2) ------------------------------------------------------------------------------
+
+
+def test_a_revoked_registration_is_not_reused_from_an_unfinished_sign_in(signin, monkeypatch):
+    provider, _manager, cfg, _settings = signin()
+    _complete(cfg, _provider_return(cfg))
+    original = _file(cfg)
+    asyncio.run(mcp_oauth.begin(cfg))  # a step-up begun and left pending, with the same registration
+    provider.clients.clear()  # the provider revokes the registration
+
+    async def invalid_client(http, endpoint, client, data):
+        return httpx.Response(401, json={"error": "invalid_client"}, request=httpx.Request("POST", endpoint))
+
+    with monkeypatch.context() as stub:
+        stub.setattr(mcp_oauth, "_token_request", invalid_client)
+        with pytest.raises(mcp_oauth.MCPAuthRequired):
+            asyncio.run(mcp_oauth.current_token(cfg, rejected=original["tokens"]["access_token"]))
+    assert not _file(cfg).get("client") and not _file(cfg).get("pending") and not _file(cfg).get("tokens")
+    restarted = asyncio.run(mcp_oauth.begin(cfg))
+    client_id = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(restarted["url"]).query))["client_id"]
+    assert client_id in provider.clients and provider.counts["register"] == 2  # registered again
+    answer = httpx.get(restarted["url"], follow_redirects=False, timeout=10)
+    assert _complete(cfg, answer.headers["location"])["ok"] is True
+
+
+def test_invalid_client_keeps_a_pending_sign_in_of_another_registration(monkeypatch, tmp_path):
+    cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)
+    pending = {"nonce": "n", "client": {"client_id": "replacement-client", "issuer": "https://auth.example"}}
+    mcp_oauth._save(cfg, {"tokens": {"access_token": "a", "refresh_token": "r", "expires_at": 1}, "pending": pending,
+                          "metadata": {"token_endpoint": "https://auth.example/token"},
+                          "client": {"client_id": "old-client", "issuer": "https://auth.example"}})
+    monkeypatch.setattr(mcp_oauth, "_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(401, json={"error": "invalid_client"}))))
+    with pytest.raises(mcp_oauth.MCPAuthRequired):
+        asyncio.run(mcp_oauth.current_token(cfg))
+    assert _file(cfg)["pending"] == pending and not _file(cfg).get("client")
+
+
+@pytest.mark.parametrize(("status", "error"), [(400, None), (401, None), (401, "invalid_client")])
+def test_refresh_refusals_without_a_body_ask_for_sign_in(monkeypatch, tmp_path, status, error):
+    cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)
+    mcp_oauth._save(cfg, {"tokens": {"access_token": "a", "refresh_token": "r", "expires_at": 1},
+                          "metadata": {"token_endpoint": "https://auth.example/token"}, "client": {"client_id": "c"}})
+    monkeypatch.setattr(mcp_oauth, "_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(status, **({"json": {"error": error}} if error else {})))))
+    with pytest.raises(mcp_oauth.MCPAuthRequired) as caught:
+        asyncio.run(mcp_oauth.current_token(cfg))
+    assert caught.value.reason == "refresh_rejected" and not _file(cfg).get("tokens")
+    assert bool(_file(cfg).get("client")) is (error != "invalid_client")
+
+
+def test_saving_a_new_address_while_an_old_refresh_finishes_allows_the_new_sign_in(signin, monkeypatch):
+    _provider, manager, cfg, settings = signin()
+    _complete(cfg, _provider_return(cfg))
+    old_access = _file(cfg)["tokens"]["access_token"]
+    newer = {**settings, "MCP_SERVERS": [{**settings["MCP_SERVERS"][0], "url": cfg.url + "?saved-new-address=1"}]}
+    real_token_request = mcp_oauth._token_request
+
+    async def interleave():
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def delayed(http, endpoint, client, data):
+            entered.set()
+            await release.wait()
+            return await real_token_request(http, endpoint, client, data)
+
+        with monkeypatch.context() as stub:
+            stub.setattr(mcp_oauth, "_token_request", delayed)
+            refresh = asyncio.create_task(mcp_oauth.current_token(cfg, rejected=old_access))
+            await entered.wait()
+            manager.configuration_changed(newer, reason="settings")  # Save prunes the old address's file
+            release.set()
+            await refresh  # ... and the old refresh writes it back
+
+    asyncio.run(interleave())
+    new_cfg = manager.server_config("docs")
+    assert _complete(new_cfg, _provider_return(new_cfg))["ok"] is True
+
+
+def test_a_contended_lock_does_not_keep_its_finished_event_loop(monkeypatch, tmp_path):
+    import gc
+    import weakref
+
+    cfg, _metadata, _seen = _mock_as(monkeypatch, tmp_path)
+
+    async def contend():
+        loop_ref, ready = weakref.ref(asyncio.get_running_loop()), asyncio.Event()
+
+        async def holder():
+            async with mcp_oauth._locked(cfg):
+                ready.set()
+                await asyncio.sleep(0.02)
+
+        async def waiter():
+            await ready.wait()
+            async with mcp_oauth._locked(cfg):
+                pass
+
+        await asyncio.gather(holder(), waiter())
+        return loop_ref
+
+    loop_ref = asyncio.run(contend())
+    gc.collect()
+    assert loop_ref() is None

@@ -356,6 +356,7 @@ const cards = host.innerHTML.split('data-mcp-card ').slice(1);
 assert.match(cards[0], /Sign-in needed: not signed in yet[\s\S]*data-mcp-sign-in-action="begin"/);
 assert.match(cards[1], /Signed in; a call needs more access: files:read files:write/);
 assert.match(cards[1], /data-mcp-sign-in-action="begin">Sign in again[\s\S]*data-mcp-sign-in-action="sign_out"/);
+assert.match(cards[1], /data-mcp-sign-in-returned[\s\S]*data-mcp-sign-in-action="complete"/);  // a step-up finishes by paste too
 '''
     result = subprocess.run([_node_bin(), '--input-type=module', '-e', script], cwd=REPO_ROOT,
                             capture_output=True, text=True, timeout=15)

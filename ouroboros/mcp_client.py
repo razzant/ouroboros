@@ -1339,7 +1339,8 @@ class MCPManager:
             }
         timeout = self._tool_timeout_sec
         try:
-            tools_raw = _run_async(lambda: self._async_list_tools(cfg, timeout), join_timeout=timeout + 3)
+            with mcp_oauth.drafting():  # the draft never replaces a saved server's sign-in
+                tools_raw = _run_async(lambda: self._async_list_tools(cfg, timeout), join_timeout=timeout + 3)
         except BaseException as exc:  # noqa: BLE001
             return {"ok": False, "error": _exception_text(exc, cfg)}
         tools_raw, instructions = mcp_catalog.split_instructions(tools_raw)

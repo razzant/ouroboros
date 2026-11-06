@@ -259,18 +259,9 @@ function signInRow(server) {
         return `<span class="mcp-server-status mcp-server-status-ok">Signed in</span>
             <button type="button" class="btn btn-default" data-mcp-sign-in-action="sign_out">Sign out</button>`;
     }
-    if (signIn.state === 'signed_in') { // still allowed what it was granted; a call needs more
-        return `<span class="mcp-server-status mcp-server-status-warn">Signed in; a call needs more access: ${escapeHtml(signIn.required_scope || '')}</span>
-            <button type="button" class="btn btn-default" data-mcp-sign-in-action="begin">Sign in again</button>
-            <button type="button" class="btn btn-default" data-mcp-sign-in-action="sign_out">Sign out</button>
-            ${signInLinks.get(server) ? `<a href="${escapeHtml(safeExternalUrl(signInLinks.get(server)))}" target="_blank" rel="noopener noreferrer" data-mcp-sign-in-link>Open the sign-in page ↗</a>` : ''}`;
-    }
-    const reason = SIGN_IN_REASONS[signIn.reason] || String(signIn.reason || 'not signed in yet').replaceAll('_', ' ');
     const link = signInLinks.get(server);
-    return `<span class="mcp-server-status mcp-server-status-warn">Sign-in needed: ${escapeHtml(reason)}</span>
-        <button type="button" class="btn btn-default" data-mcp-sign-in-action="begin">Sign in</button>
-        ${link ? `<a href="${escapeHtml(safeExternalUrl(link))}" target="_blank" rel="noopener noreferrer" data-mcp-sign-in-link>Open the sign-in page ↗</a>` : ''}
-        <details class="mcp-sign-in-details"><summary>Details</summary>
+    const opener = link ? `<a href="${escapeHtml(safeExternalUrl(link))}" target="_blank" rel="noopener noreferrer" data-mcp-sign-in-link>Open the sign-in page ↗</a>` : '';
+    const details = `<details class="mcp-sign-in-details"><summary>Details</summary>
             <label class="ui-field-help">If your browser did not come back here after signing in, paste the address it stopped on:
                 <input type="text" class="ui-control" data-mcp-sign-in-returned autocomplete="off" spellcheck="false"></label>
             <button type="button" class="btn btn-default" data-mcp-sign-in-action="complete">Finish sign-in</button>
@@ -278,6 +269,18 @@ function signInRow(server) {
                 <input type="text" class="ui-control" data-mcp-sign-in-client-id placeholder="Client ID" autocomplete="off" spellcheck="false">
                 <input type="password" class="ui-control" data-mcp-sign-in-client-secret placeholder="Client secret (optional)" autocomplete="off"></label>
         </details>`;
+    if (signIn.state === 'signed_in') { // still allowed what it was granted; a call needs more
+        return `<span class="mcp-server-status mcp-server-status-warn">Signed in; a call needs more access: ${escapeHtml(signIn.required_scope || '')}</span>
+            <button type="button" class="btn btn-default" data-mcp-sign-in-action="begin">Sign in again</button>
+            <button type="button" class="btn btn-default" data-mcp-sign-in-action="sign_out">Sign out</button>
+            ${opener}
+            ${details}`;
+    }
+    const reason = SIGN_IN_REASONS[signIn.reason] || String(signIn.reason || 'not signed in yet').replaceAll('_', ' ');
+    return `<span class="mcp-server-status mcp-server-status-warn">Sign-in needed: ${escapeHtml(reason)}</span>
+        <button type="button" class="btn btn-default" data-mcp-sign-in-action="begin">Sign in</button>
+        ${opener}
+        ${details}`;
 }
 
 function paintSignIn(card, server) {

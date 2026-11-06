@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -77,11 +78,25 @@ def _load(cfg: Any) -> Dict[str, Any]:
     return doc if doc.get("url") == cfg.url else {}
 
 
+_DRAFT: "contextvars.ContextVar[bool]" = contextvars.ContextVar("mcp_oauth_draft", default=False)
+
+
+@contextlib.contextmanager
+def drafting():
+    """A Settings Test of an unsaved draft: it uses (and refreshes) the grant of its own address, and never
+    writes over the file of another address, such as the saved server's grant beside an edited URL."""
+    token = _DRAFT.set(True)
+    try:
+        yield
+    finally:
+        _DRAFT.reset(token)
+
+
 def _save(cfg: Any, doc: Dict[str, Any]) -> None:
     path = _path(cfg.id)
     recorded = (read_json_dict(path) or {}).get("url")
-    if recorded and recorded != cfg.url:
-        return  # another address's grant (a Test of an edited draft) is never replaced; Save prunes it
+    if _DRAFT.get() and recorded and recorded != cfg.url:
+        return  # a draft never replaces another address's grant; a saved address always writes (Save prunes)
     path.parent.mkdir(parents=True, exist_ok=True)
     with contextlib.suppress(OSError):
         os.chmod(path.parent, 0o700)  # a rewrite's temporary file is never readable by another account
@@ -90,7 +105,9 @@ def _save(cfg: Any, doc: Dict[str, Any]) -> None:
         os.chmod(path, 0o600)
 
 
-_LOOP_LOCKS: "weakref.WeakKeyDictionary[Any, Dict[str, asyncio.Lock]]" = weakref.WeakKeyDictionary()
+# Per event loop, per server; a lock lives only while a coroutine holds or awaits it (a bound lock refers to
+# its loop, so a strongly held one would keep every closed loop alive).
+_LOOP_LOCKS: "weakref.WeakKeyDictionary[Any, weakref.WeakValueDictionary]" = weakref.WeakKeyDictionary()
 _LOOP_LOCKS_GUARD = threading.Lock()
 
 
@@ -102,7 +119,10 @@ async def _locked(cfg: Any):
     from ouroboros import store
 
     with _LOOP_LOCKS_GUARD:
-        lock = _LOOP_LOCKS.setdefault(asyncio.get_running_loop(), {}).setdefault(cfg.id, asyncio.Lock())
+        locks = _LOOP_LOCKS.setdefault(asyncio.get_running_loop(), weakref.WeakValueDictionary())
+        lock = locks.get(cfg.id)
+        if lock is None:
+            lock = locks[cfg.id] = asyncio.Lock()
     async with lock:
         deadline = time.monotonic() + MCP_OAUTH_LOCK_WAIT_SEC
         while True:
@@ -260,8 +280,14 @@ async def current_token(cfg: Any, rejected: Optional[str] = None) -> str:
             error = _oauth_error(response)
             if error == "invalid_request":  # a malformed request, not a refused grant: the grant stays
                 response.raise_for_status()
-            # invalid_grant (expired or revoked), invalid_client (the registration is gone: register again)
-            raise _required(cfg, doc, "refresh_rejected", error, **({"client": None} if error == "invalid_client" else {}))
+            # invalid_grant (expired or revoked), invalid_client (the registration is gone: register again,
+            # so a pending sign-in made with the same registration goes too)
+            facts: Dict[str, Any] = {}
+            if error == "invalid_client":
+                facts["client"] = None
+                if ((doc.get("pending") or {}).get("client") or {}).get("client_id") == (doc.get("client") or {}).get("client_id"):
+                    facts["pending"] = None
+            raise _required(cfg, doc, "refresh_rejected", error, **facts)
         response.raise_for_status()  # an unreachable authorization server is a failure, not a lost sign-in
         doc["tokens"] = _tokens(OAuthToken.model_validate_json(response.content), tokens.get("refresh_token"),
                                 tokens.get("scope"))
