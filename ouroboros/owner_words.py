@@ -102,7 +102,7 @@ def row_ref(item: Mapping[str, Any]) -> str:
     if client and chat:
         return _chat_ref({"chat_id": chat, "client_message_id": client})
     if msg_id:
-        return f"msg {msg_id}"
+        return msg_id if msg_id.startswith("row:") else f"msg {msg_id}"
     return f"message {client}" if client else ""
 
 
@@ -121,6 +121,18 @@ def _carrier_ref(item: Mapping[str, Any], *, canonical: Any = "") -> str:
     if str(canonical or ""):
         return str(canonical)
     return row_ref(item)
+
+
+def _held_origin(ref: Mapping[str, Any], held: Any) -> Mapping[str, Any] | None:
+    """Resolve an identified origin from rows already retained, without guessing from equal words alone."""
+    if not (ref.get("client_message_id") or ref.get("ts")) or not ref.get("text_sha256"):
+        return None
+    from ouroboros.project_dialogue import entry_matches_source_ref
+    from ouroboros.owner_relay import owner_row_address
+
+    matches = {owner_row_address(row): row for row in _mapping(held).values()
+               if isinstance(row, dict) and entry_matches_source_ref(row, [dict(ref)])}
+    return next(iter(matches.values())) if len(matches) == 1 else None
 
 
 def _deduped(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
@@ -212,6 +224,10 @@ def directive_owner_rows(ctx: Any) -> List[Dict[str, str]]:
     door_text = _ctx_metadata(ctx).get("origin_message_text")
     door_text = door_text if isinstance(door_text, str) and door_text.strip() else None
     task_id = str(getattr(ctx, "task_id", "") or "")
+    known = _held_origin(origin_ref, getattr(ctx, "_held_owner_messages", None)
+                         or _ctx_metadata(ctx).get("held_owner_messages"))
+    from ouroboros.owner_relay import owner_row_address
+    reference = _carrier_ref(known, canonical=owner_row_address(known)) if known else _chat_ref(origin_ref)
     rows = []
     for item in getattr(ctx, "_owner_directives", None) or []:
         if not isinstance(item, dict) or item.get("source") not in OWNER_SOURCES:
@@ -219,7 +235,7 @@ def directive_owner_rows(ctx: Any) -> List[Dict[str, str]]:
         stamped = item["source"] == "initial_user" and origin_ref
         rows += _words_rows(item, carrier="ctx", task_id=task_id,
                             content=door_text if stamped and door_text is not None else None,
-                            ts=origin_ref.get("ts") if stamped else "", ref=_chat_ref(origin_ref) if stamped else "")
+                            ts=origin_ref.get("ts") if stamped else "", ref=reference if stamped else "")
     return _deduped(rows)
 
 
@@ -467,13 +483,13 @@ def owner_row(row: Mapping[str, Any] | None, drive_root: Any = None, *, accounts
 
 
 def _message_rows(drive_root: Any, task_id: str, text: Any, ref: Any, carrier: str,
-                  accounts: Any = None) -> List[Dict[str, str]]:
+                  accounts: Any = None, held: Any = None) -> List[Dict[str, str]]:
     ref = _mapping(ref)
     from ouroboros.project_dialogue import resolve_owner_message_source
     from ouroboros.store import StoreError
 
     try:
-        row = resolve_owner_message_source(drive_root, dict(ref)) if ref else None
+        row = _held_origin(ref, held) or (resolve_owner_message_source(drive_root, dict(ref)) if ref else None)
     except (StoreError, OSError):
         if not (isinstance(text, str) and text.strip()):
             raise
@@ -481,14 +497,15 @@ def _message_rows(drive_root: Any, task_id: str, text: Any, ref: Any, carrier: s
         row = None
     from ouroboros.owner_relay import owner_row_address
     reference = _carrier_ref(row, canonical=owner_row_address(row)) if row else (_chat_ref(ref) if ref else "")
+    source_root = _mapping(row).get("_owner_source_root") or drive_root
     if isinstance(text, str) and text.strip():
-        target = reply_target(drive_root, _mapping(row).get("reply_to"))
+        target = reply_target(source_root, _mapping(row).get("reply_to"))
         return _words_rows({"source": "origin_message", "content": text, "reply_to": target}, carrier=carrier,
                            task_id=task_id, ts=ref.get("ts"), ref=reference)
-    if not owner_row(row, drive_root, accounts=accounts):
+    if not owner_row(row, source_root, accounts=accounts if str(source_root) == str(drive_root) else None):
         return []
     return _words_rows({**row, "source": "origin_message", "content": row["text"],
-                        "reply_to": reply_target(drive_root, row.get("reply_to"))}, carrier=carrier,
+                        "reply_to": reply_target(source_root, row.get("reply_to"))}, carrier=carrier,
                        task_id=task_id, ts=row.get("ts"), ref=reference)
 
 
@@ -503,7 +520,8 @@ def _corpus_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any], ac
         from ouroboros.owner_relay import owner_row_address
         from ouroboros.store import StoreError
         try:
-            saved = resolve_owner_message_source(drive_root, dict(origin))
+            saved = (_held_origin(origin, record.get("held_owner_messages"))
+                     or resolve_owner_message_source(drive_root, dict(origin)))
         except (StoreError, OSError):
             saved = None  # its carried words remain; an unreadable source supplies no new identity
         if saved:
@@ -518,7 +536,8 @@ def _origin_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any], ac
     nested = _mapping(record.get("metadata"))
     return _message_rows(drive_root, task_id,
                          record.get("origin_message_text") or nested.get("origin_message_text"),
-                         record.get("origin_message_ref") or nested.get("origin_message_ref"), "origin_message", accounts)
+                         record.get("origin_message_ref") or nested.get("origin_message_ref"), "origin_message", accounts,
+                         record.get("held_owner_messages"))
 
 
 def _binding_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any], accounts: Any) -> List[Dict[str, str]]:
@@ -526,7 +545,7 @@ def _binding_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any], a
 
     binding = _mapping(project_task_bindings(drive_root).get(task_id))
     return _message_rows(drive_root, task_id, binding.get("source_text"), binding.get("source_ref"), "binding",
-                         accounts)
+                         accounts, record.get("held_owner_messages"))
 
 
 def _annotation_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any],

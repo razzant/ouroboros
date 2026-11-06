@@ -46,7 +46,8 @@ def test_a_message_its_root_holds_and_names_as_its_origin_is_one_row(tmp_path):
 
 
 @pytest.mark.parametrize("carrier", ["origin_ref", "origin_text", "binding", "corpus"])
-def test_legacy_origin_and_held_copy_share_identity_without_collapsing_another_message(tmp_path, monkeypatch, carrier):
+@pytest.mark.parametrize("source_state", ["readable", "missing", "error"])
+def test_legacy_origin_and_held_copy_share_identity_without_collapsing_another_message(tmp_path, monkeypatch, carrier, source_state):
     from ouroboros.owner_relay import held_owner_messages, retain_owner_message
     from tests.test_owner_relay import context
 
@@ -57,6 +58,12 @@ def test_legacy_origin_and_held_copy_share_identity_without_collapsing_another_m
     ctx = context(tmp_path); ctx.task_metadata = {"origin_message_ref": ref}
     held_owner_messages(ctx)
     retain_owner_message(ctx, other)
+    if source_state != "readable":
+        def unavailable(*_args):
+            if source_state == "error":
+                raise OSError("source unavailable")
+            return None
+        monkeypatch.setattr("ouroboros.project_dialogue.resolve_owner_message_source", unavailable)
     record = {"id": ROOT, "held_owner_messages": ctx._held_owner_messages}
     if carrier == "binding":
         monkeypatch.setattr("ouroboros.projects_registry.project_task_bindings", lambda _root: {
@@ -71,6 +78,32 @@ def test_legacy_origin_and_held_copy_share_identity_without_collapsing_another_m
     assert not absent
     assert [(r["ref"], r["text"]) for r in rows] == [(format_address(row_address(origin)), "yes"),
                                                      (format_address(row_address(other)), "yes")]
+
+
+def test_a_legacy_origin_quoted_back_into_the_live_turn_is_one_known_source(tmp_path):
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_relay import inject_relay, owner_quote, relay_envelope
+    from tests.test_owner_relay import context
+
+    row = {"chat_id": 1, "direction": "in", "ts": TS, "text": "yes"}
+    ds.append(tmp_path, "chat", row)
+    stored = next(item.row for item in ds.iter_rows(tmp_path, "chat"))
+    ctx = context(tmp_path)
+    ctx.task_metadata = {"origin_message_ref": build_owner_message_ref(chat_id=1, client_message_id="", ts=TS, text="yes"),
+                         "origin_message_text": "yes"}
+    _initialize_owner_directives(ctx, [{"role": "user", "content": "yes"}])
+    inject_relay(ctx, {"relay": relay_envelope("same", [owner_quote(tmp_path, stored)], chat_id=1),
+                       "owner_rows": [stored], "text": "context", "source_task_id": "other"}, [])
+    assert [r["text"] for r in ow.directive_owner_rows(ctx)] == ["yes"]
+
+
+def test_missing_origin_identity_does_not_infer_a_match_from_equal_words(tmp_path):
+    first = _stored(tmp_path, "yes", "one")
+    second = _stored(tmp_path, "yes", "two", ts="2026-09-30T05:42:00+00:00")
+    rows, _ = ow.task_owner_words(tmp_path, ROOT, task={"origin_message_text": "yes",
+        "held_owner_messages": {format_address(row_address(r)): r for r in (first, second)}})
+    assert {r["ref"] for r in rows} >= {"chat 1 / one", "chat 1 / two"}
+    assert len(rows) == 3, "without an origin reference, two possible identical sources cannot be guessed into one"
 
 
 def test_two_messages_with_the_same_words_stay_two_rows(tmp_path):
