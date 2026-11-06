@@ -60,6 +60,55 @@ def test_definite_configured_session_start_refusal_terminalizes_before_llm(
     assert task["subagent_availability"]["host_fallback"] is False
 
 
+def test_a_refused_start_is_recorded_blocked_not_as_an_unused_substrate(monkeypatch, tmp_path):
+    """Audit 05.11 item 5: refused starts were recorded ``harness`` with their route, so the completion seam
+    read their zero runs as ``delegated_substrate_unused``. A refused start writes the dispatch-time block's
+    record (``blocked``, empty route, the refusal in the delta); a started leaf keeps its own."""
+    import ouroboros.subagent_runtime as runtime
+    from ouroboros.agent_dispatch import _blocked_executor_terminal
+    from ouroboros.subagent_bootstrap import bootstrap_before_context
+    from ouroboros.subagent_dispatch_notes import _fill_executor_blocked_caps
+    from ouroboros.subagents import envelope_from_task
+
+    monkeypatch.setattr(runtime, "exact_start", lambda _ctx, _prompt, _spec: _fail(
+        "delegate_start", "credential_pool_exhausted", "the route refused this start"))
+    monkeypatch.setattr(runtime, "current_subagent_alternatives", lambda _exclude: [{"subagent_id": "api-scout"}])
+    snapshot = _snapshot(_settings(_session_row()), "session-builder")
+    dispatch = SimpleNamespace(executor="harness", blocked=False,
+                               executor_resolution=SimpleNamespace(route=SimpleNamespace(route_id="codex")))
+
+    def child(task_id):
+        ctx = SimpleNamespace(task_id=task_id, drive_root=tmp_path, budget_drive_root=str(tmp_path), task_metadata={})
+        return ctx, {"id": task_id, "configured_subagent": snapshot, "task_contract": {"objective": "Build"},
+                     "budget_drive_root": str(tmp_path), "requested_executor": "harness",
+                     "effective_executor": "harness", "executor_route": "codex",
+                     "capability_delta": {"effective_executor": "harness", "reduced": False, "reduction_reasons": []}}
+
+    ctx, task = child("child-refused")
+    assert bootstrap_before_context(ctx, task, dispatch) == ""
+    cap_info = {}
+    _fill_executor_blocked_caps(ctx, cap_info, dispatch, task)
+    assert (task["effective_executor"], task["executor_route"]) == ("blocked", "")
+    assert task["capability_delta"]["reduced"] is True
+    assert task["capability_delta"]["reduction_reasons"] == ["credential_pool_exhausted"]
+    assert cap_info["executor_blocked_route"] == "codex"  # the card still names the route that refused
+    envelope = envelope_from_task(task, status="failed")
+    assert envelope["effective_executor"] == "blocked"
+    assert "delegated_substrate_unused" not in (envelope["capability_delta"].get("substrate_disclosures") or [])
+    text, usage, _trace = _blocked_executor_terminal(cap_info, task)
+    assert "the route refused this start" in text and "api-scout" in text and "NOT run" in text
+    assert (usage["unavailable_reason"], usage["host_fallback"], usage["terminal_origin"], usage["reason_code"]) == (
+        "credential_pool_exhausted", False, "host_notice", "subagent_executor_unavailable")
+
+    # Quiet: a leaf the host started keeps its record, and zero runs at completion stay an honest disclosure.
+    ctx, task = child("child-started")
+    cap_info = {}
+    _fill_executor_blocked_caps(ctx, cap_info, dispatch, task)
+    assert cap_info == {} and (task["effective_executor"], task["executor_route"]) == ("harness", "codex")
+    envelope = envelope_from_task(task, status="completed")
+    assert "delegated_substrate_unused" in envelope["capability_delta"]["substrate_disclosures"]
+
+
 @pytest.mark.parametrize("payload", [
     # A custody handle means a run may exist: never a $0 terminal.
     {"status": "refused", "reason": "credential_pool_exhausted", "run_id": "run-x"},
@@ -241,7 +290,7 @@ def test_definite_refusal_reaches_the_zero_dollar_terminal_without_a_model_round
     assert calls == [], "a definite pre-start refusal must never reach the model"
     record = read_result(drive, "pinned-refused")
     assert float(record.get("cost_usd") or 0.0) == 0.0
-    assert "NOT run on metered API tokens" in str(record.get("result") or "")
+    assert "NOT run and spent nothing" in str(record.get("result") or "")
 
 
 def test_blocked_fault_row_is_visible_attempt_evidence(monkeypatch, tmp_path):

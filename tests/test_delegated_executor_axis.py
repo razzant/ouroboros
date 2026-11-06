@@ -423,9 +423,10 @@ def test_a_blocked_pin_ends_the_task_unrun_instead_of_spending(monkeypatch):
     res = _session_dispatch(raises=cx.ClaudexorUnavailable("daemon_unreachable", "x"),
                             monkeypatch=monkeypatch)
     text, usage = executor_blocked_outcome(res)
-    assert usage == {"execution_status": "infra_failed",
-                     "reason_code": "subagent_executor_unavailable"}
-    assert "NOT run on metered API tokens" in text
+    assert usage == {"execution_status": "infra_failed", "reason_code": "subagent_executor_unavailable",
+                     "unavailable_reason": res.reason, "alternatives": [], "host_fallback": False,
+                     "terminal_origin": "host_notice"}
+    assert "NOT run and spent nothing" in text
     # No visible marker for a blocked run: there is no child to inform.
     from ouroboros.agent import dispatch_executor_note
     assert dispatch_executor_note(res) == ""

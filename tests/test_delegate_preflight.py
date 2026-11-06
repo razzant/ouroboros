@@ -101,7 +101,7 @@ def test_explicit_harness_pin_with_invisible_verbs_blocks_with_zero_spend():
     assert usage["reason_code"] == "delegate_tools_invisible"
     assert usage["execution_status"] == "infra_failed"
     assert "not visible" in text
-    assert "NOT run on metered API tokens" in text
+    assert "NOT run and spent nothing" in text
     # And the cap_info seam _prepare_task_context feeds rebuilds the same outcome.
     cap_info = {
         "executor_blocked_reason": result.executor_resolution.reason,
@@ -132,7 +132,7 @@ def test_broken_introspection_with_pinned_harness_fails_closed():
     text, usage = executor_blocked_outcome(result.executor_resolution)
     assert usage["reason_code"] == "delegate_visibility_unverified"
     assert "could not be verified" in text
-    assert "NOT run on metered API tokens" in text
+    assert "NOT run and spent nothing" in text
 
 
 def test_native_and_undispatched_children_are_not_probed():

@@ -923,7 +923,7 @@ class OuroborosAgent:
         # adopt p34's `SubagentExecutorResolution`/`executor_blocked_outcome` without
         # a same-named twin to dedup here.
         if not startup_wake:
-            _fill_executor_blocked_caps(ctx, cap_info, dispatch)
+            _fill_executor_blocked_caps(ctx, cap_info, dispatch, task)
         self._emit_live_log(
             "context_building_finished",
             task_id=str(task.get("id") or ""),

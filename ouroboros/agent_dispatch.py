@@ -88,78 +88,46 @@ def executor_blocked_outcome(
     *,
     availability: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, Dict[str, Any]]:
-    """The terminal ``(text, usage)`` of a child that was pinned and could not run.
+    """The terminal ``(text, usage)`` of a child the host could not start: one notice for API and session rows.
 
-    Deliberately NOT a fallback: the task ends unrun and typed, having spent nothing.
+    Deliberately NOT a fallback: the task ends unrun and typed, having spent nothing. The text and the usage carry
+    the same facts (the cause, the producer's detail, the reset instant, the current alternatives, not ranked), so
+    the parent reads why and what it may choose instead (#1241); ``reason_code`` keeps its codes.
     """
+    from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE
+
     availability = availability if isinstance(availability, dict) else {}
-    if (
-        availability.get("route_kind") == "api_model"
-        or (decision.requested == "native" and decision.reason == "credentials_unavailable")
-    ):
-        alternatives = availability.get("alternatives")
-        alternatives = alternatives if isinstance(alternatives, list) else []
-        text = (
-            "⚠️ SUBAGENT_UNAVAILABLE: the selected API-model actor has no usable "
-            "credentials for its exact configured route. The task was NOT run and the "
-            "host did not substitute another model or substrate. Current configured "
-            "alternatives (not ranked): "
-            + json.dumps(alternatives, ensure_ascii=False, sort_keys=True)
-        )
-        return text, {
-            "execution_status": "infra_failed",
-            "reason_code": "subagent_executor_unavailable",
-            "unavailable_reason": "credentials_unavailable",
-            "alternatives": alternatives,
-            "host_fallback": False,
-        }
-    if decision.reason in ("delegate_tools_invisible", "delegate_visibility_unverified"):
-        # Q1A preflight (2026-08-10 amendments): the route is healthy but the
-        # child's MATERIALIZED toolset does not carry the delegate verbs — or
-        # the toolset introspection itself failed, so visibility is UNKNOWN,
-        # not disproven (distinct reason: the terminal states exactly what is
-        # known). Either way the pin cannot be honored, and the fix is tool
-        # policy/contract, not waiting for the route to recover.
-        detail = (
-            "the delegate tools (delegate_start/delegate_wait/delegate_cancel) "
-            "are not visible in its materialized toolset"
-            if decision.reason == "delegate_tools_invisible"
-            else "the toolset introspection failed, so the delegate tools' "
-            "(delegate_start/delegate_wait/delegate_cancel) visibility could "
-            "not be verified"
-        )
-        text = (
-            "⚠️ EXECUTOR_UNAVAILABLE: this subagent was pinned to the delegated "
-            f"substrate (executor='harness'), but {detail}, so the pin cannot be "
-            "honored. The task was NOT run on metered API tokens. Fix the tool "
-            "policy / task contract that hides the delegate verbs, or explicitly "
-            "select another Available subagent."
-        )
-        # Literal codes (not `decision.reason`) so the provenance drift guard
-        # keeps seeing every code the runtime can emit.
-        if decision.reason == "delegate_visibility_unverified":
-            return text, {"execution_status": "infra_failed", "reason_code": "delegate_visibility_unverified"}
-        return text, {"execution_status": "infra_failed", "reason_code": "delegate_tools_invisible"}
-    # The ":delegation_" wording branch retired with route_health's aggregate
-    # status refusal (cx-delegation sprint): the engine's belt capability was
-    # never a structural fact about Ouroboros's marker-based delegated runs,
-    # and the host no longer manufactures a "waiting will not heal it" verdict
-    # the engine did not give.
+    api_row = availability.get("route_kind") == "api_model" or (
+        decision.requested == "native" and decision.reason == "credentials_unavailable")
+    reason = "credentials_unavailable" if api_row else str(decision.reason or "configured_session_unavailable")
+    verbs = "delegate tools (delegate_start/delegate_wait/delegate_cancel)"
+    # Q1A preflight (2026-08-10): a healthy route whose child toolset hides the verbs, or whose introspection
+    # failed (visibility UNKNOWN, not disproven); the fix is tool policy, not waiting for the route.
+    cause = {
+        "credentials_unavailable": "its API-model route has no usable credentials",
+        "delegate_tools_invisible": f"the {verbs} are not visible in its materialized toolset; fix the tool "
+                                    "policy or task contract that hides them",
+        "delegate_visibility_unverified": f"the toolset introspection failed, so the visibility of the {verbs} "
+                                          "could not be verified",
+    }.get(reason, f"its route cannot run: {reason}")
+    alternatives = availability.get("alternatives") if isinstance(availability.get("alternatives"), list) else []
     text = (
-        "⚠️ EXECUTOR_UNAVAILABLE: this subagent was pinned to the delegated substrate "
-        f"(executor='harness') and the route cannot run: {decision.reason}."
+        f"⚠️ SUBAGENT_UNAVAILABLE: this subagent could not start: {cause}."
         + (f" It resets at {decision.reset_at}." if decision.reset_at else "")
-        # The producer's own words (a refused snapshot provision names the lock
-        # holder here), so the parent reads WHY, not only a reason code (#1241).
+        # The producer's own words (a refused snapshot provision names the lock holder), not only a code (#1241).
         + (f" {availability['detail']}" if availability.get("detail") else "")
-        + " The task was NOT run on metered API tokens, because that spend is exactly "
-        "what the pin exists to prevent. The recorded cause describes this failed start; "
-        "no replacement executor was selected."
+        + " The task was NOT run and spent nothing; the host did not substitute another model, route or substrate."
+        + (" Configured alternatives now (not ranked): " + json.dumps(alternatives, ensure_ascii=False, sort_keys=True)
+           if alternatives else "")
     )
-    return text, {
-        "execution_status": "infra_failed",
-        "reason_code": "subagent_executor_unavailable",
-    }
+    # The codes stay literal (the provenance drift guard reads them from this keyword).
+    return text, dict(
+        execution_status="infra_failed", unavailable_reason=reason, alternatives=alternatives, host_fallback=False,
+        terminal_origin=TERMINAL_ORIGIN_HOST_NOTICE,
+        reason_code=("delegate_tools_invisible" if reason == "delegate_tools_invisible"
+                     else "delegate_visibility_unverified" if reason == "delegate_visibility_unverified"
+                     else "subagent_executor_unavailable"),
+    )
 
 
 def _record_executor_resolution(

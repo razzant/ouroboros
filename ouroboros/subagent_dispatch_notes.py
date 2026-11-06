@@ -31,14 +31,18 @@ def _nanny_route_dispatched_for(task: Dict[str, Any], dispatch: Any = None) -> b
     return str(route.get("kind") or "") == "agent_session"
 
 
-def _fill_executor_blocked_caps(ctx: Any, cap_info: Dict[str, Any], dispatch: Any) -> None:
+def _fill_executor_blocked_caps(ctx: Any, cap_info: Dict[str, Any], dispatch: Any,
+                                task: Optional[Dict[str, Any]] = None) -> None:
     """Project the $0-unrun terminal facts onto cap_info (charter D2).
 
     Two producers, one projection: a dispatch-time blocked pin, or the host's
     pre-start of a configured session leaf DEFINITELY refused before the first
     model round (typed refusal, no custody handle). Callers gate on an empty
     startup wake — a non-empty wake means a fence/receipt episode owns the
-    facts instead."""
+    facts instead. A refused start rewrites ``task``'s record the way a
+    dispatch-time block writes it (``blocked``, empty route, the refusal in the
+    delta), so the completion seam never reads its zero runs as an unused
+    substrate (``agent._record_executor_facts``)."""
     if dispatch is not None and dispatch.blocked:
         res = dispatch.executor_resolution
         cap_info["executor_blocked_reason"] = str(
@@ -55,11 +59,19 @@ def _fill_executor_blocked_caps(ctx: Any, cap_info: Dict[str, Any], dispatch: An
         return
     refusal = getattr(ctx, "_configured_startup_refusal", None)
     if isinstance(refusal, dict):
-        cap_info["executor_blocked_reason"] = str(
-            refusal.get("reason") or "configured_session_unavailable"
-        )
+        reason = str(refusal.get("reason") or "configured_session_unavailable")
+        cap_info["executor_blocked_reason"] = reason
         cap_info["executor_blocked_requested"] = str(refusal.get("requested") or "harness")
         cap_info["executor_blocked_reset_at"] = str(refusal.get("reset_at") or "")
+        if isinstance(task, dict) and str(task.get("effective_executor") or "") != "blocked":
+            from ouroboros.subagents import derive_capability_reason
+
+            cap_info["executor_blocked_route"] = str(task.get("executor_route") or "")
+            delta = dict(task.get("capability_delta") or {})
+            reasons = [str(item) for item in (delta.get("reduction_reasons") or []) if str(item) != reason] + [reason]
+            delta.update(effective_executor="blocked", reduced=True, reduction_reasons=reasons,
+                         reason=derive_capability_reason(reasons, delta.get("substrate_disclosures") or ()))
+            task.update(effective_executor="blocked", executor_route="", capability_delta=delta)
 
 # The v7 adoption keeps ONE home for the dispatch-note pair (MIGRATION rows
 # 3935-3936): the bodies live in ouroboros/agent_dispatch.py; this module keeps

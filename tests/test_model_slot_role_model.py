@@ -1097,7 +1097,7 @@ def test_blocked_configured_session_terminals_unrun_without_a_model_round(tmp_pa
     assert record["configured_subagent"]["selected_subagent_id"] == "session-actor"
     assert record["capability_delta"]["reason"] == "configured_session_route_unavailable"
     assert float(record.get("cost_usd") or 0.0) == 0.0
-    assert "NOT run on metered API tokens" in str(record.get("result") or "")
+    assert "NOT run and spent nothing" in str(record.get("result") or "")
 
 
 def test_legacy_heavy_migration_selects_an_exact_api_model(tmp_path, monkeypatch):
