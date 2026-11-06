@@ -1271,6 +1271,34 @@ def test_spec_retains_cross_platform_packaging_hooks():
     assert "clr_loader" in source
 
 
+def _spec_cft_block() -> str:
+    spec = _pkg_read("Ouroboros.spec")
+    start = spec.index("# --- Chrome for Testing payload, collected verbatim on macOS ---")
+    end = spec.index("# --- end Chrome for Testing payload ---")
+    return spec[start:end]
+
+
+@pytest.mark.skipif(not _BUNDLE_FILES_PRESENT, reason=_PACKAGING_SKIP_REASON)
+@pytest.mark.parametrize("macos", [True, False])
+def test_spec_collects_the_chrome_for_testing_payload_verbatim_only_on_macos(macos):
+    """Its stub dylibs have no header room for PyInstaller's install-name rewrite (7.10.0 dry run)."""
+    import types
+
+    cft = "python-standalone/lib/python3.10/site-packages/playwright/driver/package/.local-browsers/ouroboros-cft-156.0.8078.80-mac-arm64"
+    shell = (f"{cft}/chrome-headless-shell", f"/src/{cft}/chrome-headless-shell", "BINARY")
+    egl = (f"{cft}/libEGL.dylib", f"/src/{cft}/libEGL.dylib", "BINARY")
+    other = ("python-standalone/lib/libpython3.10.dylib", "/src/libpython3.10.dylib", "BINARY")
+    data = ("assets/icon.icns", "/src/assets/icon.icns", "DATA")
+    analysis = types.SimpleNamespace(binaries=[shell, egl, other], datas=[data])
+    exec(compile(_spec_cft_block(), "Ouroboros.spec", "exec"), {"os": os, "_is_macos": macos, "a": analysis})
+    if macos:
+        assert analysis.binaries == [other]
+        assert analysis.datas == [data, (shell[0], shell[1], "DATA"), (egl[0], egl[1], "DATA")]
+    else:
+        assert analysis.binaries == [shell, egl, other]
+        assert analysis.datas == [data]
+
+
 @pytest.mark.skipif(not _BUNDLE_FILES_PRESENT, reason=_PACKAGING_SKIP_REASON)
 def test_launcher_retains_cross_platform_runtime_hooks():
     launcher_source = _pkg_read("launcher.py")
