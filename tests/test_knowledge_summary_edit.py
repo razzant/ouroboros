@@ -82,7 +82,8 @@ def test_registry_summary_edit_reaches_the_next_context_and_not_a_captured_one(t
     assert receipt["knowledge_source"]["revision"] == current.revision
     row = _history(address)[-1]
     assert (row["mode"], row["writer"], row["task_id"], row["summary"]) == ("edit", "turn", "summary-edit", NEW)
-    assert (row["old_content"], row["new_content"], row["delta"]) == (original.text, current.text, delta)
+    from tests.test_linked_knowledge import replaced
+    assert (replaced(address.canonical_root, row), row["new_content"], row["delta"]) == (original.text, current.text, delta)
     assert "edits" not in row
     for inventory in ((address.shelf / store.INDEX_FILE).read_text(encoding="utf-8"),
                       registry.execute("knowledge_list", {"scope": scope})):
@@ -109,7 +110,8 @@ def test_one_body_replacement_and_its_summary_land_in_one_revision(tmp_path):
     assert (receipt["knowledge_delta"]["body_changed"], receipt["knowledge_delta"]["summary_changed"]) == (True, True)
     rows = _history(address)
     assert len(rows) == 2 and rows[-1]["summary"] == "Line one.\nLine two."
-    assert (rows[-1]["old_content"], rows[-1]["new_content"]) == (original.text, current.text)
+    from tests.test_linked_knowledge import replaced
+    assert (replaced(address.canonical_root, rows[-1]), rows[-1]["new_content"]) == (original.text, current.text)
     assert "  Line one.\n  Line two." in (address.shelf / store.INDEX_FILE).read_text(encoding="utf-8")
 
 

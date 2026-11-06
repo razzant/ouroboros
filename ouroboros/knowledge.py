@@ -641,6 +641,48 @@ def _lifecycle_content(current: KnowledgeNote, mode: str, reason: str) -> bytes:
     return (b"---\n" + front + b"---\n" if metadata else b"") + current.raw[current.source.body_span.start_byte:]
 
 
+# One read of the journal's tail per write, the memory reader's own journal budget: on a 300 MB
+# journal this note's newest row lies inside it for ~96 % of the repeated bytes. A miss, or a newest
+# row holding other text, only keeps the replaced version inline, as every row did before.
+_JOURNAL_TAIL_BYTES = 8 * 1024 * 1024
+
+
+def _recorded_version(journal: Path, address: KnowledgeAddress, text: str) -> dict[str, Any] | None:
+    """The memory reader's address of this note's newest captured row, when its ``new_content`` is ``text``.
+
+    Read under the shelf lock every writer of the journal holds. ``None`` keeps ``text`` inline: an
+    empty text, a newest row that holds other text or none (an outside edit, a failed publication, a
+    digest-era row), no row within the journal's tail, or an unreadable journal.
+    """
+    if not text:
+        return None
+    try:
+        with journal.open("rb") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            handle.seek(0)
+            tail = utils.jsonl_window(handle, size, _JOURNAL_TAIL_BYTES)
+    except OSError:
+        return None
+    base, end, topic = size - len(tail), len(tail), json.dumps(address.topic, ensure_ascii=False).encode("utf-8")
+    while end > 0:
+        start = tail.rfind(b"\n", 0, end - 1) + 1
+        line, end = tail[start:end], start
+        if topic not in line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if (not isinstance(row, dict) or row.get("publication") != "source_capture" or row.get("topic") != address.topic
+                or not isinstance(row.get("address"), dict) or row["address"].get("scope") != address.scope):
+            continue
+        if row.get("new_content") != text:
+            return None
+        return {"kind": "entry", "journal": f"knowledge:{address.scope}", "offset": base + start,
+                "field": ["new_content"]}
+    return None
+
+
 @dataclass(frozen=True)
 class KnowledgeWriteResult:
     ok: bool
@@ -689,7 +731,10 @@ def write_knowledge_note(
     ``old_chars``/``new_chars``/``change_chars``, the
     ``removed_headings`` and ``body_changed``/``summary_changed`` (heading and
     changed flags are ``None`` when a side has no parsed source). The history row
-    also records ``old_chars``/``new_chars``.
+    also records ``old_chars``/``new_chars``. It keeps the version it publishes
+    whole; the version it replaces stays inline unless this note's newest row within
+    the journal's tail read holds exactly those bytes, which ``old_content_ref`` then names as a
+    memory-reader entry address. Lifecycle rows keep both.
 
     ``archive``/``restore`` require an existing revision and own only the
     ``archive: {at, reason}`` field, never body bytes. The tool's optional
@@ -780,29 +825,32 @@ def write_knowledge_note(
                  "change_chars": len(updated.text) - len(old_text), "removed_headings": removed_headings,
                  "body_changed": old_body != raw[updated.source.body_span.start_byte:] if known else None,
                  "summary_changed": old_summary != updated.summary if known else None}
-        # Capture both complete versions before replacing source bytes. A capture
+        # Capture the new version, and the one it replaces unless an earlier row
+        # already holds those exact bytes, before replacing source bytes. A capture
         # is not a commit receipt; a failed publication returns its actual
         # current source, never success.
+        journal = address.shelf.parent / "knowledge_history.jsonl"
+        recorded = None if lifecycle else _recorded_version(journal, address, old_text)
         history = {"ts": utc_now_iso(), "task_id": task_id, "topic": address.topic, "mode": mode,
                    "address": address.as_dict(), "publication": "source_capture",
                    "writer": writer or UNKNOWN_STAMP, "route": route or UNKNOWN_STAMP,
                    "writer_input_ref": writer_input_ref or UNKNOWN_STAMP, "focus": focus or UNKNOWN_STAMP,
                    "old_chars": len(old_text), "new_chars": len(updated.text),
                    "old_sha256": hashlib.sha256(current.raw).hexdigest() if current and current.raw else "",
-                   "new_sha256": updated.revision if raw else "", "old_content": old_text,
+                   "new_sha256": updated.revision if raw else "",
+                   **({"old_content_ref": recorded} if recorded else {"old_content": old_text}),
                    "new_content": updated.text, "source_ref": updated.source_ref(), "delta": delta,
                    **({"summary": summary} if summary is not None else {})}
         history_ref = None
         if lifecycle:
-            history_ref = {"history_path": str(address.shelf.parent / "knowledge_history.jsonl"),
+            history_ref = {"history_path": str(journal),
                            "history_field": "old_content", "revision": revision, "new_revision": updated.revision}
             if capture_previous is not None:
                 try:
                     history_ref.update(capture_previous(current))
                 except (OSError, ValueError) as exc:
                     return KnowledgeWriteResult(False, f"source_capture_unavailable: {exc}", current, revision)
-        if not append_jsonl(address.shelf.parent / "knowledge_history.jsonl", history,
-                            ensure_record_boundary=True, require_lock=True):
+        if not append_jsonl(journal, history, ensure_record_boundary=True, require_lock=True):
             return KnowledgeWriteResult(False, "history_unavailable", current, revision)
         try:
             address.path.parent.mkdir(parents=True, exist_ok=True)

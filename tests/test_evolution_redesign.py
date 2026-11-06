@@ -1003,7 +1003,8 @@ def test_memory_provenance_records_old_and_new_content(tmp_path):
         json.loads(line)
         for line in (tmp_path / "memory" / "knowledge_history.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    assert history[-1]["old_content"] == current.text
+    from tests.test_linked_knowledge import replaced
+    assert replaced(tmp_path, history[-1]) == current.text
     assert history[-1]["new_content"] == "---\ntype: note\n---\nnew"
 
     from hashlib import sha256
