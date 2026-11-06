@@ -314,12 +314,14 @@ def _parsed_view(text: str) -> MemoryViewSnapshot:
     return MemoryViewSnapshot(**data)
 
 
-def _owner_words_block(task: Mapping[str, Any], drive_root: Any = None) -> str:
+def _owner_words_block(task: Mapping[str, Any], drive_root: Any = None, marks: Any = None) -> str:
     """A helper's birth set (``owner_words.task_words_text``): its field, then its room's rows read once here; the
-    files the rows carry are staged on the helper's own drive and named by the path it opens them with."""
+    files the rows carry are staged on the helper's own drive and named by the path it opens them with. ``marks``:
+    the acting marks the view's capture holds, so the marked rows are cut from them and the chronicle is not
+    entered again; None (a declared start outside a capture) lets the set read them itself."""
     from ouroboros.owner_words import task_words_text  # D03->D17 is lazy-only
 
-    return task_words_text(drive_root, task, indent=INDENT, stage=True)
+    return task_words_text(drive_root, task, indent=INDENT, stage=True, marks=marks)
 
 
 def _activation(store: ChronicleStore) -> Dict[str, Any]:
@@ -912,7 +914,8 @@ def _capture_marks(store: ChronicleStore, spec: ViewSpec, label: Callable[..., s
 
 def _capture_live(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, label: Callable[..., str],
                   story: List[Dict[str, Any]] = ()) -> tuple:
-    """``(this room, live rooms, marks, waiting)`` from the same captured rows, notes and active marks."""
+    """``(this room, live rooms, marks, waiting, acting)`` from the same captured rows, notes and active marks;
+    ``acting`` is every room's acting marks as read here (None when this view reads none)."""
     lineage = row_lineage(root)
     integrating = spec.role not in DELEGATED_FOCUS_ROLES
     notes = _notes_by_room(store) if integrating or spec.room_id is not None or spec.live_rooms != "none" else {}
@@ -929,7 +932,7 @@ def _capture_live(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
     warm_lineage(lineage, ((meta, pos) for entries in quiet.values() for _address, meta, pos in entries))
     room = (_capture_room(store, root, spec, label, by_room.get(spec.room_id, []), notes, lineage, story, gaps)
             if spec.room_id is not None else None)
-    marks = store.active_marks(None) if spec.marks != "none" or integrating else []
+    marks = store.active_marks(None) if spec.marks != "none" or integrating else None
     waiting, projects = {}, None
     if integrating or spec.live_rooms != "none":
         from ouroboros.memory_waiting import measure
@@ -945,7 +948,7 @@ def _capture_live(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
         if integrating:
             waiting = measure(marks, notes, [p for p in projects if "closed" not in p] if projects is not None else None)
     live = _live_rooms(store, root, spec, label, by_room, notes, lineage, gaps, quiet, projects or []) if spec.live_rooms != "none" else []
-    return room, live, _capture_marks(store, spec, label, marks), waiting
+    return room, live, _capture_marks(store, spec, label, marks), waiting, marks
 
 
 def capture_memory_view(drive_root: Any, task: Mapping[str, Any], spec: ViewSpec) -> MemoryViewSnapshot:
@@ -953,16 +956,22 @@ def capture_memory_view(drive_root: Any, task: Mapping[str, Any], spec: ViewSpec
 
     Before the import has completed (another importer holds the legacy lock, the
     import was refused, the journal cannot be opened) the snapshot carries only the
-    reason and the room id: no story, lanes or live rooms; the owner-words block,
-    built first, still reads the bound room (``owner_words.task_words_text``).
+    reason and the room id: no story, lanes or live rooms; the owner-words block
+    still reads the bound room (``owner_words.task_words_text``). On an active
+    chronicle that block is drawn after the capture, over the acting marks the capture
+    read: a helper's birth enters the chronicle no more often than its view does.
     """
     root = pathlib.Path(drive_root)
-    owner_words = _owner_words_block(task, root) if spec.owner_words else ""
+
+    def words(marks: Any = None) -> str:
+        return _owner_words_block(task, root, marks=marks) if spec.owner_words else ""
+
     status = _activation(ChronicleStore(root))
     label = room_labeler(root)
     bare = {"room_id": spec.room_id, "label": label(spec.room_id)} if spec.room_id is not None else None
     if status["state"] != "active":
-        return MemoryViewSnapshot(spec=spec, store_status=status, frontier={}, room=bare, owner_words=owner_words)
+        return MemoryViewSnapshot(spec=spec, store_status=status, frontier={}, room=bare, owner_words=words())
+    owner_words: Optional[str] = None  # drawn once the capture holds its marks; a journal lost before reads the store
     try:
         store = ChronicleStore(root)
         # One state of the chronicle for every reader (activation may publish: before), with the stored tail facts
@@ -972,7 +981,8 @@ def capture_memory_view(drive_root: Any, task: Mapping[str, Any], spec: ViewSpec
         with capture(root, tail=tail) as derived:
             frontier = legacy_frontier(store)
             story, story_status, refusals = capture_story(store, root, label) if spec.story else ([], {}, [])
-            room, live, marks, waiting = _capture_live(store, root, spec, label, story)
+            room, live, marks, waiting, acting = _capture_live(store, root, spec, label, story)
+        owner_words = words(acting)
         if room:
             from ouroboros.owner_words import task_governing_words
 
@@ -989,7 +999,7 @@ def capture_memory_view(drive_root: Any, task: Mapping[str, Any], spec: ViewSpec
         log.warning("memory view: the chronicle could not be read", exc_info=True)
         return MemoryViewSnapshot(spec=spec, store_status={"state": "journal_unreadable",
                                                            "reason": f"{type(exc).__name__}: {exc}"},
-                                  frontier={}, room=bare, owner_words=owner_words)
+                                  frontier={}, room=bare, owner_words=words() if owner_words is None else owner_words)
     if any(not read.complete for read in ((derived or {}).get(key) for key in ("tail", "terminal_tail")) if read):
         status = {**status, "tail_facts": "filling"}  # its rows were read live: the stored tail is not complete
     return MemoryViewSnapshot(spec=spec, store_status=status,

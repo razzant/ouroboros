@@ -494,12 +494,15 @@ def _held_words(held: Any, drive_root: Any, task_id: str, *, context: Any = None
     return rows
 
 
-def _live_words(drive_root: Any, room: int, accounts: Any) -> Tuple[List[Dict[str, Any]], List[str]]:
+def _live_words(drive_root: Any, room: int, accounts: Any, marks: Any = None) -> Tuple[List[Dict[str, Any]], List[str]]:
     """``(rows, gap lines)`` read live at a handoff: my human's rows of the bound Project room (carrier ``room``),
     the Project's retained origin rows (``origin``), then the rows that marks in force target (``marked``: the
-    room's and the global marks; Main's for a tree outside every Project). Each store that cannot be read is one
-    typed gap line, as is a room read that may lack rows (``room_appearances.read_gaps``); the rows that could be
-    read stay, and nothing else is withheld."""
+    room's and the global marks; Main's for a tree outside every Project). ``marks``: every room's acting marks
+    the caller's one capture already holds (a helper's birth inside ``memory_view.capture_memory_view``), cut here
+    as the store cuts them for the room, so the chronicle is not entered once more; None (a review subject, a
+    session's scheduling read) reads them from the store. Each store that cannot be read is one typed gap line,
+    as is a room read that may lack rows (``room_appearances.read_gaps``); the rows that could be read stay, and
+    nothing else is withheld."""
     from ouroboros.chat_chain import format_address, resolve_row, room_rows, row_address
     from ouroboros.chronicle_store import ChronicleStore
     from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
@@ -537,8 +540,13 @@ def _live_words(drive_root: Any, room: int, accounts: Any) -> Tuple[List[Dict[st
             gaps.append(f"[Host fact: the origin rows the Project retained for room {room} could not be read here "
                         f"({type(exc).__name__}); chat_history reads that room.]")
     try:
-        store = ChronicleStore(drive_root)
-        for mark in store.active_marks(str(room or WEB_UI_CHAT_ID)) if store.log_path.exists() else []:
+        key = str(room or WEB_UI_CHAT_ID)
+        if marks is None:
+            store = ChronicleStore(drive_root)
+            marks = store.active_marks(key) if store.log_path.exists() else []
+        else:  # the store's own cut of every room's acting marks: this room's and the global ones
+            marks = [mark for mark in marks if str(mark.get("room_id", "")) == key or mark.get("scope", "room") == "global"]
+        for mark in marks:
             target = _mapping(mark.get("target_ref"))
             if target.get("kind") == "chat_row" and target.get("row_sha256"):
                 rows += words(resolve_row(drive_root, dict(target))[0], "marked", "marked_message")
@@ -642,10 +650,11 @@ def safety_sources(ctx: Any) -> List[Dict[str, Any]]:
 
 
 def task_words_text(drive_root: Any, task: Mapping[str, Any], *, audience: str = "child", indent: str = "",
-                    stage: bool = False) -> str:
+                    stage: bool = False, marks: Any = None) -> str:
     """A task's set rendered from its record at its start (a helper's birth): the field it was scheduled with and
     the rows its record holds, then the live rows of its room, read once here; without ``drive_root`` the record
-    alone. ``stage`` (a birth): the files the rows carry are staged on the task's own drive and named by path."""
+    alone. ``stage`` (a birth): the files the rows carry are staged on the task's own drive and named by path.
+    ``marks``: the acting marks the caller's capture holds, so the marked rows are cut from them (``_live_words``)."""
     record = _mapping(task)
     meta = _mapping(record.get("metadata"))
     task_id = str(record.get("id") or record.get("task_id") or "")
@@ -656,7 +665,7 @@ def task_words_text(drive_root: Any, task: Mapping[str, Any], *, audience: str =
         accounts = owner_place_accounts(drive_root)
         held = record.get("held_owner_messages") or meta.get("held_owner_messages")
         live, gaps = _live_words(drive_root, _room_of(
-            drive_root, task_id, record.get("parent_task_id") or meta.get("parent_task_id"), root_id), accounts)
+            drive_root, task_id, record.get("parent_task_id") or meta.get("parent_task_id"), root_id), accounts, marks)
         rows = _deduped([*rows, *(row for context in (False, True) for row in _held_words(
             held, drive_root, task_id, context=context, accounts=accounts, read=True)), *live])
         if stage and task_id:
