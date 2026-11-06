@@ -324,7 +324,7 @@ def test_late_status_keeps_typed_field(direct_server_with_data, loopback, engine
             for route in held:
                 route.fulfill(response=route.fetch())
             held.clear()
-            expect(saved.locator('.mcp-server-status')).to_have_text(re.compile(r'^1 tool \(listed .+\)$'), timeout=20_000)
+            expect(saved.locator('.mcp-server-status')).to_have_text(re.compile(r'^1 tool · listed .+$'), timeout=20_000)
             expect(saved.locator('[data-mcp-message]')).to_contain_text('Saved catalog refreshed')
             assert 'echo' in saved.locator('.mcp-tools-disclosure').text_content()
             page.keyboard.insert_text('on3')

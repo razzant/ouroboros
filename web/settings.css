@@ -266,30 +266,35 @@
 }
 
 
+/* MCP servers: one tray per server (DESIGN "List editors"): the row (name, one state chip, Enabled, its actions),
+   the action's result under it, then the form behind Edit and the stamps behind Details (the shared disclosure). */
 .mcp-servers-list {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: var(--space-2);
 }
 
 .mcp-server-card {
     display: flex;
     flex-direction: column;
-    gap: 14px;
-    padding: 14px;
+    gap: var(--space-2);
+    padding: var(--space-3);
 }
 
 .mcp-server-card-head {
     display: flex;
-    align-items: flex-start;
+    flex-wrap: wrap;
+    align-items: center;
     justify-content: space-between;
-    gap: 12px;
+    gap: var(--space-2) var(--space-3);
 }
 
 .mcp-server-card-title {
     display: flex;
-    flex-direction: column;
-    gap: 6px;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
+    flex: 1 1 16rem;
     min-width: 0;
 }
 
@@ -298,15 +303,15 @@
     display: flex;
     align-items: center;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: var(--space-2);
 }
 
+/* The chip is a flat status tint (DESIGN "Status and chips"): the state word in its hue, never pressable. */
 .mcp-server-status {
-    width: fit-content;
     max-width: 100%;
-    white-space: normal;
     overflow-wrap: anywhere;
-    padding: 3px 8px;
+    padding: 1px var(--space-2);
+    border-radius: var(--pill-radius);
     font-size: var(--type-meta);
     line-height: var(--line-meta);
     background: var(--status-neutral-bg);
@@ -317,17 +322,19 @@
 .mcp-server-status-danger { color: var(--status-error-fg); background: var(--status-error-bg); }
 .mcp-server-status-muted { color: var(--status-neutral-fg); }
 
-.mcp-tools-disclosure {
-    border-radius: var(--radius-inner);
-    border: 1px solid transparent;
-    background: var(--surface-tray);
-    padding: 10px 12px;
+.mcp-server-message:empty, .mcp-server-message[hidden] { display: none; }
+
+.mcp-server-form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
 }
 
-.mcp-tools-disclosure summary {
-    cursor: pointer;
-    color: var(--text-secondary);
-}
+.mcp-server-facts { margin: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.mcp-server-facts > div { display: flex; flex-wrap: wrap; gap: 0 var(--space-3); font-size: var(--type-meta); line-height: var(--line-meta); }
+.mcp-server-facts dt { flex: 0 1 9em; color: var(--text-meta); }
+.mcp-server-facts dd { flex: 1 1 16rem; min-width: 0; margin: 0; color: var(--text-primary); overflow-wrap: anywhere; }
+.mcp-server-facts:empty + [data-mcp-weight][hidden] { display: none; }
 
 .mcp-tools-list {
     display: flex;
@@ -1163,7 +1170,6 @@
 .mcp-import-choice { display: inline-flex; align-items: center; gap: var(--space-2); cursor: pointer; }
 @media (max-width: 600px) {
     .mcp-header-row { grid-template-columns: minmax(0, 1fr); }
-    .mcp-server-card-head { flex-wrap: wrap; }
 }
 
 /* About: a centred page block, its title at the page size and the versions as one meta line. */
