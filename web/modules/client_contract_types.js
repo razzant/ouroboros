@@ -1199,17 +1199,19 @@
 /**
  * Read-time "where did the money go" projection on GET /api/tasks/{task_id}
  * (ROOT tasks only; computed from the physical-attempt ledger at read time,
- * never persisted). own + children + unattributed == subtree. When the object
+ * never persisted). own + children + unattributed == subtree (a null own counts
+ * as 0 there); children_usd and accounted_upper_bound_usd are null when the
+ * subtree's rows state no amount (subscription work). When the object
  * is present every key is present; the WHOLE object is absent — never a
  * confident $0 — when accounting is unavailable or holds no attributable row
  * for the subtree, and on non-root task details. The root card's Details render
  * by_purpose ("Spent on") and by_route ("Ran on"), two partitions of one subtree.
  * @typedef {Object} TaskCostBreakdown
  * @property {?number} own_usd  null when the root's own rows exist but none has a price
- * @property {number} children_usd
+ * @property {?number} children_usd
  * @property {number} unattributed_usd
  * @property {number} delegated_disclosed_usd
- * @property {number} accounted_upper_bound_usd
+ * @property {?number} accounted_upper_bound_usd
  *   C2: the explicit subtree total under its honest name — an accounted UPPER
  *   BOUND (own + children + unattributed), not a settled receipt.
  * @property {number} subscription_sessions

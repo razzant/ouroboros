@@ -36,17 +36,19 @@ class TaskCostSlice(TypedDict):
 
 class TaskCostBreakdown(TypedDict):
     """Root-only task-detail ledger projection, computed on read, never persisted.
-    All keys appear together; ``own + children + unattributed == subtree``. Omit
-    the object for non-roots, unavailable accounting or no attributable subtree rows; never invent $0.
-    ``own_usd`` is None when the root's own rows exist but none has a price. ``by_purpose`` (usage
-    categories) and ``by_route`` (the routes that served the rows) each partition the same subtree."""
+    All keys appear together; ``own + children + unattributed == subtree`` (a None own counts as 0 there).
+    Omit the object for non-roots, unavailable accounting or no attributable subtree rows; never invent $0.
+    ``own_usd`` is None when the root's own rows exist but none has a price; ``children_usd`` and
+    ``accounted_upper_bound_usd`` are None when the subtree's rows state no amount (subscription work).
+    ``by_purpose`` (usage categories) and ``by_route`` (the routes that served the rows) each partition
+    the same subtree."""
 
     own_usd: Optional[float]
-    children_usd: float
+    children_usd: Optional[float]
     unattributed_usd: float
     delegated_disclosed_usd: float
     # C2: own + children + unattributed is an accounted UPPER BOUND, not a receipt.
-    accounted_upper_bound_usd: float
+    accounted_upper_bound_usd: Optional[float]
     subscription_sessions: int
     unknown_unmetered: int
     non_final_rows: int
@@ -243,7 +245,9 @@ def _task_cost_breakdown_view(drive_root: pathlib.Path, result: Dict[str, Any]) 
     covers BOTH an unreadable ledger and a readable one that holds no
     attributable row for this subtree (empty or legacy-only): ``_summary()``
     always returns a float for ``accounted_usd``, so "no accounting happened"
-    is decided on the ROW COUNTS, never on the dollar sum being 0.0."""
+    is decided on the ROW COUNTS, never on the dollar sum being 0.0. Rows that
+    state no amount (subscription work) keep the view and its slices, with the
+    amounts they cannot state as None."""
     task_id = str(result.get("task_id") or "")
     root_id = str(result.get("root_task_id") or "") or task_id
     # Subtree math is ledger-attributable only at the root (child rows carry
@@ -270,7 +274,7 @@ def _task_cost_breakdown_view(drive_root: pathlib.Path, result: Dict[str, Any]) 
     # reading would have published as `own 0 / children 0 / cost_final true`.
     priced_rows = sum(int(value or 0) for key, value in counts.items() if key != "metadata_only")
     sessions = int(breakdown.get("subscription_sessions") or 0)
-    if subtree is None or (priced_rows <= 0 and sessions <= 0):
+    if priced_rows <= 0 and sessions <= 0:
         return None
     own_bucket = (breakdown.get("by_task") or {}).get(task_id)
     # No rows attributed to the root itself is a MEASURED zero (all spend was
@@ -290,12 +294,12 @@ def _task_cost_breakdown_view(drive_root: pathlib.Path, result: Dict[str, Any]) 
     axis_unattributed = breakdown.get("unattributed") if isinstance(breakdown.get("unattributed"), dict) else {}
     return {
         "own_usd": round(own_shown, 6) if own_shown is not None else None,
-        "children_usd": round(max(0.0, float(subtree) - own - unattributed), 6),
+        "children_usd": round(max(0.0, float(subtree) - own - unattributed), 6) if subtree is not None else None,
         "unattributed_usd": round(unattributed, 6),
         "delegated_disclosed_usd": round(float(delegated.get("settled_usd") or 0.0), 6),
         # C2: the explicit subtree total under its honest name — an accounted
         # UPPER BOUND (own + children + unattributed), not a settled receipt.
-        "accounted_upper_bound_usd": round(float(subtree), 6),
+        "accounted_upper_bound_usd": round(float(subtree), 6) if subtree is not None else None,
         "subscription_sessions": sessions,
         "unknown_unmetered": breakdown.get("unknown_unmetered"),
         "non_final_rows": breakdown.get("non_final_rows"),

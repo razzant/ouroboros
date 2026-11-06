@@ -522,17 +522,21 @@ def test_task_detail_cost_breakdown_view_absent_when_nothing_was_accounted(tmp_p
     assert view["own_usd"] == 0.0 and view["children_usd"] == 0.25
 
 
-def test_task_detail_unknown_zero_subtree_is_omitted_not_reported_free(tmp_path, monkeypatch):
+def test_task_detail_unknown_zero_subtree_keeps_its_slices_and_reports_nothing_free(tmp_path, monkeypatch):
+    """Subscription-only work keeps the view (where it went), with every amount it cannot state as None."""
     from ouroboros.gateway.tasks import _task_cost_breakdown_view
 
     root = _data_root(tmp_path, monkeypatch)
+    assert _task_cost_breakdown_view(root, {"task_id": "root-1", "root_task_id": "root-1"}) is None  # no rows
     ua.record_unmetered_external_dispatch(
         "detail-opaque", drive_root=root, provider="external-skill",
         task_id="root-1", root_task_id="root-1",
     )
-    assert _task_cost_breakdown_view(
-        root, {"task_id": "root-1", "root_task_id": "root-1"},
-    ) is None
+    view = _task_cost_breakdown_view(root, {"task_id": "root-1", "root_task_id": "root-1"})
+    assert view is not None
+    assert view["own_usd"] is None and view["children_usd"] is None and view["accounted_upper_bound_usd"] is None
+    assert [(part["key"], part["cost_presentation"]["tracked_amount"], part["model_calls"]) for part in view["by_route"]] == [
+        ("external-skill", None, 1)]
 
 
 def test_task_detail_cost_breakdown_view_discloses_unattributed_money(tmp_path, monkeypatch):

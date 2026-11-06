@@ -6,13 +6,12 @@
 
 import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
 import { costPresentationMeta } from './chat_activity.js';
+import { SURFACE_LABELS } from './review_opinions.js';
 import { escapeHtmlText, formatCompactNumber } from './utils.js';
 
-// The words the card's Reviews doors already use; the rest reads as its own key.
-const PURPOSE_WORDS = Object.freeze({
-    task: 'Work', subagent: 'Helpers', multi_model_review_review: 'Code review',
-    task_acceptance_review: 'Result review', advisory_review: 'Early look',
-});
+// A task's own work and its helpers; a review surface's category (`<surface>_review`) takes the word its Reviews
+// door uses; the rest reads as its own key.
+const PURPOSE_WORDS = Object.freeze({ task: 'Work', subagent: 'Helpers' });
 
 const plural = (n, word) => `${n.toLocaleString('en-US')} ${word}${n === 1 ? '' : 's'}`;
 const mechanical = (key) => {
@@ -21,7 +20,8 @@ const mechanical = (key) => {
 };
 
 /** A usage category in the owner's words. */
-export const purposeWord = (key) => PURPOSE_WORDS[key] || mechanical(key);
+export const purposeWord = (key) => PURPOSE_WORDS[key] || SURFACE_LABELS[String(key || '').replace(/_review$/, '')]
+    || mechanical(key);
 
 /** A route (the ledger's provider) by its product name. */
 export function routeWord(key) {
@@ -53,10 +53,11 @@ export function costBreakdownRows(view) {
 }
 
 /** Keep a ROOT card's breakdown rows from the task detail it fetched (`record.costBreakdownRows`, which the
- *  card's Details append); a child detail carries none. True when the rows changed. */
+ *  card's Details append). Only a detail carrying the view changes them: an event, summary or replayed record
+ *  without one changes nothing, and rows only grow with the ledger. True when the rows changed. */
 export function syncCostBreakdown(record, detail) {
-    if (!record || record.isSubagent) return false;
-    const view = detail?.cost_breakdown && typeof detail.cost_breakdown === 'object' ? detail.cost_breakdown : null;
+    const view = detail?.cost_breakdown;
+    if (!record || record.isSubagent || !view || typeof view !== 'object') return false;
     const rows = costBreakdownRows(view);
     if (JSON.stringify(rows) === JSON.stringify(record.costBreakdownRows ?? [])) return false;
     record.costBreakdownRows = rows;

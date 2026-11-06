@@ -42,14 +42,16 @@ test('each line is its word, the card\'s own money words and the recorded volume
 });
 
 test('purposes use the words of the card\'s Reviews doors, routes their product names; the rest reads as its key', () => {
-    assert.deepEqual(['task', 'subagent', 'multi_model_review_review', 'task_acceptance_review', 'plan_review_review',
-        'scope_review_review', 'consciousness_task', ''].map(purposeWord),
-    ['Work', 'Helpers', 'Code review', 'Result review', 'Plan review', 'Scope review', 'Consciousness task', 'Other']);
+    // A review category is `<surface>_review` (review_substrate.review_usage_category).
+    assert.deepEqual(['task', 'subagent', 'commit_gate_review', 'preflight_review', 'task_acceptance_review',
+        'plan_review_review', 'multi_model_review_review', 'consciousness_task', ''].map(purposeWord),
+    ['Work', 'Helpers', 'Code review', 'Early look', 'Result review', 'Plan review', 'Multi model review',
+        'Consciousness task', 'Other']);
     assert.deepEqual(['openrouter', 'openai', 'codex', 'claude', 'agy', 'claudexor', 'external-extension'].map(routeWord),
         ['OpenRouter', 'OpenAI', 'Codex', 'Claude Code', 'Antigravity', 'Claudexor', 'External extension']);
 });
 
-test('a root\'s detail gives two Details rows; no view gives none, and a child card keeps none', () => {
+test('a root\'s detail gives two Details rows; an event without the view keeps them, a child card keeps none', () => {
     const rows = costBreakdownRows(VIEW);
     assert.deepEqual(rows.map(([label]) => label), ['Spent on', 'Ran on']);
     assert.equal(rows[0][1].split('<br>').length, 3);
@@ -59,8 +61,14 @@ test('a root\'s detail gives two Details rows; no view gives none, and a child c
     assert.equal(syncCostBreakdown(root, { cost_breakdown: VIEW }), true);
     assert.deepEqual(root.costBreakdownRows, rows);
     assert.equal(syncCostBreakdown(root, { cost_breakdown: VIEW }), false, 'the same detail repaints nothing');
-    assert.equal(syncCostBreakdown(root, {}), true, 'a detail without the view clears the rows');
-    assert.deepEqual(root.costBreakdownRows, []);
+    // Every root log event, summary and replayed record reaches the same sync without the view: the rows stay.
+    for (const payload of [{ type: 'llm_round_finished' }, {}, { cost_breakdown: null }]) {
+        assert.equal(syncCostBreakdown(root, payload), false);
+        assert.deepEqual(root.costBreakdownRows, rows);
+    }
+    const later = { ...VIEW, by_purpose: VIEW.by_purpose.slice(0, 1) };
+    assert.equal(syncCostBreakdown(root, { cost_breakdown: later }), true, 'a later view replaces them');
+    assert.deepEqual(root.costBreakdownRows, costBreakdownRows(later));
     const child = { isSubagent: true };
     assert.equal(syncCostBreakdown(child, { cost_breakdown: VIEW }), false);
     assert.equal(child.costBreakdownRows, undefined);
