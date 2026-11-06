@@ -128,7 +128,7 @@ def test_real_host_capture_signal_provenance_silence_and_no_heard_replay(word_pl
     assert meta["presence"]["event"]["facts"] == [SIGNAL]
     assert meta["presence"]["place"]["state"] == "silent"
     assert meta["focus"]["matched_wakes"] == [SIGNAL]
-    assert not meta["focus"]["addressed"] and not meta["focus"]["actor"]["owner_confirmed"]
+    assert "addressed" not in meta["focus"] and not meta["focus"]["actor"]["owner_confirmed"]  # facts, no verdict
     assert json.dumps({"fact": SIGNAL, "author": "owner"}) in frame_focus_content(tasks[0], wire["text"])
 
     wire.update(source_event_id="text-only", facts=[], text="Вик? Броборос Уроборос Ouroboros signal.words",

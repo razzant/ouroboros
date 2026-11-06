@@ -914,13 +914,17 @@ def focus_frame_sources(metadata: Mapping[str, Any], recorded: Any) -> dict | No
     those records and the bare event text qualifies; anything else the recorded frame carries (an
     attachment manifest, image notes or blocks, an empty-text placeholder, another turn's inputs) is
     absent from the records, so the caller keeps that row whole. The allowance line is the mind's
-    budget, not the event."""
+    budget, not the event; its reader names this task by the id the producer derives from the binding and
+    the event (``presence_turn_task_id``), so the frame re-renders from the records alone."""
+    from ouroboros.presence_runner import presence_turn_task_id
     presence = metadata.get("presence") if isinstance(metadata.get("presence"), Mapping) else {}
     if (metadata.get("wake_cause") != "focus" or not isinstance(recorded, str) or "observed_text" not in presence
             or not isinstance(presence.get("event"), Mapping)):
         return None
+    event_id = str(presence["event"].get("source_event_id") or "")
+    task_id = presence_turn_task_id(str(presence.get("binding_id") or ""), event_id) if presence.get("binding_id") and event_id else ""
     try:
-        rendered = frame_focus_content({"metadata": metadata}, str(presence["observed_text"]).strip())
+        rendered = frame_focus_content({"id": task_id, "metadata": metadata}, str(presence["observed_text"]).strip())
     except Exception:  # records this renderer cannot read prove nothing; the row stays whole
         return None
     if rendered != recorded:

@@ -343,6 +343,8 @@ _CONVERSATION_READERS = {
     "ouroboros/presence_carrier.py::_saved_event": "the task document's presence event",
     "ouroboros/presence_observations.py::record_transport_queue.update": "the task document's presence event",
     "ouroboros/presence_owner_contact.py::contact_origin": "the task document's presence event",
+    "ouroboros/presence_context.py::_author_directory": "the task document's presence event: author names",
+    "ouroboros/presence_context.py::_thread_snapshot": "the task document's presence event: the connector's capture, whole",
     "ouroboros/tool_effects.py::effect_of": "a tool effect's declared conversation (a string)",
 }
 # Every function that decodes a stored dialogue body itself (``Row`` readers go through ``project_source``).
