@@ -534,8 +534,9 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
     main.append(head, note, lines, freshness);
     const side = element('div', 'evo-campaign-side');
     // Consciousness once, as a quiet pointer to its own tab (U071): its detail and allowance are that tab's.
+    // Its name is its visible state and the › that opens the tab (M16: a label over it would hide the state).
     const mind = element('button', 'btn btn-ghost btn-sm ui-status evo-consciousness',
-        { id: 'evo-consciousness', type: 'button', 'data-tone': 'neutral', 'aria-label': 'Open Dashboard › Consciousness' });
+        { id: 'evo-consciousness', type: 'button', 'data-tone': 'neutral' });
     mind.hidden = true;
     mind.addEventListener('click', () => openDashboardTab?.('consciousness'));
     side.append(mind);
@@ -588,10 +589,12 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
     let disposed = false;
     let commandPending = false;
     // A Start the gateway queued (or may have queued) that no state answer has shown applied yet: /api/command only
-    // queues it, so the answer read right after can still say off. Pause stays offered until the campaign is seen on
-    // or a Pause is queued after it.
-    let startUnconfirmed = false;
-    let historySeq = 0, runtimeSeq = 0, pollTimer = 0;
+    // queues it, so the answer read right after can still say off. Pause stays offered until the campaign is seen on,
+    // a Pause is queued after it, or a read taken START_WINDOW_MS after the Start still shows it off: the runtime
+    // refused it (its reason is in chat), and the chip says the state again with Start offered. The time it was sent.
+    const START_WINDOW_MS = 10000;
+    let startUnconfirmed = 0;
+    let historySeq = 0, runtimeSeq = 0, pollTimer = 0, startTimer = 0;
     let resizeObserver = null;
     let painted = '';          // what the chart and the detail show: an equal answer repaints only the status line
 
@@ -608,8 +611,8 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
         // unknown control both Start and Pause: the owner may need either. So does off while a Start is unconfirmed,
         // and then the chip says the Start, never "Off" beside an offered Pause (U072); Start stays pressable, since a
         // Start that never applies must stay retryable.
-        const starting = Boolean(facts) && startUnconfirmed && facts.enabled !== true;
-        const pausable = Boolean(facts) && (facts.enabled !== false || startUnconfirmed);
+        const starting = Boolean(facts) && startUnconfirmed > 0 && facts.enabled !== true;
+        const pausable = Boolean(facts) && (facts.enabled !== false || startUnconfirmed > 0);
         if (!facts) {
             chip.hidden = true;
             note.textContent = runtimeError ? 'The runtime state could not be read. It is read again when this tab opens.' : 'Reading the runtime state…';
@@ -644,7 +647,7 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
             runtime = answer;
             runtimeAt = new Date().toISOString();
             runtimeError = false;
-            if (campaignView(runtime).enabled === true) startUnconfirmed = false;
+            if (campaignView(runtime).enabled === true || Date.now() - startUnconfirmed >= START_WINDOW_MS) startUnconfirmed = 0;
         } else runtimeError = true;
         paintCampaign();
     }
@@ -689,10 +692,10 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
                 const answer = await resp.json().catch(() => ({}));
                 throw new Error(answer?.error || `HTTP ${resp.status}`);
             }
-            startUnconfirmed = start;  // queued: a Start waits to be seen applied; a queued Pause supersedes it
+            startUnconfirmed = start ? Date.now() : 0;  // queued: a Start waits to be seen applied; a queued Pause supersedes it
         } catch (error) {
             // A refused command was never queued; without an answer the gateway may still have queued a Start.
-            if (start && !refused) startUnconfirmed = true;
+            if (start && !refused) startUnconfirmed = Date.now();
             showToast(`Could not send ${cmd.split(' ', 2).join(' ')}: ${error?.message || error}`, 'error');
         } finally {
             commandPending = false;
@@ -701,6 +704,12 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
             if (document.activeElement === document.body && !button.disabled && !button.hidden) button.focus({ preventScroll: true });
         }
         loadRuntime();
+        // The read that ends an unapplied Start's window, if nothing reads the state again before then.
+        clearTimeout(startTimer);
+        if (startUnconfirmed) {
+            startTimer = setTimeout(loadRuntime, START_WINDOW_MS);
+            startTimer?.unref?.();
+        }
     }
     startBtn.addEventListener('click', async () => {
         if (commandPending) return;
@@ -954,6 +963,7 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
             historySeq += 1;
             runtimeSeq += 1;
             clearTimeout(pollTimer);
+            clearTimeout(startTimer);
             resizeObserver?.disconnect();
             unsubscribeOpen();
             window.removeEventListener('ouro:page-shown', onPageShown);

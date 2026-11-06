@@ -102,6 +102,42 @@ test('the campaign offers the commands its state allows: Start when off, Pause a
     }
 });
 
+test('a Start the runtime refused says Starting… only for its window, then the state again with Start offered', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.parse('2026-11-06T12:00:00Z') });
+    const env = installDomDouble();
+    const savedFetch = globalThis.fetch;
+    const runtime = { runtime_mode: 'advanced', evolution_state: { status: 'disabled', enabled: false } };
+    globalThis.fetch = async (url) => (String(url).includes('/api/command') ? Response.json({ ok: true })
+        : Response.json(String(url).includes('evolution-data') ? NO_HISTORY : runtime));
+    let dispose;
+    try {
+        const mount = env.doc.createElement('div');
+        env.doc.body.append(mount);
+        const ws = new WS('ws://unused');
+        ({ dispose } = initEvolution({ ws, mount, state: { activePage: 'dashboard', dashboardActiveSubtab: 'evolution' },
+            dialog: async () => ({ confirmed: true, value: '' }) }));
+        ws.emit('open');
+        await flush();
+        const chip = env.doc.getElementById('evo-campaign-chip');
+        const off = chip.textContent;
+        env.doc.getElementById('evo-start').click();
+        await flush();
+        assert.equal(chip.textContent, 'Starting…', 'the queued Start is said while the runtime may still apply it');
+        t.mock.timers.tick(9000);
+        ws.emit('open');  // a read inside the window still says off: still the Start
+        await flush();
+        assert.equal(chip.textContent, 'Starting…');
+        t.mock.timers.tick(1000);  // the window's own read: still off, so the runtime refused it
+        await flush();
+        assert.equal(chip.textContent, off, 'a refused Start never says Starting… for ever');
+        assert.equal(env.doc.getElementById('evo-start').disabled, false, 'and Start is offered again');
+    } finally {
+        dispose?.();
+        globalThis.fetch = savedFetch;
+        env.restore();
+    }
+});
+
 test('a Start the runtime has not applied yet says Starting… beside the Pause it may need; no button moves', async () => {
     const env = installDomDouble();
     const savedFetch = globalThis.fetch;
