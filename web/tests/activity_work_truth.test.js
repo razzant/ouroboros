@@ -59,5 +59,5 @@ test('a late row takes its state and line from the work; rows that are not parke
     // A working direct turn is no parked guess: its census words stand, its work beside it unchanged.
     const turn = liveActivityRowHtml({ activity_id: 'turn', kind: 'direct_chat', phase: 'working', started_at: 0 }, 0,
         null, false, { ...work('working', 'none', running, STOP), episode: { task_id: 'turn', live: true } });
-    assert.match(turn, /<span class="activity-sub"><span data-i18n-skip>Working<\/span><\/span>/);
+    assert.match(turn, /<span class="ui-row-meta activity-sub"><span class="status-mark activity-mark"[^>]*>(?:<i><\/i>){3}<\/span><span data-i18n-skip>Working<\/span><\/span>/);
 });

@@ -12,7 +12,7 @@ test('schedule headings prefer the projected name and retain legacy fallbacks', 
         [{ ...standing, display_name: 'Check <results>' }, 'Check &lt;results&gt;'],
         [standing, 'Daily check'], [{ id: 'bare' }, 'bare'],
     ]) {
-        assert.ok(scheduleRowHtml(row).includes(`<span class="activity-name" data-i18n-authored>${name}</span>`));
+        assert.ok(scheduleRowHtml(row).includes(`<span class="ui-row-title activity-name" data-i18n-authored>${name}</span>`));
     }
 });
 
@@ -21,18 +21,22 @@ test('task and note text is readable with a native disclosure for the complete i
     for (const fields of [{ kind: 'task', task: { text } }, { kind: 'note', notification: { text } }]) {
         const html = scheduleRowHtml({ ...standing, ...fields });
         assert.match(html, /<details[^>]+data-schedule-text="daily">/);
-        assert.match(html, /<summary[^>]*>Check &lt;results&gt;…<\/summary>/);
+        // The row's one Details holds the whole instruction; no sliced preview repeats the title (U041).
+        assert.match(html, /<summary[^>]*>Details<\/summary>/);
+        assert.doesNotMatch(html, /…/);
         assert.match(html, /Check &lt;results&gt;<br>Keep the second line &amp; its exact words\./);
         assert.doesNotMatch(html, /title=/);
         assert.match(scheduleRowHtml({ ...standing, ...fields }, true), /data-schedule-text="daily" open>/);
     }
     const short = scheduleRowHtml({ ...standing, task: { text: 'Read the report' } });
-    assert.match(short, /data-i18n-authored>Read the report<\/span>/);
-    assert.doesNotMatch(short, /<details/);
-    assert.doesNotMatch(scheduleRowHtml(standing), /data-schedule-text/);
+    assert.match(short, /<p class="activity-order" data-i18n-authored>Read the report<\/p>/);
+    // A title that already is the instruction (the server's display name) keeps no copy of it in Details.
+    const titled = scheduleRowHtml({ ...standing, display_name: 'Read the report.', task: { text: 'Read the report' } });
+    assert.doesNotMatch(titled, /activity-order/);
+    assert.match(titled, /<p class="activity-facts">cron 0 9 \* \* \*/, 'its codes still are');
+    assert.doesNotMatch(scheduleRowHtml(standing), /activity-order/);
     const long = 'Read '.repeat(30);
-    assert.match(scheduleRowHtml({ ...standing, description: long }), /<summary[^>]*>Read [^<]+…<\/summary>/);
-    assert.ok(scheduleRowHtml({ ...standing, description: long }).includes(long.trim()));
+    assert.ok(scheduleRowHtml({ ...standing, description: long }).includes(long.trim()), 'whole, never sliced');
 });
 
 test('waiting details are inline for the projected and legacy rows', () => {
@@ -56,13 +60,24 @@ test('waiting details are inline for the projected and legacy rows', () => {
         /Original work/);
 });
 
-test('kind, zone and destination are visible without inventing missing addresses', () => {
-    const html = scheduleRowHtml({ ...standing, kind: 'task', timezone: 'Europe/Moscow',
-        destination: { project_id: 'p<1>', chat_id: 0 } });
-    assert.match(html, /task · 0 9 \* \* \* \(Europe\/Moscow\)/);
-    assert.match(html, /project p&lt;1&gt; · chat 0/);
+test('kind, cadence and one zone lead the row; codes, zone and destination are its Details', () => {
+    const row = { ...standing, kind: 'task', timezone: 'Europe/Moscow', cadence: 'Daily at 09:00',
+        next_run_at: '2027-01-15T06:00:00Z', destination: { project_id: 'p<1>', chat_id: 0 } };
+    const html = scheduleRowHtml(row, false, 'Europe/Moscow');
+    // The cadence and the next run are said in the schedule's own zone, in one fixed format, never with a UTC twin.
+    assert.match(html, /<span class="activity-sub">Task · Daily at 09:00 · next <time datetime="2027-01-15T06:00:00Z" title="2027-01-15T06:00:00Z">15 Jan at 09:00<\/time> · active<\/span>/);
+    // A switched-off schedule has no next run, whatever its stale record still says.
+    assert.doesNotMatch(scheduleRowHtml({ ...row, enabled: false, status: 'disabled' }, false, 'Europe/Moscow'), / · next /);
+    assert.doesNotMatch(html, /UTC\)|GMT|\(Europe/, 'the viewer\'s own zone is not named on the main line');
+    assert.match(scheduleRowHtml(row, false, 'Asia/Tokyo'), /Task · Daily at 09:00 \(Europe\/Moscow\) · next /,
+        'a schedule in another zone names it beside its times');
+    const facts = html.split('<p class="activity-facts">')[1];
+    assert.match(facts, /^cron 0 9 \* \* \* · time zone Europe\/Moscow · relation independent · project p&lt;1&gt; · chat 0<\/p>/);
+    assert.match(scheduleRowHtml({ ...standing, cadence: '' }), /<span class="activity-sub">0 9 \* \* \* · active/,
+        'a shape the server cannot say in words stays as written');
     assert.match(scheduleRowHtml({ ...standing, task: { chat_id: 4 } }), / · chat 4/);
     assert.doesNotMatch(scheduleRowHtml(standing), / · (project|chat) /);
+    assert.match(scheduleRowHtml(standing), /server time zone/, 'a cron without a stored zone runs in the server\'s');
 });
 
 test('last-run outcomes keep settled words and use the canonical end time', () => {

@@ -42,6 +42,47 @@ def schedule_lifecycle_status(record: dict[str, Any]) -> str:
     return "active" if record.get("enabled", True) else "disabled"
 
 
+_WEEKDAYS = ("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
+
+
+def _listed(words: list[str]) -> str:
+    return words[0] if len(words) == 1 else f"{', '.join(words[:-1])} and {words[-1]}"
+
+
+def _step(field: str) -> int:
+    """N of a ``*/N`` field (N > 1), else 0."""
+    return int(field[2:]) if field.startswith("*/") and field[2:].isdigit() and int(field[2:]) > 1 else 0
+
+
+def cadence_words(expr: str) -> str:
+    """A cron expression in owner words for the shapes schedules take (daily or weekly at given times, every N
+    minutes or hours), in the schedule's own zone; "" for any other shape, which a surface shows as written.
+    Form only: five fields of digits, lists and steps; nothing about what the schedule does."""
+    fields = str(expr or "").split()
+    if len(fields) != 5 or fields[2:4] != ["*", "*"]:
+        return ""
+    minute, hour, weekday = fields[0], fields[1], fields[4]
+    if _step(minute) and hour == "*" and weekday == "*":
+        return f"Every {_step(minute)} minutes"
+    if not minute.isdigit() or int(minute) > 59:
+        return ""
+    at_minute = f" at :{int(minute):02d}" if int(minute) else ""
+    if hour in {"*", "*/1"} and weekday == "*":
+        return f"Every hour{at_minute}"
+    if _step(hour) and weekday == "*":
+        return f"Every {_step(hour)} hours{at_minute}"
+    hours = hour.split(",")
+    if not all(part.isdigit() and int(part) < 24 for part in hours):
+        return ""
+    at = _listed([f"{int(part):02d}:{int(minute):02d}" for part in hours])
+    if weekday == "*":
+        return f"Daily at {at}"
+    days = weekday.split(",")
+    if all(part.isdigit() and int(part) <= 7 for part in days):
+        return f"Every {_listed([_WEEKDAYS[int(part) % 7] for part in days])} at {at}"
+    return ""
+
+
 def decorate(row: dict[str, Any], now: datetime.datetime) -> dict[str, Any]:
     """Add display facts without changing the definition or reading task stores."""
     out = dict(row)
@@ -51,9 +92,20 @@ def decorate(row: dict[str, Any], now: datetime.datetime) -> dict[str, Any]:
     name = str(row.get("name") or "")
     objective = str(template.get("text") or template.get("description") or row.get("description") or "")
     first_line = objective.splitlines()[0].strip() if objective else ""
-    out.update(display_name=first_line[:96] if _LEGACY_NAME.fullmatch(name) and first_line else name,
+    # The whole first line: a surface clamps it, and a slice would cut a word and repeat itself under the title.
+    out.update(display_name=name if authored_name(row) else first_line or name,
                kind="note" if note else "task", timezone=str(row.get("timezone") or ""),
                destination={"chat_id": template.get("chat_id"), "project_id": template.get("project_id")})
+    trigger = row.get("trigger") if isinstance(row.get("trigger"), dict) else {}
+    out.pop("cadence", None)
+    out.pop("time_passed_on", None)
+    if str(trigger.get("type") or "cron") == "cron" and (cadence := cadence_words(trigger.get("expr"))):
+        out["cadence"] = cadence
+    # A switched-off one-shot whose moment has passed: it fires again only if someone turns it back on.
+    if str(trigger.get("type") or "") == "once" and not row.get("enabled", True) and not row.get("completed_at"):
+        at = parse_schedule_time(trigger.get("run_at"), timezone_for_schedule(row))
+        if at and at <= now:
+            out["time_passed_on"] = at.isoformat()
     last_id = str(row.get("last_task_id") or "")
     cached = row.get("last_outcome") or {}
     observed = bool(last_id and cached.get("task_id") == last_id)
@@ -94,10 +146,8 @@ def _entry(row: dict[str, Any], now: datetime.datetime) -> dict[str, Any]:
         entry["previous_run_open"] = row["previous_run_open"]
     if row.get("last_error"):
         entry["last_error"] = str(row["last_error"])[:160]
-    if once and not row.get("enabled", True) and not row.get("completed_at"):
-        at = parse_schedule_time(trigger.get("run_at"), timezone_for_schedule(row))
-        if at and at <= now:
-            entry["time_passed_on"] = at.isoformat()
+    if view.get("time_passed_on"):
+        entry["time_passed_on"] = view["time_passed_on"]
     return entry
 
 
