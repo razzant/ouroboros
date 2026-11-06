@@ -15,7 +15,7 @@ def test_measured_envelope_prices_physical_pressure_without_changing_window(monk
     room = syn.room(lane1=[row] if held == 'owner_row' else [], notes=1 if held == 'note' else 0)
     if room['notes']:
         room['notes'][0]['text'] = 'Held note label. ' + 'n' * 8000
-    snap = syn.snapshot(room_facts=room, story=[], live=[])
+    snap = syn.snapshot(room_facts=room, story=[], conversations=[])
     core = cf.ContextCore('Core', 'BIBLE', '', '', 'Identity', 'Facts', '"Assignment"', False,
                           memory_view_json=mv.snapshot_json(snap))
     monkeypatch.setattr(cf, '_route_calibration_ratio', lambda *a, **kw: ratio)

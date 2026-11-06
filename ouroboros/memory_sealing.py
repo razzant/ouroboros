@@ -63,6 +63,13 @@ def writer_terminal_rows(root, starts):
     return grouped
 
 
+def linked_rows(root, store):
+    """The ``row_sha256`` of every writer's later terminal row its page links below it (``terminal_links``): that
+    page's, never read as an open row of my other conversations (``memory_view_conversations``) or a debt."""
+    grouped = capture_terminal_rows(root, store.room_records(None, kinds=("page",)))
+    return {address["row_sha256"] for rows in grouped.values() for address, _facts, _pos in rows}
+
+
 def terminal_links(root, record, cache=None):
     """This page writer's later typed terminal rows as one separately attributed line: each row's kind,
     status and recorded finality (its authority stays in the row), and one reader over their span."""

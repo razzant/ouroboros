@@ -118,7 +118,7 @@ def test_unavailable_project_census_keeps_readable_memory_and_other_waiting_fact
         patch.setattr(pr, "list_projects", unavailable)
         snapshot = view(tmp_path)
         assert snapshot.active and snapshot.room == before.room and snapshot.story == before.story
-        assert snapshot.live_rooms == before.live_rooms and snapshot.marks == before.marks
+        assert snapshot.conversations == before.conversations and snapshot.marks == before.marks
         assert snapshot.waiting["notes"] == before.waiting["notes"]
         assert snapshot.waiting["late_reviews"] == before.waiting["late_reviews"]
         assert snapshot.waiting["projects"] == {"count": "unknown", "oldest": "unknown"}

@@ -978,15 +978,22 @@ def _read_source(root: Path, ref: Any, start: int, limit: int) -> str:
 
 
 def _read_rooms(root: Path, store: ChronicleStore, start: int, limit: int) -> str:
-    from ouroboros import memory_view as mv
+    """Every open room, by conversation: the block's own capture (``memory_view_conversations``), one line a room."""
+    from ouroboros import memory_view as mv, memory_view_conversations as conversations
+    from ouroboros.projects_registry import list_projects
 
-    spec = mv.ViewSpec("integrator", room_id=None, live_rooms="directory")
+    spec = mv.ViewSpec("integrator", room_id=None)
     with capture(root):  # one state of the chronicle for every room's facts
-        gaps, quiet = {}, {}
-        rows, lineage = memory_inventory.open_rows_by_room(root, gaps=gaps, quiet=quiet), row_lineage(root)
-        rooms = mv._live_rooms(store, root, spec, mv.room_labeler(root), rows, mv._notes_by_room(store), lineage, gaps, quiet)
-    body = "\n".join(mv._directory_room(room) for room in rooms)
-    return _window(f"Open rooms: {len(rooms)}; live {sum(room['live'] for room in rooms)}", body, start, limit,
+        gaps, quiet, sealed = {}, {}, {}
+        rows, lineage = memory_inventory.open_rows_by_room(root, gaps=gaps, quiet=quiet, sealed=sealed), row_lineage(root)
+        groups = conversations.capture(store, root, spec, mv.room_labeler(root), rows, mv._notes_by_room(store), lineage,
+                                       quiet=quiet, sealed=sealed, gaps=gaps, projects=list_projects(root))
+    lines = [line for group in groups for line in (conversations.identity_line(group), *(
+        f"  - {room['label']}; {'my human or I spoke here' if room['engaged'] else 'neither my human nor I spoke here'}; "
+        f"{mv._facts_text(room['facts'], 'that room')}; memory_read(room_id='{room['room_id']}', rows=true)"
+        for room in group["rooms"]))]
+    count = sum(len(group["rooms"]) for group in groups)
+    return _window(f"Open rooms: {count} in {len(groups)} conversations", "\n".join(lines), start, limit,
                    lambda n: f"memory_read(room_id='*', start={n})")
 
 
@@ -1033,7 +1040,7 @@ def _read_proposal(ctx: Any, root: Path, store: ChronicleStore, proposal: Dict[s
     from ouroboros import memory_view as mv
     from ouroboros.memory_floor import view_tokens
 
-    spec = mv.ViewSpec("integrator", room_id=room, room_lanes=False, origin_words=False, live_rooms="none",
+    spec = mv.ViewSpec("integrator", room_id=room, room_lanes=False, origin_words=False, other_conversations=False,
                        marks="none", knowledge=False)
     with capture(root, tail="terminal"):  # one state for the rules, both views and every record's facts
         result = store.select_account(proposal["target_id"], replaces=proposal["replaces"], author=focus_signature(ctx),

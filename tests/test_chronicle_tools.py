@@ -426,7 +426,7 @@ def test_rows_read_attributes_each_row_by_its_source_fields_as_text(tmp_path):
     assert lines[3] == (f"[{ts(2)}; host; {addr(rows[1])}] host facts for taskA001: status=completed; outcome=Done; "
                         "phase=done; final=unknown; result: get_task_result(task_id=taskA001)")
     assert lines[4].startswith(f"[{ts(3)}; child kid00001 of taskA001; ") and lines[4].endswith("child report")
-    assert lines[5] == f"[{ts(4)}; Ouroboros; {addr(rows[3])}] my answer"
+    assert lines[5] == f"[{ts(4)}; Ouroboros (task taskA001); {addr(rows[3])}] my answer"  # the work that sent it
     assert "Ouroboros" not in "".join(lines[2:5])
     only = _memory_read(ctx_for(tmp_path), rows=True, task_id="kid00001").split("\n")
     assert only[0] == "room 1; rows; task_id kid00001" and len(only) == 3
@@ -457,10 +457,10 @@ def test_an_install_without_any_lineage_row_attributes_old_outgoing_rows_by_task
     lines = _memory_read(ctx, rows=True).split("\n")[2:]
     assert lines[1].startswith(f"[{ts(2)}; outgoing, author not recorded; {addr(rows[1])}]")
     assert lines[2].startswith(f"[{ts(3)}; child kid00002 of root0001; ")
-    assert lines[3] == f"[{ts(4)}; Ouroboros; {addr(rows[3])}] Done."
+    assert lines[3] == f"[{ts(4)}; Ouroboros (task root0001); {addr(rows[3])}] Done."
     assert ChronicleStore(tmp_path).activation()["metadata"]["lineage_epoch"]["pos"] == 4
     later = chat(tmp_path, [{"chat_id": 1, "direction": "out", "ts": ts(5), "task_id": "root0002", "text": "Next."}])
-    assert _memory_read(ctx, rows=True).split("\n")[-1] == f"[{ts(5)}; Ouroboros; {addr(later[0])}] Next."
+    assert _memory_read(ctx, rows=True).split("\n")[-1] == f"[{ts(5)}; Ouroboros (task root0002); {addr(later[0])}] Next."
 
 
 def test_node_read_shows_stamp_original_and_corrections_with_the_acting_revision(tmp_path):

@@ -86,8 +86,8 @@ def test_unknown_address_never_defaults_to_main(entry, label):
 
 
 def test_actual_main_context_names_every_room_by_its_registry_label(tmp_path):
-    """Main keeps its own rows; quiet rooms share an aggregate with an exact labelled directory;
-    the registry is only read, A2A never enters and the hidden partition is not Main's."""
+    """Main keeps its own rows; every other room is in my other conversations by its label, with the same
+    labelled directory; the registry is only read, A2A never enters and the hidden partition is not Main's."""
     from types import SimpleNamespace
 
     from ouroboros.tools.chronicle import _memory_read
@@ -106,20 +106,23 @@ def test_actual_main_context_names_every_room_by_its_registry_label(tmp_path):
     _write_chat(root, rows)
     before = path.read_bytes()
     changing = _view(tmp_path, 1)
-    room, live = section(changing, "## This room (Main)"), section(changing, "## Live rooms")
+    room, block = section(changing, "## This room (Main)"), section(changing, "## Other conversations")
     assert path.read_bytes() == before
     assert "] MAIN" in room and "] MISSING" in room and room.index("] MAIN") < room.index("] MISSING")
     assert "] UNKNOWN" in room  # a non-Project chat's unbound row is Main's too
-    assert "PROJECT" not in changing and "HIDDEN" not in room and "A2A EXCLUDED" not in changing
-    assert "3 open rooms;" in live and "memory_read(room_id='*', start=0)" in live
+    assert "] UNKNOWN" not in block, block  # a row this room holds is not repeated among the others
+    assert "PROJECT" not in changing  # an unsigned outgoing row is a task fact there: counted, with its reader
+    assert "task facts 1, ~7 chars; no page of that room yet; memory_read(room_id='1500', rows=true)" in block
+    assert "HIDDEN" not in changing and "A2A EXCLUDED" not in changing
     reader = SimpleNamespace(drive_root=root)
     directory = _memory_read(reader, room_id="*", start=0)
+    assert directory.startswith("Open rooms: 4 in 4 conversations")  # the directory has no focus: Main too
     for label, chat_id in (("Project Alpha [chat_id=1500]", "1500"),
                           ("Unknown room [chat_id=987654]", "987654"), ("Hidden [chat_id=0]", "0")):
-        assert label not in live
+        assert f"### {label}" in block, block
         assert f"- {label};" in directory
         assert f"memory_read(room_id='{chat_id}', rows=true)" in directory
-    assert "Main — open" not in live  # the current room is not one of the other rooms
+    assert "Main" not in block.replace("## Other conversations", "")  # the current room is not one of the others
     project_rows = _memory_read(reader, room_id="1500", rows=True)
     assert "] PROJECT" in project_rows and "] MAIN" not in project_rows
     assert "] UNKNOWN" in _memory_read(reader, room_id="987654", rows=True)

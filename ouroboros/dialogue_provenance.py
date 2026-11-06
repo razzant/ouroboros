@@ -696,8 +696,11 @@ def _with_transport(label: str, row: Mapping[str, Any]) -> str:
 
 
 def _ouroboros_author(row: Mapping[str, Any], **extra: str) -> dict[str, Any]:
-    """My own row; private Presence contact names its audience in the label every header prints."""
-    label = _with_transport("Ouroboros", row) + (", privately to the owner" if private_contact(row) else "")
+    """My own row, under the work that sent it (its task, else its delivery's ``transport.origin``); private
+    Presence contact names its audience in the label every header prints."""
+    work = _text(row.get("task_id")) or _text(_mapping(_mapping(row.get("transport")).get("origin")).get("task_id"))
+    label = _with_transport("Ouroboros" + (f" (task {work})" if work else ""), row) + (
+        ", privately to the owner" if private_contact(row) else "")
     author: dict[str, Any] = {"kind": "ouroboros", "label": label, **extra}
     if _text(row.get("initiator")) == "consciousness":
         author["focus"] = "consciousness"
@@ -804,6 +807,13 @@ def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch:
         if pos < int(lineage_epoch["pos"]):
             return _pre_epoch_author(row, lineage_lookup)
     return _ouroboros_author(row)
+
+
+def owner_speech(row: Mapping[str, Any], author: Mapping[str, Any]) -> bool:
+    """My human's own words, from ``row_author``'s answer for ``row``: a person's row outside places (Main, a
+    Project; a quiz answer), or a place row from an account its place confirms now (``owner_confirmed``). The
+    one definition of my human's words every view of my conversations reads."""
+    return author.get("kind") == "human" and (row_provenance(row) != "place" or author.get("owner_confirmed") is True)
 
 
 def row_class(row: Mapping[str, Any], **lineage: Any) -> dict[str, Any]:
@@ -1195,6 +1205,7 @@ __all__ = [
     "dialogue_speaker",
     "dialogue_text",
     "memory_row_header",
+    "owner_speech",
     "private_contact",
     "private_contact_text",
     "recorded_finality",

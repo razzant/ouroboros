@@ -346,6 +346,7 @@ _CONVERSATION_READERS = {
     "ouroboros/tool_effects.py::effect_of": "a tool effect's declared conversation (a string)",
     "ouroboros/dialogue_provenance.py::RoomLabelResolver.label": "whether a row's facts carry their conversation's scalars",
     "ouroboros/dialogue_provenance.py::RoomLabelResolver._place_label": "tail facts or a row: the scalar name/audience only",
+    "ouroboros/memory_view_conversations.py::capture": "tail facts: the conversation's scalars only, for its label",
 }
 # Every function that decodes a stored dialogue body itself (``Row`` readers go through ``project_source``).
 _BODY_DECODERS = {

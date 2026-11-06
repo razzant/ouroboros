@@ -546,7 +546,8 @@ def _unfolded(plan, addressed, message):
 
     sent = json.dumps(message, ensure_ascii=False)
     return [(step, ident) for step, ident, whole, _short in mf.floor_elements(snapshot_from_json(plan.core.memory_view_json))
-            if (step, ident) in addressed and json.dumps(whole, ensure_ascii=False)[1:-1] in sent]
+            if (step, ident) in addressed and whole and json.dumps(whole, ensure_ascii=False)[1:-1] in sent]  # a list
+    # form (F5a, F6a, F7a, F8a) has no whole text of its own: it is a form of elements already addressed
 
 
 def _shown_low(main_call, monkeypatch, tmp_path, cut):
@@ -576,7 +577,9 @@ def _shown_low(main_call, monkeypatch, tmp_path, cut):
     whole_view = {"story": render_story(actor), "room": render_room(actor)}  # the unfloored source, not an unsent mode
     addressed = _addressed(built, "low")
     assert addressed and not _unfolded(built, addressed, ctx.messages[0])
-    assert set(_unfolded(built, addressed, whole_view)) == {pair for pair in addressed if pair[0] != "F3"}
+    from ouroboros.memory_floor import _LIST_FORMS
+    assert set(_unfolded(built, addressed, whole_view)) == {pair for pair in addressed if pair[0] != "F3"
+                                                            and pair[0] not in _LIST_FORMS}
     return ctx, tools, events, windows, built
 
 
@@ -848,7 +851,7 @@ def test_a_presend_low_fold_keeps_every_address_narrowed_from_the_max_view(
 
     elements = mf.floor_elements(snapshot_from_json(built.core.memory_view_json))
     narrowed = {(step, ident) for step, ident, whole, _short in elements if shows(first, whole) and not shows(low, whole)}
-    assert {step for step, _ident in narrowed} >= {"F1", "F1b"}  # the deficit took more than one element
+    assert {step for step, _ident in narrowed} >= {"F1", "F2"}  # the deficit took more than one element
     # Max sends [books, handbook, story, rooms notice, turns...]; Low [book navigation, story, rooms notice, turns...].
     assert len(json.dumps(low[0])) < len(json.dumps(first[0]))
     from ouroboros.transcript_prefix import message_digest
@@ -860,7 +863,7 @@ def test_a_presend_low_fold_keeps_every_address_narrowed_from_the_max_view(
     # what the request actually showed only by address.
     sent_fact = mf.trace_facts(tools._ctx.context_fit_plan.projection("low").memory_facts)
     assert trace[VIEW_TRACE_KEY] == tools._ctx.memory_view_facts == sent_fact
-    assert sent_fact["floor"]["mode"] == "low" and sent_fact["floor"]["steps"].keys() >= {"F1", "F1b"}
+    assert sent_fact["floor"]["mode"] == "low" and sent_fact["floor"]["steps"].keys() >= {"F1", "F2"}
     assert shortage_from_trace(trace).kind == "open_rows"  # open conversation now survives beyond the late note cuts
     # A later fitting route keeps this historical note and every address without reasserting a new shortage.
     after = tools._ctx.context_fit_plan

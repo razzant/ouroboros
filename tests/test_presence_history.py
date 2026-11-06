@@ -801,7 +801,9 @@ def test_wake_counts_imported_history_without_listing_it(room):
     kinds = [kind for kind, _offset, _line in observation.events]
     assert kinds.count("history_import") == 3 and kinds.count("correspondent_message") == 1
     text = observation.full_text()
-    assert "3 imported earlier Presence messages" in text and "a live correspondent" in text
+    assert "3 imported earlier Presence messages (counted, not listed: room history" in text
+    assert "1 message in a place (counted, not listed:" in text  # its words are my view's, not the wake text's
+    assert "a live correspondent" not in text and b"a live correspondent" in observation.source_bytes()
     assert "message 1" not in text and "message 2" not in text
 
 
@@ -1455,11 +1457,17 @@ def test_a_room_read_by_time_is_bounded_by_its_rows_stored_times(room):
     assert span in text and f"### Open conversation since {mv._minute(sent)} (" in text, text
     listed = _memory_read(ToolContext(repo_dir=room.root, drive_root=room.root, task_id="reader", current_chat_id=1),
                           room_id="*").split("\n")
-    line = next(line for line in listed if f"memory_read(room_id='{CHAT}', rows=true)" in line)
-    assert span in line and f"last activity {mv._minute(received)};" in line, line
+
+    def lines_of(chat):  # a room's own line, and its conversation's line above it
+        at = next(n for n, line in enumerate(listed)
+                  if line.startswith("  - ") and f"memory_read(room_id='{chat}', rows=true)" in line)
+        return listed[at], next(line for line in reversed(listed[:at]) if line.startswith("- "))
+
+    line, group = lines_of(CHAT)
+    assert span in line and f"last activity {mv._minute(received)};" in group, (line, group)
     first, last = stamp["OTHER-1"], stamp["OTHER-2"]
-    line = next(line for line in listed if f"memory_read(room_id='{other}', rows=true)" in line)
-    assert f"open {mv._minute(first)} → {mv._minute(last)};" in line and f"last activity {mv._minute(last)};" in line
+    line, group = lines_of(other)
+    assert f"open {mv._minute(first)} → {mv._minute(last)};" in line and f"last activity {mv._minute(last)};" in group
     assert rows(room.root) == before and open_room_rows(room.root, CHAT) == opened  # nothing restamped or moved
 
 

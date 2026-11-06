@@ -302,7 +302,9 @@ def test_every_event_of_the_window_is_observed_without_a_count_cut(tmp_path):
     assert len(observation.outstanding) == 7  # every answerable card, newest first
     assert [line.split()[3] for line in observation.outstanding] == [f"c{i}" for i in reversed(range(7))]
     text = observation.full_text()
-    assert "2 owner messages, 15 task terminals, 7 outstanding cards" in text
+    assert ("2 owner messages (counted, not listed: my view holds the words), 15 task terminals, "
+            "7 outstanding cards") in text
+    assert "first human line" not in text and "- task t14 Done, $1.25" in text  # my human's words are in my view
     assert "(+" not in text and "more; see" not in text
 
 
@@ -500,7 +502,8 @@ def test_invalid_only_import_has_an_explicit_gap_and_later_sql_row_keeps_its_old
     assert not first.events and first.gaps and first.boundary["upper"] > 0
     ds.append(tmp_path, "chat", row)
     second = wake.observe_wake(tmp_path, boundary=first.boundary, since=T0 + 10, now=T0 + 100)
-    assert len(second.events) == 1 and "newly complete" in second.full_text()
+    assert len(second.events) == 1 and second.events[0][2].endswith("newly complete")  # recorded whole, counted
+    assert "1 owner message (counted, not listed" in second.full_text()
     assert second.window["basis"] == "accepted_boundary" and not second.gaps
     assert wake.observe_wake(tmp_path, boundary=second.boundary, since=T0 + 110, now=T0 + 200).events == ()
 
@@ -513,7 +516,7 @@ def test_pending_import_does_not_advance_an_accepted_wake_boundary(tmp_path):
     assert any("still importing" in gap for gap in first.gaps)
     assert "upper" not in first.boundary
     import_all(tmp_path)
-    assert "pending" in _observe(tmp_path, boundary=first.boundary).full_text()
+    assert any(line.endswith("] pending") for _kind, _offset, line in _observe(tmp_path, boundary=first.boundary).events)
 
 
 def test_human_input_is_classified_by_producer_provenance(tmp_path):

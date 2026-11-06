@@ -249,7 +249,7 @@ def test_each_focus_holds_in_its_one_capture_the_stored_rows_its_view_shows(tmp_
     entered, index = [], ChronicleStore._index
     monkeypatch.setattr(ChronicleStore, "_index", lambda self: entered.append(1) or index(self))
     task, scoped = {"id": "turn0001", "chat_id": 1}, mv.capture
-    for role, room, scope in (("integrator", "1", "all"), ("presence", "1", "terminal"),
+    for role, room, scope in (("integrator", "1", "all"), ("presence", "1", "all"),  # every integrating focus: all
                               ("child", str(rooms["alpha"]), "terminal"), ("nanny", "1", "terminal")):
         spec = dataclasses.replace(mv.ROLE_DEFAULTS[role], room_id=room)
         monkeypatch.setattr(mv, "capture", scoped)
