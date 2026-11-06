@@ -11,6 +11,7 @@ import pytest
 from ouroboros import knowledge as store
 from ouroboros.tools import knowledge as tools
 from ouroboros.tools.registry import ToolContext
+from tests._knowledge_history_shared import replaced
 
 
 def address(tmp_path, topic="people/Антон", scope="global"):
@@ -441,15 +442,6 @@ def test_legacy_index_context_survives_until_authored_overview_without_recursive
                                       "# What I currently understand\n\nA reconsidered overview with [details](details.md).").ok
     assert "Earlier generated context" not in index.read_text(encoding="utf-8")
     assert any(row.get("old_content") == original for row in history(target))
-
-
-def replaced(root, row):
-    """The version a history row replaced: inline, or the earlier row it names through the memory reader."""
-    if "old_content" in row:
-        return row["old_content"]
-    from ouroboros.memory_reader import MAX_LENGTH, read_memory
-
-    return read_memory(root, "document", {"address": row["old_content_ref"], "length": MAX_LENGTH})["text"]
 
 
 @pytest.mark.parametrize("scope", ["global", "project:p"])

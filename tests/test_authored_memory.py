@@ -90,7 +90,7 @@ def test_the_backlog_is_an_ordinary_note_written_read_and_revised_through_the_to
     assert "revision_required" in registry.execute("knowledge_write", {"topic": BACKLOG, "content": "Rewritten."})
     assert store.read_knowledge_note(address).raw == edited.raw
     # Every revision keeps its complete new source and the old one, inline or named once.
-    from tests.test_linked_knowledge import replaced
+    from tests._knowledge_history_shared import replaced
     rows = _history(tmp_path, BACKLOG)
     assert [row["mode"] for row in rows] == ["overwrite", "append", "edit"]
     assert all(row["writer"] == "turn" for row in rows)
@@ -158,7 +158,7 @@ def test_a_correction_keeps_the_attributed_narrative_recoverable(tmp_path):
         "old_str": "that Alpha shipped in June.", "content": "that Alpha shipped in June; it shipped in July (release notes).",
         "expected_revision": note.revision}))
     [_, correction] = _history(tmp_path, "people/alex")
-    from tests.test_linked_knowledge import replaced
+    from tests._knowledge_history_shared import replaced
     assert "Alex said on 2026-09-01 (chat row 42) that Alpha shipped in June.\n" in replaced(tmp_path, correction)
     assert "it shipped in July (release notes)." in correction["new_content"]
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="later")
