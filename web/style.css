@@ -5595,8 +5595,10 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .evo-campaign-chip { height: 20px; padding: 0 8px; font-size: var(--type-meta); font-weight: 500; }
 .evo-campaign-side { flex: 1 1 17rem; }
 .evo-campaign-side .ui-status { margin: 0; }
-/* The pointer to the Consciousness tab is a quiet link with its state's dot (U071). */
-.evo-consciousness { justify-self: start; max-width: 100%; }
+/* The pointer to the Consciousness tab is a quiet link with its state's dot (U071). Its state wraps on a narrow card
+   ("sleeping until 4 Nov at 15:41"), so like the verbs it takes its box from its tokens and grows a line instead of
+   spilling out of the lock's one-line box; one line stays the small capsule's 28 px. */
+.evo-consciousness { justify-self: start; max-width: 100%; --control-h: auto; --control-pad-y: 5px; }
 /* A campaign verb grows a line when a translation is long: the row's box comes from its tokens (the lock owns the
    property), one line staying the control's height. */
 .evo-campaign-actions { --control-h: auto; --control-pad-y: var(--space-2);
