@@ -33,11 +33,12 @@ def place(tmp_path):
 
 
 def _place_row(place_id, actor_id="anton", *, text="Ship the long answer, the end changes its meaning.",
-               sends_as="", sends_kind="user", authenticated=None, account="qa", **extra):
+               sends_as="", sends_kind="user", authenticated=None, account="qa", message=None, **extra):
     actor = {"platform_actor_id": actor_id, "display_name": actor_id.title()}
     if authenticated is not None:
         actor["authenticated"] = authenticated
-    transport = {"provider": "chat", "account_id": account, "conversation_id": "design", "actor": actor}
+    transport = {"provider": "chat", "account_id": account, "conversation_id": "design", "actor": actor,
+                 **({"message": message} if message else {})}
     if sends_as:
         transport["identity"] = {"sends_as": {"id": sends_as, "label": "Shared", "kind": sends_kind}}
     return {"ts": "2026-11-04T10:00:00Z", "direction": "in", "chat_id": ROOM, "text": text, "source": "presence:chat",
@@ -82,6 +83,39 @@ def test_one_confirmation_counts_in_every_room_of_its_bot_or_app_and_nowhere_els
 
     assert admitted(sibling, "qa") is True and admitted(other_account, "other") is False
     assert places.get_place(tmp_path, sibling.place_id).owner_accounts == (), "the sibling's record stays as stored"
+
+
+def test_my_post_through_my_humans_account_is_never_their_words_and_their_same_words_still_are(tmp_path, place):
+    """A message I posted through a tool signed in as my human (an MCP send whose result named its conversation and
+    message id) comes back through the connector from their confirmed account: by its provider identity it is mine,
+    on the row, on its stored facts and at an admission; my human's own message in the very same words stays theirs."""
+    from types import SimpleNamespace
+
+    from ouroboros import own_sends
+    from ouroboros.presence_context import focus_metadata
+    from ouroboros.presence_runner import PresenceTurnEvent
+
+    words = "Ship the long answer, the end changes its meaning."
+    receipt = ("MsgID,UserID,UserName,RealName,Channel,ThreadTs,Text,Time\n"
+               f'1793991732.265319,anton,anton,Anton,design,,"{words}",2026-11-07T10:00:00Z\n')
+    assert own_sends.record_result(tmp_path, {"annotations": {"readOnlyHint": False}}, receipt,
+                                   via="mcp:slack/conversations_add_message")
+    accounts = place_owner_accounts(tmp_path)
+    echo = _place_row(place.place_id, text=words, message={"message_id": "1793991732.265319"})
+    theirs = _place_row(place.place_id, text=words, message={"message_id": "1793991800.000100"})
+    assert not owner_confirmed_row(echo, accounts) and not owner_confirmed_row(row_meta(echo), accounts)
+    assert owner_confirmed_row(theirs, accounts) and owner_confirmed_row(row_meta(theirs), accounts)
+    assert not row_author(echo, owner_accounts=accounts)["label"].startswith("my human")
+    assert row_author(theirs, owner_accounts=accounts)["label"].startswith("my human")
+
+    def admitted(message_id):
+        event = PresenceTurnEvent(message_id, "chat", "qa", "design", "", "chat:qa:design:0",
+                                  {"platform_actor_id": "anton"}, {}, {"message_id": message_id}, words)
+        admission = SimpleNamespace(place=places.get_place(tmp_path, place.place_id), binding_id=place.place_id,
+                                    allowance={})
+        return focus_metadata(admission, event, "presence-1", 7, tmp_path)["focus"]["actor"]["owner_confirmed"]
+
+    assert admitted("1793991732.265319") is False and admitted("1793991800.000100") is True
 
 
 def test_a_place_where_i_write_from_my_humans_account_keeps_their_rows_theirs(tmp_path, place):

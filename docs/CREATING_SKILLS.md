@@ -1086,7 +1086,10 @@ For `kind: user` only, a matching `platform_actor_id` in the same `account_id` s
 the same connector and provider holds the confirmation (one confirmation per bot or app, read when used); revoking it
 in every place that holds it removes it.
 This says whose credential writes or reads, independently of who sent an incoming message. Never return your own
-sends as incoming events: from the owner's confirmed account they would read as the owner's words. Where the
+sends as incoming events: from the owner's confirmed account they would read as the owner's words. A post Ouroboros
+makes as that account through another tool (an MCP server signed in as the owner) does come back through you: the
+host knows it by the event's `conversation_id` and `message.message_id`, so report the provider's own ids there
+(the Slack `ts`, the Telegram `message_id`). Where the
 provider lets you tell them apart (GitHub does), do report the account's other activity (its edits, merges and posts
 made by other tools acting as it): the host settles an event whose actor is `sends_as.id`, not reported
 unauthenticated, as heard with reason `own_account`; it stays in the room and the next own wake and never wakes a

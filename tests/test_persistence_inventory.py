@@ -922,7 +922,7 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # its pin of 453 (red there before this branch; the pin follows the tree).
 # 454 -> 455 (supervisor-recovery, owner 2A): the Fault boot's admitted recovery turn and the generation
 # that admitted it, ``state/core_loss_recovery.json`` (``ouroboros/server_process.py``); its own row.
-EXPECTED_SCAN_PATHS = 455
+EXPECTED_SCAN_PATHS = 456
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

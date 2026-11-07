@@ -460,31 +460,46 @@ def place_rows(drive_root: Any) -> dict[str, Place]:
     return {key: _decode(value, connections.get(key)) for key, value in current["places"].items()}
 
 
-def place_owner_accounts(drive_root: Any) -> dict[str, tuple[OwnerAccount, ...]]:
-    """Every place's counted owner accounts as stored now (``counted_owner_accounts`` over ``place_rows``): one read
-    for a pass. Unknown, never "no owner"."""
-    return counted_owner_accounts(place_rows(drive_root).values())
+class OwnerAccounts(dict):
+    """One ``place_owner_accounts`` snapshot: place id -> the owner accounts that count there, and ``sent``, the
+    provider identities of messages I posted as an account (``own_sends``), which are never my human's words."""
+
+    def __init__(self, accounts: Mapping[str, tuple[OwnerAccount, ...]] | None = None, sent: Iterable = ()) -> None:
+        super().__init__(accounts or {})
+        self.sent = frozenset(sent)
+
+
+def place_owner_accounts(drive_root: Any) -> OwnerAccounts:
+    """Every place's counted owner accounts as stored now (``counted_owner_accounts`` over ``place_rows``) with my
+    recorded sends (``own_sends.sent_identities``): one read of each for a pass. Unknown, never "no owner"."""
+    from ouroboros.own_sends import sent_identities
+
+    return OwnerAccounts(counted_owner_accounts(place_rows(drive_root).values()), sent_identities(drive_root))
 
 
 def owner_author(accounts: Mapping[str, Iterable[OwnerAccount]], place_id: str, actor: Any, account_id: str,
                  conversation_id: str = "", message: Any = None) -> bool:
     """A place message as my human's own words now: its actor is an account its place's connector account confirms
-    (``accounts``, one ``place_owner_accounts`` snapshot) and the connector does not report it unauthenticated.
-    Provenance of the words, never whom they are for."""
+    (``accounts``, one ``place_owner_accounts`` snapshot), the connector does not report it unauthenticated, and it is
+    not a message I posted as an account (its provider identity among ``accounts.sent``; never compared by its words,
+    so my human repeating my words is still my human). Provenance of the words, never whom they are for."""
+    from ouroboros.own_sends import message_identity
+
     actor = actor if isinstance(actor, Mapping) else {}
     actor_id = str(actor.get("platform_actor_id") or actor.get("id") or "").strip()
     return (actor.get("authenticated") is not False
-            and owner_account_matches(accounts.get(place_id, ()), actor_id, str(account_id or "")))
+            and owner_account_matches(accounts.get(place_id, ()), actor_id, str(account_id or ""))
+            and message_identity(conversation_id, message) not in getattr(accounts, "sent", frozenset()))
 
 
 def owner_event_now(drive_root: Any, place_id: str, event: Any) -> bool:
-    """``owner_author`` for one place event (a captured event, or the facts its record keeps) over the places as they
-    stand now, so a confirmation made after a turn began counts for what that turn reads later; without readable
-    places nobody is confirmed."""
+    """``owner_author`` for one place event (a captured event, or the facts its record keeps) over the stores as they
+    stand now, so a confirmation made after a turn began counts for what that turn reads later and a message I posted
+    there never does; without readable places nobody is confirmed."""
     facts = event if isinstance(event, Mapping) else {
         key: getattr(event, key, None) for key in ("actor", "account_id", "conversation_id", "message")}
     try:
-        accounts = place_owner_accounts(drive_root) if drive_root is not None else {}
+        accounts = place_owner_accounts(drive_root) if drive_root is not None else OwnerAccounts()
     except PlaceError:
         return False
     return owner_author(accounts, str(place_id or ""), facts.get("actor"), str(facts.get("account_id") or ""),
@@ -509,8 +524,9 @@ def owner_confirmed_row(row: Mapping[str, Any], accounts: Mapping[str, Iterable[
     is the admission's own snapshot instead (``focus.actor.owner_confirmed``), with the same rule. Only facts a
     stored row keeps beside its text are read (``memory_inventory._META_FIELDS``). An imported earlier message
     (``presence_history``) is never confirmed. A place where I write from my human's own account (``sends_as``
-    confirmed, CREATING_SKILLS "Who the connector writes as") confirms their rows as theirs, as admission does;
-    returning my own sends as arrivals is the connector's to filter, never inferred here.
+    confirmed, CREATING_SKILLS "Who the connector writes as") confirms their rows as theirs, as admission does; the
+    connector filters its own sends, and a message I posted through another tool acting as that account is known by
+    its provider identity (``own_sends``), never by its words.
     """
     transport = _fields(row, "transport")
     return not isinstance(row.get("historical_import"), Mapping) and owner_author(

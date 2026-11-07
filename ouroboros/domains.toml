@@ -1071,6 +1071,7 @@ D20 = "Presence"
 "ouroboros/conversation_lease.py" = "D20"
 "ouroboros/place_guard.py" = "D13"
 "ouroboros/places.py" = "D20"
+"ouroboros/own_sends.py" = "D20"  # provider identities of my posts as an account: never my human's words
 "ouroboros/tool_effects.py" = "D04"
 "ouroboros/icon_geometry.py" = "D14"
 
