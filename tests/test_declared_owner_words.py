@@ -33,6 +33,7 @@ from tests.test_helper_owner_words_flow import ASKED, LATER, _child, _root, _sch
 from tests.test_helper_owner_words_flow import _one_api_actor as _one_api_actor  # noqa: F401  (autouse fixture)
 
 SESSION_HEADING, CHILD_HEADING = ow._HEADINGS["session"], ow._HEADINGS["child"]
+LAUNCHED_HEADING = ow._LAUNCHED_SESSION[0]  # the heading a work order without its room rows keeps (its fingerprint)
 WORDS_ITEM = "the owner's words that caused this work"  # the literal a work order without its room rows keeps
 WORDS_ITEM_NOW = "my human's words for this work"  # a native receipt's, and a work order scheduled with the rows
 MARKS_ITEM = "the memory marks in force (this room's and the global ones) and the knowledge outline"
@@ -103,9 +104,10 @@ def test_a_task_scheduled_before_the_fact_keeps_its_bytes_recovery_and_range_rea
     marker = "HOST TASK CONTRACT AUTHORITY (normalized JSON; predecessor is a brief):\n"
     older_ctx, newer_ctx = _flat_ctx(tmp_path, OLDER), _flat_ctx(tmp_path, newer)
     assert assignment_instructions(older_ctx).startswith(marker) and SAID not in assignment_instructions(older_ctx)
-    assert assignment_instructions(newer_ctx).endswith("\n\n" + SESSION_HEADING + "\nHost fact, carried by value "
-                                                       "from task root.\n[2026-10-04T05:00:00+00:00 · owner · "
-                                                       "initial_user of task root · chat 1 / msg-1]\n" + SAID)
+    assert assignment_instructions(newer_ctx).endswith(  # a live start: the one heading and the actor frame
+        f"\n\n{SESSION_HEADING}\n{ow._FRAMES['session']}\n[2026-10-04T05:00:00+00:00 · owner · "
+        "initial_user of task root · chat 1 / msg-1]\n" + SAID)
+    assert LAUNCHED_HEADING not in assignment_instructions(newer_ctx) and "{origin}" not in ow._FRAMES["session"]
 
 
 def test_the_receipt_moves_only_the_words_between_its_lists():
@@ -155,15 +157,16 @@ def test_a_declared_child_carries_the_words_on_every_path(tmp_path, kind):
     assert [item for item in receipt["included"] if item.startswith(MARKS_ITEM)]
     assert "the memory marks of that room" not in str(receipt) and "its open conversation" in str(receipt)
     assert "Figures live in reports/q3/." in changing  # the parent's authored context, as before
-    # 2. The work order its session leaf receives: the words after the parent context.
+    # 2. The work order its session leaf receives: the words after the parent context. Scheduled without its room
+    # rows (no ``ROOM_FIELD``), the order keeps the heading and frame it launched with.
     rendered = compile_external_work_order(payload)
     section = rendered.split("PARENT CONTEXT / REFERENCES\n", 1)[1].split("\n\nEXPECTED OUTPUT", 1)[0]
     context_part, words = section.split("\n\n", 1)
-    assert context_part.endswith("\nFigures live in reports/q3/.") and words.startswith(SESSION_HEADING)
-    assert ASKED in words and words.endswith(LATER)
-    # 3. A direct delegate start from it appends the same words after the host contract.
+    assert context_part.endswith("\nFigures live in reports/q3/.") and words.startswith(LAUNCHED_HEADING + "\n")
+    assert ASKED in words and words.endswith(LATER) and SESSION_HEADING not in rendered
+    # 3. A direct delegate start from it appends the same rows after the host contract, under the one heading.
     direct = assignment_instructions(_child(tmp_path, payload))
-    assert direct.split("\n\n", 1)[1] == words
+    assert direct.split("\n\n", 1)[1] == f"{SESSION_HEADING}\n{ow._FRAMES['session']}\n" + words.split("\n", 2)[2]
 
 
 def test_a_grandchild_of_a_declared_child_carries_the_root_words(tmp_path):
@@ -172,9 +175,9 @@ def test_a_grandchild_of_a_declared_child_carries_the_root_words(tmp_path):
     assert grand["task_contract"]["input_sources"] == "declared" and grand["metadata"][DECLARED_WORDS_FACT] is True
     assert grand["metadata"][ow.FIELD] == payload["metadata"][ow.FIELD]
     first = _first_input(tmp_path, grand).split(CHILD_HEADING, 1)[1].split("\n\n## ", 1)[0]
-    order = compile_external_work_order(grand).split(SESSION_HEADING, 1)[1].split("\n\nEXPECTED OUTPUT", 1)[0]
-    for words in (first, order):
-        assert "from task root." in words and "Build the quarterly report" in words and "Add the charts too" in words
+    order = compile_external_work_order(grand).split(LAUNCHED_HEADING, 1)[1].split("\n\nEXPECTED OUTPUT", 1)[0]
+    for words in (first, order):  # the root's rows under the root's stamps
+        assert " of task root · " in words and "Build the quarterly report" in words and "Add the charts too" in words
         assert "Collect the Q3 figures" not in words  # the child's assignment is not the owner's words
 
 

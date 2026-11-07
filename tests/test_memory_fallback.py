@@ -285,7 +285,7 @@ def test_the_input_holds_the_owners_words_behind_the_units_tasks_and_the_minds_g
     [draft] = _drafts(tmp_path)
     # Alpha's block 1 is caused by the owner's words in Main (row 5), outside the unit's own rows.
     assert _addresses(tmp_path)[5]["row_sha256"] not in draft["covers"]["rows"]
-    assert shared.ORIGIN in llm.prompts[0] and "Words of my human that caused this work" in llm.prompts[0]
+    assert shared.ORIGIN in llm.prompts[0] and "## My human's words for this work (verbatim, dated, host-attested)" in llm.prompts[0]
     assert "Earlier helper retelling of this period, not a source, may be wrong" in llm.prompts[0]
     assert "Alpha worked." in llm.prompts[0] and "Beta asked." not in llm.prompts[0]
     assert "remembering" not in llm.prompts[0]

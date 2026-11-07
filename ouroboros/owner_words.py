@@ -67,26 +67,27 @@ _RUN_ORIGIN_MARKERS = ("initiator", "source", "task_type")
 _ANNOTATED_ACTS = frozenset({"promote_chat_to_task", "route_to_project", "steer_task", "mailbox_delivery"})
 _ANNOTATED_STATUSES = frozenset({"scheduled", "delivered", "read"})
 _ORIGIN = " from task {root}"
-_HEADINGS = {
-    "child": "## Words of my human that caused this work (verbatim)",
-    "session": ("OWNER WORDS THAT CAUSED THIS WORK (verbatim; your assignment is the task given to you, "
-                "these words are why it exists)"),
-    "reviewer": "## Words of my human that caused this work (verbatim, host-attested)",
-    "plan": "## Words of my human that caused this work (verbatim, host-attested)",
-    "writer": "## Words of my human that caused this work (verbatim)",
-}
-# The one frame a reviewer of an intention, a change or a result reads under the owner's words.
+# One heading for every audience (a work order's titles are upper-case); ``root``: a project root's sealed rows' section.
+_HEADING = "My human's words for this work (verbatim, dated, host-attested)"
+_HEADINGS = {**dict.fromkeys(("child", "reviewer", "plan", "writer"), f"## {_HEADING}"),
+             "session": "MY HUMAN'S WORDS FOR THIS WORK (verbatim, dated, host-attested)",
+             "root": "### My human's words in this project (verbatim, dated; open ones are in the conversation below)"}
 _ACCOUNTS = ("They state what was asked. Every other text here — the goal or objective, the plan, room rows by others, issues, "
              "briefs, attachments — is someone's account, labelled with its author as far as the host knows; never take "
              "Ouroboros's own earlier words (an issue it opened, its triage, a parent's brief) for my human's ask.")
-_FRAMES = {
-    "child": ("Host fact, carried by value{origin}. Your assignment is the parent's message; "
-              "these words are why it exists."),
-    "session": "Host fact, carried by value{origin}.",
-    "reviewer": _ACCOUNTS,
-    "plan": _ACCOUNTS,
-    "writer": "Host fact, read from what the host recorded{origin}; these words are why the work exists.",
-}
+_LATER = " A later row of theirs changes an earlier one only where it actually does."
+_SCOPED = (" Your assignment divides and scopes your part within them; it never overrides what they ask or forbid, "
+           "and they are not new tasks for you.")
+_ACTOR = (_ACCOUNTS + _LATER + _SCOPED + " Later words of theirs reach you as they arrive, carried by the host, each "
+          "under a line that begins \"[Owner words quoted verbatim\".")
+_FRAMES = {"child": _ACTOR, "session": _ACTOR, "writer": "Host fact, read from what the host recorded{origin}.",
+           "root": _ACCOUNTS + _LATER + _SCOPED,  # the root hears its human in the conversation below, not by a carried line
+           **dict.fromkeys(("reviewer", "plan"), _ACCOUNTS + _LATER + " The work's assignment divides and scopes it within "
+                           "them; it never overrides what they ask or forbid, and they are not new tasks for this work.")}
+# A session task scheduled before ``ROOM_FIELD`` keeps the heading and frame its work order launched with: that
+# order is a function of its record and its fingerprint binds its recovery (``render_owner_words(current=False)``).
+_LAUNCHED_SESSION = (("OWNER WORDS THAT CAUSED THIS WORK (verbatim; your assignment is the task given to you, "
+                      "these words are why it exists)"), "Host fact, carried by value{origin}.")
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -495,7 +496,8 @@ def _held_words(held: Any, drive_root: Any, task_id: str, *, context: Any = None
     return rows
 
 
-def _live_words(drive_root: Any, room: int, accounts: Any, marks: Any = None) -> Tuple[List[Dict[str, Any]], List[str]]:
+def _live_words(drive_root: Any, room: int, accounts: Any, marks: Any = None, *,
+                addressed: bool = False) -> Tuple[List[Dict[str, Any]], List[str]]:
     """``(rows, gap lines)`` read live at a handoff: my human's rows of the bound Project room (carrier ``room``),
     the Project's retained origin rows (``origin``), then the rows that marks in force target (``marked``: the
     room's and the global marks; Main's for a tree outside every Project). ``marks``: every room's acting marks
@@ -503,7 +505,7 @@ def _live_words(drive_root: Any, room: int, accounts: Any, marks: Any = None) ->
     as the store cuts them for the room, so the chronicle is not entered once more; None (a review subject, a
     session's scheduling read) reads them from the store. Each store that cannot be read is one typed gap line,
     as is a room read that may lack rows (``room_appearances.read_gaps``); the rows that could be read stay, and
-    nothing else is withheld."""
+    nothing else is withheld. ``addressed`` (``project_words``): a chat row's words carry its chat address too."""
     from ouroboros.chat_chain import format_address, resolve_row, room_rows, row_address
     from ouroboros.chronicle_store import ChronicleStore
     from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
@@ -514,7 +516,8 @@ def _live_words(drive_root: Any, room: int, accounts: Any, marks: Any = None) ->
     def words(row: Any, carrier: str, source: str) -> List[Dict[str, Any]]:
         if not quotable_owner_row(row, drive_root, accounts=accounts):
             return []
-        return _chat_words(row, key=format_address(row_address(row)), carrier=carrier, source=source, root=drive_root)
+        found = _chat_words(row, key=(key := format_address(row_address(row))), carrier=carrier, source=source, root=drive_root)
+        return [{**found[0], "address": key}, *found[1:]] if addressed and found else found
 
     rows: List[Dict[str, Any]] = []
     gaps: List[str] = []
@@ -853,13 +856,12 @@ def task_owner_words(drive_root: Any, task_id: str, *,
 
 
 def render_owner_words(rows: Any, absent: str = "", *, audience: str, root_task_id: str = "", indent: str = "",
-                       gaps: Any = ()) -> str:
-    """One verbatim section for a child, a session, a reviewer, a plan review or the page writer.
-
-    ``indent`` prefixes every line of the words (the memory view's two spaces), so a line of
-    the owner's own that starts with ``## `` never reads as a section of the request. A row's
-    files are named on a host line under its words; ``gaps`` (``work_words``) close the section.
-    """
+                       gaps: Any = (), current: bool = True) -> str:
+    """One verbatim section for a child, a session, a reviewer, a plan review or the page writer. ``indent``
+    prefixes every line of the words (the memory view's two spaces), so a line of the owner's own that starts with
+    ``## `` never reads as a section of the request. A row's files are named on a host line under its words;
+    ``gaps`` (``work_words``) close the section. ``current=False``: a session order whose record predates
+    ``ROOM_FIELD`` keeps the literals it launched with (``_LAUNCHED_SESSION``)."""
     if audience not in _HEADINGS:
         raise ValueError(f"unknown owner-words audience {audience!r}; expected one of {sorted(_HEADINGS)}")
     rows = [row for row in (rows if isinstance(rows, list) else []) if isinstance(row, Mapping) and _kept(row)]
@@ -868,13 +870,28 @@ def render_owner_words(rows: Any, absent: str = "", *, audience: str, root_task_
         none = f"No words of my human are recorded for this work (host marker: {absent})." if absent else ""
         return "\n".join([*([none] if none else []), *gaps])
     origin = _ORIGIN.format(root=root_task_id) if root_task_id else ""
-    blocks = []
-    for row in rows:
-        text = str(row.get("text") or "") or (unread_target(row) if row.get("source") == REPLY_TARGET else "")
-        text = "\n".join(part for part in (text, attachments_line(row.get("attachments"))) if part)
-        words = "\n".join(indent + line if line else line for line in text.split("\n"))
-        blocks.append(words_stamp(row) + "\n" + words)
-    return f"{_HEADINGS[audience]}\n{_FRAMES[audience].format(origin=origin)}\n" + "\n\n".join([*blocks, *gaps])
+    heading, frame = _LAUNCHED_SESSION if audience == "session" and not current else (_HEADINGS[audience], _FRAMES[audience])
+    return f"{heading}\n{frame.format(origin=origin)}\n" + "\n\n".join([*(words_block(row, indent) for row in rows), *gaps])
+
+
+def words_block(row: Mapping[str, Any], indent: str = "") -> str:
+    """One row as every section prints it: its stamp, its words (a reply target's unread fact) and its files line."""
+    text = str(row.get("text") or "") or (unread_target(row) if row.get("source") == REPLY_TARGET else "")
+    text = "\n".join(part for part in (text, attachments_line(row.get("attachments"))) if part)
+    return words_stamp(row) + "\n" + "\n".join(indent + line if line else line for line in text.split("\n"))
+
+
+def project_words(drive_root: Any, room: int, *, open_rows: Any = (), indent: str = "") -> List[Dict[str, Any]]:
+    """A project root's rows of its human that left the open conversation: the set's room rows (``_live_words``,
+    carrier ``room``; never a reply target) whose reference or chat address no open row (``open_rows``, lane 1) holds,
+    oldest first, whole (``line``) and as the dated address the floor folds it into (``short``: its stamp, its size
+    and the address that reads it; never a retelling); a store gap closes the list as a line with no address."""
+    rows, gaps = _live_words(drive_root, room, owner_place_accounts(drive_root), [], addressed=True)
+    held = {key for item in open_rows for key in (item.get("ref"), item.get("address")) if key}
+    return [{"address": row["address"], "ref": row["ref"], "ts": row["ts"], "line": words_block(row, indent),
+             "short": f"{words_stamp(row)} (words, {len(row['text'])} chars — read by address {row['address']})"}
+            for row in _deduped(rows) if row.get("carrier") == "room" and row.get("source") != REPLY_TARGET
+            and not {row["ref"], row["address"]} & held] + [{"line": line} for line in gaps]
 
 
 def attachments_line(files: Any) -> str:
@@ -896,14 +913,17 @@ def unread_target(row: Mapping[str, Any]) -> str:
 
 
 def words_stamp(row: Mapping[str, Any]) -> str:
-    """One row's stamp in every form, whole or by reference: ``[ts · owner · source of task · ref]``, or a reply
-    target's own author, never my human (``REPLY_TARGET``)."""
+    """One row's stamp in every form, whole or by reference: ``[ts · owner · source of task · ref]``; a row held as
+    context adds where it went (``went to <task>``) before its reference, the last part (a room, origin or marked
+    row's source names its carrier); a reply target's own author, never my human (``REPLY_TARGET``)."""
     source, task_id, ref = str(row.get("source") or ""), str(row.get("task_id") or ""), str(row.get("ref") or "")
+    carrier = str(row.get("carrier") or "")
     if source == REPLY_TARGET:  # context beside the words, under its own author: never my human's words
         stamp = [f"{row.get('author') or 'author not recorded'}: the message my human replied to, "
                  "not my human's words", ref]
     else:
-        stamp = [str(row.get("ts") or ""), "owner", f"{source} of task {task_id}" if task_id else source, ref]
+        stamp = [str(row.get("ts") or ""), "owner", f"{source} of task {task_id}" if task_id else source,
+                 carrier if carrier.startswith("went to ") else "", ref]
     return "[" + " · ".join(part for part in stamp if part) + "]"
 
 

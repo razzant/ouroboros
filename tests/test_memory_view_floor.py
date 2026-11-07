@@ -74,6 +74,40 @@ def test_pages_go_before_uncovered_owner_rows_and_the_oldest_rows_go_only_when_p
     assert dict(both.addressed)["F7"] == tuple(r["address"] for r in rows)
 
 
+def test_a_project_roots_sealed_owner_rows_fold_only_under_physical_pressure_oldest_first_into_dated_addresses():
+    """F7 holds a project root's rows of its human that left the open conversation (``project_words``) before the
+    open ones: whole under margin pressure, the oldest first into its dated address (never a retelling) only under
+    physical pressure; a store gap line is no row; a mind's own fold of one needs its authored note as any
+    uncovered commitment does."""
+    def sealed_row(i):
+        stamp = f"[2026-09-0{i + 1}T00:00:00+00:00 · owner · room_message · chat 1 / s{i}]"
+        address = f"row:1@2026-09-0{i + 1}T00:00:00+00:00#{i:012x}"
+        return {"address": address, "ref": f"chat 1 / s{i}", "ts": f"2026-09-0{i + 1}T00:00:00+00:00",
+                "line": f"{stamp}\n  " + "w" * 5_000, "short": f"{stamp} (words, 5000 chars — read by address {address})"}
+
+    sealed = [sealed_row(i) for i in range(2)]
+    gap = {"line": "[Host fact: my human's rows of room 1 could not be read here (OSError); chat_history reads that room.]"}
+    rows = [{**syn.spoken(i, "human", 5_000), "owner_side": True} for i in range(2)]
+    snapshot = syn.snapshot(room_facts={**syn.room("1", lane1=rows), "project_words": [*sealed, gap]})
+    assert mf.sealed_owner_rows(snapshot.room) == sealed
+    full = mv.render_room(snapshot)
+    assert all(item["line"] in full for item in sealed) and gap["line"] in full
+    assert full.index(sealed[1]["line"]) < full.index("### Open conversation") < full.index(rows[0]["line"])
+    soft = mf.fit_memory_view(snapshot, frame(0))  # margin pressure alone: people's words stay whole
+    assert "F7" not in dict(soft.addressed) and all(item["line"] in mv.render_room(snapshot, soft) for item in sealed)
+    oldest = mf.fit_memory_view(snapshot, frame(0, tokens(snapshot, soft) - 100))
+    assert dict(oldest.addressed)["F7"] == (sealed[0]["address"],)
+    text = mv.render_room(snapshot, oldest)
+    assert sealed[0]["short"] in text and sealed[0]["line"] not in text and gap["line"] in text
+    assert sealed[1]["line"] in text and all(row["line"] in text for row in rows)
+    physical = mf.fit_memory_view(snapshot, frame(0, 0))
+    assert dict(physical.addressed)["F7"] == (*(item["address"] for item in sealed), *(row["address"] for row in rows))
+    with pytest.raises(ValueError, match="authored working_note"):
+        mf.level_with(snapshot, mv.FULL_VIEW, [f"F7:{sealed[0]['address']}"])
+    noted = mf.level_with(snapshot, mv.FULL_VIEW, [f"F7:{sealed[0]['address']}"], owner_note=True)
+    assert dict(noted.addressed)["F7"] == (sealed[0]["address"],)
+
+
 @pytest.mark.parametrize("lane1, owners", [
     ([{**syn.spoken(i, "human", 8_000), "owner_side": True} for i in range(3)], True),
     ([syn.spoken(i, "ouroboros", 1_000) for i in range(400)], False),

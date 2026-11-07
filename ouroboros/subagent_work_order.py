@@ -198,7 +198,8 @@ def _owner_words_section(task: Mapping[str, Any]) -> str:
     its receipt names the words among the omitted inputs, so its work order holds none
     and keeps the bytes and fingerprint it started with. A session task's room rows
     (``work_order_room_words``) follow the field's rows, one row per identity; nothing
-    is read from a store here, so the order is a function of the record.
+    is read from a store here, so the order is a function of the record. The key also
+    tells the heading and frame: a record without it keeps the literals it launched with.
     """
     from ouroboros.contracts.task_contract import task_input_sources
     from ouroboros.owner_words import FIELD, _deduped, render_owner_words, task_governing_words
@@ -209,7 +210,8 @@ def _owner_words_section(task: Mapping[str, Any]) -> str:
     room = work_order_room_words(task)
     if room is not None:
         rows = _deduped(rows + task_governing_words({FIELD: room})[0])
-    return render_owner_words(rows, absent, audience="session", root_task_id=str(task.get("root_task_id") or ""))
+    return render_owner_words(rows, absent, audience="session", root_task_id=str(task.get("root_task_id") or ""),
+                              current=room is not None)
 
 
 def _render_external_work_order(task: Mapping[str, Any]) -> str:

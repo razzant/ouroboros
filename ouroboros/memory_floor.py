@@ -42,9 +42,17 @@ def view_tokens(text: str) -> int:
     return estimate_tokens(json.dumps(str(text), ensure_ascii=False)) if text else 0
 
 
+def sealed_owner_rows(room: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """A project root's rows of its human that left the open conversation (``owner_words.project_words``), as F7
+    holds them before lane 1's: by their chat address, oldest first, uncovered (only physical pressure or the root's
+    own authored fold changes their form, into dated addresses); a store gap line is no row."""
+    return [item for item in room.get("project_words") or () if item.get("address")]
+
+
 def floor_elements(snapshot: mv.MemoryViewSnapshot) -> List[Tuple[str, str, str, str]]:
     """Ordered addressable forms, oldest first; F5 by covered-period start then sequence, across kinds.
-    Display order is independent. Core and governing words have no rung."""
+    Display order is independent. Core and governing words have no rung. F7 holds a project root's
+    sealed rows of its human before the open ones: dated addresses, never a retelling."""
     if not snapshot.active:
         return []
     room = snapshot.room or {}
@@ -68,8 +76,9 @@ def floor_elements(snapshot: mv.MemoryViewSnapshot) -> List[Tuple[str, str, str,
                for i in [*room.get("legacy", ()), *room.get("under_parts", ())]],
         "F7p": [(i["address"], i["line"], mv._row_pointer(i, "words")) for i in lane1
                 if i["kind"] != "ouroboros" and not i.get("owner_side", i["kind"] == "human")],
-        "F7": [(i["address"], i["line"], mv._row_pointer(i, "words")) for i in lane1
-               if i.get("owner_side", i["kind"] == "human") and not i.get("immune")],
+        "F7": [(i["address"], i["line"], i["short"]) for i in sealed_owner_rows(room)]
+              + [(i["address"], i["line"], mv._row_pointer(i, "words")) for i in lane1
+                 if i.get("owner_side", i["kind"] == "human") and not i.get("immune")],
         "F5l": [(e["id"], "\n".join(mv._page_lines(e)), mv._page_label(e))
                 for e in sorted(snapshot.story, key=lambda e: tuple(e.get("floor_order", (0, 0))))
                 if e.get("kind") == "page" and not e.get("told_by")],
@@ -366,8 +375,10 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
 
 
 def uncovered_owner_rows(snapshot: mv.MemoryViewSnapshot, elements=None) -> List[Tuple[str, str, int, int]]:
-    """Owner rows no page or note carries yet, oldest first; governing and unanswered rows have no address."""
-    owner = {i["address"]: i for i in (snapshot.room or {}).get("lane1", ())}
+    """Owner rows no page or note carries yet, oldest first; governing and unanswered rows have no address.
+    A project root's sealed rows of its human count as uncovered: only physical pressure folds them."""
+    room = snapshot.room or {}
+    owner = {i["address"]: i for i in [*sealed_owner_rows(room), *room.get("lane1", ())]}
     return [e for e in (degradable_elements(snapshot) if elements is None else elements)
             if e[0] == "F7" and not owner[e[1]].get("carried")]
 
@@ -409,7 +420,8 @@ def level_with(snapshot: mv.MemoryViewSnapshot, kept: mv.FloorLevel, addresses: 
                     ('F7', row['address']) in taken and not row.get('carried') for row in snapshot.room['lane1']):
                 raise ValueError('Uncovered owner commitments require an authored working_note before changing their form')
         if step == "F7" and not owner_note and not next(
-                row.get("carried") for row in snapshot.room["lane1"] if row["address"] == ident):
+                row.get("carried") for row in [*sealed_owner_rows(snapshot.room), *snapshot.room["lane1"]]
+                if row["address"] == ident):
             raise ValueError("Uncovered owner commitments require an authored working_note before changing their form")
         taken.add((step, ident))
         if step in ('F5l', 'F5'):
@@ -474,7 +486,7 @@ def owner_note_capsule(plan, addresses, note, request, *, drive_root, task_id, m
     if not wanted:
         return None
     snap = mv.snapshot_from_json(plan.core.memory_view_json)
-    rows = [{"role": "user", "content": row["line"]} for row in snap.room["lane1"]
+    rows = [{"role": "user", "content": row["line"]} for row in [*sealed_owner_rows(snap.room), *snap.room["lane1"]]
             if row["address"] in wanted and not row.get("carried")]
     if not rows:
         return None

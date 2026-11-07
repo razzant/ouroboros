@@ -524,7 +524,7 @@ def test_render_absence_is_one_line_and_unknown_audience_is_refused():
 def test_owner_words_text_renders_the_scheduled_words(tmp_path):
     ctx = _ctx(tmp_path, metadata={"root_task_id": ROOT}, directives=[{"source": "initial_user", "content": "Ask"}])
     text = ow.owner_words_text(ctx)
-    assert text.startswith("## Words of my human that caused this work (verbatim, host-attested)\n") and "\nAsk" in text
+    assert text.startswith("## My human's words for this work (verbatim, dated, host-attested)\n") and "\nAsk" in text
     assert ow.owner_words_text(_ctx(tmp_path, metadata={"initiator": "consciousness"}, directives=[])) == (
         "No words of my human are recorded for this work (host marker: initiator=consciousness).")
 

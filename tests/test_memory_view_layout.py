@@ -356,7 +356,7 @@ def test_a_helpers_role_line_names_exactly_what_its_request_holds(tmp_path, rout
     assert "raw conversations" in missing and "### Open conversation" not in c and "## Live rooms" not in c
     # No root record gave this helper a field; its room's rows of my human are read at its start and drawn.
     assert "my human's words for this work" in loaded
-    assert "· owner · room_message · chat " in section(c, "## Words of my human that caused this work (verbatim)")
+    assert "· owner · room_message · chat " in section(c, "## My human's words for this work (verbatim, dated, host-attested)")
 
 
 def test_the_tool_schemas_count_in_the_floor_of_every_mode(tmp_path):

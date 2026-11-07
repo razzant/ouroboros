@@ -546,6 +546,36 @@ def test_this_room_has_its_head_retold_records_origin_words_and_notes(tmp_path):
     assert f"note {note.record['id']} by root on " in _section(noted, "### My notes not yet sealed")
 
 
+def test_a_project_root_reads_its_humans_sealed_rows_whole_under_the_actor_frame_and_main_does_not(tmp_path):
+    """In a project room (never Main) the root's own view adds one section at the origins seam: the room's rows of
+    my human that left the open conversation, verbatim and dated under the actor frame, the frame line over the
+    open rows; a row still open is read once, in the conversation; a child reads its words in its own block."""
+    from ouroboros.owner_words import _FRAMES, _HEADINGS
+    from ouroboros.tools.chronicle import page_covers
+
+    rooms, rows = _install(tmp_path)
+    alpha, task = str(rooms["alpha"]), {"id": "ra1", "chat_id": rooms["alpha"]}
+    before_snapshot, before = _view(tmp_path, task)
+    lane1 = _section(before, "### Open conversation since")
+    assert before_snapshot.room["project_words"] == [] and _HEADINGS["root"] not in before  # nothing sealed yet
+    assert lane1.split("\n")[1] == _FRAMES["root"] and "alpha words" in lane1  # the frame alone, over the open rows
+    covers = page_covers(tmp_path, alpha, from_addr=_addr(rows[11]), to_addr=_addr(rows[11]))["covers"]
+    assert ChronicleStore(tmp_path).publish_page(room_id=alpha, text="alpha asked", covers=covers, author=shared.MIND).ok
+    snapshot, text = _view(tmp_path, task)
+    section = _section(text, _HEADINGS["root"])
+    stamp = f"[2026-09-05T10:13:00+00:00 · owner · room_message · chat {alpha} / a1]"
+    assert section.split("\n")[1] == _FRAMES["root"] and f"{stamp}\n  alpha words" in section
+    assert "alpha words" not in _section(text, "### Open conversation since")  # it left the open rows: read once
+    assert text.index("### Words that started this work") < text.index(_HEADINGS["root"]) < text.index("### Open conversation")
+    assert [item["address"] for item in snapshot.room["project_words"]] == [_addr(rows[11])]
+    assert snapshot.room["project_words"][0]["short"].startswith(f"{stamp} (words, 11 chars — read by address row:")
+    _main, main_text = _view(tmp_path, MAIN_TASK)
+    assert _HEADINGS["root"] not in main_text and _FRAMES["root"] not in main_text and _main.room["project_words"] is None
+    _kid, kid_text = _view(tmp_path, {"id": "kid", "chat_id": rooms["alpha"], "delegation_role": "subagent",
+                                      "parent_task_id": "ra1", "root_task_id": "ra1"})
+    assert _HEADINGS["root"] not in kid_text and _kid.room["project_words"] is None
+
+
 def test_main_room_page_shows_the_room_less_retellings_whole_to_a_nanny_and_the_story_to_everyone_else(tmp_path):
     """The flat summary and a room-less era predate rooms and were Main's memory: whole in the story of every
     focus that carries one (Main's integrator, a root bound elsewhere, a wake, a child), under their own label,
@@ -619,7 +649,7 @@ def test_each_role_sees_its_parts_of_the_live_view(tmp_path):
     assert "  Old Main talk." in mv.render_story(child)  # the retold record is in its story, whole, as in Main's
     assert "### Retold before the update" not in child_text and "### Open conversation" not in child_text
     assert "## Live rooms" not in child_text and "Watch alpha" not in child_text and "Watch root1" in child_text
-    assert child_text.startswith("## Words of my human that caused this work (verbatim)\n")
+    assert child_text.startswith("## My human's words for this work (verbatim, dated, host-attested)\n")
     assert "Find the cause" in child_text and "Find the cause" not in main_text
     nanny_task = {**child_task, "id": "nan9", "configured_subagent": {"route": {"kind": "agent_session"}}}
     nanny, nanny_text = _view(tmp_path, nanny_task)
@@ -653,7 +683,7 @@ def test_a_helpers_owner_words_are_indented_so_their_lines_never_become_headings
     assert "\n  Find the cause\n  ## not a heading of the request" in child_text
     titles = re.findall(r"^## (.+)$", child_text, flags=re.M)
     assert "not a heading of the request" not in titles
-    assert titles[0] == "Words of my human that caused this work (verbatim)"
+    assert titles[0] == "My human's words for this work (verbatim, dated, host-attested)"
     # The indent is the view's: every other audience prints the words as recorded.
     rows = [{"text": said, "source": "initial_user", "task_id": "root1"}]
     assert "\nFind the cause\n## not a heading" in render_owner_words(rows, audience="reviewer")

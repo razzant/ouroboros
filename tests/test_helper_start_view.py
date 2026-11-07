@@ -35,7 +35,7 @@ from tests.test_available_subagents_runtime import _api_row, _settings
 
 ASKED = "Count the alpha inventory\nand name what is missing"
 ASKED_BETA = "Look at the beta numbers"
-WORDS = "## Words of my human that caused this work (verbatim)"
+WORDS = "## My human's words for this work (verbatim, dated, host-attested)"
 MAIN = {"id": "tmain", "chat_id": 1}
 
 
@@ -301,7 +301,7 @@ def test_a_declared_child_starts_with_the_owner_words_and_nothing_of_shared_memo
     older = copy.deepcopy(declared)
     older["metadata"].pop(DECLARED_WORDS_FACT)
     older_messages, _cap, older_changing, older_receipt = start(older)
-    assert "Words of my human" not in older_changing and "alpha inventory" not in json.dumps(older_messages)
+    assert WORDS not in older_changing and "alpha inventory" not in json.dumps(older_messages)
     assert any(item.startswith(words_item) for item in older_receipt["omitted_automatic"])
     assert section(older_changing, "## Marks I keep in view") == marks  # the marks and the outline ride either way
     bare = copy.deepcopy(older)

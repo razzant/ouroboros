@@ -719,7 +719,7 @@ def _capture_room(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
                              "facts": _with_gaps(memory_inventory.room_facts(store, room, entries, lineage,
                                                                              len(notes.get(room, ()))), gaps, room),
                              "legacy": [], "under_parts": [], "notes": [], "origins": [], "since": "",
-                             "lane1": [], "lane2": [], "told": []}
+                             "lane1": [], "lane2": [], "told": [], "project_words": None}
     if spec.room_page:
         units = {unit.record_id: unit for unit in memory_inventory.legacy_units(store, root)}
         retold = [record for record in records if record["kind"] in ("legacy", "gap")]
@@ -752,12 +752,18 @@ def _capture_room(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
                   for record in pointer_records if record.get("folded_into")
                   and record["id"] in teller]
         facts["told"] = told_here([*story, *folded], {room, *((LEGACY_ROOM_ID,) if main else ())})
-    if spec.origin_words and room.lstrip("-").isdigit() and int(room) in memory_inventory.membership_facts(
-            root).project_chat_ids:
+    sealed = spec.room_lanes and spec.role == "integrator"  # the root's own view of its project's sealed rows
+    project = (spec.origin_words or sealed) and room.lstrip("-").isdigit() and int(room) in (
+        memory_inventory.membership_facts(root).project_chat_ids)
+    if spec.origin_words and project:
         facts["origins"] = _origins(root, room, entries if spec.room_lanes else [])
     if spec.room_lanes and entries:
         facts["since"] = _minute(facts["facts"]["earliest"])  # the rows' first stored time, not the first row read
         facts["lane1"], facts["lane2"] = _lanes(root, entries, lineage)
+    if sealed and project:  # never Main: my human's project rows that left the open conversation, whole and dated
+        from ouroboros.owner_words import project_words
+
+        facts["project_words"] = project_words(root, int(room), open_rows=facts["lane1"], indent=INDENT)
     return facts
 
 
@@ -1359,7 +1365,10 @@ def _live_text(rooms: Tuple[Dict[str, Any], ...], gone: Mapping[str, List[str]],
 
 
 def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]]) -> str:
-    """``## This room (<label>) — head <n>; <standing facts>``: the room page, the words that started it, notes, two lanes."""
+    """``## This room (<label>) — head <n>; <standing facts>``: the room page, the words that started it, a project
+    root's sealed rows of its human (``project_words``; folded by F7 into dated addresses), notes, two lanes."""
+    from ouroboros.owner_words import _FRAMES, _HEADINGS
+
     retold, mine, people, facts = (set(gone.get(step, ())) for step in ("F4", "F2", "F7", "F1"))
     people |= set(gone.get("F7p", ()))
     lines = [f"## This room ({room['label']}) — head {room['head']}; {_facts_text(room['facts'])}"]
@@ -1375,10 +1384,14 @@ def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]]) -> str:
         lines += ["", "### Words that started this work (retention-proof)"]
         lines += [f"[{item['ts'] or 'time not recorded'}; owner; {item['ref']}] " + _indented(item["text"]).lstrip()
                   for item in room["origins"]]
+    if room.get("project_words"):  # a project root: its human's rows that left the open conversation, whole and dated
+        lines += ["", _HEADINGS["root"], _FRAMES["root"], "\n\n".join(  # under the actor frame; a gap line has no address
+            item["short"] if item.get("address") in people else item["line"] for item in room["project_words"])]
     if room["notes"]:
         lines += ["", "### My notes not yet sealed"] + _room_note_lines(room["notes"], gone)
     if room["lane1"]:
         lines += ["", f"### Open conversation since {room['since']} (verbatim: people and my replies)"]
+        lines += [_FRAMES["root"]] if room.get("project_words") is not None else []  # the root's frame over the open rows
         addressed = mine | people
         aggregate = [item for item in room['lane1'] if item['address'] in addressed
                      and not item.get('immune')] if gone.get('F7a') else []

@@ -31,6 +31,9 @@ from tests.test_helper_owner_words_flow import ASKED, LATER, LATEST, _child, _ro
 from tests.test_helper_owner_words_flow import _one_api_actor as _one_api_actor  # noqa: F401  (autouse fixture)
 
 SESSION_HEADING = ow._HEADINGS["session"]
+# A record without its room rows (``ROOM_FIELD``: an API child's never has them, a session task scheduled before
+# the key) keeps the heading and frame its work order launched with; a live start renders the one heading.
+LAUNCHED_HEADING, LAUNCHED_FRAME = ow._LAUNCHED_SESSION[0], "Host fact, carried by value from task root."
 # A child scheduled before the field existed, and its work order as the host rendered it then.
 SNAPSHOT_TASK = {
     "id": "kid1", "parent_task_id": "root", "root_task_id": "root", "objective": "Collect the Q3 figures",
@@ -70,19 +73,24 @@ def test_a_task_without_the_field_keeps_its_pre_update_bytes_and_fingerprint():
 def test_the_words_follow_the_parent_context_verbatim():
     rendered = compile_external_work_order({**SNAPSHOT_TASK, "metadata": {ow.FIELD: WORDS}})
     order = _sections(rendered)
-    at = order.index(SESSION_HEADING)
+    at = order.index(LAUNCHED_HEADING)  # no room rows on the record: the launched heading and frame
     assert order[at - 1] == "PARENT CONTEXT / REFERENCES" and order[at + 1] == "EXPECTED OUTPUT"
-    section = rendered.split("\n\n" + SESSION_HEADING, 1)[1].split("\n\nEXPECTED OUTPUT", 1)[0]
+    section = rendered.split("\n\n" + LAUNCHED_HEADING, 1)[1].split("\n\nEXPECTED OUTPUT", 1)[0]
     assert section.endswith("\n" + SAID)  # verbatim: no strip, no indent, no cut
-    assert "Host fact, carried by value from task root." in section
+    assert section.startswith("\n" + LAUNCHED_FRAME + "\n") and SESSION_HEADING not in rendered
     assert "OBJECTIVE above" not in rendered and "OBJECTIVE above" not in SESSION_HEADING
+    # With its room rows (an empty list when the room has none) the order renders the one heading and frame.
+    current = compile_external_work_order({**SNAPSHOT_TASK, "metadata": {ow.FIELD: WORDS, ow.ROOM_FIELD: []}})
+    assert f"\n\n{SESSION_HEADING}\n{ow._FRAMES['session']}\n[" in current and LAUNCHED_HEADING not in current
+    assert (current.split("\n\n" + SESSION_HEADING, 1)[1].split("\n\nEXPECTED OUTPUT", 1)[0].split("\n", 2)[2]
+            == section.split("\n", 2)[2])  # the same rows under either heading
     # Without a parent context the words still stand right after the objective.
     bare = compile_external_work_order({**SNAPSHOT_TASK, "context": None, "metadata": {ow.FIELD: WORDS}})
-    assert _sections(bare)[:3] == ["OBJECTIVE", SESSION_HEADING, "EXPECTED OUTPUT"]
+    assert _sections(bare)[:3] == ["OBJECTIVE", LAUNCHED_HEADING, "EXPECTED OUTPUT"]
     marked = compile_external_work_order({**SNAPSHOT_TASK, "metadata": {ow.ABSENT_FIELD: "initiator=consciousness"}})
     absent = "No words of my human are recorded for this work (host marker: initiator=consciousness)."
     assert f"Figures live in reports/q3/.\n\n{absent}\n\nEXPECTED OUTPUT" in marked
-    assert SESSION_HEADING not in marked
+    assert SESSION_HEADING not in marked and LAUNCHED_HEADING not in marked
 
 
 def test_the_payload_the_flat_metadata_and_the_record_render_one_work_order(tmp_path):
@@ -106,7 +114,7 @@ def test_the_payload_the_flat_metadata_and_the_record_render_one_work_order(tmp_
     # A work order rendered without the words is not the canonical source of this task.
     wordless = compile_external_work_order({**payload, "metadata": {
         key: value for key, value in payload["metadata"].items() if key != ow.FIELD}})
-    assert SESSION_HEADING not in wordless
+    assert SESSION_HEADING not in wordless and LAUNCHED_HEADING not in wordless
     stale = {**request, "complete_sha256": hashlib.sha256(wordless.encode("utf-8")).hexdigest(),
              "complete_chars": len(wordless)}
     assert canonical_work_order_source(child, stale) == ("", "source_digest_mismatch")
@@ -134,7 +142,7 @@ def test_a_direct_start_appends_the_words_after_the_host_contract(tmp_path):
     text = assignment_instructions(root)
     contract_json, words = text[len(marker):].split("\n\n", 1)
     assert text.startswith(marker) and json.loads(contract_json)["objective"] == root.task_contract["objective"]
-    assert words.startswith(SESSION_HEADING + "\nHost fact, carried by value from task root.\n")
+    assert words.startswith(f"{SESSION_HEADING}\n{ow._FRAMES['session']}\n")  # a live start: the one heading
     assert words.endswith(ASKED + "\n\n[owner · owner_mailbox of task root · msg mail-1]\n" + LATER)
     # A child appends what it inherited, not its own assignment.
     _event, _stored, payload = _schedule(root)
@@ -175,19 +183,19 @@ def test_a_declared_work_order_carries_the_words_and_one_scheduled_before_holds_
     assert "the parent's room page and its open conversation" in str(current["omitted_automatic"])
     assert "the memory marks of that room" not in str(current) and "started its project" not in str(current)
     order = _sections(rendered)
-    assert order[order.index(SESSION_HEADING) - 1] == "OBJECTIVE"  # no parent context: right after the objective
-    assert rendered.split("\n\n" + SESSION_HEADING, 1)[1].split("\n\nEXPECTED OUTPUT", 1)[0].endswith(LATER)
+    assert order[order.index(LAUNCHED_HEADING) - 1] == "OBJECTIVE"  # no parent context: right after the objective
+    assert rendered.split("\n\n" + LAUNCHED_HEADING, 1)[1].split("\n\nEXPECTED OUTPUT", 1)[0].endswith(LATER)
     child = _child(tmp_path, declared)
     assert compile_external_work_order(_source_task_from_context(child, declared["id"])) == rendered  # flat
     direct = assignment_instructions(child)
     contract_json, words = direct[len(marker):].split("\n\n", 1)
     assert direct.startswith(marker) and json.loads(contract_json)["input_sources"] == "declared"
-    assert words.startswith(SESSION_HEADING + "\nHost fact, carried by value from task root.\n") and ASKED in words
+    assert words.startswith(f"{SESSION_HEADING}\n{ow._FRAMES['session']}\n") and ASKED in words
     # The other side: scheduled before the fact, the same child keeps its parent's selection; the words ride unread.
     older = {**declared, "metadata": {key: value for key, value in declared["metadata"].items()
                                       if key != DECLARED_WORDS_FACT}}
     older_text = compile_external_work_order(older)
-    assert SESSION_HEADING not in older_text and ASKED not in older_text and LATER not in older_text
+    assert LAUNCHED_HEADING not in older_text and ASKED not in older_text and LATER not in older_text
     assert [item for item in input_source_selection_receipt(older)["omitted_automatic"] if item.startswith(words_item)]
     bare = {**older, "metadata": {key: value for key, value in older["metadata"].items() if key != ow.FIELD}}
     assert compile_external_work_order(bare) == older_text  # the carried field changes nothing there
@@ -196,7 +204,7 @@ def test_a_declared_work_order_carries_the_words_and_one_scheduled_before_holds_
     # A shared sibling's work order and direct start carry the words, and no fact rides with it.
     _e, shared_stored, shared = _schedule(root, objective="Collect the Q4 figures")
     assert DECLARED_WORDS_FACT not in shared["metadata"] and DECLARED_WORDS_FACT not in shared_stored
-    assert SESSION_HEADING in compile_external_work_order(shared) and ASKED in compile_external_work_order(shared)
+    assert LAUNCHED_HEADING in compile_external_work_order(shared) and ASKED in compile_external_work_order(shared)
     assert assignment_instructions(_child(tmp_path, shared)).split("\n\n", 1)[1].startswith(SESSION_HEADING)
 
 
@@ -270,7 +278,8 @@ def test_a_session_tasks_work_order_is_a_function_of_its_record_and_its_first_st
     # The other side: a record without the key (scheduled before it) renders as before, the room's row unread.
     older = {**session, "metadata": {key: value for key, value in session["metadata"].items() if key != ow.ROOM_FIELD}}
     assert work_order_room_words(older) is None and sibling not in compile_external_work_order(older)
-    assert SESSION_HEADING in compile_external_work_order(older) and ASKED in compile_external_work_order(older)
+    assert LAUNCHED_HEADING in compile_external_work_order(older) and ASKED in compile_external_work_order(older)
+    assert SESSION_HEADING not in compile_external_work_order(older)  # the launched literals, as before the key
     assert compile_external_work_order(SNAPSHOT_TASK) == SNAPSHOT_TEXT
     # The first start's references carry the rows that arrived since the scheduling, under the host's fact, their
     # attachments named; a row the body holds does not ride again; a start that continues a run gets no tail.

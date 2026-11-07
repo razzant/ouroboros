@@ -131,7 +131,7 @@ def test_the_owner_words_ride_the_event_the_record_and_the_payload(tmp_path):
     from ouroboros.memory_view import _owner_words_block
 
     block = _owner_words_block(payload)
-    assert block.startswith("## Words of my human that caused this work (verbatim)\n") and "  " + LATER in block
+    assert block.startswith("## My human's words for this work (verbatim, dated, host-attested)\n") and "  " + LATER in block
     bare = {**payload, "metadata": {key: value for key, value in payload["metadata"].items() if key != ow.FIELD}}
     assert _owner_words_block(bare) == ""
 
@@ -400,7 +400,9 @@ def test_the_child_corpus_stays_its_assignment_and_no_owner_door(tmp_path):
     # The words a reviewer or a session of this run sees: the child's inherited, the root's own corpus.
     assert ASKED in ow.owner_words_text(child) and LATER in ow.owner_words_text(child)
     assert "Collect the Q3 figures" not in ow.owner_words_text(child)
-    assert ASKED in ow.owner_words_text(root) and "from task root" in ow.owner_words_text(root, audience="session")
+    session = ow.owner_words_text(root, audience="session")
+    assert ASKED in ow.owner_words_text(root) and session.startswith(ow._HEADINGS["session"] + "\n" + ow._FRAMES["session"])
+    assert "of task root ·" in session and "from task root" not in session  # the stamp names the task, the frame no longer
 
 
 def test_the_parent_reads_the_childs_words_from_the_childs_record(tmp_path):
