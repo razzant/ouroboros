@@ -483,13 +483,14 @@ def test_a_late_answer_direct_turn_starts_with_the_rebuilt_frame(tmp_path, monke
 
 def test_a_late_answer_bypasses_an_unrelated_project_reader(tmp_path, monkeypatch):
     """End to end through the real bridge intake: a late answer in a Project room whose
-    one live root is unrelated work never enters that root's mailbox; a fresh head
-    receives the answer with its typed late_answer provenance."""
+    one live root is unrelated work is never that root's addressed mail (it hears the room's
+    words as context only); a fresh head receives the answer with its typed late_answer provenance."""
     from types import SimpleNamespace
 
     import server
     import supervisor.message_bus as mb
     from ouroboros.owner_mailbox import drain_owner_entries
+    from ouroboros.owner_relay import ROUTED_BY_HEAD
     from ouroboros.projects_registry import create_project
 
     project = create_project(tmp_path, "racer")
@@ -519,7 +520,9 @@ def test_a_late_answer_bypasses_an_unrelated_project_reader(tmp_path, monkeypatc
     monkeypatch.setattr(bridge, "send_routing_ack", lambda *a, **k: None, raising=False)
     server._process_bridge_updates(bridge, 0, ctx)
 
-    assert drain_owner_entries(tmp_path, "pending-root", set()) == []
+    [context] = drain_owner_entries(tmp_path, "pending-root", set())
+    assert context["msg_id"].startswith("relay:carry-context:") and "late_answer" not in context
+    assert context["host_carried"] == {"went_to": ROUTED_BY_HEAD}
     assert len(heads) == 1
     metadata = heads[0][1]["task_metadata"]
     _assert_host_snapshot(metadata["late_answer"], "task-1", "q1")
@@ -587,6 +590,7 @@ def test_a_late_answer_reaches_the_head_its_askers_earlier_answer_started(tmp_pa
     live head that an earlier late answer to the SAME asker started, beside an unrelated reader, in
     a Project or in Main; a head holding another asker's answer is unrelated, and a fresh head starts."""
     from ouroboros.owner_mailbox import drain_owner_entries
+    from ouroboros.owner_relay import ROUTED_BY_HEAD
     from ouroboros.projects_registry import create_project
 
     project = create_project(tmp_path, "racer") if room == "project" else {}
@@ -597,7 +601,10 @@ def test_a_late_answer_reaches_the_head_its_askers_earlier_answer_started(tmp_pa
                  "delegation_role": "root", "drive_root": str(tmp_path)}
     started = _intake(tmp_path, monkeypatch, bridge, running={"busy-root": {"task": unrelated}})
 
-    assert drain_owner_entries(tmp_path, "busy-root", set()) == []
+    # The unrelated reader is never addressed; in a Project it hears the room's words as context, naming the head.
+    heard = drain_owner_entries(tmp_path, "busy-root", set())
+    assert [(e["msg_id"].split(":")[1], e["host_carried"]["went_to"]) for e in heard] == (
+        [("carry-context", "head-1" if head_asker == "task-1" else ROUTED_BY_HEAD)] if room == "project" else [])
     if head_asker == "task-1":
         assert started == []
         [entry] = drain_owner_entries(tmp_path, "head-1", set())
@@ -610,7 +617,7 @@ def test_a_late_answer_reaches_the_head_its_askers_earlier_answer_started(tmp_pa
 
 def test_two_heads_of_one_askers_answers_give_the_next_one_to_the_earliest(tmp_path, monkeypatch):
     """A start race left two heads of one asker's late answers: the next answer goes to the
-    earliest of them instead of starting a third; the later head's mailbox stays empty."""
+    earliest of them instead of starting a third; the later head gets no answer, only the room's context."""
     from ouroboros.owner_mailbox import drain_owner_entries
     from ouroboros.projects_registry import create_project
 
@@ -622,7 +629,8 @@ def test_two_heads_of_one_askers_answers_give_the_next_one_to_the_earliest(tmp_p
 
     assert _intake(tmp_path, monkeypatch, bridge) == []
     assert [e["late_answer"]["quiz_id"] for e in drain_owner_entries(tmp_path, "head-early", set())] == ["q1"]
-    assert drain_owner_entries(tmp_path, "head-late", set()) == []
+    assert [(e["msg_id"].split(":")[1], e["host_carried"]["went_to"], "late_answer" in e)
+            for e in drain_owner_entries(tmp_path, "head-late", set())] == [("carry-context", "head-early", False)]
 
 
 def test_a_late_answer_head_running_as_queued_work_still_holds_its_askers_thread(tmp_path, monkeypatch):

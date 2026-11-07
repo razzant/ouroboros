@@ -56,8 +56,8 @@ def build_knowledge_sections(
             from ouroboros.knowledge import overview_residency
 
             heading = f"## Shared understanding\n\n{overview_residency(overview)}\nSource: {reader}.\n\n"
-            # The whole authored orientation rides whole in every request: the owner chose on
-            # 20.10.2026 that the window never shortens the overview (TIER0_ALWAYS_FULL).
+            # The whole authored orientation rides whole in every request: the window never
+            # shortens the overview (TIER0_ALWAYS_FULL); its headings are no substitute for it.
             sections.append(HostSection("shared_understanding", heading + overview_text, reader=reader))
         else:
             sections.append(_SHARED_UNDERSTANDING_GAP)  # present but empty is still unauthored
@@ -127,6 +127,27 @@ def knowledge_navigation_sections(root: Any, project_id: str = "", *, overview: 
         # title, people's summaries kept (``knowledge.render_knowledge_outline``).
         sections.append(HostSection("knowledge_index" if address is global_address else "project_knowledge_index",
                                     f"{header}\n\n{text}", f"{header}\n\n{outline}", reader=reader))
+    return sections
+
+
+def helper_navigation_sections(root: Any, project_id: str = "") -> List[str]:
+    """A helper's knowledge at its start: the global shelf's outline and its room's (every active note by address and
+    title, people's summaries kept: ``knowledge.render_knowledge_outline``), each under its own heading; the whole
+    index arrives with its first accepted delegation (``delegation_knowledge_index``)."""
+    from ouroboros.knowledge import OVERVIEW_TOPIC, knowledge_index_views, resolve_knowledge_address
+
+    pid = str(project_id or "").strip()
+    shelves = [("knowledge_outline", "## Knowledge outline", resolve_knowledge_address(root, OVERVIEW_TOPIC, "global"))] + (
+        [("project_knowledge_outline", f"## Project knowledge outline ({pid})",
+          resolve_knowledge_address(root, "topic", f"project:{pid}"))] if pid else [])
+    sections: List[str] = []
+    for section_id, header, address in shelves:
+        reader = f"knowledge_list(scope={address.scope!r})"
+        try:
+            outline = knowledge_index_views(address)[1]
+        except (OSError, UnicodeDecodeError) as exc:
+            outline = f"Knowledge navigation unavailable: {type(exc).__name__}; {reader}."
+        sections.append(HostSection(section_id, f"{header}\n\n{outline}", reader=reader))
     return sections
 
 

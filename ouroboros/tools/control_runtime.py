@@ -1082,8 +1082,10 @@ def completion_request(ctx: ToolContext | None, arguments: object) -> tuple[dict
         return None, "fold_read folds what this run read into its summary: give the sentence"
     if silent and action != "finish":
         return None, "silent requires action=finish"
-    if summary and not (self_started or resolve_ctx_lineage(ctx)["is_root_task"]):
-        return None, "summary is available only on a root task or a self-started run"
+    # A sentence for a human this run does not speak to is decorative: dropped and named, never a veto on the answer;
+    # the fold it would stand for goes with it.
+    ignored = ([*(["summary"] if summary else []), *(["fold_read"] if fold_read else [])]
+               if summary and not (self_started or resolve_ctx_lineage(ctx)["is_root_task"]) else [])
     if silent and not self_started and not reply_carrier(metadata):
         return None, ("silent is available only on a self-started run: "
                       "a consciousness wake's own turn, or a schedule-born root without a Presence binding; "
@@ -1094,8 +1096,8 @@ def completion_request(ctx: ToolContext | None, arguments: object) -> tuple[dict
         "action": action, "answer": answer, "answer_sha256": selector,
         "rationale": arguments.get("rationale", ""), "acceptance_subject": arguments.get("acceptance_subject"),
         "pending_review": arguments.get("pending_review"), "wake_silent": bool(silent) or None,
-        "wake_summary": summary or None, "fold_read": True if fold_read else None,
-        "swarm_comparison": arguments.get("swarm_comparison"),
+        "wake_summary": (not ignored and summary) or None, "fold_read": True if fold_read and not ignored else None,
+        "swarm_comparison": arguments.get("swarm_comparison"), "ignored": ignored or None,
     }, allow_empty=bool(silent))
 
 
@@ -1166,8 +1168,8 @@ def _stage_checked_completion(ctx: ToolContext, checked: dict, *, source: str, r
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
             text="ERROR: COMPLETION_CONFLICT: contradictory completion requests in one response; select again after seeing all results."))
     ctx._completion_request = staged
-    return json.dumps({"status": "completion_requested", "completion_control": True, "action": staged["action"]},
-                      ensure_ascii=False)
+    return json.dumps({"status": "completion_requested", "completion_control": True, "action": staged["action"],
+                       **({"ignored": staged["ignored"]} if staged.get("ignored") else {})}, ensure_ascii=False)
 
 
 _FINISH_TASK_ARGUMENTS = frozenset(inspect.signature(_finish_task).parameters) - {"ctx"}

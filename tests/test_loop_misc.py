@@ -101,6 +101,7 @@ def test_owner_directives_survive_compaction_without_control_prose(tmp_path):
         row for row in drain_owner_entries(tmp_path, "root")
         if row["msg_id"] == "control-1"
     )
+    mail_entry = next(row for row in drain_owner_entries(tmp_path, "root") if row["msg_id"] == "mail-1")
     expected_deadline = (
         parse_deadline_ts(control_entry["ts"]).timestamp()
         + task_pacing.effective_finalization_reserve_sec(ctx)
@@ -124,10 +125,14 @@ def test_owner_directives_survive_compaction_without_control_prose(tmp_path):
     ]
     assert ctx._owner_directives[0]["content"] == "Initial requirement verbatim"
     assert ctx._owner_directives[1]["msg_id"] == "direct-1"
+    # No chat row is held for either: each keeps when the host received it (the mailbox entry's time; the
+    # drain's read time for the in-memory delivery), never an invented chat time or room.
+    assert ctx._owner_directives[1]["received"] and "ts" not in ctx._owner_directives[1]
     assert ctx._owner_directives[2] == {
         "source": "owner_mailbox",
         "content": "mailbox follow-up",
         "msg_id": "mail-1",
+        "received": mail_entry["ts"],
     }
     assert "deadline control" not in json.dumps(ctx._owner_directives)
 

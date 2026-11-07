@@ -48,6 +48,7 @@ def test_api_all_fields_form_queues_without_changing_write_surface(registry, acc
         "may_fan_out": True, "max_children": 0, "requested_depth": 0,
         "required_capabilities": [], "deadline_at": "", "acceptance_claims": [], "effort": "auto",
         "input_files": [],  # an explicit none gates no surface
+        "memory_view": {},  # an explicit none widens no view; the child's start, not the schedule, judges it
     }
     schema = registry.get_schema_by_name("schedule_subagent")["function"]["parameters"]
     # Session-only choices have no API-child default; omission preserves native execution.

@@ -898,6 +898,59 @@ def test_a_failed_probe_is_retried_once_its_throttle_expires_and_not_before(tmp_
     assert retried.status == ce.STATUS_CONFIRMED and retried.window_tokens == 1_000_000
 
 
+def test_a_cold_child_probes_its_own_route_and_a_failed_probe_stays_an_unknown(tmp_path, monkeypatch):
+    """A child sizes its first request on its own route's evidence. In a cold process (an empty
+    store) concurrent child starts on one route each may ask the provider, all of them see the
+    confirmed window and a later start reuses it unasked; a child that switches to a route whose
+    provider is down probed it, and that failure stays the plan's unknown."""
+    import threading
+    from types import SimpleNamespace
+
+    from ouroboros import context, context_fit
+    from ouroboros import loop_model_call
+
+    fetches = []
+
+    def metadata(_provider, model, *_args, **_kwargs):
+        fetches.append(model)
+        return (1_000_000, ce.utc_now_iso()) if model == "x/child" else (0, "")
+
+    def resolver(task, *, allow_fetch):
+        model = task.get("model") or "x/child"
+        return ({"provider": "openrouter", "model": model, "base_url": "", "use_local": False},
+                ce.probe(tmp_path, provider="openrouter", model=model, allow_fetch=allow_fetch))
+
+    monkeypatch.setattr(ce, "_provider_metadata_window", metadata)
+    monkeypatch.setattr(ce, "_metadata_fetch_transport_failed", lambda *a, **k: True)
+    monkeypatch.setattr(context, "_context_fit_route", resolver)
+    monkeypatch.setattr(context_fit, "reference_doc_sections", lambda *a, **k: ([], ""))
+    core = context_fit.ContextCore(
+        base_prompt="p", bible_md="b", architecture_md="a", development_md="d",
+        semi_stable_text="s", dynamic_text="y", user_content_json='"u"', docs_need_development=False)
+    env, child = SimpleNamespace(drive_root=str(tmp_path)), {"delegation_role": "subagent",
+                                                             "task_metadata": {"delegation_role": "subagent"}}
+
+    def start(plans):
+        plans.append(context_fit.build_context_fit_plan(env, core, dict(child), preferred_mode="max",
+                                                         route_resolver=resolver))
+    plans = []
+    workers = [threading.Thread(target=start, args=(plans,)) for _ in range(4)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+    assert [(plan.status, plan.window_tokens) for plan in plans] == [(ce.STATUS_CONFIRMED, 1_000_000)] * 4
+    asked = len(fetches)
+    assert 1 <= asked <= 4 and set(fetches) == {"x/child"}
+    start(plans)
+    assert len(fetches) == asked and (plans[-1].status, plans[-1].window_tokens) == (ce.STATUS_CONFIRMED, 1_000_000)
+
+    tools = SimpleNamespace(_ctx=SimpleNamespace(task_metadata=dict(child["task_metadata"]), _accumulated_usage={}))
+    rebound, _mode = loop_model_call._rebind_context_fit_plan(
+        plans[0], tools, plans[0].messages_for("max"), model="x/down", use_local=False, tool_schemas=[])
+    assert fetches[-1] == "x/down" and (rebound.status, rebound.window_tokens) == (ce.STATUS_FAILED, 0)
+
+
 def test_expired_probe_records_drop_on_write(tmp_path):
     """CPL4-C8: the write seam drops probe records the reader already treats as
     expired — failed/unprobeable past their TTL, confirmed past GC retention —

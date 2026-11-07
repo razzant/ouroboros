@@ -577,9 +577,8 @@ def _rebind_context_fit_plan(
         "model_route": model_route if model_route is not None else getattr(plan, "model_route", {}),
         "credential_profile_id": credential_profile_id,
     }
-    is_subagent = str(metadata.get("delegation_role") or "").lower() == "subagent"
     try:
-        route, evidence = _context_fit_route(task, allow_fetch=not is_subagent)
+        route, evidence = _context_fit_route(task, allow_fetch=True)
     except Exception:
         log.debug("Route-switch capability probe failed; preserving unknown Max", exc_info=True)
         route, evidence = _failed_route_evidence(task)

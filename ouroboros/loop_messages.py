@@ -254,7 +254,7 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
         # The named owner ingress carries the host-bound answer snapshot: its human words are authority, the card
         # rides beside them; the source-work link in the model's frame and the external request are context.
         _loop()._record_owner_directive(ctx, source="owner_quiz_answer", content=late_answer_owner_text(answered),
-                                      origin={"source_task_id": late["task_id"], "quiz_id": late["quiz_id"]},
+                                      origin={"source_task_id": late["task_id"], "quiz_id": late["quiz_id"], "ts": answered.get("answered_at")},
                                       reply_to=answered_card_reply(answered, late["task_id"]))
         return
     author = metadata.get("objective_author")
@@ -267,7 +267,7 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
                     ctx, source=str(row["source"]), content=row.get("content"),
                     msg_id=str(row.get("msg_id") or ""),
                     origin={key: row[key] for key in ("source_task_id", "relayed_from_task_id", "quiz_id",
-                                                      "client_message_id", "chat_id") if row.get(key)},
+                                                      "client_message_id", "chat_id", "ts", "received") if row.get(key)},
                     reply_to=row.get("reply_to") if isinstance(row.get("reply_to"), dict) else None, carried=True,
                 )
         return  # The task-drafted objective is never an owner directive.

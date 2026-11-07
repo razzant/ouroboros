@@ -644,7 +644,7 @@ def run_llm_loop(
             _pre_drain_sig = transcript_growth_signature(messages)
             _controls = _drain_incoming_messages(
                 messages, incoming_messages, drive_root, task_id, event_queue,
-                _owner_msg_seen, owner_ctx=ctx, defer_content_ack=True)
+                _owner_msg_seen, owner_ctx=ctx, defer_content_ack=True, place_live_runs=True)
             if _delegate_hold_step(
                     tools, controls=_controls, messages=messages, drive_logs=drive_logs,
                     task_id=task_id, emit_progress=emit_progress,
