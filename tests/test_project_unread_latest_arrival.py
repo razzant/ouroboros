@@ -235,11 +235,132 @@ def test_an_unreadable_store_answers_the_whole_read_as_unavailable(room, monkeyp
     assert payload["messages"] == [] and payload["has_more"] is True and "latest_message" not in payload["window"]
 
 
-def test_main_names_nothing(room):
-    message_bus.send_with_budget(1, "a Main reply", task_id="root-1")
-    response = asyncio.run(history.make_chat_history_endpoint(message_bus.DATA_DIR)(
-        SimpleNamespace(query_params={})))
-    assert "latest_message" not in json.loads(response.body)["window"]
+def deliver_main(room, text: str, minute: int | None, task_id: str = "root-1", **fields) -> None:
+    """A Main delivery through the real send seam (``minute=None``: written now, as a live row is)."""
+    delivery._handle_send_message({"type": "send_message", "chat_id": 1, "task_id": task_id, "text": text,
+                                   **({"ts": ts(minute)} if minute is not None else {}), **fields}, room.host)
+
+
+def main_window(room, **params) -> dict:
+    response = asyncio.run(history.make_chat_history_endpoint(room.root)(SimpleNamespace(query_params=params)))
+    assert response.status_code == 200, response.body
+    return json.loads(response.body)["window"]
+
+
+def test_main_names_its_newest_arrival_as_a_project_does(room):
+    """Main lands on what arrived last too (owner 06.11, DESIGN "Unread"): a late answer that keeps its earlier ``ts``
+    is named out of order, and a child's own words are card content, never Main's arrival."""
+    for minute in (10, 11):
+        deliver_main(room, f"main reply {minute}", minute)
+    deliver_main(room, "late main final", 1)
+    assert main_window(room)["latest_message"] == {"history_id": room.row_id("late main final"), "out_of_order": True}
+    deliver_main(room, "a child's own words", 12, task_id="kid-1")
+    assert main_window(room)["latest_message"]["history_id"] == room.row_id("late main final"), "card content is never it"
+
+
+def project_row(room, kind: str, minute: int, project_id: str = "racer") -> str:
+    """A Project lifecycle row in Main as the host writes it; ``project_id=""``: a row written before it carried one."""
+    text = f"Racer task · {kind} {minute}"
+    deliver_main(room, text, minute, role="system", system_type=kind, delivery_id=f"{kind}:{minute}", progress_meta={
+        "project_name": "Racer", "target_label": "Racer task", "task_name": "Racer task",
+        **({"project_id": project_id} if project_id else {})})
+    return text
+
+
+@pytest.mark.parametrize("kind", ["project_started", "project_handoff"])
+def test_a_started_or_handed_over_project_main_shows_as_its_portal_is_never_mains_arrival(room, kind):
+    """Main draws such a row as the work's portal (work_portal.js ``row``), never a node of its own: it never makes
+    Main unread (the producer), and named, Main would stay unread for good (DESIGN "Unread"). The same row with no
+    Project id is drawn as text, counts and is named; a completion summary is the author's final bubble, the same."""
+    from ouroboros.gateway.ui_preferences import main_room_revision
+
+    deliver_main(room, "main reply", 10)
+    counted = main_room_revision(room.root)
+    project_row(room, kind, 11)
+    assert main_room_revision(room.root) == counted, "a portal is a card: Main is not made unread by it"
+    assert main_window(room)["latest_message"]["history_id"] == room.row_id("main reply")
+    legacy = project_row(room, kind, 12, project_id="")
+    assert main_room_revision(room.root) == counted + 1, "drawn as text, it is a message"
+    assert main_window(room)["latest_message"] == {"history_id": room.row_id(legacy), "out_of_order": False}
+    final = project_row(room, "project_completion_summary", 13)
+    assert main_room_revision(room.root) == counted + 2
+    assert main_window(room)["latest_message"] == {"history_id": room.row_id(final), "out_of_order": False}
+
+
+def test_the_bounded_search_passes_a_portal_row_on_to_mains_own_reply(room, narrow_recent):
+    deliver_main(room, "main reply", 5)
+    project_row(room, "project_started", 6)
+    for index in range(6):
+        deliver_main(room, f"child note {index}", 20 + index, task_id="kid-1")
+    message_bus.log_chat("in", 1, 7, "owner asks", ts=ts(40))
+    recent = main_window(room, n_human="2")
+    assert recent["latest_message"] == {"history_id": room.row_id("main reply"), "out_of_order": True}
+
+
+def ask_from_project(room, monkeypatch):
+    """A question the Project's work asks: Main shows it as a copy of the room's (a pointer) and never counts it."""
+    from ouroboros.task_results import STATUS_RUNNING, write_task_result
+    from tests.test_quiz_answer import _escalate, _tool_ctx
+
+    write_task_result(room.root, "task-1", STATUS_RUNNING, project_id="racer", chat_id=room.chat_id)
+    ctx = _tool_ctx(room.root, task_id="task-1", chat_id=room.chat_id)
+    ctx.owner_wait_callback = lambda *_: None
+    assert _escalate(ctx, question="Which storage?", wait_for_answer=True,
+                     options=[{"label": "Local"}, {"label": "Shared"}]).startswith("OK:")
+    event = ctx.pending_events[0]
+    assert room.host.bridge.send_quiz(room.chat_id, **{key: event[key] for key in (
+        "quiz_id", "question", "options", "stake", "assumption", "state", "task_id", "wait_for_answer")})[0]
+    return event["quiz_id"]
+
+
+def test_a_project_question_main_mirrors_is_never_its_arrival_open_or_answered(room, monkeypatch):
+    from ouroboros.gateway.ui_preferences import main_room_revision
+    from tests.test_quiz_answer import _decision_app, _post
+
+    deliver_main(room, "main reply", None)
+    counted = main_room_revision(room.root)
+    quiz_id = ask_from_project(room, monkeypatch)
+    assert main_room_revision(room.root) == counted, "a Project's question never counts in Main"
+    main_read = json.loads(asyncio.run(history.make_chat_history_endpoint(room.root)(
+        SimpleNamespace(query_params={}))).body)
+    assert any(row.get("system_type") == "project_question_pointer" for row in main_read["messages"]), "Main shows it"
+    assert main_read["window"]["latest_message"]["history_id"] == room.row_id("main reply")
+    answered = _post(_decision_app(room.root, monkeypatch, live_task={"id": "task-1", "chat_id": room.chat_id}),
+                     {"request_id": "answer-1", "decision_id": f"quiz:task-1:{quiz_id}", "option_index": 1})
+    assert answered.status_code == 200, answered.text
+    assert main_window(room)["latest_message"]["history_id"] == room.row_id("main reply"), "answered, still not it"
+
+
+def test_mains_own_question_is_its_arrival_in_the_recent_read_and_the_bounded_search(room, narrow_recent, monkeypatch):
+    """The other direction: only a Project's copy is passed over; a question Main's own work asks is Main's message."""
+    from ouroboros.task_results import STATUS_RUNNING, write_task_result
+    from tests.test_quiz_answer import _escalate, _tool_ctx
+
+    deliver_main(room, "main reply", None)
+    write_task_result(room.root, "main-task", STATUS_RUNNING, chat_id=1)
+    ctx = _tool_ctx(room.root, task_id="main-task", chat_id=1)
+    ctx.owner_wait_callback = lambda *_: None
+    assert _escalate(ctx, question="Which storage, Main?", wait_for_answer=True,
+                     options=[{"label": "Local"}, {"label": "Shared"}]).startswith("OK:")
+    event = ctx.pending_events[0]
+    assert room.host.bridge.send_quiz(1, **{key: event[key] for key in (
+        "quiz_id", "question", "options", "stake", "assumption", "state", "task_id", "wait_for_answer")})[0]
+    question = next(s.history_id for s in ds.newest(room.root, "chat", limit=1 << 40) if s.row.get("type") == "quiz")
+    assert main_window(room)["latest_message"]["history_id"] == question
+    for index in range(6):
+        deliver_main(room, f"child note {index}", None, task_id="kid-1")
+    message_bus.log_chat("in", 1, 7, "owner asks")
+    assert main_window(room, n_human="2")["latest_message"] == {"history_id": question, "out_of_order": True}
+
+
+def test_the_bounded_search_passes_a_project_question_on_to_mains_own_reply(room, narrow_recent, monkeypatch):
+    deliver_main(room, "main reply", None)
+    ask_from_project(room, monkeypatch)
+    for index in range(6):
+        deliver_main(room, f"child note {index}", None, task_id="kid-1")
+    message_bus.log_chat("in", 1, 7, "owner asks")
+    recent = main_window(room, n_human="2")
+    assert recent["latest_message"] == {"history_id": room.row_id("main reply"), "out_of_order": True}
 
 
 def test_a_room_read_while_the_project_registry_is_unreadable_names_no_arrival_and_main_reads_on(room):

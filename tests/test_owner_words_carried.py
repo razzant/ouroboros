@@ -1,8 +1,8 @@
-"""My human's words reach the work they caused, by value: from an addressed place turn, through a follow-up
+"""My human's words reach the work they caused, by value: from a place turn that cites them, through a follow-up
 (once and cron) to its root and that root's helpers, with the message they replied to under its own author.
 
-Every guard is checked both ways: the words arrive where my human addressed the work, and stay out where
-they did not (an unaddressed remark, a participant, a run with no owner words).
+Every guard is checked both ways: the words arrive where my human's cited words started the work, and stay out
+where they did not (uncited provenance, a participant, a forward, a run with no owner words).
 """
 from __future__ import annotations
 
@@ -23,37 +23,51 @@ LONG = ("Sasha's estimate is fine, but before you start: keep the old export pat
         "write the migration as a reversible step, and only then switch the default. ") * 3 + "Do NOT ship on Friday."
 
 
-def _place_turn(tmp_path, *, addressed=True, confirmed=True, reply_to_message_id="", forwarded=False):
+def _place_turn(tmp_path, *, confirmed=True, reply_to_message_id="", forwarded=False):
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, current_task_type="presence")
     ctx.task_id = "place-turn"
     message = {"reply_to_message_id": reply_to_message_id} if reply_to_message_id else {}
     message.update({"forward_origin": {"sender_user_name": "Andrew"}} if forwarded else {})
     ctx.task_metadata = {
-        "focus": {"place_id": "p1", "room_chat_id": 2 ** 41 + 3, "addressed": addressed,
+        "focus": {"place_id": "p1", "room_chat_id": 2 ** 41 + 3,
                   "actor": {"platform_actor_id": "anton", "owner_confirmed": confirmed}},
         "presence": {"observed_text": LONG, "event": {"source_event_id": "ev-9", "message": message}}}
     _initialize_owner_directives(ctx, [{"role": "user", "content": "[FOCUS] an event in Team chat …"}])
     return ctx
 
 
-def test_an_addressed_place_turn_from_my_human_carries_their_exact_words(tmp_path):
+def test_a_confirmed_place_turn_records_my_humans_exact_words_as_provenance_that_a_cite_carries(tmp_path):
+    """Their words from a confirmed account are provenance (no directive, no verdict about whom they are for): a
+    helper or schedule gets no governing words from them; only the cite the mind makes carries them whole."""
+    from ouroboros.owner_words import PLACE_CONFIRMED, cited_owner_basis
     ctx = _place_turn(tmp_path)
     place, frame = ctx._owner_directives
-    assert place == {"source": "place_owner", "content": LONG, "msg_id": f"chat {2 ** 41 + 3} / ev-9", "carried": True}
+    assert place == {"source": PLACE_CONFIRMED, "content": LONG, "msg_id": f"chat {2 ** 41 + 3} / ev-9", "carried": True}
     assert frame["source"] == "initial_text", "the event frame stays the first text Safety reads"
-    words = governing_words_for_schedule(ctx)[FIELD]
-    assert [row["text"] for row in words] == [LONG], "a helper gets the whole words, not a cut"
+    assert FIELD not in governing_words_for_schedule(ctx), "provenance alone governs nothing"
+    basis, error = cited_owner_basis(ctx, LONG)
+    assert error == "" and basis["content"] == LONG and basis["basis"] == "cited"
+    seeded = SimpleNamespace(task_metadata={"objective_author": {"kind": "task", "task_id": "place-turn"}, "owner_corpus": [basis]})
+    _initialize_owner_directives(seeded, [{"role": "user", "content": "drafted"}])
+    assert [row["text"] for row in governing_words_for_schedule(seeded)[FIELD]] == [LONG], "a helper gets the whole words, not a cut"
 
 
-@pytest.mark.parametrize("addressed,confirmed,forwarded", [(False, True, False), (True, False, False), (True, True, True)])
-def test_an_unaddressed_remark_a_participant_or_a_forward_is_not_work(tmp_path, addressed, confirmed, forwarded):
-    ctx = _place_turn(tmp_path, addressed=addressed, confirmed=confirmed, forwarded=forwarded)  # a forward: another author
+@pytest.mark.parametrize("confirmed,forwarded", [(False, False), (True, True)])
+def test_a_participant_or_a_forward_is_not_my_humans_words(tmp_path, confirmed, forwarded):
+    ctx = _place_turn(tmp_path, confirmed=confirmed, forwarded=forwarded)  # a forward: another author
     assert [row["source"] for row in ctx._owner_directives] == ["initial_text"]
     assert FIELD not in governing_words_for_schedule(ctx)
+    from ouroboros.owner_words import cited_owner_basis
+    assert cited_owner_basis(ctx, LONG)[0] is None, "their bytes cannot be cited as my human's"
 
 
 def test_a_place_reply_names_its_target_by_address_when_the_connector_gave_no_words(tmp_path):
-    rows = governing_words_for_schedule(_place_turn(tmp_path, reply_to_message_id="m-41"))[FIELD]
+    from ouroboros.owner_words import cited_owner_basis
+    basis, _error = cited_owner_basis(_place_turn(tmp_path, reply_to_message_id="m-41"), LONG)
+    seeded = SimpleNamespace(task_metadata={"objective_author": {"kind": "task", "task_id": "place-turn"}, "owner_corpus": [basis]})
+    _initialize_owner_directives(seeded, [{"role": "user", "content": "drafted"}])
+    seeded.task_id = "place-turn"
+    rows = governing_words_for_schedule(seeded)[FIELD]
     assert rows[1] == {"text": "", "source": REPLY_TARGET, "carrier": "ctx", "task_id": "place-turn", "ts": "",
                        "ref": "platform message m-41 in this room", "author": "author not recorded"}
     text = render_owner_words(rows, audience="child")
@@ -113,16 +127,16 @@ def test_one_list_names_my_humans_corpus_labels_for_every_reader(tmp_path):
     from ouroboros.owner_continue import CORPUS_INITIAL_SOURCES, CORPUS_OWNER_SOURCES
     from ouroboros.tools.control_routing import _attach_drafted_objective
 
+    from ouroboros.owner_words import cited_owner_basis
     assert "place_owner" in OWNER_SOURCES and CORPUS_OWNER_SOURCES == OWNER_SOURCES - CORPUS_INITIAL_SOURCES
     ctx = _place_turn(tmp_path)
     evt: dict = {}
     _attach_drafted_objective(ctx, evt)
-    assert [row["source"] for row in evt["owner_corpus"]] == ["place_owner"] == [
-        row["source"] for row in carried_owner_corpus(ctx)]
-    seeded = SimpleNamespace(task_metadata={"objective_author": {"kind": "task", "task_id": "place-turn"},
-                                            "owner_corpus": evt["owner_corpus"]})
+    assert evt["owner_corpus"] == [] == carried_owner_corpus(ctx), "provenance rows are not the corpus a start carries"
+    corpus = [*evt["owner_corpus"], cited_owner_basis(ctx, LONG)[0]]  # what start_task adds on a verified cite
+    seeded = SimpleNamespace(task_metadata={"objective_author": {"kind": "task", "task_id": "place-turn"}, "owner_corpus": corpus})
     _initialize_owner_directives(seeded, [{"role": "user", "content": "drafted"}])
-    assert [row["content"] for row in seeded._owner_directives] == [LONG]
+    assert [(row["source"], row["content"]) for row in seeded._owner_directives] == [("place_owner", LONG)]
 
 
 def test_words_repeat_only_by_identity_never_by_likeness(tmp_path):

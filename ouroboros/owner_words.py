@@ -49,9 +49,15 @@ from typing import Any, Dict, List, Mapping, Tuple
 log = logging.getLogger(__name__)
 
 # The one list of corpus labels (``loop_messages._record_owner_directive``) that are my human's own words;
-# ``place_owner``: an addressed place turn's event from an account its place confirmed at admission.
+# ``place_owner``: their words from a place that a run cited for the work it started (``basis: cited``, verified by
+# ``cited_owner_basis``); older records carry the same label from the retired host verdict.
 OWNER_SOURCES = frozenset({"initial_user", "owner_mailbox", "owner_quiz_answer", "origin_message",
                            "owner_corpus", "direct_incoming", "place_owner"})
+# A place event from an account its place confirms as my human's: their words, said where others can hear. Provenance
+# only (outside ``OWNER_SOURCES``): whom they are for, and whether they ask me for work, is my reading; an order exists
+# only where I cite them and the host verifies the bytes.
+PLACE_CONFIRMED = "place_confirmed"
+CITED = "cited"
 FIELD, ABSENT_FIELD = "governing_owner_words", "governing_owner_words_absent"
 # A session task's record alone: the rows ``_live_words`` read at its scheduling (the bound room's rows, the
 # Project's origin rows and the marked rows), by value, read by its work order only (never inherited, carried or
@@ -347,12 +353,41 @@ def carried_owner_corpus(ctx: Any, source_text: Any = "") -> List[Dict[str, Any]
     return [row for row in rows if row["content"].strip()]
 
 
-def place_owner_words(focus: Any, text: Any, message: Any) -> str:
-    """A place event's words when they are my human's: addressed to me from an account its place confirmed, the
-    same rule at a turn's opening and mid-turn. A forwarded message carries another author's words: context."""
-    focus, words = _mapping(focus), str(text or "")
-    confirmed = focus.get("addressed") is True and _mapping(focus.get("actor")).get("owner_confirmed") is True
-    return words if confirmed and words.strip() and not _mapping(message).get("forward_origin") else ""
+def place_confirmed_words(confirmed: bool, text: Any, message: Any) -> str:
+    """A place event's words as provenance when its author is an account the place confirms as my human's (and the
+    connector does not report it unauthenticated), the same at a turn's opening and mid-turn. A forwarded message
+    carries another author's words: context. Never a verdict about whom the words are for."""
+    words = str(text or "")
+    return words if confirmed is True and words.strip() and not _mapping(message).get("forward_origin") else ""
+
+
+def cited_owner_basis(ctx: Any, owner_words: Any) -> Tuple[Dict[str, Any] | None, str]:
+    """``(basis, error)`` for words a run cites as my human's order for the work it starts.
+
+    The host verifies provenance and nothing else: the exact bytes (``chronicle_quotes.quote_in``, emphasis
+    markers aside) inside one message that reached THIS run and is my human's by provenance: an owner-door row
+    (``OWNER_SOURCES``) or a place event from an account its place confirms (``PLACE_CONFIRMED``: confirmed,
+    not unauthenticated, not forwarded). Absent words: ``(None, "")``, the work is my own. Words found: the row
+    the new root carries (``basis: cited``) holds the whole verified message as ``content`` (never a host cut of my
+    human's words) with the cited span as ``cited``, labelled by its real source: the owner door it came through,
+    or ``place_owner`` for a confirmed account's place words. Words not found: a typed refusal, nothing started.
+    Whether the words ask for this work is the citing mind's reading, visible on the card."""
+    from ouroboros.chronicle_quotes import quote_in
+
+    wanted = str(owner_words or "").strip()
+    if not wanted:
+        return None, ""
+    for row in directive_owner_rows(ctx):  # owner-door rows that reached this run (never a reply target's words)
+        if row["source"] in OWNER_SOURCES and quote_in(wanted, row["text"]):
+            return {"source": row["source"], "content": row["text"], "cited": wanted, "basis": CITED, "carried": True,
+                    **({"msg_id": row["ref"]} if row.get("ref") else {})}, ""
+    for item in getattr(ctx, "_owner_directives", None) or []:  # confirmed place events, with what they replied to
+        if isinstance(item, dict) and item.get("source") == PLACE_CONFIRMED and quote_in(wanted, str(item.get("content") or "")):
+            return {"source": "place_owner", "content": str(item.get("content") or ""), "cited": wanted, "basis": CITED,
+                    "carried": True, **{key: item[key] for key in ("msg_id", "reply_to") if item.get(key)}}, ""
+    return None, ("owner_words were not found verbatim in any message of your human that reached this run (their "
+                  "confirmed account, not forwarded): nothing was started. Copy their exact words, or omit owner_words "
+                  "to start the work as your own.")
 
 
 def place_reply_target(message: Any) -> Dict[str, str] | None:

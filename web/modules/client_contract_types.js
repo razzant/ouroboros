@@ -493,7 +493,7 @@
  */
 
 /**
- * Bounds of one history response. `latest_message` (Project rooms) names the latest eligible
+ * Bounds of one history response. `latest_message` (Main and Project rooms) names the latest eligible
  * non-owner standalone message by stored arrival, excluding card content; null means unknown.
  * `out_of_order`: it sorts above earlier arrivals or before the recent read. With a null message,
  * `latest_before` says the bounded search found none at or after that chat offset; older pages

@@ -223,3 +223,35 @@ def test_failure_fact_does_not_change_pin_or_single_account_auto_mode():
     assert _request(target, _continuation("only-profile"), None, parameters)["account"] == {
         "mode": "auto",
     }
+
+
+def _released(code):
+    from types import SimpleNamespace
+    from ouroboros.llm_claudexor import ClaudexorModelNotDispatched
+
+    error = ClaudexorModelNotDispatched({"code": code, "message": "no request left the host"},
+                                        route={"source": "codex", "model": "gpt-6", "credentialProfileId": "profile-a"})
+    error.physical_attempt_capture = SimpleNamespace(state="released", provider="claudexor", route_is_loopback=False)
+    return error
+
+
+@pytest.mark.parametrize(("error", "kept"), [
+    (ClaudexorModelError({"code": "context_length_exceeded", "message": "too long"},
+                         route={"source": "codex", "model": "gpt-6", "credentialProfileId": "profile-a"}), True),
+    (_released("model_account_unavailable"), False),  # an engine account verdict, though it reads as a transport wait
+    (ClaudexorModelError({"code": "context_length_exceeded", "message": "too long", "context": {"poolCause": "quota"}},
+                         route={"source": "codex", "model": "gpt-6", "credentialProfileId": "profile-a"}), False),
+    (ClaudexorModelError({"code": "server_error", "message": "stream ended"}, unknown=True,
+                         route={"source": "codex", "model": "gpt-6", "credentialProfileId": "profile-a"}), False),
+    (ClaudexorModelError({"code": "rate_limited", "message": "slow down"},
+                         route={"source": "codex", "model": "gpt-6", "credentialProfileId": "profile-a"}), False),
+])
+def test_a_size_refusal_keeps_the_conversations_account(error, kept):
+    """C2 S5 (06.11.2026): a size refusal says nothing about the account, so the shrunk request stays
+    where its prefix is cached; an unknown outcome or any account evidence still drops it once."""
+    target = {"source": "codex", "resolved_model": "gpt-6"}
+    parameters = {"cache_affinity": f"execution-{error.code}"}
+    remember_failed_profile(target, parameters, error)
+
+    preferred = _request(target, _continuation(), None, parameters)["account"].get("preferredProfileId")
+    assert preferred == ("profile-a" if kept else None)

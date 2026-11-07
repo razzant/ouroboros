@@ -58,6 +58,25 @@ def test_numberless_refusal_adds_no_ceiling(tmp_path, monkeypatch, message, usab
     assert resolve_window(evidence, 65_536, root=tmp_path).usable == usable
 
 
+def test_numberless_refusal_bounds_the_window_only_at_a_measured_size(tmp_path, monkeypatch):
+    """Codex refuses by size without a number: a measured refused size lowers a window an acceptance raised."""
+    from types import SimpleNamespace
+    from ouroboros.context_anchor import record_refused_input
+
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    plan = SimpleNamespace(route_fp="r", window_witness_bound=True, provider="openai", model="model")
+    evidence = ce.CapabilityEvidence(872_000, "confirmed", "metadata", "r")
+    record_observation(tmp_path, "r", accepted=919_379, reserve=65_536, transmitted=65_536)
+    assert resolve_window(evidence, 65_536, root=tmp_path).usable == 919_379
+    usage = {"_last_llm_provider_message": "Codex reported a failed response."}
+    record_refused_input(usage, plan, 911_000)  # a cold estimate measures nothing beyond this task
+    assert resolve_window(evidence, 65_536, root=tmp_path).usable == 919_379
+    record_refused_input(usage, plan, 911_000, measured=True)
+    window = resolve_window(evidence, 65_536, root=tmp_path)
+    assert (window.usable, window.source.split()[0]) == (911_000, "refusal")
+    assert resolve_window(replace(evidence, route_fp="other"), 65_536, root=tmp_path).total.tokens == 872_000
+
+
 @pytest.mark.parametrize("main", [True, False])
 def test_settlement_binds_main_density_and_acceptance_but_auxiliary_calls_do_not(tmp_path, main):
     from types import SimpleNamespace

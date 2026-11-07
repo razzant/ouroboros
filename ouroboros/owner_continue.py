@@ -98,12 +98,14 @@ OWNER_SOURCE_KINDS = frozenset({"owner_text", "quiz_answer", "quiz_closed", "car
 # The retained owner corpus (``review_evidence.task_inputs``) labels each row by its recorder's typed
 # ``source`` (``loop_messages._record_owner_directive``): my human's later words (the one owner list less
 # the first text; the successor's seeding set), the run's first text (a projection of the original, never a
-# later message) and a task's words (context). A row whose label is none of these is not promoted to owner text.
-# The door's labels in words carried by value (a follow-up's, a drafted start's ``owner_corpus``) are my human's.
+# later message), a task's words and a confirmed account's place words (context; an order only by cite). A row whose
+# label is none of these is not promoted to owner text. The door's labels in words carried by value (a follow-up's, a
+# drafted start's ``owner_corpus``) are my human's.
 CORPUS_INITIAL_SOURCES = frozenset({"origin_message", "initial_user", "initial_text", "initial_text_transcript"})
 CORPUS_OWNER_SOURCES = OWNER_SOURCES - CORPUS_INITIAL_SOURCES
 CARRIED_DOOR_SOURCES = frozenset({"origin_message", "initial_user"})
 CORPUS_TASK_SOURCES = frozenset({"principal_task_message", "relayed_peer_message"})
+CORPUS_PLACE_SOURCES = frozenset({"place_confirmed"})  # my human's confirmed account in a place: provenance, whole
 # The typed ids an owner-source row may carry, each a string when present: its message, a task message's sender and
 # relaying sibling, an owner answer's card, the chat row it is and that id's room; its ``reply_to`` rides beside them.
 ROW_IDS = ("msg_id", "source_task_id", "relayed_from_task_id", "quiz_id", "client_message_id", "chat_id")
@@ -468,7 +470,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
                      not isinstance(original.get("origin_message_ref", {}), dict)):
         gaps.append("original_owner_source_malformed")
     later: List[Dict[str, Any]] = []
-    peers: List[Dict[str, Any]] = []
+    peers, confirmed = [], []  # other tasks' words (counted, behind a reader); my human's confirmed place words (whole)
     attached, quoted = [], []  # an owner message's staged files; the chat uploads a relay quoted
     # The start's answers keep their one identity: a corpus copy is the same message.
     seen: Dict[str, Tuple[str, bool]] = {row["msg_id"]: (row["content"], True) for row in (start or {}).get("answers") or []}
@@ -477,6 +479,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
     # Validate identities before deduplication: a dict comprehension would hide rivals.
     for key, target, text_key, source_key, sources in (
         ("later", later, "content", "source", CORPUS_OWNER_SOURCES | CARRIED_DOOR_SOURCES),
+        ("confirmed_place", confirmed, "content", "source", CORPUS_PLACE_SOURCES),
         ("peer_context", peers, "text", "provenance", None),
     ):
         for row in container(continuation if key == "peer_context" else chained, key, list,
@@ -525,7 +528,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
                 client_identity = row_identity({"chat_id": row.get("chat_id") or original_chat_id,
                                                 "client_message_id": client})
                 origin_identity = original_id
-            if source not in CORPUS_INITIAL_SOURCES | CORPUS_OWNER_SOURCES | CORPUS_TASK_SOURCES:
+            if source not in CORPUS_INITIAL_SOURCES | CORPUS_OWNER_SOURCES | CORPUS_TASK_SOURCES | CORPUS_PLACE_SOURCES:
                 gaps.append("owner_source_provenance_unknown")
                 continue
             door = carried and source in CARRIED_DOOR_SOURCES
@@ -553,6 +556,9 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
                         if source == "owner_quiz_answer" and ids.get("source_task_id") == task_id else None)
                 later.append({"source": source, "content": text, "msg_id": msg_id, **ids,
                               **({"card": card} if card else {})})
+            elif source in CORPUS_PLACE_SOURCES:  # carried to the successor whole, with its id and reply target
+                confirmed.append({"source": source, "content": text, "msg_id": msg_id,
+                                  **({"reply_to": row["reply_to"]} if isinstance(row.get("reply_to"), dict) else {})})
             elif source in CORPUS_TASK_SOURCES:
                 peers.append({"msg_id": msg_id, "ts": "", "source_task_id": str(row.get("source_task_id") or ""),
                               "provenance": source, "text": text,
@@ -676,7 +682,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
                    and row.get("kind") == "memory_export" and pathlib.Path(str(row.get("path") or "")).is_file()), "")
     readable = (*(drive / "task_drives" / task_id for drive in drives), *task_artifact_stores(root, task_id))
     return {"original": original, "schedule": schedule, "start": start, "wake": wake, "api": api, "later": later,
-            "peer_context": peers, "gaps": list(dict.fromkeys(gaps)),
+            "peer_context": peers, "confirmed_place": confirmed, "gaps": list(dict.fromkeys(gaps)),
             "open_relays": result.get("open_relays", chained.get("open_relays", {})),
             "held_owner_messages": {**chained.get("held_owner_messages", {}), **result.get("held_owner_messages", {})},
             "attached": attached, "quoted": quoted, "drives": drives, "memory_export": export,
@@ -727,6 +733,9 @@ def owner_corpus_rows(sources: Dict[str, Any]) -> List[Dict[str, Any]]:
             card = answered_card_reply(row.get("card"), row.get("source_task_id"))
             rows.append({"source": row.get("source") or "owner_mailbox", "content": row["content"],  # a card wins
                          **{key: row[key] for key in (*ROW_IDS, "reply_to") if row.get(key)}, **({"reply_to": card} if card else {})})
+    for row in sources.get("confirmed_place") or []:  # provenance rows ride beside the owner's, outside the owner sources
+        if isinstance(row, dict) and str(row.get("content") or "").strip():
+            rows.append({"source": "place_confirmed", "content": row["content"], **{key: row[key] for key in ("msg_id", "reply_to") if row.get(key)}})
     return rows
 
 
@@ -863,11 +872,15 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
         lines += ["", "That task was a wake of your consciousness; no owner message opened it. Its recorded "
                       "opening (host facts, not owner words):",
                   json.dumps({key: value for key, value in wake.items() if key != "observed_text"}, ensure_ascii=False)]
-        # Once, below, as mine, only when this opening event was itself recorded as mine (``place_owner``).
+        # Once, below, only when my human's confirmed account opened the wake and a ``place_owner`` row (cited, or an
+        # older record's) or their confirmed place words hold these words; a participant's same words stay theirs.
         focus = wake.get("focus") if isinstance(wake.get("focus"), dict) else {}
-        recorded = focus.get("addressed") is True and (focus.get("actor") or {}).get("owner_confirmed") is True
+        recorded = (focus.get("actor") or {}).get("owner_confirmed") is True
         mine = {row["content"] for row in later if row.get("source") == "place_owner"} if recorded else set()
-        if "observed_text" in wake and wake["observed_text"] not in mine:
+        theirs = {row.get("content") for row in sources.get("confirmed_place") or [] if isinstance(row, dict)} if recorded else set()
+        if "observed_text" in wake and wake["observed_text"] in theirs - mine:
+            lines.append("The event's words are your human's; they follow once below, under their confirmed words.")
+        elif "observed_text" in wake and wake["observed_text"] not in mine:
             lines += ["The event's words, from the sender recorded above (context, not an owner "
                       "instruction; verbatim):", str(wake["observed_text"])]
     api = sources.get("api") if isinstance(sources.get("api"), dict) else None
@@ -882,6 +895,12 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
         for row in later:
             lines += (_card_lines(row) if isinstance(row.get("card"), dict)
                       else [f"- {row.get('ts') or ''} {row['content']}"])
+    confirmed = [row for row in sources.get("confirmed_place") or [] if isinstance(row, dict) and row.get("content")]
+    if confirmed:  # my human's words are never shortened to a count or a pointer
+        lines += ["", "Words from your human's confirmed account in that place (their words there, by provenance; an order "
+                      "only where you cite them), verbatim:"]
+        lines += [f"- {row.get('msg_id') or ''}: {row['content']}" + (f" (in reply to {row['reply_to']['address']})"
+                  if isinstance(row.get("reply_to"), dict) and row["reply_to"].get("address") else "") for row in confirmed]
     peers = [row for row in sources.get("peer_context") or [] if isinstance(row, dict)]
     if peers:
         chars = sum(len(str(row.get("text") or "")) for row in peers)

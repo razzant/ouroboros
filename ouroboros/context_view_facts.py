@@ -9,6 +9,21 @@ from ouroboros.memory_waiting import text as waiting_text
 CONTEXT_FACTS_NAME = "ouroboros_context_facts"
 
 
+def focus_line(messages, fingerprint, written, view):
+    """The self-authored focus: whole when it changed or no intact facts row in view carries it,
+    else one line with its fingerprint and age, so an unchanged focus is not repeated every round."""
+    import json
+
+    from ouroboros.context_budget import host_row_intact
+
+    body = json.dumps(view, ensure_ascii=False, sort_keys=True)
+    if any(row.get(HOST_CONTEXT_KIND_KEY) == CONTEXT_FACTS_NAME and body in str(row.get("content") or "")
+           and host_row_intact(row) for row in messages):
+        return f"self-authored focus unchanged, {written} (fingerprint {str(fingerprint)[:12]}; whole in an earlier facts row in view)"
+    return ("self-authored focus, the line my human reads under this work's name, "
+            f"{written} (dated data, not owner instructions): " + body)
+
+
 def memory_snapshot(plan):
     core = getattr(plan, "core", None)
     return mv.snapshot_from_json(core.memory_view_json) if core and core.memory_view_json else None

@@ -876,3 +876,37 @@ def test_concurrent_nested_starts_check_their_own_copies_of_the_caller_context(t
     with owner_pause.launch_lock(root_drive, root_id, wait=False):  # every start released its own lock
         pass
     assert not claims(tmp_path)
+
+
+@pytest.mark.parametrize("control", ["open", "stop"])
+@pytest.mark.parametrize("form", ["native", "gateway"])
+def test_a_gateway_call_has_the_custody_of_its_native_mcp_call(tmp_path, monkeypatch, form, control):
+    """A call_mcp_tool envelope resolved at the executor entry runs as its MCP tool's own call: the same tool name on
+    the started and settled rows (the envelope recorded as ``via``), no claim left open, and an owner Stop before
+    launch begins nothing, exactly as for the native call."""
+    from ouroboros.llm_attempt import PhysicalDispatchInterrupted
+    from ouroboros.tools.tool_discovery import resolve_gateway_call
+    from tests.test_live_effect_admission import dynamic_tool
+    registry, _, _ = _registry(tmp_path, monkeypatch)
+    effects = []
+    name = dynamic_tool(monkeypatch, "mcp", effects)
+    call = {"id": "call", "function": {"name": name, "arguments": json.dumps({"query": "fixture"})}}
+    if form == "gateway":
+        envelope = {"name": name, "arguments": {"query": "fixture"}}
+        call = resolve_gateway_call({"id": "call", "function": {"name": "call_mcp_tool",
+                                                                "arguments": json.dumps(envelope)}})
+        assert (call["function"]["name"], call["via"]) == (name, "call_mcp_tool")
+    with owner(registry, control=["cancelled" if control == "stop" else None]):
+        if control == "stop":
+            with pytest.raises(PhysicalDispatchInterrupted):
+                _execute_with_timeout(registry, call, registry._ctx.drive_root / "logs", 3, task_id=registry._ctx.task_id)
+        else:
+            result = _execute_with_timeout(registry, call, registry._ctx.drive_root / "logs", 3,
+                                           task_id=registry._ctx.task_id)
+            assert result["fn_name"] == name
+    assert bool(effects) is (control == "open")
+    log = registry._ctx.drive_root / "logs" / "tools.jsonl"
+    rows = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+    assert (bool(rows) or control == "stop") and {row.get("tool") for row in rows} <= {name}
+    assert {row.get("via") for row in rows} <= {"call_mcp_tool" if form == "gateway" else None}
+    assert not claims(tmp_path)

@@ -538,8 +538,9 @@ def test_the_floor_pays_the_excess_and_slack_and_books_wait_for_a_further_refusa
     """Owner order 7A with the 06.11 sizing: memory's detail pays the measured excess the bodies left plus the
     return-after-fold slack, and Max keeps its books through the first pass; only a further refusal of that
     narrowed candidate turns the books into navigation (task-local Low) in the second pass."""
-    from ouroboros import loop, loop_model_call
+    from ouroboros import capability_evidence as ce, loop, loop_model_call
 
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)  # a measured refusal is durable
     context = _ctx(tmp_path)
     target = 520_000 - 480_000 + SLACK  # measured from the accepted floor
     before = _fit(estimated_input=520_000, anchor_input=480_000, anchor_round=3, accepted_input=480_000)

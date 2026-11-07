@@ -56,7 +56,7 @@ def reconcile_restored_tools(tools: Any, state: dict, messages: list, mode: str)
     frozen_digest = transcript_prefix.tools_digest(frozen)
     intact = (isinstance(previous, list) and bool(previous) and bool(messages)
               and previous[0] == transcript_prefix.message_digest(messages[0])
-              and before_tools == frozen_digest)
+              and before_tools == frozen_digest and not _gateway_due(tools, frozen, mode))
     changed = False
     if not intact:
         changed = _adopt_current_tools(tools, state, messages, mode, frozen_digest)
@@ -65,6 +65,14 @@ def reconcile_restored_tools(tools: Any, state: dict, messages: list, mode: str)
         messages.append({"role": "user", "content":
                          "[SYSTEM NOTICE]\n" + "\n".join(format_capability_omissions(omissions))})
     return changed
+
+
+def _gateway_due(tools: Any, frozen: list, mode: str) -> bool:
+    """A list saved before the MCP gateway existed lacks it while a fresh start in ``mode`` carries it: adopting
+    the current list once (with its notice) costs one tools change instead of one per later MCP load."""
+    from ouroboros.tool_capabilities import MCP_GATEWAY_TOOL_NAME as gateway
+
+    return gateway not in _by_name(frozen) and gateway in _by_name(initial_tool_schemas(tools, context_mode=mode))
 
 
 def _adopt_current_tools(tools: Any, state: dict, messages: list, mode: str, before: str) -> bool:

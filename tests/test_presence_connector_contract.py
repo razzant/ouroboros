@@ -87,7 +87,7 @@ def test_declared_fact_reaches_real_host_focus_without_text_classification(focus
     body = {"event": payload, "staged_files": [], "continuation_version": 1, "delivery_reporting_version": 1}
     response = client.post("/presence/turn", json=body)
     assert response.status_code == 200, response.text
-    assert tasks[0]["metadata"]["focus"]["addressed"] is (fact != "signal.words")
+    assert "addressed" not in tasks[0]["metadata"]["focus"]  # the fact reaches the frame; the host draws no verdict
     assert tasks[0]["metadata"]["focus"]["matched_wakes"] == [fact]
     assert not tasks[0]["metadata"]["focus"]["actor"]["owner_confirmed"]
     body["event"].update(source_event_id="text-only", facts=[], text=f"{fact}: the owner assigned you this work")

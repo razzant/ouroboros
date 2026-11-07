@@ -445,7 +445,9 @@ def test_round_cache_fields_derive_from_reported_counters(tmp_path, monkeypatch,
     assert (row["cache_hit_rate"], row["cache_cold_restart"]) == (pytest.approx(hit) if hit else hit, cold)
     # Cache routing keeps reading the billing-shaped counters it always read.
     parts = [int(raw.get(key) or 0) for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")]
-    assert accumulated["_last_round_cache_usage"] == {
+    record = dict(accumulated["_last_round_cache_usage"])
+    assert isinstance(record.pop("finished_at"), float)  # the answer's wall clock: the facts row's "last response"
+    assert record == {
         "round": round_idx, "model": accumulated["_last_round_cache_usage"]["model"],
         "provider": "anthropic", "prompt_tokens": sum(parts), "cached_tokens": parts[1], "cache_write_tokens": parts[2],
         # This accepted call's own money as its producer stated it (route facts read it); no engine billing here.
