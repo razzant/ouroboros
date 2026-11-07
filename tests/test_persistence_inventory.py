@@ -922,7 +922,11 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # its pin of 453 (red there before this branch; the pin follows the tree).
 # 454 -> 455 (supervisor-recovery, owner 2A): the Fault boot's admitted recovery turn and the generation
 # that admitted it, ``state/core_loss_recovery.json`` (``ouroboros/server_process.py``); its own row.
-EXPECTED_SCAN_PATHS = 455
+# 455 -> 457: the integrated tree (``origin/ouroboros`` at 8030f13cf) already scans 457 paths against its pin of
+# 455: the MCP OAuth writer's ``state/mcp/oauth`` and ``state/mcp/oauth/server-*.json`` (their own row).
+# 457 -> 458 (owner A, 07.11): the open Low episode of memory-lowered starts, ``state/low_start_episode.json``
+# (``ouroboros/context_view_facts.py``); its own row.
+EXPECTED_SCAN_PATHS = 458
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

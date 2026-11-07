@@ -1,12 +1,16 @@
 """Names and sizes of the selected context, read from its captured sources."""
 from __future__ import annotations
 
+import pathlib
+
 from ouroboros import memory_floor as floor, memory_view as mv
 from ouroboros.chronicle_store import DELEGATED_FOCUS_ROLES
 from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, REQUIRED_BOOK_CHOICES, REQUIRED_BOOK_UNFIT_KEY
 from ouroboros.memory_waiting import text as waiting_text
+from ouroboros.utils import update_json_locked, utc_now_iso
 
 CONTEXT_FACTS_NAME = "ouroboros_context_facts"
+LOW_START_EPISODE = "low_start_episode.json"  # under state/: the open episode of memory-lowered starts, if any
 
 
 def focus_line(messages, fingerprint, written, view):
@@ -72,18 +76,36 @@ def memory_facts(plan, mode, messages=()):
 
 
 def low_start_line(plan, mode, task_id):
-    """The owner's Main line for one fresh start of an integrating focus that memory lowered to Low (owner decision
-    1B, 29.10): its Max room (which exists only on the owner's Max with a known window) is ``crowded`` while the
-    books, core, assignment, tool schemas, reply reserve and work room alone fit (``memory_floor.crowded_by_memory``).
-    The host's measure, no advice. "" for every other start: a route (the task's own facts disclose it), tool
-    schemas that tip it alone, a held start, a delegated child or nanny, the owner's Low or Nano, an unknown window."""
+    """The owner's Main line for a fresh start of an integrating focus that memory lowered to Low: its Max room (which
+    exists only on the owner's Max with a known window) is ``crowded`` while the books, core, assignment, tool schemas,
+    reply reserve and work room alone fit (``memory_floor.crowded_by_memory``). No numbers: the task's own facts keep
+    them. "" for every other start: a route (the task's own facts disclose it), tool schemas that tip it alone, a held
+    start, a delegated child or nanny, the owner's Low or Nano, an unknown window."""
     receipt = (plan.projection(mode).memory_facts or {}) if plan is not None else {}
     room = receipt.get("max_room")
     if receipt.get("role") in DELEGATED_FOCUS_ROLES or not floor.crowded_by_memory(room):
         return ""
     maps = "Low with chapter maps" + (floor.REQUIRED_BOOK_WHOLE if room.get("book_required") else "")
-    return (f"Task {task_id} started in {maps}: its memory ({room['story'] + room['room']:,} tokens) "
-            f"did not fit the {room['allowance']:,} tokens left beside the full books.")
+    return f"Task {task_id} started in {maps}: memory did not fit beside the full books."
+
+
+def low_start_episode(root, plan, mode, task_id, send):
+    """One Main line per Low episode (owner A, 07.11.2026, replacing 1B of 29.10). A fresh start that memory lowered to
+    Low (``low_start_line``) opens an episode and ``send``s its line; while Low holds nothing more is sent; a start that
+    holds Max closes the episode silently, and a later Low opens a new one. Every other start (a delegated child or
+    nanny, the owner's Low or Nano, an unknown window, a route or tool schemas that tip a start alone) leaves it as it
+    is. The episode is one small object, ``state/low_start_episode.json``, rewritten under its lock in the terminal
+    outbox's failure domain; ``send`` runs inside that lock and opens the episode only when it queued the line."""
+    receipt = (plan.projection(mode).memory_facts or {}) if plan is not None else {}
+    held = (receipt.get("max_room") or {}).get("cause") == "held" and receipt.get("role") not in DELEGATED_FOCUS_ROLES
+    line = low_start_line(plan, mode, task_id)
+
+    def episode(bit):  # None leaves the file as it is
+        if held:
+            return {} if bit.get("since") else None
+        return None if bit.get("since") or not send(line) else {"since": utc_now_iso(), "task": task_id}
+    if line or held:
+        update_json_locked(pathlib.Path(root) / "state" / LOW_START_EPISODE, episode)
 
 
 def size_refusal_cause(usage):

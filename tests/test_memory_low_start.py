@@ -1,9 +1,12 @@
-"""One host line in Main for each fresh start that memory lowered to Low (owner decision 1B, 29.10).
+"""One host line in Main per Low episode of fresh starts that memory lowered to Low (owner A, 07.11.2026, which
+replaced the line per start of 1B, 29.10).
 
-No episode and no line when Max returns: the start's own Max room decides (``memory_floor.crowded_by_memory``), the
-line goes through the terminal outbox under one id per task attempt, and a route, tool schemas that tip a start
-alone, a held start, a delegated child or nanny and the owner's Low or Nano get none.
+The start's own Max room decides (``memory_floor.crowded_by_memory``); the line, without numbers, goes through the
+terminal outbox under one id per task attempt when no episode is open; a start that holds Max closes the episode
+silently; a route, tool schemas that tip a start alone, a delegated child or nanny, the owner's Low or Nano and an
+unknown window neither send nor touch the episode.
 """
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -35,12 +38,10 @@ def sent(monkeypatch):
     return rows
 
 
-def test_a_start_memory_lowered_to_low_names_the_hosts_measure_without_advice():
-    room = _room()
-    line = low_start_line(_plan(room), "low", "root1")
-    assert line == (f"Task root1 started in Low with chapter maps: its memory ({room['story'] + room['room']:,} tokens) "
-                    f"did not fit the {room['allowance']:,} tokens left beside the full books.")
-    assert len(line.splitlines()) == 1 and "my memory" not in line
+def test_a_start_memory_lowered_to_low_says_so_without_numbers_or_advice():
+    line = low_start_line(_plan(_room()), "low", "rootA")
+    assert line == "Task rootA started in Low with chapter maps: memory did not fit beside the full books."
+    assert not any(char.isdigit() for char in line) and len(line.splitlines()) == 1  # numbers stay in the task's facts
     assert not any(word in line for word in ("may bring", "should", "must", "fold", "episode", "again"))
 
 
@@ -62,24 +63,47 @@ def test_a_measured_crowded_start_gets_its_line(monkeypatch):
     assert low_start_line(_start(core, 2_000_000, monkeypatch), "max", "wake") == ""
 
 
-def test_the_line_goes_through_the_outbox_once_per_task_attempt(tmp_path, sent):
+def test_the_line_goes_through_the_outbox_once_per_low_episode(tmp_path, sent):
+    """Low, Low: one line; Max closes the episode silently; Low again: a new line. A delegated child or nanny, the
+    owner's Low or Nano, an unknown window, a route and tool schemas that tip a start alone send nothing and leave the
+    episode as it is, open or closed."""
     ctx = SimpleNamespace(task_metadata={"budget_drive_root": str(tmp_path)}, drive_root=tmp_path / "drive",
                           task_attempt=None)
-    loop._note_low_start(ctx, _plan(_room()), "low", "root1", None)
+    bit = tmp_path.resolve() / "state" / "low_start_episode.json"
+
+    def start(task, room, mode="low", **plan):
+        loop._note_low_start(ctx, _plan(room, **plan), mode, task, None)
+        return json.loads(bit.read_text(encoding="utf-8")) if bit.exists() else None
+
+    assert start("rootA", _room())["task"] == "rootA"
     [(root, event)] = sent
     assert root == tmp_path.resolve() and event["chat_id"] == 7 and event["task_id"] == ""
     assert event["role"] == "system" and event["system_type"] == "low_start_notice" and event["type"] == "send_message"
-    assert event["delivery_id"] == "low_start:root1:1" and event["text"].startswith("Task root1 started in Low")
-    loop._note_low_start(SimpleNamespace(**{**vars(ctx), "task_attempt": 2}), _plan(_room()), "low", "root1", None)
-    loop._note_low_start(ctx, _plan(_room()), "low", "root2", None)
-    assert [event["delivery_id"] for _root, event in sent] == ["low_start:root1:1", "low_start:root1:2",
-                                                               "low_start:root2:1"]
-    loop._note_low_start(ctx, _plan(_room("held")), "max", "root3", None)  # Max held: no line, no return line
-    assert len(sent) == 3
+    assert event["delivery_id"] == "low_start:rootA:1" and event["text"].startswith("Task rootA started in Low")
+    opened = start("rootB", _room())
+    assert opened["task"] == "rootA" and len(sent) == 1  # Low holds: no second line
+    for task, room, mode, plan in (("kid", _room(), "low", {"role": "child"}), ("nan", _room("held"), "max", {"role": "nanny"}),
+                                   ("ownerlow", None, "low", {}), ("route", _room("route"), "low", {}),
+                                   ("schemas", _room(zero_need=1_100_000), "low", {})):
+        assert start(task, room, mode, **plan) == opened and len(sent) == 1  # untouched, open
+    assert start("rootC", _room("held"), "max") == {} and len(sent) == 1  # Max held: closed, no return line
+    for task, room, mode, plan in (("kid", _room(), "low", {"role": "child"}), ("ownerlow", None, "low", {})):
+        assert start(task, room, mode, **plan) == {} and len(sent) == 1  # untouched, closed
+    assert start("rootD", _room())["task"] == "rootD"
+    assert [event["delivery_id"] for _root, event in sent] == ["low_start:rootA:1", "low_start:rootD:1"]
 
 
-def test_a_failing_outbox_never_fails_the_start(tmp_path, monkeypatch):
+def test_a_failing_outbox_never_fails_the_start_and_keeps_the_episode_closed(tmp_path, monkeypatch, sent):
+    queued = {"outcome": "unavailable"}
+    monkeypatch.setattr(outbox, "enqueue_terminal_delivery_outcome", lambda root, event, event_queue=None: (
+        sent.append((root, event)) or queued["outcome"]))
+    ctx = SimpleNamespace(task_metadata={}, drive_root=tmp_path)
+    loop._note_low_start(ctx, _plan(_room()), "low", "t", None)  # the queue refused the line: nothing is open
     monkeypatch.setattr(outbox, "enqueue_terminal_delivery_outcome",
                         lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("store busy")))
-    monkeypatch.setattr(schedule_notes, "owner_chat_id", lambda _root: 7)
-    loop._note_low_start(SimpleNamespace(task_metadata={}, drive_root=tmp_path), _plan(_room()), "low", "t", None)
+    loop._note_low_start(ctx, _plan(_room()), "low", "t", None)  # a raising outbox fails no start either
+    monkeypatch.setattr(outbox, "enqueue_terminal_delivery_outcome", lambda root, event, event_queue=None: (
+        sent.append((root, event)) or "queued"))
+    loop._note_low_start(ctx, _plan(_room()), "low", "u", None)
+    loop._note_low_start(ctx, _plan(_room()), "low", "v", None)
+    assert [event["delivery_id"] for _root, event in sent] == ["low_start:t:1", "low_start:u:1"]
