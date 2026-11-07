@@ -53,7 +53,7 @@ def test_anthropic_settings_selection_and_untouched_legacy_dispatch(route_ui, mo
         page.locator('#s-websearch-source').select_option('anthropic')
     expected = (SEARCH_MODELS['anthropic'] if edit == 'untouched' else
                 'claude-future-native' if edit == 'model' else 'claude-opus-4-6')
-    expect(preview).to_contain_text(f'anthropic · {expected}')
+    expect(preview).to_contain_text(f'Anthropic · {expected}')
     if edit != 'untouched':
         expect(preview).not_to_contain_text('does not apply')
     if edit == 'model':
@@ -78,7 +78,7 @@ def test_anthropic_settings_selection_and_untouched_legacy_dispatch(route_ui, mo
     assert calls == [expected] and result['model'] == expected
     page.locator('#btn-reload-settings').click()
     expect(field).to_have_value(saved['OUROBOROS_WEBSEARCH_MODEL'])
-    expect(preview).to_contain_text(f'anthropic · {expected}')
+    expect(preview).to_contain_text(f'Anthropic · {expected}')
     if edit == 'model':
         preview.scroll_into_view_if_needed()
         routes.roles.capture(page, 'anthropic-native-saved-reloaded')
@@ -95,19 +95,21 @@ def test_settings_preview_names_why_a_search_source_is_unavailable(route_ui, mon
     ui['settings'].update(OUROBOROS_WEBSEARCH_BACKEND='auto', OUROBOROS_WEBSEARCH_MODEL='gpt-5.2')
     if state == 'no_key':
         ui['settings'].pop('ANTHROPIC_API_KEY', None)
-        expected = 'Unavailable: openai (no API key), anthropic (no API key).'
+        expected = 'Not available now: OpenAI (no API key), Anthropic (no API key).'
     else:
         monkeypatch.setitem(sys.modules, 'anthropic', None)
         ui['settings'].update(ANTHROPIC_API_KEY='fixture-key', OPENAI_API_KEY='fixture-key',
                               OPENAI_BASE_URL='https://compatible.invalid/v1')
-        expected = 'Unavailable: openai (OPENAI_BASE_URL is set), anthropic (package not installed).'
+        expected = 'Not available now: OpenAI (OPENAI_BASE_URL is set), Anthropic (package not installed).'
     monkeypatch.setitem(sys.modules, 'ddgs', types_module('ddgs'))
     page = ui['page']
     page.goto(ui['url'] + '/#settings')
     page.locator('[data-settings-tab="models"]').click()
     preview = page.locator('#s-websearch-preview')
     expect(preview).to_contain_text(expected)
-    expect(preview).to_contain_text('Eligible routes: openrouter · openai/gpt-5.2 → ddgs.')
+    # The sources by their option words in the main line; the model and the gaps behind its Details.
+    expect(preview).to_contain_text('Uses OpenRouter, then DuckDuckGo.')
+    expect(preview).to_contain_text('OpenRouter · openai/gpt-5.2.')
     assert 'fixture-key' not in preview.inner_text()
     source = page.locator('#s-websearch-source')
     selection = (source.input_value(), page.locator('#s-websearch-model').input_value())
@@ -222,9 +224,10 @@ def test_a_blank_search_model_stays_blank_from_the_real_page_to_dispatch(saved_u
 
     ui = saved_ui
     page, preview, field = _open_models(ui, {'OUROBOROS_WEBSEARCH_BACKEND': 'auto'}, theme=theme)
-    legs = [f"openai · {SEARCH_MODELS['openai']} (recommended)", f"openrouter · {SEARCH_MODELS['openrouter']} (recommended)",
-            f"anthropic · {SEARCH_MODELS['anthropic']} (recommended)", 'ddgs']
-    expect(preview).to_contain_text('Eligible routes: ' + ' → '.join(legs) + '.')
+    models = [f"OpenAI · {SEARCH_MODELS['openai']} (recommended)", f"OpenRouter · {SEARCH_MODELS['openrouter']} (recommended)",
+              f"Anthropic · {SEARCH_MODELS['anthropic']} (recommended)"]
+    expect(preview).to_contain_text('Uses OpenAI, then OpenRouter, then Anthropic, then DuckDuckGo.')
+    expect(preview).to_contain_text('; '.join(models) + '.')
     expect(field).to_have_value('')
     assert page.evaluate("document.documentElement.dataset.theme || document.documentElement.getAttribute('data-theme')") == theme
     browser = page.context.browser
@@ -243,7 +246,7 @@ def test_a_blank_search_model_stays_blank_from_the_real_page_to_dispatch(saved_u
     on_disk = _on_disk()
     assert on_disk.get('GITHUB_REPO') == 'owner/repo' and on_disk.get('OUROBOROS_WEBSEARCH_MODEL', '') == ''
     expect(field).to_have_value('')
-    expect(preview).to_contain_text(f"anthropic · {SEARCH_MODELS['anthropic']} (recommended)")
+    expect(preview).to_contain_text(f"Anthropic · {SEARCH_MODELS['anthropic']} (recommended)")
 
     acts = {}
     call = _dispatch(monkeypatch, tmp_path, acts)
@@ -268,17 +271,17 @@ def test_a_blank_search_model_stays_blank_from_the_real_page_to_dispatch(saved_u
 
 @pytest.mark.parametrize('case,document,edit,saved,reloaded_preview,first_sent', [
     # An old shipped value is a saved choice like any other: it survives an unrelated Save and keeps its legs.
-    ('legacy', {'OUROBOROS_WEBSEARCH_MODEL': 'gpt-5.2'}, None, 'gpt-5.2', 'openai · gpt-5.2 →', ('openai', 'gpt-5.2')),
+    ('legacy', {'OUROBOROS_WEBSEARCH_MODEL': 'gpt-5.2'}, None, 'gpt-5.2', 'OpenAI · gpt-5.2;', ('openai', 'gpt-5.2')),
     # The Anthropic pin keeps its legacy reading of a saved bare id: recommended, and said to be unapplied.
     ('legacy_pin', {'OUROBOROS_WEBSEARCH_BACKEND': 'anthropic', 'OUROBOROS_WEBSEARCH_MODEL': 'claude-opus-4-6'}, None,
      'claude-opus-4-6', 'Anthropic does not apply the saved model claude-opus-4-6', ('anthropic', SEARCH_MODELS['anthropic'])),
     # Clearing the field is the owner's move onto the recommendations; typing authors a choice.
-    ('cleared', {'OUROBOROS_WEBSEARCH_MODEL': 'gpt-5.2'}, '', '', f"openai · {SEARCH_MODELS['openai']} (recommended)",
+    ('cleared', {'OUROBOROS_WEBSEARCH_MODEL': 'gpt-5.2'}, '', '', f"OpenAI · {SEARCH_MODELS['openai']} (recommended)",
      ('openai', SEARCH_MODELS['openai'])),
-    ('edited', {}, 'native-future', 'native-future', 'openai · native-future →', ('openai', 'native-future')),
+    ('edited', {}, 'native-future', 'native-future', 'OpenAI · native-future;', ('openai', 'native-future')),
     # A single-provider install left blank: its own source's recommended model, whatever Main is.
     ('direct_anthropic', {'OPENAI_API_KEY': '', 'OPENROUTER_API_KEY': '', 'OUROBOROS_MODEL': 'anthropic::fixture-main'}, None, '',
-     f"anthropic · {SEARCH_MODELS['anthropic']} (recommended)", ('anthropic', SEARCH_MODELS['anthropic'])),
+     f"Anthropic · {SEARCH_MODELS['anthropic']} (recommended)", ('anthropic', SEARCH_MODELS['anthropic'])),
 ])
 def test_a_saved_search_choice_keeps_its_meaning_from_the_real_page_to_dispatch(
         saved_ui, monkeypatch, tmp_path, case, document, edit, saved, reloaded_preview, first_sent):

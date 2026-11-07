@@ -92,7 +92,6 @@ APPROVED_DELTAS: Mapping[str, Delta] = MappingProxyType({
     "CAPABILITY_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
     "CHILD_RESULT_LINEAGE_FORBIDDEN": Delta(False, "ok", True, "blocked", "A.4", "a refused child-result lineage is a denial"),
     "COGNITIVE_TOOL_REQUIRED": Delta(True, "cognitive_tool_required", False, "ok", "A.11", "owner batch #4: the cognitive redirect is a hint, the error flag is removed"),
-    "EXECUTOR_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
     # This tree's post-cutoff producers emit four more *_UNAVAILABLE identifiers
     # the reference corpus never saw; each is the same A.18 move (the generic
     # `_UNAVAILABLE` marker keeps its own status instead of the coarse error).
@@ -359,6 +358,8 @@ def _golden() -> dict[str, dict]:
 # unavailable. Keep the historical corpus intact and assert the new observed
 # outcome explicitly rather than manufacture old evidence (04-AGENCY S1/S3).
 CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's size notice rides a successful update_world
+    # mcp_oauth: a remote MCP server that needs the owner's sign-in ran nothing; the substrate cannot serve the call yet.
+    "MCP_AUTH_REQUIRED": (True, "unavailable"),
     # A readable diff with escaped Git output is still successful; the original Git failure, if any, keeps its own code.
     "OUTPUT_NOT_UTF8": (False, "ok"),
     # Staging was refused before any effect; the producer must publish that refusal, not a successful warning.
@@ -371,6 +372,9 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     # D1 per-target mutation custody: the existing INTEGRATE_ family reports a
     # busy target as a substrate refusal; no historical answer is fabricated.
     "INTEGRATE_DELEGATED_TARGET_BUSY": (True, "integration_blocked"),
+    # #2889: a target another git step holds is no conflict: nothing applied, no verdict recorded, the result kept; an
+    # INTEGRATE_ refusal like its family, which the retired pair never saw.
+    "INTEGRATE_NOT_STARTED": (True, "integration_blocked"),
     # integrate_subagent_patch decision='accept' on a non-shared result: refused before any
     # effect, an INTEGRATE_ refusal like its family; the retired pair never saw the decision.
     "INTEGRATE_ACCEPT_UNSUPPORTED": (True, "integration_blocked"),

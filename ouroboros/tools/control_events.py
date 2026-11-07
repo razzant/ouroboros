@@ -150,7 +150,7 @@ def _emit_control_event(ctx: ToolContext, evt: Dict[str, Any]) -> str:
 
 
 def _promotion_pool_disabled_from_snapshot(ctx: ToolContext) -> str:
-    """Cheap early refusal for the known crash-storm state.
+    """Cheap early refusal for the known disabled-pool state (readiness exhaustion).
 
     The supervisor handler remains authoritative.  This projection only keeps
     source/project side effects from starting when the latest durable snapshot

@@ -316,6 +316,14 @@ _TAIL_SCOPES = {"all": False, "terminal": True, "none": None}  # a view's tail: 
 _SELECTION_FREE = ("membership", "tail", "terminal_tail", "legacy_pointers")  # memo facts a selection never changes
 
 
+def _page_refs(record: Mapping[str, Any]) -> List[Tuple[str, str, str]]:
+    """``(room, page id, row ref)`` of a page's seal: each row in its room, a conversation page's in each room of its
+    ``covers.rooms``, every other page's in its own room."""
+    covers = record["covers"]
+    rooms = covers.get("rooms") if isinstance(covers.get("rooms"), dict) else {record["room_id"]: covers["rows"]}
+    return [(str(room), str(record["id"]), str(ref)) for room, refs in rooms.items() for ref in refs]
+
+
 def _tail_rows(db, terminal_only: bool) -> List[List[Any]]:
     """The stored tail facts (only those with a terminal status: ``terminal_only``) by position, read on the
     caller's one read transaction a page at a time: one statement and one step a page, parsed as it arrives,
@@ -643,8 +651,7 @@ class ChronicleStore:
             elif kind == "mark_release":
                 db.execute("DELETE FROM active_marks WHERE id=?", (record["target_id"],))
             elif kind == "page" and not record.get("metadata", {}).get("candidate"):
-                db.executemany("INSERT INTO page_rows VALUES (?,?,?)",
-                               [(room, record_id, str(ref)) for ref in record["covers"]["rows"]])
+                db.executemany("INSERT INTO page_rows VALUES (?,?,?)", _page_refs({**record, "id": record_id}))
             elif kind == "part":
                 db.executemany("INSERT INTO folded VALUES (?,?)",
                                [(str(member), record_id) for member in record["covers"]["member_ids"]])
@@ -659,8 +666,7 @@ class ChronicleStore:
             elif kind == "decision" and record.get("accepted"):
                 target = self._get(db, record["target_id"])
                 if target.get("metadata", {}).get("candidate"):
-                    db.executemany("INSERT INTO page_rows VALUES (?,?,?)",
-                                   [(target["room_id"], target["id"], ref) for ref in target["covers"]["rows"]])
+                    db.executemany("INSERT INTO page_rows VALUES (?,?,?)", _page_refs(target))
         except sqlite3.IntegrityError as exc:
             raise ValueError(f"chronicle projection conflict: {exc}") from exc
 
@@ -931,12 +937,18 @@ class ChronicleStore:
         span = covers.get("stream_span")
         if not (isinstance(span, list) and len(span) == 2 and all(type(v) is int for v in span)):
             return _refuse("invalid", "covers.stream_span is [first, last] stream position; it orders pages")
+        rooms = covers.get("rooms")
+        if rooms is not None and not (isinstance(rooms, dict) and rooms and all(
+                isinstance(refs, list) and refs and all(_nonblank(ref) for ref in refs) for refs in rooms.values())
+                and {ref for refs in rooms.values() for ref in refs} == set(rows)):
+            return _refuse("invalid", "covers.rooms maps each room of a conversation page to its refs, together its rows")
         sealed = set()
-        for start in range(0, len(rows), _CHUNK):
-            chunk = rows[start:start + _CHUNK]
-            sealed.update(page for (page,) in db.execute(
-                "SELECT DISTINCT page_id FROM page_rows WHERE room=? AND row_ref IN (%s)" % ",".join("?" * len(chunk)),
-                (room, *chunk)))
+        for each, refs in (rooms or {room: rows}).items():
+            for start in range(0, len(refs), _CHUNK):
+                chunk = refs[start:start + _CHUNK]
+                sealed.update(page for (page,) in db.execute(
+                    "SELECT DISTINCT page_id FROM page_rows WHERE room=? AND row_ref IN (%s)" % ",".join("?" * len(chunk)),
+                    (str(each), *chunk)))
         if sealed:
             return _refuse("already_sealed", "the page's set intersects rows another page of this room seals",
                            conflict_ids=self._by_sequence(db, sealed))

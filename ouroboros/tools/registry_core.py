@@ -329,7 +329,8 @@ class ToolRegistry:
     _FROZEN_TOOL_MODULES = [
         "browser", "compact_context", "control",
         "core", "delegate", "edit_ops", "evolution_stats", "followup", "git", "git_pr", "git_rollback", "github",
-        "health", "imagegen", "join_ledger", "knowledge", "media", "memory_tools", "plan_review", "preflight_review",
+        "health", "imagegen", "join_ledger", "knowledge", "mcp_sign_in", "media", "memory_tools", "plan_review",
+        "preflight_review",
         "project_journal", "presence",
         "recent_tasks",
         "query_code", "query_data", "review", "review_change", "search", "secret_hitl", "services", "shell", "skill_exec",
@@ -1268,9 +1269,10 @@ class ToolRegistry:
                 return ToolResult(status="error", code="TOOL_ARG_ERROR", text=_route_note)
             from ouroboros import body_candidate
 
-            if (candidate_refusal := body_candidate.authoring_seam(self._ctx, name, args)) is not None:
-                return ToolResult(status="blocked", code=candidate_refusal.code,
-                                  text=f"⚠️ {candidate_refusal.code}: {candidate_refusal.text}")
+            seam = body_candidate.authoring_seam(self._ctx, name, args)  # a refusal, or a fresh bind's neighbour note
+            if isinstance(seam, body_candidate.CandidateRefused):
+                return ToolResult(status="blocked", code=seam.code, text=f"⚠️ {seam.code}: {seam.text}")
+            _route_note = "\n\n".join(part for part in (_route_note, seam) if part)
         selected_skill = bool(task_constraint and task_constraint.has_selected_skill)
         workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)())
         effective_constraint = task_constraint

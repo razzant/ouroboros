@@ -22,6 +22,7 @@ meta set) so every surface tells the same story with the same names.
 from __future__ import annotations
 
 import logging
+import math
 import pathlib
 import threading
 import time
@@ -62,13 +63,15 @@ COST_OPENNESS_FIELDS = (
 
 
 def _as_amount(value: Any) -> Optional[float]:
-    """A dollar amount, or None. Booleans and unparseable values are None."""
+    """A dollar amount, or None. Booleans, unparseable and non-finite values are None (the web's
+    ``formatUsd2``/``formatUsdKnown`` print such a value as unknown too)."""
     if value is None or isinstance(value, bool):
         return None
     try:
-        return float(value)
+        amount = float(value)
     except (TypeError, ValueError):
         return None
+    return amount if math.isfinite(amount) else None
 
 
 def honest_accounted_amount(source: Optional[Mapping[str, Any]]) -> Optional[float]:
@@ -569,19 +572,63 @@ def current_costs(sources: Any, drive_root: Any) -> list:
     return rows
 
 
+def usd_text(amount: float, decimals: int = 2) -> str:
+    """A known dollar amount: ``decimals`` places, at least four under a cent and ``<$0.0001`` (at four
+    places) below what they show, so a positive amount never prints as the priced zero ``$0.00`` (the web
+    card's ``formatUsdKnown``); a caller asking for more places keeps them."""
+    from decimal import ROUND_HALF_UP, Context, Decimal
+
+    if not math.isfinite(amount):
+        return "unknown"
+    places = max(decimals, 4) if 0 < amount < 0.01 else decimals
+    if 0 < amount < 10 ** -places:
+        return f"<${10 ** -places:.{places}f}"
+    # The exact binary value, a tie going up, as the card's toFixed and Telegram round it; the context holds
+    # every digit of the result, however large the amount.
+    exact = Decimal(amount)
+    context = Context(prec=max(28, exact.adjusted() + places + 2))
+    return f"${exact.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP, context=context)}"
+
+
+def uncounted_money_text(summary: Optional[Mapping[str, Any]], *, decimals: int = 2, prefix: str = "") -> str:
+    """What a limit does not count as spending, each part under its own name and only when present (P8:
+    known spend, estimates and unresolved charges stay distinct): reservations of calls not yet sent, and
+    the upper bound of calls without a known price (in flight, or ended without one). '' when neither.
+    ``prefix`` reads an axis's fields (``global_reserved_usd``...)."""
+    src = summary if isinstance(summary, Mapping) else {}
+    reserved, unresolved = (_as_amount(src.get(prefix + key)) or 0.0 for key in ("reserved_usd", "unresolved_upper_bound_usd"))
+    return "; ".join(part for part in (
+        f"{usd_text(reserved, decimals)} reserved for calls not yet sent" if reserved > 0 else "",
+        f"up to {usd_text(unresolved, decimals)} for calls without a known price" if unresolved > 0 else "") if part)
+
+
 def cost_display(source: Optional[Mapping[str, Any]], *, decimals: int = 2) -> str:
     """Human rendering of one task's cost. Null NEVER renders as ``$0.00``.
 
     ``$1.23`` for a final amount, ``$1.23 (upper bound, not final)`` for an open
-    one, ``unknown (accounting unavailable or not settled)`` when nothing is
-    accounted. ``Tracked: $1.23 (total unknown)`` preserves a known subtotal
-    when unpriced work prevents a total or an upper bound.
+    one; with nothing accounted, the reason as known: ``unknown (accounting
+    unavailable)``, ``unknown (not settled yet)`` (its calls are still open),
+    ``unknown (no price recorded for its calls)`` (the ledger read, its rows carry
+    no price, e.g. subscription work), else ``unknown (accounting unavailable or
+    not settled)``. ``Tracked: $1.23 (total unknown)`` preserves a
+    known subtotal when unpriced work prevents a total or an upper bound.
     """
     projection = cost_projection(source)
     amount = projection["accounted_upper_bound_usd"]
     if amount is None:
+        src = source if isinstance(source, Mapping) else {}
+        carrier = projection.get("cost_presentation") or src.get("cost_presentation")
+        custody = src.get("cost_custody") if isinstance(src.get("cost_custody"), Mapping) else {}
+        # As the card says it (costPresentationMeta): an unreadable ledger, custody view or quarantined ledger.
+        if (src.get("cost_accounting_status") == "unavailable" or src.get("ledger_integrity_degraded") is True
+                or custody.get("status") == "unavailable"):
+            return "unknown (accounting unavailable)"
+        if isinstance(carrier, Mapping) and carrier.get("accounting_open"):
+            return "unknown (not settled yet)"  # a price may still arrive
+        if isinstance(carrier, Mapping) and carrier.get("has_rows"):
+            return "unknown (no price recorded for its calls)"  # a readable ledger, rows without a price
         return "unknown (accounting unavailable or not settled)"
-    text = f"${amount:.{decimals}f}"
+    text = usd_text(amount, decimals)  # $0.00 is a priced zero only
     from ouroboros.delegate_custody_usage import cost_coverage_open
     carrier = projection.get("cost_presentation") or {}
     if carrier.get("has_unpriced") or projection.get("unknown_unmetered") or cost_coverage_open(projection):

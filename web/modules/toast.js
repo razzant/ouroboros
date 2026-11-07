@@ -1,4 +1,5 @@
 import { haptic } from './haptics.js';
+import { tr } from './i18n.js';
 import { SHELL_ICONS } from './page_icons.js';
 import { normalizeTone } from './ui_helpers.js';
 
@@ -36,19 +37,22 @@ function markCut(stack) {
 /**
  * One toast; a press anywhere on it dismisses it, a scroll over it never does. `ttl` 0 keeps it until then. `action`
  * ({label, run}) adds one button that dismisses the toast and runs (a recovery notice's way back, host_modules.js).
- * `dismissLabel` adds an accessible close button, the words beside it in their own box; hover or focus pauses the
- * auto-dismiss timer. An error toast answers the owner's own action and plays Telegram's error haptic (haptics.js); a
+ * Non-expiring toasts always have an accessible close; `dismissLabel` also adds one to timed toasts and can name it.
+ * Words stay beside the close in their own box; hover or focus pauses the auto-dismiss timer. An error toast answers the owner's own action and plays Telegram's error haptic (haptics.js); a
  * notice the owner did not cause passes `{ haptic: false }`.
  * Optional `host` confines the stack above a room's composer. Its owner calls the returned node's `dispose()` on teardown.
  */
 export function showToast(message, tone = 'info', { ttl = 6000, action = null, haptic: felt = true, dismissLabel = '', host = null } = {}) {
     const stack = getStack(host);
+    // A notice that cannot expire must always have a visible, keyboard-reachable way out.
+    // Timed acknowledgements keep their quiet single-node shape unless a caller names a close.
+    const effectiveDismissLabel = dismissLabel || (ttl <= 0 ? tr('toast.dismiss', 'Dismiss notice') : '');
     const toast = document.createElement('div');
     const cleanTone = normalizeTone(tone || 'info', 'info');
     if (felt && cleanTone === 'danger') haptic('error');
     toast.className = `toast toast-${cleanTone}`;
     toast.setAttribute('role', cleanTone === 'danger' ? 'alert' : 'status');
-    const words = dismissLabel ? document.createElement('span') : toast;
+    const words = effectiveDismissLabel ? document.createElement('span') : toast;
     if (words !== toast) {
         words.className = 'toast-words';
         toast.append(words);
@@ -102,11 +106,11 @@ export function showToast(message, tone = 'info', { ttl = 6000, action = null, h
         });
         toast.append(button);
     }
-    if (dismissLabel) {
+    if (effectiveDismissLabel) {
         const close = document.createElement('button');
         close.type = 'button';
         close.className = 'shell-icon-control toast-dismiss ui-hit-area';
-        close.setAttribute('aria-label', dismissLabel);
+        close.setAttribute('aria-label', effectiveDismissLabel);
         close.innerHTML = SHELL_ICONS.close;
         close.addEventListener('click', (event) => {
             event.stopPropagation();

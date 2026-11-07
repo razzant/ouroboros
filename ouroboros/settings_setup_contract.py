@@ -154,7 +154,7 @@ _STEPS = _rows(("id", "title", "railCopy", "copy", "footer"), (
     ("accounts", "Connect your accounts", "Subscriptions + API", "Connect Codex to start without an API key, or add an API key or local model. The same account can serve models and agents.", "Add more subscriptions or API access later in Settings → Accounts. Subscription limits and optional provider credits still apply."),
     ("models", "Choose models", "model slots", "Review the visible model defaults derived from your current setup, then edit anything you want before launch.", "Each slot names its source. OpenRouter stays the source for ids such as openai/gpt-5.6-terra; a provider's own key routes that slot straight to the provider."),
     ("review_mode", "Choose review mode", "Advisory vs blocking", "Reviewers read how Ouroboros understood a request, its plans, its results and its changes. Decide whether their critical findings block the work or only inform Ouroboros.", "Pick both review enforcement and the initial runtime mode before Ouroboros starts."),
-    ("budget", "Review limits", "Quota + API budget", "Review subscription quotas and optional API spending limits.", "When subscription quota is exhausted, work waits for renewal or your choice of another account or model. This integration does not enable paid provider credits."),
+    ("budget", "Review limits", "Quota + API budget", "Review subscription quotas and optional API spending limits.", ""),
     ("summary", "Review before launch", "Final check", "Check the final provider, model, review, and budget picture. Ouroboros will save these onboarding values before starting.", "The same onboarding values remain editable later in Settings."),
 ))
 _STEP_ORDER = [step["id"] for step in _STEPS]
@@ -225,7 +225,7 @@ _ACTIVE_LOCAL_KEYS = (
 
 _BUDGET_NOTE = (
     "Spending limits use known spend only: confirmed and estimated prices count toward the applicable limit; "
-    "known $0 local calls are priced at $0 and do not use the limit. Unpriced calls stay Unknown / unmetered "
+    "known $0 local calls are priced at $0 and do not use the limit. Unpriced calls stay without a price "
     "and are not counted as $0: they add nothing to known spend, so unpriced spending alone never triggers a limit. "
     "Open reservations and unresolved charges are not counted as spending. The Total Budget covers all work: once "
     "known spend reaches it, new paid calls are refused, API calls with an unknown price included, while known $0 "

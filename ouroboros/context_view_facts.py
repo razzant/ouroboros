@@ -35,8 +35,8 @@ def block_label(message, index, block, plan):
         return "assignment" if index == 1 else message.get("role", "message")
     if "## My story" in text:
         return "my story and identity"
-    if "## This room" in text or "## Live rooms" in text:
-        return "this room, live rooms and runtime facts"
+    if "## This room" in text or "## Other conversations" in text:
+        return "this room, my other conversations and runtime facts"
     if text.startswith("## DEVELOPMENT.md"):
         return "development book"
     return "core and books" if index == 0 else "runtime facts"

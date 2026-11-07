@@ -359,6 +359,9 @@ test('attention status distinguishes native desktop attention from browser suppo
     assert.match(attentionStatusText({ supported: true }), /Browser notifications/);
     assert.match(attentionStatusText({ bridge: true }), /will be confirmed/);
     assert.match(attentionStatusText(), /no native attention bridge/);
+    // Off is said once, by the status line above; the attention line adds nothing then (U095).
+    assert.equal(attentionStatusText({ enabled: false, nativeAttention: true }), '');
+    assert.match(notifyStatusText({ enabled: false, supported: true }), /^Notifications are off/);
 });
 
 function notifierFixture({ permission = 'granted', prefs = { ...ON, task_done: true } } = {}) {

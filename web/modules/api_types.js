@@ -81,7 +81,7 @@
  * Background Consciousness alarm clock (server._describe_bg_consciousness_state over consciousness.status_snapshot). A wake-up is an ordinary Main turn; the direct-activity census owns its liveness.
  * @typedef {Object} BgConsciousnessState
  * @property {boolean} enabled
- * @property {string} status  // disabled | stopped | thinking | due | sleeping | waiting_for_first_conversation | allowance_exhausted | allowance_unknown | wake_rejected | wake_failed | wake_paused | wake_outcome_unknown
+ * @property {string} status  // disabled | starting | stopped | thinking | due | sleeping | waiting_for_first_conversation | allowance_exhausted | allowance_unknown | wake_rejected | wake_failed | wake_paused | wake_outcome_unknown
  * @property {string} detail  // one honest owner-readable line (e.g. "Sleeping until 14:05.")
  * @property {string} level  // observe | act | full
  * @property {string} next_wake_at  // next attempt, moved by skips/refusals; ISO instant or ""
@@ -1184,28 +1184,7 @@
  * @property {Object=} queue
  * @property {string=} error
  */
-/**
- * Read-time "where did the money go" projection on GET /api/tasks/{task_id}
- * (ROOT tasks only; computed from the physical-attempt ledger at read time,
- * never persisted). own + children + unattributed == subtree. When the object
- * is present every key is present; the WHOLE object is absent — never a
- * confident $0 — when accounting is unavailable or holds no attributable row
- * for the subtree, and on non-root task details.
- * @typedef {Object} TaskCostBreakdown
- * @property {number} own_usd
- * @property {number} children_usd
- * @property {number} unattributed_usd
- * @property {number} delegated_disclosed_usd
- * @property {number} accounted_upper_bound_usd
- *   C2: the explicit subtree total under its honest name — an accounted UPPER
- *   BOUND (own + children + unattributed), not a settled receipt.
- * @property {number} subscription_sessions
- * @property {number} unknown_unmetered
- * @property {number} non_final_rows
- * @property {boolean} cost_final
- * @property {?CostCustody} cost_custody
- * @property {"physical_attempt_ledger"} authority
- */
+/** @typedef {import('./client_contract_types.js').TaskCostBreakdown} TaskCostBreakdown */
 /**
  * GET /api/tasks/{task_id} — the public task-result envelope (open shape;
  * stored task-result keys pass through) plus additive typed projections.

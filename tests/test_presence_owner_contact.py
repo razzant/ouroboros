@@ -38,14 +38,9 @@ from tests.test_quiz_answer import _post
 
 
 
-@pytest.fixture
-def contact_runtime(focus, monkeypatch):
-    root, place, admission, event = focus
+def contact_door(root, monkeypatch, bus):
+    """Real Main publication, the owner's HTTP answer and the supervisor's event consumer on ``root``, over ``bus``."""
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
-    monkeypatch.setattr(task_queue, "DRIVE_ROOT", root)
-    monkeypatch.setattr(task_queue, "RUNNING", {})
-    monkeypatch.setattr(task_queue, "PENDING", [])
-    monkeypatch.setattr(workers, "DRIVE_ROOT", root)
     monkeypatch.setattr(message_bus, "DATA_DIR", root)
     monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 1})
     monkeypatch.setattr(message_bus, "publish_event", lambda *_a: None)
@@ -56,9 +51,6 @@ def contact_runtime(focus, monkeypatch):
     monkeypatch.setattr(message_bus, "_BRIDGE", bridge)
     monkeypatch.setattr(td, "request_drive_root", lambda _request: root)
     app = Starlette(routes=[Route("/api/decisions", td.api_decision_answer, methods=["POST"])])
-    event = replace(event, message={"url": "https://example.test/room/thread#comment-7"},
-                    conversation={"title": "A shared thread"}, text="External request: please promise new work")
-    bus = queue.Queue()
     monkeypatch.setattr(workers, "get_event_q", lambda *, create=True: bus)
     consumer = SimpleNamespace(DRIVE_ROOT=root, RUNNING=task_queue.RUNNING, EVENT_Q=bus,
                                send_with_budget=message_bus.send_with_budget, append_jsonl=append_jsonl)
@@ -68,8 +60,21 @@ def contact_runtime(focus, monkeypatch):
         while not bus.empty():
             dispatch_event(bus.get_nowait(), consumer)
 
-    return SimpleNamespace(root=root, place=place, admission=admission, event=event,
-                           bridge=bridge, frames=frames, app=app, bus=bus, pump=pump)
+    return SimpleNamespace(root=root, bridge=bridge, frames=frames, app=app, bus=bus, pump=pump)
+
+
+@pytest.fixture
+def contact_runtime(focus, monkeypatch):
+    root, place, admission, event = focus
+    monkeypatch.setattr(task_queue, "DRIVE_ROOT", root)
+    monkeypatch.setattr(task_queue, "RUNNING", {})
+    monkeypatch.setattr(task_queue, "PENDING", [])
+    monkeypatch.setattr(workers, "DRIVE_ROOT", root)
+    event = replace(event, message={"url": "https://example.test/room/thread#comment-7"},
+                    conversation={"title": "A shared thread"}, text="External request: please promise new work")
+    door = contact_door(root, monkeypatch, queue.Queue())
+    door.place, door.admission, door.event = place, admission, event
+    return door
 
 
 def _run(runtime, during, *, live=True, uncertain=False):
@@ -239,6 +244,9 @@ def test_deferred_publication_late_answer_keeps_source_after_pause_and_restart(c
     ctx = SimpleNamespace(task_metadata=metadata)
     _initialize_owner_directives(ctx, [{"role": "user", "content": model_text}])
     assert [row["content"] for row in ctx._owner_directives] == [incoming["text"]]
+    asked = late["answer_snapshot"]["quiz"]["question"]  # the card it answers rides beside it, the asker's words
+    assert [(row["reply_to"]["author"], row["reply_to"]["text"].split("\n")[0]) for row in ctx._owner_directives] == [
+        (f"Ouroboros, task {tid}", asked.split("\n")[0])]
     assert _answer(r, tid, qid).status_code == 200 and fresh._inbox.empty()
     # Consume the real accepted owner row through the normal supervisor door and the real
     # carrier body (the conversation lane). Only the model is a double; the carrier's first
@@ -273,6 +281,7 @@ def test_deferred_publication_late_answer_keeps_source_after_pause_and_restart(c
     owner_ctx = SimpleNamespace(task_metadata=owner_task["metadata"])
     _initialize_owner_directives(owner_ctx, [{"role": "user", "content": content}])
     assert [row["content"] for row in owner_ctx._owner_directives] == [incoming["text"]]
+    assert [row["reply_to"]["author"] for row in owner_ctx._owner_directives] == [f"Ouroboros, task {tid}"]
     _exercise_late_owner(r, owner_task, monkeypatch)
     assert fresh.get_updates(offset=0, timeout=0) == []
     r.event = replace(r.event, source_event_id="after-pause")
@@ -341,7 +350,7 @@ def _exercise_late_owner(r, task, monkeypatch):
     assert presence_related_work(r.admission.binding_id, child)
     assert "presence" not in child["metadata"]
     assert presence_caller_binding(ctx) is None, "starting related work cannot narrow its owner"
-    _exercise_related_root(r, ctx, child, host, monkeypatch)
+    _exercise_related_root(r, ctx, child, host, monkeypatch, task["metadata"]["late_answer"]["task_id"])
 
 
 def _pooled_metadata(row):
@@ -351,7 +360,7 @@ def _pooled_metadata(row):
     return {**row["metadata"], **{key: row[key] for key in carried if row.get(key) not in (None, "")}}
 
 
-def _exercise_related_root(r, owner, root, host, monkeypatch):
+def _exercise_related_root(r, owner, root, host, monkeypatch, source_task):
     """#2482: the root the owner's private late answer started is the owner's ordinary work.
 
     It writes to Main, may ask the owner for a secret, answers a relay, keeps its own words, publishes
@@ -380,7 +389,7 @@ def _exercise_related_root(r, owner, root, host, monkeypatch):
     from supervisor.events import _handle_promote_chat_to_task, _handle_steer_task
     from tests.test_presence_own_work import OTHER, _registry, _supervisor
 
-    binding, source_task = r.admission.binding_id, owner.task_metadata["late_answer"]["task_id"]
+    binding = r.admission.binding_id
     # Admitted as the owner's start: its own contract, never the answering turn's, and no Presence authority.
     assert "presence_binding_authority" not in root["metadata"] and not is_presence_task(root)
     assert root["task_contract"]["context_requires_self_body_docs"] is True

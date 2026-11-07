@@ -341,13 +341,31 @@ test('each owner-required action is one System message in the feed, first stampe
 
 test('the reason names what the task needs from the owner', t => {
     const main = mainPage(t);
-    const rows = [action('restart', { attention_reason: 'restart' }), action('resume', { attention_reason: 'resume' }),
+    // A plain resume pause beside its own Resume button says nothing more, even with a reason of its own (audit 05.11,
+    // U014); without that button (the owner's own Pause rides the menu) it still says what it needs.
+    const rows = [action('restart', { attention_reason: 'restart' }), action('resume', { attention_reason: 'resume', reason: 'Paused.' }),
         action('access', { attention_reason: 'model_access' }), action('own', { attention_reason: '', reason: 'A reason of its own.' }),
-        action('held', { attention_reason: '', project_admission_hold: { label: 'Waiting for a Project slot.' } })];
+        action('held', { attention_reason: '', project_admission_hold: { label: 'Waiting for a Project slot.' } }),
+        action('owner', { attention_reason: 'resume', pause_cause: 'owner' })];
     main.waiting.snapshot(census({ actions: rows }));
-    const reason = id => find(main.actionNode(id), node => node.classList.contains('owner-action-reason')).textContent;
-    assert.deepEqual(rows.map(row => reason(row.task_id)), ['Needs Resume after the restart.', 'Needs an explicit Resume.',
-        'Needs you to restore model access.', 'A reason of its own.', 'Waiting for a Project slot.']);
+    const reason = id => find(main.actionNode(id), node => node.classList.contains('owner-action-reason'));
+    assert.deepEqual(rows.map(row => reason(row.task_id).textContent), ['Needs Resume after the restart.', '',
+        'Needs you to restore model access.', 'A reason of its own.', 'Waiting for a Project slot.', 'Needs an explicit Resume.']);
+    assert.deepEqual(rows.map(row => reason(row.task_id).hidden), [false, true, false, false, false, false]);
+    // The row's own facts decide, not the socket: a reconnect adds and removes no line.
+    main.waiting.setConnected(false);
+    assert.equal(reason('resume').textContent, '');
+    main.waiting.setConnected(true);
+    assert.equal(reason('resume').textContent, '');
+});
+
+test('the pause row\'s Project reference does not repeat a title that already names the Project', t => {
+    // A nameless work is titled by its Project; the capsule beside that title reads `Project` (audit 05.11, U014).
+    const main = mainPage(t);
+    main.waiting.snapshot(census({ actions: [action('nameless', { task_name: '' }), action('named')] }));
+    const label = id => find(main.actionNode(id), node => node.classList.contains('chat-live-project-name')).textContent;
+    assert.equal(label('nameless'), 'Project');
+    assert.equal(label('named'), 'Build');
 });
 
 test('the message says a refused Resume as dated history and opens no message of its own for one', t => {
@@ -577,7 +595,7 @@ test('an owner-action message says its task\'s state as the owner\'s move, besid
     // Both keep their look and carry the one touch hit area (ui.css .ui-hit-area), like a task card's.
     assert.equal(resume.className, 'btn btn-sm btn-primary ui-hit-area');
     const stop = find(main.actionNode('limit'), node => node.tagName === 'BUTTON' && node.textContent === 'Stop…');
-    assert.equal(stop.className, 'btn btn-xs btn-default ui-hit-area');
+    assert.equal(stop.className, 'btn btn-sm btn-default ui-hit-area');
     main.waiting.setConnected(false);
     for (const id of ['limit', 'resumed', 'access']) assert.deepEqual(look(id), ['Activity unconfirmed', 'neutral', 'ring/ink'], id);
 });

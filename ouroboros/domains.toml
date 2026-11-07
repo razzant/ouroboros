@@ -110,6 +110,7 @@ D20 = "Presence"
 "ouroboros/room_reader.py" = "D11"
 "ouroboros/tools/control_relay.py" = "D05"
 "ouroboros/tools/control_ui_translation.py" = "D05"
+"ouroboros/tools/mcp_sign_in.py" = "D05"
 "ouroboros/tools/control_update_description.py" = "D05"
 "ouroboros/openrouter_cost.py" = "D02"
 "ouroboros/obligations.py" = "D11"
@@ -193,6 +194,7 @@ D20 = "Presence"
 "ouroboros/claudexor_node_seed.py" = "D07"  # the daemon's kept copy of the bundled Node
 "ouroboros/engine_pin_policy.py" = "D07"  # one engine pin rule shared by update preflight and restart
 "ouroboros/claudexor_startup_failure.py" = "D07"
+"ouroboros/claudexor_restart.py" = "D07"  # the owner's Restart Claudexor: what it ends, then the attested stop and start
 "ouroboros/cli.py" = "D18"
 "ouroboros/client_surface.py" = "D11"
 "ouroboros/code_import_candidates.py" = "D05"
@@ -254,6 +256,7 @@ D20 = "Presence"
 "ouroboros/memory_floor.py" = "D03"  # the memory view's physical floor: what a window shows only by address
 "ouroboros/memory_view_legacy.py" = "D03"  # how my story names a retold old record: what its address holds
 "ouroboros/memory_view_account.py" = "D03"  # common-view account rendering and retained source addresses
+"ouroboros/memory_view_conversations.py" = "D03"  # my other conversations: their groups, words whole, task lines
 "ouroboros/contracts/__init__.py" = "D19"
 "ouroboros/contracts/chat_id_policy.py" = "D19"
 "ouroboros/contracts/plugin_api.py" = "D19"
@@ -416,6 +419,7 @@ D20 = "Presence"
 "ouroboros/gateways/claudexor_threads.py" = "D07"
 "ouroboros/gateways/claudexor_routing.py" = "D07"
 "ouroboros/gateways/claudexor_route_health.py" = "D07"
+"ouroboros/gateways/claudexor_live_runs.py" = "D07"
 "ouroboros/llm_claudexor.py" = "D02"
 "ouroboros/git_shell_policy.py" = "D13"
 "ouroboros/git_observation.py" = "D18"
@@ -478,6 +482,7 @@ D20 = "Presence"
 "ouroboros/mcp_catalog.py" = "D05"
 "ouroboros/mcp_schema.py" = "D05"
 "ouroboros/mcp_headers.py" = "D05"
+"ouroboros/mcp_oauth.py" = "D05"
 "ouroboros/mcp_import.py" = "D05"
 "ouroboros/mcp_result_images.py" = "D05"
 "ouroboros/mcp_task_session.py" = "D05"
@@ -712,6 +717,7 @@ D20 = "Presence"
 "ouroboros/copy_environments.py" = "D07"  # declared temporary environments beside a copy: the one rule of Free and the custody pass
 "ouroboros/owner_keep.py" = "D07"  # the owner's direct keep of one task's materials, read at every retirer
 "ouroboros/review_thread_retention.py" = "D07"  # a finished reviewer thread: export kept here, then engine retirement
+"ouroboros/delegate_result_taken.py" = "D07"  # a held delegated Git result: the engine told `taken` once its tree ends
 "ouroboros/copy_capture_proof.py" = "D07"  # may a finished plain copy go: unique work proven in its saved patch
 "ouroboros/workspace_copies.py" = "D07"
 "ouroboros/body_candidate.py" = "D07"  # own-body authoring candidate: one more kind of task-owned isolated copy
@@ -915,6 +921,7 @@ D20 = "Presence"
 "ouroboros/storage_free_view.py" = "D16"  # Temporary space pool and paged item views over the held plan
 "ouroboros/storage_free.py" = "D16"  # Dashboard Storage: the owner's free-space preview and run over the existing retirers
 "ouroboros/storage_removers.py" = "D16"  # Dashboard Storage: each place's removers and how their last pass ended
+"ouroboros/tools/control_storage.py" = "D16"  # Dashboard Storage: the mind's Free tool over the same storage_free owner
 "ouroboros/jsonl_tail.py" = "D18"
 "ouroboros/temp_sweep.py" = "D18"
 "ouroboros/utils.py" = "D18"
@@ -930,6 +937,7 @@ D20 = "Presence"
 "ouroboros/docker_process_observer.py" = "D17"
 "ouroboros/workspace_patch_rules.py" = "D17"
 "ouroboros/workspace_preflight.py" = "D17"
+"ouroboros/session_scratch.py" = "D17"
 "ouroboros/world_profiler.py" = "D15"
 "server.py" = "D11"
 "ouroboros/server_liveness.py" = "D11"
@@ -1243,6 +1251,7 @@ allowed = [
   "D15->D18",
   "D15->D19",
   "D16->D02",
+  "D16->D04",
   "D16->D06",
   "D16->D12",
   "D16->D17",

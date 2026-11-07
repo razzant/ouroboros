@@ -1616,7 +1616,7 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.0" },
     { name = "llama-cpp-python", marker = "extra == 'all'" },
     { name = "llama-cpp-python", marker = "extra == 'local-model'" },
-    { name = "mcp", specifier = ">=1.10,<2.0" },
+    { name = "mcp", specifier = ">=1.29,<2.0" },
     { name = "openai", specifier = ">=1.66.0" },
     { name = "pillow", specifier = ">=10.0" },
     { name = "pip" },

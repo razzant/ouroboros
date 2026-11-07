@@ -205,7 +205,7 @@ def test_recovery_prices_the_prepared_input_not_the_canonical_image_proxy(tmp_pa
     room = syn.room(notes=1)
     room["notes"][0]["text"] = "Held note. " + "n" * 8000
     core = context_fit.ContextCore("Core", "BIBLE", "", "", "Identity", "Facts", '"Assignment"', False,
-        memory_view_json=memory_view.snapshot_json(syn.snapshot(room_facts=room, story=[], live=[])))
+        memory_view_json=memory_view.snapshot_json(syn.snapshot(room_facts=room, story=[], conversations=[])))
     plan = context_fit.build_context_fit_plan(None, core, {"id": "recovery", "_is_direct_chat": True},
         preferred_mode=mode, tool_schemas=[], route_resolver=lambda *_a, **_kw: (
             {"provider": "fixture", "model": "fixture"},
@@ -237,7 +237,7 @@ def test_recovery_prices_the_prepared_input_not_the_canonical_image_proxy(tmp_pa
     fit = measure(ctx)
     deficit = fit.measurement.capacity_deficit_tokens
     assert estimate(prepare(ctx.messages)) + REPLY - window == 500  # actual prepared bytes
-    assert 499 <= deficit <= 500  # carrying rounded prior counts may differ by one estimator token
+    assert 499 <= deficit <= 501  # carrying rounded prior counts may differ by one estimator token, either way
     if mode == "low":
         slack = context_fit.reclaim_low_water_margin(None, window)
         lmc._apply_refusal_step(ctx, "floor", fit, target=deficit + slack, slack=slack)
@@ -312,7 +312,7 @@ def test_the_retry_is_measured_ordinarily_while_its_passes_measured_at_the_refus
     raw = loop._measure_round_main_fit(ctx, automatic_pass_used=False).measurement.raw_input_tokens
     ctx.accumulated_usage["_last_llm_provider_message"] = _stated(math.ceil(raw * DENSITY))
     passes, sends = [], []
-    monkeypatch.setattr(lmc, "_apply_refusal_pass", lambda c, steps, fit, *_a: passes.append(
+    monkeypatch.setattr(lmc, "_apply_refusal_pass", lambda c, steps, fit, *_a, **_kw: passes.append(
         fit.measurement.measurement_density) or True)
     monkeypatch.setattr(loop, "_dispatch_round_model", lambda c, disposition, **_kw: sends.append(
         disposition.measurement.measurement_density) or ({"role": "assistant", "content": "fits"}, 0.0))
@@ -331,7 +331,7 @@ def test_a_changed_view_that_was_never_sent_is_not_the_refused_request(tmp_path,
     failed = replace(_failed_capture(size=1_000), prompt_tokens_bounded_estimate=400_000)
     monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_round_fit()]))  # an ordinary 1.0 measure
     seen = []
-    monkeypatch.setattr(lmc, "_apply_refusal_pass", lambda ctx, steps, fit, target, slack=None, refused=False:
+    monkeypatch.setattr(lmc, "_apply_refusal_pass", lambda ctx, steps, fit, target, slack=None, refused=False, **_kw:
                         seen.append((steps, ctx.refused_density, target, slack)) or True)
 
     def unsent(*_args, **_kwargs):
@@ -340,8 +340,8 @@ def test_a_changed_view_that_was_never_sent_is_not_the_refused_request(tmp_path,
     assert lmc._recover_context_overflow(context, failed, 0.0)[0] is None
     target, slack = 524_000 + REPLY - 500_000 + 62_500, 62_500  # the provider's units while its density measures
     density = 524_000 / 400_000
-    assert seen == [(("host_copies", "bodies"), density, target, slack),
-                    (("floor", "books", "unseen_bodies"), None, *(math.ceil(n / density) for n in (target, slack)))]
+    assert seen == [(("host_copies", "bodies", "floor"), density, target, slack),
+                    (("books", "unseen_bodies"), None, *(math.ceil(n / density) for n in (target, slack)))]
 
 
 def test_a_reused_call_context_starts_ordinary(tmp_path, monkeypatch):

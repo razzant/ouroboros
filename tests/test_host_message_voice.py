@@ -195,9 +195,10 @@ HOST_ROW_CLASSES = {
     "skill_lifecycle_pointer": ("owner_act_receipt", 1),
     "skill_notice": ("signed_words", 1),
     "skill_repair": ("owner_act_receipt", 1),  # the owner's Repair; marketplace auto-repair is retired
-    "startup_notice": ("runtime_state", 2),
+    "startup_notice": ("runtime_state", 3),  # the boot notice, the storage switch, a fault boot's no-turn row
     "steer_not_delivered": ("not_started", 1),
     "storage_switch_notice": ("runtime_state", 1),
+    "storage_free_notice": ("runtime_state", 1),  # the mind's Free receipt is a Main System row
     "subagent_admission_notice": ("card_row", 1),
     "subagent_started": ("card_row", 1),
     "subagent_terminal_notice": ("card_row", 1),
@@ -211,7 +212,7 @@ HOST_ROW_CLASSES = {
     "task_start_unconfirmed": ("not_started", 1),
     "terminal_incident": ("no_mind", 2),
     "ui_hold": ("runtime_state", 1),
-    "worker_failure": ("no_mind", 3),  # + the degraded executor's disclosure (inline_carrier._disclose)
+    "worker_failure": ("no_mind", 2),  # the exhausted crash retry + the degraded executor's disclosure (inline_carrier._disclose); the crash-storm toast is gone
     "worker_readiness_notice": ("runtime_state", 2),
 }
 # The closed classes; none is "the success of a landed act" (its receipt or card already says it).

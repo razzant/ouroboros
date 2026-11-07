@@ -200,7 +200,7 @@ PROMPT_NON_TOOL_IDENTIFIERS = frozenset({
     "write_root", "write_surface",
     # tool parameters named as cross-tool policy
     "project_id", "project_name", "recommended_use", "retry_of", "review_rebuttal", "subagent_id", "working_note",
-    "extra_tests", "full_tests", "test_reason",
+    "extra_tests", "full_tests", "test_reason", "view_address",
     # typed outcomes / statuses / runtime-context keys
     "needs_manual_target", "started_uncustodied", "owner_client",
     # safety policy class names (ouroboros/safety.py TOOL_POLICY values) and

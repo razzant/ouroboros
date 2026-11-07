@@ -206,10 +206,14 @@ def _exposed_units(messages: list, units: Sequence[_AtomicUnit], observation: Ma
     return exposed
 
 
-def _unit_facts(messages: Sequence[Mapping[str, Any]], unit: _AtomicUnit) -> str:
-    """Typed facts and exact source reader from the producer's bound record, never a retelling."""
+def _unit_facts(messages: Sequence[Mapping[str, Any]], unit: _AtomicUnit, *, error_text: bool = True) -> str:
+    """Typed facts and exact source reader from the producer's bound record, never a retelling.
+
+    A recorded outcome other than ``ok`` keeps its result text verbatim (``error_text``) when that text is no longer
+    than the record naming it: the error a work must act on is not reduced to a size, while a long log leaves its
+    exact reader (and a record that would not save room leaves the body in place, ``emergency_address_view``)."""
     rows = compaction._view_source_messages(messages[unit.start:unit.end + 1])
-    lines = [f"Unit {unit.unit_id}: tool, {unit.context_size_tokens} tokens estimated"]
+    lines, texts = [f"Unit {unit.unit_id}: tool, {unit.context_size_tokens} tokens estimated"], []
     results = {str(row.get("tool_call_id") or ""): row for row in rows if str(row.get("role") or "") == "tool"}
     for call in rows[0].get("tool_calls") or []:
         function = call.get("function") if isinstance(call.get("function"), Mapping) else {}
@@ -229,6 +233,12 @@ def _unit_facts(messages: Sequence[Mapping[str, Any]], unit: _AtomicUnit) -> str
         if record.get("source_ref"):
             detail += f"; source {compaction._canonical_json(record['source_ref'])}"
         lines.append(f"- {function.get('name') or '?'} {shown} -> result {result_chars} chars{detail}")
+        status = str(record["facts"].get("status") or "unknown")
+        if record["state"] == "recorded" and status not in ("ok", "unknown") and result_text:
+            texts.append((len(lines), f"  {status} result, verbatim:\n{result_text}"))
+    bare = "\n".join(lines)  # an error text no longer than the record naming it stays; a longer log, its reader
+    for offset, (index, text) in enumerate([item for item in texts if len(item[1]) <= len(bare)] if error_text else ()):
+        lines.insert(index + offset, text)
     return "\n".join(lines)
 
 
@@ -268,12 +278,15 @@ def emergency_address_view(
     task_id: str,
     usable_input: Optional[int] = None,
     replacing_host_kinds: Sequence[str] = (),
+    release_shown_chosen: bool = False,
 ) -> Tuple[list, ContextReclaimReceipt]:
     """Model-free pass after the provider's typed refusal of this very request.
 
     Obsolete host rows share one exact original-checkpoint pointer; review indexes
     have no invented selectable unit IDs. ``bodies`` takes confirmed exposed complete
-    tool units oldest first, stopping at the measured goal. ``unseen_bodies`` is the
+    tool units oldest first, stopping at the measured goal; a chosen read a usable turn showed is an ordinary
+    shown body only when a provider's refusal started the round (``release_shown_chosen``: an estimate never
+    cuts a chosen read, BIBLE P1). ``unseen_bodies`` is the
     separately disclosed late rescue of units whose exposure is unconfirmed;
     ``chosen_bodies`` alone reaches such a just-chosen body that fits by itself. Exact
     body units remain restorable; no view claims understanding. ``measure_candidate``
@@ -293,7 +306,9 @@ def emergency_address_view(
                           measurement_density=density)
     protected = compaction.owner_protected_unit_ids(messages, units)
     fitting = chosen_read_units(messages, units, usable_input=usable_input, density=density)
-    protected |= set() if rung == "chosen_bodies" else fitting
+    tool_units = [u for u in units if compaction.unit_kind(messages, u) == "tool" and u.generation == 0]
+    exposed = _exposed_units(messages, tool_units, observation or {})
+    protected |= set() if rung == "chosen_bodies" else (fitting - exposed if release_shown_chosen else fitting)
     obsolete = _obsolete_host_rows(messages) if rung == "host_copies" else set()
     if rung == "host_copies" and replacing_host_kinds:
         from ouroboros.context_budget import host_row_intact
@@ -302,12 +317,14 @@ def emergency_address_view(
     first_user = next((i for i, row in enumerate(messages) if row.get("role") == "user"), -1)
     obsolete = {i for i in obsolete if i != first_user and not messages[i].get("function_call")
                 and compaction._plain_text(messages[i].get("content")) is not None}
-    raw = [u for u in units if compaction.unit_kind(messages, u) == "tool" and u.generation == 0
-           and u.unit_id not in protected]
+    raw = [u for u in tool_units if u.unit_id not in protected]
     oversized = chosen_read_units(messages, raw) - fitting  # chosen bodies that alone exceed usable input
-    exposed = _exposed_units(messages, raw, observation or {})
-    eligible = [u for u in raw if (u.unit_id in exposed) == (rung == "bodies")
-                and (u.unit_id in fitting) == (rung == "chosen_bodies")] if rung != "host_copies" else []
+    if rung == "bodies":
+        eligible = [u for u in raw if u.unit_id in exposed]
+    elif rung != "host_copies":
+        eligible = [u for u in raw if u.unit_id not in exposed and (u.unit_id in fitting) == (rung == "chosen_bodies")]
+    else:
+        eligible = []
     if not eligible and not obsolete:
         return messages, compaction._receipt("no_eligible", before_sha=before_sha)
     fingerprint = compaction._sha256(compaction._canonical_bytes({"rung": rung, "transcript": before_sha,

@@ -424,7 +424,7 @@ def _capture(reason: str, *, census: Optional[str] = None) -> Optional[Dict[str,
             "attempt": t.get("_attempt"), "queued_at": t.get("queued_at"),
             "queue_seq": t.get("_queue_seq"),
             "task": _frozen({**{key: t.get(key) for key in _PENDING_FIELDS}, **subagent_intent_fields(t), **carried_basis(t),
-                             **{key: t[key] for key in ('admitted_dispatch', '_project_scope_none', '_working_recovery',
+                             **{key: t[key] for key in ('admitted_dispatch', '_project_scope_none', '_working_recovery', '_seed_return',
                                                         # #939: the execution budget and its carried clock offset travel with the row.
                                                         'execution_timeout_sec', '_execution_consumed_sec', '_execution_handoff_sec') if key in t}}),
         })

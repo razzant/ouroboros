@@ -37,6 +37,7 @@ def test_running_project_ids_counts_top_level_scoped_tasks_only():
         _task("beta"),                       # bare task dict
         _meta(_task("", tid="plain")),       # unscoped: no lane
         _meta(_task("gamma", role="subagent")),  # swarm member: no lease of its own
+        {**_meta(_task("delta")), "lane": "conversation"},  # a room's reply turn answers beside its work
         "garbage",
         None,
     ]

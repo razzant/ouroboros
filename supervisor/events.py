@@ -254,6 +254,7 @@ from supervisor.events_project_routing import (  # noqa: E402, F401 -- intention
 from supervisor.events_runtime_controls import (  # noqa: E402, F401 -- intentional public re-exports
     _handle_cancel_task,
     _handle_deep_self_review_request,
+    _handle_free_storage,
     _handle_owner_message_injected,
     _handle_promote_to_stable,
     _handle_rollback_request,
@@ -297,6 +298,7 @@ from supervisor.events_worker_reports import (  # noqa: E402, F401 -- intentiona
     _handle_acceptance_fence,
     _handle_external_wait_lease,
     _handle_log_event,
+    _handle_mcp_signed_in,
     _handle_skill_lifecycle,
     _handle_task_dispatch_resolved,
     _handle_task_focus_updated,
@@ -351,6 +353,7 @@ EVENT_HANDLERS = {
     "task_dispatch_resolved": _handle_task_dispatch_resolved,
     "task_focus_updated": _handle_task_focus_updated,
     "ui_i18n_updated": _handle_ui_i18n_updated,
+    "mcp_signed_in": _handle_mcp_signed_in,
     "update_progress_changed": _handle_update_progress_changed,
     "typing_start": _handle_typing_start,
     "send_message": _handle_send_message,
@@ -358,6 +361,7 @@ EVENT_HANDLERS = {
     "task_metrics": _handle_task_metrics,
     "deep_self_review_request": _handle_deep_self_review_request,
     "promote_to_stable": _handle_promote_to_stable,
+    "free_storage": _handle_free_storage,
     "rollback_request": _handle_rollback_request,
     # D06: the "schedule_task" key retired here had no producer anywhere in the
     # tree — it advertised a capability nothing could reach. The FUNCTION keeps

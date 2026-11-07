@@ -1475,6 +1475,14 @@ test('each row projection is gated by ITS OWN facet, and a stale value says it i
     assert.equal(fresh.quota.exhausted, true);
     assert.match(fresh.quota.label, /^Limit reached/);
     assert.match(fresh.meta, /Limit reached/);
+    // Line 2 is facts: only the spent window takes the warning's hue; a plan id is said in the owner's words (U094, U102).
+    const planned = accountRowFacts({ ...row, identity: { plan: 'self_serve_business_usage_based', email: 'a@b.c' } }, payload,
+        { accountsRead: 'ok', quotaRead: 'ok' });
+    assert.deepEqual(planned.metaParts.filter((part) => part.tone).map((part) => part.tone), ['warn']);
+    assert.match(planned.metaParts.find((part) => part.tone).text, /^Limit reached/);
+    assert.ok(planned.metaParts.some((part) => part.text === 'Business usage-based' && !part.tone));
+    assert.doesNotMatch(planned.meta, /self_serve/);
+    assert.equal(planned.meta, planned.metaParts.map((part) => part.text).join(' · '));
 
     // The QUOTA read refused: nothing may be claimed about the window, so the
     // remembered percentage is not re-shown as current — and the row stops
@@ -1485,6 +1493,7 @@ test('each row projection is gated by ITS OWN facet, and a stale value says it i
     assert.equal(staleQuota.quota.exhausted, false);
     assert.equal(staleQuota.quota.label, 'Limits not checked');
     assert.match(staleQuota.meta, /Limits not checked/);
+    assert.ok(staleQuota.metaParts.every((part) => !part.tone), 'an unread window paints nothing');
 
     // The ACCOUNTS read refused: the row is memory of an account, so its
     // verification claim is dated — and the window, read fine, is not.
@@ -1827,7 +1836,7 @@ test('a lower pin under a newer engine is never promised to activate', () => {
     const line = daemonStatusLine(read, {});
     assert.equal(line.tone, 'warn');
     assert.match(line.text, /^Engine 4\.3\.1 keeps serving; this Ouroboros version pins older Claudexor 4\.3\.0\./);
-    assert.match(line.text, /After a Restart, Panic or engine exit, 4\.3\.0 may refuse data a newer engine served\./);
+    assert.match(line.text, /After Restart Claudexor, Panic or an engine exit, 4\.3\.0 may refuse data a newer engine served\./);
     assert.ok(!/activate|staged|ready/.test(line.text), line.text);
     // A facet gap: the serving claim yields to the facets; the pin fact stays.
     const gap = daemonStatusLine({ ...read, reads: { catalog: 'ok', accounts: 'failed', quota: 'ok' } }, {});

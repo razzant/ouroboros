@@ -168,7 +168,8 @@ def answer_early(binding: ReviewWaitBinding, _task: Any = None) -> bool:
 
 
 def note_place_delivery(ctx: Any, entry: Mapping[str, Any], controls: dict) -> None:
-    """A drained place arrival: a wake one may reopen a ready final, background alone never does.
+    """A drained place arrival: a wake one may reopen a ready final, background alone never does. My human's own
+    words it carries (``owner_words``) are owner input the drain records, which revisits a ready final either way.
 
     Each arrival the drain hands to the model is a candidate for coverage (``covered_send``), as is
     each incoming message a reentry note carries whole (``reentry_note``, never a wake). A typed
@@ -179,7 +180,7 @@ def note_place_delivery(ctx: Any, entry: Mapping[str, Any], controls: dict) -> N
 
     arrival = entry.get("place_arrival") if isinstance(entry.get("place_arrival"), Mapping) else {}
     if arrival.get("wake") is not False:
-        controls["place_event"] = True  # accepted context, never owner authority
+        controls["place_event"] = True  # accepted context; my human's own words ride the drain's own row
     message = arrival.get("message") if isinstance(arrival.get("message"), Mapping) else {}
     if ctx is not None and arrival.get("source_event_id") and not reaction_fact(message):
         if not isinstance(getattr(ctx, "_presence_delivered", None), list):
@@ -614,7 +615,7 @@ def _arrivals_in_mail(binding: ReviewWaitBinding, ctx: Any) -> set | None:
     return {entry["msg_id"] for entry in mail if entry.get("provenance") == "place_event"} if status.get("complete") else None
 
 
-_PARKED_BY = {"review": "While you waited for the review", "pause": "While the owner's Pause kept your work parked",
+_PARKED_BY = {"review": "While you waited for the review", "pause": "While the Pause kept your work parked",
               "restart": "While your saved work waited through the application's restart"}
 
 

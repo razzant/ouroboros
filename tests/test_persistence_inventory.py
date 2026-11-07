@@ -918,7 +918,11 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # 452 -> 453 (test diet): the install's test durations table ``state/test-durations.json``
 # (``ouroboros/test_evidence.py`` names it, the evidence plugin of the gate's sessions writes it);
 # its own section-2 row.
-EXPECTED_SCAN_PATHS = 453
+# 453 -> 454: the integrated tree (``origin/ouroboros`` at 84772aae8a) already scans 454 paths against
+# its pin of 453 (red there before this branch; the pin follows the tree).
+# 454 -> 455 (supervisor-recovery, owner 2A): the Fault boot's admitted recovery turn and the generation
+# that admitted it, ``state/core_loss_recovery.json`` (``ouroboros/server_process.py``); its own row.
+EXPECTED_SCAN_PATHS = 455
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
@@ -1137,7 +1141,7 @@ STALE_ROW_EXEMPTIONS = frozenset({
     # live writer (``review_source_closure.retain_review_request_sources`` left
     # with the acceptance machine); old snapshots are still read
     # (``review_source_closure._owned_attachment_path`` during child-ref promotion,
-    # ``delegate_registration_policy.minted_review_root``).
+    # ``delegate_registration_policy.minted_root``).
     "task_results/artifacts/*/source_handles/review_inputs",
     # A LIVE plane the scan cannot see: ``delegate_output.retain_terminal_bytes``
     # and ``delegate_collection._retain`` spell each source id as an f-string over a

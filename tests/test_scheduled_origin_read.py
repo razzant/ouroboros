@@ -291,7 +291,7 @@ def test_a_presence_follow_up_keeps_its_ceiling_and_never_inherits_a_second_hop(
     origin.task_contract = {"objective": "presence turn", "capability_ceiling": presence_ceiling_payload(ceiling),
                             "predecessor_authority": predecessor_envelope(GRAND)}
     out = _handle_schedule_followup(origin, relation="independent", run_at="2000-01-01T00:00:00+00:00",
-                                    objective="Revisit")
+                                    objective="Revisit", destination="place")
     assert out.startswith("FOLLOWUP_SCHEDULED"), out
     record = queue.list_scheduled_tasks(host.root)["tasks"][-1]
     assert sorted(record["task"]["task_contract"]) == ["capability_ceiling"]

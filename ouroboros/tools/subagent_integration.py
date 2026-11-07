@@ -1284,7 +1284,9 @@ def _apply_to_parent_repo(ctx: ToolContext, child_task_id: str, *, reason: str, 
                 admission_check=lambda: copy_apply_refusal(ctx, target, touched))
         except (OSError, ValueError, KeyError, subprocess.SubprocessError, zipfile.BadZipFile) as exc:
             return f"⚠️ INTEGRATE_APPLY_UNKNOWN: {type(exc).__name__}: {exc}. Inspect the target before another apply; the captured result is retained."
-        detail = outcome.get("admission_refusal") or outcome.get("lock_error") or outcome.get("drift_error")
+        if outcome.get("lock_error"):  # a busy target is no conflict (06.11): nothing applied, no verdict, result kept
+            return f"⚠️ INTEGRATE_NOT_STARTED: {child_task_id} into {target}: the target is busy ({outcome['lock_error']}). Retry later."
+        detail = outcome.get("admission_refusal") or outcome.get("drift_error")
         if outcome.get("drifted"):
             detail = "source files changed since copy: " + ", ".join(outcome["drifted"])
         proc, unindexed = outcome["proc"], outcome.get("unindexed") or []
@@ -1295,9 +1297,9 @@ def _apply_to_parent_repo(ctx: ToolContext, child_task_id: str, *, reason: str, 
     else:
         from ouroboros.tools.git import _acquire_git_lock, _release_git_lock
         try:
-            _git_lock = _acquire_git_lock(ctx)
+            _git_lock = _acquire_git_lock(ctx, repo_dir=target)
         except Exception as exc:
-            return f"⚠️ INTEGRATE_LOCK_TIMEOUT: could not acquire the repo git lock: {type(exc).__name__}: {exc}."
+            return f"⚠️ INTEGRATE_NOT_STARTED: {child_task_id} into {target}: the target is busy ({type(exc).__name__}: {exc}). Retry later."
         partial_applied = False
         apply_attempted = False
         try:

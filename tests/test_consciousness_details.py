@@ -49,7 +49,7 @@ def test_primary_endpoint_and_state_fallback_share_status(monkeypatch, tmp_path,
     assert {key: panel[key] for key in fallback} == fallback
     assert clock.details_snapshot(True) == panel
     assert "places" not in panel and panel["recent_wakes"] == [{"task_id": "wake"}]
-    assert panel["recent_wakes_coverage"] == "wakes that reached a model call in the last 48 h"
+    assert panel["recent_wakes_coverage"] == "Wakes that reached a model call in the last 48 h"
     assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
 
 
@@ -107,8 +107,9 @@ def test_explained_outcomes_label_future_and_overdue_attempts(monkeypatch, outco
 
 
 @pytest.mark.parametrize("constructed", [False, True])
-@pytest.mark.parametrize("enabled,status", [(None, "unknown"), (False, "disabled"), (True, "stopped")])
-def test_stored_control_and_unconstructed_clock_are_visible(monkeypatch, tmp_path, constructed, enabled, status):
+@pytest.mark.parametrize("enabled,status,failed", [(None, "unknown", None), (False, "disabled", None),
+                                                   (True, "starting", None), (True, "stopped", "Supervisor init failed: boom")])
+def test_stored_control_and_unconstructed_clock_are_visible(monkeypatch, tmp_path, constructed, enabled, status, failed):
     import server
     from supervisor import state
 
@@ -118,6 +119,7 @@ def test_stored_control_and_unconstructed_clock_are_visible(monkeypatch, tmp_pat
     monkeypatch.setattr(view, "place_views", lambda root: [])
     monkeypatch.setattr(view, "recent_wakes", lambda root, places, **kw: [])
     monkeypatch.setattr(server, "_consciousness", clock if constructed else None)
+    monkeypatch.setattr(server, "_supervisor_error", failed)
     monkeypatch.setattr(state, "load_state", lambda: {} if enabled is None else {"bg_consciousness_enabled": enabled})
     response = asyncio.run(api_consciousness(Request({"type": "http", "app": server.app.app})))
     panel = json.loads(response.body)
@@ -125,7 +127,11 @@ def test_stored_control_and_unconstructed_clock_are_visible(monkeypatch, tmp_pat
     assert panel["status"] == ("sleeping" if constructed and enabled else status)
     assert panel["enabled"] is enabled
     assert {key: panel[key] for key in fallback} == fallback
-    assert ("not constructed" in panel["detail"]) == (not constructed and enabled is True)
+    # Without a clock the owner reads why: Ouroboros is still starting, or its start failed and only a restart helps.
+    if not constructed and enabled is True:
+        assert panel["detail"] == ("Cannot wake: Ouroboros did not finish starting. Restart Ouroboros." if failed
+                                   else "Waits for Ouroboros to finish starting.")
+    assert "alarm clock" not in panel["detail"] and "supervisor" not in panel["detail"].lower()
 
 
 @pytest.mark.parametrize("selected_count", [0, 49, 50])
@@ -141,8 +147,8 @@ def test_recent_wake_coverage_names_the_selection_cap_even_with_pruned_documents
     monkeypatch.setattr(clock, "status_snapshot", lambda: {"places_brief": []})
     panel = clock.details_snapshot(True)
     assert len(reads) == 1 and len(panel["recent_wakes"]) == bool(selected_count)
-    prefix = "the latest 50 " if selected_count == 50 else ""
-    assert panel["recent_wakes_coverage"] == prefix + "wakes that reached a model call in the last 48 h"
+    expected = ("The latest 50 wakes" if selected_count == 50 else "Wakes") + " that reached a model call in the last 48 h"
+    assert panel["recent_wakes_coverage"] == expected
 
 
 @pytest.mark.parametrize("own,places", [(50, 0), (0, 50), (49, 1)])
@@ -155,12 +161,12 @@ def test_recent_wake_coverage_names_actual_shares_only_on_a_full_mixed_page(monk
     monkeypatch.setattr(clock, "status_snapshot", lambda: {"places_brief": []})
     coverage = clock.details_snapshot(True)["recent_wakes_coverage"]
     if own + places < 50:
-        assert coverage == "wakes that reached a model call in the last 48 h"
+        assert coverage == "Wakes that reached a model call in the last 48 h"
     elif own and places:
-        assert coverage == (f"the latest {own} of its own wakes and {places} wakes in places "
+        assert coverage == (f"The latest {own} of its own wakes and {places} wakes in places "
                             "that reached a model call in the last 48 h")
     else:
-        assert coverage == "the latest 50 wakes that reached a model call in the last 48 h"
+        assert coverage == "The latest 50 wakes that reached a model call in the last 48 h"
 
 
 @pytest.mark.parametrize(("day", "words", "offset"), [

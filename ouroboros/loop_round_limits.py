@@ -121,8 +121,11 @@ def _drain_incoming_messages(
         if not acknowledge_transcript_entry(drive_root, task_id, entry) or event_queue is None:
             return
         if entry.get("relay") or entry.get("quiz_delivery") or entry.get("card_delivery"):
+            from ouroboros.owner_relay import retained_relay
             event_queue.put_nowait({"type": "owner_message_injected", "task_id": task_id,
-                                   "relay_ack": entry.get("relay"), "quiz_ack": entry.get("quiz_delivery"),
+                                   "relay_ack": (entry["_relay_delivery"] if "_relay_delivery" in entry
+                                                 else retained_relay(entry)) if entry.get("relay") else None,
+                                   "quiz_ack": entry.get("quiz_delivery"),
                                    "card_ack": entry.get("card_delivery")})
 
     def ack_content(entry: Dict[str, Any]) -> None:
@@ -218,9 +221,17 @@ def _drain_incoming_messages(
                 # owner's messages supersede a reviewed answer). The typed provenance
                 # and the sender id ride the row, the injected event and the ack.
                 provenance = str(entry.get("provenance") or "ancestor_task")
+                arrival = entry.get("place_arrival") if isinstance(entry.get("place_arrival"), dict) else {}
                 if provenance == "place_event":
                     from ouroboros.presence_continuation import note_place_delivery
-                    note_place_delivery(owner_ctx, entry, controls)  # context, never owner authority
+                    note_place_delivery(owner_ctx, entry, controls)  # the event is context; my human's words are theirs
+                    if arrival.get("owner_words"):  # as at the opening, under its id: this mailbox row is context
+                        from ouroboros.owner_words import place_reply_target
+                        from ouroboros.presence_runner import presence_chat_id
+                        room = presence_chat_id(str((entry.get("sender_origin") or {}).get("conversation_key") or ""))
+                        _loop()._record_owner_directive(owner_ctx, source="place_owner", carried=True,
+                            content=arrival["owner_words"], msg_id=f"chat {room} / {arrival.get('source_event_id') or ''}",
+                            reply_to=place_reply_target(arrival.get("message")))
                 if provenance not in CONTEXT_ONLY_TASK_PROVENANCES:
                     _loop()._record_owner_directive(
                         owner_ctx, content=dmsg, msg_id=str(entry.get("msg_id") or ""),
@@ -229,7 +240,8 @@ def _drain_incoming_messages(
                         origin={"source_task_id": str(entry.get("source_task_id") or ""),
                                 "relayed_from_task_id": str(entry.get("relayed_from_task_id") or "")},
                     )
-                words = OWNER_WORDS_KIND if provenance not in CONTEXT_ONLY_TASK_PROVENANCES else ""
+                owned = provenance not in CONTEXT_ONLY_TASK_PROVENANCES or arrival.get("owner_words")
+                words = OWNER_WORDS_KIND if owned else ""  # my human's words never fold as context
                 deliver_task_message(
                     entry, task_id, event_queue,
                     lambda text: _loop()._append_or_merge_user_message(messages, text, slot=owner_ctx, kind=words),
@@ -257,15 +269,17 @@ def _drain_incoming_messages(
                 continue
             if kind == KIND_QUIZ_ANSWER:
                 from ouroboros.owner_quiz import late_answer_owner_text
+                from ouroboros.owner_words import answered_card_reply
                 delivery = entry.get("quiz_delivery") or {}
                 answer = delivery.get("answer_snapshot")
                 owner_words = late_answer_owner_text(answer) if isinstance(answer, dict) else dmsg
                 if isinstance(answer, dict):
                     from ouroboros.owner_relay import retain_owner_message
                     retain_owner_message(owner_ctx, (answer.get("delivery") or {}).get("answer_row"))
-                _loop()._record_owner_directive(  # the delivered card's identity: its question stays findable
+                _loop()._record_owner_directive(  # the card it answers rides beside it, the asking task's words
                     owner_ctx, source="owner_quiz_answer", content=owner_words, msg_id=str(entry.get("msg_id") or ""),
-                    origin={"source_task_id": delivery.get("task_id"), "quiz_id": delivery.get("quiz_id")})
+                    origin={"source_task_id": delivery.get("task_id"), "quiz_id": delivery.get("quiz_id")},
+                    reply_to=answered_card_reply(answer, delivery.get("task_id")))
                 deliver_quiz_answer(
                     entry, task_id, event_queue,
                     lambda text: _loop()._append_or_merge_user_message(messages, text, slot=owner_ctx,
@@ -274,8 +288,8 @@ def _drain_incoming_messages(
                 ack_content(entry)
                 continue
             # A LATE quiz answer: the owner's row and this entry's text are the
-            # owner's own words; the model reads (and the owner corpus keeps) the
-            # FULL card frame rebuilt from the stored block on the canonical root.
+            # owner's own words; the model reads the FULL card frame rebuilt from the
+            # stored block on the canonical root, the corpus the card beside their words.
             model_msg = dmsg
             if entry.get("late_answer") is not None:
                 from ouroboros.owner_quiz import late_answer_model_text
@@ -290,7 +304,7 @@ def _drain_incoming_messages(
                 model_msg = card_press_model_text(str(getattr(owner_ctx, "budget_drive_root", "") or "") or drive_root,
                                                   entry.get("card_press"), dmsg)
             owner_content = _owner_content({**entry, "text": model_msg}, drive_root, task_id)
-            from ouroboros.owner_words import reply_target
+            from ouroboros.owner_words import answered_card_reply, answered_card_source, reply_target
 
             chats = str(getattr(owner_ctx, "budget_drive_root", "") or "") or drive_root  # the room's rows
             _loop()._record_owner_directive(
@@ -299,7 +313,8 @@ def _drain_incoming_messages(
                 content=_owner_content(entry, drive_root, task_id),
                 msg_id=str(entry.get("msg_id") or ""),
                 origin={"client_message_id": entry.get("client_message_id")},  # the same message relayed: one row
-                reply_to=reply_target(chats, entry.get("reply_reference")) or None,
+                reply_to=answered_card_reply(*answered_card_source(entry))  # a late answer replies to its card
+                or reply_target(chats, entry.get("reply_reference")) or None,
             )
             _stamp_owner_delivery(
                 owner_ctx,
@@ -338,12 +353,13 @@ def _drain_incoming_messages(
     return controls
 
 
-def _context_overflow_retries(tool_ctx: Any) -> set[Tuple[str, str]]:
-    """Per-task ``(round_id, pass)`` record of the refusal passes (``REFUSAL_PASSES``): once per round, any route."""
-    retries = getattr(tool_ctx, "_context_overflow_retries", None)
+def _context_overflow_retries(tool_ctx: Any, record: str = "_context_overflow_retries") -> set:
+    """Per-task ``(round_id, pass)`` record of the refusal passes (``REFUSAL_PASSES``): once per round, any route.
+    ``_context_overflow_changed`` keeps the rounds a pass changed the candidate in (owner 2A, a fallback's re-entry)."""
+    retries = getattr(tool_ctx, record, None)
     if not isinstance(retries, set):
         retries = set()
-        tool_ctx._context_overflow_retries = retries
+        setattr(tool_ctx, record, retries)
     return retries
 
 
@@ -1158,7 +1174,9 @@ def _run_emergency_address_pass(ctx: Any, disposition: Any, *, rung: str, goal_t
     """Publish a model-free source view, measuring the sealed candidate with its next facts line.
 
     ``goal_tokens`` is the refusal's measured target (``loop_model_call._refusal_target``); without
-    one the pass takes its whole category, never one unit sized by a missing number."""
+    one the pass takes its whole category, never one unit sized by a missing number. A size refusal's
+    pass (``refusal_policy``) frees a shown chosen read only after a provider's refusal (an estimate
+    never cuts a chosen read)."""
     from ouroboros.context_budget import ContextReclaimRequest
     from ouroboros.context_compaction import context_reclaim_transcript_sha256, emergency_address_view
 
@@ -1187,6 +1205,8 @@ def _run_emergency_address_pass(ctx: Any, disposition: Any, *, rung: str, goal_t
         drive_root=pathlib.Path(ctx.drive_root or ctx.drive_logs.parent), task_id=ctx.task_id,
         usable_input=(measurement.capacity_total_tokens - measurement.response_reserve_tokens
                       if measurement.capacity_total_tokens is not None else None),
+        **({"release_shown_chosen": bool(policy.get("provider_refused"))}
+           if (policy := getattr(ctx, "refusal_policy", None)) and cause == "context_size" and rung == "bodies" else {}),
     )
     if receipt.status == "applied":
         _publish_reclaimed_transcript(ctx, rebuilt, by=f"{'refusal_pass' if cause == 'context_size' else cause}:{rung}")
@@ -1201,12 +1221,14 @@ def _run_emergency_address_pass(ctx: Any, disposition: Any, *, rung: str, goal_t
     return receipt
 
 
-def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None) -> bool:
+def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, slack: int = 0) -> bool:
     """Narrow memory beside the actual transcript without inventing a smaller route window.
 
     The view saves the measured ``saving`` (else the capacity
     deficit, else at least one element) from the level it shows (no target or working margin
-    reapplied, nothing addressed unfolds)."""
+    reapplied, nothing addressed unfolds). ``slack`` asks the return-after-fold room beyond it, which only
+    memory detail and ordinary host forms pay (``ContextFitPlan.reproject_for_route``): a zero ``saving``
+    beside it is no excess, so no whole-or-outline section pays."""
     plan = ctx.context_fit_plan
     measurement = fit.measurement
     if plan is None or getattr(plan, "core", None) is None:
@@ -1219,7 +1241,9 @@ def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None) ->
         ratio=measurement.measurement_density,
         output_reserve=int(plan.output_reserve_tokens), tool_schemas=ctx.tool_schemas, start_mode=mode,
         current_messages=ctx.messages, measured_input_tokens=measurement.reprojection_input_tokens,
-        refused_tokens=max(1, int(saving or measurement.capacity_deficit_tokens or 0)),
+        refused_tokens=(int(saving) if saving or (saving == 0 and slack)  # a slack-only ask states no excess
+                        else max(1, int(measurement.capacity_deficit_tokens or 0))),
+        **({"slack_tokens": int(slack)} if slack else {}),
     )
     selected_mode = rebound.initial_mode
     if selected_mode == mode and rebound.projection(mode).system_content_json == before:

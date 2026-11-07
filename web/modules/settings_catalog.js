@@ -1,6 +1,6 @@
 import { accountRows, claudexorStatus, READ_OK } from './claudexor_status_store.js';
 import { apiFetch } from './api_client.js';
-import { setInlineStatus } from './ui_helpers.js';
+import { setResult } from './ui_primitives.js';
 import { parseModelSource } from './route_editor_primitives.js';
 export const MODEL_CATALOG_TIMEOUT_MS = 25000;
 let catalogRefreshSeq = 0;
@@ -172,11 +172,12 @@ export function catalogReadNote(data = {}, { compact = false } = {}) {
         : errors.length ? `Model catalog could not be read: ${clauses}.`
             : state === 'stale' ? 'Model catalog is last known.' : state === 'partial' ? 'Some account model lists could not be read.'
                 : ['failed', 'transport'].includes(state) ? 'Model catalog could not be read.' : 'Model catalog has not been read yet.';
-    return `${reason} Existing suggestions and your selection are kept. Refresh Model Catalog in Models to retry.`;
+    return `${reason} Existing suggestions and your selection are kept. Refresh model catalog in Models to retry.`;
 }
 
+// The catalog's result beside its Refresh button (ui.css .ui-action-row): a count ends by itself, a gap stays.
 function setCatalogStatus(statusEl, text, tone = 'muted') {
-    setInlineStatus(statusEl, text, tone);
+    setResult(statusEl, { text, tone, ends: tone === 'ok' });
 }
 
 function broadcastCatalog(data) {

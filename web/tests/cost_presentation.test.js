@@ -61,7 +61,7 @@ test('the budget pill asks for the owner only while a spending-limit stop waits 
     assert.deepEqual(budget.filter((rule) => amber.test(rule) && !rule.includes('[data-attention="1"]')), [],
         'nothing paints the budget amber without the owner\'s move');
     assert.ok(budget.some((rule) => amber.test(rule) && rule.includes('[data-attention="1"]')));
-    assert.ok(rules('.chat-header-btn.danger.ui-chrome-control').some((rule) => /--tone-red|--status-error/.test(rule)));
+    assert.ok(rules('.chat-header-btn.danger').some((rule) => /--panic-fill|--panic-ink|--tone-red|--status-error/.test(rule)));
 });
 
 test('task cards distinguish unavailable, pending zero, and final zero', () => {
@@ -250,41 +250,49 @@ test('cost dashboard distinguishes loading, unavailable, pending, and final zero
             cost_final: false,
         },
     };
+    const fact = (view, label) => Object.fromEntries(view.facts)[label];
     const pending = costDashboardPresentation(base);
-    assert.equal(pending.knownLimit, '$0.00 / $10.00');
+    assert.equal(pending.figure, '$0.00 of $10.00');
+    assert.equal(pending.left, '$10.00 left');
     // An older payload carries no cause. Say only what is known — never invent "0 open".
-    assert.equal(pending.final, 'Pending');
-    assert.equal(pending.calls, '0');
+    assert.equal(fact(pending, 'Final'), 'No');
+    assert.equal(fact(pending, 'Physical attempts'), '0');
 
     // A flag without its cause is not reconstructible. This exact snapshot — every dollar
     // bucket $0.00, unknown 0, cost_final false — is what an ESTIMATED $0.00 produces, and
     // it rendered "Pending" with the reason nowhere on the page.
-    assert.equal(costDashboardPresentation({
+    assert.equal(fact(costDashboardPresentation({
         ...base,
         accounting: { ...base.accounting, non_final_rows: 1 },
-    }).final, 'Pending (1 open)');
-    assert.equal(costDashboardPresentation({
+    }), 'Final'), 'No (1 open)');
+    assert.equal(fact(costDashboardPresentation({
         ...base,
-        accounting: { ...base.accounting, non_final_rows: 3 },
-    }).final, 'Pending (3 open)');
+        accounting: { ...base.accounting, non_final_rows: 294359 },
+    }), 'Final'), 'No (294,359 open)', 'a count reads grouped like money');
+    // Open rows are the ledger's open ones: calls that will never get a price (subscription
+    // work, in non_final_rows) are not "open" (05.11: 3,176 open among 294,141 non-final).
+    assert.equal(fact(costDashboardPresentation({
+        ...base,
+        accounting: { ...base.accounting, non_final_rows: 294141, accounting_open_rows: 3176 },
+    }), 'Final'), 'No (3,176 open)');
     // The count never contradicts the flag it explains, and a settled ledger says "Yes".
-    assert.equal(costDashboardPresentation({
+    assert.equal(fact(costDashboardPresentation({
         ...base,
         accounting: { ...base.accounting, cost_final: true, non_final_rows: 0 },
-    }).final, 'Yes');
+    }), 'Final'), 'Yes');
     // Non-final with ZERO open rows is a real shape, not a contradiction: a torn ledger
     // tail makes `_with_integrity` clear `cost_final` on its own authority. The cause is
     // then `integrity_degraded`, so this must NOT fabricate "(0 open)" and blame rows.
-    assert.equal(costDashboardPresentation({
+    assert.equal(fact(costDashboardPresentation({
         ...base,
         accounting: { ...base.accounting, cost_final: false, non_final_rows: 0 },
-    }).final, 'Pending');
+    }), 'Final'), 'No');
 
     const final = costDashboardPresentation({
         ...base,
         accounting: { ...base.accounting, cost_final: true },
     });
-    assert.equal(final.final, 'Yes');
+    assert.equal(fact(final, 'Final'), 'Yes');
 
     assert.equal(costDashboardPresentation({
         ...base,
@@ -302,25 +310,70 @@ test('cost dashboard sets the limit against known spend, open holds beside it (#
             reserved_usd: 4, unresolved_upper_bound_usd: 20, accounted_usd: 26,
         },
     });
-    // $2 known of $10: the $24 of holds is shown in its own tiles, never as spending.
-    assert.equal(shown.knownLimit, '$2.00 / $10.00');
-    assert.deepEqual([shown.confirmed, shown.estimated, shown.reserved, shown.unresolved],
+    // $2 known of $10: the $24 of holds is said beside it and kept in Details, never added in as spending.
+    assert.equal(shown.figure, '$2.00 of $10.00');
+    assert.equal(shown.left, '$8.00 left');
+    assert.equal(shown.open, 'up to $20.00 for calls without a known price', 'the producer\'s words: a worst case, not spending');
+    assert.equal(shown.reached, false);
+    assert.equal(shown.share, 20);
+    assert.deepEqual(shown.facts.map(([label]) => label), ['Final', 'Confirmed', 'Estimated', 'Reserved',
+        'Unresolved upper bound', 'Calls without a price', 'Physical attempts'], 'the accounting terms are the record\'s');
+    assert.deepEqual(['Confirmed', 'Estimated', 'Reserved', 'Unresolved upper bound'].map((label) => Object.fromEntries(shown.facts)[label]),
         ['$1.50', '$0.50', '$4.00', '$20.00']);
 });
 
-test('legacy breakdown buckets disclose unknown and pending zero amounts', () => {
-    assert.equal(costBucketPresentation({
-        cost: 0, calls: 1, unknown_unmetered: 1, non_final_rows: 1, cost_final: false,
-    }), 'cost pending (unmetered=1)');
-    assert.equal(costBucketPresentation({
-        cost: 0, calls: 1, unknown_unmetered: 0, non_final_rows: 1, cost_final: false,
-    }), 'cost pending');
-    assert.equal(costBucketPresentation({
-        cost: 0.25, calls: 2, unknown_unmetered: 1, non_final_rows: 1, cost_final: false,
-    }), '$0.25 (pending, unmetered=1)');
-    assert.equal(costBucketPresentation({
+test('the known spend leads grouped like money, says what is left, and a reached limit is the owner\'s move', () => {
+    const view = (accounting) => costDashboardPresentation({ total_calls: 423015, by_model: {}, accounting: {
+        available: true, cost_final: true, non_final_rows: 0, unknown_unmetered: 0, confirmed_usd: 0, estimated_usd: 0,
+        reserved_usd: 0, unresolved_upper_bound_usd: 0, ...accounting } });
+    const near = view({ settled_usd: 29438.2, limit_usd: 29800, remaining_known_usd: 361.8 });
+    assert.equal(near.figure, '$29,438.20 of $29,800.00');
+    assert.equal(near.left, '$361.80 left', 'the room the admission rule reports, never recomputed past it');
+    assert.equal(near.open, '', 'nothing open is said only when something is');
+    assert.equal(near.reached, false);
+    assert.equal(Object.fromEntries(near.facts)['Physical attempts'], '423,015');
+    const reached = view({ settled_usd: 30500, limit_usd: 30500, remaining_known_usd: 0 });
+    assert.equal(reached.reached, true);
+    assert.equal(reached.left, 'Limit reached: new paid work is refused');
+    assert.equal(reached.share, 100);
+    const unlimited = view({ settled_usd: 12.5, limit_usd: 0 });
+    assert.deepEqual([unlimited.figure, unlimited.left, unlimited.share], ['$12.50', 'No limit set', null]);
+});
+
+test('a breakdown cell is its amount in the card\'s words, what it leaves out on the face under it, never a free zero', () => {
+    // Subscription calls settle without a price: none will arrive, so not pending; a session row may have no call.
+    assert.deepEqual(costBucketPresentation({
+        cost: 0, calls: 0, unknown_unmetered: 3, non_final_rows: 3, accounting_open_rows: 0, cost_final: false,
+    }), { text: 'Cost not priced', open: false, detail: '3 without a price' });
+    assert.deepEqual(costBucketPresentation({
+        cost: 0, calls: 1, unknown_unmetered: 1, non_final_rows: 1, accounting_open_rows: 1, cost_final: false,
+    }), { text: 'Cost pending', open: true, detail: '1 without a price' });
+    assert.deepEqual(costBucketPresentation({
+        cost: 0, calls: 1, unknown_unmetered: 0, non_final_rows: 1, accounting_open_rows: 1, cost_final: false,
+    }), { text: 'Cost pending', open: true, detail: '' });
+    assert.deepEqual(costBucketPresentation({
+        cost: 0.25, calls: 2, unknown_unmetered: 1, non_final_rows: 1, accounting_open_rows: 0, cost_final: false,
+    }), { text: 'Tracked: $0.25', open: false, detail: '1 without a price' });
+    assert.deepEqual(costBucketPresentation({
+        cost: 0.0004, calls: 1, unknown_unmetered: 0, non_final_rows: 0, accounting_open_rows: 0, cost_final: true,
+    }), { text: '$0.0004', open: false, detail: '' }, 'a positive sub-cent amount is never $0.00');
+    assert.deepEqual(costBucketPresentation({
+        cost: 0.25, calls: 2, unknown_unmetered: 0, non_final_rows: 1, accounting_open_rows: 1, cost_final: false,
+    }), { text: '$0.25', open: true, detail: 'pending' });
+    assert.deepEqual(costBucketPresentation({
+        cost: 5623.32, calls: 2, unknown_unmetered: 764, non_final_rows: 765, accounting_open_rows: 1, cost_final: false,
+    }), { text: 'Tracked: $5,623.32', open: true, detail: 'pending · 764 without a price' });
+    // An older payload without the open count: its non-final rows past the unpriced ones are the open ones.
+    assert.deepEqual(costBucketPresentation({ cost: 0, calls: 1, unknown_unmetered: 1, non_final_rows: 1, cost_final: false }),
+        { text: 'Cost not priced', open: false, detail: '1 without a price' });
+    assert.deepEqual(costBucketPresentation({
         cost: 0, calls: 1, unknown_unmetered: 0, non_final_rows: 0, cost_final: true,
-    }), '$0.00');
+    }), { text: '$0.00', open: false, detail: '' }, 'a settled zero is a fact');
+    assert.deepEqual(costBucketPresentation({ cost: null, calls: 1 }), { text: 'unknown', open: false, detail: '' });
+    for (const cell of [costBucketPresentation({ cost: 5623.32, cost_final: false, unknown_unmetered: 764 })]) {
+        assert.doesNotMatch(cell.text, /unmetered|pending|without a price|\(/, 'the counts leave the amount');
+        assert.equal(cell.detail, '764 without a price', 'and are said under it');
+    }
 });
 
 test('an unavailable snapshot is sticky but never pins the card (v6.82 r2)', () => {
@@ -442,6 +495,10 @@ test('#498 the scoped carrier answers the whole money question from one bucket',
     });
     // A proven zero: priced rows evidenced it and the accounting is closed.
     assert.deepEqual(costPresentationMeta(carrier({ tracked_amount: 0 })), ['$0.00']);
+    // Under a cent is not that zero: four places, as review records print it.
+    assert.deepEqual(costPresentationMeta(carrier({ tracked_amount: 0.0004, has_unpriced: true })), ['Tracked: $0.0004']);
+    // Below four places a positive amount still never reads as zero.
+    assert.deepEqual(costPresentationMeta(carrier({ tracked_amount: 0.00003 })), ['<$0.0001']);
     // An open subtotal is a ceiling, not a receipt.
     assert.deepEqual(costPresentationMeta(carrier({ tracked_final: false, accounting_open: true })),
         ['up to $1.20']);

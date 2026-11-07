@@ -82,7 +82,7 @@ def _agents_panel_typing_reads_draft(page) -> None:
         """() => [...document.querySelectorAll('[data-subagent-status]')]
             .every((el) => !el.textContent.includes('·'))
             && document.querySelector('[data-subagents-intent]')?.textContent === ''
-            && !document.querySelector('#settings-unsaved-indicator')?.hidden
+            && document.querySelector('.settings-footer')?.dataset.draft === 'dirty'
             && document.activeElement === document.querySelector(
                 '.available-subagent-row [data-subagent-field="recommended_use"]')""",
         timeout=5_000,

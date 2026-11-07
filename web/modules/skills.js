@@ -16,12 +16,15 @@ import {
 import { createSkillBrowse } from './skill_browse.js';
 import { createSkillSources, unconfirmedHubRows } from './skill_sources_view.js';
 import { openSkillDetailSheet } from './skill_detail_sheet.js';
+import { getContributions } from './contributions.js';
+import { getHostModules } from './host_modules.js';
 import {
     openCompareDialog, openOfficialExplanation, openPublishDestinationDialog, openSkipReviewDialog, openUpdateDialog, updateWithoutReview,
 } from './skill_dialogs.js';
-import { plural, popularityText, repoLabel, routeExternalLink, versionText } from './skill_presentation.js';
+import { plural, popularityText, repoLabel, routeExternalLink, skillTitle, versionText } from './skill_presentation.js';
 import { runSkillPublishFlow } from './skill_publish_flow.js';
 import { installedTime } from './ui_helpers.js';
+import { bindScrollFade } from './scroll_fade.js';
 import {
     boundedText, emitSkillLifecycle, escapeHtmlAttr as escapeHtml, grantReady, renderSkillRepairPrompt,
     reviewTone, reviewReady,
@@ -52,7 +55,7 @@ function skillsPageTemplate() {
             })}
             <div class="skills-search-chrome" data-chrome-pane="installed">
                 <input type="search" class="ui-control skills-search" id="skills-installed-search" placeholder="Find an installed skill" aria-label="Find an installed skill" autocomplete="off">
-                <div class="skills-filter-strip" id="skills-installed-filters" role="group" aria-label="Show"></div>
+                <div class="skills-filter-strip" id="skills-installed-filters" role="group" aria-label="Show" data-scroll-x></div>
             </div>
             <div class="skills-search-chrome" data-chrome-pane="browse" id="skills-browse-chrome" hidden></div>
             <div class="skills-scroll scroll-fade-y">
@@ -165,10 +168,10 @@ export function matchesInstalledFilter(skill, filter, model = installedSkillMode
 }
 
 /** «All 62 · Needs you 10 · Updates 12 · Off 41 · Made here 43», as facts of the loaded list. */
-export function installedFilterCounts(skills) {
+export function installedFilterCounts(skills, pageModules = {}) {
     const counts = Object.fromEntries(INSTALLED_FILTERS.map(([key]) => [key, 0]));
     for (const skill of skills) {
-        const model = installedSkillModel(skill);
+        const model = installedSkillModel(skill, { pageModules });
         for (const [key] of INSTALLED_FILTERS) if (matchesInstalledFilter(skill, key, model)) counts[key] += 1;
     }
     return counts;
@@ -284,6 +287,7 @@ export function initSkills(ctx = {}) {
     const emptyEl = document.getElementById('skills-empty');
     const filterEmpty = document.getElementById('skills-filter-empty');
     const filtersEl = document.getElementById('skills-installed-filters');
+    if (filtersEl) bindScrollFade(filtersEl, { axis: 'x' });  // a phone's one scrolling line fades where chips hide
     const searchInput = document.getElementById('skills-installed-search');
     const refreshBtn = document.getElementById('skills-refresh');
     const updateAllBtn = document.getElementById('skills-update-all');
@@ -300,6 +304,11 @@ export function initSkills(ctx = {}) {
     let pollTimer = 0;
     let lastListingRead = 0;
     let firstStartAsked = false;
+    const contributions = getContributions();
+    const hostModules = getHostModules();
+    const onPageModuleFacts = () => { if (!destroyed && visible && snapshot) paintInstalled(); };
+    const stopContributionFacts = contributions?.onChange?.(onPageModuleFacts);
+    const stopHostFacts = hostModules?.onFactsChange?.(onPageModuleFacts);
 
     // ---- shared reads (Browse and Sources reuse them) -------------------------------------------
     const cache = { sources: null, sourcesValue: null, sourcesProblem: '', sourceSuggestions: [], catalog: null, catalogValue: null };
@@ -331,11 +340,17 @@ export function initSkills(ctx = {}) {
     // The catalog entry an installed skill came from (its author, full text), when the catalog was read.
     const catalogEntry = (skill) => (cache.catalogValue?.items || [])
         .find((item) => item.source_id === skill?.install?.source?.id && item.name === skill?.name) || null;
-    const cardOptions = () => ({ githubTokenConfigured: snapshot?.githubTokenConfigured });
+    const pageModuleFacts = () => {
+        const contributions = getContributions();
+        const host = getHostModules();
+        const facts = host?.pageModuleFacts?.() || { faults: contributions?.faults?.() || [], held: [] };
+        return { ...facts, startHeldModule: (key) => host?.startHeldModule?.(key) === true };
+    };
+    const cardOptions = () => ({ githubTokenConfigured: snapshot?.githubTokenConfigured, pageModules: pageModuleFacts() });
 
     // ---- Installed view -------------------------------------------------------------------------
     function paintFilters(skills) {
-        const counts = skills ? installedFilterCounts(skills) : null;
+        const counts = skills ? installedFilterCounts(skills, pageModuleFacts()) : null;
         filtersEl.innerHTML = INSTALLED_FILTERS.map(([key, label]) => {
             const count = counts ? counts[key] : null;
             const hide = key !== 'all' && count === 0 && filter !== key;
@@ -346,10 +361,11 @@ export function initSkills(ctx = {}) {
     function applyInstalledFilter() {
         const query = searchInput.value.trim().toLowerCase();
         const byName = installedByName() || new Map();
+        const pageModules = pageModuleFacts();
         let shown = 0;
         for (const card of container.querySelectorAll(':scope > .skills-card')) {
             const skill = byName.get(card.dataset.skill);
-            const ok = !skill || (matchesInstalledFilter(skill, filter)
+            const ok = !skill || (matchesInstalledFilter(skill, filter, installedSkillModel(skill, { pageModules }))
                 && (!query || [skill.name, skill.description].some((text) => String(text || '').toLowerCase().includes(query))));
             card.hidden = !ok;
             if (ok) shown += 1;
@@ -363,7 +379,7 @@ export function initSkills(ctx = {}) {
         paintFilters(skills);
         const candidates = skills ? updateAllCandidates(skills, cache.sourcesValue) : [];
         updateAllBtn.hidden = !(activeTab === 'installed' && candidates.length >= 2);
-        updateAllBtn.textContent = `Update all (${candidates.length})`;
+        updateAllBtn.textContent = `Update ${candidates.length} trusted`;
         const pill = document.getElementById('skills-tab-pill-installed');
         const count = inFlightCount(lifecycleEventsFromQueue(snapshot?.queue));
         if (pill) { pill.hidden = !count; pill.textContent = count ? String(count) : ''; }
@@ -372,11 +388,13 @@ export function initSkills(ctx = {}) {
     function paintInstalled({ replace = false } = {}) {
         if (!snapshot?.rawSkills || destroyed) return;
         const skills = projected();
+        const pageFacts = pageModuleFacts();
+        const options = () => ({ githubTokenConfigured: snapshot?.githubTokenConfigured, pageModules: pageFacts });
         const cards = new Map(Array.from(container.querySelectorAll(':scope > .skills-card')).map((card) => [card.dataset.skill, card]));
         let replacementFocus = null;
         if (replace) {
             closeMenus();
-            container.innerHTML = skills.map((skill) => renderInstalledSkillCard(skill, reviewingSkills, repairingSkills, snapshot.live, cardOptions())).join('');
+            container.innerHTML = skills.map((skill) => renderInstalledSkillCard(skill, reviewingSkills, repairingSkills, snapshot.live, options())).join('');
         } else {
             for (const skill of [...skills].reverse()) {
                 const card = cards.get(skill.name);
@@ -389,18 +407,18 @@ export function initSkills(ctx = {}) {
                             || (ownsMenu && activeMenu.popover.contains(document.activeElement));
                         if (ownsMenu) closeMenus();
                         const template = document.createElement('template');
-                        template.innerHTML = renderInstalledSkillCard(skill, reviewingSkills, repairingSkills, snapshot.live, cardOptions());
+                        template.innerHTML = renderInstalledSkillCard(skill, reviewingSkills, repairingSkills, snapshot.live, options());
                         const fresh = template.content.firstElementChild;
                         card.replaceWith(fresh);
                         if (focused) replacementFocus = fresh;
                     } else {
-                        patchInstalledSkillEnrichment(card, skill, reviewingSkills, repairingSkills, snapshot.live, cardOptions(),
+                        patchInstalledSkillEnrichment(card, skill, reviewingSkills, repairingSkills, snapshot.live, options(),
                             activeMenu?.card === card ? activeMenu.popover : card);
                     }
                     cards.delete(skill.name);
                 } else {
                     const template = document.createElement('template');
-                    template.innerHTML = renderInstalledSkillCard(skill, reviewingSkills, repairingSkills, snapshot.live, cardOptions());
+                    template.innerHTML = renderInstalledSkillCard(skill, reviewingSkills, repairingSkills, snapshot.live, options());
                     container.insertBefore(template.content.firstElementChild, container.firstElementChild);
                 }
             }
@@ -755,7 +773,7 @@ export function initSkills(ctx = {}) {
         const catalogItem = catalogEntry(skill);
         const item = catalogItem || {
             id: `installed/${name}`, source_id: skill.install?.source?.id || '', source_name: installedSourceLabel(skill),
-            name, description: skill.description || '', version: skill.version, permissions: skill.permissions || [],
+            name, title: skillTitle(skill), description: skill.description || '', version: skill.version, permissions: skill.permissions || [],
             needs_keys: skill.grants?.requested_keys || [], official: Boolean(skill.install?.official), signals: null,
             category: skill.category || [],
         };
@@ -829,7 +847,7 @@ export function initSkills(ctx = {}) {
         const lines = candidates.map((skill) => `${skill.name} ${versionText(skill.install.release?.version || skill.version)} → ${versionText(skill.install.update_available.version)}`);
         const ok = await openConfirmDialog({
             title: `Update ${plural(candidates.length, 'skill')}?`,
-            body: `${lines.join(', ')}. Skills you changed here are not included; each of those asks what to keep.`,
+            body: `${lines.join(', ')}. Not included: skills you changed here and updates from sources that review each skill; each of those updates from its own card.`,
             confirmLabel: `Update ${candidates.length}`,
         });
         if (!ok) return;
@@ -870,7 +888,11 @@ export function initSkills(ctx = {}) {
         actionTarget.disabled = true;
         let refresh = true;
         try {
-            refresh = await runInstalledAction(name, action, { keys: actionTarget.dataset.keys || '', payloadRoot: actionTarget.dataset.payloadRoot || '', node: actionTarget }) !== false;
+            if (action === 'start_host_module') {
+                refresh = pageModuleFacts().startHeldModule(actionTarget.dataset.hostModuleKey || '') === true;
+            } else {
+                refresh = await runInstalledAction(name, action, { keys: actionTarget.dataset.keys || '', payloadRoot: actionTarget.dataset.payloadRoot || '', node: actionTarget }) !== false;
+            }
         } catch (err) {
             if (err.cancelled) refresh = false;
             showToast(`${name}: ${err.message || err}`, err.cancelled ? 'warn' : 'danger');
@@ -943,6 +965,7 @@ export function initSkills(ctx = {}) {
                 reviewed: (cache.sourcesValue || []).find((row) => row.id === item.source_id)?.trust !== 'trusted' },
         }),
         toast: (message, tone) => showToast(message, tone),
+        pageModuleFacts,
         showInstalled: (name) => { selectTab('installed'); searchInput.value = name; applyInstalledFilter(); },
         showMadeHere: () => { filter = 'made'; selectTab('installed'); },
         openBehaviorSettings: () => { if (typeof ctx.openSettingsTab === 'function') ctx.openSettingsTab('behavior'); },
@@ -1052,6 +1075,8 @@ export function initSkills(ctx = {}) {
         tabs.destroy();
         disposeBar();
         unsubscribe?.();
+        stopContributionFacts?.();
+        stopHostFacts?.();
         refreshBtn.removeEventListener('click', onRefresh);
         updateAllBtn.removeEventListener('click', updateAll);
         searchInput.removeEventListener('input', onSearch);

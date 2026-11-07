@@ -1,31 +1,22 @@
 import { bindPageHeader, renderPageHeader } from './page_header.js';
-import { SHELL_ICONS } from './page_icons.js';
+import { PAGE_ICONS, SHELL_ICONS, strokeIcon } from './page_icons.js';
 import { bindScrollFade } from './scroll_fade.js';
 import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
 import { fetchJson, jsonPost } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { downloadViaHostBridge, setInlineStatus } from './ui_helpers.js';
 import { bindMenu } from './ui_interactions.js';
+import { formatBytes } from './storage_format.js';
 
-function formatFileSize(size) {
-    const num = Number(size);
-    if (!Number.isFinite(num) || num < 0) return '';
-    if (num < 1024) return `${num} B`;
-    if (num < 1024 * 1024) return `${(num / 1024).toFixed(1)} KB`;
-    return `${(num / (1024 * 1024)).toFixed(1)} MB`;
-}
+// A row is its folder or file glyph in the secondary ink (the folder is the Files page's own icon; page_icons.js
+// has no file glyph), the name, a file's size, and a folder's quiet chevron: what a row does is the row itself.
+const FILE_ICON = strokeIcon('<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/>');
+const entryIcon = (type) => `<span class="files-entry-icon" aria-hidden="true">${type === 'dir' ? PAGE_ICONS.files : FILE_ICON}</span>`;
+const metaLine = (...parts) => parts.filter(Boolean).join(' · ');
+const CHOOSE_A_FILE = 'Choose a file to preview it.';
 
-function iconForEntry(entry) {
-    return entry.type === 'dir' ? '▸' : '•';
-}
-
-function defaultDirectoryMeta() {
-    return 'Browse folders, preview/edit text files, upload, download, copy, and move files here. This is a file manager, not a chat attachment picker.';
-}
-
-function defaultDirectoryContent() {
-    return 'Open a folder or file from the left panel to browse, preview, or edit its contents.';
-}
+// The preview's own sentences are prose in the reading face; a file's text keeps the code face (style.css).
+const previewNote = (text) => Object.assign(document.createElement('p'), { className: 'files-empty', textContent: text });
 
 export function initFiles({ state: appState, setBeforePageLeave, layers = null } = {}) {
     const page = document.createElement('div');
@@ -46,7 +37,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
                     <div class="files-browser-actions">
                         <button class="btn btn-default" id="files-paste" title="Paste copied or moved item" hidden>Paste</button>
                         <button class="btn btn-default" id="files-new-file" title="Create file">+ File</button>
-                        <button class="btn btn-default" id="files-new-dir" title="Create directory">+ Dir</button>
+                        <button class="btn btn-default" id="files-new-dir" title="Create folder">+ Folder</button>
                     </div>
                 </div>
                 <div id="files-list" class="files-list scroll-fade-y" tabindex="0" aria-label="Files in current folder"></div>
@@ -55,19 +46,20 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
                 <div class="files-preview-back">
                     <button type="button" class="btn btn-default files-back" data-files-back>Back to folder</button>
                 </div>
-                <div class="files-preview-header">
+                <div class="files-preview-header" hidden>
                     <div>
-                        <div id="files-preview-path" class="files-preview-path">Files</div>
-                        <div id="files-preview-meta" class="files-preview-meta">${defaultDirectoryMeta()}</div>
+                        <div id="files-preview-path" class="files-preview-path"></div>
+                        <div id="files-preview-meta" class="files-preview-meta"></div>
                     </div>
                     <div class="files-preview-actions">
                         <button class="btn btn-default" id="files-download" hidden>Download</button>
                         <button class="btn btn-default" id="files-open-external" hidden>Open externally</button>
+                        <button class="btn btn-ghost" id="files-discard" hidden>Discard</button>
                         <button class="btn btn-primary" id="files-save" hidden disabled>Save</button>
                     </div>
                 </div>
                 <div id="files-preview-status" class="ui-status files-preview-status" role="status" aria-live="polite" hidden></div>
-                <div id="files-preview-content" class="files-preview-content scroll-fade-y">${defaultDirectoryContent()}</div>
+                <div id="files-preview-content" class="files-preview-content scroll-fade-y"><p class="files-empty">${CHOOSE_A_FILE}</p></div>
             </section>
             <div class="files-drop-overlay" aria-hidden="true">
                 <div class="files-drop-card">Drop files to upload into the current folder</div>
@@ -76,7 +68,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
                 <button type="button" role="menuitem" class="files-context-item" data-action="download">Download</button>
                 <button type="button" role="menuitem" class="files-context-item" data-action="copy">Copy</button>
                 <button type="button" role="menuitem" class="files-context-item" data-action="move">Move</button>
-                <button type="button" role="menuitem" class="files-context-item" data-action="paste">Paste Here</button>
+                <button type="button" role="menuitem" class="files-context-item" data-action="paste">Paste here</button>
                 <button type="button" role="menuitem" class="files-context-item files-context-item-danger" data-action="delete">Delete</button>
             </div>
         </div>
@@ -86,6 +78,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     const layoutEl = page.querySelector('.files-layout');
     const listEl = page.querySelector('#files-list');
     const breadcrumbEl = page.querySelector('#files-breadcrumb');
+    const previewHeaderEl = page.querySelector('.files-preview-header');
     const previewPathEl = page.querySelector('#files-preview-path');
     const previewMetaEl = page.querySelector('#files-preview-meta');
     const previewContentEl = page.querySelector('#files-preview-content');
@@ -94,6 +87,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     let contextMenuBinding = null;
     let contextAnchor = null;
     const saveBtn = page.querySelector('#files-save');
+    const discardBtn = page.querySelector('#files-discard');
     const downloadBtn = page.querySelector('#files-download');
     const openExternalBtn = page.querySelector('#files-open-external');
     const pasteBtn = page.querySelector('#files-paste');
@@ -215,6 +209,8 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
                 : state.selectedPath === state.editorPath
         ) && (state.editorDirty || state.editorIsNew);
         saveBtn.hidden = !visible;
+        discardBtn.hidden = !state.editorIsNew;
+        discardBtn.disabled = state.editorSaving;
         saveBtn.disabled = !canSave || state.editorSaving;
         saveBtn.textContent = state.editorSaving ? 'Saving…' : 'Save';
         const fileSelected = state.selectedType === 'file' && Boolean(state.selectedPath);
@@ -245,8 +241,10 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
 
     function setPreview({ path, meta, content, html, node }) {
         showStatus('');
-        previewPathEl.textContent = path || 'Select a file';
+        previewPathEl.textContent = path || '';
         previewMetaEl.textContent = meta || '';
+        // Nothing chosen: the header has nothing to say and takes no room.
+        previewHeaderEl.hidden = !path && !meta;
         if (node) {
             previewContentEl.replaceChildren(node);
             return;
@@ -276,6 +274,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
                 draftRevision += 1;
                 state.editorFilename = nameInput.value;
                 state.editorDirty = state.editorValue !== state.editorOriginal || state.editorFilename !== state.editorOriginalFilename;
+                previewPathEl.textContent = nameInput.value.trim() || 'New file';
                 showStatus('');
                 updateEditorActions();
             });
@@ -317,7 +316,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     async function canLeaveEditor() {
         if (!state.editorDirty) return true;
         const result = await showModal({
-            title: 'Discard Changes?',
+            title: 'Discard changes?',
             message: 'You have unsaved edits in the current file. Leave without saving?',
             confirmLabel: 'Discard',
             cancelLabel: 'Stay',
@@ -333,15 +332,9 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
         const downloadItem = contextMenuEl.querySelector('[data-action="download"]');
         const pasteItem = contextMenuEl.querySelector('[data-action="paste"]');
         const deleteItem = contextMenuEl.querySelector('[data-action="delete"]');
-        if (downloadItem) {
-            downloadItem.hidden = type !== 'file';
-        }
-        if (pasteItem) {
-            pasteItem.hidden = !state.clipboard || (type === 'file');
-        }
-        if (deleteItem) {
-            deleteItem.hidden = !path;
-        }
+        if (downloadItem) downloadItem.hidden = type !== 'file';
+        if (pasteItem) pasteItem.hidden = !state.clipboard || (type === 'file');
+        if (deleteItem) deleteItem.hidden = !path;
         contextMenuEl.querySelectorAll('[data-action="copy"], [data-action="move"]').forEach((item) => {
             item.hidden = !path;
         });
@@ -382,7 +375,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
         breadcrumbEl.innerHTML = '';
         items.forEach((item, idx) => {
             const btn = document.createElement('button');
-            btn.className = 'files-crumb';
+            btn.className = 'files-crumb ui-hit-area';
             btn.textContent = item.name;
             btn.addEventListener('click', () => {
                 loadDirectory(item.path).catch(showError);
@@ -406,11 +399,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'files-entry is-draft selected';
-        button.innerHTML = `
-            <span class="files-entry-icon">•</span>
-            ${label}
-            <span class="files-entry-meta"><span class="files-entry-unsaved">unsaved</span></span>
-        `;
+        button.innerHTML = `${entryIcon('file')}${label}<span class="files-entry-meta"><span class="files-entry-unsaved">unsaved</span></span>`;
         button.addEventListener('click', () => showPane('file', backBtn));
         return button;
     }
@@ -450,12 +439,14 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
             button.className = `files-entry ${entry.isParentLink ? 'parent-link' : ''} ${selected ? 'selected' : ''}`;
             if (!entry.isParentLink) button.dataset.path = entry.path;
             button.toggleAttribute('data-unsaved', Boolean(unsavedMark) && entry.path === unsavedMark);
-            const meta = entry.isParentLink ? 'up' : (entry.type === 'file' ? formatFileSize(entry.size) : 'open');
-            const unsaved = entry.type === 'file' ? '<span class="files-entry-unsaved">unsaved</span>' : '';
+            const file = entry.type === 'file';
+            const chevron = entry.type === 'dir' && !entry.isParentLink
+                ? `<span class="files-entry-chevron" aria-hidden="true">${SHELL_ICONS.chevron}</span>` : '';
             button.innerHTML = `
-                <span class="files-entry-icon">${iconForEntry(entry)}</span>
+                ${entryIcon(entry.type)}
                 <span class="files-entry-name">${escapeHtml(entry.name)}</span>
-                <span class="files-entry-meta"><span class="files-entry-size">${meta}</span>${unsaved}</span>
+                <span class="files-entry-meta"><span class="files-entry-size">${file ? escapeHtml(formatBytes(entry.size)) : ''}</span>${file ? '<span class="files-entry-unsaved">unsaved</span>' : ''}</span>
+                ${chevron}
             `;
             button.addEventListener('contextmenu', (event) => {
                 if (entry.isParentLink) return;
@@ -572,9 +563,9 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
 
         if (!preserveEditor || (!state.selectedPath && !state.editorWritable)) {
             setPreview({
-                path: data.display_path || state.rootPath || 'Files',
-                meta: data.truncated ? 'Directory listing truncated.' : defaultDirectoryMeta(),
-                content: defaultDirectoryContent(),
+                path: '',
+                meta: data.truncated ? 'Only part of this folder is listed.' : '',
+                node: previewNote(CHOOSE_A_FILE),
             });
         }
     }
@@ -605,7 +596,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
             resetEditorState();
             setPreview({
                 path: data.display_path || state.rootPath || 'Files',
-                meta: `${formatFileSize(data.size)} • ${data.media_type || 'image'}`,
+                meta: metaLine(formatBytes(data.size), data.media_type || 'image'),
                 html: `<img class="files-preview-image" src="${escapeHtmlAttr(data.content_url)}" alt="${escapeHtmlAttr(data.name || data.path || 'image')}">`,
             });
         } else if (data.is_pdf && data.content_url) {
@@ -613,15 +604,15 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
             const safeUrl = escapeHtmlAttr(data.content_url);
             setPreview({
                 path: data.display_path || state.rootPath || 'Files',
-                meta: `${formatFileSize(data.size)} • PDF preview`,
+                meta: metaLine(formatBytes(data.size), 'PDF preview'),
                 html: `<iframe class="files-preview-frame" sandbox="allow-same-origin" src="${safeUrl}" title="${escapeHtmlAttr(data.name || 'PDF preview')}"></iframe>`,
             });
         } else if (!data.is_text) {
             resetEditorState();
             setPreview({
                 path: data.display_path || state.rootPath || 'Files',
-                meta: `${formatFileSize(data.size)} • binary or unsupported preview`,
-                content: 'Binary or non-text file preview is not available in the UI yet.',
+                meta: formatBytes(data.size),
+                node: previewNote('This kind of file has no preview here. Download it or open it externally.'),
             });
         } else {
             const editable = !data.truncated;
@@ -637,8 +628,8 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
             setPreview({
                 path: data.display_path || state.rootPath || 'Files',
                 meta: editable
-                    ? `${formatFileSize(data.size)} • editable`
-                    : `${formatFileSize(data.size)} • preview truncated • read-only`,
+                    ? metaLine(formatBytes(data.size), 'editable')
+                    : metaLine(formatBytes(data.size), 'preview truncated', 'read-only'),
                 node: editable ? renderEditor(data.content || '', { isNew: false }) : document.createTextNode(data.content || ''),
             });
         }
@@ -663,8 +654,8 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
 
     async function createDirectory() {
         const result = await showModal({
-            title: 'Create Directory',
-            message: 'Enter a name for the new directory in the current folder.',
+            title: 'New folder',
+            message: 'Name',
             input: true,
             confirmLabel: 'Create',
             cancelLabel: 'Cancel',
@@ -673,7 +664,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
         if (!result?.confirmed || !name) return;
         await jsonPost('/api/files/mkdir', { path: state.path || '.', name });
         await loadDirectory(state.path || '.');
-        showStatus(`Directory ${name} created.`, 'success');
+        showStatus(`Folder ${name} created.`, 'success');
     }
 
     async function finishFileOperation(view, { directory, path = '', type = 'dir', message }) {
@@ -727,7 +718,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
         if (!(await canLeaveEditor())) return;
 
         const result = await showModal({
-            title: `Delete ${entry.type === 'dir' ? 'Directory' : 'File'}?`,
+            title: `Delete ${entry.type === 'dir' ? 'folder' : 'file'}?`,
             message: entry.type === 'dir'
                 ? `Delete "${entry.name}" and all its contents? This cannot be undone.`
                 : `Delete "${entry.name}"? This cannot be undone.`,
@@ -741,7 +732,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
         await jsonPost('/api/files/delete', { path });
 
         await finishFileOperation(view, {
-            directory, message: `${entry.type === 'dir' ? 'Directory' : 'File'} deleted: ${entry.name}.`,
+            directory, message: `${entry.type === 'dir' ? 'Folder' : 'File'} deleted: ${entry.name}.`,
         });
     }
 
@@ -805,7 +796,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
             if (nameInput === document.activeElement) editor?.focus();
             nameInput?.remove();
             previewPathEl.textContent = data.display_path || state.editorPath;
-            previewMetaEl.textContent = `${formatFileSize(data.size)} • editable`;
+            previewMetaEl.textContent = metaLine(formatBytes(data.size), 'editable');
             showStatus(state.editorDirty ? 'Saved. Newer edits are still unsaved.' : 'Saved.', 'success');
         } finally {
             state.editorSaving = false;
@@ -838,10 +829,8 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
         renderList();
         updateEditorActions();
         setPreview({
-            path: state.path && state.path !== '.'
-                ? `${state.rootPath || 'Files'}/${state.path}`
-                : (state.rootPath || 'Files'),
-            meta: 'New file • editable',
+            path: 'New file',
+            meta: 'Not saved yet',
             node: renderEditor('', { isNew: true }),
         });
         showPane('file', previewContentEl.querySelector('.files-editor-name'));
@@ -859,6 +848,17 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
 
     newDirBtn.addEventListener('click', () => {
         createDirectory().catch(showError);
+    });
+
+    // A new file's draft is dropped whole: nothing was written, so nothing is asked.
+    discardBtn.addEventListener('click', () => {
+        if (!state.editorIsNew || state.editorSaving) return;
+        state.selectedPath = '';
+        state.selectedType = 'dir';
+        resetEditorState();
+        renderList();
+        setPreview({ path: '', meta: '', node: previewNote(CHOOSE_A_FILE) });
+        showPane('list', listEl);
     });
 
     pasteBtn.addEventListener('click', () => {

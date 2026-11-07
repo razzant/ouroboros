@@ -1195,3 +1195,42 @@
  * @typedef {Object} OwnerSafetyModelResponse
  * @property {boolean} ok
  */
+
+/**
+ * Read-time "where did the money go" projection on GET /api/tasks/{task_id}
+ * (ROOT tasks only; computed from the physical-attempt ledger at read time,
+ * never persisted). own + children + unattributed == subtree (a null own counts
+ * as 0 there); children_usd and accounted_upper_bound_usd are null when the
+ * subtree's rows state no amount (subscription work). When the object
+ * is present every key is present; the WHOLE object is absent — never a
+ * confident $0 — when accounting is unavailable or holds no attributable row
+ * for the subtree, and on non-root task details. The root card's Details render
+ * by_purpose ("Spent on") and by_route ("Ran on"), two partitions of one subtree.
+ * @typedef {Object} TaskCostBreakdown
+ * @property {?number} own_usd  null when the root's own rows exist but none has a price
+ * @property {?number} children_usd
+ * @property {number} unattributed_usd
+ * @property {number} delegated_disclosed_usd
+ * @property {?number} accounted_upper_bound_usd
+ *   C2: the explicit subtree total under its honest name — an accounted UPPER
+ *   BOUND (own + children + unattributed), not a settled receipt.
+ * @property {number} subscription_sessions
+ * @property {number} unknown_unmetered
+ * @property {number} non_final_rows
+ * @property {boolean} cost_final
+ * @property {?import('./api_types.js').CostCustody} cost_custody
+ * @property {TaskCostSlice[]} by_purpose
+ * @property {TaskCostSlice[]} by_route
+ * @property {"physical_attempt_ledger"} authority
+ */
+
+/**
+ * One recorded value of an axis inside a root's tree (a usage category or a route): its money as the card's
+ * own carrier and its volume; tokens null when no row of the slice reported them.
+ * @typedef {Object} TaskCostSlice
+ * @property {string} key
+ * @property {?import('./api_types.js').CostPresentation} cost_presentation
+ * @property {number} model_calls
+ * @property {number} sessions
+ * @property {?number} tokens
+ */

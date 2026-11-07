@@ -22,6 +22,7 @@ import {
     sessionRouteVerdict,
 } from './subagent_status_primitives.js';
 import { recheckMarkHtml } from './safety_recheck.js';
+import { settingsSection } from './settings_controls.js';
 import { revealNewRow } from './ui_helpers.js';
 import { effortLabel } from './effort_levels.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
@@ -533,7 +534,7 @@ function rowDetailsHtml(row, state, rowKey) {
     const stored = session ? '' : String(row.route.target_id || '').trim();
     const minted = MINTED_FROM[row.minted_from] || '';
     const fact = (label, value, attrs) => `<div${value ? '' : ' hidden'}${attrs ? ` ${attrs}` : ''}><dt>${label}</dt><dd>${escapeHtml(value)}</dd></div>`;
-    return `<details class="model-role-details available-subagent-details" data-subagent-details>
+    return `<details class="model-role-details available-subagent-details ui-disclosure" data-subagent-details>
                 <summary>Details &amp; history</summary>
                 <dl class="available-subagent-facts">
                     <div><dt>Review cost</dt><dd data-subagent-review-facts>${escapeHtml(reviewCost(row, state))}</dd></div>
@@ -1027,7 +1028,7 @@ export function createAvailableSubagentsEditor({
             </div>
             <div class="available-subagents-source" data-review-pool-stays ${pool.stays ? '' : 'hidden'}>${escapeHtml(pool.stays)}</div>
             <div class="available-subagents-diagnostics" data-review-pool-note ${pool.note ? '' : 'hidden'}>${escapeHtml(pool.note)}</div>
-            <details class="model-role-details" data-review-pool-history ${pool.history ? '' : 'hidden'}><summary>Reviewer origin</summary>
+            <details class="model-role-details ui-disclosure" data-review-pool-history ${pool.history ? '' : 'hidden'}><summary>Reviewer origin</summary>
                 <div class="available-subagents-source" data-review-pool-history-text>${escapeHtml(pool.history)}</div></details>
             <div class="available-subagents-source" data-subagents-read-problem ${readProblem ? '' : 'hidden'}>${escapeHtml(readProblem)}</div>
             <div data-subagents-diagnostics class="available-subagents-diagnostics" ${diagnostics.length ? '' : 'hidden'}>${escapeHtml(diagnostics.join(' · '))}</div>
@@ -1308,23 +1309,22 @@ export const reviewerTickCaption = (enforcement, access) => REVIEWER_TICK_CAPTIO
     ? 'cyber_pro' : String(enforcement || '').trim().toLowerCase() === 'blocking' ? 'blocking' : 'advisory'];
 
 export function renderSubagentsSection() {
-    return `
-        <div class="form-section" id="subagents-section">
-            <h3>Available subagents</h3>
-            <div class="settings-section-copy">
-                Describe when Ouroboros should choose each numbered subagent, then select how it runs.
-                Clearing a subagent's checkbox keeps its configuration and stops new tasks and reviews
-                from choosing it. Internal references stay stable automatically. A route that is unavailable stays saved
-                and returns an explicit refusal instead of silently changing actor or model. An unpinned
-                session row may rotate among compatible healthy accounts for that same route.
-                Rows marked Reviewer form the review pool; an unmarked row Ouroboros asks is an adviser, heard but never counted.
-            </div>
-            <div class="settings-inline-note" data-reviewer-tick-caption hidden></div>
-            <div class="settings-inline-note">
-                Saved reviewer changes apply from the next task: a task that is already running keeps the
-                reviewers it started with. A reviewer on a subscription waits for capacity rather than
-                silently falling back to API spend.
-            </div>
+    return settingsSection({
+        title: 'Available subagents',
+        id: 'subagents-section',
+        lead: 'Which agents Ouroboros may hand work to, and which of them review it.',
+        details: `Configure the subagents and reviewers Ouroboros works with. Subscriptions and
+            API keys are in Accounts; global model roles are in Models.
+            Describe when Ouroboros should choose each numbered subagent, then select how it runs.
+            Clearing a subagent's checkbox keeps its configuration and stops new tasks and reviews
+            from choosing it. Internal references stay stable automatically. A route that is unavailable stays saved
+            and returns an explicit refusal instead of silently changing actor or model. An unpinned
+            session row may rotate among compatible healthy accounts for that same route.
+            Rows marked Reviewer form the review pool; an unmarked row Ouroboros asks is an adviser, heard but never counted.
+            Saved reviewer changes apply from the next task: a task that is already running keeps the
+            reviewers it started with. A reviewer on a subscription waits for capacity rather than
+            silently falling back to API spend.`,
+        body: `<div class="settings-inline-note" data-reviewer-tick-caption hidden></div>
             ${availableSubagentsEditorHost()}
             <div class="settings-effort-card">
                 <label>Allow mutative subagents</label>
@@ -1356,7 +1356,7 @@ export function renderSubagentsSection() {
                     <div class="settings-inline-note">How deep the chain may nest. <code>0</code> turns delegation off entirely.</div>
                 </div>
             </div>
-            <details class="settings-subsection" id="delegation-advanced">
+            <details class="settings-subsection ui-disclosure" id="delegation-advanced">
                 <summary>Advanced — where subagents check out their work</summary>
                 <div class="settings-subsection-body">
                     <div class="form-grid two">
@@ -1374,8 +1374,8 @@ export function renderSubagentsSection() {
                         Genesis projects are durable; worktrees follow the GC retention setting.
                     </div>
                 </div>
-            </details>
-        </div>`;
+            </details>`,
+    });
 }
 
 let settingsEditor = null;

@@ -20,7 +20,7 @@ import { showToast } from './toast.js';
 import { escapeHtmlAttr, escapeHtmlText } from './utils.js';
 import { DOTS, durationLabel, formatBytes, isSize, largestPartsHtml, number, plural, signedBytes as signed, whenLabel } from './storage_format.js';
 import { DELETED_ROWS, deletedProjectsHtml } from './storage_deleted.js';
-import { EMPTY_LIST, MANUAL_ROWS, OUTDATES_PLAN, acceptPage, attemptSentences, confirmCopy, doorOffered, excludedCount, lostNotice, manualConfirmCopy, manualFacts, manualKnown, manualOf, notStarted, resultSentences, savedGroups, trayHtml, trayState } from './storage_free.js';
+import { EMPTY_LIST, MANUAL_ROWS, OUTDATES_PLAN, acceptPage, attemptSentences, confirmCopy, doorOffered, excludedCount, holdsPhrase, lostNotice, manualConfirmCopy, manualFacts, manualKnown, manualOf, notStarted, resultSentences, savedGroups, trayHtml, trayState } from './storage_free.js';
 
 export { durationLabel, formatBytes, whenLabel };
 
@@ -54,6 +54,7 @@ const PLACE_WORDS = {
     deliverables: { label: 'Deliverables', why: 'Files Ouroboros made for you. Not deleted here.' },
     work_folders: { label: 'Task work folders', why: 'Removed by the app’s own cleanup {days} days after a task finishes.' },
     working_copies: { label: 'Working copies', why: 'Copies of code that helpers work in. Removed {days} days after they were made, once their task has finished, their work is saved and you have not asked to keep them.' },
+    session_scratch: { label: 'Session scratch', why: 'Short-lived folders coding sessions write test files and package caches into, outside the data folder. Released by the app once their task or reviewer seat is over; the Storage line says what still holds them.' },
     app_state: { label: 'App state', why: 'The task database, settings, caches and working state.', parts: true },
     data_other: { label: 'Everything else in the data folder', why: 'Logs, attachments and anything not listed above.', parts: true },
     program: { label: 'Ouroboros program', why: 'The installed app and its history. Updated by the app.' },
@@ -72,6 +73,11 @@ const JOB_WORDS = {
     custody_trash: 'Deleting moved folders',
     evidence_packing: 'Evidence packing',
     record_compression: 'Compression',
+    drive_settlement: 'Work folder settlement',
+    copy_retirement: 'Working copy retirement',
+    review_checkout_prune: 'Review copy retirement',
+    session_scratch_release: 'Scratch release',
+    engine_runtime_prune: 'Engine program copies',
 };
 const JOB_STATES = {
     done: '{job}: done',
@@ -106,6 +112,12 @@ function jobPhrase(fact, now) {
     const job = fmt(JOB_WORDS[fact.id] || String(fact.id));
     if (fact.last_error) {
         return fmt('{job}: stopped by an error ({error}, {when})', { job, error: fact.last_error.class, when: whenLabel(fact.last_error.at, now) });
+    }
+    if (Array.isArray(fact.holds) || isSize(fact.released)) {  // a retirer pass: what it released, what it holds and why
+        const parts = [fact.at ? fmt('{job}: last change {when}', { job, when: whenLabel(fact.at, now) }) : job,
+            plural(fact.released || 0, '{n} released', '{count} released'), holdsPhrase(fact, now),
+            fact.errors > 0 ? plural(fact.errors, '{n} error', '{count} errors') : ''];
+        return parts.filter(Boolean).join(' · ');
     }
     if (fact.id === 'record_compression' && fact.state !== 'unsupported' && fact.compressed > 0) {
         // This place's own plane (task evidence, or reviewer seat homes), never one total under two places.
@@ -194,17 +206,34 @@ export function storageState(response) {
     return response.error && !response.error.stopped ? 'failed' : 'never';
 }
 
-function factsLine(count, now) {
-    const parts = [fmt('Last count: {when}', { when: whenLabel(count.finished_at, now) })];
-    const took = durationLabel(count.duration_seconds);
-    if (took) parts.push(fmt('took {duration}', { duration: took }));
+/** How old the count is (the fact a Refresh answers): "Counted today at 18:40", "Counted 30 Oct — 6 days ago". */
+function countedWords(iso, now) {
+    const at = new Date(iso);
+    if (!iso || Number.isNaN(at.getTime())) return '';
+    const days = Math.round((new Date(now).setHours(0, 0, 0, 0) - new Date(iso).setHours(0, 0, 0, 0)) / 864e5);
+    if (days < 1) return fmt('Counted {when}', { when: whenLabel(iso, now) });
+    return fmt('Counted {date} — {age}', { date: at.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }), age: plural(days, '{n} day ago', '{count} days ago') });
+}
+
+/** The hero's meta lines under the footprint: the count's age, then what it grew by since the one before. */
+function countLines(count, now) {
+    const lines = [countedWords(count.finished_at, now)];
     if (isSize(count.growth_bytes) && count.growth_since) {
         const when = whenLabel(count.growth_since, now);
-        const growth = count.growth_bytes === 0 ? fmt('no change since {when}', { when })
-            : fmt(count.growth_bytes > 0 ? '+{size} since {when}' : '−{size} since {when}', { size: formatBytes(Math.abs(count.growth_bytes)), when });
-        parts.push(count.growth_flag === 'unreadable' ? `${growth} ${fmt('(some items could not be read)')}` : growth);
+        lines.push(count.growth_bytes === 0 ? fmt('No change since {when}', { when })
+            : fmt(count.growth_bytes > 0 ? '+{size} since {when}' : '−{size} since {when}', { size: formatBytes(Math.abs(count.growth_bytes)), when }));
     }
-    return parts.join(' · ');
+    return lines.filter(Boolean).map((line) => `<p class="dashboard-hero-meta" data-i18n-fmt="storage.facts">${text(line)}</p>`).join('');
+}
+
+/** How the count was taken, each fact once (the hero's Details): how long it took, what it could not read (this
+ *  count's items, or the earlier count's when only the growth is qualified). '' when there is nothing to say. */
+function countFactsHtml(count) {
+    const took = durationLabel(count?.duration_seconds);
+    const facts = [took ? fmt('Took {duration}.', { duration: took }) : '',
+        count?.unreadable > 0 ? `${plural(count.unreadable, '{n} item could not be read', '{count} items could not be read')}.`
+            : count?.growth_flag === 'unreadable' ? fmt('Some items could not be read, so the growth is approximate.') : ''];
+    return facts.filter(Boolean).map((fact) => `<p class="storage-meta" data-i18n-fmt="storage.facts">${text(fact)}</p>`).join('');
 }
 
 function progressHtml(counting) {
@@ -274,14 +303,13 @@ function diskHtml(response, now) {
     return `<p class="storage-meta storage-disk" data-i18n-fmt="storage.disk">${text(disk)}</p>`;
 }
 
-/** Whole footprint; the free space of the disk stands under it only while there is no count yet. */
+/** The hero's words (style.css "The Dashboard tab body"): the whole footprint, its count's age and growth; the free
+ *  space of the disk stands under it only while there is no count yet. */
 function summaryHtml(response, { readFailed, now }) {
     const count = response?.count;
     const value = count ? formatBytes(count.bytes) : readFailed ? fmt('Could not be read') : !response ? fmt('Loading…') : fmt('Not measured yet');
-    const facts = count ? factsLine(count, now) + (count.unreadable > 0 ? ` · ${plural(count.unreadable, '{n} item could not be read', '{count} items could not be read')}` : '') : '';
-    return `<div class="storage-kicker">Space used by Ouroboros</div><div class="storage-total${count ? '' : ' is-unknown'}" data-i18n-fmt="storage.total">${text(value)}</div>
-        ${facts ? `<div class="storage-meta" data-i18n-fmt="storage.facts">${text(facts)}</div>` : ''}
-        ${count ? '' : diskHtml(response, now)}
+    return `<p class="dashboard-hero-kicker">Space used by Ouroboros</p><p class="dashboard-hero-figure storage-total${count ? '' : ' is-unknown'}" data-i18n-fmt="storage.total">${text(value)}</p>
+        ${count ? countLines(count, now) : diskHtml(response, now)}
         ${readFailed ? '<p class="ui-status storage-status" data-tone="warn">Storage status could not be read. Showing the last answer.</p>' : ''}`;
 }
 
@@ -362,6 +390,7 @@ export function renderStorage(response, { pending = false, readFailed = false, n
     return {
         state,
         summary: summaryHtml(response, { readFailed, now }),
+        facts: countFactsHtml(response?.count),
         bar: barHtml(response, now),
         auto: response ? fmt('Files of finished tasks are also removed by the app {days} days after the task ends. Project folders stay.', { days: response.retention_days ?? 7 }) : '',
         status: countStatusHtml(response, now),
@@ -395,37 +424,35 @@ export function initStorage({ state, mount } = {}) {
     if (!mount) return null;
     const page = document.createElement('div');
     page.id = 'page-storage';
-    page.className = 'settings-embedded-content';
+    page.className = 'dashboard-body scroll-fade-y';  // the tab's one root and scroller (style.css "The Dashboard tab body")
     page.innerHTML = `
-        <div class="costs-scroll">
-            <div class="storage-root">
-                <section class="storage-summary ui-card" aria-label="Space used by Ouroboros">
-                    <p class="storage-announce" data-storage-live role="status" aria-live="polite"></p>
-                    <div class="storage-summary-head">
-                        <div class="storage-summary-text" data-storage-summary></div>
-                        <div class="storage-actions storage-summary-actions">
-                            <button type="button" class="btn btn-ghost btn-sm storage-refresh" data-storage-action="measure">Measure sizes</button>
-                            <button type="button" class="btn btn-default btn-sm" data-storage-action="stop" hidden>Stop</button>
-                        </div>
-                    </div>
-                    <div data-storage-status></div><div data-storage-bar></div>
-                </section>
-                <section class="storage-panel storage-cleanup ui-card" aria-label="Cleanup">
-                    <h3 class="storage-card-title">Cleanup</h3>
-                    <div class="storage-tray" data-storage-tray></div>
-                    <div class="storage-actions storage-cleanup-door"><button type="button" class="btn btn-primary btn-sm" data-free-preview data-key="data-free-preview" data-storage-door hidden>Check for files to remove</button></div>
-                    <p class="storage-auto" data-storage-auto data-i18n-fmt="storage.auto"></p>
-                </section>
-                <section class="storage-panel ui-card" aria-label="Folders" data-storage-panel hidden>
-                    <div class="storage-tray-head"><h3 class="storage-card-title">Folders</h3></div>
-                    <div data-storage-places></div>
-                </section>
+        <section class="storage-summary ui-card" aria-label="Space used by Ouroboros">
+            <p class="storage-announce" data-storage-live role="status" aria-live="polite"></p>
+            <div class="dashboard-hero">
+                <div class="storage-summary-text" data-storage-summary></div>
+                <div class="dashboard-hero-actions storage-summary-actions">
+                    <button type="button" class="btn btn-default btn-sm" data-storage-action="measure">Measure sizes</button>
+                    <button type="button" class="btn btn-default btn-sm" data-storage-action="stop" hidden>Stop</button>
+                </div>
             </div>
-        </div>
+            <details class="ui-disclosure storage-count-details" data-storage-details hidden><summary>Details</summary><div data-storage-facts></div></details>
+            <div data-storage-status></div><div data-storage-bar></div>
+        </section>
+        <section class="storage-panel storage-cleanup ui-card" aria-label="Cleanup">
+            <h3 class="storage-card-title">Cleanup</h3>
+            <div class="storage-tray" data-storage-tray></div>
+            <div class="storage-actions storage-cleanup-door"><button type="button" class="btn btn-primary btn-sm" data-free-preview data-key="data-free-preview" data-storage-door hidden>Check for files to remove</button></div>
+            <p class="storage-auto" data-storage-auto data-i18n-fmt="storage.auto"></p>
+        </section>
+        <section class="storage-panel ui-card" aria-label="Folders" data-storage-panel hidden>
+            <div class="storage-tray-head"><h3 class="storage-card-title">Folders</h3></div>
+            <div data-storage-places></div>
+        </section>
     `;
     mount.appendChild(page);
     const regions = {
         summary: page.querySelector('[data-storage-summary]'),
+        facts: page.querySelector('[data-storage-facts]'),
         status: page.querySelector('[data-storage-status]'),
         bar: page.querySelector('[data-storage-bar]'),
         places: page.querySelector('[data-storage-places]'),
@@ -452,7 +479,8 @@ export function initStorage({ state, mount } = {}) {
     const stopButton = page.querySelector('[data-storage-action="stop"]');
     const door = page.querySelector('[data-storage-door]');
     const auto = page.querySelector('[data-storage-auto]');
-    const scroller = page.querySelector('.costs-scroll');
+    const scroller = page;
+    const details = page.querySelector('[data-storage-details]');
     const painted = new Map();
     let response = null;
     let readFailed = false;
@@ -489,6 +517,8 @@ export function initStorage({ state, mount } = {}) {
         const top = scroller.scrollTop;
         const flowHeld = regions.tray.contains(document.activeElement) || document.activeElement === door;
         patch(regions.summary, view.summary, painted);
+        patch(regions.facts, view.facts, painted);
+        details.hidden = !view.facts;
         if (live.textContent !== view.announce) live.textContent = view.announce;
         if (auto.textContent !== view.auto) auto.textContent = view.auto;
         patch(regions.status, view.status, painted);

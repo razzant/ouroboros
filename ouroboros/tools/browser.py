@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import contextlib
 import contextvars
 import dataclasses
@@ -14,7 +15,8 @@ import pathlib
 import subprocess
 import sys
 import threading
-from typing import Any, Dict, List, Tuple
+import time
+from typing import Any, Callable, Dict, List, Tuple
 
 try:
     from playwright_stealth import Stealth
@@ -171,8 +173,8 @@ def _ensure_playwright_installed(*, engine: str = "chromium", allow_install: boo
         log.info("Playwright not found, installing...")
         from ouroboros.platform_layer import pip_install_target_args
 
-        subprocess.check_call([sys.executable, "-m", "pip", "install",
-                               *pip_install_target_args(sys.executable), "playwright"])
+        _install_beside_calls("playwright-package", "the Playwright package", lambda _progress: subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", *pip_install_target_args(sys.executable), "playwright"]))
 
     if engine == "chromium":
         return _pinned_chromium(allow_install=allow_install)
@@ -215,6 +217,7 @@ def _ensure_playwright_installed(*, engine: str = "chromium", allow_install: boo
     key = (engine, str(os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or ""))
     if _playwright_ready and key in _playwright_ready_engines:
         return
+    install_key = ":".join(key)
 
     try:
         from playwright.sync_api import sync_playwright
@@ -228,7 +231,7 @@ def _ensure_playwright_installed(*, engine: str = "chromium", allow_install: boo
                 local_browsers = None
             if local_browsers is None or not _has_platform_browser(local_browsers, engine):
                 raise RuntimeError(f"bundled Playwright {engine} is missing")
-        elif not executable_path.exists():
+        elif not executable_path.exists() or install_key in _installs:  # still being installed: join it
             raise RuntimeError(f"Playwright {engine} binary not found at {executable_path}")
         log.info("Playwright %s binary found", engine)
     except Exception:
@@ -237,9 +240,13 @@ def _ensure_playwright_installed(*, engine: str = "chromium", allow_install: boo
                 f"Browser tools are unavailable in local_readonly_subagent mode because {engine} is not already installed."
             )
         install_python = _playwright_python()
-        log.info("Installing Playwright %s dependencies and binary...", engine)
-        _repair_host_dependencies(engine, install_python)
-        subprocess.check_call([install_python, "-m", "playwright", "install", engine])
+
+        def install(_progress: Dict[str, Any]) -> None:  # Playwright's own installer locks its browsers root
+            log.info("Installing Playwright %s dependencies and binary...", engine)
+            _repair_host_dependencies(engine, install_python)
+            subprocess.check_call([install_python, "-m", "playwright", "install", engine])
+
+        _install_beside_calls(install_key, f"Playwright {engine}", install)
 
     _playwright_ready_engines.add((engine, str(os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or "")))
     _playwright_ready = True
@@ -277,6 +284,97 @@ def _repair_host_dependencies(engine: str, install_python: str = "") -> None:
         log.warning("Playwright system dependency repair failed; continuing with browser download: %s", exc)
 
 
+# One preparation per browser engine and root at a time, beside the calls that need it: the first
+# Chromium of a new pin (~100 MB) once kept four calls past their windows (04.11) while each started
+# its own download. A call waits only what is left of its own window and then says where it stands.
+_installs: Dict[str, Tuple[concurrent.futures.Future, Dict[str, Any]]] = {}
+_installs_lock = threading.Lock()
+
+
+def _install_beside_calls(key: str, what: str, install: Callable[[Dict[str, Any]], Any], hint: str = "") -> Any:
+    """Join or start the one background preparation for ``key``; wait at most this call's own window.
+
+    The worker's dispatch deadline less the settlement margin bounds the wait, so the call answers
+    with a typed fact before its outer wait ends; the preparation continues and a later call joins it
+    or finds its result. Without a deadline the call waits as before. The starting call physically
+    ends with its preparation (``hold_invocation``), so its worker is not retired mid-download. A
+    failure reaches its waiters and is never sticky: the next call starts a fresh preparation."""
+    from ouroboros.model_wait import dispatch_deadline_remaining_sec
+    from ouroboros.runtime_limits import NESTED_SETTLEMENT_MARGIN_SEC
+    from ouroboros.tool_custody import hold_invocation
+
+    with _installs_lock:
+        entry = _installs.get(key)
+        if entry is None:
+            entry, release = (concurrent.futures.Future(), {"started": time.monotonic()}), hold_invocation()
+            try:
+                threading.Thread(target=_run_install, args=(key, entry, install, release),
+                                 name=f"browser-install {key}", daemon=True).start()
+            except BaseException:
+                release()  # nothing started: no entry for later calls to wait on
+                raise
+            _installs[key] = entry
+    future, progress = entry
+    remaining = dispatch_deadline_remaining_sec()
+    try:
+        return future.result(timeout=None if remaining is None else max(0.0, remaining - NESTED_SETTLEMENT_MARGIN_SEC))
+    except concurrent.futures.TimeoutError:
+        state = ("waiting for another Ouroboros process that is installing it" if progress.get("waiting")
+                 else f"{progress['bytes']} of {progress.get('size')} bytes downloaded" if "bytes" in progress
+                 else "started")
+        raise chromium_runtime.ChromiumRefusal(chromium_runtime.PREPARING, (
+            f"{what} is still being installed ({state}, {int(time.monotonic() - progress['started'])} s so far); "
+            f"this call opened no browser. The install continues in the background and a later call uses it.{hint}"
+        )) from None
+
+
+def _run_install(key: str, entry: Tuple[concurrent.futures.Future, Dict[str, Any]],
+                 install: Callable[[Dict[str, Any]], Any], release: Callable[[], None]) -> None:
+    future, progress = entry
+    outcome, failure = None, None
+    try:
+        outcome = install(progress)
+    except BaseException as exc:  # noqa: BLE001 - every waiter receives the install's own failure
+        failure = exc
+        log.warning("Browser install %s failed: %s", key, exc)  # its callers may have answered already
+    with _installs_lock:  # settled before any waiter wakes: its next call starts afresh or finds the result
+        if _installs.get(key) is entry:
+            del _installs[key]
+    try:
+        release()
+    finally:
+        future.set_exception(failure) if failure is not None else future.set_result(outcome)
+
+
+@contextlib.contextmanager
+def _machine_lock(path: pathlib.Path, progress: Dict[str, Any]):
+    """One installer per browsers root on this machine (tasks run in separate worker processes);
+    the OS frees the lock with its process. The lock file stays: one inode, one lock. Where no
+    lock can be taken (no write access, a filesystem without locks) the install runs unlocked, as
+    before: its atomic publication still keeps two installs from colliding."""
+    from ouroboros.platform_layer import file_lock_exclusive, file_unlock
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(path, "a+b")
+    except OSError:
+        yield
+        return
+    with handle:
+        progress["waiting"] = True
+        try:
+            file_lock_exclusive(handle.fileno())
+            locked = True
+        except OSError:
+            locked = False
+        progress.pop("waiting", None)
+        try:
+            yield
+        finally:
+            if locked:
+                file_unlock(handle.fileno())
+
+
 def _pinned_chromium(*, allow_install: bool) -> str:
     """The pinned headless shell's executable: found, else installed and verified, else refused.
 
@@ -299,9 +397,18 @@ def _pinned_chromium(*, allow_install: bool) -> str:
             f"the pinned Chromium {chromium_runtime.CHROMIUM_VERSION} is not installed, and this read-only "
             "actor may not install it; a Chromium browser call by its parent installs it."))
     target = operator or cache
-    _repair_host_dependencies("chromium")
-    log.info("Installing pinned Chromium %s into %s", chromium_runtime.CHROMIUM_VERSION, target)
-    return str(chromium_runtime.install(target, pin))
+
+    def install(progress: Dict[str, Any]) -> str:
+        with _machine_lock(target / f".{pin.directory}.lock", progress):
+            if (published := chromium_runtime.installed_executable(target, pin)) is not None:
+                return str(published)  # a peer process installed it while this one waited
+            _repair_host_dependencies("chromium")
+            log.info("Installing pinned Chromium %s into %s", chromium_runtime.CHROMIUM_VERSION, target)
+            progress["size"] = pin.archive_size
+            return str(chromium_runtime.install(target, pin, progress=progress))
+
+    return _install_beside_calls(f"chromium:{target}", f"the pinned Chromium {chromium_runtime.CHROMIUM_VERSION}",
+                                 install, " engine='webkit' is available where it is installed.")
 
 
 def _launch_browser_with_fallback(pw_instance: Any, *, engine: str = "chromium",

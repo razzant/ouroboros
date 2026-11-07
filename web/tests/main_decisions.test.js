@@ -639,7 +639,7 @@ test('an interrupted owner Resume of a member offers the same Resume; the owner\
         assert.equal(find(card('held'), node => node.classList.contains('owner-action-reason')).textContent,
             'Needs Resume after the restart.');
         assert.equal(find(card('returned'), node => node.classList.contains('owner-action-reason')).textContent,
-            'Needs an explicit Resume.');
+            '', 'its Resume button is the whole ask (audit 05.11, U014)');
         assert.equal(resume('own'), null, 'the owner\'s own Pause is never asked for again');
         assert.equal(find(card('held'), node => node.textContent === 'Stop…'), null, 'Stop addresses roots only');
         for (const id of ['held', 'returned']) {

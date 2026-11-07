@@ -1097,7 +1097,7 @@ def await_messages_entry() -> ToolEntry:
                      "description": "Requires mode=warm or cold. Sleep: your delegated run ids whose terminal wakes you."},
             "services": {"type": "array", "items": {"type": "string"},
                          "description": "Requires mode=warm or cold. Warm sleep: names of your own running services whose exit wakes you."},
-            "wake_at": {"type": "string", "description": "Requires mode=warm or cold. Sleep: an absolute ISO-8601 wake time (with timezone)."},
+            "wake_at": {"type": "string", "description": "Requires mode=warm or cold. Sleep: an absolute ISO-8601 wake time (with timezone). A time your human names for this work's return belongs here."},
             "wake_after_sec": {"type": "integer", "description": "Requires mode=warm or cold. Sleep: wake after this many seconds."},
         }},
     }, _await_messages, timeout_sec=None)

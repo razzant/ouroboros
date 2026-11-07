@@ -387,6 +387,32 @@ def outbox_place(drive_root: Any, *, connector: str, provider: str, account_id: 
                          conversation_id=conversation_id, thread_id=thread_id)
 
 
+def observed_facts(event: Any) -> tuple[str, ...]:
+    """The facts attention reads on an event: the connector's own (an event with none is a legacy addressed
+    message), plus ``from_bot`` when the connector names its author a bot."""
+    facts = tuple(event.facts) if event.facts is not None else (FACT_LEGACY_ADDRESSED,)
+    return (*facts, FACT_FROM_BOT) if event.actor.get("is_bot") is True else facts
+
+
+def writes_as_owner(place: Place, identity: Mapping[str, Any] | None, account_id: str = "") -> bool:
+    """The place writes from my human's own account (``sends_as`` confirmed as theirs): its posts are theirs."""
+    sending = (identity or {}).get("sends_as") or {}
+    return sending.get("kind") == "user" and is_owner_account(place, str(sending.get("id") or ""), account_id)
+
+
+def own_account_event(place: Place, event: Any) -> bool:
+    """Written by the account this place writes as (``identity.sends_as``): by me, through the connector or any other
+    tool that acts as that account (my posts; a provider that does not name an edit's or merge's actor reports those
+    without one, and its connector keeps them from reading as replies). It stays in the room and my next own wake and
+    never wakes me. Not where that account is my human's own (their posts there are their words), and never for an
+    actor the connector reports unauthenticated (a mail From proves nothing) or an event without an identity."""
+    identity = getattr(event, "identity", None) or {}
+    sender = str((identity.get("sends_as") or {}).get("id") or "").strip()
+    actor = str(event.actor.get("platform_actor_id") or event.actor.get("id") or "").strip()
+    return (bool(sender) and actor == sender and event.actor.get("authenticated") is not False
+            and not writes_as_owner(place, identity, event.account_id))
+
+
 def wake_matches(place: Place, facts: Iterable[str]) -> tuple[WakeItem, ...]:
     present = set(facts)
     if FACT_FROM_BOT in present and not any(item.fact == FACT_FROM_BOT for item in place.wakes):
@@ -405,12 +431,17 @@ def owner_account_matches(owner_accounts: Iterable[OwnerAccount], platform_actor
                                for a in owner_accounts)
 
 
-def place_owner_accounts(drive_root: Any) -> dict[str, tuple[OwnerAccount, ...]]:
-    """Every place's confirmed owner accounts as stored now: one read, never a migration (``load_places``
-    may write). An unreadable document raises ``PlaceError``: unknown, never "no owner"."""
+def place_rows(drive_root: Any) -> dict[str, Place]:
+    """Every place as stored now, by id: one read, never a migration (``load_places`` may write). An
+    unreadable document raises ``PlaceError``: unknown, never "no place"."""
     current = _read(drive_root)
     connections = current.get("connections", {})
-    return {key: _decode(value, connections.get(key)).owner_accounts for key, value in current["places"].items()}
+    return {key: _decode(value, connections.get(key)) for key, value in current["places"].items()}
+
+
+def place_owner_accounts(drive_root: Any) -> dict[str, tuple[OwnerAccount, ...]]:
+    """Every place's confirmed owner accounts as stored now (``place_rows``): unknown, never "no owner"."""
+    return {key: place.owner_accounts for key, place in place_rows(drive_root).items()}
 
 
 def _fields(value: Any, key: str) -> Mapping[str, Any]:

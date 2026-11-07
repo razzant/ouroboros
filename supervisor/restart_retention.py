@@ -1,8 +1,8 @@
 """What a stop may retain: the ONE predicate every shutdown consumer shares.
 
-Manual Restart, Panic, graceful shutdown and a crash-storm kill all end this
-server generation's processes. None of them may turn a SAVED pause into a
-terminal. An acknowledged Restart returns eligible saved work and its previously
+Manual Restart, Panic, graceful shutdown and the fault exit (``bus_lost``,
+``loop_failed``) all end this server generation's processes. None of them may
+turn a SAVED pause into a terminal. An acknowledged Restart returns eligible saved work and its previously
 runnable queue; existing pauses and holds remain (owner S1, 2026-10-08).
 The Restart's cancel census, ``kill_workers``'s running
 and pending handling, the snapshot restore and the unused-grant revocation all
@@ -709,19 +709,26 @@ def recover_aborted_update(drive_root: Any, running: Dict[str, Any], pending: Li
 
 
 def retain_saved_running(running: Dict[str, Any], preserve: Iterable[str], drive_root: Any) -> List[str]:
-    """``kill_workers`` at an application stop: RUNNING rows whose attempt saved work and
-    that no Stop claims stay RUNNING, marked ``RETAINED_FOR_BOOT``, in the final snapshot;
-    the next boot returns or holds them."""
-    kept, lineage = [], {}
-    preserved = set(preserve or ())
+    """``kill_workers`` at an application stop: RUNNING rows whose attempt saved work (or that the returning
+    door named before their first save, D5) and that no Stop claims stay RUNNING, marked ``RETAINED_FOR_BOOT``,
+    in the final snapshot; the next boot returns or holds them."""
+    from supervisor.task_admission import SEED_RETURN, seed_returnable
+
+    kept, lineage, seeds, preserved = [], {}, {}, set(preserve or ())
+    named = set(_txn().active_restart_transaction(drive_root).get("return_ids") or [])  # the door's own returns
     for task_id, meta in dict(running or {}).items():
         task = meta.get("task") if isinstance(meta, dict) and isinstance(meta.get("task"), dict) else {}
         root = pathlib.Path(task.get("budget_drive_root") or drive_root)
-        if (task and task_id not in preserved and not presence_turn(task, drive_root)
-                and not _cancel_intent_active(root, task_id)
-                and working_saved(root, task_id, int(meta.get("attempt") or task.get("_attempt") or 1), task=task)):
-            kept.append(str(task_id))
-            lineage[str(task_id)] = {str(task.get("parent_task_id") or ""), str(task.get("root_task_id") or "")}
+        attempt = int(meta.get("attempt") or task.get("_attempt") or 1) if task else 0
+        if not task or task_id in preserved or presence_turn(task, drive_root) or _cancel_intent_active(root, task_id):
+            continue
+        if not working_saved(root, task_id, attempt, task=task):
+            # D5: decided now, the attempt dead, never later from a file's absence (a lost source is no seed).
+            if task_id not in named or not seed_returnable(root, task, attempt):
+                continue
+            seeds[str(task_id)] = {"source_task_id": str(task_id), "from_attempt": attempt}
+        kept.append(str(task_id))
+        lineage[str(task_id)] = {str(task.get("parent_task_id") or ""), str(task.get("root_task_id") or "")}
     # Invariant 19: a saved child of a RUNNING parent that is not itself kept is
     # interrupted with that parent (the ordinary path), never kept alone.
     # A separately preserved question/review handoff survives this stop too;
@@ -733,6 +740,8 @@ def retain_saved_running(running: Dict[str, Any], preserve: Iterable[str], drive
         if not orphaned:
             for task_id in kept:
                 running[task_id][RETAINED_FOR_BOOT] = True
+                if task_id in seeds:
+                    running[task_id]["task"][SEED_RETURN] = seeds[task_id]
             return kept
         kept = [task_id for task_id in kept if task_id not in orphaned]
 
@@ -751,7 +760,7 @@ def prepare_restart_returns(drive_root: Any, running: Dict[str, Any], pending: L
     import os as _os
 
     from supervisor.events_budget import budget_hold_fact
-    from supervisor.task_admission import _working_resume_granted
+    from supervisor.task_admission import _working_resume_granted, seed_returnable
 
     dr = _txn()
     returns = set()
@@ -760,7 +769,7 @@ def prepare_restart_returns(drive_root: Any, running: Dict[str, Any], pending: L
         attempt = int(meta.get("attempt") or task.get("_attempt") or 1) if task else 0
         root = pathlib.Path(task.get("budget_drive_root") or drive_root)
         if (task and task_id not in set(owner_wait_ids) and not presence_turn(task, drive_root)
-                and working_saved(root, task_id, attempt, task=task)
+                and (working_saved(root, task_id, attempt, task=task) or seed_returnable(root, task, attempt))
                 and pause_retention(root, task_id, attempt) not in {RETAIN_SAVED, RETAIN_UNUSED_GRANT, RETAIN_SLEEP,
                                                                     RETAIN_OWNER_PAUSE}):
             returns.add(str(task_id))
@@ -769,7 +778,7 @@ def prepare_restart_returns(drive_root: Any, running: Dict[str, Any], pending: L
         attempt = int((record or {}).get("_attempt") or 1)
         root = pathlib.Path((record or {}).get("budget_drive_root") or drive_root)
         if (task_id and task_id not in set(owner_wait_ids) and not presence_turn(record, drive_root)
-                and working_saved(root, task_id, attempt, task=record)
+                and (working_saved(root, task_id, attempt, task=record) or seed_returnable(root, record, attempt))
                 and pause_retention(root, task_id, attempt) not in {RETAIN_SAVED, RETAIN_UNUSED_GRANT, RETAIN_SLEEP,
                                                                     RETAIN_OWNER_PAUSE}):
             returns.add(task_id)
@@ -877,10 +886,12 @@ def recover_saved_running(rows: Iterable[Dict[str, Any]], drive_root: Any, *,
     Each becomes its same-id successor carrying the frozen source: dispatchable
     when the fresh transaction returns it, otherwise held for an explicit Resume.
     A Stop (active cancel intent), a terminal or unreadable result, a final the
-    host already owes, or no usable source keeps the ordinary interrupted path.
+    host already owes, or no usable source keeps the ordinary interrupted path;
+    a returned owner turn cut before its first save starts again from its input (D5).
     """
     from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, load_task_result
     from supervisor.events_budget import HOLD_SAVED_WORK, hold_budget_row
+    from supervisor.task_admission import SEED_RETURN, seed_returnable
     from ouroboros.work_stop import retain_consumed_selection
 
     returning = set((transaction or {}).get("return_ids") or [])
@@ -903,9 +914,12 @@ def recover_saved_running(rows: Iterable[Dict[str, Any]], drive_root: Any, *,
                 continue
             auto = task_id in returning
             source_cause = "restart" if auto and cause != "update_aborted" else cause
+            seed = task.pop(SEED_RETURN, None)  # the stop's own decision (``retain_saved_running``)
             if not _recovery_source(root, task, attempt, source_cause):
-                refused[task_id] = "no_usable_recovery_source"
-                continue
+                if not (auto and isinstance(seed, dict) and seed_returnable(root, task, attempt)):
+                    refused[task_id] = "no_usable_recovery_source"
+                    continue
+                task[SEED_RETURN] = {**seed, "cause": source_cause}
             from ouroboros.model_wait import fold_running_clock, stamp_execution_handoff
             from supervisor.events_budget import fold_consumed_resume
             fold_consumed_resume(row, root)  # a consumption whose notification died with the process

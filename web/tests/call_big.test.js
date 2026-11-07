@@ -59,7 +59,8 @@ function readable(doc) {
     return dress;
 }
 
-function harness({ reduce = false, width = 1280, vision = { screen: true, camera: false, cameraReason: 'No camera here' } } = {}) {
+function harness({ reduce = false, width = 1280, vision = { screen: true, camera: false, cameraReason: 'No camera here' }, adopted = false, copy = '',
+    offered = () => true } = {}) {
     const dom = installDomDouble();
     const { doc } = dom;
     const dress = readable(doc);
@@ -82,13 +83,14 @@ function harness({ reduce = false, width = 1280, vision = { screen: true, camera
     doc.body.append(page);
     const field = page.querySelector('textarea');
     Object.assign(field, { value: '', placeholder: 'Message Ouroboros...' });
+    if (copy) page.querySelector('.chat-send-inline').innerHTML = copy;  // the room's host painted Talk before the mount
     let session = { state: 'idle', muted: false, sharing: '', activity: { working: false, label: '' }, liveSince: 0, active: false };
     const calls = [];
     const voice = { heard: false, owner: false };  // what the light hears: Ouroboros's playback, the owner's gate
     const light = { heard: () => voice.heard, speaking: () => voice.owner, setMode() {} };
     const capsule = createCallCapsule({ page, env, visual: CALL_VISUAL, light, view: () => session,
         talk: () => calls.push('talk'), mute: () => calls.push('mute'), show: kind => calls.push(`show:${kind}`),
-        vision: () => vision, end: () => calls.push('end'), dismiss: () => calls.push('dismiss'), act: () => {} });
+        vision: () => vision, end: () => calls.push('end'), dismiss: () => calls.push('dismiss'), act: () => {}, adopted, offered });
     const wrap = page.querySelector('.chat-input-wrap');
     const row = page.querySelector('.chat-text-row');
     const $ = selector => page.querySelector(selector);
@@ -349,6 +351,56 @@ test('Talk wears the wave\'s small still sign: three strands, the main one stron
         assert.equal(send.querySelector('.call-entry-word').textContent, 'Talk');
         assert.equal(mark.querySelectorAll('i').length, 0);  // no bars of the old sign
     } finally { h.done(); }
+});
+
+test('Talk takes over the face the room painted before the feature loaded: built again, or turned into Send', async () => {
+    // The room's host paints the face this device last showed (conversation_controls.js) and hands it over at mount.
+    const copy = '<span class="call-entry-mark" aria-hidden="true"></span><span class="call-entry-word">Talk</span>';
+    const h = harness({ adopted: true, copy });
+    try {
+        const send = h.page.querySelector('.chat-send-inline');
+        const shown = [...send.children];
+        await Promise.resolve();
+        await Promise.resolve();
+        assert.equal(send.dataset.callEntry, 'talk', 'the first paint claims the face');
+        assert.equal(send.title, 'Talk with Ouroboros');
+        assert.deepEqual(send.children.map(child => child.className), ['call-entry-mark', 'call-entry-word']);
+        assert.notEqual(send.children[1], shown[1], 'built again, so Talk and Send keep one measured width');
+        const own = [...send.children];
+        h.capsule.entry();
+        assert.equal(send.children[1], own[1], 'its own face is built once');
+        h.field.value = 'hello';
+        h.capsule.entry();
+        assert.equal(send.textContent, 'Send');
+    } finally { h.done(); }
+    const typed = harness({ adopted: true, copy });
+    try {
+        const send = typed.page.querySelector('.chat-send-inline');
+        typed.field.value = 'hello';  // the owner typed between the hand-over and the stylesheet
+        typed.capsule.entry();
+        assert.equal(send.textContent, 'Send', 'the copy becomes Send at once, never a Talk that sends the draft');
+        assert.equal(send.dataset.callEntry, 'send');
+        typed.field.value = '';
+        typed.capsule.entry();
+        assert.equal(send.textContent, 'Send', 'Talk is built only with its own look');
+        await Promise.resolve();
+        await Promise.resolve();
+        assert.equal(send.dataset.callEntry, 'talk', 'and comes with the stylesheet');
+    } finally { typed.done(); }
+    let on = true;
+    const off = harness({ adopted: true, copy, offered: () => on });
+    try {
+        const send = off.page.querySelector('.chat-send-inline');
+        on = false;  // a read says calls are off before the stylesheet applied
+        off.capsule.entry();
+        assert.equal(send.textContent, 'Send', 'a copy the feature no longer offers turns into Send at once');
+    } finally { off.done(); }
+    const left = harness({ adopted: true, copy });
+    const send = left.page.querySelector('.chat-send-inline');
+    left.capsule.destroy();  // the feature leaves before its first paint
+    assert.equal(send.textContent, 'Send', 'no copy of Talk outlives the feature');
+    left.dom.restore();
+    delete globalThis.MutationObserver;
 });
 
 test('the words\' second line is the wave\'s while a voice speaks or it has nothing to say, else its words', () => {

@@ -454,6 +454,12 @@ TOOL_CODE_SPECS: Mapping[str, ToolCodeSpec] = MappingProxyType(
             "warning",
             "enable or repair the MCP provider",
         ),
+        "MCP_AUTH_REQUIRED": _code_spec(
+            "unavailable",
+            "unavailable",
+            "warning",
+            "the owner signs in (Settings → MCP, or a link from remote_mcp_sign_in)",
+        ),
         "EXTENSION_UNAVAILABLE": _code_spec(
             "unavailable",
             "unavailable",
@@ -883,6 +889,7 @@ def _wrap_run_script_process_result(
 _EXACT_IDENTIFIER_CODES = MappingProxyType(
     {
         "ACCESS_DENIED": "ACCESS_BLOCKED",
+        "MCP_AUTH_REQUIRED": "MCP_AUTH_REQUIRED",
         "TOOL_ACCESS_BLOCKED": "ACCESS_BLOCKED",
         "ACTING_NO_WORKSPACE_BLOCKED": "ACCESS_BLOCKED",
         "ACTING_SUBAGENT_BLOCKED": "ACCESS_BLOCKED",
@@ -930,7 +937,7 @@ _EXACT_IDENTIFIER_CODES = MappingProxyType(
         # hung-session backlog refusal is browser unavailability.
         "BROWSER_SESSION_RETIRED": "TOOL_TIMEOUT",
         "BROWSER_ACTION_OUTCOME_UNKNOWN": "TOOL_ERROR",
-        "BROWSER_BACKLOG_RETIRED_SESSIONS": "LEGACY_UNAVAILABLE",
+        "BROWSER_BACKLOG_RETIRED_SESSIONS": "LEGACY_UNAVAILABLE", "BROWSER_PREPARING": "LEGACY_UNAVAILABLE",
         # imagegen typed markers: the same no-blind-retry contract as the
         # browser unknown-outcome marker, with the rate window its own lane.
         "IMAGE_RATE_LIMITED": "IMAGE_RATE_LIMITED",

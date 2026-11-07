@@ -23,6 +23,7 @@ def promotion_intent_notice(task_id: str, result: dict) -> str:
         arguments = {key: intent[key] for key in (
             "objective", "title", "expected_output", "project_id", "project_name", "workspace_root",
             "workspace", "source", "context_requires_self_body_docs", "context_requires_development", "reasoning_effort",
+            "destination", "owner_quote",
         ) if key in intent}
         return (f"Task {task_id}: not_started. No admission began. An explicit retry is available: "
                 f"start_task({json.dumps(arguments, ensure_ascii=False)}). Nothing restarts automatically.")

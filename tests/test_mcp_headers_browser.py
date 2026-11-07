@@ -324,7 +324,7 @@ def test_late_status_keeps_typed_field(direct_server_with_data, loopback, engine
             for route in held:
                 route.fulfill(response=route.fetch())
             held.clear()
-            expect(saved.locator('.mcp-server-status')).to_have_text(re.compile(r'^1 tool \(listed .+\)$'), timeout=20_000)
+            expect(saved.locator('.mcp-server-status')).to_have_text(re.compile(r'^1 tool · listed .+$'), timeout=20_000)
             expect(saved.locator('[data-mcp-message]')).to_contain_text('Saved catalog refreshed')
             assert 'echo' in saved.locator('.mcp-tools-disclosure').text_content()
             page.keyboard.insert_text('on3')
@@ -653,15 +653,15 @@ def test_mcp_header_editor_ui(direct_server_with_data, loopback, engine):  # noq
             pair.locator('[data-mcp-header-row="1"] [data-mcp-header-field="name"]').fill("X-Dup")
             _save(page)
             assert _disk(data_dir)["pair"]["headers"] == {"x-a": ALPHA, "X-Dup": ""}
-            indicator = page.locator("#settings-unsaved-indicator")
-            expect(indicator).not_to_have_class(re.compile(r"\bis-visible\b"))
+            indicator = page.locator("#settings-status")
+            expect(indicator).not_to_have_text("Unsaved changes")
             pair.locator("[data-mcp-header-add]").click()
             pair.locator('[data-mcp-header-row="2"] [data-mcp-header-field="name"]').fill("X-Dup")
-            expect(indicator).to_have_class(re.compile(r"\bis-visible\b"))
+            expect(indicator).to_have_text("Unsaved changes")
             page.click("#btn-save-settings")
             expect(page.locator("#mcp-1-header-2-name-error")).to_contain_text("repeats header X-Dup")
             pair.locator('[data-mcp-header-row="2"] [data-mcp-header-remove]').click()
-            expect(indicator).not_to_have_class(re.compile(r"\bis-visible\b"))
+            expect(indicator).not_to_have_text("Unsaved changes")
 
             # Re-typing the mask is an edit: a preview taken before it is stale, the page is dirty,
             # leaving asks first, and Save refuses the reserved marker instead of keeping the old value.
@@ -682,13 +682,13 @@ def test_mcp_header_editor_ui(direct_server_with_data, loopback, engine):  # noq
             expect(dialog.locator("[data-mcp-import-status]")).to_contain_text("changed after this preview")
             dialog.locator("[data-mcp-import-cancel]").first.click()
             assert pair.locator('[data-mcp-header-row="0"] [data-mcp-header-field="value"]').input_value() == "***set***"
-            expect(indicator).to_have_class(re.compile(r"\bis-visible\b"))
+            expect(indicator).to_have_text("Unsaved changes")
             page.click("#btn-reload-settings")
             confirm = page.get_by_role("button", name="Stay")
             confirm.wait_for(timeout=10_000)
             assert "You have unsaved settings changes" in page.locator("body").inner_text()
             confirm.click()
-            expect(indicator).to_have_class(re.compile(r"\bis-visible\b"))
+            expect(indicator).to_have_text("Unsaved changes")
             before = len(posts)
             page.click("#btn-save-settings")
             expect(page.locator("#mcp-1-header-0-value-error")).to_contain_text("reserved for keeping a saved value")

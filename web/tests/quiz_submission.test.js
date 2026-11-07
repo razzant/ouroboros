@@ -135,7 +135,7 @@ test('the feedback follows the answer it describes: Forget first and quiet, the 
         assert.equal(box.nextElementSibling, feedback);
         assert.equal(feedback.hidden, true, 'nothing to say takes no line');
         assert.deepEqual(feedback.children.map((node) => node.className), ['chat-quiz-submission-note', 'chat-quiz-storage-note',
-            'chat-quiz-forget btn btn-xs btn-ghost', 'chat-quiz-check btn btn-xs btn-default', 'chat-quiz-retry btn btn-xs btn-default']);
+            'chat-quiz-forget btn btn-sm btn-ghost', 'chat-quiz-check btn btn-sm btn-default', 'chat-quiz-retry btn btn-sm btn-default']);
         choose(card); await turn(); await turn();
         assert.equal(card.dataset.submission, 'unknown');
         assert.equal(feedback.hidden, false);

@@ -41,7 +41,7 @@ def test_main_view_reads_its_open_rows_a_page_at_a_time_and_reads_as_before(tmp_
     made = shape.open_rows(tmp_path, 1_300)
     opened = _counted(monkeypatch, ds, "transaction")
     batched = mv.capture_memory_view(tmp_path, made["task"], made["spec"])
-    assert batched.active and len(batched.live_rooms) == shape.ROOMS - 1
+    assert batched.active and sum(len(group["rooms"]) for group in batched.conversations) == shape.ROOMS - 1
     pages = -(-1_300 // cc._ADDRESS_PAGE)
     # The stream's pages, two lookups a page, the selected rows' one read, and the readers' bounds.
     assert len(opened) <= 3 * pages + 8, collections.Counter(opened)
@@ -60,7 +60,7 @@ def test_a_view_enters_the_chronicle_index_for_its_activation_and_its_one_captur
                                   covers={"rows": [f"sealed-{chat}"], "stream_span": [chat, chat]}).ok
     entered = _counted(monkeypatch, ChronicleStore, "_index")
     view = mv.capture_memory_view(tmp_path, made["task"], made["spec"])
-    assert view.active and len(view.live_rooms) == 17 and len(view.other_rooms) == 6 and view.room["facts"]["pages"] == 1
+    assert view.active and sum(len(group["rooms"]) for group in view.conversations) == 23 and view.room["facts"]["pages"] == 1
     assert entered == ["_reading", "capture"]  # the activation receipt, then one read for every reader of the view
 
 

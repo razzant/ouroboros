@@ -172,6 +172,23 @@ def _compute_subagent_handoff(tools: Any, drive_root: Any, task_id: str, content
     return ""
 
 
+def _unread_review_updates(tool_ctx: Any, messages: List[Dict[str, Any]], *, selected: bool) -> Tuple[list, bool]:
+    """Review answers settled since the mind's last read: the queue its final call left (drained here) and, on a
+    ``finish_task`` final, rows that call's tool boundary appended after it (a prose final read earlier rows)."""
+    from ouroboros import review_history_view as history
+
+    queued: list = []
+    try:
+        if getattr(tool_ctx, "_pending_review_context", None):
+            queued, _ = history.review_context_updates(tool_ctx, messages=messages)
+            tool_ctx._pending_review_context = {}
+    except Exception:  # an unreadable history delivers as before
+        log.debug("Failed to read review updates before delivery", exc_info=True)
+    last = max((index for index, row in enumerate(messages) if row.get("role") == "assistant"), default=-1)
+    keys = (history.REVIEW_HISTORY_MESSAGE_KEY, history.REVIEW_CONTEXT_INDEX_KEY)
+    return queued, selected and any(key in row for row in messages[last + 1:] for key in keys)
+
+
 def _effective_delivery_criteria(tool_ctx: Any) -> Any:
     """The initial full requirements, then Main's explicit current criteria."""
     existing = getattr(tool_ctx, "_delivery_effective_criteria", None)
@@ -1246,6 +1263,18 @@ def _no_tool_final_answer(
             llm_trace["reasoning_notes"].append("Subagent handoff status refreshed before final response.")
             _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
             return held("subagent_handoff")
+        from ouroboros.owner_hurry import latched
+        # The mind reads its review before it decides (owner 11.10); the rows themselves are the news.
+        review_rows, review_present = ([], False) if resume_candidate or latched(tools._ctx) else (
+            _unread_review_updates(tools._ctx, messages, selected=explicit_candidate))
+        if review_rows or review_present:
+            if content and content.strip() and not explicit_candidate:  # a selection is already its own row
+                messages.append({"role": "assistant", "content": content})
+            messages.extend(review_rows)
+            emit_progress("Review answers that arrived before delivery were shown first.")
+            _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
+            tools._ctx._completion_pair_appended = bool(explicit_candidate)
+            return held("review_update")
         absorption_result = _loop()._maybe_enforce_child_absorption_gate(
             tools, limit_ctx, content, messages, emit_progress, llm_trace,
         )
@@ -1458,6 +1487,7 @@ def _no_tool_final_answer(
     if getattr(candidate, "quiet", False):  # only this exit accepts a wake's silent finish
         limit_ctx.accumulated_usage.update(wake_silent=True, terminal_origin=_loop().TERMINAL_ORIGIN_MODEL_FINAL)
     if summary := (getattr(tools._ctx, "_completion_selected", None) or {}).get("wake_summary"): limit_ctx.accumulated_usage["wake_summary"] = summary
+    if (getattr(tools._ctx, "_completion_selected", None) or {}).get("fold_read") is True: limit_ctx.accumulated_usage["fold_read"] = True
     if getattr(tools._ctx, "_owner_message_sent", False): limit_ctx.accumulated_usage["owner_message_sent"] = True
     from ouroboros.swarm_receipt import retain_comparison
     retain_comparison(tools._ctx)

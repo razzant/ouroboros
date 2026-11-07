@@ -11,7 +11,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from ouroboros.review_price import REVIEW_USAGE_CATEGORY, review_price, review_price_text
+from ouroboros.review_price import PLAN_USAGE_CATEGORY, REVIEW_USAGE_CATEGORY, review_price, review_price_text
 from tests._usage_store_testing import ledger_rows, root, write_journal  # noqa: F401 -- the fixture
 
 REPO = Path(__file__).resolve().parents[1]
@@ -54,6 +54,17 @@ def test_one_review_costs_the_median_of_its_measured_waves(root):  # noqa: F811
     assert review_price(root, "critic", "openrouter/never-used") is None
     assert review_price(root, "stranger", MODEL) is None
     assert review_price_text(None) == "cost unknown"
+
+
+def test_a_plan_ask_has_its_own_price_and_never_moves_a_reviews(root):  # noqa: F811
+    _seed(root)
+
+    plan = review_price(root, "critic", MODEL, category=PLAN_USAGE_CATEGORY)
+
+    assert plan is not None and (plan.reviews, plan.usd) == (1, 7.0)
+    assert review_price_text(plan, "plan ask") == "≈$7.00 per plan ask (1 measured)"
+    assert review_price(root, "critic", MODEL).reviews == 3, "the plan wave never enters a review's median"
+    assert review_price(root, "critic", LIGHT, category=PLAN_USAGE_CATEGORY) is None
 
 
 def test_settings_prints_the_same_words(root, monkeypatch):  # noqa: F811

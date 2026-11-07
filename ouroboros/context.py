@@ -425,8 +425,8 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, sc
         "This captured runtime context is authoritative over stale paths, tool lists, "
         "or capability assumptions embedded in the task text. Use the visible "
         "task_contract, [ATTACHMENTS], disabled_tools, filesystem roots, and queue "
-        "observations here when they conflict with older prompt wording. Queue load is dated "
-        "evidence at context construction, not a continuously refreshed capacity reading."
+        "observations here when they conflict with older prompt wording. Queue load and official_update are "
+        "dated evidence as of their stamps, not live readings: claiming nothing new upstream needs a fresh check."
     )
     if str(task.get("workspace_root") or "").strip():
         runtime_data["active_workspace"] = {

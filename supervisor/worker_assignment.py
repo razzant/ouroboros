@@ -24,8 +24,8 @@ from supervisor.queue import _queue_lock
 def _pool():
     """The parent module, read at call time.
 
-    The pool owns the repo/drive roots, its size, the worker table, the shared
-    PENDING/RUNNING refs and the crash clock, and ``init`` REBINDS them.
+    The pool owns the repo/drive roots, its size, the worker table and the shared
+    PENDING/RUNNING refs, and ``init`` REBINDS them.
     Reading them through the module is what keeps one binding: a from-import
     here would freeze the value this module saw at import time (the
     owner-approved D18/D33 mechanical exception).
@@ -917,12 +917,15 @@ def assign_tasks() -> None:
                 if cost_fields.get("cost_accounting_status") != "available":
                     log.error("Budget pause blocked: task attempt history unavailable for %s", task_id)
                     return
+                from supervisor.restart_retention import returned_before_body
+
+                seed = bool((returned_before_body(task) or {}).get("seed_return"))  # D5: its given-back attempt never put
                 retry_lineage = bool(
-                    int(task.get("_attempt") or 1) > 1
+                    int(task.get("_attempt") or 1) > 1 and not seed
                     or task.get("original_task_id") or task.get("timeout_retry_from")
                 )
                 replay_safe = (
-                    (task.get("admitted_dispatch") == "none" or _unsent(task) is not None)  # never put here
+                    (task.get("admitted_dispatch") == "none" or _unsent(task) is not None or seed)  # never put here
                     and int(cost_fields.get("total_rounds") or 0) == 0
                     and not bool(cost_fields.get("ledger_integrity_degraded"))
                     and not retry_lineage

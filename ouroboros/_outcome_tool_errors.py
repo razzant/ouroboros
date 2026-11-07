@@ -279,7 +279,19 @@ def _tool_error_record(item: Dict[str, Any], *, recovered_by: int | None = None)
             record[extra] = item.get(extra)
     if recovered_by is not None:
         record["recovered_by_call_index"] = recovered_by
+    from ouroboros.tool_capabilities import PURE_READ_TOOLS
+
+    if record["tool"] in PURE_READ_TOOLS:
+        record["read_only"] = True  # a known pure read: its failure stays in the details (warns_without_review)
     return record
+
+
+def warns_without_review(*bundles: Any) -> bool:
+    """Owner 06.11 («A — изменения и команды»): a leftover tool error warns that no review checked the result only
+    when it is not a known pure read (``read_only`` on its record, from PURE_READ_TOOLS). An effect that did
+    not happen, a failed command and a tool of unknown kind (MCP, extensions) stay loud; a failed read or search is
+    recorded in the details. A record written before the flag existed stays loud."""
+    return any(isinstance(error, dict) and not error.get("read_only") for errors in bundles for error in errors or [])
 
 
 def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
