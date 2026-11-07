@@ -612,7 +612,7 @@ def continuation_refusal(exc: Exception) -> str:
     else:
         step = ("decide with the review_reference an outcome you read returned (the last commit_reviewed call names "
                 "its own), or call without author_disposition to review the current bytes.")
-    return f"ERROR: REVIEW_AUTHOR_CONTINUATION_INVALID: {exc}. Nothing was staged or committed. Next: {step}"
+    return f"⚠️ REVIEW_AUTHOR_CONTINUATION_INVALID: {exc}. Nothing was staged or committed. Next: {step}"
 
 
 def default_commit_continuation(ctx, kwargs) -> str:
@@ -651,7 +651,7 @@ def default_commit_continuation(ctx, kwargs) -> str:
     latest = returned[-1]
     reference = json.dumps({"surface": "commit", "repo_key": repo_key, "task_id": task_id, "tool_name": latest.tool_name,
                             "attempt": latest.attempt, "pre_review_fingerprint": latest.pre_review_fingerprint})
-    return ("ERROR: REVIEW_AUTHOR_CONTINUATION_INVALID: author_disposition names no review_reference, and a decision "
+    return ("⚠️ REVIEW_AUTHOR_CONTINUATION_INVALID: author_disposition names no review_reference, and a decision "
             "answers an outcome it has read. Nothing was staged or committed. Next: once you have read the outcome of "
             f"attempt {latest.attempt}, the latest returned for this copy, call again with this author_disposition "
             f"and review_reference={reference}.")

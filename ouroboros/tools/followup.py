@@ -498,10 +498,10 @@ def _destination_error(ctx: ToolContext, destination: Any, *, new_work: bool) ->
     if destination == DESTINATION_PLACE:
         return ""
     if destination == DESTINATION_OWNER:
-        return ("ERROR: FOLLOWUP_DESTINATION_OWNER: the owner's private work is not scheduled from here. Start it now with "
+        return ("⚠️ FOLLOWUP_DESTINATION_OWNER: the owner's private work is not scheduled from here. Start it now with "
                 "start_task(destination='owner', owner_quote=<their held answer to a private question>); that new root "
                 "then calls schedule_followup itself. Nothing was scheduled.")
-    return (f"ERROR: FOLLOWUP_DESTINATION_REQUIRED: destination must be {DESTINATION_PLACE!r} (this place's promise) or "
+    return (f"⚠️ FOLLOWUP_DESTINATION_REQUIRED: destination must be {DESTINATION_PLACE!r} (this place's promise) or "
             f"{DESTINATION_OWNER!r} (the owner's private work). Nothing was scheduled.")
 
 
