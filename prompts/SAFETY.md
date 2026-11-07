@@ -44,4 +44,4 @@ Respond with exactly:
   "speech": true | false,
   "quote": "the exact words, empty if none"
 }
-`speech`: does this call deliver words to people, whatever the tool?
+"speech": does this call deliver words to people, whatever the tool?

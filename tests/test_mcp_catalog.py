@@ -91,7 +91,7 @@ def test_published_annotation_hints_reach_every_process(monkeypatch):
     reader.list_tools_for_registry()
     fact = tool_effects.effect_of(name, is_mcp=True)
     assert fact.annotations == {"readOnlyHint": True, "destructiveHint": False}
-    assert fact.effect == "write" and not fact.declared  # hints never grant authority
+    assert (fact.effect, fact.declared) == ("read", True)  # the configured server's readOnlyHint is a declared read
     async def plain(cfg, timeout):
         return listing("read")
     writer._async_list_tools = plain
