@@ -128,6 +128,45 @@ def test_one_catalog_read_serves_window_and_output_and_a_failed_read_is_not_repe
     assert _probe(tmp_path / "fresh").status == ce.STATUS_UNPROBEABLE and reads[1:] == ["answered", "answered"]
 
 
+def test_a_failed_auto_catalog_read_plans_by_the_pools_smallest_fresh_statement(tmp_path, catalog, monkeypatch):
+    """Window B (owner, 07.11.2026): when the engine's catalog does not answer, an unpinned Auto plan is bounded by the
+    smallest window this model's accounts stated within the confirmed TTL, labelled ``pool`` and dated: a bound of one
+    plan, no account witness and no server statement, while the store keeps the failure. A pin (even without its
+    fingerprint), a stale or another model's statement, a catalog that answered without a window and a reader that
+    may not fetch leave the window unknown."""
+    from ouroboros.context_window import resolve_window
+    from ouroboros.llm import LLMClient
+
+    for account, window in (("account-a", 872_000), ("account-b", 500_000)):  # two Auto reads advertised two accounts
+        catalog["value"] = _catalog(account, f"identity-{account[-1]}", window)
+        assert _probe(tmp_path).window_tokens == window
+    reads = []
+    monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(
+        lambda *_a, **_kw: reads.append(1) or (_ for _ in ()).throw(TimeoutError("controlled daemon timeout"))))
+    bound = _probe(tmp_path)
+    assert (bound.window_tokens, bound.status, bound.source) == (500_000, ce.STATUS_CONFIRMED, "pool") and reads == [1]
+    assert not (bound.account_fingerprint or bound.credential_profile_id or bound.server_window)
+    assert bound.ts == max(row["ts"] for row in ce._read(tmp_path)["probes"].values() if row["status"] == "confirmed")
+    assert bound.detail.startswith("smallest advertised capacity of 2 accounts, newest stated 20")
+    assert ce._read(tmp_path)["probes"][bound.route_fp]["status"] == ce.STATUS_FAILED  # only the failure is stored
+    assert resolve_window(bound, 65_536, bound=False).usable == 500_000 - 65_536
+    assert _probe(tmp_path).to_json() == bound.to_json() and reads == [1]  # its ten-minute record reads nothing
+    assert _probe(tmp_path, allow_fetch=False).status == ce.STATUS_FAILED  # a reader that may not fetch: unknown
+    pinned = _probe(tmp_path, options={"source_id": "test-source", "credential_profile_id": "account-a"})
+    assert pinned.status == ce.STATUS_FAILED and pinned.window_tokens == 0  # a pin without its fingerprint is no Auto
+    other = ce.probe(tmp_path, provider="claudexor", model=MODEL + "-other")
+    assert other.window_tokens == 0 and other.status == ce.STATUS_FAILED  # another model's accounts state nothing here
+    data = ce._read(tmp_path)
+    for row in data["probes"].values():
+        row["ts"] = "2020-01-01T00:00:00Z"
+    monkeypatch.setattr(ce, "_read", lambda _root: data)
+    assert not ce._pool_bound(tmp_path, bound, {"provider": "claudexor", "model": MODEL})  # stale statements: unknown
+    monkeypatch.undo()
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    assert _probe(fresh, allow_fetch=False).window_tokens == 0  # not probed: unknown, no pool
+
+
 def test_exact_observed_binding_reuses_only_its_cache(tmp_path, catalog):
     first = _probe(tmp_path)
     options = ce.model_account_options(MODEL, model_route=_binding(first))

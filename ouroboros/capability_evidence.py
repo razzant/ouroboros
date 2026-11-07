@@ -1070,11 +1070,33 @@ def with_role_window(evidence: CapabilityEvidence, window: int) -> CapabilityEvi
                    source=SOURCE_USER_SETTING, stale=False, ts="", detail="role Window set by owner") if window else evidence
 
 
+def _pool_bound(drive_root: Any, evidence: CapabilityEvidence, route: Dict[str, Any]) -> Optional[CapabilityEvidence]:
+    """An unpinned Auto route whose catalog read failed: the smallest window this model's accounts stated within the
+    confirmed TTL, as one plan's bound (source ``pool``), never an account's witness: no account fields, nothing
+    stored, no server statement. A pin, even one without its fingerprint, is no Auto; no fresh statement: unknown."""
+    options = route.get("options") or {}
+    if route.get("provider") != "claudexor" or options.get("credential_profile_id") or options.get("account_fingerprint"):
+        return None
+    stated = [row for row in (_read(drive_root).get("probes") or {}).values() if isinstance(row, dict)
+              and row.get("provider") == "claudexor" and row.get("model") == route.get("model")
+              and row.get("account_fingerprint") and row.get("status") == STATUS_CONFIRMED
+              and int(row.get("window_tokens") or 0) > 0 and _age_seconds(str(row.get("ts") or "")) <= _CONFIRMED_TTL_SEC]
+    if not stated:
+        return None
+    newest = str(min(stated, key=lambda row: _age_seconds(str(row.get("ts") or ""))).get("ts") or "")
+    return CapabilityEvidence(min(int(row["window_tokens"]) for row in stated), STATUS_CONFIRMED, "pool",
+                              evidence.route_fp, evidence.model, evidence.provider, ts=newest, detail=(
+                                  f"smallest advertised capacity of {len(stated)} accounts, newest stated "
+                                  f"{newest.replace('T', ' ')[:16]} (catalog unavailable)"))
+
+
 def probe(drive_root: Any, **route) -> CapabilityEvidence:
     """Resolve independent context and output facts; one owner's window ack cannot suppress output discovery.
 
     One catalog read serves both: a read that failed (live, or its ten-minute record) is not repeated for the
     output limit, which then answers from what is stored; a read that succeeded without a window still reads it.
+    After a failed read a fetching probe of an unpinned Auto route plans by the pool's smallest fresh statement
+    (``_pool_bound``); a reader that may not fetch keeps it unknown.
     """
     from dataclasses import asdict, replace
     from ouroboros.response_limits import probe_response_limit
@@ -1084,6 +1106,8 @@ def probe(drive_root: Any, **route) -> CapabilityEvidence:
     if is_known(evidence, require_fresh=True):
         evidence.server_window = dict(tokens=evidence.window_tokens, kind=evidence.window_kind,
                                       source=evidence.source, observed_at=evidence.ts)
+    if read_failed and route.get("allow_fetch", True):  # after the server's word: the pool's bound is none
+        evidence = _pool_bound(drive_root, evidence, route) or evidence
     ack = _read(drive_root).get("owner_acks", {}).get(evidence.route_fp)
     options = {**(route.get("options") or {}), **{key: getattr(evidence, key) for key in (
         "source_id", "credential_profile_id", "account_fingerprint") if getattr(evidence, key)}}
