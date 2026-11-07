@@ -84,7 +84,7 @@ def test_second_unavailable_is_a_hold_without_an_extra_attempt(supervisor, bad):
     h.replies.extend([{"status": "DANGEROUS", "reason": "flag"}, bad])
     ok, msg = h.module.check_safety("place_reply", {}, ctx=h.ctx)
     assert not ok and "UNAVAILABLE" in msg and len(h.calls) == 2
-    assert not h.module._PRIOR_VERDICTS
+    assert not any(row.get("speech_refused") for row in h.module._PRIOR_VERDICTS.get("work", {}).values())
 
 
 def test_unmarked_or_disabled_never_second_checks(supervisor):

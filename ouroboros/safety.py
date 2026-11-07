@@ -24,7 +24,7 @@ from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
 from ouroboros.llm import LLMClient
 from ouroboros.loop_llm_call import classify_llm_exception, is_rate_limit_text
 from ouroboros.pricing import emit_llm_usage_event, normalize_usage_cost, infer_provider_from_model
-from ouroboros.utils import sanitize_tool_result_for_log
+from ouroboros.utils import sanitize_tool_result_for_log, utc_now_iso
 from ouroboros.config import runtime_setting
 from ouroboros.safety_config import OWNER_RULES_KEY
 
@@ -482,15 +482,20 @@ def _authoring_call(ctx):
     return str(meta.get("llm_call_id") or "") if isinstance(meta, dict) else ""
 
 
-def _remember(ctx, digest, tool_name, assessment, *, speech_refused=False):
+def _remember(ctx, digest, tool_name, assessment, *, speech_refused=False, held=False):
+    """Retain a verdict, or a hold of words (when and by which model call: the owner's exit reads it)."""
     root = _root_id(ctx)
     if not root:
         return True  # rootless calls never earn a reusable speech flag
-    row = {"digest": digest, "tool": tool_name, "verdicts": assessment.verdicts,
-           "speech_refused": speech_refused, **({"llm_call_id": _authoring_call(ctx)} if speech_refused else {})}
     with _PRIOR_LOCK:
         previous = _PRIOR_VERDICTS.get(root, {})
-        row["verdicts"] = coalesce_verdicts(previous.get(digest, {}).get("verdicts", ()), assessment.verdicts)
+        before = previous.get(digest, {})
+        row = {"digest": digest, "tool": tool_name, "speech_refused": speech_refused,
+               "verdicts": coalesce_verdicts(before.get("verdicts", ()), assessment.verdicts),
+               **({"llm_call_id": _authoring_call(ctx)} if speech_refused or held else {}),
+               # the first hold is when the mind was told to ask; a retry held again keeps that time
+               **({"held_at": before.get("held_at") or utc_now_iso(), "hold": getattr(assessment, "status", "")}
+                  if held else {})}
         history = _VerdictHistory({**previous, digest: row})
         history.omitted_safe = getattr(previous, "omitted_safe", 0)
         safe_rows = iter([key for key, value in history.items()
@@ -521,9 +526,45 @@ def _needs_checker(ctx):
 def _hold(ctx, tool_name, reason, *, status="UNAVAILABLE"):
     _emit_durable_safety_event(ctx, {"type": "safety_hold", "tool": tool_name, "reason": reason, "hold": status})
     marker = "SAFETY_SUBJECT_TOO_LARGE_BLOCKED" if status == "TOO_LARGE" else "SAFETY_UNAVAILABLE"
-    next_step = ("Reduce the payload or split the work before retrying; complete evidence must fit."
-                 if status == "TOO_LARGE" else "Retry when review is available.")
-    return _Assessment(False, f"⚠️ {marker}: {reason}. This call was not checked. {next_step}", status=status)
+    return _Assessment(False, f"⚠️ {marker}: {reason}. This call was not checked: that is no verdict. Retry later.",
+                       status=status)
+
+
+# Words no check could judge wait in every mode; the exits are named, never a route around the hold.
+_HELD_WORDS = ("These words wait until a check judges them. Or ask your human privately, quoting the exact text and "
+               "destination: their answer on that card lets an identical re-issue from a later step send it unjudged. "
+               "Never route these words through another tool.")
+
+
+def _owner_yes(ctx, tool_name, arguments, effect, prior):
+    """The quiz my human answered after these words were held, its card holding their exact text and every
+    destination; "" if none. The host checks facts only (bytes, destination, time): the mind's re-issue after reading
+    the answer is its judgment that the answer approves."""
+    from datetime import datetime
+    from ouroboros.place_guard import call_place_facts
+    from ouroboros.tool_effects import _selected
+
+    def when(stamp):
+        try:
+            return datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    words, held = _selected(arguments, effect.text or "text"), when(prior.get("held_at"))
+    facts = call_place_facts(ctx, tool_name, arguments) or {}
+    destinations = ([row["place_label"] for row in facts.get("places") or [] if row.get("place_label")]
+                    or [value for values in (facts.get("targets") or {}).values() for value in values])
+    if not isinstance(words, str) or not words.strip() or not destinations or held is None:
+        return ""
+    for row in getattr(ctx, "_owner_directives", None) or []:
+        card = str(((row.get("reply_to") if isinstance(row, dict) else None) or {}).get("text") or "")
+        answered = when(row.get("ts") or row.get("received")) if card else None
+        try:
+            later = answered is not None and answered > held
+        except TypeError:  # an answer time without an offset is not comparable: not a fact this exit can use
+            later = False
+        if row.get("source") == "owner_quiz_answer" and later and words in card and all(d in card for d in destinations):
+            return str(row.get("quiz_id") or row.get("msg_id") or "")
+    return ""
 
 
 def _focus_event_source(row, metadata, notes):
@@ -1392,8 +1433,8 @@ def check_safety(
         prior = _PRIOR_VERDICTS.get(root, {}).get(digest, {})
         if root in _PRIOR_VERDICTS:
             _PRIOR_VERDICTS.move_to_end(root)
+    call = _authoring_call(ctx)
     if prior.get("speech_refused"):  # host- or verdict-marked speech, flagged before
-        call = _authoring_call(ctx)
         if not call or call == prior.get("llm_call_id"):  # the flagged decision re-presented, not a later one
             return False, "⚠️ SAFETY_VIOLATION: Message not sent: this exact call was flagged in this same step. " + _SEND_DESPITE
         _emit_durable_safety_event(ctx, {"type": "safety_sent_despite_check", "tool": tool_name,
@@ -1401,6 +1442,12 @@ def check_safety(
                                        "flagged_in": prior.get("llm_call_id", ""), "sent_by": call,
                                        "detail": "sent despite the check by a later model call"})
         return True, "⚠️ SAFETY_ADVICE: Identical re-issue from a later step; sent despite the check."
+    if (speech or is_mcp) and prior.get("held_at") and call and call != prior.get("llm_call_id") and (
+            quiz := _owner_yes(ctx, tool_name, arguments, effect, prior)):
+        _emit_durable_safety_event(ctx, {"type": "safety_sent_without_assessment", "tool": tool_name,
+                                       "subject_digest": digest, "quiz_id": quiz, "hold": prior.get("hold", ""),
+                                       "held_at": prior["held_at"], "sent_by": call})
+        return True, f"⚠️ SAFETY_ADVICE: Sent without a Safety assessment, on your human's answer to quiz {quiz}."
 
     # Preserve the selected assessment coverage independently of resource
     # admission. Cyber changes the authority of an assessment, never its verdict.
@@ -1437,7 +1484,9 @@ def check_safety(
     # Holds cannot earn retry authority. Speech holds bind in every runtime mode, and so does an MCP call's hold:
     # without a verdict nothing says it is not words to people (built-in undeclared tools' holds stay advice).
     if not allowed and (speech or (is_mcp and not getattr(assessment, "verdicts", ()))):
-        return False, message
+        if not getattr(assessment, "verdicts", ()):
+            _remember(ctx, digest, tool_name, assessment, held=True)
+        return False, message + "\n" + _HELD_WORDS
     if cyber and not allowed:
         _emit_durable_safety_event(ctx, {"type": "safety_advisory", "tool": tool_name,
             "assessment_allowed": False, "assessment": message, "runtime_mode": _runtime_mode(ctx), "execution_allowed": True})

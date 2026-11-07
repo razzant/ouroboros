@@ -958,6 +958,7 @@ tools:
       target: body.channel
       conversation: body.channel
       thread: body.thread_ts
+      text: body.text          # the words (default: the argument named text)
 contributes:
   - id: place
     provides: place
@@ -980,7 +981,9 @@ contributes:
   its configured server marks it `readOnlyHint: true`, otherwise `write`; that hint is trusted, so a server lying
   about a write runs it unchecked, and Advises may call the tools a server marks read-only.
 - `target`/`conversation`/`thread` attribute each destination; a dotted name (`body.channel`) selects a nested
-  argument (`args["body"]["channel"]`). Declare `account_id` for multi-account writes:
+  argument (`args["body"]["channel"]`). `text` (default: the argument named `text`) names the words: when no check
+  could judge a message, your human's answer on a card holding those exact words and the destination lets the
+  mind's identical re-issue send it. Declare `account_id` for multi-account writes:
   an exact account outside all applicable Place scopes remains an ordinary tool target, including in Acts.
   Unresolved targets inside applicable scopes retain the Silent/Paused hold. Use the same canonical account key
   in credentials, targets and Places; sender aliases are separate. Never resolve an unknown key to another account after dispatch.

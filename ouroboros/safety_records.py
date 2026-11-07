@@ -52,7 +52,8 @@ def _record_task_checks(ctx: Optional[Any], event: Dict[str, Any]) -> None:
         return
     kind = event.get("type")
     chips = {"safety_sent_despite_check": ("sent_despite",), "safety_hold": ("held",),
-             "safety_mode_skip": ("not_checked",), "safety_declared_read_skip": ("not_checked",)}.get(kind, ())
+             "safety_mode_skip": ("not_checked",), "safety_declared_read_skip": ("not_checked",),
+             "safety_sent_without_assessment": ("not_checked",)}.get(kind, ())
     if kind == "safety_verdict":
         chips = tuple(dict.fromkeys("checked" if verdict["status"] == "SAFE" else "warned"
                                    for verdict in event.get("verdicts", ()) if verdict.get("status")))

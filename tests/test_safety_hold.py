@@ -24,7 +24,7 @@ def test_no_checker_hold_and_no_retry_grant(supervisor, monkeypatch, mode, requi
     for _ in range(2):
         ok, msg = h.module.check_safety("place_reply", {"text": "hello"}, ctx=h.ctx)
         assert not ok and "SAFETY_UNAVAILABLE" in msg
-    assert not h.module._PRIOR_VERDICTS
+    assert not any(row.get("speech_refused") for row in h.module._PRIOR_VERDICTS.get("work", {}).values())
     assert h.module.check_safety("write_remote", {}, ctx=h.ctx)[0] == (mode == "cyber_pro")
     # Restored checker can approve the exact same speech; it did not consume an earlier flag.
     monkeypatch.setattr(h.module, "_resolve_safety_routing", lambda: (False, False, None))
@@ -56,6 +56,45 @@ def test_held_words_wait_in_cyber_pro_whatever_tool_carries_them(supervisor, mon
         assert ok and "SAFETY_ADVICE" in message and held in message, other[0]
 
 
+@pytest.mark.parametrize("card,sent", [("exact", True), ("other words", False), ("no destination", False),
+                                       ("answered before", False)])
+def test_my_humans_yes_on_the_exact_held_words_sends_them_on_a_later_decision(supervisor, monkeypatch, card, sent):
+    """Held words wait in every mode and the hold names its exits. An owner quiz answered after the hold whose card
+    holds the exact text and the destination lets an identical re-issue from a later model call send it, recorded
+    as sent without assessment; the host checks only bytes, destination and time, and the same call re-presenting
+    the words decides nothing."""
+    from datetime import datetime, timedelta
+    from ouroboros import place_guard
+    h = supervisor
+    monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")
+    monkeypatch.setattr(place_guard, "call_place_facts", lambda *a, **kw: {
+        "places": [{"place_id": "p", "place_label": "Telegram · FusionBrain"}], "targets": {"chat_id": ["-100"]}})
+    text = "Status of the tracks: Atlas passed 70 and 95."
+    reply = {"place_id": "p", "text": text, "destination": {"conversation_id": "-100"}}
+    h.replies.append(RuntimeError("provider_failed"))
+    ok, message = h.module.check_safety("place_reply", reply, ctx=h.ctx)
+    assert not ok and "SAFETY_UNAVAILABLE" in message and "no verdict" in message
+    assert "quoting the exact text and destination" in message and "Never route these words through another tool" in message
+    held_at = datetime.fromisoformat(h.module._PRIOR_VERDICTS["work"][h.module._subject_digest("place_reply", reply)]["held_at"])
+    words = "Status: all good." if card == "other words" else text
+    place = "" if card == "no destination" else " to Telegram · FusionBrain"
+    answered = held_at + timedelta(seconds=-5 if card == "answered before" else 5)
+    h.ctx._owner_directives = [{"source": "owner_quiz_answer", "content": "1. Send it", "quiz_id": "q9",
+                                "ts": answered.isoformat(), "reply_to": {
+                                    "address": "quiz q9 of task work", "author": "Ouroboros, task work",
+                                    "text": f"Send exactly this{place}?\n> {words}\n1. Send it\n2. Not now\n"
+                                            "(host record: my human pressed option 1)"}}]
+    h.replies.append(RuntimeError("provider_failed"))
+    assert not h.module.check_safety("place_reply", reply, ctx=h.ctx)[0]  # the same model call decides nothing new
+    h.later()
+    h.replies.append(RuntimeError("provider_failed"))
+    ok, message = h.module.check_safety("place_reply", reply, ctx=h.ctx)
+    assert ok is sent and len(h.calls) == (2 if sent else 3)
+    exits = [event for event in h.events if event["type"] == "safety_sent_without_assessment"]
+    assert [(event["quiz_id"], event["hold"]) for event in exits] == ([("q9", "UNAVAILABLE")] if sent else [])
+    assert ("quiz q9" in message) is sent
+
+
 def test_legacy_owner_backend_absence_still_warns(supervisor, monkeypatch):
     h = supervisor
     monkeypatch.setattr(h.module, "_resolve_safety_routing", lambda: (False, False, "no backend"))
@@ -76,7 +115,9 @@ def test_mandatory_bundle_never_truncated(supervisor, monkeypatch, source):
     elif source == "directives":
         h.ctx._owner_directives = [{"role": "user", "content": "exact" * 1000}]
     else:
-        h.module._PRIOR_VERDICTS["work"] = {"x": {"reason": "earlier" * 1000}}
+        h.module._PRIOR_VERDICTS["work"] = {"x": {"digest": "x", "tool": "remote_write", "speech_refused": False,
+                                                  "verdicts": [{"stage": "first", "status": "SUSPICIOUS",
+                                                                "reason": "earlier" * 1000}]}}
     for _ in range(2):
         ok, msg = h.module.check_safety("place_reply", args, ctx=h.ctx)
         assert not ok and "TOO_LARGE" in msg

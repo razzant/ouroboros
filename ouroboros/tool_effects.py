@@ -45,6 +45,8 @@ class ToolEffect:
     to/cc/bcc. ``conversation``/``thread`` name the arguments that address a
     conversation, when the connector declared them. ``declared`` is False when
     the effect is the default (no declaration, MCP, unreadable manifest).
+    ``text`` names the argument holding the words (``""``: the one named
+    ``text``); my human's yes on a held message is checked against those bytes.
     """
 
     effect: str
@@ -54,6 +56,7 @@ class ToolEffect:
     declared: bool = False
     source: str = ""
     annotations: Mapping[str, Any] = field(default_factory=dict)
+    text: str = ""
 
 
 BUILTIN = ToolEffect(effect="", source="builtin")
@@ -139,6 +142,7 @@ def _routed(row: Mapping[str, Any], effect: str, *, declared: bool) -> ToolEffec
         effect=effect, declared=declared, source="extension", targets=_argument_names(row.get("target")),
         conversation=row.get("conversation") if isinstance(row.get("conversation"), str) else "",
         thread=row.get("thread") if isinstance(row.get("thread"), str) else "",
+        text=row.get("text") if isinstance(row.get("text"), str) else "",
     )
 
 
