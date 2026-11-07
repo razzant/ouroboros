@@ -19,7 +19,15 @@ import pathlib
 import stat
 from typing import Dict, List
 
-from ouroboros.artifacts import copy_directory_to_task_artifacts, copy_file_to_task_artifacts, iter_artifact_tree, stream_artifact_file
+from ouroboros.artifacts import (
+    _ARTIFACT_MANIFEST,
+    copy_directory_to_task_artifacts,
+    copy_file_to_task_artifacts,
+    iter_artifact_tree,
+    stream_artifact_file,
+    task_artifact_dir_path,
+    task_id_for_artifacts,
+)
 from ouroboros.artifact_directories import iter_artifact_entries
 from ouroboros.runtime_mode_policy import (
     is_protected_runtime_path,
@@ -43,7 +51,7 @@ from ouroboros.tool_access import (
     resource_root_path,
     user_files_path_block_reason,
 )
-from ouroboros.utils import normalized_path_text, safe_relpath, sanitize_tool_result_for_log
+from ouroboros.utils import normalized_path_text, read_json_dict, safe_relpath, sanitize_tool_result_for_log
 from ouroboros.workspace_executor import BackendPathNoMatch, executor_ref_from_ctx
 from ouroboros.workspace_executor import map_backend_path as executor_map_backend_path
 from ouroboros.workspace_executor import map_backend_path_lexical as executor_map_backend_path_lexical
@@ -534,6 +542,74 @@ def _record_skipped_members(ctx: ToolContext, output: str, members: List[str]) -
                  row["task_id"] or "?", output, len(members), "; ".join(members))
 
 
+def _has_canonical_artifact_capture(
+    ctx: ToolContext,
+    source: pathlib.Path,
+    after: tuple[bool, int, str],
+) -> bool:
+    """Return True if an identical canonical artifact capture for source already exists."""
+    drive_root = getattr(ctx, "drive_root", None)
+    if not drive_root:
+        return False
+    try:
+        task_id = task_id_for_artifacts(ctx)
+        artifact_dir = task_artifact_dir_path(drive_root, task_id, create=False)
+    except Exception:
+        return False
+    if not artifact_dir.is_dir():
+        return False
+
+    manifest_path = artifact_dir / _ARTIFACT_MANIFEST
+    data = read_json_dict(manifest_path) or {}
+    artifacts = data.get("artifacts")
+    if not isinstance(artifacts, dict):
+        return False
+
+    source_resolved = str(source.resolve(strict=False))
+    source_str = str(source)
+
+    if source.is_file():
+        for record in artifacts.values():
+            if not isinstance(record, dict):
+                continue
+            rec_source = str(record.get("source_path") or "")
+            rec_name = str(record.get("name") or "")
+            rec_path = str(record.get("path") or "")
+            if (
+                rec_source in {source_str, source_resolved}
+                or (rec_name == source.name and rec_path and pathlib.Path(rec_path).parent == artifact_dir.resolve(strict=False))
+            ):
+                dest = pathlib.Path(rec_path) if rec_path else (artifact_dir / rec_name)
+                if (
+                    dest.is_file()
+                    and record.get("sha256") == after[2]
+                    and int(record.get("size", -1)) == after[1]
+                ):
+                    return True
+        return False
+
+    if source.is_dir():
+        for record in artifacts.values():
+            if not isinstance(record, dict):
+                continue
+            rec_source = str(record.get("source_path") or "")
+            if rec_source in {source_str, source_resolved} and str(record.get("kind") or "").endswith("_manifest"):
+                ledger_path = pathlib.Path(str(record.get("path") or ""))
+                if not ledger_path.is_file():
+                    continue
+                ledger_data = read_json_dict(ledger_path) or {}
+                zip_name = ledger_data.get("zip_name")
+                if not zip_name or not (artifact_dir / str(zip_name)).is_file():
+                    continue
+                files = ledger_data.get("files") or []
+                ledger_total = sum(int(f.get("size", 0)) for f in files if isinstance(f, dict))
+                if ledger_total == after[1]:
+                    return True
+        return False
+
+    return False
+
+
 def _register_process_outputs(
     ctx: ToolContext,
     outputs: List[str] | None,
@@ -587,13 +663,20 @@ def _register_process_outputs(
         before = (before_outputs or {}).get(str(source), (False, -1, ""))
         after = _fingerprint_output(source, resolved_output=resolved)
         if before[0] and before == after:
-            # Present-but-unchanged is NOT a failure (a deterministic re-run, or a
-            # command that re-verifies an existing artifact): note it cosmetically
-            # and skip re-registration. "Did it actually work?" lives on the
-            # objective/review axis, not the tool-execution axis (Bible P5). A
-            # genuinely MISSING declared output above stays a blocking failure.
-            notes.append(f"unchanged output (cosmetic): {text}")
-            continue
+            is_task_drive = False
+            try:
+                task_drive = resource_root_path(ctx, "task_drive")
+                is_task_drive = path_is_relative_to(source, task_drive) or _path_is_relative_to_casefold(source, task_drive)
+            except Exception:
+                pass
+            if not is_task_drive or _has_canonical_artifact_capture(ctx, source, after):
+                # Present-but-unchanged is NOT a failure (a deterministic re-run, or a
+                # command that re-verifies an existing artifact): note it cosmetically
+                # and skip re-registration. "Did it actually work?" lives on the
+                # objective/review axis, not the tool-execution axis (Bible P5). A
+                # genuinely MISSING declared output above stays a blocking failure.
+                notes.append(f"unchanged output (cosmetic): {text}")
+                continue
         if source.is_file():
             try:
                 record = copy_file_to_task_artifacts(ctx, source, kind="process_output")
