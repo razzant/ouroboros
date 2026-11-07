@@ -40,6 +40,12 @@ ROW_GEOMETRY = """(row) => {
         control_on_screen: ctl.left >= 0 && ctl.right <= innerWidth && ctl.width > 0,
         beside: lines.every((r) => r.right <= ctl.left + 0.5),
         lines: new Set(lines.map((r) => Math.round(r.top))).size,
+        // Wrapping only for want of room: every line but the last runs on toward the control (within a word and the gap).
+        filled: (() => {
+            const ends = new Map();
+            for (const r of lines) ends.set(Math.round(r.top), Math.max(ends.get(Math.round(r.top)) ?? -Infinity, r.right));
+            return [...ends.entries()].sort((a, b) => a[0] - b[0]).slice(0, -1).every(([, right]) => right >= ctl.left - 120);
+        })(),
         selectable: getComputedStyle(sub).userSelect !== 'none',
         theme: document.documentElement.dataset.theme,
     };
@@ -121,9 +127,10 @@ def test_held_continue_toast_activity_reason_and_no_resume(direct_server_with_da
                     if width < 700:
                         assert geometry["lines"] > 1, "the phone row wraps the cause instead of cutting it"
                     else:
-                        # A wide row keeps its control beside the cause, which wraps only for want of room.
-                        assert geometry["beside"] and geometry["lines"] <= 2, ("a desktop row keeps its compact shape",
-                                                                               geometry)
+                        # A wide row keeps its control beside the cause, which wraps only for want of room: the line
+                        # count follows the platform's font (two lines on macOS, three on Linux), the shape does not.
+                        assert geometry["beside"] and geometry["filled"], ("a desktop row keeps its compact shape",
+                                                                           geometry)
                     row.screenshot(path=str(evidence / f"{engine}-2-activity-held-row-{theme}-{width}.png"))
                     page.screenshot(path=str(evidence / f"{engine}-2-activity-page-{theme}-{width}.png"),
                                     full_page=True)
