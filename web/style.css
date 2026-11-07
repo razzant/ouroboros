@@ -9075,14 +9075,15 @@ body.keyboard-open .project-panel {
 .updates-letter-details p {
     margin: var(--space-2) 0 0;
 }
-/* The letter opens at its first part (about eight lines); "Read all" opens the rest in place. */
+/* The panel's letter opens at its first part (about eight lines); "Read all" opens the rest in place. The Apply
+   confirmation's copy has no such control: it reads whole in that dialog's own scrolling region. */
 .updates-letter-body {
     font-size: var(--type-body);
     line-height: var(--line-body);
     color: var(--text-primary);
     margin-top: var(--space-2);
 }
-.updates-letter-body:not(.is-open) { max-height: calc(8 * var(--line-body) * 1em); overflow: hidden; }
+.updates-letter .updates-letter-body:not(.is-open) { max-height: calc(8 * var(--line-body) * 1em); overflow: hidden; }
 /* A long reading text keeps its structure: the title one size up, a section as a label with room above it, a
    subsection in the secondary ink — declared after the global .md-h* block it narrows. */
 .updates-letter-body :is(.md-h1, .md-h2, .md-h3) {
