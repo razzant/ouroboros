@@ -112,3 +112,22 @@ def test_an_mcp_call_carries_whose_credential_it_acts_with(supervisor, monkeypat
     assert data["subject"]["sends_as"] == {"mcp_server": "slack", "label": "Slack (user)",
                                            "acts_with": "your human's sign-in at https://slack.com"}
     assert "sends_as" not in bundle(h, "mcp_other__post", {"x": 1})["subject"]
+
+
+def test_a_speech_refusal_names_the_words_the_rule_and_the_destinations_notes(supervisor, monkeypatch):
+    """A flagged message returns to the mind with the exact words, the rule they break and the destination's label
+    and my human's notes there (resolved once, for the bundle); a SAFE message says nothing."""
+    from ouroboros import places, place_guard, tool_effects
+    h = supervisor
+    monkeypatch.setattr(tool_effects, "effect_of", lambda *a, **kw: tool_effects.ToolEffect("message", declared=True))
+    monkeypatch.setattr(place_guard, "call_place_facts", lambda *_a, **_k: {
+        "places": [{"place_id": "fb", "place_label": "Telegram · FusionBrain"}]})
+    monkeypatch.setattr(places, "load_places", lambda root: [places.Place("fb", "connector", "chat", label="Telegram · FusionBrain",
+        notes=(places.NoteEntry("Do not disclose Joi/Eva/SDG here.", "owner"), places.NoteEntry("They like brevity.", "ouroboros")))])
+    h.replies.append({"status": "DANGEROUS", "reason": "owner rule 1 keeps Joi/Eva apart", "speech": True,
+                      "quote": "App stays his track"})
+    ok, message = h.module.check_safety("connector_send", {"chat_id": "-100", "text": "Andrei: App stays his track."}, ctx=h.ctx)
+    assert not ok and "owner rule 1 keeps Joi/Eva apart" in message and 'Flagged words: "App stays his track"' in message
+    assert ('[DESTINATION] Telegram · FusionBrain: your human\'s notes for this place: "Do not disclose Joi/Eva/SDG here."'
+            in message) and "They like brevity" not in message
+    assert h.module.check_safety("connector_send", {"chat_id": "-100", "text": "Atlas passed 70 and 95."}, ctx=h.ctx) == (True, "")

@@ -142,6 +142,37 @@ def dispatch_refusal(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
     return ""
 
 
+def destination_line(label: str, notes: list[str]) -> str:
+    """One destination as the mind reads it beside an act or a refusal: its label and my human's notes for it."""
+    import json
+
+    return f"[DESTINATION] {label}: your human's notes for this place: " + (
+        "; ".join(json.dumps(text, ensure_ascii=False) for text in notes) or "none")
+
+
+def with_destination_facts(ctx: Any, name: str, args: Mapping[str, Any], result: Any) -> Any:
+    """A send into a place other than this turn's focus carries that place's label and my human's notes beside its
+    result, in every mode (my human's own work with Safety off included): the facts sit next to the act. ``result``
+    is a ``ToolResult``; the note trails its text as a host annotation, the producer's text kept apart. A blocked
+    call carries its own facts (a place refusal names the place, a Safety refusal its destination)."""
+    if (not isinstance(args, Mapping) or getattr(result, "status", "") == "blocked"
+            or effect_of(name, ctx=ctx, args=args).effect != EFFECT_MESSAGE):
+        return result
+    try:
+        _effect, _targets, resolved, _siblings, _known = _call_destinations(ctx, name, args, None, False)
+    except _PlacesUnreadable:
+        return result
+    focus = (_metadata(ctx).get("focus") or {}).get("place_id")
+    note = "\n".join(destination_line(place.label or place.place_id,
+                                      [entry.text for entry in place.notes if entry.author in {"owner", "migration"}])
+                     for place in resolved if place.place_id != focus)
+    if not note:
+        return result
+    from dataclasses import replace
+    return replace(result, text=f"{result.text}\n\n{note}", host_annotations=(*result.host_annotations, note),
+                   producer_text=result.text if result.producer_text is None else result.producer_text)
+
+
 def _note_message_call(ctx: Any, name: str, args: Mapping[str, Any], keys: list[str]) -> None:
     """Keep on the context that this run dispatched a ``message`` call into these conversations (``_place_message_calls``):
     the words proposed (the call's ``text`` argument, when it has one) and when. A dispatched call is not a delivery:

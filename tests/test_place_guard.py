@@ -165,6 +165,30 @@ def test_supervisor_facts_keep_every_place_once(published_tool, places):
     assert _only(reply)["conversation_key"] == "service:account:C1:0"
 
 
+def test_a_send_into_another_place_carries_its_notes_beside_the_result(published_tool, places, monkeypatch, tmp_path):
+    """Through the real tool-execution seam, in every mode: a send into a place other than the turn's focus carries
+    that place's label and my human's notes beside its result; a send into the focus place and a write carry none."""
+    import json
+    from ouroboros import loop_tool_execution as execution
+    from ouroboros.tools.tool_result import ToolResult
+    _, ctx = places
+    registry = SimpleNamespace(_ctx=ctx, CODE_TOOLS=frozenset(),
+                               execute_result=lambda *a: ToolResult(status="ok", code="OK", text="queued"))
+    monkeypatch.setattr(execution, "persist_call", lambda *a, **k: {})
+
+    def run(name, args):
+        call = {"id": "c1", "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+        return execution._execute_single_tool(registry, call, tmp_path / "logs", "caller")["result"]
+    name, _tool = published_tool("message", target="room", conversation="room")
+    assert run(name, {"room": "C1", "text": "hi"}) == (
+        'queued\n\n[DESTINATION] Quiet: your human\'s notes for this place: "Owner instruction"')
+    ctx.task_metadata = {"focus": {"place_id": "quiet"}}  # the turn's own place: its notes are already in its frame
+    assert run(name, {"room": "C1", "text": "hi"}) == "queued"
+    ctx.task_metadata = {}
+    name, _tool = published_tool("write", target="room", conversation="room")
+    assert run(name, {"room": "C1"}) == "queued"
+
+
 def test_actual_registry_callsite_blocks_and_allows(published_tool, places):
     _, ctx = places
     name, tool = published_tool("message", target="room")

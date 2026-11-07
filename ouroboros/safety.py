@@ -448,9 +448,9 @@ class _VerdictHistory(dict):
 
 class _Assessment(tuple):
     """Keep the public pair ABI while distinguishing flags from infrastructure holds."""
-    def __new__(cls, allowed, message, *, status="", verdicts=()):
+    def __new__(cls, allowed, message, *, status="", verdicts=(), destination=""):
         result = super().__new__(cls, (allowed, message))
-        result.status, result.verdicts = status, tuple(verdicts)
+        result.status, result.verdicts, result.destination = status, tuple(verdicts), destination
         return result
 
 
@@ -590,8 +590,10 @@ def _focus_event_source(row, metadata, notes):
             **typed}
 
 
-def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, ctx=None, resolved_binding=None):
-    """Fixed host evidence, with authorship separate from semantic authorization."""
+def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, ctx=None, resolved_binding=None,
+                        evidence=None):
+    """Fixed host evidence, with authorship separate from semantic authorization. ``evidence`` (a dict) receives
+    the destinations and notes resolved here, so a refusal names them without resolving them again."""
     from dataclasses import asdict, is_dataclass
     from ouroboros import owner_words
     from ouroboros.place_guard import call_place_facts
@@ -661,6 +663,8 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
         "earlier_verdicts": earlier,
         "earlier_safe_verdicts_omitted": omitted_safe,
     }
+    if isinstance(evidence, dict):
+        evidence.update(place=place, notes=notes)
     return (f"Runtime mode: {_runtime_mode(ctx)}\nHost evidence (provenance is not consent):\n"
             + _render_subject_json(bundle) + "\nProposed tool call:\nTool: " + tool_name
             + "\nArguments:\n" + (args_json if args_json is not None else _render_subject_json(arguments))
@@ -1182,8 +1186,9 @@ def _run_llm_check(
     args_json = _render_subject_json(arguments)
     if len(args_json) > _SAFETY_SUBJECT_CHAR_BUDGET:
         return _Assessment(*_subject_too_large_blocked(ctx, tool_name, len(args_json)), status="TOO_LARGE")
+    evidence = {}
     prompt = _build_check_prompt(tool_name, arguments, messages, args_json=args_json,
-                                 ctx=ctx, resolved_binding=resolved_binding)
+                                 ctx=ctx, resolved_binding=resolved_binding, evidence=evidence)
     if len(prompt.encode("utf-8")) > _SAFETY_BUNDLE_BYTE_BUDGET:
         return _hold(ctx, tool_name, "The complete mandatory evidence bundle is too large", status="TOO_LARGE")
     _use_local_light, _is_local_fallback, _skip_reason = _resolve_safety_routing()
@@ -1368,7 +1373,19 @@ def _run_llm_check(
         return _Assessment(True, "⚠️ SAFETY_WARNING: The Safety Supervisor flagged this action as suspicious.\n"
                            + reasons + "\nThe command was allowed, but consider whether this is the right approach.", status=status, verdicts=verdicts)
     return _Assessment(False, "⚠️ SAFETY_VIOLATION: The Safety Supervisor blocked this command.\n"
-                       + reasons + "\nReconsider whether and how to proceed.", status=status, verdicts=verdicts)
+                       + reasons + "\nReconsider whether and how to proceed.", status=status, verdicts=verdicts,
+                       destination="\n".join(_destination_lines(evidence)))
+
+
+def _destination_lines(evidence):
+    """The flagged call's destinations as the bundle resolved them: each label with my human's notes there."""
+    from ouroboros.place_guard import destination_line
+
+    place = evidence.get("place") or {}
+    rows = {row["place_id"]: row for row in [*(place.get("places") or []), place] if row.get("place_id")}
+    return [destination_line(row.get("place_label") or pid, [note["text"] for note in evidence.get("notes") or ()
+                                                            if note["place_id"] == pid and note["standing_delegation"]])
+            for pid, row in rows.items()]
 
 
 def check_safety(
@@ -1478,9 +1495,13 @@ def check_safety(
         else:
             _emit_durable_safety_event(ctx, {"type": "safety_verdict", "tool": tool_name,
                                            "subject_digest": digest, "verdicts": verdicts})
-            if flagged_speech:
+            if flagged_speech:  # private to the mind: the words, the rule and where they would land
                 reasons = "\n".join(f"{v['stage']}: {v['status']} — {v.get('reason', '')}" for v in verdicts)
-                return False, "⚠️ SAFETY_VIOLATION: Message not sent.\n" + reasons + "\n" + _SEND_DESPITE
+                quote = next((v["quote"] for v in reversed(verdicts) if v.get("quote")), "")
+                return False, ("⚠️ SAFETY_VIOLATION: Message not sent.\n" + reasons
+                               + (f"\nFlagged words: {json.dumps(quote, ensure_ascii=False)}" if quote else "")
+                               + (f"\n{assessment.destination}" if getattr(assessment, "destination", "") else "")
+                               + "\n" + _SEND_DESPITE)
     # Holds cannot earn retry authority. Speech holds bind in every runtime mode, and so does an MCP call's hold:
     # without a verdict nothing says it is not words to people (built-in undeclared tools' holds stay advice).
     if not allowed and (speech or (is_mcp and not getattr(assessment, "verdicts", ()))):
