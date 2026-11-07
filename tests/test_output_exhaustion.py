@@ -234,6 +234,33 @@ def test_empty_stop_reply_is_retried_as_an_ordinary_empty_response(tmp_path, no_
     assert "_last_llm_error_kind" not in usage and "_last_llm_output_exhausted" not in usage
 
 
+@pytest.mark.parametrize(("usage", "msg"), [
+    ({"prompt_tokens": 5, "response_finish_reason": "content_filter"}, {"role": "assistant", "content": ""}),  # OpenAI family
+    ({"prompt_tokens": 5}, {"role": "assistant", "content": "", "stop_reason": "refusal"}),  # Anthropic
+])
+def test_a_provider_content_refusal_is_typed_sent_once_and_carries_its_lineage(tmp_path, no_sleep, usage, msg):
+    """A provider's refusal is a route fact, not a transient empty reply: one send, its own event
+    and kind, no cooldown, no spent wall, not infra; a transient body error still retries as itself."""
+    assert _classify_empty_response(usage, msg) == ("provider_content_refusal", False, True)
+    assert _classify_empty_response({**usage, "provider_error": {"kind": "rate_limit", "code": 429}}, msg) == (
+        "llm_empty_response", False, False)
+    llm, totals = _ScriptedLLM((msg, usage), (msg, usage)), {}
+    with ua.usage_scope(ua.UsageScope(task_id="t-exhaust", root_task_id="root", parent_task_id="parent")):
+        assert _call(llm, tmp_path, totals)[0] is None
+
+    assert llm.calls == 1 and no_sleep == []
+    [row] = _events(tmp_path, "provider_content_refusal")
+    assert (row["finish_reason"], row["root_task_id"], row["parent_task_id"]) == (
+        usage.get("response_finish_reason") or msg.get("stop_reason"), "root", "parent")
+    assert _events(tmp_path, "llm_empty_response") == _events(tmp_path, "provider_incomplete_response") == []
+    assert totals["_last_llm_error_kind"] == "content_filter" == totals["_last_llm_call_meta"]["failure_code"]
+    assert "content_filter" not in _TRANSIENT_RETRY_KINDS | _COOLDOWN_ERROR_KINDS
+    assert (totals["execution_status"], totals["reason_code"]) == ("failed", "provider_content_refusal")
+    assert RETRY_WALL_EXHAUSTED_KEY not in totals and "_last_llm_output_exhausted" not in totals
+    assert loop_transport._FAILURE_KIND_WORDS["content_filter"] != loop_transport._FAILURE_KIND_WORDS[
+        "provider_policy_refusal"]
+
+
 # ------------------------------------------------------------------ the next ordinary round (T10)
 
 HOST_FACT = "[SYSTEM NOTICE]\nThe provider ended your previous reply on its length limit"

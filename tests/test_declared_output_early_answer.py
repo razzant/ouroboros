@@ -382,9 +382,19 @@ def test_an_absent_output_and_a_readable_one_need_no_disclosure(project):
     (active / "site" / "kept.txt").write_text("same")
     seen = []
     registry._ctx.emit_progress_fn = seen.append
-    result = _run(registry, "run_command", active / "site", ["kept.txt", "fresh.txt"], "Path('fresh.txt').write_text('new')")
+    outputs = ["kept.txt", "fresh.txt"]
+    result = _run(registry, "run_command", active / "site", outputs, "Path('fresh.txt').write_text('new')")
     assert result.code == "OK" and "output baseline unavailable" not in result.text, result.text
-    assert "unchanged output (cosmetic): kept.txt" in result.text and not any("baseline" in row for row in seen)
+    # Readable and unchanged, kept.txt is captured as found: a declared deliverable needs no change.
+    assert re.search(r"registered output \S*kept\.txt -> artifact_store:kept\.txt .*\(existing output, captured as found\)",
+                     result.text), result.text
+    repeat = _run(registry, "run_script", active / "site", outputs, "Path('fresh.txt').write_text('new')")
+    assert repeat.code == "OK" and repeat.meta.get("artifact_registered") is not True, repeat.text
+    assert "ARTIFACT_OUTPUT_NOTE" in repeat.text and "unchanged output (cosmetic): fresh.txt" in repeat.text
+    mixed = _run(registry, "run_command", active / "site", outputs, "Path('fresh.txt').write_text('newer')")
+    assert mixed.code == "OK" and mixed.meta.get("artifact_registered") is True, mixed.text
+    assert "unchanged output (cosmetic): kept.txt" in mixed.text and "ARTIFACT_OUTPUTS" in mixed.text
+    assert not any("baseline" in row for row in seen)
 
 
 @posix_permissions

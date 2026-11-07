@@ -82,6 +82,8 @@ def reported_price(usage: Dict[str, Any], *fallbacks: Any) -> Tuple[Optional[flo
 # Finish reasons that mean a reply reached its output allowance: OpenAI-family ``length``
 # and Anthropic ``max_tokens``. The one vocabulary every finish-reason reader shares.
 OUTPUT_LIMIT_FINISH_REASONS = frozenset({"length", "max_tokens"})
+# A provider's own content refusal: OpenAI-family ``content_filter`` and Anthropic ``refusal``.
+CONTENT_REFUSAL_FINISH_REASONS = frozenset({"content_filter", "refusal"})
 
 
 def response_finish_reason(usage: Any, msg: Any) -> Tuple[bool, Optional[str]]:

@@ -145,11 +145,21 @@ def test_schedule_result_carries_the_row_and_still_queues(tmp_path, monkeypatch)
     from tests.test_available_subagents_runtime import _session_row, _settings
     from tests.test_supervisor_route_flow import root_context, schedule
 
-    ctx = root_context(tmp_path, _settings(_session_row()), monkeypatch)
+    ctx = root_context(tmp_path, {**_settings(_session_row()), "OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS": "true"}, monkeypatch)
     answer = schedule(ctx)
     assert answer.startswith("Subagent request queued")
     assert "primary" in answer and "engine:" in answer and "pool:" in answer
     assert "tree slots" not in answer
+    assert "\nwrite root: none (read-only child)" in answer
+    # An acting child's result names its resolved write root and who chose it.
+    project = tmp_path / "project"
+    project.mkdir()
+    assert f"\nwrite root: {project} (caller)" in schedule(ctx, write_surface="external_workspace", write_root=str(project))
+    ctx.workspace_root = str(project)
+    assert f"\nwrite root: {project} (parent workspace)" in schedule(ctx, write_surface="external_workspace")
+    ctx.workspace_root = ""
+    minted = schedule(ctx, write_surface="external_workspace")
+    assert "(host-minted coop tree) — children write there" in minted and "pool:" in minted
 
 
 def test_delegate_start_refusal_carries_the_row_and_a_wait_refusal_does_not():

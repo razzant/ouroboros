@@ -14,6 +14,7 @@ import pytest
 from ouroboros import dialogue_store
 from ouroboros.chat_chain import format_address, row_address
 from ouroboros.loop_messages import _initialize_owner_directives, _record_owner_directive
+from ouroboros.owner_relay import words_unseen_in
 from ouroboros.owner_words import (FIELD, OWNER_SOURCES, REPLY_TARGET, _deduped, carried_owner_corpus,
                                    governing_words_for_schedule, render_owner_words)
 from ouroboros.tools.registry import ToolContext
@@ -138,13 +139,27 @@ def test_one_list_names_my_humans_corpus_labels_for_every_reader(tmp_path):
     assert [(row["source"], row["content"]) for row in seeded._owner_directives] == [("place_owner", LONG)]
 
 
-def test_words_repeat_only_by_identity_never_by_likeness():
-    def row(text, ref):
-        return {"text": text, "source": "owner_mailbox", "carrier": "ctx", "task_id": "t", "ts": "", "ref": ref}
+def test_words_repeat_only_by_identity_never_by_likeness(tmp_path):
+    def row(text, ref, ts=""):
+        return {"text": text, "source": "owner_mailbox", "carrier": "ctx", "task_id": "t", "ts": ts, "ref": ref}
 
     assert len(_deduped([row("да", "msg a"), row("да", "msg b")])) == 2, "two yeses are two messages"
     assert len(_deduped([row("да", "msg a"), row("да", "msg a")])) == 1
     assert len(_deduped([row("да", ""), row("да", "")])) == 1, "without an identity the text is the only key"
+    # A row with no reference is told by its words and its time: two id-less «да» at two times are two rows,
+    # and the first of one identity keeps its carrier.
+    two = _deduped([row("да", "", "received 2026-11-05T10:00:00+00:00"), row("да", "", "received 2026-11-05T10:05:00+00:00")])
+    assert [r["ts"] for r in two] == ["received 2026-11-05T10:00:00+00:00", "received 2026-11-05T10:05:00+00:00"]
+    assert len(_deduped([row("да", "", "2026-11-05T10:00:00+00:00"), row("да", "", "2026-11-05T10:00:00+00:00")])) == 1
+    # In an earlier subject a row with no reference is told by its words whole under a stamp with its time, never
+    # by its words anywhere in the text: «да» heading another row's words does not hide an undated «да», nor does
+    # a dated «да»; its own undated block does, whatever section follows it.
+    ctx = _owner_root(tmp_path)
+    ctx._owner_directives = [{"source": "owner_mailbox", "content": "да"}]
+    dated, undated = "[2026-11-05T10:00:00+00:00 · owner · owner_mailbox of task t]", "[owner · owner_mailbox of task t]"
+    assert [r["text"] for r in words_unseen_in(ctx, f"{undated}\nда, но позже")] == ["да"]
+    assert [r["text"] for r in words_unseen_in(ctx, f"{dated}\nда")] == ["да"]
+    assert words_unseen_in(ctx, f"{undated}\nда\n\n## The reply\n\nда") == []
 
 
 def test_the_message_my_human_replied_to_rides_whole_under_its_author(tmp_path):

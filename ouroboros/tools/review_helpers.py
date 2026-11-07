@@ -579,8 +579,8 @@ def build_goal_section(
     ``## Informational context`` block and explicitly flagged as narrative
     so reviewers don't fact-check commit-message wording against the code.
 
-    ``owner_words`` is the host-attested section of the owner's words that
-    caused the work (``owner_words.owner_words_text``), placed right after the
+    ``owner_words`` is the host-attested section of my human's words for
+    the work (``owner_words.owner_words_text``), placed right after the
     intent: what was asked, beside the author's account of the change. Empty
     keeps the section byte-identical to a review without it.
     ``preflight_execution`` is the wave's frozen test execution exhibit

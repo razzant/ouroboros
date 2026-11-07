@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -13,27 +15,13 @@ import pytest
 from ouroboros import mcp_client
 from ouroboros.contracts.task_constraint import TaskConstraint
 from ouroboros.tools import services
-from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros.tools.tool_result import ToolResult
 from ouroboros.utils import sanitize_tool_args_for_log
 from ouroboros.workspace_executor import resolve_process_env
+from tests._process_environment import process_context as _process_context
 
 
-
-@pytest.fixture
-def process_context(tmp_path, monkeypatch):
-    system, workspace, data = (tmp_path / name for name in ('system', 'workspace', 'data'))
-    for path in (system, workspace, data):
-        path.mkdir()
-    monkeypatch.setenv('OUROBOROS_RUNTIME_MODE', 'advanced')
-    monkeypatch.setattr('ouroboros.safety.check_safety', lambda *args, **kwargs: (True, ''))
-    context = ToolContext(repo_dir=system, drive_root=data, workspace_root=workspace,
-                          workspace_mode='external', task_id='process-env')
-    registry = ToolRegistry(system, data)
-    registry.set_context(context)
-    yield registry, context, workspace, data
-    services.kill_all_services(data)
-    mcp_client.reset_manager_for_tests()
+process_context = _process_context
 
 
 def test_environment_resolution_retains_settings_classification():
@@ -287,13 +275,15 @@ for line in sys.stdin:
 
 @pytest.mark.parametrize('local_executor', [False, True])
 def test_replacing_exited_service_finalizes_each_environment_revision(process_context, monkeypatch, local_executor):
-    from ouroboros import workspace_executor
+    from ouroboros import config, workspace_executor
+    from ouroboros.settings_integrity import task_settings_scope, task_settings_snapshot
 
     registry, ctx, workspace, _data = process_context
     if local_executor:
         ctx.executor_ref = {'type': 'local', 'workspace_host_path': str(workspace), 'workspace_backend_path': '/workspace'}
     settings = {'CUSTOM_KEY': 'synthetic-first-environment'}
     monkeypatch.setattr(services, 'load_settings', lambda: dict(settings))
+    snapshot = task_settings_snapshot(settings, dict(os.environ))
     finalized = []
     finalize = services._finalize_service_log_for_drive
 
@@ -304,16 +294,19 @@ def test_replacing_exited_service_finalizes_each_environment_revision(process_co
 
     monkeypatch.setattr(services, '_finalize_service_log_for_drive', observe)
     script = workspace / 'one_shot.py'
-    script.write_text("import os; print(os.environ['TOKEN'], flush=True)")
+    script.write_text("import os,hashlib; print(os.environ['TOKEN'], flush=True); print(hashlib.sha256(os.environ['TOKEN'].encode()).hexdigest(), flush=True)")
     for secret in ('synthetic-first-environment', 'synthetic-second-environment'):
         settings['CUSTOM_KEY'] = secret
-        result = registry.execute_result('start_service', {'cmd': [sys.executable, str(script)],
-            'cwd': str(workspace), 'env_from_settings': {'TOKEN': 'CUSTOM_KEY'}})
+        with task_settings_scope(snapshot):
+            result = registry.execute_result('start_service', {'cmd': [sys.executable, str(script)],
+                'cwd': str(workspace), 'env_from_settings': {'TOKEN': 'CUSTOM_KEY'}})
+            assert config.runtime_settings(settings_reader=services.load_settings)['CUSTOM_KEY'] == 'synthetic-first-environment'
         assert result.status == 'ok', result.text
         records = workspace_executor._SERVICES if local_executor else services._SERVICES
         record = records[workspace_executor.service_key(ctx, 'service')]
         proc = record.local_proc if local_executor else record.proc
         assert proc.wait(timeout=5) == 0
+        assert hashlib.sha256(secret.encode()).hexdigest() in registry.execute('service_logs', {})
     registry.execute('stop_service', {})
     assert len(finalized) == 2
     for result in finalized:

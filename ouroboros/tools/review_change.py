@@ -836,6 +836,29 @@ def review_result(record: Dict[str, Any], *, reused: bool) -> Dict[str, Any]:
     }
 
 
+def _words_since_reuse(ctx: ToolContext, record: Dict[str, Any]) -> Dict[str, Any]:
+    """One host fact beside a reused verdict: my human's rows this run holds now that no retained brief of that
+    record names (``owner_relay.words_unseen_in``: by identity; a brief that cannot be read back names every
+    row). Nothing is held and no seat is bought: the author judges whether they change what was asked."""
+    from ouroboros.owner_relay import words_unseen_in
+    from ouroboros.owner_words import words_stamp
+    from ouroboros.review_ledger import read_source
+
+    briefs: List[str] = []
+    for source in (ref for seat in record.get("rows") or [] for ref in seat.get("source_refs") or []):
+        if source.get("role") == "prompt" and source.get("status") == "retained":
+            try:
+                briefs.append(read_source(ledger_root(ctx), str(record.get("task_id") or ""),
+                                          source).decode("utf-8", "replace"))
+            except (OSError, ValueError, TypeError, KeyError):
+                continue  # an unreadable brief names nothing as seen
+    unseen = words_unseen_in(ctx, "\n".join(briefs))
+    return {"owner_words_since_review": {
+        "host_fact": "This reused review's seats were not sent these words of your human; nothing is held or "
+                     "bought again: judge whether they change what was asked.",
+        "rows": [f"{words_stamp(row)}\n{row['text']}" for row in unseen]}} if unseen else {}
+
+
 def _cycles_exhausted(ctx: ToolContext, wave: _Wave) -> Optional[Dict[str, Any]]:
     """The shared per-task-tree ceiling of (this root, this kind of review: ``wave_tool_name``); a skill
     wave outside any task (the manual lane) meets the same number per content version (owner Q23)."""
@@ -1127,7 +1150,7 @@ def run_review_change(ctx: ToolContext, **args: Any) -> Dict[str, Any]:
             else:
                 prior = reuse_or_none(ledger_root(ctx), wave.reuse_key, questions=request.author_questions)
                 if prior is not None:
-                    return review_result(prior["record"], reused=True)
+                    return {**review_result(prior["record"], reused=True), **_words_since_reuse(ctx, prior["record"])}
                 exhausted = _cycles_exhausted(ctx, wave)
                 if exhausted is not None:
                     return _refuse_exhausted(ctx, wave, exhausted)

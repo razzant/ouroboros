@@ -312,14 +312,30 @@ def test_the_view_fact_reaches_the_cap_info_the_task_context_and_one_event(tmp_p
     assert len(events) == 1 and events[0]["task_id"] == "tmain" and events[0]["blocks"] == facts["blocks"]
 
 
-def test_a_declared_input_child_carries_no_view_fact(tmp_path):
-    env, memory, _rooms = world(tmp_path)
+def test_a_declared_input_child_carries_the_view_fact_of_its_omissions(tmp_path):
+    """The one builder's view: a child's spec without the story and the room page, captured and recorded. The
+    role is read where the declared validator reads it: a role recorded only under ``task_contract.lineage``
+    draws the child view (its room's and the global marks, the outline), and an explicit ``memory_view`` widen
+    still applies to it."""
+    env, memory, rooms = world(tmp_path)
     child = {"id": "kid", "chat_id": 1, "delegation_role": "subagent", "parent_task_id": "bound",
              "root_task_id": "bound", "task_contract": {"input_sources": "declared"},
              "configured_subagent": {"route": {"kind": "api_model"}}}
     _messages_out, cap = _messages(env, memory, child)
-    assert "memory_view" not in cap
-    assert not (memory.drive_root / "memory" / "chronicle").exists()  # no capture, no activation
+    spec = cap["memory_view"]["spec"]
+    assert cap["memory_view"]["role"] == "child" and spec["room_id"] == str(rooms["alpha"])
+    assert spec["marks"] == "room_and_global" and not spec["story"] and not spec["room_page"] and not spec["room_lanes"]
+    assert (memory.drive_root / "memory" / "chronicle").exists()  # the one capture activates, as a shared child's
+    lineage_only = {**{key: value for key, value in child.items() if key != "delegation_role"},
+                    "task_contract": {"input_sources": "declared", "lineage": {"delegation_role": "subagent"}}}
+    _out, lineage_cap = _messages(env, memory, lineage_only)
+    lineage_spec = lineage_cap["memory_view"]["spec"]
+    assert lineage_cap["memory_view"]["role"] == "child" and lineage_spec["room_id"] == str(rooms["alpha"])
+    assert lineage_spec["marks"] == "room_and_global" and lineage_spec["knowledge"] is False and lineage_spec == spec
+    _out, widened_cap = _messages(env, memory, {**lineage_only, "memory_view": {"knowledge": True}})
+    widened = widened_cap["memory_view"]["spec"]
+    assert widened_cap["memory_view"]["role"] == "child" and widened["knowledge"] is True  # the explicit widen applies
+    assert widened["marks"] == "room_and_global" and not widened["story"] and not widened["room_page"]
 
 
 @pytest.mark.parametrize("route,story", [("api_model", True), ("agent_session", False)])
@@ -336,10 +352,13 @@ def test_a_helpers_role_line_names_exactly_what_its_request_holds(tmp_path, rout
     assert f"the page of your parent's room {alpha}" in loaded and f"## This room ({alpha})" in c
     assert ("the top level of your story" in loaded) == story == ("## My story" in b)
     assert ("the top level of your story" in missing) == (not story)
-    assert "the index arrives with your first delegation" in missing and "## Shared understanding" not in c
+    assert "the whole knowledge index (it arrives with your first delegation)" in missing and "## Shared understanding" not in c
     assert "## Knowledge base" not in c and "knowledge_list" in missing
+    assert "the knowledge outline (every note by address and title)" in loaded and "## Knowledge outline" in c
     assert "raw conversations" in missing and "### Open conversation" not in c and "## Live rooms" not in c
-    assert "the words of my human that caused this work" not in loaded  # no root record: no block drawn
+    # No root record gave this helper a field; its room's rows of my human are read at its start and drawn.
+    assert "my human's words for this work" in loaded
+    assert "· owner · room_message · chat " in section(c, "## My human's words for this work (verbatim, dated, host-attested)")
 
 
 def test_the_tool_schemas_count_in_the_floor_of_every_mode(tmp_path):

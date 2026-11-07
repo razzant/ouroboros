@@ -160,15 +160,11 @@ def test_project_store_stays_behind_the_scoped_reader(world):
     assert "PROJECT_p1" in _run(ctx, own) and "PROJECT_p2" in _run(ctx, other)
     assert "ACCESS_DENIED" in registry.execute("read_file", {"root": "runtime_data", "path": str(project_reflections_path("p1"))})
     for profile in ("local_readonly_subagent", "acting_subagent"):
+        # A child reads its own Project's journal and workpad (journal_read, workpad_read are in every child
+        # profile); another Project's store stays behind the scoped reader for it as for its parent.
         child, _registry = actor(world, profile)
-        if profile == "acting_subagent" and world.mode == "cyber_pro":
-            assert "PROJECT_p1" in _run(child, own)
-            assert "TOOL_FORBIDDEN" in _run(child, other)
-        else:
-            # Existing child name ceilings omit journal_read. A source pointer
-            # must not be mistaken for a grant or expand those ceilings.
-            refusal = "LOCAL_READONLY_SUBAGENT_BLOCKED" if profile == "local_readonly_subagent" else "ACTING_SUBAGENT_BLOCKED"
-            assert refusal in _run(child, own) and refusal in _run(child, other)
+        assert "PROJECT_p1" in _run(child, own)
+        assert "TOOL_FORBIDDEN" in _run(child, other)
     # Missing metadata is not proof of root authority even though runtime reads now have parity.
     ctx.task_metadata = {"budget_drive_root": str(world.drive_root)}
     assert "TOOL_FORBIDDEN" in _run(ctx, other)

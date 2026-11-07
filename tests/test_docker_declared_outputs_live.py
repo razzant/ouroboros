@@ -271,7 +271,11 @@ def test_directory_view_and_baseline_include_overlay_exclude_hidden_decoy(lab):
         assert f"nested/{lab.q}/.env" not in z.namelist()
         assert f"nested/{lab.q}/link" not in z.namelist()
     unchanged = call(lab, cmd=["sh", "-c", ":"], outputs=[output])
-    assert unchanged.code == "OK" and "unchanged output" in unchanged.text, unchanged.text
+    # The registered pair still holds the bind view's bytes: a cosmetic note, no new registration.
+    assert unchanged.code == "OK" and "ARTIFACT_OUTPUT_NOTE" in unchanged.text, unchanged.text
+    assert unchanged.meta.get("artifact_registered") is not True
+    rows = collect_task_artifact_records(lab.ctx.drive_root, lab.q, require_registered=True)
+    assert [pathlib.Path(row["path"]) for row in rows if row["name"].endswith(".zip")] == zips
 
 
 @pytest.mark.skipif(os.environ.get("DOCKER_OUTPUT_LAB_TMPFS") != "1",

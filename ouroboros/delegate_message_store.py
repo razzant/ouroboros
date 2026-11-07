@@ -28,8 +28,12 @@ def _wire(frame: dict, text: str) -> str:
 
 
 def prepare(ctx: Any, entry: Any, relation: str, text: str, message_id: str,
-            reply_to: dict | None) -> dict:
-    """Commit before POST; an explicit key must replay an existing exact row."""
+            reply_to: dict | None, owner_words: dict | None = None) -> dict:
+    """Commit before POST; an explicit key must replay an existing exact row.
+
+    ``owner_words`` marks a frame the starter's placement sends (``place_rows_into_runs``): the
+    owner row's address and chat source, so the frame rows of a run answer which rows of my
+    human's reached it and how; the same wire kind, one field more."""
     root = custody_root(ctx)
     require_owned_root(root)
     sender = str(getattr(ctx, "task_id", "") or "")
@@ -48,7 +52,7 @@ def prepare(ctx: Any, entry: Any, relation: str, text: str, message_id: str,
             frame = row.get("frame", {})
             if (frame.get("message_id") != message_id or row.get("run_id") != entry.run_id
                     or frame.get("source_task_id") != sender or row.get("text") != text
-                    or frame.get("reply_to") != reply_to
+                    or frame.get("reply_to") != reply_to or frame.get("owner_words") != owner_words
                     or row.get("starter_task_id") != entry.task_id
                     or row.get("wire_text") != _wire(frame, text)
                     or hashlib.sha256(row["wire_text"].encode("utf-8")).hexdigest() != row.get("wire_sha256")):
@@ -69,6 +73,8 @@ def prepare(ctx: Any, entry: Any, relation: str, text: str, message_id: str,
         }
         if reply_to is not None:
             frame["reply_to"] = reply_to
+        if owner_words is not None:
+            frame["owner_words"] = owner_words
         wire = _wire(frame, text)
         row = {"schema": 1, "run_id": entry.run_id, "starter_task_id": entry.task_id,
                "frame": frame, "text": text, "wire_text": wire,
@@ -85,6 +91,15 @@ def record_outcome(ctx: Any, run_id: str, message_id: str, outcome: str, reason:
             row.update(outcome=outcome, reason=reason)
             row.pop("note", None)
             txn.put_row(_set(run_id), message_id, row)
+
+
+def placed_words(ctx: Any, run_id: str) -> list:
+    """The frames the starter's placement sent into ``run_id`` (those with ``owner_words``), oldest first:
+    the reader of which rows of my human's a run has heard, and with which outcome."""
+    with store.open_store(custody_root(ctx), write=False) as txn:
+        rows = txn.set_rows(_set(run_id))
+    return sorted((row for row in rows.values() if isinstance(row.get("frame", {}).get("owner_words"), dict)),
+                  key=lambda row: str(row["frame"].get("ts") or ""))
 
 
 def journal(ctx: Any, run_id: str) -> list:

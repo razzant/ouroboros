@@ -639,7 +639,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
             later.append(carded(row, entry))  # a live delivery's card, or a late answer's snapshot, beside the words
             if entry.get("attachment_manifest") or "attachment_manifest_ref" in entry:
                 attached.append(entry)  # the files that message attached, staged in this task's own store
-        elif kind == "relay_entry":
+        elif kind == "relay_entry" and not entry.get("host_carried"):  # a carried row is the tree's, not this corpus
             from ouroboros.owner_relay import owner_text, quotable_owner_row
             from ouroboros.owner_words import owner_place_accounts
             fallback_root = entry.get("relay_canonical_root") or root
@@ -660,7 +660,7 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
                     seen[address] = (owner_text(row), True)
                     quoted += [{**ref, "_owner_source_root": str(source_root)}
                                for ref in row.get("attachments") or [] if isinstance(ref, dict)]
-        if kind in {"relay_entry", "task_message"}:  # a relay's own note and a task's words are peer context
+        if kind in {"relay_entry", "task_message"} and not entry.get("host_carried"):  # a note and a task's words: peers
             peers.append({"msg_id": msg_id, "ts": str(entry.get("ts") or ""),
                           "source_task_id": str(entry.get("source_task_id") or ""),
                           "provenance": "independent_task" if kind == "relay_entry" else str(entry.get("provenance") or ""),
@@ -785,7 +785,7 @@ def recorded_system_checkout(result: Dict[str, Any]) -> Dict[str, str]:
 def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any], *,
                     deadline_at: str = "", authority_source: Optional[Dict[str, Any]] = None,
                     checkout: Optional[Dict[str, str]] = None, successor_task_id: str = "",
-                    drive_mode: str = "", stop_note: str = "") -> str:
+                    drive_mode: str = "", stop_note: str = "", tree_note: str = "") -> str:
     """The successor's first message: host-authored FACTS, the owner's words verbatim.
 
     It frames nothing as a decision: the model judges whether and how to go on and asks the owner in this
@@ -820,6 +820,7 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
         "verification) or rejected, "
         "and the old task's stopped delegated runs are yours to continue with delegate_start(subagent_id=..., "
         "continue_from=<run_id>, prompt=...) instead of redoing them.",
+        *([tree_note] if tree_note else []),
         result_line,
         *([stop_note] if stop_note else []),
         "Decide whether and how to continue; if the right next step is unclear (for example the work "
