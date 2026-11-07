@@ -15,10 +15,9 @@ OWNER_DELIVERY_TOOL_NAMES: frozenset[str] = frozenset({
 # carries it — the main chat, a project room, and an admitted presence
 # conversation, whose ceiling compiles this set in
 # ouroboros/presence_authority.py::build_presence_capability_ceiling.
-# Reading the chronicle and marking what matters belong here; sealing chronicle
-# pages (chronicle_write) is the integrating mind's and stays in the core set,
-# so a presence writes knowledge about people and marks, not pages (a delegated
-# child's sets below carry it for the child's own drafts only).
+# Reading the chronicle and marking what matters belong here; sealing
+# (chronicle_write) is in the core set of every integrating focus, a presence
+# turn included; a delegated child publishes drafts only (its sets below).
 COGNITIVE_MEMORY_TOOL_NAMES: frozenset[str] = frozenset({
     "knowledge_read", "knowledge_write", "knowledge_list",
     "update_scratchpad", "update_identity", "update_world", "chat_history",
@@ -87,6 +86,8 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
 META_TOOL_NAMES: frozenset[str] = frozenset({
     "list_available_tools", "enable_tools",
 })
+# Main's gateway to on-demand MCP tools: what keeps a request's tool list stable, so a route ceiling keeps it too.
+MCP_GATEWAY_TOOL_NAME: str = "call_mcp_tool"
 
 # An actor's own working form: which model thinks (switch_model) and how its own
 # transcript is folded under its own note, exact sources kept (compact_context).
@@ -114,7 +115,7 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     # drafts signed with its focus (it is not the integrating mind, so tools/chronicle.py
     # refuses its note, correction and decision); the integrating mind accepts or rejects the drafts,
     # keeps identity and scratchpad, and receives the child's result as a report.
-    "knowledge_read", "knowledge_list", "knowledge_write", "memory_read", "memory_mark", "chronicle_write",
+    "knowledge_read", "knowledge_list", "knowledge_write", "memory_read", "memory_mark", "chronicle_write", "journal_read", "workpad_read",
     "chat_history", "recent_tasks", "get_task_result", "wait_task", "wait_tasks",
     "await_messages",
     "escalate",
@@ -155,7 +156,7 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
 TASK_DIAGNOSTIC_TOOL_NAMES: frozenset[str] = frozenset({
     "read_file", "list_files", "search_code", "query_code", "query_data", "vcs_read",
     "inspect_harness", "chat_history", "recent_tasks", "get_task_result", "peek_task",
-    "tree_read", "knowledge_read", "knowledge_list", "memory_read", "wait_task", "wait_tasks",
+    "tree_read", "knowledge_read", "knowledge_list", "journal_read", "workpad_read", "memory_read", "wait_task", "wait_tasks",
     "await_messages", "forward_to_worker", "pause_task", "resume_task", "continue_task",
     "finish_task", "list_available_tools", *OWN_FORM_TOOL_NAMES,
 })
@@ -196,7 +197,7 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     # An independent look at the assigned work, never child approval or commit.
     # review_change admits the physical subject before freezing or dispatching.
     "review_change",
-    "knowledge_read", "knowledge_list", "knowledge_write", "memory_read", "memory_mark", "chronicle_write",
+    "knowledge_read", "knowledge_list", "knowledge_write", "memory_read", "memory_mark", "chronicle_write", "journal_read", "workpad_read",
     "chat_history",
     "tree_note", "tree_read", "override_delegation_constraint",
     # Same nanny verbs, same host-derived profile — an acting child hosts a
@@ -411,6 +412,24 @@ def requested_result_view(tool_args: Any) -> Optional[tuple[Optional[int], Optio
     return None
 
 
+def requested_call_view(name: str, tool_args: Any) -> Optional[tuple[Optional[int], Optional[int]]]:
+    """``requested_result_view`` of a whole call: the catalog view ``enable_tools`` returns is a form the mind
+    asked for, and a call through the MCP gateway asks for the view its inner arguments name."""
+    if name == "enable_tools":
+        return (None, None)
+    if name == MCP_GATEWAY_TOOL_NAME and isinstance(tool_args, dict):
+        inner = tool_args.get("arguments")
+        if isinstance(inner, str):
+            import json
+
+            try:
+                inner = json.loads(inner or "{}")
+            except ValueError:
+                inner = {}
+        tool_args = inner if isinstance(inner, dict) else {}
+    return requested_result_view(tool_args)
+
+
 def _view_chars(value: Any) -> int:
     try:
         return max(0, int(value or 0))
@@ -498,6 +517,7 @@ OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
     "skill_install", "skill_update",
     "journal_write", "workpad_write", "pin_ui_translation", "record_update_description",
     "github_write", "pr_merge",
+    "remote_mcp_sign_in",  # stores or revokes the owner's sign-in to a remote MCP server
 })
 
 

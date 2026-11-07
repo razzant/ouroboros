@@ -411,6 +411,26 @@ def _author_stop_note(result: Dict[str, Any]) -> str:
               "owner's words remain the sources.")
 
 
+def _tree_note(q: Any, predecessor: str) -> str:
+    """The predecessor's helper tree as one host fact: each member, its status and parent, and the reader of
+    its work order and final; its counters are not copied. A tree that cannot be read is named, never empty."""
+    from ouroboros.task_store import tree_facts
+
+    try:
+        census = tree_facts(q.DRIVE_ROOT, predecessor)
+    except Exception as exc:
+        log.warning("Predecessor tree unreadable for %s", predecessor, exc_info=True)
+        return f"Its helper tree could not be read when this Continue was admitted ({type(exc).__name__})."
+    named = [f"{tid} ({row.get('status') or 'status unknown'}"
+             + (f", under {row['parent_task_id']})" if row.get("parent_task_id") not in (None, "", predecessor) else ")")
+             for tid, row in sorted(census.members.items()) if tid != predecessor]
+    named += [f"{tid} (record unreadable)" for tid, gap in sorted(census.unresolved.items())
+              if gap.get("linked") and tid not in census.members]
+    return ("Its helper tree when this Continue was admitted (host facts, not owner instructions): "
+            f"{', '.join(named)}. get_task_result(task_id=<id>) returns each one's final, and with "
+            "include_work_order_source=True its work order.") if named else ""
+
+
 def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: Dict[str, Any],
                     verdict: Dict[str, Any], sources: Dict[str, Any], admission: Dict[str, Any]) -> Dict[str, Any]:
     from ouroboros.owner_continue import AUTHOR_STOP_CAUSE, owner_corpus_rows, recorded_system_checkout, work_order_text
@@ -434,7 +454,8 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
                            authority_source=authority_source, checkout=recorded_system_checkout(result),
                            successor_task_id=str(binding.get("successor_task_id") or ""),
                            drive_mode=drive.get("memory_mode", ""),
-                           stop_note=_author_stop_note(result) if verdict["cause"] == AUTHOR_STOP_CAUSE else "")
+                           stop_note=_author_stop_note(result) if verdict["cause"] == AUTHOR_STOP_CAUSE else "",
+                           tree_note=_tree_note(q, predecessor))
     # Every episode carries its work: the first root's id and name. The title is
     # that name under ONE prefix, however long the chain.
     work_id, work_name = _work_identity(q, predecessor, result)
@@ -511,6 +532,7 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
                                   **({"wake": sources["wake"]} if sources.get("wake") else {}),
                                   **({"api": sources["api"]} if sources.get("api") else {}),
                                   "later": sources.get("later") or [],
+                                  **({"confirmed_place": sources["confirmed_place"]} if sources.get("confirmed_place") else {}),
                                   "held_owner_messages": sources.get("held_owner_messages") or {},
                                   "open_relays": sources.get("open_relays") or {}},
                 "peer_context": sources.get("peer_context") or [],

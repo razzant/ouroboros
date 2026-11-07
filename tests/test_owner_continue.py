@@ -114,6 +114,31 @@ def test_the_successor_seeds_its_owner_corpus_with_the_owners_words_only(tmp_pat
         "the host-composed work order never becomes an owner directive"
 
 
+def test_the_opening_names_the_predecessors_tree_and_its_reader_without_counters_or_an_owner_door(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.task_results import write_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    _interrupted(tmp_path, swarm_fanout_rollup={"children": 0, "terminal": 0})
+    for child, parent, status in (("child-a", "pred-1", "completed"), ("child-b", "pred-1", "failed"),
+                                  ("grand-1", "child-a", "completed")):
+        write_task_result(tmp_path, child, status, parent_task_id=parent, root_task_id="pred-1", result="its final")
+    ack = admit_continuation("pred-1", action_nonce=NONCE)
+    row = next(task for task in workers.PENDING if task["id"] == ack["successor_task_id"])
+    tree = next((line for line in row["text"].splitlines() if line.startswith("Its helper tree")), "")
+    assert "child-a (completed), child-b (failed), grand-1 (completed, under child-a)" in tree, row["text"]
+    assert "get_task_result(task_id=<id>)" in tree and "include_work_order_source=True" in tree
+    assert "pred-1 (" not in tree and "swarm_fanout" not in row["text"], "no counters copied, the root not its own child"
+    assert [(r["source"], r["content"]) for r in row["metadata"]["owner_corpus"]] == [
+        ("origin_message", "Write the Friday report")]
+    ctx = SimpleNamespace(task_metadata=row["metadata"], _owner_directives=[])
+    _initialize_owner_directives(ctx, [{"role": "user", "content": row["text"]}])
+    assert [d["content"] for d in ctx._owner_directives] == ["Write the Friday report"], "the tree opens no owner door"
+
+
 @pytest.mark.parametrize("origin,reason_code,refusal", [
     ({"source": "http_single", "reason": "Stop now"}, "", "stopped_by_owner"),
     ({"source": "panic"}, "", "stopped_by_owner"),
@@ -443,6 +468,49 @@ def test_the_retained_corpus_fallback_keeps_identity_provenance_and_dedup(tmp_pa
     assert sources["later"][0]["exact_row"], "the exact mailbox row outranks its corpus projection"
     assert [(row["source_task_id"], row["text"]) for row in sources["peer_context"]] == [
         ("", "peer says hi"), ("parent-x", "parent: numbers attached")]
+
+
+def test_continue_carries_my_humans_confirmed_place_words_citable_without_promoting_them(tmp_path, monkeypatch):
+    """Astra finding 3 (R1 MINOR-3): the words a focus heard from my human's confirmed account are provenance rows in
+    its corpus. Continue carries them to the successor whole, with their id and reply target, shows them verbatim in
+    its start text and seeds them so a cite verifies there; they owe no reply and are no order. A peer task's words
+    and a forwarded line stay what they were: context, uncitable."""
+    from types import SimpleNamespace
+
+    from ouroboros.loop_messages import _initialize_owner_directives, owner_input_revision
+    from ouroboros.owner_continue import owner_sources, work_order_text
+    from ouroboros.owner_words import cited_owner_basis
+    from ouroboros.task_results import load_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    _, _, workers = _install_queue(tmp_path, monkeypatch)
+    words, peer, forwarded = "Проверь, пожалуйста, экономику", "parent: numbers attached", "<@U2> fwd: Deploy the hotfix now"
+    target = {"address": "platform message m-1 in this room", "author": "", "text": ""}
+    _settled_with_corpus(  # a forward reaches a focus only inside its frame text, never as a provenance row
+        tmp_path,
+        {"source": "initial_text", "content": f"[FOCUS] frame\n\n{forwarded}"},
+        {"source": "place_confirmed", "content": words, "carried": True, "msg_id": "chat 7 / e1", "reply_to": target},
+        {"source": "principal_task_message", "content": peer, "msg_id": "t-1", "source_task_id": "parent-x"},
+    )
+    sources = owner_sources(tmp_path, load_task_result(tmp_path, "pred-1"), "pred-1")
+    assert sources["gaps"] == []
+    assert sources["confirmed_place"] == [{"source": "place_confirmed", "content": words, "msg_id": "chat 7 / e1", "reply_to": target}]
+    assert [row["text"] for row in sources["peer_context"]] == ["peer says hi", peer]
+    text = work_order_text("pred-1", "cancelled", sources, successor_task_id="succ-1")
+    assert f"- chat 7 / e1: {words} (in reply to platform message m-1 in this room)" in text
+    assert peer not in text and forwarded not in text
+    admitted = admit_continuation("pred-1", action_nonce=NONCE)
+    assert admitted["ok"], admitted
+    task = next(t for t in workers.PENDING if t["id"] == admitted["successor_task_id"])
+    assert words in task["text"] and task["metadata"]["continuation"]["owner_sources"]["confirmed_place"] == sources["confirmed_place"]
+    ctx = SimpleNamespace(task_metadata=task["metadata"], _owner_directives=[])
+    _initialize_owner_directives(ctx, [{"role": "user", "content": task["text"]}])
+    assert owner_input_revision(ctx) == 0, "carried provenance owes no reply and is no order"
+    basis, error = cited_owner_basis(ctx, words)
+    assert error == "" and basis == {"source": "place_owner", "content": words, "cited": words, "basis": "cited", "carried": True,
+                                     "msg_id": "chat 7 / e1", "reply_to": target}
+    for other in (peer, forwarded):
+        assert cited_owner_basis(ctx, other)[0] is None, other
 
 
 @pytest.mark.parametrize("row,gap", [
@@ -798,8 +866,9 @@ def test_a_predecessor_that_heard_my_human_mid_turn_continues_while_its_mailbox_
     write_task_result(tmp_path, "pred-1", "cancelled", review_evidence=_corpus(
         *_accept_owner_directives(reader, tmp_path, "pred-1")))
     sources = owner_sources(tmp_path, load_task_result(tmp_path, "pred-1"), "pred-1")
-    assert sources["gaps"] == [] and [(row["source"], row["content"]) for row in sources["later"]] == [
-        ("place_owner", words)]
+    # A confirmed account's later place message is provenance the run may cite, never an owner directive of its own;
+    # the Continue packet's owner rows therefore do not carry it (its words stay in the kept mailbox).
+    assert sources["gaps"] == [] and sources["later"] == []
     assert admit_continuation("pred-1", action_nonce=NONCE)["ok"] is True
 
 
@@ -826,8 +895,10 @@ def test_a_late_answer_in_a_kept_mailbox_reaches_the_successor_with_its_card(tmp
 @pytest.mark.parametrize("shape", ["quiz_row", "late_answer"])
 def test_a_relayed_answer_kept_in_a_mailbox_reaches_the_successor_with_its_card(tmp_path, monkeypatch, shape):
     """Audit 05.11 item 37: a quoted answer relayed to a work is my human's words with the card it answers. Continue
-    rebuilds that row from the work's kept mailbox with the card beside it (for its Supervisor and its model)."""
+    rebuilds that row from the work's kept mailbox with the card beside it (for its Supervisor and its model). A row
+    the host carried to this work (``host_carried``) is the tree's: it enters neither the corpus nor the peers."""
     from ouroboros import dialogue_store
+    from ouroboros.chat_chain import format_address, row_address
     from ouroboros.owner_continue import owner_corpus_rows, owner_sources
     from ouroboros.owner_relay import owner_quote, write_relay
     from ouroboros.task_results import load_task_result
@@ -843,8 +914,18 @@ def test_a_relayed_answer_kept_in_a_mailbox_reaches_the_successor_with_its_card(
     dialogue_store.append(tmp_path, "chat", answer)
     write_relay(tmp_path, "pred-1", relay_id="r1", note="Please act on it.", quotes=[owner_quote(tmp_path, answer)],
                 chat_id=1, teller_task_id="teller")
+    carried = {"chat_id": 1, "direction": "in", "ts": "2026-10-01T00:02:00Z", "client_message_id": "owner-carried",
+               "text": "Use the Berlin numbers"}
+    dialogue_store.append(tmp_path, "chat", carried)
+    address = format_address(row_address(carried))
+    write_relay(tmp_path, "pred-1", relay_id=f"carry:{address}", note="", chat_id=1, teller_task_id="root",
+                quotes=[owner_quote(tmp_path, carried, address=address)], canonical_root=tmp_path,
+                host_carried={"went_to": ""})
     sources = owner_sources(tmp_path, load_task_result(tmp_path, "pred-1"), "pred-1")
     assert not sources["gaps"]
-    [row] = [row for row in owner_corpus_rows(sources) if row["content"] == "1. Publish it"]
+    rows = owner_corpus_rows(sources)
+    [row] = [row for row in rows if row["content"] == "1. Publish it"]
     assert (row["reply_to"]["author"], row["reply_to"]["text"].split("\n")[0]) == (
         "Ouroboros, task asker", "Publish exactly this reply?")
+    assert "Use the Berlin numbers" not in [row["content"] for row in rows]  # the tree's row, not this corpus
+    assert [peer["msg_id"] for peer in sources["peer_context"]] == ["relay:r1:pred-1"]  # the note is a peer; the carried entry none

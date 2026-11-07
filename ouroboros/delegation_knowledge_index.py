@@ -1,7 +1,7 @@
 """A helper that started without knowledge meets the knowledge index with its first delegation.
 
-A delegated child or nanny starts without knowledge (``memory_view.ViewSpec.knowledge``; a
-declared-input child carries no memory view at all). When it first delegates in its task (an
+A delegated child or nanny starts without knowledge (``memory_view.ViewSpec.knowledge``, a
+declared-input child's view included). When it first delegates in its task (an
 accepted ``schedule_subagent``, whose record ``ctx._last_scheduled_subagents`` holds, or a
 ``delegate_start`` of new work, not ``retry_of``, that was not refused) the host adds, once per
 task, the global shelf's knowledge index and its room's to that call's result, rendered by

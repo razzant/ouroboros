@@ -232,12 +232,16 @@ def test_the_producer_records_its_start_sources_where_every_writer_persists_them
     # Each answer is read with its card, the asking task's words beside the owner's.
     assert [(row["reply_to"]["author"], row["reply_to"]["text"].splitlines()[0]) for row in answered] == [
         (f"Ouroboros, task {WAKE}", QUESTION), (f"Ouroboros, task {WAKE}", SCOPE_QUESTION)]
-    expected = [{"source": "owner_quiz_answer", "content": "1. Yes, start it", "msg_id": f"quiz_answer:{WAKE}:q-start",
-                 "source_task_id": WAKE, "quiz_id": "q-start", "reply_to": answered[0]["reply_to"]},
-                {"source": "owner_quiz_answer", "content": "Europe and Turkey, not Asia",
-                 "msg_id": f"quiz_answer:{WAKE}:q-scope", "source_task_id": WAKE, "quiz_id": "q-scope",
-                 "reply_to": answered[1]["reply_to"]}]
-    assert answered == expected
+    # Each row names the answer's own chat row (the row the wake holds): its room, client id and accept time.
+    held = {row["client_message_id"]: row for row in wake._held_owner_messages.values()}
+    start_id, scope_id = f"quiz_answer:{WAKE}:q-start", f"quiz_answer:{WAKE}:q-scope"
+    expected = [{"source": "owner_quiz_answer", "content": "1. Yes, start it", "msg_id": start_id,
+                 "source_task_id": WAKE, "quiz_id": "q-start", "chat_id": "1", "client_message_id": start_id,
+                 "ts": held[start_id]["ts"], "reply_to": answered[0]["reply_to"]},
+                {"source": "owner_quiz_answer", "content": "Europe and Turkey, not Asia", "msg_id": scope_id,
+                 "source_task_id": WAKE, "quiz_id": "q-scope", "chat_id": "1", "client_message_id": scope_id,
+                 "ts": held[scope_id]["ts"], "reply_to": answered[1]["reply_to"]}]
+    assert answered == expected and all(row["ts"] for row in expected)
     receipt = load_task_result(tmp_path, rid)
     assert receipt["status"] == "scheduled"
     for carrier in (root["metadata"], receipt["metadata"]):
@@ -555,7 +559,9 @@ def test_an_owner_screenshot_sent_while_main_runs_survives_the_start_the_restart
     assert _start_task(tool, "Research the market", title="Market research", workspace="none").startswith("OK")
     [root] = workers.PENDING
     expected = [{"client_message_id": "owner-msg-1", "chat_id": "7", "source": "origin_message", "content": words},
-                {"source": "direct_incoming", "content": projection}]  # the origin by its id and that id's room
+                # the origin by its id and that id's room; the in-memory delivery by when the drain read it
+                {"source": "direct_incoming", "content": projection, "received": recorded["received"]}]
+    assert recorded["received"] and "ts" not in recorded, "no chat row: a received time, never an invented date"
     receipt = load_task_result(tmp_path, root["id"])
     assert receipt["status"] == "scheduled"
     assert queue.persist_queue_snapshot(reason="test_owner_screenshot") is True
@@ -602,8 +608,8 @@ def test_a_drafted_start_keeps_an_owner_mailbox_image_by_reference_through_resta
     assert original.read_bytes() == shot
     projection = _owner_content_projection(recorded["content"])
     assert SHOT_WORDS in projection and str(original) in projection
-    row = {"source": "owner_mailbox", "content": projection, "msg_id": "owner-shot-1803",
-           "client_message_id": "owner-shot"}  # the owner message the mail delivered: one row if also relayed
+    row = {"source": "owner_mailbox", "content": projection, "msg_id": "owner-shot-1803",  # no chat row is held for
+           "client_message_id": "owner-shot", "received": recorded["received"]}  # it: when its mail was written
     assert root["metadata"]["origin_message_absent"] is True and row in root["metadata"]["owner_corpus"]
     _run_interrupted_by_restart(tmp_path, monkeypatch, queue, workers, bridge, root, own_card=False)
     stored = load_task_result(tmp_path, root["id"])

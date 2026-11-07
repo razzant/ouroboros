@@ -41,7 +41,7 @@ Iframes inherit no host tokens or choice; `render.appearance` declares their pol
   "Document reading").
 - `log_events.js` ← event classification and the one factual task-presentation projection for Chat and Logs: task truth maps only to DESIGN §4's five task words; it owns no actions, incidents or notifications, and compact headlines never expose raw reason codes. Task-to-task delivery appears in the receiving timeline (`task_message_injected`), delivery or refusal in the sending one (`task_message_routed`).
 - `effort_evidence.js` ← Logs: requested effort, host carrier, engine preparation, sourced provider observation; missing echoes stay unknown.
-- `toast.js`, `masonry.js`, `widget_frame.js`, `widget_job.js` ← toasts, layout, framed-widget bootstrap/lifecycle, bounded widget request/job policy.
+- `toast.js`, `masonry.js`, `widget_frame.js`, `widget_job.js` ← toasts (including keyboard-close for non-expiring announcements), layout, framed-widget bootstrap/lifecycle, bounded widget request/job policy.
 - `result_files.js` ← Files and validated question materials via canonical artifacts, the reader and explicit downloads.
 - `history_retention.js` ← history-transfer details and storage problems for Chat and Logs; routine transfer alters no task outcome.
 - `settled_card.js` ← `syncSettledItems`: the settled card's Files row and Continue action follow one detail.
@@ -168,7 +168,7 @@ Files browses, previews (image, sandboxed PDF, text; binary/unsupported said), e
 
 ### Skills and Widgets
 
-`skills.js` owns Installed, Browse and Sources. Installed merges the local listing and lifecycle queue without waiting for sources; failed reads keep a labelled prior list. Virtual↔installed transitions replace only that card and close its menu; ordinary enrichment keeps controls/disclosures. Focus returns only to a visible replacement. A card has one run chip and at most two actionable one-sentence trays; ended review jobs say how they ended beside the verdict, never `pending`. Browse uses host-cached catalogs plus registry search (§13), explains trust before Install, and offers Compare/Replace for names held by another source (one host install). Sources separates read health and problems from trust (§13). Update binds shown digests; modified copies offer merge/replace/keep. Cards show acceptance basis (`review_gate.blocking_reason`) and update outcome. Enable, Remove and Skip review use §13's lifecycle. Repair and run uses owner-message ingress; a later owner disable wins. Publish selects its destination (or creates My skills), then preflight and a managed task; listing never runs Betterleaks.
+`skills.js` owns Installed, Browse and Sources. Installed joins listing/lifecycle facts without waiting for sources; failed reads retain a labelled list. Virtual↔installed replacement closes only that menu; enrichment keeps controls, disclosures and focus. Switches show On/Off; exceptional states get a chip and at most two action trays. Ended reviews keep outcome and verdict. `host_modules.pageModuleFacts()` supplies window-local faults/holds to cards, Needs you and Browse; `startHeldModule` recovers holds only while running. Stop removes recovery toasts and publishes reload guidance. No duplicate fault/hold state. Browse reads cached catalogs and registry search, discloses trust and compares competing names (§13); Sources separates health from trust. Digest-bound updates preserve merge/replace/keep. Cards show acceptance basis and update outcome. Enable, Remove, Skip review and Repair follow §13; later owner disable wins. Publish selects a destination then preflight/task; listing never runs Betterleaks.
 
 `connector_places.js` lists Places beside the shared Connect control. The sheet's `consciousness_api.readPlaceConnector` requests its `account_id` for identity/readiness, refusing an explicit mismatch; Connect still reads all instances. `place_history.js` reads conversations there. Back/Escape keep editor drafts, status, disclosures and focus across repaint; native or button Close disposes the sheet. Exits abort reads and free Markdown. Speech is role-labelled and untranslated; only recorded facts appear (§12), without progress. Pagination, import and gaps stay distinct; Retry keeps its cursor; a changed view rereads the newest page.
 
@@ -228,7 +228,7 @@ Each key row's **Test** (`POST /api/providers/test`, §4) is one bounded, physic
 
 A directory or separately hosted builtin client offers outside-frame recovery via `?builtin=1`; the builtin main page omits it (`ws.pageOwnedByCore`). macOS `launcher_onboarding.setup_recovery_menu` opens it without page JS. Completion writes starter skills; previews write nothing.
 
-`web/provider-return.html`, `provider-return.css` and `modules/provider_return.js` finish provider navigation on builtin `/onboarding/static/`, then POST to the owning skill. They keep the deployment prefix and report confirmed/denied/unconfirmed outcomes; credential custody and the protocol belong to CREATING_SKILLS “Provider sign-in return”.
+`web/provider-return.html`, `provider-return.css` and `modules/provider_return.js` finish provider navigation on builtin `/onboarding/static/`, then POST to the state's owner (a skill, or `/api/mcp/sign-in`); protocol and outcomes: CREATING_SKILLS “Provider sign-in return”.
 
 #### Agent accounts
 

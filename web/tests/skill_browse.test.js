@@ -118,6 +118,12 @@ test('installed from this source: On, Off · Turn on, an update, needs you, modi
     assert.doesNotMatch(on.status, /status-mark/, 'at rest the sentence keeps its own dot');
     const modified = browseCardState({ ...item('ouroboros/weather'), name: 'anime_studio', source_id: 'ouroboros-community' }, { installed: installed('anime_studio') });
     assert.equal(text(modified.status), 'Installed · modified here');
+    const modifiedNeeds = browseCardState({ ...item('ouroboros/weather'), name: 'anime_studio', source_id: 'ouroboros-community' }, {
+        installed: { ...installed('anime_studio'), skill_review: {} },
+        pageModules: { faults: [{ skill: 'anime_studio', current: true, reason: 'fixture failed' }], held: [] },
+    });
+    assert.equal(text(modifiedNeeds.status), 'Installed v3.3.0 · needs you');
+    assert.match(modifiedNeeds.action, /data-browse-action="installed"/);
 });
 
 test('one name, two sources: the card offers Compare… instead of a silent replace', () => {
@@ -155,7 +161,7 @@ test('Browse offers the current update after rejection, including a newer releas
                 assert.doesNotMatch(state.action, /Open in Installed/);
                 assert.ok(text(state.status).includes(`v${row.install.update_available.version} available`));
             } else {
-                assert.match(state.action, modified ? />Details</ : /Open in Installed/);
+                assert.match(state.action, modified && !/needs you/.test(text(state.status)) ? />Details</ : /Open in Installed/);
                 assert.doesNotMatch(state.action, /data-browse-action="update"/);
             }
         }

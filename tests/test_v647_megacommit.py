@@ -521,20 +521,24 @@ def test_finalize_schedule_emission_surfaces_coop_tree_path():
         "root_task_id": "p1",
         "emitted_modes": ["live"],
         "write_surface": "external_workspace",
-        "coop_shared_tree": "/tmp/projects/coop_abc123",
+        "write_root": ("/tmp/projects/coop_abc123", "host-minted coop tree"),
     })
     # Windows renders the tree path with os separators — pin label + tree name.
-    assert "shared coop tree: " in out and "coop_abc123" in out
+    assert "write root: " in out and "coop_abc123 (host-minted coop tree)" in out
     assert "root=subagent_projects" in out
     assert "coop_abc123" in out
     assert "effective_lane=" not in out  # request-only doctrine intact
-    # Without a minted tree the result is unchanged.
+    # A caller's own root is named without the read recipe; a read-only child has none.
+    caller = _finalize_schedule_emission(ctx, {
+        "task_ids": ["c3"], "objective": "build", "write_surface": "external_workspace",
+        "write_root": ("/tmp/projects/mine", "caller")})
+    assert "/tmp/projects/mine (caller)" in caller and "root=subagent_projects" not in caller
     out2 = _finalize_schedule_emission(ctx, {
         "task_ids": ["c2"], "requested_model_lane": "light", "objective": "probe",
         "role": "scout", "depth": 1, "parent_task_id": "p1", "root_task_id": "p1",
         "emitted_modes": ["live"],
     })
-    assert "shared coop tree" not in out2
+    assert "write root: none (read-only child)" in out2 and "coop" not in out2
 
 
 def test_zero_run_complete_is_no_longer_writable(tmp_path):

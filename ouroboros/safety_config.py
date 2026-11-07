@@ -152,7 +152,8 @@ def owner_rules_section(*, session: bool = False) -> str:
         rules = str(cfg.runtime_setting(OWNER_RULES_KEY, "") or "")
     except Exception as exc:
         return head + f"Unreadable now ({type(exc).__name__}); they live in {_RULES_ADDRESS}."
-    reach = "every Safety check and delegated session reads them, while my marks reach only my own work"
+    reach = ("every Safety check and delegated session reads them, while my marks reach only my own work and the "
+             "sessions it starts")
     if not rules.strip():
         return head + f"None set: {_RULES_ADDRESS} is empty" + ("." if session else f"; once set, {reach}.")
     frame = (("The owner of your host set these standing rules for Ouroboros and the work it delegates, this "

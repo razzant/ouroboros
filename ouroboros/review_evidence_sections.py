@@ -222,6 +222,27 @@ def _accept_receipt_exhibits(receipts: list) -> list:
     } for idx, r in enumerate(x for x in (receipts or []) if isinstance(x, dict))]
 
 
+def marks_in_force(ctx: Any, task_id: str) -> List[Dict[str, Any]]:
+    """The marks in force at a result ask, as a reviewer's readings beside the rows they target: the work's room
+    (Main's for a tree outside every Project) and the global ones, each with its ``id``, ``scope``, ``text``, its
+    author (``who``: ``chronicle_store.draft_signer`` for the mind, else the author's kind), its ``date`` and
+    whether the work under review set it itself (``own``). Raises what the store raised: the caller names it."""
+    from ouroboros.chronicle_store import ChronicleStore, draft_signer
+    from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+    from ouroboros.projects_registry import project_chat_for_task_tree
+
+    meta, store = getattr(ctx, "task_metadata", None) or {}, ChronicleStore(ctx.drive_root)
+    room = project_chat_for_task_tree(ctx.drive_root, task_id, meta.get("parent_task_id"), meta.get("root_task_id"))
+    readings = []
+    for mark in store.active_marks(str(room or WEB_UI_CHAT_ID)) if store.log_path.exists() else []:
+        author = mark.get("author") if isinstance(mark.get("author"), dict) else {}
+        readings.append({"id": mark.get("id"), "scope": mark.get("scope") or "room", "text": mark.get("text") or "",
+                         "who": draft_signer(author) if author.get("kind") == "mind" else author.get("kind") or "not recorded",
+                         "date": str(mark.get("ts") or "")[:10] or "date not recorded",
+                         "own": str(author.get("task_id") or "") == task_id})
+    return readings
+
+
 def _accept_effective_claims(
     ctx: Any, contract: Dict[str, Any], drive_root: Any, task_id: str,
 ) -> tuple[list, str, Dict[str, Any]]:

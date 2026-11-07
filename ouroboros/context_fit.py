@@ -63,7 +63,7 @@ class ContextFitProjection:
     calibration_ratio: float
     user_content_json: Optional[str] = None
     # The memory view's fact of this projection (``memory_floor.view_receipt``): role,
-    # room, floor steps and boundaries, block sizes; empty without a view (declared input).
+    # room, floor steps and boundaries, block sizes; empty without a view.
     memory_facts: Mapping[str, Any] = field(default_factory=dict)
     # A route rebind may measure the actual shortened transcript, not the initial tail.
     continuation_messages_json: Optional[str] = None
@@ -283,7 +283,7 @@ class ContextCore:
     # Knowledge (overview, index, project journal) leading the changing block.
     dynamic_head_text: str = ""
     # The captured memory view (``memory_view.snapshot_json``); each projection renders
-    # it for its own mode and window. Empty: no memory view (a declared-input child).
+    # it for its own mode and window. Empty: no memory view was captured.
     memory_view_json: str = ""
     # Captured source rows follow the assignment, outside the immutable system view.
     supplementary_messages_json: str = "[]"
@@ -846,11 +846,8 @@ def build_context_fit_plan(
         preferred = "max"
 
     meta = task.get("task_metadata") if isinstance(task.get("task_metadata"), dict) else {}
-    is_subagent = str(
-        task.get("delegation_role") or meta.get("delegation_role") or ""
-    ).strip().lower() == "subagent"
-    try:
-        route, evidence = route_resolver(task, allow_fetch=not is_subagent)
+    try:  # a child probes its own route too: its parent's warm evidence is no fact about it
+        route, evidence = route_resolver(task, allow_fetch=True)
     except Exception:
         log.debug("Context-fit route evidence unavailable; preserving Max", exc_info=True)
         route, evidence = _failed_route_evidence(task)

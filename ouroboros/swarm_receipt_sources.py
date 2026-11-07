@@ -72,7 +72,7 @@ def tree_inputs(root, root_id, *, task=None):
         expected = set(facts.get("child_ids") or ())
     except (OSError, ValueError, TypeError, store.StoreError):
         gaps.append("fanout_history_unavailable")
-    if expected - set(ids):
+    if expected - set(ids) - {key.partition(":")[2] for key in actors if key.startswith("run:")}:  # a run's fan-out names its run id
         gaps.append("missing_child_results")
     if not owner:
         gaps.append("root_result_absent")

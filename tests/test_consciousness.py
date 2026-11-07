@@ -202,8 +202,8 @@ def test_status_details_and_launch_use_only_stored_places(clock, monkeypatch):
         "Places: {places}", encoding="utf-8")
     assert clock.clock.tick(clock.clock.next_wake_at) == "launched"
     text = clock.launches[-1]["text"]
-    assert f"Research room [{place.place_id}]: active; open turns: 3; chat_history(chat_id=123)" in text
-    assert "note (owner): Watch releases." in text
+    assert f"Research room [{place.place_id}]: active; open turns: 3; rooms: 2" in text
+    assert "note (owner): Watch releases." in text and "a place's rooms: configure_presence(action='inspect'," in text
 
 
 @pytest.mark.parametrize("captured", [True, False])
@@ -257,6 +257,15 @@ def _chat_row(**row):
     return dialogue_store.append(row.pop("root"), "chat", row)
 
 
+def _observed(clock):
+    """The last launched wake's observation as its bound source stores it: every event line whole (its text
+    counts my human's words, which my view holds)."""
+    from ouroboros.artifacts import read_actor_source_bytes
+
+    source = clock.launches[-1]["task"]["metadata"]["wake_observation"]["source"]
+    return read_actor_source_bytes(clock.root, source["task_id"], source).decode("utf-8")
+
+
 def test_restored_boundary_reaches_the_launched_wake_text(clock):
     """Without an accepted observation boundary yet, the first window starts at the last wake."""
     clock.store[LAST_WAKE_STATE_KEY] = T0 - 3600
@@ -287,7 +296,8 @@ def test_an_accepted_wake_advances_the_observation_boundary_and_a_refused_one_do
     clock.clock._next_wake_at = T0 + FLOOR + 2
     assert clock.clock.tick(T0 + FLOOR + 2) == "launched"
     assert clock.launches[-1]["admitted_text"] == "[Wake-up · heartbeat]"  # the clock admits a placeholder
-    assert '] first' in clock.launches[-1]["text"]  # the refused window is observed again, whole, by the carrier
+    assert '] first' in _observed(clock)  # the refused window is observed again, whole, by the carrier
+    assert "1 owner message (counted, not listed: my view holds the words)" in clock.launches[-1]["text"]
     # The carrier bound the observation to the admitted wake before its turn could run, and accepted
     # the boundary on the task; the clock persists nothing until the wake's terminal carries it.
     bound = clock.launches[-1]["task"]["metadata"]["wake_observation"]
@@ -303,8 +313,8 @@ def test_an_accepted_wake_advances_the_observation_boundary_and_a_refused_one_do
     clock.receipt["task_id"] = "wake0002"
     clock.clock._next_wake_at = T0 + 2 * FLOOR
     assert clock.clock.tick(T0 + 2 * FLOOR) == "launched"
-    text = clock.launches[-1]["text"]
-    assert '] second' in text and '] first' not in text
+    observed = _observed(clock)
+    assert '] second' in observed and '] first' not in observed
 
 
 def test_a_refused_wake_consumes_no_transition_and_the_admitted_one_persists_observed_identities(clock):
@@ -378,7 +388,7 @@ def test_inventory_source_failure_never_advances_accepted_boundary(clock, monkey
     clock.receipt['task_id'] = 'wake0003'
     clock.clock._next_wake_at = T0 + 3 * FLOOR
     assert clock.clock.tick(T0 + 3 * FLOOR) == 'launched'
-    assert 'late old row' in clock.launches[-1]['text']
+    assert 'late old row' in _observed(clock)
     clock.finish('wake0003', True)
     assert clock.store[OBSERVATION_STATE_KEY] != accepted
 
@@ -440,14 +450,14 @@ def test_first_failed_source_preserves_intervening_events(clock, monkeypatch, fa
     alarm = BackgroundConsciousness(clock.root, clock.root / 'repo', lambda: 7, now=finish_at + 1) if restart else clock.clock
     clock.receipt['task_id'] = 'wake0002'
     assert alarm.tick(alarm.next_wake_at) == 'launched'
-    assert 'during first wake' in clock.launches[-1]['text']
+    assert 'during first wake' in _observed(clock)
     assert 'task intervening Done' in clock.launches[-1]['text']
-    assert 'before bootstrap' not in clock.launches[-1]['text']
+    assert 'before bootstrap' not in _observed(clock)
     clock.finish('wake0002', True, alarm=alarm)
     assert clock.store[OBSERVATION_STATE_KEY]
     clock.receipt['task_id'] = 'wake0003'
     assert alarm.tick(alarm.next_wake_at + DEFAULT) == 'launched'
-    assert 'during first wake' not in clock.launches[-1]['text']
+    assert 'during first wake' not in _observed(clock)
     assert 'task intervening Done' not in clock.launches[-1]['text']
 
 
@@ -1043,3 +1053,34 @@ def test_finish_before_dispatch_budget_pause_is_not_done(clock):
     clock.clock._wake_finished("wake0001", True, pooled=True)
     assert clock.clock.status_snapshot()["last_wake_outcome"] == "paused"
     assert clock.clock._backoff == 1
+
+
+def test_off_names_the_roots_it_leaves_running_on_my_humans_cited_words(clock, monkeypatch):
+    """Owner 06.11 (3A): the switch stops autonomous work, not work started on a verified cite of my human's words,
+    and its one Main row says which roots keep running and on which words; without such roots it adds nothing."""
+    import supervisor.consciousness_carriers as carriers
+    from supervisor import queue as q
+
+    cited = {"source": "place_owner", "content": "Проверь экономику", "basis": "cited", "carried": True}
+    pending = [{"id": "cited-root", "metadata": {"work_kind": "owner", "owner_corpus": [cited]}},
+               {"id": "owner-door-root", "metadata": {"work_kind": "owner", "owner_corpus": [{"source": "initial_user", "content": "x"}]}},
+               {"id": "own-root", "metadata": {"initiator": "consciousness", "work_kind": "consciousness", "owner_corpus": [cited]}}]
+    monkeypatch.setattr(q, "PENDING", pending)
+    span = {**cited, "content": "Проверь экономику и напиши мне", "cited": "Проверь экономику"}  # the whole message, the span named
+    monkeypatch.setattr(q, "RUNNING", {"cited-running": {"task": {"id": "cited-running", "metadata": {
+        "work_kind": "owner", "owner_corpus": [{"source": "owner_mailbox", "content": "y"}, span]}}}})
+    assert carriers.cited_owner_roots() == [("cited-root", "Проверь экономику"), ("cited-running", "Проверь экономику")]
+    schedules = [{"id": "sched-1", "enabled": True, "writer_kind": "owner", "task": {"metadata": {"owner_corpus": [span]}}},
+                 {"id": "sched-off", "enabled": False, "writer_kind": "owner", "task": {"metadata": {"owner_corpus": [span]}}},
+                 {"id": "sched-own", "enabled": True, "writer_kind": "consciousness", "task": {"metadata": {"owner_corpus": [span]}}}]
+    monkeypatch.setattr(q, "list_scheduled_tasks", lambda _root=None: {"tasks": schedules})
+    assert carriers.cited_owner_schedules(None) == [("sched-1", "Проверь экономику")]
+    stopped = []
+    monkeypatch.setattr(carriers, "stop_pooled_wake", stopped.append)
+    assert clock.clock.stop() == ("Background consciousness disabled; autonomous work ends at its next step."
+                                  "\nKept running on your words (task cited-root): «Проверь экономику»"
+                                  "\nKept running on your words (task cited-running): «Проверь экономику»"
+                                  "\nKept firing on your words (schedule sched-1): «Проверь экономику»")
+    assert set(stopped) <= {"own-root"}, "only the autonomous root is stopped; the cited ones keep running"
+    monkeypatch.setattr(q, "PENDING", []); monkeypatch.setattr(q, "RUNNING", {}); schedules.clear()
+    assert clock.clock.stop() == "Background consciousness is already disabled."

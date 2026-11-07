@@ -281,3 +281,9 @@ def test_the_vocabulary_is_closed():
     assert set(rbf.HOW_VALUES) == {"dir", "git_common_dir", "remote_chain", "managed_remote",
                                    "install_fork", "copy_origin", "unknown"}
     assert rbf.CHECKLIST_LAYERS == ("core", "body")
+
+
+def test_a_name_the_filesystem_refuses_is_a_failed_probe_not_an_error(tmp_path):
+    # An over-long component or an embedded NUL is a failed probe (None), never an exception (#2918).
+    assert rbf.repository_root(tmp_path / ("x" * 300) / "new.py") is None
+    assert rbf.repository_root(str(tmp_path / "bad\x00name.py")) is None

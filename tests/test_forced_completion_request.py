@@ -243,13 +243,14 @@ def test_silence_while_a_reply_is_owed_is_refused_on_both_forms(at_limit, form):
 def test_forced_root_sentence_keeps_the_separate_silence_and_child_boundaries(at_limit, form, arguments, metadata):
     turn = at_limit
     text, usage, trace, _bus = turn.run([call("chat_history", {}), FORMS[form](arguments)], metadata=metadata)
-    if "summary" in arguments and not metadata.get("parent_task_id"):
-        assert _request_fact(trace)["status"] == "selected"
-        assert text == ANSWER and usage["wake_summary"] == SUMMARY
+    if "summary" in arguments:
+        child = bool(metadata.get("parent_task_id"))
+        assert _request_fact(trace)["status"] == "selected" and text == ANSWER
+        assert usage.get("wake_summary") == (None if child else SUMMARY)
+        assert _request_fact(trace).get("ignored") == (["summary"] if child else None), "a child's sentence is named, never a veto"
     else:
         _host_fallback(text, usage, trace)
-        field = "silent" if "silent" in arguments else "summary"
-        assert _request_fact(trace)["reason"].startswith(f"invalid_completion_request: {field} is available only")
+        assert _request_fact(trace)["reason"].startswith("invalid_completion_request: silent is available only")
 
 
 @pytest.mark.parametrize("calls", [
@@ -297,6 +298,10 @@ WRONG_TYPES = {  # name: (the request, its typed refusal)
     "summary-object": ({"action": "finish", "silent": True, "summary": {"text": SUMMARY}, "answer": INTERNAL},
                        "summary must be text"),
     "rationale-object": ({"action": "stop", "rationale": {"why": RATIONALE}, "answer": PARTIAL}, "rationale must be text"),
+    "fold-read-string": ({"action": "finish", "summary": SUMMARY, "fold_read": "true", "answer": ANSWER},
+                         "fold_read must be true or false"),
+    "fold-read-without-summary": ({"action": "finish", "fold_read": True, "answer": ANSWER},
+                                  "fold_read folds what this run read into its summary: give the sentence"),
 }
 
 
@@ -337,7 +342,8 @@ def test_null_fields_name_nothing_and_false_keeps_a_spoken_finish(tmp_path, form
     assert usage.get("wake_silent") is not True and "wake_summary" not in usage and "task_completion" not in returned
 
 
-@pytest.mark.parametrize("case", ["action-list", "silent-string", "summary-object"])
+@pytest.mark.parametrize("case", ["action-list", "silent-string", "summary-object", "fold-read-string",
+                                  "fold-read-without-summary"])
 def test_the_handler_refuses_the_same_types_and_stages_nothing(wake, case):
     """The ordinary finish_task call reads the same contract: a typed argument error, nothing staged."""
     request, reason = WRONG_TYPES[case]

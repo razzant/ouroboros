@@ -93,6 +93,15 @@ def restore(prepared):
     return state["tool_schemas"]
 
 
+@pytest.mark.parametrize("mode", ["max", "nano"])
+def test_a_list_saved_before_the_mcp_gateway_adopts_it_once_where_a_fresh_start_carries_it(tmp_path, monkeypatch, mode):
+    """An intact prefix whose saved list predates call_mcp_tool is adopted once on resume when a fresh start in its
+    mode carries the gateway (Max); Nano, whose fresh start carries none, keeps its frozen list."""
+    prepared = prepare(tmp_path, monkeypatch, frozen=[_schema("old")], current=[_schema("old"), _schema("call_mcp_tool")],
+                       mode=mode, system_changed=False)
+    assert ("call_mcp_tool" in _names(restore(prepared))) is (mode == "max")
+
+
 def test_intact_own_prefix_keeps_frozen_tools_and_reasoning(tmp_path, monkeypatch):
     prepared = prepare(tmp_path, monkeypatch, system_changed=False)
     tools, state, messages, trace, _, projections = prepared

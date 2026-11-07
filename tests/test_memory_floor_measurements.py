@@ -63,14 +63,14 @@ def test_ordinary_scale_fit_measurements(tmp_path, monkeypatch, rows):
     assert calls <= rows // 3 + 15, f'{rows} rows: at most rows/3 + 15 complete envelope measurements, got {calls}'
 
 
-def _near_even_plan(root, monkeypatch, window, tail=61, owner=5200, pad=2, shift=1):
+def _near_even_plan(root, monkeypatch, window, tail=61, owner=5199, pad=2, shift=1):
     """A small real start whose note's label sits within a token of its receipt clause, so each host step's own bytes
     can change whether the label saves: the whole request rounds differently beside every new address."""
     lane = [syn.spoken(i, 'ouroboros', 300) for i in range(2)]
     lane.append({**syn.spoken(90, 'human', owner), 'owner_side': True, 'carried': False})
     room = syn.room('1', lane1=lane)
     room['notes'] = [{'id': 'note-here-0', 'date': '2026-09-02', 'role': 'root', 'text': 'Where this stands. ' + 'x' * tail}]
-    snap = syn.snapshot(room_facts=room, story=syn.pages(2, 300), live_rooms='none')
+    snap = syn.snapshot(room_facts=room, story=syn.pages(2, 300), other_conversations=False)
     runtime = HostSection('runtime', '## runtime\n\n' + 'o' * (1600 + pad), '## runtime\n\nOperative.' + 'q' * shift)
     skills = HostSection('installed_skills', '## skills\n\n' + 's' * (1200 + pad), '## skills\n\nPurpose.')
     index = HostSection('knowledge_index', '## knowledge\n\n' + 'k' * 2400, '## knowledge\n\nOutline.')
@@ -94,11 +94,11 @@ def _hosts(plan):
 @pytest.mark.parametrize('window,shape,hosts,steps', [
     # Beside the second host form the label starts to save and the request fits: the index stays whole. Forms chosen
     # beside the first host form would price it a token over and outline the index for no physical need.
-    (4740, {}, [('runtime', False), ('installed_skills', False)], {'F2': 2, 'F5': 2, 'F8': 1}),
+    (4745, {}, [('runtime', False), ('installed_skills', False)], {'F2': 2, 'F5': 2, 'F8': 1}),
     # The window holds the request after the first step, and the next one pays only the start's room.
-    (4977, {}, [('runtime', False), ('installed_skills', True)], {'F2': 2, 'F5': 2}),
+    (4982, {}, [('runtime', False), ('installed_skills', True)], {'F2': 2, 'F5': 2}),
     # Three characters fewer, and beside the middle host form the whole request still rounds to the same price.
-    (4077, {'tail': 63, 'owner': 1600, 'pad': 0, 'shift': 0},
+    (4082, {'tail': 63, 'owner': 1600, 'pad': 0, 'shift': 0},
      [('runtime', False), ('installed_skills', True)], {'F2': 2, 'F5': 2, 'F8': 1}),
 ])
 def test_each_host_address_walks_its_own_shortest_forms(tmp_path, monkeypatch, window, shape, hosts, steps):
@@ -146,3 +146,42 @@ def test_a_shortest_walk_measures_no_form_its_text_settles(tmp_path, monkeypatch
         sent, lambda level: ties.append(level.addressed) or measure(level)))
     assert scale.build(tmp_path, monkeypatch).initial_mode == 'nano'
     assert walks == ['nano'] * 4 and ties == []
+
+
+@pytest.mark.parametrize("step, target, outlined", [
+    ("floor", 12_500, []), ("floor", 25_000, ["knowledge_index"]),  # slack alone / a measured excess
+    ("floor", None, []), ("memory_rest", None, ["knowledge_index"]),  # unknown: first pass / after a further refusal
+])
+def test_the_slack_alone_never_outlines_the_knowledge_index(tmp_path, monkeypatch, step, target, outlined):
+    """BIBLE P1, both directions, on the real floor (review 06.11): when the measured excess is paid and only the
+    return-after-fold slack remains, memory and ordinary host forms pay it and the index stays whole; a measured
+    excess the host forms cannot pay outlines it. Against an unknown target the first pass outlines nothing; memory's
+    rest after a further refusal may."""
+    from ouroboros import loop, loop_model_call as lmc
+
+    index = HostSection("knowledge_index", "## knowledge\n\n" + "k" * 10000, "## knowledge\n\nOutline.")
+    core = cf.ContextCore(base_prompt="SYSTEM", bible_md="BIBLE",
+        architecture_md="# Architecture", development_md="", docs_need_development=False,
+        semi_stable_text="IDENTITY", dynamic_text="", dynamic_head_text=index,
+        dynamic_sections=(), dynamic_head_sections=(index,),
+        user_content_json=json.dumps("Continue."), section_root=str(tmp_path), section_task_id="slack-probe")
+    monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *a, **kw: 1.0)
+    monkeypatch.setattr(cf, "main_output_reserve_tokens", lambda **kw: 2000)
+    evidence = SimpleNamespace(route_fp="probe", status="confirmed", stale=False, window_tokens=100000, source="synthetic")
+    plan = cf.build_context_fit_plan(SimpleNamespace(drive_root=tmp_path), core,
+        {"id": "slack-probe", "_is_direct_chat": True}, preferred_mode="max",
+        route_resolver=lambda *a, **kw: ({"provider": "test", "model": "synthetic"}, evidence))
+    initial = plan.projection(plan.initial_mode)
+    assert not initial.memory_facts.get("host_sections_addressed")
+    fit = SimpleNamespace(measurement=SimpleNamespace(capacity_total_tokens=100000, measurement_density=1.0,
+        reprojection_input_tokens=None, estimated_input_tokens=initial.calibrated_tokens,
+        capacity_deficit_tokens=0, route_fp="probe"))
+    ctx = SimpleNamespace(context_fit_plan=plan, active_context_mode=plan.initial_mode,
+        tools=SimpleNamespace(_ctx=SimpleNamespace()), tool_schemas=[],
+        messages=[initial.system_message(), {"role": "user", "content": "Continue."}],
+        task_id="slack-probe", event_queue=None, drive_logs=tmp_path, round_idx=1)
+    monkeypatch.setattr(loop, "_measure_round_main_fit", lambda *a, **kw: fit)
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *a, **kw: None)
+    lmc._apply_refusal_step(ctx, step, fit, target, 12_500)  # a known target holds the 12,500 slack
+    hosts = ctx.context_fit_plan.projection(ctx.active_context_mode).memory_facts.get("host_sections_addressed", [])
+    assert [row["section_id"] for row in hosts] == outlined

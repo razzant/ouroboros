@@ -25,6 +25,11 @@ the agent's choice at scheduling time; the host never classifies the text. A not
 reaches the owner directly, so Presence, agent-to-agent and delegated callers are
 refused (``control_runtime.owner_contact_refusal``).
 
+New independent work from a Presence carrier names its ``destination``, as every
+``start_task`` from one does (``_destination_error``): ``place`` is the promise this
+tool writes; ``owner`` writes nothing, since only a live start can cite the owner's
+answer: that private root schedules for itself (owner's decision, 5 November 2026).
+
 Authority is narrower than the parent's, not wider: a delegated subagent may not
 mint future root tasks (typed refusal) and the objective is the agent's own plain
 text (no host template). How many follow-ups a task registers is the agent's
@@ -57,7 +62,7 @@ def _manage_schedules(
     ctx: ToolContext, action: str = "list", schedule_id: str = "", reason: str = "",
     offset: int = 0, limit: int = 20, expected_hold_id: str = "", relation: str = "",
     name: str = "", objective: str = "", context: str = "", run_at: str = "",
-    cron: str = "", timezone: str = "", reasoning_effort: str = "",
+    cron: str = "", timezone: str = "", reasoning_effort: str = "", owner_words: str = "",
 ) -> str:
     """See, or apply one narrow audited change to, the rows already in the table.
 
@@ -118,9 +123,14 @@ def _manage_schedules(
             row = observed_store(root, {"tasks": [row]})["tasks"][0]
             return _schedule_definition_reply(row, ok=True)
         if operation == "update":
+            from ouroboros.owner_words import cited_owner_basis
+            owner_basis, cite_error = cited_owner_basis(ctx, owner_words)
+            if cite_error:
+                return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
+                                                         text=f"⚠️ OWNER_WORDS_UNVERIFIED (manage_schedules): {cite_error}"))
             return _update_schedule(ctx, root, schedule_id, reason, {
                 "name": name, "objective": objective, "context": context, "run_at": run_at,
-                "cron": cron, "timezone": timezone, "reasoning_effort": reasoning_effort})
+                "cron": cron, "timezone": timezone, "reasoning_effort": reasoning_effort}, owner_basis=owner_basis)
         if operation not in SCHEDULE_ACTIONS:
             return publish_no_effect(ctx, json.dumps({"ok": False, "status": "invalid_action",
                                "allowed": ["list", "get", "update", *sorted(SCHEDULE_ACTIONS)]}, sort_keys=True), tool_name="manage_schedules")
@@ -210,7 +220,8 @@ def _schedule_definition_reply(row: dict, **facts) -> str:
                       ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def _update_schedule(ctx: ToolContext, root: Any, schedule_id: str, reason: str, fields: dict) -> str:
+def _update_schedule(ctx: ToolContext, root: Any, schedule_id: str, reason: str, fields: dict,
+                     owner_basis: dict | None = None) -> str:
     from supervisor.queue import patch_scheduled_task
 
     patch = {key: str(value).strip() for key, value in fields.items() if value is not None and str(value).strip()}
@@ -238,16 +249,18 @@ def _update_schedule(ctx: ToolContext, root: Any, schedule_id: str, reason: str,
         patch["trigger"] = {"type": "once", "run_at": patch.pop("run_at")}
     elif "cron" in patch:
         patch["trigger"] = {"type": "cron", "expr": patch.pop("cron")}
-    if patch.keys() & {"objective", "context"}:  # a new assignment keeps the words that changed it
+    assignment = bool(patch.keys() & {"objective", "context"})
+    if assignment or owner_basis:  # a new assignment keeps the words that changed it; a verified cite is stored either way
         from ouroboros.owner_words import carried_owner_corpus
 
-        if words := carried_owner_corpus(ctx):
+        if words := [*(carried_owner_corpus(ctx) if assignment else []), *([owner_basis] if owner_basis else [])]:
             patch["owner_corpus"] = words
     outcome = patch_scheduled_task(schedule_id, patch, reason=reason, actor="agent",
                                    task_id=str(getattr(ctx, "task_id", "") or ""), drive_root=root,
                                    writer_kind=work_kind(getattr(ctx, "task_metadata", None)),
                                    writer_metadata={**(getattr(ctx, "task_metadata", None) or {}),
-                                                    "task_id": str(getattr(ctx, "task_id", "") or "")})
+                                                    "task_id": str(getattr(ctx, "task_id", "") or ""),
+                                                    **({"owner_basis": owner_basis} if owner_basis else {})})
     if outcome.get("ok") is False:
         return publish_no_effect(ctx, json.dumps(outcome, ensure_ascii=False), tool_name="manage_schedules")
     facts = {key: outcome[key] for key in ("status", "changed_fields", "audit", "reconsidered_claim")}
@@ -284,6 +297,8 @@ def _starting_effort(value: Any) -> tuple[str, str]:
 
 
 def get_tools() -> List[ToolEntry]:
+    from ouroboros.tools.control import _OWNER_WORDS_PARAM
+
     return [
         ToolEntry(
             name="schedule_followup",
@@ -302,6 +317,8 @@ def get_tools() -> List[ToolEntry]:
                     "the original verified money/deadline and Stop controls, or independent work; notes are "
                     "independent. Either task relation can read this task's task_drive/artifact_store "
                     "read-only, one hop, at paths you name. Root tasks only; Presence cannot leave notes. "
+                    "Independent work from a Presence conversation or work acting for a place names destination: "
+                    "without one nothing is scheduled. Elsewhere omit it. "
                     "manage_schedules gets full definitions, updates a promise in place, disables future "
                     "dispatch, or withdraws it with delete; withdrawal remains restorable for a while."
                 ),
@@ -311,6 +328,10 @@ def get_tools() -> List[ToolEntry]:
                         "name": {"type": "string", "description": "Optional label for this promise, in your own words."},
                         "relation": {"type": "string", "enum": ["related", "independent"],
                                      "description": "Explicit relationship to this work. Related preserves its original money and hard deadline; independent is separate work. Author/cron/text do not decide this. A note is always independent."},
+                        "destination": {"type": "string", "enum": ["place", "owner"], "description": (
+                            "Presence callers' independent work only. 'place': this place's promise. 'owner' schedules "
+                            "nothing: start the owner's private work with start_task(destination='owner', owner_quote=...) "
+                            "and let that new root schedule its follow-up.")},
                         "run_at": {
                             "type": "string",
                             "description": "One-shot ISO 8601 instant to fire at/after (naive = UTC).",
@@ -347,6 +368,7 @@ def get_tools() -> List[ToolEntry]:
                                            "Cyber Pro only — otherwise the task starts at my human's recommended "
                                            "level and the result says so. Omit for that level.",
                         },
+                        "owner_words": {"type": "string", "description": _OWNER_WORDS_PARAM},
                     },
                     "required": ["objective", "relation"],
                 },
@@ -393,6 +415,7 @@ def get_tools() -> List[ToolEntry]:
                 "relation": {"type": "string", "enum": ["related", "independent"], "description": "Resolve a legacy unknown relationship on restore. Related must bind the existing origin; no fresh budget is inferred."},
                 "offset": {"type": "integer", "minimum": 0, "description": "Zero-based list offset."},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Rows per list page (max 20; responses stay bounded)."},
+                "owner_words": {"type": "string", "description": "Update: " + _OWNER_WORDS_PARAM},
             }, "required": ["action"], "additionalProperties": False},
         }, _manage_schedules, timeout_sec=30),
     ]
@@ -456,6 +479,30 @@ def _naive_instant(raw: str) -> bool:
         return datetime.fromisoformat(raw[:-1] + "+00:00" if raw.endswith("Z") else raw).tzinfo is None
     except ValueError:
         return False
+
+
+def _destination_error(ctx: ToolContext, destination: Any, *, new_work: bool) -> str:
+    """The refusal of a call's ``destination``, else ``""``; read before any schedule or audit write.
+
+    ``new_work`` is an independent task, the one kind of follow-up that begins separate work. From a
+    Presence carrier it names where it belongs (owner's choice A, 4 November 2026); anything else
+    has no such choice, and one named there refuses rather than being ignored.
+    """
+    from ouroboros.presence_owner_contact import DESTINATION_OWNER, DESTINATION_PLACE
+
+    carrier = presence_root_carrier(getattr(ctx, "task_metadata", None), task_contract=getattr(ctx, "task_contract", None))
+    if not (carrier and new_work):
+        return "" if destination in (None, "") else (
+            "ERROR: FOLLOWUP_DESTINATION_NOT_APPLICABLE: destination applies only to an independent task from a "
+            "Presence conversation or work acting for a place; omit it here. Nothing was scheduled.")
+    if destination == DESTINATION_PLACE:
+        return ""
+    if destination == DESTINATION_OWNER:
+        return ("ERROR: FOLLOWUP_DESTINATION_OWNER: the owner's private work is not scheduled from here. Start it now with "
+                "start_task(destination='owner', owner_quote=<their held answer to a private question>); that new root "
+                "then calls schedule_followup itself. Nothing was scheduled.")
+    return (f"ERROR: FOLLOWUP_DESTINATION_REQUIRED: destination must be {DESTINATION_PLACE!r} (this place's promise) or "
+            f"{DESTINATION_OWNER!r} (the owner's private work). Nothing was scheduled.")
 
 
 def _handle_schedule_followup(ctx: ToolContext, **params) -> str:
@@ -547,7 +594,12 @@ def _handle_schedule_followup(ctx: ToolContext, **params) -> str:
         drive_root = canonical_data_root(ctx)
     except Exception as exc:
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ERROR", text=(f"ERROR: FOLLOWUP_DATA_ROOT_UNRESOLVED: {exc}")))
+    from ouroboros.owner_words import cited_owner_basis
     from supervisor.followup_policy import resolve_relation
+    owner_basis, cite_error = cited_owner_basis(ctx, params.get("owner_words"))
+    if cite_error:
+        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
+                                                 text=f"⚠️ OWNER_WORDS_UNVERIFIED (schedule_followup): {cite_error}"))
     origin = {"task_id": task_id, "root_task_id": str(getattr(ctx, "root_task_id", "") or
               (getattr(ctx, "task_metadata", None) or {}).get("root_task_id") or task_id)}
     if notify and str(params.get("relation") or "") == "related":
@@ -559,6 +611,8 @@ def _handle_schedule_followup(ctx: ToolContext, **params) -> str:
     except ValueError as exc:
         return publish_no_effect(ctx, ToolResult(status="unavailable", code="CAPABILITY_UNAVAILABLE",
                                     text=f"FOLLOWUP_REFUSED: {exc}"))
+    if error := _destination_error(ctx, params.get("destination"), new_work=not notify and relation["kind"] == "independent"):
+        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=error))
     # The pending count is read from the table this call is about to write, so the
     # reported total and the write share ONE transaction.
     from supervisor.queue import ScheduleStoreUnreadable
@@ -567,10 +621,12 @@ def _handle_schedule_followup(ctx: ToolContext, **params) -> str:
         with schedule_transaction(drive_root):
             if notify:
                 return _register_note(ctx, task_id, drive_root, objective, trigger, cron, timezone,
-                                      timezone_note, origin, relation, name=str(params.get("name") or "").strip())
+                                      timezone_note, origin, relation, name=str(params.get("name") or "").strip(),
+                                      owner_basis=owner_basis)
             return _register_followup(ctx, task_id, drive_root, objective, context,
                                       trigger, cron, timezone, timezone_note, origin, relation,
-                                      reasoning_effort=effort, name=str(params.get("name") or "").strip())
+                                      reasoning_effort=effort, name=str(params.get("name") or "").strip(),
+                                      owner_basis=owner_basis)
     except ScheduleStoreUnreadable as exc:
         # A missed table lock (ScheduleLockTimeout) or an unparseable table: the
         # follow-up was NOT registered, and the refusal says so in the text ABI
@@ -601,7 +657,7 @@ def _pending_for_task(task_id: str, drive_root: Any) -> list:
 
 def _register_note(ctx: ToolContext, task_id: str, drive_root: Any, objective: str,
                    trigger: Dict[str, Any], cron: str, timezone: str, notes: str,
-                   origin: dict, relation: dict, *, name: str = "") -> str:
+                   origin: dict, relation: dict, *, name: str = "", owner_basis: dict | None = None) -> str:
     """A note: the same table and lifecycle as a follow-up, but no task template.
 
     The row keeps the words and when they were written; the scheduler tick shows
@@ -615,12 +671,15 @@ def _register_note(ctx: ToolContext, task_id: str, drive_root: Any, objective: s
         "kind": "notify", "source": FOLLOWUP_SOURCE, "enabled": True,
         "timezone": timezone, "trigger": trigger,
         "notification": {"text": objective, "set_at": utc_now_iso()},
+        # My human's cited words live in the one home the lifecycle and Off read; a note's template holds only them.
+        **({"task": {"metadata": {"owner_corpus": [owner_basis]}}} if owner_basis else {}),
     }
     try:
         stored = upsert_scheduled_task(
             record, drive_root=drive_root, actor="agent:schedule_followup", task_id=task_id,
             writer_kind=work_kind(getattr(ctx, "task_metadata", None)),
-            writer_metadata={**(getattr(ctx, "task_metadata", None) or {}), "task_id": str(getattr(ctx, "task_id", "") or "")},
+            writer_metadata={**(getattr(ctx, "task_metadata", None) or {}), "task_id": str(getattr(ctx, "task_id", "") or ""),
+                             **({"owner_basis": owner_basis} if owner_basis else {})},
             reason=f"note registered by task {task_id}",
             host_followup={"followup_origin": origin, "followup_relation": relation})
     except ScheduleRefused as exc:
@@ -650,7 +709,7 @@ def _register_note(ctx: ToolContext, task_id: str, drive_root: Any, objective: s
 def _register_followup(ctx: ToolContext, task_id: str, drive_root: Any,
                        objective: str, context: str, trigger: Dict[str, Any], cron: str,
                        timezone: str, timezone_note: str, origin: dict, relation: dict,
-                       *, reasoning_effort: str = "", name: str = "") -> str:
+                       *, reasoning_effort: str = "", name: str = "", owner_basis: dict | None = None) -> str:
     """The pending read, the record build and the write — all under the schedule lock."""
     from supervisor.queue import upsert_scheduled_task
 
@@ -694,10 +753,12 @@ def _register_followup(ctx: ToolContext, task_id: str, drive_root: Any,
     # The host writer persists this origin separately; the template is not its
     # authority. Only independent work uses the root-start exception and cause.
     record["task"]["metadata"].update(consciousness_origin_metadata(
-        metadata_src, started_root=relation["kind"] == "independent"))
+        metadata_src, started_root=relation["kind"] == "independent",
+        owner_basis=owner_basis if relation["kind"] == "independent" else None))
     from ouroboros.owner_words import carried_owner_corpus
 
-    if corpus := carried_owner_corpus(ctx):  # my human's words ride by value, as a drafted start's; none: no claim
+    # My human's words ride by value, as a drafted start's, the cited ones among them; none: no claim.
+    if corpus := [*carried_owner_corpus(ctx), *([owner_basis] if owner_basis else [])]:
         record["task"]["metadata"]["owner_corpus"] = corpus
     # The resource choice rides BY VALUE (#1315): the origin's producer-stamped intent,
     # else a direct turn's own (its room's default, or Main's system repo).
@@ -728,7 +789,8 @@ def _register_followup(ctx: ToolContext, task_id: str, drive_root: Any,
         stored = upsert_scheduled_task(
             record, drive_root=drive_root, actor="agent:schedule_followup", task_id=task_id,
             writer_kind=work_kind(getattr(ctx, "task_metadata", None)),
-            writer_metadata={**(getattr(ctx, "task_metadata", None) or {}), "task_id": str(getattr(ctx, "task_id", "") or "")},
+            writer_metadata={**(getattr(ctx, "task_metadata", None) or {}), "task_id": str(getattr(ctx, "task_id", "") or ""),
+                             **({"owner_basis": owner_basis} if owner_basis else {})},
             reason=f"follow-up registered by task {task_id}",
             host_followup={"followup_origin": origin, "followup_relation": relation},
             # Host-authored provenance of a NAMED continuation (never payload/prose):

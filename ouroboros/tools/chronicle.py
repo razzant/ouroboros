@@ -238,8 +238,35 @@ def _note_covers(root: Path, room: str, ids: Any) -> tuple:
     return covers, {"rows": 0, "notes": len(notes), "by_author": {}}, []
 
 
+def _conversation_rows(root: Path, room: str, to_addr: Any) -> Tuple[str, List[Tuple[Dict[str, Any], Dict[str, Any], int, str]]]:
+    """``(conversation key, [(address, row, pos, room)])``: the open rows, up to the row ``to_addr`` names, of every
+    room of that row's conversation (``memory_view_conversations.conversation_of``: a place conversation without its
+    thread; Main and a Project are their own), oldest first; ``room`` is the page's."""
+    from ouroboros.memory_view_conversations import conversation_of
+
+    bound = chat_chain.stream_position_of(root, to_addr)
+    row, _found = chat_chain.resolve_row(root, to_addr)
+    if bound is None or row is None:
+        raise ValueError("covers.to names no readable row of this conversation")
+    projects = memory_inventory.membership_facts(root).project_chat_ids
+    key = conversation_of(room, [({}, row, bound)], [], projects)[0]
+    picked = [(address, meta, pos, other) for other, entries in memory_inventory.open_rows_by_room(root).items()
+              if conversation_of(other, entries, [], projects)[0] == key
+              for address, meta, pos in entries if pos <= bound]
+    if not any(other == room for *_rest, other in picked):
+        raise ValueError("a conversation page lives in a room it seals: room_id names a room of that conversation "
+                         "with open rows up to covers.to")
+    texts = chat_chain.rows_by_address(root, [address for address, *_rest in picked])
+    return key, sorted(((address, texts.get(address["row_sha256"], meta), pos, other)
+                        for address, meta, pos, other in picked), key=lambda item: (item[2], item[3]))
+
+
 def _expand(root: Path, room: str, lineage: Dict[str, Any], *, from_addr: Any = None, to_addr: Any = None,
-            task_ids: Any = None, note_ids: Any = None) -> Tuple[Dict[str, Any], Dict[str, Any], List[Tuple[Dict[str, Any], Dict[str, Any], int]]]:
+            task_ids: Any = None, note_ids: Any = None,
+            conversation: bool = False) -> Tuple[Dict[str, Any], Dict[str, Any], List[Tuple[Dict[str, Any], Dict[str, Any], int]]]:
+    rooms: Dict[str, List[str]] = {}
+    if conversation and (from_addr or not to_addr or task_ids is not None or note_ids is not None):
+        raise ValueError("covers.conversation takes {to}: the open rows of every room of that row's conversation up to it")
     if note_ids is not None:
         if task_ids is not None or from_addr or to_addr:
             raise ValueError("covers.note_ids is a separate coverage choice, without row bounds or task_ids")
@@ -254,6 +281,11 @@ def _expand(root: Path, room: str, lineage: Dict[str, Any], *, from_addr: Any = 
         # when none is left the full set goes on and the store's refusal names the page(s) that sealed them.
         still_open = {address["row_sha256"] for address, _meta, _pos in memory_inventory.open_room_rows(root, room)}
         found = [entry for entry in found if entry[0]["row_sha256"] in still_open] or found
+    elif conversation:  # S3: the whole conversation's open rows, each in its own room, up to the address
+        key, picked = _conversation_rows(root, room, to_addr)
+        for address, _row, _pos, other in picked:
+            rooms.setdefault(other, []).append(address["row_sha256"])
+        found, request, mode = [entry[:3] for entry in picked], {"to": to_addr, "conversation": True}, "conversation"
     elif to_addr and not from_addr:  # "up to here": the room's open rows, as the view counts them, to the address
         open_rows = {address["row_sha256"] for address, _meta, _pos in memory_inventory.open_room_rows(root, room)}
         found = [entry for entry in chat_chain.iter_room_rows(root, room, to_addr=to_addr)
@@ -270,22 +302,28 @@ def _expand(root: Path, room: str, lineage: Dict[str, Any], *, from_addr: Any = 
             seen.add(entry[0]["row_sha256"])
             rows.append(entry)
     if not rows:
-        raise ValueError(f"covers resolve to no {'open ' if mode == 'open_to' else ''}row of room {room}")
+        raise ValueError(f"covers resolve to no {'open ' if mode in ('open_to', 'conversation') else ''}row of "
+                         f"{'the conversation of ' if mode == 'conversation' else ''}room {room}")
     tasks = list(dict.fromkeys([str(row.get("task_id")) for _a, row, _p in rows if row.get("task_id")]
                                + (list(request.get("task_ids") or []))))
     store = _existing_store(root)
     notes: List[str] = []
-    if store is not None:
-        sealed = store.sealed_row_refs(room)
-        notes = [record["id"] for record in store.records(room, kinds=["note"])
-                 if str(record.get("task_id") or "") in tasks and f"note:{record['id']}" not in sealed]
+    for each in (rooms or {room: ()}) if store is not None else ():  # a task's notes go with its rows, in their room
+        sealed = store.sealed_row_refs(each)
+        held = [record["id"] for record in store.records(each, kinds=["note"])
+                if str(record.get("task_id") or "") in tasks and f"note:{record['id']}" not in sealed]
+        notes += held
+        if rooms:
+            rooms[each] = list(dict.fromkeys([*rooms[each], *(f"note:{ident}" for ident in held)]))
     authors = Counter(_author_of(row, pos, lineage)["kind"] for _a, row, pos in rows)
     covers = {"room_id": room, "mode": mode, "request": request,
               "rows": [address["row_sha256"] for address, _r, _p in rows] + [f"note:{n}" for n in notes],
               "first": rows[0][0], "last": rows[-1][0], "count": len(rows), "task_ids": tasks, "note_ids": notes,
               "ts_span": source_time_span(row.get("ts") for _a, row, _p in rows),
-              "stream_span": [rows[0][2], rows[-1][2]]}
-    facts = {"rows": len(rows), "notes": len(notes), "by_author": dict(sorted(authors.items()))}
+              "stream_span": [rows[0][2], rows[-1][2]],
+              **({"conversation": key, "rooms": rooms} if rooms else {})}
+    facts = {"rows": len(rows), "notes": len(notes), "by_author": dict(sorted(authors.items())),
+             **({"rooms": len(rooms)} if rooms else {})}
     return covers, facts, rows
 
 
@@ -301,6 +339,16 @@ def page_covers(root: Any, room_id: Any, *, from_addr: Any = None, to_addr: Any 
     covers, facts, rows = _expand(Path(root), str(room_id), row_lineage(Path(root)), from_addr=from_addr,
                                   to_addr=to_addr, task_ids=task_ids, note_ids=note_ids)
     return {"covers": covers, "coverage_facts": facts, "rows": [(address, row) for address, row, _p in rows]}
+
+
+def page_room_label(root: Any, room_id: Any, rows: Iterable[Any] = ()) -> str:
+    """The room's label as it reads now (``memory_view.room_labeler``), recorded on a page at publication
+    (``metadata.room_label``): the story names the room from it even when no row of the room is left open."""
+    from ouroboros.memory_view import room_labeler
+
+    sample = next((row for _address, row, *_pos in reversed(list(rows))
+                   if isinstance(row, dict) and (row.get("transport") or row.get("presence_provenance"))), None)
+    return room_labeler(Path(root))(room_id, sample)
 
 
 def host_stamp(root: Any, task_ids: Iterable[Any], *, rows: Iterable[Any] = ()) -> Dict[str, Any]:
@@ -354,26 +402,52 @@ def check_quotes(root: Any, quotes: Any) -> Tuple[bool, Optional[int]]:
 
 # --- chronicle_write ------------------------------------------------------------------------------
 
+def publish_covered_page(root: Path, store: ChronicleStore, author: Dict[str, Any], room: str, text: str,
+                         covers_arg: Dict[str, Any], *, quotes: Iterable[Any] = (), expected_sequence: Optional[int] = None,
+                         closes_project: str = "", closure_delivery: str = "",
+                         ) -> Tuple[PublishResult, Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    """Expand a page's covers (``_expand``) and publish it: ``(result, covers, coverage facts, host stamp)``, as
+    ``chronicle_write(kind='page')`` and ``close_project`` (its closing note, ``closes_project``: the notice it posts
+    after the page, ``closure_delivery``, is linked below it) write one. An unresolved bound raises
+    ``chat_chain.RowAddressError``; covers that name nothing open raise ``ValueError``."""
+    lineage = row_lineage(root)
+    covers, facts, rows = _expand(root, room, lineage, from_addr=covers_arg.get("from"), to_addr=covers_arg.get("to"),
+                                  task_ids=covers_arg.get("task_ids"), note_ids=covers_arg.get("note_ids"),
+                                  conversation=covers_arg.get("conversation") is True)
+    stamp = host_stamp(root, covers["task_ids"], rows=rows)
+    resolver = _quote_resolver(root, lineage, {address["row_sha256"]: pos for address, _r, pos in rows})
+    label = page_room_label(root, room, rows)
+    if covers.get("rooms"):  # a conversation page names the conversation it retells, not one of its rooms
+        from ouroboros.memory_view import room_labeler
+        from ouroboros.memory_view_conversations import conversation_label, conversation_of
+
+        place = conversation_of(room, rows, [], memory_inventory.membership_facts(root).project_chat_ids)[1]
+        label = (conversation_label(room_labeler(root), place, [row for _a, row, _p in rows]) if place else label) + (
+            f" (whole conversation, {len(covers['rooms'])} rooms)")
+    result = store.publish_page(room_id=room, text=text, covers=covers, author=author, quotes=quotes or (), host_stamp=stamp,
+                                metadata={"coverage_facts": facts, "room_label": label,
+                                          "terminal_after_pos": max((pos for _a, _r, pos in chat_chain.iter_room_rows(root, room)), default=-1),
+                                          **({"closes_project": closes_project, "closure_delivery": closure_delivery}
+                                             if closes_project else {})},
+                                quote_resolver=resolver, expected_sequence=expected_sequence)
+    return result, covers, facts, stamp
+
+
 def _write_page(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
     covers_arg = a["covers"]
     if not isinstance(covers_arg, dict):
         return _arg_error(ctx, "a page needs covers: {from, to} row addresses, {to}, {task_ids} or {note_ids}")
-    room, lineage = _room(ctx, root, a["room_id"]), row_lineage(root)
     try:
-        covers, facts, rows = _expand(root, room, lineage, from_addr=covers_arg.get("from"),
-                                      to_addr=covers_arg.get("to"), task_ids=covers_arg.get("task_ids"), note_ids=covers_arg.get("note_ids"))
+        result, covers, facts, stamp = publish_covered_page(root, store, author, _room(ctx, root, a["room_id"]), a["text"],
+                                                            covers_arg, quotes=a["quotes"] or (),
+                                                            expected_sequence=a["expected_sequence"])
     except chat_chain.RowAddressError as exc:
         return _refused(ctx, "target_missing", f"a covers bound does not resolve: {exc.resolution.get('status')}")
-    stamp = host_stamp(root, covers["task_ids"], rows=rows)
-    resolver = _quote_resolver(root, lineage, {address["row_sha256"]: pos for address, _r, pos in rows})
-    result = store.publish_page(room_id=room, text=a["text"], covers=covers, author=author,
-                                quotes=a["quotes"] or (), host_stamp=stamp, metadata={"coverage_facts": facts,
-                                "terminal_after_pos": max((pos for _a, _r, pos in chat_chain.iter_room_rows(root, room)), default=-1)},
-                                quote_resolver=resolver, expected_sequence=a["expected_sequence"])
     if not result.ok:
         return _published(ctx, result)
     statuses = Counter(entry["status"] or "unknown" for entry in stamp["tasks"])
     return _published(ctx, result, rows=covers["count"], notes=len(covers["note_ids"]), coverage_facts=facts,
+                      rooms=sorted(covers["rooms"]) if covers.get("rooms") else None,
                       first=chat_chain.format_address(covers["first"]) if covers["first"] else None,
                       last=chat_chain.format_address(covers["last"]) if covers["last"] else None,
                       stamp=dict(sorted(statuses.items())))
@@ -933,8 +1007,13 @@ def _read_node(root: Path, node_id: str, start: int, limit: int, revision: str =
     if record is None:
         raise ValueError(f"memory node {node_id} not found")
     shown, document = _node_document(store, record, revision)
-    from ouroboros.memory_sealing import terminal_links
-    links = terminal_links(root, shown)
+    from ouroboros.memory_sealing import closure_link, covered_rooms, terminal_links
+    rooms = covered_rooms(root, record)
+    if rooms:  # a conversation page: each room it sealed, with the exact reader of its rows there
+        document += "\n\nRooms this page covers:\n" + "\n".join(
+            f"- {name}: memory_read(room_id='{room}', rows=true, from='{first}', to='{last}')"
+            for room, name, first, last in rooms)
+    links = terminal_links(root, shown) + closure_link(root, shown)
     if links:
         document += "\n\nHost-linked terminal facts (outside page coverage):\n" + "\n".join(links)
     told = told_by(store, [shown["id"]]).get(shown["id"]) if shown.get("kind") in STORY_KINDS else None
@@ -966,16 +1045,50 @@ def _read_source(root: Path, ref: Any, start: int, limit: int) -> str:
                    lambda end: f"memory_read(source_ref=<same>, start={end})")
 
 
-def _read_rooms(root: Path, store: ChronicleStore, start: int, limit: int) -> str:
-    from ouroboros import memory_view as mv
+def _groups(root: Path, store: ChronicleStore) -> List[Dict[str, Any]]:
+    """Every conversation with an open room, as the block of a focus without a room captures it."""
+    from ouroboros import memory_view as mv, memory_view_conversations as conversations
+    from ouroboros.projects_registry import list_projects
 
-    spec = mv.ViewSpec("integrator", room_id=None, live_rooms="directory")
+    spec = mv.ViewSpec("integrator", room_id=None)
     with capture(root):  # one state of the chronicle for every room's facts
-        gaps, quiet = {}, {}
-        rows, lineage = memory_inventory.open_rows_by_room(root, gaps=gaps, quiet=quiet), row_lineage(root)
-        rooms = mv._live_rooms(store, root, spec, mv.room_labeler(root), rows, mv._notes_by_room(store), lineage, gaps, quiet)
-    body = "\n".join(mv._directory_room(room) for room in rooms)
-    return _window(f"Open rooms: {len(rooms)}; live {sum(room['live'] for room in rooms)}", body, start, limit,
+        gaps, quiet, sealed = {}, {}, {}
+        rows, lineage = memory_inventory.open_rows_by_room(root, gaps=gaps, quiet=quiet, sealed=sealed), row_lineage(root)
+        return conversations.capture(store, root, spec, mv.room_labeler(root), rows, mv._notes_by_room(store), lineage,
+                                     quiet=quiet, sealed=sealed, gaps=gaps, projects=list_projects(root))
+
+
+def _read_owed(root: Path, store: ChronicleStore, start: int, limit: int) -> str:
+    """The conversations whose words no page holds (``memory_waiting``'s class), oldest first, each with the rooms
+    where my human or I spoke and the act that seals them."""
+    from ouroboros import memory_view as mv, memory_view_conversations as conversations
+
+    owed = conversations.owed(_groups(root, store))
+
+    def whole(item):  # one page over every room of the conversation, held by the room of its newest row
+        room, newest = item["newest"]
+        return (f"  seal it whole: chronicle_write(kind='page', room_id='{room}', covers={{'to': '{newest}', "
+                "'conversation': true})") if len(item["group"]["rooms"]) > 1 else ""
+
+    lines = [line for item in owed for line in (conversations.identity_line(item["group"]), whole(item), *(
+        f"  - {room['label']}; open since {mv._minute(room['facts']['earliest'])}; ~{room['facts']['chars']} chars; "
+        f"memory_read(room_id='{room['room_id']}', rows=true); seal: chronicle_write(kind='page', "
+        f"room_id='{room['room_id']}', covers={{'to': '{room['newest']}'}})" for room in item["rooms"])) if line]
+    return _window(f"Conversations whose words no page holds: {len(owed)}", "\n".join(lines), start, limit,
+                   lambda n: f"memory_read(room_id='conversations', start={n})")
+
+
+def _read_rooms(root: Path, store: ChronicleStore, start: int, limit: int) -> str:
+    """Every open room, by conversation: the block's own capture (``memory_view_conversations``), one line a room."""
+    from ouroboros import memory_view as mv, memory_view_conversations as conversations
+
+    groups = _groups(root, store)
+    lines = [line for group in groups for line in (conversations.identity_line(group), *(
+        f"  - {room['label']}; {'my human or I spoke here' if room['engaged'] else 'neither my human nor I spoke here'}; "
+        f"{mv._facts_text(room['facts'], 'that room')}; memory_read(room_id='{room['room_id']}', rows=true)"
+        for room in group["rooms"]))]
+    count = sum(len(group["rooms"]) for group in groups)
+    return _window(f"Open rooms: {count} in {len(groups)} conversations", "\n".join(lines), start, limit,
                    lambda n: f"memory_read(room_id='*', start={n})")
 
 
@@ -1022,7 +1135,7 @@ def _read_proposal(ctx: Any, root: Path, store: ChronicleStore, proposal: Dict[s
     from ouroboros import memory_view as mv
     from ouroboros.memory_floor import view_tokens
 
-    spec = mv.ViewSpec("integrator", room_id=room, room_lanes=False, origin_words=False, live_rooms="none",
+    spec = mv.ViewSpec("integrator", room_id=room, room_lanes=False, origin_words=False, other_conversations=False,
                        marks="none", knowledge=False)
     with capture(root, tail="terminal"):  # one state for the rules, both views and every record's facts
         result = store.select_account(proposal["target_id"], replaces=proposal["replaces"], author=focus_signature(ctx),
@@ -1049,10 +1162,14 @@ def _read_proposal(ctx: Any, root: Path, store: ChronicleStore, proposal: Dict[s
         return ", ".join(f"{r} ({n})" for r, n in sorted(Counter(str(record["room_id"]) for record in group).items()))
 
     def whole(record: Dict[str, Any]) -> List[str]:
+        from ouroboros.memory_sealing import covered_rooms
+
         covers = record.get("covers") if isinstance(record.get("covers"), dict) else {}
-        readers = [f"memory_read(node_id='{record['id']}')"] + (
-            [f"rows: memory_read(room_id='{record['room_id']}', rows=true, from='{_address_text(covers.get('first'))}', "
-             f"to='{_address_text(covers.get('last'))}')"] if record["kind"] == "page" and covers.get("first") else [])
+        spans = [(room, first, last) for room, _name, first, last in covered_rooms(root, record)] or (
+            [(record["room_id"], _address_text(covers.get("first")), _address_text(covers.get("last")))]
+            if record["kind"] == "page" and covers.get("first") else [])  # one reader per room the page sealed
+        readers = [f"memory_read(node_id='{record['id']}')"] + [
+            f"rows: memory_read(room_id='{room}', rows=true, from='{first}', to='{last}')" for room, first, last in spans]
         moves = (["(its words leave my story with this selection)"] if record["id"] in visible[0] - visible[1] else
                  ["(its words return to my story with this selection)"] if record["id"] in visible[1] - visible[0] else [])
         return ["", "\n".join([_listed(record, periods, told_now), *map(quote_line, record.get("quotes") or ()), *moves]),
@@ -1127,6 +1244,8 @@ def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: in
                 return _published(ctx, text)
         elif str(room_id) == "*":
             text = _read_rooms(root, store, start, limit)
+        elif str(room_id) == "conversations":
+            text = _read_owed(root, store, start, limit)
         elif str(room_id) in {"late_reviews", "notes"}:
             from ouroboros.memory_view import _notes_by_room
             from ouroboros.memory_waiting import listing
@@ -1295,8 +1414,9 @@ def chronicle_tools() -> List[ToolEntry]:
         "room_id": room,
         "text": {"type": "string", "description": "The record in my own words. No length limit; it is read back through memory_read pages."},
         "covers": {"type": "object", "additionalProperties": False,
-                   "description": "page: {from, to} row addresses (inclusive), {to} alone (this room's still-open rows up to it), {task_ids} (those tasks' rows and bound owner words), or {note_ids} (selected notes of this room, even without open rows). The host expands the exact coverage; it proves no reading. Already sealed members are refused. Pages never release marks.",
-                   "properties": {"from": address, "to": address, "task_ids": {"type": "array", "items": string},
+                   "description": "page: {from, to} row addresses (inclusive), {to} alone (this room's still-open rows up to it), {to, conversation: true} (the still-open rows up to it of every room of that row's conversation — a repository, a channel, a group — each sealed in its own room), {task_ids} (those tasks' rows and bound owner words), or {note_ids} (selected notes of this room, even without open rows). The host expands the exact coverage; it proves no reading, so a page names what it did not re-read. Already sealed members are refused. Pages never release marks.",
+                   "properties": {"from": address, "to": address, "conversation": {"type": "boolean"},
+                                  "task_ids": {"type": "array", "items": string},
                                   "note_ids": {"type": "array", "items": string, "minItems": 1, "uniqueItems": True}}},
         "member_ids": {"type": "array", "items": string, "description": "part: adjacent unfolded records of one kind in one room; default room is theirs."},
         "quotes": quotes,
@@ -1320,7 +1440,7 @@ def chronicle_tools() -> List[ToolEntry]:
                                               "shown": {"type": "boolean"}}},
         "fingerprint": {"type": "string", "description": "proposed_selection: the document a later page continues, as the read's header names it; a changed one is refused position_mismatch, never joined."},
         "node_id": {"type": "string", "description": "One record: as it acts now, its host stamp, coverage, original text, corrections and decisions."},
-        "room_id": {**room, "description": room["description"] + " '*' lists all open rooms (label, period, counts, reader); 'late_reviews' lists unreleased host review marks; 'notes' lists unsealed mind notes. Lists name ids, rooms, dates and exact readers, oldest first."},
+        "room_id": {**room, "description": room["description"] + " '*' lists all open rooms by conversation (label, period, counts, reader); 'conversations' lists the conversations whose words no page holds, with the act that seals each; 'late_reviews' lists unreleased host review marks; 'notes' lists unsealed mind notes. Lists name ids, rooms, dates and exact readers, oldest first."},
         "after_seq": {"type": "integer", "minimum": 0, "description": "Room records and active marks after this sequence (the previous page's next_after_seq)."},
         "rows": {"type": "boolean", "description": "true: the room's chat rows verbatim, one header line each, filtered by from/to, task_id, period, in stored order (the order from/to and next: from= follow). A room holding imported earlier messages reads by send time in its view and chat_history; here each stands where it was stored."},
         "from": address, "to": address,

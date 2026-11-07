@@ -582,7 +582,8 @@ def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destinatio
         if error:
             return publish_no_effect(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=error, meta={"reason_code": "RELAY_RETURN_UNRESOLVED"}))
         chat_id, system_type = relay["source"]["chat_id"], "relay_reply"
-        reply_meta = {"reply_to": resolve_reply(canonical_data_root(ctx), relay["source"]["address"]),
+        source_root = relay.get("_owner_source_roots", {}).get(relay["source"]["address"]) or canonical_data_root(ctx)
+        reply_meta = {"reply_to": resolve_reply(source_root, relay["source"]["address"]),
                       "reply_to_relay": relay["relay_id"]}
     from ouroboros.tools.owner_delivery import deliver_owner_event, publish_delivery_receipt, stamp_lineage
     from ouroboros.utils import append_jsonl
@@ -1027,7 +1028,8 @@ def _effort_switch(ctx: ToolContext, requested: str) -> tuple[str, str]:
 def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,
                  answer_sha256: str | None = None, rationale: str = "",
                  acceptance_subject: dict | None = None, pending_review: str | None = None,
-                 silent: bool = False, swarm_comparison: str | None = None, summary: str = "") -> str:
+                 silent: bool = False, swarm_comparison: str | None = None, summary: str = "",
+                 fold_read: bool = False) -> str:
     """Stage an author act; a self-started run (an own-clock or focused wake, a schedule-born root
     without a Presence binding) may choose silence and may leave one sentence for its human.
     A task that answers its own retained place conversation (its reply carrier: a promoted or
@@ -1035,7 +1037,7 @@ def _finish_task(ctx: ToolContext, action: str, answer: str | None = None,
     request, error = completion_request(ctx, {
         "action": action, "answer": answer, "answer_sha256": answer_sha256, "rationale": rationale,
         "acceptance_subject": acceptance_subject, "pending_review": pending_review, "silent": silent,
-        "swarm_comparison": swarm_comparison, "summary": summary,
+        "swarm_comparison": swarm_comparison, "summary": summary, "fold_read": fold_read,
     })
     if error:
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
@@ -1072,11 +1074,18 @@ def completion_request(ctx: ToolContext | None, arguments: object) -> tuple[dict
         return None, "silent must be true or false"
     if summary is not None and not isinstance(summary, str):
         return None, "summary must be text"
+    fold_read = arguments.get("fold_read")
+    if fold_read is not None and not isinstance(fold_read, bool):
+        return None, "fold_read must be true or false"
     summary = " ".join((summary or "").split())
+    if fold_read and not summary:
+        return None, "fold_read folds what this run read into its summary: give the sentence"
     if silent and action != "finish":
         return None, "silent requires action=finish"
-    if summary and not (self_started or resolve_ctx_lineage(ctx)["is_root_task"]):
-        return None, "summary is available only on a root task or a self-started run"
+    # A sentence for a human this run does not speak to is decorative: dropped and named, never a veto on the answer;
+    # the fold it would stand for goes with it.
+    ignored = ([*(["summary"] if summary else []), *(["fold_read"] if fold_read else [])]
+               if summary and not (self_started or resolve_ctx_lineage(ctx)["is_root_task"]) else [])
     if silent and not self_started and not reply_carrier(metadata):
         return None, ("silent is available only on a self-started run: "
                       "a consciousness wake's own turn, or a schedule-born root without a Presence binding; "
@@ -1087,7 +1096,8 @@ def completion_request(ctx: ToolContext | None, arguments: object) -> tuple[dict
         "action": action, "answer": answer, "answer_sha256": selector,
         "rationale": arguments.get("rationale", ""), "acceptance_subject": arguments.get("acceptance_subject"),
         "pending_review": arguments.get("pending_review"), "wake_silent": bool(silent) or None,
-        "wake_summary": summary or None, "swarm_comparison": arguments.get("swarm_comparison"),
+        "wake_summary": (not ignored and summary) or None, "fold_read": True if fold_read and not ignored else None,
+        "swarm_comparison": arguments.get("swarm_comparison"), "ignored": ignored or None,
     }, allow_empty=bool(silent))
 
 
@@ -1158,8 +1168,8 @@ def _stage_checked_completion(ctx: ToolContext, checked: dict, *, source: str, r
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
             text="ERROR: COMPLETION_CONFLICT: contradictory completion requests in one response; select again after seeing all results."))
     ctx._completion_request = staged
-    return json.dumps({"status": "completion_requested", "completion_control": True, "action": staged["action"]},
-                      ensure_ascii=False)
+    return json.dumps({"status": "completion_requested", "completion_control": True, "action": staged["action"],
+                       **({"ignored": staged["ignored"]} if staged.get("ignored") else {})}, ensure_ascii=False)
 
 
 _FINISH_TASK_ARGUMENTS = frozenset(inspect.signature(_finish_task).parameters) - {"ctx"}

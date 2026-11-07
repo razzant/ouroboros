@@ -82,7 +82,7 @@ def test_child_keeps_biography_and_book_orientation_in_max(tmp_path):
     assert "Unselected raw parent conversation." not in text
     # The child role line is carried verbatim: it no longer names tools or claims the
     # parent's selected discussion is attached (that claim was false: nothing attached it).
-    assert "Work from this assignment first" in text and "name what you read in your report" in text
+    assert "Read memory or sources whenever they could change what you do" in text and "name what you read in your answer" in text
     assert "The shared biography is loaded above" not in text
     assert "parent's selected discussion" not in text
 

@@ -174,7 +174,7 @@ def test_e8_the_view_s_receipt_counts_the_story_and_every_live_room(stand):
     shape = SHAPES[stand["shape_name"]]
     facts = stand["stand"]
     blocks = facts["memory_view"]["blocks"]
-    assert blocks["live_rooms"] >= shape.rooms, blocks
+    assert blocks["conversations"] >= shape.rooms, blocks
     assert blocks["story_tokens"] * CHARS_PER_TOKEN >= facts["rooms"]["story_chars"], (blocks, facts["rooms"])
 
 

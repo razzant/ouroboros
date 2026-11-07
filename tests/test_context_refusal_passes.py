@@ -123,7 +123,9 @@ def test_the_size_parser_reads_input_reply_and_total_apart():
     assert _parse_ctx_requested("Your input exceeds the context window of this model") == (0, 0, 0)
 
 
-def test_bodies_shed_only_what_the_host_copies_left_of_the_target(monkeypatch):
+def test_bodies_shed_only_what_the_host_copies_left_of_the_measured_excess(monkeypatch):
+    """Audit of early stops (06.11): shown bodies pay the measured excess only; the return-after-fold
+    slack is memory's to pay, so bodies the host copies already covered stay in place."""
     calls, shed = [], {}
 
     def address(_ctx, _fit, *, rung, goal_tokens=None):
@@ -132,56 +134,66 @@ def test_bodies_shed_only_what_the_host_copies_left_of_the_target(monkeypatch):
 
     monkeypatch.setattr(lmc, "_run_emergency_address_pass", address)
     first = ("host_copies", "bodies")
-    shed.update(host_copies=60_000, bodies=70_000)
-    assert lmc._apply_refusal_pass(_ctx(), first, _fit(1), 126_830) is True
-    assert calls == [("host_copies", None), ("bodies", 66_830)]  # the rest, not the whole target again
+    shed.update(host_copies=6_000, bodies=70_000)  # target 126,830 = excess 11,600 + slack 115,230
+    assert lmc._apply_refusal_pass(_ctx(), first, _fit(1), 126_830, 115_230) is True
+    assert calls == [("host_copies", None), ("bodies", 5_600)]  # the rest of the excess, never the slack
     calls.clear()
-    assert lmc._apply_refusal_pass(_ctx(), first, _fit(1), 50_000) is True
-    assert calls == [("host_copies", None)]  # superseded host state freed the room: every body stays
+    shed.update(host_copies=60_000)
+    assert lmc._apply_refusal_pass(_ctx(), first, _fit(1), 126_830, 115_230) is True
+    assert calls == [("host_copies", None)]  # superseded host state paid the excess: every body stays
+    calls.clear()
+    assert lmc._apply_refusal_pass(_ctx(), first, _fit(1), 126_830) is True  # the slack read from the window
+    assert calls == [("host_copies", None)]
     calls.clear()
     assert lmc._apply_refusal_pass(_ctx(), first, _fit(1), None) is True
     assert calls == [("host_copies", None), ("bodies", None)]  # unknown: each step takes its category
     calls.clear()
     shed.clear()
-    assert lmc._apply_refusal_pass(_ctx(), first, _fit(1), 126_830) is False  # nothing changed, no retry
+    assert lmc._apply_refusal_pass(_ctx(), first, _fit(1), 126_830, 115_230) is False  # nothing changed, no retry
 
 
-def test_memory_narrowed_enough_addresses_no_unseen_body(monkeypatch):
+def test_bodies_pay_the_excess_memory_the_slack_and_books_wait_for_a_further_refusal(monkeypatch):
+    """Owner order 7A with the 06.11 sizing: superseded host rows, shown bodies for the measured excess,
+    memory's detail for the rest and the return-after-fold slack; books and unseen bodies only in the
+    second pass, after a further refusal."""
     import ouroboros.loop as loop
 
     calls, sizes = [], []
-    monkeypatch.setattr(lmc, "_coarsen_memory_view", lambda _ctx, _fit, *, saving=None: calls.append(("floor", saving)) or True)
+    monkeypatch.setattr(lmc, "_coarsen_memory_view", lambda _ctx, _fit, *, saving=None, slack=0: (
+        calls.append(("floor", saving, slack)) or True))
     monkeypatch.setattr(lmc, "_reproject_actual_overflow_low",
                         lambda ctx: calls.append(("books",)) or setattr(ctx, "active_context_mode", "low"))
     monkeypatch.setattr(loop, "_measure_round_main_fit", lambda _ctx, **_kw: _fit(sizes.pop(0)))
     monkeypatch.setattr(lmc, "_run_emergency_address_pass", lambda _ctx, _fit, *, rung, goal_tokens=None: (
-        calls.append((rung, goal_tokens)) or SimpleNamespace(status="applied", reclaimed_tokens=goal_tokens)))
-    second = lmc.REFUSAL_PASSES[1]
-    unsized = _fit(900_000, accepted=None)  # no window reading anywhere: no slack, the whole target is excess
-    sizes[:] = [800_000]
-    assert lmc._apply_refusal_pass(_ctx(), second, unsized, 80_000) is True
-    assert calls == [("floor", 80_000)]  # memory alone saved it: books stay, no unseen body leaves
-    calls.clear()
-    sizes[:] = [800_000, 760_000]
-    assert lmc._apply_refusal_pass(_ctx(), second, unsized, 150_000) is True
-    assert calls == [("floor", 150_000), ("books",), ("unseen_bodies", 10_000)]  # books, then only the rest
-    calls.clear()
-    sizes[:] = [800_000, 760_000]
-    assert lmc._apply_refusal_pass(_ctx(), second, unsized, None) is True
-    assert calls == [("floor", lmc.WHOLE_CATEGORY), ("books",), ("unseen_bodies", None)]  # unknown: each whole
-    calls.clear()
-    sizes[:] = [800_000, 760_000]
-    known = SimpleNamespace(measurement=SimpleNamespace(**{**vars(unsized.measurement), "capacity_deficit_tokens": 18_887}))
-    assert lmc._apply_refusal_pass(_ctx(), second, known, None) is True
-    assert calls[0] == ("floor", 18_887)  # no target, but a known window's deficit sizes memory, not "everything"
-    # Memory narrows by the measured excess only; the return-after-fold slack falls to books and sources
-    # (review r1, 17.10: narrowing memory for slack showed this room's own rows by address).
-    calls.clear()
-    sizes[:] = [880_000, 880_000, 700_000]
+        calls.append((rung, goal_tokens)) or SimpleNamespace(status="applied", reclaimed_tokens=goal_tokens or 0)))
+    first, second = lmc.REFUSAL_PASSES
+    assert first == ("host_copies", "bodies", "floor") and second == ("books", "unseen_bodies")
     stated = _ctx("This model's maximum context length is 400,000 tokens.")  # slack 50,000
-    assert lmc._apply_refusal_pass(stated, second, _fit(900_000, accepted=None), 70_000) is True
-    # Memory paid the excess; books pay the remaining work room before an unseen body leaves.
-    assert calls == [("floor", 20_000), ("books",)]
+    sizes[:] = [830_000]  # after memory narrowed
+    assert lmc._apply_refusal_pass(stated, first, _fit(900_000, accepted=None), 70_000, 50_000) is True
+    assert calls == [("host_copies", None), ("bodies", 20_000), ("floor", 0, 50_000)]  # slack alone: no excess
+    assert stated.active_context_mode == "max"  # books stay through the first pass
+    calls.clear()
+    sizes[:] = [880_000, 830_000]  # before and after the books step
+    assert lmc._apply_refusal_pass(stated, second, _fit(900_000, accepted=None), 70_000, 50_000) is True
+    assert calls == [("books",), ("unseen_bodies", 20_000)]  # books first, then only what they left
+    assert stated.active_context_mode == "low"
+    unsized = _fit(900_000, accepted=None)  # no window reading anywhere: no slack, the whole target is excess
+    calls.clear()
+    sizes[:] = [800_000]
+    assert lmc._apply_refusal_pass(_ctx(), first, unsized, None) is True
+    # Unknown: memory's detail pays all it can, a whole-or-outline section nothing without a measured excess.
+    assert calls == [("host_copies", None), ("bodies", None), ("floor", 0, lmc.WHOLE_CATEGORY)]
+    calls.clear()
+    sizes[:] = [800_000, 790_000, 780_000]  # the books step's before and after, then memory's rest
+    assert lmc._apply_refusal_pass(_ctx(), second, unsized, None) is True
+    # After a further refusal memory's rest may take everything, whole-or-outline sections included.
+    assert calls == [("books",), ("unseen_bodies", None), ("floor", lmc.WHOLE_CATEGORY, 0)]
+    calls.clear()
+    sizes[:] = [800_000]
+    known = SimpleNamespace(measurement=SimpleNamespace(**{**vars(unsized.measurement), "capacity_deficit_tokens": 18_887}))
+    assert lmc._apply_refusal_pass(_ctx(), first, known, None) is True
+    assert calls[-1] == ("floor", 18_887, 0)  # no target, but a known window's deficit sizes memory (no slack here)
 
 
 def test_a_failed_candidates_walk_keeps_the_rounds_refusal_and_the_conversation_facts():
@@ -207,11 +219,11 @@ def test_a_local_pre_send_refusal_uses_the_reply_its_exact_request_reserved():
 
 
 def test_books_pay_remaining_room_before_any_unseen_body(monkeypatch):
-    """The owner's 22 October priority: memory and host books yield before chosen bodies."""
+    """The owner's 22 October priority: memory and host books yield before chosen bodies; since 06.11 books
+    wait for the second pass, after a further refusal."""
     import ouroboros.loop as loop
 
     calls, sizes, unseen = [], [], {}
-    monkeypatch.setattr(lmc, "_coarsen_memory_view", lambda _ctx, _fit, *, saving=None: calls.append(("floor", saving)) or True)
     monkeypatch.setattr(lmc, "_reproject_actual_overflow_low",
                         lambda ctx: calls.append(("books",)) or setattr(ctx, "active_context_mode", "low"))
     monkeypatch.setattr(loop, "_measure_round_main_fit", lambda _ctx, **_kw: _fit(sizes.pop(0)))
@@ -220,17 +232,16 @@ def test_books_pay_remaining_room_before_any_unseen_body(monkeypatch):
                                                              reclaimed_tokens=unseen.get("shed", 0))))
     stated = _ctx("This model's maximum context length is 400,000 tokens.")  # slack 50,000
     second = lmc.REFUSAL_PASSES[1]
-    sizes[:] = [880_000, 880_000, 830_000]  # after the floor; before and after the books step
+    sizes[:] = [880_000, 810_000]  # before and after the books step
     assert lmc._apply_refusal_pass(stated, second, _fit(900_000, accepted=None), 70_000) is True
-    assert calls == [("floor", 20_000), ("books",)]
+    assert calls == [("books",)]  # the books paid the whole goal: unseen bodies stay
     assert stated.active_context_mode == "low"
     calls.clear()
     paid = _ctx("This model's maximum context length is 400,000 tokens.")
     unseen.update(status="applied", shed=50_000)
-    sizes[:] = [830_000]
+    sizes[:] = [880_000, 860_000]
     assert lmc._apply_refusal_pass(paid, second, _fit(900_000, accepted=None), 70_000) is True
-    assert calls == [("floor", 20_000)]  # the whole goal was paid: books and bodies stay
-    assert paid.active_context_mode == "max"
+    assert calls == [("books",), ("unseen_bodies", 50_000)]  # then only what the books left
 
 
 @pytest.mark.parametrize("refused", [False, True])
@@ -244,9 +255,9 @@ def test_a_just_chosen_body_pays_last_and_only_what_a_providers_refusal_left(mon
     first, second = lmc.REFUSAL_PASSES
     for steps, target, paid, expected in (
             (second, None, {}, [("chosen_bodies", None)]),  # nothing else changed an unmeasured refusal
-            (second, None, {"floor": 0}, []),  # memory changed the candidate: its retry answers first
-            (second, 100_000, {"floor": 30_000, "unseen_bodies": 10_000}, [("chosen_bodies", 60_000)]),
-            (second, 100_000, {"floor": 100_000}, []),  # memory paid the whole measured target
+            (second, None, {"books": 0}, []),  # the books changed the candidate: its retry answers first
+            (second, 100_000, {"books": 30_000, "unseen_bodies": 10_000}, [("chosen_bodies", 60_000)]),
+            (second, 100_000, {"books": 100_000}, []),  # the books paid the whole measured target
             (first, None, {}, [])):  # the first pass never reaches a chosen body
         shed.clear(), shed.update(paid), chosen.clear()
         changed = lmc._apply_refusal_pass(_ctx(), steps, _fit(1), target, None, refused)
@@ -284,6 +295,8 @@ def test_books_recovery_keeps_the_current_refusal_frame_and_selected_mode(tmp_pa
         record_observation(tmp_path, plan.route_fp, refused=ceiling)
     lmc._reproject_actual_overflow_low(ctx)
     assert ctx.active_context_mode == ctx.tools._ctx.active_context_mode == mode
+    from ouroboros.transcript_prefix import SCOPED_SANCTION_ATTR  # the next send names this rebuild (C2 S4)
+    assert getattr(ctx.tools._ctx, SCOPED_SANCTION_ATTR) == {"system": "low_retry"}
     assert ctx.messages[0] == ctx.context_fit_plan.projection(mode).system_message()
     assert ctx.context_fit_plan.window_record is not None
     assert measure(ctx).measurement.capacity_total_tokens == (ceiling or 1_000_000)

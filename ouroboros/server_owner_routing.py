@@ -585,8 +585,8 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
     from ouroboros.card_store import late_press_ref
     from ouroboros.owner_quiz import late_answer_ref
 
-    late = task_metadata.get("late_answer")
-    thread_of = (late_answer_ref(late) or late_press_ref(task_metadata.get("card_press")) or {}).get("task_id", "")
+    late, press = task_metadata.get("late_answer"), task_metadata.get("card_press")
+    thread_of = (late_answer_ref(late) or late_press_ref(press) or {}).get("task_id", "")
     # ONE read of the addressable roots for this message: the room's reader, Main's
     # manifest and the decision metadata all see the same projection.
     roots = addressable_roots(ctx)
@@ -602,6 +602,12 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
             thread_of=thread_of,
             roots=roots,
         )
+        # The room's other live roots hear my human's words as context, whichever return routed them, a late answer
+        # included; a press is a typed act on a card, not words: it reaches its author's thread and no other reader.
+        if project_id and not press:
+            from ouroboros.owner_relay import carry_room_context
+
+            carry_room_context(ctx.DRIVE_ROOT, chat_id, client_message_id, roots.rows(chat_id), routed_to_task)
         if routed_to_task:
             _record_routing_receipt(
                 bridge,

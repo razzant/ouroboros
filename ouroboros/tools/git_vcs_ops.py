@@ -606,7 +606,7 @@ def _revert_commit(
             "Commit or discard changes first (use vcs_restore), then retry.",
             binding,
         )
-    lock = _git()._acquire_git_lock(ctx)
+    lock = _git()._acquire_git_lock(ctx, repo_dir=repo_dir)  # the tree this revert writes, never the serving one
     try:
         try:
             _git().run_cmd(["git", "revert", "--no-edit", full_sha], cwd=repo_dir)

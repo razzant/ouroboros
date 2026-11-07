@@ -97,8 +97,8 @@ class BriefIntent:
 
     These always travel together, so they ride as one immutable parameter
     object instead of parallel arguments a caller can silently mis-order.
-    ``owner_words`` is the host-attested section of the owner's words that
-    caused the work (``owner_words_text``); ``coupling_history`` is this
+    ``owner_words`` is the host-attested section of my human's words for
+    the work (``owner_words_text``); ``coupling_history`` is this
     subject's prior ``per_question.coupling`` rounds; ``preflight_execution`` the
     wave's frozen test execution exhibit text (``preflight_receipts``) and
     ``diff_pulse`` the subject's growth since its contribution base.

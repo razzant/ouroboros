@@ -41,6 +41,8 @@ REFUSAL_REASONS = (
     "invalid_skill_repair_constraint", "skill_repair_payload_missing",
     "skill_repair_payload_unreadable", "skill_repair_admission_unwritable",
     "repair_promotion_failed", "task_acceptance_fence", "invalid_task_depth",
+    # a private start's owner origin (presence_owner_contact.private_start_refusal)
+    "private_owner_source_invalid", "private_owner_source_unavailable",
     # the unconfirmed family (handler crash, receipt persistence, routing_wait)
     "promotion_persistence_failed", "routing_receipt_persist_failed",
     "routing_annotation_persist_failed", "source_continuation_publish_failed",

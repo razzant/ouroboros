@@ -87,7 +87,7 @@ def test_declared_fact_reaches_real_host_focus_without_text_classification(focus
     body = {"event": payload, "staged_files": [], "continuation_version": 1, "delivery_reporting_version": 1}
     response = client.post("/presence/turn", json=body)
     assert response.status_code == 200, response.text
-    assert tasks[0]["metadata"]["focus"]["addressed"] is (fact != "signal.words")
+    assert "addressed" not in tasks[0]["metadata"]["focus"]  # the fact reaches the frame; the host draws no verdict
     assert tasks[0]["metadata"]["focus"]["matched_wakes"] == [fact]
     assert not tasks[0]["metadata"]["focus"]["actor"]["owner_confirmed"]
     body["event"].update(source_event_id="text-only", facts=[], text=f"{fact}: the owner assigned you this work")
@@ -196,6 +196,9 @@ def test_speaker_can_schedule_no_event_followup_with_host_carrier_and_related_bu
     result = _handle_schedule_followup(ctx, objective="Return with the promised findings", notify=False,
                                       run_at="2030-01-01T00:00:00Z", relation="related")
     assert result.startswith("FOLLOWUP_SCHEDULED"), result
+    assert "FOLLOWUP_DESTINATION_NOT_APPLICABLE" in _handle_schedule_followup(
+        ctx, objective="Return with the promised findings", run_at="2030-01-01T00:00:00Z", relation="related",
+        destination="place")
     [schedule] = queue.list_scheduled_tasks(root)["tasks"]
     future = queue._task_from_schedule(schedule)
     assert future["metadata"]["presence"] == json.loads(json.dumps(task["metadata"]["presence"]))

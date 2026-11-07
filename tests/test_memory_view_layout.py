@@ -45,8 +45,8 @@ def test_note_labels_and_aggregate_keep_readers_and_do_not_change_other_rooms():
     assert '6 notes not yet sealed, 2026-09-02 → 2026-09-03, by child, root; ids:' in text
     assert all(note['id'] in text for note in snap.room['notes'])
     assert '(memory_read(node_id=…))' in text
-    for other in snap.live_rooms:
-        assert '\n'.join(mv._live_room(other)) in text
+    from ouroboros import memory_view_conversations as conversations
+    assert conversations.render(snap.conversations, {}) in text  # this room's note forms leave the other groups be
     assert mv.render_story(snap, aggregate) == mv.render_story(snap)
 
 
@@ -90,15 +90,15 @@ def test_the_request_keeps_my_story_before_the_changing_tail_and_the_book_separa
     a, d, b, c = (block["text"] for block in content)
     assert d.startswith("## DEVELOPMENT.md\n") and "## DEVELOPMENT.md\n" not in a
     assert "## My story" in b and "## My story" not in a + d + c
-    for heading in ("## Shared understanding", "## Knowledge base", "## Live rooms", "## This room (Main)"):
+    for heading in ("## Shared understanding", "## Knowledge base", "## This room (Main)", "## Other conversations"):
         assert heading in c and heading not in a + b, heading
     for gone in ("## Dialogue History", "## Recent chat", "## Project owner origins", "## Legacy Dialogue Summary"):
         assert gone not in a + b + c, gone
 
 
 def test_b_is_byte_identical_for_main_another_room_and_a_wake(tmp_path):
-    """One story for every integrating focus; a wake's room is Main, byte for byte the Main turn's, and its
-    live rooms give one directory line per room without standing verbatim words."""
+    """One story for every integrating focus; a wake's room is Main, byte for byte the Main turn's, and its other
+    conversations are the block a Main turn holds (owner 06.11, Q2-A)."""
     env, memory, rooms = world(tmp_path)
     views = {name: blocks(env, memory, task) for name, task in (
         ("main", MAIN), ("alpha", {"id": "bound", "chat_id": 1}), ("beta", {"id": "tb", "chat_id": rooms["beta"]}),
@@ -109,9 +109,11 @@ def test_b_is_byte_identical_for_main_another_room_and_a_wake(tmp_path):
     main_c, wake_c = views["main"][2], views["wake"][2]
     assert section(wake_c, "## This room (Main)") == section(main_c, "## This room (Main)")
     assert "## This room (Main)" not in views["alpha"][2]
+    assert section(wake_c, "## Other conversations") == section(main_c, "## Other conversations")
     for words in ("alpha again", "beta again"):
-        assert words not in section(wake_c, "## Live rooms") and words not in main_c, words
-    assert "memory_read(room_id=" in section(wake_c, "## Live rooms")
+        assert words in section(wake_c, "## Other conversations") and words not in section(main_c, "## This room (Main)")
+    assert "memory_read(room_id=" in section(wake_c, "## Other conversations")
+    assert section(main_c, "## This room (Main)") in main_c.split("## Other conversations", 1)[0]  # the room first
 
 
 def test_full_roles_share_the_first_block_and_only_eligible_tasks_get_the_handbook(tmp_path):
@@ -299,7 +301,7 @@ def test_the_view_fact_reaches_the_cap_info_the_task_context_and_one_event(tmp_p
     assert facts["role"] == "integrator" and facts["room_id"] == "1"
     assert facts["store_status"] == {"state": "active", "tail_facts": "filling"}  # open rows read live, no fill yet
     assert facts["legacy_frontier_status"] == "exact"
-    assert facts["spec"]["live_rooms"] == "lines" and facts["blocks"]["live_rooms"] == 2
+    assert facts["spec"]["other_conversations"] is True and facts["blocks"]["conversations"] == 4  # every other one
     assert facts["blocks"]["story_tokens"] > 0 and facts["blocks"]["room_tokens"] > 0
     assert facts["floor"]["mode"] == "max" and facts["floor"]["steps"] == {}
     assert ctx.memory_view_facts == {key: facts[key] for key in ("role", "room_id", "floor", "story_status", "max_room")}
@@ -310,14 +312,30 @@ def test_the_view_fact_reaches_the_cap_info_the_task_context_and_one_event(tmp_p
     assert len(events) == 1 and events[0]["task_id"] == "tmain" and events[0]["blocks"] == facts["blocks"]
 
 
-def test_a_declared_input_child_carries_no_view_fact(tmp_path):
-    env, memory, _rooms = world(tmp_path)
+def test_a_declared_input_child_carries_the_view_fact_of_its_omissions(tmp_path):
+    """The one builder's view: a child's spec without the story and the room page, captured and recorded. The
+    role is read where the declared validator reads it: a role recorded only under ``task_contract.lineage``
+    draws the child view (its room's and the global marks, the outline), and an explicit ``memory_view`` widen
+    still applies to it."""
+    env, memory, rooms = world(tmp_path)
     child = {"id": "kid", "chat_id": 1, "delegation_role": "subagent", "parent_task_id": "bound",
              "root_task_id": "bound", "task_contract": {"input_sources": "declared"},
              "configured_subagent": {"route": {"kind": "api_model"}}}
     _messages_out, cap = _messages(env, memory, child)
-    assert "memory_view" not in cap
-    assert not (memory.drive_root / "memory" / "chronicle").exists()  # no capture, no activation
+    spec = cap["memory_view"]["spec"]
+    assert cap["memory_view"]["role"] == "child" and spec["room_id"] == str(rooms["alpha"])
+    assert spec["marks"] == "room_and_global" and not spec["story"] and not spec["room_page"] and not spec["room_lanes"]
+    assert (memory.drive_root / "memory" / "chronicle").exists()  # the one capture activates, as a shared child's
+    lineage_only = {**{key: value for key, value in child.items() if key != "delegation_role"},
+                    "task_contract": {"input_sources": "declared", "lineage": {"delegation_role": "subagent"}}}
+    _out, lineage_cap = _messages(env, memory, lineage_only)
+    lineage_spec = lineage_cap["memory_view"]["spec"]
+    assert lineage_cap["memory_view"]["role"] == "child" and lineage_spec["room_id"] == str(rooms["alpha"])
+    assert lineage_spec["marks"] == "room_and_global" and lineage_spec["knowledge"] is False and lineage_spec == spec
+    _out, widened_cap = _messages(env, memory, {**lineage_only, "memory_view": {"knowledge": True}})
+    widened = widened_cap["memory_view"]["spec"]
+    assert widened_cap["memory_view"]["role"] == "child" and widened["knowledge"] is True  # the explicit widen applies
+    assert widened["marks"] == "room_and_global" and not widened["story"] and not widened["room_page"]
 
 
 @pytest.mark.parametrize("route,story", [("api_model", True), ("agent_session", False)])
@@ -334,10 +352,13 @@ def test_a_helpers_role_line_names_exactly_what_its_request_holds(tmp_path, rout
     assert f"the page of your parent's room {alpha}" in loaded and f"## This room ({alpha})" in c
     assert ("the top level of your story" in loaded) == story == ("## My story" in b)
     assert ("the top level of your story" in missing) == (not story)
-    assert "the index arrives with your first delegation" in missing and "## Shared understanding" not in c
+    assert "the whole knowledge index (it arrives with your first delegation)" in missing and "## Shared understanding" not in c
     assert "## Knowledge base" not in c and "knowledge_list" in missing
+    assert "the knowledge outline (every note by address and title)" in loaded and "## Knowledge outline" in c
     assert "raw conversations" in missing and "### Open conversation" not in c and "## Live rooms" not in c
-    assert "the words of my human that caused this work" not in loaded  # no root record: no block drawn
+    # No root record gave this helper a field; its room's rows of my human are read at its start and drawn.
+    assert "my human's words for this work" in loaded
+    assert "· owner · room_message · chat " in section(c, "## My human's words for this work (verbatim, dated, host-attested)")
 
 
 def test_the_tool_schemas_count_in_the_floor_of_every_mode(tmp_path):

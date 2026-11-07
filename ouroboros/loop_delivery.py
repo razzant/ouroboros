@@ -689,10 +689,6 @@ def selected_completion_text(request: dict, candidate: Any, messages: list,
     return None, "selection_unavailable: select the current retained/whole held answer or supply complete bytes"
 
 
-OWNER_REPLY_OWED_REFUSAL = ("owner_reply_owed: your human wrote after your last live message; "
-                            "answer before finishing silently")
-
-
 def forced_completion_selection(parsed: Any, malformed: bool, candidate: Any, *, tool_ctx: Any = None,
                                 envelope_keys: Tuple[str, ...] = (), messages: list | None = None,
                                 held_sha256: str = "") -> tuple[dict | None, str | None, str]:
@@ -700,7 +696,8 @@ def forced_completion_selection(parsed: Any, malformed: bool, candidate: Any, *,
     ``(request, selected text, "")`` or ``(None, None, error)``. Pure: finish_task's own contract
     (``completion_request``), the same byte selection and the silence rule of
     ``consume_completion_request``; nothing is staged, executed or acknowledged here."""
-    from ouroboros.loop_messages import owner_reply_owed
+    from ouroboros.loop_messages import OWNER_REPLY_OWED_REFUSAL, owner_reply_owed
+    from ouroboros.place_reply import records_only_now
     from ouroboros.tools.control_runtime import completion_request
 
     if malformed or not isinstance(parsed, dict) or getattr(parsed, "duplicate_keys", set()):
@@ -709,7 +706,7 @@ def forced_completion_selection(parsed: Any, malformed: bool, candidate: Any, *,
     if error:
         return None, None, "invalid_completion_request: " + error
     text, error = selected_completion_text(request, candidate, messages or [], held_sha256)
-    if not error and request.get("wake_silent") and tool_ctx is not None and owner_reply_owed(tool_ctx):
+    if not error and tool_ctx is not None and (request.get("wake_silent") or records_only_now(tool_ctx)) and owner_reply_owed(tool_ctx):
         error = OWNER_REPLY_OWED_REFUSAL
     return (None, None, error) if error else (request, text, "")
 
@@ -748,11 +745,12 @@ def record_forced_completion(trace: dict, tool_ctx: Any, response_meta: dict, *,
         return None
     blocked = unadopted or verdict.get("unadopted", "")
     reason, cut = blocked or verdict["error"], forced_response_cut(response_meta)
+    ignored = None if reason else (verdict.get("request") or {}).get("ignored")
     trace["forced_completion_request"] = {
         "form": "native" if native is not None or unadopted else "text",
         "status": "not_adopted" if blocked else "refused" if reason else "selected",
         "tool_call_count": response_meta.get("tool_call_count"), **({"reason": reason} if reason else {}),
-        **({"response_cut": cut} if cut else {})}
+        **({"ignored": ignored} if ignored else {}), **({"response_cut": cut} if cut else {})}
     return None if reason else verdict["request"]
 
 
@@ -767,7 +765,7 @@ def carry_forced_selection(tool_ctx: Any, request: dict | None, candidate: Any) 
 def consume_completion_request(tools: ToolRegistry, ctx: Any, trace: dict, content: Any = None) -> bool:
     """Resolve one staged author act after the full batch, using its original observation."""
     from ouroboros.tool_capabilities import completion_observation_calls
-    from ouroboros.loop_messages import owner_reply_owed, owner_source_sha256
+    from ouroboros.loop_messages import OWNER_REPLY_OWED_REFUSAL, owner_reply_owed, owner_source_sha256
     tool_ctx = tools._ctx
     request = getattr(tool_ctx, "_completion_request", None)
     if not isinstance(request, dict):
@@ -779,7 +777,8 @@ def consume_completion_request(tools: ToolRegistry, ctx: Any, trace: dict, conte
     observation = request.get("observation") or {}
     candidate = getattr(tool_ctx, "_delivery_candidate", None)
     text, error = selected_completion_text(request, candidate, ctx.messages, getattr(tool_ctx, "_completion_held_sha256", ""))
-    if request.get("wake_silent") and owner_reply_owed(tool_ctx):
+    from ouroboros.place_reply import records_only_now, riding_sends
+    if (request.get("wake_silent") or records_only_now(tool_ctx)) and owner_reply_owed(tool_ctx):
         error = OWNER_REPLY_OWED_REFUSAL
     calls = (trace.get("tool_calls") or [])[int(observation.get("tool_count") or 0):]
     conflict = getattr(tool_ctx, "_completion_conflict", False)
@@ -793,10 +792,9 @@ def consume_completion_request(tools: ToolRegistry, ctx: Any, trace: dict, conte
     if observation.get("owner_source_sha256") != owner_source_sha256(tool_ctx):
         error = "owner_input_changed: consider the new owner input before selecting completion"
     unseen = completion_observation_calls(calls)
-    # Delivery-only Presence composition relies on actual delivery receipts downstream.
-    delivered = (getattr(tool_ctx, "_presence_completion", None) or {}).get("outcome") == "tool_delivered"
-    if delivered:
-        unseen = [call for call in unseen if not call.get("presence_delivery_confirmed") or call.get("is_error")]
+    riding = riding_sends(tool_ctx, calls)  # a queued send into the turn's own conversation rides with its finish
+    tool_ctx._completion_riding_send = bool(riding)  # ``prepare_focus_reply`` reads it: a record that sent nothing returns once
+    unseen = [call for call in unseen if call not in riding]
     subject, applied = request.get("acceptance_subject"), None
     if not error and subject is not None:
         previous = getattr(tool_ctx, "_acceptance_observation", {})
@@ -811,8 +809,7 @@ def consume_completion_request(tools: ToolRegistry, ctx: Any, trace: dict, conte
         _loop()._latch_final_answer_marker(trace, "" if candidate.quiet else text)  # quiet words latch no fallback
     if not error and request["action"] == "finish" and unseen:
         error = "unobserved_tool_results: read the completed results before finishing: " + ", ".join(str(c.get("tool")) for c in unseen)
-    tool_ctx._completion_request = None
-    tool_ctx._completion_conflict = False
+    tool_ctx._completion_request, tool_ctx._completion_conflict = None, False
     if error:
         trace.setdefault("completion_refusals", []).append({"reason": error, "request": request})
         ctx.messages.append({"role": "user", "content": "[SYSTEM NOTICE] Completion held: " + error})
@@ -1237,6 +1234,8 @@ def _no_tool_final_answer(
     from ouroboros.loop_messages import transcript_growth_signature
     before = transcript_growth_signature(messages)
     origin = "resume" if resume_candidate else "selection" if explicit_candidate else "prose"
+    if origin == "prose":  # a tool-less response carries nothing that rides: a records-only place returns its note once
+        tools._ctx._completion_riding_send = False
 
     def held(reason: str, subreason: str = ""):
         if transcript_growth_signature(messages) != before:
@@ -1427,6 +1426,15 @@ def _no_tool_final_answer(
                 else:
                     tools._ctx._delivery_control_required = False
             return held("owner_followup")
+        if post_controls.get("owner_carried_addressed"):  # my human's row for this work, read by no round yet:
+            solving_again()  # one round reads it; corpus, acknowledgement hash and seal are untouched
+            if isinstance(candidate, _loop().DeliveryCandidate):  # the plain follow-up's shape, which a round reads:
+                candidate.finalization_control = "owner_revision_required"
+                if candidate.control_episode_seen:  # an open control episode keeps its control
+                    _loop()._arm_delivery_control(tools, limit_ctx, llm_trace, control="owner_revision_required")
+                else:  # else no control round
+                    tools._ctx._delivery_control_required = False
+            return held("owner_followup", "owner_carried")
         if provisional_assistant is not None and messages[-1] is provisional_assistant:
             messages.pop()
         if post_controls.get("finalize_now"):
@@ -1473,10 +1481,10 @@ def _no_tool_final_answer(
         record_stopped_completion(tools, limit_ctx, llm_trace, request, candidate)
         if not _seal_admission_before_delivery(tools, limit_ctx, llm_trace):
             return held("admission_seal")
-    from ouroboros.place_reply import prepare_focus_reply
+    from ouroboros.place_reply import prepare_focus_reply, refusal_facts
     allowed, refusal = prepare_focus_reply(tools._ctx, str(content or ""), quiet=bool(getattr(candidate, "quiet", False)))
-    if not allowed:
-        messages.append({"role": "user", "content": refusal})
+    if not allowed:  # the flag returns with the host facts the mind decides on: destination, its own sends, silence
+        messages.append({"role": "user", "content": refusal + refusal_facts(tools._ctx)})
         _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
         solving_again()
         return held("focus_reply_refused")
@@ -1484,9 +1492,10 @@ def _no_tool_final_answer(
         tools._ctx._presence_completion_accepted = True
         limit_ctx.accumulated_usage["presence_completion_outcome"] = tools._ctx._presence_completion["outcome"]
         limit_ctx.accumulated_usage["terminal_origin"] = _loop().TERMINAL_ORIGIN_MODEL_FINAL
-    if getattr(candidate, "quiet", False):  # only this exit accepts a wake's silent finish
+    if getattr(candidate, "quiet", False) or getattr(tools._ctx, "_focus_record_only", False):  # a wake's silent or records-only finish
         limit_ctx.accumulated_usage.update(wake_silent=True, terminal_origin=_loop().TERMINAL_ORIGIN_MODEL_FINAL)
     if summary := (getattr(tools._ctx, "_completion_selected", None) or {}).get("wake_summary"): limit_ctx.accumulated_usage["wake_summary"] = summary
+    if (getattr(tools._ctx, "_completion_selected", None) or {}).get("fold_read") is True: limit_ctx.accumulated_usage["fold_read"] = True
     if getattr(tools._ctx, "_owner_message_sent", False): limit_ctx.accumulated_usage["owner_message_sent"] = True
     from ouroboros.swarm_receipt import retain_comparison
     retain_comparison(tools._ctx)
@@ -1509,6 +1518,10 @@ def finish_completed_stop(tools: ToolRegistry, ctx: Any, emit_progress: Any,
         tools._ctx._completion_selected = None
         _loop()._arm_delivery_control(tools, ctx, ctx.llm_trace, control="owner_revision_required")
         observe_completion_hold(tools, ctx, "selection", "owner_input_changed")
+        return None
+    if controls.get("owner_carried_addressed"):  # a carried row for this work: one round reads it; the hash stands
+        tools._ctx._completion_selected = None
+        observe_completion_hold(tools, ctx, "selection", "owner_carried")
         return None
     reason = str(controls.get("finalize_now") or "").splitlines()
     cause = reason[0].strip() if reason else ""

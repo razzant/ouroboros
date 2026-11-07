@@ -220,18 +220,18 @@ def _finalize_schedule_emission(ctx: ToolContext, emission: Dict[str, Any]) -> s
     signature inside the <8-parameter contract. Keys: ``task_ids``,
     ``requested_model_lane``, ``objective``, ``role``, ``depth``,
     ``parent_task_id``, ``root_task_id``, ``emitted_modes``, plus optional
-    ``write_surface`` and ``coop_shared_tree``.
+    ``write_surface`` and ``write_root`` (the resolved root and who chose it).
 
     It reports the REQUEST and nothing else. Until v6.87.28 it also printed an
     `effective_lane=` and a `CAPABILITY_DELTA` line, both produced by resolving the
     child inside the scheduling call — an answer about live availability, given
     before the child was queued, let alone started. The reduction now reaches the
     parent where it can act on it: in `[SUBTASK_OUTCOME]`, when it reads the answer
-    and decides how far to trust it. ``coop_shared_tree`` is the ONE exception by
-    design: the host-minted shared coop tree is a SCHEDULE-TIME fact (the parent's
-    effective write_root input, not a dispatch-time resolution), and withholding it
-    forced every wave to rediscover its own tree by trial and error (the submarine
-    waves' 'user_files path blocked' loop)."""
+    and decides how far to trust it. The write root is the ONE exception by design:
+    a SCHEDULE-TIME fact (the caller's, the host-minted shared coop tree or the parent
+    workspace; a self_worktree or genesis root is provisioned at admission), and
+    withholding it forced every wave to rediscover its own tree by trial and error
+    (the submarine waves' 'user_files path blocked' loop)."""
     task_ids = list(emission.get("task_ids") or [])
     requested_model_lane = str(emission.get("requested_model_lane") or "")
     objective = str(emission.get("objective") or "")
@@ -241,7 +241,7 @@ def _finalize_schedule_emission(ctx: ToolContext, emission: Dict[str, Any]) -> s
     root_task_id = str(emission.get("root_task_id") or "")
     emitted_modes = list(emission.get("emitted_modes") or [])
     write_surface = str(emission.get("write_surface") or "")
-    coop_shared_tree = str(emission.get("coop_shared_tree") or "")
+    write_root, write_source = emission.get("write_root") or ("", "")
     configured = emission.get("configured_subagent") if isinstance(
         emission.get("configured_subagent"), dict
     ) else {}
@@ -307,19 +307,15 @@ def _finalize_schedule_emission(ctx: ToolContext, emission: Dict[str, Any]) -> s
             leaf_scope_note = f"\nagent_session selected source: {source}."
         leaf_scope_note += (" First start confirms the scope or private checking copy; supervisor read roots "
                             "are not a leaf-access guarantee. Prompt-only paths are not prepared." + selected_note)
-    coop_note = ""
-    if str(coop_shared_tree or "").strip():
-        try:
-            import pathlib as _pl
-
-            _tree = _pl.Path(coop_shared_tree)
-            coop_note = (
-                f"\nshared coop tree: {_tree} — children write there "
-                "(write_surface=external_workspace); you read it via "
-                f"root=subagent_projects, path={_tree.name!r}/…"
-            )
-        except Exception:
-            coop_note = f"\nshared coop tree: {coop_shared_tree}"
+    if write_surface in {"self_worktree", "genesis"}:
+        write_note = f"\nwrite root: provisioned for this child at admission ({write_surface})"
+    elif not write_surface:
+        write_note = "\nwrite root: none (read-only child)"
+    else:
+        write_note = f"\nwrite root: {write_root} ({write_source})"
+        if write_source == "host-minted coop tree":
+            write_note += (" — children write there (write_surface=external_workspace); you read it via "
+                           f"root=subagent_projects, path={Path(write_root).name!r}/…")
     commitment = _schedule_commitment(ctx, route_kind, emission)
     legacy_note = (
         "\nDEPRECATED_LEGACY_SELECTOR: deterministically mapped to this exact configured row; "
@@ -336,7 +332,7 @@ def _finalize_schedule_emission(ctx: ToolContext, emission: Dict[str, Any]) -> s
     return (
         f"Subagent request queued {task_ids[0]}: {objective} "
         f"(subagent_id={selected_name}, route={route_kind}, {commitment})"
-        f"{worker_note}{pool_note}{profile_note}{leaf_scope_note}{coop_note}{legacy_note}{access_note}{inputs_note}"
+        f"{worker_note}{pool_note}{profile_note}{leaf_scope_note}{write_note}{legacy_note}{access_note}{inputs_note}"
         f"{_effort_request_note(configured, str(emission.get('requested_effort') or ''), getattr(ctx, 'task_metadata', None))}"
     )
 
@@ -977,10 +973,10 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "configured_subagent": configured_subagent,
         "parent_cognitive_route": parent_cognitive_route,
         **{key: fields[key] for key in ("directory_strategy", "scope_paths", "delegated_mode", "workspace", "attachment_paths",
-                                        "attachment_import", "document_import_intent", "prepared_input_files") if key in fields},
+                                        "attachment_import", "document_import_intent", "prepared_input_files", "memory_view") if key in fields},
         "resource_intent": resource_intent,
     }
-    owner_origin = {**governing_words_for_schedule(ctx), **declared_words_fact(child_contract)}  # the owner's words, by value
+    owner_origin = {**governing_words_for_schedule(ctx, session=requested_executor == "harness"), **declared_words_fact(child_contract)}  # the owner's words, by value
     child_facts = {
         **({"execution_timeout_sec": execution_left} if execution_left is not None else {}),
         "objective": objective,
@@ -1069,13 +1065,8 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "legacy_selection": legacy_selection,
         "requested_access": params.get("access"),
         "requested_effort": fields["requested_effort"], "input_files": fields.get("prepared_input_files"),
-        # Host-minted shared coop tree only (a caller-supplied write_root is the
-        # parent's own knowledge already).
-        "coop_shared_tree": (
-            effective_write_root
-            if effective_write_root and effective_write_root != str(params.get("write_root", "") or "")
-            else ""
-        ),
+        "write_root": (task_constraint.get("write_root") or "", "caller" if str(params.get("write_root") or "").strip()
+                       else "host-minted coop tree" if str(effective_write_root or "").strip() else "parent workspace"),
     })
 
 

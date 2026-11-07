@@ -343,7 +343,13 @@ _CONVERSATION_READERS = {
     "ouroboros/presence_carrier.py::_saved_event": "the task document's presence event",
     "ouroboros/presence_observations.py::record_transport_queue.update": "the task document's presence event",
     "ouroboros/presence_owner_contact.py::contact_origin": "the task document's presence event",
+    "ouroboros/presence_context.py::_author_directory": "the task document's presence event: author names",
+    "ouroboros/presence_context.py::_thread_snapshot": "the task document's presence event: the connector's capture, whole",
     "ouroboros/tool_effects.py::effect_of": "a tool effect's declared conversation (a string)",
+    "ouroboros/dialogue_provenance.py::RoomLabelResolver.label": "whether a row's facts carry their conversation's scalars",
+    "ouroboros/dialogue_provenance.py::RoomLabelResolver._place_label": "tail facts or a row: the scalar name/audience only",
+    "ouroboros/memory_view_conversations.py::_scalars": "tail facts or a row: the conversation's scalars only, for a label",
+    "ouroboros/tools/chronicle.py::publish_covered_page": "a page's own covers.conversation flag, never a row's conversation",
 }
 # Every function that decodes a stored dialogue body itself (``Row`` readers go through ``project_source``).
 _BODY_DECODERS = {

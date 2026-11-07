@@ -29,7 +29,7 @@ from ouroboros.loop_llm_call import REBOUND_PHYSICAL_CONTEXT_KEY, REFUSED_CANDID
 from ouroboros.loop_round_limits import _coarsen_memory_view, _run_emergency_address_pass
 from ouroboros.observability import new_execution_id
 from ouroboros.tools.registry import ToolRegistry
-from ouroboros.transcript_prefix import rewrite_epoch
+from ouroboros.transcript_prefix import rewrite_epoch, rewrite_view
 from ouroboros.usage_accounting import PhysicalAttemptContext, PhysicalAttemptPreconditionFailed, invalidate_task_cache_splits
 
 
@@ -357,7 +357,7 @@ def _run_cross_model_fallback_chain(
         if context_fit_plan is not None:  # a failed candidate's view leaves with it (the primary row's resumed one too)
             if fallback_messages is messages:  # a same-family candidate rebound the shared transcript
                 messages[:] = context_fit_plan.reproject_transcript(messages, active_context_mode)
-                invalidate_task_cache_splits(task_id)
+                rewrite_view(tools._ctx, task_id, "fallback_view_restored")
             _adopt_view_facts(tools._ctx, context_fit_plan, active_context_mode)
         _restore_context_fit_usage(accumulated_usage, primary_context_usage)
         if (resident[0] is not None and resident[0] != tool_schemas and fallback_messages is not messages
@@ -365,7 +365,7 @@ def _run_cross_model_fallback_chain(
             # Its ceiling fit left with its transcript copy, notice included; the next route gets the list it had.
             # (A same-family candidate wrote its notice into the shared transcript, so its fit stays with it.)
             tool_schemas[:], tools._ctx._route_left_out_tool_names = resident
-            invalidate_task_cache_splits(task_id)
+            rewrite_view(tools._ctx, task_id, "fallback_tools_restored", scope="tools")
         if _walk_fenced(tools._ctx, accumulated_usage) or (not recovering_output and str(
                 accumulated_usage.get("_last_llm_error_kind") or "") == "llm_output_exhausted"):
             break  # an exhausted candidate replied unusably: its outcome is the round's, no further route is dialed
@@ -577,9 +577,8 @@ def _rebind_context_fit_plan(
         "model_route": model_route if model_route is not None else getattr(plan, "model_route", {}),
         "credential_profile_id": credential_profile_id,
     }
-    is_subagent = str(metadata.get("delegation_role") or "").lower() == "subagent"
     try:
-        route, evidence = _context_fit_route(task, allow_fetch=not is_subagent)
+        route, evidence = _context_fit_route(task, allow_fetch=True)
     except Exception:
         log.debug("Route-switch capability probe failed; preserving unknown Max", exc_info=True)
         route, evidence = _failed_route_evidence(task)
@@ -627,7 +626,7 @@ def _rebind_context_fit_plan(
     projected_prompt_tokens = rebound.projected_tokens_with_tools(mode, tool_schemas)
     shown = messages[0] if messages else None
     messages[:] = rebound.reproject_transcript(messages, mode)
-    invalidate_task_cache_splits(getattr(tools._ctx, "task_id", ""))
+    rewrite_view(tools._ctx, getattr(tools._ctx, "task_id", ""), "route_rebind")
     tools._ctx.context_fit_plan = rebound
     tools._ctx.messages = messages
     tools._ctx.active_context_mode = mode
@@ -723,6 +722,7 @@ class _RoundModelCallContext:
     output_recovery_fallback: bool = False
     physical_send_claim: Optional[Callable[[Any], None]] = None
     refused_density: Optional[float] = None  # the size refusal in recovery: its own density, until the recovery sends
+    refusal_policy: Optional[Dict[str, bool]] = None  # a refusal pass's bodies view: did a provider start the round (06.11)
 
 
 def _route_follows(candidates: List[Tuple[str, str, bool, bool]]) -> bool:
@@ -1103,7 +1103,7 @@ def _reproject_actual_overflow_low(ctx: _RoundModelCallContext) -> None:
         measured_input_tokens=fit.measurement.reprojection_input_tokens)
     mode = ctx.context_fit_plan.initial_mode
     ctx.messages[:] = ctx.context_fit_plan.reproject_transcript(ctx.messages, mode)
-    invalidate_task_cache_splits(ctx.task_id)
+    rewrite_view(ctx.tools._ctx, ctx.task_id, "low_retry")
     ctx.active_context_mode = mode
     ctx.tools._ctx.messages = ctx.messages
     ctx.tools._ctx.active_context_mode = mode
@@ -1326,7 +1326,7 @@ def _fit_route_tool_ceiling(ctx: _RoundModelCallContext) -> bool:
     schemas[:], left_out = fit_tool_schemas_to_limit(schemas, limit, keep=earlier | loaded,
                                                      protect=history_tool_names(ctx.messages))
     ctx.tools._ctx._route_left_out_tool_names = earlier | set(left_out)
-    invalidate_task_cache_splits(ctx.task_id)
+    rewrite_view(ctx.tools._ctx, ctx.task_id, "route_tool_ceiling", scope="tools")
     _loop()._append_or_merge_user_message(ctx.messages, route_tool_limit_notice(
         ctx.active_model, limit, total, left_out, selectors=usable_selectors(ctx.tools, schemas)))
     return True
@@ -1395,13 +1395,10 @@ def _call_round_model_once(ctx: _RoundModelCallContext) -> Tuple[Any, float, str
     return _recover_context_overflow(ctx, failed_capture, cost, prepared=prepared)
 
 
-# Size recovery (owner revision, 20.10.2026): a known-window prediction of no result room or the provider's
-# typed size refusal starts two model-free passes, each earning one strictly smaller check/retry: the
-# first replaces superseded host state and bodies a usable turn already showed; the second, only after a
-# further failed check/refusal, lowers memory granularity (books too when memory falls short of the excess), then
-# changes books before addressing eligible unseen bodies, a just-chosen one last. Each pass runs once
-# per round whatever the route, so a configured fallback receives the view as applied and walks nothing
-# again. The fallback chain and the end of the path follow in the caller.
+# Size recovery (owner revision, 20.10.2026; sizing 06.11.2026): a known-window prediction of no result room or the
+# provider's typed size refusal starts the model-free passes of ``REFUSAL_PASSES`` (order and sizes there), each
+# earning one strictly smaller check/retry. Each runs once per round whatever the route, so a configured fallback
+# receives the view as applied and walks nothing again. The fallback chain and the end of the path follow in the caller.
 from ouroboros.context_budget import REFUSAL_PASSES  # one rung order; dispatch stays in this driver
 WAKE_DELIVERY_STEP = "wake_delivery"  # the change applied before the passes, when there was one
 #: The round needing size recovery (``context_renewal`` reads it); a fallback's other failure cannot cancel it.
@@ -1459,7 +1456,7 @@ def _refusal_target(ctx: _RoundModelCallContext, fit: Any, refused: Any = None) 
         slack = refused.predicted_slack_tokens
         return max(0, -predicted_free) + slack, slack
     stated, size, slack, reply = _refusal_window(ctx, fit, refused)
-    record_refused_input(ctx.accumulated_usage, ctx.context_fit_plan, size)  # the provider's count when it stated one
+    record_refused_input(ctx.accumulated_usage, ctx.context_fit_plan, size, measured=measurement.anchor_input_tokens is not None)  # the provider's count when stated
     if stated:
         return max(0, size + reply - stated) + slack, slack
     accepted = measurement.accepted_input_tokens
@@ -1482,6 +1479,7 @@ def _recover_context_overflow(ctx: _RoundModelCallContext, failed_capture: Any, 
     if not _failed_capture_is_comparable(failed_capture):
         return _skipped("failed_candidate_not_comparable")
     done = _loop()._context_overflow_retries(ctx.tools._ctx)
+    changed = _loop()._context_overflow_retries(ctx.tools._ctx, "_context_overflow_changed")  # owner 2A reads the round
     fit = _loop()._measure_round_main_fit(ctx, automatic_pass_used=False)
     if fit is None:
         return None, cost, ctx.active_context_mode
@@ -1494,8 +1492,9 @@ def _recover_context_overflow(ctx: _RoundModelCallContext, failed_capture: Any, 
             if key in done:
                 continue
             done.add(key)
-            if not _apply_refusal_pass(ctx, steps, fit, target, slack, real):
+            if not _apply_refusal_pass(ctx, steps, fit, target, slack, real, earlier_change=fit.measurement.round_id in changed):
                 continue
+            changed.add(fit.measurement.round_id)  # a fallback's re-entry of this round reads it too
         density, ctx.refused_density = ctx.refused_density, None  # the retry is measured and sent ordinarily
         fit = _loop()._measure_round_main_fit(ctx, automatic_pass_used=True)
         if fit is None:
@@ -1526,20 +1525,20 @@ def _recover_context_overflow(ctx: _RoundModelCallContext, failed_capture: Any, 
     return None, cost, ctx.active_context_mode
 
 
-def _apply_refusal_pass(ctx: _RoundModelCallContext, steps: Tuple[str, ...], fit: Any,
-                        target: Optional[int], slack: Optional[int] = None, refused: bool = False) -> bool:
+def _apply_refusal_pass(ctx: _RoundModelCallContext, steps: Tuple[str, ...], fit: Any, target: Optional[int],
+                        slack: Optional[int] = None, refused: bool = False, *, earlier_change: bool = False) -> bool:
     """Apply a pass's steps in order until together they shed ``target``; True when the candidate changed.
 
-    Each step is sized by what the earlier steps of the pass left of the target: host copies that
-    already freed the room leave every body in place, and memory the floor narrowed enough addresses
-    no unseen body (the gradual order the owner asked for). An unknown target lets each step take its
-    whole category. A just-chosen body that fits alone goes last, only in a round a provider's refusal
-    started (``refused``) and only for what the late rescue's other steps could not answer: the measured
-    target left, or nothing changed against an unknown one (owner 2A). No step pays for a directly required handbook
-    (owner 1.11): each is sized without it, and an excess it alone explains, or an unknown one beside it, stops the pass.
+    Each step is sized by what the earlier ones left: host copies that freed the room leave every body in place,
+    bodies that paid the measured excess leave memory the slack (the owner's gradual order); an unknown target lets
+    each step take its whole category. After a further refusal memory pays the rest before a just-chosen body, which
+    goes last, only in a round a provider's refusal started (``refused``): for the measured target left, or against
+    an unknown one when nothing in the round changed (``earlier_change``, owner 2A). No step pays for a directly
+    required handbook (owner 1.11): an excess it alone explains, or an unknown one beside it, stops the pass.
     """
     changed, remaining, charged = False, target, 0
-    for step in steps:
+    ctx.refusal_policy = {"provider_refused": bool(refused)}  # a shown chosen read yields only to a provider
+    for step in (*steps, "memory_rest") if "unseen_bodies" in steps else steps:  # memory before a chosen read (2A)
         if remaining is not None and remaining <= 0:
             break
         if getattr(ctx.context_fit_plan, "window_record", None) is not None:
@@ -1552,7 +1551,7 @@ def _apply_refusal_pass(ctx: _RoundModelCallContext, steps: Tuple[str, ...], fit
         if shed is not None:
             changed = True
             remaining = None if remaining is None else remaining - shed
-    if refused and "unseen_bodies" in steps and (not changed if remaining is None else remaining > 0):
+    if refused and "unseen_bodies" in steps and (not (changed or earlier_change) if remaining is None else remaining > 0):
         changed |= _run_emergency_address_pass(ctx, fit, rung="chosen_bodies", goal_tokens=remaining).status == "applied"
     return changed
 
@@ -1561,39 +1560,37 @@ def _apply_refusal_step(ctx: _RoundModelCallContext, step: str, fit: Any, target
                         slack: Optional[int] = None) -> Optional[int]:
     """Apply one step of a refusal pass to the live transcript: the tokens it shed, None when unchanged.
 
-    Bodies are addressed oldest first until ``target`` (the whole category when it is unknown). The floor
-    narrows memory by the measured excess only, never by the return-after-fold slack: memory is continuity
-    (BIBLE P1), and narrowing it for slack showed this room's own rows by address. Without a target it
-    narrows by the deficit against a known window, and only with neither by everything it can give. Books
-    become navigation before any eligible unseen body leaves; a just-chosen body leaves last.
-    Memory alone satisfying the whole goal leaves the books and bodies untouched.
+    Shown bodies pay the measured excess only, oldest first, a shown chosen read only after a provider's refusal
+    (``refusal_policy``, ``context_source_view``): the work keeps its room (BIBLE P1). Unseen bodies pay what the
+    pass still owes (all when unknown). The floor lowers memory's granularity for the rest and the slack, which
+    only memory detail and ordinary host forms pay, a whole-or-outline section (``memory_floor``) only a measured
+    excess: granularity changes, coverage stays (BIBLE P1). Unknown, it asks a known window's deficit, else memory
+    detail alone; memory's rest after a further refusal asks everything. Its floor lowers the books only where
+    memory cannot make room; the books step waits for the second pass.
     """
+    slack = _refusal_window(ctx, fit)[2] if slack is None else slack
     if step in ("host_copies", "bodies", "unseen_bodies"):
         goal = None if step == "host_copies" else target
+        if step == "bodies" and target is not None and (goal := target - slack) <= 0:
+            return None  # the measured excess is paid; memory pays the slack
         receipt = _run_emergency_address_pass(ctx, fit, rung=step, goal_tokens=goal)
         return max(0, int(receipt.reclaimed_tokens or 0)) if receipt.status == "applied" else None
-    if step not in ("floor", "books") or (step == "books" and ctx.active_context_mode != "max"):
+    if step not in ("floor", "memory_rest", "books") or (step == "books" and ctx.active_context_mode != "max"):
         return None  # outside Max the books already show as navigation
     current = _loop()._measure_round_main_fit(ctx, automatic_pass_used=True) if step == "books" else fit
     before = (current or fit).measurement.estimated_input_tokens
 
-    def shed_since_before(default: int) -> int:
+    def shed_since_before() -> int:
         after = _loop()._measure_round_main_fit(ctx, automatic_pass_used=True)
-        return max(0, before - after.measurement.estimated_input_tokens) if after is not None else default
-
-    def books_to_navigation(saved: int) -> Optional[int]:
-        mode = ctx.active_context_mode
-        _reproject_actual_overflow_low(ctx)
-        return shed_since_before(saved) if ctx.active_context_mode != mode else None
+        return max(0, before - after.measurement.estimated_input_tokens) if after is not None else 0
 
     if step == "books":
-        return books_to_navigation(0)
-    # The measured excess, else the deficit against a known window, else everything memory can give.
-    slack = _refusal_window(ctx, fit)[2] if slack is None else slack
-    excess = max(1, target - slack) if target else (fit.measurement.capacity_deficit_tokens or WHOLE_CATEGORY)
-    coarsened = _coarsen_memory_view(ctx, fit, saving=excess)
-    saved = shed_since_before(0) if coarsened else 0
-    if target and saved >= excess:
-        return saved  # the next step handles any remaining slack
-    shed = books_to_navigation(saved)
-    return shed if shed is not None else (saved if coarsened else None)
+        mode = ctx.active_context_mode
+        _reproject_actual_overflow_low(ctx)
+        return shed_since_before() if ctx.active_context_mode != mode else None
+    # The rest of the measured excess with the slack (a slack-only ask outlines nothing), else a known window's
+    # deficit with it, else memory detail alone, or after a further refusal everything memory can give.
+    deficit = fit.measurement.capacity_deficit_tokens
+    excess, asked = ((max(0, target - slack), min(slack, target)) if target else (deficit, slack) if deficit
+                     else (WHOLE_CATEGORY, 0) if step == "memory_rest" else (0, WHOLE_CATEGORY))
+    return shed_since_before() if _coarsen_memory_view(ctx, fit, saving=excess, slack=asked) else None

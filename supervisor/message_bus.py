@@ -1366,7 +1366,11 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
                 record_narration(DATA_DIR, progress_record)
                 meta.update(projection_fields(progress_record))
         else:
-            feed = _text.strip() not in ("", "\u200b") and not is_task_card_message(progress_meta)
+            # A started or handed-over Project's row in Main is drawn as that work's portal (work_portal.js ``row``), a
+            # card and no message: it never makes Main unread (DESIGN "Unread": where a row is shown decides).
+            portal = chat_id == 1 and system_type in ("project_started", "project_handoff") and bool(
+                task_id and meta.get("project_id"))
+            feed = _text.strip() not in ("", "\u200b") and not is_task_card_message(progress_meta) and not portal
             stored = log_chat(
                 # S3 (Q4): a typed SYSTEM row persists as direction="system", the
                 # role history replay already maps to a system rendering — so the

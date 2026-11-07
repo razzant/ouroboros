@@ -12,6 +12,9 @@ from typing import Any, Dict
 
 
 VALID_SUBTASK_MEMORY_MODES = frozenset({"forked", "empty"})
+# The fields a parent may widen a child's memory view by: the ones its description offers, no other ViewSpec field.
+MEMORY_VIEW_FIELDS = ("story", "room_page", "room_lanes", "origin_words", "other_conversations", "marks", "knowledge",
+                      "owner_words")
 
 
 def schedule_subagent_properties() -> Dict[str, Any]:
@@ -59,23 +62,34 @@ def schedule_subagent_properties() -> Dict[str, Any]:
         "objective": {"type": "string", "description": "Focused OUTCOME and scope, not a step-by-step script. A harness-dispatched child forwards work to its delegated run; a scripted objective can read as orders to execute natively."},
         "expected_output": {"type": "string", "description": "Concrete handoff expected from the child."},
         "role": {"type": "string", "description": "Optional freeform lineage/UI role, e.g. architecture-reviewer; omission assigns no role."},
-        "context": {"type": "string", "description": "Optional reference context, not instructions: write the orientation it lacks (purpose, prior decisions, material paths). The child does not see this conversation; input_sources says what it starts with. For a harness-dispatched child this becomes its session's WORK ORDER; that session has none of my memory, so put recipes/details here, not in objective."},
+        "context": {"type": "string", "description": "Optional reference context, not instructions: write the orientation it lacks (purpose, prior decisions, material paths). The child does not see this conversation; input_sources says what it starts with. For a harness-dispatched child this becomes its session's WORK ORDER; that session starts with my human's words, the marks and the knowledge outline but none of my other memory, so put recipes/details here, not in objective."},
         "input_sources": {
             "type": "string", "enum": ["shared", "declared"],
             "description": (
-                "Omit or shared: the child starts with SYSTEM/BIBLE, book maps, my identity, life's top-level "
-                "account (except Agent-session supervisors), the child's room page, full assignment, "
-                "attachments and my human's originating words verbatim; knowledge and other material "
-                "remain one read away. declared selects only the authored objective/context/constraints, "
-                "my human's originating words verbatim and full governance/task authority for an independent "
-                "first position. It excludes automatic shared memory, dialogue, project knowledge, inherited "
-                "parent context and attachments; put common evidence in context. Descendants cannot widen inherited "
+                "Every child starts with my human's words for the work verbatim and dated, the marks in force "
+                "and the knowledge outline; other knowledge stays one read away. Omit or shared: it also starts "
+                "with SYSTEM/BIBLE, book maps, my identity, life's top-level account (except Agent-session "
+                "supervisors), the child's room page, full assignment and attachments. declared selects only "
+                "the authored objective/context/constraints and full governance/task authority for an independent "
+                "first position; it excludes the rest of shared memory (identity, life account, room page), "
+                "dialogue, inherited parent context and attachments; put common evidence in context. Descendants cannot widen inherited "
                 "declared. Selection lasts for the task; the assignment defines retention/collaboration, "
                 "and tool results/messages can broaden input. It prescribes no exchange sequence or "
                 "transport, provides no access isolation and makes no claim about provider context or priors."
             ),
         },
         "constraints": {"type": "string", "description": "Optional constraints/non-goals for the child."},
+        "memory_view": {
+            "type": "object",
+            "description": (
+                "Optional widening of the child's memory view by field, e.g. {\"knowledge\": true} starts it with the whole "
+                "knowledge base instead of the outline. Fields: story, room_page, room_lanes, origin_words, "
+                "other_conversations, marks (all|room_and_global), knowledge, owner_words. It only widens but for the story, "
+                "which the assignment may leave out: my human's words and the marks in force can be turned on, never off "
+                "(owner_words false and marks none are refused), and any other field is refused here. Omitted: the role's "
+                "default view. A value the view does not know is refused "
+                "at the child's start with the role default and one event."),
+        },
         "memory_mode": {
             "type": "string",
             "enum": sorted(VALID_SUBTASK_MEMORY_MODES),
@@ -346,6 +360,13 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None) -> tu
         if subset_only and not set(origins).issubset(resource_policy.get("allowed_origins", [])):
             return {}, "⚠️ BROWSER_ORIGIN_NOT_GRANTED: this caller may only narrow its inherited allowed_origins."
         resource_policy["allowed_origins"] = origins
+    view = params.get("memory_view")
+    if isinstance(view, dict) and (view.get("owner_words") is False or view.get("marks") == "none"):
+        return {}, ("⚠️ TOOL_ARG_ERROR (schedule_subagent): memory_view only widens a child's view; "
+                    "it keeps my human's words and the marks in force.")
+    if isinstance(view, dict) and not set(view) <= set(MEMORY_VIEW_FIELDS):
+        return {}, ("⚠️ TOOL_ARG_ERROR (schedule_subagent): memory_view fields are "
+                    f"{', '.join(MEMORY_VIEW_FIELDS)} (got: {', '.join(sorted(map(str, set(view) - set(MEMORY_VIEW_FIELDS))))}).")
     return {
         "deadline_at": deadline_at, "objective": objective, "expected_output": expected_output,
         "role": str(params.get("role") or "").strip(),
@@ -354,6 +375,7 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None) -> tu
         "memory_mode": memory_mode, "may_mutate": params.get("may_mutate", False),
         "requested_effort": requested_effort,
         **({"delegated_mode": params["mode"]} if params.get("mode") is not None else {}),
+        **({"memory_view": view} if view is not None else {}),  # its values are checked at the child's start
         "acceptance_claims": acceptance_claims,
         "resource_policy": resource_policy,
         "parent_contract": parent,

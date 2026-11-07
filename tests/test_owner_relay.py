@@ -144,6 +144,79 @@ def test_saved_ack_updates_each_quoted_owner_row(tmp_path):
     assert events.get_nowait()["relay_ack"]["relay_id"] == "both"
 
 
+def test_revoked_place_owner_row_is_not_quoted_or_relayed(tmp_path):
+    """A held place row is rechecked when the account is revoked before delivery."""
+    from ouroboros import places
+    from ouroboros.owner_relay import inject_relay
+    from tests.test_place_owner_author import _place_row
+
+    connected = places.connect_place(tmp_path, connector="bridge", provider="chat", account_id="qa",
+                                     label="Team chat")
+    places.edit_place(tmp_path, connected.place_id, "confirm_owner_account", author="owner",
+                      platform_actor_id="anton", account_id="qa")
+    row = _place_row(connected.place_id)
+    dialogue_store.append(tmp_path, "chat", row)
+    stored = next(entry.row for entry in dialogue_store.iter_rows(tmp_path, "chat"))
+    handle = format_address(row_address(stored))
+    sender = context(tmp_path, stored)
+    assert handle in held_owner_messages(sender)
+
+    places.edit_place(tmp_path, connected.place_id, "revoke_owner_account", author="owner",
+                      platform_actor_id="anton", account_id="qa")
+    assert quote_rows(sender, [handle])[0] == []
+
+    receiver = context(tmp_path)
+    receiver.task_id = "receiver"
+    inject_relay(receiver, {"relay": {"relay_id": "r1", "quotes": []},
+                            "owner_rows": [stored], "source_task_id": "sender", "text": "note"}, [])
+    assert not [row for row in getattr(receiver, "_owner_directives", []) if row.get("source") == "owner_mailbox"]
+    assert not held_owner_messages(receiver)
+
+
+def test_cross_root_relay_validates_source_place_but_holds_on_recipient_root(tmp_path):
+    """A relay keeps source-place authority when sender and recipient use different data roots."""
+    from ouroboros import places
+    from ouroboros.owner_relay import inject_relay
+    from tests.test_place_owner_author import _place_row
+
+    source_root, recipient_root = tmp_path / "source", tmp_path / "recipient"
+    source_root.mkdir()
+    recipient_root.mkdir()
+    connected = places.connect_place(source_root, connector="bridge", provider="chat", account_id="qa",
+                                     label="Source chat")
+    places.edit_place(source_root, connected.place_id, "confirm_owner_account", author="owner",
+                      platform_actor_id="anton", account_id="qa")
+    row = _place_row(connected.place_id)
+    dialogue_store.append(source_root, "chat", row)
+    stored = next(entry.row for entry in dialogue_store.iter_rows(source_root, "chat"))
+    sender = context(source_root, stored)
+    handle = format_address(row_address(stored))
+    quotes, error = quote_rows(sender, [handle])
+    assert not error
+    relay, created = write_relay(recipient_root, "receiver", relay_id="cross", note="note", quotes=quotes,
+                                 chat_id=1, teller_task_id="sender", canonical_root=source_root)
+    assert created
+
+    receiver = context(recipient_root)
+    receiver.task_id = "receiver"
+    inject_relay(receiver, relay, [])
+    assert [row.get("content") for row in receiver._owner_directives] == [stored["text"]]
+    assert handle in held_owner_messages(receiver)
+
+    third_root = tmp_path / "third"
+    third_root.mkdir()
+    forwarded, error = quote_rows(receiver, [handle])
+    assert not error and forwarded[0]["text"] == stored["text"]
+    forwarded_entry, created = write_relay(third_root, "receiver", relay_id="cross-again", note="note",
+                                            quotes=forwarded, chat_id=1, teller_task_id="receiver",
+                                            canonical_root=recipient_root)
+    assert created
+    third = context(third_root)
+    third.task_id = "receiver"
+    inject_relay(third, forwarded_entry, [])
+    assert [row.get("content") for row in third._owner_directives] == [stored["text"]]
+
+
 def test_retained_current_quotes_extend_owner_corpus_without_the_note(tmp_path):
     from ouroboros.task_results import write_task_result
     from ouroboros.owner_words import task_owner_words
@@ -385,6 +458,181 @@ def test_an_unrecordable_relay_answer_sends_nothing_and_keeps_the_relay_open(tmp
     assert "RELAY_RETURN_NOT_OWED" in receipt and q.empty() and "once" in recipient._open_relays
 
 
+def _carried_entry(canonical, drive, member, quote, *, went_to="", teller="root", earlier_ref=""):
+    """One host-carried relay entry as the carriage writes it (``owner_relay._carry_to_member``)."""
+    address = quote["source"]["address"]
+    return write_relay(drive, member, relay_id=f"{'carry-context' if went_to else 'carry'}:{address}", note="",
+                       quotes=[quote], chat_id=1, teller_task_id=teller, canonical_root=canonical,
+                       host_carried={"went_to": went_to, **({"earlier_ref": earlier_ref} if earlier_ref else {})})
+
+
+def _helper(drive, task_id="helper"):
+    from ouroboros.tools.registry import ToolContext
+    ctx = ToolContext(repo_dir=drive, drive_root=drive, task_id=task_id)
+    ctx.task_metadata = {"delegation_role": "subagent", "root_task_id": "root", "parent_task_id": "root"}
+    ctx._owner_directives = []
+    return ctx
+
+
+def test_a_carried_entry_renders_the_carried_line_and_holds_the_row_outside_corpus_return_and_receipt(tmp_path):
+    """A row the host carries is my human's words shown once under the carried line, held with its fact, its file
+    staged on the member's drive; it enters no corpus, opens no return relay, posts no receipt and moves no owner
+    hash. A helper gets no handles fact and no runtime handle list; a root with its own row prints both."""
+    from ouroboros.chat_uploads import claim_refs, store_upload
+    from ouroboros.context import build_runtime_section
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND
+    from ouroboros.loop_messages import owner_source_sha256
+    from ouroboros.owner_relay import owner_quote
+    from tests._context_shared import _make_health_env
+    import json
+    _path, ref = store_upload(b"carried attached words", "plan.txt", data_dir=tmp_path)
+    claim_refs([ref], tmp_path)
+    row, address = source(tmp_path)
+    row["attachments"] = [ref]
+    child = tmp_path / "child"
+    child.mkdir()
+    entry, created = _carried_entry(tmp_path, child, "helper", owner_quote(tmp_path, row, address=address))
+    assert created and entry["host_carried"] == {"went_to": ""} and entry["msg_id"] == f"relay:carry:{address}:helper"
+    helper = _helper(child)
+    hash_before = owner_source_sha256(helper)
+    events, messages = queue.Queue(), [{"role": "user", "content": "Your assignment."}]
+    controls = _drain_incoming_messages(messages, queue.Queue(), child, "helper", events, set(), owner_ctx=helper)
+    assert controls["owner_carried_addressed"] == [address]
+    [shown] = messages[1:]
+    line = f"[Owner words quoted verbatim; {row['ts']}; Main; carried to this work by the host (reached this work); handle {address}]"
+    assert str(shown["content"]).startswith(f"{line}\n{row['text']}\n") and shown[HOST_CONTEXT_KIND_KEY] == OWNER_WORDS_KIND
+    assert "[Message from Ouroboros" not in str(shown) and "owner_quote_handles" not in str(messages)
+    assert helper._owner_directives == [] and owner_source_sha256(helper) == hash_before
+    assert not getattr(helper, "_open_relays", None) and events.empty() and not drain_owner_entries(child, "helper")
+    assert held_owner_messages(helper)[address]["carried"] == {"from": "root", "went_to": "", "at": entry["ts"]}
+    assert held_owner_messages(helper)[address]["text"] == row["text"]
+    assert (child / "task_results/artifacts/helper/attachments" / ref["upload"]).read_bytes() == b"carried attached words"
+    assert "read_file" in str(shown["content"])
+    env = _make_health_env(tmp_path / "env")
+    section = json.loads(build_runtime_section(env, {"id": "helper", "metadata": helper.task_metadata}, ctx=helper).split("\n\n", 1)[1])
+    assert "owner_quote_handles" not in section
+    # The other direction: a context entry names where the row went and is no closing control; a root prints both facts.
+    other = tmp_path / "other"
+    other.mkdir()
+    _carried_entry(tmp_path, other, "helper", owner_quote(tmp_path, {**row, "attachments": []}, address=address), went_to="sibling")
+    peer, peer_messages = _helper(other), []
+    assert "owner_carried_addressed" not in _drain_incoming_messages(peer_messages, queue.Queue(), other, "helper", None, set(), owner_ctx=peer)
+    assert "carried to this work by the host (went to sibling)" in str(peer_messages[0]["content"])
+    root, root_messages = context(tmp_path, row), []
+    held_owner_messages(root)  # the turn holds its own row
+    _drain_incoming_messages(root_messages, queue.Queue(), tmp_path, "teller", None, set(), owner_ctx=root)
+    assert "owner_quote_handles held by this turn" in str(root_messages) and address in str(root_messages)
+    section = json.loads(build_runtime_section(env, {"id": "teller", "metadata": root.task_metadata}, ctx=root).split("\n\n", 1)[1])
+    assert section["owner_quote_handles"] == [address]
+
+
+def test_one_address_is_one_entry_and_a_row_held_under_the_same_fact_renders_nothing(tmp_path):
+    """Two drains of a root write the member identical bytes under one id, whichever name the project has by then;
+    an entry delivered again (a crash before its ack) renders nothing more; a context entry after the addressed one
+    renders nothing; an addressed entry after a context one flips the fact and is shown once."""
+    from ouroboros.owner_relay import carry_to_members, inject_relay, owner_quote, retain_owner_message
+    from ouroboros.projects_registry import create_project, update_project
+    from ouroboros.task_results import write_task_result
+    project = create_project(tmp_path, "alpha", name="Alpha")
+    row = {"chat_id": project["chat_id"], "direction": "in", "ts": "2026-10-01T00:00:00Z", "text": "exact words",
+           "client_message_id": "owner-1"}
+    dialogue_store.append(tmp_path, "chat", row)
+    address = format_address(row_address(row))
+    write_task_result(tmp_path, "member", "running", delegation_role="subagent", parent_task_id="root", root_task_id="root")
+    root = context(tmp_path)
+    root.task_id = "root"
+    retain_owner_message(root, row)
+    carry_to_members(root, delivered=True)
+    update_project(tmp_path, project["id"], name="Beta")
+    carry_to_members(root, delivered=True)  # the member holds the id: no second write, whatever the room is called now
+    [entry] = drain_owner_entries(tmp_path, "member")
+    assert entry["msg_id"] == f"relay:carry:{address}:member" and entry["source_task_id"] == "root"
+    assert entry["relay"]["source"]["label"] == "Alpha" and entry["host_carried"] == {"went_to": ""}
+    quote = owner_quote(tmp_path, row, address=address)
+    member, messages = _helper(tmp_path, "member"), []
+    assert inject_relay(member, entry, messages) == [address] and len(messages) == 1
+    assert inject_relay(member, entry, messages) == [] and len(messages) == 1  # delivered again: no second line
+    context_entry, _ = _carried_entry(tmp_path, tmp_path, "member", quote, went_to="sibling")
+    assert inject_relay(member, context_entry, messages) == [] and len(messages) == 1
+    assert held_owner_messages(member)[address]["carried"]["went_to"] == ""  # never downgraded to context
+    # The other direction: a row held as context, addressed since, is shown once more and its fact flips.
+    second = {**row, "client_message_id": "owner-2", "text": "second words", "ts": "2026-10-01T00:02:00Z"}
+    dialogue_store.append(tmp_path, "chat", second)
+    second_address = format_address(row_address(second))
+    second_quote = owner_quote(tmp_path, second, address=second_address)
+    as_context, _ = _carried_entry(tmp_path, tmp_path, "member", second_quote, went_to="sibling")
+    assert inject_relay(member, as_context, messages) == [] and len(messages) == 2
+    assert "went to sibling" in str(messages[1]["content"])
+    assert held_owner_messages(member)[second_address]["carried"]["went_to"] == "sibling"
+    addressed, _ = _carried_entry(tmp_path, tmp_path, "member", second_quote)
+    assert inject_relay(member, addressed, messages) == [second_address] and len(messages) == 3
+    assert "reached this work" in str(messages[2]["content"])
+    assert held_owner_messages(member)[second_address]["carried"]["went_to"] == ""
+    assert inject_relay(member, as_context, messages) == [] and len(messages) == 3
+
+
+def test_a_failed_write_stops_no_other_member_and_the_next_drain_writes_it_once(tmp_path, monkeypatch):
+    """The carriage keeps no delivery state: a write that raises for one member leaves the others written, the next
+    drain (of a restarted drainer, with nothing kept in the process) writes exactly the missing entry, a root's
+    quiet drain writes a grandchild born below a settled child, and a quiet drain of a helper reads no member while
+    a drain that delivered, scheduled a helper or follows a failed write runs the pass."""
+    from ouroboros import owner_relay
+    from ouroboros.owner_relay import carry_to_members, retain_owner_message
+    from ouroboros.task_results import write_task_result
+    row, address = source(tmp_path)
+    root = context(tmp_path, row)
+    root.task_id = "root"
+    retain_owner_message(root, row)
+    for member in ("a", "b"):
+        write_task_result(tmp_path, member, "running", delegation_role="subagent", parent_task_id="root", root_task_id="root")
+    write_task_result(tmp_path, "done", "completed", delegation_role="subagent", parent_task_id="root", root_task_id="root")
+    real = owner_relay.write_relay
+
+    def failing(drive, task_id, **kwargs):
+        if task_id == "a":
+            raise OSError("injected mailbox outage")
+        return real(drive, task_id, **kwargs)
+
+    monkeypatch.setattr(owner_relay, "write_relay", failing)
+    carry_to_members(root, delivered=True)
+    assert not drain_owner_entries(tmp_path, "a") and len(drain_owner_entries(tmp_path, "b")) == 1
+    assert not drain_owner_entries(tmp_path, "done") and root._carriage_memo["failed"] is True
+    monkeypatch.setattr(owner_relay, "write_relay", real)
+    restarted = context(tmp_path, row)  # the drainer restarted: a fresh context, no memo, the same retained row
+    restarted.task_id = "root"
+    retain_owner_message(restarted, row)
+    carry_to_members(restarted, delivered=False)
+    assert [entry["msg_id"] for entry in drain_owner_entries(tmp_path, "a")] == [f"relay:carry:{address}:a"]
+    assert len(drain_owner_entries(tmp_path, "b")) == 1 and restarted._carriage_memo["failed"] is False
+    monkeypatch.setattr(owner_relay, "write_relay", lambda *a, **k: (_ for _ in ()).throw(AssertionError("written twice")))
+    carry_to_members(root, delivered=True)  # the process that failed, a drain that delivered: nothing is missing
+    assert root._carriage_memo["failed"] is False
+    # A grandchild born below a child that settled since the last pass: the root's quiet drain writes it, once.
+    monkeypatch.setattr(owner_relay, "write_relay", real)
+    write_task_result(tmp_path, "b", "completed", delegation_role="subagent", parent_task_id="root", root_task_id="root")
+    write_task_result(tmp_path, "grand", "running", delegation_role="subagent", parent_task_id="b", root_task_id="root")
+    carry_to_members(root, delivered=False)
+    assert [entry["msg_id"] for entry in drain_owner_entries(tmp_path, "grand")] == [f"relay:carry:{address}:grand"]
+    assert len(drain_owner_entries(tmp_path, "b")) == 1 and root._carriage_memo["members"] == {"a", "grand"}
+    carry_to_members(root, delivered=False)
+    assert len(drain_owner_entries(tmp_path, "grand")) == 1
+    # The skip rule at a helper, both ways: a quiet drain reads no member; delivery, a new helper or a failed write does.
+    reads = []
+    monkeypatch.setattr("ouroboros.task_status.find_child_tasks", lambda *a, **k: reads.append(k) or [])
+    helper = context(tmp_path, row)
+    helper.task_id, helper.task_metadata = "b", {"delegation_role": "subagent", "root_task_id": "root"}
+    carry_to_members(helper, delivered=False)  # the attempt's first pass reads
+    carry_to_members(helper, delivered=False)
+    assert len(reads) == 1 and reads[0]["scope"] == "direct"
+    carry_to_members(helper, delivered=True)
+    helper._last_scheduled_subagents = [{"task_id": "c"}]
+    carry_to_members(helper, delivered=False)
+    helper._carriage_memo["failed"] = True
+    carry_to_members(helper, delivered=False)
+    carry_to_members(helper, delivered=False)
+    assert len(reads) == 4
+
+
 def test_quoteless_relay_to_child_drive_labels_source_from_canonical_registry(tmp_path):
     from ouroboros.projects_registry import create_project
 
@@ -400,3 +648,157 @@ def test_quoteless_relay_to_child_drive_labels_source_from_canonical_registry(tm
     assert entry["relay_canonical_root"] == str(canonical)
     assert write_relay(child, "receiver", **args) == (entry, False)
     assert len(drain_owner_entries(child, "receiver")) == 1
+
+
+@pytest.mark.parametrize("source_count", [1, 2])
+@pytest.mark.parametrize("revoked", [False, True])
+def test_forwarded_rows_keep_each_source_through_pending_read_delivery_and_continue(tmp_path, source_count, revoked):
+    """A→B→C may combine sources. Each row keeps its own authority, full reply and attached bytes at every hop."""
+    from ouroboros import places, owner_words
+    from ouroboros.chat_references import reference_from_row
+    from ouroboros.chat_uploads import store_upload, claim_refs
+    from ouroboros.owner_continue import owner_sources, owner_corpus_rows, declared_inputs
+    from ouroboros.owner_relay import inject_relay, owner_row_address
+    from tests.test_place_owner_author import _place_row
+
+    middle_root, final_root = tmp_path / "middle", tmp_path / "final"
+    middle, rows, roots, handles, uploads = context(middle_root), [], [], [], []
+    for index in range(source_count):
+        root = tmp_path / f"source-{index}"
+        place = places.connect_place(root, connector="bridge", provider="chat", account_id="qa", label="Source")
+        places.edit_place(root, place.place_id, "confirm_owner_account", author="owner",
+                          platform_actor_id="anton", account_id="qa")
+        target = {"chat_id": 1, "direction": "out", "ts": "2026-09-30T05:40:00Z",
+                  "text": f"Proposal {index}. " * 100, "client_message_id": "proposal"}
+        dialogue_store.append(root, "chat", target)
+        _path, upload = store_upload(f"attachment {index}".encode(), "note.txt", data_dir=root)
+        claim_refs([upload], root)
+        row = _place_row(place.place_id, text=f"owner words {index}", client_message_id=f"owner-{index}",
+                         reply_to=reference_from_row(target), attachments=[upload])
+        dialogue_store.append(root, "chat", row)
+        stored = next(item.row for item in dialogue_store.rows_by_client_id(root, f"owner-{index}"))
+        handle = owner_row_address(stored)
+        quotes, error = quote_rows(context(root, stored), [handle])
+        assert not error
+        entry, _ = write_relay(middle_root, middle.task_id, relay_id=f"first-{index}", note="context", quotes=quotes,
+                                chat_id=1, teller_task_id="first", canonical_root=root)
+        inject_relay(middle, entry, [])
+        rows.append((stored, target)); roots.append((root, place)); handles.append(handle); uploads.append(upload)
+    quotes, error = quote_rows(middle, handles)
+    assert not error and len(quotes) == source_count
+    entry, _ = write_relay(final_root, "final", relay_id="forwarded", note="context", quotes=quotes,
+                            chat_id=1, teller_task_id=middle.task_id, canonical_root=middle_root)
+    if revoked:
+        root, place = roots[0]
+        places.edit_place(root, place.place_id, "revoke_owner_account", author="owner",
+                          platform_actor_id="anton", account_id="qa")
+    expected = rows[1:] if revoked else rows
+    pending, _ = owner_words.task_owner_words(final_root, "final", task={"id": "final"})
+    assert [r["text"] for r in pending if r["source"] != owner_words.REPLY_TARGET] == [r[0]["text"] for r in expected]
+    assert [r["text"] for r in pending if r["source"] == owner_words.REPLY_TARGET] == [r[1]["text"] for r in expected]
+    record = {"origin_message_text": "Original work", "origin_message_ref": {},
+              "owner_mailbox": {"rows": [], "read_complete": True}}
+    before_drain = owner_sources(final_root, record, "final")
+    inputs = declared_inputs("final", record, before_drain)
+    assert len(inputs) == len(expected)
+    for item, index in zip(inputs, range(1 if revoked else 0, source_count)):
+        assert item["status"] == "staged"
+        from pathlib import Path
+        assert Path(item["abs_path"]).read_bytes() == f"attachment {index}".encode()
+    final = context(final_root); final.task_id = "final"
+    events = queue.Queue()
+    _drain_incoming_messages([], queue.Queue(), final_root, "final", events, set(), owner_ctx=final)
+    assert [r["content"] for r in getattr(final, "_owner_directives", [])] == [r[0]["text"] for r in expected]
+    if expected:
+        kept_return, error = select_return(final, "forwarded")
+        assert not error
+        assert [q["source"]["address"] for q in kept_return["quotes"]] == handles[1 if revoked else 0:]
+        assert kept_return["source"]["address"] == handles[1 if revoked else 0]
+    else:
+        assert not select_return(final, "forwarded")[0]
+    for index in range(1 if revoked else 0, source_count):
+        delivered = final_root / "task_results/artifacts/final/attachments" / uploads[index]["upload"]
+        assert delivered.read_bytes() == f"attachment {index}".encode()
+    continued = owner_sources(final_root, {"origin_message_text": "Original work", "origin_message_ref": {},
+                                         "owner_mailbox": {"rows": [], "read_complete": True}}, "final")
+    assert not continued["gaps"]
+    assert [r["content"] for r in continued["later"]] == [r[0]["text"] for r in expected]
+    assert [r["reply_to"]["text"] for r in continued["later"]] == [r[1]["text"] for r in expected]
+    assert [r["content"] for r in owner_corpus_rows(continued)][1:] == [r[0]["text"] for r in expected]
+    if not revoked:
+        from ouroboros.project_dialogue import chat_annotation_receipt
+        from ouroboros.owner_relay import publish_relay_ack
+        for index, (root, _place) in enumerate(roots):
+            assert chat_annotation_receipt(root, f"owner-{index}", "forwarded")["status"] == "read"
+        saved_ack = events.get_nowait()["relay_ack"]
+        sent = []
+        publish_relay_ack(final_root, "final", saved_ack, SimpleNamespace(send_routing_ack=lambda *a, **kw: sent.append(kw)))
+        assert {row["client_message_id"] for row in sent} == {f"owner-{i}" for i in range(source_count)}
+
+
+@pytest.mark.parametrize("revoked", ["before", "after", "none"])
+def test_relay_ack_and_return_name_only_owner_rows_that_entered_the_transcript(tmp_path, revoked):
+    from ouroboros import places
+    from ouroboros.owner_mailbox import acknowledge_transcript_entry
+    from ouroboros.owner_relay import inject_relay, publish_relay_ack
+    from ouroboros.project_dialogue import chat_annotation_receipt
+    from tests.test_place_owner_author import _place_row
+
+    source_root, target_root = tmp_path / "source", tmp_path / "recipient"
+    place = places.connect_place(source_root, connector="bridge", provider="chat", account_id="qa", label="Team")
+    places.edit_place(source_root, place.place_id, "confirm_owner_account", author="owner",
+                      platform_actor_id="anton", account_id="qa")
+    row = _place_row(place.place_id)
+    dialogue_store.append(source_root, "chat", row)
+    stored = next(item.row for item in dialogue_store.iter_rows(source_root, "chat"))
+    quotes, error = quote_rows(context(source_root, stored), [format_address(row_address(stored))])
+    assert not error
+    entry, _ = write_relay(target_root, "receiver", relay_id="revoke", note="Peer note", quotes=quotes,
+                            chat_id=1, teller_task_id="teller", canonical_root=source_root)
+    def revoke():
+        places.edit_place(source_root, place.place_id, "revoke_owner_account", author="owner",
+                          platform_actor_id="anton", account_id="qa")
+    if revoked == "before":
+        revoke()
+    receiver = context(target_root); receiver.task_id = "receiver"
+    messages = []
+    inject_relay(receiver, entry, messages)
+    if revoked == "after":
+        revoke()  # actual prior delivery remains a fact even if authority changes before acknowledgement
+    assert acknowledge_transcript_entry(target_root, "receiver", entry)
+    annotation = chat_annotation_receipt(source_root, stored["client_message_id"], "revoke")
+    if revoked == "before":
+        assert not getattr(receiver, "_owner_directives", []) and not annotation
+        assert not receiver._open_relays
+        assert "Peer note" in str(messages)
+    else:
+        assert [r["content"] for r in receiver._owner_directives] == [stored["text"]]
+        assert annotation["status"] == "read" and "revoke" in receiver._open_relays
+    sent = []
+    publish_relay_ack(target_root, "receiver", entry.get("_relay_delivery", entry["relay"]),
+                       SimpleNamespace(send_routing_ack=lambda *a, **kw: sent.append(kw)))
+    assert len(sent) == (0 if revoked == "before" else 1)
+
+
+def test_cross_root_return_reference_survives_continue(tmp_path):
+    from ouroboros.owner_continue import owner_sources
+    from ouroboros.tools.control_runtime import _send_user_message
+
+    source_root, target_root = tmp_path / "source", tmp_path / "target"
+    row, handle = source(source_root)
+    quotes, error = quote_rows(context(source_root, row), [handle])
+    assert not error
+    write_relay(target_root, "receiver", relay_id="return", note="context", quotes=quotes,
+                chat_id=1, teller_task_id="teller", canonical_root=source_root)
+    receiver = context(target_root); receiver.task_id = "receiver"
+    _drain_incoming_messages([], queue.Queue(), target_root, "receiver", None, set(), owner_ctx=receiver)
+    sources = owner_sources(target_root, {"origin_message_text": "Work", "origin_message_ref": {},
+                                          "held_owner_messages": receiver._held_owner_messages,
+                                          "open_relays": receiver._open_relays,
+                                          "owner_mailbox": {"rows": [], "read_complete": True}}, "receiver")
+    successor = context(target_root); successor.task_id = "successor"
+    successor.task_metadata = {"continuation": {"owner_sources": sources}}
+    held_owner_messages(successor)
+    assert _send_user_message(successor, "Done", reply_to_relay="return").startswith("OK:")
+    [event] = successor.pending_events
+    assert event["progress_meta"]["reply_to"]["snippet"] == "exact owner words"

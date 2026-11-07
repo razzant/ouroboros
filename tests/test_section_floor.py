@@ -422,7 +422,7 @@ def test_declared_inputs_use_the_same_book_map_floor_without_loading_shared_memo
     monkeypatch.setattr(context, "build_memory_sections", lambda *_a, **_kw: pytest.fail("shared memory opened"))
     monkeypatch.setattr(context, "build_knowledge_sections", lambda *_a, **_kw: pytest.fail("knowledge opened"))
     core = context._capture_context_core(env, memory, task, None, None)
-    assert not core.memory_view_json
+    assert '"story":false' in core.memory_view_json and '"room_page":false' in core.memory_view_json  # the one view
     assert core.section_root == str(env.drive_root) and core.section_task_id == task["id"]
     unknown = _plan(core, 0, "nano")
     assert not _host_facts(unknown)

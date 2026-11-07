@@ -162,7 +162,7 @@ def _collapse_description_copies(record):
 
 
 # ``owner_corpus`` is internal: the editing run's carried words (``tools.followup._update_schedule``), joined
-# to the template's by identity only when the assignment itself changes, under this write's transaction.
+# to the template's by identity when the assignment itself changes or the write carries a verified cite.
 _PATCH_FIELDS = frozenset({"name", "objective", "context", "trigger", "timezone", "reasoning_effort", "owner_corpus"})
 
 
@@ -225,12 +225,13 @@ def _patched_definition(current, patch):
     _require_template_effort(template)
     if not note:
         incoming["task"] = template
-        if patch.get("owner_corpus") and any(_patch_value(current, key) != _patch_value(incoming, key)
-                                             for key in ("objective", "context")):
-            from ouroboros.owner_words import merged_corpus  # the words of the run that changed the assignment
+    cited = any(isinstance(row, dict) and row.get("basis") == "cited" for row in patch.get("owner_corpus") or [])
+    if patch.get("owner_corpus") and (cited or any(_patch_value(current, key) != _patch_value(incoming, key)
+                                                   for key in ("objective", "context"))):
+        from ouroboros.owner_words import merged_corpus  # the words of the run that changed the assignment, or its cite
 
-            metadata = template.setdefault("metadata", {})
-            metadata["owner_corpus"] = merged_corpus(metadata.get("owner_corpus"), patch["owner_corpus"])
+        metadata = incoming.setdefault("task", {}).setdefault("metadata", {})  # the one home, a note's template too
+        metadata["owner_corpus"] = merged_corpus(metadata.get("owner_corpus"), patch["owner_corpus"])
     changed = sorted(key for key in patch if _patch_value(current, key) != _patch_value(incoming, key))
     if "trigger" in changed or "timezone" in changed:
         old = current.get("trigger") or {}
@@ -282,8 +283,9 @@ def patch_scheduled_task(schedule_id: str, patch: dict, *, reason: str, actor: s
                 from supervisor.followup_policy import relation_kind
 
                 _collapse_description_copies(incoming)
-                stamp_schedule_writer(incoming, writer_kind, writer_metadata,
-                                      started_root=relation_kind(incoming) == "independent")
+                stamp_schedule_writer(incoming, writer_kind, writer_metadata,  # the same work unless its assignment changed
+                                      started_root=relation_kind(incoming) == "independent",
+                                      same_work=not ({"objective", "context"} & set(changed_fields)))
                 if fingerprint(before) != fingerprint(incoming):
                     incoming.pop("hold", None)
                     occ = current.get("occurrence") or {}
@@ -529,8 +531,8 @@ def mutate_scheduled_task(action: str, schedule_id: str, *, reason: str,
             if changed:
                 _collapse_description_copies(current)
                 from ouroboros.consciousness_authority import stamp_schedule_writer
-                stamp_schedule_writer(current, writer_kind, writer_metadata,
-                                      started_root=relation_kind(current) == "independent")
+                stamp_schedule_writer(current, writer_kind, writer_metadata,  # a lifecycle step of the same work
+                                      started_root=relation_kind(current) == "independent", same_work=True)
                 current["updated_at"] = utc_now_iso()
                 data["tasks"] = tasks
                 _write_scheduled_tasks(data, root)

@@ -1,7 +1,8 @@
-"""A wake keeps its start floor while its fallback form carries my human's words whole: when that projection is
-physically unfit too, the first build delivers the bare pointer its producer bound, the plan keeps the whole input,
+"""A wake keeps its start floor while its fallback form carries my human's card answers whole: when that projection
+is physically unfit too, the first build delivers the bare pointer its producer bound, the plan keeps the whole input,
 a round boundary measures the projection as well before it swaps one in, a route that holds more gets it back, and
-every delivery record names the form the request carried.
+every delivery record names the form the request carried. A wake's text counts my human's messages (my view carries
+them: ``## This room``, ``## Other conversations``) and lists place messages whole; the source keeps each line.
 
 Built on the review's reproduction (RV1W Astra F3): the same memory, window and words that refused Max and Low
 before now start; an unreadable source still rescues nothing.
@@ -14,18 +15,28 @@ from dataclasses import replace
 import pytest
 
 from ouroboros.context_input_selection import wake_input_checkpoint, wake_projection_inputs, whole_wake_input
-from tests.test_consciousness_wake import T0, _chat, _observe, _owner
+from tests.test_consciousness_wake import T0, _chat, _iso, _observe, _owner
 from tests.test_wake_observation_fit import FULL, WAKE, _ctx, _first_build, _record_events, _start_wake
 
-LARGE = "An ordinary paragraph of the owner's message. " * 600
+LARGE = "An ordinary paragraph of the owner's answer. " * 600
+
+
+def _card(index):
+    """My human's answer to a card, in their own words: a wake's text and its projection carry it whole."""
+    block = {"quiz_id": f"q{index}", "state": "answered", "asked_at": _iso(T0 - 200 + index),
+             "answered_at": _iso(T0 - 100 + index), "options": ["A", "B"], "comment": LARGE + str(index),
+             "question": "Which way?"}
+    return {"ts": _iso(T0 - 100 + index), "direction": "system", "type": "quiz_answer", "chat_id": 1,
+            "task_id": f"asker{index}", "quiz": block}
 
 
 def _large_owner_wake(tmp_path, monkeypatch):
     from ouroboros.consciousness_wake import bind_wake_observation
 
     env, memory, task, _observation, registry = _start_wake(tmp_path, monkeypatch, lines=0)
-    _chat(env.drive_root, *[_owner(LARGE + str(index), T0 - 100 + index, cmid=f"owner-{index}") for index in range(20)])
+    _chat(env.drive_root, *[_card(index) for index in range(20)])
     observation = _observe(env.drive_root)
+    assert observation.counts() == {"card_answer": 20}
 
     def render(events):
         return "[Wake-up] " + events
@@ -168,13 +179,14 @@ def test_a_projection_that_saves_nothing_never_stops_the_pointer_or_the_whole_in
     assert [(event["checkpoint_kind"], event["form"]) for event in events] == [form]
 
 
-def test_a_busy_window_starts_with_my_humans_words_and_the_others_counted(tmp_path, monkeypatch):
-    """Opus N2: thousands of short messages of a participant make each pointer line almost as long as its message,
-    so the projection cannot fit; the middle form, my human's words whole with everyone else counted, starts instead
-    of the bare pointer, chosen by its fit alone."""
+def test_a_busy_window_lists_the_places_messages_and_starts_with_my_humans_words_in_my_view(tmp_path, monkeypatch):
+    """Opus N2's window: thousands of short messages of a participant beside one of my human's. The wake lists the
+    participant's messages whole and counts my human's (the source keeps every line), so its whole input is unfit and
+    the bare pointer starts; my human's words reach the first request in my view, and the participant's silent room is
+    one line with its count."""
     from ouroboros import dialogue_store as ds, places
+    from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.consciousness_wake import bind_wake_observation, observe_wake
-    from tests.test_consciousness_wake import _iso
 
     env, memory, task, _observation, registry = _start_wake(tmp_path, monkeypatch, lines=0)
     place = places.connect_place(env.drive_root, connector="bridge", provider="chat", account_id="qa", label="Team")
@@ -197,9 +209,14 @@ def test_a_busy_window_starts_with_my_humans_words_and_the_others_counted(tmp_pa
     bind_wake_observation(env.drive_root, task, observation, render)
     registry._ctx.task_metadata = dict(task["metadata"])
     wake = task["metadata"]["wake_observation"]
-    middle = wake["owner_projection_text"]
-    assert words in middle and "message number 17 " not in middle and "6000 messages in places" in middle
-    assert len(wake["pointer_text"]) < len(middle) < len(wake["projection_text"])
+    assert "1 owner message (counted, not listed" in task["text"] and "6000 messages in places;" in task["text"]
+    assert words not in task["text"] and "message number 17 " in task["text"]  # the place's messages: listed whole
+    assert not {"owner_projection_text", "pointer_text"} & set(wake)  # no card answer: the projection is the pointer
+    stored = read_actor_source_bytes(env.drive_root, wake["source"]["task_id"], wake["source"]).decode("utf-8")
+    assert words in stored and "message number 5999 " in stored  # every line whole at the source
     messages, _capture = _first_build(env, memory, task, registry, monkeypatch, "max")
-    assert messages[1]["content"] == middle, "my human's words reach the first request"
-    assert _delivery_records(env) == [("wake_input_by_source", 0, "projection")]
+    assert messages[1]["content"] == wake["projection_text"], "the whole input is unfit: the bare pointer starts"
+    view = json.dumps(messages[0], ensure_ascii=False)
+    assert words in view, "my human's words reach the first request, in my view"
+    assert "message number 17 " not in view and "6000 words nobody considered" in view
+    assert _delivery_records(env) == [("wake_input_by_source", 0, "pointer")]

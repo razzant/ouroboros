@@ -414,7 +414,7 @@ def test_other_steps_foreign_shapes_and_no_fact_are_no_shortage():
     only_facts = _trace(FloorLevel((("F1", (line["first"],)),)))
     assert only_facts[mi.VIEW_TRACE_KEY]["floor"]["newest_addressed_row"] is not None  # F1 names a row too
     assert mi.shortage_from_trace(only_facts) is None
-    for step, ident in (("F1b", "2"), ("F3", "1000"), ("F6", room["lane1"][0]["address"])):
+    for step, ident in (("F6g", "2"), ("F3", "1000"), ("F6w", "2:" + room["lane1"][0]["address"])):
         assert mi.shortage_from_trace(_trace(FloorLevel(((step, (ident,)),)))) is None, step
     assert mi.shortage_from_trace(_trace(FloorLevel())) is None  # the full view
     good = _trace(FloorLevel((("F2", (room["lane1"][0]["address"],)),)))

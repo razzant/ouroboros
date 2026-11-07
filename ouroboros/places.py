@@ -424,6 +424,16 @@ def is_owner_account(place: Place, platform_actor_id: str, account_id: str = "")
     return owner_account_matches(place.owner_accounts, platform_actor_id, account_id)
 
 
+def confirmed_author(place: Mapping[str, Any], actor: Mapping[str, Any], account_id: str = "") -> bool:
+    """Whether an event's author is an account this place's stored row (``place_summary``) confirms as my human's,
+    and the connector does not report it unauthenticated: provenance of the words, never whom they are for."""
+    actor_id = str((actor or {}).get("platform_actor_id") or (actor or {}).get("id") or "").strip()
+    rows = (place or {}).get("owner_accounts") or ()
+    return bool(actor_id) and (actor or {}).get("authenticated") is not False and any(
+        isinstance(row, Mapping) and str(row.get("platform_actor_id") or "") == actor_id
+        and (not row.get("account_id") or row.get("account_id") == account_id) for row in rows)
+
+
 def owner_account_matches(owner_accounts: Iterable[OwnerAccount], platform_actor_id: str, account_id: str) -> bool:
     """Pure account-scoped owner match shared by actors and credential identities."""
     actor = str(platform_actor_id or "").strip()
@@ -431,12 +441,17 @@ def owner_account_matches(owner_accounts: Iterable[OwnerAccount], platform_actor
                                for a in owner_accounts)
 
 
-def place_owner_accounts(drive_root: Any) -> dict[str, tuple[OwnerAccount, ...]]:
-    """Every place's confirmed owner accounts as stored now: one read, never a migration (``load_places``
-    may write). An unreadable document raises ``PlaceError``: unknown, never "no owner"."""
+def place_rows(drive_root: Any) -> dict[str, Place]:
+    """Every place as stored now, by id: one read, never a migration (``load_places`` may write). An
+    unreadable document raises ``PlaceError``: unknown, never "no place"."""
     current = _read(drive_root)
     connections = current.get("connections", {})
-    return {key: _decode(value, connections.get(key)).owner_accounts for key, value in current["places"].items()}
+    return {key: _decode(value, connections.get(key)) for key, value in current["places"].items()}
+
+
+def place_owner_accounts(drive_root: Any) -> dict[str, tuple[OwnerAccount, ...]]:
+    """Every place's confirmed owner accounts as stored now (``place_rows``): unknown, never "no owner"."""
+    return {key: place.owner_accounts for key, place in place_rows(drive_root).items()}
 
 
 def _fields(value: Any, key: str) -> Mapping[str, Any]:

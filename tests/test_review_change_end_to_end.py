@@ -381,6 +381,41 @@ def test_a_new_round_of_the_same_index_is_a_new_physical_review_not_a_replay(sta
     assert len({send["retry_key"] for send in sends}) == 4
 
 
+def test_a_reused_verdict_names_the_rows_of_my_human_its_seats_were_not_sent_by_identity(staged_body, tmp_path, monkeypatch):
+    """The identical request after my human wrote again is the settled record, free; beside the verdict rides one
+    host fact naming the rows the reused seats were not sent — each by the reference of its stamp, whole, never by
+    likeness (``msg m-1`` is not ``msg m-12``, the longer token the briefs hold), read from the record's retained
+    briefs. A reuse with nothing new carries no fact; a reuse whose briefs cannot be read back names every row;
+    nothing is held or bought."""
+    repo = Path(staged_body["repo"])
+    sends: list[dict] = []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", shared.golden_physical_seam(sends))
+    ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "drive", task_id="task-reuse")
+    ctx._owner_directives = [{"source": "owner_mailbox", "content": "да", "msg_id": "m-12", "received": "2026-11-05T10:00:00+00:00"}]
+    ask = dict(root="system_repo", surface="change", goal=GOAL, scope=SCOPE, subject="index")
+    first = run_review_change(ctx, **ask)
+    assert first["reused"] is False and "owner_words_since_review" not in first and len(sends) == 3
+    record = review_ledger.load_record(ctx.drive_root, first["record_id"])
+    briefs = [ref for seat in record["rows"] for ref in seat["source_refs"] if ref.get("role") == "prompt"]
+    assert briefs and all(ref["status"] == "retained" for ref in briefs)
+    same = run_review_change(ctx, **ask)
+    assert same["reused"] is True and "owner_words_since_review" not in same and len(sends) == 3
+    ctx._owner_directives.append({"source": "owner_mailbox", "content": "да", "msg_id": "m-1"})
+    later = run_review_change(ctx, **ask)
+    assert later["reused"] is True and later["record_id"] == first["record_id"] and len(sends) == 3
+    assert later["owner_words_since_review"]["rows"] == ["[owner · owner_mailbox of task task-reuse · msg m-1]\nда"]
+    assert "not sent these words" in later["owner_words_since_review"]["host_fact"]
+    def gone(*_args, **_kwargs):
+        raise OSError("the retained brief cannot be read")
+
+    monkeypatch.setattr(review_ledger, "read_source", gone)
+    every = run_review_change(ctx, **ask)
+    assert every["reused"] is True and len(sends) == 3
+    assert [row.split("\n")[0] for row in every["owner_words_since_review"]["rows"]] == [
+        "[received 2026-11-05T10:00:00+00:00 · owner · owner_mailbox of task task-reuse · msg m-12]",
+        "[owner · owner_mailbox of task task-reuse · msg m-1]"]
+
+
 def _lay_project(folder: Path) -> None:
     shared.git(folder, "init", "-q")
     (folder / "app.py").write_text("VALUE = 1\n", encoding="utf-8")

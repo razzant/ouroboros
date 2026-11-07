@@ -169,8 +169,29 @@ def test_unreadable_record_is_not_quarantined_and_recovery_refreshes_same_round(
     assert read_result(tmp_path, "task") == original
     assert result_signature(tmp_path, "task") == signature
     assert append_context_facts(ctx)
-    assert "Retain this dated thought" in _facts(ctx.messages)
+    # The first row still carries the recovered, unchanged focus whole: the new row names it in one line.
+    assert "self-authored focus unchanged" in _facts(ctx.messages)
     assert not append_context_facts(ctx)
+
+
+def test_an_unchanged_focus_is_whole_once_while_an_intact_facts_row_in_view_carries_it(tmp_path):
+    """C2 S3 (06.11.2026): an unchanged focus is not repeated every round; a change or a lost carrier shows it whole."""
+    ctx = _ctx(tmp_path)
+    ctx.context_fit_plan = None
+    _record(tmp_path, "Retain this dated thought")
+    assert append_context_facts(ctx) and "Retain this dated thought" in _facts(ctx.messages)
+    ctx.round_idx += 1
+    assert append_context_facts(ctx)
+    line = _facts(ctx.messages)
+    assert "Retain this dated thought" not in line and "self-authored focus unchanged" in line and "fingerprint" in line
+    for row in ctx.messages:  # the carrying row is no longer the host state it was produced as
+        if "Retain this dated thought" in str(row.get("content")):
+            row["content"] += " edited"
+    ctx.round_idx += 1
+    assert append_context_facts(ctx) and "Retain this dated thought" in _facts(ctx.messages)
+    _record(tmp_path, "A changed thought")
+    ctx.round_idx += 1
+    assert append_context_facts(ctx) and "A changed thought" in _facts(ctx.messages)
 
 
 @pytest.mark.parametrize("destination", [MODEL, "openai::gpt-5.6-terra"])

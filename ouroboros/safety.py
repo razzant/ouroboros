@@ -541,6 +541,7 @@ def _focus_event_source(row, metadata, notes):
 def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, ctx=None, resolved_binding=None):
     """Fixed host evidence, with authorship separate from semantic authorization."""
     from dataclasses import asdict, is_dataclass
+    from ouroboros import owner_words
     from ouroboros.place_guard import call_place_facts
     from ouroboros.places import load_places
     from ouroboros.tool_access import canonical_data_root
@@ -581,7 +582,7 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
         occasion = "owner door"
     directives = getattr(ctx, "_owner_directives", None)
     # User messages are quoted input when the caller has no retained host source; never certify them as owner words.
-    sources = directives if isinstance(directives, list) else [m for m in (messages or []) if m.get("role") == "user"]
+    sources = [*directives, *owner_words.safety_sources(ctx)] if isinstance(directives, list) else [m for m in (messages or []) if m.get("role") == "user"]
     if isinstance(directives, list):
         sources = [_focus_event_source(row, metadata, notes) for row in sources]
     target = asdict(resolved_binding) if is_dataclass(resolved_binding) else resolved_binding

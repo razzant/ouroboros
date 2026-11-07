@@ -80,6 +80,49 @@ test('each attention tray is one sentence with its own actions, visible without 
     assert.match(otherEdit, /data-skill-action="rereview"[^>]*>Review</);
 });
 
+test('page-module faults and holds are owner-visible and keep recovery discoverable', () => {
+    const faulty = renderInstalledSkillCard(skill({ enabled: true }), new Set(), new Set(), {}, {
+        pageModules: { faults: [{ skill: 'demo', reason: 'boom', current: true }], held: [] },
+    });
+    assert.deepEqual(chipOf(faulty).slice(1), ['warn', 'Off in this window']);
+    assert.match(traysOf(faulty), /page module stopped in this window: boom/);
+    assert.doesNotMatch(traysOf(faulty), /data-host-module-key/);
+    const held = renderInstalledSkillCard(skill({ enabled: true }), new Set(), new Set(), {}, {
+        pageModules: { faults: [], held: [{ key: 'demo:voice', skill: 'demo', reason: 'start' }] },
+    });
+    assert.match(traysOf(held), /Held back: the page stopped while this was starting last time\./);
+    assert.match(held, /data-skill-action="start_host_module"[^>]*data-host-module-key="demo:voice"/);
+    const stale = renderInstalledSkillCard(skill({ enabled: true }), new Set(), new Set(), {}, {
+        pageModules: { faults: [{ skill: 'demo', reason: 'old', current: false }], held: [] },
+    });
+    assert.equal(chipOf(stale), null, 'stale faults do not add a chip to the normal enabled switch');
+    assert.match(stale, /class="skills-toggle"[^>]*checked/);
+});
+
+test('faults and held siblings of one skill both retain their page facts', () => {
+    const html = renderInstalledSkillCard(skill({ enabled: true }), new Set(), new Set(), {}, {
+        pageModules: {
+            faults: [{ skill: 'demo', reason: 'voice failed', current: true }],
+            held: [{ key: 'demo:tts', skill: 'demo', reason: 'start' }],
+        },
+    });
+    assert.match(html, /page module stopped in this window: voice failed/);
+    assert.match(html, /data-skill-action="start_host_module"[^>]*data-host-module-key="demo:tts"/);
+});
+
+test('page attention keeps an overflow update fact in Details', () => {
+    const row = skill({
+        enabled: true,
+        install: { update_available: { version: '2.0.0' }, release: { version: '1.0.0' } },
+    });
+    const html = renderInstalledSkillCard(row, new Set(['demo']), new Set(), {}, {
+        pageModules: { faults: [], held: [{ key: 'demo:voice', skill: 'demo', reason: 'start' }] },
+    });
+    assert.match(html, /data-skill-detail-overflow/);
+    assert.match(html, /2\.0\.0 is available/);
+    assert.match(html, /data-skill-action="update"/);
+});
+
 test('updates: one click for an unmodified skill, «Update…» asks what to keep for a modified one', () => {
     const plain = traysOf(renderInstalledSkillCard(row('weather')));
     assert.match(plain, /v0\.3\.2 is available\./);

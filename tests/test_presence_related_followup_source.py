@@ -183,7 +183,8 @@ def test_a_follow_up_the_still_narrowed_run_emits_reads_its_source_and_the_run_k
     holds = presence_caller_binding(run), _worker_reads_the_owners_table(q, {"id": run.task_id, "metadata": run.task_metadata})
     assert holds == (BINDING, False)
 
-    written = _handle_schedule_followup(run, objective="Recheck the source", run_at="2000-01-01T00:00:00Z", relation="independent")
+    written = _handle_schedule_followup(run, objective="Recheck the source", run_at="2000-01-01T00:00:00Z", relation="independent",
+                                        destination="place")
 
     assert written.startswith("FOLLOWUP_SCHEDULED"), written
     [row] = [item for item in _rows(q).values() if (item.get("followup_origin") or {}).get("task_id") == run.task_id]
@@ -208,7 +209,7 @@ def test_a_root_the_still_narrowed_run_starts_keeps_that_runs_carrier_and_proves
     monkeypatch.setattr("ouroboros.tools.control_routing._promotion_pool_disabled_from_snapshot", lambda _ctx: "")
     monkeypatch.setattr("ouroboros.tools.control_routing._emit_and_wait_for_routing",
                         lambda _ctx, evt: (started.append(evt) or "live", {"status": "scheduled"}))
-    assert _start_task(run, "Follow the lead", title="Lead").startswith("OK: task")
+    assert _start_task(run, "Follow the lead", title="Lead", destination="place").startswith("OK: task")
     assert started[0]["presence_binding_authority"] == AUTHORITY["presence_binding_authority"]
     assert "presence_binding_relation" not in started[0] and "task_contract" in started[0]
 

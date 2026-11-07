@@ -1,10 +1,11 @@
-"""Task input selection, declared-source composition and historical exposure.
+"""Task input selection, the declared request's omissions and historical exposure.
 
 The context facade captures governance once and supplies its runtime/user
-renderers. This leaf decides task/document eligibility and builds the selected
-core without opening the automatic shared-memory channels. Usable-response
-observations retain the first/latest selected inputs as evidence for evaluators,
-without changing current task authority or opening today's memory.
+renderers. This leaf decides task/document eligibility and names what a declared
+request's view withholds of the automatic shared-memory channels (the one
+builder in ``context`` composes it). Usable-response observations retain the
+first/latest selected inputs as evidence for evaluators, without changing
+current task authority or opening today's memory.
 """
 from __future__ import annotations
 
@@ -15,10 +16,7 @@ import logging
 import pathlib
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from ouroboros.context_fit import ContextCore as _ContextCore
-from ouroboros.context_runtime_facts import snapshot_labelled
 from ouroboros.contracts.task_contract import normalize_bool
-from ouroboros.memory import Memory
 from ouroboros.reference_books import BOOK_ENTRYPOINTS
 from ouroboros.store import StoreError
 
@@ -332,9 +330,8 @@ def task_input_pointer(env: Any, task: Dict[str, Any], user_content_json: str) -
 
 def _wake_forms(wake: Dict[str, Any]) -> List[str]:
     """A wake's bound deliveries in rescue order (``consciousness_wake.bind_wake_observation``): the projection (my
-    human's words whole and every other person's row by address, beside the exact pointer), then my human's words
-    alone with the others counted when bound apart from it (a busy window), then the bare pointer when bound apart.
-    The choice among them is only ever their actual fit."""
+    human's card answers whole beside the exact pointer), an older wake's middle step when it bound one, then the
+    bare pointer when bound apart. The choice among them is only ever their actual fit."""
     keys = ("projection_text", "owner_projection_text", "pointer_text")
     return [text for text in dict.fromkeys(wake.get(key) for key in keys) if text]
 
@@ -349,8 +346,8 @@ def wake_deliveries(wake: Dict[str, Any], full: Dict[str, Any]) -> List[Dict[str
 
 def wake_input_checkpoint(wake: Dict[str, Any], content: Any, *, round_idx: int, after_overflow: bool) -> Dict[str, Any]:
     """The record of the wake delivery a request carried (``content``; ``None``: the whole observation): its
-    ``form`` is ``whole``, ``projection`` (my human's words inline: ``inline_rows_in_fallback`` covers only this
-    form) or ``pointer`` (the bare pointer, nothing inline)."""
+    ``form`` is ``whole``, ``projection`` (my human's card answers inline) or ``pointer`` (the bare pointer,
+    nothing inline)."""
     forms = _wake_forms(wake)
     if content is None:
         form = "whole"
@@ -471,81 +468,23 @@ def _validate_declared_input_task(task: Dict[str, Any]) -> None:
                          "(API model or configured session)")
 
 
-def _capture_declared_context_core(
-    env: Any,
-    memory: Memory,
-    task: Dict[str, Any],
-    ctx: Any,
-    *,
-    runtime_builder: Callable[..., str],
-    user_builder: Callable[[Dict[str, Any]], Any],
-    **sources: Any,
-) -> _ContextCore:
-    """Compose only declared case inputs plus governance and actual authority.
+def _declared_omissions(task: Dict[str, Any], spec: Any) -> Any:
+    """The one builder's view of a declared request: the role's (a child's or a nanny's) without the story, the
+    parent's room page and its open conversation; my human's words ride it as a shared child's unless the task
+    was scheduled before ``DECLARED_WORDS_FACT``; the marks in force and the knowledge outline ride it. Identity,
+    WORLD, review history, skills and parent context are gated in the builder (``context._capture_context_core``).
+    The receipt (``subagent_work_order.input_source_selection_receipt``) names each omission."""
+    import dataclasses
 
-    Branch before shared memory is opened. Do not guess which memory sentences
-    might bias this case. Rebuilds read the same durable task selection, while
-    retries and fitting operate on the resulting immutable ContextCore. A task
-    scheduled with ``DECLARED_WORDS_FACT`` carries the owner's words that caused
-    the work right after its receipt, ahead of the dated runtime facts: the block
-    a shared child reads, rendered from the task's own frozen record.
-    """
-    from ouroboros.safety_config import owner_rules_section
-    from ouroboros.memory_view import _owner_words_block  # the shared child's block, byte for byte
-    from ouroboros.subagent_work_order import declared_inputs_carry_owner_words, input_source_selection_receipt
-    from ouroboros.subagent_metrics import fact_line
-    from ouroboros.section_floor import HostSection, capture_sections, labelled_section
-    from ouroboros.subagent_runtime import (
-        current_model_visible_subagent_catalog, review_facts_block, review_records_block, subagent_supervision_fact_line,
-        subagent_catalog_section,
-    )
+    from ouroboros.subagent_work_order import declared_inputs_carry_owner_words  # D03->D07 is lazy-only
 
-    canonical_root = pathlib.Path(task.get("budget_drive_root") or getattr(env, "budget_drive_root", None) or memory.drive_root)
-    same_drive = canonical_root.resolve(strict=False) == memory.drive_root.resolve(strict=False)
-    process_memory = memory if same_drive else Memory(drive_root=canonical_root, repo_dir=memory.repo_dir)
-    supplementary_messages: list = []
-    words = _owner_words_block(task) if declared_inputs_carry_owner_words(task) else ""
-    parts = [
-        "## Input source selection\n\n" + json.dumps(input_source_selection_receipt(task), ensure_ascii=False, sort_keys=True),
-        *([words] if words else []),
-        runtime_builder(env, task, ctx=ctx, captured_at=sources["captured_at"],
-                        supplementary_messages_out=supplementary_messages),
-    ]
-    parts.extend(labelled_section(section, lambda text: snapshot_labelled(text, sources["captured_at"]))
-                 if isinstance(section, HostSection) else snapshot_labelled(section, sources["captured_at"]) for section in
-                 process_memory.recent_activity_sections(str(task["id"]), own_drive=None if same_drive else memory))
-    catalog_text, catalog = "", None
-    try:
-        catalog = current_model_visible_subagent_catalog()
-        if catalog:
-            catalog_text = subagent_catalog_section(catalog)
-    except Exception:
-        log.debug("Failed to build Available subagents catalog", exc_info=True)
-    review_text, review_activity = "", []
-    try:
-        review_text = review_facts_block(activity_out=review_activity)
-        parts.extend(review_activity)  # each seat's price and last review change: never the cached prefix
-        parts.extend(filter(None, (
-            review_records_block(drive_root=canonical_root, task_id=str(task["id"])),
-            subagent_supervision_fact_line(task, ctx=ctx, catalog=catalog),
-            fact_line(task, drive_root=canonical_root),
-        )))
-    except Exception:
-        log.warning("Failed to build the Review block", exc_info=True)
-    standing_rules = owner_rules_section()
-    return _ContextCore(
-        base_prompt=sources["base_prompt"], bible_md=sources["bible_md"],
-        architecture_md=sources["architecture_md"], development_md=sources["development_md"],
-        # The owner's standing rules are governance like SYSTEM.md, not a selectable case input.
-        semi_stable_text="\n\n".join(part for part in (catalog_text, review_text, standing_rules) if part),
-        semi_stable_sections=capture_sections((part for part in (catalog_text, review_text, standing_rules) if part), prefix='stable'),
-        dynamic_text="\n\n".join(parts),
-        dynamic_sections=capture_sections(parts, prefix='dynamic'),
-        user_content_json=json.dumps(user_builder(task), ensure_ascii=False, sort_keys=True),
-        docs_need_development=_task_requires_self_body_docs(task), development_required=development_required(task),
-        reference_books=tuple(sources["books"]), reference_book_errors=tuple(sources["book_errors"]),
-        compact_reference_docs=True,
-        dynamic_head_text=sources.get("design_nav", ""),
-        supplementary_messages_json=json.dumps(supplementary_messages, ensure_ascii=False, sort_keys=True),
-        connections=sources.get("connections", ("", "")),
-    )
+    return dataclasses.replace(spec, story=False, room_page=False, room_lanes=False, origin_words=False,
+                               other_conversations=False, owner_words=declared_inputs_carry_owner_words(task))
+
+
+def declared_receipt_section(task: Dict[str, Any]) -> str:
+    """``## Input source selection``: the native request's receipt, the one builder's view named in it."""
+    from ouroboros.subagent_work_order import input_source_selection_receipt  # D03->D07 is lazy-only
+
+    receipt = input_source_selection_receipt(task, native=True)
+    return "## Input source selection\n\n" + json.dumps(receipt, ensure_ascii=False, sort_keys=True)

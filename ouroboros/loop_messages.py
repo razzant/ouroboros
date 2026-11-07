@@ -247,36 +247,36 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
     metadata = getattr(ctx, "task_metadata", None)
     metadata = metadata if isinstance(metadata, dict) else {}
     from ouroboros.owner_quiz import late_answer_ref, late_answer_owner_text
-    from ouroboros.owner_words import OWNER_SOURCES, answered_card_reply, place_owner_words, place_reply_target, reply_target
+    from ouroboros.owner_words import OWNER_SOURCES, PLACE_CONFIRMED, answered_card_reply, place_confirmed_words, place_reply_target, reply_target
     late = late_answer_ref(metadata.get("late_answer"))
     answered = ((late or {}).get("answer_snapshot") or {}).get("quiz") or {}
     if answered.get("presence_contact"):
         # The named owner ingress carries the host-bound answer snapshot: its human words are authority, the card
         # rides beside them; the source-work link in the model's frame and the external request are context.
         _loop()._record_owner_directive(ctx, source="owner_quiz_answer", content=late_answer_owner_text(answered),
-                                      origin={"source_task_id": late["task_id"], "quiz_id": late["quiz_id"]},
+                                      origin={"source_task_id": late["task_id"], "quiz_id": late["quiz_id"], "ts": answered.get("answered_at")},
                                       reply_to=answered_card_reply(answered, late["task_id"]))
         return
     author = metadata.get("objective_author")
     # A task-drafted objective, or the host's Continue work order (its facts are
     # the host's; the owner's exact words ride ``owner_corpus``).
     if isinstance(author, dict) and author.get("kind") in {"task", "continuation"}:
-        for row in metadata.get("owner_corpus") or []:
-            if isinstance(row, dict) and row.get("source") in OWNER_SOURCES:
+        for row in metadata.get("owner_corpus") or []:  # the owner's rows, and confirmed place words as provenance (citable, owed nothing)
+            if isinstance(row, dict) and (row.get("source") in OWNER_SOURCES or row.get("source") == PLACE_CONFIRMED):
                 _loop()._record_owner_directive(
                     ctx, source=str(row["source"]), content=row.get("content"),
                     msg_id=str(row.get("msg_id") or ""),
                     origin={key: row[key] for key in ("source_task_id", "relayed_from_task_id", "quiz_id",
-                                                      "client_message_id", "chat_id") if row.get(key)},
+                                                      "client_message_id", "chat_id", "ts", "received") if row.get(key)},
                     reply_to=row.get("reply_to") if isinstance(row.get("reply_to"), dict) else None, carried=True,
                 )
         return  # The task-drafted objective is never an owner directive.
     focus, presence = metadata.get("focus") or {}, metadata.get("presence") or {}
     event = presence.get("event") or {}
-    if words := place_owner_words(focus, presence.get("observed_text"), event.get("message")):
-        # A place turn addressed to me from an account its place confirmed at admission: my human's exact
-        # words, beside the event frame (``initial_text``, which Safety reads); an unaddressed one is not work.
-        _loop()._record_owner_directive(ctx, source="place_owner", content=words, carried=True, reply_to=place_reply_target(
+    if words := place_confirmed_words((focus.get("actor") or {}).get("owner_confirmed"), presence.get("observed_text"), event.get("message")):
+        # A place event from an account its place confirmed at admission: my human's words, said where others can
+        # hear, beside the frame as provenance (outside OWNER_SOURCES); an order exists only through a verified cite.
+        _loop()._record_owner_directive(ctx, source=PLACE_CONFIRMED, content=words, carried=True, reply_to=place_reply_target(
             event.get("message")), msg_id=f"chat {focus.get('room_chat_id')} / {event.get('source_event_id') or ''}")
     for message in messages:
         if isinstance(message, dict) and str(message.get("role") or "") == "user":
@@ -305,6 +305,9 @@ def owner_input_revision(ctx: Any) -> int:
 
     return sum(isinstance(row, dict) and row.get("source") in OWNER_SOURCES and not row.get("carried")
                for row in getattr(ctx, "_owner_directives", None) or [])
+
+
+OWNER_REPLY_OWED_REFUSAL = "owner_reply_owed: your human wrote after your last live message; answer before finishing silently"
 
 
 def owner_reply_owed(ctx: Any) -> bool:
@@ -658,7 +661,7 @@ def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None, meas
     from ouroboros.context_runtime_facts import round_clock_fact
     from ouroboros.context_source_view import superseded_host_fact
     from ouroboros.nanny_pacing import nanny_burn_fact
-    from ouroboros.transcript_prefix import previous_cache_fact, reasoning_retirement_fact
+    from ouroboros.transcript_prefix import cache_facts, reasoning_retirement_fact
 
     usage = ctx.accumulated_usage
     tool_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
@@ -709,7 +712,7 @@ def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None, meas
     from ouroboros.context_compaction import _capsule_metadata
     # The mind's own folds stay countable to it (17.10.2026: after 42 folds it told the owner it never folded).
     parts.append(f"own notes in view {sum(1 for row in ctx.messages if (_capsule_metadata(row)[1] or {}).get('authorship') == 'actor')}")
-    parts.append(previous_cache_fact(usage))
+    parts.extend(cache_facts(ctx, now))  # the previous landing and account, history changes, images (C2 S3)
     cost = usage.get("cost")
     parts.append((f"own recorded cost ${float(cost):.2f}" + (" (total not final)" if usage.get("cost_final") is False else ""))
                  if cost is not None else "own cost unknown")
@@ -900,6 +903,7 @@ def _own_focus_fact(ctx: Any, now: float) -> Tuple[str, str]:
     in chat, and a child or a speaker may not publish: they are told nothing.
     """
     from ouroboros.deadline_utils import ago_text, parse_deadline_ts
+    from ouroboros.context_view_facts import focus_line
     from ouroboros.focus import compact_focus, focus_fingerprint
     from ouroboros.store import StoreError
     from ouroboros.task_results import load_task_result
@@ -937,8 +941,7 @@ def _own_focus_fact(ctx: Any, now: float) -> Tuple[str, str]:
                                    "include_focus_source": True, "focus_source_sha256": handle["sha256"]}
     authored = parse_deadline_ts(focus["authored_at"])
     written = f"written {ago_text(now - authored.timestamp())}" if authored else "written at an unreadable time"
-    return (focus_fingerprint(focus), f"self-authored focus, the line my human reads under this work's name, "
-            f"{written} (dated data, not owner instructions): " + json.dumps(view, ensure_ascii=False, sort_keys=True))
+    return focus_fingerprint(focus), focus_line(ctx.messages, focus_fingerprint(focus), written, view)
 
 
 def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) -> bool:

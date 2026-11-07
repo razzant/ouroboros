@@ -653,11 +653,11 @@ Status, owner action, and urgent notification are separate product concepts:
   product's explicit incident/notification seam, not a red status or a failed
   task as a proxy.
 
-A status names what ends it, by role, and what the owner may still need stays where its fact lives. An announcement
-(a toast) says its news once and may end after its time, hover and focus pausing it, whatever its tone: the problem,
-needed restart or unconfirmed outcome it announces is kept in its authoritative view (a card, the Updates record, the
-in-feed history edge) until that fact changes or the owner resolves it. A notice the owner may hide is hidden on the
-notice itself, per browser, never in its record (the Update indicator, owner 1B, 25.10). A plain acknowledgement in
+A status names who or what ends it; needed facts stay in their owning view. A toast announces news once:
+its timer pauses on hover or focus, and a non-expiring toast has a visible keyboard-reachable close, whatever its tone.
+The problem, needed restart or unconfirmed outcome stays in its authoritative view (a card, Updates record or
+in-feed history edge) until it changes or the owner resolves it. Dismissing a notice hides it per browser,
+never its record (the Update indicator, owner 1B, 25.10). A plain acknowledgement in
 place may end by itself, but where the line is its fact's only home (Costs' budget save) an error, a warning or a
 needed restart stays until the next save, or an edit of what it is about, replaces it. A current fact ends with its fact; unread ends when the message
 is shown; a retained record (Updates, history, the Settings save result, `Input saved`) lives with its record, with
@@ -962,7 +962,8 @@ revision, so this counter guarantees no delivery durability.
   The newest message is the one that arrived last: a late answer keeps its
   written time and chronological place. While reading elsewhere the crimson mark remains
   until that message is shown by scrolling, `Scroll to latest message`, or a
-  return to the page/window; opening alone never clears it. Unknown newest
+  return to the page; a window shown again keeps the reader's place and reads
+  the message if that place shows it. Opening alone never clears it. Unknown newest
   arrivals (an unfinished line, a damaged row) acknowledge nothing and are never
   searched for; state refreshes recheck an open unread room until history is
   repaired or newer standalone content arrives. A room with no standalone
@@ -1072,9 +1073,10 @@ holding the owner's `notify_owner` grant speaks the same way in its own name: a
 
 Formatting is asymmetric: assistant text always uses the sanitized chat markdown
 renderer regardless of `markdown`; ordinary System text is escaped unless
-`markdown: true`. The typed `skill_review` row keeps its dedicated renderer.
-Voice does not confer task finality. The existing untyped terminal-host-notice
-contract remains a documented exception, not a pattern for new notices.
+`markdown: true`. Owner text stays literal, with each explicit http(s) address
+linked. Typed `skill_review` rows keep their own renderer. Voice does not confer
+task finality. The untyped terminal-host-notice contract is a documented
+exception, not a pattern for new notices.
 
 Built-in chrome uses words and monochrome `currentColor` vectors, not decorative
 emoji. System keeps its resting body and amber/gold label without an edge; status stays explicit in
@@ -2136,8 +2138,10 @@ this device" only when the browser marks it local, otherwise "Online voice".
 
 Live Conversation keeps the glass wave, phone controls and collapsed transcript.
 Talk occupies empty Send only when Calls (beta) is enabled and the server confirms
-the selected engine is loaded and its credential grants are current. Text or a
-file restores equal-width Send; empty Enter never calls. The dictation mic hides
+the selected engine is loaded and its credential grants are current. Until a page's
+first read answers, the answer this device last got stands from the first frame; a
+device without one (new, or its storage blocked) shows Send until that read. Text or
+a file restores equal-width Send; empty Enter never calls. The dictation mic hides
 during the call and returns with the draft intact. The glass keeps the composer's
 fixed corner as it becomes a card; End remains visible in phone and keyboard
 views. A model without vision hides Show and says, “This voice engine does not

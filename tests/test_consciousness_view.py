@@ -54,9 +54,11 @@ def test_places_context_has_every_place_and_room_without_reading_history(monkeyp
     rows = view.place_views(tmp_path)
     assert [row["unanswered"] for row in rows] == [3, None, 0]
     text = view.places_text(tmp_path, rows)
-    assert "Inbox [mail]: active; open turns: 3; chat_history(chat_id=-1); chat_history(chat_id=-2)" in text
+    assert "Inbox [mail]: active; open turns: 3; rooms: 2" in text
+    assert "chat_history(" not in text and "chat:" not in text  # a count, and one reader for every room
+    assert text.count("configure_presence(action='inspect', place_id=") == 1 and text.endswith("in brackets>)")
     assert "Quiet room [quiet]: silent; open turns: 0; no captured room" in text
-    assert "Paused room [paused]: paused; open turns: unknown" in text
+    assert "Paused room [paused]: paused; open turns: unknown; rooms: 1" in text
     assert "note (owner): Watch releases." in text and "note (owner): Keep the exact second line." in text
     assert calls == [(tmp_path, place.place_id) for place in configured]
     for place in configured:
@@ -71,7 +73,8 @@ def test_unavailable_index_does_not_claim_zero(monkeypatch, tmp_path):
         raise OSError("room index unavailable")
     monkeypatch.setattr(places, "place_room_index", unavailable)
     assert view.place_views(tmp_path)[0]["unanswered"] is None
-    assert "unknown" in view.places_text(tmp_path, view.place_views(tmp_path))
+    text = view.places_text(tmp_path, view.place_views(tmp_path))
+    assert "rooms unknown" in text and "no captured room" not in text  # unknown never reads as zero
     assert "unknown" in view.places_text(tmp_path, None)
 
 

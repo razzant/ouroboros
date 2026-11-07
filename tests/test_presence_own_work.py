@@ -17,7 +17,7 @@ from tests.frozen_presence_authority import build_presence_capability_ceiling
 from tests.frozen_presence_capabilities import PresenceToolTarget
 from ouroboros.task_results import load_task_result, write_task_result
 from ouroboros.tools.registry import ToolContext, ToolRegistry
-from ouroboros.utils import atomic_write_json
+from ouroboros.utils import append_jsonl, atomic_write_json
 from tests.test_presence_authority import _resolution
 from tests._store_shared import unavailable_store
 
@@ -262,10 +262,14 @@ def test_presence_steer_reaches_pending_and_running_own_work_as_task_authored_te
     foreign = {"id": "foreign-work", "delegation_role": "root", "chat_id": 79,
                "metadata": {"presence": _presence(OTHER)}}
     owner = {"id": "owner-work", "delegation_role": "root", "chat_id": 1, "metadata": {}}
+    # The work that leads this thread: another binding's root with a delivery receipt in the sender's conversation.
+    leads = {"id": "thread-leader", "delegation_role": "root", "chat_id": 80, "metadata": {"presence": _presence(OTHER)}}
+    append_jsonl(tmp_path / "logs" / "chat.jsonl", {"task_id": "thread-leader", "type": "presence_delivery", "text": "root post",
+                 "transport": {"conversation_key": HERE, "delivery": {"state": "delivered", "delivery_id": "d", "part_id": "0"}}})
     fence = {"root_task_id": "running-work", "status": "active", "owner_message_generation": 3}
     monkeypatch.setitem(queue.ACCEPTANCE_FENCES, "running-work", fence)
     emitted = []
-    turn = _steering_turn(tmp_path, _supervisor(tmp_path, pending=[queued, foreign], running=[running, owner]),
+    turn = _steering_turn(tmp_path, _supervisor(tmp_path, pending=[queued, foreign, leads], running=[running, owner]),
                           emitted)
 
     exact = "Alex says: use the March figures, not February."
@@ -287,6 +291,8 @@ def test_presence_steer_reaches_pending_and_running_own_work_as_task_authored_te
         refused = _tell_task(turn, target, "stop")
         assert "TELL_REJECTED" in refused and "presence_work_not_related" in refused
         assert drain_owner_entries(tmp_path, target) == []
+    assert "Message written to" in _tell_task(turn, "thread-leader", exact)  # owner 06.11, 4=A: a note to the thread's work
+    assert [entry["text"] for entry in drain_owner_entries(tmp_path, "thread-leader")] == [exact]
 
 
 def test_an_ordinary_task_still_messages_any_listed_root(tmp_path, monkeypatch):
@@ -545,7 +551,7 @@ def test_an_unconfirmed_presence_promote_is_readable_as_pending_by_its_own_bindi
         task_contract={"capability_ceiling": presence_ceiling_payload(_ceiling())},
     )
 
-    out = _start_task(ctx, "Compile the figures", title="Figure compilation")
+    out = _start_task(ctx, "Compile the figures", title="Figure compilation", destination="place")
 
     assert out.startswith("Not confirmed yet:")
     task_id = emitted[0]["task_id"]
