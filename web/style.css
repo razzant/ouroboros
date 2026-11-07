@@ -252,7 +252,7 @@ html[data-layout="stack"] .shell-icon-control {
    (app.js: --drag-width while dragged, the stored width when the drag ends); absent in the stack layout (layout.js). */
 /* CW10 (v6.34.0): suppress text selection while dragging via a class, not a JS
    inline style (DEVELOPMENT.md: no element.style.* property mutations in UI JS). */
-body.resizing-panels { user-select: none; }
+body.resizing-panels { -webkit-user-select: none; user-select: none; }
 .resize-handle {
     position: absolute;
     top: 0;
@@ -2125,6 +2125,7 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     transition: opacity 0.3s ease;
     font-variant-numeric: tabular-nums;
     letter-spacing: 0.02em;
+    -webkit-user-select: none;
     user-select: none;
 }
 /* A completion row's one compact time line shows the short form; the full instants stay its title and spoken text. */
@@ -6213,6 +6214,7 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 
 .activity-history > summary {
     cursor: pointer;
+    -webkit-user-select: none;
     user-select: none;
     color: var(--text-meta);
     font-size: 12px;
@@ -6523,6 +6525,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     display: inline-flex;
     align-items: center;
     cursor: pointer;
+    -webkit-user-select: none;
     user-select: none;
     padding: 11px 4px;
     margin: -11px -4px;
@@ -6939,6 +6942,7 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
    the drag keeps its events over them. */
 .widgets-list.resizing {
     cursor: col-resize;
+    -webkit-user-select: none;
     user-select: none;
 }
 
@@ -9615,6 +9619,7 @@ body.keyboard-open .project-panel {
     max-height: 100%;
     margin: auto;
     object-fit: contain;
+    -webkit-user-select: none;
     user-select: none;
     -webkit-user-drag: none;
 }
@@ -9652,6 +9657,7 @@ body.keyboard-open .project-panel {
     height: 100%;
     overflow: hidden;
     touch-action: none;
+    -webkit-user-select: none;
     user-select: none;
 }
 

@@ -1115,3 +1115,83 @@ def test_collapsed_projects_ignore_the_census_and_the_open_one(shell_ui, tmp_pat
     assert facts['list_hidden'] is True, facts
     # Work under the collapsed header shows as its one mark: moving while any works, nothing once none does.
     assert (facts['one_header'], facts['three_header'], facts['none_header']) == ('moving', 'moving', 'none'), facts
+
+
+# Selection dismissal regression coverage: kept in this module so browser fixtures remain
+# owned by the shell-interaction test surface rather than imported from another test module.
+def _select_first_bubble_for_dismissal(page):
+    return page.evaluate("""() => {
+        const bubble = document.querySelector('#chat-messages .chat-bubble');
+        const text = [...(bubble?.childNodes || [])].flatMap((node) => {
+            const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+            const out = []; while (walker.nextNode()) out.push(walker.currentNode); return out;
+        }).find((node) => (node.textContent || '').length > 8);
+        if (!text) return {length: 0, error: 'no selectable chat text'};
+        const range = document.createRange(); range.setStart(text, 0);
+        range.setEnd(text, Math.min(8, text.length));
+        const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+        return {length: selection.toString().length, text: selection.toString()};
+    }""")
+
+
+@pytest.mark.parametrize('target', ['sidebar', 'composer'])
+def test_primary_press_dismisses_document_selection_without_breaking_controls(shell_ui, tmp_path, target):
+    page = seed_page(shell_ui, 1100, 750)
+    client, respond = saved_history(tmp_path)
+    try:
+        page.route('**/api/chat/history**', respond)
+        boot(page, shell_ui)
+        page.wait_for_selector('#chat-messages .chat-bubble')
+        selected = _select_first_bubble_for_dismissal(page)
+        assert selected['length'] > 0, selected
+        if target == 'sidebar':
+            page.locator('#chat-messages .chat-message-copy').last.click()
+        else:
+            page.locator('#chat-input').click()
+            assert page.locator('#chat-input').evaluate('node => document.activeElement === node')
+        page.evaluate('() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+        assert page.evaluate('() => getSelection()?.toString() || ""') == ''
+    finally:
+        page.close()
+        client.close()
+
+
+def test_control_inside_selected_range_dismisses_before_activation(shell_ui, tmp_path):
+    page = seed_page(shell_ui, 1100, 750)
+    client, respond = saved_history(tmp_path)
+    try:
+        page.route('**/api/chat/history**', respond)
+        boot(page, shell_ui)
+        page.wait_for_selector('#chat-messages .chat-bubble')
+        selected = page.evaluate("""() => {
+            const bubble = document.querySelector('#chat-messages .chat-bubble');
+            const button = document.createElement('button');
+            button.type = 'button'; button.dataset.selectionTest = '1'; button.textContent = 'control';
+            bubble.appendChild(button);
+            const range = document.createRange(); range.selectNodeContents(bubble);
+            const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+            return selection.toString().length;
+        }""")
+        assert selected > 0
+        page.locator('[data-selection-test]').click()
+        assert page.evaluate('() => getSelection()?.toString() || ""') == ''
+    finally:
+        page.close()
+        client.close()
+
+
+def test_touch_press_preserves_selection_for_native_scroll_and_handles(shell_ui, tmp_path):
+    page = seed_page(shell_ui, 390, 844)
+    client, respond = saved_history(tmp_path)
+    try:
+        page.route('**/api/chat/history**', respond)
+        boot(page, shell_ui)
+        page.wait_for_selector('#chat-messages .chat-bubble')
+        selected = _select_first_bubble_for_dismissal(page)
+        assert selected['length'] > 0, selected
+        page.locator('#primary-sidebar').dispatch_event(
+            'pointerdown', {'button': 0, 'isPrimary': True, 'pointerType': 'touch', 'clientX': 8, 'clientY': 200})
+        assert page.evaluate('() => getSelection()?.toString() || ""') == selected['text']
+    finally:
+        page.close()
+        client.close()
