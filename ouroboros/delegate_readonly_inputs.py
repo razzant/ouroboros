@@ -1,4 +1,4 @@
-"""Materialize native lineage read authority for a folderless session request.
+"""Materialize selected or automatic native inputs for a folderless session request.
 
 The engine accepts one readonly project scope, not additional read roots. Give
 each invocation its own scratch with verified input copies; never pass parent
@@ -12,7 +12,7 @@ exact bytes are retained in the selecting task's canonical artifact store
 (``source_handles/delegated_readonly_inputs/<invocation|scheduled-<child>>/``, named by
 content, ``inputs/selected/<sha256[:16]>/<name>``): the existing snapshot home that is no
 deliverable, outlives the task drive, and whose name the lineage walker prunes.
-A folderless start restages them once into its scope; a start in a repository or folder
+A nonempty selection replaces automatic lineage copies. A folderless start restages it once into its scope; a start in a repository or folder
 keeps it as scope and cwd and names the retained copies by absolute path:
 the engine has no readable-root field, so reaching them is the harness's native read
 reach, not a host guarantee. A scheduled API child's first input names its copies for
@@ -43,9 +43,12 @@ INPUT_FILES_CONTRACT = (
     "else active_workspace. Every entry is mandatory: each is checked as read_file checks it and its exact bytes are "
     "retained in your task's artifact store before the run starts, and one that cannot be prepared refuses the whole "
     "start typed, unrun. The receipt covers exactly these entries (not the automatic inputs); prepared is not read. A "
+    "nonempty selection replaces automatic folderless task/artifact lineage copies; omitted, null or [] keeps them. A "
     "folderless run also finds the copies inside its folder; a run in a repository or folder keeps it and gets the "
-    "retained copies' absolute paths outside it, reached by its harness's own native read reach. A path named only "
-    "in the prompt is never copied. Omit (or []) for today's inputs. Not engine documents: those are attachment_paths.")
+    "retained copies' absolute paths outside it, reached by its harness's own native read reach. A plan-thread "
+    "turn keeps its original folder and names new copies outside it. A path named only "
+    "in the prompt is never copied. Omit (or use null or []) for the existing automatic inputs. "
+    "Not engine documents: those are attachment_paths.")
 
 
 class InputSelectionError(ValueError):
@@ -238,7 +241,7 @@ def schedule_selected_inputs(ctx: Any, entries: List[Dict[str, str]], child_task
 
 def start_inputs(ctx: Any, authority: Any, invocation_id: str, input_files: Any, prepared: Any,
                  thread_turn: bool = False):
-    """``(inputs, refusal)`` for one new start: lineage staging plus the explicit selection.
+    """``(inputs, refusal)`` for one new start: selected inputs or default lineage staging.
 
     Only a read-only run (readonly access or an evidence-only investigation) stages inputs; a
     nonempty selection for a writable run refuses typed, while omission and [] never gate it.
@@ -266,41 +269,42 @@ def start_inputs(ctx: Any, authority: Any, invocation_id: str, input_files: Any,
 def prepare_readonly_inputs(ctx: Any, invocation_id: str, entries: Optional[List[Dict[str, str]]] = None,
                             prepared: Optional[List[Dict[str, Any]]] = None, *,
                             thread_turn: bool = False) -> ReadonlyInputs:
-    """This invocation's inputs: folderless lineage copies and the explicit selection.
+    """This invocation's inputs: selected files replace folderless lineage copies.
 
     ``entries`` are this call's ``input_files``; ``prepared`` a scheduled child's
     schedule-time receipt for its first start. Without either the result equals the
     pre-selection behavior exactly. A ``thread_turn`` keeps its thread's original folder
-    (the engine drops a new scope), so its selection is named by retained path, outside it."""
+    (the engine drops a new scope), so it never walks or creates a new scope; its selection
+    is named by retained path outside the thread's folder."""
     from ouroboros.tool_access import folderless_scratch_dir
 
     rows = resolve_selection(ctx, entries) if entries else list(prepared or [])
     scratch = folderless_scratch_dir(ctx)
-    if scratch is None and not rows:
+    if (scratch is None or thread_turn) and not rows:
         return ReadonlyInputs("", "", [], "")
     if not invocation_id or pathlib.Path(invocation_id).name != invocation_id:
         raise ValueError("invalid readonly invocation identity")
-    container = None if scratch is None else _owned_container(scratch)
+    container = None if scratch is None or thread_turn else _owned_container(scratch)
     if entries:
         retained_root = _retained_root(ctx, invocation_id)
         retained_root.mkdir(parents=True, exist_ok=False)
         rows = copy_selection(rows, retained_root)
         _write_manifest(retained_root, [], rows)
     outside = [{**row, "carrier": "outside_scope_path"} for row in (rows if entries else copy_selection(rows, None))
-               ] if container is None or thread_turn else []  # the run keeps its folder and names the retained copies
+               ] if container is None else []  # the run keeps its folder and names the retained copies
     note = _selection_note(pathlib.Path(outside[0]["retained"]).parents[3] / "inputs.json", outside,
                            inside_scope=False) if outside else ""
     if container is None:
         return ReadonlyInputs("", "\n" + note, outside, note)
     root = container / invocation_id
     root.mkdir(parents=True, exist_ok=False)
-    lineage = _lineage_copies(ctx, root)
-    receipt = outside if thread_turn else [{**row, "carrier": "scope"} for row in copy_selection(rows, root)]
-    _write_manifest(root, lineage, [] if thread_turn else receipt)
+    lineage = [] if rows else _lineage_copies(ctx, root)
+    receipt = [{**row, "carrier": "scope"} for row in copy_selection(rows, root)]
+    _write_manifest(root, lineage, receipt)
     note = note or (_selection_note(root / "inputs.json", receipt, inside_scope=True, scope=root) if receipt else "")
     return ReadonlyInputs(str(root), (
         "\nREADONLY INPUTS: This invocation has its own scratch scope, not a workspace grant. "
-        "inputs.json maps permitted native lineage sources to byte-identical verified local copies. "
+        "inputs.json maps the selected files, or default native lineage sources, to verified local copies. "
         "Read those local paths when the work order names the original sources. "
         "The manifest describes staged copies, not an additional filesystem-read boundary.\n"
     ) + note, receipt, note)

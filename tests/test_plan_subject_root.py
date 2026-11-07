@@ -397,7 +397,9 @@ def test_evidence_an_ask_could_not_attach_is_named_in_its_result_and_in_the_free
     recorded = _asks(env, "t-omit")[0]["omissions"]
     assert recorded == [{"locator": "notes/absent.md", "reason": "missing"}, {"locator": "notes/long.md", "reason": "truncated_to_40000"}]
     read, _result = _call(ctx)
-    line = "\n  evidence omitted: notes/absent.md (missing); notes/long.md (truncated_to_40000)\n"
+    # The head attached in part; only the absent file is not attached, each with its reason.
+    line = ("\n  evidence attached (prepared for the participants): notes/long.md (in part; source 50000 bytes; truncated_to_40000)"
+            "\n  evidence not attached: notes/absent.md (missing)\n")
     for shown in (text, read):
         assert line in shown and shown.index("- ask a1 on revision 1") < shown.index(line), shown
         assert "cannot be attached directly" not in shown  # what to attach instead is said only for a deny root

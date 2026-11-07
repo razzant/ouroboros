@@ -141,7 +141,7 @@ def test_folderless_start_copies_the_selection_inside_its_scope_even_from_a_prio
     assert first["status"] == "started" and "input_files" not in first, first
     assert not _retained_home(ctx).exists(), "no selection retains nothing"
     prior = pathlib.Path(engine.requests[0]["scope"]["root"])
-    lineage = json.loads((prior / "inputs.json").read_text(encoding="utf-8"))
+    assert json.loads((prior / "inputs.json").read_text(encoding="utf-8"))
     selection = [{"root": "task_drive", "path": f"delegated_readonly_inputs/{prior.name}/inputs.json"}]
     second = _start(ctx, input_files=selection)
     assert second["status"] == "started", second
@@ -155,7 +155,7 @@ def test_folderless_start_copies_the_selection_inside_its_scope_even_from_a_prio
     assert pathlib.Path(row["local"]) == scope / "inputs" / "selected" / digest / "inputs.json", "hash-stable name"
     assert pathlib.Path(row["local"]).read_bytes() == (prior / "inputs.json").read_bytes()
     manifest = json.loads((scope / "inputs.json").read_text(encoding="utf-8"))
-    assert [m["source"] for m in manifest if "selected_path" not in m] == [m["source"] for m in lineage]
+    assert [m for m in manifest if "selected_path" not in m] == [], "selection replaces automatic lineage"
     assert [m["local"] for m in manifest if "selected_path" in m] == [f"inputs/selected/{digest}/inputs.json"]
     instructions = engine.requests[1]["instructions"]
     assert "READONLY INPUTS" in instructions and "SELECTED INPUT FILES" in instructions
@@ -169,6 +169,35 @@ def test_folderless_start_copies_the_selection_inside_its_scope_even_from_a_prio
     assert retained.read_bytes() == expected
     assert custody.invocation_record(ctx.drive_root, second["invocation_id"])["input_files"] == [row]
     assert json.loads((retained.parents[3] / "inputs.json").read_text(encoding="utf-8"))[0]["source"] == row["source"]
+
+
+def test_nonempty_selection_skips_unrelated_lineage_walk_but_empty_keeps_default(tmp_path, monkeypatch):
+    from ouroboros import delegate_readonly_inputs as inputs
+
+    ctx, engine = _ctx(tmp_path, monkeypatch, folderless=True)
+    drive = _drive(ctx)
+    drive.mkdir(parents=True)
+    (drive / "chosen.md").write_bytes(b"chosen\n")
+    (drive / "unrelated.md").write_bytes(b"unrelated\n")
+    walked = []
+
+    def unreadable_lineage(_base):
+        walked.append(True)
+        raise OSError("unrelated archive is unreadable")
+        yield  # generator: the failure occurs when enumeration begins
+
+    monkeypatch.setattr(inputs, "_input_files", unreadable_lineage)
+    selected = _start(ctx, input_files=[{"root": "task_drive", "path": "chosen.md"}])
+    assert selected["status"] == "started" and not walked, selected
+    [request] = engine.requests
+    scope = pathlib.Path(request["scope"]["root"])
+    manifest = json.loads((scope / "inputs.json").read_text(encoding="utf-8"))
+    assert len(manifest) == 1 and manifest[0]["selected_path"] == "chosen.md"
+    assert not any("unrelated" in str(row) for row in manifest)
+    for options in ({}, {"input_files": []}, {"input_files": None}):
+        result = _start(ctx, **options)
+        assert result["reason"] == "readonly_inputs_unavailable" and result["definitely_unrun"], result
+    assert len(walked) == 3 and len(engine.requests) == 1
 
 
 def test_unpreparable_selection_refuses_typed_with_every_entry_before_any_send(tmp_path, monkeypatch):
@@ -294,6 +323,7 @@ def test_a_lost_start_retry_returns_exactly_the_recorded_receipt_or_none(tmp_pat
 
 
 def test_continuation_copies_only_its_own_new_selection(tmp_path, monkeypatch):
+    from ouroboros import delegate_readonly_inputs as inputs
     from tests.test_investigation_start_roots import _consumer, _folderless
 
     scratch, metadata = _folderless(tmp_path)
@@ -304,6 +334,13 @@ def test_continuation_copies_only_its_own_new_selection(tmp_path, monkeypatch):
     assert first["status"] == "started", first
     assert custody.emit(ctx.drive_root, custody.SETTLED, {"run_id": first["run_id"], "state": "succeeded"})
     custody._CUSTODY.clear()
+    (scratch / "unrelated-archive.md").write_bytes(b"unrelated\n")
+
+    def unexpected_lineage(*_args, **_kwargs):
+        raise AssertionError("a selected continuation must not enumerate lineage")
+
+    monkeypatch.setattr(inputs, "_lineage_copies", unexpected_lineage)
+    monkeypatch.setattr(inputs, "_input_files", unexpected_lineage)
     second = start(continue_from=first["run_id"], input_files=[{"root": "task_drive", "path": "second.md"}])
     assert second["status"] == "started", second
     [row] = second["input_files"]
@@ -312,6 +349,8 @@ def test_continuation_copies_only_its_own_new_selection(tmp_path, monkeypatch):
     request = engine.starts[1]
     assert row["local"] in request["instructions"] and first["input_files"][0]["local"] not in request["instructions"]
     assert row["local"] in request["prompt"], "a resumed session reads its own selection in the prompt"
+    manifest = json.loads((pathlib.Path(request["scope"]["root"]) / "inputs.json").read_text(encoding="utf-8"))
+    assert len(manifest) == 1 and manifest[0]["selected_path"] == "second.md"
     assert pathlib.Path(request["scope"]["root"]) != pathlib.Path(engine.starts[0]["scope"]["root"])
     custody._CUSTODY.clear()
 
@@ -632,11 +671,19 @@ def test_a_writable_start_refuses_only_a_nonempty_selection(tmp_path, monkeypatc
 # -- evidence-only investigations: the other read-only shape ----------------------------------------------
 
 def test_a_folderless_investigation_finds_the_selection_in_the_folder_its_copy_is_made_from(tmp_path, monkeypatch):
+    from ouroboros import delegate_readonly_inputs as inputs
     from tests.test_investigation_start_roots import _consumer, _folderless
 
     scratch, metadata = _folderless(tmp_path)
     ctx, engine, start = _consumer(tmp_path, monkeypatch, "workspace_write", metadata=metadata)
     (scratch / "selected.md").write_bytes(b"selected\n")
+    (scratch / "unrelated-archive.md").write_bytes(b"unrelated\n")
+
+    def unexpected_lineage(*_args, **_kwargs):
+        raise AssertionError("a selected investigation must not enumerate lineage")
+
+    monkeypatch.setattr(inputs, "_lineage_copies", unexpected_lineage)
+    monkeypatch.setattr(inputs, "_input_files", unexpected_lineage)
     result = start(input_files=[{"root": "task_drive", "path": "selected.md"}])
     assert result["status"] == "started", result
     [request] = engine.starts
@@ -645,6 +692,8 @@ def test_a_folderless_investigation_finds_the_selection_in_the_folder_its_copy_i
     [row] = result["input_files"]
     relative = pathlib.Path(row["local"]).relative_to(staged)
     assert relative.parts[:2] == ("inputs", "selected") and (staged / relative).read_bytes() == b"selected\n"
+    manifest = json.loads((staged / "inputs.json").read_text(encoding="utf-8"))
+    assert len(manifest) == 1 and manifest[0]["selected_path"] == "selected.md"
     assert f"{relative.as_posix()} in this folder" in request["instructions"]
     custody._CUSTODY.clear()
 
@@ -801,6 +850,7 @@ def test_an_empty_plan_continuation_restates_its_new_selection_outside_the_threa
     assert first["status"] == "started", first
     [(_path, thread, _key)] = [call for call in p.engine.calls if call[0] == "/v2/threads"]
     folder = pathlib.Path(thread["scope"]["root"])  # the thread's folder, fixed at its creation
+    scopes_before = set(folder.parent.iterdir())
     prior, _payload = p.finish(first["run_id"])
     drive = pathlib.Path(p.ctx.drive_root) / "task_drives" / p.ctx.task_id
     (drive / "second.md").write_bytes(b"second input\n")
@@ -808,11 +858,82 @@ def test_an_empty_plan_continuation_restates_its_new_selection_outside_the_threa
     assert turn["status"] == "started", turn
     path, request, _key = p.engine.calls[-1]
     assert path == f"/v2/threads/{prior.thread_id}/turns" and "scope" not in request, "the thread keeps its folder"
+    assert set(folder.parent.iterdir()) == scopes_before, "a turn must not create an unused scope"
     [row] = turn["input_files"]
     assert row["carrier"] == "outside_scope_path" and folder not in pathlib.Path(row["local"]).parents
     assert pathlib.Path(row["local"]).read_bytes() == b"second input\n"
     assert "SELECTED INPUT FILES" in request["prompt"] and row["local"] in request["prompt"]
     assert "outside this run's folder" in request["prompt"] and "in this folder" not in request["prompt"]
+    assert "ACCESS: The starting folder is a location, not a read boundary." in request["prompt"]
+
+
+@pytest.mark.parametrize("engine_version", ["4.5.0", "5.1.0"], ids=["registration-fallback", "ephemeral-thread"])
+@pytest.mark.parametrize("selected", [False, True], ids=["no-selection", "new-selection"])
+def test_folderless_plan_turn_registers_a_real_root_without_walking_lineage(
+        plan_setup, monkeypatch, engine_version, selected):
+    from ouroboros import delegate_readonly_inputs as inputs
+
+    p = plan_setup
+    p.engine.engine_version = engine_version
+    p.snapshot["access"] = "readonly"
+    p.ctx.workspace_root, p.ctx.task_constraint = "", {"mode": "local_readonly_subagent"}
+    p.ctx.task_metadata = {**(p.ctx.task_metadata or {}), "resource_intent": {"kind": "explicit_none"}}
+    p.engine.questions = {"parse": "found", "questions": []}
+    registrations = []
+
+    def find_project(root):
+        assert root and pathlib.Path(root).is_dir(), root
+        registrations.append(("find", root))
+        return ""
+
+    def register_project(root):
+        assert root and pathlib.Path(root).is_dir(), root
+        registrations.append(("register", root))
+        return "registered-project"
+
+    monkeypatch.setattr(p.engine, "find_project_id", find_project)
+    monkeypatch.setattr(p.engine, "register_project", register_project, raising=False)
+    first = p.start(mode="plan")
+    assert first["status"] == "started", first
+    thread_body = next(body for path, body, _key in p.engine.calls if path == "/v2/threads")
+    thread_root = pathlib.Path(thread_body["scope"]["root"])
+    assert thread_root.is_dir()
+    first_registration_count = len(registrations)
+    if engine_version == "4.5.0":
+        assert ("register", str(thread_root)) in registrations, "the old engine needs a registered thread root"
+    else:
+        assert not registrations, "the modern engine accepts an ephemeral thread root"
+    prior, _payload = p.finish(first["run_id"])
+    prior_roots = set(thread_root.parent.iterdir())
+    drive = pathlib.Path(p.ctx.drive_root) / "task_drives" / p.ctx.task_id
+    (drive / "unrelated-archive.md").write_bytes(b"unrelated\n")
+    options = {}
+    if selected:
+        (drive / "new.md").write_bytes(b"new source\n")
+        options["input_files"] = [{"root": "task_drive", "path": "new.md"}]
+
+    def unexpected_lineage(*_args, **_kwargs):
+        raise AssertionError("a folderless thread turn must not enumerate lineage")
+
+    monkeypatch.setattr(inputs, "_lineage_copies", unexpected_lineage)
+    monkeypatch.setattr(inputs, "_input_files", unexpected_lineage)
+    turn = p.start("", continue_from=prior.run_id, mode="plan", **options)
+    assert turn["status"] == "started", turn
+    path, request, _key = p.engine.calls[-1]
+    assert path == f"/v2/threads/{prior.thread_id}/turns"
+    assert "scope" not in request and "in this folder" not in request["prompt"]
+    assert set(thread_root.parent.iterdir()) == prior_roots
+    turn_registrations = registrations[first_registration_count:]
+    assert turn_registrations, "the turn must resolve its registration from the recorded target root"
+    assert all(root == prior.target_root and pathlib.Path(root).is_dir() for _action, root in turn_registrations)
+    if selected:
+        [row] = turn["input_files"]
+        assert row["carrier"] == "outside_scope_path"
+        assert pathlib.Path(row["local"]).read_bytes() == b"new source\n"
+        assert thread_root not in pathlib.Path(row["local"]).parents
+        assert row["local"] in request["prompt"]
+    else:
+        assert "input_files" not in turn and "SELECTED INPUT FILES" not in request["prompt"]
 
 
 @pytest.mark.parametrize("prompt", ["", "answers"])

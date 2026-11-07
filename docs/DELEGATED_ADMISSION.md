@@ -154,18 +154,23 @@ it is saved. The Git copy shares the source repository's refs, stash, hooks and
 configuration (the former independent clone failed on shallow and partial
 sources). A Git-subdirectory starting folder copies the enclosing worktree and
 starts in the matching folder;
-a folderless Project's engine copy is made from this invocation's staged lineage
+a folderless Project's engine copy is made from this invocation's staged
 inputs (`delegate_readonly_inputs`, `resource_ref.source_root`), never from the
-live scratch. Folderless readonly and investigation starts stage every permitted
+live scratch. Folderless readonly and investigation starts without a nonempty `input_files` selection stage every permitted
 lineage file, a scheduled origin's whole `task_drive`/`artifact_store` included
 (`tool_access_reads.scheduled_origin`): the copy grows with that scratch, and one
 unreadable or nonregular file refuses the start before opening it (`readonly_inputs_unavailable`);
-explicit `input_files` are separate (3b). A folder no private copy serves (a data-drive subfolder, an
+nonempty explicit `input_files` replaces that automatic staging (3b). A folder no private copy serves (a data-drive subfolder, an
 ignored starting folder) refuses typed, naming `access='readonly'`. A read-only child
 (an explicit `readonly` lowering, Observe, or a Presence ceiling without a
 delegated write grant) defaults to `mode: ask`, `access: readonly`. Explicit
 `mode: plan` is also read-only; omitted mode preserves access-derived execution. Its parent-selected starting folder is the session project
-root, not a read boundary; omitting it preserves inherited/folderless behavior.
+root, not a read boundary; omitting it preserves inherited/folderless behavior. Read-only
+workers and reviewer sessions may read only task-authorized sources within the parent's
+existing read authority, subject to explicit narrower constraints and effective tools.
+Prose paths grant no access, and credential/harness runtime discovery needs specific source
+authorization. A review of a frozen snapshot stays on that snapshot: an outside supplemental
+source cannot replace the reviewed tree. Read-only sessions make no writes.
 The host reads effective access back for both shapes;
 the delegated HOME/boundary checks below apply only to marker-carrying runs.
 
@@ -342,8 +347,10 @@ scheduled child adds its own resource policy on each contract carrier. One entry
 missing, not a file, on an unsupported root, or changed or failed while copied refuses the whole
 start (`input_files_unavailable`, `definitely_unrun`, from the pre-check or the start alike) with one
 result row per entry; no failed row reads `prepared`. Only a nonempty selection refuses a writable start
-(`input_files_readonly_only`) or an acting `write_surface`. Omitted, null and `[]` send the same
-request as before, and only `[]` reports an empty receipt (`input_files: []`). There is no count
+(`input_files_readonly_only`) or an acting `write_surface`. A nonempty selection replaces automatic
+folderless task/artifact lineage staging: unrelated lineage entries are not enumerated or copied.
+Omitted, null and `[]` keep the previous automatic inputs and request shape, and only `[]` reports
+an empty receipt (`input_files: []`). There is no count
 or size cap. Retention and folderless restaging stream and hash each file. Preparation may
 outlive the ordinary tool wait and finish as a late start result; a tool timeout proves no
 non-dispatch, so inspect that start before requesting another.
@@ -359,7 +366,7 @@ no deliverable (`collect_task_artifact_records` skips `source_handles`), kept wi
 artifacts past drive retirement, pruned by name from automatic lineage staging at any depth, while an
 explicit entry may still select an earlier copy.
 
-A folderless start also restages the bytes once into its per-invocation scope
+A folderless start with a nonempty selection restages only those bytes once into its per-invocation scope
 (`carrier: scope`; its `inputs.json` rows carry `selected_path`). A start in a repository or folder
 keeps it as `scope.root` and cwd; `readonly_root` is not reused and no task-drive copy
 is made. It names the retained copies by absolute path outside its folder
@@ -371,7 +378,8 @@ sha256 and size, never the automatic lineage inputs. Preparation is not reading.
 a new selection, replays the recorded body and paths without rereading or recopying, and returns
 the recorded receipt. `continue_from` retains only its own new selection and restates its map in
 the continuation prompt, even an empty one. A plan-thread turn keeps its thread's original folder (the
-engine drops a new scope), so its copies are named outside it (`outside_scope_path`).
+engine drops a new scope), does not enumerate or create an unused scope, and names newly selected
+copies outside it (`outside_scope_path`). Its continuation prompt restates current typed access.
 
 `schedule_subagent` retains before queueing under `scheduled-<child>` and saves the receipt as
 `prepared_input_files`, scheduling intent (`SUBAGENT_INTENT_FIELDS`) that crosses admission, the
@@ -391,7 +399,8 @@ child must retain `{"kind": "explicit_none"}` so its first session gets the dele
 an explicit `workspace_root` is recorded as `{"kind": "explicit_resource", "root": ...}` after
 schedule-time folder selection. The scheduling acknowledgement for an `agent_session` describes the
 selected sources separately from the nanny's broad `read_file` profile; first start confirms the
-scope or private checking copy, never the leaf's reading. A path
+scope or private checking copy, never the leaf's reading; nanny/native tools are not automatically
+available to the session leaf. A path
 written only in prose is not prepared. One session binds one directory; three worktrees require three
 read-only children or explicit regular-file selections. This preserves the existing contract without
 staging whole trees or adding an engine multi-root.
