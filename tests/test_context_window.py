@@ -59,7 +59,8 @@ def test_numberless_refusal_adds_no_ceiling(tmp_path, monkeypatch, message, usab
 
 
 def test_numberless_refusal_bounds_the_window_only_at_a_measured_size(tmp_path, monkeypatch):
-    """Codex refuses by size without a number: a measured refused size lowers a window an acceptance raised."""
+    """Codex refuses by size without a number: a measured refused size lowers a window an acceptance raised. A refusal
+    of one input string's length is cured by a smaller input too, but bounds no token window at any size."""
     from types import SimpleNamespace
     from ouroboros.context_anchor import record_refused_input
 
@@ -70,6 +71,8 @@ def test_numberless_refusal_bounds_the_window_only_at_a_measured_size(tmp_path, 
     assert resolve_window(evidence, 65_536, root=tmp_path).usable == 919_379
     usage = {"_last_llm_provider_message": "Codex reported a failed response."}
     record_refused_input(usage, plan, 911_000)  # a cold estimate measures nothing beyond this task
+    assert resolve_window(evidence, 65_536, root=tmp_path).usable == 919_379
+    record_refused_input({**usage, "_last_llm_provider_code": "string_above_max_length"}, plan, 911_000, measured=True)
     assert resolve_window(evidence, 65_536, root=tmp_path).usable == 919_379
     record_refused_input(usage, plan, 911_000, measured=True)
     window = resolve_window(evidence, 65_536, root=tmp_path)

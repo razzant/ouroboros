@@ -71,7 +71,9 @@ def test_display_redacts_typed_details_without_mutating_custody():
 @pytest.mark.parametrize("code,status,unknown,kind,retry,wait,vendor", [
     ("provider_failed", 400, False, "context_overflow", False, "", "context_length_exceeded"),
     ("invalid_request", 400, False, "context_overflow", False, "", " context_length_exceeded "),
-    ("invalid_request", 400, False, "bad_request", False, "", "string_above_max_length"),
+    # One input string over its length (OpenAI's 10 MiB text, 07.11.2026): a smaller input cures it, as the window.
+    ("invalid_request", 400, False, "context_overflow", False, "", "string_above_max_length"),
+    ("invalid_request", 400, False, "bad_request", False, "", "invalid_value"),
 ])
 def test_vendor_facts_reach_shared_readers_without_changing_wrapper_custody(code, status, unknown, kind, retry, wait, vendor):
     from ouroboros.llm_attempt import _is_structured_context_overflow_exception

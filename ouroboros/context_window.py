@@ -190,8 +190,10 @@ def record_refusal(usage, plan, refused_input: int = 0) -> None:
     ``refused_input`` is the caller's measured provider-unit size of the refused request (anchored on an
     accepted request of this conversation), passed only when measured: Codex states no number, and a
     route that never records its refusals keeps planning at a larger acceptance and is refused again.
-    Without a stated limit or a measured size a refusal adds no ceiling."""
+    Without a stated limit or a measured size a refusal adds no ceiling, and a refusal of one input string's
+    length (``INPUT_STRING_LENGTH_CODES``) adds none at any size: it says nothing of the token window."""
     from ouroboros import capability_evidence as ce
+    from ouroboros.context_budget import INPUT_STRING_LENGTH_CODES
 
     plan = observed_plan(plan, usage)
     if plan is None or not getattr(plan, "window_witness_bound", True):
@@ -199,7 +201,8 @@ def record_refusal(usage, plan, refused_input: int = 0) -> None:
     message = str(usage.get("_last_llm_provider_message") or "")
     limit = ce._parse_ctx_limit_number(message)
     if not limit:
-        if int(refused_input or 0) > 0:
+        if (int(refused_input or 0) > 0
+                and str(usage.get("_last_llm_provider_code") or "").lower() not in INPUT_STRING_LENGTH_CODES):
             record_observation(ce.canonical_evidence_root(), observation_scope(plan),
                                refused=int(refused_input), kind="input")
         return
