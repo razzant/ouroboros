@@ -613,8 +613,9 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
 
 
 def _parse_safety_response(text: str) -> Optional[Dict[str, Any]]:
-    """Parse the ``{"status", "reason"}`` verdict from a Safety model response.
+    """Parse the ``{"status", "reason", "speech", "quote"}`` verdict from a Safety model response.
 
+    ``speech`` is kept only as a boolean and ``quote`` only as non-empty text; both are the checker's claims.
     Models occasionally wrap the JSON in prose or code fences despite the prompt.
     The whole reply and every outermost ``{...}`` in it are candidates; the
     strictest recognized status wins (DANGEROUS > SUSPICIOUS > SAFE, first of
@@ -655,7 +656,12 @@ def _parse_safety_response(text: str) -> Optional[Dict[str, Any]]:
     def verdict_of(raw: str) -> Optional[Dict[str, Any]]:
         obj = json.loads(raw)
         status = str(obj.get("status") or "").upper() if isinstance(obj, dict) else ""
-        return {"status": status, "reason": str(obj.get("reason") or "")} if status in rank else None
+        if status not in rank:
+            return None
+        quote = obj.get("quote")
+        return {"status": status, "reason": str(obj.get("reason") or ""),
+                **({"speech": obj["speech"]} if isinstance(obj.get("speech"), bool) else {}),
+                **({"quote": quote} if isinstance(quote, str) and quote.strip() else {})}
 
     for candidate in candidates:
         try:
@@ -1239,7 +1245,7 @@ def _run_llm_check(
             repair_prompt = (
                 "Your previous Safety Supervisor response was not parseable as the required JSON object.\n"
                 "Return ONLY this strict JSON shape, with no markdown and no prose:\n"
-                "{\"status\":\"SAFE|SUSPICIOUS|DANGEROUS\",\"reason\":\"short reason\"}\n\n"
+                "{\"status\":\"SAFE|SUSPICIOUS|DANGEROUS\",\"reason\":\"short reason\",\"speech\":true|false,\"quote\":\"\"}\n\n"
                 "Original proposed tool call follows again.\n\n"
                 f"{prompt}"
             )
