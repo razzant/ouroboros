@@ -107,6 +107,27 @@ def test_auto_does_not_reuse_last_discovered_accounts_capacity(tmp_path, catalog
     assert len(catalog["calls"]) == 2
 
 
+def test_one_catalog_read_serves_window_and_output_and_a_failed_read_is_not_repeated(tmp_path, monkeypatch):
+    """A probe reads the engine's catalog once. When that read fails (now, or its ten-minute record), the output limit
+    answers from what is stored instead of waiting on a second read of the same daemon; a read that succeeded without
+    an account's window still reads the output limit."""
+    from ouroboros.llm import LLMClient
+
+    reads = []
+
+    def unreachable(source, credential_profile_id=None, *, requested_model=None):
+        reads.append("timed out")
+        raise TimeoutError("controlled daemon timeout")
+    monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(unreachable))
+    assert _probe(tmp_path).status == ce.STATUS_FAILED and reads == ["timed out"]
+    assert _probe(tmp_path).status == ce.STATUS_FAILED and reads == ["timed out"]  # the failure's record: no read
+    nameless = {**_catalog(), "accountFingerprint": ""}  # answered, but names no account to hold a window
+    monkeypatch.setattr(LLMClient, "claudexor_model_catalog",
+                        staticmethod(lambda *_a, **_kw: reads.append("answered") or copy.deepcopy(nameless)))
+    (tmp_path / "fresh").mkdir()
+    assert _probe(tmp_path / "fresh").status == ce.STATUS_UNPROBEABLE and reads[1:] == ["answered", "answered"]
+
+
 def test_exact_observed_binding_reuses_only_its_cache(tmp_path, catalog):
     first = _probe(tmp_path)
     options = ce.model_account_options(MODEL, model_route=_binding(first))
