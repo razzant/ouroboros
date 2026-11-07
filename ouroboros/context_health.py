@@ -201,13 +201,15 @@ def _plan_review_note(env: Any, task_id: str) -> str:
 def _identity_age_line(env: Any) -> str:
     """When ``identity.md`` was last written, as a fact; whether that is long is the mind's reading
     (the STALE/THIN identity and EMPTY/BLOATED scratchpad verdicts and their OK lines left with the
-    owner's rule that no threshold stands in for judgment). An absent file is no fact."""
+    owner's rule that no threshold stands in for judgment). An absent file is no fact. A write's timestamp can run
+    ahead of a coarse clock (Windows, Python 3.10: 15.6 ms), so a file written just now is 0.0 h old, never -0.0."""
     import time as _time
 
     try:
         identity_path = env.drive_path("memory/identity.md")
         if identity_path.exists():
-            return f"identity.md last updated {(_time.time() - identity_path.stat().st_mtime) / 3600:.1f} h ago"
+            age = max(0.0, _time.time() - identity_path.stat().st_mtime)
+            return f"identity.md last updated {age / 3600:.1f} h ago"
     except Exception:
         pass
     return ""
