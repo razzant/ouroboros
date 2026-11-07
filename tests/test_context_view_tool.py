@@ -47,6 +47,12 @@ def test_inspect_then_new_model_turn_and_owner_tail_preserves_pinned_source(tmp_
                 and m["content"].startswith("[Context view receipt]")]
     assert len(receipts) == 1 and receipts[0]["role"] == "user"
     assert "[INDEPENDENT_ROOTS]" not in receipts[0]["content"]
+    notice = json.loads(receipts[0]["content"].split("\n", 1)[1])  # what the fold freed and kept (C2 S3)
+    assert notice["reclaimed_tokens"] == ctx._context_view_receipt["reclaimed_tokens"] and notice["basis"] == "host estimates"
+    from ouroboros.tools.compact_context import residue_by_kind
+    assert notice["residue"] == residue_by_kind(candidate[:candidate.index(receipts[0])])  # the view it kept
+    assert notice["residue"]["capsule"]["units"] == 1 and notice["residue"]["tool"]["tokens"] > 0
+    assert "resulting_input_tokens" in notice
     assert candidate.index(receipts[0]) > next(
         i for i, m in enumerate(candidate) if m.get("tool_call_id") == "compact")
     assert ctx._pending_compaction is None

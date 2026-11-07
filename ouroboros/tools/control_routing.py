@@ -18,7 +18,7 @@ from ouroboros.tools.control_events import (
 )
 from ouroboros.tool_access_paths import canonical_data_root
 from ouroboros.tools.registry import ToolContext
-from ouroboros.tools.tool_result import completed_local_read
+from ouroboros.tools.tool_result import ToolResult, completed_local_read, publish_no_effect
 from ouroboros.utils import append_jsonl, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -258,14 +258,25 @@ def _start_task(
     context_requires_development: Optional[bool] = None,
     destination: str = "",
     owner_quote: str = "",
+    owner_words: str = "",
 ) -> str:
     """Start separate new work; the caller keeps its identity and obligations."""
+    from ouroboros.owner_words import cited_owner_basis
+
     effort_fields, effort_error, effort_note = _root_effort_arg(reasoning_effort, "start_task")
     if effort_error:
         return effort_error
     goal = str(objective or "").strip()
     if not goal:
         return "⚠️ TOOL_ARG_ERROR (start_task): objective is required"
+    owner_basis, cite_error = cited_owner_basis(ctx, owner_words)
+    if cite_error:  # the same typed argument refusal the schedule doors publish: nothing was started
+        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
+                                                 text=f"⚠️ OWNER_WORDS_UNVERIFIED (start_task): {cite_error}"))
+    if owner_basis and destination == "owner":  # a private owner start names its held answer (#2795), not a place cite
+        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
+            "⚠️ TOOL_ARG_ERROR (start_task): owner_words cites your human's words for this place's work "
+            "(destination='place'); a private owner start names their held answer in owner_quote. Nothing was scheduled.")))
     card_title, title_error = _task_card_title_arg(title, "start_task")
     if title_error:
         return title_error
@@ -419,13 +430,21 @@ def _start_task(
     # origin label, ledger category and level ride the event by value; the
     # supervisor stamps them on the new root (worker_promotion) — no presence-style
     # stripping, the wake chooses project/workspace like any Main turn (В9').
-    from ouroboros.consciousness_authority import consciousness_origin_metadata
+    from ouroboros.consciousness_authority import consciousness_origin_metadata, is_focus_wake
 
-    if not private:
-        evt.update(consciousness_origin_metadata({**metadata, "task_id": str(getattr(ctx, "task_id", "") or "")}, started_root=True))
+    if not private:  # a private owner start carries its own owner contract (#2795); a place start, its writer's kind
+        evt.update(consciousness_origin_metadata({**metadata, "task_id": str(getattr(ctx, "task_id", "") or "")},
+                                                 started_root=True, owner_basis=owner_basis))
         _attach_origin_from_metadata(ctx, evt)
         _attach_client_surface(ctx, evt)
     _attach_drafted_objective(ctx, evt)
+    if owner_basis:  # the cited words ride into the new root alone, never back into this run's own corpus
+        evt["owner_corpus"] = [*evt.get("owner_corpus", []), owner_basis]
+    kind_note = ""
+    if is_focus_wake(metadata) and not private:  # a place turn's start: whose work it is, in one plain sentence
+        kind_note = (" Started as your human's work on their cited words." if owner_basis else
+                     " Started as your own work (consciousness kind): it draws on the consciousness allowance, and "
+                     "the Off switch stops it.")
     mode, confirmation = _emit_and_wait_for_routing(ctx, evt)
     confirmation_status = str(confirmation.get("status") or "unconfirmed")
     reason = str(confirmation.get("reason") or "")
@@ -437,7 +456,7 @@ def _start_task(
         scope_note = _effective_scope_note(ctx, effective_pid)
         response = (
             f"OK: task {tid}{scope_note} accepted and durably scheduled ({mode}){repo_root_note}."
-            f"{source_confirmation} "
+            f"{source_confirmation}{kind_note} "
             "The task now runs independently, and follow-up chat can steer it. "
             "Use wait_task/get_task_result if its result "
             "is needed in this conversation."

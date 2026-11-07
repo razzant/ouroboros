@@ -111,14 +111,14 @@ def test_each_source_projection_appears_once_and_the_event_is_typed(focus, monke
     ctx, bundle, prompt = _reply_bundle(root, monkeypatch, checker)
 
     retained = ctx._owner_directives[0]
-    assert retained["source"] == "initial_text" and "allowance known spend" in retained["content"]
+    assert retained["source"] == "initial_text" and "counted_roots" in retained["content"]
     source = bundle["occasion"]["sources"][0]
     assert source["message_text"] == "hello there" and source["event"]["conversation_key"] == "chat:a:r:0"
     assert source["work_here"] == "Already started: task1" and "content" not in source
     assert "notes_at_event" not in source  # the same note versions are read now
     for text in ("OWNER NOTE", "MIND NOTE", RULES.splitlines()[0], "hello there"):
         assert prompt.count(text) == 1, text
-    for frame_only in ("allowance known spend", "root-a", "Place facts (context only)"):
+    for frame_only in ("counted_roots", "root-a", "Place facts (context only)"):
         assert frame_only not in prompt
     notes = bundle["standing_delegation"]["place_notes"]
     assert [(n["author"], n["standing_delegation"], bool(n["at"])) for n in notes] == [

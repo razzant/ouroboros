@@ -184,7 +184,7 @@ from ouroboros.nanny_pacing import (
 )
 
 
-def _setup_dynamic_tools(tools_registry, tool_schemas, messages, context_mode="max"):
+def _setup_dynamic_tools(tools_registry, tool_schemas, messages, context_mode="max", gateway=False):
     """Bind the one discovery implementation to this loop's resident schema list.
 
     The tools a task starts without schemas for are named by the connections map in the
@@ -192,7 +192,7 @@ def _setup_dynamic_tools(tools_registry, tool_schemas, messages, context_mode="m
     """
     from ouroboros.tools.tool_discovery import bind_resident_schemas
 
-    enabled_extra = bind_resident_schemas(tools_registry, tool_schemas)
+    enabled_extra = bind_resident_schemas(tools_registry, tool_schemas, gateway=gateway)  # Main: MCP via call_mcp_tool
     tools_registry._ctx._actor_loaded_tool_names = enabled_extra  # a route's schema ceiling keeps these
     omissions = (
         tools_registry.capability_omissions()
@@ -582,7 +582,7 @@ def run_llm_loop(
         _loop_tree_accounting(refresh=True, max_age_sec=0.0)
     continuation = saved or saved_pause or saved_working
     tool_schemas = continuation["tool_schemas"] if continuation else initial_tool_schemas(tools, context_mode=active_context_mode)
-    tool_schemas, _enabled_extra_tools = _setup_dynamic_tools(tools, tool_schemas, messages, context_mode=active_context_mode)
+    tool_schemas, _enabled_extra_tools = _setup_dynamic_tools(tools, tool_schemas, messages, context_mode=active_context_mode, gateway=True)
     ctx.event_queue, ctx.task_id, ctx.messages = event_queue, task_id, messages
     stateful_executor = StatefulToolExecutor()
     exit_ctx = _LoopExitContext(

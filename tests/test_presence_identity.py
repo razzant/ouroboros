@@ -173,7 +173,7 @@ def test_authentication_controls_safety_occasion_and_child_authority(focus, auth
     assert metadata["focus"]["actor"].get("owner_address_unverified", False) is (address_matches and authenticated is False)
     assert metadata["focus"]["actor"]["owner_confirmed"] is owner
     child = consciousness_origin_metadata(metadata, started_root=True)
-    assert child["work_kind"] == ("owner" if owner else "consciousness")
+    assert child["work_kind"] == "consciousness"  # a confirmed account mints nothing; only a verified cite does
     ctx = SimpleNamespace(task_metadata=metadata, drive_root=root, repo_dir=root)
     evidence = _build_check_prompt("read_file", {}, ctx=ctx)
     assert ('"cause": "confirmed owner account"' in evidence) is owner
@@ -187,9 +187,9 @@ def test_authentication_controls_safety_occasion_and_child_authority(focus, auth
 
 
 @pytest.mark.parametrize("kind,owner,expected", [
-    ("bot", False, "You write here as Ouroboros, through Human mailbox."),
-    ("user", False, "You write here through the account Human mailbox; your human's notes say what that account is."),
-    ("user", True, "You write here from your human's own account, Human mailbox: your words appear as theirs, and their notes say how. If someone sincerely asks whether they are writing to a person, say what you are."),
+    ("bot", False, "You write here as Ouroboros, through Human mailbox (human@example.test)."),
+    ("user", False, "You write here through the account Human mailbox (human@example.test); your human's notes say what that account is."),
+    ("user", True, "You write here from your human's own account, Human mailbox (human@example.test): your words appear as theirs, and their notes say how. If someone sincerely asks whether they are writing to a person, say what you are."),
 ])
 def test_focus_voice_uses_detached_event_identity_and_user_owner_match(focus, kind, owner, expected):
     from ouroboros.presence_context import frame_focus_content

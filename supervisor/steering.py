@@ -81,7 +81,27 @@ def _presence_target_refused(ctx: Any, evt: Dict[str, Any], task: Dict[str, Any]
     record = presence_target_record(ctx.DRIVE_ROOT, target, queue_row=task)
     if binding and task.get("_inline_presence_author") and presence_record_binding(record) == binding:
         return False  # the live author of this place's own conversation: place_guard names it to its callers
+    if binding and _delivered_in_conversation(ctx, target, evt.get("sender_origin")):
+        return False  # the work that leads this thread (it has a delivery here): a lineage-scoped note (owner 06.11, 4=A)
     return not presence_related_work(binding, record)
+
+
+def _delivered_in_conversation(ctx: Any, task_id: str, sender_origin: Any) -> bool:
+    """Whether ``task_id`` has a delivery receipt in the sender's own conversation (its run origin's provider, account,
+    conversation and thread): the host's record that this work wrote there, a thread it rooted or answered, read from
+    the dialogue store and never from the target's say-so."""
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_runner import _live_task_rows
+
+    origin = sender_origin if isinstance(sender_origin, dict) else {}
+    if not task_id or not (origin.get("provider") and origin.get("conversation_id")):
+        return False
+    key = conversation_key(str(origin["provider"]), str(origin.get("account_id") or ""), str(origin["conversation_id"]),
+                           str(origin.get("thread_id") or ""))
+    try:
+        return any(row.get("type") == "presence_delivery" for row in _live_task_rows(ctx.DRIVE_ROOT, task_id, key))
+    except Exception:
+        return False  # an unreadable store proves no relation
 
 
 def _refuse_steering_while_cancelling(

@@ -247,14 +247,16 @@ def _started_work_section(drive_root: Path, value: Mapping[str, Any], task_id: s
     )
 
 
-def presence_send_facts(drive_root: Path, task_id: str, value: Any) -> str:
-    """Transport sends of this task confirmed so far in its own conversation, or honest unknown."""
+def presence_send_record(drive_root: Path, task_id: str, value: Any) -> dict[str, Any] | None:
+    """The host receipts of this task's transport sends in its own conversation: ``{"sent": [confirmed texts],
+    "uncertain": parts whose latest receipt is uncertain, "partial": no inbound row covers the trace, "actions":
+    typed reaction receipts}``; None when the transport reports no receipts (unknown, never none)."""
     from ouroboros.presence_runner import _live_task_rows, _turn_actions, _turn_sends
 
     value = value if isinstance(value, Mapping) else {}
     key = str((value.get("event") or {}).get("conversation_key") or "")
     if not key or value.get("delivery_reporting_version") != 1:
-        return "unknown (this transport reports no delivery receipts)"
+        return None
     rows = _live_task_rows(Path(drive_root), str(task_id or ""), key)
     sent, uncertain = _turn_sends(rows)
     partial = sent is None
@@ -262,10 +264,20 @@ def presence_send_facts(drive_root: Path, task_id: str, value: Any) -> str:
         # No inbound row of this task in the live log (a promoted root never logs one): its receipts
         # there are still observed, but earlier ones may sit in rotated history this read does not cover.
         sent, uncertain = _turn_sends(rows, same_generation=True)
-    said = " / ".join(json.dumps(text, ensure_ascii=False) for text in sent if text) or "none"
-    if partial:
+    return {"sent": [text for text in sent if text], "uncertain": uncertain, "partial": partial,
+            "actions": _turn_actions(rows, same_generation=partial)}
+
+
+def presence_send_facts(drive_root: Path, task_id: str, value: Any) -> str:
+    """Transport sends of this task confirmed so far in its own conversation, or honest unknown."""
+    record = presence_send_record(drive_root, task_id, value)
+    if record is None:
+        return "unknown (this transport reports no delivery receipts)"
+    said = " / ".join(json.dumps(text, ensure_ascii=False) for text in record["sent"]) or "none"
+    if record["partial"]:
         said += " (live chat log only; receipts rotated into archived history are not covered, so there may be more)"
-    actions = "".join(f"; {action}" for action in _reaction_actions(_turn_actions(rows, same_generation=partial)))
+    actions = "".join(f"; {action}" for action in _reaction_actions(record["actions"]))
+    uncertain = record["uncertain"]
     return said + (f"; {uncertain} more part(s) have an uncertain outcome and may have landed" if uncertain else "") + actions
 
 
@@ -607,7 +619,7 @@ def _conversation_now(root: Path, value: Mapping[str, Any], task_id: str) -> dic
 
 __all__ = [
     "build_presence_context_section", "frame_presence_user_content",
-    "presence_finish_not_accepted_note", "presence_send_facts",
+    "presence_finish_not_accepted_note", "presence_send_facts", "presence_send_record",
 ]
 
 
@@ -629,8 +641,145 @@ def confirmed_delivery_receipts(ctx: Any) -> frozenset[tuple[str, str]]:
     return frozenset(identity for identity, state in latest.items() if state in {"delivered", "accepted"})
 
 
-PLACEHOLDERS = ("who", "place", "when", "waiting_line", "event", "place_state", "notes",
-                "wake_item", "actor_facts", "work_here", "spent_line", "roots_line", "working_folder", "voice_line")
+PLACEHOLDERS = ("who", "place", "when", "facts_line", "event", "speak_line", "place_state", "notes",
+                "wake_item", "actor_facts", "work_here", "spent_line", "working_folder", "voice_line")
+
+# The connector's observed provider facts (CREATING_SKILLS ``event.facts``) in plain words. Each is what the
+# provider recorded about this event, never a reading of its text or a verdict about whom it is for.
+_FACT_WORDS = {
+    "direct_message": "a direct message to your account",
+    "group_dm": "a message in a group direct conversation you are a member of",
+    "mention": "it mentions your account",
+    "reply_to_me": "it replies to a message you wrote",
+    "my_thread": "it is in a thread you started or wrote in",
+    "new_issue": "a new issue in a watched place",
+    "new_pull_request": "a new pull request in a watched place",
+    "review_requested": "it requests your review",
+    "assigned": "it is assigned to your account",
+    "any_message": "a message in a watched conversation",
+    "from_bot": "its author is a bot",
+    "legacy_addressed": "an older connector that filtered events itself and reports no per-event facts",
+}
+
+
+def _self_ids(focus: Mapping[str, Any], event: Mapping[str, Any]) -> tuple[str, ...]:
+    """The platform ids of the account this focus writes as: its credential identity, then the connector's own
+    ``provider_facts.self_user_id``; empty when neither names one."""
+    sending = (focus.get("identity") or {}).get("sends_as") or {}
+    facts = (event.get("message") or {}).get("provider_facts")
+    own = (str(sending.get("id") or ""), str((facts or {}).get("self_user_id") or "") if isinstance(facts, Mapping) else "")
+    return tuple(dict.fromkeys(value for value in own if value))
+
+
+def _author_directory(event: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    """The connector's directory of the thread snapshot's authors (``thread_history.authors``: id, name, is_self), by id."""
+    conversation = event.get("conversation") if isinstance(event.get("conversation"), Mapping) else {}
+    history = conversation.get("thread_history") if isinstance(conversation.get("thread_history"), Mapping) else {}
+    rows = history.get("authors") if isinstance(history.get("authors"), list) else []
+    return {str(row["id"]): row for row in rows if isinstance(row, Mapping) and row.get("id")}
+
+
+def _mentions(event: Mapping[str, Any], self_ids: tuple[str, ...]) -> list[dict[str, Any]] | None:
+    """Whom the message mentions, by platform id: the connector's ``message.mentions`` rows when it supplies them,
+    else its ``provider_facts.mentioned_user_ids`` named through the thread's author directory where it has them,
+    with ``is_self`` by id equality; None when it reports neither."""
+    message = event.get("message") if isinstance(event.get("message"), Mapping) else {}
+    rows = message.get("mentions")
+    if isinstance(rows, list):
+        return [{"id": str(row.get("id")), "name": row.get("name") if isinstance(row.get("name"), str) else None,
+                 "is_self": bool(row.get("is_self"))} for row in rows if isinstance(row, Mapping) and row.get("id")]
+    facts = message.get("provider_facts") if isinstance(message.get("provider_facts"), Mapping) else {}
+    ids = facts.get("mentioned_user_ids")
+    if not isinstance(ids, list):
+        return None
+    directory = _author_directory(event)
+    return [{"id": str(value), "name": _directory_name(directory.get(str(value))),
+             "is_self": str(value) in self_ids or bool((directory.get(str(value)) or {}).get("is_self"))}
+            for value in ids if str(value or "")]
+
+
+def _directory_name(row: Mapping[str, Any] | None) -> str | None:
+    name = (row or {}).get("name")
+    return name if isinstance(name, str) and name.strip() else None
+
+
+def _facts_line(focus: Mapping[str, Any], event: Mapping[str, Any]) -> str:
+    """The observed facts of this event as sentences, mentions named with a you/not-you mark."""
+    facts = list(event.get("facts")) if isinstance(event.get("facts"), list) else ["legacy_addressed"]
+    if (focus.get("actor") or {}).get("is_bot") and "from_bot" not in facts:
+        facts.append("from_bot")
+    words = [_FACT_WORDS.get(fact) or (f"the connector signalled {fact[len('signal.'):]}" if str(fact).startswith("signal.")
+                                        else f"the connector reports {fact}") for fact in facts]
+    line = "The connector observed: " + "; ".join(words) + "."
+    mentions = _mentions(event, _self_ids(focus, event))
+    if mentions is None:
+        return line
+    if not mentions:
+        return line + " It mentions no one by platform id."
+    named = []
+    for row in mentions:
+        who = (f"{row['name']} (id {row['id']})" if row["name"]
+               else f"id {row['id']} (name not supplied; a connector read tool can resolve it)")
+        named.append(who + (" — you" if row["is_self"] else " — not you"))
+    return line + " It mentions: " + "; ".join(named) + "."
+
+
+def _thread_author(message: Mapping[str, Any]) -> tuple[str, str]:
+    """``(id, name)`` of a snapshot message's author across the connector shapes the host reads (CREATING_SKILLS
+    "Thread snapshot"): flat ids, nested actor/author mappings, provider profiles; unknown stays empty."""
+    nested = next((message[key] for key in ("actor", "author") if isinstance(message.get(key), Mapping)), {})
+    identity = next((str(value) for value in (message.get("user"), message.get("actor_id"), message.get("author_id"),
+                                              message.get("platform_actor_id"), nested.get("platform_actor_id"),
+                                              nested.get("id")) if value), "")
+    profiles = [message.get(key) for key in ("user_profile", "bot_profile") if isinstance(message.get(key), Mapping)]
+    names = [*(profile.get(key) for profile in profiles for key in ("real_name", "display_name", "name")),
+             message.get("author_name"), message.get("display_name"), message.get("username"),
+             nested.get("display_name"), nested.get("username")]
+    return identity, next((str(value) for value in names if isinstance(value, str) and value.strip()), "")
+
+
+def _thread_time(message: Mapping[str, Any]) -> str:
+    from ouroboros.presence_history import instant
+    sent = message.get("sent_at")
+    if instant(sent) is not None:
+        return str(sent)
+    raw = message.get("ts") if message.get("ts") is not None else message.get("timestamp")
+    try:  # a numeric epoch is a time; anything else stays unknown
+        return datetime.fromtimestamp(float(raw), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "an unrecorded time"
+
+
+def _thread_snapshot(focus: Mapping[str, Any], event: Mapping[str, Any]) -> str:
+    """The thread as the connector captured it (``event.conversation.thread_history``), one line per message
+    with its author (named through ``thread_history.authors`` first), a ``[you]`` mark by that directory or by id, a
+    ``[this message]`` mark on the waking message and its time. Rendered whole: the connector's capture is already
+    bounded, and a cut only the window itself may record (BIBLE P1). Lines the room already shows are not filtered
+    (matching them is a store read the frame does not make)."""
+    history = (event.get("conversation") or {}).get("thread_history") if isinstance(event.get("conversation"), Mapping) else None
+    if not isinstance(history, Mapping):
+        return ""
+    data = history.get("data") if isinstance(history.get("data"), Mapping) else {}
+    messages = [row for row in data.get("messages") or [] if isinstance(row, Mapping)] if isinstance(data.get("messages"), list) else None
+    status = str(history.get("status") or "")
+    if messages is None:
+        return f"The connector's thread snapshot holds no messages (status {status or 'unknown'})."
+    own, directory = _self_ids(focus, event), _author_directory(event)
+    current = event.get("message") if isinstance(event.get("message"), Mapping) else {}
+    waking = {str(value) for value in (current.get("message_id"), current.get("id"), current.get("ts")) if value}
+    lines = []
+    for row in messages:
+        identity, name = _thread_author(row)
+        known = directory.get(identity) if identity else None
+        name = _directory_name(known) or name  # the connector's directory first, its per-message fields next
+        mine = bool(identity) and (identity in own or bool((known or {}).get("is_self")))
+        marks = (" [you]" if mine else "") + (
+            " [this message]" if waking & {str(value) for value in (row.get("message_id"), row.get("id"), row.get("ts")) if value} else "")
+        who = f"{name} ({identity})" if name and identity else name or identity or "unknown author"
+        lines.append(f"- {who}{marks} at {_thread_time(row)}: {json.dumps(str(row.get('text') or ''), ensure_ascii=False)}")
+    coverage = "" if data.get("complete") in (None, True) else ", the connector reports it incomplete"
+    observed = f", observed at {history['observed_at']}" if history.get("observed_at") else ""
+    return "\n".join([f"The thread as the connector captured it ({len(messages)} message(s){coverage}{observed}):", *lines])
 
 
 def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int) -> dict:
@@ -657,11 +806,8 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int) -> di
                             "owner_confirmed": owner_address and event.actor.get("authenticated") is not False,
                             **({"authenticated": event.actor["authenticated"]} if "authenticated" in event.actor else {}),
                             "is_bot": "from_bot" in facts},
-                  "matched_wakes": [w.fact for w in wake_matches(place, facts)],
-                  "addressed": bool(set(facts) & {"direct_message", "group_dm", "mention", "reply_to_me",
-                                                  "review_requested", "assigned", "legacy_addressed"})},
+                  "matched_wakes": [w.fact for w in wake_matches(place, facts)]},
         "focus_allowance": allowance,
-        "focus_counted_roots": allowance.get("counted_roots", "unavailable; inspect current work"),
     }
     remaining = allowance.get("remaining_usd")
     if remaining is not None and float(remaining) > 0:
@@ -676,11 +822,14 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int) -> di
     return metadata
 
 
-def _voice_line(focus: Mapping[str, Any]) -> str:
+def _voice_line(focus: Mapping[str, Any], event: Mapping[str, Any] | None = None) -> str:
+    """Who you are here: the account you write as with its platform id, so an id in the text or the thread reads as
+    you or not you. Without a credential identity, the connector's own id of this account, when it supplies one."""
     sending = (focus.get("identity") or {}).get("sends_as") or {}
     if not sending:
-        return ""
-    label = sending["label"]
+        own = _self_ids(focus, event or {})
+        return f"Here your account is {own[0]}." if own else ""
+    label = sending["label"] + (f" ({sending['id']})" if sending.get("id") else "")
     if sending["kind"] == "bot":
         return f"You write here as Ouroboros, through {label}."
     if focus.get("identity_owner"):
@@ -697,8 +846,21 @@ def _when(message: Mapping[str, Any]) -> str:
     return (f"at {sent}" if sent else "at an unrecorded time") + (f", edited at {edited}" if edited else "")
 
 
+def _allowance_line(allowance: Mapping[str, Any], task_id: str) -> str:
+    """The consciousness allowance as counts (money, window, how many roots it counts); the root ids stay behind an
+    exact reader of this task's own record, never a dump in the frame (BIBLE P1: a raw payload behind an exact reader)."""
+    roots = allowance.get("roots")
+    folded = {key: allowance[key] for key in ("status", "limit_usd", "settled_usd", "remaining_usd", "resets_at") if key in allowance}
+    if isinstance(roots, list):
+        folded["counted_roots"] = len(roots)
+        folded["root_ids"] = (f'query_data(op="json", kind="task_result", ids=["{task_id}"], '
+                              'select="metadata.focus_allowance.roots")')
+    return json.dumps(folded or allowance, ensure_ascii=False)
+
+
 def frame_focus_content(task: Mapping[str, Any], content: Any) -> Any:
     """The volatile assignment lives at the user tail, after the shared cached prefix."""
+    from ouroboros.place_reply import speak_line
     from ouroboros.places import SILENT_DISCLOSURE
     metadata = task.get("metadata") or {}
     presence = metadata.get("presence") or {}
@@ -717,14 +879,16 @@ def frame_focus_content(task: Mapping[str, Any], content: Any) -> Any:
     previous = presence.get("previous_turn")
     if isinstance(previous, Mapping):
         work = _previous_turn_line(previous) + ("\n" + work if work else "")
-    voice = _voice_line(focus)
+    voice = _voice_line(focus, event)
+    snapshot = _thread_snapshot(focus, event)
     fields = {
         "voice_line": voice + "\n" if voice else "",
         "who": actor.get("display_name") or actor.get("platform_actor_id") or "A person",
         "place": place.get("label") or place.get("provider") or place.get("place_id"),
         "when": _when(event.get("message") or {}),
-        "waiting_line": "the event addressed you" if focus.get("addressed") else "an event matched this place's wake list",
-        "event": content if isinstance(content, str) else "\n".join(item.get("text", "") for item in content if isinstance(item, dict)),
+        "facts_line": _facts_line(focus, event),
+        "event": (content if isinstance(content, str) else "\n".join(item.get("text", "") for item in content if isinstance(item, dict)))
+                 + (f"\n\n{snapshot}" if snapshot else ""),
         "place_state": state + (". " + SILENT_DISCLOSURE if state == "silent" else ""),
         "notes": json.dumps(place.get("notes") or [], ensure_ascii=False),
         "wake_item": json.dumps([w for w in place.get("wakes", []) if w["fact"] in matched], ensure_ascii=False),
@@ -732,8 +896,8 @@ def frame_focus_content(task: Mapping[str, Any], content: Any) -> Any:
             "; authenticated: no" + ("; your human's own address: yes (unverified)" if unverified else "")
             if actor.get("authenticated") is False else ""),
         "work_here": work or "No earlier work recorded here; recent_tasks reads current work.",
-        "spent_line": json.dumps(allowance, ensure_ascii=False),
-        "roots_line": json.dumps(metadata.get("focus_counted_roots", "unavailable; inspect current work"), ensure_ascii=False),
+        "spent_line": _allowance_line(allowance, str(task.get("id") or "")),
+        "speak_line": speak_line(metadata),
         "working_folder": place.get("working_folder") or "not selected",
     }
     template = (Path(__file__).resolve().parents[1] / "prompts" / "FOCUS.md").read_text(encoding="utf-8")
@@ -750,13 +914,17 @@ def focus_frame_sources(metadata: Mapping[str, Any], recorded: Any) -> dict | No
     those records and the bare event text qualifies; anything else the recorded frame carries (an
     attachment manifest, image notes or blocks, an empty-text placeholder, another turn's inputs) is
     absent from the records, so the caller keeps that row whole. The allowance line is the mind's
-    budget, not the event."""
+    budget, not the event; its reader names this task by the id the producer derives from the binding and
+    the event (``presence_turn_task_id``), so the frame re-renders from the records alone."""
+    from ouroboros.presence_runner import presence_turn_task_id
     presence = metadata.get("presence") if isinstance(metadata.get("presence"), Mapping) else {}
     if (metadata.get("wake_cause") != "focus" or not isinstance(recorded, str) or "observed_text" not in presence
             or not isinstance(presence.get("event"), Mapping)):
         return None
+    event_id = str(presence["event"].get("source_event_id") or "")
+    task_id = presence_turn_task_id(str(presence.get("binding_id") or ""), event_id) if presence.get("binding_id") and event_id else ""
     try:
-        rendered = frame_focus_content({"metadata": metadata}, str(presence["observed_text"]).strip())
+        rendered = frame_focus_content({"id": task_id, "metadata": metadata}, str(presence["observed_text"]).strip())
     except Exception:  # records this renderer cannot read prove nothing; the row stays whole
         return None
     if rendered != recorded:

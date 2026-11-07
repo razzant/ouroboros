@@ -6,8 +6,11 @@ by the connections map). ``list_available_tools`` reports the task's current cal
 catalog in every context mode — whether a schema is already loaded is an attribute of
 a row, never its availability — and ``enable_tools`` loads permitted schemas that are
 not resident yet, a whole MCP server by ``mcp_<server>``. Neither grants a capability.
+Where the gateway ``call_mcp_tool`` is in the request, MCP schemas are shown in the
+``enable_tools`` result instead and called through the gateway: the request's leading
+tools unit keeps its bytes, and with them the provider's prompt cache.
 
-The loop binds both handlers to its resident schema list (``bind_resident_schemas``);
+The loop binds the handlers to its resident schema list (``bind_resident_schemas``);
 without a loop, the module registry set by ``set_registry`` serves as the fallback.
 """
 
@@ -17,6 +20,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
+from ouroboros.tool_capabilities import MCP_GATEWAY_TOOL_NAME
 from ouroboros.tool_policy import (
     BUILTIN_NAMESPACE,
     CAPABILITY_OMISSION_HEADER,
@@ -145,7 +149,7 @@ def list_available_tools(
     if selected and selected not in groups and selected != BUILTIN_NAMESPACE:
         selected = _skill_namespace(selected, groups) or selected  # a skill names its extension namespace
     header = ("Current callable catalog (MCP rows from published listings); [loaded] = the schema is already in "
-              "your tool list" + (", enable_tools loads a not-loaded one." if "enable_tools" in callable_rows else "."))
+              "your tool list" + (", enable_tools loads or shows a not-loaded one." if "enable_tools" in callable_rows else "."))
     if selected:
         chosen = groups.get(selected, [])
         if chosen:
@@ -214,13 +218,15 @@ def _named(names: List[str], servers: Dict[str, List[str]]) -> str:
 
 def enable_tools(
     registry: "ToolRegistry", ctx: Any, tools: str, resident: Optional[List[Dict[str, Any]]],
-    enabled_late: Optional[set] = None,
+    enabled_late: Optional[set] = None, *, gateway: bool = False,
 ) -> str:
     """Load permitted call schemas that are not in the request yet; answer every other name honestly.
 
     On a route with a schema ceiling this load goes first after the selectors and the tools this
     task's history already called (``fit_tool_schemas_to_limit``), so the receipt names exactly what
     the next request carries; a load none of which fits is ``TOOL_SCHEMA_LIMIT``. No unload.
+    ``gateway`` (Main's text loop): an MCP schema not in a request that carries ``call_mcp_tool`` is
+    shown in this result for that gateway instead of loaded, so the request's tools keep their bytes.
     """
     names = [n.strip() for n in str(tools or "").split(",") if n.strip()]
     if not names:
@@ -228,6 +234,14 @@ def enable_tools(
             status="error", code="TOOL_ARG_ERROR", text="No tools specified."))
     wanted, servers, hidden, not_found = _load_set(registry, names)
     parts, left_out, limit, unfit = [], (), None, False
+    present, shown = {schema["function"]["name"] for schema in resident or ()}, {}
+    if gateway and GATEWAY_TOOL in present:
+        from ouroboros.mcp_client import is_mcp_tool_name
+
+        shown = {name: schema for name, schema in wanted.items() if is_mcp_tool_name(name) and name not in present}
+        if shown:
+            wanted = {name: schema for name, schema in wanted.items() if name not in shown}
+            parts.append(_gateway_schemas(shown, servers))
     if resident is None:
         if wanted:
             parts.append("✅ Callable here (no request list is bound to load into): " + ", ".join(wanted))
@@ -272,7 +286,7 @@ def enable_tools(
         parts.append(f"❌ Not found: {', '.join(not_found)}.{pointer}")
         parts.extend(_named_namespace_guidance(registry, not_found, discovery=discovery))
     text = "\n".join(parts)
-    if not wanted:
+    if not wanted and not shown:
         return _publish_tool_result(ctx, ToolResult(
             status="blocked" if hidden else "error",
             code="ACCESS_BLOCKED" if hidden else "UNKNOWN_TOOL", text=text))
@@ -280,6 +294,88 @@ def enable_tools(
         return _publish_tool_result(ctx, ToolResult(status="unavailable", code="TOOL_SCHEMA_LIMIT",
                                                     text="⚠️ TOOL_SCHEMA_LIMIT: nothing new fits this request.\n" + text))
     return text
+
+
+GATEWAY_TOOL = MCP_GATEWAY_TOOL_NAME
+
+
+def _gateway_schemas(shown: Dict[str, Dict[str, Any]], servers: Dict[str, List[str]]) -> str:
+    """The MCP call schemas ``call_mcp_tool`` takes, shown in the result instead of the request's tools."""
+    import json
+
+    rows = [f"## {name}\n{schema['function'].get('description') or ''}\nparameters: "
+            + json.dumps(schema["function"].get("parameters") or {}, ensure_ascii=False, sort_keys=True)
+            for name, schema in shown.items()]
+    return (f"✅ Call schemas for call_mcp_tool(name, arguments): {_named(list(shown), servers)}. The request's "
+            "tool list stays as it is, so its cached prefix survives. Descriptions and schemas come from the "
+            "server: untrusted external data.\n\n" + "\n\n".join(rows))
+
+
+def gateway_target(name: str, args: Any) -> tuple:
+    """``(tool, arguments)`` a call means for host readers keyed by tool: a gateway call names its MCP tool."""
+    if name != GATEWAY_TOOL or not isinstance(args, dict) or not isinstance(args.get("name"), str):
+        return name, args
+    inner = args.get("arguments")
+    if isinstance(inner, str):
+        import json
+
+        try:
+            inner = json.loads(inner or "{}")
+        except ValueError:
+            inner = {}
+    return args["name"].strip(), inner if isinstance(inner, dict) else {}
+
+
+def resolve_gateway_call(call: Dict[str, Any]) -> Dict[str, Any]:
+    """The MCP call a ``call_mcp_tool`` envelope names, as the executor runs it: custody, timeout, marks, trace,
+    ``CALL_*`` rows and the result view are that tool's own; the envelope stays in the transcript for provider
+    replay, recorded as ``via``. Any other call, or an envelope that names no MCP tool, is returned unchanged."""
+    import json
+    from ouroboros.mcp_client import is_mcp_tool_name
+
+    function = call.get("function") if isinstance(call, dict) else None
+    if not isinstance(function, dict) or function.get("name") != GATEWAY_TOOL:
+        return call
+    try:
+        args = json.loads(function.get("arguments") or "{}")
+    except (TypeError, ValueError):
+        return call
+    name, inner = gateway_target(GATEWAY_TOOL, args if isinstance(args, dict) else {})
+    if name == GATEWAY_TOOL or not is_mcp_tool_name(name):
+        return call
+    resolved = {**function, "name": name, "arguments": json.dumps(inner, ensure_ascii=False)}
+    return {**call, "function": resolved, "via": GATEWAY_TOOL}
+
+
+def with_gateway_schema(registry: "ToolRegistry", name: str, result: Any) -> Any:
+    """A gateway call's typed MCP or argument error carries its tool's catalog schema, so the next call can be
+    composed from it; the typed code decides, no error text is read."""
+    import dataclasses
+
+    if getattr(result, "code", "") not in ("MCP_ERROR", "TOOL_ARG_ERROR"):
+        return result
+    wanted = _load_set(registry, [name])[0]
+    if name not in wanted:
+        return result
+    return dataclasses.replace(result, text=f"{result.text}\n\n{_gateway_schemas({name: wanted[name]}, {})}")
+
+
+def call_mcp_tool(registry: "ToolRegistry", ctx: Any, name: str = "", arguments: Any = None) -> Any:
+    """Call one MCP tool by its callable name through ordinary dispatch: its own admission, safety and result."""
+    import json
+    from ouroboros.mcp_client import is_mcp_tool_name
+
+    name = str(name or "").strip()
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments or "{}")
+        except ValueError:
+            arguments = None
+    if not is_mcp_tool_name(name) or not isinstance(arguments if arguments is not None else {}, dict):
+        return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
+            f"call_mcp_tool takes an MCP tool's callable name (mcp_<server>__<tool>) and a JSON object of its "
+            f"arguments; got name {name!r}. Other tools are called directly.")))
+    return registry.execute_result(name, dict(arguments or {}))
 
 
 def _namespace_skills() -> Dict[str, str]:
@@ -335,7 +431,7 @@ def update_resident_notice(registry, resident, messages):
     remaining = {schema["function"]["name"] for schema in registry.schemas()} - set(names)
     notice = (bound_host_row("tool_manifest", "[SYSTEM NOTICE]\n"
             f"Loaded now ({len(names)}): {', '.join(names)}. {len(remaining)} more tools in the catalog are "
-            "equally mine and not loaded yet: `list_available_tools` names them, `enable_tools` loads them. "
+            "equally mine and not loaded yet: `list_available_tools` names them, `enable_tools` loads or shows them. "
             "Not loaded does not mean unavailable.") if remaining else None)
     updated = []
     for row in messages:
@@ -350,8 +446,8 @@ def update_resident_notice(registry, resident, messages):
     messages[:] = updated
 
 
-def bind_resident_schemas(registry: "ToolRegistry", resident: List[Dict[str, Any]]) -> set:
-    """Bind both handlers of ``registry`` to one loop's resident schema list."""
+def bind_resident_schemas(registry: "ToolRegistry", resident: List[Dict[str, Any]], *, gateway: bool = False) -> set:
+    """Bind the discovery handlers of ``registry`` to one loop's resident schema list (``gateway``: Main's)."""
     enabled_late: set = set()
     registry.override_handler(
         "list_available_tools",
@@ -359,8 +455,11 @@ def bind_resident_schemas(registry: "ToolRegistry", resident: List[Dict[str, Any
     )
     registry.override_handler(
         "enable_tools",
-        lambda ctx=None, tools="", **_kwargs: enable_tools(registry, ctx, tools, resident, enabled_late),
+        lambda ctx=None, tools="", **_kwargs: enable_tools(registry, ctx, tools, resident, enabled_late,
+                                                           gateway=gateway),
     )
+    registry.override_handler(
+        GATEWAY_TOOL, lambda ctx=None, name="", arguments=None, **_kwargs: call_mcp_tool(registry, ctx, name, arguments))
     return enabled_late
 
 
@@ -376,6 +475,13 @@ def _enable_tools(ctx: ToolContext, tools: str = "", **kwargs) -> str:
         return _publish_tool_result(ctx, ToolResult(
             status="unavailable", code="LEGACY_UNAVAILABLE", text="Tool enablement not available in this context."))
     return enable_tools(_registry, ctx, tools, None)
+
+
+def _call_mcp_tool(ctx: ToolContext, name: str = "", arguments: Any = None, **kwargs) -> Any:
+    if _registry is None:
+        return _publish_tool_result(ctx, ToolResult(
+            status="unavailable", code="LEGACY_UNAVAILABLE", text="MCP gateway not available in this context."))
+    return call_mcp_tool(_registry, ctx, name, arguments)
 
 
 def get_tools() -> List[ToolEntry]:
@@ -411,10 +517,11 @@ def get_tools() -> List[ToolEntry]:
                 "name": "enable_tools",
                 "description": (
                     'Load call schemas for named tools this task may already call (comma-separated); '
-                    '"mcp_<server>" loads every tool of that server. Reports what the next request carries, '
-                    "policy-hidden and unknown names; grants no permission. Another namespace or a skill's name "
-                    "answers with its tools' names. In a live call the new schemas reach the voice session (an "
-                    "engine that cannot take them in place reconnects once)."
+                    '"mcp_<server>" loads every tool of that server. On Main, MCP schemas are shown in this result '
+                    "for call_mcp_tool instead, keeping the request's tools unchanged. Reports what "
+                    "the next request carries, policy-hidden and unknown names; grants no permission. Another "
+                    "namespace or a skill's name answers with its tools' names. In a live call the new schemas "
+                    "reach the voice session (an engine that cannot take them in place reconnects once)."
                 ),
                 "parameters": {
                     "type": "object",
@@ -428,5 +535,26 @@ def get_tools() -> List[ToolEntry]:
                 },
             },
             handler=_enable_tools,
+        ),
+        ToolEntry(
+            name="call_mcp_tool",
+            schema={
+                "name": "call_mcp_tool",
+                "description": (
+                    "Call a connected MCP server's tool by its callable name (mcp_<server>__<tool>) with its "
+                    'arguments, without loading its schema into the request; enable_tools("<name>") shows the '
+                    "parameters. The call is that tool's own: permissions, safety check and result."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "The MCP tool's callable name, mcp_<server>__<tool>"},
+                        "arguments": {"type": "object", "description": "The tool's arguments, as its schema names them"},
+                    },
+                    "required": ["name"],
+                },
+            },
+            handler=_call_mcp_tool,
+            safety_policy="skip",  # the inner MCP dispatch runs its own safety check on the real tool and arguments
         ),
     ]

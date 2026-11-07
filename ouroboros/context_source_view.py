@@ -88,9 +88,11 @@ def retire_superseded_at_departure(slot: Any, messages: list, tools: Any, *, dri
     """Superseded host state leaves where this request already departs from the last send.
 
     From the departure on (``transcript_prefix.departure``: a tool load re-reads from the start, a
-    rewrite from its first change) every row is read again anyway, so retiring
+    rewrite at least from its first change; on Codex, whose cache keeps only whole leading system
+    items, from the end of those items) every row is read again anyway, so retiring
     the superseded host rows there costs no extra re-read and retires no reasoning the departure
-    itself does not. Their exact rows are retained first; one host record names what left and
+    itself does not. Rows between the leading items and the departure stay even where a route
+    reads them again (a disclosed residual, C2 S6). Their exact rows are retained first; one host record names what left and
     where it is. Nothing before the departure moves, and a round that only appends keeps its
     cached prefix: this never starts a rewrite, it only rides one. Without a recorded send nothing
     proves the provider's cached prefix is gone, so nothing leaves.
@@ -242,7 +244,7 @@ def _unit_facts(messages: Sequence[Mapping[str, Any]], unit: _AtomicUnit, *, err
 
 def chosen_read_units(messages, units, *, usable_input=None, density=1.0):
     """Explicitly chosen bodies that fit known usable input alone (every chosen body when it is unknown)."""
-    from ouroboros.tool_capabilities import requested_result_view
+    from ouroboros.tool_capabilities import requested_call_view
 
     protected = set()
     for unit in units:
@@ -254,7 +256,7 @@ def chosen_read_units(messages, units, *, usable_input=None, density=1.0):
             except (ValueError, TypeError):
                 continue
             row = results.get(str(call.get("id") or ""))
-            if row is None or requested_result_view(arguments) is None:
+            if row is None or requested_call_view(str(call.get("function", {}).get("name") or ""), arguments) is None:
                 continue
             cost = compaction._context_tokens_for_messages([row], density) - compaction._context_tokens_for_messages(
                 [{**row, "content": ""}], density)

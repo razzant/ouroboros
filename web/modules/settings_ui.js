@@ -313,11 +313,11 @@ function behaviorPanel() {
 
         ${settingsSection({
             title: 'Prompt Cache TTL',
-            lead: 'How long providers keep Ouroboros\'s context warm between calls.',
+            lead: 'How long Anthropic-family routes keep Ouroboros\'s context warm between calls.',
             details: `How long provider prompt caches keep this agent's stable context warm (Anthropic-family routes; other providers manage caching implicitly).
                 <strong>1h</strong> keeps the large stable prefix cached across long waits and review cycles &mdash; cache writes bill at 2&times; base input instead of 1.25&times;, but one wait longer than 5 minutes already pays that back on big contexts.
                 <strong>5m</strong> is the provider default tier as an explicit value; <strong>Default</strong> sends bare markers (provider default, callers may still declare their own TTL).
-                One honest global: it applies to every lane, including review and safety prompts.`,
+                On those routes it is one honest global for every lane, review and safety prompts included; Codex and other OpenAI-family routes keep their own cache lifetime, which this setting does not reach.`,
             body: choice({ id: 's-prompt-cache-ttl', value: '1h', options: [
                 { value: 'default', label: 'Default' },
                 { value: '5m', label: '5m' },

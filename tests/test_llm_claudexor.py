@@ -670,6 +670,9 @@ def test_native_reset_keeps_canonical_tools_and_only_claims_a_real_account_chang
     assert event["type"] == "native_continuation_reset" and "payload" not in json.dumps(event)
     assert event["routes"] == [{"old_route": ROUTE, "new_route": changed if rerouted else {}}]
     assert messages == original
+    # The reset names the account the request asked for and the one the engine bound (C2 S5).
+    assert (event["requested_profile"], event["observed_profile"]) == (ROUTE["credentialProfileId"],
+                                                                  changed["credentialProfileId"])
 
 
 @pytest.mark.parametrize(("with_message_token", "asynchronous"), [(False, False), (True, True)])

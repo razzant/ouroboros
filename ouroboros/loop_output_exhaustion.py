@@ -203,7 +203,8 @@ def _send_smaller(ctx: Any, cost: Any) -> tuple:
         if refused is not None and getattr(refused, "predicted_free_tokens", None) is None:
             # The smaller send's own provider refusal is window evidence like any other; empty replies are not.
             from ouroboros.context_anchor import record_refused_input
-            record_refused_input(usage, ctx.context_fit_plan, _refusal_window(ctx, fit, refused)[1])
+            record_refused_input(usage, ctx.context_fit_plan, _refusal_window(ctx, fit, refused)[1],
+                                 measured=fit.measurement.anchor_input_tokens is not None)
     if msg is not None:
         usage.pop(KEY, None)
     _save(ctx)
