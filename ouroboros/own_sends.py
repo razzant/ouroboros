@@ -109,7 +109,7 @@ def record_result(drive_root: Any, metadata: Any, text: Any, *, via: str) -> boo
     if len(pairs) != 1:
         return False
     (conversation, message), = pairs
-    row = {"conversation": conversation, "message": message, "at": utc_now_iso(), "via": via}
+    row = {"conversation_id": conversation, "message_id": message, "at": utc_now_iso(), "via": via}
 
     def keep(current: dict) -> dict:
         rows = current.get("sent") if isinstance(current.get("sent"), list) else []
@@ -133,5 +133,5 @@ def sent_identities(drive_root: Any) -> frozenset:
     except (OSError, ValueError, AttributeError) as exc:
         log.warning("Own sends unreadable at %s: %s", path, exc)
         return frozenset()
-    return frozenset((str(row["conversation"]), str(row["message"])) for row in rows
-                     if isinstance(row, dict) and row.get("conversation") and row.get("message"))
+    return frozenset((str(row["conversation_id"]), str(row["message_id"])) for row in rows
+                     if isinstance(row, dict) and row.get("conversation_id") and row.get("message_id"))
