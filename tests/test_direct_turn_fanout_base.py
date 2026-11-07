@@ -293,9 +293,10 @@ def test_a_budget_refusal_of_a_minted_turn_writes_no_base(lane, monkeypatch):
 
 @pytest.mark.parametrize("when", ["before_admission", "after_admission"])
 def test_restart_deferral_keeps_its_create_only_receipt_and_the_later_start_reuses_it(lane, monkeypatch, when):
-    """A Restart pending at the door saves the turn on the durable queue with one create-only receipt the
-    later start reuses. A Restart accepted AFTER the admission finds started work: the admitted turn is
-    not deferred, its carrier runs it, and no deferral receipt is written."""
+    """A Restart draining at the door (``ready``: its requester finished; a merely requested restart lets the
+    owner's turn start) saves the turn on the durable queue with one create-only receipt the later start
+    reuses. A drain that opens AFTER the admission finds started work: the admitted turn is not deferred,
+    its carrier runs it, and no deferral receipt is written."""
     from ouroboros import server_restart
     from supervisor import queue, task_admission
 
@@ -312,18 +313,18 @@ def test_restart_deferral_keeps_its_create_only_receipt_and_the_later_start_reus
     monkeypatch.setitem(server_restart._AGENT_RESTART, "status", "released")
     enter = _public_entry(lane, monkeypatch, _host(lane.root, lambda task: lane.body.append(task) or []))
 
-    def restart_accepted():
-        server_restart._AGENT_RESTART["status"] = "awaiting"
+    def drain_opens():
+        server_restart._AGENT_RESTART["status"] = "ready"
 
     if when == "after_admission":
-        assert enter(between=restart_accepted) is True  # accepted between the admission and the carrier's first step
+        assert enter(between=drain_opens) is True  # opened between the admission and the carrier's first step
         server_restart._AGENT_RESTART["status"] = "released"
         assert receipts == [] and lane.workers.PENDING == [], "started work is not deferred"
         assert [row["id"] for row in lane.body] == ["S"] and lane.errors == []
         started = load_task_result(lane.root, "S")
         assert started["swarm_fanout_rollup"] == INITIAL and started["billing_group"]["billing_group_id"] == "S"
         return
-    restart_accepted()
+    drain_opens()
     assert enter() is None
     server_restart._AGENT_RESTART["status"] = "released"
     (create_only, token, stored), = receipts

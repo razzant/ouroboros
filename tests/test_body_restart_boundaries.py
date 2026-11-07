@@ -76,6 +76,9 @@ def test_cached_stop_after_late_registration_cannot_arm_adoption(tmp_path, monke
     scene = Scene(tmp_path, monkeypatch)
     scene.commit()
     scene.authorize()
+    # The restart binds before its stop door opens (server_restart: bind, then teardown); a begun
+    # stop closes Git admission, so a bind after it is refused (#2841).
+    assert body_adoption.bind_restart(lambda **kw: (True, 'ok'), scene.data, 'adopt it')()[0]
     initial = owned_shutdown.stop_owned_work(scene.data)
     assert initial['state'] == 'completed' and initial['targets'] == 0
     late = _sleeper()
@@ -90,7 +93,6 @@ def test_cached_stop_after_late_registration_cannot_arm_adoption(tmp_path, monke
         import multiprocessing
         import threading
         from supervisor import workers
-        assert body_adoption.bind_restart(lambda **kw: (True, 'ok'), scene.data, 'adopt it')()[0]
         restart = threading.Event()
         restart.set()
         monkeypatch.setattr(server, 'DATA_DIR', scene.data)
@@ -104,6 +106,7 @@ def test_cached_stop_after_late_registration_cannot_arm_adoption(tmp_path, monke
         assert body_adoption.read(scene.data)['phase'] == 'authorized'
         assert not scene.pointer().exists()
         assert owned_shutdown.finish_unconfirmed_stops(scene.data)['confirmed'] == 1
+        assert not body_adoption.bind_restart(lambda **kw: (True, 'ok'), scene.data, 'adopt it')()[0]
     finally:
         _reap(late)
 

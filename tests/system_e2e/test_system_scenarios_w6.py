@@ -376,7 +376,13 @@ def test_s26_direct_chat_turn_owner_stop_mid_round_is_typed_and_ends_the_turn(
                 assert wait_until(lambda: not _direct_activities(server, client_message_id), 60), (
                     "the direct turn is still an active chat activity after it ended")
                 assert wait_until(lambda: task_id not in _running_task_ids(server), 60)
-                assert task_id not in oracle.running_ids(), oracle.queue_snapshot().get("running")
+                # The published queue drops the row on the supervisor's NEXT tick: custody's removal is
+                # a mark (supervisor/queue_publication.py, `persist_queue_snapshot`), the tick writes the
+                # document at the end of its iteration and drains `task_done` at the start of the next,
+                # so a Stop settled right after one publication shows `task_done` and every drain above
+                # about a second before the document follows. Waited like S21's read of the same document.
+                assert wait_until(lambda: task_id not in oracle.running_ids(), 60), (
+                    oracle.queue_snapshot().get("running"))
                 chat_rows = wait_until(
                     lambda: [r for r in oracle._jsonl("logs/chat.jsonl")
                              if str(r.get("task_id") or "") == task_id

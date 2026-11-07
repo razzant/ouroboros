@@ -9,9 +9,9 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import json
+import os
 from pathlib import Path
 import sqlite3
-import sys
 from threading import Event
 import time
 
@@ -131,7 +131,7 @@ def _child_main(mode, trace):
                 phase = budget.phase
                 if phase not in seen:
                     seen.add(phase)
-                    record(executing=phase, deadline=budget.expires, started=budget.started)
+                    record(executing=phase, deadline=budget.expires, started=budget.started, pid=os.getpid())
                     if mode == "slow_" + phase:
                         _wait(budget.remaining() + 0.05)  # Interrupt an active real SQLite VM.
                 return 0
@@ -140,7 +140,7 @@ def _child_main(mode, trace):
                 record(path=path.name, statement=statement)
                 if budget.phase == "sql" and "sql" not in seen and not mode.startswith("slow_"):
                     seen.add("sql")
-                    record(executing="sql", deadline=budget.expires, started=budget.started)
+                    record(executing="sql", deadline=budget.expires, started=budget.started, pid=os.getpid())
 
             if mode.startswith("slow_"):
                 conn.set_progress_handler(progress, 1)
@@ -185,7 +185,8 @@ def instrument(ctx, monkeypatch, mode="trace"):
 
     def spawn(cmd, **kwargs):
         script = f"from tests.test_query_data_sql_phases import _child_main; _child_main({mode!r}, {str(trace)!r})"
-        proc = original_spawn([sys.executable, "-c", script, *cmd[3:]], **kwargs)
+        # The product's own interpreter (``query_data_sql._interpreter``): the process the parent reaps runs the SQL.
+        proc = original_spawn([cmd[0], "-c", script, *cmd[3:]], **kwargs)
         children.append(proc)
         return proc
 
@@ -288,6 +289,9 @@ def test_parent_kills_uninterruptible_sql_at_operation_deadline(money, monkeypat
     assert sql.FINISH_SEC + 1 <= sql.RESPONSE_SEC
     assert finished - active["started"] < 2 + sql.FINISH_SEC + 1
     assert any(row.get("statement") == "SELECT stall()" for row in rows)
+    # The reaped process ran the SQL: no venv redirector between them leaves the reader to die after the
+    # answer, still holding its source (on Windows the next WAL opener then cannot reset the shared memory).
+    assert [proc.pid for proc in children] == [active["pid"]]
     assert_writable(money)
     assert_reaped(children, directories)
 

@@ -217,7 +217,9 @@ def test_skill_preflight_validator_env_keeps_windows_process_base_keys(tmp_path,
     replacement -- the 0x8f that kills a locale-decoded (cp1252) reader thread
     is inert here.
     """
+    from ouroboros.tools import shell_process
     from ouroboros.tools import skill_preflight as sp
+    from tests.test_tracked_tree_containment import fake_tree_read
 
     seen: dict = {}
 
@@ -225,13 +227,20 @@ def test_skill_preflight_validator_env_keeps_windows_process_base_keys(tmp_path,
         returncode = 0
         pid = 4242
 
+        def poll(self):
+            return self.returncode
+
         def communicate(self, timeout=None):
             return b"", b"\x8f\xff not utf-8"
+
+    proc, registry = _FakeProc(), set()
+    monkeypatch.setattr(shell_process, "_active_subprocesses", registry)
+    fake_tree_read(monkeypatch, proc, remains=False)  # a double has no group: its tree is measured here
 
     def _fake_popen(cmd, **kwargs):
         seen["cmd"] = list(cmd)
         seen["kwargs"] = kwargs
-        return _FakeProc()
+        return proc
 
     monkeypatch.setattr(sp, "Popen", _fake_popen)
     for key in sp._WINDOWS_BASE_ENV_KEYS:
@@ -239,6 +248,7 @@ def test_skill_preflight_validator_env_keeps_windows_process_base_keys(tmp_path,
     monkeypatch.setenv("OPENROUTER_API_KEY", "must-not-reach-the-validator")
 
     result = sp._run_check(["node", "--check", "widget.js"], cwd=tmp_path)
+    assert registry == set(), "an exited validator whose tree was measured empty is retired"
     posix_env = seen["kwargs"]["env"]
     assert set(posix_env) == {"PATH", "HOME", "LANG"}
     assert posix_env["LANG"] == "C.UTF-8"

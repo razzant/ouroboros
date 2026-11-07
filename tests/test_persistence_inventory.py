@@ -918,8 +918,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # 452 -> 453 (test diet): the install's test durations table ``state/test-durations.json``
 # (``ouroboros/test_evidence.py`` names it, the evidence plugin of the gate's sessions writes it);
 # its own section-2 row.
-# 453 -> 454: the integrated tree (``origin/ouroboros`` at 84772aae8a) already scans 454 paths against
-# its pin of 453 (red there before this branch; the pin follows the tree).
+# 453 -> 454 (#2841): ``state/body_adoption/arm-deferred.json`` (a deferred exit arm), ``handoff.json`` now spelled
+# by the detached-HEAD repair guard and ``locks/git-bootstrap.lock`` (the ``locks/**`` row) join; ``switch.py`` and
+# ``installation_stop.py`` leave the scan, now copied into a staging sibling (all on the body adoption row).
 # 454 -> 455 (supervisor-recovery, owner 2A): the Fault boot's admitted recovery turn and the generation
 # that admitted it, ``state/core_loss_recovery.json`` (``ouroboros/server_process.py``); its own row.
 EXPECTED_SCAN_PATHS = 455

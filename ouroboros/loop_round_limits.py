@@ -972,17 +972,19 @@ def _handle_model_wait_control(
         # already interrupted in flight keeps the ordinary unknown no-resend rail.
         return _handle_provider_unavailable(ctx, error_kind="provider_outcome_unknown") if unknown else None
     from ouroboros.llm_attempt import PhysicalDispatchInterrupted
+    from ouroboros.usage_accounting import POSITIVE_PHYSICAL_ATTEMPT_STATES
 
     previous = getattr(error, "previous_error", None)
-    if (reason == "finalize_requested" and first_line == REASON_OWNER_REQUESTED_FINALIZATION and capture is None
+    sent = getattr(capture, "state", None) in POSITIVE_PHYSICAL_ATTEMPT_STATES
+    if (reason == "finalize_requested" and first_line == REASON_OWNER_REQUESTED_FINALIZATION and not sent
             and (previous is None or isinstance(previous, PhysicalDispatchInterrupted))):
         # A fresh Wrap up can arrive after this round's mailbox drain but before
         # the model call. Rejoin its existing bounded finalizer; no provider wait
         # was interrupted, and the real drain above consumed this control. So does
         # a refusal at an admission before any request bytes (a tool the Wrap up
-        # kept from starting, an unsent call), unless it carries a sent capture
-        # (``preserve_prior_dispatch``). Older transport episodes and unresolved
-        # wire attempts keep their no-call rails.
+        # kept from starting, an unsent call, an attempt reserved and released
+        # unsent), unless it carries a sent capture (``preserve_prior_dispatch``).
+        # Older transport episodes and unresolved wire attempts keep their no-call rails.
         no_call_source, _ = _loop().provider_no_call_source(ctx.accumulated_usage, False)
         if (no_call_source == "provider_outcome_unknown_no_resend"
                 and not isinstance(ctx.accumulated_usage.get(TRANSPORT_DEATHS_KEY), dict)):

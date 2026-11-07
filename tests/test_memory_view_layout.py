@@ -379,8 +379,9 @@ def test_a_nano_floor_names_only_the_path_its_own_request_sends(tmp_path, monkey
     passes them (``initial_tool_schemas``), and the plan's Nano projection is the request. A read-only
     child carries enable_tools in every mode (#1860), so a Nano the window chose for the owner's Max
     sends it too, as the owner's Nano and a root always do: their floor says memory_read is reachable
-    through it. A child whose contract disables enable_tools sends list_available_tools alone: its
-    floor names that and the parent, never enable_tools or chronicle_write."""
+    through it. A child whose contract disables enable_tools sends list_available_tools and its own
+    fold (compact_context, in every restricted profile and mode since #2846) alone: its floor names
+    list_available_tools and the parent, never enable_tools or chronicle_write."""
     from types import SimpleNamespace
 
     from ouroboros import context
@@ -434,7 +435,7 @@ def test_a_nano_floor_names_only_the_path_its_own_request_sends(tmp_path, monkey
     # Sealing is offered only to a request that can call chronicle_write (sent, or loaded by enable_tools).
     assert ("chronicle_write kind=page" in floor) == bool({"chronicle_write", "enable_tools"} & set(sent)), floor
     if actor == "child_without_selector":
-        assert sent == ("list_available_tools",)
+        assert sent == ("compact_context", "list_available_tools")
         assert floor.rstrip().endswith("list_available_tools shows what this task can call, and my parent task can "
                                        "read any address I name to it)")
     else:

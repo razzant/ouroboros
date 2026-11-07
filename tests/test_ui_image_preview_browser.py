@@ -734,6 +734,9 @@ def test_owner_files_and_photos_read_in_place_with_a_head_that_wraps(direct_serv
                 assert touch.evaluate(PREVIEW_STATE)["title"] == TINY
                 touch.locator('dialog.document-reader .document-reader-body').tap()
                 assert touch.locator('dialog.document-reader .document-reader-head').get_attribute('hidden') == ''
+                # A second tap inside the double-tap window zooms the photo (#2838, event.detail >= 2); the owner's
+                # separate tap comes after it and brings the head back.
+                touch.wait_for_timeout(1000)
                 touch.locator('dialog.document-reader .document-reader-body').tap()
                 assert touch.locator('dialog.document-reader .document-reader-head').get_attribute('hidden') is None
                 touch.screenshot(path=str(evidence / f"{engine}-390-light-touch-tiny-view.png"))

@@ -158,6 +158,16 @@ jobs:
           --ui-browser-shard=${{ matrix.shard }}/8 --session-timeout=4500
           --junitxml="${{ runner.temp }}/ci-private/ui/host.xml"
           --ci-evidence-dir="${{ runner.temp }}/ci-evidence/ui/host"
+      # Ubuntu 23.10+ runners restrict unprivileged user namespaces through AppArmor, so the pinned
+      # Chrome for Testing shell cannot start its sandbox there ("No usable sandbox!"). Allow them for
+      # this host so the smoke proves Chromium with its sandbox on (#2735); a host that keeps the
+      # restriction gets the typed refusal the product discloses, as the Docker lane checks.
+      - name: Let Chromium's sandbox start on this runner
+        if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')) && matrix.shard == 1 }}
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - name: Run browser tools Chromium/WebKit smoke
         id: browser_tools
         timeout-minutes: 20

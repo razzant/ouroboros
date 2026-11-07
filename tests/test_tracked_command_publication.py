@@ -67,7 +67,9 @@ def registry(monkeypatch, tmp_path):
         if proc.poll() is None:
             proc.kill()
         proc.wait(timeout=10)
-        assert shell_process.retire_tracked(proc)
+        # Settled only once its containment measures empty, never at the root's exit: a Windows venv python.exe is a
+        # redirector whose interpreter child ends a moment after it (``_tree_remains``).
+        _wait(lambda proc=proc: shell_process.retire_tracked(proc), why=lambda proc=proc: f"tree of {proc.pid} still runs")
     shell_process._active_subprocesses.clear()
     shell_process._active_subprocesses.update(saved)
 
@@ -157,7 +159,8 @@ def test_a_start_still_inside_popen_at_the_deadline_keeps_the_outcome_unconfirme
     hold.set()
     producer.join(10)
     assert _stopped(child), "the late publication meets the stop and its starter ends the child"
-    assert shell_process.unsettled_tracked_children() is None
+    _wait(lambda: shell_process.unsettled_tracked_children() is None,
+          why=lambda: f"its tree is still unsettled: {shell_process.unsettled_tracked_children()}")
     joined = owned_shutdown.stop_owned_work(registry.data)  # a later door joins; it never claims completion
     assert joined["state"] == "unconfirmed"
 
@@ -171,16 +174,16 @@ def test_a_publication_during_the_kill_loop_keeps_its_name_until_its_exit(regist
     producer = _producer(registry, hold)
     _wait(lambda: len(registry.started) == 2 and shell_process._spawning_subprocesses == 1)
     late = registry.started[1]
-    kill, entered = shell_process._kill_process_group, []
+    end, entered = shell_process._end_tree, []
 
-    def kill_then_let_the_late_start_publish(proc):
-        kill(proc)
+    def end_then_let_the_late_start_publish(proc):
+        end(proc)  # the stop's per-child end: a POSIX group kill, or a Windows child's own Job
         if proc is early and not entered:
             entered.append(proc)
             hold.set()  # the late child is published while this loop still runs
             _wait(lambda: late in shell_process._active_subprocesses)
 
-    monkeypatch.setattr(shell_process, "_kill_process_group", kill_then_let_the_late_start_publish)
+    monkeypatch.setattr(shell_process, "_end_tree", end_then_let_the_late_start_publish)
     outcome = owned_shutdown.stop_owned_work(registry.data)
     producer.join(10)
     assert entered == [early] and _stopped(early) and _stopped(late)
@@ -193,7 +196,7 @@ def test_an_unconfirmed_kill_keeps_its_handle_and_says_so(registry, monkeypatch)
     child = shell_process.contained_popen(subprocess.Popen, SLEEP, **subprocess_new_group_kwargs())
     registry.started.append(child)
     shell_process._active_subprocesses.add(child)
-    monkeypatch.setattr(shell_process, "_kill_process_group", lambda proc: None)  # a request that ends nothing
+    monkeypatch.setattr(shell_process, "_end_tree", lambda proc: None)  # a request that ends nothing, POSIX group or Job
     report = shell_process.kill_all_tracked_subprocesses(deadline=time.monotonic() + 0.3)
     assert report == {"state": "unconfirmed", "pids": [child.pid], "unpublished": 0}
     assert child in shell_process._active_subprocesses and child.poll() is None, "a sent request is no exit proof"
