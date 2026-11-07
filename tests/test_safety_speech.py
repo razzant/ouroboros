@@ -52,6 +52,25 @@ def test_speech_flag_retry_and_changed_subject(supervisor, monkeypatch, mode, st
     assert len(h.calls) == 4
 
 
+def test_a_verdict_marks_speech_on_any_checked_call(supervisor, monkeypatch):
+    """A built-in without declarations (github_write) gets speech semantics only from the verdict: flagged as speech
+    it returns unsent at first issue and sends on a later decision, in Cyber Pro too; the same verdict without the
+    mark stays advice there."""
+    h = supervisor
+    monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")
+    comment = {"method": "comment", "repo": "razzant/ouroboros", "number": 2805, "body": "Taking it up."}
+    h.replies.append({"status": "DANGEROUS", "reason": "the place note asks for a quiz first", "speech": True,
+                      "quote": "Taking it up."})
+    ok, message = h.module.check_safety("github_write", comment, ctx=h.ctx)
+    assert not ok and "Message not sent" in message
+    h.later()
+    ok, message = h.module.check_safety("github_write", comment, ctx=h.ctx)
+    assert ok and "despite the check" in message and len(h.calls) == 1
+    h.replies.append({"status": "DANGEROUS", "reason": "the place note asks for a quiz first", "speech": False})
+    ok, message = h.module.check_safety("github_write", {**comment, "body": "Other words."}, ctx=h.ctx)
+    assert ok and "Cyber Pro leaves the decision to Ouroboros" in message
+
+
 def test_writes_keep_binding_and_effective_mode(supervisor, monkeypatch):
     h = supervisor
     monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")

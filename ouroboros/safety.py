@@ -556,6 +556,7 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
     from ouroboros.place_guard import call_place_facts
     from ouroboros.places import load_places
     from ouroboros.tool_access import canonical_data_root
+    from ouroboros.tool_effects import mcp_sends_as
 
     metadata = getattr(ctx, "task_metadata", None) or {}
     kind = work_kind(metadata)
@@ -597,6 +598,8 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
     if isinstance(directives, list):
         sources = [_focus_event_source(row, metadata, notes) for row in sources]
     target = asdict(resolved_binding) if is_dataclass(resolved_binding) else resolved_binding
+    # Whose credential an MCP call acts with (e.g. a server signed in as my human); connectors carry it per place.
+    sends_as = {"sends_as": mcp} if tool_name.startswith("mcp_") and (mcp := mcp_sends_as(tool_name)) else {}
     with _PRIOR_LOCK:
         root = _root_id(ctx)
         history = _PRIOR_VERDICTS.get(root, {})
@@ -611,7 +614,7 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
         "occasion": {"cause": occasion, "consciousness_cause": metadata.get("consciousness_cause"),
                      "origin_wake_task_id": metadata.get("origin_wake_task_id"), "focus": focus,
                      "sources": sources, "retained_host_sources": isinstance(directives, list)},
-        "subject": {"tool": tool_name, "physical_target": target, "place": place},
+        "subject": {"tool": tool_name, "physical_target": target, "place": place, **sends_as},
         # The acting mind's context reads the same key through the same snapshot (``owner_rules_section``).
         "standing_delegation": {"owner_rules": runtime_setting(OWNER_RULES_KEY, ""), "place_notes": notes},
         "earlier_verdicts": earlier,
@@ -1347,7 +1350,11 @@ def check_safety(
     policy = TOOL_POLICY.get(tool_name) or (declared if declared in POLICY_VALUES else DEFAULT_POLICY)
 
     from ouroboros.tool_effects import effect_of
-    effect = effect_of(tool_name, ctx=ctx, is_mcp=tool_name.startswith("mcp_"))
+    is_mcp = tool_name.startswith("mcp_")
+    effect = effect_of(tool_name, ctx=ctx, is_mcp=is_mcp, args=arguments)
+    # Speech the host knows before any verdict, from declarations only: a ``message`` effect, a connector-declared
+    # send of a generic tool (``message.when``), or the automatic reply. A verdict may add the mark (below), never
+    # an argument name. An MCP call that is no declared read waits like speech when no verdict exists.
     speech = tool_name == "place_reply" or effect.effect == "message"
     if tool_name == "manage_schedules" and arguments.get("action") in {"create", "update", "restore"}:
         policy = POLICY_CHECK
@@ -1385,7 +1392,7 @@ def check_safety(
         prior = _PRIOR_VERDICTS.get(root, {}).get(digest, {})
         if root in _PRIOR_VERDICTS:
             _PRIOR_VERDICTS.move_to_end(root)
-    if speech and prior.get("speech_refused"):
+    if prior.get("speech_refused"):  # host- or verdict-marked speech, flagged before
         call = _authoring_call(ctx)
         if not call or call == prior.get("llm_call_id"):  # the flagged decision re-presented, not a later one
             return False, "⚠️ SAFETY_VIOLATION: Message not sent: this exact call was flagged in this same step. " + _SEND_DESPITE
@@ -1416,6 +1423,7 @@ def check_safety(
     verdicts = getattr(assessment, "verdicts", ())
     if verdicts:
         # Speech follows the final assessment (a second check included): SUSPICIOUS sends with its warning.
+        speech = speech or any(verdict.get("speech") is True for verdict in verdicts)
         flagged_speech = speech and getattr(assessment, "status", "") == "DANGEROUS"
         if not _remember(ctx, digest, tool_name, assessment, speech_refused=flagged_speech):
             assessment = _hold(ctx, tool_name, "This work's mandatory prior-verdict history is too large", status="TOO_LARGE")
@@ -1426,8 +1434,9 @@ def check_safety(
             if flagged_speech:
                 reasons = "\n".join(f"{v['stage']}: {v['status']} — {v.get('reason', '')}" for v in verdicts)
                 return False, "⚠️ SAFETY_VIOLATION: Message not sent.\n" + reasons + "\n" + _SEND_DESPITE
-    # Holds cannot earn retry authority. Speech holds bind in every runtime mode.
-    if speech and not allowed:
+    # Holds cannot earn retry authority. Speech holds bind in every runtime mode, and so does an MCP call's hold:
+    # without a verdict nothing says it is not words to people (built-in undeclared tools' holds stay advice).
+    if not allowed and (speech or (is_mcp and not getattr(assessment, "verdicts", ()))):
         return False, message
     if cyber and not allowed:
         _emit_durable_safety_event(ctx, {"type": "safety_advisory", "tool": tool_name,

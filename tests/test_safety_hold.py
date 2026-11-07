@@ -5,8 +5,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from ouroboros import tool_effects as _tool_effects
 from tests._safety_fixtures import supervisor as supervisor_fixture
-supervisor = supervisor_fixture
+from tests.test_tool_effects import published_tool as _published_tool
+supervisor, published_tool = supervisor_fixture, _published_tool
+REAL_EFFECT_OF = _tool_effects.effect_of  # bound before the fixture stubs it
 
 
 @pytest.mark.parametrize(("required", "mode"), [("explicit", "advanced"), ("consciousness", "cyber_pro")])
@@ -27,6 +30,30 @@ def test_no_checker_hold_and_no_retry_grant(supervisor, monkeypatch, mode, requi
     monkeypatch.setattr(h.module, "_resolve_safety_routing", lambda: (False, False, None))
     assert h.module.check_safety("place_reply", {"text": "hello"}, ctx=h.ctx) == (True, "")
     assert len(h.calls) == 1
+
+
+@pytest.mark.parametrize("cause", ["outage", "oversize"])
+def test_held_words_wait_in_cyber_pro_whatever_tool_carries_them(supervisor, monkeypatch, published_tool, cause):
+    """Unjudged words wait in every mode: a generic tool's declared send and an MCP call that is no declared read
+    are held like speech in Cyber Pro (the 04.11 slack_api route); that tool's other calls and a built-in without
+    declarations keep the advice Cyber Pro gives any other unjudged call."""
+    h = supervisor
+    monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")
+    monkeypatch.setattr(_tool_effects, "effect_of", REAL_EFFECT_OF)
+    monkeypatch.setattr(_tool_effects, "_MCP_ANNOTATIONS", {})
+    name, _tool = published_tool("write", target=[], message={"when": {"path": "chat.postMessage"}, "target": "body.channel"})
+    if cause == "outage":
+        h.replies.extend([RuntimeError("provider_failed: Codex reported a failed response")] * 4)
+    else:
+        monkeypatch.setattr(h.module, "_SAFETY_BUNDLE_BYTE_BUDGET", 10)
+    held = "SAFETY_UNAVAILABLE" if cause == "outage" else "TOO_LARGE"
+    for words in ((name, {"path": "chat.postMessage", "body": {"channel": "C1", "text": "hi"}}),
+                  ("mcp_slack__conversations_add_message", {"channel_id": "C1", "payload": "hi"})):
+        ok, message = h.module.check_safety(*words, ctx=h.ctx)
+        assert not ok and held in message, words[0]
+    for other in ((name, {"path": "pins.add", "body": {"channel": "C1"}}), ("github_write", {"method": "comment"})):
+        ok, message = h.module.check_safety(*other, ctx=h.ctx)
+        assert ok and "SAFETY_ADVICE" in message and held in message, other[0]
 
 
 def test_legacy_owner_backend_absence_still_warns(supervisor, monkeypatch):

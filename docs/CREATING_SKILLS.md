@@ -950,6 +950,14 @@ tools:
   - name: slack_history
     effect: read
     target: channel_id
+  - name: slack_api            # a generic tool: its own effect, and the calls that deliver words
+    effect: write
+    target: []
+    message:
+      when: {path: [chat.postMessage, chat.update]}   # each (dotted) selector holds one of its values
+      target: body.channel
+      conversation: body.channel
+      thread: body.thread_ts
 contributes:
   - id: place
     provides: place
@@ -963,11 +971,16 @@ contributes:
 
 - `effect` is one fact with three consumers: Advises (autonomy) refuses everything but a declared read; a Silent or
   Paused place refuses `message` and `write` aimed at it; the Safety Supervisor skips declared reads at Light/Full and
-  gives `message` its speech semantics (a flagged message returns to the mind; the identical re-issue is sent and
-  recorded). A tool that reads or writes depending on its arguments is `write`. An MCP tool is a declared read when
+  gives `message` its speech semantics (a flagged message returns to the mind; an identical re-issue from a later
+  step is sent and recorded; with no verdict it waits). A tool that reads or writes depending on its arguments is
+  `write`, unless its `message:` block declares which calls deliver words: a call whose every `when` selector holds
+  one of its listed values is `message`, attributed by that block's `target`/`conversation`/`thread`; any other call
+  keeps the row's `effect`. This is the connector's fact: core lists no provider method and never reads speech from
+  argument names (the Supervisor's verdict may still mark a call speech). An MCP tool is a declared read when
   its configured server marks it `readOnlyHint: true`, otherwise `write`; that hint is trusted, so a server lying
   about a write runs it unchecked, and Advises may call the tools a server marks read-only.
-- `target`/`conversation`/`thread` attribute each destination. Declare `account_id` for multi-account writes:
+- `target`/`conversation`/`thread` attribute each destination; a dotted name (`body.channel`) selects a nested
+  argument (`args["body"]["channel"]`). Declare `account_id` for multi-account writes:
   an exact account outside all applicable Place scopes remains an ordinary tool target, including in Acts.
   Unresolved targets inside applicable scopes retain the Silent/Paused hold. Use the same canonical account key
   in credentials, targets and Places; sender aliases are separate. Never resolve an unknown key to another account after dispatch.

@@ -53,8 +53,9 @@ def _declares_place(connector: str) -> bool:
 
 
 def _call_destinations(ctx: Any, name: str, args: Mapping[str, Any], ext_tool: Any, is_mcp: bool):
-    """Resolve each recipient separately so an Active To never hides a Silent Cc."""
-    effect = effect_of(name, ext_tool=ext_tool, is_mcp=is_mcp, ctx=ctx)
+    """Resolve each recipient separately so an Active To never hides a Silent Cc. A call its connector declares as
+    one that delivers words (``message.when``) is a ``message`` here, routed by that declaration's selectors."""
+    effect = effect_of(name, ext_tool=ext_tool, is_mcp=is_mcp, ctx=ctx, args=args)
     targets = target_values(effect, args)
     connector, root = connector_of(name, ext_tool), _drive_root(ctx)
     if not connector or root is None:
@@ -106,7 +107,7 @@ def dispatch_refusal(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
     try:
         effect, targets, resolved, siblings, attributable = _call_destinations(ctx, name, args, ext_tool, is_mcp)
     except _PlacesUnreadable as exc:
-        effect = effect_of(name, ext_tool=ext_tool, is_mcp=is_mcp, ctx=ctx)
+        effect = effect_of(name, ext_tool=ext_tool, is_mcp=is_mcp, ctx=ctx, args=args)
         if effect.effect == EFFECT_READ and not is_observe_origin(_metadata(ctx)):
             return ""
         return (_PREFIX + f"The place records need repair, so {name!r} cannot be attributed to a place: {exc}. "
