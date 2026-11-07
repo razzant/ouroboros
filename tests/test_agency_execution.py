@@ -96,11 +96,14 @@ def test_supervisor_backend_failure_keeps_original_evidence(tmp_path, monkeypatc
     def failed(*args, **kwargs):
         raise RuntimeError("fixture backend unavailable")
     monkeypatch.setattr(safety, "_run_llm_check", failed)
-    allowed, message = safety.check_safety("mcp_fixture__run", {}, ctx=ctx)
+    allowed, message = safety.check_safety("fixture_remote_write", {}, ctx=ctx)
     assert allowed == (mode == "cyber_pro")
     assert "SAFETY_UNAVAILABLE" in message and "backend unavailable" in message
     if mode == "cyber_pro":
         assert "SAFETY_ADVICE" in message
+    # An MCP call that is no declared read waits like words to people when no verdict exists, in every mode.
+    allowed, message = safety.check_safety("mcp_fixture__run", {}, ctx=ctx)
+    assert not allowed and "SAFETY_UNAVAILABLE" in message and "backend unavailable" in message
 
 
 def test_cyber_does_not_swallow_owner_stop(tmp_path, monkeypatch):

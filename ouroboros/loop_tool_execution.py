@@ -662,6 +662,8 @@ def _execute_single_tool(
         if tc.get("via"):  # a gateway call's typed error carries its MCP tool's catalog schema
             from ouroboros.tools.tool_discovery import with_gateway_schema
             tool_result = with_gateway_schema(tools, fn_name, tool_result)
+        from ouroboros.place_guard import with_destination_facts  # a send into another place: its notes beside the act
+        tool_result = tool_result if host_refusal else with_destination_facts(getattr(tools, "_ctx", None), fn_name, args, tool_result)
         result = tool_result.text
     except (UsageAccountingError, ModelWaitInterrupted):
         raise

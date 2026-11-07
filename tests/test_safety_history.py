@@ -59,6 +59,7 @@ def test_safe_history_compacts_but_flagged_speech_stays_mandatory(supervisor, mo
     history = h.module._PRIOR_VERDICTS["work"]
     assert history.omitted_safe > 0 and len(json.dumps(history).encode()) <= 1000
     count = len(h.calls)
+    h.later()
     assert h.module.check_safety("place_reply", {"text": "flagged"}, ctx=h.ctx)[0]
     assert len(h.calls) == count  # compaction did not discard the deliberate reissue
     for n in range(10):
@@ -69,7 +70,7 @@ def test_safe_history_compacts_but_flagged_speech_stays_mandatory(supervisor, mo
             break
     else:
         raise AssertionError("Flagged history must hold when decisive evidence does not fit")
-    assert "Retry when review is available" not in message
+    assert "quoting the exact text and destination" in message  # held words name their exits
     count = len(h.calls)
     h.replies.append({"status": "DANGEROUS", "reason": "Decisive flagged evidence" * 3})
     assert not h.module.check_safety("place_reply", {"text": f"flag-{n}"}, ctx=h.ctx)[0]
@@ -91,4 +92,5 @@ def test_root_limit_evicts_retry_authority_without_holding_new_work(supervisor):
     h.replies.append({"status": "DANGEROUS", "reason": "Flagged again"})
     assert not h.module.check_safety("place_reply", {"text": "same"}, ctx=h.ctx)[0]
     assert "root-0" in h.module._PRIOR_VERDICTS and "root-1" not in h.module._PRIOR_VERDICTS
+    h.later()
     assert h.module.check_safety("place_reply", {"text": "same"}, ctx=h.ctx)[0]

@@ -264,6 +264,10 @@ def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, s
             allowed, message = check_safety("place_reply", subject, ctx=ctx)
             if not allowed:
                 return False, message
+            if message:  # a warning rides beside the words in the room's record, where the next round reads it
+                record_notice(root, place_id=carrier["place_id"], conversation_key=carrier["conversation_key"],
+                              task_id=ctx.task_id, text="Safety note on this turn's reply: " + message,
+                              identity=f"{ctx.task_id}:{digest}:safety-note")
             ctx._focus_checked_reply = digest
     outcome = "deferred" if _handoff_ref(ctx) else "silent" if quiet or held else "message"
     old = getattr(ctx, "_presence_completion", {}) or {}

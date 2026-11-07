@@ -51,14 +51,19 @@ def test_second_verdict_final_for_write(supervisor, second, allowed):
     assert len(h.calls) == 3  # SAFE first verdict never triggers the second stage.
 
 
-def test_speech_returns_both_reasons_even_when_second_overturns(supervisor):
+@pytest.mark.parametrize("second,sent", [("SAFE", True), ("DANGEROUS", False)])
+def test_speech_follows_the_second_stage_and_keeps_both_opinions(supervisor, second, sent):
+    """The final assessment decides speech: a second stage that overturns the flag sends it; one that keeps it
+    returns it unsent with both reasons. Both stage opinions stay in the durable verdict either way."""
     h = supervisor
     h.values["OUROBOROS_SUBAGENTS"] = catalog()
-    h.replies.extend([{"status": "SUSPICIOUS", "reason": "first reason"}, {"status": "SAFE", "reason": "delegated"}])
+    h.replies.extend([{"status": "DANGEROUS", "reason": "first reason"}, {"status": second, "reason": "second reason"}])
     ok, msg = h.module.check_safety("place_reply", {"text": "hi"}, ctx=h.ctx)
-    assert not ok and "first reason" in msg and "delegated" in msg
-    assert h.module.check_safety("place_reply", {"text": "hi"}, ctx=h.ctx)[0]
-    assert len(h.calls) == 2
+    assert ok is sent and len(h.calls) == 2
+    verdict = next(event for event in h.events if event["type"] == "safety_verdict")
+    assert [(v["stage"], v["status"], v["reason"]) for v in verdict["verdicts"]] == [
+        ("first", "DANGEROUS", "first reason"), ("second", second, "second reason")]
+    assert sent or ("first reason" in msg and "second reason" in msg and "Message not sent" in msg)
 
 
 @pytest.mark.parametrize("second,allowed", [("SAFE", True), ("DANGEROUS", False)])
@@ -79,7 +84,7 @@ def test_second_unavailable_is_a_hold_without_an_extra_attempt(supervisor, bad):
     h.replies.extend([{"status": "DANGEROUS", "reason": "flag"}, bad])
     ok, msg = h.module.check_safety("place_reply", {}, ctx=h.ctx)
     assert not ok and "UNAVAILABLE" in msg and len(h.calls) == 2
-    assert not h.module._PRIOR_VERDICTS
+    assert not any(row.get("speech_refused") for row in h.module._PRIOR_VERDICTS.get("work", {}).values())
 
 
 def test_unmarked_or_disabled_never_second_checks(supervisor):
