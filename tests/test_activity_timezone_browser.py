@@ -1,8 +1,9 @@
-"""Owner-facing schedule times use the viewer's zone, with the exact UTC beside them (#1320, 7A).
+"""Owner-facing schedule times use one zone per row, each time keeping the exact UTC instant (#1320).
 
 A real browser in a non-UTC zone (Asia/Tokyo) against the real server: the chat frame
-it sends carries that IANA zone, and Activity renders stored UTC schedule instants as
-Tokyo time with the UTC instant next to it. The screenshot is evidence for inspection.
+it sends carries that IANA zone. Activity says a stored UTC instant in the schedule's own
+zone, named when it is not the viewer's, else in Tokyo time; every time keeps the exact
+UTC instant as its datetime and title. The screenshot is evidence for inspection.
 """
 from __future__ import annotations
 
@@ -61,9 +62,18 @@ def test_activity_schedules_render_in_the_viewer_zone_with_utc_beside(direct_ser
             text = section.inner_text()
             once = section.locator('time[datetime="2027-01-15T09:00:00Z"]').first
             assert once.get_attribute("title") == "2027-01-15T09:00:00Z"
-            # 09:00 UTC is 18:00 in Tokyo; the stored instant is printed beside it.
-            assert re.search(r"at/after 15 Jan, 18:00 GMT\+9 \(15 Jan, 09:00 UTC\)", text), text
-            assert "0 9 * * * (Europe/Moscow)" in text and re.search(r"next .*GMT\+9 \(.* UTC\)", text), text
+            # 09:00 UTC is 18:00 in Tokyo, the viewer's own zone, so the row names none.
+            assert "Task · Once on 15 Jan at 18:00 · active" in text, text
+            # A cron row says its cadence and next run in its own zone, named; 09:00 in Moscow is 06:00 UTC. The cron
+            # code and the zone are the row's Details.
+            assert re.search(r"Task · Daily at 09:00 \(Europe/Moscow\) · next \d{1,2} \w{3} at 09:00 · active", text), text
+            digest = section.locator(".activity-schedule", has_text="Morning digest")
+            following = digest.locator(".activity-sub time").first
+            assert re.fullmatch(r"\d{4}-\d\d-\d\dT06:00:00Z", following.get_attribute("datetime") or ""), text
+            assert following.get_attribute("title") == following.get_attribute("datetime")
+            digest.locator("details.activity-details > summary").click()
+            facts = digest.locator(".activity-facts").inner_text()
+            assert "cron 0 9 * * *" in facts and "time zone Europe/Moscow" in facts, facts
             shot = evidence / "activity-timezone-tokyo.png"
             section.scroll_into_view_if_needed()
             page.screenshot(path=str(shot), full_page=True)
