@@ -121,6 +121,23 @@ def test_parallel_checks_are_bounded_and_removed_with_task(tmp_path):
     assert delete_document(tmp_path, "wake") and read_document(tmp_path, "wake") is None
 
 
+def test_a_task_drives_audit_also_reaches_the_shared_log_once(tmp_path):
+    """A per-task drive is pruned two days after its task: each of its audit rows is also in the canonical shared
+    log. A drive that is the canonical root writes its one row there, never twice."""
+    def lines(root):
+        path = root / "logs" / "events.jsonl"
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+    drive, shared = tmp_path / "task-drive", tmp_path / "data"
+    ctx = SimpleNamespace(drive_root=drive, budget_drive_root=str(shared), task_id="wake", drive_logs=lambda: drive / "logs")
+    records._emit_durable_safety_event(ctx, {"type": "safety_hold", "tool": "place_reply"})
+    assert [row["type"] for row in lines(drive)] == [row["type"] for row in lines(shared)] == ["safety_hold"]
+    assert lines(drive) == lines(shared)
+    canonical = SimpleNamespace(drive_root=shared, task_id="main", drive_logs=lambda: shared / "logs")
+    records._emit_durable_safety_event(canonical, {"type": "safety_verdict", "tool": "remote_write", "verdicts": []})
+    assert [row["type"] for row in lines(shared)] == ["safety_hold", "safety_verdict"]
+    assert [row["type"] for row in lines(drive)] == ["safety_hold"]
+
+
 def test_index_failure_does_not_suppress_the_original_durable_audit(tmp_path, monkeypatch):
     ctx = SimpleNamespace(drive_root=tmp_path, task_id="wake", drive_logs=lambda: tmp_path / "logs")
     def unavailable(*args):
