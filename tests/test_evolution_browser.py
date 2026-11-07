@@ -148,6 +148,7 @@ def test_one_measure_milestones_and_the_chosen_version_beneath(subscription_ui, 
     page.locator('[data-measure="identity"]').click()
     assert page.locator('[data-measure="identity"]').get_attribute("aria-pressed") == "true"
     assert page.locator('[data-measure="code_lines"]').get_attribute("aria-pressed") == "false"
+    page.locator(".evo-method > summary").click()  # how a measure is counted reads behind its disclosure
     assert page.locator(".evo-caption").inner_text().startswith("This installation · Identity: characters of identity.md")
     assert page.locator(".evo-chart .evo-ch-strong").text_content() == "26,500 characters", "the newest journal record ends the line"
     assert overflow(page) == {"page": 0, "panel": 0}
@@ -192,7 +193,10 @@ def test_campaign_keeps_readable_text_when_status_and_actions_grow(subscription_
         }""")
         assert sizes["main"] >= min(320, sizes["available"]) - 1, sizes
         assert not sizes["outside"] and not sizes["clipped"], sizes
-        assert sizes["count"] == (3 if running else 2)
+        # Start, Pause, Run review and the Consciousness pointer: Pause keeps its place and is offered only while a
+        # campaign runs.
+        assert sizes["count"] == 4
+        assert page.locator("#evo-stop").is_enabled() == running
         assert objective in page.locator(".evo-campaign-lines").inner_text()
         assert page.evaluate("() => document.activeElement.id") == "evo-start"
         assert overflow(page) == {"page": 0, "panel": 0}
@@ -360,7 +364,8 @@ def test_a_start_the_runtime_applies_late_keeps_pause_and_arrives_with_the_page_
     page.clock.install()
     open_evolution(subscription_ui, history(), state=state)
     start, pause, chip = page.locator("#evo-start"), page.locator("#evo-stop"), page.locator("#evo-campaign-chip")
-    assert (chip.inner_text(), start.is_visible(), pause.is_visible()) == ("Off", True, False)
+    # Pause keeps its place: present and inactive while there is nothing to pause.
+    assert (chip.inner_text(), start.is_visible(), pause.is_visible(), pause.is_enabled()) == ("Off", True, True, False)
 
     def send(button, *, confirm=True):
         sent, read = len(commands), len(reads)
@@ -368,7 +373,7 @@ def test_a_start_the_runtime_applies_late_keeps_pause_and_arrives_with_the_page_
         if confirm:
             page.locator("[data-confirm-ok]").click()  # an empty objective: the backend's own
         until(page, lambda: len(commands) > sent and len(reads) > read)  # the command, then the state read after it
-        page.wait_for_function("() => !document.querySelector('#evo-stop').disabled")
+        page.wait_for_function("() => !document.querySelector('#evo-start').disabled")  # the gateway answered
         page.evaluate("() => new Promise((done) => requestAnimationFrame(() => setTimeout(done, 0)))")
 
     def poll(now):
@@ -380,13 +385,14 @@ def test_a_start_the_runtime_applies_late_keeps_pause_and_arrives_with_the_page_
     answers["command"] = "refuse"
     send(start)
     assert commands == ["/evolve on"] and page.locator(".toast", has_text="Could not send /evolve on").count() == 1
-    assert (start.is_visible(), pause.is_visible()) == (True, False), "a refused Start was never queued"
+    assert (start.is_visible(), pause.is_visible(), pause.is_enabled()) == (True, True, False), "a refused Start was never queued"
 
     answers["command"] = "queue"
     send(start)
-    assert chip.inner_text() == "Off", "the read right after the queued Start still says off"
+    assert reads[-1] == "disabled", "the read right after the queued Start still says off"
+    assert chip.inner_text() == "Starting…", "the chip says the unconfirmed Start, never Off beside an offered Pause"
     assert pause.is_visible() and pause.is_enabled(), "Pause stays offered while the Start is unconfirmed"
-    assert start.is_visible()
+    assert start.is_visible() and start.is_enabled(), "a Start that never applies stays retryable"
     setup_browser.capture(page, "evolution-start-unconfirmed")
 
     poll(RUNNING)
@@ -410,7 +416,7 @@ def test_a_start_the_runtime_applies_late_keeps_pause_and_arrives_with_the_page_
     assert commands[-1] == "/evolve off" and chip.inner_text() == "Running", "the Pause is only queued"
     poll(STATE)
     page.wait_for_function("() => document.querySelector('#evo-campaign-chip').textContent === 'Off'", timeout=5000)
-    assert (start.is_visible(), pause.is_visible()) == (True, False), "off again, and nothing left unconfirmed"
+    assert (start.is_visible(), pause.is_visible(), pause.is_enabled()) == (True, True, False), "off again, and nothing left unconfirmed"
 
     answers["command"] = "lose"
     send(start)

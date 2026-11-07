@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ouroboros"
-version = "7.10.0a0"
+version = "7.10.0"
 description = "Self-creating AI agent with constitution, background consciousness, and persistent identity"
 readme = "README.md"
 license = {text = "MIT"}
@@ -43,7 +43,7 @@ dependencies = [
     "starlette",
     "python-multipart",
     "Pillow>=10.0",
-    "pypdf>=4.0",
+    "pypdf>=7.0",
     "uvicorn[standard]",
     "websockets",
     "pytest>=7.0",

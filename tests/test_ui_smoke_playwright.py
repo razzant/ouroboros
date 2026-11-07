@@ -2524,7 +2524,7 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                     remaining: messages.scrollHeight - messages.scrollTop - messages.clientHeight,
                     visible: button.classList.contains('visible'),
                     width: b.width, height: b.height,
-                    centerDelta: Math.abs((b.left + b.width / 2) - (w.left + w.width / 2)),
+                    endInset: w.right - b.right,
                     gap: w.top - b.bottom,
                     toolbarOverlap: overlap(b, t),
                     previewOverlap: preview ? overlap(b, preview.getBoundingClientRect()) : 0,
@@ -2540,7 +2540,8 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
         if require_overflow:
             assert facts["remaining"] > 48, facts
         assert abs(facts["width"] - 32) <= 1 and abs(facts["height"] - 32) <= 1, facts
-        assert facts["centerDelta"] <= 1 and abs(facts["gap"] - 8) <= 1, facts
+        # ↓ latest stands at the composer's end, never over the middle of the column.
+        assert abs(facts["endInset"] - 8) <= 1 and abs(facts["gap"] - 8) <= 1, facts
         assert facts["toolbarOverlap"] == 0 and facts["previewOverlap"] == 0, facts
         assert facts["boxShadow"] != "none", facts
         return facts

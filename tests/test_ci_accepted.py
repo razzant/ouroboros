@@ -49,10 +49,16 @@ def _file(tmp_path, document):
     return path
 
 
-def test_the_committed_file_is_a_valid_empty_list():
-    assert ci_accepted.load(REPO / "tests" / "accepted_failures.json") == []
+def test_the_committed_file_is_valid_and_each_entry_names_its_issue_and_systems():
+    """An entry is inert until the owner labels its issue (`labelled_by_owner`); the file only names candidates.
+    Each carries its own systems, so none widens to a system its issue does not describe."""
     document = json.loads((REPO / "tests" / "accepted_failures.json").read_text(encoding="utf-8"))
-    assert document == {"format": 1, "label": "not-a-product-bug", "entries": []}
+    assert set(document) == {"format", "label", "entries"}
+    assert (document["format"], document["label"]) == (1, ci_accepted.LABEL)
+    entries = ci_accepted.load(REPO / "tests" / "accepted_failures.json")
+    assert entries == document["entries"]
+    assert all(entry.get("platforms") for entry in entries), "an entry names the systems its issue describes"
+    assert len({entry["nodeid"] for entry in entries}) == len(entries)
 
 
 @pytest.mark.parametrize("document", [

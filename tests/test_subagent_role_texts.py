@@ -118,8 +118,8 @@ def test_schedule_subagent_tells_the_parent_children_write_signed_memory_and_dra
     assert "Children may write knowledge notes, memory marks and chronicle drafts in their own name" in description
     assert "(the integrating mind accepts or rejects drafts: chronicle_write kind=decision)" in description
     assert "no child commits, grants itself tools or writes identity/scratchpad" in description
-    assert ("READ-ONLY children inspect local repo/data/history and web/browser and return findings, writing no "
-            "other local state and running no shell/review/runtime/skills") in description
+    assert ("READ-ONLY children inspect local repo/data/history and web/browser and return findings; no other "
+            "local writes or shell/review/runtime/skills") in description
     # Which records a child drafts is said once, by the tool that writes them, in the same catalog.
     chronicle = next(entry.schema for entry in chronicle_tools() if entry.name == "chronicle_write")["description"]
     assert "A delegated child or nanny publishes pages and parts only as drafts" in chronicle

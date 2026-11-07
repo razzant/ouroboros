@@ -176,6 +176,21 @@ a = Analysis(
     noarchive=False,
 )
 
+# --- Chrome for Testing payload, collected verbatim on macOS ---
+# The pinned Chrome for Testing shell (ouroboros/chromium_runtime.py) ships stub dylibs
+# (libEGL.dylib, libGLESv2.dylib) without Mach-O header padding, so PyInstaller's @rpath
+# install-name rewrite of every collected Mach-O cannot fit ("larger updated load commands do
+# not fit") and the macOS build stops. The shell is launched by path and loads its libraries
+# from its own folder, so it needs no rewrite: move its entries to data, copied byte for byte.
+# build.sh still signs every Mach-O in the bundle before the outer seal.
+if _is_macos:
+    _cft_entries = [entry for entry in a.binaries
+                    if '/.local-browsers/ouroboros-cft-' in '/' + entry[0].replace(os.sep, '/')]
+    if _cft_entries:
+        a.binaries = [entry for entry in a.binaries if entry not in _cft_entries]
+        a.datas = a.datas + [(dest, src, 'DATA') for dest, src, _typecode in _cft_entries]
+# --- end Chrome for Testing payload ---
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(

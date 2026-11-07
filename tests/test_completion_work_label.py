@@ -83,7 +83,8 @@ def test_the_live_banner_says_the_name_word_and_cause_from_the_frame_the_produce
 let text = ''; for await (const chunk of process.stdin) text += chunk;
 const said = Object.entries(JSON.parse(text)).map(([id, frame]) => [id, classifyLiveFrame(frame, { kind: 'log' })?.body]);
 console.log(JSON.stringify(Object.fromEntries(said)));"""
-    run = subprocess.run([node, "--input-type=module", "-e", script], input=json.dumps(frames), text=True,
+    # Node writes UTF-8 to a pipe on every host; a bare text=True would decode it with the locale's codec (cp1252).
+    run = subprocess.run([node, "--input-type=module", "-e", script], input=json.dumps(frames), text=True, encoding="utf-8",
                          cwd=pathlib.Path(__file__).resolve().parents[1], capture_output=True, timeout=60, check=True)
     assert json.loads(run.stdout) == {"crashed": "Rename the config keys · Failed: The worker process running the task crashed",
                                       "clean": "Rename the config keys · Done"}

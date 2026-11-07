@@ -1261,7 +1261,11 @@ html[data-layout="docked"] .app-page-header[data-narrow] { grid-template-columns
 html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-leading { display: none; }
 html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-title-block { position: absolute; }
 html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-toolbar { flex-wrap: wrap; }
-html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-toolbar > button { flex: none; }
+/* A narrow header's actions wrap a long label instead of leaving the column (a translation, or a wider platform font:
+   "Update 2 trusted" in a 160 px column on Linux); like the Evolution verbs, the box comes from the tokens; a fixed
+   16 px line keeps one line at the small capsule's 28 px (1 + 5 + 16 + 5 + 1) on every platform font. */
+html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-toolbar > button { flex: none; max-width: 100%;
+    white-space: normal; overflow-wrap: anywhere; line-height: 16px; --control-h: auto; --control-pad-y: 5px; }
 html[data-layout="docked"] .app-page-header[data-lead] {
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas: "title toolbar";
@@ -5599,8 +5603,10 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .evo-campaign-chip { height: 20px; padding: 0 8px; font-size: var(--type-meta); font-weight: 500; }
 .evo-campaign-side { flex: 1 1 17rem; }
 .evo-campaign-side .ui-status { margin: 0; }
-/* The pointer to the Consciousness tab is a quiet link with its state's dot (U071). */
-.evo-consciousness { justify-self: start; max-width: 100%; }
+/* The pointer to the Consciousness tab is a quiet link with its state's dot (U071). Its state wraps on a narrow card
+   ("sleeping until 4 Nov at 15:41"), so like the verbs it takes its box from its tokens and grows a line instead of
+   spilling out of the lock's one-line box; one line stays the small capsule's 28 px. */
+.evo-consciousness { justify-self: start; max-width: 100%; --control-h: auto; --control-pad-y: 5px; }
 /* A campaign verb grows a line when a translation is long: the row's box comes from its tokens (the lock owns the
    property), one line staying the control's height. */
 .evo-campaign-actions { --control-h: auto; --control-pad-y: var(--space-2);
@@ -6312,9 +6318,11 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 /* A notice's one way back (host_modules.js recovery) follows its words on the same line when they fit. */
 .toast .toast-action { display: inline-flex; flex-shrink: 0; margin-left: var(--space-2); vertical-align: middle; }
 .toast:has(> .toast-dismiss) { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-2); }
-.toast:has(> .toast-dismiss) .toast-words { min-width: 0; grid-column: 1; }
-.toast:has(> .toast-dismiss) .toast-action { grid-column: 1; margin-left: 0; justify-self: start; }
-.toast:has(> .toast-dismiss) .toast-dismiss { grid-column: 2; grid-row: 1 / span 2; }
+/* Each part asks for the close button among its own following siblings (toast.js appends words, action, close), so
+   :has() stays in the subject compound. */
+.toast > .toast-words:has(~ .toast-dismiss) { min-width: 0; grid-column: 1; }
+.toast > .toast-action:has(~ .toast-dismiss) { grid-column: 1; margin-left: 0; justify-self: start; }
+.toast > .toast-dismiss { grid-column: 2; grid-row: 1 / span 2; }
 /* The page's stack ends 18 px above the screen's bottom, as it keeps from its right, and the notices it keeps scroll
    there as one column: every word and close button is reached by wheel, touch or keyboard (toast.js names it a region
    once cut). A scrolling box clips what it holds, so its padding is the toasts' shadow room (0 18px 42px): left and
@@ -9975,7 +9983,7 @@ body.keyboard-open .project-panel {
     justify-content: flex-end;
     gap: var(--space-2);
     padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3);
-    border: 1px solid transparent;
+    border: 1px solid var(--field-border);
     border-radius: var(--radius-inner);
     background: var(--surface-tray);
     transition: border-color 0.12s ease, box-shadow 0.12s ease;

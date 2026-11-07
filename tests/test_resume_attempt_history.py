@@ -560,14 +560,21 @@ def test_only_held_members_read_an_attempt_and_an_unreadable_one_is_a_disclosed_
     rows = [_held_row("sr", "restart", can_resume=True),
             {"activity_id": "q1", "phase": "queued", "kind": "managed_task", "chat_id": 42, "task_attempt": 1,
              "started_at": 50.0}]
+    import contextlib
+    import pathlib
     import tempfile
 
-    with tempfile.TemporaryDirectory() as root, \
+    from ouroboros import store
+
+    with tempfile.TemporaryDirectory() as root, contextlib.ExitStack() as release, \
             mock.patch.object(wp._Observations, "result", lambda self, task_id: None), \
             mock.patch.object(wp._Observations, "fence", lambda self, root_id, drive_root=None: {}), \
             mock.patch.object(wp._Observations, "model_handoffs", lambda self, root_id, drive_root=None: []), \
             mock.patch.object(wp, "_open_runs", lambda drive_root: {}), \
             mock.patch.object(wp, "_inflight_upkeep", lambda drive_root, known: []):
+        # As ``work_fields``: the projection's real reads cache this root's stores (its usage store among them) and
+        # Windows removes no open file, so this root's handles go back before the root does.
+        release.callback(store.close_connections_under, pathlib.Path(root))
         snapshot = json.loads(json.dumps(wp.works_snapshot(root, rows, {"sr": SAVED})))
     assert asked == ["sr"], "only the held member's attempt is read"
     assert snapshot["works_gaps"] == [{"reason": "resume_attempt_unavailable", "task_id": "sr"}]

@@ -751,13 +751,36 @@ def pytest_unconfigure(config):  # noqa: ARG001
 _PHASE_EVENT_LOOPS = pytest.StashKey()
 
 
+_LAST_ITEM_RAN = pytest.StashKey()
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtestloop(session):
+    """pytest-timeout's `--session-timeout` asks the session to stop after any test that ends past its deadline,
+    the last one too, and that stop request alone made the exit status 1. After the last test nothing is left to
+    stop, so the loop ends as a complete one: the exit status is the tests' and the session guards'. A CI shard
+    whose every test passed went red without this (run 42395824706, UI shard 2: 313 of 313 passed, the deadline
+    crossed in the last one), and scripts/ci_retry.py rightly refuses a red session that no test explains."""
+    try:
+        return (yield)
+    except session.Failed as stop:
+        last_ran = bool(session.items) and session.items[-1].stash.get(_LAST_ITEM_RAN, False)
+        if not (last_ran and str(stop).startswith("session-timeout: ")):
+            raise
+        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+        if reporter is not None:
+            reporter.write_line(f"{stop} in the last test: nothing was left to stop")
+        return True
+
+
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
-def pytest_runtest_protocol(item, nextitem):  # noqa: ARG001
+def pytest_runtest_protocol(item, nextitem):
     """Create both phase loops before fixtures can guard socket operations.
 
     Windows loop construction opens a local socket pair. Network guards must
     remain active throughout the test and its finalizers, so only construction
     precedes fixture setup. This owner closes both loops even if a phase fails.
+    It also notes that the session's last item ran (`pytest_runtestloop`).
     """
     loops = []
     try:
@@ -768,6 +791,8 @@ def pytest_runtest_protocol(item, nextitem):  # noqa: ARG001
             item.stash[_RETENTION_BEFORE_ITEM] = _basetemp_witness(item)
         _test_folders.begin()
         yield
+        if nextitem is None:
+            item.stash[_LAST_ITEM_RAN] = True
     finally:
         # The call and teardown hooks close their loops and fail that phase if a close raises;
         # this pass only guarantees the close. A loop whose close already raised is left half

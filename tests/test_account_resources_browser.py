@@ -128,7 +128,10 @@ def test_twenty_accounts_layout_and_scoped_refresh(resources_ui, width, theme):
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     assert panel.evaluate("e => e.scrollWidth <= e.clientWidth + 1")
     if width < 980:
-        assert panel.locator("[data-refresh-account]").bounding_box()["height"] >= 36
+        # A desk pointer: the one control height at every width; a finger's 44 px comes from the coarse-pointer scope.
+        control_h = page.evaluate("parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--control-h'))")
+        assert control_h >= 34
+        assert panel.locator("[data-refresh-account]").bounding_box()["height"] == pytest.approx(control_h, abs=0.5)
     panel.scroll_into_view_if_needed()
     capture(page, f"resources-{width}-{theme}-expanded")
     frame_section(panel.locator('.resource-reset-section'))
