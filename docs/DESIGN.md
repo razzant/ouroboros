@@ -1589,10 +1589,10 @@ reviews create child tasks or prove execution.
   objections` (added critics' only, warning), `awaiting answers` (working while
   its task runs), `no open objection` (done) or `not asked yet`; `objections not
   projected` (neutral) when the detail lacks the host's fold, which is never
-  re-derived. Facts keep the latest revision's goal, `done_when` and earlier
-  claims; each ask reads `k of n answered` and lists participants (`counts` or
-  `added — never holds`, `awaiting`, `not sent`) with their standing and
-  objections (`(not adjudicated)`, `(never holds)`, withdrawn).
+  re-derived. Facts keep the goal, `done_when`, earlier claims, participants and
+  objections. Each ask reads `k of n answered`; partial, missing or unrecorded
+  evidence adds one notice, with locators and reasons in Record facts. Attached
+  means prepared, not sent or read; legacy gaps never mean complete or empty.
 - An earlier-schema plan wave or stored acceptance panel whose reviewers may
   still answer is work in progress only while its task runs (`in progress · k of
   n answered`, or `passed so far` once the quorum is met; awaited reviewers are
