@@ -784,7 +784,11 @@ def _safety_deadline_epoch(ctx: Optional[Any]) -> Optional[float]:
 
 
 def _resolve_safety_routing() -> Tuple[bool, bool, Optional[str]]:
-    """Choose local/remote safety backend; unreachable fallback fails open."""
+    """Choose local/remote safety backend; unreachable fallback fails open.
+
+    Only no-backend cases fail open with ``SAFETY_WARNING``: no local lane and either no provider key or one not
+    covering the light model's provider; a fallback local runtime that fails or is rate-limited, never a chain route
+    (``_unanswered``). An explicit local runtime (``USE_LOCAL_LIGHT``) that fails holds."""
     selected = get_safety_model()
     explicit = bool(str(runtime_setting("OUROBOROS_MODEL_SAFETY", "") or "").strip())
     local_light = str(runtime_setting("USE_LOCAL_LIGHT", "") or "").lower() in ("true", "1")
@@ -1377,7 +1381,12 @@ def check_safety(
     """Return ``(allowed, warning_or_error)`` for one tool call.
 
     ``declared_policy`` is a first-party ``ToolEntry``'s own declaration; a
-    ``TOOL_POLICY`` entry outranks it and an invalid value is ``DEFAULT_POLICY``."""
+    ``TOOL_POLICY`` entry outranks it and an invalid value is ``DEFAULT_POLICY``.
+    Speech, known before a verdict from declarations or marked by the verdict's ``speech``, follows the final
+    assessment: DANGEROUS returns it unsent with the reason, the verdict's ``quote`` and the destination's notes, and
+    only an identical re-issue (request_id included) from a later model call sends it. A hold on speech, or on an MCP
+    call without a verdict, binds in every mode and names its exits; my human's answered card holding the exact
+    words and destination lets a later identical re-issue send it (``_owner_yes``)."""
     # Arguments can be None for no-parameter tool calls.
     tool_name = str(tool_name or "").strip()
     arguments = arguments or {}

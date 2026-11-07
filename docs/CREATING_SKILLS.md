@@ -977,7 +977,8 @@ contributes:
   `write`, unless its `message:` block declares which calls deliver words: a call whose every `when` selector holds
   one of its listed values is `message`, attributed by that block's `target`/`conversation`/`thread`; any other call
   keeps the row's `effect`. This is the connector's fact: core lists no provider method and never reads speech from
-  argument names (the Supervisor's verdict may still mark a call speech). An MCP tool is a declared read when
+  argument names (the Supervisor's verdict may still mark a call speech; a built-in tool without declarations, such
+  as `github_write`, is speech only by that mark, so its hold stays advice in Cyber Pro). An MCP tool is a declared read when
   its configured server marks it `readOnlyHint: true`, otherwise `write`; that hint is trusted, so a server lying
   about a write runs it unchecked, and Advises may call the tools a server marks read-only.
 - `target`/`conversation`/`thread` attribute each destination; a dotted name (`body.channel`) selects a nested
