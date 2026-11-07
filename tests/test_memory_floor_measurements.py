@@ -1,4 +1,5 @@
 """Count complete measurements, not just the rendered size of a small fixture."""
+import dataclasses
 import hashlib
 import json
 import time
@@ -61,6 +62,19 @@ def test_ordinary_scale_fit_measurements(tmp_path, monkeypatch, rows):
         'sha256': hashlib.sha256(projection.system_content_json.encode()).hexdigest()}))
     assert plan.initial_mode == 'nano'
     assert calls <= rows // 3 + 15, f'{rows} rows: at most rows/3 + 15 complete envelope measurements, got {calls}'
+
+
+def test_one_start_lists_a_snapshot_s_floor_elements_once(tmp_path, monkeypatch):
+    """Live scale (520 other conversations, ~17,000 words of people, no owner text): every walk, level, receipt and
+    Max-room measure of one start reads one listing of the snapshot's elements; a changed snapshot lists its own."""
+    listed, original = [], mf._list_elements
+    monkeypatch.setattr(mf, '_list_elements', lambda snapshot: listed.append(snapshot) or original(snapshot))
+    snap = syn.live_scale()
+    plan = scale.build(tmp_path, monkeypatch, snap=snap, window=600_000)
+    assert plan.projection(plan.initial_mode).memory_facts['floor']['steps'].get('F6w')  # the walk ran at this scale
+    assert len(listed) == 1, f'one listing per snapshot object, got {len(listed)}'
+    fewer = dataclasses.replace(snap, conversations=snap.conversations[:1])
+    assert len(mf.floor_elements(fewer)) < len(mf.floor_elements(listed[0])) and len(listed) == 2
 
 
 def _near_even_plan(root, monkeypatch, window, tail=61, owner=5199, pad=2, shift=1):

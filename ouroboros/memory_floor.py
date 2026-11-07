@@ -9,7 +9,7 @@ import dataclasses
 import json
 import logging
 import math
-from functools import lru_cache
+from functools import cached_property, lru_cache
 from typing import Callable, Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from ouroboros import context_budget
@@ -52,10 +52,44 @@ def sealed_owner_rows(room: Mapping[str, Any]) -> List[Dict[str, Any]]:
     return [item for item in room.get("project_words") or () if item.get("address")]
 
 
-def floor_elements(snapshot: mv.MemoryViewSnapshot) -> List[Tuple[str, str, str, str]]:
+class _Elements:
+    """One snapshot's floor elements, listed once (``_elements``): each step's ids in ladder order and the
+    ``step:id`` addresses, so a level is one pass over its own steps; their token prices on first need."""
+
+    def __init__(self, listed: List[Tuple[str, str, str, str]]):
+        self.listed, self.ids = tuple(listed), {}
+        for step, ident, _whole, _short in self.listed:
+            self.ids.setdefault(step, []).append(ident)
+        self.eligible = {f"{step}:{ident}": (step, ident) for step, ident, *_ in self.listed}
+
+    @cached_property
+    def priced(self) -> Tuple[Tuple[str, str, int, int], ...]:
+        return tuple((step, ident, view_tokens(whole), view_tokens(short)) for step, ident, whole, short in self.listed)
+
+    def level(self, taken, by_budget: int = 0) -> mv.FloorLevel:
+        """The level of ``(step, id)`` pairs, each step's ids in ladder order."""
+        chosen = ((step, tuple(i for i in self.ids.get(step, ()) if (step, i) in taken)) for step in LADDER)
+        return mv.FloorLevel(tuple((step, ids) for step, ids in chosen if ids), by_budget=by_budget)
+
+
+def _elements(snapshot: mv.MemoryViewSnapshot) -> _Elements:
+    """The snapshot's element table: a non-field attribute (``snapshot_json`` and equality never see it) that
+    lives as long as the snapshot object (``memory_view._parsed_view``); a replaced snapshot lists its own."""
+    table = snapshot.__dict__.get("_floor_elements")
+    if table is None:
+        table = _Elements(_list_elements(snapshot))
+        object.__setattr__(snapshot, "_floor_elements", table)
+    return table
+
+
+def floor_elements(snapshot: mv.MemoryViewSnapshot) -> Tuple[Tuple[str, str, str, str], ...]:
     """Ordered addressable forms, oldest first; F5 by covered-period start then sequence, across kinds.
     Display order is independent. Core and governing words have no rung. F7 holds a project root's
     sealed rows of its human before the open ones: dated addresses, never a retelling."""
+    return _elements(snapshot).listed
+
+
+def _list_elements(snapshot: mv.MemoryViewSnapshot) -> List[Tuple[str, str, str, str]]:
     if not snapshot.active:
         return []
     room = snapshot.room or {}
@@ -91,10 +125,9 @@ def floor_elements(snapshot: mv.MemoryViewSnapshot) -> List[Tuple[str, str, str,
             if step in _COLLAPSING or step in _LIST_FORMS or step == 'F8' or len(short) < len(whole)]
 
 
-def degradable_elements(snapshot: mv.MemoryViewSnapshot) -> List[Tuple[str, str, int, int]]:
+def degradable_elements(snapshot: mv.MemoryViewSnapshot) -> Tuple[Tuple[str, str, int, int], ...]:
     """``(step, element id, tokens whole, tokens by address)`` in ladder order: each element's known saving."""
-    return [(step, ident, view_tokens(whole), view_tokens(short))
-            for step, ident, whole, short in floor_elements(snapshot)]
+    return _elements(snapshot).priced
 
 
 def floor_allowances(*, window_tokens: Optional[int], output_reserve_tokens: Optional[int], non_memory_tokens: int,
@@ -155,8 +188,7 @@ def max_room_fact(snapshot: Optional[mv.MemoryViewSnapshot], core: Any, books: I
     parts = {"books": max(0, sum(map(view_tokens, books)) - base), "core": base + view_tokens(core.semi_stable_text),
              "knowledge, scratchpad and runtime facts": view_tokens(core.dynamic_head_text) + view_tokens(core.dynamic_text)}
     parts["assignment"] = max(0, fixed - schemas - sum(parts.values()))  # the task's messages and their framing
-    elements = floor_elements(snapshot) if snapshot else ()
-    ordinary = mv.FloorLevel(tuple((step, tuple(ident for s, ident, *_ in elements if s == step))
+    ordinary = mv.FloorLevel(tuple((step, tuple(_elements(snapshot).ids.get(step, ())))
                                    for step in _ORDINARY)) if snapshot else mv.FULL_VIEW
     memory = {"story": view_tokens(story), "room": view_tokens(mv.render_room(snapshot, ordinary)) if snapshot else 0,
               "unfolded": unfolded_pages(snapshot)["tokens"]}
@@ -281,7 +313,8 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
 
     ``compare(taken, trial)`` prices an optional form against the level it joins; by default each is ``measure``d.
     """
-    elements = degradable_elements(snapshot)
+    table = _elements(snapshot)
+    elements = table.priced
     labels = {ident: short for step, ident, _whole, short in elements if step == 'F5l'}
     old = {(step, ident) for step, ids in kept.addressed for ident in ids}
     taken = set(old)
@@ -294,13 +327,11 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
     target = min(bound if bound is not None else current, current - saving) if saving else bound
     budget = allowances.get("budget") is not None and allowances.get("budget") == bound
 
-    def level(selected):
-        selected = {(s, i) for s, i in selected if s != 'F5l' or ('F5', i) not in selected}
-        selected = {(s, i) for s, i in selected if s not in _LIST_FORMS or any(
-            prior in _LIST_FORMS[s] for prior, _ in selected)}
-        return mv.FloorLevel(tuple((s, tuple(i for step, i, *_ in elements if step == s and (s, i) in selected))
-                                  for s in LADDER if any(step == s for step, _ in selected)),
-                             by_budget=kept.by_budget + (len(selected - old) if budget else 0))
+    def level(selected):  # a page's label yields to its address; a list form needs what it lists
+        listed = lambda steps: any((step, i) in selected for step in steps for i in table.ids.get(step, ()))
+        selected = selected - {('F5l', i) for i in table.ids.get('F5l', ()) if ('F5', i) in selected} - {
+            (s, i) for s, priors in _LIST_FORMS.items() if not listed(priors) for i in table.ids.get(s, ())}
+        return table.level(selected, kept.by_budget + (len(selected - old) if budget else 0))
 
     uncovered = uncovered_owner_rows(snapshot, elements)
     last = {(step, ident) for step, ident, *_ in uncovered}
@@ -406,10 +437,9 @@ def kept_level(snapshot: mv.MemoryViewSnapshot, facts: Mapping[str, Any]) -> mv.
 def level_with(snapshot: mv.MemoryViewSnapshot, kept: mv.FloorLevel, addresses: Iterable[str], *,
                owner_note: bool = False) -> mv.FloorLevel:
     """Select exact inspected forms; a note's :whole address restores its captured source."""
-    elements = [(step, ident) for step, ident, *_ in floor_elements(snapshot)]  # listed once: a receipt prices many levels
-    eligible = {f"{step}:{ident}": (step, ident) for step, ident in elements}
+    table = _elements(snapshot)  # listed once per snapshot: a receipt prices many levels
+    eligible = table.eligible
     taken = {(step, ident) for step, ids in kept.addressed for ident in ids}
-    owner = owner_rows(snapshot)
     for address in addresses:
         if address.endswith(':whole') and address[:-6] in eligible and eligible[address[:-6]][0] == 'F8':
             taken.discard(eligible[address[:-6]])
@@ -425,15 +455,14 @@ def level_with(snapshot: mv.MemoryViewSnapshot, kept: mv.FloorLevel, addresses: 
             if step == 'F7a' and not owner_note and any(
                     ('F7', row['address']) in taken and not row.get('carried') for row in snapshot.room['lane1']):
                 raise ValueError('Uncovered owner commitments require an authored working_note before changing their form')
-        if step == "F7" and not owner_note and not owner[ident].get("carried"):
+        if step == "F7" and not owner_note and not owner_rows(snapshot)[ident].get("carried"):
             raise ValueError("Uncovered owner commitments require an authored working_note before changing their form")
         taken.add((step, ident))
         if step in ('F5l', 'F5'):
             taken.discard(('F5' if step == 'F5l' else 'F5l', ident))
         if step == 'F8':
             taken = {(s, i) for s, i in taken if s != 'F8a'}  # an explicit label selection unfolds the note list
-    return mv.FloorLevel(tuple((step, tuple(ident for s, ident in elements if s == step and (s, ident) in taken))
-                               for step in LADDER if any(s == step for s, _ in taken)), by_budget=kept.by_budget)
+    return table.level(taken, kept.by_budget)
 
 
 def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool = False):
