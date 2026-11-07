@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -44,6 +45,26 @@ def test_environment_resolution_retains_settings_classification():
     )
     assert env == {'PORT': '8080', 'DEBUG': '1', 'PASSWORD': '!', 'MODE': 'info'}
     assert secrets == ('!',)
+
+
+def test_selection_reads_saved_settings_never_a_mirrored_value(process_context, monkeypatch, tmp_path):
+    """A selection reads Settings as a skill does (``skill_settings``): inside a running task, a key the owner
+    cleared never comes back from the value this tree mirrored at the task's start, while an operator's own
+    variable still stands in for a key the document leaves unset."""
+    from ouroboros import config, subagent_runtime
+    from ouroboros.gateway.owner_settings import _owner_update_settings, fields_on_saved_document
+
+    registry, _ctx, workspace, _data = process_context
+    monkeypatch.setattr(config, 'SETTINGS_PATH', tmp_path / 'settings.json')
+    monkeypatch.setenv('GITHUB_REPO', 'operator/own-variable')
+    _owner_update_settings(fields_on_saved_document({'GITHUB_TOKEN': 'synthetic-mirrored-token'}))
+    with config.task_settings_scope(subagent_runtime.apply_task_start_settings()):
+        assert os.environ['GITHUB_TOKEN'] == 'synthetic-mirrored-token'  # this tree's own projection
+        _owner_update_settings(fields_on_saved_document({'GITHUB_TOKEN': ''}))
+        result = registry.execute_result('run_command', {'cwd': str(workspace),
+            'cmd': [sys.executable, '-c', "import os; print(repr(os.environ['TOKEN']), os.environ['REPO'])"],
+            'env_from_settings': {'TOKEN': 'GITHUB_TOKEN', 'REPO': 'GITHUB_REPO'}})
+    assert result.status == 'ok' and "'' operator/own-variable" in result.text, result.text
 
 
 def test_mcp_literal_environment_and_unknown_extras_preserve_working_server():

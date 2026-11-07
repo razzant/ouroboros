@@ -187,7 +187,7 @@ def test_reference_authority_precedes_settings_read_and_spawn(process_context, m
 
     _registry, ctx, workspace, _data = process_context
     ctx.task_constraint = TaskConstraint(mode="acting_subagent", surface="external_workspace", write_root=str(workspace))
-    monkeypatch.setattr("ouroboros.config.runtime_settings", lambda **kwargs: pytest.fail("read forbidden Settings"))
+    monkeypatch.setattr("ouroboros.config.load_settings", lambda *a, **k: pytest.fail("read forbidden Settings"))
     result = _run_shell(ctx, [sys.executable, "-c", "raise SystemExit('must not run')"],
         cwd=str(workspace), env_from_settings={"TOKEN": "CUSTOM_KEY"})
     assert "PROCESS_ENV_REFERENCE_BLOCKED" in result

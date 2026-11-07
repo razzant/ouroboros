@@ -4,12 +4,16 @@ Through the real ``POST /api/decisions/secret`` over a real task store and Setti
 ``tests.test_secret_hitl`` fixtures): a Settings document that exists but cannot be read is unknown to
 the form and is never written as if it were new; an attempt whose outcome stayed unknown is never
 repeated under its own id, however many newer attempts followed it; readers that could not be
-discovered are recorded as unknown, never as "no skill reads it", and the save stays a save.
+discovered are recorded as unknown, never as "no skill reads it", and the save stays a save; the
+asking task's next selected process receives what is saved, never its admission snapshot.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import pathlib
+import sys
 import threading
 import time
 
@@ -345,3 +349,70 @@ def test_the_wake_reads_a_saved_secret_as_its_host_event_without_a_value(env):
     line = wake._answered_card_line(TASK, quiz_id, _block(env, quiz_id), now=time.time())
     assert "host outcome secret_filled: fakeplug, botToken" in line, line
     assert "answer text unavailable" not in line and CANARY not in line
+
+
+# One row per selection reader: commands, scripts and run-kind verification share process_facts' (their
+# per-tool wiring has its witness in test_workflow_process_environment.py); services resolve their own.
+@pytest.mark.parametrize("tool", ["run_script", "start_service"])
+def test_a_running_task_selects_what_the_form_saved_into_its_next_process(env, monkeypatch, tool):
+    """The asking task need not restart to use the answer: what the form fills or replaces, or the owner clears or
+    deletes, while it runs is what its next ``env_from_settings`` process receives at exec; the task's own
+    next-task reads keep its admission snapshot, and egress masks the value the child actually received."""
+    from ouroboros import config, subagent_runtime, workspace_executor
+    from ouroboros.gateway.owner_settings import _owner_update_settings, fields_on_saved_document
+    from ouroboros.loop_tool_execution import _execute_single_tool
+    from ouroboros.tools import services
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *args, **kwargs: (True, ""))  # an unrelated gate
+    system, workspace, data = (env.root / name for name in ("system", "workspace", "tools"))
+    for path in (system, workspace, data / "logs"):
+        path.mkdir(parents=True)
+    tools = ToolRegistry(system, data)
+    tools.set_context(ctx := ToolContext(repo_dir=system, drive_root=data, workspace_root=workspace,
+                                         workspace_mode="external", task_id=TASK))
+    witness, rows = workspace / "witness", []
+    program = ("import hashlib,os,pathlib; value=os.environ['TOKEN']; print('child received '+value, flush=True); "
+               f"pathlib.Path({str(witness)!r}).write_text(hashlib.sha256(value.encode()).hexdigest())")
+
+    def received():
+        """The child's own digest of its TOKEN at exec; None when nothing ran."""
+        witness.unlink(missing_ok=True)
+        args = {"cwd": str(workspace), "env_from_settings": {"TOKEN": "FAKEPLUG_TOKEN"}}
+        if tool == "run_script":
+            args.update(script=program, interpreter=sys.executable)
+        else:
+            args.update(cmd=[sys.executable, "-c", program])
+        rows.append(_execute_single_tool(tools, {"id": f"call-{len(rows)}", "function": {
+            "name": tool, "arguments": json.dumps(args)}}, data / "logs", task_id=TASK))
+        if tool == "start_service" and not rows[-1]["is_error"]:
+            assert services._SERVICES[workspace_executor.service_key(ctx, "service")].proc.wait(timeout=10) == 0
+        return witness.read_text(encoding="utf-8") if witness.exists() else None
+
+    def digest(value):
+        return hashlib.sha256(value.encode()).hexdigest()
+
+    _put_settings(env, FAKEPLUG_TOKEN="synthetic-old-token", OUROBOROS_EFFORT_TASK="high")
+    try:
+        with config.task_settings_scope(subagent_runtime.apply_task_start_settings()):
+            assert received() == digest("synthetic-old-token")
+            replaced = _save(env, _ask(env), {"botToken": "synthetic-new-token"})
+            assert replaced.json()["secret_outcome"]["event"] == "secret_replaced"
+            assert received() == digest("synthetic-new-token")
+            # The Settings page's Clear (and Remove) saves "" through the owner writer.
+            _owner_update_settings(fields_on_saved_document({"FAKEPLUG_TOKEN": "", "OUROBOROS_EFFORT_TASK": "low"}))
+            assert received() == digest("")
+            assert config.load_settings()["OUROBOROS_EFFORT_TASK"] == "low"
+            assert config.runtime_setting("OUROBOROS_EFFORT_TASK") == "high", "the task's own reads keep its snapshot"
+            config.save_settings({key: value for key, value in _settings(env).items() if key != "FAKEPLUG_TOKEN"})
+            assert received() is None and rows[-1]["is_error"] and "missing" in rows[-1]["result"]
+        with config.task_settings_scope(subagent_runtime.apply_task_start_settings()):  # admitted without the key
+            filled = _save(env, _ask(env), {"botToken": "synthetic-filled-token"})
+            assert filled.json()["secret_outcome"]["event"] == "secret_filled"
+            assert received() == digest("synthetic-filled-token")
+    finally:
+        services.kill_all_services(data)
+    records = (data / "logs" / "tools.jsonl").read_text(encoding="utf-8")
+    assert tool == "start_service" or "child received ***" in records
+    assert not any(token in records for token in ("synthetic-old-token", "synthetic-new-token", "synthetic-filled-token"))
