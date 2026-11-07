@@ -472,7 +472,8 @@ def test_a_fallbacks_reentry_reads_whether_the_round_already_changed_the_candida
         return None, 0
 
     monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
-    lmc._recover_context_overflow(context, _failed_capture(), 0, prepared=first_entry == "wake_retry")
+    lmc._recover_context_overflow(context, _failed_capture(), 0,
+                                  prepared=lmc.WAKE_DELIVERY_STEP if first_entry == "wake_retry" else "")
     assert not rescues
     lmc._recover_context_overflow(replace(context, active_model="fallback"), _failed_capture(size=900), 0)
     assert rescues == ([] if changes else ["chosen_bodies"])
