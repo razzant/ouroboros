@@ -178,15 +178,19 @@ def test_s42_direct_project_turn_continues_after_stop_restart_and_owner_resume(e
 
 TURN_A, TURN_B, SIBLING = "S42_FOLDERLESS_TURN", "S42_SIBLING_STARTER", "S42_SIBLING_TASK"
 PROOF = "s42-resource-proof.txt"
+CARRIED = "[Owner words quoted verbatim"
 
 
 def _request(body: dict) -> str:
     """The current request: the last user message naming one of this scenario's turns.
-    Host notes (the request clock) follow it, and room history may quote earlier turns."""
+    Host notes (the request clock) follow it, and room history may quote earlier turns.
+    A room row the host carries to the room's other live roots (#2924) arrives as quoted
+    owner words under the ``CARRIED`` line: context for that turn, never its request."""
     from tests.system_e2e.harness import message_text
 
     texts = [message_text(m) for m in body.get("messages") or [] if isinstance(m, dict) and m.get("role") == "user"]
-    return next((text for text in reversed(texts) if any(mark in text for mark in (TURN_A, TURN_B, SIBLING))), "")
+    return next((text for text in reversed(texts) if not text.startswith(CARRIED)
+                 and any(mark in text for mark in (TURN_A, TURN_B, SIBLING))), "")
 
 
 class _FolderStub(ScriptedStubModel):
