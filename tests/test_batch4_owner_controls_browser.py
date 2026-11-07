@@ -682,8 +682,9 @@ def test_continue_after_a_crash_rejoins_a_lost_answer_and_survives_reload(direct
                 _wait(lambda: model.main_calls("DELTA") == 2, 90, "DELTA resumed under its own id")
                 assert _task(page, url, DELTA)["status"] == "running"
 
-                # Its worker process dies (SIGKILL) while the application stays up: the
-                # existing policy keeps a signal death terminal, so Continue is its manual path.
+                # Its worker process dies (SIGKILL) while the application stays up. A signal death takes
+                # the task's one retry, and this resumed run already is DELTA's retry (its first attempt
+                # died with the application), so the death is terminal and Continue is its manual path.
                 # The pool's other live worker is the conversation lane's ready spare (#2654):
                 # the kill names DELTA's own carrier, never "the" worker of the pool.
                 from tests._shared import live_worker_pids
@@ -700,7 +701,7 @@ def test_continue_after_a_crash_rejoins_a_lost_answer_and_survives_reload(direct
                               120, "DELTA settled by its worker's death")
                 record["delta"] = {key: delta.get(key) for key in ("status", "reason_code", "cancel_origin",
                                                                    "continuation_offer")}
-                assert delta["reason_code"] == "worker_crash_signal", record["delta"]
+                assert delta["reason_code"] == "worker_crash_retry_exhausted", record["delta"]
                 assert (delta.get("continuation_offer") or {}).get("eligible") is True
                 # Opened afresh, as after a reboot: the settled card is rebuilt from its
                 # history rows, which carry the offer.
