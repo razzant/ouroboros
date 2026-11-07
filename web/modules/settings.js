@@ -884,7 +884,9 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             await Promise.all(enrichment);
             if (!isCurrent()) {
                 updateSettingsDirtyState();
-                return false;
+                // The same answer as the document stage: a newer load took over (null, it reports), or an owner edit
+                // kept the draft (false). A page-show refresh says "Your edits are kept" only for the second.
+                return sequence !== loadSequence ? null : false;
             }
             // Optional enrichment belongs in a still-clean baseline, never in an
             // owner edit made while one of those reads was pending.
