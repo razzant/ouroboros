@@ -905,15 +905,16 @@ def frame_focus_content(task: Mapping[str, Any], content: Any) -> Any:
     return text if isinstance(content, str) else [{"type": "text", "text": text}, *[item for item in content if item.get("type") != "text"]]
 
 
-def focus_frame_sources(metadata: Mapping[str, Any], recorded: Any) -> dict | None:
-    """The typed records behind one recorded FOCUS frame; ``None`` unless they render it exactly.
+def focus_frame_sources(metadata: Mapping[str, Any], recorded: Any, content: Any = None) -> dict | None:
+    """The typed records behind one recorded FOCUS frame (its text); ``None`` unless they render it exactly.
 
     A reader outside the turn (the Safety Supervisor) may take these instead of the frame: the
     correspondent's exact text, the connector's event, what was already said and started here and the
     place's notes as they stood at the event. Only a frame this renderer reproduces byte for byte from
-    those records and the bare event text qualifies; anything else the recorded frame carries (an
-    attachment manifest, image notes or blocks, an empty-text placeholder, another turn's inputs) is
-    absent from the records, so the caller keeps that row whole. The allowance line is the mind's
+    those records and ``content`` (default: the bare event text; a caller may pass the producer's
+    attachment manifest and image blocks, which it then carries itself) qualifies; anything else the
+    recorded frame carries (an empty-text placeholder, another turn's inputs) is absent from the records,
+    so the caller keeps that row whole. The allowance line is the mind's
     budget, not the event; its reader names this task by the id the producer derives from the binding and
     the event (``presence_turn_task_id``), so the frame re-renders from the records alone."""
     from ouroboros.presence_runner import presence_turn_task_id
@@ -924,10 +925,11 @@ def focus_frame_sources(metadata: Mapping[str, Any], recorded: Any) -> dict | No
     event_id = str(presence["event"].get("source_event_id") or "")
     task_id = presence_turn_task_id(str(presence.get("binding_id") or ""), event_id) if presence.get("binding_id") and event_id else ""
     try:
-        rendered = frame_focus_content({"id": task_id, "metadata": metadata}, str(presence["observed_text"]).strip())
+        rendered = frame_focus_content({"id": task_id, "metadata": metadata},
+                                       str(presence["observed_text"]).strip() if content is None else content)
     except Exception:  # records this renderer cannot read prove nothing; the row stays whole
         return None
-    if rendered != recorded:
+    if (rendered[0].get("text") if isinstance(rendered, list) else rendered) != recorded:
         return None
     place = presence.get("place") if isinstance(presence.get("place"), Mapping) else {}
     optional = {"previous_turn": presence.get("previous_turn"), "open_turns": presence.get("open_turns"),

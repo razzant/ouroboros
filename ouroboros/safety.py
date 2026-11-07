@@ -567,29 +567,6 @@ def _owner_yes(ctx, tool_name, arguments, effect, prior):
     return ""
 
 
-def _focus_event_source(row, metadata, notes):
-    """A place event's host frame as its typed records when they reproduce that row exactly.
-
-    Each row is compared on its own, so any other row (attachments, images, another turn's frame,
-    a Continue order) stays whole. Notes as they stood at the event are kept only where they differ
-    from those read now."""
-    from ouroboros.presence_context import focus_frame_sources
-
-    typed = (focus_frame_sources(metadata, row.get("content"))
-             if isinstance(row, dict) and row.get("source") == "initial_text" else None)
-    if typed is None:
-        return row
-    at_event, place_id = typed.pop("notes_at_event", None) or [], (metadata.get("focus") or {}).get("place_id")
-
-    def versions(rows):
-        return sorted((str(n.get("text")), str(n.get("author")), str(n.get("at") or "")) for n in rows)
-    if versions(at_event) != versions(n for n in notes if n["place_id"] == place_id):
-        typed["notes_at_event"] = at_event
-    return {**{key: value for key, value in row.items() if key != "content"},
-            "host_frame": "prompts/FOCUS.md showed the mind these records and its allowance",
-            **typed}
-
-
 def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, ctx=None, resolved_binding=None,
                         evidence=None):
     """Fixed host evidence, with authorship separate from semantic authorization. ``evidence`` (a dict) receives
@@ -600,6 +577,7 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
     from ouroboros.places import load_places
     from ouroboros.tool_access import canonical_data_root
     from ouroboros.tool_effects import mcp_sends_as
+    from ouroboros.safety_evidence import focus_event_source
 
     metadata = getattr(ctx, "task_metadata", None) or {}
     kind = work_kind(metadata)
@@ -638,8 +616,7 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
     directives = getattr(ctx, "_owner_directives", None)
     # User messages are quoted input when the caller has no retained host source; never certify them as owner words.
     sources = [*directives, *owner_words.safety_sources(ctx)] if isinstance(directives, list) else [m for m in (messages or []) if m.get("role") == "user"]
-    if isinstance(directives, list):
-        sources = [_focus_event_source(row, metadata, notes) for row in sources]
+    sources = [focus_event_source(row, metadata, notes) for row in sources]  # the evidence diet: what a row costs
     target = asdict(resolved_binding) if is_dataclass(resolved_binding) else resolved_binding
     # Whose credential an MCP call acts with (e.g. a server signed in as my human); connectors carry it per place.
     sends_as = {"sends_as": mcp} if tool_name.startswith("mcp_") and (mcp := mcp_sends_as(tool_name)) else {}
