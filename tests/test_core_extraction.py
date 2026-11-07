@@ -175,7 +175,7 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # (8892c8af... before).
     # Presence clarification keeps the question notice private and names the requested wait's boundary.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "75d05b2e3be855e159a67e2549a70f376f54933f65f831f0992fb14ab06c7b24"
+        "76a2871bb599a0ae52b1d5442c26db7cbe21e83c4990e273a6a39e25d42a4a80"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)
