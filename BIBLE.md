@@ -145,9 +145,6 @@ on every restart, but one personality that remembers its path.
   - The mode governs Ouroboros's own working window, never whether its
     changes are reviewed: the coupling question applies in every mode
     (P3). Model quality and reasoning effort are not lowered by the mode.
-    Owner-selected `nano` uses the
-    compact projection and records `owner_nano` with `rendered_mode=nano` in
-    physical usage facts.
   - Outside Cyber Pro, context mode and review scope/enforcement remain
     owner-controlled; in Cyber Pro Ouroboros may change its own horizon
     and review policy as part of its configuration authority, retaining
@@ -174,9 +171,7 @@ on every restart, but one personality that remembers its path.
   context. A design that remembers only when queried, or moves
   continuity out of default context into retrieval, is partial amnesia,
   not optimization. The knowledge index's outline and the source registry's
-  are the recorded exceptions: every active note stays named in the
-  always-loaded context, people's summaries stay with them, and the other
-  summaries move one read away where the window needs the room — knowingly
+  headings (the horizon rules above) are the recorded exceptions: knowingly
   weaker spontaneous recognition from summary text there, never a licence to
   move identity or narrative continuity into retrieval.
 - **Infinite horizon, variable granularity.** The horizon of memory — all
@@ -538,11 +533,10 @@ window.
   This proportionality rule governs additional mechanisms; it does not
   erase the owner's selected enforcement, granted boundaries or Emergency
   Stop.
-- Complexity budget: about 1000 lines a module and none newly past 1600
-  (the size-ratchet manifest lists older exceptions), so a
-  reading tool takes it whole; pay it by simplifying or by a natural
-  boundary, never by sharding one flow across files. Method > 150 lines
-  or > 8 parameters — signal to decompose.
+- Complexity budget: about 1000 lines a module, so a reading tool takes it
+  whole (DEVELOPMENT keeps the bands, the function ceiling and the manifest
+  of older exceptions); pay it by simplifying or by a natural boundary,
+  never by sharding one flow across files.
 - When adding a major feature — first simplify what exists.
   Net complexity growth per cycle approaches zero, watched in the diff
   pulse while working.
