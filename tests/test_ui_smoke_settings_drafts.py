@@ -224,6 +224,7 @@ def test_initial_settings_document_survives_early_edit_while_enrichment_waits(su
     assert pending["reviewers"], "the review pool read must still be pending"
     assert pending["status"], "the status read must still be pending"
     assert page.locator('#btn-save-settings').is_enabled(), "the known document can be saved before enrichment"
+    assert 'Your edits are kept' not in page.locator('#settings-status').inner_text(), "no edit has been made yet"
     source = main.locator('[data-model-role-source]')
     source.select_option("api:openrouter")
     model = main.locator('[data-model-role-model]')
