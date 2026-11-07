@@ -1082,7 +1082,9 @@ must match the query; older responses without it remain supported. The server ne
 Neither carrier adds fields to `places.json`.
 
 The owner's “This is my account” confirms `sends_as.id` using the existing `owner_accounts` writer.
-For `kind: user` only, a matching `platform_actor_id` in the same `account_id` scope derives `owner: true`; revocation removes it.
+For `kind: user` only, a matching `platform_actor_id` in the same `account_id` scope derives `owner: true`, whichever place of
+the same connector and provider holds the confirmation (one confirmation per bot or app, read when used); revoking it
+in every place that holds it removes it.
 This says whose credential writes or reads, independently of who sent an incoming message. Never return your own
 sends as incoming events: from the owner's confirmed account they would read as the owner's words. Where the
 provider lets you tell them apart (GitHub does), do report the account's other activity (its edits, merges and posts

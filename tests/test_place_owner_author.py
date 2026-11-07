@@ -53,6 +53,37 @@ def test_the_confirmed_account_is_my_human_on_the_row_and_on_its_stored_facts(tm
     assert not owner_confirmed_row(owner, {}), "no snapshot of the place: no confirmation"
 
 
+def test_one_confirmation_counts_in_every_room_of_its_bot_or_app_and_nowhere_else(tmp_path, place):
+    """My human confirmed their account once, in ``place``: it is theirs in another room of the same connector account,
+    on its rows and at an admission there, never on another account of that connector or through another connector,
+    and nothing is copied into the other room's record (derived at every read)."""
+    from types import SimpleNamespace
+
+    from ouroboros.presence_context import focus_metadata
+    from ouroboros.presence_runner import PresenceTurnEvent
+
+    sibling = places.connect_place(tmp_path, connector="bridge", provider="chat", account_id="qa", conversation_id="ops")
+    other_account = places.connect_place(tmp_path, connector="bridge", provider="chat", account_id="other",
+                                         conversation_id="ops")
+    other_connector = places.connect_place(tmp_path, connector="mailer", provider="chat", account_id="qa")
+    accounts = place_owner_accounts(tmp_path)
+    assert owner_confirmed_row(_place_row(sibling.place_id), accounts), "one confirmation per bot or app"
+    assert owner_confirmed_row(row_meta(_place_row(sibling.place_id)), accounts)
+    assert not owner_confirmed_row(_place_row(sibling.place_id, "sasha"), accounts), "a participant stays a participant"
+    assert not owner_confirmed_row(_place_row(other_account.place_id, account="other"), accounts), "another account"
+    assert not owner_confirmed_row(_place_row(other_connector.place_id), accounts), "another connector"
+
+    def admitted(target, account):
+        event = PresenceTurnEvent("ev-1", "chat", account, "ops", "", f"chat:{account}:ops:0",
+                                  {"platform_actor_id": "anton"}, {}, {"message_id": "ev-1"}, "Ship it")
+        admission = SimpleNamespace(place=places.get_place(tmp_path, target.place_id), binding_id=target.place_id,
+                                    allowance={})
+        return focus_metadata(admission, event, "presence-1", 7, tmp_path)["focus"]["actor"]["owner_confirmed"]
+
+    assert admitted(sibling, "qa") is True and admitted(other_account, "other") is False
+    assert places.get_place(tmp_path, sibling.place_id).owner_accounts == (), "the sibling's record stays as stored"
+
+
 def test_a_place_where_i_write_from_my_humans_account_keeps_their_rows_theirs(tmp_path, place):
     """The owner's "This is my account" confirms the account I send as: their rows there stay theirs, as at
     admission (``presence_context.focus_metadata``), on the full row and its stored facts."""
