@@ -95,7 +95,7 @@ def _choices(plan):
 
     facts = plan.projection(plan.initial_mode).memory_facts
     floor = facts.get("floor") or {}
-    return (plan.initial_mode, floor.get("steps"), floor.get("addressed"), floor.get("mode_switch"),
+    return (plan.initial_mode, floor.get("steps"), floor.get("runs"), floor.get("mode_switch"),
             [row["section_id"] for row in facts.get("host_sections_addressed", ())],
             select_tool_schemas(SCHEMAS, context_mode=plan.initial_mode).chosen,
             json.loads(plan.projection(plan.initial_mode).user_content_json or plan.user_content_json))
@@ -455,8 +455,8 @@ def test_reprojection_keeps_the_book_and_asks_nothing_of_memory_for_it(tmp_path,
     # A window the ordinary view itself cannot hold narrows both alike; the book stays resident.
     tight = enough - 20_000
     plain, kept = on_route(ordinary, tight), on_route(required, tight)
-    assert kept.low_projection.memory_facts["floor"]["addressed"] == plain.low_projection.memory_facts["floor"]["addressed"]
-    assert plain.low_projection.memory_facts["floor"]["addressed"]
+    assert kept.low_projection.memory_facts["floor"]["runs"] == plain.low_projection.memory_facts["floor"]["runs"]
+    assert plain.low_projection.memory_facts["floor"]["runs"]
     assert len(_book_blocks(kept, "low")) == 1
     assert kept.initial_mode == plain.initial_mode == "low"
 

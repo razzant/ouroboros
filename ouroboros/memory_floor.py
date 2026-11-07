@@ -6,6 +6,7 @@ rows without carried commitments may spend the work room, but never silently dis
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import logging
 import math
@@ -65,6 +66,23 @@ class _Elements:
     @cached_property
     def priced(self) -> Tuple[Tuple[str, str, int, int], ...]:
         return tuple((step, ident, view_tokens(whole), view_tokens(short)) for step, ident, whole, short in self.listed)
+
+    @cached_property
+    def order(self) -> str:
+        """A fingerprint of each step's ids in their order: what index runs count against."""
+        return hashlib.sha256(json.dumps(self.ids, ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
+
+    def runs(self, level: mv.FloorLevel) -> Dict[str, List[List[int]]]:
+        """Each step's addressed elements as ``[first, last]`` positions in that step's order."""
+        runs: Dict[str, List[List[int]]] = {}
+        for step, chosen in level.addressed:
+            chosen, spans = set(chosen), runs.setdefault(step, [])
+            for n, ident in enumerate(self.ids.get(step, ())):
+                if ident in chosen and spans and spans[-1][1] == n - 1:
+                    spans[-1][1] = n
+                elif ident in chosen:
+                    spans.append([n, n])
+        return runs
 
     def level(self, taken, by_budget: int = 0) -> mv.FloorLevel:
         """The level of ``(step, id)`` pairs, each step's ids in ladder order."""
@@ -420,18 +438,18 @@ def uncovered_owner_rows(snapshot: mv.MemoryViewSnapshot, elements=None) -> List
 
 
 def kept_level(snapshot: mv.MemoryViewSnapshot, facts: Mapping[str, Any]) -> mv.FloorLevel:
-    """The level a projection's floor fact names: each step's first ``count`` elements, in ladder order."""
-    floor = (facts or {}).get("floor") or {}
+    """The level a projection's floor fact names: its index runs while they count against this snapshot's element
+    order (an older fact's ``addressed`` ids likewise), else each step's first ``count`` elements, in ladder order."""
+    floor, table = (facts or {}).get("floor") or {}, _elements(snapshot)
+    if "runs" in floor and floor.get("element_order") == table.order:
+        return table.level({(step, table.ids[step][n]) for step, spans in floor["runs"].items()
+                            for first, last in spans for n in range(first, last + 1)}, int(floor.get("by_budget") or 0))
     if "addressed" in floor:
         return mv.FloorLevel(tuple((step, tuple(ids)) for step, ids in floor["addressed"]),
                              by_budget=int(floor.get("by_budget") or 0))
     counts = dict(floor.get("steps") or {})
-    ids: Dict[str, List[str]] = {}
-    for step, ident, _whole, _short in floor_elements(snapshot):
-        if len(ids.setdefault(step, [])) < int(counts.get(step) or 0):
-            ids[step].append(ident)
-    return mv.FloorLevel(tuple((step, tuple(ids[step])) for step in LADDER if ids.get(step)),
-                         by_budget=int(floor.get("by_budget") or 0))
+    prefixes = ((step, tuple(table.ids.get(step, ())[:int(counts.get(step) or 0)])) for step in LADDER)
+    return mv.FloorLevel(tuple((step, ids) for step, ids in prefixes if ids), by_budget=int(floor.get("by_budget") or 0))
 
 
 def level_with(snapshot: mv.MemoryViewSnapshot, kept: mv.FloorLevel, addresses: Iterable[str], *,
@@ -611,8 +629,9 @@ def view_facts(snapshot: mv.MemoryViewSnapshot, level: mv.FloorLevel, *, window_
                lowered_from: Optional[str] = None) -> Dict[str, Any]:
     """The floor fact of one projection, kept in the task trace: steps, boundaries, what is shown by address.
 
-    ``newest_addressed_row`` is the newest row of this room that F1, F2 or F7 shows only by
-    address; ``pointer_records`` the records F4 and F5 show by a pointer. No list of rows.
+    ``runs`` are each step's addressed elements as index runs in its element order, which ``element_order``
+    fingerprints (``kept_level``); ``newest_addressed_row`` is the newest row of this room that F1, F2 or F7
+    shows only by address; ``pointer_records`` the records F4 and F5 show by a pointer. No list of rows.
     """
     gone = {step: set(ids) for step, ids in level.addressed}
     room = snapshot.room or {}
@@ -621,7 +640,8 @@ def view_facts(snapshot: mv.MemoryViewSnapshot, level: mv.FloorLevel, *, window_
     rows += [(item["pos"], item["address"]) for item in room.get("lane1") or () if item["address"] in addressed]
     status = snapshot.legacy_blocks or {}
     return {"role": snapshot.spec.role, "room_id": snapshot.spec.room_id,
-            "floor": {"steps": dict(level.steps), "addressed": level.addressed, "window_tokens": window_tokens, "mode": mode,
+            "floor": {"steps": dict(level.steps), "runs": _elements(snapshot).runs(level),
+                      "element_order": _elements(snapshot).order, "window_tokens": window_tokens, "mode": mode,
                       "allowance_tokens": allowances.get("margin"), "physical_allowance_tokens": allowances.get("physical"),
                       "target_tokens": target_tokens, "budget_allowance_tokens": allowances.get("budget"),
                       "by_budget": level.by_budget, "mode_switch": {"from": lowered_from, "to": mode} if lowered_from else None,
