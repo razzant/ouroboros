@@ -38,6 +38,7 @@ ROW_GEOMETRY = """(row) => {
         under_control: lines.some((r) => r.right > ctl.left && r.left < ctl.right
             && r.bottom > ctl.top && r.top < ctl.bottom),
         control_on_screen: ctl.left >= 0 && ctl.right <= innerWidth && ctl.width > 0,
+        beside: lines.every((r) => r.right <= ctl.left + 0.5),
         lines: new Set(lines.map((r) => Math.round(r.top))).size,
         selectable: getComputedStyle(sub).userSelect !== 'none',
         theme: document.documentElement.dataset.theme,
@@ -120,7 +121,9 @@ def test_held_continue_toast_activity_reason_and_no_resume(direct_server_with_da
                     if width < 700:
                         assert geometry["lines"] > 1, "the phone row wraps the cause instead of cutting it"
                     else:
-                        assert geometry["lines"] == 1, "a desktop row keeps its one compact line"
+                        # A wide row keeps its control beside the cause, which wraps only for want of room.
+                        assert geometry["beside"] and geometry["lines"] <= 2, ("a desktop row keeps its compact shape",
+                                                                               geometry)
                     row.screenshot(path=str(evidence / f"{engine}-2-activity-held-row-{theme}-{width}.png"))
                     page.screenshot(path=str(evidence / f"{engine}-2-activity-page-{theme}-{width}.png"),
                                     full_page=True)
