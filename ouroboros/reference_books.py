@@ -299,7 +299,8 @@ def read_book_section(book: ReferenceBook, title: str) -> BookView:
 
 BOOK_GROWTH_RULE = (
     "Each touched book, BIBLE.md and the prompts (prompts/*.md as one text) must end no larger "
-    "than at its contribution base; added text is paid by shortening the same text. Manual/tag "
+    "than at its contribution base; added text is paid in the same text by a statement that leaves, "
+    "never by a lost fact (DEVELOPMENT \"Paying down a size cap\"). Manual/tag "
     "CI without that base does not verify this rule. The owner's book-growth label can approve "
     "an exception; local commits are not blocked."
 )

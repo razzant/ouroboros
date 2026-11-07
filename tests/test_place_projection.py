@@ -97,6 +97,21 @@ def test_http_and_tool_connect_are_silent_and_instances_are_distinct(client, tmp
     assert client.post("/api/places", json={"connector": "connector", "account_id": None}).status_code == 400
 
 
+def test_a_label_that_already_names_its_connector_is_not_prefixed_again(tmp_path, connector):
+    """Audit 05.11 (U015): «GitHub · GitHub · …» came from prefixing a label that already said its connector."""
+    named = projection.connect_declared_place(tmp_path, "connector", conversation_id="a/b", label="GitHub · a/b")
+    plain = projection.connect_declared_place(tmp_path, "connector", conversation_id="c/d", label="c/d")
+    assert (named.label, plain.label) == ("GitHub · a/b", "GitHub · c/d")
+    # A label stored doubled before this fix reads its word once on every place surface; the store keeps its bytes.
+    doubled = projection.connect_declared_place(tmp_path, "connector", conversation_id="e/f", label="GitHub · GitHub · e/f")
+    assert projection.place_view(tmp_path, doubled, brief=True)["label"] == "GitHub · e/f"
+    assert projection.place_view(tmp_path, doubled)["label"] == "GitHub · e/f", "the place sheet's full view too"
+    assert places.get_place(tmp_path, doubled.place_id).label == "GitHub · GitHub · e/f"
+    assert projection.place_view(tmp_path, plain, brief=True)["label"] == "GitHub · c/d"
+    # A label that only begins like the word is still prefixed: «GitHubbers» is not «GitHub · …».
+    assert projection.connect_declared_place(tmp_path, "connector", conversation_id="g/h", label="GitHubbers").label == "GitHub · GitHubbers"
+
+
 def test_tool_accepts_only_this_live_connectors_declared_signal(tmp_path, connector, monkeypatch):
     place = projection.connect_declared_place(tmp_path, "connector")
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)

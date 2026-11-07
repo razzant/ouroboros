@@ -184,19 +184,30 @@ def test_launch_captures_previous_wake_before_binding_the_new_id(clock, has_prev
     assert f"- previous wake: {expected}\n" in launch["task"]["metadata"]["wake_observation"]["projection_text"]
 
 
-@pytest.mark.parametrize(("summary", "announced"), [("Проверил состояние системы: всё спокойно.", True), ("", False)])
-def test_only_direct_turns_with_authored_lines_join_the_observation_text(tmp_path, announced, summary):
-    row = seed_wake(tmp_path, **({"wake_summary": summary} if summary else {}))
+_AUTHOR_STOP = {"lifecycle": {"status": "completed"}, "objective": {"status": "fail", "source": "task_completion",
+                                                                     "reason": "author_stop"},
+                "execution": {"status": "ok", "task_completion": {"action": "stop", "rationale": "It waits on an Allow."}}}
+
+
+@pytest.mark.parametrize(("summary", "announced", "stopped"), [
+    ("Проверил состояние системы: всё спокойно.", True, False), ("", False, False), ("", False, True)])
+def test_only_direct_turns_with_a_line_or_an_open_continue_join_the_observation_text(tmp_path, announced, summary,
+                                                                                      stopped):
+    """A finished turn's exchange is the dialogue itself, so it is counted; an authored line, or an open Continue (a
+    stop with work left, which the dialogue does not show), lists it."""
+    row = seed_wake(tmp_path, **({"wake_summary": summary} if summary else {}),
+                    **({"outcome_axes": _AUTHOR_STOP} if stopped else {}))
     now = wake._parse_iso(row["terminal_time"]["occurred_at"]) + 60
     if announced:
         _chat(tmp_path, _summary(row["task_id"], now - 30))
     observation = wake.observe_wake(tmp_path, boundary=None, since=now - 3600, now=now, reason="heartbeat")
     line = next(line for kind, _, line in observation.events if kind.startswith("direct_turn"))
-    assert (line in observation.full_text()) is bool(summary)
+    assert (line in observation.full_text()) is bool(summary or stopped)
+    assert line.endswith(" · Continue open (author_stop)") is stopped
     if summary:
         assert line.endswith(": " + summary)
     else:
-        assert "its line" not in line and row["result"] not in line
+        assert row["result"] not in line
     assert row["result"] not in observation.full_text(), "the whole note has its separate previous-wake slot"
 
 
@@ -302,7 +313,9 @@ def test_every_event_of_the_window_is_observed_without_a_count_cut(tmp_path):
     assert len(observation.outstanding) == 7  # every answerable card, newest first
     assert [line.split()[3] for line in observation.outstanding] == [f"c{i}" for i in reversed(range(7))]
     text = observation.full_text()
-    assert "2 owner messages, 15 task terminals, 7 outstanding cards" in text
+    assert ("2 owner messages (counted, not listed: my view holds the words), 15 task terminals, "
+            "7 outstanding cards") in text
+    assert "first human line" not in text and "- task t14 Done, $1.25" in text  # my human's words are in my view
     assert "(+" not in text and "more; see" not in text
 
 
@@ -500,7 +513,8 @@ def test_invalid_only_import_has_an_explicit_gap_and_later_sql_row_keeps_its_old
     assert not first.events and first.gaps and first.boundary["upper"] > 0
     ds.append(tmp_path, "chat", row)
     second = wake.observe_wake(tmp_path, boundary=first.boundary, since=T0 + 10, now=T0 + 100)
-    assert len(second.events) == 1 and "newly complete" in second.full_text()
+    assert len(second.events) == 1 and second.events[0][2].endswith("newly complete")  # recorded whole, counted
+    assert "1 owner message (counted, not listed" in second.full_text()
     assert second.window["basis"] == "accepted_boundary" and not second.gaps
     assert wake.observe_wake(tmp_path, boundary=second.boundary, since=T0 + 110, now=T0 + 200).events == ()
 
@@ -513,7 +527,7 @@ def test_pending_import_does_not_advance_an_accepted_wake_boundary(tmp_path):
     assert any("still importing" in gap for gap in first.gaps)
     assert "upper" not in first.boundary
     import_all(tmp_path)
-    assert "pending" in _observe(tmp_path, boundary=first.boundary).full_text()
+    assert any(line.endswith("] pending") for _kind, _offset, line in _observe(tmp_path, boundary=first.boundary).events)
 
 
 def test_human_input_is_classified_by_producer_provenance(tmp_path):
@@ -749,12 +763,16 @@ def test_projection_names_every_honest_status(describe):
     assert done["status"] == "sleeping"
 
 
-def test_projection_without_a_constructed_clock_is_stopped_not_running(monkeypatch):
+def test_projection_without_a_constructed_clock_says_why_and_is_never_running(monkeypatch):
     import server
 
     monkeypatch.setattr(server, "_consciousness", None)
-    described = server._describe_bg_consciousness_state(True)
-    assert described["status"] == "stopped" and "not constructed" in described["detail"]
+    monkeypatch.setattr(server, "_supervisor_error", None)
+    starting = server._describe_bg_consciousness_state(True)
+    assert starting["status"] == "starting" and starting["detail"] == "Waits for Ouroboros to finish starting."
+    monkeypatch.setattr(server, "_supervisor_error", "Supervisor init failed: boom")
+    failed = server._describe_bg_consciousness_state(True)
+    assert failed["status"] == "stopped" and failed["detail"].endswith("Restart Ouroboros.")
     assert server._describe_bg_consciousness_state(False)["status"] == "disabled"
 
 

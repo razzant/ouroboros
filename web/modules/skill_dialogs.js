@@ -106,7 +106,7 @@ export function openChoiceDialog({ title, lead = '', choices = [], selected = ch
             title, wide: true, onSettle: resolve,
             bodyHtml: `${lead ? `<p>${escapeHtml(lead)}</p>` : ''}${choiceCardsHtml(choices, selected, { label: groupLabel })}${note ? `<p class="skills-dialog-note">${escapeHtml(note)}</p>` : ''}${footHtml}`,
         });
-        host.actions.innerHTML = `<button type="button" class="btn btn-default" data-dialog-cancel>${escapeHtml(cancelLabel)}</button><button type="button" class="btn btn-primary" data-dialog-ok></button>`;
+        host.actions.innerHTML = `<button type="button" class="btn btn-default" data-dialog-cancel>${escapeHtml(cancelLabel)}</button><button type="button" class="btn" data-primary data-dialog-ok></button>`;
         const ok = host.actions.querySelector('[data-dialog-ok]');
         const paint = (value) => {
             const choice = choices.find((item) => item.value === value) || choices[0];
@@ -209,7 +209,7 @@ export function openPublishDestinationDialog({ name, choices = [], changed = fal
                 ${error ? `<p class="skills-dialog-note" role="alert">${escapeHtml(error)}</p>` : ''}
                 <p class="skills-dialog-note" data-publication-disclosure></p>
                 <p class="skills-dialog-note">Ouroboros first checks it for secrets and problems.</p>`;
-            host.actions.innerHTML = '<button type="button" class="btn btn-default" data-dialog-cancel>Cancel</button><button type="button" class="btn btn-primary" data-dialog-ok>Check and publish</button>';
+            host.actions.innerHTML = '<button type="button" class="btn btn-default" data-dialog-cancel>Cancel</button><button type="button" class="btn" data-primary data-dialog-ok>Check and publish</button>';
             const disclose = () => { host.body.querySelector('[data-publication-disclosure]').textContent = publicationDisclosure(current()?.private, current()?.repository); };
             bindChoiceCards(host.body.querySelector('[role="radiogroup"]'), (value) => { selected = value; disclose(); });
             disclose();
@@ -375,7 +375,7 @@ export function openAddSourceDialog({ api, initialAddress = '', suggestions = []
                 </details>
                 ${error ? `<p class="ui-status skills-dialog-error" data-tone="danger" role="alert">${escapeHtml(error)}</p>` : ''}
                 ${suggestionsHtml(offered)}`;
-            host.actions.innerHTML = '<button type="button" class="btn btn-default" data-dialog-cancel>Cancel</button><button type="button" class="btn btn-primary" data-add-check>Check</button>';
+            host.actions.innerHTML = '<button type="button" class="btn btn-default" data-dialog-cancel>Cancel</button><button type="button" class="btn" data-primary data-add-check>Check</button>';
             const input = host.body.querySelector('[data-source-address]');
             const field = (name) => host.body.querySelector(`[data-source-${name}]`);
             const controls = [input, field('revision'), field('subfolder')];
@@ -436,7 +436,7 @@ export function openAddSourceDialog({ api, initialAddress = '', suggestions = []
                 ${choiceCardsHtml(trustChoices(), 'review', { label: 'Trust' })}
                 <p class="skills-dialog-note">You choose once. You can change it later in Sources.</p>
                 ${error ? `<p class="ui-status skills-dialog-error" data-tone="danger" role="alert">${escapeHtml(error)}</p>` : ''}`;
-            host.actions.innerHTML = '<button type="button" class="btn btn-default" data-add-back>Back</button><button type="button" class="btn btn-primary" data-add-ok>Add source</button>';
+            host.actions.innerHTML = '<button type="button" class="btn btn-default" data-add-back>Back</button><button type="button" class="btn" data-primary data-add-ok>Add source</button>';
             const trust = bindChoiceCards(host.body.querySelector('[role="radiogroup"]'));
             host.actions.querySelector('[data-add-back]').addEventListener('click', () => stepOne());
             host.actions.querySelector('[data-add-ok]').addEventListener('click', async () => {
@@ -478,7 +478,7 @@ export function openFirstStartDialog(rows = []) {
             title: 'How should skills from the Ouroboros hub install?', wide: true, onSettle: resolve,
             bodyHtml: firstStartTrustHtml(rows),
         });
-        host.actions.innerHTML = '<button type="button" class="btn btn-default" data-dialog-cancel>Later</button><button type="button" class="btn btn-primary" data-first-ok>Confirm</button>';
+        host.actions.innerHTML = '<button type="button" class="btn btn-default" data-dialog-cancel>Later</button><button type="button" class="btn" data-primary data-first-ok>Confirm</button>';
         host.body.addEventListener('click', (event) => {
             const button = event.target.closest('[data-trust]');
             if (!button) return;

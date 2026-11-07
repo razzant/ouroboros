@@ -15,7 +15,7 @@ export async function panicWithoutSocket(surface, socket = null, onAccepted) {
     const bridge = globalThis.pywebview?.api?.panic_stop;
     const failed = () => showToast(typeof bridge === 'function'
         ? 'Panic was not confirmed. Use Panic in the tray or menu bar.'
-        : 'Panic was not confirmed. Check Ouroboros on the host computer.', 'error');
+        : 'Panic was not confirmed. Check Ouroboros on the host computer.', 'error', { ttl: 0 });
     if (typeof bridge === 'function') {
         let resolved = false, accepted = false;
         try { accepted = (await bridge())?.status === 'stopping'; resolved = true; } catch { /* Try the captured live socket once. */ }

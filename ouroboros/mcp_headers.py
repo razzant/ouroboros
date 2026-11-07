@@ -23,7 +23,7 @@ sends it under an unchanged name keeps the saved value.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, Mapping, Optional
 
 from ouroboros.secret_masking import CONFIGURED_SECRET_PLACEHOLDER
 
@@ -159,3 +159,70 @@ def validate_changed_headers(incoming: Any, current: Any) -> None:
                                    legacy_token=entry.get("auth_token", ""))
         if str(entry.get("transport") or "streamable_http").strip().lower() == "stdio" and headers:
             raise ValueError("headers are unsupported for stdio")
+
+
+# The origin guard: every saved credential stays on the configured origin (`06-agent-core.md`).
+class MCPRedirectRefused(RuntimeError):
+    """A request that would carry saved credentials to another origin; it was never sent."""
+
+    code = "MCP_REDIRECT_REFUSED"
+
+
+def _origin(url: Any) -> tuple:
+    """``(scheme, host, port)`` with the scheme's default port made explicit."""
+    import httpx
+
+    parsed = url if isinstance(url, httpx.URL) else httpx.URL(str(url))
+    return parsed.scheme, parsed.host, parsed.port or {"http": 80, "https": 443}.get(parsed.scheme, 0)
+
+
+def _origin_text(origin: tuple) -> str:
+    """An origin for messages: never userinfo, path or query."""
+    scheme, host, port = origin
+    shown = f"[{host}]" if ":" in host else host
+    return f"{scheme}://{shown}" + ("" if port == {"http": 80, "https": 443}.get(scheme) else f":{port}")
+
+
+class _CredentialOriginGuard:
+    """One connection's HTTP client factory: saved credentials stay on the configured origin.
+
+    The SDK client follows redirects, and the HTTP client strips only
+    ``Authorization`` when a redirect leaves the origin — every other configured
+    header would follow. While the server carries credentials, a request to a
+    different scheme, host or port (``http`` → ``https`` included) is stopped by
+    a request hook before it is sent; requests on the configured origin,
+    same-origin redirects included, are unchanged. A server without credentials
+    keeps the SDK's redirect behavior: a stored sign-in bearer (``mcp_oauth``) is
+    attached only on the configured origin and is ``Authorization``, which the
+    HTTP client drops when a redirect leaves it. The SDK factory keeps its
+    timeouts and the transport keeps the client's lifetime.
+    """
+
+    def __init__(self, cfg: Any) -> None:  # an MCPServerConfig
+        self.cfg = cfg
+        self.refusal: Optional[MCPRedirectRefused] = None
+
+    def client(self, headers: Any = None, timeout: Any = None, auth: Any = None) -> Any:
+        from mcp.shared._httpx_utils import create_mcp_http_client  # the SDK's default factory
+
+        client = create_mcp_http_client(headers=headers, timeout=timeout, auth=auth)
+        if self.cfg.carries_credentials():
+            async def stay_on_origin(request: Any) -> None:
+                expected, actual = _origin(self.cfg.url), _origin(request.url)
+                if actual == expected:
+                    return
+                self.refusal = MCPRedirectRefused(
+                    f"MCP_REDIRECT_REFUSED: server {self.cfg.id!r} at {_origin_text(expected)} redirected a "
+                    f"request to {_origin_text(actual)}. Saved headers go only to the configured origin (scheme, "
+                    "host and port), so that request was stopped before it was sent. If the service has moved, "
+                    "enter its new address as the Server URL.")
+                # Ending the connection fails the pending session call now; an
+                # SSE message POST would otherwise wait for its tool timeout.
+                await client.aclose()
+                raise self.refusal
+
+            client.event_hooks["request"].append(stay_on_origin)
+        return client
+
+
+origin_of = _origin  # public spelling for mcp_oauth

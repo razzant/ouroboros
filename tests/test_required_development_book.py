@@ -67,7 +67,7 @@ def _core(root, *, required=False, subject=False, book_tokens=40_000, assignment
     lane = [*(syn.spoken(i, "ouroboros", 8_000) for i in range(2, 8)),
             {**syn.spoken(1, "human", 200), "owner_side": True, "immune": True}]
     snapshot = syn.snapshot(room_facts=syn.room("1", lane1=lane, lane2=6, legacy=4, legacy_chars=8_000),
-                            story=syn.pages(12, page_chars), live=[syn.live_room(i) for i in range(4)], mark_count=2)
+                            story=syn.pages(12, page_chars), conversations=[syn.conversation(i) for i in range(4)], mark_count=2)
     return fit.ContextCore(
         base_prompt="SYSTEM", bible_md="BIBLE", architecture_md="# Architecture\n\n" + "body " * arch_words,
         development_md="# Development\n\n## Review\n\n" + "handbook " * (book_tokens * 4 // 9),
@@ -217,8 +217,8 @@ def test_a_follow_up_is_separate_work_and_inherits_no_answer(tmp_path, monkeypat
     monkeypatch.setattr(followup, "presence_root_carrier", lambda *_a, **_kw: {"presence": {"binding_id": "b"}})
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="origin", current_chat_id=1,
                       task_metadata={"root_task_id": "origin"}, task_contract={KEY: True, "constraints": "keep"})
-    assert _handle_schedule_followup(ctx, objective="Later work", run_at="2030-01-01T00:00:00Z",
-                                     relation="independent").startswith("FOLLOWUP_SCHEDULED")
+    assert _handle_schedule_followup(ctx, objective="Later work", run_at="2030-01-01T00:00:00Z", relation="independent",
+                                     destination="place").startswith("FOLLOWUP_SCHEDULED")
     row = next(item for item in task_queue.list_scheduled_tasks(tmp_path)["tasks"] if item.get("kind") != "notify")
     assert KEY not in row["task"]["task_contract"] and row["task"]["task_contract"]["constraints"] == "keep"
     # No schedule writer holds this door, whatever a template carries: the public API takes a raw task body.
@@ -547,7 +547,8 @@ def test_neither_refusal_pass_pays_for_the_book(monkeypatch, passes, book, targe
     ctx, measured = _pass_context(None, book)
     steps = lmc.REFUSAL_PASSES[passes]
     assert lmc._apply_refusal_pass(ctx, steps, measured, target, slack) is False
-    assert [name for name, _ in calls] == (list(steps) if runs else [])
+    rest = ["memory_rest"] if "unseen_bodies" in steps else []  # memory's rest before a just-chosen body (2A)
+    assert [name for name, _ in calls] == (list(steps) + rest if runs else [])
     if runs and target:
         assert calls[0][1] == target - book
 

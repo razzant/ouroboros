@@ -32,19 +32,27 @@ export function initLogs({ ws, state, mount }) {
         Object.keys(LOG_CATEGORIES).map((key) => [key, true]),
     );
 
+    // One Dashboard tab body is the tab's root and its one scroller; the filters stay at its top while the list,
+    // one card of tray rows, scrolls under them. The history line and the empty line live in the list's card.
     const page = document.createElement('div');
     page.id = 'page-logs';
-    page.className = 'settings-embedded-content settings-logs-panel';
+    page.className = 'dashboard-body settings-logs-panel';
     page.innerHTML = `
-        <div class="logs-filters" id="log-filters"><button class="btn btn-default logs-inline-clear" id="btn-clear-logs">Clear</button></div>
-        <div class="ui-status logs-history-status" role="status"></div>
-        <div id="log-entries"></div>
+        <div class="logs-filters" id="log-filters"><button type="button" class="btn btn-ghost btn-sm logs-inline-clear" id="btn-clear-logs">Clear</button></div>
+        <section class="ui-card logs-card">
+            <div class="ui-status logs-history-status" role="status"></div>
+            <p class="logs-empty" data-log-empty hidden></p>
+            <div id="log-entries"></div>
+        </section>
     `;
     mount.appendChild(page);
 
     const filtersDiv = page.querySelector('#log-filters');
     const logEntries = page.querySelector('#log-entries');
     const historyStatus = page.querySelector('.logs-history-status');
+    const emptyLine = page.querySelector('[data-log-empty]');
+    let historyLoading = false;
+    let clearedAt = '';
     function isLogsVisible() {
         return state.activePage === 'dashboard' && state.dashboardActiveSubtab === 'logs';
     }
@@ -52,7 +60,7 @@ export function initLogs({ ws, state, mount }) {
     function scrollToLatest() {
         if (!isLogsVisible()) return;
         requestAnimationFrame(() => {
-            logEntries.scrollTop = logEntries.scrollHeight;
+            page.scrollTop = page.scrollHeight;
         });
     }
 
@@ -65,29 +73,81 @@ export function initLogs({ ws, state, mount }) {
     // the tab-switch jump the reader gets on return.
     const PINNED_SLACK_PX = 48;
     function isPinnedToLatest() {
-        return logEntries.scrollHeight - logEntries.scrollTop - logEntries.clientHeight <= PINNED_SLACK_PX;
+        return page.scrollHeight - page.scrollTop - page.clientHeight <= PINNED_SLACK_PX;
     }
 
     function updateVisibility(entry) {
         entry.hidden = !state.activeFilters[entry.dataset.category];
     }
 
+    // One line says why the list shows nothing (U033): every event filtered out (with Show all), the owner's
+    // Clear, or no event yet; nothing while the history is still loading (its own line says so).
+    function updateEmptyState() {
+        const entries = [...logEntries.children];
+        const quiet = entries.some((entry) => !entry.hidden) || (historyLoading && !entries.length);
+        emptyLine.hidden = quiet;
+        if (quiet) return;
+        if (entries.length) {
+            emptyLine.innerHTML = 'The filters hide every event. <button type="button" class="btn btn-ghost btn-sm" data-log-show-all>Show all</button>';
+        } else {
+            emptyLine.textContent = clearedAt ? `Cleared at ${clearedAt}. New events appear here.` : 'No events yet. New events appear here.';
+        }
+    }
+
+    // Filters narrow the list: while every one is on nothing is narrowed and no chip takes the chosen tone; once
+    // one is off, the ones still on are the chosen ones (board fork "Logs filters": quiet chips, one tone).
+    const chips = new Map();
+    function syncFilterChips() {
+        const narrowed = Object.keys(LOG_CATEGORIES).some((key) => !state.activeFilters[key]);
+        chips.forEach((chip, key) => {
+            chip.classList.toggle('active', narrowed && Boolean(state.activeFilters[key]));
+            chip.setAttribute('aria-pressed', String(Boolean(state.activeFilters[key])));
+        });
+    }
+
+    function applyFilters() {
+        syncFilterChips();
+        logEntries.querySelectorAll('.log-entry').forEach(updateVisibility);
+        updateEmptyState();
+        scrollToLatest();
+    }
+
     function renderFilters() {
         const inlineClear = filtersDiv.querySelector('.logs-inline-clear');
         filtersDiv.innerHTML = '';
+        chips.clear();
         Object.entries(LOG_CATEGORIES).forEach(([key, cat]) => {
             const chip = document.createElement('button');
-            chip.className = `filter-chip ${state.activeFilters[key] ? 'active' : ''}`;
+            chip.type = 'button';
+            chip.className = 'filter-chip';
             chip.textContent = cat.label;
             chip.addEventListener('click', () => {
                 state.activeFilters[key] = !state.activeFilters[key];
-                chip.classList.toggle('active');
-                logEntries.querySelectorAll('.log-entry').forEach(updateVisibility);
-                scrollToLatest();
+                applyFilters();
             });
+            chips.set(key, chip);
             filtersDiv.appendChild(chip);
         });
         if (inlineClear) filtersDiv.appendChild(inlineClear);
+        syncFilterChips();
+    }
+
+    emptyLine.addEventListener('click', (event) => {
+        if (!event.target?.closest?.('[data-log-show-all]')) return;
+        Object.keys(LOG_CATEGORIES).forEach((key) => { state.activeFilters[key] = true; });
+        applyFilters();
+    });
+
+    // History arrives after the live stream has started: every entry takes its place by its own time, so the list
+    // reads oldest to newest whatever order the two sources delivered (U035). A live event lands at the end at once.
+    function placeEntry(entry, time) {
+        entry.dataset.logTime = String(time);
+        entry.remove?.();
+        const nodes = [...logEntries.children];
+        let index = nodes.length;
+        while (index > 0 && Number(nodes[index - 1].dataset.logTime) > time) index -= 1;
+        if (index === nodes.length) logEntries.appendChild(entry);
+        else logEntries.insertBefore(entry, nodes[index]);
     }
 
     function trimEntries() {
@@ -106,15 +166,20 @@ export function initLogs({ ws, state, mount }) {
         return `<div class="log-meta">${meta.map((item) => `<span class="log-pill">${escapeHtml(item)}</span>`).join('')}</div>`;
     }
 
-    function logMainHtml({ ts = '', type = '', phase = 'info', headline = 'Event', repeat = '', attrs = {} }) {
+    // An event's one first line (U027, U028): its time, its type only when the headline does not already say it
+    // (a task card's kind always: it changes with the card), its level (the default `info` says nothing, CSS hides
+    // it), the headline, the repeat count and, for an event with a record, Raw at the line's end.
+    function logMainHtml({ ts = '', type = '', phase = 'info', headline = 'Event', repeat = '', attrs = {}, raw = false }) {
         const attr = (key) => attrs[key] ? ` ${attrs[key]}` : '';
+        const showType = type && (attrs.type || (type.label && type.label !== headline));
         return `
             <div class="log-main">
                 <span class="log-ts"${attr('ts')}>${escapeHtml(ts)}</span>
-                ${type ? `<span class="log-type ${escapeHtml(type.className || '')}"${attr('type')}>${escapeHtml(type.label || '')}</span>` : ''}
+                ${showType ? `<span class="log-type ${escapeHtml(type.className || '')}"${attr('type')}>${escapeHtml(type.label || '')}</span>` : ''}
                 <span class="log-phase ${escapeHtml(phase)}"${attr('phase')}>${escapeHtml(phase)}</span>
                 <span class="log-headline"${attr('headline')}>${escapeHtml(headline)}</span>
                 <span class="log-repeat"${attr('repeat')}${repeat ? '' : ' hidden'}>${escapeHtml(repeat)}</span>
+                ${raw ? '<button class="btn btn-ghost btn-sm log-raw-toggle" type="button" aria-expanded="false">Raw</button>' : ''}
             </div>
         `;
     }
@@ -122,8 +187,10 @@ export function initLogs({ ws, state, mount }) {
     function bindRawToggle(root) {
         root.querySelectorAll('.log-raw-toggle').forEach((rawToggle) => {
             if (rawToggle.dataset.bound === '1') return;
-            const rawEl = rawToggle.parentElement?.nextElementSibling;
-            if (!rawEl || !rawEl.classList.contains('log-raw')) return;
+            // The record follows the event's first line, after its facts.
+            let rawEl = rawToggle.parentElement?.nextElementSibling;
+            while (rawEl && !rawEl.classList.contains('log-raw')) rawEl = rawEl.nextElementSibling;
+            if (!rawEl) return;
             rawToggle.dataset.bound = '1';
             rawToggle.addEventListener('click', () => {
                 const isHidden = rawEl.hasAttribute('hidden');
@@ -134,6 +201,7 @@ export function initLogs({ ws, state, mount }) {
                     rawEl.setAttribute('hidden', '');
                     rawToggle.textContent = 'Raw';
                 }
+                rawToggle.setAttribute('aria-expanded', String(isHidden));
             });
         });
     }
@@ -166,8 +234,9 @@ export function initLogs({ ws, state, mount }) {
                 if (tsEl) tsEl.textContent = normalizeLogTs(evt.ts || evt.timestamp);
                 const rawEl = last.entry.querySelector('.log-raw');
                 if (rawEl) rawEl.textContent = prettyLogEvent(evt);
-                logEntries.appendChild(last.entry);
+                placeEntry(last.entry, now);
                 updateVisibility(last.entry);
+                updateEmptyState();
                 return;
             }
         }
@@ -184,6 +253,7 @@ export function initLogs({ ws, state, mount }) {
                 type: { className: cat, label: view.typeLabel },
                 phase: view.phase || 'info',
                 headline: view.headline || 'Event',
+                raw: true,
             })}
             ${execution ? `<div class="harness-chip log-executor-chip" title="${escapeHtmlAttr(execution.title || '')}">${harnessIdentityMarkup(execution.harness, {
                 label: execution.label || '',
@@ -192,21 +262,19 @@ export function initLogs({ ws, state, mount }) {
             ${execution?.title ? `<div class="log-body log-executor-detail">${escapeHtml(execution.title)}</div>` : ''}
             ${metaPills(view.meta)}
             ${bodyHtml}
-            <div class="log-actions">
-                <button class="log-raw-toggle" type="button">Raw</button>
-            </div>
             <pre class="log-raw" hidden>${escapeHtml(prettyLogEvent(evt))}</pre>
         `;
         bindRawToggle(entry);
         updateVisibility(entry);
         const pinned = isPinnedToLatest();
-        logEntries.appendChild(entry);
+        placeEntry(entry, now);
 
         if (dedupeKey) {
             duplicateState.set(dedupeKey, { entry, ts: now, count: 1 });
         }
 
         trimEntries();
+        updateEmptyState();
         if (state.activeFilters[cat] && pinned) scrollToLatest();
     }
 
@@ -232,7 +300,7 @@ export function initLogs({ ws, state, mount }) {
             <div class="harness-chip log-executor-chip" data-task-executor hidden></div>
             <div class="log-body log-executor-detail" data-task-executor-detail hidden></div>
             <div class="log-body log-task-review" data-task-review hidden></div>
-            <details class="log-task-details">
+            <details class="ui-disclosure log-task-details">
                 <summary>Timeline</summary>
                 <div class="log-task-timeline" data-task-timeline></div>
             </details>
@@ -266,12 +334,10 @@ export function initLogs({ ws, state, mount }) {
                     phase: item.phase || 'info',
                     headline: item.headline,
                     repeat: item.count > 1 ? `x${item.count}` : '',
+                    raw: true,
                 })}
                 ${metaPills(item.meta)}
                 ${item.body ? `<div class="log-body">${escapeHtml(item.body)}</div>` : ''}
-                <div class="log-actions">
-                    <button class="log-raw-toggle" type="button">Raw</button>
-                </div>
                 <pre class="log-raw" hidden>${escapeHtml(item.raw || '')}</pre>
             </div>
         `).join('');
@@ -297,7 +363,10 @@ export function initLogs({ ws, state, mount }) {
         const wake = evt.initiator === 'consciousness' || Boolean(earlier?.wake);
         const category = eventCategory === 'errors' || earlier?.category === 'errors' ? 'errors'
             : (wake ? 'consciousness' : 'tasks');
-        const kindLabel = wake ? 'Consciousness' : `task ${groupId}`;
+        // A task is named by its own type and its id's first eight characters, as every other row of the log names
+        // one (U030); the type, once seen, stays the card's.
+        const taskType = String(earlier?.taskType || evt.task_type || '').trim();
+        const kindLabel = wake ? 'Consciousness' : `${taskType || 'task'} ${String(groupId).slice(0, 8)}`;
         // Captured before ANY record mutation: an already-mounted card grows
         // in place (summary rewrite, review unhide, timeline render) before
         // the append below, and that growth alone can push a pinned reader
@@ -309,8 +378,12 @@ export function initLogs({ ws, state, mount }) {
         record.events += 1;
         record.category = category;
         record.wake = wake;
+        record.taskType = taskType;
         record.entry.dataset.category = category;
-        record.ts.textContent = ts;
+        // The card's time is its newest event's: an older frame that history delivers later never dates it back.
+        const time = Date.parse(evt.ts || evt.timestamp || '') || Date.now();
+        const newest = Math.max(time, Number(record.entry.dataset.logTime) || 0);
+        if (time >= newest) record.ts.textContent = ts;
         record.kind.textContent = kindLabel;
         record.kind.className = `log-type ${category}`;
         // The card's headline settles only on the typed task_done frame. The bus
@@ -332,7 +405,11 @@ export function initLogs({ ws, state, mount }) {
         if (settles) record.terminal = true;
         record.count.textContent = `x${record.events}`;
         record.count.hidden = record.events <= 1;
-        record.summary.innerHTML = metaPills([`task=${groupId}`, ...view.meta]);
+        // The card's facts beside its kind; the ids and the type its kind and lineage already are stay in its
+        // Timeline (U029).
+        const lineage = new Set([`task=${groupId}`, `task=${evt.task_id || ''}`, `parent=${evt.parent_task_id || ''}`,
+            `root=${evt.root_task_id || ''}`, taskType]);
+        record.summary.innerHTML = metaPills(view.meta.filter((item) => !lineage.has(item)));
         const execution = executorChip(evt);
         if (execution && record.executor) {
             record.executor.title = execution.title || '';
@@ -375,8 +452,10 @@ export function initLogs({ ws, state, mount }) {
 
         renderTaskTimeline(record);
         updateVisibility(record.entry);
-        logEntries.appendChild(record.entry);
+        // A card stands where its newest event does; an older event (history) never moves it later.
+        placeEntry(record.entry, newest);
         trimEntries();
+        updateEmptyState();
         if (state.activeFilters[category] && pinned) scrollToLatest();
     }
 
@@ -417,6 +496,8 @@ export function initLogs({ ws, state, mount }) {
     // double-renders the post-connect overlap.
     async function backfillRecentLogs() {
         const revision = ++backfillRevision;
+        historyLoading = true;
+        updateEmptyState();
         setInlineStatus(historyStatus, 'Loading recent history…');
         historyStatus.hidden = false;
         const merged = [];
@@ -440,6 +521,8 @@ export function initLogs({ ws, state, mount }) {
                 ? `Recent history is incomplete: ${failed.join(', ')} could not be loaded. Live events are shown as they arrive; reconnect reloads recent history.`
                 : '', 'error');
             historyStatus.hidden = failed.length === 0;
+            historyLoading = false;
+            updateEmptyState();
         }
         scrollToLatest();
     }
@@ -457,6 +540,8 @@ export function initLogs({ ws, state, mount }) {
         duplicateState.clear();
         taskGroups.clear();
         logEntries.innerHTML = '';
+        clearedAt = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+        updateEmptyState();
     });
 
     window.addEventListener('ouro:dashboard-subtab-shown', (event) => {

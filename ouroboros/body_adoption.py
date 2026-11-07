@@ -161,6 +161,44 @@ def authorize(ctx: Any, commit: str, *, reason: str) -> Dict[str, Any]:
                          task_id=str(getattr(ctx, "task_id", "") or ""), ctx=ctx)
 
 
+def official_relation(serving: pathlib.Path, cand: str, data_dir: Any) -> Dict[str, Any]:
+    """The candidate's history relative to the official tip as last checked: two pinned commits, no fetch.
+
+    ``managed_update_cache`` names the tip and when it was checked; one ``rev-list`` in the serving repository (the
+    candidate shares its objects) counts commits only here and only in that tip. History, not content: the updater's
+    own merges count too. Unknown, with its reason, is never zero."""
+    from ouroboros.update_channels import get_update_channel
+    from ouroboros.utils import read_json_dict
+
+    cache = (read_json_dict(pathlib.Path(data_dir) / "state" / "state.json") or {}).get("managed_update_cache") or {}
+    tip, checked_at = str(cache.get("latest_sha") or ""), str(cache.get("checked_at") or "")
+    channel = str(cache.get("update_channel") or "")
+    if not tip:
+        return {"unknown": "no_official_check"}
+    if channel and channel != get_update_channel():
+        return {"unknown": "update_channel_changed", "tip": tip, "checked_at": checked_at}
+    counted = _git(serving, "rev-list", "--left-right", "--count", f"{cand}...{tip}", check=False)
+    parts = counted.stdout.split() if counted.returncode == 0 else []
+    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+        return {"unknown": "official_tip_unreadable", "tip": tip, "checked_at": checked_at}
+    return {"tip": tip, "checked_at": checked_at, "channel": channel, "only_here": int(parts[0]),
+            "only_official": int(parts[1])}
+
+
+def official_relation_text(relation: Dict[str, Any]) -> str:
+    """One sentence for a receipt or a card row; ``{}`` (an older handoff) says nothing."""
+    if not relation:
+        return ""
+    why = {"no_official_check": "no official Update check is on record",
+           "update_channel_changed": "the last official check was for another update channel",
+           "official_tip_unreadable": "the last checked official tip is not readable here"}
+    if relation.get("unknown"):
+        return f"Its distance from the official line is unknown: {why.get(relation['unknown'], relation['unknown'])}."
+    return (f"Against the official tip {str(relation['tip'])[:12]} (checked {relation['checked_at'] or 'at an unknown time'}):"
+            f" {relation['only_here']} commit(s) here are not on the official line, {relation['only_official']} official"
+            " commit(s) are not here (history, not content).")
+
+
 def authorize_row(data_dir: pathlib.Path, row: Dict[str, Any], commit: str, *, reason: str,
                   runtime_mode: str = "advanced", task_id: str = "", ctx: Any = None) -> Dict[str, Any]:
     """The checks and the durable handoff; shared by the tool and the evolution supervisor path."""
@@ -237,6 +275,7 @@ def authorize_row(data_dir: pathlib.Path, row: Dict[str, Any], commit: str, *, r
     except (ValueError, OSError, subprocess.SubprocessError) as exc:
         raise AdoptionRefused("ADOPTION_TESTS_REQUIRED", str(exc)) from exc
 
+    relation = official_relation(serving, cand, data_dir)  # dated history against the last-checked official tip
     from supervisor.git_ops import bootstrap_transition_lock
     try:
         with bootstrap_transition_lock(data_dir=data_dir):
@@ -269,7 +308,7 @@ def authorize_row(data_dir: pathlib.Path, row: Dict[str, Any], commit: str, *, r
                 "created_tag": str((row.get("reviewed_release_tags") or {}).get(cand) or ""),
                 "switch": rows, "deps_command": _dependency_command(serving, rows), "authorized_at": utc_now_iso(),
                 "unreviewed_commits": unreviewed, "attempts": 0, "events": [],
-                "tests": qualification,
+                "tests": qualification, "official_relation": relation,
             }
             # The helper is captured from the body that is running, never from the candidate.
             shutil.copyfile(pathlib.Path(body_switch.__file__), staging / "switch.py")
@@ -669,10 +708,13 @@ def finalize_on_boot(data_dir: Any, repo_dir: Any, *, supervisor_ready: bool,
     body_switch.record(str(helper_dir(data_dir)), handoff, "adopted", f"ready on {head[:12]} (pid {os.getpid()})")
     _archive(data_dir, handoff, "adopted")
     kept = sorted({*(loaded.get("later_edits") or []), *(handoff.get("later_edit_kept") or [])})
+    relation = dict(handoff.get("official_relation") or {})  # as authorized: a later check never rewrites it
     return _settled(handoff, "adopted", f"Adopted candidate commit {cand} on {handoff.get('branch')}; previous commit "
                                         f"{str(handoff.get('old') or '')[:12]}."
-                                        + (f" Later local edits were kept at: {', '.join(kept)}." if kept else ""),
-                    sha=head, tests=dict(handoff.get("tests") or {}), created_tag=str(handoff.get("created_tag") or ""))
+                                        + (f" Later local edits were kept at: {', '.join(kept)}." if kept else "")
+                                        + (" " + official_relation_text(relation) if relation else ""),
+                    sha=head, tests=dict(handoff.get("tests") or {}), created_tag=str(handoff.get("created_tag") or ""),
+                    **({"official_relation": relation} if relation else {}))
 
 
 def _adopted_commits(repo_dir: Any, result: Dict[str, Any]) -> Dict[str, Any]:
@@ -707,7 +749,8 @@ def _publish_on_task(data_dir: Any, repo_dir: Any, result: Dict[str, Any], text:
     revision = int(result.get("card_row_revision") or 1)
     fact = {"adoption_id": adoption_id, "outcome": result["outcome"], "commit_sha": result["candidate"],
             "previous_sha": str(result.get("previous") or ""), "branch": result["branch"], "note": text,
-            "settled_at": utc_now_iso(), "revision": revision, **_adopted_commits(repo_dir, result)}
+            "settled_at": utc_now_iso(), "revision": revision, **_adopted_commits(repo_dir, result),
+            **({"official_relation": result["official_relation"]} if result.get("official_relation") else {})}
 
     def _mutate(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         require_writable_task_result_schema(current)

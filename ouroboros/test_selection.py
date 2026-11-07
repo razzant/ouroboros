@@ -203,7 +203,9 @@ def _reaching_helper(repo: Path, helper: str, sources: Iterable[str]) -> set[str
         reached |= more
 
 
-def validate_widening(repo: Path, extra_tests=(), full_tests=False, reason="") -> tuple[str, ...]:
+def validate_widening(repo: Path, extra_tests=(), full_tests=False, reason="", *, skipped=None) -> tuple[str, ...]:
+    """The widening a commit asks; ``skipped`` (a list) collects the extra_tests entries the tests preflight cannot
+    run, disclosed instead of refusing the call (06.11); without it such an entry refuses, as before."""
     if type(full_tests) is not bool or not isinstance(extra_tests, (list, tuple)):
         raise ValueError("extra_tests must be a list of paths and full_tests must be a boolean")
     if not isinstance(reason, str):
@@ -213,13 +215,17 @@ def validate_widening(repo: Path, extra_tests=(), full_tests=False, reason="") -
     normalized = set()
     for path in extra_tests:
         if not isinstance(path, str) or "\\" in path or ".." in PurePosixPath(path).parts:
-            raise ValueError(f"extra_tests needs repository-relative test modules: {path!r}")
-        p = PurePosixPath(path)
-        if p.is_absolute() or not is_test_module(path) or not (repo / path).is_file():
-            raise ValueError(f"extra_tests module is missing or invalid: {path!r}")
-        if not (repo / path).resolve().is_relative_to(repo.resolve()):
-            raise ValueError(f"extra_tests module escapes the candidate: {path!r}")
-        normalized.add(p.as_posix())
+            problem = f"extra_tests needs repository-relative test modules: {path!r}"
+        elif PurePosixPath(path).is_absolute() or not is_test_module(path) or not (repo / path).is_file():
+            problem = f"extra_tests module is missing or invalid: {path!r}"
+        elif not (repo / path).resolve().is_relative_to(repo.resolve()):
+            problem = f"extra_tests module escapes the candidate: {path!r}"
+        else:
+            normalized.add(PurePosixPath(path).as_posix())
+            continue
+        if skipped is None:
+            raise ValueError(problem)
+        skipped.append(str(path))
     return tuple(sorted(normalized))
 
 
@@ -328,7 +334,7 @@ def widening_properties() -> dict:
     """Tool-schema SSOT: the model chooses consumers the import graph cannot see."""
     return {
         "extra_tests": {"type": "array", "items": {"type": "string"}, "default": [],
-                        "description": "Add test module paths for indirect/dynamic, prompt, skill or cross-language consumers beyond the floor and direct imports; explain in test_reason."},
+                        "description": "Add Python test modules (tests/test_*.py of this repository) for indirect/dynamic, prompt or skill consumers beyond the floor and direct imports; explain in test_reason. Other entries are skipped with a note."},
         "full_tests": {"type": "boolean", "default": False,
                        "description": "Request the full battery for broad or unresolved impact; explain in test_reason. Managed updates and adoption/evolution publication require full; local adoption may use an exact whole-delta selection. See DEVELOPMENT: The tiered commit and CI gates for publication limits."},
         "test_reason": {"type": "string", "default": "",
@@ -337,13 +343,19 @@ def widening_properties() -> dict:
 
 
 def bind_commit_test_request(ctx, kwargs) -> str:
+    ctx._commit_call_notes = []  # a commit call's notes start here (``review_collection.note_commit_call``)
     request = {key: kwargs.pop(key, default) for key, default in
                (("extra_tests", []), ("full_tests", False), ("test_reason", ""))}
+    skipped: list = []
     try:
         request["extra_tests"] = validate_widening(Path(ctx.repo_dir), **{
-            "extra_tests": request["extra_tests"], "full_tests": request["full_tests"], "reason": request["test_reason"]})
+            "extra_tests": request["extra_tests"], "full_tests": request["full_tests"], "reason": request["test_reason"]},
+            skipped=skipped)
     except ValueError as exc:
         return f"⚠️ TOOL_ARG_ERROR: {exc}. Nothing was staged or reviewed."
+    if skipped:  # what the tests preflight cannot run is disclosed, never a refusal of the commit (06.11)
+        ctx._commit_call_notes.append("extra_tests skipped (only Python test modules tests/test_*.py of this "
+                                      f"repository run in the tests preflight): {', '.join(skipped)}.")
     ctx._commit_test_request = request
     return ""
 

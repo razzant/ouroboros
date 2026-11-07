@@ -410,18 +410,22 @@ export class CallSession {
 /** The room call: Talk in the composer, the live capsule (the chip and its big view), its light, the
  * call's card in the room and the mark. */
 export function mountCall({ page, chatId, env = globalThis, ws = null, label = () => 'Main',
-    onScreen = () => true, reveal = () => {}, openSettings = () => {}, onSettled = () => {} }) {
+    onScreen = () => true, reveal = () => {}, openSettings = () => {}, onSettled = () => {}, rememberEntry = () => {},
+    claimEntry = () => false }) {
     const doc = page.ownerDocument;
     const composer = page.querySelector('.chat-input-wrap');
     const available = callAvailability(env);
     const noop = { destroy() {}, leave() {}, retains: () => false, state() {} };
+    if (available.hidden) rememberEntry(null);  // a surface that never holds a call shows no Talk on its next load
     if (!composer || available.hidden) return noop;
     const styled = ensureStylesheet(doc);
     let destroyed = false;
     let entry = null;
     // Talk appears once the server says calls are on (a beta the owner turns on in Settings) and this
-    // feature configuration has explicitly enabled it. Credential presence never enables calls.
-    let offered = false, selectedModel = null;
+    // feature configuration has explicitly enabled it. Credential presence never enables calls. Until this page's
+    // first read answers, this device's last answer stands: the room already shows its Talk face and hands it over.
+    const shown = claimEntry();
+    let offered = shown, selectedModel = null;
     const visible = () => !destroyed && onScreen() && doc.visibilityState !== 'hidden';
     const light = createCallLight({ env, visible, heard: now => capsule.heard(now), voice: () => capsule.voice(),
         owner: () => capsule.render(), draw: state => capsule.draw(state) });
@@ -447,7 +451,7 @@ export function mountCall({ page, chatId, env = globalThis, ws = null, label = (
         end: () => session.end(),
         dismiss: () => session.dismiss(),
         act: action => act(action),
-        offered: () => offered });
+        offered: () => offered, adopted: shown });
     light.attach(capsule.wrap);
     entry = trackCallMark({ session, label, onScreen, reveal, page, env, sign: () => CALL_VISUAL.mark(doc),
         wake: () => light.wake() });
@@ -490,7 +494,12 @@ export function mountCall({ page, chatId, env = globalThis, ws = null, label = (
         retains: () => session.active,
         state(data) {
             if (destroyed) return;
-            offered = data?.enabled === true && data?.offered === true;
+            // A real read carries `offered`; the mount's first default does not, and leaves the last answer standing.
+            // The host paints this face with the next page's first frame, so Talk never replaces Send after a load.
+            if (data && 'offered' in data) {
+                offered = data.enabled === true && data.offered === true;
+                rememberEntry(offered ? capsule.face() : null);
+            }
             selectedModel = data?.selected_model || null;
             if (data?.enabled !== true) session.end();
             capsule.entry();

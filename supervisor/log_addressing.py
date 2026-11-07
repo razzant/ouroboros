@@ -157,8 +157,8 @@ def address_task_event(running: Any, drive_root: Any, payload: Dict[str, Any]) -
     _handle_task_heartbeat), otherwise preserve an explicit chat_id already on
     the event (0 is a real session — the Skill Review panel — never "missing";
     a None value is absence, not an address), otherwise stamp the task row's
-    own chat_id, otherwise the DirectActivityRegistry entry (in-process
-    direct/ephemeral turns are never in RUNNING). Addressing is HONEST — an
+    own chat_id, otherwise the DirectActivityRegistry entry (an in-process
+    turn may have no RUNNING row). Addressing is HONEST — an
     A2A synthetic id is stamped as the row says it; the broadcast choke
     (push_log) suppresses A2A frames, so machine traffic never reaches the
     browser while the durable row keeps the true audience.

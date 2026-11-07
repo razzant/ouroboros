@@ -56,6 +56,13 @@ def test_counts_include_foreign_reviews_notes_and_only_open_projects_and_fall_af
     assert "covers (notes): 0 rows" in _memory_read(ctx, node_id=page["node_id"])
     for project in pr.list_projects(tmp_path):
         pr.update_project(tmp_path, project["id"], closed={"at": "2026-10-29T00:00:00Z", "by": "mind", "note": "completed"})
+    from ouroboros.memory_view_conversations import owed
+    debts = owed(view(tmp_path).conversations)
+    assert view(tmp_path).waiting["conversations"]["count"] == len(debts) > 0  # a closed state seals no words
+    for item in debts:  # the class's own act: a page over each room's open words
+        for room in item["rooms"]:
+            assert json.loads(_chronicle_write(ctx, kind="page", room_id=room["room_id"], text="Read and closed.",
+                                               covers={"to": room["newest"]}))["ok"]
     assert all(f["count"] == 0 for f in view(tmp_path).waiting.values())
     assert review not in _memory_read(ctx, room_id="late_reviews") and note not in _memory_read(ctx, room_id="notes")
     assert {m["id"] for m in ChronicleStore(tmp_path).active_marks(None)} == {ordinary}
@@ -118,7 +125,7 @@ def test_unavailable_project_census_keeps_readable_memory_and_other_waiting_fact
         patch.setattr(pr, "list_projects", unavailable)
         snapshot = view(tmp_path)
         assert snapshot.active and snapshot.room == before.room and snapshot.story == before.story
-        assert snapshot.live_rooms == before.live_rooms and snapshot.marks == before.marks
+        assert snapshot.conversations == before.conversations and snapshot.marks == before.marks
         assert snapshot.waiting["notes"] == before.waiting["notes"]
         assert snapshot.waiting["late_reviews"] == before.waiting["late_reviews"]
         assert snapshot.waiting["projects"] == {"count": "unknown", "oldest": "unknown"}
@@ -126,3 +133,47 @@ def test_unavailable_project_census_keeps_readable_memory_and_other_waiting_fact
         assert "open projects unknown, oldest unknown" in shown
         assert "unsealed mind notes 1" in shown and "list_projects(closed=false, oldest_first=true)" in shown
     assert view(tmp_path).waiting == before.waiting
+
+
+def _github_row(conversation, thread, minute, text, **extra):
+    """A row of one issue thread of a GitHub repository (a place conversation without its thread)."""
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_runner import presence_chat_id
+
+    chat = presence_chat_id(conversation_key("github", "me", conversation, thread))
+    transport = {"provider": "github", "account_id": "me", "conversation_id": conversation, "thread_id": thread,
+                 "actor": {"platform_actor_id": "u7"}}
+    return {"chat_id": chat, "direction": "in", "ts": f"2026-09-06T01:{minute:02d}:00+00:00", "text": text,
+            "source": "presence:github", "client_message_id": f"gh-{conversation}-{thread}-{minute}",
+            "transport": transport, **extra}
+
+
+def test_a_conversation_waits_while_words_where_i_spoke_are_open_and_never_for_ambient_rooms(tmp_path):
+    """S4: the fourth class counts a conversation whose room where my human or I spoke holds words no page holds; a
+    conversation where neither spoke does not; a page to the room's head takes it out; the listing names the act."""
+    from ouroboros import chat_chain, dialogue_store as ds
+    from ouroboros.memory_view_conversations import owed
+
+    shared.world(tmp_path)
+    ctx = _ctx(tmp_path, "root0001")
+    asked = _github_row("repo.1", "i1", 1, "can you look?")
+    answer = {**_github_row("repo.1", "i1", 2, "Looking."), "direction": "out", "type": "presence_delivery",
+              "task_id": "p1", "client_message_id": "", "transport": {**asked["transport"], "delivery": {"state": "delivered"}}}
+    for row in (asked, answer, _github_row("repo.2", "i9", 3, "a dependabot bump")):
+        ds.append(tmp_path, "chat", row)
+
+    def owing():
+        return {item["group"]["key"] for item in owed(view(tmp_path).conversations)}
+
+    assert "github:me:repo.1" in owing() and "github:me:repo.2" not in owing()
+    snapshot = view(tmp_path)
+    facts, shown = snapshot.waiting["conversations"], line(snapshot)
+    assert facts["count"] == len(owed(snapshot.conversations)) and "conversations whose words no page holds" in shown
+    assert "memory_read(room_id='conversations', start=0)" in shown and "'conversation': true" in shown
+    listing = _memory_read(ctx, room_id="conversations")
+    assert listing.startswith("Conversations whose words no page holds: ") and "repo.2" not in listing
+    newest = chat_chain.format_address(chat_chain.row_address(answer))
+    assert f"covers={{'to': '{newest}'}}" in listing
+    assert json.loads(_chronicle_write(ctx, kind="page", room_id=str(asked["chat_id"]), text="Answered; closed.",
+                                       covers={"to": newest}))["ok"]
+    assert "github:me:repo.1" not in owing()

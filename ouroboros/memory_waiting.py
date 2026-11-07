@@ -21,6 +21,11 @@ WAITING_CLASSES = MappingProxyType({
                  "reader": "list_projects(closed=false, oldest_first=true)",
                  "act": "close_project(project_id=..., note=...)",
                  "focus": "integrating", "moment": "when folding"},
+    "conversations": {"subject": "conversations whose words no page holds", "action": "chronicle_write",
+                      "parameter": ("covers", "conversation"),
+                      "reader": "memory_read(room_id='conversations', start=0)",
+                      "act": "chronicle_write(kind='page', room_id=..., covers={'to': ..., 'conversation': true})",
+                      "focus": "integrating", "moment": "when folding"},
 })
 
 
@@ -32,9 +37,12 @@ def mind_notes(notes):
     return [(room, note) for room, items in notes.items() for note in items if note.get("author_kind") == "mind"]
 
 
-def measure(marks, notes, projects):
-    """Captured active marks, unsealed notes and registry view (None when its census is unavailable)."""
-    reviews, unsealed = late_reviews(marks), mind_notes(notes)
+def measure(marks, notes, projects, conversations=()):
+    """Captured active marks, unsealed notes, registry view (None when its census is unavailable) and my other
+    conversations (``memory_view_conversations.capture``'s groups: what of them no page holds, no extra read)."""
+    from ouroboros.memory_view_conversations import owed
+
+    reviews, unsealed, debts = late_reviews(marks), mind_notes(notes), owed(conversations)
 
     def facts(items, date):
         stamps = [str(date(item) or "") for item in items]
@@ -45,7 +53,10 @@ def measure(marks, notes, projects):
             "notes": {**facts(unsealed, lambda item: item[1].get("date")),
                       "rooms": sorted(rooms.items(), key=lambda item: (-item[1], item[0]))[:3]},
             "projects": (facts(projects, lambda project: project.get("last_active_at")) if projects is not None
-                         else {"count": "unknown", "oldest": "unknown"})}
+                         else {"count": "unknown", "oldest": "unknown"}),
+            "conversations": {**facts(debts, lambda item: str(item["earliest"])[:10]),
+                              "largest": [[item["group"]["label"], item["chars"]] for item in  # JSON-stable pairs
+                                          sorted(debts, key=lambda item: -item["chars"])[:3]]}}
 
 
 def text(waiting):
@@ -53,8 +64,11 @@ def text(waiting):
         return ""
     lines = []
     for name, cls in WAITING_CLASSES.items():
-        facts = waiting[name]
-        rooms = ", ".join(f"room {room}: {count}" for room, count in facts.get("rooms", ()))
+        facts = waiting.get(name)
+        if facts is None:  # a view captured before this class existed
+            continue
+        rooms = ", ".join([*(f"room {room}: {count}" for room, count in facts.get("rooms", ())),
+                           *(f"{label} ~{chars} chars" for label, chars in facts.get("largest", ()))])
         lines.append(f"{cls['subject']} {facts['count']}, oldest {facts['oldest']}"
                      + (f", most in {rooms}" if rooms else "") + f"; {cls['reader']}; act {cls['act']}")
     return "; waiting for me at the start: " + " | ".join(lines)

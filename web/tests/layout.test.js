@@ -124,3 +124,65 @@ test('measurePinnedBars writes the pinned head and foot heights for the rows\' s
     assert.equal(typeof measurePinnedBars({ querySelector: () => null }, { Observer }), 'function');
     assert.equal(typeof measurePinnedBars(sidebar, { Observer: undefined }), 'function');
 });
+
+// The primary input, the switch's one other fact (owner 06.11; docs/DESIGN.md "Shell"): theme.js paints
+// html[data-pointer] beside html[data-layout] before CSS from one `(pointer: coarse)` query; layout.js is the door.
+function bootPointer({ docked = true, coarse = false, media = true } = {}) {
+    const handlers = new Map();
+    const events = [];
+    const root = { dataset: {} };
+    const noop = () => {};
+    const query = (matches, key) => ({ matches, addEventListener: (type, fn) => handlers.set(`${key}:${type}`, fn),
+        removeEventListener: (type) => handlers.delete(`${key}:${type}`) });
+    const layoutQuery = query(docked, 'layout');
+    const pointerQuery = query(coarse, 'pointer');
+    const colorQuery = query(false, 'color');
+    const window = {
+        addEventListener: noop, removeEventListener: noop,
+        dispatchEvent: (event) => events.push(event),
+        ...(media ? { matchMedia: (q) => (q.includes('min-width') ? layoutQuery : q.includes('pointer') ? pointerQuery : colorQuery) } : {}),
+    };
+    const document = {
+        documentElement: root, createElement: () => ({ dataset: {}, classList: { toggle: noop }, setAttribute: noop }),
+        querySelectorAll: () => [], addEventListener: noop, removeEventListener: noop,
+    };
+    vm.runInNewContext(themeSource, {
+        document, window, localStorage: { getItem: () => null, setItem: noop },
+        CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init?.detail; } },
+    });
+    return { root, window, handlers, events, layoutQuery, pointerQuery };
+}
+
+test('theme.js paints the primary input beside the layout and publishes it', () => {
+    const finger = bootPointer({ docked: true, coarse: true });
+    assert.equal(finger.root.dataset.layout, 'docked');
+    assert.equal(finger.root.dataset.pointer, 'coarse', 'a tablet: docked columns, a finger');
+    assert.equal(finger.window.ouroLayout.pointer, 'coarse');
+    assert.equal(bootPointer({ docked: true, coarse: false }).root.dataset.pointer, 'fine', 'a desk with a mouse');
+    assert.equal(bootPointer({ docked: false, coarse: true }).root.dataset.layout, 'stack', 'the input never moves the columns');
+    assert.equal(bootPointer({ media: false }).root.dataset.pointer, 'fine', 'no media queries: a desktop window');
+});
+
+test('a new primary input repaints and announces once, on the one layout event', () => {
+    const s = bootPointer({ docked: true, coarse: false });
+    s.pointerQuery.matches = true;  // a Surface's cover came off
+    s.handlers.get('pointer:change')();
+    assert.equal(s.root.dataset.pointer, 'coarse');
+    assert.equal(s.root.dataset.layout, 'docked');
+    s.handlers.get('pointer:change')();  // the same answer again is no change
+    assert.deepEqual(s.events.map((e) => [e.type, e.detail.layout, e.detail.pointer]), [['ouro:layout-changed', 'docked', 'coarse']]);
+});
+
+test('layout.js reads the primary input through one door, and a covering room from it', async () => {
+    const mod = await import('../modules/layout.js');
+    const w = { ouroLayout: { dockedMinWidth: 720, layout: 'docked', pointer: 'coarse' } };
+    assert.deepEqual([...mod.POINTERS], ['fine', 'coarse']);
+    assert.equal(mod.currentPointer({ root: { dataset: { pointer: 'fine' } }, w }), 'fine');
+    assert.equal(mod.currentPointer({ root: { dataset: {} }, w }), 'coarse', 'no attribute yet: the facts answer');
+    assert.equal(mod.currentPointer({ root: { dataset: {} }, w: {} }), 'fine', 'neither: a desktop window');
+    assert.equal(mod.isCoarsePointer({ root: { dataset: { pointer: 'coarse' } }, w }), true);
+    const room = (layout, pointer) => mod.roomCoversMain({ root: { dataset: { layout, pointer } }, w: {} });
+    assert.equal(room('docked', 'fine'), false, 'a desk: the panel lies beside Main');
+    assert.equal(room('docked', 'coarse'), true, 'a finger: the Project in Main\'s place');
+    assert.equal(room('stack', 'fine'), true, 'a phone-width window: the room fills the screen');
+});

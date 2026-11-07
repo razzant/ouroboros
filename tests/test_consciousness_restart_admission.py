@@ -41,6 +41,15 @@ from tests.test_consciousness import AVAILABLE, CEILING, DEFAULT, FLOOR
 
 
 OWNER_LINE = "owner line observed during the window"
+OWNER_COUNTED = "1 owner message (counted, not listed: my view holds the words)"  # the wake's text counts it; my view holds the words
+
+
+def _observed(root, task):
+    """A wake's observation as its bound source stores it, every event line whole."""
+    from ouroboros.artifacts import read_actor_source_bytes
+
+    source = task["metadata"]["wake_observation"]["source"]
+    return read_actor_source_bytes(root, source["task_id"], source).decode("utf-8")
 
 
 @pytest.fixture
@@ -191,7 +200,7 @@ def test_a_restart_before_the_row_is_a_refusal_and_leaves_the_window_to_the_next
     assert race.clock.tick(race.clock.next_wake_at) == "launched"
     task = _run_wake(race)
     assert race.finished.is_set() and race.ran == [task]
-    assert OWNER_LINE in task["text"] and race.notices == []
+    assert OWNER_COUNTED in task["text"] and OWNER_LINE in _observed(race.root, task) and race.notices == []
     assert race.state.load_state()[OBSERVATION_STATE_KEY]["task_id"] == task["id"]
     assert race.state.load_state()[OWN_WAKE_STATE_KEY]["finished"] is True
     assert queued_wakes() == [] and _wake_rows(race) == [task["id"]]  # one wake, and only the one that ran
@@ -350,7 +359,7 @@ def test_an_admission_that_raises_leaves_no_row_owner_or_observation(race, monke
     assert race.clock.next_wake_at == race.start + 2 * DEFAULT
     assert race.clock.tick(race.clock.next_wake_at) == "launched"
     task = _run_wake(race)
-    assert race.finished.is_set() and OWNER_LINE in task["text"]
+    assert race.finished.is_set() and OWNER_COUNTED in task["text"] and OWNER_LINE in _observed(race.root, task)
 
 
 @pytest.mark.parametrize("fault", ["binder_raises", "source_store_fails"])
@@ -368,7 +377,7 @@ def test_a_binding_failure_runs_the_wake_with_its_text_and_moves_no_boundary(rac
     task = _run_wake(race)
     after = time.time()
     assert race.finished.is_set()
-    assert OWNER_LINE in task["text"] and race.clock._backoff == 1
+    assert OWNER_COUNTED in task["text"] and race.clock._backoff == 1  # no source: the text, counts and all
     stored = race.state.load_state()
     assert OBSERVATION_STATE_KEY not in stored  # replayed whole by the next wake, never skipped
     assert stored[OWN_WAKE_STATE_KEY]["task_id"] == task["id"] and stored[OWN_WAKE_STATE_KEY]["finished"] is True
@@ -422,19 +431,20 @@ def test_a_panic_barred_wake_never_admits_beside_a_pending_restart(race, monkeyp
     assert queued_wakes() == [] and list(race.spare.in_q) == []
 
 
-def test_owner_main_in_the_same_window_is_still_saved_and_the_wake_is_not(race, monkeypatch):
-    """The ordinary Main deferral keeps its receipt, its words and its first durable row."""
+def test_owner_main_in_the_same_window_starts_and_the_wake_is_not(race, monkeypatch):
+    """The owner's turn is dialogue (BIBLE P5): accepted in the same window it starts and joins the request's
+    started work, while a consciousness wake is still refused until the restart."""
     from supervisor import workers
 
     _accept_before_the_row(race, monkeypatch)
     workers.handle_chat_direct(7, "Main in the window", task_metadata={"client_message_id": "main-1"})
-    saved = next(task for task in race.runtime.queue.PENDING if task.get("text") == "Main in the window")
-    assert saved["id"] not in queued_wakes() and list(race.spare.in_q) == []
-    row = load_task_result(race.root, saved["id"])
-    assert row["status"] == "scheduled" and row["host_admission"]["status"] == "accepted"
-    assert race.notices == ["Saved for execution after Restart."]
+    assert not any(task.get("text") == "Main in the window" for task in race.runtime.queue.PENDING)
+    [main] = [tid for tid, meta in workers.RUNNING.items()
+              if isinstance(meta, dict) and (meta.get("task") or {}).get("text") == "Main in the window"]
+    assert main not in queued_wakes() and race.runtime.restart._AGENT_RESTART["started"][main] == main
+    assert "Saved for execution after Restart." not in race.notices
     assert race.clock.tick(race.start) == "rejected:restart_pending"
-    assert race.clock._backoff == 1 and len(race.notices) == 1
+    assert race.clock._backoff == 1
     assert list(queued_wakes()) == [] and race.ran == []
 
 

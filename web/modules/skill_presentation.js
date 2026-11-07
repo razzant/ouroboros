@@ -122,7 +122,7 @@ export function trayHtml({ sentence = '', note = '', actions = '', tone = '', at
 export function officialMarkHtml({ control = true, sourceId = '' } = {}) {
     const inner = `<span class="skills-mark-glyph" aria-hidden="true">${OFFICIAL_GLYPH}</span>Official`;
     return control
-        ? `<button type="button" class="skills-mark" data-mark="official" data-official-mark${sourceId ? ` data-official-source="${escapeHtml(sourceId)}"` : ''} aria-haspopup="dialog">${inner}</button>`
+        ? `<button type="button" class="skills-mark ui-hit-area" data-mark="official" data-official-mark${sourceId ? ` data-official-source="${escapeHtml(sourceId)}"` : ''} aria-haspopup="dialog">${inner}</button>`
         : `<span class="skills-mark" data-mark="official">${inner}</span>`;
 }
 

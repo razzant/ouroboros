@@ -25,10 +25,6 @@
     justify-content: center;
 }
 
-.chat-send-inline[data-call-entry="talk"] {
-    gap: 6px;
-}
-
 /* ---- The live capsule ------------------------------------------------------------------------ */
 
 .chat-input-wrap[data-call] {

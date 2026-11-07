@@ -549,7 +549,8 @@ def resolve_commit_review_reference(ctx: ToolContext, reference: Any, *, state: 
         findings=[*source.critical_findings, *source.advisory_findings],
         terminal=source.phase == "review_only" and source.status == "reviewed",
     ):
-        raise ValueError("author continuation needs received feedback or a terminal unavailable outcome; reviewers are still running")
+        from ouroboros.tools.review_collection import ContinuationWaits
+        raise ContinuationWaits("author continuation needs received feedback or a terminal unavailable outcome; reviewers are still running")
     return source
 
 
@@ -1351,14 +1352,16 @@ def prepare_author_commit_request(ctx: ToolContext, review_reference: Any, autho
     from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
     if review_reference is not None or author_disposition is not None:
         from ouroboros.review_records import build_author_disposition_from_mapping
+        from ouroboros.tools.review_collection import continuation_refusal, without_broken_subagent_check
         try:
             if review_rebuttal:
                 raise ValueError("a paid rebuttal and free author continuation are separate choices")
+            author_disposition = without_broken_subagent_check(ctx, author_disposition)
             build_author_disposition_from_mapping(author_disposition, subject_hash="pending-current-candidate")
             ctx._author_commit_source = resolve_commit_review_reference(ctx, review_reference)
             ctx._author_commit_reference, ctx._author_commit_decision = dict(review_reference), dict(author_disposition)
-        except (OSError, ValueError) as exc:
-            return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=f"ERROR: REVIEW_AUTHOR_CONTINUATION_INVALID: {exc}"))
+        except (OSError, ValueError) as exc:  # the text names the next call its cause leaves
+            return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=continuation_refusal(exc)))
         from ouroboros.tools.review_collection import author_scope
         return author_scope(ctx, paths_omitted=paths_omitted)
     return None

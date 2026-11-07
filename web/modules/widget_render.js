@@ -244,7 +244,7 @@ function renderComponentBody(ctx, component, view, treePath, inheritedTarget = '
         const stateKey = `tab:${key}`;
         const active = Math.max(0, Math.min(Number(componentState[stateKey] || 0), Math.max(tabs.length - 1, 0)));
         const buttons = tabs.map((item, idx) => (
-            `<button type="button" class="widget-tab-btn ${idx === active ? 'active' : ''}" data-widget-tab-key="${escapeHtml(stateKey)}" data-widget-tab-idx="${idx}" aria-selected="${idx === active ? 'true' : 'false'}">${escapeHtml(item.label || `Tab ${idx + 1}`)}</button>`
+            `<button type="button" class="btn btn-ghost btn-sm widget-tab-btn ${idx === active ? 'active' : ''}" data-widget-tab-key="${escapeHtml(stateKey)}" data-widget-tab-idx="${idx}" aria-selected="${idx === active ? 'true' : 'false'}">${escapeHtml(item.label || `Tab ${idx + 1}`)}</button>`
         )).join('');
         const activeTab = tabs[active] || {};
         const passiveTarget = inheritedTarget ? target : '';

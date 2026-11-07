@@ -52,17 +52,19 @@ test('the time axis breaks at a long quiet stretch and keeps a burst of early ta
 });
 
 test('each measure speaks its own unit, and a missing value is said, never drawn as zero', () => {
-    assert.equal(formatMeasure('code_lines', 1388331), '1.39M lines');
-    assert.equal(formatMeasure('code_lines', 1388331, { exact: true }), '1,388,331 lines');
-    assert.equal(formatMeasure('bible_bytes', 50739), '49.5 KiB');
-    assert.equal(formatMeasure('identity', 25901), '25.9K chars');
-    assert.equal(formatMeasure('scratchpad', 25901, { exact: true }), '25,901 characters');
+    // The Storage tab's formats (storage_format.js): counts grouped, sizes in decimal units.
+    assert.equal(formatMeasure('code_lines', 1388331), '1,388,331 lines');
+    assert.equal(formatMeasure('bible_bytes', 50739), '51 KB');
+    assert.equal(formatMeasure('system_bytes', 999), '999 bytes');
+    assert.equal(formatMeasure('identity', 25901), '25,901 characters');
+    assert.equal(formatMeasure('scratchpad', 25901), '25,901 characters');
     assert.equal(formatMeasure('code_lines', null), 'Not measured');
     assert.equal(formatMeasure('identity', null), 'Not recorded');
     assert.equal(formatDelta('code_lines', 1112820, 985000), '+13%');
-    assert.equal(formatDelta('system_bytes', 29342, 25349), '+3.9 KiB');
-    assert.equal(formatDelta('system_bytes', 25000, 70000), '−43.9 KiB');
-    assert.equal(formatDelta('identity', 26000, 25000), '+1K chars');
+    assert.equal(formatDelta('system_bytes', 29342, 25349), '+4.0 KB');
+    assert.equal(formatDelta('system_bytes', 25000, 70000), '−45 KB');
+    assert.equal(formatDelta('system_bytes', 25000, 25000), 'no change');
+    assert.equal(formatDelta('identity', 26000, 25000), '+1,000 characters');
     assert.equal(formatDelta('code_lines', 100, 100), 'no change');
     assert.equal(formatDelta('code_lines', 100, null), '');
 });
@@ -81,7 +83,7 @@ test('a version is titled by its author’s short title, else its row heading, a
     assert.deepEqual([unnamed.title, unnamed.authored], ['Version 6.18.0', false], 'the number is the page’s own words');
 });
 
-test('the chart marks a release author’s words as content and leaves the page’s own words to the interface language', () => {
+test('the chart names versions by their numbers, the chosen one and the major releases; the card under it says what each is', () => {
     const model = historyModel({ versions: [
         version('v1.0.0', '2026-06-01T09:00:00Z', { level: 'major', milestone: true, code_lines: 100 }),
         version('v1.1.0', '2026-06-20T09:00:00Z', { level: 'minor', milestone: true, code_lines: 400,
@@ -92,12 +94,23 @@ test('the chart marks a release author’s words as content and leaves the page�
     const texts = (svg, cls) => [...svg.matchAll(new RegExp(`<text class="${cls}"([^>]*)>([^<]*)</text>`, 'g'))]
         .map(([, attrs, text]) => [text, attrs.includes('data-i18n-authored')]);
     const chosen = chartSvg(model, { key: 'code_lines', version: model.versions[1] }, 900);
-    assert.deepEqual(texts(chosen.svg, 'evo-ch-label'), [['Web Presence + Budget Categorization', true]]);
-    const labels = texts(chosen.svg, 'evo-ch-mlabel');
-    assert.ok(labels.length >= 1, 'the chart names milestones where there is room');
-    for (const [text, authored] of labels) assert.equal(authored, !text.startsWith('Version '), text);
+    // A number, never a sliced sentence over the line (U073); the detail card carries the author's words.
+    assert.deepEqual(texts(chosen.svg, 'evo-ch-label'), [['1.1.0', false]]);
+    assert.deepEqual(texts(chosen.svg, 'evo-ch-mlabel'), [['1.0.0', false]], 'the major release beside it, a minor one not');
+    assert.doesNotMatch(chosen.svg, /Web Presence|Memory as one ladder|…/);
     const unnamed = chartSvg(model, { key: 'code_lines', version: model.versions[0] }, 900);
-    assert.deepEqual(texts(unnamed.svg, 'evo-ch-label'), [['Version 1.0.0', false]]);
+    assert.deepEqual(texts(unnamed.svg, 'evo-ch-label'), [['1.0.0', false]]);
+    assert.deepEqual(texts(unnamed.svg, 'evo-ch-mlabel'), []);
+    // A long quiet stretch on the axis says what is missing there: releases.
+    const quiet = historyModel({ versions: [
+        version('v0.1.0', '2026-02-16T09:00:00Z', { level: 'minor', code_lines: 50 }),
+        version('v0.2.0', '2026-02-18T09:00:00Z', { level: 'minor', code_lines: 60 }),
+        ...['2026-06-01', '2026-07-01', '2026-08-01', '2026-09-01'].map((day, i) => version(`v1.${i}.0`, `${day}T09:00:00Z`,
+            { level: 'minor', code_lines: 100 + i })),
+    ] });
+    const gap = chartSvg(quiet, { key: 'code_lines', version: quiet.versions.at(-1) }, 900).svg;
+    assert.match(gap, />no releases<\/text>/);
+    assert.doesNotMatch(gap, /no tags/);
 });
 
 test('the campaign object says one honest sentence per state', () => {
@@ -105,8 +118,14 @@ test('the campaign object says one honest sentence per state', () => {
     const off = campaignView({ runtime_mode: 'advanced', evolution_enabled: false, bg_consciousness_enabled: true,
         bg_consciousness_state: { status: 'sleeping', next_wake_at: '2026-10-21T08:40:00Z' } }, new Date('2026-10-21T08:00:00Z'));
     assert.deepEqual([off.chip.text, off.chip.tone, off.note, off.lines], ['Off', 'neutral', 'Improvement cycles run only during a campaign.', []]);
-    assert.match(off.consciousness.text, /^Consciousness sleeping until \d\d:\d\d$/);
-    assert.equal(off.consciousness.tone, 'ok');
+    // One pointer to the Consciousness tab: neutral while it sleeps or is due, its tone only while it works now (U071).
+    assert.match(off.consciousness.text, /^Consciousness: sleeping until \d\d:\d\d$/);
+    assert.equal(off.consciousness.tone, 'neutral');
+    assert.deepEqual(Object.keys(off.consciousness), ['text', 'tone'], 'its detail and allowance are that tab\'s');
+    const thinking = campaignView({ bg_consciousness_enabled: true, bg_consciousness_state: { status: 'thinking' } });
+    assert.deepEqual([thinking.consciousness.text, thinking.consciousness.tone], ['Consciousness: thinking', 'ok']);
+    const failed = campaignView({ bg_consciousness_enabled: true, bg_consciousness_state: { status: 'wake_failed' } });
+    assert.equal(failed.consciousness.tone, 'error', 'a failure keeps its tone');
     const light = campaignView({ runtime_mode: 'light', evolution_state: { status: 'disabled', enabled: false } });
     assert.equal(light.lightMode, true);
     assert.match(light.note, /Advanced or Pro/);

@@ -54,7 +54,7 @@ dependencies = [
     # dependencies because the packaged hermetic commit gate invokes them.
     "pytest-xdist>=3.5",
     "pytest-timeout>=2.1",
-    "mcp>=1.10,<2.0",
+    "mcp>=1.29,<2.0",
     "PyYAML>=6.0",
     "croniter",
     # Upper-bounded: tree-sitter 0.25.x + language-pack 1.x changed the grammar/

@@ -332,10 +332,10 @@ def terminal_result_fields(usage: Dict[str, Any], *, existing: Dict[str, Any] | 
     if usage.get("wake_silent") is True:
         fields["wake_silent"] = True
     if usage.get("wake_summary"):
-        # Self-started runs may take this name; an authored title always stays.
-        fields["wake_summary"] = str(usage["wake_summary"])
+        fields["wake_summary"] = str(usage["wake_summary"])  # a self-started run's name, never over a title
         if summary_names_run(metadata, task_contract) and not str(title or prior.get("title") or "").strip():
             fields["suggested_name"] = fields["wake_summary"]
+        fields.update({"fold_read": True} if usage.get("fold_read") is True else {})  # it stands for what was read
     if usage.get("owner_message_sent") is True:
         fields["owner_message_sent"] = True
     if usage.get("terminal_plan_review_open") is True:

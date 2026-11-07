@@ -145,7 +145,8 @@ export function decorateContactSource(bubble, contact) {
     const href = safeHttpUrl(contact.url);
     const source = document.createElement(href ? 'a' : 'span');
     source.dataset.contactSource = contact.task_id;
-    source.textContent = String(contact.label || tr('Connected place'));
+    // A label stored before its connector stopped doubling its word reads once ("Telegram · Telegram · …").
+    source.textContent = String(contact.label || tr('Connected place')).split(' · ').filter((part, i, all) => part !== all[i - 1]).join(' · ');
     source.title = fmt('Source work: {task_id}', { task_id: contact.task_id });
     if (href) {
         source.className = 'md-link';
@@ -217,7 +218,6 @@ export function bindComposerFileTargets({ page, inputArea, input, stagePendingFi
 }
 
 export function createChatMedia({
-    chatSessionId,
     durableChatMediaUrl,
     formatMsgTime,
     insertMessageNode,
@@ -269,11 +269,7 @@ export function createChatMedia({
 
     function messageSender(msg, role) {
         return role === 'user'
-            ? senderLabel('user', false, '', {
-                source: msg.source || '',
-                senderLabel: msg.sender_label || '',
-                senderSessionId: msg.sender_session_id || '',
-            }, chatSessionId)
+            ? senderLabel('user', false, '', { source: msg.source || '', senderLabel: msg.sender_label || '' })
             : 'Ouroboros';
     }
 

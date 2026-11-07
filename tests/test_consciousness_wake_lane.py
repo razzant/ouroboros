@@ -210,7 +210,7 @@ def test_the_carrier_binds_the_observation_before_the_turn_runs_and_keeps_the_co
     assert "wake_observation" not in dispatched["metadata"]
     carry(workers, spare, Actor())
     bound = seen["metadata"][wake.WAKE_OBSERVATION_KEY]
-    assert seen["text"].startswith("RENDERED:") and "owner words" in seen["text"]  # the complete observation, never the projection
+    assert seen["text"].startswith("RENDERED:") and "1 owner message (counted, not listed: my view holds the words)" in seen["text"]  # the complete observation, never the projection
     assert bound["composition"] == {"owner_message": 1} and bound["window"]["basis"] == "time_bootstrap"
     assert bound["projection_text"].startswith("RENDERED:") and bound["source"]["sha256"] in bound["projection_text"]
     assert bound["accepted_boundary"]["task_id"] == task_id  # the clock reads it from the terminal (consciousness._settle_wake)
@@ -273,13 +273,13 @@ def test_the_bound_source_survives_handoff_and_cleanup_for_a_read_file_consumer(
     later = ToolContext(repo_dir=repo, drive_root=tmp_path, task_id="nextwake", task_metadata={})
     after = _read_file(later, **durable["source"]["read"]["arguments"])
     assert event_line in after and f"lines 1–{durable['source']['lines']} of {durable['source']['lines']}" in after
-    assert "owner words" in seen["task"]["text"]  # the complete observation stayed the input
+    assert "1 owner message (counted, not listed: my view holds the words)" in seen["task"]["text"]  # the complete observation stayed the input
     later_observation = wake.observe_wake(tmp_path, boundary=bound["accepted_boundary"], since=1_900_000_000.0,
                                           now=1_900_000_600.0)
     assert later_observation.window['transitions_basis'] == 'accepted_inventory'
     assert not later_observation.gaps
     assert not any(kind == 'owner_message' for kind, _offset, _line in later_observation.events)
-    assert 'owner words' not in later_observation.full_text()  # accepted input is not replayed
+    assert "owner_message" not in later_observation.counts()  # accepted input is not replayed
 
 
 @pytest.mark.parametrize("fault", ["binder_raises", "preparation_fails"])

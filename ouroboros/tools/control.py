@@ -108,6 +108,8 @@ _START_TASK_DESCRIPTION = (
     "Give the separate work a short title and objective. project_name creates a named room; "
     "project_id selects an existing room. workspace_root selects its folder; "
     "workspace='none' opts out of the room's default folder. "
+    "From a Presence conversation or work acting for a place, name where each new work belongs with destination; "
+    "without one nothing starts. Elsewhere omit it. "
     "Set context_requires_development=true only when the task itself needs the whole development handbook in every "
     "mode, never for its subject; a route too small for it refuses the task. "
     "A durable pending intent is recorded but not yet confirmed; inspect its recorded "
@@ -134,6 +136,16 @@ _MESSAGE_DESTINATION_DESCRIPTION = (
 _ROOT_EFFORT_PARAM = {"type": "string", "enum": list(EFFORT_SCALE), "description": (
     "Optional: the reasoning effort the NEW task starts on; applied in Cyber Pro only — otherwise the "
     "task starts at my human's recommended level and the result says so. Omit for that level.")}
+_START_CHOICE_PARAMS = {
+    "reasoning_effort": _ROOT_EFFORT_PARAM,
+    "destination": {"type": "string", "enum": ["place", "owner"], "description": (
+        "Presence callers only. 'place': this place's work, which may answer its conversation. 'owner': the owner's own "
+        "private work, asked for by their answer to a private question; it runs as ordinary owner work in Main or a "
+        "Project chosen here without an automatic place reply; the place can still read and stop it. That root schedules "
+        "its own follow-ups.")},
+    "owner_quote": {"type": "string", "default": "", "description": (
+        "With destination='owner': the held owner_quote_handle of the answer that asks for this work.")},
+}
 
 
 # The direct-OpenAI custom projection drops parameter prose and keeps this lead only as far as it fits
@@ -172,10 +184,10 @@ def _project_tool_entries() -> List[ToolEntry]:
     return [
         ToolEntry("close_project", {
             "name": "close_project",
-            "description": "Close a finished project with a note, or reopen it. Its room and history stay; a new owner message or task reopens it.",
+            "description": "Close a finished project with a note, or reopen it. Closing makes the note the room's last page over its open rows, from what I hold (name what I did not re-read); its room and history stay; a new owner message or task reopens it.",
             "parameters": {"type": "object", "properties": {
                 "project_id": {"type": "string"},
-                "note": {"type": "string", "description": "Why I close or reopen this project."},
+                "note": {"type": "string", "description": "Why I close or reopen this project; closing: also the room's page, so what it did, found and left open."},
                 "reopen": {"type": "boolean", "default": False},
             }, "required": ["project_id", "note"], "additionalProperties": False},
         }, _close_project, safety_policy="skip"),
@@ -225,19 +237,21 @@ def get_tools() -> List[ToolEntry]:
             }, "required": ["subagent_id"], "additionalProperties": False},
         }, inspect_subagent_tool),
         ToolEntry("finish_task", {"name": "finish_task",
-            "description": "Select the complete answer after considering the work. Use finish, or stop with a rationale naming unfinished work or why you are stopping. "
-                "A root's stop records unfinished work for explicit Continue under the same limits. Continue does not reopen an ordinary finish or a final reply without this tool, even when its text calls it partial. "
+            "description": "Select the complete answer after considering the work. Use finish when nothing of this work is left for you; use stop, with a rationale naming what remains or why you are stopping, while a step of it is still yours, including when a limit ends this turn first. "
+                "A root's stop records unfinished work for explicit Continue under the same limits (a reached deadline or money limit refuses it): your human's Continue or a later focus's continue_task starts a new root that reads this one, with a root's work room, also when this is a chat turn; continue_in_background keeps this same turn and its work room. Continue does not reopen an ordinary finish or a final reply without this tool, even when its text calls it partial. "
+                "Ending closes this task's browser, task-session connections and services not kept alive, and any link they serve; when your work can go on only after your human's act or choice, a live root asks with escalate (wait_for_answer=true) before ending. "
                 "Select exactly one of answer or a host-offered answer_sha256. Successful page, note, mark and addressed-message writes may ride in the same response; any other result is read before the finish. On a self-started run (a consciousness wake's own turn, or a schedule-born root without a Presence binding) or a root answering its place, silent=true sends no message (any answer stays your internal note), refused while your human awaits a reply. No answer is needed. The run records no message unless a host notice is owed. This grants no success, cancels no children, and retains all configured review and owner controls.",
             "parameters": {"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["finish", "stop"]}, "answer": {"type": "string", "description": "The complete answer, including a short correction; a child's parent reads it as your report, a root's goes where that root answers (its owner's chat, or the conversation a Presence root answers, as your context names)."},
                 "answer_sha256": {"type": "string", "description": "Exact offered retained or whole held response hash."},
-                "rationale": {"type": "string", "description": "For stop, what remains unfinished or why you are stopping; the owner reads it as the stop's cause on the task row. Optional for finish."}, "acceptance_subject": {"type": "object", "properties": {"owner_source_sha256": {"type": "string"},
+                "rationale": {"type": "string", "description": "For stop, what remains unfinished, whose step it is and why you end now; the owner reads it as the stop's cause on the task row. Optional for finish."}, "acceptance_subject": {"type": "object", "properties": {"owner_source_sha256": {"type": "string"},
                     "effective_criteria": {"type": "string"}, "material_tool_indices": {"type": "array", "items": {"type": "integer"}},
                 }, "required": ["owner_source_sha256"]},
                 "pending_review": {"type": "string", "enum": ["wait", "finish"], "default": "wait"},
                 "swarm_comparison": {"type": "string", "description": "Optional solo-versus-swarm comparison in your own words, attributed to you separately from measured tree facts."},
                 "silent": {"type": "boolean", "default": False, "description": "Finish without a message where allowed above and no human reply is owed; any answer stays internal (wake_silent)."},
-                "summary": {"type": "string", "default": "", "description": "On a root task or self-started run: one short plain sentence for your human, in their language, saying what this run did, found or decided. A clean finish shows it on the card, room row and portal; a held cause takes precedence. An unnamed self-started run, including a schedule-born root without a Presence binding, may take it as its title; an authored title and an ordinary task's name stay. It also appears in the schedule's last-run line or Consciousness row; the next scheduled run or wake reads it. Your full answer stays as written. Not available to a child."},
+                "summary": {"type": "string", "default": "", "description": "On a root task or self-started run: one short plain sentence for your human, in their language, saying what this run did, found or decided. A clean finish shows it on the card, room row and portal; a held cause takes precedence. An unnamed self-started run, including a schedule-born root without a Presence binding, may take it as its title; an authored title and an ordinary task's name stay. It also appears in the schedule's last-run line or Consciousness row; the next scheduled run or wake reads it, and my other foci read it beside this room until a page seals its rows. Your full answer stays as written. Not available to a child."},
+                "fold_read": {"type": "boolean", "default": False, "description": "With summary, when this run read words here and owes nothing: my other conversations read this room's words up to this finish as this sentence with their address, until a page seals them. My human's words stay whole; nothing is sealed."},
             }, "required": ["action"]}}, _finish_task),
         ToolEntry("set_tool_timeout", {
             "name": "set_tool_timeout",
@@ -274,7 +288,7 @@ def get_tools() -> List[ToolEntry]:
                     "context_requires_self_body_docs": {"type": "boolean", "description": "True for work on Ouroboros code, including copies elsewhere: this task gets the full development handbook in Max. Low/Nano and helpers keep their usual book maps.", "default": False},
                     "context_requires_development": {"type": "boolean", "description": "true: all of docs/DEVELOPMENT.md in every mode; false: its chapter map."},
                     "source": {"type": "string", "description": "Attach an existing folder or clone a git URL (https://... or git@host:path) server-side into the projects root; private auth failures are typed auth_required. Registers the folder with provenance + trusted_at as the Project/task workspace. Use for work on a supplied repo/folder.", "default": ""},
-                    "reasoning_effort": _ROOT_EFFORT_PARAM,
+                    **_START_CHOICE_PARAMS,
                 },
                 "required": ["objective", "title"],
             },

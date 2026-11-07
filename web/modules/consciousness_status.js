@@ -15,22 +15,17 @@
  */
 import { headlineView } from './consciousness_dashboard.js';
 import { normalizeConsciousness, readConsciousness } from './consciousness_api.js';
-import { clockText, deadlineWords, splitWakes, wakePhaseText } from './consciousness_words.js';
+import { allowanceText, clockText, consciousnessMark, deadlineWords, splitWakes, wakePhaseText } from './consciousness_words.js';
 import { tr } from './i18n.js';
 import { controlIcon } from './page_icons.js';
 import { createStatusMark, paintStatusMark } from './status_mark.js';
-import { formatUsd2 } from './utils.js';
 import { hangUnderCapsules } from './room_work.js';
 import { motionMs, reducedMotion } from './motion.js';
 
-// The owner's move (DESIGN "Status marks", amber): consciousness stopped by its spending limit or waiting for a first
-// conversation, a campaign stopped by its limit or waiting for the owner's chat. A failure is an outcome's red dot,
-// an unconfirmed outcome a ring, a paused wake two bars, a due wake the still mark.
-const OWNER_MOVE = new Set(['allowance_exhausted', 'waiting_for_first_conversation']);
+export { allowanceText };
+// A campaign stopped by its limit or waiting for the owner's chat is the owner's move too (the state's own marks are
+// consciousness_words.consciousnessMark, shared with the Dashboard's headline).
 const CAMPAIGN_OWNER_MOVE = new Set(['waiting_for_first_conversation', 'waiting_for_owner_chat', 'budget_blocked', 'budget_stopped']);
-const FAILED = new Set(['wake_failed', 'wake_rejected', 'stopped']);
-const UNCONFIRMED = new Set(['wake_outcome_unknown', 'allowance_unknown']);
-const NONE = Object.freeze({ shape: 'none', hue: 'ink' });
 const WAKES_SHOWN = 3;
 // A command waits this long for the runtime before the room's state clock is asked again (the Dashboard's beat).
 const COMMAND_SETTLE_MS = 400;
@@ -48,30 +43,13 @@ export function chipView(data = {}) {
     const evolving = data.evolution_enabled === true;
     const off = snapshot.enabled === false;
     const unknown = snapshot.enabled === null;
-    const status = snapshot.status;
-    const owner = (!off && !unknown && OWNER_MOVE.has(status))
-        || (evolving && CAMPAIGN_OWNER_MOVE.has(String(data.evolution_state?.status || '')));
     const word = evolving ? 'Evolving' : off ? 'Off' : headline.moving || unknown ? '' : deadlineWords(snapshot);
-    const mark = owner ? { shape: 'dot', hue: 'owner' }
-        : headline.moving ? { shape: 'moving', hue: 'ink' }
-            : off ? NONE
-                : FAILED.has(status) ? { shape: 'dot', hue: 'failed' }
-                    : unknown || UNCONFIRMED.has(status) ? { shape: 'ring', hue: 'ink' }
-                        : status === 'wake_paused' ? { shape: 'pause', hue: 'ink' }
-                            : status === 'due' ? { shape: 'still', hue: 'ink' } : NONE;
+    const mark = consciousnessMark(snapshot,
+        { owner: evolving && CAMPAIGN_OWNER_MOVE.has(String(data.evolution_state?.status || '')) });
     const said = [`Consciousness: ${headline.text}`,
-        evolving ? 'evolution campaign running' : '', owner ? 'waits for you' : '']
+        evolving ? 'evolution campaign running' : '', mark.hue === 'owner' ? 'waits for you' : '']
         .filter(Boolean).join(' · ');
     return { word, mark, off, evolving, said, headline, snapshot };
-}
-
-/** The money line: «$1.50 of $20.00 in the last 24 hours»; a floor (≥) while some rows are unmetered; '' when unknown. */
-export function allowanceText(snapshot) {
-    const { spentUsd, dailyUsd } = snapshot;
-    if (spentUsd === null || dailyUsd === null) return '';
-    const floor = snapshot.unknownUnmetered > 0 ? '≥ ' : '';
-    const degraded = snapshot.integrityDegraded ? ' (ledger integrity degraded)' : '';
-    return `${floor}${formatUsd2(spentUsd)} of ${formatUsd2(dailyUsd)} in the last 24 hours${degraded}`;
 }
 
 /** The three last wakes, newest first: time, its one short line, and its phase in the Dashboard's words. */

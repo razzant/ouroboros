@@ -46,7 +46,7 @@ def probe(output):
                             if (telegram) { document.documentElement.dataset.host = 'telegram'; window.Telegram = { WebApp: { platform: 'ios' } }; }
                             document.head.innerHTML = ['ui', 'style', 'settings', 'cards', 'consciousness'].map(file =>
                                 `<link rel="stylesheet" href="/web/${file}.css">`).join('') +
-                                '<style>body{margin:0;display:block}#main-mount{height:100dvh}#main-mount[hidden],#mount[hidden]{display:none}#mount{height:100dvh;padding:16px;box-sizing:border-box}.costs-scroll{height:calc(100dvh - 32px);overflow:auto}</style>';
+                                '<style>body{margin:0;display:block}#main-mount{height:100dvh}#main-mount[hidden],#mount[hidden]{display:none}#mount{height:100dvh;padding:16px;box-sizing:border-box}.dashboard-body{height:calc(100dvh - 32px);overflow:auto}</style>';
                             document.body.innerHTML = '<main id="mount" class="dashboard-shell"></main><main id="main-mount" hidden></main>';
                         }""", {"telegram": telegram, "width": width})
                         page.add_script_tag(url=origin + "/web/marked.min.js")

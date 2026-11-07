@@ -132,7 +132,7 @@ def test_a_presence_childs_promote_and_follow_up_stay_its_bindings_work_under_th
     )
 
     out = _start_task(child_ctx, "Compile the full audit", title="Full audit", project_name="Widened",
-                                workspace_root=str(tmp_path / "elsewhere"), source="api")
+                                workspace_root=str(tmp_path / "elsewhere"), source="api", destination="place")
 
     authority = {"binding_id": BINDING}
     [evt], [root] = emitted, pending

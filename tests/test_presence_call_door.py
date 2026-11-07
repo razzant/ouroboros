@@ -134,6 +134,24 @@ def test_event_facts_must_be_declared_wake_facts(tmp_path, place, opened):
     assert refused.value.code == "presence_event_invalid"
 
 
+ME = {"sends_as": {"id": "me", "label": "ouroboros-agent", "kind": "user"}}
+
+
+def test_a_call_event_carries_the_connectors_identity_and_its_own_account_opens_nothing(tmp_path, place, opened):
+    # Another person's event with the negotiated identity opens the call, as it does without one.
+    assert _open(tmp_path, event=_event(identity=ME, facts=["mention"])).call_id
+    # The account this place sends as is heard, not answered: no call, no hub, the room keeps it with its reason.
+    with pytest.raises(door.PresenceCallRefused) as refused:
+        _open(tmp_path, event=_event(source_event_id="e2", actor={"id": "me"}, identity=ME, facts=["mention"]))
+    assert refused.value.code == "place_own_account"
+    assert len(opened["hubs"]) == 1 and "own_account" in _heard(tmp_path)[-1][1]
+    # A malformed identity is refused before the room hears it, with the code /presence/turn answers.
+    with pytest.raises(door.PresenceCallRefused) as refused:
+        _open(tmp_path, event=_event(source_event_id="e3", identity={"sends_as": {"id": "me"}}, facts=["mention"]))
+    assert refused.value.code == "presence_identity_invalid"
+    assert len(_heard(tmp_path)) == 2
+
+
 def test_host_door_checks_the_connected_place_of_the_connector(tmp_path, place):
     from ouroboros.gateway import host_call
 
@@ -187,7 +205,7 @@ def test_an_older_connectors_own_reaction_key_keeps_the_call_path(tmp_path, plac
     assert opened["started"]
 
 
-def test_the_skill_door_answers_an_invalid_reaction_as_the_turn_door_does(tmp_path, place, opened, monkeypatch):
+def test_the_skill_door_answers_reactions_and_identities_as_the_turn_door_does(tmp_path, place, opened, monkeypatch):
     from starlette.testclient import TestClient
 
     from ouroboros.gateway import host_call, host_service
@@ -204,3 +222,10 @@ def test_the_skill_door_answers_an_invalid_reaction_as_the_turn_door_does(tmp_pa
     assert (heard.status_code, heard.json()["code"]) == (403, "place_reaction_context_only")
     assert len(_heard(tmp_path)) == 1
     assert opened["hubs"] == []
+    own = client.post("/call/open", json={"role": "meeting",
+                                          "event": _event(source_event_id="e4", actor={"id": "me"}, identity=ME,
+                                                          facts=["mention"])})
+    assert (own.status_code, own.json()["code"]) == (403, "place_own_account")
+    malformed = client.post("/call/open", json={"role": "meeting",
+                                                "event": _event(source_event_id="e5", identity=[], facts=["mention"])})
+    assert (malformed.status_code, malformed.json()["code"]) == (400, "presence_identity_invalid")

@@ -432,7 +432,7 @@ def _finish_task_done_dispatch(
             or load_task_result(ctx.DRIVE_ROOT, str(task_id or ""))
             or {}
         )
-        from supervisor.subagent_task_truth import enrich_task_done_event
+        from supervisor.subagent_task_truth import enrich_task_done_event, terminal_executor_route
 
         _envelope = enrich_task_done_event(task_done_event, effective_result)
         # Membership, not truthiness (C4): chat 0 real, negative A2A.
@@ -513,7 +513,7 @@ def _finish_task_done_dispatch(
                 # The terminal frame carries the route so the finished card's chip can be
                 # rebuilt on replay, and the completion-seam EVIDENCE (below) so the chip
                 # upgrades from the neutral "dispatched" decision to what actually ran.
-                "executor_route": str(effective_result.get("executor_route") or ""),
+                "executor_route": terminal_executor_route(effective_result),
                 # The effort decision survives the terminal card and its replay (empty = unknown).
                 "effort_level": str(effective_result.get("effort_level") or ""),
                 "effort_requested": str(effective_result.get("effort_requested") or ""),
@@ -802,7 +802,7 @@ def _resolve_lifecycle_fault(
             default=HIDDEN_CHAT_ID,
         ),
         "status": status,
-        "wake_silent": stored.get("wake_silent") is True, **{key: stored[key] for key in ("wake_summary", "schedule_name") if stored.get(key)}, **work_label(stored, task_row),
+        "wake_silent": stored.get("wake_silent") is True, **{key: stored[key] for key in ("wake_summary", "fold_read", "schedule_name") if stored.get(key)}, **work_label(stored, task_row),
         "quiet_effective": quiet_finish(stored),
         "reason_code": str(stored.get("reason_code") or ""),
         "outcome_axes": normalize_outcome_axes(stored),
@@ -1071,7 +1071,7 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
             default=HIDDEN_CHAT_ID,
         ),
         "status": str(final_task_result.get("status") or evt.get("status") or ""),
-        "wake_silent": known_result.get("wake_silent") is True, **{key: known_result[key] for key in ("wake_summary", "schedule_name") if known_result.get(key)}, **work_label(known_result, task),
+        "wake_silent": known_result.get("wake_silent") is True, **{key: known_result[key] for key in ("wake_summary", "fold_read", "schedule_name") if known_result.get(key)}, **work_label(known_result, task),
         "quiet_effective": quiet_finish(known_result),
         # The direct-turn fact rides the rebuilt terminal so the chat block keys
         # its chrome on host truth: the worker frame carries it, the durable
