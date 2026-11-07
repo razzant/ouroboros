@@ -40,8 +40,8 @@ Otherwise, when in doubt → SAFE. Only a clear violation of a rule above, an ow
 Respond with exactly:
 {
   "status": "SAFE" | "SUSPICIOUS" | "DANGEROUS",
-  "reason": "short explanation",
+  "reason": "short; name the rule or note",
   "speech": true | false,
-  "quote": "the exact words, empty if none"
+  "quote": "exact words, or empty"
 }
 "speech": does this call deliver words to people, whatever the tool?
