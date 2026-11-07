@@ -55,7 +55,7 @@ def _declares_place(connector: str) -> bool:
 
 def _call_destinations(ctx: Any, name: str, args: Mapping[str, Any], ext_tool: Any, is_mcp: bool):
     """Resolve each recipient separately so an Active To never hides a Silent Cc. A call its connector declares as
-    one that delivers words (``message.when``) is a ``message`` here, routed by that declaration's selectors."""
+    one that delivers words (``sends.when``) is a ``message`` here, routed by that declaration's selectors."""
     effect = effect_of(name, ext_tool=ext_tool, is_mcp=is_mcp, ctx=ctx, args=args)
     targets = target_values(effect, args)
     connector, root = connector_of(name, ext_tool), _drive_root(ctx)

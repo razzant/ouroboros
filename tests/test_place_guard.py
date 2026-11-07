@@ -111,7 +111,7 @@ def test_a_declared_generic_send_meets_the_place_guards_as_a_message(published_t
     """A generic tool's call its connector declares as words is a message here: a Silent place refuses it through
     its nested target and another turn's conversation names its author; the tool's other calls keep its write."""
     rows, ctx = places
-    name, tool = published_tool("write", target=[], message={"when": {"path": "chat.postMessage"}, "text": "body.text",
+    name, tool = published_tool("write", target=[], sends={"when": {"path": "chat.postMessage"}, "text": "body.text",
                                                               "target": "body.channel", "conversation": "body.channel"})
     def send(room):
         return {"path": "chat.postMessage", "body": {"channel": room, "text": "hi"}}

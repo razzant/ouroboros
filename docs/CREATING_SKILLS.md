@@ -953,7 +953,7 @@ tools:
   - name: slack_api            # a generic tool: its own effect, and the calls that deliver words
     effect: write
     target: []
-    message:
+    sends:
       when: {path: [chat.postMessage, chat.update]}   # each (dotted) selector holds one of its values
       target: body.channel
       conversation: body.channel
@@ -974,7 +974,7 @@ contributes:
   Paused place refuses `message` and `write` aimed at it; the Safety Supervisor skips declared reads at Light/Full and
   gives `message` its speech semantics (a flagged message returns to the mind; an identical re-issue from a later
   step is sent and recorded; with no verdict it waits). A tool that reads or writes depending on its arguments is
-  `write`, unless its `message:` block declares which calls deliver words: a call whose every `when` selector holds
+  `write`, unless its `sends:` block declares which calls deliver words: a call whose every `when` selector holds
   one of its listed values is `message`, attributed by that block's `target`/`conversation`/`thread`; any other call
   keeps the row's `effect`. A `write` into a conversation (a reaction, a pin, a bookmark) is not words by itself.
   This is the connector's fact: core lists no provider method and never reads speech from argument names. The

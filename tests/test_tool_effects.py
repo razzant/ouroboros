@@ -86,9 +86,9 @@ def test_target_values_are_flat_declared_arguments_only():
 
 
 def test_a_generic_tool_declares_which_calls_deliver_words(published_tool):
-    """A connector names the calls of its generic tool that deliver words (``message.when``) and where they land
+    """A connector names the calls of its generic tool that deliver words (``sends.when``) and where they land
     (dotted selectors); every other call keeps the tool's own declaration, and a malformed one selects nothing."""
-    name, descriptor = published_tool("write", target=[], message={
+    name, descriptor = published_tool("write", target=[], sends={
         "when": {"path": ["chat.postMessage", "chat.update"]},
         "target": "body.channel", "conversation": "body.channel", "thread": "body.thread_ts"})
     send = {"path": "chat.postMessage", "body": {"channel": "C1", "thread_ts": "1.2", "text": "hi"}}
@@ -98,5 +98,5 @@ def test_a_generic_tool_declares_which_calls_deliver_words(published_tool):
     assert effects.target_values(fact, send) == {"body.channel": ["C1"], "body.thread_ts": ["1.2"]}
     for args in ({"path": "reactions.add", "body": {"channel": "C1"}}, {"body": {"channel": "C1"}}, None):
         assert effects.effect_of(name, ext_tool=descriptor, args=args).effect == "write"
-    name, descriptor = published_tool("write", message={"when": {"path": 5}, "target": "channel"})
+    name, descriptor = published_tool("write", sends={"when": {"path": 5}, "target": "channel"})
     assert effects.effect_of(name, ext_tool=descriptor, args={"path": 5, "channel": "C1"}).effect == "write"

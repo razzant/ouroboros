@@ -1398,7 +1398,7 @@ def check_safety(
     is_mcp = tool_name.startswith("mcp_")
     effect = effect_of(tool_name, ctx=ctx, is_mcp=is_mcp, args=arguments)
     # Speech the host knows before any verdict, from declarations only: a ``message`` effect, a connector-declared
-    # send of a generic tool (``message.when``), or the automatic reply. A verdict may add the mark (below), never
+    # send of a generic tool (``sends.when``), or the automatic reply. A verdict may add the mark (below), never
     # an argument name. An MCP call that is no declared read waits like speech when no verdict exists.
     speech = tool_name == "place_reply" or effect.effect == "message"
     if tool_name == "manage_schedules" and arguments.get("action") in {"create", "update", "restore"}:

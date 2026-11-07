@@ -41,7 +41,7 @@ def test_held_words_wait_in_cyber_pro_whatever_tool_carries_them(supervisor, mon
     monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")
     monkeypatch.setattr(_tool_effects, "effect_of", REAL_EFFECT_OF)
     monkeypatch.setattr(_tool_effects, "_MCP_ANNOTATIONS", {})
-    name, _tool = published_tool("write", target=[], message={"when": {"path": "chat.postMessage"}, "target": "body.channel"})
+    name, _tool = published_tool("write", target=[], sends={"when": {"path": "chat.postMessage"}, "target": "body.channel"})
     if cause == "outage":
         h.replies.extend([RuntimeError("provider_failed: Codex reported a failed response")] * 5)
     else:

@@ -11,7 +11,7 @@ otherwise it is ``write`` with ``declared=False``. Two widenings follow and
 are disclosed: a server that lies about a write runs it unchecked, and
 Advises may call such tools. A mixed tool (one tool that reads or writes
 depending on its arguments) is ``write``, unless its row declares which of its
-calls deliver words: ``message: {when: {<selector>: <value or values>}, target,
+calls deliver words: ``sends: {when: {<selector>: <value or values>}, target,
 conversation, thread}`` makes a call whose selected arguments all hold a listed
 value a ``message`` with those targets (a connector-owned fact, e.g. the API
 method of a generic Slack tool; core never lists provider methods). Selectors
@@ -147,8 +147,8 @@ def _routed(row: Mapping[str, Any], effect: str, *, declared: bool) -> ToolEffec
 
 
 def _declared_send(row: Mapping[str, Any], args: Any) -> bool:
-    """Whether the row's ``message.when`` selects this call: every selector holds one of its listed values."""
-    send = row.get("message")
+    """Whether the row's ``sends.when`` selects this call: every selector holds one of its listed values."""
+    send = row.get("sends")
     when = send.get("when") if isinstance(send, Mapping) else None
     if not isinstance(when, Mapping) or not when or not isinstance(args, Mapping):
         return False
@@ -162,7 +162,7 @@ def _declared_send(row: Mapping[str, Any], args: Any) -> bool:
 
 def effect_of(name: str, *, ext_tool: Any = None, is_mcp: bool = False, ctx: Any = None, args: Any = None) -> ToolEffect:
     """Resolve the published declaration; defaults never relax a call's policy. With ``args``, a call the row
-    declares as one that delivers words (``message.when``) is a ``message`` with that declaration's targets."""
+    declares as one that delivers words (``sends.when``) is a ``message`` with that declaration's targets."""
     from ouroboros.extension_surface_names import parse_extension_surface_name
 
     if is_mcp or name.startswith("mcp_"):
@@ -174,7 +174,7 @@ def effect_of(name: str, *, ext_tool: Any = None, is_mcp: bool = False, ctx: Any
         return BUILTIN
     row = _published_declaration(name, ext_tool)
     if args is not None and _declared_send(row, args):
-        return _routed(row["message"], EFFECT_MESSAGE, declared=True)
+        return _routed(row["sends"], EFFECT_MESSAGE, declared=True)
     effect = row.get("effect")
     declared = isinstance(effect, str) and effect in EFFECTS
     return _routed(row, effect if declared else EFFECT_WRITE, declared=declared)
