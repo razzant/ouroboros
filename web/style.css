@@ -6307,8 +6307,11 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 }
 .toast-stack--room .toast { max-width: min(520px, 100%); box-sizing: border-box; background: var(--surface-float); }
 /* A notice's one way back (host_modules.js recovery) follows its words on the same line when they fit. */
-.toast .toast-action { display: inline-flex; margin-left: var(--space-2); vertical-align: middle; }
-.toast:has(> .toast-dismiss) { display: flex; align-items: center; gap: var(--space-2); }
+.toast .toast-action { display: inline-flex; flex-shrink: 0; margin-left: var(--space-2); vertical-align: middle; }
+.toast:has(> .toast-dismiss) { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-2); }
+.toast:has(> .toast-dismiss) .toast-words { min-width: 0; grid-column: 1; }
+.toast:has(> .toast-dismiss) .toast-action { grid-column: 1; margin-left: 0; justify-self: start; }
+.toast:has(> .toast-dismiss) .toast-dismiss { grid-column: 2; grid-row: 1 / span 2; }
 /* The page's stack ends 18 px above the screen's bottom, as it keeps from its right, and the notices it keeps scroll
    there as one column: every word and close button is reached by wheel, touch or keyboard (toast.js names it a region
    once cut). A scrolling box clips what it holds, so its padding is the toasts' shadow room (0 18px 42px): left and

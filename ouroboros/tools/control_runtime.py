@@ -582,7 +582,8 @@ def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destinatio
         if error:
             return publish_no_effect(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=error, meta={"reason_code": "RELAY_RETURN_UNRESOLVED"}))
         chat_id, system_type = relay["source"]["chat_id"], "relay_reply"
-        reply_meta = {"reply_to": resolve_reply(canonical_data_root(ctx), relay["source"]["address"]),
+        source_root = relay.get("_owner_source_roots", {}).get(relay["source"]["address"]) or canonical_data_root(ctx)
+        reply_meta = {"reply_to": resolve_reply(source_root, relay["source"]["address"]),
                       "reply_to_relay": relay["relay_id"]}
     from ouroboros.tools.owner_delivery import deliver_owner_event, publish_delivery_receipt, stamp_lineage
     from ouroboros.utils import append_jsonl

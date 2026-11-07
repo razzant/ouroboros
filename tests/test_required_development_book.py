@@ -217,8 +217,8 @@ def test_a_follow_up_is_separate_work_and_inherits_no_answer(tmp_path, monkeypat
     monkeypatch.setattr(followup, "presence_root_carrier", lambda *_a, **_kw: {"presence": {"binding_id": "b"}})
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="origin", current_chat_id=1,
                       task_metadata={"root_task_id": "origin"}, task_contract={KEY: True, "constraints": "keep"})
-    assert _handle_schedule_followup(ctx, objective="Later work", run_at="2030-01-01T00:00:00Z",
-                                     relation="independent").startswith("FOLLOWUP_SCHEDULED")
+    assert _handle_schedule_followup(ctx, objective="Later work", run_at="2030-01-01T00:00:00Z", relation="independent",
+                                     destination="place").startswith("FOLLOWUP_SCHEDULED")
     row = next(item for item in task_queue.list_scheduled_tasks(tmp_path)["tasks"] if item.get("kind") != "notify")
     assert KEY not in row["task"]["task_contract"] and row["task"]["task_contract"]["constraints"] == "keep"
     # No schedule writer holds this door, whatever a template carries: the public API takes a raw task body.
