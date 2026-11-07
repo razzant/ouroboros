@@ -13,6 +13,7 @@ import logging
 import contextlib
 import copy
 from datetime import datetime, timezone
+import math
 import pathlib
 import queue
 import time
@@ -216,6 +217,10 @@ def _run_cross_model_fallback_chain(
             append_unknown_recovery_input(target, accumulated_usage, dict(accumulated_usage.get("_pending_transport_outcome") or {}),
                                           lead=lead, continuation="configured_route")
 
+    def _asks_owner() -> bool:  # the deferred refusal's own wait (below), read as the walk has left it
+        return (not recovering_output and task_type != "presence" and deferred is not None and not own_wait
+                and waiter is not None and waiter.waits_allowed)
+
     waiter = current_model_wait()
     _cooled(active_model, active_use_local, str(getattr(context_fit_plan, "model_role", "") or "main"))
     primary_context_usage = _snapshot_context_fit_usage(accumulated_usage)
@@ -227,8 +232,6 @@ def _run_cross_model_fallback_chain(
     # A primary resource refusal returned here, not waited: the configured routes come
     # first, and the owner question is that refusal's own wait, asked after them.
     deferred, tools._ctx._deferred_resource_refusal = getattr(tools._ctx, "_deferred_resource_refusal", None), None
-    owner_question = (task_type != "presence" and deferred is not None and not own_wait
-                      and waiter is not None and waiter.waits_allowed)
     deferred_candidate = None  # The route that actually refused; never replay an unrelated primary.
     rows = _route_candidates(tools._ctx, active_model, active_use_local,
                              str(getattr(context_fit_plan, "model_role", "") or ""), waiter)
@@ -297,7 +300,7 @@ def _run_cross_model_fallback_chain(
                 attempt_cap=1 if recovering_output else attempt_cap,
                 model_role=fallback_role,
                 emit_progress=emit_progress,
-                defer_resource_wait=(recovering_output or task_type == "presence" or owner_question
+                defer_resource_wait=(recovering_output or task_type == "presence" or _asks_owner()
                                      or _route_follows(rows[index + 1:])),
                 output_recovery_fallback=recovering_output,
             )
@@ -317,8 +320,6 @@ def _run_cross_model_fallback_chain(
             deferred = getattr(tools._ctx, "_deferred_resource_refusal", None)
             if deferred is not None:
                 deferred_candidate = candidate_call
-            owner_question = (task_type != "presence" and deferred is not None and not own_wait
-                              and waiter is not None and waiter.waits_allowed)
         if msg is not None or (not recovering_output and accumulated_usage.get("_last_llm_error_kind") == output_recovery.KIND
                                and not accumulated_usage.get("_pending_transport_outcome")):
             (active_model, active_use_local, context_fit_plan, active_context_mode) = _adopt_fallback_route(
@@ -378,10 +379,8 @@ def _run_cross_model_fallback_chain(
         accumulated_usage["_acting_route_failure"] = entry_failure  # its own failure decides its salvage; the last row stays the walk's
     if deferred is None:
         deferred = getattr(tools._ctx, "_deferred_resource_refusal", None)
-    owner_question = (not recovering_output and task_type != "presence" and deferred is not None and not own_wait
-                      and waiter is not None and waiter.waits_allowed)
     accumulated_usage.pop(RESOURCE_REFUSAL_KEY, None)
-    if msg is None and owner_question and not fenced:
+    if msg is None and _asks_owner() and not fenced:
         # Only the refused route is eligible to re-send after the owner wait;
         # the primary might have failed permanently before a fallback's quota refusal.
         deferred.ask_owner(waiter)
@@ -426,7 +425,7 @@ def _run_cross_model_fallback_chain(
             context_fit_plan = retry_call.context_fit_plan
     elif msg is None and deferred is not None and not own_wait:  # the refused primary buys no forced final either
         accumulated_usage[RESOURCE_REFUSAL_KEY] = deferred.terminal(
-            fallbacks_tried=tried, owner_wait="not_asked" if owner_question else "not_allowed")
+            fallbacks_tried=tried, owner_wait="not_asked" if _asks_owner() else "not_allowed")
     return (
         msg,
         active_model,
@@ -594,9 +593,10 @@ def _rebind_context_fit_plan(
     window = resolve_window(evidence, output_reserve, bound=bound, observation_fp=scope)  # before density: it caps the key
     window_tokens, known_window = window.total_equivalent, window.usable is not None
     ratio, carried = anchor.density if anchor is not None else _route_calibration_ratio(
-        None, str(getattr(evidence, "route_fp", "") or ""), str(route.get("model") or model),  # the canonical evidence root
-        min(estimate_context_prompt_tokens(messages, tool_schemas, provider=str(route.get("provider") or "")),
-            window.usable or float("inf")), view_kind=plan.view_kind), None  # compared at the size that can be sent
+        None,  # canonical evidence root (one observation store)
+        str(getattr(evidence, "route_fp", "") or ""), str(route.get("model") or model),
+        min(estimate_context_prompt_tokens(messages, tool_schemas, provider=str(route.get("provider") or "")), window.usable or math.inf),
+        view_kind=plan.view_kind), None  # compared at the size that can be sent
     if anchor is not None and route_window_kwargs(evidence)["window_basis"] != "estimator":  # that stays raw, as in a round
         ratio, carried = anchor.view_terms(estimate_context_prompt_tokens(  # the view sized below, not the one last shown
             plan.reproject_transcript(messages, start_mode or preferred), tool_schemas, provider=str(route.get("provider") or "")))
@@ -1397,7 +1397,8 @@ def _call_round_model_once(ctx: _RoundModelCallContext) -> Tuple[Any, float, str
 # earning one strictly smaller check/retry. Each runs once per round whatever the route, so a configured fallback
 # receives the view as applied and walks nothing again. The fallback chain and the end of the path follow in the caller.
 from ouroboros.context_budget import REFUSAL_PASSES  # one rung order; dispatch stays in this driver
-WAKE_DELIVERY_STEP, REBOUND_VIEW_STEP = "wake_delivery", "rebound_view"  # a change applied before the passes
+WAKE_DELIVERY_STEP = "wake_delivery"  # the change applied before the passes, when there was one
+REBOUND_VIEW_STEP = "rebound_view"  # or the view the refusal's route rebind narrowed
 #: The round needing size recovery (``context_renewal`` reads it); a fallback's other failure cannot cancel it.
 CONTEXT_REFUSAL_ROUND_KEY = "_context_refusal_round"
 
@@ -1420,7 +1421,7 @@ def _refusal_window(ctx: _RoundModelCallContext, fit: Any,
     message = str(ctx.accumulated_usage.get("_last_llm_provider_message") or "")
     stated = _parse_ctx_limit_number(message) or None
     sent = int(getattr(refused, "prompt_tokens_bounded_estimate", 0) or 0)  # the refused attempt's own bytes, in this
-    sent = int(-(-sent * measurement.measurement_density // 1)) if sent else 0  # measurement's units, never a rebound view
+    sent = math.ceil(sent * measurement.measurement_density) if sent else 0  # measurement's units, never a rebound view
     # The provider's own count of the refused request beats the estimate when it states both; a stated limit
     # beside a COLD estimate measures nothing (chars/4 under-counts code and Cyrillic): unknown, as before.
     stated_input, stated_reply, stated_total = _parse_ctx_requested(message) if stated else (0, 0, 0)
