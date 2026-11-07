@@ -195,7 +195,7 @@ def test_a_handoff_renders_the_rooms_rows_live_dated_in_the_unions_order_and_eve
     from ouroboros import dialogue_store as ds
     from ouroboros.chat_chain import row_address
     from ouroboros.chronicle_store import ChronicleStore
-    from ouroboros.owner_relay import inject_relay
+    from ouroboros.owner_relay import inject_relay, stamped_refs, words_unseen_in
 
     origin = build_owner_message_ref(chat_id=1, client_message_id="msg-o", ts=_at(0), text="Start the Quotas project")
     room = _project(tmp_path, origin={"ref": origin, "text": "Start the Quotas project"})
@@ -226,9 +226,9 @@ def test_a_handoff_renders_the_rooms_rows_live_dated_in_the_unions_order_and_eve
     # such part; every parser still takes the reference last: the held row is seen by it, and unseen without it.
     held = f"[{_at(6)} · owner · owner_mailbox of task {ROOT} · went to other01 · chat {room} / cm-ctx]"
     assert f"{held}\nWent to another work\n" in text and text.count(" · went to ") == 1
-    assert {f"chat {room} / cm-ctx", f"chat {room} / cm-f"} <= ow.stamped_refs(text) and "went to other01" not in ow.stamped_refs(text)
-    assert ow.stamped_refs(ow.words_stamp({"source": ow.REPLY_TARGET, "author": "Ann", "ref": "row:abc"})) == set()
-    assert ow.words_unseen_in(ctx, text) == [] and [row["ref"] for row in ow.words_unseen_in(
+    assert {f"chat {room} / cm-ctx", f"chat {room} / cm-f"} <= stamped_refs(text) and "went to other01" not in stamped_refs(text)
+    assert stamped_refs(ow.words_stamp({"source": ow.REPLY_TARGET, "author": "Ann", "ref": "row:abc"})) == set()
+    assert words_unseen_in(ctx, text) == [] and [row["ref"] for row in words_unseen_in(
         ctx, text.replace(f"chat {room} / cm-ctx", f"chat {room} / cm-gone"))] == [f"chat {room} / cm-ctx"]
     # The other side: a room that cannot be read is one gap line; the tree's, the held, the origin and the marked
     # rows stay. An origin read that fails is its own line; a room read that may lack rows says so.

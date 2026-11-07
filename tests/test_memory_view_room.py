@@ -583,13 +583,16 @@ def test_a_project_root_reads_its_humans_sealed_rows_whole_under_the_actor_frame
     assert "alpha words" not in _section(text, "### Open conversation since")  # it left the open rows: read once
     assert [item["address"] for item in snapshot.room["project_words"]] == [_addr(rows[11])]
     assert snapshot.room["project_words"][0]["short"].startswith(f"{stamp} (words, 11 chars — read by address row:")
-    # The sealed origin row stands once, under the retention-proof heading; the section holds the other sealed rows.
+    # The sealed origin row stands once under the retention-proof heading and never in this section, which holds the
+    # other sealed rows. (Its own room, Main, may still list it among my other conversations: that lane is not this
+    # section's, so the guard reads the sections, not the whole text.)
     covers = page_covers(tmp_path, alpha, from_addr=_addr(origin), to_addr=_addr(origin))["covers"]
     assert ChronicleStore(tmp_path).publish_page(room_id=alpha, text="alpha started", covers=covers, author=shared.MIND).ok
     sealed, text = _view(tmp_path, task)
-    assert text.count(shared.ORIGIN) == 1 and shared.ORIGIN in _section(text, "### Words that started this work")
+    assert _section(text, "### Words that started this work").count(shared.ORIGIN) == 1
+    assert shared.ORIGIN not in _section(text, _HEADINGS["root"]) and shared.ORIGIN not in _section(text, "### Open conversation")
     assert text.index("### Words that started this work") < text.index(_HEADINGS["root"]) < text.index("### Open conversation")
-    assert [item["ref"] for item in sealed.room["project_words"]] == [f"chat {alpha} / a1"]
+    assert [item["ref"] for item in sealed.room["project_words"]] == [f"chat {alpha} / a1"]  # the origin's ref is not among them
     _main, main_text = _view(tmp_path, MAIN_TASK)
     assert _HEADINGS["root"] not in main_text and _FRAMES["root"] not in main_text and _main.room["project_words"] is None
     _kid, kid_text = _view(tmp_path, {"id": "kid", "chat_id": rooms["alpha"], "delegation_role": "subagent",
