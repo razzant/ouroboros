@@ -1014,7 +1014,10 @@ def test_quiz_dot_and_evolution_facts_keep_their_shape_in_narrow_columns(subscri
                 .filter(c => c.getBoundingClientRect().right > card.right + 0.5).length};
     }""")
     assert metrics == {'scroll': 0, 'outside': 0}, metrics
-    fact.scroll_into_view_if_needed()
+    # The card redraws on every state answer, so a held element handle can detach between Playwright's stability wait and
+    # its scroll (Linux CI, both attempts); the capture's scroll finds the current node in one step.
+    page.evaluate("""text => [...document.querySelectorAll('.evo-campaign-lines p')]
+        .find(p => p.textContent.includes(text)).scrollIntoView({block: 'nearest'})""", 'measure-every-tagged-commit-once')
     setup_browser.capture(page, 'evolution-facts-390')
 
 
