@@ -155,12 +155,14 @@ def with_destination_facts(ctx: Any, name: str, args: Mapping[str, Any], result:
     result, in every mode (my human's own work with Safety off included): the facts sit next to the act. ``result``
     is a ``ToolResult``; the note trails its text as a host annotation, the producer's text kept apart. A blocked
     call carries its own facts (a place refusal names the place, a Safety refusal its destination)."""
-    if (not isinstance(args, Mapping) or getattr(result, "status", "") == "blocked"
-            or effect_of(name, ctx=ctx, args=args).effect != EFFECT_MESSAGE):
-        return result
     try:
+        if (not isinstance(args, Mapping) or getattr(result, "status", "") == "blocked"
+                or effect_of(name, ctx=ctx, args=args).effect != EFFECT_MESSAGE):
+            return result
         _effect, _targets, resolved, _siblings, _known = _call_destinations(ctx, name, args, None, False)
-    except _PlacesUnreadable:
+    except Exception:  # the call already ran: a missing note never turns its result into a failure
+        import logging
+        logging.getLogger(__name__).warning("destination facts for %s unavailable", name, exc_info=True)
         return result
     focus = (_metadata(ctx).get("focus") or {}).get("place_id")
     note = "\n".join(destination_line(place.label or place.place_id,
