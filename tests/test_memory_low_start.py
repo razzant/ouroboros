@@ -17,10 +17,10 @@ from supervisor import schedule_notes, terminal_delivery as outbox
 from tests.test_memory_max_room import _core, _crowded_window, _fact, _start
 
 
-def _room(cause="crowded", *, window=1_000_000, zero_need=900_000):
+def _room(cause="crowded", *, window=1_000_000, zero_need=900_000, levels=1):
     return {"cause": cause, "window": window, "allowance": 40_000, "floor_need": zero_need - 70_000,
             "schemas": 70_000, "zero_need": zero_need, "need": zero_need + 150_000, "story": 110_000,
-            "unfolded": 60_000, "room": 40_000, "reserve": 65_536, "work": 125_000, "levels": 1,
+            "unfolded": 60_000, "room": 40_000, "reserve": 65_536, "work": 125_000 * levels, "levels": levels,
             "parts": [["books", 400_000], ["core", 30_000]]}
 
 
@@ -91,6 +91,24 @@ def test_the_line_goes_through_the_outbox_once_per_low_episode(tmp_path, sent):
         assert start(task, room, mode, **plan) == {} and len(sent) == 1  # untouched, closed
     assert start("rootD", _room())["task"] == "rootD"
     assert [event["delivery_id"] for _root, event in sent] == ["low_start:rootA:1", "low_start:rootD:1"]
+
+
+def test_only_a_start_with_the_opening_work_room_that_holds_max_closes_the_episode(tmp_path, sent):
+    """Opus RV1 F2: a root keeps two eighths of its window for work, a chat turn or wake one. Memory in the band
+    between lets a turn hold Max where a root cannot; that proves no room for the next root, so the episode stays open
+    and the next root's Low adds no line. A root that holds Max closes it, and a turn's own episode closes on a turn."""
+    ctx = SimpleNamespace(task_metadata={"budget_drive_root": str(tmp_path)}, drive_root=tmp_path / "drive",
+                          task_attempt=None)
+    starts = (("rootA", "crowded", 2), ("turnA", "held", 1), ("rootB", "crowded", 2),  # a turn's Max: still open
+              ("rootC", "held", 2), ("rootD", "crowded", 2),  # a root held Max: the next Low is a new episode
+              ("rootE", "held", 2), ("turnB", "crowded", 1),  # a chat turn opens its own episode
+              ("turnC", "held", 1), ("turnD", "crowded", 1))  # and a chat turn's Max closes it
+    for task, cause, levels in starts:
+        loop._note_low_start(ctx, _plan(_room(cause, levels=levels)), "max" if cause == "held" else "low", task, None)
+    assert [event["delivery_id"] for _root, event in sent] == [
+        "low_start:rootA:1", "low_start:rootD:1", "low_start:turnB:1", "low_start:turnD:1"]
+    bit = json.loads((tmp_path.resolve() / "state" / "low_start_episode.json").read_text(encoding="utf-8"))
+    assert (bit["task"], bit["levels"]) == ("turnD", 1)
 
 
 def test_a_failing_outbox_never_fails_the_start_and_keeps_the_episode_closed(tmp_path, monkeypatch, sent):

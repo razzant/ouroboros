@@ -92,18 +92,23 @@ def low_start_line(plan, mode, task_id):
 def low_start_episode(root, plan, mode, task_id, send):
     """One Main line per Low episode (owner A, 07.11.2026, replacing 1B of 29.10). A fresh start that memory lowered to
     Low (``low_start_line``) opens an episode and ``send``s its line; while Low holds nothing more is sent; a start that
-    holds Max closes the episode silently, and a later Low opens a new one. Every other start (a delegated child or
-    nanny, the owner's Low or Nano, an unknown window, a route or tool schemas that tip a start alone) leaves it as it
-    is. The episode is one small object, ``state/low_start_episode.json``, rewritten under its lock in the terminal
-    outbox's failure domain; ``send`` runs inside that lock and opens the episode only when it queued the line."""
+    holds Max with at least the opening start's work room (a root keeps two eighths, a chat turn or wake one) closes
+    the episode silently, and a later Low opens a new one. Every other start (a delegated child or nanny, the owner's
+    Low or Nano, an unknown window, a route or tool schemas that tip a start alone) leaves it as it is. The episode is
+    one small object, ``state/low_start_episode.json``, rewritten under its lock in the terminal outbox's failure
+    domain; ``send`` runs inside that lock and opens the episode only when it queued the line."""
     receipt = (plan.projection(mode).memory_facts or {}) if plan is not None else {}
-    held = (receipt.get("max_room") or {}).get("cause") == "held" and receipt.get("role") not in DELEGATED_FOCUS_ROLES
+    room = receipt.get("max_room") or {}
+    held = room.get("cause") == "held" and receipt.get("role") not in DELEGATED_FOCUS_ROLES
+    levels = int(room.get("levels") or 1)  # the start's work room in eighths of its window
     line = low_start_line(plan, mode, task_id)
 
     def episode(bit):  # None leaves the file as it is
-        if held:
-            return {} if bit.get("since") else None
-        return None if bit.get("since") or not send(line) else {"since": utc_now_iso(), "task": task_id}
+        if held:  # a turn that holds Max beside one eighth proves no room for a root that keeps two
+            return {} if bit.get("since") and levels >= int(bit.get("levels") or 1) else None
+        if bit.get("since") or not send(line):
+            return None
+        return {"since": utc_now_iso(), "task": task_id, "levels": levels}
     if line or held:
         update_json_locked(pathlib.Path(root) / "state" / LOW_START_EPISODE, episode)
 
