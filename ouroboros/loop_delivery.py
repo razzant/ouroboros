@@ -1548,8 +1548,11 @@ def finish_completed_stop(tools: ToolRegistry, ctx: Any, emit_progress: Any,
         ctx.accumulated_usage.update(execution_status="failed", reason_code=cause)
         return _loop()._forced_fallback_result(ctx, ctx.llm_trace, tools._ctx._delivery_candidate.full_text,
             cause, source="authored_stop_at_hard_rail")
-    return _loop()._no_tool_final_answer(tools._ctx._delivery_candidate.full_text, ctx, ctx.llm_trace,
+    result = _loop()._no_tool_final_answer(tools._ctx._delivery_candidate.full_text, ctx, ctx.llm_trace,
         tools, ctx.incoming_messages, ctx.owner_msg_seen, emit_progress, explicit_candidate=True)
+    if result is None:  # held, as _finalize_loop_candidate's holds: only a later model round may select it again
+        tools._ctx._completion_selected = tools._ctx._presence_completion = None
+    return result
 
 
 def record_stopped_completion(tools: ToolRegistry, ctx: Any, trace: dict, request: dict,

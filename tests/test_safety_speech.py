@@ -26,19 +26,30 @@ def test_speech_flag_retry_and_changed_subject(supervisor, monkeypatch, mode, st
     from ouroboros import tool_effects
     monkeypatch.setattr(h.module, "get_runtime_mode", lambda: mode)
     monkeypatch.setattr(tool_effects, "effect_of", lambda *a, **kw: tool_effects.ToolEffect("message", declared=True))
-    args = {"text": "hello", "destination": "room"}
+    args = {"text": "hello", "destination": "room", "request_id": "r-1"}
     h.replies.append({"status": status, "reason": "owner has not delegated this"})
-    assert h.module.check_safety(name, args, ctx=h.ctx)[0] is False
+    ok, message = h.module.check_safety(name, args, ctx=h.ctx)
+    assert ok is False and "repeat the identical call, request_id included, in a later step" in message
     assert len(h.calls) == 1
+    # The same model call re-presenting the bytes (the host republishing a held reply) decides nothing new.
+    ok, message = h.module.check_safety(name, dict(reversed(list(args.items()))), ctx=h.ctx)
+    assert not ok and "flagged in this same step" in message and len(h.calls) == 1
+    assert all(event["type"] != "safety_sent_despite_check" for event in h.events)
+    h.later()
     ok, message = h.module.check_safety(name, dict(reversed(list(args.items()))), ctx=h.ctx)
     assert ok and "despite the check" in message
     assert len(h.calls) == 1
     assert h.events[-1]["type"] == "safety_sent_despite_check"
+    assert (h.events[-1]["flagged_in"], h.events[-1]["sent_by"]) == ("llm-round-1", "llm-round-2")
     assert h.module.check_safety(name, {**args, "text": "changed"}, ctx=h.ctx) == (True, "")
     assert len(h.calls) == 2
+    # request_id is part of the message's identity: the same words under a new id are checked again (Joi/Eva, 05.11).
+    h.replies.append({"status": status, "reason": "owner has not delegated this"})
+    assert h.module.check_safety(name, {**args, "request_id": "r-2"}, ctx=h.ctx)[0] is False
+    assert len(h.calls) == 3
     h.ctx.task_id = "different-root"
     h.module.check_safety(name, args, ctx=h.ctx)
-    assert len(h.calls) == 3
+    assert len(h.calls) == 4
 
 
 def test_writes_keep_binding_and_effective_mode(supervisor, monkeypatch):

@@ -471,12 +471,23 @@ def _subject_digest(tool_name, arguments):
     return hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
 
 
+# A flag is overridden by a decision, never by bytes re-presented: the re-issue must come from a later model call.
+_SEND_DESPITE = ("To send despite this flag, repeat the identical call, request_id included, in a later step; "
+                 "any changed argument is checked again.")
+
+
+def _authoring_call(ctx):
+    """The model call that authored this tool call (the loop's ``_current_llm_call_meta``); "" when unknown."""
+    meta = getattr(ctx, "_current_llm_call_meta", None)
+    return str(meta.get("llm_call_id") or "") if isinstance(meta, dict) else ""
+
+
 def _remember(ctx, digest, tool_name, assessment, *, speech_refused=False):
     root = _root_id(ctx)
     if not root:
         return True  # rootless calls never earn a reusable speech flag
     row = {"digest": digest, "tool": tool_name, "verdicts": assessment.verdicts,
-           "speech_refused": speech_refused}
+           "speech_refused": speech_refused, **({"llm_call_id": _authoring_call(ctx)} if speech_refused else {})}
     with _PRIOR_LOCK:
         previous = _PRIOR_VERDICTS.get(root, {})
         row["verdicts"] = coalesce_verdicts(previous.get(digest, {}).get("verdicts", ()), assessment.verdicts)
@@ -1375,10 +1386,14 @@ def check_safety(
         if root in _PRIOR_VERDICTS:
             _PRIOR_VERDICTS.move_to_end(root)
     if speech and prior.get("speech_refused"):
+        call = _authoring_call(ctx)
+        if not call or call == prior.get("llm_call_id"):  # the flagged decision re-presented, not a later one
+            return False, "⚠️ SAFETY_VIOLATION: Message not sent: this exact call was flagged in this same step. " + _SEND_DESPITE
         _emit_durable_safety_event(ctx, {"type": "safety_sent_despite_check", "tool": tool_name,
                                        "subject_digest": digest, "verdicts": prior["verdicts"],
-                                       "detail": "sent despite the check"})
-        return True, "⚠️ SAFETY_ADVICE: Identical re-issue; sent despite the check."
+                                       "flagged_in": prior.get("llm_call_id", ""), "sent_by": call,
+                                       "detail": "sent despite the check by a later model call"})
+        return True, "⚠️ SAFETY_ADVICE: Identical re-issue from a later step; sent despite the check."
 
     # Preserve the selected assessment coverage independently of resource
     # admission. Cyber changes the authority of an assessment, never its verdict.
@@ -1410,8 +1425,7 @@ def check_safety(
                                            "subject_digest": digest, "verdicts": verdicts})
             if flagged_speech:
                 reasons = "\n".join(f"{v['stage']}: {v['status']} — {v.get('reason', '')}" for v in verdicts)
-                return False, ("⚠️ SAFETY_VIOLATION: Message not sent.\n" + reasons
-                               + "\nReconsider whether and how to proceed. An identical re-issue sends despite the check.")
+                return False, "⚠️ SAFETY_VIOLATION: Message not sent.\n" + reasons + "\n" + _SEND_DESPITE
     # Holds cannot earn retry authority. Speech holds bind in every runtime mode.
     if speech and not allowed:
         return False, message
