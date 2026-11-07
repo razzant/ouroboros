@@ -962,7 +962,8 @@ revision, so this counter guarantees no delivery durability.
   The newest message is the one that arrived last: a late answer keeps its
   written time and chronological place. While reading elsewhere the crimson mark remains
   until that message is shown by scrolling, `Scroll to latest message`, or a
-  return to the page/window; opening alone never clears it. Unknown newest
+  return to the page; a window shown again keeps the reader's place and reads
+  the message if that place shows it. Opening alone never clears it. Unknown newest
   arrivals (an unfinished line, a damaged row) acknowledge nothing and are never
   searched for; state refreshes recheck an open unread room until history is
   repaired or newer standalone content arrives. A room with no standalone

@@ -845,9 +845,9 @@ def _arrived_unread(data_dir, chat_id):
 
 def latest_arrival(rows, page, data_dir, row_matches_thread, stored_chat_id, projected_gaps=frozenset(),
                    task_result=lambda _task_id: {}):
-    """``window.latest_message`` of a recent Project read (DESIGN "Unread").
+    """``window.latest_message`` of a recent Main or Project read (DESIGN "Unread").
 
-    The window is ordered and tailed by event time, but a Project message counts
+    The window is ordered and tailed by event time, but a room's message counts
     as unread when it ARRIVES: an answer the terminal outbox delivers late keeps
     its original ``ts``, so it can sort above messages that arrived before it
     (``out_of_order``) or below the window's floor, where the first older page
@@ -898,7 +898,16 @@ def latest_arrival(rows, page, data_dir, row_matches_thread, stored_chat_id, pro
     offset = lambda row: row["history_position"]["offset"]  # noqa: E731
     words = lambda row: _card_content(row, str(row.get("system_type") or ""), child)  # noqa: E731
     arrived = _arrived_unread(data_dir, page["chat_id"])
-    feed = [row for row in rows if _feed_message(row)]
+    question_chat = getattr(row_matches_thread, "question_project_chat", lambda _row: 0)
+
+    def elsewhere(row):
+        # Main draws a Project's question only as a copy of that room's (it never counted here), and a started or
+        # handed-over Project as its work's portal (work_portal.js ``row``): no message of their own to read. Both are
+        # Main's rows alone (room_membership pins the one; ``question_project_chat`` names nothing off Main).
+        kind = str(row.get("system_type") or row.get("type") or "")
+        return kind == "project_question_pointer" or bool(question_chat(row)) or (
+            kind in ("project_started", "project_handoff") and bool(row.get("task_id") and row.get("project_id")))
+    feed = [row for row in rows if _feed_message(row) and not elsewhere(row)]
     spoken = sorted((row for row in feed if row.get("role") != "user" and arrived(row) and (
         str(row.get("text") or "").strip() not in ("", "\u200b") or row.get("msg_type"))), key=offset)
     latest = next((row for row in reversed(spoken) if not words(row)), None)
@@ -922,7 +931,7 @@ def latest_arrival(rows, page, data_dir, row_matches_thread, stored_chat_id, pro
         return {"latest_absent": True} if start == 0 and not gaps else {}
     if latest is None and start > 0:
         stored = _stored_message(row_matches_thread, stored_chat_id, child)
-        message = lambda entry: stored(entry) and arrived(entry)  # noqa: E731
+        message = lambda entry: stored(entry) and arrived(entry) and not elsewhere(entry)  # noqa: E731
         entries, before, gaps = HistorySource(data_dir, "chat", page["lens"]["chat"], end).older(
             start, 1, message, min(_ARRIVAL_SEARCH_ROWS, _READ_CEILING_ROWS))
         found = next(filter(message, entries), None)  # ``older`` stops at the newest one
