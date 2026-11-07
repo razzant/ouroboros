@@ -1073,9 +1073,10 @@ holding the owner's `notify_owner` grant speaks the same way in its own name: a
 
 Formatting is asymmetric: assistant text always uses the sanitized chat markdown
 renderer regardless of `markdown`; ordinary System text is escaped unless
-`markdown: true`. The typed `skill_review` row keeps its dedicated renderer.
-Voice does not confer task finality. The existing untyped terminal-host-notice
-contract remains a documented exception, not a pattern for new notices.
+`markdown: true`. Owner text stays literal, with each explicit http(s) address
+linked. Typed `skill_review` rows keep their own renderer. Voice does not confer
+task finality. The untyped terminal-host-notice contract is a documented
+exception, not a pattern for new notices.
 
 Built-in chrome uses words and monochrome `currentColor` vectors, not decorative
 emoji. System keeps its resting body and amber/gold label without an edge; status stays explicit in
