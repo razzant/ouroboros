@@ -1375,11 +1375,10 @@ output leaves it in place; only a newer line moves a card timeline to its end.
 New replies remain below in the same live conversation without moving the passage.
 
 When loaded fragments are disconnected or their coverage is uncertain (reading
-far back releases the newest pages from memory while replies keep arriving), a
-toast above the composer announces once per document opening `Some saved history is not loaded.
-Shown messages may have gaps.`, and the same readable explanation stays at the
-in-feed `Load more history` edge, including beside a read failure or approximate position (owner 21.10).
-The notice can be closed; hover and focus pause its six-second dismissal. A failed read stays in header chrome.
+far back releases the newest pages from memory while replies keep arriving), the
+room says `Some saved history is not loaded. Shown messages may have gaps.` where the gap lies: at the
+in-feed `Load more history` edge that heads the loaded window, including beside a read failure or approximate position (owner 21.10).
+The room raises no notice of its own over its newest rows (U021). A failed read stays in header chrome.
 Bytes written after a read found a source empty count as missing until a later
 read delivers them from its start. Mixed task cards keep one node and use this
 general note: dates, common row IDs and an exhausted cursor cannot establish a
