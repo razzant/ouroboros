@@ -273,6 +273,10 @@ def _start_task(
     if cite_error:  # the same typed argument refusal the schedule doors publish: nothing was started
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
                                                  text=f"⚠️ OWNER_WORDS_UNVERIFIED (start_task): {cite_error}"))
+    if owner_basis and destination == "owner":  # a private owner start names its held answer (#2795), not a place cite
+        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
+            "⚠️ TOOL_ARG_ERROR (start_task): owner_words cites your human's words for this place's work "
+            "(destination='place'); a private owner start names their held answer in owner_quote. Nothing was scheduled.")))
     card_title, title_error = _task_card_title_arg(title, "start_task")
     if title_error:
         return title_error
@@ -281,10 +285,6 @@ def _start_task(
     private, destination_error = _start_destination(ctx, presence_carrier, destination, owner_quote)
     if destination_error:
         return destination_error
-    if private and owner_basis:  # a private owner start names its held answer; a place cite orders this place's work
-        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
-            "⚠️ TOOL_ARG_ERROR (start_task): owner_words cites your human's words for this place's work "
-            "(destination='place'); a private owner start names their held answer in owner_quote. Nothing was scheduled.")))
     chosen: Dict[str, Any] = {"destination": destination} if presence_carrier else {}
     if private:
         chosen["owner_quote"] = owner_quote

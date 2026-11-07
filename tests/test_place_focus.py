@@ -593,12 +593,13 @@ def test_a_refused_focus_reply_returns_destination_sends_and_silence(tmp_path):
 # --- an order exists only where the mind cites my human's exact words and the host verifies their provenance -------
 
 
-@pytest.mark.parametrize("cite,expected_kind", [
-    ("Проверь, пожалуйста, экономику", "owner"), ("", "consciousness"),
-    ("Проверь экономику", "refused"),  # a paraphrase of their words is no cite
-    ("<@U2> look into this", "refused"),  # a colleague's bytes in the same conversation
+@pytest.mark.parametrize("cite,expected_kind,destination", [
+    ("Проверь, пожалуйста, экономику", "owner", "place"), ("", "consciousness", "place"),
+    ("Проверь экономику", "refused", "place"),  # a paraphrase of their words is no cite
+    ("<@U2> look into this", "refused", "place"),  # a colleague's bytes in the same conversation
+    ("Проверь, пожалуйста, экономику", "private", "owner"),  # a private owner start names owner_quote (#2795)
 ])
-def test_start_task_from_a_place_cites_or_starts_its_own_work(focus, monkeypatch, cite, expected_kind):
+def test_start_task_from_a_place_cites_or_starts_its_own_work(focus, monkeypatch, cite, expected_kind, destination):
     from ouroboros.loop_messages import _initialize_owner_directives
     from ouroboros.tools import control_routing
     from ouroboros.owner_words import PLACE_CONFIRMED
@@ -619,9 +620,13 @@ def test_start_task_from_a_place_cites_or_starts_its_own_work(focus, monkeypatch
     monkeypatch.setattr(control_routing, "_emit_and_wait_for_routing", lambda _ctx, evt: emitted.append(evt) or ("live", {"status": "scheduled"}))
     monkeypatch.setattr(control_routing, "_finish_swarm_handoff", lambda _ctx, _evt, response, **_kw: response)
     monkeypatch.setattr(control_routing, "_promotion_pool_disabled_from_snapshot", lambda _ctx: "")
-    result = control_routing._start_task(ctx, objective="Recheck the economy", title="Economy", owner_words=cite)
+    result = control_routing._start_task(ctx, objective="Recheck the economy", title="Economy", destination=destination,
+                                         owner_words=cite)
     if expected_kind == "refused":
         assert result.startswith("⚠️ OWNER_WORDS_UNVERIFIED (start_task): owner_words were not found verbatim") and not emitted
+        return
+    if expected_kind == "private":
+        assert result.startswith("⚠️ TOOL_ARG_ERROR (start_task): owner_words cites your human's words") and not emitted
         return
     evt = emitted[0]
     assert evt["work_kind"] == expected_kind
