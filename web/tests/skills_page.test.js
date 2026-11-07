@@ -5,6 +5,8 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { createMySkillsDestination } from '../modules/skill_dialogs.js';
 import { publicationDisclosure } from '../modules/skill_presentation.js';
+import { browseCardState } from '../modules/skill_browse.js';
+import { installedSkillModel } from '../modules/skill_card_renderer.js';
 
 import {
     buildHealPrompt, destinationFromChoice, inFlightCount, installedFilterCounts, lifecycleEventsFromQueue,
@@ -52,6 +54,31 @@ test('the filter strip counts facts of the loaded list', () => {
     assert.equal(matchesInstalledFilter(byName('old_tool'), 'updates'), true, 'withdrawn counts as an update to act on');
     assert.equal(matchesInstalledFilter(byName('minecraft-widget'), 'made'), true);
     assert.equal(matchesInstalledFilter({ name: 'v', lifecycle_virtual: true, enabled: false }, 'off'), false);
+});
+
+test('page-module faults participate in Installed filters and Browse state', () => {
+    const telegram = byName('telegram');
+    const pageModules = { faults: [{ skill: telegram.name, current: true, reason: 'fixture failed' }], held: [] };
+    assert.equal(installedSkillModel(telegram, { pageModules }).needs, true);
+    assert.equal(matchesInstalledFilter(telegram, 'needs', installedSkillModel(telegram, { pageModules })), true);
+    const counts = installedFilterCounts(rows(), pageModules);
+    assert.equal(counts.needs, 5, 'a page-local fault must be reflected in Needs you');
+    const browse = browseCardState(
+        { id: 'telegram-row', name: telegram.name, source_id: telegram.install?.source?.id, source_name: 'built-in', installed: true },
+        { installed: telegram, listed: true, pageModules },
+    );
+    assert.match(browse.status, /needs you/);
+});
+
+test('a held page module after Panic explains reload instead of offering a dead Start it action', () => {
+    const telegram = byName('telegram');
+    const model = installedSkillModel(telegram, {
+        pageModules: { faults: [], held: [{ key: 'module:telegram', skill: telegram.name, reason: 'start' }], stopped: true },
+    });
+    const html = model.trays.join('');
+    assert.equal(model.needs, true);
+    assert.match(html, /Reload this page to restore it/);
+    assert.doesNotMatch(html, /start_host_module/);
 });
 
 test('«Update all» covers only unmodified updates installed through trust from a row still trusted', () => {

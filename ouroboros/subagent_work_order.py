@@ -535,7 +535,8 @@ def unseen_words_section(ctx: Any, text: str, fact: str) -> str:
     words beside theirs, under its own stamp), under the session heading, the gap line of a store that could
     not be read (``work_words``) and ``fact`` as the host's closing lines; "" when ``text`` holds them all. A text
     with no stamp holds none: every row rides."""
-    from ouroboros.owner_words import REPLY_TARGET, render_owner_words, words_unseen_in, work_words
+    from ouroboros.owner_relay import words_unseen_in
+    from ouroboros.owner_words import REPLY_TARGET, render_owner_words, work_words
 
     unseen = words_unseen_in(ctx, text)
     if not unseen:

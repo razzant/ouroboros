@@ -1,5 +1,6 @@
 // Captured conversation content mounted inside the Place sheet. The sheet owns navigation and drafts.
 import { apiClient } from './api_client.js';
+import { failureText } from './consciousness_api.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { mountChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
 import { tr } from './i18n.js';
@@ -59,10 +60,9 @@ export function historyFactWords(row) {
 export function placeRoomsHtml({ rooms = null, coverage = null, error = '' } = {}) {
     const state = error ? `<p role="alert" data-i18n-authored>${escapeHtml(error)}</p>` : rooms === null
         ? '<p class="place-sheet-note" role="status">Reading captured conversations…</p>' : rooms.length
-            ? `<ul class="consciousness-place-rows place-rooms">${rooms.map((room) => `<li><button type="button" class="consciousness-place-row place-room-row" data-place-room="${room.room_chat_id}">
+            ? `<ul class="consciousness-place-rows place-rooms">${rooms.map((room) => `<li><button type="button" class="consciousness-place-row place-room-row" data-place-room="${room.room_chat_id}"${room.thread_id ? ` title="${escapeHtml(`Thread ${room.thread_id}`)}"` : ''}>
                 <span class="consciousness-place-name" data-i18n-authored>${escapeHtml(room.label || room.address)}</span>
-                <span class="consciousness-place-facts">${!room.label ? '<span>Name not recorded</span> · ' : ''}<time data-i18n-authored>${escapeHtml(timeText(room.last_at))}</time>${room.unanswered_count === null ? ' · Focus count unavailable' : room.unanswered_count > 0 ? ` · ${room.unanswered_count} open ${room.unanswered_count === 1 ? 'focus' : 'focuses'}` : ''}</span>
-                ${room.thread_id ? `<span class="place-sheet-note">Thread: <span data-i18n-authored>${escapeHtml(room.thread_id)}</span></span>` : ''}
+                <span class="consciousness-place-facts">${!room.label ? '<span>Name not recorded</span> · ' : ''}${room.thread_id ? 'thread · ' : ''}<time data-i18n-authored>${escapeHtml(timeText(room.last_at))}</time>${room.unanswered_count === null ? ' · Focus count unavailable' : room.unanswered_count > 0 ? ` · ${room.unanswered_count} open ${room.unanswered_count === 1 ? 'focus' : 'focuses'}` : ''}</span>
             </button></li>`).join('')}</ul>`
             : '<p>No saved conversation found in this index.</p>';
     return `${state}${coverage?.importing ? '<p class="place-sheet-note" role="status">Older records are still being imported; this list may be incomplete.</p>' : ''}
@@ -212,7 +212,7 @@ export function mountPlaceHistory(host, place, room, { onBack, readHistory = api
             if (hadRows && target === null) scroller.scrollTop = beforeTop + scroller.scrollHeight - beforeHeight;
         } catch (error) {
             if (closed || version !== generation) return;
-            find('[data-history-status]').textContent = error?.message || String(error);
+            find('[data-history-status]').textContent = failureText(error);
             find('[data-history-status]').dataset.tone = 'error';
             retry = () => loadPage(cursor, target); find('[data-history-retry]').hidden = false;
         } finally {

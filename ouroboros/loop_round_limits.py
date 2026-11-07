@@ -137,8 +137,11 @@ def _drain_incoming_messages(
             return
         if ((entry.get("relay") and not entry.get("host_carried"))  # a carried row posts no receipt to the room
                 or entry.get("quiz_delivery") or entry.get("card_delivery")):
+            from ouroboros.owner_relay import retained_relay
             event_queue.put_nowait({"type": "owner_message_injected", "task_id": task_id,
-                                   "relay_ack": entry.get("relay"), "quiz_ack": entry.get("quiz_delivery"),
+                                   "relay_ack": (entry["_relay_delivery"] if "_relay_delivery" in entry
+                                                 else retained_relay(entry)) if entry.get("relay") else None,
+                                   "quiz_ack": entry.get("quiz_delivery"),
                                    "card_ack": entry.get("card_delivery")})
 
     def ack_content(entry: Dict[str, Any]) -> None:
@@ -375,12 +378,13 @@ def _drain_incoming_messages(
     return controls
 
 
-def _context_overflow_retries(tool_ctx: Any) -> set[Tuple[str, str]]:
-    """Per-task ``(round_id, pass)`` record of the refusal passes (``REFUSAL_PASSES``): once per round, any route."""
-    retries = getattr(tool_ctx, "_context_overflow_retries", None)
+def _context_overflow_retries(tool_ctx: Any, record: str = "_context_overflow_retries") -> set:
+    """Per-task ``(round_id, pass)`` record of the refusal passes (``REFUSAL_PASSES``): once per round, any route.
+    ``_context_overflow_changed`` keeps the rounds a pass changed the candidate in (owner 2A, a fallback's re-entry)."""
+    retries = getattr(tool_ctx, record, None)
     if not isinstance(retries, set):
         retries = set()
-        tool_ctx._context_overflow_retries = retries
+        setattr(tool_ctx, record, retries)
     return retries
 
 
@@ -1170,7 +1174,9 @@ def _run_emergency_address_pass(ctx: Any, disposition: Any, *, rung: str, goal_t
     """Publish a model-free source view, measuring the sealed candidate with its next facts line.
 
     ``goal_tokens`` is the refusal's measured target (``loop_model_call._refusal_target``); without
-    one the pass takes its whole category, never one unit sized by a missing number."""
+    one the pass takes its whole category, never one unit sized by a missing number. A size refusal's
+    pass (``refusal_policy``) frees a shown chosen read only after a provider's refusal (an estimate
+    never cuts a chosen read)."""
     from ouroboros.context_budget import ContextReclaimRequest
     from ouroboros.context_compaction import context_reclaim_transcript_sha256, emergency_address_view
     from ouroboros.loop_messages import append_context_facts
@@ -1208,6 +1214,8 @@ def _run_emergency_address_pass(ctx: Any, disposition: Any, *, rung: str, goal_t
         drive_root=pathlib.Path(ctx.drive_root or ctx.drive_logs.parent), task_id=ctx.task_id,
         usable_input=(measurement.capacity_total_tokens - measurement.response_reserve_tokens
                       if measurement.capacity_total_tokens is not None else None),
+        **({"release_shown_chosen": bool(policy.get("provider_refused"))}
+           if (policy := getattr(ctx, "refusal_policy", None)) and cause == "context_size" and rung == "bodies" else {}),
     )
     if receipt.status == "applied":
         _publish_reclaimed_transcript(ctx, rebuilt, by=f"{'refusal_pass' if cause == 'context_size' else cause}:{rung}")
@@ -1220,12 +1228,14 @@ def _run_emergency_address_pass(ctx: Any, disposition: Any, *, rung: str, goal_t
     return receipt
 
 
-def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None) -> bool:
+def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, slack: int = 0) -> bool:
     """Narrow memory beside the actual transcript without inventing a smaller route window.
 
     The view saves the measured ``saving`` (else the capacity
     deficit, else at least one element) from the level it shows (no target or working margin
-    reapplied, nothing addressed unfolds)."""
+    reapplied, nothing addressed unfolds). ``slack`` asks the return-after-fold room beyond it, which only
+    memory detail and ordinary host forms pay (``ContextFitPlan.reproject_for_route``): a zero ``saving``
+    beside it is no excess, so no whole-or-outline section pays."""
     plan = ctx.context_fit_plan
     measurement = fit.measurement
     if plan is None or getattr(plan, "core", None) is None:
@@ -1238,7 +1248,9 @@ def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None) ->
         ratio=measurement.measurement_density,
         output_reserve=int(plan.output_reserve_tokens), tool_schemas=ctx.tool_schemas, start_mode=mode,
         current_messages=ctx.messages, measured_input_tokens=measurement.reprojection_input_tokens,
-        refused_tokens=max(1, int(saving or measurement.capacity_deficit_tokens or 0)),
+        refused_tokens=(int(saving) if saving or (saving == 0 and slack)  # a slack-only ask states no excess
+                        else max(1, int(measurement.capacity_deficit_tokens or 0))),
+        **({"slack_tokens": int(slack)} if slack else {}),
     )
     selected_mode = rebound.initial_mode
     if selected_mode == mode and rebound.projection(mode).system_content_json == before:

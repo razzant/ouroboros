@@ -1104,8 +1104,7 @@ def place_rows_into_runs(ctx: ToolContext) -> List[str]:
     from ouroboros.delegate_message_store import placed_words, prepare
     from ouroboros.delegate_progress import poll_bound
     from ouroboros.gateways.claudexor import ClaudexorGateway, ClaudexorUnavailable
-    from ouroboros.owner_relay import _quote_body, _rows_to_carry, carried_quote_line
-    from ouroboros.owner_words import stamped_refs
+    from ouroboros.owner_relay import _quote_body, _rows_to_carry, carried_quote_line, stamped_refs
 
     lines: List[str] = []
     try:

@@ -545,7 +545,7 @@ def test_an_unconfirmed_presence_promote_is_readable_as_pending_by_its_own_bindi
         task_contract={"capability_ceiling": presence_ceiling_payload(_ceiling())},
     )
 
-    out = _start_task(ctx, "Compile the figures", title="Figure compilation")
+    out = _start_task(ctx, "Compile the figures", title="Figure compilation", destination="place")
 
     assert out.startswith("Not confirmed yet:")
     task_id = emitted[0]["task_id"]

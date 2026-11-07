@@ -415,8 +415,8 @@ def test_project_room_keeps_an_older_own_directive_beside_sibling_traffic(tmp_pa
     _a, _b, changing, _cap = blocks(env, memory, {"id": "own-task", "chat_id": own_chat})
     room = section(changing, f"## This room (Project Own [chat_id={own_chat}])")
     assert decisive in room
-    assert "noise-" not in changing  # the sibling room is one line in ## Live rooms
-    assert f"Project Sibling [chat_id={sibling_chat}]" in section(changing, "## Live rooms")
+    assert "noise-" not in room  # the sibling's traffic is another conversation, never this room's
+    assert f"### Project Sibling [chat_id={sibling_chat}]" in section(changing, "## Other conversations")
     assert str(root) not in room
 
 

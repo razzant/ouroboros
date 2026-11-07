@@ -387,11 +387,11 @@ def earlier_request_subject(ctx: Any, subject: Any, rows: Optional[List[Dict[str
 
 def _words_since(ctx: Any, earlier: str) -> List[str]:
     """My human's rows this run holds now that the earlier subject's request did not carry, each under its stamp:
-    told by the row's identity, never by likeness of words (``owner_words.words_unseen_in``; what my human
+    told by the row's identity, never by likeness of words (``owner_relay.words_unseen_in``; what my human
     replied to is not theirs; a subject that cannot be read back names every row)."""
-    from ouroboros.owner_words import words_stamp, words_unseen_in
+    from ouroboros import owner_relay, owner_words
 
-    return [f"{words_stamp(row)}\n{row['text']}" for row in words_unseen_in(ctx, earlier)]
+    return [f"{owner_words.words_stamp(row)}\n{row['text']}" for row in owner_relay.words_unseen_in(ctx, earlier)]
 
 
 def _request_changed_text(ctx: Any, record: Dict[str, Any], *, outcome: bool = False) -> str:

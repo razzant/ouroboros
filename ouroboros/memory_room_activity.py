@@ -1,4 +1,7 @@
-"""Room liveness from captured rows and indexed running-task facts; no history scan or sealing authority."""
+"""A room's considered point and its running work, from captured rows and indexed task facts; no history scan,
+no sealing authority. What considers a room is an act of mine there (``memory_view_conversations``): my own
+words, a quiet finish, a finish that folded what it read (``fold_read``), a note; never a time and never a wake's
+bare boundary."""
 from ouroboros.dialogue_provenance import row_class
 
 
@@ -14,11 +17,6 @@ def considered_through(entries, lineage):
         if row.get("quiet_finish") is True and (own or canonical):
             positions.append(pos)
     return max(positions, default=-1)
-
-
-def unconsidered_people(entries, lineage, quiet_pos):
-    return sum(pos > quiet_pos and (cls := row_class(row, pos=pos, **lineage))["lane"] == 1
-               and cls["author"]["kind"] == "human" for _address, row, pos in entries)
 
 
 def running_by_room(root, by_room, notes, bindings, projects):

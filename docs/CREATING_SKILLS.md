@@ -1278,17 +1278,17 @@ a bound ending is not consent, and terminal questions stay answerable. Neither c
 sends an external reply or accepts an external request as an owner instruction.
 Delegated children still escalate to their parent.
 
-For promised work without a new event, `start_task` and
-`schedule_followup(notify=false, relation=...)` retain the existing Presence
-carrier and ordinary resource/control semantics. A scheduled root explicitly
-uses connector tools to deliver later; it is not discovered by polling the old
-event, its finish reaches no one by itself, and it reads the conversation's
-current previous turn rather than the copy taken when it was scheduled. Any turn
-of the place lists, reads and withdraws the follow-ups related to it, its own and
-those of the owner's work a late answer began (`manage_schedules`
-`list`/`get`/`delete`); withdrawal stops future runs only, and
-`cancel_task` stops work one already started. `notify=true` and the owner-wide
-schedule table remain separate capabilities.
+For promised work without an event, `start_task` and `schedule_followup`
+retain the Presence carrier and resource/control semantics. Starts and
+independent schedules require `destination`: `place` keeps this path; `owner`
+starts private work, or refuses a schedule so that private root can schedule
+itself. Scheduled roots deliver via connector tools, never polling the old
+event or their final text; they read the conversation's current previous turn.
+Any turn of the place lists, reads and withdraws its related follow-ups,
+including those of owner work an answer began (`manage_schedules`
+`list`/`get`/`delete`). Withdrawal stops future runs; `cancel_task` stops work
+already started. `notify=true` and the owner-wide schedule table are separate
+capabilities.
 
 A turn's source identity uses its first legacy binding id (otherwise its place id), source event ID, provider/account,
 conversation/thread, actor ID and text. Keep those facts stable on retry;
@@ -1864,8 +1864,11 @@ An opaque widget's `location.origin` is `null`: use the host-bridged begin reque
 
 Encode OAuth `state` as base64url UTF-8 JSON `{v:1,skill:<canonical name>,nonce:<random>}` and retain it with PKCE
 in your state directory. Register POST `oauth/complete`; the page forwards `{state,code}` or
-`{state,error,error_description}` to that same-origin skill route, retaining its deployment prefix. The skill validates
-its issued state, handles denial, exchanges credentials and stores tokens. The page neither validates grants nor owns tokens.
+`{state,error,error_description}` to that same-origin skill route, retaining its deployment prefix, plus `iss` when the
+provider sent one. The skill validates its issued state, compares a present `iss` with the issuer it asked (RFC 9207;
+a provider that advertises `authorization_response_iss_parameter_supported` must send it), handles denial, exchanges
+credentials and stores tokens. The page neither validates grants nor owns tokens. A state `{v:1,mcp:<server>,nonce}` is
+the core's own remote MCP sign-in (`ouroboros/mcp_oauth.py`), posted to `/api/mcp/sign-in`.
 Reply `{ok:true,email}` (or a human-readable `label`) only on confirmed connection; failures use `{ok:false,code,error}`.
 The page shows unconfirmed outcomes without automatic replay and clears its query from history when supported.
 Use separate local disconnect and provider-wide revoke semantics; shared client configuration does not imply independent grants.

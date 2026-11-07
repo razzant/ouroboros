@@ -113,6 +113,7 @@ def test_chat_activities_snapshot_projects_queue_roots_with_phases(tmp_path, mon
         "client_message_id": "",
         "kind": "managed_task",
         "phase": "queued",
+        "suggested_name": "do the thing",  # the run's name as its card shows it, never its whole order
         "can_resume": False,
         "cancelable": True,
         "task_attempt": 1,
@@ -159,7 +160,7 @@ def test_snapshot_rehomes_activity_without_changing_sources(tmp_path, monkeypatc
     expected = original_direct[0] if kind == "direct_chat" else {
         "activity_id": "root", "chat_id": 1, "project_id": "",
         "kind": "managed_task", "phase": "working", "started_at": 9.0,
-        "client_message_id": "", "task_attempt": 1,
+        "client_message_id": "", "task_attempt": 1, "suggested_name": "do the thing",
         "can_resume": False, "cancelable": True,
     }
     # K8: the census row's own facts (no narration, no calls, not detached, no registered room).

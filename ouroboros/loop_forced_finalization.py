@@ -130,6 +130,7 @@ def _record_forced_finalization(
     # path (`_handle_budget_exceeded` -> `_forced_fallback_result`).
     ctx.accumulated_usage.setdefault("terminal_origin", TERMINAL_ORIGIN_HOST_NOTICE)
     ctx.accumulated_usage.pop("wake_summary", None)  # Only the accepting exit can publish the author's sentence.
+    ctx.accumulated_usage.pop("fold_read", None)  # and what it folds into it
     # Every rail returns this candidate's bytes. A wake's quiet selection stays
     # internal here too (the pipeline publishes only the host's outcome notice);
     # an ordinary replacement or the host's own fallback text is speech.
@@ -1471,12 +1472,11 @@ def _forced_final_answer(
         ctx.accumulated_usage["execution_status"] = "failed"
         ctx.accumulated_usage["reason_code"] = reason_code
         late = _loop()._drain_forced_owner_directives(ctx, llm_trace)
-        # The closing admission reads Stop now as an ordinary answer's does; it outranks a late directive.
-        if (stop_now := presence_stop_now(tools_ctx)) or not late:
-            break
         unknown = str(ctx.accumulated_usage.get("_last_llm_error_kind") or "") == "provider_outcome_unknown"
-        if late == "carried" and (single_semantic_turn or attempt == 1 or unknown):
-            break  # a carried row is not a directive: the forced final stands; both fallbacks are a grown corpus's
+        # Stop now outranks a late directive; a carried row is no directive: the forced final stands, no fallback.
+        if (stop_now := presence_stop_now(tools_ctx)) or not late or (
+                late == "carried" and (single_semantic_turn or attempt == 1 or unknown)):
+            break
         if unknown:
             return _loop()._forced_fallback_result(
                 ctx, llm_trace,
@@ -1582,6 +1582,8 @@ def _forced_final_answer(
         if isinstance(request, dict):  # this accepting exit publishes the author's sentence and comparison
             if request.get("wake_summary"):
                 ctx.accumulated_usage["wake_summary"] = request["wake_summary"]
+                if request.get("fold_read") is True:
+                    ctx.accumulated_usage["fold_read"] = True
             from ouroboros.swarm_receipt import retain_comparison
             retain_comparison(tools_ctx)
         return (

@@ -388,7 +388,7 @@ export function notifyStatusText({ enabled, supported, permission, storageAvaila
 /** Explain the separate native-attention capability without calling it a banner. The page asks it
  *  for no sound of its own, so a raised window is `window_only` by design, not a failed sound. */
 export function attentionStatusText({ enabled = true, nativeAttention = false, supported = false, status = '', bridge = false } = {}) {
-    if (!enabled) return 'Notifications are off; no attention is requested from this system.';
+    if (!enabled) return '';  // the status line above already says notifications are off
     if (status === 'window_only') return 'Desktop attention can raise this window without a sound of its own; the soft app tone plays only where the system confirms sound is allowed.';
     if (status === 'unsupported' || status === 'unavailable') return 'Desktop attention is unavailable in this launcher; browser or in-app delivery remains available.';
     if (status === 'background') return 'Desktop attention is available; while Ouroboros runs in the background, alerts use a system banner or a Dock mark instead of opening this window.';

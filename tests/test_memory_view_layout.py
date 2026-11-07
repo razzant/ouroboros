@@ -45,8 +45,8 @@ def test_note_labels_and_aggregate_keep_readers_and_do_not_change_other_rooms():
     assert '6 notes not yet sealed, 2026-09-02 → 2026-09-03, by child, root; ids:' in text
     assert all(note['id'] in text for note in snap.room['notes'])
     assert '(memory_read(node_id=…))' in text
-    for other in snap.live_rooms:
-        assert '\n'.join(mv._live_room(other)) in text
+    from ouroboros import memory_view_conversations as conversations
+    assert conversations.render(snap.conversations, {}) in text  # this room's note forms leave the other groups be
     assert mv.render_story(snap, aggregate) == mv.render_story(snap)
 
 
@@ -90,15 +90,15 @@ def test_the_request_keeps_my_story_before_the_changing_tail_and_the_book_separa
     a, d, b, c = (block["text"] for block in content)
     assert d.startswith("## DEVELOPMENT.md\n") and "## DEVELOPMENT.md\n" not in a
     assert "## My story" in b and "## My story" not in a + d + c
-    for heading in ("## Shared understanding", "## Knowledge base", "## Live rooms", "## This room (Main)"):
+    for heading in ("## Shared understanding", "## Knowledge base", "## This room (Main)", "## Other conversations"):
         assert heading in c and heading not in a + b, heading
     for gone in ("## Dialogue History", "## Recent chat", "## Project owner origins", "## Legacy Dialogue Summary"):
         assert gone not in a + b + c, gone
 
 
 def test_b_is_byte_identical_for_main_another_room_and_a_wake(tmp_path):
-    """One story for every integrating focus; a wake's room is Main, byte for byte the Main turn's, and its
-    live rooms give one directory line per room without standing verbatim words."""
+    """One story for every integrating focus; a wake's room is Main, byte for byte the Main turn's, and its other
+    conversations are the block a Main turn holds (owner 06.11, Q2-A)."""
     env, memory, rooms = world(tmp_path)
     views = {name: blocks(env, memory, task) for name, task in (
         ("main", MAIN), ("alpha", {"id": "bound", "chat_id": 1}), ("beta", {"id": "tb", "chat_id": rooms["beta"]}),
@@ -109,9 +109,11 @@ def test_b_is_byte_identical_for_main_another_room_and_a_wake(tmp_path):
     main_c, wake_c = views["main"][2], views["wake"][2]
     assert section(wake_c, "## This room (Main)") == section(main_c, "## This room (Main)")
     assert "## This room (Main)" not in views["alpha"][2]
+    assert section(wake_c, "## Other conversations") == section(main_c, "## Other conversations")
     for words in ("alpha again", "beta again"):
-        assert words not in section(wake_c, "## Live rooms") and words not in main_c, words
-    assert "memory_read(room_id=" in section(wake_c, "## Live rooms")
+        assert words in section(wake_c, "## Other conversations") and words not in section(main_c, "## This room (Main)")
+    assert "memory_read(room_id=" in section(wake_c, "## Other conversations")
+    assert section(main_c, "## This room (Main)") in main_c.split("## Other conversations", 1)[0]  # the room first
 
 
 def test_full_roles_share_the_first_block_and_only_eligible_tasks_get_the_handbook(tmp_path):
@@ -299,7 +301,7 @@ def test_the_view_fact_reaches_the_cap_info_the_task_context_and_one_event(tmp_p
     assert facts["role"] == "integrator" and facts["room_id"] == "1"
     assert facts["store_status"] == {"state": "active", "tail_facts": "filling"}  # open rows read live, no fill yet
     assert facts["legacy_frontier_status"] == "exact"
-    assert facts["spec"]["live_rooms"] == "lines" and facts["blocks"]["live_rooms"] == 2
+    assert facts["spec"]["other_conversations"] is True and facts["blocks"]["conversations"] == 4  # every other one
     assert facts["blocks"]["story_tokens"] > 0 and facts["blocks"]["room_tokens"] > 0
     assert facts["floor"]["mode"] == "max" and facts["floor"]["steps"] == {}
     assert ctx.memory_view_facts == {key: facts[key] for key in ("role", "room_id", "floor", "story_status", "max_room")}

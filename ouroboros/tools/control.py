@@ -108,6 +108,8 @@ _START_TASK_DESCRIPTION = (
     "Give the separate work a short title and objective. project_name creates a named room; "
     "project_id selects an existing room. workspace_root selects its folder; "
     "workspace='none' opts out of the room's default folder. "
+    "From a Presence conversation or work acting for a place, name where each new work belongs with destination; "
+    "without one nothing starts. Elsewhere omit it. "
     "Set context_requires_development=true only when the task itself needs the whole development handbook in every "
     "mode, never for its subject; a route too small for it refuses the task. "
     "A durable pending intent is recorded but not yet confirmed; inspect its recorded "
@@ -134,6 +136,16 @@ _MESSAGE_DESTINATION_DESCRIPTION = (
 _ROOT_EFFORT_PARAM = {"type": "string", "enum": list(EFFORT_SCALE), "description": (
     "Optional: the reasoning effort the NEW task starts on; applied in Cyber Pro only — otherwise the "
     "task starts at my human's recommended level and the result says so. Omit for that level.")}
+_START_CHOICE_PARAMS = {
+    "reasoning_effort": _ROOT_EFFORT_PARAM,
+    "destination": {"type": "string", "enum": ["place", "owner"], "description": (
+        "Presence callers only. 'place': this place's work, which may answer its conversation. 'owner': the owner's own "
+        "private work, asked for by their answer to a private question; it runs as ordinary owner work in Main or a "
+        "Project chosen here without an automatic place reply; the place can still read and stop it. That root schedules "
+        "its own follow-ups.")},
+    "owner_quote": {"type": "string", "default": "", "description": (
+        "With destination='owner': the held owner_quote_handle of the answer that asks for this work.")},
+}
 
 
 # The direct-OpenAI custom projection drops parameter prose and keeps this lead only as far as it fits
@@ -172,10 +184,10 @@ def _project_tool_entries() -> List[ToolEntry]:
     return [
         ToolEntry("close_project", {
             "name": "close_project",
-            "description": "Close a finished project with a note, or reopen it. Its room and history stay; a new owner message or task reopens it.",
+            "description": "Close a finished project with a note, or reopen it. Closing makes the note the room's last page over its open rows, from what I hold (name what I did not re-read); its room and history stay; a new owner message or task reopens it.",
             "parameters": {"type": "object", "properties": {
                 "project_id": {"type": "string"},
-                "note": {"type": "string", "description": "Why I close or reopen this project."},
+                "note": {"type": "string", "description": "Why I close or reopen this project; closing: also the room's page, so what it did, found and left open."},
                 "reopen": {"type": "boolean", "default": False},
             }, "required": ["project_id", "note"], "additionalProperties": False},
         }, _close_project, safety_policy="skip"),
@@ -238,7 +250,8 @@ def get_tools() -> List[ToolEntry]:
                 "pending_review": {"type": "string", "enum": ["wait", "finish"], "default": "wait"},
                 "swarm_comparison": {"type": "string", "description": "Optional solo-versus-swarm comparison in your own words, attributed to you separately from measured tree facts."},
                 "silent": {"type": "boolean", "default": False, "description": "Finish without a message where allowed above and no human reply is owed; any answer stays internal (wake_silent)."},
-                "summary": {"type": "string", "default": "", "description": "On a root task or self-started run: one short plain sentence for your human, in their language, saying what this run did, found or decided. A clean finish shows it on the card, room row and portal; a held cause takes precedence. An unnamed self-started run, including a schedule-born root without a Presence binding, may take it as its title; an authored title and an ordinary task's name stay. It also appears in the schedule's last-run line or Consciousness row; the next scheduled run or wake reads it. Your full answer stays as written. A child's sentence is dropped and named in its result (ignored: summary)."},
+                "summary": {"type": "string", "default": "", "description": "On a root task or self-started run: one short plain sentence for your human, in their language, saying what this run did, found or decided. A clean finish shows it on the card, room row and portal; a held cause takes precedence. An unnamed self-started run, including a schedule-born root without a Presence binding, may take it as its title; an authored title and an ordinary task's name stay. It also appears in the schedule's last-run line or Consciousness row; the next scheduled run or wake reads it, and my other foci read it beside this room until a page seals its rows. Your full answer stays as written. A child's sentence is dropped and named in its result (ignored: summary)."},
+                "fold_read": {"type": "boolean", "default": False, "description": "With summary, when this run read words here and owes nothing: my other conversations read this room's words up to this finish as this sentence with their address, until a page seals them. My human's words stay whole; nothing is sealed."},
             }, "required": ["action"]}}, _finish_task),
         ToolEntry("set_tool_timeout", {
             "name": "set_tool_timeout",
@@ -275,7 +288,7 @@ def get_tools() -> List[ToolEntry]:
                     "context_requires_self_body_docs": {"type": "boolean", "description": "True for work on Ouroboros code, including copies elsewhere: this task gets the full development handbook in Max. Low/Nano and helpers keep their usual book maps.", "default": False},
                     "context_requires_development": {"type": "boolean", "description": "true: all of docs/DEVELOPMENT.md in every mode; false: its chapter map."},
                     "source": {"type": "string", "description": "Attach an existing folder or clone a git URL (https://... or git@host:path) server-side into the projects root; private auth failures are typed auth_required. Registers the folder with provenance + trusted_at as the Project/task workspace. Use for work on a supplied repo/folder.", "default": ""},
-                    "reasoning_effort": _ROOT_EFFORT_PARAM,
+                    **_START_CHOICE_PARAMS,
                 },
                 "required": ["objective", "title"],
             },

@@ -122,8 +122,37 @@ def row_ref(item: Mapping[str, Any]) -> str:
     if client and chat:
         return _chat_ref({"chat_id": chat, "client_message_id": client})
     if msg_id:
-        return f"msg {msg_id}"
+        return msg_id if msg_id.startswith("row:") else f"msg {msg_id}"
     return f"message {client}" if client else ""
+
+
+def _carrier_ref(item: Mapping[str, Any], *, canonical: Any = "") -> str:
+    """Keep a carrier's stable address when its row has no client id.
+
+    Older held and relayed rows can have no ``client_message_id``.  Falling back
+    to ``_chat_ref`` then gives every such row the same ``chat N`` identity and
+    ``_deduped`` silently drops all but the first one.  A canonical carrier key
+    (the held-map key or the relay quote address) is the identity in that case;
+    rows that do name a client message retain the historical chat/client form so
+    they still merge with their origin copy.
+    """
+    if item.get("client_message_id"):
+        return _chat_ref(item)
+    if str(canonical or ""):
+        return str(canonical)
+    return row_ref(item)
+
+
+def _held_origin(ref: Mapping[str, Any], held: Any) -> Mapping[str, Any] | None:
+    """Resolve an identified origin from rows already retained, without guessing from equal words alone."""
+    if not (ref.get("client_message_id") or ref.get("ts")) or not ref.get("text_sha256"):
+        return None
+    from ouroboros.project_dialogue import entry_matches_source_ref
+    from ouroboros.owner_relay import owner_row_address
+
+    matches = {owner_row_address(row): row for row in _mapping(held).values()
+               if isinstance(row, dict) and entry_matches_source_ref(row, [dict(ref)])}
+    return next(iter(matches.values())) if len(matches) == 1 else None
 
 
 def _deduped(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -233,17 +262,24 @@ def _held_twin(item: Mapping[str, Any], held: Mapping[str, Any]) -> Mapping[str,
 
 def _dated_directives(ctx: Any):
     """``(item, time, reference, door-stamped)`` for each owner-sourced item of the run's corpus: the door's stamp
-    for its first message; else the item's own room, client id and time (empty here: ``_words_rows`` reads them);
+    for its first message, and for its origin row recorded without an identity of its own, under the reference
+    the held origin row keeps when the run holds one (``_held_origin``: a legacy door without a client id keeps
+    its carrier's address); else the item's own room, client id and time (empty here: ``_words_rows`` reads them);
     an item without a room reads under the chat row this focus holds for it (``_held_twin``), so one message is
     one row whichever carrier names it, and an answer recorded without its card takes the card its twin answers,
     so the card renders beside the answer."""
+    from ouroboros.owner_relay import owner_row_address
+
     origin_ref = _mapping(_ctx_metadata(ctx).get("origin_message_ref"))
     held = _mapping(getattr(ctx, "_held_owner_messages", None))
+    known = _held_origin(origin_ref, held or _ctx_metadata(ctx).get("held_owner_messages"))
+    reference = _carrier_ref(known, canonical=owner_row_address(known)) if known else _chat_ref(origin_ref)
     for item in getattr(ctx, "_owner_directives", None) or []:
         if not isinstance(item, dict) or item.get("source") not in OWNER_SOURCES:
             continue
-        if item["source"] == "initial_user" and origin_ref:
-            yield item, str(origin_ref.get("ts") or ""), _chat_ref(origin_ref), True
+        door = item["source"] == "initial_user" and bool(origin_ref)
+        if door or (item["source"] == "origin_message" and origin_ref and not row_ref(item)):
+            yield item, str(origin_ref.get("ts") or ""), reference, door
             continue
         twin = {} if item.get("chat_id") and item.get("client_message_id") else _held_twin(item, held)
         if twin and not _mapping(item.get("reply_to")).get("address") and (
@@ -333,20 +369,32 @@ def owner_words_contain(ctx: Any, text: Any) -> bool:
 
 
 def _corpus_keys(row: Mapping[str, Any]) -> set:
-    """One carried row's identities: its ``msg_id`` and origin ``client_message_id`` (an empty id names none),
-    else its source and words."""
-    keys = {(key, str(row[key])) for key in ("msg_id", "client_message_id") if str(row.get(key) or "").strip()}
+    """One carried row's identities: client ids are scoped by chat when a carrier names one."""
+    keys = set()
+    msg_id = str(row.get("msg_id") or "").strip()
+    client_id = str(row.get("client_message_id") or "").strip()
+    chat_id = str(row.get("chat_id") or "").strip()
+    if msg_id:
+        keys.add(("msg_id", msg_id))
+    if client_id:
+        keys.add(("client_message_id", client_id, chat_id))
     return keys or {("words", str(row.get("source") or ""), str(row.get("content") or ""))}
 
 
+def _same_corpus_source(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    """Same-room client ids are one source; an unscoped carrier matches any room."""
+    left_id, right_id = str(left.get("client_message_id") or "").strip(), str(right.get("client_message_id") or "").strip()
+    if left_id and left_id == right_id:
+        left_chat, right_chat = str(left.get("chat_id") or "").strip(), str(right.get("chat_id") or "").strip()
+        return not left_chat or not right_chat or left_chat == right_chat
+    return bool(_corpus_keys(left) & _corpus_keys(right))
+
+
 def merged_corpus(kept: Any, added: Any) -> List[Dict[str, Any]]:
-    """``kept`` carried rows, then each row of ``added`` whose source is not among them yet (one source is one
-    row): a schedule edit's new words join the words already carried, never doubling an old message."""
+    """Merge carried rows without collapsing same client ids from different rooms."""
     merged: List[Dict[str, Any]] = []
-    seen: set = set()
     for row in [*(kept if isinstance(kept, list) else []), *(added if isinstance(added, list) else [])]:
-        if isinstance(row, Mapping) and not (keys := _corpus_keys(row)) & seen:
-            seen |= keys
+        if isinstance(row, Mapping) and not any(_same_corpus_source(row, prior) for prior in merged):
             merged.append(dict(row))
     return merged
 
@@ -481,18 +529,24 @@ def _held_words(held: Any, drive_root: Any, task_id: str, *, context: Any = None
     """The rows a focus holds by address (``owner_relay.held_owner_messages``) as rows of the set. ``context``
     selects by the carriage fact beside a held row: False, the rows that reached this work (a held value without
     a ``carried`` fact counts as one); True, the rows held as context, which went to another work; None, every
-    row. A context row's carrier names where it went."""
+    row. A context row's carrier names where it went. A row is judged, and its reply target read, against the
+    data root it was read from (``_owner_source_root``: a teller's root may differ from this work's), with that
+    root's place snapshot; ``accounts`` is ``drive_root``'s."""
     from ouroboros.owner_relay import quotable_owner_row
 
     rows: List[Dict[str, Any]] = []
+    accounts_by_root = {str(drive_root): accounts}
     for key, row in _mapping(held).items():
         fact = _mapping(row.get("carried")) if isinstance(row, Mapping) else {}
         went = str(fact.get("went_to") or "")
         if not isinstance(row, Mapping) or (context is not None and bool(went) is not context):
             continue
-        if quotable_owner_row(row, drive_root, accounts=accounts):
+        source_root = row.get("_owner_source_root") or drive_root
+        if (source_accounts := accounts_by_root.get(str(source_root))) is None:
+            source_accounts = accounts_by_root[str(source_root)] = owner_place_accounts(source_root)
+        if quotable_owner_row(row, source_root, accounts=source_accounts):
             rows += _chat_words(row, key=str(key), carrier=f"went to {went}" if went else "held",
-                                source="owner_mailbox", task_id=task_id, root=drive_root if read else None)
+                                source="owner_mailbox", task_id=task_id, root=source_root if read else None)
     return rows
 
 
@@ -648,64 +702,11 @@ def safety_sources(ctx: Any) -> List[Dict[str, Any]]:
     root = _data_root(ctx)
     for key, row in _mapping(getattr(ctx, "_held_owner_messages", None)).items():
         if isinstance(row, Mapping) and isinstance(row.get("carried"), dict) and not row["carried"].get("went_to"):
-            replied = answered_card_reply(*answered_card_source(row)) or reply_target(root, row.get("reply_to"))
+            replied = answered_card_reply(*answered_card_source(row)) or reply_target(
+                row.get("_owner_source_root") or root, row.get("reply_to"))
             rows.append({"source": "owner_mailbox", "content": owner_text(row), "msg_id": str(key),
                          **({"reply_to": replied} if replied else {})})
     return rows
-
-
-def task_words_text(drive_root: Any, task: Mapping[str, Any], *, audience: str = "child", indent: str = "",
-                    stage: bool = False, marks: Any = None) -> str:
-    """A task's set rendered from its record at its start (a helper's birth): the field it was scheduled with and
-    the rows its record holds, then the live rows of its room, read once here; without ``drive_root`` the record
-    alone. ``stage`` (a birth): the files the rows carry are staged on the task's own drive and named by path.
-    ``marks``: the acting marks the caller's capture holds, so the marked rows are cut from them (``_live_words``)."""
-    record = _mapping(task)
-    meta = _mapping(record.get("metadata"))
-    task_id = str(record.get("id") or record.get("task_id") or "")
-    root_id = str(record.get("root_task_id") or meta.get("root_task_id") or "")
-    rows, absent = task_governing_words(record)
-    gaps: List[str] = []
-    if drive_root is not None:
-        accounts = owner_place_accounts(drive_root)
-        held = record.get("held_owner_messages") or meta.get("held_owner_messages")
-        live, gaps = _live_words(drive_root, _room_of(
-            drive_root, task_id, record.get("parent_task_id") or meta.get("parent_task_id"), root_id), accounts, marks)
-        rows = _deduped([*rows, *(row for context in (False, True) for row in _held_words(
-            held, drive_root, task_id, context=context, accounts=accounts, read=True)), *live])
-        if stage and task_id:
-            _stage_birth_files(drive_root, record, task_id, rows)
-    return render_owner_words(rows, absent, audience=audience, root_task_id=root_id, indent=indent, gaps=gaps)
-
-
-def _stage_birth_files(drive_root: Any, record: Mapping[str, Any], task_id: str, rows: List[Dict[str, Any]]) -> None:
-    """At a helper's birth the files its set's rows carry are staged on its own drive from their saved uploads
-    (``owner_relay.stage_quoted``, as a relay stages at a drain: by saved hash, idempotent), and each file's line
-    names the staged path it opens, or the host's reason it could not be staged; a declared helper and a
-    grandchild stage the same way. A staging that fails leaves the file named as before. Never raises."""
-    from types import SimpleNamespace
-
-    from ouroboros.owner_relay import stage_quoted
-    from supervisor.queue_timeouts import _task_drive_for_task
-
-    meta = _mapping(record.get("metadata"))
-    # The record's drive fields, else the drive the mailbox writer resolves for the same task (``carry_to_members``).
-    drive = str(record.get("child_drive_root") or record.get("drive_root") or meta.get("child_drive_root") or "") or (
-        _task_drive_for_task(dict(record), task_id, canonical=drive_root) if drive_root is not None else "")
-    ctx = SimpleNamespace(drive_root=pathlib.Path(drive) if drive else drive_root, task_id=task_id)
-    for row in rows:
-        if not row.get("attachments"):
-            continue
-        try:
-            manifest = stage_quoted(ctx, {"relay_canonical_root": str(drive_root)}, row)
-        except Exception as exc:  # the file stays named; the birth block is never refused over a copy
-            log.warning("owner words: files of a row not staged at the birth of %s (%s: %s)", task_id,
-                        type(exc).__name__, exc)
-            continue
-        for ref, item in zip(row["attachments"], manifest if isinstance(manifest, list) else []):
-            item = _mapping(item)
-            ref["staged"] = (f"read_file(root='artifact_store', path='{item.get('relpath')}')"
-                             if item.get("status") == "staged" else f"not staged: {item.get('reason') or 'unknown'}")
 
 
 def _inbound_rows(drive_root: Any, client_ids: Mapping[str, str], accounts: Any = None) -> List[Dict[str, Any]]:
@@ -746,20 +747,30 @@ def owner_row(row: Mapping[str, Any] | None, drive_root: Any = None, *, accounts
 
 
 def _message_rows(drive_root: Any, task_id: str, text: Any, ref: Any, carrier: str,
-                  accounts: Any) -> List[Dict[str, str]]:
+                  accounts: Any = None, held: Any = None) -> List[Dict[str, str]]:
     ref = _mapping(ref)
-    if isinstance(text, str) and text.strip():
-        return [_row(text, source="origin_message", carrier=carrier, task_id=task_id, ts=ref.get("ts"),
-                     ref=_chat_ref(ref) if ref else "")]
-    if not ref:
-        return []
     from ouroboros.project_dialogue import resolve_owner_message_source
+    from ouroboros.store import StoreError
 
-    row = resolve_owner_message_source(drive_root, dict(ref))
-    if not owner_row(row, drive_root, accounts=accounts):
+    try:
+        row = _held_origin(ref, held) or (resolve_owner_message_source(drive_root, dict(ref)) if ref else None)
+    except (StoreError, OSError):
+        if not (isinstance(text, str) and text.strip()):
+            raise
+        log.debug("Reply source unreadable; retaining recorded owner words", exc_info=True)
+        row = None
+    from ouroboros.owner_relay import owner_row_address
+    reference = _carrier_ref(row, canonical=owner_row_address(row)) if row else (_chat_ref(ref) if ref else "")
+    source_root = _mapping(row).get("_owner_source_root") or drive_root
+    if isinstance(text, str) and text.strip():
+        target = reply_target(source_root, _mapping(row).get("reply_to"))
+        return _words_rows({"source": "origin_message", "content": text, "reply_to": target}, carrier=carrier,
+                           task_id=task_id, ts=ref.get("ts"), ref=reference)
+    if not owner_row(row, source_root, accounts=accounts if str(source_root) == str(drive_root) else None):
         return []
-    return [_row(row["text"], source="origin_message", carrier=carrier, task_id=task_id, ts=row.get("ts"),
-                 ref=_chat_ref(row))]
+    return _words_rows({**row, "source": "origin_message", "content": row["text"],
+                        "reply_to": reply_target(source_root, row.get("reply_to"))}, carrier=carrier,
+                       task_id=task_id, ts=row.get("ts"), ref=reference)
 
 
 def _corpus_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any], accounts: Any) -> List[Dict[str, str]]:
@@ -768,6 +779,17 @@ def _corpus_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any], ac
     corpus = _mapping(record.get("metadata")).get("owner_corpus") or record.get("owner_corpus")
     origin = _mapping(record.get("origin_message_ref") or _mapping(record.get("metadata")).get("origin_message_ref"))
     stamp = {"ts": origin.get("ts"), "ref": _chat_ref(origin)} if origin else {}
+    if origin and not origin.get("client_message_id"):
+        from ouroboros.project_dialogue import resolve_owner_message_source
+        from ouroboros.owner_relay import owner_row_address
+        from ouroboros.store import StoreError
+        try:
+            saved = (_held_origin(origin, record.get("held_owner_messages"))
+                     or resolve_owner_message_source(drive_root, dict(origin)))
+        except (StoreError, OSError):
+            saved = None  # its carried words remain; an unreadable source supplies no new identity
+        if saved:
+            stamp["ref"] = _carrier_ref(saved, canonical=owner_row_address(saved))
     return [row for item in (corpus if isinstance(corpus, list) else [])
             if isinstance(item, Mapping) and item.get("source") in OWNER_SOURCES
             for row in _words_rows(item, carrier="owner_corpus", task_id=task_id,
@@ -778,7 +800,8 @@ def _origin_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any], ac
     nested = _mapping(record.get("metadata"))
     return _message_rows(drive_root, task_id,
                          record.get("origin_message_text") or nested.get("origin_message_text"),
-                         record.get("origin_message_ref") or nested.get("origin_message_ref"), "origin_message", accounts)
+                         record.get("origin_message_ref") or nested.get("origin_message_ref"), "origin_message", accounts,
+                         record.get("held_owner_messages"))
 
 
 def _binding_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any], accounts: Any) -> List[Dict[str, str]]:
@@ -786,7 +809,7 @@ def _binding_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any], a
 
     binding = _mapping(project_task_bindings(drive_root).get(task_id))
     return _message_rows(drive_root, task_id, binding.get("source_text"), binding.get("source_ref"), "binding",
-                         accounts)
+                         accounts, record.get("held_owner_messages"))
 
 
 def _annotation_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any],
@@ -799,9 +822,12 @@ def _annotation_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any]
         if (row.get("action") in _ANNOTATED_ACTS and row.get("status") in _ANNOTATED_STATUSES
                 and str(row.get("target") or "") == task_id):
             acts.setdefault(client_id, str(row["action"]))
-    return [_row(row["text"], source=acts[str(row["client_message_id"])], carrier="annotation", task_id=task_id,
-                 ts=row.get("ts"), ref=_chat_ref(row))
-            for row in (_inbound_rows(drive_root, acts, accounts) if acts else [])]
+    rows = []
+    for row in (_inbound_rows(drive_root, acts, accounts) if acts else []):
+        rows.extend(_words_rows({**row, "source": acts[str(row["client_message_id"])], "content": row["text"],
+                                 "reply_to": reply_target(drive_root, row.get("reply_to"))},
+                                carrier="annotation", task_id=task_id, ts=row.get("ts"), ref=_chat_ref(row)))
+    return rows
 
 
 def _mailbox_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any], accounts: Any) -> List[Dict[str, str]]:
@@ -812,11 +838,38 @@ def _mailbox_carrier(drive_root: Any, task_id: str, record: Mapping[str, Any], a
         entries = drain_owner_entries(pathlib.Path(drive_root), task_id, include_acknowledged=True)
     except (OSError, ValueError):
         return []
-    return [_row(entry.get("text"), source="owner_mailbox", carrier="mailbox", task_id=task_id, ts=entry.get("ts"),
-                 ref=f"msg {entry.get('msg_id')}") for entry in entries if entry.get("kind") == KIND_OWNER_TEXT] + [
-        _row(owner_text(row), source="owner_mailbox", carrier="relay", task_id=task_id, ts=row.get("ts"),
-             ref=_chat_ref(row)) for entry in entries if entry.get("kind") == "relay_entry"
-        for row in entry.get("owner_rows") or [] if quotable_owner_row(row, drive_root, accounts=accounts)]
+    rows: List[Dict[str, str]] = []
+    accounts_by_root = {str(drive_root): accounts}
+    for entry in entries:
+        if entry.get("kind") != KIND_OWNER_TEXT:
+            continue
+        item = {**entry, "source": "owner_mailbox", "content": entry.get("text")}
+        if target := reply_target(drive_root, entry.get("reply_reference")):
+            item["reply_to"] = target
+        rows.extend(_words_rows(item, carrier="mailbox", task_id=task_id, ts=entry.get("ts"),
+                                ref=f"msg {entry.get('msg_id')}"))
+    for entry in entries:
+        if entry.get("kind") != "relay_entry":
+            continue
+        fallback_root = entry.get("relay_canonical_root") or drive_root
+        quotes = entry.get("relay", {}).get("quotes") if isinstance(entry.get("relay"), Mapping) else []
+        for index, row in enumerate(entry.get("owner_rows") or []):
+            source_root = row.get("_owner_source_root") or fallback_root
+            source_key = str(source_root)
+            source_accounts = accounts_by_root.get(source_key)
+            if source_accounts is None:
+                source_accounts = accounts_by_root[source_key] = owner_place_accounts(source_root)
+            if not quotable_owner_row(row, source_root, accounts=source_accounts):
+                continue
+            quote = quotes[index] if isinstance(quotes, list) and index < len(quotes) else {}
+            source = quote.get("source") if isinstance(quote, Mapping) else {}
+            canonical = source.get("address") if isinstance(source, Mapping) else ""
+            canonical = canonical or f"{entry.get('msg_id') or 'relay'}#{index}"
+            item = {**row, "source": "owner_mailbox", "content": owner_text(row),
+                    "reply_to": reply_target(source_root, row.get("reply_to"))}
+            rows.extend(_words_rows(item, carrier="relay", task_id=task_id, ts=row.get("ts"),
+                                    ref=_carrier_ref(row, canonical=canonical)))
+    return rows
 
 
 def _task_record(drive_root: Any, task_id: str) -> Dict[str, Any]:
@@ -840,7 +893,7 @@ def task_owner_words(drive_root: Any, task_id: str, *,
     record = dict(task) if isinstance(task, Mapping) else _task_record(drive_root, task_id)
 
     accounts = owner_place_accounts(drive_root)  # one snapshot for every row this read judges
-    held = _held_words(record.get("held_owner_messages"), drive_root, task_id, accounts=accounts)
+    held = _held_words(record.get("held_owner_messages"), drive_root, task_id, accounts=accounts, read=True)
     rows, absent = task_governing_words(record)
     if rows or absent:
         return _deduped(rows + held), "" if rows or held else absent
@@ -932,64 +985,6 @@ def owner_words_text(ctx: Any, *, audience: str = "reviewer") -> str:
     rows, absent, gaps = work_words(ctx)
     root = str(_ctx_metadata(ctx).get("root_task_id") or getattr(ctx, "task_id", "") or "")
     return render_owner_words(rows, absent, audience=audience, root_task_id=root, gaps=gaps)
-
-
-def _stamp_parts(line: str) -> List[str]:
-    """The parts of one owner-words stamp line as ``words_stamp`` prints it (``[… · owner · …]``); ``[]`` for any
-    other line, a reply target's stamp among them. The one parser of a stamp for every reader of one."""
-    line = line.strip()
-    parts = line[1:-1].split(" · ") if line.startswith("[") and line.endswith("]") else []
-    return parts if "owner" in parts[:2] else []
-
-
-def stamped_sources(text: Any) -> Dict[str, str]:
-    """``{reference: source}`` of every owner-words stamp in a rendered text (a review subject, a brief, a member's
-    first request): the last part of each stamp line, whole, so one reference is never found inside a longer one,
-    and the source part the stamp names before it (``room_message``, ``owner_mailbox of task …``)."""
-    stamps: Dict[str, str] = {}
-    for line in str(text or "").split("\n"):
-        if parts := _stamp_parts(line):
-            stamps[parts[-1]] = parts[parts.index("owner") + 1] if len(parts) > 2 else ""
-    return stamps
-
-
-def stamped_refs(text: Any) -> set:
-    """The reference tokens of every owner-words stamp in a rendered text (``stamped_sources``)."""
-    return set(stamped_sources(text))
-
-
-def _stamp_blocks(text: str) -> List[Tuple[str, str]]:
-    """``(time, words)`` under every owner-words stamp line of a rendered text: the stamp's time part (``""`` when
-    undated) and the lines beneath it up to the next stamp line, as a row with no reference is told
-    (``words_unseen_in``)."""
-    blocks: List[Tuple[str, List[str]]] = []
-    for line in text.split("\n"):
-        if parts := _stamp_parts(line):
-            blocks.append(("" if parts[0] == "owner" else parts[0], []))
-        elif blocks:
-            blocks[-1][1].append(line)
-    return [(when, "\n".join(lines).strip()) for when, lines in blocks]
-
-
-def words_unseen_in(ctx: Any, text: Any) -> List[Dict[str, Any]]:
-    """My human's rows of this run's set (``work_words``; never a reply target, another author's words) whose
-    identity a rendered ``text`` does not hold. Identity is the stamp's reference token, matched whole, under
-    either reference the row has printed (``_earlier_refs``); a row with no reference is told by its words under
-    a stamp with its time (``_stamp_blocks``: the words whole at the block's head, never a substring of the text).
-    Never the whole stamp: a row's source, and a referenced row's date, may change for a reader that did see it.
-    A text with no stamp at all (unreadable, or rendered without words) holds no row: every row is unseen."""
-    rows = [row for row in work_words(ctx)[0] if row.get("source") != REPLY_TARGET]
-    text = str(text or "")
-    seen, earlier, blocks = stamped_refs(text), _earlier_refs(ctx), _stamp_blocks(text)
-
-    def held(row: Mapping[str, Any]) -> bool:
-        if row["ref"]:
-            return row["ref"] in seen or earlier.get(row["ref"]) in seen
-        words = row["text"].strip()
-        return bool(words) and any(when == row["ts"] and (block == words or block.startswith(words + "\n"))
-                                   for when, block in blocks)
-
-    return [row for row in rows if not (seen and held(row))]
 
 
 def reviewer_words_material() -> list:

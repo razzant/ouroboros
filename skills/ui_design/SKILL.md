@@ -1,13 +1,13 @@
 ---
 name: ui_design
-version: 2.0.2
+version: 2.0.4
 type: instruction
 os: any
 permissions: []
 description: "Design, change or show anything people look at (app UI, widget, mockup, HTML page or report, chart, icon): it fits the existing system, uses real content and states, and is judged by eye at the viewer's real size."
 when_to_use: "Before designing or changing how something looks, judging screenshots of such work, putting visual variants before a person, or briefing another model that will draw. Not software architecture."
 model_experience:
-  what_model_sees: "A few lines of metadata while enabled. On read: a one-screen playbook; references hold the craft floor, the render-and-measure recipe, the author brief, a one-file comparison page and two browser-side snippets (measure.js, freeze.js). No tools."
+  what_model_sees: "A few lines of metadata while enabled. On read: a one-screen playbook; references hold the craft floor, the render-and-measure recipe, the author brief, a one-file comparison page and two browser-side snippets (measure.js, freeze.js), and an optional read-only stand for Ouroboros's own interface (live_stand.py). No tools."
   token_effect: "A few context lines while enabled. The body costs about two and a half thousand tokens when read; each reference costs tokens only when opened."
 ---
 
@@ -43,6 +43,7 @@ A surface looks designed when every choice on it is explained by what the viewer
 ## 4. Putting a choice before a person
 
 - One self-contained page made from `assets/compare.html`: one scene at a time at the viewer's real size, Now and two to four genuinely different directions swapped in place (keys 1–9, arrows; S side by side; C clean view), real product code and the real long data. A blink between pictures hides the difference being judged.
+- For Ouroboros's own interface every frame is a capture of its running shell, or of this task's candidate `web/` served over the same live reads, at the owner's window and in the state the owner sees. `compare.html` shows those frames; it is not where the interface is drawn.
 - One plain line per variant: what changes, what it costs. A is the recommendation, chosen for fit over novelty; "none of these" is always offered. A refinement shows Now and one proposal. A variant that moves away from something already approved says so.
 - Demo chrome stays outside the product frame; nothing floats over the app. Open the file alone at the viewer's size and engine, switch every variant and look before sending.
 - The message: one line on what is decided, the file plus one inline first-screen image for phone readers, at most three plain numbered questions, A first with its cost. No file names, test counts or process story.
@@ -64,4 +65,4 @@ A delegated session may not see this skill: give it this file's absolute path an
 
 ## Done means
 
-A delivered page opens alone and fetches nothing; zero console errors; the awkward content fits; you looked at it at the viewer's size, in both themes when the product has two, and what you saw (and what any eye you asked saw) matches your viewer sentence; you can name what you saw and what you measured.
+A delivered page opens alone with nothing behind it: a page that works only while a server you started runs is not a delivery; zero console errors; the awkward content fits; frames of Ouroboros's own interface are captures of it running (§4), and a timeout or a failed load is a fault of the capture, never a frame; you looked at it at the viewer's size, in both themes when the product has two, and what you saw (and what any eye you asked saw) matches your viewer sentence; you can name what you saw and what you measured.

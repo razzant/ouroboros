@@ -838,9 +838,10 @@ def review_result(record: Dict[str, Any], *, reused: bool) -> Dict[str, Any]:
 
 def _words_since_reuse(ctx: ToolContext, record: Dict[str, Any]) -> Dict[str, Any]:
     """One host fact beside a reused verdict: my human's rows this run holds now that no retained brief of that
-    record names (``owner_words.words_unseen_in``: by identity; a brief that cannot be read back names every
+    record names (``owner_relay.words_unseen_in``: by identity; a brief that cannot be read back names every
     row). Nothing is held and no seat is bought: the author judges whether they change what was asked."""
-    from ouroboros.owner_words import words_stamp, words_unseen_in
+    from ouroboros.owner_relay import words_unseen_in
+    from ouroboros.owner_words import words_stamp
     from ouroboros.review_ledger import read_source
 
     briefs: List[str] = []

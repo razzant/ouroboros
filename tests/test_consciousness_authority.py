@@ -93,7 +93,7 @@ def test_observe_table_covers_every_registry_entry_marked_mutates_worktree(tmp_p
     unknown = set(ca.OBSERVE_DISABLED) - {e.name for e in reg._entries.values()}
     # Skill/project tools are registered lazily (skills, journal); the built-in names must exist.
     assert unknown <= {"toggle_skill", "skill_owner_action", "journal_write", "workpad_write",
-                       "configure_presence", "initiate_presence", "delegate_start"}, sorted(unknown)
+                       "initiate_presence", "delegate_start"}, sorted(unknown)
 
 
 # --- derivation at task build ---------------------------------------------------

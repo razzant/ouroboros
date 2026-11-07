@@ -4,7 +4,7 @@
 loop right after ``tick_publisher_started``) the capture is handed to one daemon thread that encodes and writes it,
 so event dispatch never waits on ``rename`` and ``open``. The tick answers False once for each failed write the writer
 completed, one tick later, and that tick's capture is the complete rewrite (FU1/R2 unchanged); a retry still on the
-disk is not another failure (the loop ends at three consecutive). The writer holds
+disk is not another failure (the third consecutive ends the generation). The writer holds
 the newest capture only (a slow disk never queues a backlog), an older capture a barrier overtook is skipped under
 the publish lock, a capture of an ended generation is never written, and the writer ends with the loop that fed it
 (``stop_queue_writer``): the doors after the loop publish synchronously where they stand. Without the writer
@@ -240,7 +240,7 @@ def _writer_writes(monkeypatch, *, fail_first: int = 0, hold: threading.Event | 
 
 def test_one_failed_write_and_a_slow_retry_answer_false_once(published, monkeypatch):
     """One failed write, then its retry sits on the disk across three ticks: the loop counts one crash, not three
-    (``server._run_supervisor`` ends the loop at three consecutive), and the retry that lands is answered True."""
+    (``server._run_supervisor`` ends the generation at three consecutive), and the retry that lands is answered True."""
     _root, _now = _seed(published)
     release = threading.Event()
     _writer_writes(monkeypatch, fail_first=1, hold=release)
@@ -275,11 +275,11 @@ def test_three_consecutive_failed_writes_still_answer_false_three_times(publishe
     assert _read(root, "queue.alive")["generation"] == _read(root, "queue_snapshot.json")["generation"]
 
 
-# ---- a disk that keeps failing slowly still ends the loop (round-2 review N1) ----------------------------------------
+# ---- a disk that keeps failing slowly still ends the generation (round-2 review N1) ----------------------------------------
 
 def _loop_reaches_its_cutoff(answers) -> bool:
     """``server._run_supervisor``'s exact rule over the tick's answers: a False is a crash, anything else resets the
-    count, three consecutive crashes end the loop."""
+    count, three consecutive crashes end the generation (``loop_failed``)."""
     streak, reached = 0, False
     for answer in answers:
         streak = streak + 1 if answer is False else 0

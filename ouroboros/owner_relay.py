@@ -3,6 +3,10 @@
 Quote authority is possession of a host-retained ingress row, never the teller's
 lane. The mailbox is the durable delivery owner; ACK follows saved cognition.
 Return addresses are retained by the recipient independently of the teller.
+How a member comes to hold my human's rows lives here too: its birth set from its
+record and room (``task_words_text``, files staged by ``stage_birth_files``), and the
+identity read of a text already sent (``words_unseen_in`` over ``owner_words.words_stamp``
+lines), which carriage and placement use to render a row once.
 """
 from __future__ import annotations
 
@@ -19,6 +23,12 @@ KIND_RELAY = "relay_entry"
 # A carried row's ``went_to`` when no work was delivered it: a head of the room routed it. A typed marker, never a
 # task id (an id carries no colon) and never the empty value that means ``reached this work``.
 ROUTED_BY_HEAD = "routed:head"
+
+
+def owner_row_address(row) -> str:
+    """Canonical row address, excluding local source-authority annotations."""
+    clean = {key: value for key, value in (row or {}).items() if key != "_owner_source_root"}
+    return format_address(row_address(clean))
 
 
 def quotable_owner_row(row, drive_root=None, *, accounts=None) -> bool:
@@ -59,16 +69,17 @@ def held_owner_messages(ctx) -> dict:
             except StoreError:  # its archive is still importing: nothing held yet, never a failed turn
                 row = None
             if quotable_owner_row(row, canonical_data_root(ctx)):
-                held[format_address(row_address(row))] = row
+                held[owner_row_address(row)] = {**row, "_owner_source_root": str(canonical_data_root(ctx))}
         persist_held_state(ctx)
     return held
 
 
-def retain_owner_message(ctx, row=None, *, client_message_id="", accounts=None):
+def retain_owner_message(ctx, row=None, *, client_message_id="", accounts=None, source_root=None):
     """Hold one owner row of this turn by its address and return it (``None`` when nothing was held), so its corpus
     row can name the same room and time; ``accounts``: the caller's one place snapshot for its rows. A row named
     by client id is looked up in the context's chat, then in the room the room rule names for its tree: a task
-    bound to a Project after admission keeps its admitted chat (``control_relay._teller_room``)."""
+    bound to a Project after admission keeps its admitted chat (``control_relay._teller_room``). ``source_root``:
+    the data root the row was read from (a teller's, for a relayed row), kept beside it as ``_owner_source_root``."""
     if ctx is None:
         return None
     if row is None and client_message_id and getattr(ctx, "drive_root", None):
@@ -83,9 +94,11 @@ def retain_owner_message(ctx, row=None, *, client_message_id="", accounts=None):
         row = accepted_chat_message(root, chat, client_message_id) or (
             accepted_chat_message(root, bound, client_message_id) if bound and bound != chat else None)
     from ouroboros.tool_access import canonical_data_root
-    if quotable_owner_row(row, canonical_data_root(ctx) if getattr(ctx, "drive_root", None) else None,
-                          accounts=accounts):
-        held_owner_messages(ctx)[format_address(row_address(row))] = copy.deepcopy(row)
+    root = source_root or (row or {}).get("_owner_source_root") or (
+        canonical_data_root(ctx) if getattr(ctx, "drive_root", None) else None)
+    if quotable_owner_row(row, root, accounts=accounts):
+        held_owner_messages(ctx)[owner_row_address(row)] = {
+            **copy.deepcopy(row), "_owner_source_root": str(root) if root else ""}
         persist_held_state(ctx)
         return row
     return None
@@ -144,25 +157,37 @@ def flush_held_state(ctx) -> None:
 
 
 def quote_rows(ctx, handles) -> tuple[list, str]:
+    if handles == []:
+        return [], ""  # An unquoted note reads no owner source or account snapshot.
     held = held_owner_messages(ctx)
-    if not isinstance(handles, list) or any(not isinstance(h, str) or h not in held for h in handles):
-        return [], "QUOTE_NOT_HELD: choose only held owner handles: " + json.dumps(list(held), ensure_ascii=False)
-    if not handles:
-        return [], ""
+    from ouroboros.owner_words import owner_place_accounts
     from ouroboros.tool_access import canonical_data_root
     root = canonical_data_root(ctx)
-    return [owner_quote(root, held[handle], address=handle) for handle in dict.fromkeys(handles)], ""
+    accounts_by_root = {}
+    current = {}
+    for handle, row in held.items():
+        source_root = row.get("_owner_source_root") or root
+        cache_key = str(source_root)
+        accounts = accounts_by_root.get(cache_key)
+        if accounts is None:
+            accounts = accounts_by_root[cache_key] = owner_place_accounts(source_root)
+        if quotable_owner_row(row, source_root, accounts=accounts):
+            current[handle] = row
+    if not isinstance(handles, list) or any(not isinstance(h, str) or h not in current for h in handles):
+        return [], "QUOTE_NOT_HELD: choose only held owner handles: " + json.dumps(list(current), ensure_ascii=False)
+    return [owner_quote(root, current[handle], address=handle) for handle in dict.fromkeys(handles)], ""
 
 
 def owner_quote(root, row: dict, *, address: str = "") -> dict:
     """One retained owner row as a quote: exact words, attachments and where/when."""
     from ouroboros.owner_words import answered_card_source
     from ouroboros.projects_registry import list_reserved_projects
+    root = row.get("_owner_source_root") or root
     labels = {int(p["chat_id"]): p["name"] for p in list_reserved_projects(root)}
     chat_id = int(row.get("chat_id", 1))
     quote = {"text": owner_text(row), "attachments": copy.deepcopy(row.get("attachments") or []),
              "source": {"chat_id": chat_id, "label": labels.get(chat_id, "Main"), "ts": str(row.get("ts") or ""),
-                        "address": address or format_address(row_address(row)),
+                        "address": address or owner_row_address(row),
                         "client_message_id": str(row.get("client_message_id") or "")},
              "owner_row": copy.deepcopy(row)}
     if isinstance(row.get("reply_to"), dict) and row["reply_to"]:  # what the owner was replying to, as the host resolved it
@@ -221,10 +246,13 @@ def write_relay(root, task_id: str, *, relay_id: str, note: str, quotes: list, c
     path = _mailbox_path(Path(root), task_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     label = {} if quotes else {"label": _source_label(canonical_root or root, chat_id)}
+    quote_roots = {str(q.get("owner_row", {}).get("_owner_source_root") or "") for q in quotes
+                   if isinstance(q, dict)}
+    source_root = next(iter(quote_roots)) if len(quote_roots) == 1 and next(iter(quote_roots)) else str(canonical_root or root)
     entry = {"kind": KIND_RELAY, "msg_id": f"relay:{relay_id}:{task_id}", "ts": utc_now_iso(),
              "text": note, "relay": relay_envelope(relay_id, quotes, chat_id=chat_id, summary=summary, **label),
              "owner_rows": [q["owner_row"] for q in quotes], "source_task_id": teller_task_id,
-             "relay_canonical_root": str(canonical_root or root)}
+             "relay_canonical_root": source_root}
     if client_surface:
         entry["client_surface"] = copy.deepcopy(client_surface)
     if sender_origin:
@@ -287,6 +315,29 @@ def _quotes_by_row(entry: dict) -> list:
             for index, row in enumerate(entry.get("owner_rows") or [])]
 
 
+def retained_relay(entry: dict, delivered: set | None = None) -> dict:
+    """The internal return/ACK envelope names only injected quotes and their stores; the visible source is unchanged."""
+    relay = copy.deepcopy(entry.get("relay") or {})
+    rows, roots, kept = entry.get("owner_rows") or [], {}, []
+    quotes = relay.get("quotes") or []
+    for index, quote in enumerate(quotes):
+        if delivered is not None and index not in delivered:
+            continue
+        kept.append(quote)
+        row = rows[index] if index < len(rows) else {}
+        if root := row.get("_owner_source_root") or entry.get("relay_canonical_root"):
+            roots[str(quote.get("source", {}).get("address") or "")] = str(root)
+    if delivered is not None and quotes:
+        if not kept:
+            return {}  # the peer note entered, but none of its owner quotes did
+        for key in quotes[0]:
+            relay.pop(key, None)
+        relay.update(kept[0], quotes=kept)
+    if roots:
+        relay["_owner_source_roots"] = roots
+    return relay
+
+
 def inject_relay(ctx, entry: dict, messages: list) -> list:
     """Only exact owner rows enter the owner corpus, carried from the teller (no reply owed); the note has its
     own voice. A ``host_carried`` entry takes the carried mode (``inject_carried``) instead. Returns the addresses
@@ -298,12 +349,27 @@ def inject_relay(ctx, entry: dict, messages: list) -> list:
     if isinstance(entry.get("host_carried"), dict):
         return inject_carried(ctx, entry, messages)
     root = canonical_data_root(ctx) if getattr(ctx, "drive_root", None) else None
-    accounts = owner_place_accounts(root)  # one place snapshot for every quoted row
-    for row, quote in _quotes_by_row(entry):
-        retain_owner_message(ctx, row, accounts=accounts)
-        address = format_address(row_address(row))
+    # The teller may have read the quoted place from a different canonical data
+    # root than the recipient. Each forwarded row retains its source; the
+    # envelope root is the fallback for older rows, not a new source for all of them.
+    fallback_root = entry.get("relay_canonical_root") or root
+    accounts_by_root = {}
+    delivered = set()
+    for index, (row, quote) in enumerate(_quotes_by_row(entry)):
+        source_root = row.get("_owner_source_root") or fallback_root
+        key = str(source_root)
+        if key not in accounts_by_root:
+            accounts_by_root[key] = owner_place_accounts(source_root)
+        accounts = accounts_by_root[key]
+        # A held place row is not permanent authority: account revocation between
+        # relay creation and delivery must prevent stale words from entering the
+        # recipient's corpus or message frame.
+        if not quotable_owner_row(row, source_root, accounts=accounts):
+            continue
+        retain_owner_message(ctx, row, accounts=accounts, source_root=source_root)
+        address = owner_row_address(row)
         # An answer replies to its card (a quiz row's own, or a late answer's snapshot), else to its chat target.
-        replied = answered_card_reply(*answered_card_source(row)) or reply_target(root, row.get("reply_to")) or None
+        replied = answered_card_reply(*answered_card_source(row)) or reply_target(source_root, row.get("reply_to")) or None
         loop._record_owner_directive(ctx, source="owner_mailbox", content=owner_text(row), msg_id=address, carried=True,
                                      origin={"source_task_id": entry.get("source_task_id"),
                                              "client_message_id": row.get("client_message_id"),
@@ -311,25 +377,30 @@ def inject_relay(ctx, entry: dict, messages: list) -> list:
                                      reply_to=replied)
         content = quote_content(ctx, entry, row, _quote_body(row, carried_quote_line(quote, address=address)))
         loop._append_or_merge_user_message(messages, content, slot=ctx, kind=OWNER_WORDS_KIND)
+        delivered.add(index)
     note = str(entry.get("text") or "")
     relay = entry["relay"]
     loop._append_or_merge_user_message(messages,
         f"[Message from Ouroboros in another turn; context, relay {relay['relay_id']}]\n{note}", slot=ctx)
+    # The deferred ACK describes this injection, not a later account snapshot. In particular, revocation after
+    # injection cannot erase a real read, while a row refused before it earns no read or return context.
+    entry["_relay_delivery"] = retained_relay(entry, delivered)
     if ctx is not None:
         relays = getattr(ctx, "_open_relays", None)
         if not isinstance(relays, dict):
             ctx._open_relays = relays = {}
-        relays[relay["relay_id"]] = copy.deepcopy(relay)
+        if entry["_relay_delivery"]:
+            relays[relay["relay_id"]] = copy.deepcopy(entry["_relay_delivery"])
+        else:
+            relays.pop(relay["relay_id"], None)
         persist_held_state(ctx)
     return []
 
 
 def first_request_stamps(messages: list) -> dict:
     """``{reference: source}`` of the owner-words stamps in a member's first request: everything before its first
-    assistant turn, read as it was sent (``owner_words.stamped_sources``). ``{}`` when it holds no stamp or cannot
+    assistant turn, read as it was sent (``stamped_sources``). ``{}`` when it holds no stamp or cannot
     be read: every row is then new (a duplicate is the cheaper error than a loss)."""
-    from ouroboros.owner_words import stamped_sources
-
     stamps: dict = {}
     for message in messages if isinstance(messages, list) else []:
         if not isinstance(message, dict) or message.get("role") == "assistant":
@@ -340,6 +411,66 @@ def first_request_stamps(messages: list) -> dict:
             stamps.update(stamped_sources(block if isinstance(block, str) else (block or {}).get("text")
                                           if isinstance(block, (str, dict)) else ""))
     return stamps
+
+
+def _stamp_parts(line: str) -> list[str]:
+    """The parts of one owner-words stamp line as ``words_stamp`` prints it (``[… · owner · …]``); ``[]`` for any
+    other line, a reply target's stamp among them. The one parser of a stamp for every reader of one."""
+    line = line.strip()
+    parts = line[1:-1].split(" · ") if line.startswith("[") and line.endswith("]") else []
+    return parts if "owner" in parts[:2] else []
+
+
+def stamped_sources(text: Any) -> dict[str, str]:
+    """``{reference: source}`` of every owner-words stamp in a rendered text (a review subject, a brief, a member's
+    first request): the last part of each stamp line, whole, so one reference is never found inside a longer one,
+    and the source part the stamp names before it (``room_message``, ``owner_mailbox of task …``)."""
+    stamps: dict[str, str] = {}
+    for line in str(text or "").split("\n"):
+        if parts := _stamp_parts(line):
+            stamps[parts[-1]] = parts[parts.index("owner") + 1] if len(parts) > 2 else ""
+    return stamps
+
+
+def stamped_refs(text: Any) -> set:
+    """The reference tokens of every owner-words stamp in a rendered text (``stamped_sources``)."""
+    return set(stamped_sources(text))
+
+
+def _stamp_blocks(text: str) -> list[tuple[str, str]]:
+    """``(time, words)`` under every owner-words stamp line of a rendered text: the stamp's time part (``""`` when
+    undated) and the lines beneath it up to the next stamp line, as a row with no reference is told
+    (``words_unseen_in``)."""
+    blocks: list[tuple[str, list[str]]] = []
+    for line in text.split("\n"):
+        if parts := _stamp_parts(line):
+            blocks.append(("" if parts[0] == "owner" else parts[0], []))
+        elif blocks:
+            blocks[-1][1].append(line)
+    return [(when, "\n".join(lines).strip()) for when, lines in blocks]
+
+
+def words_unseen_in(ctx: Any, text: Any) -> list[dict[str, Any]]:
+    """My human's rows of this run's set (``work_words``; never a reply target, another author's words) whose
+    identity a rendered ``text`` does not hold. Identity is the stamp's reference token, matched whole, under
+    either reference the row has printed (``_earlier_refs``); a row with no reference is told by its words under
+    a stamp with its time (``_stamp_blocks``: the words whole at the block's head, never a substring of the text).
+    Never the whole stamp: a row's source, and a referenced row's date, may change for a reader that did see it.
+    A text with no stamp at all (unreadable, or rendered without words) holds no row: every row is unseen."""
+    from ouroboros.owner_words import REPLY_TARGET, _earlier_refs, work_words
+
+    rows = [row for row in work_words(ctx)[0] if row.get("source") != REPLY_TARGET]
+    text = str(text or "")
+    seen, earlier, blocks = stamped_refs(text), _earlier_refs(ctx), _stamp_blocks(text)
+
+    def held(row: dict) -> bool:
+        if row["ref"]:
+            return row["ref"] in seen or earlier.get(row["ref"]) in seen
+        words = row["text"].strip()
+        return bool(words) and any(when == row["ts"] and (block == words or block.startswith(words + "\n"))
+                                   for when, block in blocks)
+
+    return [row for row in rows if not (seen and held(row))]
 
 
 def inject_carried(ctx, entry: dict, messages: list) -> list:
@@ -360,7 +491,7 @@ def inject_carried(ctx, entry: dict, messages: list) -> list:
     addressed = []
     for row, quote in _quotes_by_row(entry):
         source = quote.get("source") if isinstance(quote.get("source"), dict) else {}
-        address = str(source.get("address") or "") or format_address(row_address(row))
+        address = str(source.get("address") or "") or owner_row_address(row)
         prior = held.get(address)
         if isinstance(prior, dict):
             prior_fact = prior.get("carried") if isinstance(prior.get("carried"), dict) else {}
@@ -390,14 +521,73 @@ def inject_carried(ctx, entry: dict, messages: list) -> list:
 
 def stage_quoted(ctx, entry, row) -> list:
     """Stage a quoted row's files on the recipient's drive from their saved uploads, by their saved hashes
-    (idempotent: a copy already there is kept); the manifest rows, staged or rejected under their names."""
+    (idempotent: a copy already there is kept); the manifest rows, staged or rejected under their names. The
+    uploads are read from the root the row was read from (``_owner_source_root``), else the entry's root."""
     from ouroboros.artifacts import stage_task_attachments
     from ouroboros.chat_uploads import uploads_dir, upload_id
     from ouroboros.tool_access import canonical_data_root
-    root = entry.get("relay_canonical_root") or canonical_data_root(ctx)
+    root = row.get("_owner_source_root") or entry.get("relay_canonical_root") or canonical_data_root(ctx)
     return stage_task_attachments(ctx.drive_root, ctx.task_id, [
         {**ref, "path": str(uploads_dir(root) / upload_id(ref.get("upload"))) if upload_id(ref.get("upload")) else "",
          "label": str(ref.get("name") or "attachment")} for ref in row["attachments"]])
+
+
+def task_words_text(drive_root: Any, task: dict, *, audience: str = "child", indent: str = "",
+                    stage: bool = False, marks: Any = None) -> str:
+    """A task's set rendered from its record at its start (a helper's birth), ``owner_words``'s set in its rendering:
+    the field it was scheduled with and the rows its record holds, then the live rows of its room, read once here;
+    without ``drive_root`` the record alone. ``stage`` (a birth): the files the rows carry are staged on the task's
+    own drive and named by path.
+    ``marks``: the acting marks the caller's capture holds, so the marked rows are cut from them (``_live_words``)."""
+    from ouroboros.owner_words import (_deduped, _held_words, _live_words, _mapping, _room_of, owner_place_accounts,
+                                       render_owner_words, task_governing_words)
+
+    record = _mapping(task)
+    meta = _mapping(record.get("metadata"))
+    task_id = str(record.get("id") or record.get("task_id") or "")
+    root_id = str(record.get("root_task_id") or meta.get("root_task_id") or "")
+    rows, absent = task_governing_words(record)
+    gaps: list[str] = []
+    if drive_root is not None:
+        accounts = owner_place_accounts(drive_root)
+        held = record.get("held_owner_messages") or meta.get("held_owner_messages")
+        live, gaps = _live_words(drive_root, _room_of(
+            drive_root, task_id, record.get("parent_task_id") or meta.get("parent_task_id"), root_id), accounts, marks)
+        rows = _deduped([*rows, *(row for context in (False, True) for row in _held_words(
+            held, drive_root, task_id, context=context, accounts=accounts, read=True)), *live])
+        if stage and task_id:
+            stage_birth_files(drive_root, record, task_id, rows)
+    return render_owner_words(rows, absent, audience=audience, root_task_id=root_id, indent=indent, gaps=gaps)
+
+
+def stage_birth_files(drive_root: Any, record: dict, task_id: str, rows: list[dict[str, Any]]) -> None:
+    """At a helper's birth the files its set's rows carry are staged on its own drive from their saved uploads
+    (``stage_quoted``, as a relay stages at a drain: by saved hash, idempotent), and each file's line
+    names the staged path it opens, or the host's reason it could not be staged; a declared helper and a
+    grandchild stage the same way. A staging that fails leaves the file named as before. Never raises."""
+    from types import SimpleNamespace
+
+    from ouroboros.owner_words import _mapping
+    from supervisor.queue_timeouts import _task_drive_for_task
+
+    meta = _mapping(record.get("metadata"))
+    # The record's drive fields, else the drive the mailbox writer resolves for the same task (``carry_to_members``).
+    drive = str(record.get("child_drive_root") or record.get("drive_root") or meta.get("child_drive_root") or "") or (
+        _task_drive_for_task(dict(record), task_id, canonical=drive_root) if drive_root is not None else "")
+    ctx = SimpleNamespace(drive_root=Path(drive) if drive else drive_root, task_id=task_id)
+    for row in rows:
+        if not row.get("attachments"):
+            continue
+        try:
+            manifest = stage_quoted(ctx, {"relay_canonical_root": str(drive_root)}, row)
+        except Exception as exc:  # the file stays named; the birth block is never refused over a copy
+            logging.getLogger(__name__).warning("owner words: files of a row not staged at the birth of %s (%s: %s)",
+                                                task_id, type(exc).__name__, exc)
+            continue
+        for ref, item in zip(row["attachments"], manifest if isinstance(manifest, list) else []):
+            item = _mapping(item)
+            ref["staged"] = (f"read_file(root='artifact_store', path='{item.get('relpath')}')"
+                             if item.get("status") == "staged" else f"not staged: {item.get('reason') or 'unknown'}")
 
 
 def quote_content(ctx, entry, row, body):
@@ -428,7 +618,8 @@ def quoted_inputs(root, refs: list) -> list:
     rows = []
     for ordinal, ref in enumerate(refs):
         uid = upload_id(ref.get("upload"))
-        path, original = uploads_dir(root) / uid, re.sub(r"^[0-9a-f]{32}_", "", uid)
+        source_root = ref.get("_owner_source_root") or root
+        path, original = uploads_dir(source_root) / uid, re.sub(r"^[0-9a-f]{32}_", "", uid)
         row = {"ordinal": ordinal, "label": str(ref.get("name") or "attachment"),
                **{key: ref[key] for key in ("mime", "size", "sha256") if key in ref}}
         if uid and (reason := _sensitive_untracked_reason(original)):
@@ -460,10 +651,12 @@ def select_return(ctx, relay_id: str) -> tuple[dict, str]:
 def acknowledge_relay(root, target: str, entry: dict) -> None:
     """Called only after the mailbox's durable content acknowledgement."""
     from ouroboros.project_dialogue import append_chat_annotation
-    for quote in entry["relay"].get("quotes") or []:
+    relay = entry["_relay_delivery"] if "_relay_delivery" in entry else retained_relay(entry)
+    for quote in relay.get("quotes") or []:
         message_id = quote["source"].get("client_message_id")
         if message_id:
-            append_chat_annotation(root, message_id, action="steer_task", target=target, status="read",
+            source_root = relay.get("_owner_source_roots", {}).get(quote["source"].get("address", "")) or root
+            append_chat_annotation(source_root, message_id, action="steer_task", target=target, status="read",
                                    routing_token=entry["relay"]["relay_id"],
                                    **relay_target_facts(root, target))
 
@@ -495,7 +688,8 @@ def publish_relay_ack(root, target: str, relay: dict, bridge) -> None:
         source = quote["source"]
         if source.get("client_message_id"):
             try:
-                saved = chat_annotation_receipt(root, source["client_message_id"], relay["relay_id"])
+                source_root = relay.get("_owner_source_roots", {}).get(source.get("address", "")) or root
+                saved = chat_annotation_receipt(source_root, source["client_message_id"], relay["relay_id"])
             except OSError:  # an unreadable sidecar sends the ack from the work's facts, as before
                 saved = {}
             fields = ({key: saved[key] for key in ROUTING_RECEIPT_FIELDS if key in saved} if saved.get("status") == "read"
@@ -687,7 +881,7 @@ def carry_room_context(drive_root, chat_id: int, client_message_id: str, roots: 
         row = accepted_chat_message(drive_root, int(chat_id), str(client_message_id or ""))
         if not quotable_owner_row(row, drive_root):
             return
-        address = format_address(row_address(row))
+        address = owner_row_address(row)
         quote = owner_quote(drive_root, row, address=address)
     except Exception:
         log.warning("Carriage: room %s row %s unreadable at ingress", chat_id, client_message_id, exc_info=True)

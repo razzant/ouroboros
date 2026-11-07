@@ -89,7 +89,7 @@ def generate():
                 usage_accounting.record_unmetered_external_dispatch(task_id, drive_root=root,
                     task_id=task_id, root_task_id=task_id, category="consciousness")
         fixture["consciousness"] = {**snapshot, "recent_wakes": view.recent_wakes(root, [], now=NOW),
-            "recent_wakes_coverage": "wakes that reached a model call in the last 48 h"}
+            "recent_wakes_coverage": "Wakes that reached a model call in the last 48 h"}
         with patch("ouroboros.terminal_projection.utc_now_iso", return_value="2026-10-24T07:50:00+00:00"):
             for row in documents[:3]:
                 seed_terminal_history(root, row)

@@ -50,10 +50,19 @@ def connect_declared_place(root, connector: str, *, account_id: str = "", conver
         raise PlaceError("place_declaration_unavailable", "connector", "Enable a reviewed connector with one place declaration.")
     row = declarations[0]
     provider = str(row["destination"]).removeprefix("vendor:").lower()
-    title = f'{row["label"]} · {label.strip()}' if label.strip() else row["label"]
+    # A label that already starts with the connector's word is not prefixed again ("Telegram · Telegram · …").
+    given, word = label.strip(), str(row["label"])
+    named = given.casefold() == word.casefold() or given.casefold().startswith(f"{word} · ".casefold())
+    title = given if named else f"{word} · {given}" if given else word
     return connect_place(root, connector=connector, provider=provider, label=title, state=STATE_SILENT,
                          account_id=account_id, conversation_id=conversation_id, scope=row.get("scope", "account"),
                          contribution_id=row["id"], wakes=row.get("wakes", []))
+
+
+def said_once(label: str) -> str:
+    """A label stored before its connector stopped prefixing its own word reads that word once (display only)."""
+    parts = str(label or "").split(" · ")
+    return " · ".join(part for index, part in enumerate(parts) if not index or part != parts[index - 1])
 
 
 def place_view(root, place, *, declarations: list[dict] | None = None, allowance: dict | None = None,
@@ -79,20 +88,20 @@ def place_view(root, place, *, declarations: list[dict] | None = None, allowance
     if brief:
         # Status and launch need labels, notes and open turns: one index pass, counts unknown when it is unavailable.
         counts = [room.get("unanswered_count") for room in rooms or []]
-        result.update(label=place.label or place.provider, rooms=rooms,
+        result.update(label=said_once(place.label or place.provider), rooms=rooms,
                       unanswered=None if rooms is None or any(c is None for c in counts) else sum(counts),
                       last_activity_at=max((str(room.get("last_at") or "") for room in rooms or []), default=""),
                       activity_coverage="captured_place_events", spent_24h_usd=spend)
         return result
     activity = place_activity(root, place)
-    result.update(label=place.label or place.provider,
+    result.update(label=said_once(place.label or place.provider),
                   rooms=rooms, unanswered=activity["unanswered"] if rooms is not None else None,
                   last_activity_at=activity["last_activity_at"],
                   activity_coverage="captured_place_events", spent_24h_usd=spend)
     rows = place_declarations(root) if declarations is None else declarations
     row = next((r for r in rows if r["skill"] == place.connector and (
         not place.contribution_id or r["id"] == place.contribution_id)), {})
-    result.update(label=place.label or row.get("label") or place.provider,
+    result.update(label=said_once(place.label or row.get("label") or place.provider),
                   reply_destination=place.destination,
                   destination=row.get("destination") or "vendor:" + place.provider,
                   icon=row.get("icon_spec") or {}, wake_suggestions=list(row.get("wakes") or []),

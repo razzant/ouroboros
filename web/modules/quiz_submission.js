@@ -241,12 +241,12 @@ export function createQuizSubmission({ apiFetch, readQuestion, accept, canUse, o
         const feedback = document.createElement('div'); feedback.className = 'chat-quiz-feedback';
         const line = document.createElement('div'); line.className = 'chat-quiz-submission-note'; line.setAttribute('role', 'status');
         const warning = document.createElement('div'); warning.className = 'chat-quiz-storage-note';
-        const check = document.createElement('button'); check.type = 'button'; check.className = 'chat-quiz-check btn btn-xs btn-default';
+        const check = document.createElement('button'); check.type = 'button'; check.className = 'chat-quiz-check btn btn-sm btn-default';
         check.textContent = tr('quiz.check_status', 'Check status');
-        const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'chat-quiz-retry btn btn-xs btn-default';
+        const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'chat-quiz-retry btn btn-sm btn-default';
         retry.textContent = tr('quiz.retry_same', 'Retry same answer');
         // Forget deletes only the local copy: a quiet control at the row's start, the two server actions at its end.
-        const forget = document.createElement('button'); forget.type = 'button'; forget.className = 'chat-quiz-forget btn btn-xs btn-ghost';
+        const forget = document.createElement('button'); forget.type = 'button'; forget.className = 'chat-quiz-forget btn btn-sm btn-ghost';
         forget.textContent = tr('quiz.forget_unconfirmed', 'Forget unconfirmed local answer');
         Object.assign(view, { feedback, line, warning, check, retry, forget });
         views.set(card, view); feedback.append(line, warning, forget, check, retry);

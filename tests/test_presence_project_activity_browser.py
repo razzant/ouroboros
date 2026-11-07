@@ -329,10 +329,13 @@ class Consumer:
             self.page.wait_for_timeout(500)
 
     def activity_menu(self, task_id):
-        self.page.locator(f'[data-activity-section="queue"] [data-act="task-control"][data-id="{task_id}"]').click()
-        self.page.locator("body > .task-control-menu").wait_for(timeout=10000)
+        """What the row's control offers: its menu's items, or, when the control is its one action (its label names
+        it), that action, whose press opens the shared confirmation (closed by close_menu, confirmed by stop_pending)."""
+        trigger = self.page.locator(f'[data-activity-section="queue"] [data-act="task-control"][data-id="{task_id}"]')
+        trigger.click()
+        self.page.locator("body > .task-control-menu, .confirm-dialog").first.wait_for(timeout=10000)
         self.page.evaluate(_SETTLE)
-        return self.page.evaluate(_MENU)
+        return self.page.evaluate(_MENU) or [trigger.inner_text().strip()]
 
     def close_menu(self):
         self.page.keyboard.press("Escape")
@@ -443,12 +446,16 @@ class Consumer:
         return bool(self.wait_for_browser(lambda: self.stop_requested(task_id) or task_id in self.oracle.cancel_intents(), timeout))
 
     def stop_pending(self, task_id, *, settle=30):
-        """Press ``Stop now`` in the menu now open; returns once the Stop is durably recorded (the held model round is the
+        """Press ``Stop now`` in the menu or the confirmation now open; returns once the Stop is durably recorded (the held model round is the
         turn's, so the request answers only when the turn reaches its next stop check)."""
         answers = []
         self.page.on("response", lambda r: answers.append((r.status, r.url.split("/api/")[-1]))
                      if r.request.method == "POST" and "/cancel" in r.url else None)
-        self.page.locator("body > .task-control-menu .task-control-item").filter(has_text="Stop now").click()
+        confirm = self.page.locator(".confirm-dialog [data-confirm-ok]")
+        if confirm.count():  # the row's control was Stop now itself: its confirmation is open
+            confirm.click()
+        else:
+            self.page.locator("body > .task-control-menu .task-control-item").filter(has_text="Stop now").click()
         self.wait_for_browser(lambda: self.stop_requested(task_id), settle)
         return answers
 

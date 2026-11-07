@@ -13,7 +13,8 @@ from typing import Any, Dict
 
 VALID_SUBTASK_MEMORY_MODES = frozenset({"forked", "empty"})
 # The fields a parent may widen a child's memory view by: the ones its description offers, no other ViewSpec field.
-MEMORY_VIEW_FIELDS = ("story", "room_page", "room_lanes", "origin_words", "live_rooms", "marks", "knowledge", "owner_words")
+MEMORY_VIEW_FIELDS = ("story", "room_page", "room_lanes", "origin_words", "other_conversations", "marks", "knowledge",
+                      "owner_words")
 
 
 def schedule_subagent_properties() -> Dict[str, Any]:
@@ -82,8 +83,8 @@ def schedule_subagent_properties() -> Dict[str, Any]:
             "type": "object",
             "description": (
                 "Optional widening of the child's memory view by field, e.g. {\"knowledge\": true} starts it with the whole "
-                "knowledge base instead of the outline. Fields: story, room_page, room_lanes, origin_words, live_rooms "
-                "(none|lines|lines_with_words|directory), marks (all|room_and_global), knowledge, owner_words. It only widens: "
+                "knowledge base instead of the outline. Fields: story, room_page, room_lanes, origin_words, "
+                "other_conversations, marks (all|room_and_global), knowledge, owner_words. It only widens: "
                 "my human's words and the marks in force can be turned on, never off (owner_words false and marks none are refused), "
                 "and any other field is refused here. Omitted: the role's default view. A value the view does not know is refused "
                 "at the child's start with the role default and one event."),

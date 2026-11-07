@@ -29,6 +29,7 @@ _MUTATING_SHAPES = [
     ("write_file", {"path": "server.py", "content": "no"}),
     ("edit_text", {"root": "active_workspace", "path": "x.py", "old": "a", "new": "b"}),
     ("manage_schedules", {"action": "update", "schedule_id": "s1", "reason": "change time", "cron": "0 9 * * *"}),
+    ("configure_presence", {"action": "set_state", "place_id": "p1", "state": "paused"}),
 ]
 
 
@@ -42,6 +43,49 @@ def test_observe_refuses_a_mutating_shape_of_a_tool_it_still_sees(subtests, tmp_
             wake = _registry(tmp_path, _wake_task("observe")["metadata"])
             assert wake.get_schema_by_name(name) is not None
             assert "RESOURCE_CONSTRAINT_BLOCKED" in wake.execute(name, args)
+
+
+_PLACE_EDITS = [("connect", {"connector": "bridge"}), ("disconnect", {}), ("set_state", {"state": "paused"}),
+                ("add_wake", {"fact": "mention"}), ("remove_wake", {"fact": "mention"}), ("add_note", {"text": "x"}),
+                ("remove_note", {"note_id": "n"}), ("set_working_folder", {"working_folder": "/tmp"}),
+                ("set_model", {"model": "m"}), ("confirm_owner_account", {"platform_actor_id": "a"}),
+                ("revoke_owner_account", {"platform_actor_id": "a"}), ("update", {}), ("List", {}), ("list ", {}),
+                ("", {})]
+
+
+def test_every_level_below_full_reads_places_and_changes_none(tmp_path, monkeypatch):
+    """A wake below Full lists and inspects places; every other ``configure_presence`` action is refused.
+
+    The two reads are the one reader of every room a place captured, which the wake's places block counts
+    and names (16.09 withheld the whole name with the owner's place configuration). Both halves at the
+    guard's seam: without the narrowing Act and Observe are refused ``list`` by name; without the refusal an
+    edit reaches the place writer. Full, an owner turn and a child of an Act wake are pinned beside them.
+    """
+    from ouroboros import places
+    from tests._safety_fixtures import disable_safety
+
+    disable_safety(monkeypatch)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    monkeypatch.setattr("ouroboros.place_projection.place_declarations", lambda _root: [])
+    for level, folder in zip(("observe", "act"), case_folders(tmp_path)):
+        wake = _registry(folder, _wake_task(level)["metadata"])
+        place = places.connect_place(folder / "drive", connector="bridge", provider="chat", conversation_id="c",
+                                     label="Inbox", state="silent")
+        listed = json.loads(wake.execute("configure_presence", {"action": "list"}))
+        assert listed["ok"] and [row["place_id"] for row in listed["places"]] == [place.place_id], level
+        inspected = json.loads(wake.execute("configure_presence", {"action": "inspect", "place_id": place.place_id}))
+        assert inspected["ok"] and inspected["place"]["rooms"] == [], level
+        for action, extra in _PLACE_EDITS:
+            refused = wake.execute("configure_presence", {"action": action, "place_id": place.place_id, **extra})
+            assert refused.startswith("⚠️ RESOURCE_CONSTRAINT_BLOCKED: below Full"), (level, action, refused)
+        assert places.get_place(folder / "drive", place.place_id) == place  # nothing changed
+    act = _wake_task("act")["metadata"]
+    child = {**ca.consciousness_origin_metadata(act), "task_id": "child-1"}
+    edit = {"action": "set_state", "place_id": "p", "state": "paused"}
+    assert ca.observe_argument_refusal(child, "configure_presence", edit).startswith("⚠️")
+    assert ca.observe_argument_refusal(_wake_task("full")["metadata"], "configure_presence", edit) == ""
+    assert ca.observe_argument_refusal({"work_kind": "owner"}, "configure_presence", edit) == ""
+    assert "configure_presence" not in ca.disabled_tools_for("act") + ca.disabled_tools_for("observe")
 
 
 def test_observe_keeps_its_own_research_and_notes(tmp_path, monkeypatch):

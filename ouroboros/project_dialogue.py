@@ -286,40 +286,38 @@ def bound_room_chat(rooms: Callable[..., int], row: Dict[str, Any]) -> int:
     return int(rooms(row.get("task_id"), row.get("parent_task_id"), row.get("root_task_id")) or 0)
 
 
-
 def _source_ref_identity(ref: Dict[str, Any]) -> Optional[tuple]:
     try:
         chat_id = int(ref.get("chat_id") or 0)
     except (TypeError, ValueError):
         return None
-    return (
-        chat_id, str(ref.get("client_message_id") or ""), str(ref.get("ts") or ""),
-        str(ref.get("text_sha256") or ""),
-    )
+    return (chat_id, str(ref.get("client_message_id") or ""), str(ref.get("ts") or ""),
+            str(ref.get("text_sha256") or ""))
 
 
 def _entry_source_identities(entry: Dict[str, Any]) -> set:
+    """An owner row's source keys: an inbound row's, or a card's recorded answer's, keyed by the owner's words, not its frame."""
+    text = entry.get("text")
     if str(entry.get("direction") or "") != "in":
-        return set()
+        from ouroboros.owner_relay import owner_text, quotable_owner_row
+
+        text = owner_text(entry) if entry.get("type") == "quiz_answer" and quotable_owner_row(entry) else ""
+        if not text:
+            return set()
     try:
         chat_id = int(entry.get("chat_id", 1))
     except (TypeError, ValueError):
         chat_id = 1
     client_id = str(entry.get("client_message_id") or "")
     ts = str(entry.get("ts") or "")
-    text_hash = _text_sha256(entry.get("text"))
-    return {
-        (chat_id, client_id, ts, text_hash), (chat_id, "", ts, text_hash),
-        (chat_id, client_id, "", text_hash), (chat_id, "", "", text_hash),
-    }
+    text_hash = _text_sha256(text)
+    return {(chat_id, client, stamp, text_hash) for client in (client_id, "") for stamp in (ts, "")
+            if client or entry.get("direction") == "in"}
 
 
 def entry_matches_source_ref(entry: Dict[str, Any], refs: Iterable[Dict[str, Any]]) -> bool:
     """Whether ``entry`` is the original row identified by one binding ref."""
-    ref_keys = {
-        key for ref in refs if isinstance(ref, dict)
-        if (key := _source_ref_identity(ref)) is not None
-    }
+    ref_keys = {key for ref in refs if isinstance(ref, dict) if (key := _source_ref_identity(ref)) is not None}
     return bool(_entry_source_identities(entry) & ref_keys)
 
 
@@ -571,16 +569,13 @@ def routing_target_label(
         return "Task"
 
 
-# Q3=A: the HOST owns the owner-facing sentence for a REFUSED routing act. One
-# factual PHRASE per typed reason (what the producer branch observed: ≤ 60
-# chars, lower-case start, no codes, no trailing period); the prefix comes from
-# the ACT and its outcome in routing_refusal_cause, so one reason reads
-# "Not started: …" on a promote and "Not moved: …" on a scope bind. The receipt
-# under the owner's message, the host-initiated System row and the picker's
-# 409 toast all read this table; the browser renders the sentence verbatim (no
-# client table). Tool results to the agent read the same table: they keep the
-# machine prefix and code, then append these words. A reason without a row stays raw ("Not started (<reason>)")
-# so a new refusal is visible before it has words.
+# Q3=A: the HOST owns the owner-facing sentence for a REFUSED routing act. One factual PHRASE per typed reason (what the
+# producer branch observed: ≤ 60 chars, lower-case start, no codes, no trailing period); the prefix comes from the ACT
+# and its outcome in routing_refusal_cause, so one reason reads "Not started: …" on a promote and "Not moved: …" on a
+# scope bind. The receipt under the owner's message, the host-initiated System row and the picker's 409 toast all read
+# this table; the browser renders the sentence verbatim (no client table). Tool results to the agent read the same
+# table: they keep the machine prefix and code, then append these words. A reason without a row stays raw
+# ("Not started (<reason>)") so a new refusal is visible before it has words.
 ROUTING_REFUSAL_CAUSES: Dict[str, str] = {
     "workspace_unusable": "the working folder can't be used",
     "workspace_provisioning_failed": "no working folder could be created for the project",
@@ -632,6 +627,8 @@ ROUTING_REFUSAL_CAUSES: Dict[str, str] = {
     "project_scope_conflict": "the task already belongs to another project",
     "missing_task_or_project": "no task or project was named",
     "project_unavailable": "the project is no longer available",
+    "private_owner_source_invalid": "its owner answer could not be verified",
+    "private_owner_source_unavailable": "its owner answer could not be read",
     # Historical routing-card refusal codes, retained for receipt replay.
     "target_unspecified": "no destination was chosen",
     "invalid_project_id": "that project id is not valid",
@@ -790,9 +787,8 @@ TASK_CAUSE_PHRASES = {
     "required_reference_unavailable": "The handbook this task requires could not be read",
     "output_recovery_exhausted": "Empty length-limited replies exhausted recovery; saved work remains available",
     "children_unabsorbed": "Some sub-task results were never folded in, so the task had to wrap up",
-    # The supervisor's timeout rails (queue_timeouts.TIMEOUT_TERMINAL_REASONS): the
-    # reaper's task_done reason_code, spoken on its grace toast, its kill notice
-    # and its salvage line through this same table, never as the code.
+    # The supervisor's timeout rails (queue_timeouts.TIMEOUT_TERMINAL_REASONS): the reaper's task_done reason_code,
+    # spoken on its grace toast, its kill notice and its salvage line through this same table, never as the code.
     "absolute_ceiling": "The task reached its maximum running time",
     "deadline": "The task reached its deadline",
     "idle_timeout": "The task made no progress for too long",
@@ -801,6 +797,10 @@ TASK_CAUSE_PHRASES = {
     "empty_final_text": "The task ended without a final answer",
     "deep_self_review_unavailable": "The deep self-review could not run",
     "deep_self_review_error": "The deep self-review stopped on an error",
+    # A helper the host could not start (agent_dispatch.executor_blocked_outcome): it never ran and spent nothing.
+    "subagent_executor_unavailable": "This helper could not start because its route was unavailable; it spent nothing",
+    "delegate_tools_invisible": "This helper could not start because the tools that run its session are hidden from it; it spent nothing",
+    "delegate_visibility_unverified": "This helper could not start because its tools could not be checked; it spent nothing",
     # #869: the provider-death rail's terminal words; the amount of retained text is
     # said by the notice, this clause only names why the task ended.
     "provider_unavailable": "The task could not get a usable model answer, so it could not finish",
@@ -816,7 +816,7 @@ TASK_CAUSE_PHRASES = {
     "tool_failure": "A tool this task used failed and nothing recovered it",
     "receipt_absent": "No host verification receipt was recorded; this does not establish whether other checks ran.",
     "expected_output_ungrounded": "A retired check recorded no tool calls or structured answer; it does not assess the written result.",
-    "residual_tool_errors_without_review": "Tool errors remain in the record; no review checked the result.",
+    "residual_tool_errors_without_review": "Tool errors remain in the record.",
     "artifacts_unavailable": "Some result files are missing or could not be preserved.",
     "partial_result": "The result is partial; remaining work is described in task details.",
     "task_exception": "The task stopped on an internal error",

@@ -14,8 +14,9 @@ import pytest
 from ouroboros import dialogue_store
 from ouroboros.chat_chain import format_address, row_address
 from ouroboros.loop_messages import _initialize_owner_directives, _record_owner_directive
+from ouroboros.owner_relay import words_unseen_in
 from ouroboros.owner_words import (FIELD, OWNER_SOURCES, REPLY_TARGET, _deduped, carried_owner_corpus,
-                                   governing_words_for_schedule, render_owner_words, words_unseen_in)
+                                   governing_words_for_schedule, render_owner_words)
 from ouroboros.tools.registry import ToolContext
 
 LONG = ("Sasha's estimate is fine, but before you start: keep the old export path working for the finance team, "

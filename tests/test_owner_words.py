@@ -330,7 +330,9 @@ def test_a_helper_in_the_room_shows_a_drained_message_once_and_one_message_is_on
         (f"chat {room} / cm-door", _at(1)), (f"chat {room} / cm-mail", _at(2)), ("msg m-3", f"received {received}")]
     child = {"id": "child01", "parent_task_id": ROOT, "root_task_id": ROOT,
              "metadata": {"delegation_role": "subagent", ow.FIELD: field}}
-    first = ow.task_words_text(tmp_path, child)
+    from ouroboros.owner_relay import task_words_text
+
+    first = task_words_text(tmp_path, child)
     assert first.count("Add charts") == first.count("Mailbox only") == first.count("Fix the quota bar") == 1
     assert f"[{_at(2)} · owner · owner_mailbox of task {ROOT} · chat {room} / cm-mail]\nAdd charts\n" in first
     helper = _ctx(tmp_path, task_id="child01", metadata={"delegation_role": "subagent", "parent_task_id": ROOT,

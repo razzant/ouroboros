@@ -330,9 +330,8 @@ def task_input_pointer(env: Any, task: Dict[str, Any], user_content_json: str) -
 
 def _wake_forms(wake: Dict[str, Any]) -> List[str]:
     """A wake's bound deliveries in rescue order (``consciousness_wake.bind_wake_observation``): the projection (my
-    human's words whole and every other person's row by address, beside the exact pointer), then my human's words
-    alone with the others counted when bound apart from it (a busy window), then the bare pointer when bound apart.
-    The choice among them is only ever their actual fit."""
+    human's card answers whole beside the exact pointer), an older wake's middle step when it bound one, then the
+    bare pointer when bound apart. The choice among them is only ever their actual fit."""
     keys = ("projection_text", "owner_projection_text", "pointer_text")
     return [text for text in dict.fromkeys(wake.get(key) for key in keys) if text]
 
@@ -347,8 +346,8 @@ def wake_deliveries(wake: Dict[str, Any], full: Dict[str, Any]) -> List[Dict[str
 
 def wake_input_checkpoint(wake: Dict[str, Any], content: Any, *, round_idx: int, after_overflow: bool) -> Dict[str, Any]:
     """The record of the wake delivery a request carried (``content``; ``None``: the whole observation): its
-    ``form`` is ``whole``, ``projection`` (my human's words inline: ``inline_rows_in_fallback`` covers only this
-    form) or ``pointer`` (the bare pointer, nothing inline)."""
+    ``form`` is ``whole``, ``projection`` (my human's card answers inline) or ``pointer`` (the bare pointer,
+    nothing inline)."""
     forms = _wake_forms(wake)
     if content is None:
         form = "whole"
@@ -480,7 +479,7 @@ def _declared_omissions(task: Dict[str, Any], spec: Any) -> Any:
     from ouroboros.subagent_work_order import declared_inputs_carry_owner_words  # D03->D07 is lazy-only
 
     return dataclasses.replace(spec, story=False, room_page=False, room_lanes=False, origin_words=False,
-                               live_rooms="none", owner_words=declared_inputs_carry_owner_words(task))
+                               other_conversations=False, owner_words=declared_inputs_carry_owner_words(task))
 
 
 def declared_receipt_section(task: Dict[str, Any]) -> str:

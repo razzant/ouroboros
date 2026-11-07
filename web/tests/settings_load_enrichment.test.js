@@ -161,7 +161,7 @@ test('the LAN hint draws one Copy link button per read and copies the address it
     assert.equal(buttons().length, 1);
     assert.match(buttons()[0][1], /class="btn btn-default btn-sm ui-hit-area"/, 'the shared button recipe with the shared touch reach');
     assert.equal(buttons()[0][2], 'Copy link');
-    assert.match(hint.innerHTML, /^<div class="settings-action-row"><span>LAN URL: <a href="http:\/\/192\.0\.2\.44:8765" target="_blank" rel="noopener">http:\/\/192\.0\.2\.44:8765<\/a> — <strong>Set a Network Password\.<\/strong><\/span><button /,
+    assert.match(hint.innerHTML, /^<div class="ui-action-row"><span>LAN URL: <a href="http:\/\/192\.0\.2\.44:8765" target="_blank" rel="noopener">http:\/\/192\.0\.2\.44:8765<\/a> — <strong>Set a Network Password\.<\/strong><\/span><button /,
         'the link keeps its words and the warning its place; the action sits right of the status');
     assert.deepEqual([hint.hidden, hint.dataset.tone], [false, 'warn']);
     click();

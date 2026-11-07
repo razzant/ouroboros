@@ -15,10 +15,9 @@ OWNER_DELIVERY_TOOL_NAMES: frozenset[str] = frozenset({
 # carries it — the main chat, a project room, and an admitted presence
 # conversation, whose ceiling compiles this set in
 # ouroboros/presence_authority.py::build_presence_capability_ceiling.
-# Reading the chronicle and marking what matters belong here; sealing chronicle
-# pages (chronicle_write) is the integrating mind's and stays in the core set,
-# so a presence writes knowledge about people and marks, not pages (a delegated
-# child's sets below carry it for the child's own drafts only).
+# Reading the chronicle and marking what matters belong here; sealing
+# (chronicle_write) is in the core set of every integrating focus, a presence
+# turn included; a delegated child publishes drafts only (its sets below).
 COGNITIVE_MEMORY_TOOL_NAMES: frozenset[str] = frozenset({
     "knowledge_read", "knowledge_write", "knowledge_list",
     "update_scratchpad", "update_identity", "update_world", "chat_history",
@@ -236,6 +235,13 @@ READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
     "web_search", "chat_history",
     "vcs_read", "service_status", "service_logs",
     "get_task_result", "list_projects", "memory_read", "search_ui_translations",
+})
+
+# The known pure reads: a failed one stays in a card's details instead of warning that no review checked the result
+# (owner 06.11, A; _outcome_tool_errors.warns_without_review). Every parallel-safe read, plus reads that cannot run in
+# parallel. A tool not named here (an effect, a command, MCP, an extension) stays loud.
+PURE_READ_TOOLS: frozenset[str] = READ_ONLY_PARALLEL_TOOLS | frozenset({
+    "browse_page", "view_image", "github_read", "knowledge_read", "youtube_transcript",
 })
 
 # Enqueue-only tools safe to emit in parallel within one tool-call round.
@@ -491,6 +497,7 @@ OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
     "skill_install", "skill_update",
     "journal_write", "workpad_write", "pin_ui_translation", "record_update_description",
     "github_write", "pr_merge",
+    "remote_mcp_sign_in",  # stores or revokes the owner's sign-in to a remote MCP server
 })
 
 
