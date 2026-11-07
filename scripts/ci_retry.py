@@ -22,7 +22,8 @@ round k in DIR/retry-<k>, for
 A round names its tests in DIR/retry-<k>/argsfile.txt and passes `@argsfile`
 (pytest's argument file) where the command's first test path stood, dropping the
 others: a file none of whose tests has an attempt yet (the unrun rest of a stopped
-session) by its path, every other test by its node id (`round_arguments`); it
+session) by its path when the lane has no test of it elsewhere, every other test by
+its node id (`round_arguments`); it
 writes its projection to DIR/retry-<k>, its JUnit to a `retry-<k>`
 directory beside the command's own, and leaves out the options that prove a whole
 lane, which no subset can (the lane is proven by the first session's projection and
@@ -138,21 +139,27 @@ def retry_command(command: list[str], *, argsfile: Path, direct: list[str], roun
     return out
 
 
-def round_arguments(pending: list[str], tries: dict[str, list]) -> list[str]:
+def round_arguments(pending: list[str], tries: dict[str, list], full: list[str] | None = None) -> list[str]:
     """What a round asks pytest for, in the pending order: a file none of whose tests has an attempt yet
-    by its path, every other pending test by its node id.
+    and whose every test in the lane (`full`, when its lane block names it) is pending, by its path; every
+    other pending test by its node id.
 
     pytest matches a node id against every entry of the file's directory, and on Windows falls back
     to a file-identity check for each entry that differs (`samefile_nofollow`): the 5,098 ids of a
     crashed shard's rest cost its retry 34 minutes of collection before a test could run
     (2026-11-05, run 42061846211, Windows shard 7). Its unrun files are asked for the way the first
-    session asked for them; the tests a file already started stay exact.
+    session asked for them; the tests a file already started stay exact. A lane that packs single
+    tests into shards (the UI lane) leaves a file's other tests to other shards, and the round drops
+    the shard option: by its path, such a file ran them all here, outside this shard's assignment
+    (run 42395824706, UI shard 3: 7 unrun tests after the session timeout, 69 collected).
     """
     started = {node.split("::", 1)[0] for node in tries}
+    wanted = set(pending)
+    shared = {node.split("::", 1)[0] for node in full or () if node not in wanted}
     arguments: list[str] = []
     for node in pending:
         path = node.split("::", 1)[0]
-        entry = node if path in started else path
+        entry = node if path in started or path in shared else path
         if entry not in arguments:
             arguments.append(entry)
     return arguments
@@ -272,6 +279,7 @@ def _evidence(directory: Path, *, aborted: bool = False) -> dict | None:
     lane = (next((data[key] for key in _LANES if isinstance(data.get(key), dict)), None) if data is not None
             else journal[2])
     assigned = lane.get("assigned", lane.get("full")) if lane is not None else None
+    full = lane.get("full") if lane is not None else None
     crash = data.get("worker_crash") if data is not None else None
     if lane is None and isinstance(crash, dict) and crash.get("collection_available") is True \
             and isinstance(crash.get("unfinished"), list):
@@ -282,6 +290,7 @@ def _evidence(directory: Path, *, aborted: bool = False) -> dict | None:
     collected = data.get("tests_collected") if data is not None else None
     return {"exported": data is not None, "results": results,
             "assigned": assigned if isinstance(assigned, list) and all(isinstance(n, str) for n in assigned) else None,
+            "full": full if isinstance(full, list) and all(isinstance(n, str) for n in full) else None,
             "collected": collected if type(collected) is int else None,
             "collection_failures": [row["nodeid"] for row in failures if isinstance(row, dict)
                                     and isinstance(row.get("nodeid"), str)] if isinstance(failures, list) else []}
@@ -372,7 +381,7 @@ def run_pass(directory: Path, command: list[str], *, max_rounds: int = MAX_ROUND
         code, causes = 130, ["interrupted"]
     first = _evidence(directory, aborted=code == _INTERNAL_ERROR)
     rounds = [{"dir": ".", "exit": code, "ran": len(first["results"]) if first else 0}]
-    assigned = first["assigned"] if first else None
+    assigned, full = (first["assigned"], first["full"]) if first else (None, None)
     if first is not None:
         _record(tries, first["results"], 0)
         collection |= set(first["collection_failures"])
@@ -400,7 +409,7 @@ def run_pass(directory: Path, command: list[str], *, max_rounds: int = MAX_ROUND
         round_dir = directory / f"retry-{round_}"
         round_dir.mkdir(parents=True)
         argsfile = round_dir / "argsfile.txt"
-        direct = write_argsfile(argsfile, round_arguments(pending, tries))
+        direct = write_argsfile(argsfile, round_arguments(pending, tries, full))
         retried = sum(node in tries for node in pending)
         _say(f"=== ci_retry round {round_}: retry {retried} failed test(s), run {len(pending) - retried} "
              f"never run; {argsfile}")
