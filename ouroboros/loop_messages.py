@@ -273,8 +273,9 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
         return  # The task-drafted objective is never an owner directive.
     focus, presence = metadata.get("focus") or {}, metadata.get("presence") or {}
     event = presence.get("event") or {}
-    if words := place_confirmed_words((focus.get("actor") or {}).get("owner_confirmed"), presence.get("observed_text"), event.get("message")):
-        # A place event from an account its place confirmed at admission: my human's words, said where others can
+    from ouroboros.presence_context import focus_owner_now
+    if words := place_confirmed_words(focus_owner_now(ctx), presence.get("observed_text"), event.get("message")):
+        # A place event from an account its connector account confirms now: my human's words, said where others can
         # hear, beside the frame as provenance (outside OWNER_SOURCES); an order exists only through a verified cite.
         _loop()._record_owner_directive(ctx, source=PLACE_CONFIRMED, content=words, carried=True, reply_to=place_reply_target(
             event.get("message")), msg_id=f"chat {focus.get('room_chat_id')} / {event.get('source_event_id') or ''}")

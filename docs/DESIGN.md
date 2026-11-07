@@ -2093,7 +2093,11 @@ imply it. Existing identities say “Connected · Open”; services retain
 offer “This is my account” via “This is me”; confirmed senders say “It writes here as
 you ({label})”, revoked by account-list Remove. Bots say “It writes here as the
 Ouroboros bot ({label})”, never “as you” or the confirm action. Pending/failed/
-malformed/undeclared identity adds nothing; reader-only names its readers.
+malformed/undeclared identity adds nothing; reader-only names its readers. A confirmed
+account saved without a name shows the provider's name its senders here carry (username
+or display name), else its id; a saved name is never replaced. An account another place of the same bot or app
+confirms reads “you · confirmed in {place}” (“and {count} more”), without Remove or “This is me”: it is removed
+where it was confirmed.
 
 Empty notes ask: “Who am I here? What may I do? What calls me at once? What matters
 here? What must I never do? What do you want to see afterwards?” Hints are never saved.

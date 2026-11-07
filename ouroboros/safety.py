@@ -607,8 +607,9 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
     occasion = "unknown"
     if metadata.get("schedule_writer_kind"):
         occasion = metadata["schedule_writer_kind"] + "-written schedule"
-    elif focus:
-        occasion = "confirmed owner account" if (focus.get("actor") or {}).get("owner_confirmed") else "person in a place"
+    elif focus:  # read at this check: a confirmation made after the admission ``focus`` records counts
+        from ouroboros.presence_context import focus_owner_now
+        occasion = "confirmed owner account" if focus_owner_now(ctx) else "person in a place"
     elif metadata.get("wake_cause") == "own_clock":
         occasion = "own clock"
     elif kind == "owner":

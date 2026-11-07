@@ -127,15 +127,20 @@ def place_views(drive_root, allowance=None) -> list[dict]:
 
 def places_text(drive_root, views) -> str:
     from ouroboros.place_arrivals import recent_identity
-    from ouroboros.places import OwnerAccount, owner_account_matches
+    from ouroboros.places import OwnerAccount, PlaceError, owner_account_matches, place_owner_accounts
     if views is None:
         return "unknown (place index unavailable)"
+    try:
+        counted = place_owner_accounts(drive_root)  # one read: the accounts each place's connector account confirms
+    except PlaceError:
+        counted = {}
     lines = []
     for view in views:
         identity = recent_identity(drive_root, view["place_id"])
         sending = (identity or {}).get("sends_as") or {}
         owner = sending.get("kind") == "user" and owner_account_matches(
-            (OwnerAccount(**a) for a in view.get("owner_accounts", [])), sending["id"], view.get("account_id", ""))
+            counted.get(view["place_id"]) or [OwnerAccount(**a) for a in view.get("owner_accounts", [])],
+            sending["id"], view.get("account_id", ""))
         voice = ""
         if sending:
             voice = (f'; as Ouroboros (bot {sending["label"]})' if sending["kind"] == "bot"

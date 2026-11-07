@@ -87,7 +87,8 @@ _TRANSPORT_NESTED = {
     "identity": ("sends_as",),  # the account I send as (``_place_speaker``)
     "delivery": ("state",  # ``dialogue_provenance``, ``reaction_note``, the view's typed fact, ``place_activity``
                  "presence_provenance"),  # an older receipt's place facts (``place_row_facts``)
-    "message": ("reaction",),  # the typed reaction (``reaction_fact``): its words, or a row that is that act alone
+    "message": ("reaction",  # the typed reaction (``reaction_fact``): its words, or a row that is that act alone
+                "message_id"),  # its provider identity: a post of mine is never my human's (``places.owner_author``)
     "origin": ("kind", "task_id"),  # the work that sent my delivered message (``memory_view``'s own-row head)
     "conversation": ("title", "name", "full_name", "username", "topic_id",  # its own name (``RoomLabelResolver``)
                      "chat_type", "channel_type", "is_im", "is_mpim", "is_private", "visibility",  # who reads it
@@ -95,9 +96,9 @@ _TRANSPORT_NESTED = {
 }
 # Bumped when ``row_meta``'s facts change (5: a transport keeps only what its readers read; 6: and the author
 # fact's; 7: the sending work, the conversation's name and audience, a finish's sentence and its fold, a project
-# closure notice's delivery): a stored prefix of another version is another source, read live until the
-# maintenance job ``memory_tail`` refills it.
-_META_VERSION = 7
+# closure notice's delivery; 8: a message's provider id, for the author fact): a stored prefix of another version
+# is another source, read live until the maintenance job ``memory_tail`` refills it.
+_META_VERSION = 8
 
 Entry = Tuple[Dict[str, Any], Dict[str, Any], int]
 
