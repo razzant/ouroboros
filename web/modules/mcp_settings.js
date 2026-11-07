@@ -550,11 +550,14 @@ function renderAll() {
     }));
 }
 
-// After a Remove the caret goes to the entry now in that place, else to Add (DESIGN "List editors");
+// After a Remove the caret goes to the entry now in that place, else to Add (DESIGN "List editors"): its first field
+// while its form is open, else the Edit that opens it, since a field inside a closed disclosure cannot take the caret;
 // a malformed entry has no field, only its own Remove.
 function revealAfterRemove(index) {
     const card = document.getElementById('mcp-servers-list')?.children[Math.min(index, mcpServers.length - 1)];
-    if (card) revealNewRow(card, card.querySelector('[data-mcp-field="id"]') || card.querySelector('button'));
+    const edit = card?.querySelector('[data-mcp-edit]');
+    const field = edit && !edit.open ? edit.querySelector('summary') : card?.querySelector('[data-mcp-field="id"]');
+    if (card) revealNewRow(card, field || card.querySelector('button'));
     else document.getElementById('btn-mcp-add-server')?.focus();
 }
 
