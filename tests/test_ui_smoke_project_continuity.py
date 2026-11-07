@@ -1220,11 +1220,13 @@ def test_ui_smoke_project_panel_lifecycle_does_not_leak(direct_server_with_data)
                 close_project()
                 # The server's readiness response precedes its worker/startup
                 # log paint. These legitimate rows add 37 nodes outside the
-                # project panel; observe them before measuring flat DOM.
+                # project panel; observe them before measuring flat DOM. A line
+                # says its type once: its type pill, or its headline when that
+                # already says it (#2886 3d81bcb22, U027).
                 page.wait_for_function(
                     """() => {
-                        const painted = new Set([...document.querySelectorAll('#log-entries .log-type')]
-                            .map(node => node.textContent));
+                        const painted = new Set([...document.querySelectorAll(
+                            '#log-entries .log-type, #log-entries .log-headline')].map(node => node.textContent));
                         return ['worker_sha_verify', 'startup_verification', 'worker_ready']
                             .every(type => painted.has(type));
                     }""",
