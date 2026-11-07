@@ -14,8 +14,8 @@ const TRANSPORTS = [
     { value: 'sse', label: 'SSE (Server-Sent Events)' },
     { value: 'stdio', label: 'Local process (stdio)' },
 ];
-// task_session/browser_policy: set by Import and kept as saved, with no control of their own. A held stdio card
-// says what they do; off stdio they are unsupported fields that Save refuses until they are removed.
+// task_session is an owner-selected stdio call lifetime; browser_policy stays an Import-set policy.
+// Off stdio they are unsupported fields that Save refuses until they are removed.
 const LIFETIME_FLAGS = ['task_session', 'browser_policy'];
 // A remote server's sign-in (`status.sign_in`, ouroboros/mcp_oauth.py): why it is needed, in words.
 const SIGN_IN_REASONS = {
@@ -173,12 +173,16 @@ function refusedFieldsMessage(server) {
     ].filter(Boolean).join(' ');
 }
 
-/** The read-only line of a held stdio server: what its Import-set flags do (no control of their own). */
+/** The stdio draft's lifetime and its Import-set browser policy, without changing either. */
 function lifetimeNote(server) {
-    if (server.transport !== 'stdio' || !lifetimeFlagOn(server.task_session)) return '';
-    return 'task_session: a task’s calls share one running server process until its tool loop ends.'
+    if (server.transport !== 'stdio') return '';
+    return (lifetimeFlagOn(server.task_session)
+        ? 'task_session: a task’s calls share one running server process until its tool loop ends.'
+        : 'Off: each tool call starts a new server process.')
+        + ' Test draft and Refresh catalog still use separate processes.'
         + (lifetimeFlagOn(server.browser_policy)
-            ? ' browser_policy: that process may ask Ouroboros’s browser rules about its requests.' : '');
+            ? ' browser_policy: that process may ask Ouroboros’s browser rules about its requests. '
+                + 'It requires a task session; use Import to change that policy explicitly before switching this off.' : '');
 }
 
 /** What this server costs the request: its part of the connections map, and its call schemas. */
@@ -486,7 +490,13 @@ function renderServerCard(server, index) {
                 <input class="ui-checkbox" type="checkbox" aria-label="MCP server ${index + 1}: Call schemas from task start" data-mcp-field="schemas_at_start" ${isPinned(server) ? 'checked' : ''}>
                 <span>Schemas from task start</span>
             </label>
-            ${lifetime ? `<div class="form-row"><span class="muted" data-mcp-lifetime>${escapeHtml(lifetime)}</span></div>` : ''}
+            ${isStdio ? `<div class="form-row"><div class="form-field ui-field">
+                <label class="mcp-server-enabled">
+                    <input class="ui-checkbox" type="checkbox" aria-label="MCP server ${index + 1}: Keep one server session per task" aria-describedby="mcp-${index}-lifetime" data-mcp-field="task_session" ${lifetimeFlagOn(server.task_session) ? 'checked' : ''} ${lifetimeFlagOn(server.browser_policy) ? 'disabled' : ''}>
+                    <span>Keep one server session per task</span>
+                </label>
+                <span class="ui-field-help" id="mcp-${index}-lifetime" data-mcp-lifetime>${escapeHtml(lifetime)}</span>
+            </div></div>` : ''}
             ${unsupported.length ? `<div class="ui-action-row"><span class="muted">Fields retained but not applied: ${escapeHtml(unsupported.join(', '))}</span>
                 <button type="button" class="btn btn-default" data-mcp-clear-unsupported>Remove unsupported fields</button></div>` : ''}
             </div>
@@ -521,10 +531,25 @@ function bindCardEvents(card) {
     card.querySelector('[data-mcp-edit]')?.addEventListener('toggle', (event) => {
         if (event.target.open) editOpen.add(rowServer); else editOpen.delete(rowServer);
     });
+    const changeTaskSession = (input) => {
+        // A lifetime edit never silently removes the independently imported browser policy.
+        if (lifetimeFlagOn(rowServer.browser_policy)) {
+            input.checked = lifetimeFlagOn(rowServer.task_session);
+            return;
+        }
+        rowServer.task_session = Boolean(input.checked);
+        const note = card.querySelector('[data-mcp-lifetime]');
+        if (note) note.textContent = lifetimeNote(rowServer);
+        serverEdited(rowServer);
+    };
     card.querySelectorAll('[data-mcp-field]').forEach((input) => {
         input.addEventListener('input', () => {
             const field = input.dataset.mcpField;
             const server = rowServer;
+            if (field === 'task_session') {
+                changeTaskSession(input);
+                return;
+            }
             if (field === 'enabled' || field === 'schemas_at_start') {
                 server[field] = Boolean(input.checked);
             } else if (field === 'allowed_tools') {
@@ -552,6 +577,10 @@ function bindCardEvents(card) {
         });
         input.addEventListener('change', () => {
             const field = input.dataset.mcpField;
+            if (field === 'task_session') {
+                changeTaskSession(input);
+                return;
+            }
             if (field === 'enabled' || field === 'schemas_at_start') {
                 rowServer[field] = Boolean(input.checked);
                 if (field === 'schemas_at_start') paintStatus();

@@ -591,6 +591,52 @@ def _disk(data_dir):
     return {entry.get("id") or entry.get("name"): entry for entry in servers}
 
 
+def test_stdio_task_session_choice(direct_server_with_data):  # noqa: F811
+    """Opt an existing server in and out through Settings; preserve an imported browser policy."""
+    from playwright.sync_api import expect, sync_playwright
+
+    url, data_dir = direct_server_with_data['url'], direct_server_with_data['data_dir']
+    servers = [
+        {'id': 'local_browser', 'transport': 'stdio', 'command': 'python3', 'enabled': False},
+        {'id': 'guarded_browser', 'transport': 'stdio', 'command': 'python3', 'enabled': False,
+         'task_session': True, 'browser_policy': True},
+        {'id': 'remote', 'transport': 'sse', 'url': 'http://127.0.0.1:9/mcp', 'enabled': False},
+    ]  # Disabled fixtures never launch a helper or contact an endpoint.
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        page = browser.new_page(viewport={'width': 1440, 'height': 1000})
+        page._evidence_engine = 'chromium'
+        try:
+            _seed(page, url, servers)
+            cards = page.locator('[data-mcp-card]')
+            choice = cards.nth(0).locator('[data-mcp-field="task_session"]')
+            expect(choice).not_to_be_checked()
+            _edit(cards.nth(0))
+            choice.scroll_into_view_if_needed()
+            _capture(page, 'mcp-task-session-off')
+            choice.check()
+            expect(choice).to_be_focused()
+            expect(cards.nth(0).locator('[data-mcp-lifetime]')).to_contain_text('share one running server process')
+            _capture(page, 'mcp-task-session-on')
+            _save(page)
+            assert _disk(data_dir)['local_browser']['task_session'] is True
+            _open_mcp(page, url)
+            expect(page.locator('#settings-status')).to_have_text('Settings refreshed')
+            expect(choice).to_be_checked()
+            _edit(cards.nth(0))
+            choice.uncheck()
+            _save(page)
+            assert _disk(data_dir)['local_browser']['task_session'] is False
+            guarded = cards.nth(1).locator('[data-mcp-field="task_session"]')
+            expect(guarded).to_be_checked()
+            expect(guarded).to_be_disabled()
+            expect(cards.nth(1).locator('[data-mcp-lifetime]')).to_contain_text('requires a task session')
+            assert _disk(data_dir)['guarded_browser']['browser_policy'] is True
+            assert cards.nth(2).locator('[data-mcp-field="task_session"]').count() == 0
+        finally:
+            browser.close()
+
+
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
 def test_mcp_header_editor_ui(direct_server_with_data, loopback, engine):  # noqa: F811
     """One header list over unchanged storage, and Show/Test/Save agreeing on identity.
