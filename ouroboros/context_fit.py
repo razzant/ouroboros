@@ -735,8 +735,13 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         host_allowances = floor.floor_allowances(window_tokens=window if known_window else None,
             output_reserve_tokens=reserve, non_memory_tokens=0, target_tokens=target if kept is None else None,
             calibration_ratio=ratio, work_room_levels=levels, boundary_tokens=boundary)
-        def shortest(forms):  # what a start sends once its own walk took each form before uncovered owner rows
-            return measure(selected, sent, forms, *view(selected, sent, forms, window, boundary, shortest=True)[:2])
+        held = [None]  # the frame's one shortest level: a host step's receipt re-prices it, a miss walks again
+        def shortest(forms, physical):  # what a start sends once its own walk took each form before uncovered owner rows
+            price = held[0] and measure(selected, sent, forms, *view(selected, sent, forms, window, boundary, level=held[0])[:2])
+            if price is None or price > physical:  # no walk yet, or its level no longer fits beside these host forms
+                story, room, facts = view(selected, sent, forms, window, boundary, shortest=True)
+                held[0], price = floor.kept_level(snapshot, facts), measure(selected, sent, forms, story, room)
+            return price
         receipts, _ = floor._host_steps(sections[selected], previous,  # every frame starts from what was shown
             measure=lambda addressed: measure(selected, sent, addressed, story_before, room_before),
             shortest=shortest if snapshot and kept is None else None,  # a held view was sent: it keeps its steps

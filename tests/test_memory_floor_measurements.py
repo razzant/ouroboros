@@ -66,30 +66,47 @@ def test_ordinary_scale_fit_measurements(tmp_path, monkeypatch, rows):
 
 def test_one_start_lists_a_snapshot_s_floor_elements_once(tmp_path, monkeypatch):
     """Live scale (520 other conversations, ~17,000 words of people, no owner text): every walk, level, receipt and
-    Max-room measure of one start reads one listing of the snapshot's elements; a changed snapshot lists its own."""
-    listed, original = [], mf._list_elements
+    Max-room measure of one start reads one listing of the snapshot's elements; a changed snapshot lists its own. The
+    frame walks its shortest view once and re-prices that level beside each later host form: 33 full room renders
+    here, where a walk beside every host form took 60."""
+    listed, probes, renders = [], [], []
+    original, render, room = mf._list_elements, mf.render_view_for_mode, mv.render_room
     monkeypatch.setattr(mf, '_list_elements', lambda snapshot: listed.append(snapshot) or original(snapshot))
+    monkeypatch.setattr(mv, 'render_room', lambda *args, **kwargs: renders.append(1) or room(*args, **kwargs))
+
+    def recorded(*args, **kwargs):
+        if kwargs.get('shortest') or kwargs.get('level') is not None:
+            probes.append('walk' if kwargs.get('level') is None else 're-price')
+        return render(*args, **kwargs)
+    monkeypatch.setattr(mf, 'render_view_for_mode', recorded)
     snap = syn.live_scale()
     plan = scale.build(tmp_path, monkeypatch, snap=snap, window=600_000)
-    assert plan.projection(plan.initial_mode).memory_facts['floor']['steps'].get('F6w')  # the walk ran at this scale
+    facts = plan.projection(plan.initial_mode).memory_facts
+    print('LIVE_SCALE_START ' + json.dumps({'mode': plan.initial_mode, 'steps': facts['floor']['steps'],
+                                            'probes': probes, 'renders': len(renders)}))
+    assert plan.initial_mode == 'max' and facts['floor']['steps'].get('F6w')  # the walk ran at this scale
     assert len(listed) == 1, f'one listing per snapshot object, got {len(listed)}'
+    assert probes[0] == 'walk' and probes.count('walk') == 1, probes  # one Max frame, one walk
+    assert probes.count('re-price') <= len(facts['host_sections_addressed']) and len(renders) <= 33
     fewer = dataclasses.replace(snap, conversations=snap.conversations[:1])
     assert len(mf.floor_elements(fewer)) < len(mf.floor_elements(listed[0])) and len(listed) == 2
 
 
-def _near_even_plan(root, monkeypatch, window, tail=61, owner=5199, pad=2, shift=1):
+def _near_even_plan(root, monkeypatch, window, tail=61, owner=5199, pad=2, shift=1, identity=0, skills=None):
     """A small real start whose note's label sits within a token of its receipt clause, so each host step's own bytes
-    can change whether the label saves: the whole request rounds differently beside every new address."""
+    can change whether the label saves: the whole request rounds differently beside every new address. ``identity``
+    pads the core and ``skills`` sizes that host section (by default its form saves about 300 tokens)."""
     lane = [syn.spoken(i, 'ouroboros', 300) for i in range(2)]
     lane.append({**syn.spoken(90, 'human', owner), 'owner_side': True, 'carried': False})
     room = syn.room('1', lane1=lane)
     room['notes'] = [{'id': 'note-here-0', 'date': '2026-09-02', 'role': 'root', 'text': 'Where this stands. ' + 'x' * tail}]
     snap = syn.snapshot(room_facts=room, story=syn.pages(2, 300), other_conversations=False)
     runtime = HostSection('runtime', '## runtime\n\n' + 'o' * (1600 + pad), '## runtime\n\nOperative.' + 'q' * shift)
-    skills = HostSection('installed_skills', '## skills\n\n' + 's' * (1200 + pad), '## skills\n\nPurpose.')
+    skills = HostSection('installed_skills', '## skills\n\n' + 's' * (1200 + pad if skills is None else skills),
+                         '## skills\n\nPurpose.')
     index = HostSection('knowledge_index', '## knowledge\n\n' + 'k' * 2400, '## knowledge\n\nOutline.')
     captured = cf.ContextCore(base_prompt='SYSTEM', bible_md='BIBLE', architecture_md='# Architecture', development_md='',
-        docs_need_development=False, semi_stable_text='IDENTITY', dynamic_text='\n\n'.join((runtime, skills)),
+        docs_need_development=False, semi_stable_text='IDENTITY' + 'i' * identity, dynamic_text='\n\n'.join((runtime, skills)),
         dynamic_head_text=index, dynamic_sections=(runtime, skills), dynamic_head_sections=(index,),
         user_content_json=json.dumps('Continue.'), section_root=str(root), section_task_id='task-1',
         memory_view_json=mv.snapshot_json(snap))
@@ -116,15 +133,18 @@ def _hosts(plan):
      [('runtime', False), ('installed_skills', True)], {'F2': 2, 'F5': 2, 'F8': 1}),
 ])
 def test_each_host_address_walks_its_own_shortest_forms(tmp_path, monkeypatch, window, shape, hosts, steps):
-    """A real start, near the label's break-even: which forms are shortest changes between one frame's host steps. Each
-    price must walk them beside its own host forms; a tie within a token takes the whole request's two measures, and a
-    walk that measures every optional form whole chooses exactly the same at every probe."""
+    """A real start, near the label's break-even: which forms are shortest changes between one frame's host steps. The
+    frame walks once, then re-prices that level beside each new host form: a re-price that misses the window walks
+    again, beside its own host forms, and chooses other forms; one that fits (the index stays whole) walks no more. A tie
+    within a token takes the whole request's two measures, and a walk that measures every optional form whole chooses
+    exactly the same at every probe."""
     render, probes, ties = mf.render_view_for_mode, [], []
 
     def recorded(*args, **kwargs):
         result = render(*args, **kwargs)
-        if kwargs.get('shortest'):
-            probes.append((kwargs['mode'], result[2]['floor']['addressed'], result[1]))
+        if kwargs.get('shortest') or kwargs.get('level') is not None:
+            probes.append(('walk' if kwargs.get('level') is None else 're-price', kwargs['mode'],
+                           mf.kept_level(args[0], result[2]).addressed, result[1]))
         return result
 
     prices = mf._shortest_prices
@@ -133,7 +153,9 @@ def test_each_host_address_walks_its_own_shortest_forms(tmp_path, monkeypatch, w
         sent, lambda level: ties.append(level.addressed) or measure(level)))
     settled = _near_even_plan(tmp_path / 'settled', monkeypatch, window, **shape)
     assert _hosts(settled) == hosts and settled.projection(settled.initial_mode).memory_facts['floor']['steps'] == steps
-    assert ties and len({str(forms) for _mode, forms, _room in probes}) > 1  # a tie was measured; the forms did change
+    walks = {str(forms) for kind, _mode, forms, _room in probes if kind == 'walk'}
+    assert [kind for kind, *_ in probes] == ['walk', 're-price', 'walk', 're-price']  # the last re-price fit: no walk
+    assert ties and len(walks) == 2  # a tie was measured; the walk after the missed re-price chose other forms
     chosen, probes[:] = list(probes), []
     monkeypatch.setattr(mf, '_shortest_prices', lambda sent, measure: (
         measure, lambda taken, trial: (measure(taken), measure(trial))))  # the control: every optional form measured whole
@@ -144,14 +166,39 @@ def test_each_host_address_walks_its_own_shortest_forms(tmp_path, monkeypatch, w
         assert measured.projection(mode).memory_facts == settled.projection(mode).memory_facts
 
 
-def test_a_shortest_walk_measures_no_form_its_text_settles(tmp_path, monkeypatch):
-    """Owner shape at 92K: Max and Low cannot hold even their least request, so neither walks; Nano walks at each of its
-    four host forms, and those walks' forms all differ by far more than a token, so none takes a whole measurement."""
-    render, walks, ties = mf.render_view_for_mode, [], []
+@pytest.mark.parametrize('window,probes,hosts', [
+    # The skills step saves 3 tokens, and the margin it frees reaches the size at which the uncovered owner row alone
+    # would fit: the receipt's clause turns to the owner words, 12 tokens longer, and the level that fitted costs more.
+    (11_416, ['walk', 're-price', 're-price', 'walk'],
+     [('runtime', False), ('installed_skills', True), ('knowledge_index', False)]),
+    # Three tokens less window and the clause stays short: the second re-price fits and the index stays whole.
+    (11_413, ['walk', 're-price', 're-price'], [('runtime', False), ('installed_skills', True)]),
+])
+def test_a_host_step_that_grows_the_receipt_walks_the_shortest_view_again(tmp_path, monkeypatch, window, probes, hosts):
+    """Astra's counterexample (R2 11(i)) on a real start: a fit proven beside one host form is proven again beside the
+    next. After the runtime step the walk's level fits under its receipt; when the next step makes that receipt longer
+    the re-price misses, the frame walks again and the index outlines for the physical window. Kept as proven, the fit
+    would leave the index whole beside a request the window cannot hold."""
+    render, seen = mf.render_view_for_mode, []
 
     def recorded(*args, **kwargs):
-        if kwargs.get('shortest'):
-            walks.append(kwargs['mode'])
+        if kwargs.get('shortest') or kwargs.get('level') is not None:
+            seen.append('walk' if kwargs.get('level') is None else 're-price')
+        return render(*args, **kwargs)
+    monkeypatch.setattr(mf, 'render_view_for_mode', recorded)
+    plan = _near_even_plan(tmp_path, monkeypatch, window, identity=26_680, skills=290)
+    assert seen == probes and _hosts(plan) == hosts
+
+
+def test_a_shortest_walk_measures_no_form_its_text_settles(tmp_path, monkeypatch):
+    """Owner shape at 92K: Max and Low cannot hold even their least request, so neither walks; Nano walks once, then at
+    each of its next three host forms re-prices that level, misses the window (even its shortest view does not fit) and
+    walks again. Those walks' forms all differ by far more than a token, so none takes a whole measurement."""
+    render, probes, ties = mf.render_view_for_mode, [], []
+
+    def recorded(*args, **kwargs):
+        if kwargs.get('shortest') or kwargs.get('level') is not None:
+            probes.append(('walk' if kwargs.get('level') is None else 're-price', kwargs['mode']))
         return render(*args, **kwargs)
 
     prices = mf._shortest_prices
@@ -159,7 +206,7 @@ def test_a_shortest_walk_measures_no_form_its_text_settles(tmp_path, monkeypatch
     monkeypatch.setattr(mf, '_shortest_prices', lambda sent, measure: prices(
         sent, lambda level: ties.append(level.addressed) or measure(level)))
     assert scale.build(tmp_path, monkeypatch).initial_mode == 'nano'
-    assert walks == ['nano'] * 4 and ties == []
+    assert probes == [('walk', 'nano')] + [('re-price', 'nano'), ('walk', 'nano')] * 3 and ties == []
 
 
 @pytest.mark.parametrize("step, target, outlined", [

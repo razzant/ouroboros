@@ -639,7 +639,7 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
                          measure_text: Optional[Callable[[str, str], int]] = None,
                          start_work: bool = False,
                          max_room: Optional[Mapping[str, Any]] = None,
-                         shortest: bool = False) -> Tuple[str, str, Dict[str, Any]]:
+                         shortest: bool = False, level: Optional[mv.FloorLevel] = None) -> Tuple[str, str, Dict[str, Any]]:
     """``(story text, room text, facts)`` of one mode's projection, the floor decided once.
 
     The window counts only when known and fresh (``known_window``). An owner target binds
@@ -653,6 +653,7 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     ``shortest``: where this walk ends when only uncovered owner rows are left to address, with its
     completed receipt -- what a start's host walk judges beside the window (``_host_steps``). Its ``measure_text``
     prices a whole request: only a tie within one token of it needs measuring (``_shortest_prices``).
+    ``level``: such a walk's level again, without walking, its receipt priced beside this request's host forms.
     """
     target, reserve = context_budget.context_mode_limits(mode, owner_mode, output_reserve, working_reserve_tokens=working_reserve_tokens)
     if kept is not None:
@@ -682,11 +683,11 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     def sent(level):  # the two texts this level adds to a request, its receipt included
         return mv.render_story(snapshot, level), mv.render_room(snapshot, level, floor_note=receipt(level))
     measure = lambda level: measure_text(*sent(level))
-    if shortest:  # A saving no form can pay takes every form in walk order; no physical bound stops it before owner rows.
-        characters, compare = _shortest_prices(sent, measure)
+    if shortest and level is None:  # A saving no form can pay takes every form in walk order; no physical bound
+        characters, compare = _shortest_prices(sent, measure)  # stops it before owner rows.
         level = fit_memory_view(snapshot, {**allowances, "physical": None}, kept=kept or mv.FULL_VIEW, saving=math.inf,
                                 measure=characters, compare=compare)
-    else:
+    elif level is None:
         level = fit_memory_view(snapshot, allowances, kept=kept or mv.FULL_VIEW, saving=saving, measure=measure)
     note = receipt(level)
     return (mv.render_story(snapshot, level), mv.render_room(snapshot, level, floor_note=note),
@@ -735,10 +736,12 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
     Elsewhere they step while the request exceeds the window or ``saving`` still holds
     a measured or refused excess; ``slack``, the part of ``saving`` a caller asks
     beyond it, only ordinary host forms and memory pay.
-    A start's frame judges what it would send: ``shortest(addressed)`` measures the
-    request beside these host forms once that frame's own memory walk has taken every
+    A start's frame judges what it would send: ``shortest(addressed, physical)`` measures
+    the request beside these host forms once that frame's own memory walk has taken every
     form before uncovered owner rows, its floor receipt included
-    (``render_view_for_mode(shortest=True)``), priced again after each new address.
+    (``render_view_for_mode(shortest=True)``). After each new address that receipt can
+    grow, so the frame re-prices the walk's level beside the new forms and walks again
+    only when the level no longer fits (``context_fit._view_projections``).
     ``bare(addressed)`` measures a request without memory: when even every candidate at
     its shorter form exceeds the window that way, no price here can fit, so each candidate
     steps for the window unpriced and the saving stays unpaid.
@@ -761,7 +764,7 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
     least = bare({**addressed, **{part.section_id: min((part.full_text, part.operative_view), key=view_tokens)
                                   for part in candidates}}) if bare else None
     if least is not None and least > physical:  # every price this walk could take exceeds the window
-        measure = shortest = lambda _addressed: least
+        measure = shortest = lambda _addressed, *_physical: least
     initial = current = measure(addressed)
     bound = allowance if allowance is not None else physical
     if (bound is None or current <= bound) and saving == 0:
@@ -777,7 +780,7 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
         if (bound is None or current <= bound) and initial - current >= saving:
             break
         if fits is None:
-            fits = (shortest(addressed) if shortest else current) <= physical
+            fits = (shortest(addressed, physical) if shortest else current) <= physical
         if part.section_id in WHOLE_OR_OUTLINE_STEPS and fits and (soft or initial - current >= excess):
             continue  # an outline is a physical step, never a start-room or slack choice
         try:

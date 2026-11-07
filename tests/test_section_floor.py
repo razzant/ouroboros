@@ -78,7 +78,7 @@ def test_a_frame_whose_least_request_overflows_takes_every_step_for_the_window_u
         root="test-root", task_id="test-task", allowance=10_000,
         bare=lambda forms: bare.append(dict(forms)) or least,
         measure=lambda addressed: priced.append("held") or 30_000 - 2_000 * len(addressed),
-        shortest=lambda addressed: priced.append("shortest") or 20_000)
+        shortest=lambda addressed, physical: priced.append("shortest") or 20_000)
     assert bare == [{"runtime": "operative", "installed_skills": "operative", "registry": "operative"}]
     assert [(row["section_id"], row.get("start_room", False)) for row in receipts] == [
         ("runtime", False), ("installed_skills", False), ("registry", False)]

@@ -119,7 +119,7 @@ def test_start_uses_one_floor_walk_and_calibrates_before_book_choice(tmp_path, m
     _, build = _built(tmp_path, monkeypatch, books=600_000, ratio=1)
     render, walks = mf.render_view_for_mode, []
     def measured(*args, **kwargs):
-        walks.append(bool(kwargs.get("shortest")))  # True: a host step's price of the walk's end, never a chosen view
+        walks.append(bool(kwargs.get("shortest") or kwargs.get("level")))  # True: a host step's price, never a chosen view
         return render(*args, **kwargs)
     monkeypatch.setattr(mf, "render_view_for_mode", measured)
     assert build(330_000).initial_mode == "max"
