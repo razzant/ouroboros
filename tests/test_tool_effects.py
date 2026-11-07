@@ -61,13 +61,18 @@ def test_absent_duplicate_and_builtin(published_tool):
     assert effects.effect_of("read_file") is effects.BUILTIN
 
 
-def test_mcp_annotations_are_retained_without_authority(monkeypatch):
+def test_only_an_mcp_read_only_hint_declares_a_read(monkeypatch):
+    """The configured server's ``readOnlyHint: true`` is a declared read; false, absent or non-boolean stays write."""
     monkeypatch.setattr(effects, "_MCP_ANNOTATIONS", {})
-    effects.record_mcp_annotations("example", [{"name": "read", "annotations": {
-        "readOnlyHint": True, "destructiveHint": False, "title": "not retained"}}])
+    effects.record_mcp_annotations("example", [
+        {"name": "read", "annotations": {"readOnlyHint": True, "destructiveHint": False, "title": "not retained"}},
+        {"name": "send", "annotations": {"readOnlyHint": False}},
+        {"name": "vague", "annotations": {"readOnlyHint": "true"}}, {"name": "bare"}])
     fact = effects.effect_of("mcp_example__read")
-    assert fact.effect == "write" and not fact.declared
+    assert (fact.effect, fact.declared, fact.source) == ("read", True, "mcp")
     assert fact.annotations == {"readOnlyHint": True, "destructiveHint": False}
+    for name in ("mcp_example__send", "mcp_example__vague", "mcp_example__bare", "mcp_example__unlisted"):
+        assert (effects.effect_of(name).effect, effects.effect_of(name).declared) == ("write", False), name
     effects.record_mcp_annotations("example", [])
     assert effects.effect_of("mcp_example__read", is_mcp=True).annotations == {}
     assert effects.effect_of("mcp_example__read").effect == "write"

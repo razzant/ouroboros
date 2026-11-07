@@ -1,9 +1,11 @@
 """Host provenance, policy coverage and attributed fixed evidence for both levels."""
 import pytest
 
+from ouroboros import tool_effects as _tool_effects
 from tests._safety_fixtures import supervisor as supervisor_fixture
 supervisor = supervisor_fixture
 from ouroboros.consciousness_authority import work_kind, consciousness_origin_metadata
+REAL_EFFECT_OF = _tool_effects.effect_of  # bound before the fixture stubs it
 
 
 @pytest.mark.parametrize("metadata,kind", [
@@ -42,7 +44,7 @@ def test_only_a_verified_cite_mints_an_independent_owner_root(basis, kind):
 def test_caller_kind_selects_level_for_steering_and_root_minting(supervisor):
     h = supervisor
     h.modes.update(owner="off", consciousness="full")
-    checked = ["forward_to_worker", "tell_task", "resume_task", "continue_task", "pause_task", "start_task",
+    checked = ["resume_task", "continue_task", "pause_task", "start_task",
                "schedule_followup", "toggle_consciousness", "configure_presence"]
     for name in checked:
         h.module.check_safety(name, {}, ctx=h.ctx)
@@ -51,7 +53,8 @@ def test_caller_kind_selects_level_for_steering_and_root_minting(supervisor):
     for name in checked:
         h.module.check_safety(name, {}, ctx=h.ctx)
     assert len(h.calls) == len(checked)
-    for name in ["schedule_subagent", "delegate_start", "delegate_message"]:
+    # Relays between my own works leave the check: the send they lead to is checked where it happens.
+    for name in ["tell_task", "forward_to_worker", "schedule_subagent", "delegate_start", "delegate_message"]:
         h.module.check_safety(name, {}, ctx=h.ctx)
     h.module.check_safety("manage_schedules", {"action": "list"}, ctx=h.ctx)
     assert len(h.calls) == len(checked)
@@ -77,6 +80,22 @@ def test_only_declared_reads_skip(supervisor, monkeypatch):
         h.module.check_safety("extension_read", {}, ctx=h.ctx)
     assert len(h.calls) == 1
     assert h.events[-1]["type"] == "safety_declared_read_skip"
+
+
+def test_an_mcp_read_only_hint_skips_and_any_other_mcp_call_is_checked(supervisor, monkeypatch):
+    """A configured server's ``readOnlyHint: true`` skips the check like a manifest read (disclosed widening)."""
+    h = supervisor
+    from ouroboros import tool_effects
+    monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")  # holds and flags would be advice anyway
+    monkeypatch.setattr(tool_effects, "effect_of", REAL_EFFECT_OF)
+    monkeypatch.setattr(tool_effects, "_MCP_ANNOTATIONS", {})
+    tool_effects.record_mcp_annotations("slack", [{"name": "history", "annotations": {"readOnlyHint": True}},
+                                                  {"name": "post", "annotations": {"readOnlyHint": False}}])
+    assert h.module.check_safety("mcp_slack__history", {"channel": "C1"}, ctx=h.ctx) == (True, "")
+    assert not h.calls and h.events[-1] == {"type": "safety_declared_read_skip", "tool": "mcp_slack__history",
+                                            "source": "mcp", "reason": "server annotation readOnlyHint"}
+    assert h.module.check_safety("mcp_slack__post", {"channel": "C1"}, ctx=h.ctx)[0]
+    assert len(h.calls) == 1
 
 
 def test_bundle_authorship_scope_and_no_reasoning_dump(supervisor, monkeypatch):

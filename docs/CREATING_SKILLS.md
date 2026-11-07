@@ -964,7 +964,9 @@ contributes:
 - `effect` is one fact with three consumers: Advises (autonomy) refuses everything but a declared read; a Silent or
   Paused place refuses `message` and `write` aimed at it; the Safety Supervisor skips declared reads at Light/Full and
   gives `message` its speech semantics (a flagged message returns to the mind; the identical re-issue is sent and
-  recorded). A tool that reads or writes depending on its arguments is `write`. MCP tools are always `write`.
+  recorded). A tool that reads or writes depending on its arguments is `write`. An MCP tool is a declared read when
+  its configured server marks it `readOnlyHint: true`, otherwise `write`; that hint is trusted, so a server lying
+  about a write runs it unchecked, and Advises may call the tools a server marks read-only.
 - `target`/`conversation`/`thread` attribute each destination. Declare `account_id` for multi-account writes:
   an exact account outside all applicable Place scopes remains an ordinary tool target, including in Acts.
   Unresolved targets inside applicable scopes retain the Silent/Paused hold. Use the same canonical account key

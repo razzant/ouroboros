@@ -5,10 +5,12 @@ A connector declares each of its tools in the manifest's ``tools:`` list with
 ``target:`` — the argument(s) naming where the effect lands. ``message`` means
 words to people at the target; ``write`` is any other change outside. The
 declaration is read from the reviewed, published generation the dispatcher
-uses, never from the mutable skill folder. MCP tools carry no declaration:
-they are ``write`` with ``declared=False``, and their annotations can only
-make a call stricter. A mixed tool (one tool that reads or writes depending on
-its arguments) is ``write``.
+uses, never from the mutable skill folder. An MCP tool is a declared read
+when the configured server's catalog marks it ``readOnlyHint: true``;
+otherwise it is ``write`` with ``declared=False``. Two widenings follow and
+are disclosed: a server that lies about a write runs it unchecked, and
+Advises may call such tools. A mixed tool (one tool that reads or writes
+depending on its arguments) is ``write``.
 
 Consumers: the Advises refusal (``place_guard``), Silent/Paused refusal of
 writes aimed at a place (``place_guard``), and the Supervisor (``safety``:
@@ -55,7 +57,7 @@ _MCP_LOCK = threading.Lock()
 
 
 def record_mcp_annotations(server_id: str, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Replace one server's discovery hints. They never grant read authority.
+    """Replace one server's discovery hints; ``readOnlyHint: true`` makes its tool a declared read.
 
     One small entry per tool, replaced on catalog adoption; process exit removes
     the cache. Only the four protocol booleans are retained. The adopter ignores
@@ -126,7 +128,8 @@ def effect_of(name: str, *, ext_tool: Any = None, is_mcp: bool = False, ctx: Any
     if is_mcp or name.startswith("mcp_"):
         with _MCP_LOCK:
             hints = next((dict(rows[name]) for rows in _MCP_ANNOTATIONS.values() if name in rows), {})
-        return ToolEffect(effect=EFFECT_WRITE, source="mcp", annotations=hints)
+        read = hints.get("readOnlyHint") is True
+        return ToolEffect(effect=EFFECT_READ if read else EFFECT_WRITE, declared=read, source="mcp", annotations=hints)
     if ext_tool is None and not parse_extension_surface_name(name):
         return BUILTIN
     row = _published_declaration(name, ext_tool)

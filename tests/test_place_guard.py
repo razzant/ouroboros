@@ -37,7 +37,8 @@ def places(monkeypatch, tmp_path):
     return rows, ctx
 
 
-def test_advises_extension_and_mcp_both_directions(published_tool, places):
+def test_advises_extension_and_mcp_both_directions(published_tool, places, monkeypatch):
+    from ouroboros import tool_effects
     _, ctx = places
     ctx.task_metadata = {"initiator": "consciousness", "consciousness_autonomy": "observe"}
     for effect in ("write", "message", None):
@@ -46,6 +47,10 @@ def test_advises_extension_and_mcp_both_directions(published_tool, places):
     name, tool = published_tool("read")
     assert guard.dispatch_refusal(ctx, name, {}, ext_tool=tool) == ""
     assert "Advises" in guard.dispatch_refusal(ctx, "mcp_demo__read", {}, is_mcp=True)
+    # The server's own readOnlyHint is a declared read, so Advises may call it (disclosed widening).
+    monkeypatch.setattr(tool_effects, "_MCP_ANNOTATIONS", {})
+    tool_effects.record_mcp_annotations("demo", [{"name": "read", "annotations": {"readOnlyHint": True}}])
+    assert guard.dispatch_refusal(ctx, "mcp_demo__read", {}, is_mcp=True) == ""
     ctx.task_metadata["consciousness_autonomy"] = "act"
     assert guard.dispatch_refusal(ctx, "mcp_demo__read", {}, is_mcp=True) == ""
     assert guard.dispatch_refusal(ctx, "read_file", {}) == ""
