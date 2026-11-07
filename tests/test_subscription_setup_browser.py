@@ -269,6 +269,8 @@ def test_cursor_login_and_catalog_are_not_execution_readiness(subscription_ui):
     cursor.get_by_text("Signed in", exact=True).wait_for()
     assert "Login verified" in cursor.inner_text()
     assert "Connected" not in cursor.inner_text()
+    # The section's copy opens behind its one Details, right under the lead.
+    page.locator("#harness-accounts-section > details.settings-section-details > summary").click()
     assert "Sign-in does not verify main-chat support or agent execution" in page.locator(
         "#harness-accounts-section").inner_text()
     cursor.scroll_into_view_if_needed()
