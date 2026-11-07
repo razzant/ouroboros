@@ -159,18 +159,22 @@ def _deduped(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Drop empty rows and repeats of one source: its reference, else (none recorded) its whitespace-normalized
     text and its time; the text alone only when no time was recorded either. Similar words under different
     references or times are not copies (BIBLE P1): two "yes" stay two. The first row of one identity keeps its
-    carrier and its date. A reply target repeats by its address: two replies of my human to one message keep one
-    target row, beside the first."""
+    carrier and its date, and takes a later twin's files when it has none (a corpus row records a relayed row's
+    words; its held chat row keeps the upload references): a row never loses a file to its own identity. A reply
+    target repeats by its address: two replies of my human to one message keep one target row, beside the first."""
     from ouroboros.project_dialogue import _text_sha256
 
-    seen: set = set()
+    seen: Dict[Any, Dict[str, Any]] = {}  # one identity -> the row kept for it
     kept = []
     for row in rows:
         key = (row["source"] == REPLY_TARGET, row["ref"]) if row["ref"] else (
             _text_sha256(row["text"]), str(row.get("ts") or ""))
-        if _kept(row) and key not in seen:
-            seen.add(key)
-            kept.append(row)
+        if not _kept(row):
+            continue
+        if key not in seen:
+            kept.append(seen.setdefault(key, row))
+        elif row.get("attachments") and not seen[key].get("attachments"):
+            seen[key]["attachments"] = row["attachments"]
     return kept
 
 

@@ -318,13 +318,16 @@ def test_a_declared_child_starts_with_the_owner_words_and_nothing_of_shared_memo
 # --- a file my human sent is staged at a birth: a declared helper and a grandchild open it ---------------
 
 def test_a_declared_helper_and_a_grandchild_born_after_a_carried_screenshot_open_it_at_their_first_round(tmp_path):
-    """A row with a file the root holds reaches a declared helper's and a grandchild's birth block with the file
-    staged on each one's own drive and its line naming the path it opens there; a helper born before the row
-    has neither the row nor a copy."""
+    """A row with a file, relayed to the root and drained as its worker drains it (the chat row held, its words
+    recorded in the root's corpus), reaches a declared helper's and a grandchild's birth block with the file
+    staged on each one's own drive and its line naming the path it opens there: the corpus row wins the identity
+    and takes the held twin's upload references, so the scheduled field names the file. A helper born before the
+    row has neither the row nor a copy."""
     from ouroboros import dialogue_store
     from ouroboros.chat_uploads import claim_refs, store_upload
     from ouroboros.context import build_llm_messages
-    from ouroboros.owner_relay import retain_owner_message
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.owner_relay import owner_quote, owner_row_address, write_relay
 
     env, memory, _rooms = world(tmp_path)
     canonical = memory.drive_root
@@ -335,8 +338,18 @@ def test_a_declared_helper_and_a_grandchild_born_after_a_carried_screenshot_open
     row = {"chat_id": 1, "direction": "in", "ts": "2026-10-04T05:30:00+00:00", "text": "Here is the shelf",
            "client_message_id": "msg-shot", "attachments": [ref]}
     dialogue_store.append(canonical, "chat", row)
-    assert retain_owner_message(root, row) is not None
+    address = owner_row_address(row)
+    write_relay(canonical, "bound", relay_id="shot", note="the shelf, for the count", chat_id=1, teller_task_id="tmain",
+                quotes=[owner_quote(canonical, row, address=address)], canonical_root=canonical)
+    _drain_incoming_messages([{"role": "user", "content": ASKED}], queue.Queue(), canonical, "bound", None, set(),
+                             owner_ctx=root)
+    assert root._held_owner_messages[address]["attachments"] == [ref]  # the chat row is held with its file
+    corpus = [item for item in root._owner_directives if item.get("content") == "Here is the shelf"]
+    assert len(corpus) == 1 and "attachments" not in corpus[0]  # its corpus row records the words alone
     declared = _schedule(root, "Count shelf two", input_sources="declared", context="Shelf two holds ten boxes")
+    carried = [item for item in declared["metadata"]["governing_owner_words"] if item["text"] == "Here is the shelf"]
+    assert len(carried) == 1 and carried[0]["carrier"] == "ctx" and carried[0]["ref"] == "chat 1 / msg-shot"
+    assert [item["upload"] for item in carried[0]["attachments"]] == [ref["upload"]]  # one row, with its file
     child = _schedule(root, "Count shelf three")
     grandparent = ToolContext(repo_dir=env.repo_dir, drive_root=pathlib.Path(child["drive_root"]),
                               budget_drive_root=str(canonical), current_task_type="task")

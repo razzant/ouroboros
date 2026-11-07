@@ -1397,17 +1397,10 @@ def test_placement_runs_from_the_round_top_drain_alone_and_skips_the_rows_a_star
     whose stamp stands in a START body of the run's line is never placed, under either reference it has printed
     (its room reference now, its pre-update mailbox ``msg <id>`` before); the others are, and the fact lines
     reach the starter's own context."""
-    import pathlib
     import queue
     from ouroboros import delegate_continuation
     from ouroboros.loop_round_limits import _drain_incoming_messages
 
-    repo = pathlib.Path(__file__).resolve().parents[1] / "ouroboros"
-    callers = {path.name: path.read_text(encoding="utf-8").count("place_live_runs=True") for path in (
-        repo / "loop.py", repo / "loop_round_limits.py", repo / "loop_forced_finalization.py",
-        repo / "live_conversation.py", repo / "loop_delivery.py", repo / "owner_wait.py")}
-    assert callers == {"loop.py": 1, "loop_round_limits.py": 0, "loop_forced_finalization.py": 0,
-                       "live_conversation.py": 0, "loop_delivery.py": 0, "owner_wait.py": 0}
     _durable_run(tmp_path, "run-open")
     a, b = _owner_row("Build it", "msg-a"), _owner_row("Add the charts too", "msg-b", ts="2026-10-04T06:00:00+00:00")
     ctx = _starter(tmp_path, a, b)

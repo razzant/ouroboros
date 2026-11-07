@@ -84,9 +84,10 @@ def schedule_subagent_properties() -> Dict[str, Any]:
             "description": (
                 "Optional widening of the child's memory view by field, e.g. {\"knowledge\": true} starts it with the whole "
                 "knowledge base instead of the outline. Fields: story, room_page, room_lanes, origin_words, "
-                "other_conversations, marks (all|room_and_global), knowledge, owner_words. It only widens: "
-                "my human's words and the marks in force can be turned on, never off (owner_words false and marks none are refused), "
-                "and any other field is refused here. Omitted: the role's default view. A value the view does not know is refused "
+                "other_conversations, marks (all|room_and_global), knowledge, owner_words. It only widens but for the story, "
+                "which the assignment may leave out: my human's words and the marks in force can be turned on, never off "
+                "(owner_words false and marks none are refused), and any other field is refused here. Omitted: the role's "
+                "default view. A value the view does not know is refused "
                 "at the child's start with the role default and one event."),
         },
         "memory_mode": {

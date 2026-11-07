@@ -84,9 +84,9 @@ def test_a_parents_memory_view_field_rides_the_schedule_to_the_view_its_child_bu
     """The producer end to end: ``schedule_subagent(memory_view=…)`` is carried by the schedule's record and
     the supervisor's payload to the start the worker builds. A field the view knows widens the child (the
     whole knowledge base at its birth, no outline); a value it does not know is carried too, refused at the start
-    with the role default and one event, and the child is born as any child. The field only widens: a view that
-    turns my human's words or the marks off, or names a field the description does not offer, is refused where it
-    enters and nothing is queued; a plain call still births a child holding the words."""
+    with the role default and one event, and the child is born as any child. A view that turns my human's words or
+    the marks off, or names a field the description does not offer, is refused where it enters and nothing is
+    queued; a plain call still births a child holding the words."""
     import dataclasses
     import json
     import queue
@@ -148,7 +148,7 @@ def test_a_parents_memory_view_field_rides_the_schedule_to_the_view_its_child_bu
     changing, spec = born(malformed)
     assert spec == born(plain)[1] and "## Knowledge outline" in changing and "## Knowledge base" not in changing
     assert len(refusals()) == 2 and refusals()[-1]["task_id"] == malformed["id"]  # the start: one more event, no more
-    # Refused where the field enters: a view that turns my human's words or the marks off (the field only widens), or
+    # Refused where the field enters: a view that turns my human's words or the marks off (they are never turned off), or
     # names a field the description does not offer (a role, a room, a work room level); nothing is queued by any of them.
     for view, reason in (({"owner_words": False}, "only widens a child's view; it keeps my human's words and the marks"),
                          ({"marks": "none"}, "only widens"), ({"work_room_levels": "two"}, "fields are story, room_page")):
