@@ -51,6 +51,7 @@ import { haptic } from './modules/haptics.js';
 import { fmt, markBootRead, pendingBootRead, refreshDictionary, setLanguage, storedLanguage, tr } from './modules/i18n.js';
 import { initOnboardingOverlay } from './modules/onboarding_overlay.js';
 import { installAltMenuSuppression, installDesktopShellLinkInterceptor } from './modules/ui_helpers.js';
+import { bindDocumentSelectionDismissal } from './modules/selection_lifecycle.js';
 
 const state = {
     messages: [],
@@ -1580,6 +1581,9 @@ installAltMenuSuppression();
 // routes target="_blank"/download/data:/blob: intents over the pywebview
 // bridge. Installs only when the bridge announces itself; inert in browsers.
 installDesktopShellLinkInterceptor();
+// Selection dismissal is document-wide; install it with other shell-level listeners,
+// not per-room chat instances, so closing a Project room cannot remove Main's behavior.
+bindDocumentSelectionDismissal(document);
 
 // Populate the project-thread isolation set BEFORE opening the socket so the live
 // fan-out never misclassifies an early project frame as main-chat traffic during

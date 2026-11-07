@@ -1170,6 +1170,16 @@ preference when it opens and on every reconnect; there is no file watcher.
   content it contains. Where content lives inside a click-to-toggle surface
   (a task card's summary), the surface ignores a pointer click whose drag
   produced a non-empty selection; keyboard activation is unaffected.
+- **A later ordinary primary mouse/pen press on a fine pointer dismisses an
+  existing document selection.** The hit is judged by the gesture target, not by whether its box
+  happens to intersect the selection: selectable text keeps native collapse and
+  drag selection, while non-selectable controls/chrome (including timestamps,
+  links and `user-select: none` surfaces) dismiss before activation. Selectable
+  `role="button"` text follows the selectable-text rule. Secondary
+  or context-menu gestures, Ctrl/Meta/Alt/Shift modifiers, scrollbar gutters,
+  and an editable field's own selection keep native behavior. Touch pointerdown
+  remains native for scrolling and selection handles; coarse-pointer pen input
+  follows the same native path.
 - **A markdown heading inside chat is never a page title.** In a full rich
   answer (§1: answers, the Project completion mirror, `markdown: true` System
   rows) it is a section of the answer and never smaller than the text it
