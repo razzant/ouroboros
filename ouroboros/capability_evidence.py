@@ -1094,7 +1094,7 @@ def probe(drive_root: Any, **route) -> CapabilityEvidence:
     """Resolve independent context and output facts; one owner's window ack cannot suppress output discovery.
 
     One catalog read serves both: a read that failed (live, or its ten-minute record) is not repeated for the
-    output limit, which then answers from what is stored; a read that succeeded without a window still reads it.
+    output limit, which names that failed read; a read that succeeded without a window still reads it.
     After a failed read a fetching probe of an unpinned Auto route plans by the pool's smallest fresh statement
     (``_pool_bound``); a reader that may not fetch keeps it unknown.
     """
@@ -1121,8 +1121,7 @@ def probe(drive_root: Any, **route) -> CapabilityEvidence:
             ts=str(ack.get("ts") or ""), detail=f"owner-ack by {ack.get('owner') or 'owner'}",
             **{key: str(options.get(key) or "") for key in (
                 "source_id", "credential_profile_id", "account_fingerprint")})
-    evidence.response_limit = asdict(probe_response_limit(
-        drive_root, evidence, {**route, "allow_fetch": route.get("allow_fetch", True) and not read_failed}))
+    evidence.response_limit = asdict(probe_response_limit(drive_root, evidence, route, read_failed=read_failed))
     return evidence
 
 

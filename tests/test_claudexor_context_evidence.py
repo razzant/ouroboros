@@ -109,7 +109,7 @@ def test_auto_does_not_reuse_last_discovered_accounts_capacity(tmp_path, catalog
 
 def test_one_catalog_read_serves_window_and_output_and_a_failed_read_is_not_repeated(tmp_path, monkeypatch):
     """A probe reads the engine's catalog once. When that read fails (now, or its ten-minute record), the output limit
-    answers from what is stored instead of waiting on a second read of the same daemon; a read that succeeded without
+    names that failed read instead of waiting on a second read of the same daemon; a read that succeeded without
     an account's window still reads the output limit."""
     from ouroboros.llm import LLMClient
 
@@ -119,7 +119,9 @@ def test_one_catalog_read_serves_window_and_output_and_a_failed_read_is_not_repe
         reads.append("timed out")
         raise TimeoutError("controlled daemon timeout")
     monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(unreachable))
-    assert _probe(tmp_path).status == ce.STATUS_FAILED and reads == ["timed out"]
+    failed = _probe(tmp_path)
+    assert failed.status == ce.STATUS_FAILED and reads == ["timed out"]
+    assert failed.response_limit["source"] == "claudexor metadata: metadata read failed"  # its provenance, not none
     assert _probe(tmp_path).status == ce.STATUS_FAILED and reads == ["timed out"]  # the failure's record: no read
     nameless = {**_catalog(), "accountFingerprint": ""}  # answered, but names no account to hold a window
     monkeypatch.setattr(LLMClient, "claudexor_model_catalog",
