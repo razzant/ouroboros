@@ -243,6 +243,22 @@ def test_a_drive_refusing_its_root_is_still_a_place_a_source_can_be(data, tmp_pa
     assert retirement._answers(str(tmp_path / "Q")) is False, "an absent root is no place a source can be"
 
 
+def test_a_step_stopped_at_its_budget_is_owed_on_a_clock_that_has_not_ticked(data, tmp_path, monkeypatch):
+    """The step owes its rest at ``time.time()``; Windows' clock ticks every 15.6 ms on Python 3.10, so the next read
+    can return the same instant, and a strict comparison left the job at rest (run 42412859782, Windows shard 4)."""
+    import shutil
+
+    retirement.record_startup(data, gaps=True)
+    [_compiled(data, path) for path in _tree(tmp_path / "gone", *(f"pkg/m{n}.py" for n in range(4)))]
+    shutil.rmtree(tmp_path / "gone")
+    monkeypatch.setattr(retirement, "BYTECODE_UNLINKS_PER_RUN", 2)
+    instant = retirement.time.time()
+    monkeypatch.setattr(retirement, "time", SimpleNamespace(time=lambda: instant))
+    assert retirement.run(data, lambda: False)["state"] == "done"
+    row = maintenance_jobs.job(data, retirement.JOB) or {}
+    assert row["next_due"] == instant and retirement.due(data, row, {}, False), "the rest is owed at its own instant"
+
+
 def test_the_step_runs_in_the_job_and_a_source_removal_makes_it_due(data, tmp_path, monkeypatch):
     from ouroboros import task_custody, worktree_removal
 
