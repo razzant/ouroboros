@@ -129,7 +129,7 @@ def _argument_names(value: Any) -> tuple[str, ...]:
     return tuple(dict.fromkeys(v.strip() for v in values))
 
 
-def _selected(args: Any, selector: str) -> Any:
+def argument_value(args: Any, selector: str) -> Any:
     """The argument a (possibly dotted) declared selector names: ``body.channel`` is ``args["body"]["channel"]``."""
     value = args
     for part in selector.split("."):
@@ -155,7 +155,7 @@ def _declared_send(row: Mapping[str, Any], args: Any) -> bool:
     for selector, wanted in when.items():
         values = [wanted] if isinstance(wanted, str) else wanted
         if (not isinstance(selector, str) or not selector.strip() or not isinstance(values, list)
-                or not all(isinstance(value, str) for value in values) or _selected(args, selector) not in values):
+                or not all(isinstance(value, str) for value in values) or argument_value(args, selector) not in values):
             return False
     return True
 
@@ -206,7 +206,7 @@ def target_values(effect: ToolEffect, args: Mapping[str, Any]) -> dict[str, list
     for name in (*effect.targets, effect.conversation, effect.thread):
         if not name or name in values:
             continue
-        raw = _selected(source, name)
+        raw = argument_value(source, name)
         items = raw if isinstance(raw, (list, tuple)) else [raw]
         texts = [str(item).strip() for item in items if type(item) in (str, int) and str(item).strip()]
         if texts:

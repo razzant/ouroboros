@@ -542,14 +542,14 @@ def _owner_yes(ctx, tool_name, arguments, effect, prior):
     the answer is its judgment that the answer approves."""
     from datetime import datetime
     from ouroboros.place_guard import call_place_facts
-    from ouroboros.tool_effects import _selected
+    from ouroboros.tool_effects import argument_value
 
     def when(stamp):
         try:
             return datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
         except ValueError:
             return None
-    words, held = _selected(arguments, effect.text or "text"), when(prior.get("held_at"))
+    words, held = argument_value(arguments, effect.text or "text"), when(prior.get("held_at"))
     facts = call_place_facts(ctx, tool_name, arguments) or {}
     destinations = ([row["place_label"] for row in facts.get("places") or [] if row.get("place_label")]
                     or [value for values in (facts.get("targets") or {}).values() for value in values])
@@ -1473,7 +1473,8 @@ def check_safety(
     verdicts = getattr(assessment, "verdicts", ())
     if verdicts:
         # Speech follows the final assessment (a second check included): SUSPICIOUS sends with its warning.
-        speech = speech or any(verdict.get("speech") is True for verdict in verdicts)
+        marked = not speech and any(verdict.get("speech") is True for verdict in verdicts)  # words only the verdict saw
+        speech = speech or marked
         flagged_speech = speech and getattr(assessment, "status", "") == "DANGEROUS"
         if not _remember(ctx, digest, tool_name, assessment, speech_refused=flagged_speech):
             assessment = _hold(ctx, tool_name, "This work's mandatory prior-verdict history is too large", status="TOO_LARGE")
@@ -1488,6 +1489,10 @@ def check_safety(
                                + (f"\nFlagged words: {json.dumps(quote, ensure_ascii=False)}" if quote else "")
                                + (f"\n{assessment.destination}" if getattr(assessment, "destination", "") else "")
                                + "\n" + _SEND_DESPITE)
+            if marked and allowed:  # the place guard a message meets at dispatch, before any verdict existed
+                from ouroboros.place_guard import verdict_speech_refusal
+                if refusal := verdict_speech_refusal(ctx, tool_name, arguments, is_mcp=is_mcp):
+                    return False, refusal
     # Holds cannot earn retry authority. Speech holds bind in every runtime mode, and so does an MCP call's hold:
     # without a verdict nothing says it is not words to people (built-in undeclared tools' holds stay advice).
     if not allowed and (speech or (is_mcp and not getattr(assessment, "verdicts", ()))):

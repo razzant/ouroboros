@@ -4,12 +4,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import place_guard as guard
+from ouroboros import place_guard as guard, tool_effects as _tool_effects
 from ouroboros.places import Place, NoteEntry
 from ouroboros.tools.registry_guards import _capability_resource_guard_result
+from tests._safety_fixtures import supervisor as _supervisor
 from tests.test_tool_effects import published_tool as _published_tool
 
-published_tool = _published_tool
+published_tool, supervisor = _published_tool, _supervisor
+REAL_EFFECT_OF, REAL_CALL_PLACE_FACTS = _tool_effects.effect_of, guard.call_place_facts  # bound before stubs
 
 
 def _only(facts):
@@ -109,15 +111,36 @@ def test_a_declared_generic_send_meets_the_place_guards_as_a_message(published_t
     """A generic tool's call its connector declares as words is a message here: a Silent place refuses it through
     its nested target and another turn's conversation names its author; the tool's other calls keep its write."""
     rows, ctx = places
-    name, tool = published_tool("write", target=[], message={"when": {"path": "chat.postMessage"},
+    name, tool = published_tool("write", target=[], message={"when": {"path": "chat.postMessage"}, "text": "body.text",
                                                               "target": "body.channel", "conversation": "body.channel"})
     def send(room):
         return {"path": "chat.postMessage", "body": {"channel": room, "text": "hi"}}
     assert "Quiet is Silent" in guard.dispatch_refusal(ctx, name, send("C1"), ext_tool=tool)
-    monkeypatch.setattr(guard.conversation_lease, "live_author", lambda key, **kw: "other" if key == "service:account:C2:0" else "")
+    authors = {"service:account:C2:0": "other"}
+    monkeypatch.setattr(guard.conversation_lease, "live_author", lambda key, **kw: authors.get(key, ""))
     assert "tell_task(task_id='other'" in guard.dispatch_refusal(ctx, name, send("C2"), ext_tool=tool)
     rows[0] = replace(rows[0], state="active")
     assert guard.dispatch_refusal(ctx, name, {"path": "pins.add", "body": {"channel": "C2"}}, ext_tool=tool) == ""
+    authors.clear()  # the send now passes and the turn's record keeps the declared words
+    assert guard.dispatch_refusal(ctx, name, send("C2"), ext_tool=tool) == ""
+    assert ctx._place_message_calls[-1]["text"] == "hi"
+
+
+def test_a_verdict_marked_conversation_write_meets_the_one_author_guard(supervisor, published_tool, places, monkeypatch):
+    """A write into a conversation (a reaction, a pin) is not words by itself: the dispatch guard gives it no author
+    lease. When the verdict marks such a call as speech, the guard a message meets at dispatch applies where its
+    targets resolve a place: another turn authoring that conversation refuses it; without the mark it runs."""
+    h = supervisor
+    monkeypatch.setattr(_tool_effects, "effect_of", REAL_EFFECT_OF)
+    monkeypatch.setattr(guard, "call_place_facts", REAL_CALL_PLACE_FACTS)
+    monkeypatch.setattr(guard.conversation_lease, "live_author", lambda key, **kw: "other" if key == "service:account:C2:0" else "")
+    name, tool = published_tool("write", target="room", conversation="room")
+    assert guard.dispatch_refusal(h.ctx, name, {"room": "C2", "emoji": "eyes"}, ext_tool=tool) == ""
+    h.replies.append({"status": "SAFE", "reason": "words to the room", "speech": True})
+    ok, message = h.module.check_safety(name, {"room": "C2", "text": "We will ship Friday."}, ctx=h.ctx)
+    assert not ok and "tell_task(task_id='other'" in message
+    h.replies.append({"status": "SAFE", "reason": "a reaction", "speech": False})
+    assert h.module.check_safety(name, {"room": "C2", "emoji": "eyes"}, ctx=h.ctx) == (True, "")
 
 
 @pytest.mark.parametrize(("account_source", "broad_account"), [("focus", "*"), ("call", "")])

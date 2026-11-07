@@ -35,15 +35,15 @@ def test_no_checker_hold_and_no_retry_grant(supervisor, monkeypatch, mode, requi
 @pytest.mark.parametrize("cause", ["outage", "oversize"])
 def test_held_words_wait_in_cyber_pro_whatever_tool_carries_them(supervisor, monkeypatch, published_tool, cause):
     """Unjudged words wait in every mode: a generic tool's declared send and an MCP call that is no declared read
-    are held like speech in Cyber Pro (the 04.11 slack_api route); that tool's other calls and a built-in without
-    declarations keep the advice Cyber Pro gives any other unjudged call."""
+    are held like speech in Cyber Pro (the 04.11 slack_api route); that tool's other calls, a write into a
+    conversation (a reaction) and a built-in without declarations keep the advice Cyber Pro gives any unjudged call."""
     h = supervisor
     monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")
     monkeypatch.setattr(_tool_effects, "effect_of", REAL_EFFECT_OF)
     monkeypatch.setattr(_tool_effects, "_MCP_ANNOTATIONS", {})
     name, _tool = published_tool("write", target=[], message={"when": {"path": "chat.postMessage"}, "target": "body.channel"})
     if cause == "outage":
-        h.replies.extend([RuntimeError("provider_failed: Codex reported a failed response")] * 4)
+        h.replies.extend([RuntimeError("provider_failed: Codex reported a failed response")] * 5)
     else:
         monkeypatch.setattr(h.module, "_SAFETY_BUNDLE_BYTE_BUDGET", 10)
     held = "SAFETY_UNAVAILABLE" if cause == "outage" else "TOO_LARGE"
@@ -54,6 +54,9 @@ def test_held_words_wait_in_cyber_pro_whatever_tool_carries_them(supervisor, mon
     for other in ((name, {"path": "pins.add", "body": {"channel": "C1"}}), ("github_write", {"method": "comment"})):
         ok, message = h.module.check_safety(*other, ctx=h.ctx)
         assert ok and "SAFETY_ADVICE" in message and held in message, other[0]
+    reaction, _tool = published_tool("write", target="channel", conversation="channel")  # "a reaction is not speech"
+    ok, message = h.module.check_safety(reaction, {"channel": "C1", "name": "eyes", "timestamp": "1.1"}, ctx=h.ctx)
+    assert ok and "SAFETY_ADVICE" in message and held in message
 
 
 @pytest.mark.parametrize("card,sent", [("exact", True), ("other words", False), ("no destination", False),
