@@ -1400,7 +1400,8 @@ def check_safety(
     allowed, message = assessment
     verdicts = getattr(assessment, "verdicts", ())
     if verdicts:
-        flagged_speech = speech and any(v["status"] != "SAFE" for v in verdicts)
+        # Speech follows the final assessment (a second check included): SUSPICIOUS sends with its warning.
+        flagged_speech = speech and getattr(assessment, "status", "") == "DANGEROUS"
         if not _remember(ctx, digest, tool_name, assessment, speech_refused=flagged_speech):
             assessment = _hold(ctx, tool_name, "This work's mandatory prior-verdict history is too large", status="TOO_LARGE")
             allowed, message = assessment

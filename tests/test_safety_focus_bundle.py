@@ -83,6 +83,27 @@ def _reply_bundle(root, monkeypatch, prompts, *, thread="", before_reply=None, t
     return ctx, bundle, prompt
 
 
+@pytest.mark.parametrize("status", ["SUSPICIOUS", "SAFE"])
+def test_a_reply_sent_with_a_warning_leaves_it_in_the_room(focus, monkeypatch, checker, status):
+    """A SUSPICIOUS reply is posted with its warning, which stays in the room's record beside it, where the next
+    round in this place reads it; a SAFE reply leaves no note."""
+    from ouroboros import dialogue_store, safety
+    from ouroboros.place_reply import _reply_digest, reply_carrier
+    from ouroboros.places import conversation_chat_id
+
+    def call(**kwargs):
+        checker.append(kwargs["user_prompt"])
+        return {"content": json.dumps({"status": status, "reason": "names a colleague the note keeps out"})}, {}
+    monkeypatch.setattr(safety, "_safety_model_call", call)
+    root, _place, _admission, _event = focus
+    ctx, _bundle, _prompt = _reply_bundle(root, monkeypatch, checker)
+    carrier = reply_carrier(ctx.task_metadata)
+    client_id = f"place-notice:{ctx.task_id}:{_reply_digest(carrier, 'A short reply')}:safety-note"
+    rows = dialogue_store.rows_by_client_id(root, client_id, chat_id=conversation_chat_id(carrier["conversation_key"]))
+    assert [(r.row["direction"], "names a colleague the note keeps out" in r.row["text"]) for r in rows] == (
+        [("system", True)] if status == "SUSPICIOUS" else [])
+
+
 def test_an_owner_answer_reaches_the_supervisor_with_the_card_it_answers(focus, monkeypatch, checker, tmp_path):
     """The Supervisor reads an owner's answer together with what it answers (audit 05.11 item 37): the row the drain
     records for a delivered answer reaches the bundle with the card beside my human's words, never inside them."""

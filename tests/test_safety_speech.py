@@ -5,8 +5,20 @@ from tests._safety_fixtures import supervisor as supervisor_fixture
 supervisor = supervisor_fixture
 
 
+@pytest.mark.parametrize(("status", "sent"), [("SUSPICIOUS", True), ("DANGEROUS", False)])
+def test_speech_follows_the_final_assessment(supervisor, monkeypatch, status, sent):
+    """SUSPICIOUS speech sends at once with its warning, as for any other call; DANGEROUS returns it unsent."""
+    h = supervisor
+    from ouroboros import tool_effects
+    monkeypatch.setattr(tool_effects, "effect_of", lambda *a, **kw: tool_effects.ToolEffect("message", declared=True))
+    h.replies.append({"status": status, "reason": "the audience is wider than the note allows"})
+    ok, message = h.module.check_safety("connector_send", {"text": "hello", "to": "room"}, ctx=h.ctx)
+    assert ok is sent and "the audience is wider than the note allows" in message
+    assert message.startswith("⚠️ SAFETY_WARNING") is sent and ("Message not sent" in message) is not sent
+
+
 @pytest.mark.parametrize(("name", "status", "mode"), [
-    ("place_reply", "SUSPICIOUS", "advanced"),
+    ("place_reply", "DANGEROUS", "advanced"),
     ("connector_send", "DANGEROUS", "cyber_pro"),
 ])
 def test_speech_flag_retry_and_changed_subject(supervisor, monkeypatch, mode, status, name):
