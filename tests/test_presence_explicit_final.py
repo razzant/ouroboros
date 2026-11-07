@@ -1,4 +1,6 @@
-"""A final the mind selects after it already spoke is new speech; silence and handoffs stay explicit.
+"""A final the mind selects after it already spoke is new speech where its connector declares no in-conversation send
+tool (a peer URL, mail recipients); where it does (``records_room``: the Slack, Telegram, GitHub, AgentRQ shape) the
+finish is the turn's record and people hear only what it sends (owner 06.11, 2A). Silence and handoffs stay explicit.
 
 The real Host routes, skill token, place admission, turn gate, production agent bootstrap,
 registered ``finish_task``, loop finalization, current place state and Safety check, terminal
@@ -18,6 +20,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from ouroboros import places
+from ouroboros.extension_surface_names import extension_surface_name
 from ouroboros.gateway.host_service import create_host_service_app
 from ouroboros.presence_runner import _read_previous_turn, run_presence_turn
 from ouroboros.task_results import load_task_result, write_task_result
@@ -37,7 +40,11 @@ SEND_SCHEMA = {"name": "bridge_send", "description": "Queue one provider send in
                "parameters": {"type": "object", "properties": {
                    "text": {"type": "string"}, "kind": {"type": "string"}, "parts": {"type": "integer"},
                    "format": {"type": "string"}, "state": {"type": "string"}, "thread_id": {"type": "string"},
+                   "conversation_id": {"type": "string"},
                    "foreign_task": {"type": "string"}, "request_id": {"type": "string"}}}}
+# The same transport under the connector's own declared surface name: ``records_room`` publishes its declaration.
+RECORDS_SEND = extension_surface_name("bridge", "send")
+RECORD_NOTE = "[FOCUS_FINISH_IS_A_RECORD]"
 
 
 class Transport:
@@ -50,8 +57,11 @@ class Transport:
         self.sent: set[str] = set()
 
     def tool(self, ctx, text="", kind="message", parts=1, format="plain", state="delivered",
-             thread_id="", foreign_task="", request_id="send"):
+             thread_id="", conversation_id="", foreign_task="", request_id="send"):
         """The connector's tool queues; its outbox worker sends and reports (here before returning)."""
+        if text == "BOOM":  # the connector's own typed failure: an ``is_error`` result the finish must still read
+            from ouroboros.tools.tool_result import ToolResult
+            return ToolResult(status="error", code="TOOL_ERROR", text="provider rejected the send")
         event = ctx.task_metadata["presence"]["event"]
         chunks = text.split("|") if parts > 1 else [text]
         message = ({"kind": "operation", "method": "setMessageReaction", "reaction": [{"type": "emoji", "emoji": "\U0001F44D"}]}
@@ -121,8 +131,13 @@ def call(name, arguments, identifier=None):
         "name": name, "arguments": json.dumps(arguments)}}]}
 
 
-def send(**arguments):
-    return call("bridge_send", arguments, "send-" + str(arguments.get("request_id", "send")))
+def send(tool="bridge_send", **arguments):
+    return call(tool, arguments, "send-" + str(arguments.get("request_id", "send")))
+
+
+def record_send(**arguments):
+    """A send through the connector's declared door into this conversation (``records_room``)."""
+    return send(RECORDS_SEND, conversation_id="r", **arguments)
 
 
 def finish(**arguments):
@@ -145,6 +160,8 @@ def room(tmp_path, monkeypatch):
         agent = h.factory(**kwargs)
         agent.tools.register(ToolEntry(name="bridge_send", schema=SEND_SCHEMA, handler=transport.tool,
                                        timeout_sec=30, safety_policy="skip"))
+        agent.tools.register(ToolEntry(name=RECORDS_SEND, schema={**SEND_SCHEMA, "name": RECORDS_SEND}, handler=transport.tool,
+                                       timeout_sec=30, safety_policy="skip"))
         return agent
 
     app = create_host_service_app(data, presence_runner=lambda **kw: run_presence_turn(
@@ -152,6 +169,20 @@ def room(tmp_path, monkeypatch):
     with TestClient(app) as client:
         transport.client, transport.recorder = client, app.state.host_service_context.presence_deliveries
         yield SimpleNamespace(h=h, data=data, place=place, client=client, transport=transport)
+
+
+@pytest.fixture
+def records_room(room, monkeypatch):
+    """The room whose connector declares an in-conversation ``effect: message`` tool (targets within account,
+    conversation and thread): a focus's finish here is its record, never posted."""
+    from ouroboros import extension_registry_state as registry
+
+    manifest = SimpleNamespace(raw_extra={"tools": [{"name": "send", "effect": "message", "target": ["conversation_id"],
+                                                     "conversation": "conversation_id", "thread": "thread_id"}]})
+    bundle = registry._ExtensionRegistrations(generation_digest="g1", loaded_skill=SimpleNamespace(manifest=manifest))
+    monkeypatch.setitem(registry._tools, RECORDS_SEND, {"skill": "bridge", "extension_generation": "g1"})
+    monkeypatch.setitem(registry._extensions, "bridge", bundle)
+    return room
 
 
 def turn(room, event_id="chat:a:1", version=0, reporting=1, text="Please check the three services.", client=None):
@@ -235,6 +266,107 @@ def test_a_final_after_interim_speech_is_new_speech_once(room, interim, version)
     confirmed = [text for text in interim_texts if text and INTERIM[interim].get("state") != "uncertain"]
     # A version-2 transport can report the final's own receipt before the turn writes this pointer.
     assert pointer["message"] == FINAL and [text for text in pointer["transport_sends"] if text != FINAL] == confirmed
+
+
+@pytest.mark.parametrize("version", [0, 1, 2])
+def test_a_records_only_final_after_an_ack_returns_once_then_stays_the_record(records_room, version):
+    """The 30.10 class in its loud form: the ack went out, the final is not posted; the finish comes back once with
+    the ack listed and the way to send, and the next finish is the turn's record (outcome silent, text on the card)."""
+    room = records_room
+    room.h.script = [record_send(text=ACK), finish(answer=FINAL), finish(answer=FINAL)]
+    body = turn(room, version=version)
+    view, stored = settle(room, body)
+    assert (view["outcome"], view["text"]) == ("silent", "") and stored["metadata"]["presence_outcome"] == "silent"
+    assert room.transport.texts() == [ACK], "nothing but the explicit send reaches the person"
+    assert stored["result"] == FINAL and stored["wake_silent"] is True  # the record on the card; the wake ended quiet
+    assert room.h.calls == 3
+    note = json.dumps(room.h.inputs[-1], ensure_ascii=False)
+    assert RECORD_NOTE in note and ACK in note and RECORDS_SEND in note and "Send it now, or finish again" in note
+    assert "A non-silent finish_task answer is posted" not in note  # the posting-form facts do not apply here
+    pointer = pointer_of(room, body["turn_ref"])
+    assert (pointer["outcome"], pointer["message"], pointer["finish_note"], pointer["transport_sends"]) == ("silent", "", FINAL, [ACK])
+
+
+def test_a_send_riding_with_a_records_only_finish_is_accepted_and_a_failed_one_is_read_first(records_room):
+    room = records_room
+    riding = {"content": None, "tool_calls": [*record_send(text=RESULT)["tool_calls"], *finish(answer=FINAL)["tool_calls"]]}
+    room.h.script = [riding]
+    view, stored = settle(room, turn(room))
+    assert (view["outcome"], view["text"]) == ("silent", "") and room.transport.texts() == [RESULT]
+    assert stored["result"] == FINAL and room.h.calls == 1, "a well-formed turn pays no extra round"
+    assert RECORD_NOTE not in json.dumps(room.h.inputs, ensure_ascii=False)
+    failing = {"content": None, "tool_calls": [*record_send(text="BOOM", request_id="boom")["tool_calls"], *finish(answer=FINAL)["tool_calls"]]}
+    room.h.script = [failing, finish(answer=FINAL), finish(answer=FINAL)]
+    seen, calls = len(room.h.inputs), room.h.calls
+    view, stored = settle(room, turn(room, event_id="chat:a:2"), event_id="chat:a:2")
+    rounds = [json.dumps(messages, ensure_ascii=False) for messages in room.h.inputs[seen:]]
+    assert room.h.calls - calls == 3 and len(rounds) == 3, (room.h.calls - calls, len(rounds))
+    assert "unobserved_tool_results" in rounds[1] and RECORD_NOTE not in rounds[1]  # the failed send is read, not a ride
+    assert RECORD_NOTE in rounds[2], "then the wordy finish that sent nothing returns once"
+    assert (view["outcome"], view["text"]) == ("silent", "") and room.transport.texts() == [RESULT]  # BOOM never left
+
+
+def test_a_prose_final_in_a_records_only_place_returns_the_note_once_then_the_finish_is_the_record(records_room):
+    """Review R1 MAJOR-2: a tool-less final carries nothing that rides, so after an ack it gets the one return with the
+    ack listed and the way to send; the finish that follows is the record, and the person hears only the ack."""
+    room = records_room
+    room.h.script = [record_send(text=ACK), {"content": FINAL, "tool_calls": []}, finish(answer=FINAL)]
+    view, stored = settle(room, turn(room))
+    assert (view["outcome"], view["text"]) == ("silent", "") and room.transport.texts() == [ACK]
+    assert stored["result"] == FINAL and stored["wake_silent"] is True and room.h.calls == 3
+    note = json.dumps(room.h.inputs[-1], ensure_ascii=False)
+    assert RECORD_NOTE in note and ACK in note and RECORDS_SEND in note and FINAL not in room.transport.texts()
+
+
+def test_a_prose_final_into_a_records_only_turn_keeps_the_owed_reply(records_room):
+    """R3 on the prose path too: my human's Main message, already in the transcript, owes a reply; a tool-less
+    records-only final is refused at the common exit like a silent finish would be, instead of ending the turn quietly
+    with their message unanswered (a place send clears no Main debt)."""
+    from ouroboros.owner_mailbox import write_owner_message
+    room = records_room
+
+    def owner_writes_then_send(_messages):
+        write_owner_message(room.data, "One more thing.", room.h.agents[-1].tools._ctx.task_id, msg_id="owner-1")
+        return record_send(text=ACK)
+
+    room.h.script = [owner_writes_then_send, {"content": FINAL, "tool_calls": []}, finish(answer=FINAL), None]
+    view, stored = settle(room, turn(room))
+    assert "One more thing." in json.dumps(room.h.inputs[1], ensure_ascii=False), "their message reached the mind first"
+    assert room.h.calls >= 3 and "owner_reply_owed" in json.dumps(room.h.inputs[2], ensure_ascii=False), "the prose final was refused"
+    assert room.transport.texts() == [ACK] and stored["metadata"]["presence_outcome"] == "silent"
+
+
+def test_a_main_message_into_a_records_only_turn_keeps_the_owed_reply(records_room):
+    """R3: my human's Main message into the running focus owes a reply; a records-only finish is refused like a
+    silent one would be, instead of ending quietly with their message unanswered."""
+    from ouroboros.owner_mailbox import write_owner_message
+    room = records_room
+
+    def owner_writes_then_finish(_messages):
+        write_owner_message(room.data, "One more thing.", room.h.agents[-1].tools._ctx.task_id, msg_id="owner-1")
+        return finish(answer=FINAL)
+
+    room.h.script = [owner_writes_then_finish, finish(answer=FINAL), None]
+    view, stored = settle(room, turn(room))
+    assert "owner_reply_owed" in json.dumps(room.h.inputs[1:], ensure_ascii=False)
+    assert room.transport.texts() == [], "nothing is posted into the place"
+
+
+def test_a_silent_records_only_place_keeps_the_held_draft(records_room):
+    """R4: a Silent place still shows the owner the draft it would have posted; records-only applies to Active only."""
+    from ouroboros import dialogue_store
+    room = records_room
+
+    def silence_then_finish(_messages):
+        places.edit_place(room.data, room.place.place_id, "set_state", author="owner", state="silent")
+        return finish(answer=FINAL)
+
+    room.h.script = [silence_then_finish]
+    view, stored = settle(room, turn(room))
+    assert (view["outcome"], view["text"]) == ("silent", "") and room.h.calls == 1
+    held = [entry.row for entry in dialogue_store.iter_rows(room.data, "chat") if entry.row.get("held")]
+    assert [row["held_text"] for row in held] == [FINAL] and held[0]["text"].startswith("Reply held:")
+    assert RECORD_NOTE not in json.dumps(room.h.inputs, ensure_ascii=False)
 
 
 @pytest.mark.parametrize("version", [0, 1, 2])

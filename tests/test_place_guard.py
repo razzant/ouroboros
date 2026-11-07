@@ -251,3 +251,34 @@ def test_safety_call_uses_focus_snapshot_only_for_its_target(published_tool, pla
         assert "sends_as" not in _only(guard.call_place_facts(ctx, name, {"room": "C2"}, ext_tool=tool))
     facts = _only(guard.call_place_facts(ctx, name, {"room": "C1"}, ext_tool=tool))
     assert facts["sends_as"] == captured["sends_as"] and facts["sends_as_owner"] is False
+
+
+def test_supervisor_facts_carry_this_turns_own_sends_in_its_conversation_both_ways(published_tool, places, tmp_path):
+    """Speech into the turn's own conversation is judged with what the turn already said there: the connector's
+    receipts and the run's own dispatched message calls without one; elsewhere, or without a carrier, nothing."""
+    from ouroboros.utils import append_jsonl
+    _, ctx = places
+    own = "service:account:C2:0"
+    ctx.task_metadata = {"focus": {"place_id": "active"}, "presence": {
+        "delivery_reporting_version": 1, "place_id": "active", "transport_skill": "connector",
+        "event": {"conversation_key": own, "provider": "service", "account_id": "account", "conversation_id": "C2", "thread_id": ""}}}
+    for row in ({"task_id": "caller", "direction": "in", "text": "hello"},
+                {"task_id": "caller", "type": "presence_delivery", "text": "said earlier",
+                 "transport": {"conversation_key": own, "delivery": {"state": "delivered", "delivery_id": "d1", "part_id": "0"}}}):
+        append_jsonl(tmp_path / "logs" / "chat.jsonl", row)
+    name, tool = published_tool("message", target=["room"], conversation="room")
+    reply = guard.call_place_facts(ctx, "place_reply", {"place_id": "active", "text": "final"})
+    assert reply["this_turn_sends"] == {"confirmed": '"said earlier"', "calls_without_receipt": []}
+    assert guard.dispatch_refusal(ctx, name, {"room": "C2", "text": "queued words"}, ext_tool=tool) == ""
+    assert guard.dispatch_refusal(ctx, name, {"room": "C2", "text": "said earlier"}, ext_tool=tool) == ""  # a receipt confirms it
+    assert "Silent" in guard.dispatch_refusal(ctx, name, {"room": "C1", "text": "never left"}, ext_tool=tool)  # refused: not noted
+    facts = guard.call_place_facts(ctx, "place_reply", {"place_id": "active", "text": "final"})
+    pending = facts["this_turn_sends"]["calls_without_receipt"]
+    assert [row["text"] for row in pending] == ["queued words"] and pending[0]["tool"] == name and pending[0]["at"]
+    assert facts["this_turn_sends"]["confirmed"] == '"said earlier"'
+    assert "this_turn_sends" in guard.call_place_facts(ctx, name, {"room": "C2", "text": "more"}, ext_tool=tool)
+    assert "this_turn_sends" not in guard.call_place_facts(ctx, name, {"room": "C3", "text": "elsewhere"}, ext_tool=tool)
+    assert "this_turn_sends" not in guard.call_place_facts(ctx, published_tool("read", target=["room"], conversation="room")[0],
+                                                           {"room": "C2"}, ext_tool=tool)
+    bare = SimpleNamespace(drive_root=tmp_path, task_id="other", task_metadata={})
+    assert "this_turn_sends" not in guard.call_place_facts(bare, "place_reply", {"place_id": "active", "text": "final"})

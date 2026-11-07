@@ -1118,8 +1118,12 @@ Use the connector's ordinary content-hash-bound skill token for:
   advertises canonical output identities and separate producer/child references in
   work polls. `presence_wake_facts` lists accepted provider facts.
   `presence_explicit_completion: 1` advertises that a new completion's outcome comes from
-  its explicit answer, silence or handoff, never from a delivery receipt. An absent key means
-  an older host without this promise: any confirmed tool receipt may suppress its final.
+  its explicit answer, silence or handoff, never from a delivery receipt. Where the event's own
+  connector declares an `effect: message` tool whose targets lie within one conversation (account,
+  its conversation argument, its thread argument), a focus's finish is its record and people hear
+  only what it sends through that tool: the outcome is `silent` and the text stays on the card. A
+  connector without such a tool (a peer URL, mail recipients) keeps the final as its reply. An absent
+  key means an older host without this promise: any confirmed tool receipt may suppress its final.
   `presence_history_import_version: 1` advertises `POST /presence/history` ("Importing
   earlier history" below); `presence_source_order_version: 1` advertises
   `event.message.source_order` on live and history events alike: an integer from 0 to
@@ -1151,12 +1155,38 @@ Use the connector's ordinary content-hash-bound skill token for:
   `legacy_addressed`, compatibility for older connectors that filtered events themselves;
   new connectors send `facts` with every event. Empty facts are distinct from absent
   facts. `review_requested` and `assigned` mean requests addressed to the watched
-  identity; narrow wake declarations may use them. A new discussion is not a
+  identity; narrow wake declarations may use them. `reply_to_me` means the provider's own reply
+  relation points at a specific message the watched identity wrote; membership of a thread the
+  watched identity started or wrote in is `my_thread`, never `reply_to_me` (a thread root's author
+  is not a reply target). A new discussion is not a
   `new_issue`; `any_message` is the generic alternative. Bots require an explicit bot wake item.
+  The focus frame (`prompts/FOCUS.md`) states these facts to the mind in plain words and never a
+  verdict about whom the message is for; that judgment stays with the mind.
+- Optional `event.message.mentions`: `[{"id": str, "name": str|null, "is_self": bool}]`, every account the
+  provider marks the message as mentioning, with the name the connector resolved (null when it could not) and
+  whether the id is the account the connector writes as. Without it the host reads
+  `message.provider_facts.mentioned_user_ids` with `is_self` from `provider_facts.self_user_id` and names
+  unknown; a connector that reports neither renders no mention line. `provider_facts.self_user_id` also
+  names the focus's own account when the event carries no credential identity.
+- Optional thread snapshot `event.conversation.thread_history`: `{status, observed_at?, authors?, data:
+  {messages: [...], complete?}}`, the conversation as the provider served it at capture. Optional `authors`
+  is the connector's directory of the snapshot's authors, `[{"id": str, "name": str|null, "is_self": bool}]`,
+  the same shape as `message.mentions`; the frame takes names and the you-mark from it first (and names
+  mentioned ids through it when `message.mentions` is absent). The frame renders each
+  message as author, a `[you]` mark, a `[this message]` mark on the waking message, its time and text;
+  per message the host reads an author id (`user`, `actor_id`, `author_id`, `platform_actor_id`, or a nested
+  `actor`/`author` mapping), a name (`user_profile`/`bot_profile` `real_name`/`display_name`/`name`,
+  `author_name`, `display_name`, `username`), a time (`sent_at`, else a numeric `ts`/`timestamp` epoch), the
+  `text` and an id (`message_id`, `id`, `ts`). The snapshot renders whole: the connector's capture is
+  already bounded, and the frame never cuts it.
 - Optional `event.message.forward_origin` (any non-empty value): the message carries words another author wrote
   (a forward, or another person's text the event copies under the sender). The host never records such an event as
-  its sender's own words: an addressed message from an account the place confirms as the owner's is the owner's words
-  at a turn's opening, mid-turn and when a focus hands it on; a forward of it is not.
+  its sender's own words. A message from an account the place confirms as the owner's is their words by provenance
+  (said where others can hear) at a turn's opening, mid-turn and when a focus hands it on, and a Continue of that work
+  carries them to the successor whole (citable there, an order only by a cite); a forward of it is not.
+  Provenance is never a verdict: whom the words are for, and whether they ask for work, is the mind's reading. An
+  order exists only where the mind cites their exact words (`owner_words` of `start_task`, `schedule_followup`,
+  `manage_schedules` update) and the host verifies the bytes inside a message of theirs that reached that run.
 - Optional `event.message.reaction` (object with `schema_version: 1`; `text` and files empty; an object
   without that key is not this fact): `change` `add`/`remove`/`replace`/`count`; `old`/`new` lists hold provider
   `{type, value}`; `count` instead has only `counts` entries `{type, value, count}` (non-negative integer),
@@ -1210,8 +1240,9 @@ clock. Before allowance, rate or capacity is consulted, the conversation's curre
 sole reader (a promoted or follow-up root of this place and conversation whose loop reads mail or
 is in an unheld cold sleep, or an author parked for its review or private question, whose wait
 wakes and retakes the conversation before any model call), receives later arrivals as typed
-context-only mail, whether or not they match a wake fact (an addressed one from the owner's confirmed
-account carries the owner's words); they never answer its question. An untagged message in the same thread, topic or direct message is a
+context-only mail, whether or not they match a wake fact (one from the owner's confirmed account is stored as their
+words there by provenance: `place_confirmed`, carried, outside the owner sources that owe a reply; it becomes an order
+only by a verified cite); they never answer its question. An untagged message in the same thread, topic or direct message is a
 wake: it ends an ordinary wait and reopens an unsent final. Other untagged group messages reach a
 current author as background and a root not at all; they stay readable in the room. Several
 readers receive nothing: the arrival takes an ordinary focus under the allowance, whose
@@ -1235,13 +1266,19 @@ answer was lost; a closed or ended one leaves the event eligible for ordinary ad
 after a Host crash or a torn write returns to its recorded holder, but the handoff is not
 exactly-once: a write whose effect cannot be proven stays unknown, as above. A
 wake arrival its model has not seen when it finishes reopens it for another round; background
-arrivals alone never do, though the owner's own words in one are owner input its final answers. An author's own explicit `action="stop"` stands: an arrival drained at
+arrivals alone never do, though a message from the owner's confirmed account in one is kept as their words there
+(provenance; an order only by a verified cite, and it owes no reply by itself). An author's own explicit `action="stop"` stands: an arrival drained at
 its close is acknowledged in its transcript, never read by its model, and starts no round.
 
 A focus, or a root promoted or scheduled from it, uses ordinary `finish_task`, including
-`silent=true`; receipts never choose its outcome. An answer after any send, file or
-reaction is new speech; started work stays `deferred` (empty after silence).
-Automatic speech passes the `place_reply` Safety check; a flag returns to the mind.
+`silent=true`; receipts never choose its outcome. Where the connector speaks by an in-conversation
+message tool (above) a focus's finish, a `finish_task` answer or a tool-less final alike, is its record: a send
+may ride in the same response, a finish with words that sent nothing there returns once with the facts, the
+next is accepted (a Main message pending from the owner is owed first, as for a silent finish); a Silent or
+Paused place and Advises keep the held draft. Elsewhere, and for a promoted root, an answer after
+any send, file or reaction is new speech; started work stays `deferred` (empty after silence).
+Automatic speech passes the `place_reply` Safety check, which sees the turn's own sends in that conversation
+(receipts and receipt-less calls); a flag returns to the mind with the destination, those sends and silence as a valid finish.
 Silent/Paused/disconnected destinations and Advises autonomy hold the reply
 with a System fact. Cached replies, continuation envelopes and work polls apply the
 current place state without another generation or paid check. A held projection keeps

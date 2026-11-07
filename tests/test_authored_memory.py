@@ -878,6 +878,6 @@ def test_journal_read_reflections_keep_the_existing_project_authority(tmp_path, 
                             task_metadata={"parent_task_id": "root", "delegation_role": "subagent"})
     assert _journal_read(child, "other", source="reflections").startswith("⚠️ TOOL_FORBIDDEN")
     speaker = SimpleNamespace(drive_root=tmp_path, project_id="mine", task_metadata={"presence": _PRESENCE})
-    assert _journal_read(speaker, "other", source="reflections").startswith("⚠️ TOOL_FORBIDDEN")
+    assert "row-00" in _journal_read(speaker, "other", source="reflections")  # a place turn reads any project, read-only
     unscoped = SimpleNamespace(drive_root=tmp_path, project_id="")
     assert _journal_read(unscoped, "other", source="reflections").startswith("⚠️ TOOL_FORBIDDEN")

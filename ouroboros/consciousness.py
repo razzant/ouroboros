@@ -572,12 +572,18 @@ class BackgroundConsciousness:
         # Its own wake by identity too: bound before delivery, a direct turn is no chat turn yet.
         wakes = list(dict.fromkeys(([wake] if wake else []) + direct + autonomous_tasks()
                                    + live_authors(drive_root=self._drive_root)))
+        # Work started on my human's cited words is theirs: the switch leaves it running and says so, quote and all,
+        # in the same Main row every surface shows (owner 06.11, 3A); they cancel it from its card if the cite was wrong.
+        from supervisor.consciousness_carriers import cited_owner_roots, cited_owner_schedules
+        kept = "".join(f"\nKept running on your words (task {task_id}): «{quote}»" for task_id, quote in cited_owner_roots())
+        kept += "".join(f"\nKept firing on your words (schedule {sid}): «{quote}»"
+                        for sid, quote in cited_owner_schedules(self._drive_root))
         if wakes:
             for task_id in wakes:
                 threading.Thread(target=self._stop_live_wake, args=(task_id,), name="wake-stop", daemon=True).start()
             return (f"Background consciousness disabled; wake-up {wake} ends at its next step." if wake
-                    else "Background consciousness disabled; autonomous work ends at its next step.")
-        return "Background consciousness disabled." if was_enabled else "Background consciousness is already disabled."
+                    else "Background consciousness disabled; autonomous work ends at its next step.") + kept
+        return ("Background consciousness disabled." if was_enabled else "Background consciousness is already disabled.") + kept
 
     @staticmethod
     def _stop_live_wake(task_id: str) -> None:

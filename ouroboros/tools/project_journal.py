@@ -99,13 +99,16 @@ def _resolve_project_id(ctx: ToolContext, explicit: Any, *, write: bool = False)
         return "", "⚠️ TOOL_ARG_ERROR: project_id is malformed"
     if own_raw and not own:
         return "", "⚠️ TOOL_ARG_ERROR: current project scope is malformed"
+    # A root reads every project; so does a place turn (owner 06.11, 4=A: it may read project journals and tell
+    # the task that leads its thread), read-only. A child reads only its own; writes stay with the current project.
+    reads_any = authority == "root" or (authority == "presence" and not write)
     if own and requested and requested != own:
         if write:
             return "", "⚠️ TOOL_FORBIDDEN: foreign project writes are refused; write only the current project"
-        if authority != "root":
+        if not reads_any:
             return "", "⚠️ TOOL_FORBIDDEN: this actor may read only its current project"
         return requested, ""
-    if requested and not own and authority != "root":
+    if requested and not own and not reads_any:
         return "", "⚠️ TOOL_FORBIDDEN: restricted actors may not access a foreign project"
     return own or requested, ""
 

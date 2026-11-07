@@ -129,13 +129,60 @@ def dispatch_refusal(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
                 "Use a tool with declared, attributable targets or change the state in Consciousness › Places "
                 "or with configure_presence.")
     if effect.effect == EFFECT_MESSAGE:
+        keys = []
         for place in resolved:
             for key in _conversation_keys(place, effect, targets, account_id=_call_account(ctx, place, targets)):
                 author = conversation_lease.live_author(key, drive_root=_drive_root(ctx))
                 if author and author != getattr(ctx, "task_id", None):
                     return (_PREFIX + f"Task {author} is authoring this conversation in {place.label or place.place_id}. "
                             f"Hand the intent to it with tell_task(task_id={author!r}, note=...).")
+                keys.append(key)
+        _note_message_call(ctx, name, args, keys)
     return ""
+
+
+def _note_message_call(ctx: Any, name: str, args: Mapping[str, Any], keys: list[str]) -> None:
+    """Keep on the context that this run dispatched a ``message`` call into these conversations (``_place_message_calls``):
+    the words proposed (the call's ``text`` argument, when it has one) and when. A dispatched call is not a delivery:
+    Safety may still refuse it and the handler may fail; the connector's receipt, when it comes, says what landed.
+    ``this_turn_sends`` reads it beside the receipts, so a finish seconds after a send is judged with the send in view."""
+    from ouroboros.utils import utc_now_iso
+
+    if not keys:
+        return
+    calls = getattr(ctx, "_place_message_calls", None)
+    if not isinstance(calls, list):
+        calls = []
+        try:
+            ctx._place_message_calls = calls
+        except AttributeError:  # a context that takes no attributes keeps no record
+            return
+    calls.append({"tool": name, "at": utc_now_iso(), "conversation_keys": list(dict.fromkeys(keys)),
+                  **({"text": args["text"]} if isinstance(args.get("text"), str) else {})})
+
+
+def this_turn_sends(ctx: Any, conversation_key: str) -> dict[str, Any]:
+    """What this run already said in ``conversation_key``, as host facts: ``confirmed`` are the connector's receipts
+    (``presence_send_facts``: delivered or accepted texts, uncertain parts, reactions, or an honest unknown);
+    ``calls_without_receipt`` are this run's own dispatched ``message`` calls there whose words no receipt confirms
+    yet (queued, refused by Safety or failed: the receipt, when it comes, says which)."""
+    from ouroboros.presence_context import presence_send_facts, presence_send_record
+    from ouroboros.tool_access import canonical_data_root
+
+    presence = _metadata(ctx).get("presence")
+    task_id = str(getattr(ctx, "task_id", "") or "")
+    try:
+        root = canonical_data_root(ctx)
+        record = presence_send_record(root, task_id, presence)
+        confirmed = presence_send_facts(root, task_id, presence)
+    except Exception:
+        record, confirmed = None, "unknown (receipts unreadable)"
+    delivered = set(record["sent"]) if record else set()
+    calls = [row for row in getattr(ctx, "_place_message_calls", None) or []
+             if isinstance(row, Mapping) and conversation_key in (row.get("conversation_keys") or ())]
+    pending = [{key: row[key] for key in ("tool", "at", "text") if key in row}
+               for row in calls if row.get("text") is None or row["text"] not in delivered]
+    return {"confirmed": confirmed, "calls_without_receipt": pending}
 
 
 def call_place_facts(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: Any = None,
@@ -174,8 +221,13 @@ def call_place_facts(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
                      **({"sends_as": dict(sending), "sends_as_owner": (sending.get("kind") == "user" and bool(focus.get("identity_owner")))
                          if same_focus else places.writes_as_owner(place, identity, account)} if sending else {}),
                      "conversation_key": keys[0] if len(keys) == 1 else "", "conversation_keys": keys})
-    return {"effect": effect.effect, "declared": effect.declared, "targets": targets,
-            "attributable": attributable, "places": rows}
+    facts = {"effect": effect.effect, "declared": effect.declared, "targets": targets,
+             "attributable": attributable, "places": rows}
+    own = str(((_metadata(ctx).get("presence") or {}).get("event") or {}).get("conversation_key") or "")
+    # Speech into this turn's own conversation is judged with what the turn already said there.
+    if effect.effect == EFFECT_MESSAGE and own and any(own in row["conversation_keys"] for row in rows):
+        facts["this_turn_sends"] = this_turn_sends(ctx, own)
+    return facts
 
 
 def outbox_binding_facts(drive_root: Any, connector: str, destination: Mapping[str, str], *,

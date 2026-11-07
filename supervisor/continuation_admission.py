@@ -511,6 +511,7 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
                                   **({"wake": sources["wake"]} if sources.get("wake") else {}),
                                   **({"api": sources["api"]} if sources.get("api") else {}),
                                   "later": sources.get("later") or [],
+                                  **({"confirmed_place": sources["confirmed_place"]} if sources.get("confirmed_place") else {}),
                                   "held_owner_messages": sources.get("held_owner_messages") or {},
                                   "open_relays": sources.get("open_relays") or {}},
                 "peer_context": sources.get("peer_context") or [],

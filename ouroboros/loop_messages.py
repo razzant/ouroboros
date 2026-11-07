@@ -247,7 +247,7 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
     metadata = getattr(ctx, "task_metadata", None)
     metadata = metadata if isinstance(metadata, dict) else {}
     from ouroboros.owner_quiz import late_answer_ref, late_answer_owner_text
-    from ouroboros.owner_words import OWNER_SOURCES, answered_card_reply, place_owner_words, place_reply_target, reply_target
+    from ouroboros.owner_words import OWNER_SOURCES, PLACE_CONFIRMED, answered_card_reply, place_confirmed_words, place_reply_target, reply_target
     late = late_answer_ref(metadata.get("late_answer"))
     answered = ((late or {}).get("answer_snapshot") or {}).get("quiz") or {}
     if answered.get("presence_contact"):
@@ -261,8 +261,8 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
     # A task-drafted objective, or the host's Continue work order (its facts are
     # the host's; the owner's exact words ride ``owner_corpus``).
     if isinstance(author, dict) and author.get("kind") in {"task", "continuation"}:
-        for row in metadata.get("owner_corpus") or []:
-            if isinstance(row, dict) and row.get("source") in OWNER_SOURCES:
+        for row in metadata.get("owner_corpus") or []:  # the owner's rows, and confirmed place words as provenance (citable, owed nothing)
+            if isinstance(row, dict) and (row.get("source") in OWNER_SOURCES or row.get("source") == PLACE_CONFIRMED):
                 _loop()._record_owner_directive(
                     ctx, source=str(row["source"]), content=row.get("content"),
                     msg_id=str(row.get("msg_id") or ""),
@@ -273,10 +273,10 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
         return  # The task-drafted objective is never an owner directive.
     focus, presence = metadata.get("focus") or {}, metadata.get("presence") or {}
     event = presence.get("event") or {}
-    if words := place_owner_words(focus, presence.get("observed_text"), event.get("message")):
-        # A place turn addressed to me from an account its place confirmed at admission: my human's exact
-        # words, beside the event frame (``initial_text``, which Safety reads); an unaddressed one is not work.
-        _loop()._record_owner_directive(ctx, source="place_owner", content=words, carried=True, reply_to=place_reply_target(
+    if words := place_confirmed_words((focus.get("actor") or {}).get("owner_confirmed"), presence.get("observed_text"), event.get("message")):
+        # A place event from an account its place confirmed at admission: my human's words, said where others can
+        # hear, beside the frame as provenance (outside OWNER_SOURCES); an order exists only through a verified cite.
+        _loop()._record_owner_directive(ctx, source=PLACE_CONFIRMED, content=words, carried=True, reply_to=place_reply_target(
             event.get("message")), msg_id=f"chat {focus.get('room_chat_id')} / {event.get('source_event_id') or ''}")
     for message in messages:
         if isinstance(message, dict) and str(message.get("role") or "") == "user":
@@ -305,6 +305,9 @@ def owner_input_revision(ctx: Any) -> int:
 
     return sum(isinstance(row, dict) and row.get("source") in OWNER_SOURCES and not row.get("carried")
                for row in getattr(ctx, "_owner_directives", None) or [])
+
+
+OWNER_REPLY_OWED_REFUSAL = "owner_reply_owed: your human wrote after your last live message; answer before finishing silently"
 
 
 def owner_reply_owed(ctx: Any) -> bool:

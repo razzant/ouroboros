@@ -225,12 +225,12 @@ def _drain_incoming_messages(
                 if provenance == "place_event":
                     from ouroboros.presence_continuation import note_place_delivery
                     note_place_delivery(owner_ctx, entry, controls)  # the event is context; my human's words are theirs
-                    if arrival.get("owner_words"):  # as at the opening, under its id: this mailbox row is context
-                        from ouroboros.owner_words import place_reply_target
+                    if confirmed := arrival.get("confirmed_words") or arrival.get("owner_words"):  # provenance, as at the opening
+                        from ouroboros.owner_words import PLACE_CONFIRMED, place_reply_target
                         from ouroboros.presence_runner import presence_chat_id
                         room = presence_chat_id(str((entry.get("sender_origin") or {}).get("conversation_key") or ""))
-                        _loop()._record_owner_directive(owner_ctx, source="place_owner", carried=True,
-                            content=arrival["owner_words"], msg_id=f"chat {room} / {arrival.get('source_event_id') or ''}",
+                        _loop()._record_owner_directive(owner_ctx, source=PLACE_CONFIRMED, carried=True,
+                            content=confirmed, msg_id=f"chat {room} / {arrival.get('source_event_id') or ''}",
                             reply_to=place_reply_target(arrival.get("message")))
                 if provenance not in CONTEXT_ONLY_TASK_PROVENANCES:
                     _loop()._record_owner_directive(
@@ -240,7 +240,7 @@ def _drain_incoming_messages(
                         origin={"source_task_id": str(entry.get("source_task_id") or ""),
                                 "relayed_from_task_id": str(entry.get("relayed_from_task_id") or "")},
                     )
-                owned = provenance not in CONTEXT_ONLY_TASK_PROVENANCES or arrival.get("owner_words")
+                owned = provenance not in CONTEXT_ONLY_TASK_PROVENANCES or arrival.get("confirmed_words") or arrival.get("owner_words")
                 words = OWNER_WORDS_KIND if owned else ""  # my human's words never fold as context
                 deliver_task_message(
                     entry, task_id, event_queue,
