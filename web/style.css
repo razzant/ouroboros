@@ -1261,7 +1261,11 @@ html[data-layout="docked"] .app-page-header[data-narrow] { grid-template-columns
 html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-leading { display: none; }
 html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-title-block { position: absolute; }
 html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-toolbar { flex-wrap: wrap; }
-html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-toolbar > button { flex: none; }
+/* A narrow header's actions wrap a long label instead of leaving the column (a translation, or a wider platform font:
+   "Update 2 trusted" in a 160 px column on Linux); like the Evolution verbs, the box comes from the tokens; a fixed
+   16 px line keeps one line at the small capsule's 28 px (1 + 5 + 16 + 5 + 1) on every platform font. */
+html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-toolbar > button { flex: none; max-width: 100%;
+    white-space: normal; overflow-wrap: anywhere; line-height: 16px; --control-h: auto; --control-pad-y: 5px; }
 html[data-layout="docked"] .app-page-header[data-lead] {
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas: "title toolbar";
