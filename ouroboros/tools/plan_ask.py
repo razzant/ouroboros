@@ -115,67 +115,64 @@ def state_location(ctx: Any) -> tuple[pathlib.Path, str]:
     return root, task_id
 
 
-def plan_is_body(ctx: Any, affected_paths: List[str], *, system_root: pathlib.Path, active_root: pathlib.Path) -> tuple[bool, str]:
-    """Body plan = the declared paths change the installed body (``resolve_constitutional``),
-    or a recognized body copy (``review_body_fact``) — the active root or a bound candidate,
-    whichever spelling, relative or absolute, reaches it — or own-body research the task
-    declared (``context_requires_self_body_docs`` with a recognized body source)."""
-    from ouroboros import body_candidate
+def _declared_body_repository(ctx: Any, paths: List[str], base: pathlib.Path, *, inside: Optional[pathlib.Path], skip: set,
+                              seen: set, probe_cache: dict, payload_roots: list, system_root: pathlib.Path) -> Optional[pathlib.Path]:
+    """The first declared path's own Git repository the body predicate recognizes. Relative locators resolve against
+    ``base``; with ``inside``, path and repository lie under it; each is judged once (``seen``), never one in ``skip``."""
     from ouroboros.review_body_fact import BODY_TRUE, body_fact, repository_root
+    from ouroboros.tools.plan_evidence import _split_selector
+    from ouroboros.tools.plan_spec import _is_path_locator, _resolve_locator_path, resolve_constitutional
+
+    for locator in (str(raw or "").strip() for raw in paths):
+        resolved = _resolve_locator_path(_split_selector(locator)[0], base)[0] if _is_path_locator(locator) else None
+        if resolved is None or (inside is not None and not resolved.is_relative_to(inside)):
+            continue
+        own = repository_root(resolved, probe_cache=probe_cache)
+        if own is None or own in skip or own in seen or (inside is not None and not own.is_relative_to(inside)):
+            continue
+        if resolve_constitutional(active_root=base, system_repo_root=own, affected_paths=[str(resolved)], evidence=(),
+                                  payload_roots=payload_roots)[0]:  # an exempt skill payload stays data
+            seen.add(own)
+            if body_fact(own, system_repo=system_root, data_dir=ctx.drive_root).body == BODY_TRUE:
+                return own
+    return None
+
+
+def plan_is_body(ctx: Any, affected_paths: List[str], *, system_root: pathlib.Path, active_root: pathlib.Path) -> tuple[bool, str]:
+    """Body plan = the declared paths change the installed body (``resolve_constitutional``) or a
+    recognized body copy (``review_body_fact``): the active root or a bound candidate in any spelling,
+    a repository nested in either, or a declared path's own repository wherever it lies (#2918); or
+    own-body research the task declared (``context_requires_self_body_docs`` with a recognized body source)."""
+    from ouroboros import body_candidate
+    from ouroboros.review_body_fact import BODY_TRUE, body_fact
     from ouroboros.tools import plan_spec
 
     payload_roots = plan_payload_roots(ctx, list(affected_paths))
     constitutional, note = plan_spec.resolve_constitutional(
-        active_root=active_root, system_repo_root=system_root, affected_paths=affected_paths, evidence=(),
-        payload_roots=payload_roots)
+        active_root=active_root, system_repo_root=system_root, affected_paths=affected_paths, evidence=(), payload_roots=payload_roots)
     if constitutional:
         return True, note
     copies = [pathlib.Path(active_root)]
     if body_candidate.is_bound(ctx):
         copies.append(pathlib.Path(body_candidate.descriptor(ctx)["path"]).resolve(strict=False))
-    probe_cache, seen_nested = {}, set()
+    judging = dict(seen=set(), probe_cache={}, payload_roots=payload_roots, system_root=system_root)  # this call only
     for root in dict.fromkeys(copies):
         if not affected_paths or root == pathlib.Path(system_root):
             continue
         under_root, _ = plan_spec.resolve_constitutional(
-            active_root=active_root, system_repo_root=root, affected_paths=affected_paths, evidence=(),
-            payload_roots=payload_roots)
+            active_root=active_root, system_repo_root=root, affected_paths=affected_paths, evidence=(), payload_roots=payload_roots)
         if under_root and body_fact(root, system_repo=system_root, data_dir=ctx.drive_root).body == BODY_TRUE:
             return True, f"body: the declared paths change a recognized copy of Ouroboros's own body ({root})"
-        # A selected workspace can be a containing folder with a separately
-        # cloned repository inside it.  The workspace itself is not evidence
-        # of that clone's identity; ask Git for each declared path's actual
-        # repository root, then apply the same body predicate to that root.
-        from ouroboros.tools.plan_evidence import _split_selector
-        from ouroboros.tools.plan_spec import _is_path_locator, _resolve_locator_path
-
-        resolved_root = root.resolve(strict=False)
-        for raw in affected_paths:
-            locator = str(raw or "").strip()
-            if not _is_path_locator(locator):
-                continue
-            resolved, _reason = _resolve_locator_path(_split_selector(locator)[0], root)
-            if resolved is None:
-                continue
-            try:
-                resolved.relative_to(resolved_root)
-            except ValueError:
-                continue
-            nested = repository_root(resolved, probe_cache=probe_cache)
-            if nested is None or nested == resolved_root or nested in seen_nested:
-                continue
-            try:
-                nested.relative_to(resolved_root)
-            except ValueError:
-                continue
-            nested_under, _ = plan_spec.resolve_constitutional(
-                active_root=root, system_repo_root=nested, affected_paths=[str(resolved)],
-                evidence=(), payload_roots=payload_roots)
-            if not nested_under:
-                continue
-            seen_nested.add(nested)
-            if body_fact(nested, system_repo=system_root, data_dir=ctx.drive_root).body == BODY_TRUE:
-                return True, f"body: the declared paths change a recognized nested copy of Ouroboros's own body ({nested})"
+        # A workspace can hold a separately cloned repository: Git, never the folder, names each declared path's own.
+        inside = root.resolve(strict=False)
+        nested = _declared_body_repository(ctx, affected_paths, root, inside=inside, skip={inside}, **judging)
+        if nested is not None:
+            return True, f"body: the declared paths change a recognized nested copy of Ouroboros's own body ({nested})"
+    # Then wherever a path lies (a sibling worktree or clone, #2918): its own repository decides, no root or read moves.
+    judged = {pathlib.Path(path).resolve(strict=False) for path in (*copies, system_root)}
+    own = _declared_body_repository(ctx, affected_paths, pathlib.Path(active_root), inside=None, skip=judged, **judging)
+    if own is not None:
+        return True, f"body: the declared paths change a recognized copy of Ouroboros's own body ({own})"
     if not affected_paths:
         from ouroboros.context_input_selection import _explicit_self_body_docs_flag
         from ouroboros.context_layout import task_design_source
