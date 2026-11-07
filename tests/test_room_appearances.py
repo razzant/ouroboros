@@ -783,9 +783,9 @@ def test_the_memory_view_names_the_gap_of_a_room_a_reply_could_belong_to(tmp_pat
     assert gaps == {str(alpha): {"reply_target_unreadable"}}
     assert "unknown-target" not in [meta.get("client_message_id") for _a, meta, _p in by_room.get(str(alpha), [])]
     assert "unknown-target" in [meta.get("client_message_id") for _a, meta, _p in by_room["1"]]
-    def head(chat):
-        return next(line for line in room_text(tmp_path, {"id": f"turn-{chat}", "chat_id": chat}).splitlines()
-                    if line.startswith("## This room"))
+    def head(chat):  # the room's standing facts close its section, after what is open there
+        lines = room_text(tmp_path, {"id": f"turn-{chat}", "chat_id": chat}).splitlines()
+        return lines[lines.index("### This room now") + 1]
 
     assert "incomplete: a Reply whose target cannot be read may belong here" in head(alpha), head(alpha)
     assert "cannot be read" not in head(beta)

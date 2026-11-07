@@ -653,11 +653,11 @@ Status, owner action, and urgent notification are separate product concepts:
   product's explicit incident/notification seam, not a red status or a failed
   task as a proxy.
 
-A status names what ends it, by role, and what the owner may still need stays where its fact lives. An announcement
-(a toast) says its news once and may end after its time, hover and focus pausing it, whatever its tone: the problem,
-needed restart or unconfirmed outcome it announces is kept in its authoritative view (a card, the Updates record, the
-in-feed history edge) until that fact changes or the owner resolves it. A notice the owner may hide is hidden on the
-notice itself, per browser, never in its record (the Update indicator, owner 1B, 25.10). A plain acknowledgement in
+A status names who or what ends it; needed facts stay in their owning view. A toast announces news once:
+its timer pauses on hover or focus, and a non-expiring toast has a visible keyboard-reachable close, whatever its tone.
+The problem, needed restart or unconfirmed outcome stays in its authoritative view (a card, Updates record or
+in-feed history edge) until it changes or the owner resolves it. Dismissing a notice hides it per browser,
+never its record (the Update indicator, owner 1B, 25.10). A plain acknowledgement in
 place may end by itself, but where the line is its fact's only home (Costs' budget save) an error, a warning or a
 needed restart stays until the next save, or an edit of what it is about, replaces it. A current fact ends with its fact; unread ends when the message
 is shown; a retained record (Updates, history, the Settings save result, `Input saved`) lives with its record, with

@@ -38,11 +38,17 @@ LEVELS = CONSCIOUSNESS_AUTONOMY_LEVELS
 LEVEL_OBSERVE, LEVEL_ACT, LEVEL_FULL = LEVELS
 
 # Act withholds the runtime's own posture: evolution, restart, the one
-# settings writer, its own alarm clock and owner-binding configuration.
+# settings writer and its own alarm clock. Place configuration is withheld on
+# the ARGUMENTS instead (``PLACE_READ_ACTIONS``): its reads are reads.
 ACT_DISABLED: tuple[str, ...] = (
     "toggle_evolution", "request_restart", "set_tool_timeout",
-    "toggle_consciousness", "configure_presence",
+    "toggle_consciousness",
 )
+# The two ``configure_presence`` actions every level keeps: a place and the rooms it
+# captured (the one model-facing reader of them). Every other action edits the
+# owner's place configuration (16.09: "конфигурация"), which below Full
+# ``observe_argument_refusal`` refuses for Act and Observe alike.
+PLACE_READ_ACTIONS: frozenset[str] = frozenset({"list", "inspect"})
 # Names Observe keeps even though they have mutating shapes,
 # because each has a real read-only or own-work path that withholding the NAME
 # would destroy along with the mutation. What the name may then be asked to DO
@@ -57,6 +63,7 @@ OBSERVE_ARGUMENT_NARROWED: frozenset[str] = frozenset({
     # a child must be able to stop the one it started (the nanny's other half).
     "cancel_task",
     "manage_schedules",  # reads and lifecycle controls remain; authoring does not
+    "configure_presence",  # its reads remain, for Act too (``PLACE_READ_ACTIONS``)
 })
 # Observe withholds every verb that starts work or changes the world beyond
 # this mind's own memory (the table beside ``ROUTING_VERBS``) plus publication.
@@ -306,11 +313,24 @@ def observe_argument_refusal(task_metadata: Any, name: str, args: Mapping[str, A
     outside its own drive, a mutating child, a writing delegated session. The
     positive path is deliberately left open — a refusal here is about the
     arguments, never about the tool.
+
+    The protected dispatch guard asks this on every call, so it also carries the
+    one narrowing Act shares: below Full, ``configure_presence`` lists and
+    inspects places (``PLACE_READ_ACTIONS``) and changes none.
     """
-    if not is_observe_origin(task_metadata):
-        return ""
     tool = str(name or "").strip()
     values = args if isinstance(args, Mapping) else {}
+    metadata = task_metadata if isinstance(task_metadata, Mapping) else {}
+    if (tool == "configure_presence" and is_consciousness_origin(metadata)
+            and normalize_level(metadata.get("consciousness_autonomy")) != LEVEL_FULL
+            and str(values.get("action") or "") not in PLACE_READ_ACTIONS):  # exact, as the tool matches it
+        return (
+            "⚠️ RESOURCE_CONSTRAINT_BLOCKED: below Full autonomy a wake lists and inspects "
+            "places, it does not change one; your human changes a place on its sheet or by "
+            "a word in Main, a Full wake with configure_presence."
+        )
+    if not is_observe_origin(task_metadata):
+        return ""
     if tool in {"write_file", "edit_text"}:
         # The file tools already confine a resolved path inside the chosen base;
         # this decides which base Observe may choose at all.

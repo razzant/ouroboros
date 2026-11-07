@@ -196,6 +196,9 @@ def test_speaker_can_schedule_no_event_followup_with_host_carrier_and_related_bu
     result = _handle_schedule_followup(ctx, objective="Return with the promised findings", notify=False,
                                       run_at="2030-01-01T00:00:00Z", relation="related")
     assert result.startswith("FOLLOWUP_SCHEDULED"), result
+    assert "FOLLOWUP_DESTINATION_NOT_APPLICABLE" in _handle_schedule_followup(
+        ctx, objective="Return with the promised findings", run_at="2030-01-01T00:00:00Z", relation="related",
+        destination="place")
     [schedule] = queue.list_scheduled_tasks(root)["tasks"]
     future = queue._task_from_schedule(schedule)
     assert future["metadata"]["presence"] == json.loads(json.dumps(task["metadata"]["presence"]))

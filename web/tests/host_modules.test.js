@@ -64,7 +64,11 @@ async function setup({ items = [], modules = {}, href = 'http://127.0.0.1:8765/#
     const holds = createHolds({ win: { location: win.location, localStorage: local, sessionStorage: session }, now: () => clock.now });
     const runtime = createHostModules({ store, win, doc, holds, mountTimeoutMs: 40, settleMs: 10,
         draft: { insert: (text) => { drafts.push(text); return true; } },
-        notice: (text, tone, options = {}) => notices.push({ text, tone, ...options }),
+        notice: (text, tone, options = {}) => {
+            const entry = { text, tone, ...options, disposed: false, dispose() { entry.disposed = true; } };
+            notices.push(entry);
+            return entry;
+        },
         importModule: async (url) => {
             imported.push(url);
             ledgerAtImport.push({ ...ledger(local), ...ledger(session) });
@@ -121,6 +125,47 @@ test('a live page module mounts with exactly the versioned context and is let go
     assert.equal(heard, 1);
     assert.equal(ctx.draft.insert('late'), false, 'a disposed module can no longer write');
     assert.deepEqual(h.drafts, ['Read this to me']);
+});
+
+test('page-module facts stay observable after a producer failure', async () => {
+    const item = hostItem('demo:voice', { runtime: 'client', provides: 'tts' });
+    const h = await setup({ items: [item], modules: { [item.render.url]: new Error('broken module') }, start: false });
+    let changes = 0;
+    const off = h.runtime.onFactsChange(() => { changes += 1; });
+    h.runtime.start();
+    await tick(10);
+    assert.equal(h.runtime.pageModuleFacts().faults[0].key, item.key);
+    assert.ok(changes >= 1, 'a producer failure reaches the Skills consumer');
+    off();
+    h.runtime.destroy();
+});
+
+test('held-module facts expose one owner recovery path', async () => {
+    const item = hostItem('demo:voice', { runtime: 'client', provides: 'tts' });
+    const local = seeded({ [`module:${item.key}`]: { reason: 'start', rev: 'r1', at: 1 } });
+    const h = await setup({ items: [item], local, modules: { [item.render.url]: { mount: () => ({ dispose() {} }) } } });
+    assert.equal(h.runtime.pageModuleFacts().held[0].key, item.key);
+    assert.equal(h.runtime.startHeldModule(item.key), true);
+    await tick();
+    assert.deepEqual(h.runtime.mounted(), [item.key]);
+    assert.equal(h.notices[0].disposed, true, 'a recovered hold retires its stale toast action');
+    h.runtime.destroy();
+});
+
+test('held recovery refuses after the page has stopped', async () => {
+    const item = hostItem('demo:voice', { runtime: 'client', provides: 'tts' });
+    const local = seeded({ [`module:${item.key}`]: { reason: 'start', rev: 'r1', at: 1 } });
+    const h = await setup({ items: [item], local, modules: { [item.render.url]: { mount: () => ({ dispose() {} }) } } });
+    let factChanges = 0;
+    const off = h.runtime.onFactsChange(() => { factChanges += 1; });
+    h.runtime.stop();
+    assert.equal(h.runtime.startHeldModule(item.key), false);
+    assert.equal(h.runtime.pageModuleFacts().held[0].key, item.key, 'the hold stays available for a fresh page');
+    assert.equal(h.runtime.pageModuleFacts().stopped, true, 'the consumer can distinguish a stopped page runtime');
+    assert.ok(factChanges >= 1, 'stopping the page repaints Skills consumers');
+    assert.equal(h.notices[0].disposed, true, 'stopping the page removes the dead toast recovery action');
+    off();
+    h.runtime.destroy();
 });
 
 test('a module that fails in any way is off for this page with one notice naming it; the others run', async () => {
@@ -234,6 +279,30 @@ test('a module whose last start the page did not outlive is held, named once, an
     const updated = await setup({ items: [fixed], modules, local: seeded({ 'module:one:x': { reason: 'start', rev: 'r1', at: 1 } }) });
     assert.deepEqual(updated.runtime.mounted(), ['one:x'], 'the skill\'s next revision starts as usual');
     assert.deepEqual(updated.notices, []);
+});
+
+test('a held recovery notice retires when its contribution leaves the projection', async () => {
+    const item = hostItem('demo:voice', { runtime: 'client', provides: 'tts' });
+    const local = seeded({ [`module:${item.key}`]: { reason: 'start', rev: 'r1', at: 1 } });
+    const h = await setup({ items: [item], local, modules: { [item.render.url]: { mount: () => ({ dispose() {} }) } } });
+    assert.equal(h.notices.length, 1);
+    await h.publish([]);
+    assert.equal(h.notices[0].disposed, true, 'a removed held contribution cannot leave an obsolete recovery action');
+    h.runtime.destroy();
+});
+
+test('a held recovery notice follows a contribution revision', async () => {
+    const item = hostItem('demo:voice', { runtime: 'client', provides: 'tts' });
+    const local = seeded({ [`module:${item.key}`]: { reason: 'start', rev: 'r1', at: 1 } });
+    const h = await setup({ items: [item], local, modules: { [item.render.url]: { mount: () => ({ dispose() {} }) } } });
+    const first = h.notices[0];
+    const revised = hostItem(item.key, { revision: 'r2', runtime: 'client', provides: 'tts',
+        render: { kind: 'host', url: '/api/extensions/demo/ui/r2/ui/voice.js' } });
+    await h.publish([revised]);
+    assert.equal(first.disposed, true, 'the old revision notice is retired');
+    assert.equal(h.notices.length, 2);
+    assert.equal(h.notices[1].disposed, false, 'the current revision remains recoverable');
+    h.runtime.destroy();
 });
 
 test('?hold=all holds every page module for that load, each released by Start it', async () => {

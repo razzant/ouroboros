@@ -45,6 +45,74 @@ def test_a_message_its_root_holds_and_names_as_its_origin_is_one_row(tmp_path):
     assert absent == ""
 
 
+@pytest.mark.parametrize("carrier", ["origin_ref", "origin_text", "binding", "corpus"])
+@pytest.mark.parametrize("source_state", ["readable", "missing", "error"])
+def test_legacy_origin_and_held_copy_share_identity_without_collapsing_another_message(tmp_path, monkeypatch, carrier, source_state):
+    from ouroboros.owner_relay import held_owner_messages, retain_owner_message
+    from tests.test_owner_relay import context
+
+    for ts in (TS, "2026-09-30T05:42:00+00:00"):
+        ds.append(tmp_path, "chat", {"chat_id": 1, "direction": "in", "ts": ts, "text": "yes"})
+    origin, other = [item.row for item in ds.iter_rows(tmp_path, "chat")]
+    ref = build_owner_message_ref(chat_id=1, client_message_id="", ts=TS, text="yes")
+    ctx = context(tmp_path); ctx.task_metadata = {"origin_message_ref": ref}
+    held_owner_messages(ctx)
+    retain_owner_message(ctx, other)
+    if source_state != "readable":
+        def unavailable(*_args):
+            if source_state == "error":
+                raise OSError("source unavailable")
+            return None
+        monkeypatch.setattr("ouroboros.project_dialogue.resolve_owner_message_source", unavailable)
+    record = {"id": ROOT, "held_owner_messages": ctx._held_owner_messages}
+    if carrier == "binding":
+        monkeypatch.setattr("ouroboros.projects_registry.project_task_bindings", lambda _root: {
+            ROOT: {"source_text": "yes", "source_ref": ref}})
+    else:
+        record["metadata"] = {"origin_message_ref": ref}
+        if carrier == "origin_text":
+            record["metadata"]["origin_message_text"] = "yes"
+        elif carrier == "corpus":
+            record["metadata"]["owner_corpus"] = [{"source": "origin_message", "content": "yes"}]
+    rows, absent = ow.task_owner_words(tmp_path, ROOT, task=record)
+    assert not absent
+    assert [(r["ref"], r["text"]) for r in rows] == [(format_address(row_address(origin)), "yes"),
+                                                     (format_address(row_address(other)), "yes")]
+
+
+@pytest.mark.parametrize("author", ["door", "task", "continuation"])
+def test_a_legacy_origin_quoted_back_into_the_live_turn_is_one_known_source(tmp_path, author):
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_relay import inject_relay, owner_quote, relay_envelope
+    from tests.test_owner_relay import context
+
+    row = {"chat_id": 1, "direction": "in", "ts": TS, "text": "yes"}
+    ds.append(tmp_path, "chat", row)
+    stored = next(item.row for item in ds.iter_rows(tmp_path, "chat"))
+    ctx = context(tmp_path)
+    ctx.task_metadata = {"origin_message_ref": build_owner_message_ref(chat_id=1, client_message_id="", ts=TS, text="yes"),
+                         "origin_message_text": "yes"}
+    if author != "door":
+        ctx.task_metadata.update(objective_author={"kind": author}, owner_corpus=[
+            {"source": "origin_message", "content": "yes"},
+            {"source": "origin_message", "content": "yes", "chat_id": "1", "client_message_id": "another"}])
+    _initialize_owner_directives(ctx, [{"role": "user", "content": "yes"}])
+    inject_relay(ctx, {"relay": relay_envelope("same", [owner_quote(tmp_path, stored)], chat_id=1),
+                       "owner_rows": [stored], "text": "context", "source_task_id": "other"}, [])
+    expected = ["yes"] if author == "door" else ["yes", "yes"]
+    assert [r["text"] for r in ow.directive_owner_rows(ctx)] == expected
+    assert [r["text"] for r in ow.governing_words_for_schedule(ctx)[ow.FIELD]] == expected
+
+
+def test_missing_origin_identity_does_not_infer_a_match_from_equal_words(tmp_path):
+    first = _stored(tmp_path, "yes", "one")
+    second = _stored(tmp_path, "yes", "two", ts="2026-09-30T05:42:00+00:00")
+    rows, _ = ow.task_owner_words(tmp_path, ROOT, task={"origin_message_text": "yes",
+        "held_owner_messages": {format_address(row_address(r)): r for r in (first, second)}})
+    assert {r["ref"] for r in rows} >= {"chat 1 / one", "chat 1 / two"}
+    assert len(rows) == 3, "without an origin reference, two possible identical sources cannot be guessed into one"
+
+
 def test_two_messages_with_the_same_words_stay_two_rows(tmp_path):
     origin = _stored(tmp_path, "yes", "msg-a")
     other = _stored(tmp_path, "yes", "msg-b", ts="2026-09-30T05:42:00+00:00")
@@ -191,6 +259,78 @@ def test_rows_without_any_id_still_repeat_only_by_their_words():
     assert [row.get("msg_id") for row in _accept_owner_directives(ctx, None, "run")] == [None, "m-1"]
 
 
+def test_legacy_held_rows_without_client_ids_keep_their_canonical_handles(tmp_path):
+    """Legacy held rows have no client id, so their retained row addresses must remain distinct."""
+    held = {
+        "row:1@2026-09-30T05:40:00+00:00#aaaaaaaaaaaa": {
+            "direction": "in", "chat_id": 1, "text": "first legacy instruction",
+            "ts": "2026-09-30T05:40:00+00:00"
+        },
+        "row:1@2026-09-30T05:41:00+00:00#bbbbbbbbbbbb": {
+            "direction": "in", "chat_id": 1, "text": "second legacy instruction",
+            "ts": "2026-09-30T05:41:00+00:00"
+        },
+    }
+    rows, absent = ow.task_owner_words(tmp_path, ROOT, task={"id": ROOT, "held_owner_messages": held})
+    assert absent == ""
+    assert [(row["text"], row["ref"]) for row in rows] == [
+        ("first legacy instruction", next(iter(held))),
+        ("second legacy instruction", list(held)[1]),
+    ]
+
+
+@pytest.mark.parametrize("carrier", ["origin_text", "origin_ref", "binding", "annotation", "held", "mailbox"])
+@pytest.mark.parametrize("target_kind", ["message", "task_card"])
+def test_fallback_carriers_keep_the_whole_reply_target(tmp_path, monkeypatch, carrier, target_kind):
+    """The same stored reply reaches the page writer through each supported fallback, not only its live corpus."""
+    from ouroboros.chat_references import reference_from_row
+    from ouroboros.owner_relay import owner_quote, write_relay
+    from ouroboros.project_dialogue import append_chat_annotation
+
+    proposal = {"chat_id": 1, "direction": "out", "ts": "2026-09-30T05:40:00Z",
+                "text": "A whole proposal. " * 100, "client_message_id": "proposal"}
+    ds.append(tmp_path, "chat", proposal)
+    reference = (reference_from_row(proposal) if target_kind == "message"
+                 else {"address": "task:some-work", "snippet": "A work card, not a message."})
+    owner = {"chat_id": 1, "direction": "in", "ts": TS, "text": "Yes, do that.",
+             "client_message_id": "reply", "reply_to": reference}
+    ds.append(tmp_path, "chat", owner)
+    stored = next(item.row for item in ds.rows_by_client_id(tmp_path, "reply"))
+    ref = build_owner_message_ref(chat_id=1, client_message_id="reply", ts=TS, text=owner["text"])
+    record = {"id": ROOT}
+    if carrier.startswith("origin"):
+        record["origin_message_ref"] = ref
+        if carrier == "origin_text":
+            record["origin_message_text"] = owner["text"]
+    elif carrier == "binding":
+        monkeypatch.setattr("ouroboros.projects_registry.project_task_bindings", lambda _root: {
+            ROOT: {"source_text": owner["text"], "source_ref": ref}})
+    elif carrier == "annotation":
+        append_chat_annotation(tmp_path, "reply", action="steer_task", target=ROOT, status="read", routing_token="r")
+    elif carrier == "held":
+        record["held_owner_messages"] = {format_address(row_address(stored)): stored}
+    else:
+        write_relay(tmp_path, ROOT, relay_id="pending", note="context", quotes=[owner_quote(tmp_path, stored)],
+                    chat_id=1, teller_task_id="teller", canonical_root=tmp_path)
+    rows, absent = ow.task_owner_words(tmp_path, ROOT, task=record)
+    assert not absent and [row["text"] for row in rows if row["source"] != ow.REPLY_TARGET] == [owner["text"]]
+    if target_kind == "task_card":
+        assert not [row for row in rows if row["source"] == ow.REPLY_TARGET], "a task card is not someone's words"
+        return
+    [target] = [row for row in rows if row["source"] == ow.REPLY_TARGET]
+    assert target["text"] == proposal["text"] and target["author"] != "owner"
+
+
+@pytest.mark.parametrize("carrier", ["origin_message", "binding"])
+def test_retained_owner_text_survives_unreadable_reply_source(tmp_path, monkeypatch, carrier):
+    def unavailable(*_args, **_kw):
+        raise OSError("source temporarily unreadable")
+    monkeypatch.setattr("ouroboros.project_dialogue.resolve_owner_message_source", unavailable)
+    rows = ow._message_rows(tmp_path, ROOT, "Exact retained owner words", {"chat_id": 1,
+                            "client_message_id": "original"}, carrier)
+    assert [r["text"] for r in rows] == ["Exact retained owner words"]
+
+
 def _drafted_corpus(tmp_path, stored):
     from ouroboros.tools.tool_context import ToolContext
 
@@ -281,6 +421,14 @@ def test_a_relay_of_several_place_rows_reads_one_place_snapshot(tmp_path, monkey
     inject_relay(receiver, {"owner_rows": quoted, "source_task_id": "teller", "text": "note", "relay": {"relay_id": "r1"}}, [])
     assert [row["content"] for row in receiver._owner_directives] == [f"Instruction {index}" for index in range(3)]
     assert len(receiver._held_owner_messages) == 3 and len(reads) == 1, "one snapshot for the whole relay"
+
+
+def test_schedule_merge_scopes_reused_client_ids_by_chat():
+    kept = [{"source": "owner_mailbox", "content": "one", "client_message_id": "42", "chat_id": "100"}]
+    other_room = [{"source": "owner_mailbox", "content": "two", "client_message_id": "42", "chat_id": "200"}]
+    same_room = [{"source": "owner_mailbox", "content": "updated", "client_message_id": "42", "chat_id": "100"}]
+    assert [row["content"] for row in ow.merged_corpus(kept, other_room)] == ["one", "two"]
+    assert [row["content"] for row in ow.merged_corpus(kept, same_room)] == ["one"]
 
 
 def test_two_replies_to_one_message_keep_one_target_row_beside_the_first():

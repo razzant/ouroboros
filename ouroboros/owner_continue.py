@@ -509,7 +509,11 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
         promoted to owner text."""
         texts = {True: {row["content"] for row in later} | {str((original or {}).get("content") or "")},
                  False: {row["text"] for row in peers}}
-        original_id = str(((original or {}).get("origin_message_ref") or {}).get("client_message_id") or "")
+        original_ref = (original or {}).get("origin_message_ref") or {}
+        original_chat_id = original_ref.get("chat_id")
+        original_client_id = str(original_ref.get("client_message_id") or "")
+        original_id = row_identity({"chat_id": original_chat_id,
+                                    "client_message_id": original_client_id})
         for row in rows:
             # The recorder writes a non-empty text body, a source label and string ids.
             if not (isinstance(row, dict) and isinstance(row.get("content"), str) and row["content"].strip()
@@ -518,12 +522,19 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
                 continue
             msg_id, source, text = str(row.get("msg_id") or ""), str(row.get("source") or ""), row["content"]
             client, identity = str(row.get("client_message_id") or ""), row_identity(row)
+            if original_client_id and not original_chat_id:
+                client_identity, origin_identity = client, original_client_id
+            else:
+                client_identity = row_identity({"chat_id": row.get("chat_id") or original_chat_id,
+                                                "client_message_id": client})
+                origin_identity = original_id
             if source not in CORPUS_INITIAL_SOURCES | CORPUS_OWNER_SOURCES | CORPUS_TASK_SOURCES | CORPUS_PLACE_SOURCES:
                 gaps.append("owner_source_provenance_unknown")
                 continue
             door = carried and source in CARRIED_DOOR_SOURCES
             if door and original is not None:  # a carried copy of the original's own message is that message
-                door = not (client == original_id if client and original_id else text == original.get("content"))
+                door = not (client_identity == origin_identity if client_identity and origin_identity
+                            else text == original.get("content"))
             if source in CORPUS_INITIAL_SOURCES and not door:  # the run's first text: the original's own projection
                 if original is not None and isinstance(row.get("reply_to"), dict):
                     original.setdefault("reply_to", row["reply_to"])  # and the message it replies to
@@ -629,14 +640,26 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
             if entry.get("attachment_manifest") or "attachment_manifest_ref" in entry:
                 attached.append(entry)  # the files that message attached, staged in this task's own store
         elif kind == "relay_entry":
+            from ouroboros.owner_relay import owner_text, quotable_owner_row
+            from ouroboros.owner_words import owner_place_accounts
+            fallback_root = entry.get("relay_canonical_root") or root
+            accounts_by_root = {}
             for row in entry.get("owner_rows") or []:
-                from ouroboros.chat_chain import format_address, row_address
-                from ouroboros.owner_relay import owner_text
-                address = format_address(row_address(row))
+                from ouroboros.owner_relay import owner_row_address
+                source_root = row.get("_owner_source_root") or fallback_root
+                key = str(source_root)
+                if key not in accounts_by_root:
+                    accounts_by_root[key] = owner_place_accounts(source_root)
+                if not quotable_owner_row(row, source_root, accounts=accounts_by_root[key]):
+                    continue
+                address = owner_row_address(row)
                 if address not in seen:
-                    later.append(carded({"source": "owner_mailbox", "content": owner_text(row), "msg_id": address}, row))
+                    target = reply_target(source_root, row.get("reply_to")) if isinstance(row.get("reply_to"), dict) else {}
+                    later.append(carded({"source": "owner_mailbox", "content": owner_text(row), "msg_id": address,
+                                         **({"reply_to": target} if target else {})}, row))
                     seen[address] = (owner_text(row), True)
-                    quoted += [ref for ref in row.get("attachments") or [] if isinstance(ref, dict)]
+                    quoted += [{**ref, "_owner_source_root": str(source_root)}
+                               for ref in row.get("attachments") or [] if isinstance(ref, dict)]
         if kind in {"relay_entry", "task_message"}:  # a relay's own note and a task's words are peer context
             peers.append({"msg_id": msg_id, "ts": str(entry.get("ts") or ""),
                           "source_task_id": str(entry.get("source_task_id") or ""),

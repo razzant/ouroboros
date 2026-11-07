@@ -41,6 +41,15 @@ from tests.test_consciousness import AVAILABLE, CEILING, DEFAULT, FLOOR
 
 
 OWNER_LINE = "owner line observed during the window"
+OWNER_COUNTED = "1 owner message (counted, not listed: my view holds the words)"  # the wake's text counts it; my view holds the words
+
+
+def _observed(root, task):
+    """A wake's observation as its bound source stores it, every event line whole."""
+    from ouroboros.artifacts import read_actor_source_bytes
+
+    source = task["metadata"]["wake_observation"]["source"]
+    return read_actor_source_bytes(root, source["task_id"], source).decode("utf-8")
 
 
 @pytest.fixture
@@ -191,7 +200,7 @@ def test_a_restart_before_the_row_is_a_refusal_and_leaves_the_window_to_the_next
     assert race.clock.tick(race.clock.next_wake_at) == "launched"
     task = _run_wake(race)
     assert race.finished.is_set() and race.ran == [task]
-    assert OWNER_LINE in task["text"] and race.notices == []
+    assert OWNER_COUNTED in task["text"] and OWNER_LINE in _observed(race.root, task) and race.notices == []
     assert race.state.load_state()[OBSERVATION_STATE_KEY]["task_id"] == task["id"]
     assert race.state.load_state()[OWN_WAKE_STATE_KEY]["finished"] is True
     assert queued_wakes() == [] and _wake_rows(race) == [task["id"]]  # one wake, and only the one that ran
@@ -350,7 +359,7 @@ def test_an_admission_that_raises_leaves_no_row_owner_or_observation(race, monke
     assert race.clock.next_wake_at == race.start + 2 * DEFAULT
     assert race.clock.tick(race.clock.next_wake_at) == "launched"
     task = _run_wake(race)
-    assert race.finished.is_set() and OWNER_LINE in task["text"]
+    assert race.finished.is_set() and OWNER_COUNTED in task["text"] and OWNER_LINE in _observed(race.root, task)
 
 
 @pytest.mark.parametrize("fault", ["binder_raises", "source_store_fails"])
@@ -368,7 +377,7 @@ def test_a_binding_failure_runs_the_wake_with_its_text_and_moves_no_boundary(rac
     task = _run_wake(race)
     after = time.time()
     assert race.finished.is_set()
-    assert OWNER_LINE in task["text"] and race.clock._backoff == 1
+    assert OWNER_COUNTED in task["text"] and race.clock._backoff == 1  # no source: the text, counts and all
     stored = race.state.load_state()
     assert OBSERVATION_STATE_KEY not in stored  # replayed whole by the next wake, never skipped
     assert stored[OWN_WAKE_STATE_KEY]["task_id"] == task["id"] and stored[OWN_WAKE_STATE_KEY]["finished"] is True

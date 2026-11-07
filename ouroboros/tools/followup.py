@@ -25,6 +25,11 @@ the agent's choice at scheduling time; the host never classifies the text. A not
 reaches the owner directly, so Presence, agent-to-agent and delegated callers are
 refused (``control_runtime.owner_contact_refusal``).
 
+New independent work from a Presence carrier names its ``destination``, as every
+``start_task`` from one does (``_destination_error``): ``place`` is the promise this
+tool writes; ``owner`` writes nothing, since only a live start can cite the owner's
+answer: that private root schedules for itself (owner's decision, 5 November 2026).
+
 Authority is narrower than the parent's, not wider: a delegated subagent may not
 mint future root tasks (typed refusal) and the objective is the agent's own plain
 text (no host template). How many follow-ups a task registers is the agent's
@@ -312,6 +317,8 @@ def get_tools() -> List[ToolEntry]:
                     "the original verified money/deadline and Stop controls, or independent work; notes are "
                     "independent. Either task relation can read this task's task_drive/artifact_store "
                     "read-only, one hop, at paths you name. Root tasks only; Presence cannot leave notes. "
+                    "Independent work from a Presence conversation or work acting for a place names destination: "
+                    "without one nothing is scheduled. Elsewhere omit it. "
                     "manage_schedules gets full definitions, updates a promise in place, disables future "
                     "dispatch, or withdraws it with delete; withdrawal remains restorable for a while."
                 ),
@@ -321,6 +328,10 @@ def get_tools() -> List[ToolEntry]:
                         "name": {"type": "string", "description": "Optional label for this promise, in your own words."},
                         "relation": {"type": "string", "enum": ["related", "independent"],
                                      "description": "Explicit relationship to this work. Related preserves its original money and hard deadline; independent is separate work. Author/cron/text do not decide this. A note is always independent."},
+                        "destination": {"type": "string", "enum": ["place", "owner"], "description": (
+                            "Presence callers' independent work only. 'place': this place's promise. 'owner' schedules "
+                            "nothing: start the owner's private work with start_task(destination='owner', owner_quote=...) "
+                            "and let that new root schedule its follow-up.")},
                         "run_at": {
                             "type": "string",
                             "description": "One-shot ISO 8601 instant to fire at/after (naive = UTC).",
@@ -470,6 +481,30 @@ def _naive_instant(raw: str) -> bool:
         return False
 
 
+def _destination_error(ctx: ToolContext, destination: Any, *, new_work: bool) -> str:
+    """The refusal of a call's ``destination``, else ``""``; read before any schedule or audit write.
+
+    ``new_work`` is an independent task, the one kind of follow-up that begins separate work. From a
+    Presence carrier it names where it belongs (owner's choice A, 4 November 2026); anything else
+    has no such choice, and one named there refuses rather than being ignored.
+    """
+    from ouroboros.presence_owner_contact import DESTINATION_OWNER, DESTINATION_PLACE
+
+    carrier = presence_root_carrier(getattr(ctx, "task_metadata", None), task_contract=getattr(ctx, "task_contract", None))
+    if not (carrier and new_work):
+        return "" if destination in (None, "") else (
+            "ERROR: FOLLOWUP_DESTINATION_NOT_APPLICABLE: destination applies only to an independent task from a "
+            "Presence conversation or work acting for a place; omit it here. Nothing was scheduled.")
+    if destination == DESTINATION_PLACE:
+        return ""
+    if destination == DESTINATION_OWNER:
+        return ("ERROR: FOLLOWUP_DESTINATION_OWNER: the owner's private work is not scheduled from here. Start it now with "
+                "start_task(destination='owner', owner_quote=<their held answer to a private question>); that new root "
+                "then calls schedule_followup itself. Nothing was scheduled.")
+    return (f"ERROR: FOLLOWUP_DESTINATION_REQUIRED: destination must be {DESTINATION_PLACE!r} (this place's promise) or "
+            f"{DESTINATION_OWNER!r} (the owner's private work). Nothing was scheduled.")
+
+
 def _handle_schedule_followup(ctx: ToolContext, **params) -> str:
     if _is_delegated_subagent(ctx):
         return (
@@ -576,6 +611,8 @@ def _handle_schedule_followup(ctx: ToolContext, **params) -> str:
     except ValueError as exc:
         return publish_no_effect(ctx, ToolResult(status="unavailable", code="CAPABILITY_UNAVAILABLE",
                                     text=f"FOLLOWUP_REFUSED: {exc}"))
+    if error := _destination_error(ctx, params.get("destination"), new_work=not notify and relation["kind"] == "independent"):
+        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=error))
     # The pending count is read from the table this call is about to write, so the
     # reported total and the write share ONE transaction.
     from supervisor.queue import ScheduleStoreUnreadable

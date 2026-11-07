@@ -154,11 +154,16 @@ def _finish_swarm_handoff(
     status: str,
     reason: str = "",
 ) -> str:
-    """Preserve the first Presence admission receipt for its terminal consumers."""
+    """Preserve the first Presence admission receipt for its terminal consumers.
+
+    The owner's private start takes no part: it is no handoff of this conversation, so
+    whatever its outcome, the slot stays free for an outward start or with the one that holds it.
+    """
+    from ouroboros.presence_owner_contact import DESTINATION_OWNER
 
     metadata = getattr(ctx, "task_metadata", {})
     presence_turn = isinstance(metadata, dict) and bool(metadata.get("presence"))
-    if presence_turn and not isinstance(
+    if presence_turn and evt.get("destination") != DESTINATION_OWNER and not isinstance(
         getattr(ctx, "_swarm_handoff_attempt", None), dict
     ):
         ctx._swarm_handoff_attempt = {
@@ -207,6 +212,37 @@ def _task_card_title_arg(title: str, verb: str) -> tuple[str, str]:
     )
 
 
+def _start_destination(ctx: ToolContext, carrier: Dict[str, Any], destination: Any,
+                       owner_quote: Any) -> tuple[Dict[str, Any], str]:
+    """``(private start's event fields, refusal)`` of a start's named destination, read before any effect.
+
+    A caller holding Presence authority (``carrier``) names where each new work belongs; omitted, unknown
+    or contradictory choices refuse and the mind chooses again. Work without one has nothing to choose.
+    """
+    from ouroboros.presence_owner_contact import (
+        DESTINATION_OWNER,
+        DESTINATION_PLACE,
+        ContactRequestInvalid,
+        private_start_fields,
+    )
+
+    refused = "⚠️ TOOL_ARG_ERROR (start_task): {} Nothing was scheduled."
+    if not carrier:
+        return {}, (refused.format("destination and owner_quote apply only to a start from a Presence "
+                                   "conversation or work acting for a place.")
+                    if destination not in (None, "") or owner_quote not in (None, "") else "")
+    if destination not in (DESTINATION_PLACE, DESTINATION_OWNER):
+        return {}, refused.format(
+            f"destination must be {DESTINATION_PLACE!r} (this place's work) or {DESTINATION_OWNER!r} (the owner's "
+            "private work, with owner_quote naming their held answer to a private question).")
+    if destination == DESTINATION_PLACE:
+        return {}, refused.format("owner_quote belongs to destination='owner'.") if owner_quote not in (None, "") else ""
+    try:
+        return private_start_fields(ctx, owner_quote), ""
+    except ContactRequestInvalid as exc:
+        return {}, refused.format(str(exc))
+
+
 def _start_task(
     ctx: ToolContext,
     objective: str,
@@ -220,6 +256,8 @@ def _start_task(
     context_requires_self_body_docs: bool = False,
     reasoning_effort: Any = None,
     context_requires_development: Optional[bool] = None,
+    destination: str = "",
+    owner_quote: str = "",
     owner_words: str = "",
 ) -> str:
     """Start separate new work; the caller keeps its identity and obligations."""
@@ -238,6 +276,18 @@ def _start_task(
     card_title, title_error = _task_card_title_arg(title, "start_task")
     if title_error:
         return title_error
+    metadata = getattr(ctx, "task_metadata", {})
+    presence_carrier = presence_root_carrier(metadata, task_contract=getattr(ctx, "task_contract", None))
+    private, destination_error = _start_destination(ctx, presence_carrier, destination, owner_quote)
+    if destination_error:
+        return destination_error
+    if private and owner_basis:  # a private owner start names its held answer; a place cite orders this place's work
+        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
+            "⚠️ TOOL_ARG_ERROR (start_task): owner_words cites your human's words for this place's work "
+            "(destination='place'); a private owner start names their held answer in owner_quote. Nothing was scheduled.")))
+    chosen: Dict[str, Any] = {"destination": destination} if presence_carrier else {}
+    if private:
+        chosen["owner_quote"] = owner_quote
     from ouroboros.project_facts import (
         explicit_project_id_ok,
         project_id_from_display_name,
@@ -262,6 +312,11 @@ def _start_task(
     else:
         # The caller's own room supplies the default, never a sibling's origin.
         pid = sanitize_project_id(_inherited_project_scope(ctx))
+    if private and not str(project_id or "").strip() and not display_name:
+        # A private owner start must not silently inherit the Presence project's room.
+        # Without an explicit owner project, ordinary owner work starts in Main;
+        # a selected project is still honored above.
+        pid = ""
     try:
         current_chat_id = int(getattr(ctx, "current_chat_id", None) or 0)
     except (TypeError, ValueError):
@@ -309,7 +364,7 @@ def _start_task(
         )
         return _finish_swarm_handoff(
             ctx,
-            {"task_id": tid, "routing_token": routing_token},
+            {"task_id": tid, "routing_token": routing_token, **chosen},
             response,
             status="rejected",
             reason=f"worker_pool_unavailable:{disabled_reason}",
@@ -346,10 +401,13 @@ def _start_task(
             if isinstance(getattr(ctx, "task_metadata", {}), dict) else []
         ),
         "ts": utc_now_iso(),
+        **chosen,
     }
-    metadata = getattr(ctx, "task_metadata", {})
-    presence_carrier = presence_root_carrier(metadata, task_contract=getattr(ctx, "task_contract", None))
-    if presence_carrier:
+    if private:
+        # The owner's work this answer asks for: the same ordinary start and relation as a private
+        # late answer's (``presence_owner_contact.private_start_fields``), nothing of this caller's.
+        evt.update(private)
+    elif presence_carrier:
         contract = dict(getattr(ctx, "task_contract", {}) or {})
         evt.update({**presence_carrier, "task_contract": contract})
         if "capability_ceiling" in contract:
@@ -374,15 +432,16 @@ def _start_task(
     # stripping, the wake chooses project/workspace like any Main turn (В9').
     from ouroboros.consciousness_authority import consciousness_origin_metadata, is_focus_wake
 
-    evt.update(consciousness_origin_metadata({**metadata, "task_id": str(getattr(ctx, "task_id", "") or "")},
-                                             started_root=True, owner_basis=owner_basis))
-    _attach_origin_from_metadata(ctx, evt)
+    if not private:  # a private owner start carries its own owner contract (#2795); a place start, its writer's kind
+        evt.update(consciousness_origin_metadata({**metadata, "task_id": str(getattr(ctx, "task_id", "") or "")},
+                                                 started_root=True, owner_basis=owner_basis))
+        _attach_origin_from_metadata(ctx, evt)
+        _attach_client_surface(ctx, evt)
     _attach_drafted_objective(ctx, evt)
     if owner_basis:  # the cited words ride into the new root alone, never back into this run's own corpus
         evt["owner_corpus"] = [*evt.get("owner_corpus", []), owner_basis]
-    _attach_client_surface(ctx, evt)
     kind_note = ""
-    if is_focus_wake(metadata):  # a place turn's start: whose work it is, in one plain sentence (facts, no nudge)
+    if is_focus_wake(metadata) and not private:  # a place turn's start: whose work it is, in one plain sentence
         kind_note = (" Started as your human's work on their cited words." if owner_basis else
                      " Started as your own work (consciousness kind): it draws on the consciousness allowance, and "
                      "the Off switch stops it.")
@@ -401,6 +460,8 @@ def _start_task(
             "The task now runs independently, and follow-up chat can steer it. "
             "Use wait_task/get_task_result if its result "
             "is needed in this conversation."
+            + (" It is the owner's private work: nothing it does reaches this conversation by itself, "
+               "and it is not this turn's deferred work." if private else "")
             + (f"\n{effort_note}" if effort_note else "")
         )
         return _finish_swarm_handoff(ctx, evt, response, status="scheduled")
@@ -487,7 +548,8 @@ def _list_projects(ctx: ToolContext, limit: int = 50, closed: Optional[bool] = N
 
 
 def _close_project(ctx: ToolContext, project_id: str, note: str, reopen: bool = False) -> str:
-    """Record a project decision and owe its owner one System row in that room."""
+    """Record a project decision and owe its owner one System row in that room, whose delivery the closed record names,
+    as does the closing page written before it when anything is open there."""
     meta = getattr(ctx, "task_metadata", {}) or {}
     lineage = (getattr(ctx, "task_contract", {}) or {}).get("lineage") or {}
     if str(meta.get("delegation_role") or lineage.get("delegation_role") or "") == "subagent":
@@ -503,9 +565,10 @@ def _close_project(ctx: ToolContext, project_id: str, note: str, reopen: bool = 
         return "⚠️ TOOL_ERROR (close_project): this work has no task id."
     root, at = canonical_data_root(ctx), utc_now_iso()
     by = f"ouroboros:{task_id}"
+    notice = f"project-closure:{uuid.uuid4().hex}"  # the record and the page name it first; it is posted after the page
     try:
-        project, changed = update_project(root, project_id, return_changed=True,
-            closed=None if reopen else {"at": at, "by": by, "note": note.strip()}) or (None, False)
+        closed = None if reopen else {"at": at, "by": by, "note": note.strip(), "delivery": notice}
+        project, changed = update_project(root, project_id, return_changed=True, closed=closed) or (None, False)
     except Exception as exc:
         return f"⚠️ PROJECTS_ERROR: {type(exc).__name__}: {exc}"
     if project is None:
@@ -517,18 +580,47 @@ def _close_project(ctx: ToolContext, project_id: str, note: str, reopen: bool = 
     text = f"Ouroboros ({task_id}) {action} this project. {note.strip()}"
     if not reopen:
         text += " A message from you in this room or a new task will reopen it."
+    page = "" if reopen else _closing_page(ctx, root, project, note.strip(), notice)
     try:
         delivery = outbox.enqueue_terminal_delivery_outcome(root, {
             "type": "send_message", "chat_id": project["chat_id"],
-            "role": "system", "system_type": "project_closure",
-            "text": text, "delivery_id": f"project-closure:{uuid.uuid4().hex}",
+            "role": "system", "system_type": "project_closure", "text": text, "delivery_id": notice,
         }, event_queue=getattr(ctx, "event_queue", None))
     except Exception:
         log.warning("Project closure committed but room notice failed", exc_info=True)
         delivery = outbox.ENQUEUE_UNAVAILABLE
     suffix = ("Room notice queued." if delivery in {outbox.ENQUEUE_QUEUED, outbox.ENQUEUE_ALREADY_DELIVERED}
               else f"Room notice delivery is {delivery}; the project change is saved.")
-    return f"OK: project {project['id']} is {state}. {suffix}"
+    return f"OK: project {project['id']} is {state}. {suffix}{page}"
+
+
+def _closing_page(ctx: ToolContext, root: Any, project: Dict[str, Any], note: str, notice: str) -> str:
+    """S2: closing a project writes its room's last page from the closing note, over the room's open rows, as
+    ``chronicle_write(kind='page', covers={'to': …})`` writes one (``tools.chronicle.publish_covered_page``), naming
+    the delivery of the closure's System notice (``notice``, posted after it). Nothing open writes none; a page the
+    store refuses, or memory not yet active, leaves the closure standing and says why."""
+    from ouroboros import chat_chain, memory_inventory
+    from ouroboros.tools.chronicle import _activated, _NotActivated, _signed_author, publish_covered_page
+
+    room = str(project["chat_id"])
+    try:
+        entries = memory_inventory.open_room_rows(root, room)
+        if not entries:
+            return " Nothing is open in its room: no page."
+        author, role = _signed_author(ctx, "page")
+        if author is None:
+            return f" No page: a {role} drafts no project's last page."
+        newest = chat_chain.format_address(max(entries, key=lambda entry: entry[2])[0])
+        result, covers, _facts, _stamp = publish_covered_page(root, _activated(root), author, room, note, {"to": newest},
+                                                              closes_project=str(project["id"]), closure_delivery=notice)
+    except _NotActivated:
+        return " No page: my memory is not active yet; the closure stands."
+    except Exception as exc:  # a store refusal path or an unreadable room never undoes the closure
+        log.warning("Project closure page not written", exc_info=True)
+        return f" Its page was not written ({type(exc).__name__}: {exc}); the closure stands."
+    if not result.ok:
+        return f" Its page was not written ({result.reason}); the closure stands."
+    return f" The closing note is its room's page {result.record['id']}, sealing {covers['count']} open rows."
 
 
 def _cause_words(code: str) -> str:

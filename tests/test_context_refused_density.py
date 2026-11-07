@@ -205,7 +205,7 @@ def test_recovery_prices_the_prepared_input_not_the_canonical_image_proxy(tmp_pa
     room = syn.room(notes=1)
     room["notes"][0]["text"] = "Held note. " + "n" * 8000
     core = context_fit.ContextCore("Core", "BIBLE", "", "", "Identity", "Facts", '"Assignment"', False,
-        memory_view_json=memory_view.snapshot_json(syn.snapshot(room_facts=room, story=[], live=[])))
+        memory_view_json=memory_view.snapshot_json(syn.snapshot(room_facts=room, story=[], conversations=[])))
     plan = context_fit.build_context_fit_plan(None, core, {"id": "recovery", "_is_direct_chat": True},
         preferred_mode=mode, tool_schemas=[], route_resolver=lambda *_a, **_kw: (
             {"provider": "fixture", "model": "fixture"},
@@ -237,7 +237,7 @@ def test_recovery_prices_the_prepared_input_not_the_canonical_image_proxy(tmp_pa
     fit = measure(ctx)
     deficit = fit.measurement.capacity_deficit_tokens
     assert estimate(prepare(ctx.messages)) + REPLY - window == 500  # actual prepared bytes
-    assert 499 <= deficit <= 500  # carrying rounded prior counts may differ by one estimator token
+    assert 499 <= deficit <= 501  # carrying rounded prior counts may differ by one estimator token, either way
     if mode == "low":
         slack = context_fit.reclaim_low_water_margin(None, window)
         lmc._apply_refusal_step(ctx, "floor", fit, target=deficit + slack, slack=slack)

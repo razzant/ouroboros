@@ -194,4 +194,4 @@ def test_view_receipts_keep_story_tokens_and_live_room_coverage(tmp_path, captur
     reused = receipt()
     assert len(captures) == 1
     assert reused == _fresh(receipt)
-    assert reused["blocks"]["story_tokens"] > 0 and reused["blocks"]["live_rooms"] > 0
+    assert reused["blocks"]["story_tokens"] > 0 and reused["blocks"]["conversations"] > 0

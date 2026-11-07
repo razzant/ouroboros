@@ -44,7 +44,7 @@ def _core(mature):
     spoken = [syn.spoken(i, "ouroboros", 4_000) for i in range(24)]
     snap = syn.snapshot(role="consciousness", story=syn.pages(103 if mature else 2, 200),
         room_facts=syn.room(lane1=spoken, lane2=359 if mature else 2),
-        live=[{**syn.live_room(i), "directory": True, "words": [], "notes": []} for i in range(164 if mature else 2)])
+        conversations=[syn.conversation(i, engaged=False) for i in range(164 if mature else 2)])
     snap = dataclasses.replace(snap, spec=dataclasses.replace(snap.spec, work_room_levels=1))
     core = cf.ContextCore("Required core", "Constitution", "b" * 600_000, "",
         "Identity", "f" * 1_000, '"Assignment"', False, memory_view_json=mv.snapshot_json(snap))

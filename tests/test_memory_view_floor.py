@@ -33,7 +33,7 @@ def test_role_budget_is_one_frame_and_reply_is_charged_once():
 def test_order_conversation_before_my_pages_and_oldest_reply_first():
     replies = [syn.spoken(1, "ouroboros", 5_000), syn.spoken(2, "ouroboros", 50_000)]
     snapshot = syn.snapshot(story=syn.pages(2, 12_000), room_facts=syn.room("1", lane1=replies))
-    assert mf.LADDER == ("F1", "F1b", "F6r", "F6", "F6a", "F3", "F2", "F4", "F7p", "F5l", "F5", "F5a", "F7", "F7a", "F8", "F8a")
+    assert mf.LADDER == ("F1", "F6w", "F6g", "F3", "F2", "F4", "F7p", "F5l", "F5", "F5a", "F7", "F7a", "F8", "F8a", "F6a")
     assert mf.fit_memory_view(snapshot, frame(tokens(snapshot))) == mv.FULL_VIEW
     level = mf.fit_memory_view(snapshot, frame(tokens(snapshot) - 100))
     assert level.addressed == (("F2", (replies[0]["address"],)),)
@@ -93,19 +93,28 @@ def test_the_start_room_notice_names_owner_words_only_when_they_keep_the_view_ab
     assert "F7" not in dict(floor["steps"])
 
 
-def test_other_rooms_have_range_directory_and_bounded_aggregate():
-    rooms = [syn.live_room(i, notes=1, words=3, word_chars=2_000) for i in range(164)]
-    snapshot = syn.snapshot(live=rooms)
-    ident = rooms[0]["room_id"]
+def test_other_conversations_fold_their_words_then_a_group_to_its_line_and_only_last_all_to_one_count():
+    from ouroboros import memory_view_conversations as conversations
+
+    groups = [syn.conversation(i, notes=1, words=3, word_chars=2_000) for i in range(164)]
+    snapshot = syn.snapshot(conversations=groups)
+    first = groups[0]
+    words = tuple(word["id"] for word in first["rooms"][0]["words"])
     full = mv.render_room(snapshot)
-    ranged = mv.render_room(snapshot, mv.FloorLevel((("F6r", (ident,)),)))
-    directory = mv.render_room(snapshot, mv.FloorLevel((("F6", (ident,)),)))
-    aggregate = mv.render_room(snapshot, mv.FloorLevel((("F6a", tuple(r["room_id"] for r in rooms)),)))
-    assert len(aggregate) < len(directory) < len(ranged) < len(full)
-    assert "from='" in ranged and rooms[0]["words"][0]["line"] not in ranged
-    assert mv._directory_room(rooms[0]) in directory
-    assert "164 open rooms" in aggregate and "memory_read(room_id='*', start=0)" in aggregate
-    assert len(aggregate) < 700
+    worded = mv.render_room(snapshot, mv.FloorLevel((("F6w", words),)))
+    lined = mv.render_room(snapshot, mv.FloorLevel((("F6g", (first["key"],)),)))
+    keys = tuple(group["key"] for group in groups)
+    counted = mv.render_room(snapshot, mv.FloorLevel((("F6g", keys), ("F6a", ("conversations",)))))
+    assert len(counted) < len(lined) < len(worded) < len(full)
+    assert "from='" in worded and first["rooms"][0]["words"][0]["line"] not in worded
+    assert conversations.identity_line(first) in lined and first["rooms"][0]["notes"][0]["text"] in full
+    assert "164 conversations by count (the window's last rung): 164 open rooms" in counted
+    assert "memory_read(room_id='*', start=0)" in counted and len(counted) < 1_200
+    order = [(step, ident) for step, ident, *_ in mf.floor_elements(snapshot) if step in ("F6w", "F6g", "F6a")]
+    assert [step for step, _ident in order][:3] == ["F6w"] * 3 and order[-1] == ("F6a", "conversations")
+    level = mf.fit_memory_view(snapshot, frame(tokens(snapshot) - 1_000))  # the oldest words fold first, alone
+    taken = dict(level.addressed)
+    assert set(taken) == {"F6w"} and taken["F6w"] == tuple(ident for step, ident in order if step == "F6w")[:len(taken["F6w"])]
 
 
 def test_giveback_restores_small_earlier_elements_but_never_kept_choices():
@@ -225,7 +234,7 @@ def note_snapshot():
     room['lane1'][0].update(owner_side=True, carried=False)
     for index, note in enumerate(room['notes']):
         note['text'] = f'Label {index}.\n' + 'Authored detail. ' * 240
-    return syn.snapshot(room_facts=room, story=syn.pages(5, 8000), live=[syn.live_room(0, notes=1)])
+    return syn.snapshot(room_facts=room, story=syn.pages(5, 8000), conversations=[syn.conversation(0, notes=1)])
 
 
 @pytest.mark.parametrize('physical', [None, 10**9])
@@ -258,7 +267,7 @@ def test_notes_yield_late_to_shortage_without_taking_uncovered_owner_rows():
 def test_notes_aggregate_only_when_all_the_label_lines_still_do_not_fit():
     snap = note_snapshot()
     lines = mf.level_with(snap, mv.FULL_VIEW, [f'{s}:{i}' for s, i, *_ in mf.floor_elements(snap)
-                                             if s not in ('F8a', 'F7')], owner_note=True)
+                                             if s not in ('F8a', 'F6a', 'F7')], owner_note=True)  # no aggregate form
     at_lines = mf.fit_memory_view(snap, frame(tokens(snap, lines)))
     assert dict(at_lines.steps)['F8'] == 6 and 'F8a' not in dict(at_lines.steps)
     level = mf.fit_memory_view(snap, frame(tokens(snap, lines) - 1))
@@ -303,3 +312,78 @@ def test_new_forms_do_not_inflate_a_short_notes_minimum_bound(monkeypatch):
         before.setattr(mf, 'LADDER', tuple(step for step in mf.LADDER if step not in ('F8', 'F8a')))
         whole = tokens(snap, mf.fit_memory_view(snap, frame(0, 0)))
     assert after == whole
+
+
+def test_retold_words_fold_before_considered_ones_and_other_rooms_owner_words_before_this_rooms():
+    """F6w folds by rank, oldest first in each: retold, considered, then the words nobody considered; F7 takes my
+    human's words of my other conversations before this room's; both only as physics demands."""
+    group = syn.conversation(0, words=3)
+    words = group["rooms"][0]["words"]
+    for word, rank in zip(words, (2, 0, 1)):  # the oldest nobody considered, the middle retold, the newest considered
+        word["rank"] = rank
+    owner = syn.conversation(1, words=2, owner=True)
+    room = syn.room(lane1=[syn.spoken(0, "human", 300), syn.spoken(1, "ouroboros", 300)])
+    snapshot = syn.snapshot(room_facts=room, conversations=[group, owner])
+    order = [(step, ident) for step, ident, *_ in mf.floor_elements(snapshot)]
+    assert [ident for step, ident in order if step == "F6w"] == [words[1]["id"], words[2]["id"], words[0]["id"]]
+    theirs = [word["id"] for word in owner["rooms"][0]["words"]]
+    f7 = [ident for step, ident in order if step == "F7"]
+    assert f7[:len(theirs)] == theirs and room["lane1"][0]["address"] in f7[len(theirs):]
+    assert not set(theirs) & {ident for step, ident in order if step == "F6w"}  # my human's words never fold early
+
+
+def test_my_humans_words_of_other_conversations_keep_the_work_room_while_this_rooms_uncovered_words_spend_it():
+    """My human's words of my other conversations are ordinary F7 elements of the walk: oldest first, after every rung
+    but the last, they fold to keep the work room the start reserves (the margin) and to pay a requested saving, with
+    few measures however many there are (240 rows here, ~1,700 on a real install). This room's uncovered owner words
+    keep their right to the work room: whole above the margin, folded only at physical pressure."""
+    owner = [syn.conversation(i, notes=1, words=4, word_chars=1_500, owner=True) for i in range(60)]
+    here = {**syn.spoken(0, "human", 300), "owner_side": True}
+    snapshot = syn.snapshot(room_facts=syn.room(lane1=[here]), story=syn.pages(3, 4_000), conversations=owner)
+    calls = []
+
+    def measure(level):
+        calls.append(level)
+        return tokens(snapshot, level)
+
+    full = measure(mv.FULL_VIEW)
+    level = mf.fit_memory_view(snapshot, {"margin": full // 3, "physical": full + 10, "budget": None}, measure=measure)
+    theirs = [word["id"] for group in owner for word in group["rooms"][0]["words"]]
+    folded = dict(level.addressed).get("F7", ())
+    assert folded and tuple(theirs[:len(folded)]) == folded and tokens(snapshot, level) <= full // 3  # oldest first
+    assert here["address"] not in folded and "F6a" not in dict(level.steps)  # the last rung stays last
+    assert len(calls) < 30, len(calls)
+    words = tuple(word["id"] for word in owner[0]["rooms"][0]["words"])  # a group's line still saves once its owner
+    lined = mv.FloorLevel((("F6g", (owner[0]["key"],)), ("F7", words)))  # words are addresses: the savings add
+    assert tokens(snapshot, lined) < tokens(snapshot, mv.FloorLevel((("F7", words),)))
+    paid = mf.fit_memory_view(snapshot, {"margin": None, "physical": full + 10, "budget": None}, saving=full // 2)
+    assert dict(paid.addressed).get("F7") and tokens(snapshot, paid) <= full - full // 2  # a refusal's saving
+    rows = [{**syn.spoken(i, "human", 4_000), "owner_side": True} for i in range(3)]
+    alone = syn.snapshot(room_facts=syn.room(lane1=rows))
+    whole = tokens(alone)
+    kept = mf.fit_memory_view(alone, {"margin": whole // 2, "physical": whole + 10, "budget": None})
+    assert "F7" not in dict(kept.steps) and tokens(alone, kept) > whole // 2  # this room's: the work room is theirs
+    pressed = mf.fit_memory_view(alone, {"margin": whole // 2, "physical": whole - 100, "budget": None})
+    assert dict(pressed.addressed)["F7"] == (rows[0]["address"],)  # and physics folds them, oldest first
+
+
+
+def test_the_last_rung_keeps_my_humans_folded_words_of_other_conversations_by_their_addresses():
+    """At the last rung (F6a, the groups to one count) my human's words of my other conversations that F7 folded keep
+    their addresses, and one F7 did not fold stays whole. With a margin below the counted form, the addresses stay
+    above it: they occupy the work room up to the physical bound, and no rung deletes them."""
+    groups = [syn.conversation(i, words=6, word_chars=2_000, owner=True) for i in range(8)]
+    snapshot = syn.snapshot(room_facts=syn.room(), conversations=groups)
+    words = [word for group in groups for word in group["rooms"][0]["words"]]
+    keys = tuple(group["key"] for group in groups)
+    counted = mv.FloorLevel((("F6g", keys), ("F7", tuple(word["id"] for word in words)), ("F6a", ("conversations",))))
+    full = tokens(snapshot)
+    level = mf.fit_memory_view(snapshot, {"margin": tokens(snapshot, counted) - 1, "physical": full + 10, "budget": None})
+    text = mv.render_room(snapshot, level)
+    assert dict(level.steps).get("F6a") and len(dict(level.addressed)["F7"]) == len(words)  # the last rung was taken
+    assert all(mv._row_pointer(word, "words") in text for word in words)  # every folded word keeps its address
+    assert tokens(snapshot, counted) - 1 < tokens(snapshot, level) <= full + 10  # above the margin, in the window
+    half = mv.FloorLevel((("F6g", keys), ("F7", tuple(word["id"] for word in words[:24])), ("F6a", ("conversations",))))
+    shown = mv.render_room(snapshot, half)
+    assert all(mv._row_pointer(word, "words") in shown for word in words[:24])
+    assert all(word["line"] in shown for word in words[24:])  # one F7 did not fold stays whole

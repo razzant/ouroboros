@@ -15,7 +15,7 @@ def snapshot(root):
     return result
 
 
-def test_scheduled_work_reopens_and_keeps_an_empty_room_live_without_binding_or_words(q):
+def test_scheduled_work_reopens_and_holds_an_empty_room_in_my_other_conversations_without_binding_or_words(q):
     project = _project(q)
     room = str(project["chat_id"])
     projects_registry.update_project(q.root, "proj", closed=CLOSED)
@@ -24,7 +24,8 @@ def test_scheduled_work_reopens_and_keeps_an_empty_room_live_without_binding_or_
     [task] = q.pending
     assert "closed" not in projects_registry.get_project(q.root, "proj")
     assert not projects_registry.project_binding_for_task(q.root, task["id"])
-    assert not snapshot(q.root).live_rooms  # admission is scheduled, not running yet
+    rooms = lambda view: {item["room_id"]: (group, item) for group in view.conversations for item in group["rooms"]}  # noqa: E731
+    assert room not in rooms(snapshot(q.root))  # admission is scheduled, not running yet
 
     # Replay the accepted scheduler receipt after the mind has closed the project again.
     projects_registry.update_project(q.root, "proj", closed=CLOSED)
@@ -33,17 +34,16 @@ def test_scheduled_work_reopens_and_keeps_an_empty_room_live_without_binding_or_
     assert [row["id"] for row in q.pending] == [task["id"]]
     assert projects_registry.get_project(q.root, "proj")["closed"] == CLOSED
     task_results.write_task_result(q.root, task["id"], "running")
-    live = next(entry for entry in snapshot(q.root).live_rooms if entry["room_id"] == room)
-    assert live["facts"]["running_tasks"] == [task["id"]] and live["facts"]["rows"] == 0
+    group, live = rooms(snapshot(q.root))[room]
+    assert group["running"] == [f"get_task_result(task_id='{task['id']}')"] and live["facts"]["rows"] == 0
     assert projects_registry.get_project(q.root, "proj")["closed"] == CLOSED
 
     task_results.write_task_result(q.root, task["id"], "completed", result="Finished")
     dialogue_store.append(q.root, "chat", {"chat_id": project["chat_id"], "direction": "system",
         "type": "task_summary", "task_id": task["id"], "text": "Completed", "ts": "2026-10-29T12:00:00Z"})
     done = snapshot(q.root)
-    assert room not in {entry["room_id"] for entry in done.live_rooms}
-    assert room in {entry["room_id"] for entry in done.other_rooms}
-    assert "1 open rooms;" in memory_view.render_room(done)
+    group, _item = rooms(done)[room]  # its open task fact holds the room; the work no longer runs
+    assert not group["running"] and f"; host; task {task['id']}] " in memory_view.render_room(done)
 
 
 @pytest.mark.parametrize("failure", ["admission", "receipt"])

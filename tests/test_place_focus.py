@@ -39,7 +39,9 @@ def test_focus_no_ceiling_host_actor_prompt(focus):
     assert meta["focus"]["event_identity"] == meta["presence_event_identity"]
     assert "capability_ceiling" not in task["task_contract"]
     assert task["_is_direct_chat"] and task["_presence_turn"]
-    assert meta["root_cost_ceiling_usd"] <= 2 and "configure_presence" in meta["disabled_tools"]
+    # A focus reads places like any wake below Full; its edits are refused on the arguments (consciousness_authority).
+    assert meta["root_cost_ceiling_usd"] <= 2 and "toggle_consciousness" in meta["disabled_tools"]
+    assert "configure_presence" not in meta["disabled_tools"]
     template = Path("prompts/FOCUS.md").read_text(encoding="utf-8")
     assert {key for _lit, key, _fmt, _conv in string.Formatter().parse(template) if key} == set(PLACEHOLDERS)
     rendered = frame_focus_content(task, "The untrusted event")

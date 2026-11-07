@@ -151,7 +151,8 @@ def promote(world, *, objective="Check the three services", event=None, source="
     focus = capture_presence_event(admission, event, drive_root=world.data)
     tool_ctx = SimpleNamespace(pending_events=[], event_queue=None, current_chat_id=focus["chat_id"], drive_root=world.data,
                                task_metadata=dict(focus["metadata"]), task_contract=focus["task_contract"])
-    assert _start_task(tool_ctx, objective, title=objective, expected_output="A report").startswith("OK: task")
+    assert _start_task(tool_ctx, objective, title=objective, expected_output="A report",
+                       destination="place").startswith("OK: task")
     def enqueued(task):  # the supervisor's admission lane stands here: what it pops, then the row it queues
         for internal in ("_admission_token", "_require_unique_task_id", "_require_worker_pool"):
             task.pop(internal, None)
@@ -205,6 +206,7 @@ def run_root(world, task, *script):
     out = queue_module.Queue()
     world.root_steps[:] = script
     agent = world.h.factory(repo_dir=str(world.h.repo), drive_root=str(world.data), event_queue=out)
+    agent.owner_wait_callback = None  # the pool installs it; a root on a forked drive copies it to its own agent
     box = {"agent": agent, "out": out}
 
     def body():
