@@ -146,6 +146,8 @@ _ADDED_OWNERS = {
     "MCP_BROWSER_GUARD_PENDING": runtime_limits,
     "MCP_STDIO_STDERR_TAIL_BYTES": runtime_limits,
     "MCP_STDIO_STDERR_NOTE_BYTES": runtime_limits,
+    "MCP_OAUTH_HTTP_TIMEOUT_SEC": runtime_limits,
+    "MCP_OAUTH_LOCK_WAIT_SEC": runtime_limits,
 }
 
 _MOVED_OWNERS = {

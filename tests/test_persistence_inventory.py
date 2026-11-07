@@ -923,7 +923,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # ``installation_stop.py`` leave the scan, now copied into a staging sibling (all on the body adoption row).
 # 454 -> 455 (supervisor-recovery, owner 2A): the Fault boot's admitted recovery turn and the generation
 # that admitted it, ``state/core_loss_recovery.json`` (``ouroboros/server_process.py``); its own row.
-EXPECTED_SCAN_PATHS = 455
+# 455 -> 457 (#2896): a remote MCP server's sign-in record ``state/mcp/oauth/server-*.json`` and the ``.lock``
+# its holder keeps while it writes (``ouroboros/mcp_oauth.py``); their own row.
+EXPECTED_SCAN_PATHS = 457
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
