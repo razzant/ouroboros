@@ -89,6 +89,18 @@ def _producing_view(ctx):
     return issued if issued is not None else getattr(ctx, "_last_context_observation", None)
 
 
+def residue_by_kind(messages: list) -> dict:
+    """What a view keeps in dialogue units, by kind, protected dialogue apart (host estimates)."""
+    from ouroboros.context_compaction import context_units, owner_protected_unit_ids, unit_kind
+
+    units = context_units(messages, scope="dialogue")
+    protected, residue = owner_protected_unit_ids(messages, units), {}
+    for unit in units:
+        row = residue.setdefault("protected" if unit.unit_id in protected else unit_kind(messages, unit), [0, 0])
+        row[0], row[1] = row[0] + 1, row[1] + unit.context_size_tokens
+    return {kind: {"units": units_, "tokens": tokens} for kind, (units_, tokens) in sorted(residue.items())}
+
+
 def _inspect(ctx, observed: dict, *, offset: int) -> str:
     """A bounded inventory of the observed view: counts and sizes by kind, then one page of
     units from ``offset`` within the tool's producer page size (``tool_result_limit``), naming
@@ -297,8 +309,9 @@ def get_tools() -> List[ToolEntry]:
                     "dialogue and newer tail stay whole. Each older tool call and contiguous results is atomic; exact "
                     "bytes are checkpointed with CAS provenance before replacement, so raw evidence remains retrievable. "
                     "Unselected notes stay; replacement "
-                    "occupies the first selected unit. Batch usefully, shorter than sources: rewriting loses prefix-cache "
-                    "reuse and signed reasoning from the earliest change. "
+                    "occupies the first selected unit. Batch usefully, shorter than sources: rewriting loses signed "
+                    "reasoning from the earliest change and cache reuse from there (on Codex from the end of the leading "
+                    "system items); round facts report the measured re-read. "
                     "Native review ignores schema_names, review_notes and review_transfers; its inspection reports "
                     "window evidence, serialized characters and previous input, never current free tokens."
                 ),
@@ -329,7 +342,7 @@ def get_tools() -> List[ToolEntry]:
                             "description": "With working_note, declare attachment decisions/reasons transferred to named current plan decisions using inspected source/spec identities; no completeness is inferred, and absent/stale transfer keeps the attachment whole."},
                         "keep_last_n": {
                             "type": "integer",
-                            "description": "With working_note and no keep_unit_ids: recent completed tool units to keep raw (2-20).",
+                            "description": "With working_note and no keep_unit_ids: recent completed tool units to keep raw (2-20); earlier notes stay.",
                         },
                     },
                     "required": [],

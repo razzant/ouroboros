@@ -92,9 +92,30 @@ def take_failed_account_preference(target: dict, parameters: dict) -> str:
     return profile
 
 
+def says_nothing_about_the_account(error: Any) -> bool:
+    """A typed context-length refusal with no account evidence: the next dispatch keeps the
+    conversation's soft preference, so its shrunk retry stays where its prefix is cached (C2 S5,
+    06.11.2026). Auth, quota, rate-limit, account and pool refusals and unknown outcomes keep the
+    one-dispatch exclusion. A request that never reached the engine carries no account and is
+    remembered by nobody; an engine verdict before dispatch (``model_account_unavailable``) is an
+    account refusal, though it classifies as a transport wait."""
+    from ouroboros.model_wait import model_wait_reason
+
+    problem = getattr(error, "problem", None)
+    context = problem.get("context") if isinstance(problem, dict) else None
+    if (getattr(error, "code", "") in _PER_SUBJECT_REFUSALS or model_wait_reason(error)
+            or (isinstance(context, dict) and context.get("poolCause"))):
+        return False
+    from ouroboros.loop_llm_call import classify_llm_exception
+
+    return classify_llm_exception(error).kind == "context_overflow"
+
+
 def remember_failed_profile(target: dict, parameters: dict, error: Any) -> None:
     if getattr(error, "stream_rejected", False):
         return  # Local message normalization says nothing about account readiness.
+    if says_nothing_about_the_account(error):
+        return
     route = error.route or {}
     key = (parameters.get("cache_affinity"), route.get("source"), route.get("model"))
     if (key == (parameters.get("cache_affinity"), target["source"], target["resolved_model"])

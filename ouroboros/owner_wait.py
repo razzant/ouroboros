@@ -33,6 +33,7 @@ from typing import Any
 from ouroboros.artifacts import read_actor_source_bytes, store_actor_source_bytes
 from ouroboros.native_task_wait import cursors_json
 from ouroboros.transcript_prefix import OBSERVER_STATE_ATTRS as _SEND_OBSERVER_KEYS  # a resumed task keeps the send observer's state
+from ouroboros.transcript_prefix import sanction_rewrite
 from ouroboros.observability import without_finalization_timing
 from ouroboros.owner_mailbox import OwnerMailboxPeek
 from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, load_task_result
@@ -1230,6 +1231,9 @@ def rebind_restored_route(tools: Any, state: dict, messages: list) -> tuple:
         start_mode=ran if owner in MODES and ran in MODES[MODES.index(owner):] else None)
     if reconcile_restored_tools(tools, state, messages, mode):
         plan, mode = _rebind_context_fit_plan(plan, tools, messages, **route, start_mode=mode)
+        sanction_rewrite(ctx, "continuation_restored", scope="tools")
+    # This process captured its context again: the restored system row names that, not a route change.
+    sanction_rewrite(ctx, "continuation_restored", scope="system")
     return plan, mode
 
 

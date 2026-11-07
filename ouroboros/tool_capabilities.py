@@ -86,6 +86,8 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
 META_TOOL_NAMES: frozenset[str] = frozenset({
     "list_available_tools", "enable_tools",
 })
+# Main's gateway to on-demand MCP tools: what keeps a request's tool list stable, so a route ceiling keeps it too.
+MCP_GATEWAY_TOOL_NAME: str = "call_mcp_tool"
 
 # An actor's own working form: which model thinks (switch_model) and how its own
 # transcript is folded under its own note, exact sources kept (compact_context).
@@ -408,6 +410,24 @@ def requested_result_view(tool_args: Any) -> Optional[tuple[Optional[int], Optio
     if EXPLICIT_RANGE_ARGS & {str(key) for key in tool_args}:
         return (None, None)
     return None
+
+
+def requested_call_view(name: str, tool_args: Any) -> Optional[tuple[Optional[int], Optional[int]]]:
+    """``requested_result_view`` of a whole call: the catalog view ``enable_tools`` returns is a form the mind
+    asked for, and a call through the MCP gateway asks for the view its inner arguments name."""
+    if name == "enable_tools":
+        return (None, None)
+    if name == MCP_GATEWAY_TOOL_NAME and isinstance(tool_args, dict):
+        inner = tool_args.get("arguments")
+        if isinstance(inner, str):
+            import json
+
+            try:
+                inner = json.loads(inner or "{}")
+            except ValueError:
+                inner = {}
+        tool_args = inner if isinstance(inner, dict) else {}
+    return requested_result_view(tool_args)
 
 
 def _view_chars(value: Any) -> int:

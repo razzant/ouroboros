@@ -782,9 +782,12 @@ def _reset_native(payload: dict, error: ClaudexorModelNotDispatched, invocation:
     if updated_with_slot is None:
         return None
     updated, changed, surface = updated_with_slot
+    requested = payload.get("account") or {}
     append_jsonl(invocation.root / "logs" / "events.jsonl", {
         "ts": utc_now_iso(), "type": "native_continuation_reset", "task_id": invocation.task_id,
         "model_role": invocation.role, "operation_id": invocation.operation_id, "routes": changed,
+        "requested_profile": str(requested.get("profileId") or requested.get("preferredProfileId") or ""),
+        "observed_profile": str((error.route or {}).get("credentialProfileId") or ""),
         **({"surface": surface} if surface else {}),
     })
     return updated

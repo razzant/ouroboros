@@ -137,12 +137,76 @@ def test_shared_text_factors_only_whole_sentences_every_description_repeats():
     assert shared_text(["Only one tool."]) == ("", "")
 
 
+def test_main_shows_mcp_schemas_for_the_gateway_and_its_request_tools_keep_their_bytes(registry, monkeypatch):
+    """Main carries call_mcp_tool: enable_tools shows an on-demand server's schemas in its result while the
+    request's tools (the prompt cache's leading unit) stay as they were, and a gateway call is the inner MCP
+    tool's own dispatch: its safety check, its arguments, its result."""
+    from ouroboros import loop as loop_module, safety
+    from ouroboros.tools.tool_result import ToolResult
+
+    _servers()
+    resident = initial_tool_schemas(registry)
+    loop_module._setup_dynamic_tools(registry, resident, [], gateway=True)
+    before = _names(resident)
+    receipt = registry.execute("enable_tools", {"tools": "mcp_gitlab"})
+    assert "call_mcp_tool" in before and _names(resident) == before
+    assert "Call schemas for call_mcp_tool(name, arguments): mcp_gitlab (all 2 tools)" in receipt
+    assert '"description": "Issue title"' in receipt and "[not read-only]" in receipt
+    assert registry.execute_result("enable_tools", {"tools": "mcp_nowhere"}).code == "UNKNOWN_TOOL"
+    checked, sent = [], []
+
+    def checked_safety(name, args, *, declared_policy="", **_kwargs):
+        if declared_policy == safety.POLICY_SKIP:
+            return True, ""
+        checked.append((name, dict(args)))
+        return (False, "refused by the fixture") if name.endswith("get_merge_request") else (True, "")
+
+    monkeypatch.setattr(safety, "check_safety", checked_safety)
+    monkeypatch.setattr(mcp_client, "_call_mcp_tool_result", lambda name, args, _ctx=None: sent.append(
+        (name, dict(args))) or ToolResult(status="ok", code="OK", text="issue created"))
+    created = registry.execute_result("call_mcp_tool", {"name": "mcp_gitlab__create_issue", "arguments": {"title": "T"}})
+    assert "issue created" in created.text and sent == checked == [("mcp_gitlab__create_issue", {"title": "T"})]
+    refused = registry.execute_result("call_mcp_tool", {"name": "mcp_gitlab__get_merge_request", "arguments": "{}"})
+    assert refused.code == "SAFETY_VIOLATION" and len(sent) == 1
+    assert registry.execute_result("call_mcp_tool", {"name": "write_file"}).code == "TOOL_ARG_ERROR" and len(sent) == 1
+
+
+def test_a_gateway_envelope_runs_as_its_mcp_call_and_a_typed_error_carries_the_schema(registry):
+    """The executor resolves call_mcp_tool to the MCP call it names (``via`` records the envelope); an envelope that
+    names no MCP tool, or is not JSON, and any other call stay as sent. A typed MCP or argument error of that call
+    carries the tool's catalog schema; a success does not."""
+    from ouroboros.tools.tool_discovery import resolve_gateway_call, with_gateway_schema
+    from ouroboros.tools.tool_result import ToolResult
+
+    _servers()
+
+    def envelope(arguments):
+        return {"id": "c", "function": {"name": "call_mcp_tool", "arguments": arguments}}
+
+    resolved = resolve_gateway_call(envelope(json.dumps({"name": "mcp_gitlab__create_issue", "arguments": {"title": "T"}})))
+    assert resolved["function"]["name"] == "mcp_gitlab__create_issue" and resolved["via"] == "call_mcp_tool"
+    assert json.loads(resolved["function"]["arguments"]) == {"title": "T"}
+    nested = resolve_gateway_call(envelope(json.dumps({"name": "mcp_gitlab__create_issue", "arguments": '{"title": "T"}'})))
+    assert json.loads(nested["function"]["arguments"]) == {"title": "T"}
+    for kept in (envelope(json.dumps({"name": "write_file", "arguments": {}})), envelope("{not json"),
+                 {"id": "c", "function": {"name": "read_file", "arguments": "{}"}}):
+        assert resolve_gateway_call(kept) is kept
+    failed = with_gateway_schema(registry, "mcp_gitlab__create_issue",
+                                 ToolResult(status="error", code="MCP_ERROR", text="bad call"))
+    assert failed.text.startswith("bad call") and "Call schemas for call_mcp_tool" in failed.text
+    assert '"description": "Issue title"' in failed.text
+    done = ToolResult(status="ok", code="OK", text="done")
+    assert with_gateway_schema(registry, "mcp_gitlab__create_issue", done) is done
+
+
 def test_enable_tools_loads_a_whole_server_and_says_what_the_next_request_carries(registry):
+    """Any binding but Main's text loop loads (a voice session, Nano, a narrowed child), the gateway resident or not."""
     from ouroboros import loop as loop_module
 
     _servers()
     resident = initial_tool_schemas(registry)
     loop_module._setup_dynamic_tools(registry, resident, [])
+    assert "call_mcp_tool" in _names(resident)
     receipt = registry.execute("enable_tools", {"tools": "mcp_gitlab"})
     assert "Call schemas loaded (≈" in receipt and "mcp_gitlab (all 2 tools)" in receipt
     assert {"mcp_gitlab__create_issue", "mcp_gitlab__get_merge_request"} <= set(_names(resident))
@@ -158,7 +222,7 @@ def test_a_load_goes_first_under_a_route_ceiling_after_selectors_and_history(reg
     from ouroboros import loop as loop_module, provider_models
 
     _servers()
-    resident = initial_tool_schemas(registry)
+    resident = [schema for schema in initial_tool_schemas(registry) if schema["function"]["name"] != "call_mcp_tool"]
     loop_module._setup_dynamic_tools(registry, resident, [])
     registry._ctx.active_model, registry._ctx.active_use_local = "openai::gpt-fixture", False
     from ouroboros.tool_capabilities import CORE_TOOL_NAMES, META_TOOL_NAMES

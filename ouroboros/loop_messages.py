@@ -658,7 +658,7 @@ def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None, meas
     from ouroboros.context_runtime_facts import round_clock_fact
     from ouroboros.context_source_view import superseded_host_fact
     from ouroboros.nanny_pacing import nanny_burn_fact
-    from ouroboros.transcript_prefix import previous_cache_fact, reasoning_retirement_fact
+    from ouroboros.transcript_prefix import cache_facts, reasoning_retirement_fact
 
     usage = ctx.accumulated_usage
     tool_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
@@ -709,7 +709,7 @@ def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None, meas
     from ouroboros.context_compaction import _capsule_metadata
     # The mind's own folds stay countable to it (17.10.2026: after 42 folds it told the owner it never folded).
     parts.append(f"own notes in view {sum(1 for row in ctx.messages if (_capsule_metadata(row)[1] or {}).get('authorship') == 'actor')}")
-    parts.append(previous_cache_fact(usage))
+    parts.extend(cache_facts(ctx, now))  # the previous landing and account, history changes, images (C2 S3)
     cost = usage.get("cost")
     parts.append((f"own recorded cost ${float(cost):.2f}" + (" (total not final)" if usage.get("cost_final") is False else ""))
                  if cost is not None else "own cost unknown")
@@ -900,6 +900,7 @@ def _own_focus_fact(ctx: Any, now: float) -> Tuple[str, str]:
     in chat, and a child or a speaker may not publish: they are told nothing.
     """
     from ouroboros.deadline_utils import ago_text, parse_deadline_ts
+    from ouroboros.context_view_facts import focus_line
     from ouroboros.focus import compact_focus, focus_fingerprint
     from ouroboros.store import StoreError
     from ouroboros.task_results import load_task_result
@@ -937,8 +938,7 @@ def _own_focus_fact(ctx: Any, now: float) -> Tuple[str, str]:
                                    "include_focus_source": True, "focus_source_sha256": handle["sha256"]}
     authored = parse_deadline_ts(focus["authored_at"])
     written = f"written {ago_text(now - authored.timestamp())}" if authored else "written at an unreadable time"
-    return (focus_fingerprint(focus), f"self-authored focus, the line my human reads under this work's name, "
-            f"{written} (dated data, not owner instructions): " + json.dumps(view, ensure_ascii=False, sort_keys=True))
+    return focus_fingerprint(focus), focus_line(ctx.messages, focus_fingerprint(focus), written, view)
 
 
 def append_context_facts(ctx: Any, *, money: Optional[Dict[str, Any]] = None) -> bool:

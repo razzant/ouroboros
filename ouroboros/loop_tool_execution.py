@@ -590,12 +590,12 @@ def _execute_single_tool(
     correlation = {key: invocation[key] for key in ("execution_id", "round_id", "llm_call_id") if key in invocation}
     # The invocation id and attempt make this call's own manifest (one address per invocation)
     # bindable to its wait-end record when it settles after a timeout (``late_tool_results``).
-    trace_identity = {"tool": fn_name, "tool_call_id": tool_call_id,
+    trace_identity = {"tool": fn_name, "tool_call_id": tool_call_id, **({"via": tc["via"]} if tc.get("via") else {}),
                       "parent_call_id": correlation.get("llm_call_id"),
                       "execution_id": correlation.get("execution_id"), "round_id": correlation.get("round_id"),
                       **{key: invocation[key] for key in ("invocation_id", "task_attempt") if key in invocation}}
     settlement = {"type": CALL_SETTLED, "tool": fn_name, "task_id": task_id, **invocation_fields(invocation),
-                  **start_log_field(invocation)}
+                  **start_log_field(invocation), **({"via": tc["via"]} if tc.get("via") else {})}
 
     try:
         args = json.loads(tc["function"]["arguments"] or "{}")
@@ -659,6 +659,9 @@ def _execute_single_tool(
 
         with staged_read_delivery_scope():
             tool_result = host_refusal if host_refusal is not None else tools.execute_result(fn_name, args)
+        if tc.get("via"):  # a gateway call's typed error carries its MCP tool's catalog schema
+            from ouroboros.tools.tool_discovery import with_gateway_schema
+            tool_result = with_gateway_schema(tools, fn_name, tool_result)
         result = tool_result.text
     except (UsageAccountingError, ModelWaitInterrupted):
         raise
@@ -1000,7 +1003,7 @@ def _execute_with_timeout(
     # Durable/live start share identity for replay deduplication.
     live = _with_correlation({
         "ts": utc_now_iso(), "type": CALL_STARTED, "task_id": task_id, "tool": fn_name,
-        "timeout_sec": None if is_reviewed_mutative else timeout_sec,
+        **({"via": tc["via"]} if tc.get("via") else {}), "timeout_sec": None if is_reviewed_mutative else timeout_sec,
         "terminal_wait": terminal_wait, "args": args_for_log,
         **receipt, **invocation_fields(invocation),
     }, correlation, tool_call_id=tool_call_id)
@@ -1232,6 +1235,8 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
     if not isinstance(getattr(tools._ctx, "_completion_observation", None), dict):
         tools._ctx._completion_observation = completion_observation(tools._ctx, llm_trace)
     tools._ctx._completion_conflict = False
+    from ouroboros.tools.tool_discovery import resolve_gateway_call
+    tool_calls = [resolve_gateway_call(tc) for tc in tool_calls]  # a gateway envelope runs as the MCP call it names
     validation = tuple(getattr(tools._ctx, "_request_wire_custom_receipts", ()) or ())
     tools._ctx._request_wire_custom_receipts = ()
     validation_by_id = custom_validation_by_call_id(validation)

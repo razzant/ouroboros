@@ -36,6 +36,10 @@ CHECKPOINT_KIND = "prompt_prefix_break"
 #: One-shot attribute a sanctioned rewrite leaves on the slot for the next observation.
 SANCTION_ATTR = "_transcript_rewrite_sanctioned"
 
+#: One-shot stamps of seams that rebuild the system row or the tool list, ``{scope: by}``; a
+#: stamp names only a break of its own scope, so a fold never names a system-row change.
+SCOPED_SANCTION_ATTR = "_transcript_rewrite_scoped"
+
 #: Count of sanctioned rewrites on this execution slot: a size measured before a
 #: rewrite is labelled as such afterwards (``context_fit.InputAnchor.rewritten``).
 REWRITE_EPOCH_ATTR = "_transcript_rewrite_epoch"
@@ -43,13 +47,36 @@ REWRITE_EPOCH_ATTR = "_transcript_rewrite_epoch"
 
 #: The observer's per-slot state a continuation checkpoint carries (``owner_wait``): the last
 #: sent digests, an unconsumed origin stamp, the rewrite count and a change already counted.
-OBSERVER_STATE_ATTRS = (DIGEST_ATTR, TOOLS_DIGEST_ATTR, SANCTION_ATTR, REWRITE_EPOCH_ATTR, "_reasoning_retirement_break")
+OBSERVER_STATE_ATTRS = (DIGEST_ATTR, TOOLS_DIGEST_ATTR, SANCTION_ATTR, REWRITE_EPOCH_ATTR, "_reasoning_retirement_break",
+                        SCOPED_SANCTION_ATTR)
 
 
-def sanction_rewrite(slot: Any, by: str = "compaction") -> None:
-    """Name the rewrite the next ``observe_send`` should attribute (one-shot)."""
-    setattr(slot, SANCTION_ATTR, by)
-    setattr(slot, REWRITE_EPOCH_ATTR, rewrite_epoch(slot) + 1)
+def sanction_rewrite(slot: Any, by: str = "compaction", scope: str = "messages") -> None:
+    """Name the rewrite the next ``observe_send`` should attribute (one-shot), by the scope its seam touches.
+
+    A message rewrite also advances the rewrite epoch; a ``system`` or ``tools`` stamp only names
+    a break of that scope (C2 S4, 06.11.2026)."""
+    if scope == "messages":
+        setattr(slot, SANCTION_ATTR, by)
+        setattr(slot, REWRITE_EPOCH_ATTR, rewrite_epoch(slot) + 1)
+    else:
+        setattr(slot, SCOPED_SANCTION_ATTR, {**(getattr(slot, SCOPED_SANCTION_ATTR, None) or {}), scope: by})
+
+
+def rewrite_view(slot: Any, task_id: str, by: str, scope: str = "system") -> None:
+    """A seam that rebuilds the sent system view or tool list: drop the cached splits and name the change."""
+    from ouroboros.usage_accounting import invalidate_task_cache_splits
+
+    invalidate_task_cache_splits(task_id)
+    if slot is not None:
+        sanction_rewrite(slot, by, scope=scope)
+
+
+def _stamps(slot: Any, messages: Optional[str] = None) -> dict:
+    """The slot's unconsumed stamps by scope; ``messages`` overrides the message-scope one."""
+    scoped = getattr(slot, SCOPED_SANCTION_ATTR, None) if slot is not None else None
+    stamp = messages or (getattr(slot, SANCTION_ATTR, None) if slot is not None else None)
+    return {**(scoped if isinstance(scoped, Mapping) else {}), "messages": stamp}
 
 
 def rewrite_epoch(slot: Any) -> int:
@@ -175,13 +202,17 @@ def unsent_in_previous_send(slot: Any, message: Any) -> bool:
 
 
 def _break_details(index: int, cause: str, previous_count: int, sanction: Any) -> dict:
-    """One owner of break classification and sanctioned-rewrite attribution."""
+    """One owner of break classification and sanctioned-rewrite attribution.
+
+    ``sanction`` is the stamps by scope (``_stamps``), or one message-scope stamp: only a
+    stamp of the break's own scope names it."""
     if cause == "messages":
         kind = ("shrunk" if index >= previous_count else
                 "tail_replaced" if index == previous_count - 1 else "rewritten")
     else:
         kind = {"system": "system_rewritten", "tools": "tools_changed", "no_baseline": "no_baseline"}[cause]
-    return {"kind": kind, "sanctioned_by": sanction if cause == "messages" else None}
+    stamps = sanction if isinstance(sanction, Mapping) else {"messages": sanction}
+    return {"kind": kind, "sanctioned_by": stamps.get(cause)}
 
 
 def observe_send(
@@ -201,9 +232,10 @@ def observe_send(
     prefix broke and whose ``sanctioned_by`` names the rewrite that was
     expected -- the explicit argument or the one-shot ``sanction_rewrite``
     stamp a rewriting seam left on the slot -- or ``None`` for an
-    unexplained break.  The stamp is consumed by every observation and
-    explains a break below the system row only: compaction never touches the
-    system row, while a context-fit reprojection touches nothing else.
+    unexplained break.  Every observation consumes the stamps, and a stamp
+    names only a break of its own scope: a fold's message stamp never names a
+    system-row change, which carries the stamp of the seam that rebuilt the
+    system view (a memory narrowing, a route rebind, a restored continuation).
     A change the slot's retirement already counted is not returned again, even
     when its request goes out in a later round; ``usage`` then binds its round
     fact to this request.
@@ -216,8 +248,9 @@ def observe_send(
     current_tools = tools_digest(tools)
     setattr(slot, DIGEST_ATTR, current)
     setattr(slot, TOOLS_DIGEST_ATTR, current_tools)
-    sanction = sanctioned_by or getattr(slot, SANCTION_ATTR, None)
+    sanction = _stamps(slot, sanctioned_by)
     setattr(slot, SANCTION_ATTR, None)
+    setattr(slot, SCOPED_SANCTION_ATTR, None)
     if not isinstance(previous, list):
         return None
     index = next(
@@ -323,10 +356,13 @@ def history_changes_path(drive_root: Any) -> Path:
 
 
 def history_change_origin(fact: Mapping[str, Any]) -> str:
-    """The stamping seam, else what changed; an unstamped message change says so."""
-    kinds = {"system_rewritten": "system view rebuilt", "tools_changed": "tool set changed",
-             "no_baseline": "resume without a send record"}
-    return str(fact.get("sanctioned_by") or kinds.get(str(fact.get("kind")), "origin not recorded"))
+    """The stamping seam, else what changed; an unstamped message or system-row change says its origin is unknown."""
+    kind, by = str(fact.get("kind")), fact.get("sanctioned_by")
+    if kind == "system_rewritten":
+        return f"system view rebuilt ({by})" if by else "system view rebuilt, origin unknown"
+    if kind == "tools_changed":
+        return f"tool set changed ({by})" if by else "tool set changed"
+    return "resume without a send record" if kind == "no_baseline" else str(by or "origin not recorded")
 
 
 def history_change_text(facts: Any, round_idx: Any) -> str:
@@ -354,7 +390,10 @@ def previous_cache_fact(usage: Mapping[str, Any]) -> str:
              if read is not None and total is not None and total > 0 else "unknown")
     cache = f"previous usable input cache {share}"
     if previous:
-        cache += f" [round {previous['round']}, {previous.get('provider') or 'provider unknown'}, {previous.get('model') or 'model unknown'}]"
+        account, moved = previous.get("served_account"), previous.get("previous_served_account")
+        served = (f", served by account {account}" + (f" (moved from {moved})" if moved and moved != account else "")
+                  if account else "")
+        cache += f" [round {previous['round']}, {previous.get('provider') or 'provider unknown'}, {previous.get('model') or 'model unknown'}{served}]"
         cache += f"; write {int(written):,} tokens" if written is not None else "; write unknown"
         cache += history_change_text(usage.get("_recent_prefix_breaks"), previous["round"])
     return cache
@@ -370,8 +409,116 @@ def count_history_change(usage: dict, fact: Mapping[str, Any], *, drive_root: An
     if not any(item.get("round") == fact.get("round") for item in recent):
         recent.append({key: fact.get(key) for key in _BREAK_KEYS})
     usage["_recent_prefix_breaks"] = recent[-2:]
+    origin = history_change_origin(fact)
+    row = usage.setdefault(_TALLY_KEY, {}).setdefault(origin, {"count": 0, "measured": 0, "uncached": 0})
+    row["count"] = int(row.get("count") or 0) + 1
+    pending = [item for item in usage.get(_PENDING_KEY) or () if isinstance(item, list) and len(item) == 2]
+    if not any(item[0] == fact.get("round") for item in pending):
+        pending.append([fact.get("round"), origin])
+    usage[_PENDING_KEY] = pending[-8:]
     if drive_root:
-        _record_history_change(Path(drive_root), history_change_origin(fact), str(task_id or ""))
+        _record_history_change(Path(drive_root), origin, str(task_id or ""))
+
+
+#: This task's changes of sent history by origin, and the first change of each round still
+#: waiting for the provider's count of the request that carries it.
+_TALLY_KEY, _PENDING_KEY = "_rewrite_tally", "_rewrite_pending"
+
+
+def served_account_fields(usage: Mapping[str, Any], earlier: Mapping[str, Any], provider: str, model: str) -> dict:
+    """The account the engine reports serving an answered call and, on the same route, the one before it.
+
+    A move between them is a named local fact of the round facts (C2 S5); without an engine
+    report nothing is recorded, and the requested account stays ``call_account``'s."""
+    served = ((usage.get("claudexor") or {}).get("route") or {}).get("credentialProfileId")
+    if not served:
+        return {}
+    same = (earlier.get("provider"), earlier.get("model")) == (provider, model)
+    return {"served_account": str(served), "previous_served_account": earlier.get("served_account") if same else None}
+
+
+def settle_rewrite_reread(usage: dict) -> None:
+    """The provider's uncached input of the answered request that first carried a counted change.
+
+    Called once per answered request (``_last_round_cache_usage``). Several changes since the
+    last answer share that one request: its count goes to the earliest of them, the others stay
+    unmeasured, and so does a change whose request was never answered or reported no counts."""
+    from ouroboros.event_usage import event_token_counts
+
+    record = usage.get("_last_round_cache_usage") or {}
+    answered = record.get("round")
+    pending = [item for item in usage.get(_PENDING_KEY) or () if isinstance(item, list) and len(item) == 2]
+    carried = [item for item in pending if isinstance(answered, int) and isinstance(item[0], int) and item[0] <= answered]
+    if not carried:
+        return
+    usage[_PENDING_KEY] = [item for item in pending if item not in carried]
+    counts = event_token_counts(record)
+    row = (usage.get(_TALLY_KEY) or {}).get(carried[0][1])
+    if isinstance(row, dict) and None not in (counts["prompt_tokens"], counts["cached_tokens"]):
+        row["measured"] = int(row.get("measured") or 0) + 1
+        row["uncached"] = int(row.get("uncached") or 0) + max(0, int(counts["prompt_tokens"]) - int(counts["cached_tokens"]))
+
+
+def rewrite_tally_fact(usage: Mapping[str, Any]) -> str:
+    """This task's changes of sent history by origin, with what the requests carrying them read uncached."""
+    rows = []
+    for origin, row in sorted((usage.get(_TALLY_KEY) or {}).items(), key=lambda item: -int(item[1].get("count") or 0)):
+        measured = int(row.get("measured") or 0)
+        rows.append(f"{origin} {int(row.get('count') or 0)}" + (
+            f" (requests carrying {measured} of them read {int(row.get('uncached') or 0):,} uncached)" if measured else ""))
+    return ("history changes this task: " + "; ".join(rows)) if rows else ""
+
+
+#: The tool context's record of this round's first size pass: the host rows its batch's first show did not count.
+SIZE_PASS_ROWS_ATTR = "_size_pass_host_rows"
+
+
+def size_pass_host_rows(ctx: Any) -> dict:
+    """The host rows after the last tool result that the last request did not carry: added after
+    the batch's first show, they are what that show did not count. Pure: the size pass keeps the
+    record on the tool context only while its candidate is measured and once it applies."""
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY
+    from ouroboros.context_fit import estimate_context_prompt_tokens
+
+    slot = getattr(getattr(ctx, "tools", None), "_ctx", None)
+    start = max((i for i, row in enumerate(ctx.messages) if row.get("role") == "tool"), default=-1) + 1
+    density = float(ctx.accumulated_usage.get("_context_measurement_density") or 1.0)
+    rows = [[str(row.get(HOST_CONTEXT_KIND_KEY)), int(estimate_context_prompt_tokens([row]) * density)]
+            for row in ctx.messages[start:] if row.get(HOST_CONTEXT_KIND_KEY) and unsent_in_previous_send(slot, row)]
+    return {"round": ctx.round_idx, "rows": rows}
+
+
+def size_pass_rows_fact(record: Any, round_idx: Any) -> str:
+    record = record if isinstance(record, Mapping) else {}
+    if record.get("round") != round_idx or not record.get("rows"):
+        return ""
+    return ("before this round's size pass, host rows added after the results' first show: "
+            + ", ".join(f"{kind} ~{tokens:,}" for kind, tokens in record["rows"]) + " (host estimates)")
+
+
+def cache_facts(ctx: Any, now: Optional[float] = None) -> list:
+    """The round facts' cache parts, provider-measured or said to be unknown (C2 S3, 06.11.2026).
+
+    The previous request's landing and serving account, the time since its response, this task's
+    history changes by origin with what the requests carrying them read uncached, the live images
+    and, in a round with a size pass, the host rows the batch's first show did not count."""
+    import time
+    from ouroboros.context_images import image_floor, image_positions
+    from ouroboros.deadline_utils import ago_text
+
+    usage = ctx.accumulated_usage
+    parts = [previous_cache_fact(usage)]
+    finished = (usage.get("_last_round_cache_usage") or {}).get("finished_at")
+    if isinstance(finished, (int, float)):
+        parts.append(f"last response {ago_text((time.time() if now is None else now) - finished)}")
+    parts.append(rewrite_tally_fact(usage))
+    images = len(image_positions(ctx.messages))
+    if images:
+        keep, high = image_floor(getattr(getattr(ctx, "context_fit_plan", None), "preferred_mode", "max"))
+        parts.append(f"images in view {images} (past {high} the oldest are replaced down to {keep})")
+    slot = getattr(getattr(ctx, "tools", None), "_ctx", None)
+    parts.append(size_pass_rows_fact(getattr(slot, SIZE_PASS_ROWS_ATTR, None), getattr(ctx, "round_idx", None)))
+    return [part for part in parts if part]
 
 
 def count_accepted_send(slot: Any, messages: list, tools: Any, *, round_idx: int, usage: dict) -> None:
@@ -485,7 +632,7 @@ def prepare_reasoning_for_send(slot: Any, messages: list, tools: Any, *, round_i
     earlier = usage.get("_reasoning_retired_round") or {}
     previous, _ = _baseline(slot)
     details = _break_details(fact["index"], fact["cause"], len(previous) if isinstance(previous, list) else 0,
-                             getattr(slot, SANCTION_ATTR, None))
+                             _stamps(slot))
     current = {**fact, "round": round_idx, "sanctioned_by": details["sanctioned_by"]}
     if earlier.get("round") == round_idx:
         current.update(turns=earlier["turns"] + fact["turns"], blocks=earlier["blocks"] + fact["blocks"])

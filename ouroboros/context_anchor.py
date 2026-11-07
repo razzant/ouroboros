@@ -151,13 +151,16 @@ def main_input_anchor(usage: Optional[Mapping[str, Any]], plan: Any, *,
     return anchor, (int(floor) if floor else None)
 
 
-def record_refused_input(usage: Dict[str, Any], plan: Any, estimate_tokens: int) -> None:
-    """Remember the smallest input estimate ``plan``'s model refused by size in this task."""
+def record_refused_input(usage: Dict[str, Any], plan: Any, estimate_tokens: int, *, measured: bool = False) -> None:
+    """Remember the smallest input estimate ``plan``'s model refused by size in this task.
+
+    ``measured`` (the estimate is anchored on an accepted request) also bounds the refusing account's
+    window when the provider stated no limit; a cold estimate stays task-local."""
     if plan is None or int(estimate_tokens or 0) <= 0:
         return
     from ouroboros.context_window import record_refusal
 
-    record_refusal(usage, plan)
+    record_refusal(usage, plan, refused_input=int(estimate_tokens) if measured else 0)
     refused = usage.setdefault(REFUSED_INPUTS_KEY, {})
     key = _anchor_model_key(plan)
     refused[key] = min(int(refused.get(key) or estimate_tokens), int(estimate_tokens))

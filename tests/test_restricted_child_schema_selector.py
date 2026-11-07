@@ -92,7 +92,7 @@ def test_an_omitted_permitted_schema_loads_stays_through_the_next_fit_and_dispat
     chosen = extensions[-1]  # the late-position tail: what a plain truncation would drop first
     assert chosen in left_out
     listing = registry.execute("list_available_tools", {"namespace": chosen.rsplit("_lookup", 1)[0]})
-    assert "enable_tools loads a not-loaded one" in listing and chosen in listing
+    assert "enable_tools loads or shows a not-loaded one" in listing and chosen in listing
 
     loaded = registry.execute("enable_tools", {"tools": chosen})
     assert "Call schemas loaded" in loaded and chosen in loaded

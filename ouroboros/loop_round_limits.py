@@ -24,7 +24,7 @@ from ouroboros.loop_tool_execution import prune_reclaim_trace_refs, reclaim_trac
 from ouroboros.loop_transport import TransportWaitEpisode, finalize_now_transport_terminal as _finalize_now_transport_terminal
 from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
 from ouroboros.tools.registry import ToolRegistry
-from ouroboros.transcript_prefix import sanction_rewrite
+from ouroboros.transcript_prefix import SIZE_PASS_ROWS_ATTR, rewrite_view, sanction_rewrite, size_pass_host_rows
 from ouroboros.usage_accounting import invalidate_task_cache_splits
 from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN, _narrow_round_deadline, _owner_stop_control_is_current, _owner_stop_window_elapsed, handle_finalize_now_entry  # noqa: F401 -- _owner_stop_control_is_current stays a facade surface
 
@@ -569,6 +569,11 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
             notice = {"status": receipt["status"], "receipt_source": "unavailable"}
         if memory_price:
             notice["memory_view"] = memory_price
+        if receipt["status"] == "applied":  # what the fold freed and kept; the next request's count measures its re-read
+            from ouroboros.tools.compact_context import residue_by_kind
+            notice.update(reclaimed_tokens=receipt.get("reclaimed_tokens"), residue=residue_by_kind(candidate),
+                          resulting_input_tokens=(receipt.get("fit") or {}).get("estimated_input_tokens"),
+                          basis="host estimates")
         exceptions = receipt.get("request_exceptions") or []
         if receipt.get("inherited_selections_unapplied"):
             notice["inherited_selections_unapplied"] = receipt["inherited_selections_unapplied"]
@@ -611,6 +616,7 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
             from ouroboros.primary_route_observation import hold_selection
             _adopt_view_facts(tool_ctx, memory_plan, mode)
             hold_selection(tool_ctx, addresses, owner_note=bool(proposal.get("working_note", "").strip()))
+            sanction_rewrite(tool_ctx, "compaction", scope="system")  # the chosen memory form rebuilt the system row
         receipt["view_revision"] = receipt["after_transcript_sha256"] = context_reclaim_transcript_sha256(candidate)
         from ouroboros.main_context_authority import publish_working_notes
 
@@ -1144,6 +1150,25 @@ def _publish_reclaimed_transcript(ctx: Any, rebuilt: list, *, by: str = "compact
     prune_reclaim_trace_refs(ctx.tools._ctx, ctx.messages)
 
 
+def _measure_trial_candidate(ctx: Any, messages: list) -> Any:
+    """Measure ``messages`` as the sealed candidate with its next facts line; the live round stays untouched."""
+    from ouroboros.loop_messages import append_context_facts
+
+    trial = copy.copy(ctx)
+    trial.messages = copy.deepcopy(messages)
+    trial.accumulated_usage = dict(ctx.accumulated_usage)
+    trial.tools = copy.copy(ctx.tools)
+    trial.tools._ctx = copy.copy(ctx.tools._ctx)
+    trial.tools._ctx.messages = trial.messages
+    trial.tools._ctx._accumulated_usage = trial.accumulated_usage
+    # The baseline is the current refused transcript, not a hypothetical
+    # reprepare with another facts line. Only replacements earn new send facts.
+    if messages is not ctx.messages:
+        _loop().seal_task_transcript(trial.messages)
+        append_context_facts(trial)
+    return _loop()._measure_round_main_fit(trial, automatic_pass_used=True)
+
+
 def _run_emergency_address_pass(ctx: Any, disposition: Any, *, rung: str, goal_tokens: Optional[int] = None,
                                 cause: str = "context_size") -> Any:
     """Publish a model-free source view, measuring the sealed candidate with its next facts line.
@@ -1154,26 +1179,17 @@ def _run_emergency_address_pass(ctx: Any, disposition: Any, *, rung: str, goal_t
     never cuts a chosen read)."""
     from ouroboros.context_budget import ContextReclaimRequest
     from ouroboros.context_compaction import context_reclaim_transcript_sha256, emergency_address_view
-    from ouroboros.loop_messages import append_context_facts
 
     measurement = disposition.measurement
     tool_ctx = ctx.tools._ctx
+    # This round's first size pass names the host rows its batch's first show did not count (C2 S3,
+    # X11): on the tool context while its candidates are measured, kept only if it applies.
+    first = cause == "context_size" and (getattr(tool_ctx, SIZE_PASS_ROWS_ATTR, None) or {}).get("round") != ctx.round_idx
+    if first:
+        setattr(tool_ctx, SIZE_PASS_ROWS_ATTR, size_pass_host_rows(ctx))
 
     def measure_candidate(messages: list) -> int:
-        trial = copy.copy(ctx)
-        trial.messages = copy.deepcopy(messages)
-        trial.accumulated_usage = dict(ctx.accumulated_usage)
-        trial.tools = copy.copy(ctx.tools)
-        trial.tools._ctx = copy.copy(tool_ctx)
-        trial.tools._ctx.messages = trial.messages
-        trial.tools._ctx._accumulated_usage = trial.accumulated_usage
-        # The baseline is the current refused transcript, not a hypothetical
-        # reprepare with another facts line. Only replacements earn new send facts.
-        if messages is not ctx.messages:
-            _loop().seal_task_transcript(trial.messages)
-            append_context_facts(trial)
-        measured = _loop()._measure_round_main_fit(trial, automatic_pass_used=True)
-        return measured.measurement.estimated_input_tokens
+        return _measure_trial_candidate(ctx, messages).measurement.estimated_input_tokens
 
     request = ContextReclaimRequest(
         route_fp=measurement.route_fp, round_id=measurement.round_id,
@@ -1194,6 +1210,8 @@ def _run_emergency_address_pass(ctx: Any, disposition: Any, *, rung: str, goal_t
     )
     if receipt.status == "applied":
         _publish_reclaimed_transcript(ctx, rebuilt, by=f"{'refusal_pass' if cause == 'context_size' else cause}:{rung}")
+    elif first:
+        setattr(tool_ctx, SIZE_PASS_ROWS_ATTR, None)  # a pass that changed nothing names nothing
     _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
         "type": "context_reclaim", "checkpoint_kind": "context_reclaim_emergency", "rung": rung, "cause": cause,
         "round": ctx.round_idx, "route_fp": measurement.route_fp, "round_id": measurement.round_id,
@@ -1235,7 +1253,7 @@ def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, sl
     ctx.context_fit_plan = rebound
     ctx.tools._ctx.context_fit_plan = rebound
     ctx.messages[:] = rebound.reproject_transcript(ctx.messages, mode)
-    invalidate_task_cache_splits(ctx.task_id)
+    rewrite_view(ctx.tools._ctx, ctx.task_id, "memory_coarsened")
     ctx.tools._ctx.messages = ctx.messages
     from ouroboros.loop_model_call import _adopt_view_facts
 

@@ -429,6 +429,17 @@ def test_main_emergency_measurement_uses_sealed_final_facts_without_mutating_liv
     after = cc._context_tokens_for_messages(ctx.messages, 1.0)
     assert receipt.reclaimed_tokens == before - after
     assert any(row.get(HOST_CONTEXT_KIND_KEY) == CONTEXT_FACTS_NAME for row in measured[-1][1])
+    # The applied pass keeps its round's record of the rows the first show did not count; a later
+    # round's pass that changes nothing names nothing (C2 S3; Astra RV4).
+    from types import SimpleNamespace
+    from ouroboros import context_compaction
+    from ouroboros.transcript_prefix import SIZE_PASS_ROWS_ATTR
+    assert getattr(ctx.tools._ctx, SIZE_PASS_ROWS_ATTR)["round"] == ctx.round_idx
+    ctx.round_idx += 1
+    monkeypatch.setattr(context_compaction, "emergency_address_view", lambda messages, *_a, **_k: (messages, SimpleNamespace(
+        status="no_eligible", reclaimed_tokens=0, checkpoint_ref=None, selected_unit_ids=())))
+    assert _run_emergency_address_pass(ctx, _fit(goal=1), rung="bodies").status == "no_eligible"
+    assert getattr(ctx.tools._ctx, SIZE_PASS_ROWS_ATTR) is None
 
 
 def test_a_non_ok_outcome_keeps_its_text_while_its_record_is_shorter_than_its_body(tmp_path):
