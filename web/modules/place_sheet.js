@@ -85,10 +85,13 @@ function identityHtml(place, ui) {
 
 function accountsHtml(place, ui) {
     const identity = ui.removed ? '' : identityHtml(place, ui);
+    // A confirmation saved without a name shows the provider's name its senders here carry (username or display name), else the id.
+    const seen = new Map(place.accountCandidates.map((account) => [account.actorId, account.label]));
+    const named = (account) => account.label || seen.get(account.actorId) || account.actorId;
     const rows = place.ownerAccounts.map((account) => `<div class="harness-account-row place-account">
-            <div class="harness-account-main"><strong data-i18n-authored>${escapeHtml(account.label || account.actorId)}</strong></div>
-            <div class="harness-account-meta">${escapeHtml([tr('places.account.you', 'you'), account.confirmedAt ? fmt('confirmed on {date}', { date: shortDate(account.confirmedAt) }) : tr('places.account.confirmed', 'confirmed')].join(' · '))}${account.label && account.label !== account.actorId ? ` · <span data-i18n-authored>${escapeHtml(account.actorId)}</span>` : ''}</div>
-            <div class="harness-account-actions"><button type="button" class="btn btn-ghost btn-sm" data-place-act="revoke" data-actor="${escapeHtml(account.actorId)}" aria-label="Not my account: remove ${escapeHtml(account.label || account.actorId)}">Remove</button></div>
+            <div class="harness-account-main"><strong data-i18n-authored>${escapeHtml(named(account))}</strong></div>
+            <div class="harness-account-meta">${escapeHtml([tr('places.account.you', 'you'), account.confirmedAt ? fmt('confirmed on {date}', { date: shortDate(account.confirmedAt) }) : tr('places.account.confirmed', 'confirmed')].join(' · '))}${named(account) !== account.actorId ? ` · <span data-i18n-authored>${escapeHtml(account.actorId)}</span>` : ''}</div>
+            <div class="harness-account-actions"><button type="button" class="btn btn-ghost btn-sm" data-place-act="revoke" data-actor="${escapeHtml(account.actorId)}" aria-label="Not my account: remove ${escapeHtml(named(account))}">Remove</button></div>
         </div>`).join('');
     const mine = new Set(place.ownerAccounts.map((account) => account.actorId));
     const candidates = place.accountCandidates.filter((account) => !mine.has(account.actorId)).map((account) => `<div class="harness-account-row place-account">
