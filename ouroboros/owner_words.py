@@ -936,7 +936,7 @@ def words_block(row: Mapping[str, Any], indent: str = "") -> str:
 
 def project_words(drive_root: Any, room: int, *, open_rows: Any = (), indent: str = "") -> List[Dict[str, Any]]:
     """A project root's rows of its human that left the open conversation: the set's room rows (``_live_words``,
-    carrier ``room``; never a reply target) whose reference or chat address no open row (``open_rows``, lane 1) holds,
+    carrier ``room``; never a reply target) whose reference or chat address no shown row (``open_rows``: lane 1, the origins) holds,
     oldest first, whole (``line``) and as the dated address the floor folds it into (``short``: its stamp, its size
     and the address that reads it; never a retelling); a store gap closes the list as a line with no address."""
     rows, gaps = _live_words(drive_root, room, owner_place_accounts(drive_root), [], addressed=True)

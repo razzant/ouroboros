@@ -1,4 +1,4 @@
-"""Reviewers see the owner's words that caused the work.
+"""Reviewers see my human's words for the work.
 
 The triad and scope reviewers (a preflight's one seat included) read the change against the author's intent;
 ``build_goal_section`` now adds, right after that intent, the host-attested words of
@@ -379,7 +379,7 @@ def test_the_result_review_reads_the_marks_in_force_with_author_and_date_and_nam
     own = {"kind": "mind", "task_id": "task-3", "focus": {"role": "root", "task_id": "task-3"}}
     other = {"kind": "mind", "task_id": "t9", "focus": {"role": "child", "task_id": "t9"}}
     mine = store.mark({"kind": "task", "task_id": "task-3"}, "Hold the deck to five slides", own, room_id="1")
-    theirs = store.mark({"kind": "task", "task_id": "x"}, "For everyone", other, room_id="1", scope="global")
+    theirs = store.mark({"kind": "task", "task_id": "x"}, "For everyone\n## and every room", other, room_id="1", scope="global")
     elsewhere = store.mark({"kind": "task", "task_id": "y"}, "Another room's reading", other, room_id="555")
     assert mine.ok and theirs.ok and elsewhere.ok
     asked = _ask(ctx)
@@ -387,7 +387,7 @@ def test_the_result_review_reads_the_marks_in_force_with_author_and_date_and_nam
     date = str(mine.record["ts"])[:10]
     assert (f"- [mark {mine.record['id']} by root, task task-3, {date}; room; set by the work under review] "
             "Hold the deck to five slides") in readings
-    assert f"- [mark {theirs.record['id']} by child, task t9, {date}; global] For everyone" in readings
+    assert f"- [mark {theirs.record['id']} by child, task t9, {date}; global] For everyone\n  ## and every room" in readings  # indented: never a heading of the ask
     assert "Another room's reading" not in asked and asked.index("## My human's words") < asked.index("Readings:")
     assert store.release_mark(mine.record["id"], own, "done").ok
     assert "Hold the deck" not in _ask(ctx) and "For everyone" in _ask(ctx)

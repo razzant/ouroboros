@@ -137,7 +137,7 @@ def _text(value: Any) -> str:
 def assignment_instructions(ctx: Any) -> str:
     """Host-authored assignment with a predecessor brief for each direct start.
 
-    The owner's words that caused the work follow the contract: a root's own
+    My human's words for the work follow the contract: a root's own
     corpus, a child's inherited words, or the host's absence marker; a declared
     contract scheduled before ``DECLARED_WORDS_FACT`` keeps the selection it
     started with and carries none. Full predecessor reports are read through the

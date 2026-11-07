@@ -559,16 +559,21 @@ def test_this_room_has_its_head_retold_records_origin_words_and_notes(tmp_path):
 def test_a_project_root_reads_its_humans_sealed_rows_whole_under_the_actor_frame_and_main_does_not(tmp_path):
     """In a project room (never Main) the root's own view adds one section at the origins seam: the room's rows of
     my human that left the open conversation, verbatim and dated under the actor frame, the frame line over the
-    open rows; a row still open is read once, in the conversation; a child reads its words in its own block."""
+    open rows; a row still open is read once, in the conversation; the Project's origin row, once sealed, stands
+    once, in the retention-proof origins section, never in this one; a child reads its words in its own block."""
     from ouroboros.owner_words import _FRAMES, _HEADINGS
     from ouroboros.tools.chronicle import page_covers
 
     rooms, rows = _install(tmp_path)
     alpha, task = str(rooms["alpha"]), {"id": "ra1", "chat_id": rooms["alpha"]}
+    origin = shared.msg("2026-09-01T00:05:00+00:00", shared.ORIGIN, client_message_id="origin-a")  # the row the binding names
+    shared.append(tmp_path / "logs" / "chat.jsonl", origin)
     before_snapshot, before = _view(tmp_path, task)
     lane1 = _section(before, "### Open conversation since")
     assert before_snapshot.room["project_words"] == [] and _HEADINGS["root"] not in before  # nothing sealed yet
     assert lane1.split("\n")[1] == _FRAMES["root"] and "alpha words" in lane1  # the frame alone, over the open rows
+    assert before.count(shared.ORIGIN) == 1 and shared.ORIGIN in lane1  # the open origin row: read once, in the conversation
+    assert "### Words that started this work" not in before
     covers = page_covers(tmp_path, alpha, from_addr=_addr(rows[11]), to_addr=_addr(rows[11]))["covers"]
     assert ChronicleStore(tmp_path).publish_page(room_id=alpha, text="alpha asked", covers=covers, author=shared.MIND).ok
     snapshot, text = _view(tmp_path, task)
@@ -576,9 +581,15 @@ def test_a_project_root_reads_its_humans_sealed_rows_whole_under_the_actor_frame
     stamp = f"[2026-09-05T10:13:00+00:00 · owner · room_message · chat {alpha} / a1]"
     assert section.split("\n")[1] == _FRAMES["root"] and f"{stamp}\n  alpha words" in section
     assert "alpha words" not in _section(text, "### Open conversation since")  # it left the open rows: read once
-    assert text.index("### Words that started this work") < text.index(_HEADINGS["root"]) < text.index("### Open conversation")
     assert [item["address"] for item in snapshot.room["project_words"]] == [_addr(rows[11])]
     assert snapshot.room["project_words"][0]["short"].startswith(f"{stamp} (words, 11 chars — read by address row:")
+    # The sealed origin row stands once, under the retention-proof heading; the section holds the other sealed rows.
+    covers = page_covers(tmp_path, alpha, from_addr=_addr(origin), to_addr=_addr(origin))["covers"]
+    assert ChronicleStore(tmp_path).publish_page(room_id=alpha, text="alpha started", covers=covers, author=shared.MIND).ok
+    sealed, text = _view(tmp_path, task)
+    assert text.count(shared.ORIGIN) == 1 and shared.ORIGIN in _section(text, "### Words that started this work")
+    assert text.index("### Words that started this work") < text.index(_HEADINGS["root"]) < text.index("### Open conversation")
+    assert [item["ref"] for item in sealed.room["project_words"]] == [f"chat {alpha} / a1"]
     _main, main_text = _view(tmp_path, MAIN_TASK)
     assert _HEADINGS["root"] not in main_text and _FRAMES["root"] not in main_text and _main.room["project_words"] is None
     _kid, kid_text = _view(tmp_path, {"id": "kid", "chat_id": rooms["alpha"], "delegation_role": "subagent",

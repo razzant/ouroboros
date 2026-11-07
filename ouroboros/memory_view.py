@@ -771,7 +771,7 @@ def _capture_room(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
     if sealed and project:  # never Main: my human's project rows that left the open conversation, whole and dated
         from ouroboros.owner_words import project_words
 
-        facts["project_words"] = project_words(root, int(room), open_rows=facts["lane1"], indent=INDENT)
+        facts["project_words"] = project_words(root, int(room), open_rows=[*facts["lane1"], *facts["origins"]], indent=INDENT)
     return facts
 
 

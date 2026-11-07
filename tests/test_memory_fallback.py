@@ -286,6 +286,10 @@ def test_the_input_holds_the_owners_words_behind_the_units_tasks_and_the_minds_g
     # Alpha's block 1 is caused by the owner's words in Main (row 5), outside the unit's own rows.
     assert _addresses(tmp_path)[5]["row_sha256"] not in draft["covers"]["rows"]
     assert shared.ORIGIN in llm.prompts[0] and "## My human's words for this work (verbatim, dated, host-attested)" in llm.prompts[0]
+    # The same set under the same name when the input cannot hold the words: each stamp with its body's size.
+    [(_group, block, pointer)] = mf._owner_words(tmp_path, [SimpleNamespace(task="bound", entry=(None, {}, 0))]).values()
+    assert shared.ORIGIN in block and pointer.startswith("## My human's words for this work (by reference)\n[2026-09-01T00:05:00+00:00 · owner · ")
+    assert shared.ORIGIN not in pointer and pointer.endswith(f"({len(shared.ORIGIN)} chars — not shown: the input could not hold them)")
     assert "Earlier helper retelling of this period, not a source, may be wrong" in llm.prompts[0]
     assert "Alpha worked." in llm.prompts[0] and "Beta asked." not in llm.prompts[0]
     assert "remembering" not in llm.prompts[0]

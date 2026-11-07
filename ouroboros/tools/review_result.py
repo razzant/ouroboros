@@ -299,8 +299,9 @@ def _ask(ctx: Any) -> str:
         readings = marks_in_force(ctx, str(getattr(ctx, "task_id", "") or "")) if getattr(ctx, "drive_root", None) else []
     except Exception as exc:  # an unreadable store hides nothing else of what was asked
         lines.append(_ASK_WORDS["readings_unreadable"].format(error=f"{type(exc).__name__}: {exc}"))
-    else:
+    else:  # a mark's further lines are indented under its own, as a row's words are (``words_block``)
         lines += [_ASK_WORDS["readings"], *(_ASK_WORDS["reading"].format(**{**item, "own": _ASK_WORDS["own"] if item["own"] else ""})
+                                            .replace("\n", "\n  ")
                                             for item in readings)] if readings else []
     return "\n".join(lines) or _ASK_WORDS["none"]
 
