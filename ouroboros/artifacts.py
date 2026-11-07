@@ -1147,7 +1147,8 @@ def stream_artifact_file(path: Any, sink: Any = None, *, expected: Any = None) -
     digest, size = sha256(), 0
     def identity(observation: os.stat_result) -> tuple:
         return (observation.st_dev, observation.st_ino, observation.st_size,
-                observation.st_mtime_ns, observation.st_ctime_ns)
+                observation.st_mtime_ns,
+                *( () if os.name == "nt" else (observation.st_ctime_ns,) ))
     from ouroboros.store import open_for_read  # a held store file keeps its locks (no new descriptor to close)
 
     # Reject pipes/devices before opening: the descriptor check alone comes too
