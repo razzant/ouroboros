@@ -863,6 +863,44 @@ def test_service_outputs_register_artifacts_on_stop(tmp_path, monkeypatch):
     assert artifact_path.read_text(encoding="utf-8") == "<h1>ok</h1>"
 
 
+def test_service_output_left_unchanged_is_captured_at_stop_then_reused(tmp_path, monkeypatch):
+    from ouroboros.tools.services import stop_task_services
+
+    _force_light_runtime(monkeypatch)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry._ctx.task_id = "task-service-unchanged"
+    task_drive = drive / "task_drives" / "task-service-unchanged"
+    task_drive.mkdir(parents=True)
+    (task_drive / "report.md").write_text("# service report\n", encoding="utf-8")
+
+    def start(name):
+        started = registry.execute("start_service", {
+            "name": name,
+            "cmd": [sys.executable, "-c", "print('READY', flush=True)"],
+            "cwd": str(task_drive),
+            "outputs": ["report.md"],
+            "readiness": {"timeout_sec": 1},
+        })
+        assert "BLOCKED" not in started, started
+        _wait_for_service_log(drive, "task-service-unchanged", f"{name}.log", lambda b: b"READY" in b)
+
+    start("verifier")
+    stopped = registry.execute_result("stop_service", {"name": "verifier"})
+    # Declared and left unchanged by the service, the existing report is still its deliverable.
+    assert stopped.code == "OK" and stopped.meta.get("artifact_registered") is True, stopped.text
+    assert "ARTIFACT_OUTPUTS" in json.loads(stopped.text)["artifact_outputs"]
+    assert registry.execute("read_file", {"root": "artifact_store", "path": "report.md"}).count("# service report") == 1
+    start("again")
+    finalized = stop_task_services(registry._ctx)  # the ordinary task-end stop finds that capture current
+    assert [item["lifecycle"] for item in finalized] == ["stopped"]
+    assert finalized[0]["artifact_outputs"].startswith("ARTIFACT_OUTPUT_NOTE")
+    assert "unchanged output (cosmetic): report.md" in finalized[0]["artifact_outputs"]
+
+
 def test_stop_task_services_preserves_output_finalization_failure(tmp_path, monkeypatch):
     from ouroboros.outcomes import derive_loop_outcome
     from ouroboros.tools.services import stop_task_services

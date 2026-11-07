@@ -129,9 +129,11 @@ def test_shell_catalog_schema_bytes_and_handler_owners_are_stable():
     # tool-reuse sprint (20.10): run_script says the selected cwd is not on Python's
     # import path and that a reusable script lives in a skill payload run with run_command.
     # Rolled for the R1 platform-wait refusal: both timeout_sec descriptions say only the task's deadline or budget
-    # narrows a timeout and that one this platform cannot wait on is refused.
+    # narrows a timeout and that one this platform cannot wait on is refused. Rolled for #2916: both outputs
+    # descriptions say an eligible path is captured even if this run left it unchanged, and that outside Cyber
+    # Pro a system_repo file is eligible only while it has uncommitted changes.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "8fa8cdd98000032c970512ab62996281bdff885e80e977699ae2b220edb71309"
+        "07ffdfbcbf50ef1758a1cff61817698be4eed420b785b356d4b5fa1865ed89f6"
     )
     original = json.loads(schema_bytes)
     for schema in original:

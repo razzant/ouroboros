@@ -724,7 +724,7 @@ def get_tools() -> List[ToolEntry]:
 	                    "type": "array",
 	                    "items": {"type": "string"},
 	                    "default": [],
-	                    "description": "Generated paths copied/registered after success, e.g. outputs=['report.txt']. The managed artifact directory is created lazily; do not move files into an assumed physical store. A declaration whose location is refused stops the call before it starts. Only outputs accept a relative '../' spelling, judged by its resolved location like an absolute one; cwd and file-tool path rules are unchanged.",
+	                    "description": "Paths captured into the task artifact store after success, e.g. outputs=['report.txt']. An eligible path is captured even if this run left it unchanged; outside Cyber Pro a system_repo file is eligible only while it has uncommitted changes. The managed artifact directory is created lazily; do not move files into an assumed physical store. A declaration whose location is refused stops the call before it starts. Only outputs accept a relative '../' spelling, judged by its resolved location like an absolute one; cwd and file-tool path rules are unchanged.",
 	                },
 	                "scratch": {
 	                    "type": "array",
@@ -770,7 +770,7 @@ def get_tools() -> List[ToolEntry]:
 	                    "type": "array",
 	                    "items": {"type": "string"},
 	                    "default": [],
-	                    "description": "Generated paths copied/registered after success, e.g. outputs=['report.txt']. The managed artifact directory is created lazily; do not move files into an assumed physical store. A declaration whose location is refused stops the call before it starts. Only outputs accept a relative '../' spelling, judged by its resolved location like an absolute one; cwd and file-tool path rules are unchanged.",
+	                    "description": "Paths captured into the task artifact store after success, e.g. outputs=['report.txt']. An eligible path is captured even if this run left it unchanged; outside Cyber Pro a system_repo file is eligible only while it has uncommitted changes. The managed artifact directory is created lazily; do not move files into an assumed physical store. A declaration whose location is refused stops the call before it starts. Only outputs accept a relative '../' spelling, judged by its resolved location like an absolute one; cwd and file-tool path rules are unchanged.",
 	                },
 	                "scratch": {
 	                    "type": "array",
