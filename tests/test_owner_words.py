@@ -249,7 +249,8 @@ def test_a_handoff_renders_the_rooms_rows_live_dated_in_the_unions_order_and_eve
     monkeypatch.undo()
     # Every ingress branch, through its own seam. A root in Main: the door; owner mail with its chat row held and
     # without one; an answer with its row; a card frame; a direct delivery with a dated payload, an undated one
-    # and plain text; a place turn's words mid-turn; a relayed quote.
+    # and plain text; a relayed quote. A confirmed place account's words mid-turn are recorded dated as
+    # provenance (``PLACE_CONFIRMED``, outside the set): an order exists only through a verified cite.
     main = build_owner_message_ref(chat_id=1, client_message_id="cm-door", ts=_at(1), text="Build it")
     root = _ctx(tmp_path, task_id="main0001", metadata={"origin_message_ref": main, "origin_message_text": "Build it"})
     messages = [{"role": "user", "content": "Build it"}]
@@ -287,17 +288,21 @@ def test_a_handoff_renders_the_rooms_rows_live_dated_in_the_unions_order_and_eve
         ("ctx", "msg mail-2", f"received {received['Mailbox only']}", "Mailbox only"),
         ("ctx", "chat 1 / cm-ans", _at(3), "1. Publish it"),
         ("ctx", "msg card-1", f"received {received['[Card] typed into the card']}", "[Card] typed into the card"),
-        ("ctx", f"msg chat {presence_chat_id('tg:123')} / ev-2", f"received {received['Place words mid-turn']}",
-         "Place words mid-turn"),
         ("ctx", "chat 1 / cm-relay", _at(5), "Quoted by the teller")]
-    assert ow.render_owner_words(rows, audience="child").count("[received ") == 5
-    # A place turn's opening (no event time is stored: undated), a presence contact's late answer (the card's
-    # ``answered_at``), and a row recorded before the update (as recorded, read under its held row's room).
+    assert ow.render_owner_words(rows, audience="child").count("[received ") == 4
+    place = [item for item in root._owner_directives if item.get("content") == "Place words mid-turn"]
+    assert [(item["source"], item.get("msg_id"), item.get("carried")) for item in place] == [
+        (ow.PLACE_CONFIRMED, f"chat {presence_chat_id('tg:123')} / ev-2", True)]
+    # A place turn's opening: the confirmed account's words are provenance under the event's reference, in no
+    # set; a presence contact's late answer (the card's ``answered_at``); and a row recorded before the update
+    # (as recorded, read under its held row's room).
     focus = {"addressed": True, "actor": {"owner_confirmed": True}, "room_chat_id": 555}
     opening = _ctx(tmp_path, task_id="pres0001", task_type="presence", metadata={
         "focus": focus, "presence": {"observed_text": "Place words at the opening", "event": {"source_event_id": "ev-1"}}})
     _initialize_owner_directives(opening, [{"role": "user", "content": "[event frame]"}])
-    assert _stamps(ow.work_words(opening)[0]) == [("ctx", "msg chat 555 / ev-1", "", "Place words at the opening")]
+    assert _stamps(ow.work_words(opening)[0]) == [] and [
+        (item["source"], item.get("msg_id"), item.get("carried")) for item in opening._owner_directives
+        if item.get("source") == ow.PLACE_CONFIRMED] == [(ow.PLACE_CONFIRMED, "chat 555 / ev-1", True)]
     late_card = {"quiz_id": "q9", "question": "Go?", "state": "answered", "answered_index": 1, "options": ["No", "Yes"],
                  "presence_contact": True, "answered_after_terminal": True, "answered_at": _at(6)}
     late = _ctx(tmp_path, task_id="late0001", metadata={"late_answer": {
