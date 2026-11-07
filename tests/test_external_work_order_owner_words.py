@@ -299,6 +299,72 @@ def test_a_session_tasks_work_order_is_a_function_of_its_record_and_its_first_st
     assert session_host_references(nanny, target_root=str(tmp_path), source_root=str(tmp_path), start_body=direct) == plain
 
 
+def test_a_session_start_carries_the_marks_in_force_and_the_outline_outside_the_work_order(tmp_path, monkeypatch):
+    """Both directions of the memory delivery. A session's start references carry, after the owner rules, the
+    marks in force for the session task's room and the global ones (another room's not), the same bytes the
+    memory view renders for a native helper, and the knowledge outline a native helper starts with (every note by
+    address and title, a person's summary kept, a plain summary and every body one read away); the work order
+    and its fingerprint do not move. A session task scheduled before the update (no room rows on its record)
+    starts with the same references: they sit outside the digest pins."""
+    import dataclasses
+
+    from ouroboros import memory_view as mv
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.knowledge import resolve_knowledge_address, write_knowledge_note
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+    from ouroboros.subagent_work_order import session_host_references, work_order_room_words
+    from ouroboros.tools import control
+    from tests._memory_inventory_shared import MIND
+    from tests._memory_view_context import section
+    from tests.test_available_subagents_runtime import _api_row, _session_row, _settings
+
+    monkeypatch.setattr(control, "load_settings", lambda: _settings(_api_row(), _session_row()))
+    room = create_project(tmp_path, "quotas", name="Quotas")["chat_id"]
+    other = create_project(tmp_path, "audits", name="Audits")["chat_id"]
+    bind_task_to_project(tmp_path, "root", "quotas", room, origin={"absent": "system"})
+    store = ChronicleStore(tmp_path)
+    assert store.ensure_activated()["kind"] == "activation"
+    store.mark({"kind": "task", "task_id": "x"}, "For everyone", MIND, room_id="1", scope="global")
+    store.mark({"kind": "task", "task_id": "tq"}, "Watch the quotas", MIND, room_id=str(room))
+    store.mark({"kind": "task", "task_id": "ta"}, "Watch the audits", MIND, room_id=str(other))
+    for topic, scope, note in (
+            ("people/owner", "global", "---\ntitle: My human\ntype: person\nsummary: PERSON_SUMMARY\n---\n# Owner\n"),
+            ("shelf-plan", "global", "---\ntitle: Shelf plan\nsummary: PLAIN_SUMMARY\n---\n# Plan\nPLAN_BODY\n"),
+            ("room-plan", "project:quotas", "---\ntitle: Quotas plan\nsummary: ROOM_SUMMARY\n---\n# Quotas\nROOM_BODY\n")):
+        assert write_knowledge_note(resolve_knowledge_address(tmp_path, topic, scope), note).ok
+    root = _root(tmp_path)
+    _event, _stored, session = _schedule(root, subagent_id="session-builder")
+    launched, fingerprint = compile_external_work_order(session), work_order_fingerprint(session)
+    nanny = _child(tmp_path, session)
+    nanny.project_id = "quotas"  # the worker's resolved Project scope rides ctx.project_id, as the native builder reads it
+    head = "\n\nMEMORY DELIVERY (host instructions, separate from canonical work order)\n"
+    references = session_host_references(nanny, target_root=str(tmp_path), source_root=str(tmp_path))
+    assert references.count(head) == 1 and references.index("OWNER RULES DELIVERY") < references.index(head)
+    memory = references.split(head, 1)[1]
+    marks = section(memory, "## Marks I keep in view")
+    assert "For everyone" in marks and "Watch the quotas" in marks and "Watch the audits" not in memory
+    spec = dataclasses.replace(mv.view_spec_for_task(session, tmp_path), owner_words=False)  # the nanny's own marks
+    native = mv.capture_memory_view(tmp_path, session, spec)
+    assert native.spec.marks == "room_and_global" and native.spec.room_id == str(room)
+    assert marks == section(mv.render_room(native), "## Marks I keep in view")  # the same bytes a native helper reads
+    outline, project = section(memory, "## Knowledge outline"), section(memory, "## Project knowledge outline (quotas)")
+    for address, title in (("people/owner", "My human"), ("shelf-plan", "Shelf plan")):
+        assert address in outline and title in outline
+    assert "PERSON_SUMMARY" in outline and "room-plan" in project and "Quotas plan" in project
+    assert "PLAIN_SUMMARY" not in memory and "ROOM_SUMMARY" not in memory and "PLAN_BODY" not in memory
+    assert memory.index("## Marks I keep in view") < memory.index("## Knowledge outline") < memory.index("## Project knowledge")
+    # The work order is untouched: the delivery sits outside it and its fingerprint.
+    assert head.strip() not in launched and "For everyone" not in launched and "## Knowledge outline" not in launched
+    assert compile_external_work_order(session) == launched and work_order_fingerprint(session) == fingerprint
+    # The other side: a session task scheduled before the update renders the same references from its start.
+    older = {**session, "metadata": {key: value for key, value in session["metadata"].items() if key != ow.ROOM_FIELD}}
+    assert work_order_room_words(older) is None and work_order_room_words(session) is not None
+    before = _child(tmp_path, older)
+    before.project_id = "quotas"
+    assert session_host_references(before, target_root=str(tmp_path), source_root=str(tmp_path)) == references
+    assert compile_external_work_order(SNAPSHOT_TASK) == SNAPSHOT_TEXT and work_order_fingerprint(SNAPSHOT_TASK) == SNAPSHOT_SHA
+
+
 def test_the_authority_fingerprint_does_not_move_with_the_words(tmp_path):
     from ouroboros.delegate_recovery import authority_fingerprint_from_context
 

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
 from hashlib import sha256
 from typing import Any, Mapping
+
+log = logging.getLogger(__name__)
 
 # Recorded beside the owner's words when a declared child is scheduled: its selection carries them
 # (BIBLE P1). A declared task scheduled before this fact existed keeps the selection it started with,
@@ -546,13 +549,53 @@ def unseen_words_section(ctx: Any, text: str, fact: str) -> str:
     return render_owner_words(rows, audience="session", root_task_id=root, gaps=[*gaps, fact])
 
 
+def session_memory_references(ctx: Any) -> str:
+    """The marks in force for the session task's room (this room's and the global ones) and the knowledge outline
+    (the global shelf's and its room's: every note by address and title, people's summaries kept) as text in a
+    session's start request: what a native helper's view holds, pinned outside the canonical work order and its
+    fingerprint, so a session task scheduled before the update starts with them too. The stores are read once as
+    they stand, through the memory view's own capture and render (``memory_view._capture_marks``, ``render_room``
+    over a marks-only snapshot) and the helper's outline (``context_sections.helper_navigation_sections``); nothing
+    is written or activated here. A retry replays the recorded bytes."""
+    import dataclasses
+
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.context_sections import helper_navigation_sections
+    from ouroboros.memory_inventory import membership_facts
+    from ouroboros.memory_view import (MemoryViewSnapshot, ROLE_DEFAULTS, _capture_marks, render_room, room_labeler,
+                                       view_room_id)
+    from ouroboros.tool_access_paths import canonical_data_root
+
+    head = ("\n\nMEMORY DELIVERY (host instructions, separate from canonical work order)\n"
+            "What my memory holds for this work as this start was prepared, as a native helper's request holds it: "
+            "the marks in force for this work's room and the global ones, then the knowledge outline (every note by "
+            "address and title). The calls named beside them are the host's own readers, not yours.\n\n")
+    meta = getattr(ctx, "task_metadata", None)
+    task = {**(meta if isinstance(meta, Mapping) else {}), "id": str(getattr(ctx, "task_id", "") or "")}
+    try:
+        root = canonical_data_root(ctx)
+        room = view_room_id(task, ctx, root, project_chat_ids=membership_facts(root).project_chat_ids)
+        spec = dataclasses.replace(ROLE_DEFAULTS["child"], room_id=room)
+        store = ChronicleStore(root)  # a chronicle never activated holds no mark; nothing activates it here
+        marks = tuple(_capture_marks(store, spec, room_labeler(root))) if store.log_path.exists() else ()
+        marks_text = render_room(MemoryViewSnapshot(spec=spec, store_status={"state": "active"}, frontier={}, marks=marks))
+        outline = "\n\n".join(helper_navigation_sections(root, str(getattr(ctx, "project_id", "") or "")))
+    except Exception as exc:  # an unreadable store is a named gap in the start, never a withheld start
+        log.warning("session references: my memory could not be read at this start", exc_info=True)
+        return head + f"My memory could not be read here ({type(exc).__name__}); this start carries no marks and no outline."
+    return head + "\n\n".join(part for part in (
+        marks_text or "No marks are in force for this work's room or globally.", outline) if part)
+
+
 def session_host_references(ctx: Any, *, target_root: str, source_root: str,
                             private_copy: bool = False, payload_skill: str = "", service: Any = None,
                             start_body: str | None = None) -> str:
     """Host references pinned in a session's start request, computed once at first start.
 
     Own-body DESIGN navigation and BIBLE path, the owner's standing rules for every session (declared
-    inputs included: they govern the work, as BIBLE does), and the installed instruction-skill index for any workspace;
+    inputs included: they govern the work, as BIBLE does), the marks in force and the knowledge outline as text
+    (``session_memory_references``: outside the work order's fingerprint, at every start of the line), and the
+    installed instruction-skill index for any workspace;
     a skill-payload builder also gets the serving host's skill contract, whatever its input
     selection, and any other private copy its environment facts: dependency files read at the
     copy's repository root, the environment placed where the session may write (``source_root``,
@@ -567,7 +610,7 @@ def session_host_references(ctx: Any, *, target_root: str, source_root: str,
 
     text = (session_design_navigation(ctx, target_root=target_root, source_root=source_root)
             + session_constitution_pointer(ctx, target_root=target_root, source_root=source_root)
-            + owner_rules_section(session=True) + session_skill_index(ctx))
+            + owner_rules_section(session=True) + session_memory_references(ctx) + session_skill_index(ctx))
     tail = unseen_words_section(ctx, start_body, START_TAIL_FACT) if start_body is not None else ""
     tail = f"\n\n{tail}" if tail else ""
     if payload_skill:

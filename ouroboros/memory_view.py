@@ -151,12 +151,11 @@ _FIELDS = {field.name: field.type for field in dataclasses.fields(ViewSpec)}
 
 
 def view_role(task: Mapping[str, Any]) -> str:
-    """The view role, first match wins, in ``knowledge.focus_signature``'s order.
-
-    A nanny is the one dispatch fact (``_nanny_route_dispatched_for``), then a delegated
-    child, an explicit focus cause, a wake's ledger category, and legacy Presence.
-    Everything else integrates.
-    The facts are read at the task's top level or under ``metadata``.
+    """The view role, first match wins, in ``knowledge.focus_signature``'s order: a nanny is the one
+    dispatch fact (``_nanny_route_dispatched_for``), then a delegated child, an explicit focus cause,
+    a wake's ledger category, and legacy Presence; everything else integrates. The facts are read at
+    the task's top level or under ``metadata``; a child's role also under ``task_contract.lineage``,
+    as the declared validator reads it (``context_input_selection._validate_declared_input_task``).
     """
     from ouroboros.consciousness_authority import CONSCIOUSNESS_CATEGORY, WAKE_CAUSE_FOCUS, wake_cause
     from ouroboros.subagent_dispatch_notes import _nanny_route_dispatched_for  # D03->D07 is lazy-only
@@ -164,7 +163,8 @@ def view_role(task: Mapping[str, Any]) -> str:
     meta = dict(_mapping(task.get("metadata")))
     if _nanny_route_dispatched_for(dict(task), None) or _nanny_route_dispatched_for(meta, None):
         return "nanny"
-    if str(task.get("delegation_role") or meta.get("delegation_role") or "").strip().lower() == "subagent":
+    lineage = _mapping(_mapping(task.get("task_contract") or meta.get("task_contract")).get("lineage"))
+    if str(task.get("delegation_role") or meta.get("delegation_role") or lineage.get("delegation_role") or "").strip().lower() == "subagent":
         return "child"
     if wake_cause({**task, **meta}) == WAKE_CAUSE_FOCUS:
         return "presence"

@@ -311,7 +311,10 @@ def test_the_view_fact_reaches_the_cap_info_the_task_context_and_one_event(tmp_p
 
 
 def test_a_declared_input_child_carries_the_view_fact_of_its_omissions(tmp_path):
-    """The one builder's view: a child's spec without the story and the room page, captured and recorded."""
+    """The one builder's view: a child's spec without the story and the room page, captured and recorded. The
+    role is read where the declared validator reads it: a role recorded only under ``task_contract.lineage``
+    draws the child view (its room's and the global marks, the outline), and an explicit ``memory_view`` widen
+    still applies to it."""
     env, memory, rooms = world(tmp_path)
     child = {"id": "kid", "chat_id": 1, "delegation_role": "subagent", "parent_task_id": "bound",
              "root_task_id": "bound", "task_contract": {"input_sources": "declared"},
@@ -321,6 +324,16 @@ def test_a_declared_input_child_carries_the_view_fact_of_its_omissions(tmp_path)
     assert cap["memory_view"]["role"] == "child" and spec["room_id"] == str(rooms["alpha"])
     assert spec["marks"] == "room_and_global" and not spec["story"] and not spec["room_page"] and not spec["room_lanes"]
     assert (memory.drive_root / "memory" / "chronicle").exists()  # the one capture activates, as a shared child's
+    lineage_only = {**{key: value for key, value in child.items() if key != "delegation_role"},
+                    "task_contract": {"input_sources": "declared", "lineage": {"delegation_role": "subagent"}}}
+    _out, lineage_cap = _messages(env, memory, lineage_only)
+    lineage_spec = lineage_cap["memory_view"]["spec"]
+    assert lineage_cap["memory_view"]["role"] == "child" and lineage_spec["room_id"] == str(rooms["alpha"])
+    assert lineage_spec["marks"] == "room_and_global" and lineage_spec["knowledge"] is False and lineage_spec == spec
+    _out, widened_cap = _messages(env, memory, {**lineage_only, "memory_view": {"knowledge": True}})
+    widened = widened_cap["memory_view"]["spec"]
+    assert widened_cap["memory_view"]["role"] == "child" and widened["knowledge"] is True  # the explicit widen applies
+    assert widened["marks"] == "room_and_global" and not widened["story"] and not widened["room_page"]
 
 
 @pytest.mark.parametrize("route,story", [("api_model", True), ("agent_session", False)])

@@ -472,8 +472,9 @@ def _validate_declared_input_task(task: Dict[str, Any]) -> None:
 def _declared_omissions(task: Dict[str, Any], spec: Any) -> Any:
     """The one builder's view of a declared request: the role's (a child's or a nanny's) without the story, the
     parent's room page and its open conversation; my human's words ride it as a shared child's unless the task
-    was scheduled before ``DECLARED_WORDS_FACT``; the marks in force and the knowledge outline ride it. The
-    receipt (``subagent_work_order.input_source_selection_receipt``) names each omission."""
+    was scheduled before ``DECLARED_WORDS_FACT``; the marks in force and the knowledge outline ride it. Identity,
+    WORLD, review history, skills and parent context are gated in the builder (``context._capture_context_core``).
+    The receipt (``subagent_work_order.input_source_selection_receipt``) names each omission."""
     import dataclasses
 
     from ouroboros.subagent_work_order import declared_inputs_carry_owner_words  # D03->D07 is lazy-only
