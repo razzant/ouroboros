@@ -34,6 +34,8 @@ class TaskSettingsSnapshot:
     settings: Mapping
     environ: Mapping
     actor_scope: tuple[Path, Mapping] | None = None
+    # Original task projection, before the first private cognition overlay.
+    projected_environ: Mapping | None = None
 
 
 def _next_task_setting(key: str) -> bool:
@@ -224,8 +226,10 @@ def _with_cognition(snapshot: TaskSettingsSnapshot, cognition: Mapping) -> TaskS
     values = cognition_overrides(cognition)
     values.pop("OUROBOROS_SUBAGENTS_MODE")  # this axis is live, never restored from an actor snapshot
     values["OUROBOROS_CONTEXT_MODE_AUTO_LOW"] = cognition.get("context_mode_auto_low", "false")
+    projected = snapshot.environ if snapshot.projected_environ is None else snapshot.projected_environ
     return replace(snapshot, settings=MappingProxyType({**snapshot.settings, **values}),
-                   environ=MappingProxyType({**snapshot.environ, **values}))
+                   environ=MappingProxyType({**snapshot.environ, **values}),
+                   projected_environ=projected)
 
 
 def _actor_scope(task: Mapping, drive_root: Path) -> tuple[Path, Mapping]:
@@ -403,7 +407,7 @@ def skill_environ() -> dict:
         with SETTINGS_ENV_LOCK:
             source = dict(os.environ)
     else:
-        source = dict(snapshot.environ)
+        source = dict(snapshot.environ if snapshot.projected_environ is None else snapshot.projected_environ)
     ours = projected_settings(source)
     return {key: value for key, value in source.items() if key not in ours or ours[key] != _value_digest(value)}
 
@@ -411,8 +415,9 @@ def skill_environ() -> dict:
 def skill_settings(settings_reader=None) -> dict:
     """What a skill reads: the settings document as it reads now, in a task or not (owner choice A, #1122).
 
-    The one reader behind a skill's ``PluginAPI.get_settings``, its scripts' and companions' environment and the
-    funded-credential disclosure of its handlers; grants and the manifest allowlist filter it afterwards; the
+    The one reader behind a skill's ``PluginAPI.get_settings``, its scripts' and companions' environment, the
+    funded-credential disclosure of its handlers and an explicit ``env_from_settings`` selection of commands,
+    scripts, verification and services; grants and the manifest allowlist filter a skill's view afterwards; the
     task's review reads keep its snapshot while its model, account and key reads share this view
     (``route_choice``, ``runtime_settings``). The loader lets the
     environment stand in for a key the document leaves unset, and a long-lived process still holds what earlier
@@ -425,8 +430,22 @@ def skill_settings(settings_reader=None) -> dict:
         return dict((settings_reader or config.load_settings)() or {})
 
 
+def selection_settings(*, settings_reader=None) -> dict:
+    """Current effective Settings for an explicit process selection (#2915).
+
+    Reuse the mirror-safe skill reader and the existing route overlay, without
+    restoring task values. Defaults and operator variables keep their precedence;
+    missing effective keys stay missing. Selection authority belongs to the caller.
+    """
+    from ouroboros.route_choice import live_settings_overlay
+
+    settings = skill_settings(settings_reader)
+    live_settings_overlay(settings)
+    return settings
+
+
 def runtime_settings(*, settings_reader=None) -> dict:
-    """Runtime document view; owner writers continue using config.load_settings."""
+    """Task document view; explicit process refs instead read selection_settings."""
     from ouroboros import config
 
     settings = dict((settings_reader or config.load_settings)() or {})
