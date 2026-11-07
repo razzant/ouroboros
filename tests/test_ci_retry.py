@@ -555,6 +555,32 @@ def _json(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+@pytest.mark.parametrize("last", [True, False], ids=["in-the-last-test", "with-more-to-run"])
+def test_a_session_timeout_stops_only_what_is_left(tmp_path, last):
+    """pytest-timeout asks the session to stop after any test that ends past its deadline, the last one too, and
+    the request alone made the exit status 1: a UI shard whose 313 tests all passed went red, crossing its
+    deadline in the last one (run 42395824706, shard 2). tests/conftest.py ends such a loop as a complete one;
+    with tests left, the session still stops before them."""
+    suite = tmp_path / "suite"
+    (suite / "tests").mkdir(parents=True)
+    expires = textwrap.dedent("""
+        def test_expires(request):
+            import pytest_timeout
+            request.config.stash[pytest_timeout.SESSION_EXPIRE_KEY] = 1.0  # The deadline passes in this test.
+        """)
+    other = "def test_other():\n    pass\n"
+    (suite / "tests" / "test_specimen.py").write_text(other + expires if last else expires + other, encoding="utf-8")
+    completed = subprocess.run(_command(tmp_path, suite, "--session-timeout=600"),
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+    output = completed.stdout + completed.stderr
+    if last:
+        assert completed.returncode == 0, output
+        assert "2 passed" in output and "session-timeout: 600.0 sec exceeded in the last test" in output
+    else:
+        assert completed.returncode == 1, output
+        assert "1 passed" in output and "session-timeout: 600.0 sec exceeded" in output
+
+
 @pytest.mark.parametrize("always", [False, True], ids=["fails-once", "fails-twice"])
 def test_a_real_session_retries_its_failure_once(tmp_path, always):
     suite = tmp_path / "suite"
