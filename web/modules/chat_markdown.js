@@ -288,7 +288,7 @@ function addressEnd(candidate) {
  * included), with each explicit http(s) address a chat link to its parsed destination. Nothing
  * else is read as structure, and the shown text is never rewritten: only the href is normalized.
  */
-export function renderLinkedPlainText(text) {
+export function linkify(text) {
     const source = String(text ?? '');
     let html = '';
     let from = 0;

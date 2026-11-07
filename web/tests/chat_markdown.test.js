@@ -9,7 +9,7 @@ import {
     parseChartConfig,
     prepareMarkdownSource,
     renderChatMarkdown,
-    renderLinkedPlainText,
+    linkify,
 } from '../modules/chat_markdown.js';
 
 test('prepareMarkdownSource neutralizes only raw HTML and leaves entities to the parser', () => {
@@ -160,19 +160,19 @@ const OWNER_TEXT_LINKS = [
     ['a & b\n\t<c>  https://e.com/x?y=1&z=2\r\n&amp;', [['https://e.com/x?y=1&z=2', 'https://e.com/x?y=1&z=2']]],
 ];
 
-test('renderLinkedPlainText keeps the owner text literal and links only its explicit http(s) addresses', () => {
+test('linkify keeps the owner text literal and links only its explicit http(s) addresses', () => {
     const anchor = /<a class="md-link" href="([^"]*)" target="_blank" rel="noopener noreferrer">([^<]*)<\/a>/g;
     const unescape = (value) => value.replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&#39;', "'")
         .replaceAll('&quot;', '"').replaceAll('&#96;', '`').replaceAll('&amp;', '&');
     for (const [source, expected] of OWNER_TEXT_LINKS) {
-        const html = renderLinkedPlainText(source);
+        const html = linkify(source);
         assert.deepEqual([...html.matchAll(anchor)].map(([, href, shown]) => [unescape(shown), unescape(href)]), expected, source);
         // No markup but those links, and the words read back exactly as written.
         const text = html.replace(anchor, '$2');
         assert.equal(text.includes('<'), false, source);
         assert.equal(unescape(text), source);
     }
-    assert.equal(renderLinkedPlainText(null), '');
+    assert.equal(linkify(null), '');
 });
 
 test('parseChartConfig accepts exactly the supported chart types', () => {

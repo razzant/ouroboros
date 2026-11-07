@@ -1,5 +1,5 @@
 import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
-import { bindMarkdownTables, destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown, renderChatMarkdown, renderLinkedPlainText } from './chat_markdown.js';
+import { bindMarkdownTables, destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown, renderChatMarkdown, linkify } from './chat_markdown.js';
 import { renderPageHeader } from './page_header.js';
 import { renderSkillIcon, strokeIcon } from './page_icons.js';
 import { bindScrollFade } from './scroll_fade.js';
@@ -2242,7 +2242,7 @@ export function createChatInstance({
         const shown = attachments.length ? attachmentCaption(text, attachments,
             { placeholder: opts.textPlaceholder === true, composed: source === 'web' }) : text;
         const rendered = role === 'user'
-            ? renderLinkedPlainText(shown)
+            ? linkify(shown)
             : skillReview
                 ? renderSkillReviewDisclosure(text, opts.skillReview || null)
                 : role === 'system' && markdown !== true
