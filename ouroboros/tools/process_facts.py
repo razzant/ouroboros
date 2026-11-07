@@ -68,8 +68,10 @@ def redact_process_data(value):
 
 @contextlib.contextmanager
 def process_environment_scope(ctx, name, arguments):
-    """One admitted Settings snapshot shared by resolution and nested launchers."""
-    from ouroboros.config import load_settings, runtime_settings
+    """One admitted Settings read shared by resolution and nested launchers: the saved document as it reads now
+    (``skill_settings``), never the task's entry snapshot, so a key saved, cleared or deleted while the task runs
+    reaches its next selection as saved."""
+    from ouroboros.settings_integrity import skill_settings
     from ouroboros.workspace_executor import resolve_process_env, validate_process_env
     from ouroboros.tools.tool_result import ToolResult
 
@@ -85,8 +87,7 @@ def process_environment_scope(ctx, name, arguments):
                 error = ToolResult(status="blocked", code="ACCESS_BLOCKED",
                     text="⚠️ PROCESS_ENV_REFERENCE_BLOCKED: this task cannot select settings-backed process environment.")
             else:
-                prepared = resolve_process_env(None, refs,
-                    settings=runtime_settings(settings_reader=load_settings) if refs else None)
+                prepared = resolve_process_env(None, refs, settings=skill_settings() if refs else None)
         except ValueError as exc:
             error = ToolResult(status="error", code="TOOL_ARG_ERROR", text=f"⚠️ TOOL_ARG_ERROR: {exc}")
     _process_facts_tls.environment = prepared

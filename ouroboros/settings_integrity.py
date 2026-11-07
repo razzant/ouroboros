@@ -411,8 +411,9 @@ def skill_environ() -> dict:
 def skill_settings(settings_reader=None) -> dict:
     """What a skill reads: the settings document as it reads now, in a task or not (owner choice A, #1122).
 
-    The one reader behind a skill's ``PluginAPI.get_settings``, its scripts' and companions' environment and the
-    funded-credential disclosure of its handlers; grants and the manifest allowlist filter it afterwards; the
+    The one reader behind a skill's ``PluginAPI.get_settings``, its scripts' and companions' environment, the
+    funded-credential disclosure of its handlers and an explicit ``env_from_settings`` selection of commands,
+    scripts, verification and services; grants and the manifest allowlist filter a skill's view afterwards; the
     task's review reads keep its snapshot while its model, account and key reads share this view
     (``route_choice``, ``runtime_settings``). The loader lets the
     environment stand in for a key the document leaves unset, and a long-lived process still holds what earlier
