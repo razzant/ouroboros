@@ -252,6 +252,13 @@ def model_account_options(model: str, *, role: str = "", settings: Any = None,
     return options
 
 
+def evidence_model_route(evidence: Any, model: str) -> Dict[str, str]:
+    """The receipt-shaped route a Claudexor plan carries: the evidence's account and the native model."""
+    return {"source": str(getattr(evidence, "source_id", "") or ""), "model": str(model).partition("=")[2],
+            "credentialProfileId": str(getattr(evidence, "credential_profile_id", "") or ""),
+            "accountFingerprint": str(getattr(evidence, "account_fingerprint", "") or "")}
+
+
 # --- Persistence ---------------------------------------------------------------
 
 def canonical_evidence_root() -> pathlib.Path:
@@ -608,7 +615,10 @@ def resolve_main_token_density(
 
     View kinds are exact: unclassified legacy rows never calibrate a classified
     focus, own wake or owner turn. When sizing a candidate, compare raw input with raw input (``prompt_chars / 4``),
-    within a factor of two. A small helper cannot calibrate a large conversation.
+    within a factor of two. A small helper cannot calibrate a large conversation. A Claudexor model's accounts share
+    one engine, serializer and tokenizer, and a witness is written under the account that served while a start asks
+    under the one advertised: without an exact-route witness the newest comparable one of the same model bucket,
+    view and basis serves (``fresh_model_usage``), a density estimate only, never a window or an account's anchor.
     """
     try:
         store = _read(drive_root).get("token_density", {}) or {}
@@ -618,15 +628,19 @@ def resolve_main_token_density(
             return str(item[0].get("view_kind") or "") == view_kind and (estimate_tokens is None
                 or estimate_tokens / 2 <= int(item[0]["prompt_chars"]) / 4 <= estimate_tokens * 2)
 
+        def newest(items):
+            return max(enumerate(items), key=lambda item: (*_density_recency_key(item[1][0]), item[0]))[1][1]
+
         route_pairs = [
             item for item in _fresh_density_pairs(store, basis=MAIN_DENSITY_BASIS)
             if route and str(item[0].get("route_fp") or "") == route and comparable(item)
         ]
         if route_pairs:
-            return max(
-                enumerate(route_pairs),
-                key=lambda item: (*_density_recency_key(item[1][0]), item[0]),
-            )[1][1], "fresh_route_usage"
+            return newest(route_pairs), "fresh_route_usage"
+        model_pairs = [item for item in _fresh_density_pairs(store, _normalized_density_model(model_id), basis=MAIN_DENSITY_BASIS)
+                       if str(model_id).startswith("claudexor::") and item[0].get("route_fp") and comparable(item)]
+        if model_pairs:
+            return newest(model_pairs), "fresh_model_usage"
     except Exception:
         pass
     # Empirical tokenizer classes (audit D8), never a per-model window table.

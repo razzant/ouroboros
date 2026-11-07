@@ -560,9 +560,9 @@ def _rebind_context_fit_plan(
         )
     from ouroboros.context import _context_fit_route
     from ouroboros.primary_route_observation import held_primary_view
+    from ouroboros.capability_evidence import evidence_model_route
     from ouroboros.context_fit import (_failed_route_evidence, _route_calibration_ratio,
                                        estimate_context_prompt_tokens, main_output_reserve_tokens)
-    from ouroboros.provider_models import parse_claudexor_model
 
     role = model_role or getattr(plan, "model_role", "main")
     plan, start_mode = held_primary_view(tools._ctx, plan, start_mode, model=model, use_local=use_local, role=role)
@@ -589,18 +589,17 @@ def _rebind_context_fit_plan(
         model=str(route.get("model") or model), provider=str(route.get("provider") or ""), route_fp=scope))
     preferred = preferred_mode or getattr(plan, "preferred_mode", "")
     preferred = preferred if preferred in {"low", "max", "nano"} else "max"
+    output_reserve = main_output_reserve_tokens(use_local=bool(route.get("use_local", use_local)), evidence=evidence)
+    bound = bool(scope) and (route.get("provider") != "claudexor" or bool((route.get("options") or {}).get("account_fingerprint")))
+    window = resolve_window(evidence, output_reserve, bound=bound, observation_fp=scope)  # before density: it caps the key
+    window_tokens, known_window = window.total_equivalent, window.usable is not None
     ratio, carried = anchor.density if anchor is not None else _route_calibration_ratio(
-        None,  # canonical evidence root (one observation store)
-        str(getattr(evidence, "route_fp", "") or ""), str(route.get("model") or model),
-        estimate_context_prompt_tokens(messages, tool_schemas, provider=str(route.get("provider") or "")),
-        view_kind=plan.view_kind), None
+        None, str(getattr(evidence, "route_fp", "") or ""), str(route.get("model") or model),  # the canonical evidence root
+        min(estimate_context_prompt_tokens(messages, tool_schemas, provider=str(route.get("provider") or "")),
+            window.usable or float("inf")), view_kind=plan.view_kind), None  # compared at the size that can be sent
     if anchor is not None and route_window_kwargs(evidence)["window_basis"] != "estimator":  # that stays raw, as in a round
         ratio, carried = anchor.view_terms(estimate_context_prompt_tokens(  # the view sized below, not the one last shown
             plan.reproject_transcript(messages, start_mode or preferred), tool_schemas, provider=str(route.get("provider") or "")))
-    output_reserve = main_output_reserve_tokens(use_local=bool(route.get("use_local", use_local)), evidence=evidence)
-    bound = bool(scope) and (route.get("provider") != "claudexor" or bool((route.get("options") or {}).get("account_fingerprint")))
-    window = resolve_window(evidence, output_reserve, bound=bound, observation_fp=scope)
-    window_tokens, known_window = window.total_equivalent, window.usable is not None
     rebound = replace(
         plan,
         preferred_mode=preferred,
@@ -610,12 +609,7 @@ def _rebind_context_fit_plan(
         status=str(getattr(evidence, "status", "") or ""),
         stale=bool(getattr(evidence, "stale", False)),
         model_role=task["model_role"],
-        model_route={
-            "source": str(getattr(evidence, "source_id", "") or ""),
-            "model": parse_claudexor_model(str(route.get("model") or model))[1],
-            "credentialProfileId": str(getattr(evidence, "credential_profile_id", "") or ""),
-            "accountFingerprint": str(getattr(evidence, "account_fingerprint", "") or ""),
-        } if route.get("provider") == "claudexor" else {},
+        model_route=evidence_model_route(evidence, str(route.get("model") or model)) if route.get("provider") == "claudexor" else {},
         evidence_source=str(getattr(evidence, "source", "") or ""),
         **route_window_kwargs(evidence), window_record=window, window_tokens=window_tokens,  # with its own frame
         window_witness_bound=bound, route_base_url=str(route.get("base_url") or ""),

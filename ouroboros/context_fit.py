@@ -877,16 +877,18 @@ def build_context_fit_plan(
         known_window=known_window, output_reserve=output_reserve, window_record=window_record,
         working_reserve_tokens=working_reserve)
     governance = {form: _governance_blocks(env, core, mode=form) for form in ("max", "low")}
+    from ouroboros.capability_evidence import evidence_model_route
     from ouroboros.memory_view import start_room, view_role
 
     view_task = {**task, "metadata": task.get("metadata") or meta}
     role = view_role(view_task)
     view_kind = {"consciousness": "own_wake", "presence": "focus", "integrator": "owner_turn"}.get(role, role)
-    # Select density on the whole captured request before the single start walk.
+    # Select density before the single start walk, comparing the whole captured request at the size that can be sent.
     rows, schemas = _whole_request(core, governance, preferred, tool_schemas)
+    sendable = min(estimate_context_prompt_tokens(rows, schemas, provider=str(route.get("provider") or "")),
+                   window_record.usable or math.inf)
     ratio = 1.0 if window_basis == "estimator" else _route_calibration_ratio(
-        None, str(evidence.route_fp or ""), str(route["model"] or ""),
-        estimate_context_prompt_tokens(rows, schemas, provider=str(route.get("provider") or "")), view_kind=view_kind)
+        None, str(evidence.route_fp or ""), str(route["model"] or ""), sendable, view_kind=view_kind)
     levels, delivered = start_room(view_task, role), {}
 
     def fit(user_content_json: str) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict]], str]:
@@ -963,12 +965,7 @@ def build_context_fit_plan(
         low_projection=low_projection,
         nano_projection=nano_projection,
         model_role=str(route.get("model_role") or "main"),
-        model_route={
-            "source": str(getattr(evidence, "source_id", "") or ""),
-            "model": str(route["model"]).partition("=")[2],
-            "credentialProfileId": str(getattr(evidence, "credential_profile_id", "") or ""),
-            "accountFingerprint": str(getattr(evidence, "account_fingerprint", "") or ""),
-        } if route["provider"] == "claudexor" else {},
+        model_route=evidence_model_route(evidence, route["model"]) if route["provider"] == "claudexor" else {},
         evidence_source=window_record.source, window_record=window_record, window_witness_bound=bound,
         route_base_url=str(route.get("base_url") or ""),
         core=core,
