@@ -92,6 +92,18 @@ def test_one_start_lists_a_snapshot_s_floor_elements_once(tmp_path, monkeypatch)
     assert len(mf.floor_elements(fewer)) < len(mf.floor_elements(listed[0])) and len(listed) == 2
 
 
+def test_a_snapshot_s_element_table_is_never_read_under_a_different_ladder(monkeypatch):
+    """The table lives on the snapshot object, which the parse memo shares between starts: one listed under a narrowed
+    ``LADDER`` (a measurement's monkeypatch) is not read once the ladder differs; the next reader lists anew."""
+    forms = {'F7a', 'F5a', 'F8', 'F8a'}
+    snap = syn.live_scale()
+    with monkeypatch.context() as narrowed:
+        narrowed.setattr(mf, 'LADDER', tuple(step for step in mf.LADDER if step not in forms))
+        assert not forms & {step for step, *_ in mf.floor_elements(snap)}
+    assert mf.floor_elements(snap) == mf.floor_elements(dataclasses.replace(snap))  # a fresh object's own listing
+    assert forms & {step for step, *_ in mf.floor_elements(snap)}
+
+
 def _near_even_plan(root, monkeypatch, window, tail=61, owner=5199, pad=2, shift=1, identity=0, skills=None):
     """A small real start whose note's label sits within a token of its receipt clause, so each host step's own bytes
     can change whether the label saves: the whole request rounds differently beside every new address. ``identity``

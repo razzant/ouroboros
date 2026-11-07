@@ -92,11 +92,12 @@ class _Elements:
 
 def _elements(snapshot: mv.MemoryViewSnapshot) -> _Elements:
     """The snapshot's element table: a non-field attribute (``snapshot_json`` and equality never see it) that
-    lives as long as the snapshot object (``memory_view._parsed_view``); a replaced snapshot lists its own."""
-    table = snapshot.__dict__.get("_floor_elements")
-    if table is None:
+    lives as long as the snapshot object (``memory_view._parsed_view``); a replaced snapshot lists its own, and a
+    different ``LADDER`` (the steps a table lists) lists anew rather than reading a table it never built."""
+    ladder, table = snapshot.__dict__.get("_floor_elements") or ((), None)
+    if ladder != LADDER:
         table = _Elements(_list_elements(snapshot))
-        object.__setattr__(snapshot, "_floor_elements", table)
+        object.__setattr__(snapshot, "_floor_elements", (LADDER, table))
     return table
 
 
