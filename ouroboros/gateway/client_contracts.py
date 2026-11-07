@@ -441,6 +441,7 @@ class PlaceSummary(TypedDict):
     activity_coverage: str
     spent_24h_usd: Optional[float]
     account_candidates: List[Dict[str, Any]]
+    shared_owner_accounts: List[Dict[str, str]]  # confirmed in another place of this bot/app; count here
 
 
 class PlaceDisconnectRequest(TypedDict, total=False):

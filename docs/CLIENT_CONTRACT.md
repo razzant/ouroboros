@@ -615,8 +615,10 @@ manifest-derived `labels: {kind: label}`; connector rows also carry those labels
 using the `GET` of declared `source.url` it already performs for readiness. Status labels override manifest
 labels; shared core words are the fallback. Identity has optional `sends_as: {id, label, kind}` and
 `reads_as: [{id, label, kind}]`, with `kind: user|bot`. The browser derives `owner` only for user identities
-matching `owner_accounts` in the place's account scope, and `can_confirm` only for an unconfirmed user
-sender. The existing confirm writer takes `platform_actor_id = identity.sends_as.id`; no new writer or
+matching `owner_accounts` or `shared_owner_accounts` in the place's account scope, and `can_confirm` only for an
+unconfirmed user sender. Full summaries carry `shared_owner_accounts`: each account another place of the same
+connector and provider confirms for this place's account scope (`platform_actor_id`, `label`, `confirmed_at`,
+`account_id`, and that place's `place_id` and `place_label`); it counts here and is revoked there. The existing confirm writer takes `platform_actor_id = identity.sends_as.id`; no new writer or
 stored Place field is introduced. The server never dispatches a connector route for a place view, a
 focus, a Safety check or an own wake. Focus identity is the event's snapshot; other Safety targets and
 own-wake text read the first valid identity among the place's newest 50 captured arrivals (of the

@@ -83,6 +83,11 @@ def test_one_confirmation_counts_in_every_room_of_its_bot_or_app_and_nowhere_els
 
     assert admitted(sibling, "qa") is True and admitted(other_account, "other") is False
     assert places.get_place(tmp_path, sibling.place_id).owner_accounts == (), "the sibling's record stays as stored"
+    from ouroboros.place_projection import place_view  # the sheet's view says so, and where it was confirmed
+    shared = place_view(tmp_path, places.get_place(tmp_path, sibling.place_id))["shared_owner_accounts"]
+    assert [(row["platform_actor_id"], row["place_id"], row["place_label"]) for row in shared] == [
+        ("anton", place.place_id, "Team chat")]
+    assert place_view(tmp_path, places.get_place(tmp_path, other_account.place_id))["shared_owner_accounts"] == []
 
 
 def test_my_post_through_my_humans_account_is_never_their_words_and_their_same_words_still_are(tmp_path, place):

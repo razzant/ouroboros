@@ -442,14 +442,16 @@ def counted_owner_accounts(places: Iterable[Place]) -> dict[str, tuple[OwnerAcco
     the whole bot or app; a note may still say my human's words in one room are not orders, which is my reading,
     never a host gate. Derived at every read from the stored rows: nothing is copied into a place."""
     rows = list(places)
-    confirmed: dict[tuple[str, str], list[tuple[str, OwnerAccount]]] = {}
-    for place in rows:
-        for account in place.owner_accounts:
-            confirmed.setdefault((place.connector, place.provider), []).append(
-                (place.place_id, replace(account, account_id=account.account_id or place.account_id)))
-    return {place.place_id: place.owner_accounts + tuple(
-        account for source, account in confirmed.get((place.connector, place.provider), ()) if source != place.place_id)
-        for place in rows}
+    return {place.place_id: place.owner_accounts + tuple(account for _other, account in confirmed_elsewhere(rows, place))
+            for place in rows}
+
+
+def confirmed_elsewhere(places: Iterable[Place], place: Place) -> list[tuple[Place, OwnerAccount]]:
+    """``(other place, account)`` for each account another place of ``place``'s connector account confirms, scoped
+    to the account it was confirmed for (``counted_owner_accounts``); the sheet names where each was confirmed."""
+    return [(other, replace(account, account_id=account.account_id or other.account_id)) for other in places
+            if other.place_id != place.place_id and (other.connector, other.provider) == (place.connector, place.provider)
+            for account in other.owner_accounts]
 
 
 def place_rows(drive_root: Any) -> dict[str, Place]:
