@@ -931,6 +931,7 @@ _FAILURE_KIND_WORDS = {
     "provider_incomplete_response": "an incomplete response",
     "llm_empty_response": "an empty response",
     "llm_output_exhausted": "a reply that reached its length limit before any visible output",
+    "content_filter": "the provider's refusal of the content",
     "provider_body_error": "an error in the provider's response",
     "provider_error": "a provider error",
     "model_substituted": "an answer from a model other than the requested one",

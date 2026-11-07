@@ -170,10 +170,13 @@ def repository_root(path: Any, *, probe_cache: Optional[dict] = None) -> Optiona
     existing parent.  A failed probe is deliberately ``None`` rather than a
     foreign verdict. A caller may reuse probes within one classification only.
     """
-    candidate = Path(path).expanduser().resolve(strict=False)
-    probe = candidate if candidate.is_dir() else candidate.parent
-    while not probe.exists() and probe != probe.parent:
-        probe = probe.parent
+    try:
+        candidate = Path(path).expanduser().resolve(strict=False)
+        probe = candidate if candidate.is_dir() else candidate.parent
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+    except (OSError, RuntimeError, ValueError):  # a name the filesystem refuses (over-long, NUL) is a failed probe
+        return None
     if probe_cache is not None and probe in probe_cache:
         return probe_cache[probe]
     try:

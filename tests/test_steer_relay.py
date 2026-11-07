@@ -114,6 +114,61 @@ def test_continue_retains_an_unanswered_return_address(tmp_path):
     assert successor._open_relays["return"] == relay
 
 
+def test_a_context_row_the_head_then_tells_to_one_work_flips_its_members_fact_once(tmp_path, monkeypatch):
+    """A room row that went to a head stands as context at a root and, carried down, at its helper; the head's
+    tell_task quoting the row makes it this work's addressed mail: the root's next drain writes the helper one more
+    entry under carry:<address>, the helper shows it once more and its fact flips; a drain after that writes nothing."""
+    from supervisor import queue as q
+    from supervisor.steering import _handle_steer_task
+    from ouroboros.owner_mailbox import drain_owner_entries
+    from ouroboros.owner_relay import ROUTED_BY_HEAD, owner_quote, write_relay
+    from ouroboros.task_results import write_task_result
+
+    row, address = source(tmp_path)
+    write_task_result(tmp_path, "teller", "running", delegation_role="root", root_task_id="teller")
+    write_task_result(tmp_path, "helper", "running", delegation_role="subagent", parent_task_id="teller",
+                      root_task_id="teller")
+    monkeypatch.setattr(q, "DRIVE_ROOT", tmp_path)
+    root = context(tmp_path)
+    root.task_metadata = {"root_task_id": "teller"}
+    write_relay(tmp_path, "teller", relay_id=f"carry-context:{address}", note="", quotes=[owner_quote(tmp_path, row,
+                address=address)], chat_id=1, teller_task_id="teller", canonical_root=tmp_path,
+                host_carried={"went_to": ROUTED_BY_HEAD})  # the ingress: a head of the room routed the row
+
+    def drain(ctx, messages):
+        return _drain_incoming_messages(messages, queue.Queue(), tmp_path, ctx.task_id, None, set(), owner_ctx=ctx)
+
+    def mail(task_id):
+        return [entry["msg_id"] for entry in drain_owner_entries(tmp_path, task_id, include_acknowledged=True)]
+
+    drain(root, [])
+    assert mail("helper") == [f"relay:carry-context:{address}:helper"]
+    helper = context(tmp_path)
+    helper.task_id, helper.task_metadata = "helper", {"delegation_role": "subagent", "root_task_id": "teller",
+                                                      "parent_task_id": "teller"}
+    shown = []
+    assert not drain(helper, shown).get("owner_carried_addressed")
+    assert len(shown) == 1 and "(in the project room; routed by a head)" in shown[0]["content"]
+    assert "routed:head" not in shown[0]["content"]  # the marker is the record's; the member reads the clause
+    assert held_owner_messages(helper)[address]["carried"]["went_to"] == ROUTED_BY_HEAD
+    # The head tells the row to this work: addressed mail at the root, one more entry at the helper, its fact flipped.
+    head = context(tmp_path, row)
+    head.task_id, head.is_direct_chat = "head", True
+    supervisor = _supervisor_ctx(tmp_path, [])
+    supervisor.RUNNING = {"teller": {"task": {"id": "teller", "chat_id": 1, "root_task_id": "teller"}}}
+    supervisor.persist_queue_snapshot = lambda **_kwargs: True
+    head.event_queue = SimpleNamespace(put_nowait=lambda event: _handle_steer_task(event, supervisor))
+    _tell_task(head, "teller", "yours now", [address])
+    drain(root, [])
+    assert "carried" not in held_owner_messages(root)[address]
+    assert mail("helper") == [f"relay:carry-context:{address}:helper", f"relay:carry:{address}:helper"]
+    assert drain(helper, shown)["owner_carried_addressed"] == [address]
+    assert len(shown) == 2 and "(reached this work)" in shown[1]["content"]
+    assert held_owner_messages(helper)[address]["carried"]["went_to"] == ""
+    drain(root, [])
+    assert len(mail("helper")) == 2 and not drain(helper, shown).get("owner_carried_addressed") and len(shown) == 2
+
+
 # Shared host doubles used by the registry-corruption tests too.
 def _supervisor_ctx(tmp_path, notices):
     return SimpleNamespace(DRIVE_ROOT=tmp_path,

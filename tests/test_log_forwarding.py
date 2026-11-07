@@ -22,7 +22,7 @@ WORKER_BASELINE_TYPES = frozenset(
 # One producer publishes the SAME type twice (durable append + live
 # emit_log_event sibling); the forwarded append copy is suppressed.
 WORKER_SAME_TYPE_PAIRS = frozenset({
-    "provider_incomplete_response", "llm_empty_response", "provider_body_error",
+    "provider_incomplete_response", "llm_empty_response", "provider_body_error", "provider_content_refusal",
     "review_cycles_exhausted",
     # #1316: the durable tool-call start / wait-ended row IS the live frame's payload.
     "tool_call_started", "tool_call_timeout",

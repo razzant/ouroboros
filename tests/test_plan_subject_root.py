@@ -11,6 +11,8 @@ native seat's episode then runs for real over the exact request that substrate r
 """
 from __future__ import annotations
 
+import json
+import os
 import pathlib
 from types import SimpleNamespace
 
@@ -23,6 +25,7 @@ from tests.body_candidate_support import git, isolate, make_serving
 from tests.test_plan_task_tool import CLEAN, _call, _reply, _slots, _Substrate, _user_text, _write
 
 BRIEF = ".local/research/brief.md"
+MANAGED_URL = "https://example.invalid/razzant/ouroboros-managed.git"
 
 
 @pytest.fixture
@@ -33,6 +36,7 @@ def env(tmp_path, monkeypatch):
     (serving / "docs" / "CHECKLISTS.md").write_text("## Plan Review Checklist\n\nFIXTURE CHECKLIST ROW.\n", encoding="utf-8")
     git(serving, "add", "-A")
     git(serving, "commit", "-q", "-m", "governance")
+    git(serving, "remote", "add", "managed", MANAGED_URL)  # a source install's maintained update remote
     data = isolate(monkeypatch, tmp_path)
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
@@ -431,3 +435,282 @@ def test_a_late_reply_settles_from_its_recorded_assignment_after_the_candidate_i
 
     delivered = read_source(env.data, "t-late", sent["participants"][0]["delivery_ref"]).decode("utf-8")
     assert f"you review {env.clone.resolve()} " in delivered
+
+
+# ------------------------------------------------- a second body copy outside the folder and candidate (#2918)
+
+
+def _delivered(request):
+    """Every text an ask handed its seats: each packet message and each session task."""
+    return [*(_user_text(m["content"]) for messages in request.slot_messages.values() for m in messages),
+            *request.slot_session_tasks.values()]
+
+
+def _ungoverned(request):
+    return not any("## BIBLE.md (constitution" in text or "## Governance pack" in text for text in _delivered(request))
+
+
+def _sibling(env, kind):
+    """A second copy of the body outside the task's folder and its candidate (#2918), recognized only by its own Git
+    identity: a linked worktree of the serving repository, a clone with a local origin, or a linked worktree of a clone
+    whose one remote is the serving repository's ``managed`` URL. Its own BIBLE and ARCHITECTURE carry markers no
+    reviewer may be given: the pack is always the serving checkout's."""
+    if kind == "worktree":
+        root = env.tmp / "sibling-worktree"
+        git(env.serving, "worktree", "add", "-q", "--detach", str(root))
+    elif kind == "clone":
+        root = env.clone
+    else:
+        mirror = env.tmp / "managed-mirror"
+        git(env.tmp, "clone", "-q", str(env.serving), str(mirror))
+        git(mirror, "remote", "set-url", "origin", MANAGED_URL)
+        root = env.tmp / "managed-worktree"
+        git(mirror, "worktree", "add", "-q", "--detach", str(root))
+    (root / "BIBLE.md").write_text("# SIBLING_OWN_BIBLE\n", encoding="utf-8")
+    (root / "docs" / "ARCHITECTURE.md").write_text("# SIBLING_OWN_ARCHITECTURE\n", encoding="utf-8")
+    return root.resolve()
+
+
+def _copy_note(root):
+    return f"body: the declared paths change a recognized copy of Ouroboros's own body ({root})"
+
+
+def _serving_pack(env, request):
+    """The serving checkout's BIBLE and ARCHITECTURE reached both seats: their exact text in the packet seat's standing
+    frame, both locators as mandatory reads in the session seat's task (``_governed`` alone checks the headers)."""
+    from ouroboros.tools.review_helpers import load_governance_doc
+
+    frame, task, docs = _user_text(request.slot_messages["s1"][0]["content"]), request.slot_session_tasks["sess1"], (
+        "BIBLE.md", "docs/ARCHITECTURE.md")
+    return (_governed(env, request) and all(load_governance_doc(env.serving, rel) in frame for rel in docs)
+            and all(f"`{env.serving.resolve() / rel}`" in task for rel in docs))
+
+
+def _sent(request):
+    """Every byte an ask handed the substrate, as one text."""
+    import dataclasses
+
+    return json.dumps(dataclasses.asdict(request), default=str, ensure_ascii=False)
+
+
+def _policy_values(request):
+    """The request's policy; only the mandatory-read size follows each plan's own text."""
+    policy = dict(request.policy)
+    assert isinstance(policy.pop("native_mandatory_read_chars"), int)
+    return policy
+
+
+@pytest.mark.parametrize("kind, how", [("worktree", "git_common_dir"), ("clone", "remote_chain"), ("managed", "managed_remote")])
+def test_a_folderless_plan_in_a_second_body_copy_is_a_body_plan_and_moves_nothing(env, kind, how):
+    """A folderless task binds candidate A, then declares only absolute paths inside another copy B of the body. B's
+    own Git identity makes it body work, and nothing else moves: A stays the subject, the task's folder and read roots
+    stay, the request's policy is that of a plan inside A itself (no address for B), and the pack is the serving
+    checkout's, never B's own."""
+    from ouroboros import review_body_fact
+    from ouroboros.tool_access import profile_readable_root_paths
+    from ouroboros.tools.tool_resolution import active_repo_dir_for
+
+    sub = env.install()
+    sibling = _sibling(env, kind)
+    assert review_body_fact.body_fact(sibling, system_repo=env.serving, data_dir=env.data).how == how
+    control = env.ctx("t-in-candidate", project_id="proj-1")
+    env.prepare(control)
+    _write(control, affected_paths=["ouroboros/mod_a.py"], ask=["s1", "sess1"], attach=[BRIEF])
+    ctx = env.ctx("t-sibling", project_id="proj-1")
+    scratch = active_repo_dir_for(ctx).resolve()
+    candidate, _receipt = env.prepare(ctx)
+    reads = profile_readable_root_paths(ctx, operation="read")
+    text, result = _write(ctx, affected_paths=[str(sibling / "ouroboros" / "mod_a.py")], ask=["s1", "sess1"], attach=[BRIEF])
+    assert result.status == "ok", text
+    [revision] = _revisions(env, "t-sibling")
+    assert revision["body"] is True and revision["body_note"] == _copy_note(sibling), revision["body_note"]
+    plain, request = (call["request"] for call in sub.calls)
+    assert request.session_root == str(candidate) and _serving_pack(env, request)
+    assert "SIBLING_OWN" not in _sent(request) and str(sibling / "BIBLE.md") not in _sent(request)
+    # Nothing moves: the task's own folder, its read roots, what an attachment resolves against, the request's policy.
+    assert active_repo_dir_for(ctx).resolve() == scratch != candidate
+    assert profile_readable_root_paths(ctx, operation="read") == reads
+    assert not any(root == sibling or sibling in root.parents for _label, root in reads)
+    missing = [{"locator": BRIEF, "reason": "missing"}]
+    assert _asks(env, "t-sibling")[0]["omissions"] == _asks(env, "t-in-candidate")[0]["omissions"] == missing
+    assert _policy_values(request) == _policy_values(plain) and "native_candidate_root" not in request.policy
+
+
+def test_every_spelling_of_a_path_in_a_second_body_copy_reaches_its_own_repository(env):
+    """A file not created yet, ``file://``, a line selector, a relative path leaving the planning root and a list
+    that also names a foreign project all reach the second copy's own repository, which the note names."""
+    sibling = _sibling(env, "worktree")
+    ctx = env.ctx("t-spellings", project_id="proj-1")
+    candidate, _receipt = env.prepare(ctx)
+    target = sibling / "ouroboros" / "mod_a.py"
+    for n, paths in enumerate((
+        [str(sibling / "ouroboros" / "brand_new" / "module.py")],
+        [f"file://{target}"],
+        [f"{target}::lines=1-1"],
+        [os.path.relpath(target, candidate)],  # relative paths resolve against the planning root, here the candidate
+        [str(env.foreign / "src" / "app.py"), str(target)],
+    ), start=1):
+        text, result = (_write if n == 1 else _call)(ctx, affected_paths=paths)
+        assert result.status == "ok", text
+        revision = _revisions(env, "t-spellings")[-1]
+        assert (revision["n"], revision["body"], revision["body_note"]) == (n, True, _copy_note(sibling)), paths
+
+
+def test_foreign_and_unknown_repositories_beside_the_candidate_stay_core(env):
+    """Git identity decides, never names: a repository whose files carry the body's names and its linked worktree, a
+    folder in no repository, a ``file://`` path to nothing and no paths at all stay core, and so does a core change
+    that only attaches a file of a recognized second copy (evidence never decides). No pack reaches any seat."""
+    sub = env.install()
+    lookalike = env.tmp / "lookalike"
+    for relative in ("BIBLE.md", "docs/ARCHITECTURE.md", "ouroboros/__init__.py", "ouroboros/mod_a.py"):
+        (lookalike / relative).parent.mkdir(parents=True, exist_ok=True)
+        (lookalike / relative).write_text(f"lookalike {relative}\n", encoding="utf-8")
+    git(lookalike, "init", "-q")
+    git(lookalike, "remote", "add", "origin", "https://example.invalid/acme/app.git")
+    git(lookalike, "add", "-A")
+    git(lookalike, "commit", "-q", "-m", "lookalike")
+    linked = env.tmp / "lookalike-linked"
+    git(lookalike, "worktree", "add", "-q", "--detach", str(linked))
+    loose = env.tmp / "loose"
+    loose.mkdir()
+    sibling = _sibling(env, "worktree")
+    ctx = env.ctx("t-core", project_id="proj-1")
+    env.prepare(ctx)
+    for n, paths in enumerate((
+        [str(lookalike / "ouroboros" / "mod_a.py"), str(lookalike / "BIBLE.md"), str(linked / "ouroboros" / "mod_a.py")],
+        [str(loose / "notes.md")],
+        ["file:///nonexistent-path"],
+        [],
+    ), start=1):
+        text, result = (_write if n == 1 else _call)(ctx, affected_paths=paths, **({"ask": ["s1", "sess1"]} if n == 1 else {}))
+        assert result.status == "ok", text
+        revision = _revisions(env, "t-core")[-1]
+        assert (revision["n"], revision["body"]) == (n, False), (paths, revision["body_note"])
+    text, result = _call(ctx, affected_paths=[str(loose / "notes.md")], ask=["s1", "sess1"],
+                         attach=[str(sibling / "ouroboros" / "mod_a.py")])
+    assert result.status == "ok", text
+    revision = _revisions(env, "t-core")[-1]
+    assert (revision["n"], revision["body"]) == (5, False), revision["body_note"]
+    assert len(sub.calls) == 2 and all(_ungoverned(call["request"]) for call in sub.calls)
+
+
+def test_a_foreign_repository_nested_in_a_body_copy_keeps_its_classification(env):
+    """Only targets outside the recognized copies gain anything: a foreign repository nested in the task's own body
+    clone stays body work by that clone's containment, as before, and one nested in a second copy is judged by its own
+    identity, which is foreign; the step never climbs from a path's own repository to a containing one."""
+    sibling = _sibling(env, "worktree")
+    for root in (env.clone, sibling):
+        nested = root / "vendor" / "app"
+        (nested / "src").mkdir(parents=True)
+        (nested / "src" / "app.py").write_text("APP = 1\n", encoding="utf-8")
+        git(nested, "init", "-q")
+        git(nested, "remote", "add", "origin", "https://example.invalid/acme/app.git")
+    ctx = env.ctx("t-nested-in-copy", workspace_root=env.clone, workspace_mode="external")
+    _write(ctx, affected_paths=["vendor/app/src/app.py"])
+    _call(ctx, affected_paths=[str(sibling / "vendor" / "app" / "src" / "app.py")])
+    inside, beside = _revisions(env, "t-nested-in-copy")
+    assert inside["body"] is True and inside["body_note"] == _copy_note(env.clone.resolve()), inside["body_note"]
+    assert beside["body"] is False, beside["body_note"]
+
+
+def test_a_repository_is_judged_once_and_probes_are_reused_within_one_call_only(env):
+    """Probes are keyed by the nearest existing folder and reused within one call; a repository is judged once however
+    many folders its paths name. 500 new files under a recognized copy cost one probe and nothing declared after it is
+    probed or judged; a folder that becomes a copy between calls is recognized by the next call."""
+    from ouroboros import review_body_fact
+
+    sibling = _sibling(env, "worktree")
+    folder = env.tmp / "task-folder"
+    folder.mkdir()
+    ctx = env.ctx("t-sibling-probes", workspace_root=folder, workspace_mode="external")
+    probes, judged = [], []
+    real_git, real_fact = review_body_fact._git, review_body_fact.body_fact
+
+    def observed_git(root, *args):
+        if args == ("rev-parse", "--show-toplevel"):
+            probes.append(root)
+        return real_git(root, *args)
+
+    def observed_fact(root, **kwargs):
+        judged.append(pathlib.Path(root))
+        return real_fact(root, **kwargs)
+
+    env.monkeypatch.setattr(review_body_fact, "_git", observed_git)
+    env.monkeypatch.setattr(review_body_fact, "body_fact", observed_fact)
+
+    def classify(paths):
+        probes.clear()
+        judged.clear()
+        return plan_ask.plan_is_body(ctx, paths, system_root=env.serving, active_root=folder)
+
+    parts = [env.foreign / f"part-{i}" for i in range(5)]
+    for part in parts:
+        part.mkdir()
+    assert classify([str(parts[i % 5] / f"new-{i}" / "module.py") for i in range(500)])[0] is False
+    assert sorted(probes) == sorted(part.resolve() for part in parts) and judged == [env.foreign.resolve()]
+    fresh = env.tmp / "becomes-a-copy"
+    fresh.mkdir()
+    later = [str(fresh / f"new-{i}" / "module.py") for i in range(500)]
+    assert classify(later)[0] is False and probes == [fresh.resolve()] and judged == []
+    git(fresh, "init", "-q")
+    git(fresh, "remote", "add", "origin", str(env.serving))
+    assert classify(later) == (True, _copy_note(fresh.resolve())) and probes == [fresh.resolve()]
+    paths = [str(sibling / f"new-{i}" / "module.py") for i in range(500)]
+    assert classify(paths + later) == (True, _copy_note(sibling)) and probes == [sibling] and judged == [sibling]
+
+
+def test_a_task_folder_stays_the_subject_when_its_plan_reaches_a_second_body_copy(env):
+    """A task with its own foreign folder W and a bound candidate A: the revision that reaches copy B is a body plan,
+    W stays the subject, native seats keep reading A at the address the request freezes, and the packet seat that
+    answered the core revision continues its own transcript under the current frame, which now carries the pack."""
+    sub = env.install()
+    sibling = _sibling(env, "worktree")
+    ctx = env.ctx("t-folder-sibling", workspace_root=env.foreign, workspace_mode="external")
+    candidate, _receipt = env.prepare(ctx)
+    _write(ctx, affected_paths=["src/app.py"], ask=["s1", "sess1"])
+    _call(ctx, affected_paths=["src/app.py", str(sibling / "ouroboros" / "mod_a.py")], ask=["s1", "sess1"])
+    target = sibling / "ouroboros" / "mod_b.py"
+    from_folder, from_candidate = os.path.relpath(target, env.foreign.resolve()), os.path.relpath(target, candidate)
+    assert from_folder != from_candidate
+    _call(ctx, affected_paths=[from_folder])
+    _call(ctx, affected_paths=[from_candidate])
+    core, body, relative, elsewhere = _revisions(env, "t-folder-sibling")
+    assert core["body"] is False and body["body"] is True and body["body_note"] == _copy_note(sibling), body["body_note"]
+    assert relative["body"] is True and relative["body_note"] == _copy_note(sibling), relative["body_note"]
+    assert elsewhere["body"] is False, elsewhere["body_note"]  # relative paths resolve against W, never the candidate
+    first, second = (call["request"] for call in sub.calls)
+    assert _ungoverned(first) and _serving_pack(env, second) and "SIBLING_OWN" not in _sent(second)
+    assert [p["continued"] for p in _asks(env, "t-folder-sibling")[1]["participants"] if p["seat_id"] == "s1"] == [True]
+    assert [m["role"] for m in second.slot_messages["s1"]] == ["system", "user", "assistant", "user"]
+    for request in (first, second):
+        assert request.session_root == str(env.foreign.resolve()) and request.policy["native_candidate_root"] == str(candidate)
+    assert _policy_values(first) == _policy_values(second)
+
+
+def test_an_exempt_payload_path_in_a_second_copy_does_not_hide_an_ordinary_one(env):
+    """Exemption is per locator, judgement per repository: a skill-payload path in a second copy stays data and leaves
+    that copy unjudged, so an ordinary path in the same copy declared after it still makes the plan body work."""
+    holder = env.data / "skills"  # a linked worktree of the body that holds the drive's skill payloads
+    git(env.serving, "worktree", "add", "-q", "--detach", str(holder))
+    folder = env.tmp / "task-folder"
+    folder.mkdir()
+    ctx = env.ctx("t-payload-sibling", workspace_root=folder, workspace_mode="external")
+    payload, ordinary = str(holder / "external" / "toy-skill" / "plugin.py"), str(holder / "ouroboros" / "mod_a.py")
+    assert plan_ask.plan_is_body(ctx, [payload], system_root=env.serving, active_root=folder)[0] is False
+    assert plan_ask.plan_is_body(ctx, [payload, ordinary], system_root=env.serving, active_root=folder) == (
+        True, _copy_note(holder.resolve()))
+    env.monkeypatch.setattr(plan_ask, "plan_payload_roots", lambda _ctx, _paths: [])  # only the exemption kept it data
+    assert plan_ask.plan_is_body(ctx, [payload], system_root=env.serving, active_root=folder)[0] is True
+
+
+def test_a_name_the_filesystem_refuses_stays_core_instead_of_failing_the_write(env):
+    """A sentence pasted as a path can be a name the filesystem refuses (over 255 bytes): it lies in no repository, so
+    the revision is recorded as core in either spelling instead of failing (relative ones failed before #2918 too)."""
+    folder = env.tmp / "task-folder"
+    folder.mkdir()
+    ctx = env.ctx("t-long-name", workspace_root=folder, workspace_mode="external")
+    name = "Обновить_README_" * 30
+    for n, locator in enumerate((f"{name}/a.py", str(folder / name / "a.py")), start=1):
+        text, result = (_write if n == 1 else _call)(ctx, affected_paths=[locator])
+        assert result.status == "ok", text
+        assert [r["body"] for r in _revisions(env, "t-long-name")] == [False] * n

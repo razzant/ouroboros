@@ -45,9 +45,17 @@ def view_tokens(text: str) -> int:
     return estimate_tokens(json.dumps(str(text), ensure_ascii=False)) if text else 0
 
 
+def sealed_owner_rows(room: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """A project root's rows of its human that left the open conversation (``owner_words.project_words``), as F7
+    holds them before lane 1's: by their chat address, oldest first, uncovered (only physical pressure or the root's
+    own authored fold changes their form, into dated addresses); a store gap line is no row."""
+    return [item for item in room.get("project_words") or () if item.get("address")]
+
+
 def floor_elements(snapshot: mv.MemoryViewSnapshot) -> List[Tuple[str, str, str, str]]:
     """Ordered addressable forms, oldest first; F5 by covered-period start then sequence, across kinds.
-    Display order is independent. Core and governing words have no rung."""
+    Display order is independent. Core and governing words have no rung. F7 holds a project root's
+    sealed rows of its human before the open ones: dated addresses, never a retelling."""
     if not snapshot.active:
         return []
     room = snapshot.room or {}
@@ -64,8 +72,9 @@ def floor_elements(snapshot: mv.MemoryViewSnapshot) -> List[Tuple[str, str, str,
                for i in [*room.get("legacy", ()), *room.get("under_parts", ())]],
         "F7p": [(i["address"], i["line"], mv._row_pointer(i, "words")) for i in lane1
                 if i["kind"] != "ouroboros" and not i.get("owner_side", i["kind"] == "human")],
-        "F7": block["F7"] + [(i["address"], i["line"], mv._row_pointer(i, "words")) for i in lane1
-                             if i.get("owner_side", i["kind"] == "human") and not i.get("immune")],
+        "F7": [(i["address"], i["line"], i["short"]) for i in sealed_owner_rows(room)] + block["F7"]
+              + [(i["address"], i["line"], mv._row_pointer(i, "words")) for i in lane1
+                 if i.get("owner_side", i["kind"] == "human") and not i.get("immune")],
         "F5l": [(e["id"], "\n".join(mv._page_lines(e)), mv._page_label(e))
                 for e in sorted(snapshot.story, key=lambda e: tuple(e.get("floor_order", (0, 0))))
                 if e.get("kind") == "page" and not e.get("told_by")],
@@ -362,15 +371,19 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
 
 
 def owner_rows(snapshot: mv.MemoryViewSnapshot) -> Dict[str, Mapping[str, Any]]:
-    """My human's rows by their F7 id: this room's by address, my other conversations' by ``room:address``."""
+    """My human's rows by their F7 id: this room's by address (a project root's sealed rows, ``sealed_owner_rows``,
+    among them), my other conversations' by ``room:address``."""
+    room = snapshot.room or {}
     return {**conversations.owner_items(snapshot.conversations),
-            **{i["address"]: i for i in (snapshot.room or {}).get("lane1", ())}}
+            **{i["address"]: i for i in [*sealed_owner_rows(room), *room.get("lane1", ())]}}
 
 
 def uncovered_owner_rows(snapshot: mv.MemoryViewSnapshot, elements=None) -> List[Tuple[str, str, int, int]]:
     """This room's owner rows no page or note carries yet, oldest first; governing and unanswered rows have no
-    address. My human's words of my other conversations are ordinary F7 elements: they keep the work room."""
-    owner = {i["address"]: i for i in (snapshot.room or {}).get("lane1", ())}
+    address. A project root's sealed rows of its human count as uncovered: only physical pressure folds them. My
+    human's words of my other conversations are ordinary F7 elements: they keep the work room."""
+    room = snapshot.room or {}
+    owner = {i["address"]: i for i in [*sealed_owner_rows(room), *room.get("lane1", ())]}
     return [e for e in (degradable_elements(snapshot) if elements is None else elements)
             if e[0] == "F7" and e[1] in owner and not owner[e[1]].get("carried")]
 

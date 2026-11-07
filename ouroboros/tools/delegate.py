@@ -580,7 +580,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                 gateway.ensure_full_access(scope_root)
             seconds = bound.seconds
             documents = attach_selected_documents(ctx, gateway, route.route_id, attachment_paths, _document_intent, _document_first_start)
-            instructions += session_host_references(ctx, target_root=record_auth["target_root"], source_root=root, private_copy=snapshot is not None, payload_skill=payload_skill, service=service)
+            instructions += session_host_references(ctx, target_root=record_auth["target_root"], source_root=root, private_copy=snapshot is not None, payload_skill=payload_skill, service=service, start_body=None if continuation_token else f"{text}\n{instructions}")  # the start tail: a start that continues no run
             request_body = _start_request(ctx, route, authority, scope_root, continuation.prompt or text,
                                           seconds, instructions, execution_root, continuation=continuation.request, ephemeral=ephemeral, service_roots=service.roots,
                                           **({"directory_options": directory_options} if directory_options else {}))
@@ -1346,9 +1346,9 @@ def get_tools() -> List[ToolEntry]:
                 "properties": {
                 "prompt": {"type": "string", "description":
                     "Direct start: a complete standalone task (why the work exists, decisions, material paths); "
-                    "the session has none of my memory. The host appends my human's originating words verbatim. "
-                    "The run starts in my write root; a path named here does not move it: for another "
-                    "repository, schedule a child whose workspace is that repository. "
+                    "the session starts with my human's words for the work, the marks and the knowledge outline, "
+                    "none of my other memory; the host appends those words verbatim. The run starts in my write root; "
+                    "a path named here does not move it: for another repository, schedule a child whose workspace is that repository. "
                     "Direct retry_of: omit or pass '' to replay the recorded request; other text must equal "
                     "the original call's. Configured-session retry/replacement: optional advisory coordination "
                     "only, never sent with retry_of; the host supplies the canonical work order."},
@@ -1562,7 +1562,7 @@ def get_tools() -> List[ToolEntry]:
                 "stored receipt instead of delivering twice); after any other outcome a "
                 "new message needs a NEW id (omit message_id). A message steers only the current "
                 "attempt: the host never re-injects it (a continuation keeps it only as the engine's "
-                "session history or evidence), and it "
+                "session history or evidence; my human's rows the host placed ride the next continuation under their own heading), and it "
                 "is reconciled on the delegate_wait timeline (message.* rows)."
             ),
             "parameters": {"type": "object", "required": ["run_id", "text"], "properties": {

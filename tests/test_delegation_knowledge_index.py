@@ -163,6 +163,7 @@ def test_the_index_is_the_integrators_own_and_nothing_sent_before_it_changes(tmp
                   "configured_subagent": {"id": "h", "route": {"kind": "api_model"}}}
     sent, _cap = build_llm_messages(env=env, memory=memory, task=child_task, ctx=child_ctx)
     assert "## Knowledge base" not in json.dumps(sent) and "REAL_REQUEST_SUMMARY" not in json.dumps(sent)
+    assert "- people/owner" in section(sent[0]["content"][-1]["text"], "## Knowledge outline")  # born with the outline
     main_ctx = ToolContext(repo_dir=env.repo_dir, drive_root=env.drive_root, task_id="tmain001", current_chat_id=1)
     main, _cap = build_llm_messages(env=env, memory=memory, task={"id": "tmain001", "type": "task", "text": "hi",
                                                                    "chat_id": 1}, ctx=main_ctx)

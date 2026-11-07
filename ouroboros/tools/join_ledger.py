@@ -213,16 +213,11 @@ def _record_child_result_disposition(
     reason_text = " ".join(str(rationale or "").split())
     if not reason_text:
         problems.append("tree_note text is required as the rationale")
-    elif len(reason_text) > 500:
-        problems.append(
-            f"tree_note rationale must be at most 500 characters (got {len(reason_text)}; "
-            "shorten it yourself — it is never truncated for you)"
-        )
     if problems:
         return _publish_tool_result(ctx, ToolResult(
             status="error", code="TOOL_ARG_ERROR",
             text=("⚠️ CHILD_RESULT_DISPOSITION_INVALID: " + "; ".join(problems) + ". "
-            "Correct example: tree_note(kind='decision', text='<short why, ≤500 chars>', "
+            "Correct example: tree_note(kind='decision', text='<why>', "
             "payload={'type': 'child_result_disposition', 'child_task_id': '<id>', "
             "'disposition': 'integrated'|'irrelevant'|'deferred', "
             "'child_result_sha256': '<the 64-hex sha from [SUBTASK_OUTCOME]/get_task_result>'})."

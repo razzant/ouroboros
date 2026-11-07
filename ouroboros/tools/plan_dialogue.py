@@ -61,7 +61,7 @@ def attach_own_dialogue(ctx: Any, root: pathlib.Path, manifest: dict,
     Room growth is evidence for the next changed author request. It cannot
     itself mint another paid plan envelope. Health/roster/cycle rails stay with
     the existing engine, which still decides whether any dispatch is earned.
-    The owner's words that caused the work follow the same rule: a replay takes
+    My human's words for the work follow the same rule: a replay takes
     the recorded section (a wave recorded without one stays without), a fresh
     request takes the run's words now (``owner_words_text``).
     """

@@ -181,7 +181,7 @@ from ouroboros import settings_integrity as _settings_integrity  # noqa: E402
 SETTINGS_INTEGRITY_ENV = _settings_integrity.SETTINGS_INTEGRITY_ENV
 SettingsIntegrityError = _settings_integrity.SettingsIntegrityError
 from ouroboros.settings_integrity import (  # noqa: E402, F401 — public config read seam
-    runtime_setting, runtime_settings, runtime_environ, task_settings_scope,
+    runtime_setting, runtime_settings, runtime_environ, selection_settings, task_settings_scope,
 )
 
 RESTART_EXIT_CODE = 42

@@ -35,7 +35,7 @@ WORKER_LOG_SINK_SUPPRESSED_TYPES = frozenset({
     # The durable start/wait-ended rows share the live frame's payload (#1316).
     "tool_call", "tool_call_started", "tool_call_timeout",
     "llm_round", "task_checkpoint", "task_done", "llm_usage",
-    "provider_incomplete_response", "llm_empty_response", "provider_body_error",
+    "provider_incomplete_response", "llm_empty_response", "provider_body_error", "provider_content_refusal",
     "review_cycles_exhausted",
 })
 

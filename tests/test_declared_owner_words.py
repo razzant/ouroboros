@@ -7,11 +7,14 @@ receipt names them included. A grandchild carries the root's words. A declared t
 before the fact keeps the work order it started with: the same bytes and fingerprint, so its
 recovery after an update finds no ``work_order_mismatch`` and a range read of its source no
 ``source_digest_mismatch``. A shared child keeps its bytes and carries no fact. The words block
-is rendered from the task's frozen record, ahead of the dated runtime facts, so it is the same
-bytes on every rebuild. Every rule is checked in both directions.
+is rendered from the task's frozen record by the one context builder, ahead of the receipt and
+the dated runtime facts, so it is the same bytes on every rebuild; a native receipt names my
+human's words, the marks and the outline, an older work order keeps the literals it was rendered
+with. Every rule is checked in both directions.
 """
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -30,7 +33,10 @@ from tests.test_helper_owner_words_flow import ASKED, LATER, _child, _root, _sch
 from tests.test_helper_owner_words_flow import _one_api_actor as _one_api_actor  # noqa: F401  (autouse fixture)
 
 SESSION_HEADING, CHILD_HEADING = ow._HEADINGS["session"], ow._HEADINGS["child"]
-WORDS_ITEM = "the owner's words that caused this work"
+LAUNCHED_HEADING = ow._LAUNCHED_SESSION[0]  # the heading a work order without its room rows keeps (its fingerprint)
+WORDS_ITEM = "the owner's words that caused this work"  # the literal a work order without its room rows keeps
+WORDS_ITEM_NOW = "my human's words for this work"  # a native receipt's, and a work order scheduled with the rows
+MARKS_ITEM = "the memory marks in force (this room's and the global ones) and the knowledge outline"
 SAID = "Weigh both designs\n## not a heading of the work order\n  keep this indent  "
 WORDS = [{"text": SAID, "source": "initial_user", "carrier": "ctx", "task_id": "root",
           "ts": "2026-10-04T05:00:00+00:00", "ref": "chat 1 / msg-1"}]
@@ -64,11 +70,12 @@ def _flat_ctx(tmp_path, task):
 
 
 def _first_input(tmp_path, payload):
-    """The dynamic block of a child's first input, composed as its worker composes it."""
-    from ouroboros import context
+    """Block C of a child's first input, built as its worker builds it: the one builder's view, then its facts."""
+    from ouroboros.context import build_llm_messages
 
     env, memory = _make_env_and_memory(tmp_path / "ctx")
-    return context._capture_context_core(env, memory, payload, None, None).dynamic_text
+    messages, _cap = build_llm_messages(env=env, memory=memory, task={"type": "task", **payload})
+    return messages[0]["content"][-1]["text"]
 
 
 def test_a_task_scheduled_before_the_fact_keeps_its_bytes_recovery_and_range_reads(tmp_path):
@@ -97,9 +104,10 @@ def test_a_task_scheduled_before_the_fact_keeps_its_bytes_recovery_and_range_rea
     marker = "HOST TASK CONTRACT AUTHORITY (normalized JSON; predecessor is a brief):\n"
     older_ctx, newer_ctx = _flat_ctx(tmp_path, OLDER), _flat_ctx(tmp_path, newer)
     assert assignment_instructions(older_ctx).startswith(marker) and SAID not in assignment_instructions(older_ctx)
-    assert assignment_instructions(newer_ctx).endswith("\n\n" + SESSION_HEADING + "\nHost fact, carried by value "
-                                                       "from task root.\n[2026-10-04T05:00:00+00:00 · owner · "
-                                                       "initial_user of task root · chat 1 / msg-1]\n" + SAID)
+    assert assignment_instructions(newer_ctx).endswith(  # a live start: the one heading and the actor frame
+        f"\n\n{SESSION_HEADING}\n{ow._FRAMES['session']}\n[2026-10-04T05:00:00+00:00 · owner · "
+        "initial_user of task root · chat 1 / msg-1]\n" + SAID)
+    assert LAUNCHED_HEADING not in assignment_instructions(newer_ctx) and "{origin}" not in ow._FRAMES["session"]
 
 
 def test_the_receipt_moves_only_the_words_between_its_lists():
@@ -139,21 +147,26 @@ def test_a_declared_child_carries_the_words_on_every_path(tmp_path, kind):
                                          context="Figures live in reports/q3/.")
     snapshot = payload["configured_subagent"]
     payload["configured_subagent"] = {**snapshot, "route": {**snapshot["route"], "kind": kind}}
-    # 1. Its own first input (API child or nanny): the block a shared child reads, right after the receipt.
-    dynamic = _first_input(tmp_path, payload)
+    # 1. Its own first input (API child or nanny): the block a shared child reads, before the receipt it is named in.
+    changing = _first_input(tmp_path, payload)
     block = _owner_words_block(payload)
-    assert block.startswith(CHILD_HEADING + "\n") and "\n  Add the charts too" in block and block in dynamic
-    assert dynamic.startswith("## Input source selection") and dynamic.index(block) < dynamic.index("## Runtime context")
-    assert "Figures live in reports/q3/." in dynamic  # the parent's authored context, as before
-    # 2. The work order its session leaf receives: the words after the parent context.
+    assert block.startswith(CHILD_HEADING + "\n") and "\n  Add the charts too" in block and block in changing
+    assert changing.index(block) < changing.index("## Input source selection") < changing.index("## Runtime context")
+    receipt = json.loads(changing.split("## Input source selection\n\n", 1)[1].split("\n\n", 1)[0])
+    assert [item for item in receipt["included"] if item.startswith(WORDS_ITEM_NOW)] and WORDS_ITEM not in str(receipt)
+    assert [item for item in receipt["included"] if item.startswith(MARKS_ITEM)]
+    assert "the memory marks of that room" not in str(receipt) and "its open conversation" in str(receipt)
+    assert "Figures live in reports/q3/." in changing  # the parent's authored context, as before
+    # 2. The work order its session leaf receives: the words after the parent context. Scheduled without its room
+    # rows (no ``ROOM_FIELD``), the order keeps the heading and frame it launched with.
     rendered = compile_external_work_order(payload)
     section = rendered.split("PARENT CONTEXT / REFERENCES\n", 1)[1].split("\n\nEXPECTED OUTPUT", 1)[0]
     context_part, words = section.split("\n\n", 1)
-    assert context_part.endswith("\nFigures live in reports/q3/.") and words.startswith(SESSION_HEADING)
-    assert ASKED in words and words.endswith(LATER)
-    # 3. A direct delegate start from it appends the same words after the host contract.
+    assert context_part.endswith("\nFigures live in reports/q3/.") and words.startswith(LAUNCHED_HEADING + "\n")
+    assert ASKED in words and words.endswith(LATER) and SESSION_HEADING not in rendered
+    # 3. A direct delegate start from it appends the same rows after the host contract, under the one heading.
     direct = assignment_instructions(_child(tmp_path, payload))
-    assert direct.split("\n\n", 1)[1] == words
+    assert direct.split("\n\n", 1)[1] == f"{SESSION_HEADING}\n{ow._FRAMES['session']}\n" + words.split("\n", 2)[2]
 
 
 def test_a_grandchild_of_a_declared_child_carries_the_root_words(tmp_path):
@@ -161,10 +174,10 @@ def test_a_grandchild_of_a_declared_child_carries_the_root_words(tmp_path):
     _event, _stored, grand = _schedule(_child(tmp_path, payload), objective="Check one region")
     assert grand["task_contract"]["input_sources"] == "declared" and grand["metadata"][DECLARED_WORDS_FACT] is True
     assert grand["metadata"][ow.FIELD] == payload["metadata"][ow.FIELD]
-    first = _first_input(tmp_path, grand).split(CHILD_HEADING, 1)[1].split("\n\n## Runtime context", 1)[0]
-    order = compile_external_work_order(grand).split(SESSION_HEADING, 1)[1].split("\n\nEXPECTED OUTPUT", 1)[0]
-    for words in (first, order):
-        assert "from task root." in words and "Build the quarterly report" in words and "Add the charts too" in words
+    first = _first_input(tmp_path, grand).split(CHILD_HEADING, 1)[1].split("\n\n## ", 1)[0]
+    order = compile_external_work_order(grand).split(LAUNCHED_HEADING, 1)[1].split("\n\nEXPECTED OUTPUT", 1)[0]
+    for words in (first, order):  # the root's rows under the root's stamps
+        assert " of task root · " in words and "Build the quarterly report" in words and "Add the charts too" in words
         assert "Collect the Q3 figures" not in words  # the child's assignment is not the owner's words
 
 
@@ -176,9 +189,9 @@ def test_a_consciousness_root_gives_its_declared_child_the_absence_marker(tmp_pa
     _initialize_owner_directives(wake, [{"role": "user", "content": "A wake decided to look at the logs"}])
     _event, _stored, payload = _schedule(wake, input_sources="declared")
     assert payload["metadata"][ow.ABSENT_FIELD] == "initiator=consciousness" and ow.FIELD not in payload["metadata"]
-    dynamic = _first_input(tmp_path, payload)
-    assert dynamic.index("## Input source selection") < dynamic.index(MARKER) < dynamic.index("## Runtime context")
-    assert CHILD_HEADING not in dynamic and "A wake decided" not in dynamic
+    changing = _first_input(tmp_path, payload)
+    assert changing.index(MARKER) < changing.index("## Input source selection") < changing.index("## Runtime context")
+    assert CHILD_HEADING not in changing and "A wake decided" not in changing
     rendered = compile_external_work_order(payload)
     assert f"OBJECTIVE\nCollect the Q3 figures\n\n{MARKER}\n\nEXPECTED OUTPUT" in rendered
     assert SESSION_HEADING not in rendered
@@ -195,5 +208,6 @@ def test_the_words_block_is_byte_stable_and_precedes_the_dated_facts(tmp_path, m
         monkeypatch.setattr(context, "utc_now_iso", lambda instant=instant: instant)
         halves.append(_first_input(tmp_path, payload).split("## Runtime context", 1))
     (head, tail), (head_again, tail_again) = halves
-    assert head == head_again and CHILD_HEADING in head and head.startswith("## Input source selection")
+    assert head == head_again and CHILD_HEADING in head and head.startswith("## Knowledge outline")
+    assert head.index(CHILD_HEADING) < head.index("## Input source selection")  # the one builder's order
     assert tail != tail_again and "2026-10-05T07:30:00+00:00" in tail_again  # the dated facts follow it

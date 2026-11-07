@@ -74,8 +74,7 @@ _TERMINAL = frozenset({"terminal_root_projection", "terminal_result_projection"}
 # The host's facts row; a ``task_summary`` without a kind is the old writer's model prose, never a status.
 _HOST_FACTS, _KINDLESS = frozenset({"host_task_facts"}), frozenset({"", None})
 # The delegated child's role text, carried verbatim, then its draft right: it publishes only drafts in its own name.
-CHILD_ROLE_TEXT = ("Work from this assignment first — it is written to be enough; read memory or sources only to "
-                   "fill a gap it leaves, and name what you read in your report. " + CHILD_DRAFT_RIGHT)
+CHILD_ROLE_TEXT = "Read memory or sources whenever they could change what you do, and name what you read in your answer. " + CHILD_DRAFT_RIGHT
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -131,7 +130,7 @@ class ViewSpec:
     room_id: Optional[str] = None  # the current room; None: no ``## This room``
     room_page: bool = True  # the room's retold records not yet folded, pages under my parts, my open notes
     room_lanes: bool = True  # the open conversation (lane 1) and one line per task (lane 2)
-    origin_words: bool = True  # the owner's words that started a Project, when its rows are not open
+    origin_words: bool = True  # the owner's words that started a Project, when its rows are not open (a helper's set carries them)
     other_conversations: bool = True  # ``## Other conversations``: every other conversation of mine
     marks: str = "all"  # all | room_and_global | none
     knowledge: bool = True  # overview, knowledge index, project journal (rendered by the context)
@@ -142,21 +141,20 @@ class ViewSpec:
 ROLE_DEFAULTS: Mapping[str, ViewSpec] = MappingProxyType({
     # Every focus that integrates holds the whole (BIBLE P1 "The subject of continuity"): one row, its room aside.
     **{role: ViewSpec(role) for role in ("integrator", "consciousness", "presence")},
-    "child": ViewSpec("child", room_lanes=False, other_conversations=False, marks="room_and_global", knowledge=False,
-                      owner_words=True),
-    "nanny": ViewSpec("nanny", story=False, room_lanes=False, other_conversations=False, marks="room_and_global",
+    "child": ViewSpec("child", room_lanes=False, origin_words=False, other_conversations=False, marks="room_and_global",
                       knowledge=False, owner_words=True),
+    "nanny": ViewSpec("nanny", story=False, room_lanes=False, origin_words=False, other_conversations=False,
+                      marks="room_and_global", knowledge=False, owner_words=True),
 })
 _FIELDS = {field.name: field.type for field in dataclasses.fields(ViewSpec)}
 
 
 def view_role(task: Mapping[str, Any]) -> str:
-    """The view role, first match wins, in ``knowledge.focus_signature``'s order.
-
-    A nanny is the one dispatch fact (``_nanny_route_dispatched_for``), then a delegated
-    child, an explicit focus cause, a wake's ledger category, and legacy Presence.
-    Everything else integrates.
-    The facts are read at the task's top level or under ``metadata``.
+    """The view role, first match wins, in ``knowledge.focus_signature``'s order: a nanny is the one
+    dispatch fact (``_nanny_route_dispatched_for``), then a delegated child, an explicit focus cause,
+    a wake's ledger category, and legacy Presence; everything else integrates. The facts are read at
+    the task's top level or under ``metadata``; a child's role also under ``task_contract.lineage``,
+    as the declared validator reads it (``context_input_selection._validate_declared_input_task``).
     """
     from ouroboros.consciousness_authority import CONSCIOUSNESS_CATEGORY, WAKE_CAUSE_FOCUS, wake_cause
     from ouroboros.subagent_dispatch_notes import _nanny_route_dispatched_for  # D03->D07 is lazy-only
@@ -164,7 +162,8 @@ def view_role(task: Mapping[str, Any]) -> str:
     meta = dict(_mapping(task.get("metadata")))
     if _nanny_route_dispatched_for(dict(task), None) or _nanny_route_dispatched_for(meta, None):
         return "nanny"
-    if str(task.get("delegation_role") or meta.get("delegation_role") or "").strip().lower() == "subagent":
+    lineage = _mapping(_mapping(task.get("task_contract") or meta.get("task_contract")).get("lineage"))
+    if str(task.get("delegation_role") or meta.get("delegation_role") or lineage.get("delegation_role") or "").strip().lower() == "subagent":
         return "child"
     if wake_cause({**task, **meta}) == WAKE_CAUSE_FOCUS:
         return "presence"
@@ -311,13 +310,14 @@ def _parsed_view(text: str) -> MemoryViewSnapshot:
     return MemoryViewSnapshot(**data)
 
 
-def _owner_words_block(task: Mapping[str, Any]) -> str:
-    from ouroboros.owner_words import render_owner_words, task_governing_words  # D03->D17 is lazy-only
+def _owner_words_block(task: Mapping[str, Any], drive_root: Any = None, marks: Any = None) -> str:
+    """A helper's birth set (``owner_relay.task_words_text``): its field, then its room's rows read once here; the
+    files the rows carry are staged on the helper's own drive and named by the path it opens them with. ``marks``:
+    the acting marks the view's capture holds, so the marked rows are cut from them and the chronicle is not
+    entered again; None (a declared start outside a capture) lets the set read them itself."""
+    from ouroboros.owner_relay import task_words_text  # D03->D01 is lazy-only
 
-    meta = _mapping(task.get("metadata"))
-    root = str(task.get("root_task_id") or meta.get("root_task_id") or "")
-    rows, absent = task_governing_words(task)
-    return render_owner_words(rows, absent, audience="child", root_task_id=root, indent=INDENT)
+    return task_words_text(drive_root, task, indent=INDENT, stage=True, marks=marks)
 
 
 def _activation(store: ChronicleStore) -> Dict[str, Any]:
@@ -721,7 +721,7 @@ def _capture_room(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
                              "facts": _with_gaps(memory_inventory.room_facts(store, room, entries, lineage,
                                                                              len(notes.get(room, ()))), gaps, room),
                              "legacy": [], "under_parts": [], "notes": [], "origins": [], "since": "",
-                             "lane1": [], "lane2": [], "told": [], "newest": "", "sealed_by": []}
+                             "lane1": [], "lane2": [], "told": [], "project_words": None, "newest": "", "sealed_by": []}
     if entries and spec.role not in DELEGATED_FOCUS_ROLES:  # S1: what a page in my finishing response covers here
         facts["newest"] = chat_chain.format_address(max(entries, key=lambda entry: entry[2])[0])
     facts["sealed_by"] = [  # S3: a conversation page another room holds seals rows here too
@@ -760,12 +760,18 @@ def _capture_room(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
                   for record in pointer_records if record.get("folded_into")
                   and record["id"] in teller]
         facts["told"] = told_here([*story, *folded], {room, *((LEGACY_ROOM_ID,) if main else ())})
-    if spec.origin_words and room.lstrip("-").isdigit() and int(room) in memory_inventory.membership_facts(
-            root).project_chat_ids:
+    sealed = spec.room_lanes and spec.role == "integrator"  # the root's own view of its project's sealed rows
+    project = (spec.origin_words or sealed) and room.lstrip("-").isdigit() and int(room) in (
+        memory_inventory.membership_facts(root).project_chat_ids)
+    if spec.origin_words and project:
         facts["origins"] = _origins(root, room, entries if spec.room_lanes else [])
     if spec.room_lanes and entries:
         facts["since"] = _minute(facts["facts"]["earliest"])  # the rows' first stored time, not the first row read
         facts["lane1"], facts["lane2"] = _lanes(root, entries, lineage)
+    if sealed and project:  # never Main: my human's project rows that left the open conversation, whole and dated
+        from ouroboros.owner_words import project_words
+
+        facts["project_words"] = project_words(root, int(room), open_rows=[*facts["lane1"], *facts["origins"]], indent=INDENT)
     return facts
 
 
@@ -834,7 +840,8 @@ def _capture_marks(store: ChronicleStore, spec: ViewSpec, label: Callable[..., s
 
 def _capture_live(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, label: Callable[..., str],
                   story: List[Dict[str, Any]] = ()) -> tuple:
-    """``(this room, my other conversations, marks, waiting)`` from the same captured rows, notes and active marks."""
+    """``(this room, my other conversations, marks, waiting, acting)`` from the same captured rows, notes and active
+    marks; ``acting`` is every room's acting marks as read here (None when this view reads none)."""
     from ouroboros import memory_view_conversations as conversations
 
     lineage = row_lineage(root)
@@ -854,7 +861,7 @@ def _capture_live(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
     warm_lineage(lineage, ((meta, pos) for entries in quiet.values() for _address, meta, pos in entries))
     room = (_capture_room(store, root, spec, label, by_room.get(spec.room_id, []), notes, lineage, story, gaps)
             if spec.room_id is not None else None)
-    marks = store.active_marks(None) if spec.marks != "none" or integrating else []
+    marks = store.active_marks(None) if spec.marks != "none" or integrating else None
     waiting, projects = {}, None
     if integrating or spec.other_conversations:
         from ouroboros.projects_registry import list_projects
@@ -873,7 +880,7 @@ def _capture_live(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
 
         waiting = measure(marks, notes, [p for p in projects if "closed" not in p] if projects is not None else None,
                           groups)
-    return room, groups, _capture_marks(store, spec, label, marks), waiting
+    return room, groups, _capture_marks(store, spec, label, marks), waiting, marks
 
 
 def capture_memory_view(drive_root: Any, task: Mapping[str, Any], spec: ViewSpec) -> MemoryViewSnapshot:
@@ -881,15 +888,22 @@ def capture_memory_view(drive_root: Any, task: Mapping[str, Any], spec: ViewSpec
 
     Before the import has completed (another importer holds the legacy lock, the
     import was refused, the journal cannot be opened) the snapshot carries only the
-    reason and the room id: no story, lanes or other conversations, and no chain read.
+    reason and the room id: no story, lanes or other conversations, and no chain read; the owner-words
+    block still reads the bound room (``owner_relay.task_words_text``). On an active chronicle that
+    block is drawn after the capture, over the acting marks the capture read: a helper's birth enters
+    the chronicle no more often than its view does.
     """
     root = pathlib.Path(drive_root)
-    owner_words = _owner_words_block(task) if spec.owner_words else ""
+
+    def words(marks: Any = None) -> str:
+        return _owner_words_block(task, root, marks=marks) if spec.owner_words else ""
+
     status = _activation(ChronicleStore(root))
     label = room_labeler(root)
     bare = {"room_id": spec.room_id, "label": label(spec.room_id)} if spec.room_id is not None else None
     if status["state"] != "active":
-        return MemoryViewSnapshot(spec=spec, store_status=status, frontier={}, room=bare, owner_words=owner_words)
+        return MemoryViewSnapshot(spec=spec, store_status=status, frontier={}, room=bare, owner_words=words())
+    owner_words: Optional[str] = None  # drawn once the capture holds its marks; a journal lost before reads the store
     try:
         store = ChronicleStore(root)
         # One state of the chronicle for every reader (activation may publish: before), with the stored tail facts
@@ -899,7 +913,8 @@ def capture_memory_view(drive_root: Any, task: Mapping[str, Any], spec: ViewSpec
         with capture(root, tail=tail) as derived:
             frontier = legacy_frontier(store)
             story, story_status, refusals = capture_story(store, root, label) if spec.story else ([], {}, [])
-            room, groups, marks, waiting = _capture_live(store, root, spec, label, story)
+            room, groups, marks, waiting, acting = _capture_live(store, root, spec, label, story)
+        owner_words = words(acting)
         if room:
             from ouroboros.owner_words import task_governing_words
 
@@ -916,7 +931,7 @@ def capture_memory_view(drive_root: Any, task: Mapping[str, Any], spec: ViewSpec
         log.warning("memory view: the chronicle could not be read", exc_info=True)
         return MemoryViewSnapshot(spec=spec, store_status={"state": "journal_unreadable",
                                                            "reason": f"{type(exc).__name__}: {exc}"},
-                                  frontier={}, room=bare, owner_words=owner_words)
+                                  frontier={}, room=bare, owner_words=words() if owner_words is None else owner_words)
     if any(not read.complete for read in ((derived or {}).get(key) for key in ("tail", "terminal_tail")) if read):
         status = {**status, "tail_facts": "filling"}  # its rows were read live: the stored tail is not complete
     return MemoryViewSnapshot(spec=spec, store_status=status,
@@ -1230,8 +1245,11 @@ def _marks_text(marks: List[Dict[str, Any]]) -> str:
 
 
 def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]]) -> str:
-    """``## This room (<label>) — head <n>``: the room page, the words that started it, notes, two lanes, and last
-    the standing facts that change with every row (so the room's earlier bytes stay a reusable prefix)."""
+    """``## This room (<label>) — head <n>``: the room page, the words that started it, a project root's sealed
+    rows of its human (``project_words``; folded by F7 into dated addresses), notes, two lanes, and last the
+    standing facts that change with every row (so the room's earlier bytes stay a reusable prefix)."""
+    from ouroboros.owner_words import _FRAMES, _HEADINGS
+
     retold, mine, people, facts = (set(gone.get(step, ())) for step in ("F4", "F2", "F7", "F1"))
     people |= set(gone.get("F7p", ()))
     lines = [f"## This room ({room['label']}) — head {room['head']}"]
@@ -1247,10 +1265,14 @@ def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]]) -> str:
         lines += ["", "### Words that started this work (retention-proof)"]
         lines += [f"[{item['ts'] or 'time not recorded'}; owner; {item['ref']}] " + _indented(item["text"]).lstrip()
                   for item in room["origins"]]
+    if room.get("project_words"):  # a project root: its human's rows that left the open conversation, whole and dated
+        lines += ["", _HEADINGS["root"], _FRAMES["root"], "\n\n".join(  # under the actor frame; a gap line has no address
+            item["short"] if item.get("address") in people else item["line"] for item in room["project_words"])]
     if room["notes"]:
         lines += ["", "### My notes not yet sealed"] + _room_note_lines(room["notes"], gone)
     if room["lane1"]:
         lines += ["", f"### Open conversation since {room['since']} (verbatim: people and my replies)"]
+        lines += [_FRAMES["root"]] if room.get("project_words") is not None else []  # the root's frame over the open rows
         addressed = mine | people
         aggregate = [item for item in room['lane1'] if item['address'] in addressed
                      and not item.get('immune')] if gone.get('F7a') else []
@@ -1289,7 +1311,8 @@ def render_room(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW, *, 
     from ouroboros import memory_view_conversations as conversations
 
     parts = [snapshot.owner_words]
-    room = snapshot.room
+    spec = snapshot.spec  # a view drawing nothing of its room (a declared request's) prints no ``## This room``
+    room = snapshot.room if spec.room_page or spec.room_lanes or spec.origin_words else None
     if not snapshot.active:
         if room:
             parts.append(f"## This room ({room.get('label')})\n\nOpen conversation unavailable until my memory is "
@@ -1344,12 +1367,14 @@ def working_sources_line(spec: ViewSpec, snapshot: Optional[MemoryViewSnapshot] 
         missing.append(f"{', '.join(memory)} (my memory is not activated yet: {snapshot.store_status.get('reason')})")
     else:
         loaded += memory
-    (loaded if spec.knowledge else missing).append("knowledge (overview, index, project journal and workpad" + (
-        ")" if spec.knowledge else "; the index arrives with your first delegation)"))  # delegation_knowledge_index
+    loaded.append("knowledge (overview, index, project journal and workpad)" if spec.knowledge
+                  else "the knowledge outline (every note by address and title)")  # context.helper_navigation_sections
+    if not spec.knowledge:  # the whole index rides the first accepted delegation's result (delegation_knowledge_index)
+        missing.append("the overview, the whole knowledge index (it arrives with your first delegation), the project journal and workpad")
     if spec.owner_words and (snapshot is None or snapshot.owner_words):  # named only when the block was drawn
-        loaded.append("the words of my human that caused this work")
+        loaded.append("my human's words for this work; my human's later words reach you at your next round")
     missing += ["the global scratchpad", "earlier task reports"]
     return ("## Working sources\n\n"
             f"Loaded above: {', '.join(loaded)}; your own recent process is loaded below. "
-            f"Not loaded: {', '.join(missing)}; memory_read, chat_history, knowledge_list, knowledge_read and "
-            "get_task_result reach them, as they reach your parent.\n" + CHILD_ROLE_TEXT)
+            f"Not loaded: {', '.join(missing)}; memory_read, chat_history, knowledge_list, knowledge_read, "
+            "journal_read, workpad_read and get_task_result reach them, as they reach your parent.\n" + CHILD_ROLE_TEXT)
