@@ -158,10 +158,17 @@ _ACCESS_PRECEDENCE = (
     "means the same relative path from there."
 )
 
+READONLY_SOURCE_SCOPE = (
+    "The starting folder is a location, not a read boundary. Read only task-authorized "
+    "sources within the parent's existing read authority, subject to explicit narrower "
+    "constraints and the tools this run actually has. A prose path grants no access. "
+    "Do not discover credentials or harness runtime state beyond specifically authorized sources. "
+)
+
 ACCESS_INSTRUCTIONS = {
     "readonly": (
-        " ACCESS: you may read and run read-only commands inside this root, and make no "
-        "edits or writes; " + _ACCESS_PRECEDENCE
+        " ACCESS: " + READONLY_SOURCE_SCOPE + "Read-only commands are allowed when the effective tools provide "
+        "them. Make no edits or writes; " + _ACCESS_PRECEDENCE
     ),
     "workspace_write": (
         " ACCESS: you may edit inside this root, and outside it write only disposable process state "

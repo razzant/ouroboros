@@ -152,7 +152,8 @@ def test_the_host_states_its_prohibitions_on_every_delegated_run(tmp_path, monke
     assert "do not run git commit, tag, push, rebase, reset" in instructions
     assert "explicit task constraints and the assigned edit target still bind" in instructions
     if access == "readonly":
-        assert "inside this root, and make no edits or writes" in instructions
+        assert "make no edits or writes" in instructions
+        assert "parent's existing read authority" in instructions
     else:
         # #2190 permits verification scratch and the named cache, without
         # granting writes to another project or the operator's files.

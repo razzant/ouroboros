@@ -30,10 +30,22 @@ def test_direct_default_and_lowering_reach_actual_post(full_run, monkeypatch, lo
     request, _ = facts['requests'][0]
     assert request['access'] == expected
     assert request['mode'] == ('ask' if expected == 'readonly' else 'agent')
+    assert request['instructions'].count('this line governs native process access') == 1
     assert bool(facts['trust_posts']) is (expected == 'full')
     assert ctx.task_constraint.surface == 'self_worktree'
+    if expected == 'workspace_write':
+        assert 'ACCESS: you may edit inside this root, and outside it write only disposable process state' in request['instructions']
+        assert 'The starting folder is a location, not a read boundary' not in request['instructions']
+    if expected == 'full':
+        assert 'ACCESS: full native process access is requested for this assignment' in request['instructions']
+        assert 'the private snapshot is not an OS sandbox' in request['instructions']
+        assert 'The starting folder is a location, not a read boundary' not in request['instructions']
     if expected == 'readonly':
         assert request['scope']['root'] == target and 'execution' not in request
+        assert 'The starting folder is a location, not a read boundary' in request['instructions']
+        assert "within the parent's existing read authority" in request['instructions']
+        assert 'A prose path grants no access' in request['instructions']
+        assert 'Make no edits or writes' in request['instructions']
         assert not result.get('snapshot_id')
 
 

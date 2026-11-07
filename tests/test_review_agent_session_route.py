@@ -73,6 +73,11 @@ def test_schema_conformant_clean_verdict_survives(tmp_path, fake_route, monkeypa
     assert start["model"] == "fake-small" and start["effort"] == "low"
     assert start["maxSeconds"] == 30 - elapsed_before_dispatch
     assert "unwrapped substantive deliverable" in start["prompt"]
+    assert "The starting folder is a location, not a read boundary" in start["instructions"]
+    assert "within the parent's existing read authority" in start["instructions"]
+    assert "supplemental sources cannot substitute a live tree" in start["instructions"]
+    assert "Reading the tree directly is a complete substitute" in start["instructions"]
+    assert "final answer must follow the output contract" in start["instructions"]
     # The manifest declared a non-interactive structured-output transport, so
     # the schema was asked on the EFFECTIVE route (D19).
     assert "outputSchema" in start

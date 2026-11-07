@@ -620,6 +620,47 @@ RECORD_HISTORY_RULE = (
 )
 
 
+# Reasons ``plan_evidence.resolve_evidence`` records BESIDE content that still attached: a head cut at the per-item
+# bound, a chat range whose history has a gap. Any other reason on an attached locator (``duplicate_locator``,
+# ``source_unretained:*``) is a note on content that went whole; on a locator that did not attach, it says why.
+_PART_REASONS = ("truncated_to_", "chat_history_gap:")
+
+
+def ask_evidence(ask: Mapping[str, Any]) -> Dict[str, Any]:
+    """One ask's evidence as its row recorded it (``attach``, ``attached``, ``omissions``), one item per locator in
+    declared order: ``whole`` or ``part`` when it attached — prepared for the participants, which proves neither that
+    one was sent it (its own status says that) nor that one read it — ``not_attached`` otherwise, each with every
+    reason recorded for it. A field an older writer did not record is not recorded, never an empty list: without
+    ``attached`` an item's state is ``unknown``; without ``omissions`` an attached item's completeness is unknown."""
+    declared = ask.get("attach") if isinstance(ask.get("attach"), list) else None
+    attached = ask.get("attached") if isinstance(ask.get("attached"), list) else None
+    omissions = ask.get("omissions") if isinstance(ask.get("omissions"), list) else None
+    rows = {str(row.get("locator") or ""): row for row in attached or [] if isinstance(row, Mapping)}
+    reasons: Dict[str, List[str]] = {}
+    for row in omissions or []:
+        if isinstance(row, Mapping):
+            reasons.setdefault(str(row.get("locator") or ""), []).append(str(row.get("reason") or ""))
+    items = []
+    for locator in dict.fromkeys([*(str(raw or "").strip() for raw in declared or []), *rows, *reasons]):
+        row, why = rows.get(locator), reasons.get(locator, [])
+        if not locator:
+            continue
+        if row is not None:
+            state = "attached_unknown" if omissions is None else "part" if any(reason.startswith(_PART_REASONS) for reason in why) else "whole"
+        elif attached is None:
+            state = "unknown"
+        elif why or omissions is None:
+            state = "not_attached"
+        else:  # declared, yet neither attached nor named absent: no row says what became of it
+            state = "unknown"
+        items.append({"locator": locator, "state": state, "reasons": why,
+                      **({key: copy.deepcopy(row[key]) for key in ("bytes", "sha256", "ref") if row.get(key) is not None}
+                         if row is not None else {})})
+    return {"recorded": {"attach": declared is not None, "attached": attached is not None, "omissions": omissions is not None},
+            "items": items, "counts": {state: sum(1 for item in items if item["state"] == state)
+                                       for state in ("whole", "part", "attached_unknown", "not_attached", "unknown")}}
+
+
 def operative_revision(record: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     """The latest revision as the plan family's current subject (``None`` before the first)."""
     latest = latest_revision(record)
@@ -653,9 +694,12 @@ def record_history(drive_root: Any, task_id: str, record: Mapping[str, Any]) -> 
                 gaps.append(_gap("reply has no retained source; its typed projection is shown",
                                  plan_ask=ask.get("ask_id"), seat_id=participant.get("seat_id")))
             reviewers.append(seat)
+        # The ask's evidence as recorded: what it declared, attached and named cut or absent, apart (``ask_evidence``);
+        # a field an older writer did not record stays absent, never an empty list.
         rounds.append({"plan_ask": ask.get("ask_id"), "revision": ask.get("revision"), "ts": ask.get("ts"),
                        "message": ask.get("message"), "review_record_id": ask.get("record_id"),
-                       "attached": copy.deepcopy(ask.get("attached") or []), "reviewers": reviewers})
+                       **{key: copy.deepcopy(ask[key]) for key in ("attach", "attached", "omissions") if isinstance(ask.get(key), list)},
+                       "reviewers": reviewers})
     decision_rows = []
     for objection in fold_objections(record):
         if objection.get("unknown_withdrawal"):

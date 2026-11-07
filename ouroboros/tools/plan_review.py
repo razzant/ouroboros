@@ -13,8 +13,10 @@
 * READ: no arguments → the free state: the current revision, every participant's open
   objections (``not_adjudicated`` flagged), who last saw which revision, the latest
   contributions and the pending asks; pending seats whose producer finished while
-  nobody listened are settled at $0 first. Each ask names the evidence it recorded as
-  not attached in full (``omissions``: locator and reason), in the read and the ask's result.
+  nobody listened are settled at $0 first. Each ask lists, in the read and the ask's result,
+  the evidence it attached (whole or in part) apart from what it did not, each locator with
+  every recorded reason (``plan_record.ask_evidence``); an older ask's unrecorded field reads
+  as not recorded.
 
 Every refusal — a schema error, an old-form call (``spec``, ``review_disposition``,
 ``author_action``, …: a typed $0 refusal naming the new form, no shim), a missing first
@@ -129,10 +131,14 @@ _SCHEMA = {
             "reason": {"type": "string", "description": "Why these reviewers: required when an Advisory first ask about your own code names fewer than all ticked reviewers. Blocking adds missing ticked reviewers; later asks name any enabled rows. Advisers are heard, not counted."},
             "message": {"type": "string", "description": "What you want from the asked participants now (what changed, what you decided and why, what to look at)."},
             "attach": {"type": "array", "items": {"type": "string"},
-                       "description": ("Evidence locators for the asked participants (paths with optional "
-                                       "::lines=A-B, task:<id>, chat:<id>); files attach as read_file may read them, your "
-                                       "own task_drive/artifact_store included, other runtime data never; bounded, every "
-                                       "absence named. Use task:<id> for a helper's saved result.")},
+                       "description": ("Evidence locators for the asked participants: a file path (relative to the subject "
+                                       "root, absolute or file://), task:<id> for a task's saved result (a helper's included), "
+                                       "or chat:<id>; any of them may end in ::lines=A-B (1-based), ::bytes=A-B (0-based), "
+                                       "::tail=N (last N bytes), or for a .py file ::symbol=Name (dotted when nested), ranges "
+                                       "inclusive. URLs are listed, never fetched. Files attach as read_file may read them, "
+                                       "your own task_drive/artifact_store included, other runtime data never. Each item and "
+                                       "the ask are bounded; the ask's result and every read list what attached and each "
+                                       "locator cut or not attached, with its reason.")},
             "reviewer_effort": {**_REVIEWER_EFFORT_SCHEMA, "description": "Optional panel strength for THIS ask (Auto rows, clamped into the owner's effort range)."},
             "continue_seats": {**CONTINUE_SEATS_SCHEMA, "description": (
                 "Alone: continue stopped session participants of an EARLIER ask, each named as the read's continuable "
@@ -379,6 +385,14 @@ def _ask_summary(prepared: Any, record: Mapping[str, Any]) -> str:
              + ("; not sent: " + "; ".join(f"{p['seat_id']} — {p.get('not_dispatched_reason') or p.get('error') or 'not sendable'}"
                                              for p in rows if not p.get("dispatched")) if any(not p.get("dispatched") for p in rows) else "")
              + "."]
+    evidence = plan_record.ask_evidence(ask)
+    if evidence["items"]:
+        counts, total = evidence["counts"], len(evidence["items"])
+        lines.append("Evidence prepared for the participants: " + ", ".join(
+            [f"{counts['whole']} of {total} attached whole"] + [f"{counts[state]} {words}" for state, words in (
+                ("part", "in part"), ("attached_unknown", "attached, completeness not recorded"),
+                ("not_attached", "not attached"), ("unknown", "not recorded")) if counts[state]])
+            + "; the ask below lists each locator and every reason.")
     if ask.get("host_added"):
         lines.append(("This reading concerns Ouroboros's own body" if ask.get("revision") is None
                       else "This is the first ask on a body plan")
@@ -434,6 +448,33 @@ def _room_facts(participant: Mapping[str, Any]) -> str:
     return f" [room: {'; '.join(facts)}]" if facts else ""
 
 
+_EVIDENCE_GROUPS = ((("whole", "part", "attached_unknown"), "evidence attached (prepared for the participants)"),
+                    (("not_attached",), "evidence not attached"),
+                    (("unknown",), "evidence declared, whether it attached not recorded"))
+
+
+def _evidence_lines(ask: Mapping[str, Any]) -> List[str]:
+    """One ask's evidence under it (``plan_record.ask_evidence``): what attached, whole or in part, apart from what
+    did not, each locator with every reason recorded for it (a cut, a repeat or a history gap stays beside content
+    that attached). A field an older ask did not record reads as not recorded, never as nothing."""
+    evidence = plan_record.ask_evidence(ask)
+    items, recorded = evidence["items"], evidence["recorded"]
+    if not items:
+        return [] if recorded["attach"] or (recorded["attached"] and recorded["omissions"]) else ["  evidence: not recorded for this ask"]
+
+    def named(item: Mapping[str, Any]) -> str:
+        facts = ({"part": ["in part"], "attached_unknown": ["completeness not recorded"]}.get(item["state"], [])) + (
+            [f"source {item['bytes']} bytes"] if item.get("bytes") is not None else []) + list(item["reasons"])
+        return str(item["locator"]) + (f" ({'; '.join(facts)})" if facts else "")
+
+    lines = [f"  {label}: " + "; ".join(named(item) for item in items if item["state"] in states)
+             for states, label in _EVIDENCE_GROUPS if any(item["state"] in states for item in items)]
+    if not recorded["omissions"]:
+        lines.append("  evidence cuts and absences: not recorded for this ask")
+    hint = plan_packet.omission_hint(ask.get("omissions") or [])
+    return lines + ([f"  {hint}"] if hint else [])
+
+
 def render_record(record: Mapping[str, Any], decision: Mapping[str, Any], legacy: Optional[Mapping[str, Any]] = None,
                   legacy_error: Optional[Mapping[str, str]] = None) -> str:
     """The read view as text: current revision (a reading's asks before it), council, open objections, gate facts."""
@@ -476,11 +517,7 @@ def render_record(record: Mapping[str, Any], decision: Mapping[str, Any], legacy
             parts.append(f"{p['seat_id']} ({p.get('model') or '?'}{'' if p.get('owner_marked') else ', added'}): {tag}{_room_facts(p)}")
         lines.append(f"- ask {ask['ask_id']} on {plan_record.ask_subject(ask['revision'])}"
                      + (f" — «{ask['message']}»" if ask.get("message") else "") + ": " + "; ".join(parts))
-        if stored.get("omissions"):  # recorded by plan_evidence when the ask was prepared; the ask's result shows it too
-            lines.append("  evidence omitted: " + "; ".join(f"{o.get('locator')} ({o.get('reason')})" for o in stored["omissions"]))
-            hint = plan_packet.omission_hint(stored["omissions"])
-            if hint:
-                lines.append(f"  {hint}")
+        lines.extend(_evidence_lines(stored))
         if ask["revision"] is None:  # a reading's listed objections are advice: they never enter the fold
             points = [f"{p.get('seat_id')}/{item.get('id')}: {item.get('text')}" for p in stored.get("participants") or []
                       if isinstance(p.get("reply"), dict) for item in p["reply"].get("objections") or []]

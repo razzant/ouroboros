@@ -106,8 +106,9 @@ def _selected_input_files(task: Mapping[str, Any]) -> str:
     rows = task.get("prepared_input_files")
     if not isinstance(rows, list) or not rows:
         return ""
-    return ("The parent selected these files (input_files); the host retained each one's exact bytes before queueing "
-            "this task. The first start of this work order verifies those copies against these digests and its "
+    return ("The parent selected these files (input_files); a nonempty selection replaces automatic folderless "
+            "task/artifact lineage copies. The host retained each one's exact bytes before queueing this task. "
+            "The first start of this work order verifies those copies against these digests and its "
             "instructions name where this run reads them; a later start copies only what its own request selects.\n"
             + "\n".join(f"- {row.get('root')}:{row.get('path')} (sha256 {row.get('sha256')}, {row.get('size')} bytes)"
                         for row in rows if isinstance(row, dict)))

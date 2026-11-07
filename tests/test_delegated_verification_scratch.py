@@ -32,9 +32,9 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 _LAUNCHER = [sys.executable, "-I", "-S", str(REPO / "scripts" / "safe_test.py")]
 
 
-def test_readonly_access_line_is_unchanged_and_writable_lines_name_one_outside_place():
-    assert ACCESS_INSTRUCTIONS["readonly"].startswith(
-        " ACCESS: you may read and run read-only commands inside this root, and make no edits or writes; ")
+def test_readonly_has_no_write_place_and_writable_lines_name_one_outside_place():
+    assert "Make no edits or writes" in ACCESS_INSTRUCTIONS["readonly"]
+    assert "Read-only commands are allowed when the effective tools provide them" in ACCESS_INSTRUCTIONS["readonly"]
     assert "Git" not in ACCESS_INSTRUCTIONS["readonly"]  # a read-only session gains no write place
     write = ACCESS_INSTRUCTIONS["workspace_write"]
     assert "must not write outside this root" not in write

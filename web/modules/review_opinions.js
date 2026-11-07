@@ -206,7 +206,9 @@ function planRows(view, attempt, format, live) {
     const answered = participants.filter(participant => participant.status === 'answered').length;
     const head = `<p class="review-ask-line">${escape([attempt.label, attempt.summary ? `«${attempt.summary}»` : '',
         `${answered} of ${participants.length} answered`].filter(Boolean).join(' · '))}</p>`;
-    return head + participants.map((participant) => {
+    // The adapter's one sentence when the evidence prepared for this ask is incomplete, read whole; which and why
+    // stay in Record facts.
+    return head + line({ words: text(attempt.evidenceNotice), whole: true }) + participants.map((participant) => {
         const seatId = text(participant.seat_id);
         const state = participantState(participant, objections, live);
         const mine = (objections || []).filter(objection => objection.seat === seatId);

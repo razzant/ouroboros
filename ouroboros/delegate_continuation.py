@@ -428,15 +428,19 @@ def with_run_binding(start: ContinuationStart, authority: Any, binding: str, wor
     not only a changed root, so carries the exact text its own instructions got from the
     same renderers after provisioning, or, where none applies, the directory it starts
     in, plus this run's own selected ``input_files`` note, if any.
-    A plan-thread turn (no ``workspace`` fact) keeps its own contract, plus that note even when the
-    caller's text is empty; a fresh start (``NO_CONTINUATION``, no facts) is unchanged.
+    A plan-thread turn (no ``workspace`` fact) keeps its own contract and restates
+    current typed access without inventing a new binding or cwd, plus that note even
+    when the caller's text is empty; a fresh start (``NO_CONTINUATION``, no facts) is unchanged.
     """
     from ouroboros.delegate_start_instructions import access_instruction, no_copy_binding_instruction
 
     if not start.facts:
         return start
     if "workspace" not in start.facts:
-        return start._replace(prompt="\n\n".join(part for part in (start.prompt, inputs) if part)) if inputs else start
+        current_access = access_instruction(authority.access, investigation=authority.investigation) if authority else ""
+        if not current_access and not inputs:
+            return start
+        return start._replace(prompt="\n\n".join(part for part in (start.prompt, current_access, inputs) if part))
     current = (access_instruction(authority.access, investigation=authority.investigation)
                + (binding or no_copy_binding_instruction(workdir)) + inputs)
     return start._replace(prompt=continuation_prompt(start.facts, start.note, current))

@@ -159,7 +159,7 @@ def test_a_session_childs_selection_crosses_admission_snapshot_and_bootstrap_to_
         parent.task_metadata["resource_intent"] = {"kind": "explicit_none"}
     reply, event = _schedule(chain, sid, input_sources="declared", input_files=SELECTION[:1])
     if folderless:
-        assert "agent_session selected source: folderless task/artifact lineage" in reply
+        assert "agent_session selected source: folderless selected files" in reply
     else:
         assert "agent_session selected source: inherited repository/folder" in reply
     assert "supervisor: child capabilities — profile=" in reply
@@ -178,6 +178,15 @@ def test_a_session_childs_selection_crosses_admission_snapshot_and_bootstrap_to_
     payload = _restore(rt)
     assert payload["prepared_input_files"] == [row]
     (drive / "brief.md").write_bytes(b"edited after queueing\n")
+
+    if folderless:
+        from ouroboros import delegate_readonly_inputs as inputs
+
+        def unexpected_lineage(_base):
+            raise AssertionError("prepared selection must skip automatic lineage enumeration")
+            yield
+
+        monkeypatch.setattr(inputs, "_input_files", unexpected_lineage)
 
     child, wake = _session_first_start(chain, monkeypatch, payload)
     receipt = json.loads(wake)

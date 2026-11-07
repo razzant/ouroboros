@@ -42,6 +42,7 @@ from ouroboros.usage_accounting import POSITIVE_PHYSICAL_ATTEMPT_STATES, Billing
 from ouroboros.delegate_custody_usage import (
     model_identity_delta, observe_failed_review_send, observe_review_usage, observe_session_usage, run_names,
 )
+from ouroboros.delegate_start_instructions import READONLY_SOURCE_SCOPE
 from ouroboros.triad_review import (
     TWO_PART_SESSION_OUTPUT_SCHEMA,
     default_output_contract,
@@ -574,11 +575,12 @@ from ouroboros.review_verdict_extraction import (  # noqa: F401 — re-exported 
 # explicitly readonly seat (writable seats get the checking-copy instructions instead).
 _REVIEW_SESSION_INSTRUCTIONS = (
     "You are a delegated read-only REVIEWER session. Retrieve the evidence "
-    "yourself with the tools your read-only mode actually gives you inside this "
-    "repository root: read files and search, and — only if command execution is "
+    "yourself. " + READONLY_SOURCE_SCOPE + "Use the tools your read-only mode actually "
+    "gives you: read files and search, and — only if command execution is "
     "among them, which read-only frequently withholds — read-only git commands "
-    "(git diff --cached, git log, git show). Reading the tree directly is a "
-    "complete substitute; a review is not incomplete for lacking a shell. Do "
+    "(git diff --cached, git log, git show). Review the frozen snapshot the host "
+    "assigned; supplemental sources cannot substitute a live tree for it. Reading "
+    "the tree directly is a complete substitute; a review is not incomplete for lacking a shell. Do "
     "not modify anything and do not run history-moving git commands. Your final "
     "answer must follow the output contract in the task EXACTLY; your host "
     "parses it structurally, and prose around the verdict is a non-response."
