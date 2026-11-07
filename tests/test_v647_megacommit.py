@@ -298,6 +298,17 @@ def test_v651_stringified_argv_recovery_and_check_normalization():
     assert normalize_check_argv("go test") == ["sh", "-c", "go test"]
     assert normalize_check_argv(["go", "test"]) == ["go", "test"]
     assert normalize_check_argv("   ") is None
+    # issue #2906: preserve empty argv elements in check list/tuple (e.g. pytest -m "")
+    assert normalize_check_argv(["pytest", "-q", "-m", "", "tests/test_foo.py"]) == [
+        "pytest",
+        "-q",
+        "-m",
+        "",
+        "tests/test_foo.py",
+    ]
+    assert normalize_check_argv([""]) is None
+    assert normalize_check_argv(["   "]) is None
+    assert normalize_check_argv([]) is None
 
 
 def test_v651_orchestrate_timeout_reaps_group_and_container(monkeypatch):

@@ -70,8 +70,9 @@ def normalize_check_argv(check: Any) -> List[str] | None:
         recovered = recover_stringified_argv(text)
         return recovered if recovered is not None else ["sh", "-c", text]
     if isinstance(check, (list, tuple)):
-        argv = [str(part) for part in check if str(part or "").strip()]
-        return argv or None
+        if not any(str(part or "").strip() for part in check):
+            return None
+        return [str(part) for part in check if part is not None]
     return None
 
 
