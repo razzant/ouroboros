@@ -102,23 +102,30 @@ def test_mcp_ui_will_not_save_held_flags_on_a_remote_transport_until_they_are_re
 
     Import cannot reach this draft (it changes no transport and refuses the flags off stdio:
     tests/test_mcp_import.py); false/false on a remote server stays equivalent to omission.
+    On stdio the lifetime checkbox edits the draft and its note in place, and an imported
+    browser policy holds it on (real layout and Save/reload: tests/test_mcp_headers_browser.py).
     The rendered run that switched back to stdio with its URL still typed (Save then wrote a
     row the loader refused, and its tools disappeared) is replayed last: each payload the real
     writer would send goes to the real loader, and Save refuses exactly the ones it drops."""
     script = r'''
 import assert from 'node:assert/strict';
-import { applyMcpSettings, collectMcpSettings, validateMcpSettings } from './web/modules/mcp_settings.js';
+import { applyMcpSettings, collectMcpSettings, initMcpSettings, validateMcpSettings } from './web/modules/mcp_settings.js';
 const handlers = {};
 const field = (name, value) => ({ id: `mcp-0-${name}`, dataset: { mcpField: name }, value, checked: false,
     addEventListener: (type, fn) => { handlers[`${name}:${type}`] = fn; } });
-const transport = field('transport', 'stdio'), url = field('url', '');
+const transport = field('transport', 'stdio'), url = field('url', ''), session = field('task_session', '');
 const clear = { addEventListener: (type, fn) => { handlers['clear:' + type] = fn; } };
-const card = { dataset: { mcpIndex: '0' }, querySelectorAll: (s) => s === '[data-mcp-field]' ? [transport, url] : [],
-    querySelector: (s) => s === '[data-mcp-clear-unsupported]' ? clear : s === '[data-mcp-field="transport"]' ? transport : null };
-const host = { innerHTML: '', querySelectorAll: (s) => s === '[data-mcp-card]' ? [card] : [] };
+const note = { textContent: '' };
+const card = { dataset: { mcpIndex: '0' }, querySelectorAll: (s) => s === '[data-mcp-field]' ? [transport, url, session] : [],
+    querySelector: (s) => s === '[data-mcp-clear-unsupported]' ? clear : s === '[data-mcp-field="transport"]' ? transport
+        : s === '[data-mcp-lifetime]' ? note : null };
+let paints = 0, changes = 0;  // card repaints (a repaint replaces the focused control) and Settings draft changes
+const host = { markup: '', get innerHTML() { return this.markup; }, set innerHTML(value) { paints += 1; this.markup = value; },
+    querySelectorAll: (s) => s === '[data-mcp-card]' ? [card] : [] };
 globalThis.document = { getElementById: (id) => id === 'mcp-servers-list' ? host : null,
     querySelector: () => card, querySelectorAll: (s) => s === '[data-mcp-card]' ? [card] : [] };
 globalThis.fetch = async () => ({ ok: false });
+initMcpSettings({ onChange: () => { changes += 1; } });
 const HELD = { id: 'held', enabled: true, transport: 'stdio', command: 'node', args: ['server.mjs'],
     task_session: true, browser_policy: true };
 const notice = () => (host.innerHTML.match(/Fields retained but not applied: ([^<]*)</) || [])[1] || '';
@@ -147,6 +154,32 @@ assert.ok(!host.innerHTML.includes('data-mcp-lifetime'));
 applyMcpSettings({ MCP_SERVERS: [HELD, { ...HELD, id: 'policy-off', browser_policy: false }] });
 assert.equal((host.innerHTML.match(/data-mcp-lifetime/g) || []).length, 2);  // a held stdio card says what it does
 assert.equal((host.innerHTML.match(/browser_policy:/g) || []).length, 1);
+const sessionTag = () => host.innerHTML.match(/<input\b[^>]*data-mcp-field="task_session"[^>]*>/)[0];
+applyMcpSettings({ MCP_SERVERS: [{ id: 'plain', enabled: true, transport: 'stdio', command: 'node', args: ['server.mjs'] }] });
+assert.doesNotMatch(sessionTag(), /\b(checked|disabled)\b/);  // per-call stays the default
+assert.match(sessionTag(), /aria-describedby="mcp-0-lifetime"/);
+assert.match(host.innerHTML, /data-mcp-lifetime>Each tool call starts a new server process\./);
+assert.ok(!Object.hasOwn(collectMcpSettings().MCP_SERVERS[0], 'task_session'));
+const painted = paints, edits = changes;
+for (const [on, event] of [[true, 'input'], [false, 'change'], [true, 'change'], [false, 'input']]) {
+    session.checked = on; handlers[`task_session:${event}`]();
+    assert.equal(collectMcpSettings().MCP_SERVERS[0].task_session, on, event);
+    assert.match(note.textContent, on ? /^One server process serves every call in a task\./ : /^Each tool call starts/);
+    assert.equal(paints, painted, event);  // edited in place: the focused checkbox keeps its node
+}
+assert.equal(changes - edits, 4);  // each edit marks the Settings draft changed
+applyMcpSettings({ MCP_SERVERS: [{ ...HELD, task_session: 'TRUE', browser_policy: 'yes' }] });  // the loader's spellings
+assert.match(sessionTag(), /\bchecked\b/);
+assert.match(sessionTag(), /\bdisabled\b/);
+assert.match(host.innerHTML, /requires a task session; use Import to change that policy explicitly/);
+const held = changes;
+for (const event of ['input', 'change']) {  // a stale or synthetic event cannot drop the imported policy's lifetime
+    session.checked = false; handlers[`task_session:${event}`]();
+    assert.equal(session.checked, true, event);
+    const saved = collectMcpSettings().MCP_SERVERS[0];
+    assert.deepEqual([saved.task_session, saved.browser_policy], ['TRUE', 'yes'], event);
+}
+assert.equal(changes, held);
 for (const off of [false, 'false', '', 0, null]) {  // false/false on a remote server equals omission
     applyMcpSettings({ MCP_SERVERS: [{ id: 'remote', enabled: true, transport: 'streamable_http',
         url: 'https://example.test/mcp', task_session: off, browser_policy: off }] });

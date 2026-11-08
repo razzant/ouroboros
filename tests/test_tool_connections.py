@@ -41,8 +41,10 @@ def _isolate_manager(tmp_path, monkeypatch):
     mcp_client.reset_manager_for_tests()
 
 
-def _servers(*, slack_pinned=True, listing=None):
-    listing = listing if listing is not None else {"gitlab": GITLAB, "slack": SLACK}
+def _servers(*, slack_pinned=True, listing=None, extra=()):
+    """The remote gitlab and slack servers, plus ``extra`` entries listing SLACK's one tool."""
+    if listing is None:
+        listing = {"gitlab": GITLAB, "slack": SLACK, **{row["id"]: SLACK for row in extra}}
 
     async def list_tools(cfg, timeout):
         rows = listing[cfg.id]
@@ -55,14 +57,14 @@ def _servers(*, slack_pinned=True, listing=None):
     servers = [{"id": "gitlab", "name": "GitLab", "enabled": True, "transport": "streamable_http",
                 "url": "https://gitlab.example/mcp"},
                {"id": "slack", "name": "Slack", "enabled": True, "transport": "streamable_http",
-                "url": "https://slack.example/mcp", "schemas_at_start": slack_pinned}]
+                "url": "https://slack.example/mcp", "schemas_at_start": slack_pinned}, *extra]
     from ouroboros import config
 
     settings = {"MCP_ENABLED": True, "MCP_SERVERS": servers}
     config.SETTINGS_PATH.write_text(json.dumps(settings), encoding="utf-8")
     mcp_client.reconfigure_from_settings(settings)
-    for server in ("gitlab", "slack"):
-        manager.refresh_server(server)
+    for server in servers:
+        manager.refresh_server(server["id"])
     return manager
 
 
@@ -100,6 +102,23 @@ def test_an_unpinned_server_starts_on_demand_in_every_mode_and_the_map_names_its
     assert "- mcp_slack (Slack): 1 tool," in helper and "loaded from task start; callable as mcp_slack__<name>: history" in helper
     for compact in (nano, helper):
         assert "\n  Server instructions: Use numeric project ids, never names." in compact
+
+
+def test_a_stdio_header_names_the_process_lifetime_its_configuration_gives(registry):
+    """#2914: a per-call stdio server starts a new process for every call, so a page it opened or a login is gone
+    by the next call; ``task_session`` keeps one process for the task. A remote server's lifetime is its own."""
+    _servers(extra=[{"id": "files", "name": "Files", "enabled": True, "transport": "stdio", "command": "node"},
+                    {"id": "browser", "enabled": True, "transport": "stdio", "command": "node", "task_session": True}])
+    full, nano = connection_views(registry, helper=False)
+    helper, _ = connection_views(registry, helper=True)
+    for text, lead in ((full, "\n### "), (nano, "\n- "), (helper, "\n- ")):
+        assert f"{lead}mcp_files (Files): 1 tool, call schemas ≈" in text
+        assert ("on demand; a new process per call, so state such as open pages or logins does not carry over; "
+                "callable as mcp_files__<name>") in text
+        assert f"{lead}mcp_browser: 1 tool," in text
+        assert "on demand; one process for the whole task; callable as mcp_browser__<name>" in text
+        assert "on demand; callable as mcp_gitlab__<name>" in text  # remote: no lifetime words
+    assert full.count("process") == helper.count("process") == 2  # nor on the pinned remote slack
 
 
 @pytest.mark.parametrize("disabled", [(), ("enable_tools",), ("enable_tools", "list_available_tools")])
