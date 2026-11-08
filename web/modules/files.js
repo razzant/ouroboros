@@ -510,6 +510,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     function watchPanes(shown) {
         if (shown) {
             panesWatch?.observe(layoutEl);
+            void noticeChangedElsewhere();
             return;
         }
         panesWatch?.disconnect();
@@ -518,6 +519,15 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     }
     window.addEventListener('ouro:page-shown', (event) => watchPanes(event?.detail?.page === 'files'));
     if (appState?.activePage === 'files') watchPanes(true);
+
+    // A draft kept (owner 2026-11-03) began from `editorOriginal`: shown again, Files says if the file changed meanwhile.
+    async function noticeChangedElsewhere() {
+        const { editorPath: path, editorOriginal: original } = state;
+        if (!state.editorDirty || state.editorIsNew || !path) return;
+        const data = await fetchJson(`/api/files/read?${new URLSearchParams({ path })}`).catch(() => null);
+        if (!data || state.editorPath !== path || state.editorOriginal !== original || !state.editorDirty) return;
+        if (!data.is_text || data.truncated || (data.content || '') !== original) showStatus('This file changed after this draft began; Save replaces those changes.', 'warn');
+    }
 
     function showStatus(text, tone = 'muted') {
         setInlineStatus(previewStatusEl, text, tone);
@@ -980,16 +990,9 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
         }
     });
 
-    if (typeof setBeforePageLeave === 'function') {
-        setBeforePageLeave(async ({ from }) => {
-            if (from !== 'files') return true;
-            hideContextMenu();
-            return canLeaveEditor();
-        });
-    }
-    if (appState) {
-        appState.filesState = state;
-    }
+    // Another page keeps an unsaved draft for its return (owner 2026-11-03); another file or folder still asks.
+    if (typeof setBeforePageLeave === 'function') setBeforePageLeave(async ({ from }) => { if (from === 'files') hideContextMenu(); return true; });
+    if (appState) appState.filesState = state;
 
     updateClipboardActions();
     loadDirectory('.', { useBackendDefault: true }).catch(showError);

@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.4.3
+version: 1.4.4
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -151,10 +151,10 @@ content still arrives. Ordinary replies, files and questions are independent, as
 remain seen, so enabling does not replay that backlog. Older summary rows without
 the host's compact cause projection retain their original reason text when On.
 
-The Mini App exposes the unchanged Ouroboros SPA through the established
-owner-authenticated sidecar and a pinned Cloudflare Quick Tunnel. It is enabled
-by default after owner binding and can be turned off independently without
-stopping the text bridge. Disabling the skill destroys process-memory Mini App
+The Mini App exposes the Ouroboros SPA through the owner-authenticated sidecar
+and a pinned Cloudflare Quick Tunnel. The sidecar relays WebSocket failure codes
+without private exception text; its 8 MiB message limit is unchanged. It is enabled
+by default after owner binding and can be turned off without stopping the text bridge. Disabling the skill destroys process-memory Mini App
 sessions, stops public exposure, and best-effort restores the prior Telegram
 menu button. The bot token can be replaced while the skill is enabled, but the
 running poller keeps polling with the token it started with until it restarts,

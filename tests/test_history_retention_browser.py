@@ -27,7 +27,8 @@ window.chat = createChatInstance({ws,state,updateUnreadBadge(){},chatId:1,idPref
         gate(){return Promise.resolve(this.begin());},isCurrent:()=>true,apply(){}}});
 initLogs({ws,state,mount:document.getElementById('logs-mount')});
 window.showLogs=()=>{document.getElementById('chat-mount').hidden=true;document.getElementById('logs-mount').hidden=false;
-    state.activePage='dashboard';state.dashboardActiveSubtab='logs';};
+    state.activePage='dashboard';state.dashboardActiveSubtab='logs';
+    window.dispatchEvent(new CustomEvent('ouro:page-shown',{detail:{page:'dashboard'}}));};
 window.fixtureReady=true;
 </script></body></html>"""
 

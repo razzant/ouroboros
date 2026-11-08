@@ -78,6 +78,8 @@ MagicMock/
 # Claudexor external-review tooling run artifacts (operator-side, never tracked)
 .claudexor/
 .review-evidence-iter2/
+# A delegated worker's evidence folder: generated diagnostics, never source (the candidate capture skips it)
+.review-evidence/
 
 # GAIA benchmark scratch: the in-repo solver/agent downloads task attachments and
 # writes OCR / extracted-image output into cwd (= repo root) during gaia runs.

@@ -962,7 +962,9 @@ revision, so this counter guarantees no delivery durability.
   The newest message is the one that arrived last: a late answer keeps its
   written time and chronological place. While reading elsewhere the crimson mark remains
   until that message is shown by scrolling, `Scroll to latest message`, or a
-  return to the page; a window shown again keeps the reader's place and reads
+  return to a room left following it, as the app's start, Main pressed again and
+  a notification always do; a return to a room left in older history keeps that
+  place, ↓ marked, and a window shown again keeps the reader's place and reads
   the message if that place shows it. Opening alone never clears it. Unknown newest
   arrivals (an unfinished line, a damaged row) acknowledge nothing and are never
   searched for; state refreshes recheck an open unread room until history is
@@ -1351,13 +1353,12 @@ not a second loading sentence in the header. Task activity remains separate.
 Failure and approximate-restoration notices are wrapping text in the room's header
 chrome: the Project status bar, or Main's floating note on its float-sheet backing (§5).
 
-Main and every Project open at their newest message, regardless of age or other
-rooms' traffic. Returning in the same session does too, including Main after
-closing a Project (owner decisions 2026-07-10 and 2026-10-05). Only explicit
-navigation lands elsewhere: a question from its Main mirror, an exact quoted message, or a row of the room's
-work status. Its landing reads the bounded page around the target as the room's history
-from there on: `Load more history` continues older from it and `Scroll to latest
-message` returns to the present. Showing the window again keeps the reader in place.
+A room first opens at its newest message, whatever its age or others' traffic. A return within the page
+session finds it as left: following, it follows the fresh end; reading older history, it
+is on that passage with its disclosures and its selection unless an ordinary click dismissed it, ↓ marked,
+newer messages unread; it reads what it missed as on reconnect. Explicit navigation wins: a question from its Main mirror, an exact quoted
+message, or a row of the room's work status. Its landing reads the bounded page around the target as the room's
+history: `Load more history` continues older from it and `Scroll to latest message` returns to the present.
 
 A room's history is its own. A page is counted in the room's messages, never in
 bytes of other rooms' traffic: the newest page holds the room's newest messages,
@@ -1397,7 +1398,7 @@ general note: dates, common row IDs and an exhausted cursor cannot establish a
 separator or full coverage. `Beginning of saved history` requires the room's
 conversation to be delivered completely. Retained origins say `Saved project
 context`; a matching canonical source row adopts that node and removes the label.
-The context itself certifies no archive coverage. When a window is shown again
+The context itself certifies no archive coverage. When a room is shown again
 and the reader's exact place is gone, the view falls back to its card, then the
 previous clamped position, and the same persistent note explains the
 approximation until explicit navigation clears it. Visible rows and card lines,
@@ -1426,7 +1427,8 @@ something that ends by itself, two bars while paused, a faint ring when
 unconfirmed. While something waits for the owner the amber dot replaces that shape
 beside the room's word; a Pause is not the owner's turn. At rest `Online` keeps its
 green dot, a status sentence's own. Only what the client alone knows lies over the
-server's mark: `Reconnecting…` (a ring), the owner's own unconfirmed send and the
+server's mark: `Reconnecting…` (a ring), `Updating…` (a ring) while a room shown again or
+reconnected still reads what it missed after 300 ms, the owner's own unconfirmed send and the
 owner's own Stop press (moving), and `Starting…` with the boot phases that refine it
 (no mark). The transcript's typing bubble shows only while the room's work moves and
 no card speaks for it. The title
@@ -3034,8 +3036,14 @@ the drawer closes: the leaving room's words fade out and the arriving room fades
 in with one breath (scale .97 → 1) while the drawer's own close brings the card
 home (owner 20.10, 4A; 21.10; `web/modules/shell_motion.js`). The stack,
 history and Back change at the tap; only the covered room's inert waits for the
-card, because it restyles the whole room. A Project room that is left keeps its
-rows until its exit has run and is the same room when reopened meanwhile. Docked,
+card, because it restyles the whole room. A room that is left keeps its
+rows through its exit and stays whole and quiet for its return; only its tasks'
+incidents still toast (§4). A reader a room opened closes when another place covers it; a Project room left also
+pauses what it plays, Main plays on, and a hidden window closes and pauses nothing. Visited rooms keep
+their state until page teardown or project deletion; memory grows with visits,
+without a second persistent archive of the conversation. Main is quiet only while
+nothing of it shows: beside a docked Project it stays live; covered by a Project (the
+phone's card, a finger's docked column), behind another page or in a hidden window it is away. Docked,
 navigation stays instant; the Project panel comes in from the window's right edge
 once its room has painted (or after a read's 300 ms bound, with its loading row)
 and goes back there whole, only its scrim fading (owner 20.10, Q2 A). A dismissed
@@ -3098,7 +3106,7 @@ own row. Files' location and its actions return above the list on one row; folde
 Files shows the folder's list and the chosen file side by side while its own width holds both (the `files`
 container, 700 px); narrower, the list comes first and a chosen file replaces it under `Back to folder`, which
 keeps an unsaved draft: the file's row says `unsaved` (a new file's draft has its own row at the top) and reopens
-it, while another file, folder or page still asks. The folder's status stands over the list (audit №7, owner
+it; another page keeps it too (a return says whether the file changed meanwhile); another file or folder asks. The folder's status stands over the list (audit №7, owner
 2026-10-28T22:09Z).
 
 **A room's bar is the law of places** (owner 24.10): it holds what has a state and the emergency exit, and a

@@ -1,4 +1,4 @@
-/** Dependency-free JSDoc mirror of `ouroboros.gateway.contracts`; the interface-language envelopes (`UiI18n*`) sit in ./ui_i18n_types.js, the model-route previews in ./model_route_types.js, the Dashboard storage envelopes (`Storage*`) in ./storage_types.js, the Dashboard Evolution history (`Evolution*`) in ./evolution_types.js, the MCP import preview in ./mcp_import_types.js, the replaceable-client envelopes (`ServedUiState`, setup bootstrap, `/api/contract`, chat history rows, journey request bodies) in ./client_contract_types.js, the product-management envelopes (skills, marketplaces, accounts, local model, MCP, update status) in ./management_contract_types.js, the owner-decision ingress in ./decision_types.js, the managed-update preflight, apply and frame envelopes in ./update_types.js. */
+/** Dependency-free JSDoc mirror of `ouroboros.gateway.contracts`; the interface-language envelopes (`UiI18n*`) sit in ./ui_i18n_types.js, the model-route previews in ./model_route_types.js, the Dashboard storage envelopes (`Storage*`) in ./storage_types.js, the Dashboard Evolution history (`Evolution*`) in ./evolution_types.js, the MCP import preview in ./mcp_import_types.js, the replaceable-client envelopes (`ServedUiState`, setup bootstrap, `/api/contract`, chat history rows, journey request bodies) in ./client_contract_types.js, the product-management envelopes (skills, marketplaces, accounts, local model, MCP, update status) in ./management_contract_types.js, the owner-decision ingress in ./decision_types.js, the managed-update preflight, apply and frame envelopes in ./update_types.js, the Dashboard › Logs compact and Raw envelopes in ./logs_types.js. */
 /** @typedef {Object} CostPresentation
  * @property {'own'|'root_tree'} scope
  * @property {?number} tracked_amount
@@ -743,11 +743,7 @@
  * @property {string[]=} target_titles
  */
 
-/** Additive history fact: a project-owned Main mirror cannot grant cancel authority.
- * @typedef {Object} ProjectMirrorHistoryFields
- * @property {boolean=} project_mirror
- */
-
+/** @typedef {import('./client_contract_types.js').ProjectMirrorHistoryFields} ProjectMirrorHistoryFields */
 /** @typedef {import('./management_contract_types.js').SkillReviewHistoryDetailResponse} SkillReviewHistoryDetailResponse */
 
 /** Additive /api/chat/history terminality projection.
@@ -1471,6 +1467,11 @@
  * @property {Object[]} entries
  * @property {string=} error
  */
+/** @typedef {import('./logs_types.js').LogRowSource} LogRowSource */
+/** @typedef {import('./logs_types.js').LogRawReference} LogRawReference */
+/** @typedef {import('./logs_types.js').LogRawResponse} LogRawResponse */
+/** @typedef {import('./logs_types.js').CompactLogEntry} CompactLogEntry */
+/** @typedef {import('./logs_types.js').CompactLogTailResponse} CompactLogTailResponse */
 /**
  * `POST /api/skills/{skill}/delete`; a refusal carries only ok, error and status_code.
  * @typedef {Object} SkillDeleteResponse

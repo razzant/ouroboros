@@ -1156,14 +1156,18 @@ function reviewRevision(value) {
 // read keeps its slot until it settles; one whose response never comes is aborted
 // at the slot's bound and fails like any lost read (its card offers Retry), so a dead
 // connection neither stalls every card's details nor stays open beside the next
-// reads. A closed owner's queued reads never start.
+// reads. A closed owner's queued reads never start; an owner away (its room off
+// the screen) starts none until it is back.
 export const REVIEW_DETAIL_READS = 2;
 export const REVIEW_DETAIL_SLOT_MS = 30000;
 const detailQueue = [];
 let detailReads = 0;
 function drainDetailReads() {
-    while (detailReads < REVIEW_DETAIL_READS && detailQueue.length) {
-        const job = detailQueue.pop();
+    while (detailReads < REVIEW_DETAIL_READS) {
+        let index = detailQueue.length - 1;
+        while (index >= 0 && detailQueue[index].away()) index -= 1;
+        if (index < 0) return;
+        const [job] = detailQueue.splice(index, 1);
         detailReads += 1;
         const abort = new AbortController();
         const lost = new Promise((_resolve, reject) => abort.signal.addEventListener('abort',
@@ -1173,19 +1177,24 @@ function drainDetailReads() {
             .finally(() => { clearTimeout(timer); detailReads -= 1; drainDetailReads(); });
     }
 }
-const queueDetailRead = (owner, read) => new Promise((resolve, reject) => {
-    detailQueue.push({ owner, read, resolve, reject });
+const queueDetailRead = (owner, read, away) => new Promise((resolve, reject) => {
+    detailQueue.push({ owner, read, resolve, reject, away });
     drainDetailReads();
 });
 
-// Revisions are opaque SHA-256 tokens; one distinct token may trail a live GET.
+// Revisions are opaque SHA-256 tokens; one distinct token may trail a live GET. An owner away (`suspend`, a room that
+// left the screen) draws nothing: what a read already sent returns, its status, a retry and the owner's settling wait
+// for `resume`, in order.
 export function createReviewHydrator({ fetchDetail, applyDetail, onState = () => {}, onSettled = () => {} } = {}) {
     const states = new Map();
+    let held = null;  // while away, what waits for the return
+    const later = (fn) => (held ? new Promise((resolve) => held.push(() => resolve(fn()))) : fn());
     const start = (taskId, state, revision, onDomWrite) => {
         clearTimeout(state.migrationTimer); state.migrationTimer = null;
         const generation = ++state.generation;
         state.inFlightRevision = revision;
-        const write = typeof onDomWrite === 'function' ? onDomWrite : (mutate) => mutate();
+        const draw = typeof onDomWrite === 'function' ? onDomWrite : (mutate) => mutate();
+        const write = (mutate) => later(() => draw(mutate));
         // First load/retry announces; routine refresh over applied content stays quiet.
         const notify = (status) => {
             state.lastStatus = status;
@@ -1194,7 +1203,7 @@ export function createReviewHydrator({ fetchDetail, applyDetail, onState = () =>
         const request = Promise.resolve()
             .then(() => {
                 if (!state.everApplied || state.lastStatus === 'error') notify('loading');
-                return queueDetailRead(states, (signal) => fetchDetail(taskId, { signal }));
+                return queueDetailRead(states, (signal) => fetchDetail(taskId, { signal }), () => held !== null);
             })
             .then((detail) => {
                 // The strict seam rejects failures; null means genuinely absent (404).
@@ -1211,7 +1220,7 @@ export function createReviewHydrator({ fetchDetail, applyDetail, onState = () =>
                 if (states.get(taskId) !== state) return false;
                 if (isStoreMigrating(error)) {
                     notify('loading');
-                    state.migrationTimer = setTimeout(() => start(taskId, state, revision, onDomWrite), 700);
+                    state.migrationTimer = setTimeout(() => later(() => start(taskId, state, revision, onDomWrite)), 700);
                     return false;
                 }
                 notify('error');
@@ -1226,7 +1235,7 @@ export function createReviewHydrator({ fetchDetail, applyDetail, onState = () =>
                 if (pending && pending.revision !== state.appliedRevision) {
                     start(taskId, state, pending.revision, pending.onDomWrite);
                 }
-                onSettled(taskId);
+                later(() => onSettled(taskId));
             });
         state.inFlight = request;
         return request;
@@ -1280,7 +1289,15 @@ export function createReviewHydrator({ fetchDetail, applyDetail, onState = () =>
             // Reset the presentation receipt after rebuild; keep joining any physical GET.
             for (const state of states.values()) state.appliedRevision = null;
         },
+        suspend() { held ||= []; },
+        resume() {
+            const owed = held || [];
+            held = null;
+            for (const fn of owed) fn();
+            drainDetailReads();
+        },
         clear() {
+            held = null;
             for (const state of states.values()) clearTimeout(state.migrationTimer);
             states.clear();
             for (const [index, job] of [...detailQueue.entries()].reverse()) {

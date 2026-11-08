@@ -371,8 +371,9 @@ def test_a_reopened_room_lands_once_after_its_superseded_reach(direct_server_wit
             room.open()
             assert _wait_for(room.page, lambda: len(room.held) == 1, attempts=200), room.older
             room.page.locator("#project-panel-close").evaluate("el => el.click()")
-            # After the exit, the replacement reads independently of the destroyed room's held page.
-            room.messages.wait_for(state='detached')
+            # After the exit the room is kept away (room_retire.js), and its return reads independently of the held
+            # page its left opening was waiting for.
+            room.messages.wait_for(state='hidden')
             room.open()
             read = _wait_for(room.page, lambda: room.seen() == [revision], attempts=200)
             room.release()
@@ -589,7 +590,9 @@ def test_an_unread_main_opens_on_the_reply_its_cards_buried(direct_server_with_d
                     page.wait_for_function("() => document.getElementById('project-panel')?.classList.contains('open')")
                 elif opening == "files" or phone:
                     go("files")
-                _bury_main(bus)
+                # Main behind another page is away (room_retire.js) and draws what came from saved history on its
+                # return, folded as at the start, so a card per word; docked beside a Project or shown, it hears it live.
+                _bury_main(bus, cards=160 if opening == "files" or phone else 40)
                 news = revision()
                 _emit_ws_frame(page, {"type": "projects_changed"})
                 if opening == "pressed-again":  # news while the owner is on Main: drawn, no count, nothing moves
@@ -614,3 +617,95 @@ def test_an_unread_main_opens_on_the_reply_its_cards_buried(direct_server_with_d
     assert not facts.get("read_while_away"), facts
     assert facts["read"] and facts["shown"]["onScreen"] and facts["shown"]["gap"] > 1, facts
     assert facts["badge_after_leaving"] == 0, facts
+
+
+# The composition of the opening above with the return rule (owner 2026-11-03): a return to Main left reading older
+# history keeps that passage, ↓ marked, and Main stays unread until the reply is shown; ↓ then shows it (here the
+# newest row, nothing buried under it) and reads it. A return to Main left following its end is the opening case above
+# ("files", "project-closed"). Real server as above.
+_MAIN_TOP_ROW = """() => {
+    const feed = document.getElementById('chat-messages');
+    const top = feed.getBoundingClientRect().top;
+    const node = [...feed.querySelectorAll('[data-history-id]')].find(n => n.getBoundingClientRect().bottom > top + 1);
+    return node && {id: node.dataset.historyId, offset: Math.round(node.getBoundingClientRect().top - top)};
+}"""
+
+
+@pytest.mark.parametrize("left, engine", [("files", "chromium"), ("files", "webkit"), ("project-closed", "chromium")])
+def test_a_main_left_reading_older_history_returns_there_unread_until_its_reply_is_shown(
+        direct_server_with_data, monkeypatch, left, engine):
+    from ouroboros.projects_registry import create_project
+    from playwright.sync_api import sync_playwright
+
+    from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
+
+    data, url = direct_server_with_data["data_dir"], direct_server_with_data["url"]
+    bus = _main_bus(data, monkeypatch)
+    for index in range(40):
+        bus.send_with_budget(1, f"Earlier Main reply {index:02d} " + "words " * 30)
+    if left == "project-closed":
+        create_project(data, "side-room", name="Side Room")
+    writes, facts = [], {}
+    badge = '[data-nav-page="chat"] .unread-badge'
+
+    def revision():
+        return page.request.get(f"{url}/api/state").json().get("main_visible_revision")
+
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch()
+        try:
+            page = browser.new_page(viewport={"width": 1187, "height": 734})
+            page.on("request", lambda r: writes.append(json.loads(r.post_data or "{}").get("main_seen_revision"))
+                    if r.method == "POST" and r.url.endswith("/api/ui/preferences") else None)
+            page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
+            page.goto(url, wait_until="domcontentloaded")
+            page.wait_for_function("() => window.__testSockets?.some(s => s.readyState === 1)")
+            page.locator("#chat-messages [data-history-id]").first.wait_for(state="attached", timeout=30_000)
+            first = revision()
+            assert _wait_for(page, lambda: first in writes, attempts=200), "Main opened read"
+            page.evaluate(_SETTLE_RESTORE_FRAMES)
+            box = page.locator("#chat-messages").bounding_box()
+            page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            for _ in range(4):  # the owner's own wheel turns Main back into older history
+                page.mouse.wheel(0, -500)
+                page.wait_for_timeout(120)
+            page.evaluate(_SETTLE_RESTORE_FRAMES)
+            page.wait_for_timeout(300)
+            place = page.evaluate(_MAIN_TOP_ROW)
+            if left == "project-closed":
+                page.locator('.nav-project-row[data-project-id="side-room"]').evaluate("el => el.click()")
+                page.wait_for_function("() => document.getElementById('project-panel')?.classList.contains('open')")
+            else:
+                page.locator('#primary-sidebar [data-nav-page="files"]').click()
+                page.locator("#page-files.active").wait_for(state="attached")
+            bus.send_with_budget(1, MAIN_REPLY)
+            news = revision()
+            _emit_ws_frame(page, {"type": "projects_changed"})
+            page.locator(badge).wait_for(state="attached", timeout=15_000)
+            if left == "project-closed":
+                page.locator("#project-panel-close").evaluate("el => el.click()")
+            else:
+                page.locator('#primary-sidebar [data-nav-page="chat"]').click()
+                page.locator("#page-chat.active").wait_for(state="attached")
+            page.evaluate(_SETTLE_RESTORE_FRAMES)
+            page.wait_for_timeout(1200)
+            facts["back"] = page.evaluate(_MAIN_TOP_ROW)
+            facts["shown"] = page.locator("#chat-messages").evaluate(_MAIN_SHOWN, MAIN_REPLY)
+            arrow = page.locator("#chat-scroll-bottom")
+            facts["arrow"] = "visible" in (arrow.get_attribute("class") or "")
+            facts["dot"] = page.locator("#chat-scroll-bottom .chat-scroll-activity-dot").is_hidden() is False
+            facts["read_on_return"] = news in writes
+            name = f"main-left-older-{left}-{engine}"
+            evidence = _evidence(data, name, place=place, facts=facts, writes=writes)
+            page.screenshot(path=str(evidence / f"{name}.png"))
+            arrow.click()
+            facts["read_after_arrow"] = _wait_for(page, lambda: news in writes, attempts=200)
+            page.evaluate(_SETTLE_RESTORE_FRAMES)
+            facts["shown_after_arrow"] = page.locator("#chat-messages").evaluate(_MAIN_SHOWN, MAIN_REPLY)
+        finally:
+            browser.close()
+    back = facts["back"]
+    assert back["id"] == place["id"] and abs(back["offset"] - place["offset"]) <= 2, (place, facts)
+    assert not facts["shown"]["onScreen"] and facts["arrow"] and facts["dot"], facts
+    assert not facts["read_on_return"], ("the reply was not shown: Main stays unread", facts)
+    assert facts["read_after_arrow"] and facts["shown_after_arrow"]["onScreen"], facts

@@ -105,11 +105,11 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
 /* (0,5,0) outranks the light theme's connection colours (0,4,0): the tone below owns the word's ink. */
 :root .rw-trigger[data-tone] .status-badge.status-badge { color: inherit; }
 /* Tones (one producer, work_status.roomStatusView): crimson is live work, amber only the owner's own question, green
-   the room at rest; a pause, an access wait, a hold, starting and reconnecting are neutral facts. The mark after the
+   the room at rest; a pause, an access wait, a hold, starting, updating and reconnecting are neutral facts. The mark after the
    word takes the word's ink. */
 .rw-trigger[data-tone="live"] { color: var(--accent-light); }
 .rw-trigger[data-tone="wait"] { color: var(--status-warn-fg); }
-.rw-trigger:is([data-tone="queued"], [data-tone="held"], [data-tone="starting"]) { color: var(--text-meta); }
+.rw-trigger:is([data-tone="queued"], [data-tone="held"], [data-tone="starting"], [data-tone="updating"]) { color: var(--text-meta); }
 .rw-trigger[data-tone="unknown"] { color: var(--status-neutral-fg); }
 .rw-trigger[data-tone="online"] { color: var(--status-ok-fg); }
 /* A start that failed is the failure's word beside its red dot (host_starting_status.js), and the control stays
@@ -200,8 +200,8 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
 .rw-extras .chat-budget-word { display: inline; }
 .rw-extras .chat-budget-text { font-size: var(--type-body); color: var(--text-meta); }
 .rw-extras .chat-budget-bar { display: none; }
-/* The Project status bar keeps the room's history note; without one it takes no room. */
-.chat-panel-statusbar:not(:has(> :not([hidden]))) { display: none; }
+/* The Project status bar keeps the room's history note; without one it takes no room (`:empty`, see style.css). */
+.chat-panel-statusbar:empty { display: none; }
 
 /* ---- the list and its rows ------------------------------------------------------------------------- */
 /* A Project's list starts with the room's whole name, which its one-line title may cut: a section title, wrapping as
