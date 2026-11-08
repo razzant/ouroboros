@@ -224,7 +224,15 @@ def continuation(ctx, drive, entry, gateway, authority, actor, invocation_id, te
              "authority_ceiling": copy.deepcopy(entry.authority_ceiling), "promotion": promotion}
     return ContinuationStart(facts={**facts, "continuation_of": entry.run_id, "resource_ref": copy.deepcopy(entry.resource_ref)}, prompt=text, request=request,
         custody={**facts, "continuation_of": entry.run_id, "capture_id": invocation_id,
-                 "snapshot_task_id": entry.snapshot_task_id or entry.task_id}, snapshot=snapshot)
+                 "snapshot_task_id": entry.snapshot_task_id or entry.task_id}, snapshot=snapshot,
+        folder=thread_folder(thread))
+
+
+def thread_folder(thread) -> str:
+    """The folder every turn of a plan thread runs in: the engine's own record of the root the thread was made on
+    (``GET /v2/threads/:id`` ``thread.repoRoot``, nullable since 4.5.0); "" when that record names none."""
+    root = (thread.get("thread") or {}).get("repoRoot") if isinstance(thread, dict) else None
+    return root if isinstance(root, str) else ""
 
 
 def answer_plan(ctx, entry, answers, reply_to=None):

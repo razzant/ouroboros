@@ -108,6 +108,7 @@ class ContinuationStart(NamedTuple):
     snapshot: Optional[AdoptedSnapshot] = None
     note: str = ""                   # the caller's text, for the prompt once the run is bound
     words: str = ""                  # my human's rows no START body of the line holds (``continuation_words``)
+    folder: str = ""                 # a plan-thread turn's: its thread's folder, as the engine names it ("" when it does not)
 
 
 NO_CONTINUATION = ContinuationStart()
