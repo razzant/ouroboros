@@ -138,7 +138,12 @@ def _toggle(skill: Any, drive_root: Path, repo_path: str, enabled: bool, actor: 
         extension_loader.unload_extension(skill.name)
         return _refusal("cannot persist disable while the skill identity collides; rename one directory first", 400,
                         extension_action="extension_unloaded", extension_reason="name_collision", **facts)
-    save_enabled(drive_root, skill.name, enabled, actor=actor, reason=reason)
+    from ouroboros.extension_registry_state import _lifecycle_lock_for
+
+    # Under the lock a companion refresh holds from its final admission through its spawn (never its stop):
+    # the refresh reads this choice, or the reconcile below finds its new process and stops it.
+    with _lifecycle_lock_for(skill.name):
+        save_enabled(drive_root, skill.name, enabled, actor=actor, reason=reason)
     skill.enabled = enabled
     state = _reconcile(skill, drive_root, repo_path, enabling=enabled)
     failed = enabled and state.get("action") == "extension_load_error"

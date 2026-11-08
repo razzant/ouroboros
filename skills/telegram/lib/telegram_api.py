@@ -73,6 +73,24 @@ class TelegramTransportError(RuntimeError):
     """Telegram could not return a trustworthy API response yet."""
 
 
+class TelegramTokenMissing(ValueError):
+    """No bot token is accepted: there is nothing to send with, which is a wait and never a failure."""
+
+
+class TelegramBindingChanged(RuntimeError):
+    """The accepted bot token changed after this client was built, so it makes no further request; a request whose
+    failure arrives after the change ends the same way, never as a failure of the token now in force.
+
+    ``accepted`` counts the requests of this client Telegram accepted (an ``ok`` answer; a refusal is not
+    one): those parts stay as they are, and a caller never sends them, or the rest, again through another
+    token's client. Broad fallbacks re-raise it instead of trying another form of the same request.
+    """
+
+    def __init__(self, accepted: int = 0) -> None:
+        super().__init__("The Telegram bot token changed; this operation stopped before its next request.")
+        self.accepted = int(accepted)
+
+
 # Shared degraded-transport pacing contract for the poller and notifier loops:
 # the first retry waits TELEGRAM_RETRY_INITIAL_SEC and each further consecutive
 # failure doubles the wait monotonically up to TELEGRAM_RETRY_MAX_SEC; any
@@ -583,7 +601,16 @@ def message_chunks(text: str, parse_mode: str = "HTML") -> list[str]:
 class TelegramClient:
     def __init__(self, token: str, *, trust_env: bool = False, proxy: Optional[str] = None,
                  on_message=None, reply_to_message_id: int = 0,
-                 api_base_url: Optional[str] = None, files_dir: Optional[str] = None):
+                 api_base_url: Optional[str] = None, files_dir: Optional[str] = None, binding=None,
+                 generation: Optional[int] = None):
+        # A client of the bridge's accepted token (lib/telegram_token.py) is one identity: the token and
+        # generation of ONE snapshot (the caller's, which also chose its bot-specific references, or taken
+        # here). A binding that moved on since makes it refuse its next request, never switch tokens.
+        self._binding, self.generation, self.accepted = binding, 0, 0
+        if binding is not None:
+            if generation is None:
+                token, generation = binding.snapshot()
+            self.generation = int(generation)
         self.token = str(token or "").strip()
         # The bot this client speaks as, fixed with its token: every id it reads or sends is this bot's.
         self.bot_id = bot_id(self.token)
@@ -593,7 +620,7 @@ class TelegramClient:
         self.on_message = on_message
         self.reply_to_message_id = int(reply_to_message_id)
         if not self.token:
-            raise ValueError("TELEGRAM_BOT_TOKEN is missing")
+            raise TelegramTokenMissing("TELEGRAM_BOT_TOKEN is missing")
         # An explicit proxy replaces ambient proxies for these calls only. With the default
         # base the target stays https://api.telegram.org, so TLS runs end to end through the
         # tunnel: the proxy sees the host, never the token-bearing path, and redirects are
@@ -605,7 +632,21 @@ class TelegramClient:
         self.file_base = f"{base}/file/bot{self.token}"
         self.files_dir = _telegram_files_dir(files_dir)
 
+    def check_binding(self) -> None:
+        """Before each request: after a token change this client asks Telegram nothing more."""
+        if self._binding is not None and not self._binding.current(self.generation):
+            raise TelegramBindingChanged(self.accepted)
+
+    def _failed(self, failure: Exception) -> Exception:
+        """What a failed request raises: its own failure while this client's token is in force. Once the binding
+        moved on, any failure (a refusal, a broken transport, an unreadable answer) belongs to the replaced token,
+        so it ends as the typed change with the parts Telegram accepted, never as a failure of the token now in force."""
+        if self._binding is not None and not self._binding.current(self.generation):
+            return TelegramBindingChanged(self.accepted)
+        return failure
+
     async def call(self, method: str, *, data: Optional[dict] = None, files: Optional[dict] = None, timeout: int = 30) -> Dict[str, Any]:
+        self.check_binding()
         method_text = str(method or "")
         safe_method = method_text if re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,63}", method_text) else "request"
         if self.reply_to_message_id and method_text in {"sendMessage", "sendPhoto", "sendVideo", "sendDocument", "sendAudio"}:
@@ -617,23 +658,24 @@ class TelegramClient:
             async with httpx.AsyncClient(
                 timeout=timeout, trust_env=self.trust_env, proxy=self.proxy, follow_redirects=False,
             ) as client:
+                self.check_binding()  # entering the transport may yield: the request itself starts only here
                 response = await client.post(f"{self.api_base}/{method_text}", data=data, files=files)
         except httpx.TimeoutException:
-            raise TelegramTransportError(f"Telegram API timed out during {safe_method}.") from None
+            raise self._failed(TelegramTransportError(f"Telegram API timed out during {safe_method}.")) from None
         except httpx.HTTPError as exc:
-            raise TelegramTransportError(
+            raise self._failed(TelegramTransportError(
                 f"Telegram API transport failed during {safe_method} ({type(exc).__name__})."
-            ) from None
+            )) from None
         try:
             payload = response.json()
         except ValueError:
-            raise TelegramTransportError(
+            raise self._failed(TelegramTransportError(
                 f"Telegram API returned invalid JSON during {safe_method}."
-            ) from None
+            )) from None
         if not isinstance(payload, dict):
-            raise TelegramTransportError(
+            raise self._failed(TelegramTransportError(
                 f"Telegram API returned an invalid response during {safe_method}."
-            )
+            ))
         try:
             api_status = int(payload.get("error_code") or response.status_code)
         except (TypeError, ValueError):
@@ -648,17 +690,18 @@ class TelegramClient:
                 status_code=response.status_code,
             )
         if response.status_code >= 400:
-            raise TelegramRequestRejected(
+            raise self._failed(TelegramRequestRejected(
                 f"Telegram API {safe_method} returned HTTP {response.status_code}.",
                 status_code=response.status_code,
                 plain_retry_safe=(safe_method == "sendMessage" and response.status_code == 400),
-            )
+            ))
         if not payload.get("ok"):
-            raise TelegramRequestRejected(
+            raise self._failed(TelegramRequestRejected(
                 f"Telegram API rejected {safe_method}.",
                 status_code=api_status,
                 plain_retry_safe=(safe_method == "sendMessage" and api_status == 400),
-            )
+            ))
+        self.accepted += 1
         self._observe_message(data, payload.get("result"))
         return payload
 
@@ -672,10 +715,12 @@ class TelegramClient:
             self.on_message(int(chat_id), int(message_id))
 
     async def _download_bytes(self, file_path: str) -> bytes:
+        self.check_binding()
         try:
             async with httpx.AsyncClient(
                 timeout=30, trust_env=self.trust_env, proxy=self.proxy, follow_redirects=False,
             ) as client:
+                self.check_binding()
                 async with client.stream("GET", f"{self.file_base}/{file_path}") as response:
                     if response.status_code >= 400:
                         raise RuntimeError(f"Telegram file download returned HTTP {response.status_code}")
@@ -691,12 +736,17 @@ class TelegramClient:
                             raise RuntimeError("Telegram file exceeds the 10 MiB download limit.")
                         content.extend(chunk)
         except httpx.TimeoutException:
-            raise RuntimeError("Telegram file download timed out.") from None
+            raise self._failed(RuntimeError("Telegram file download timed out.")) from None
         except httpx.HTTPError as exc:
-            raise RuntimeError(
+            raise self._failed(RuntimeError(
                 f"Telegram file download transport failed ({type(exc).__name__})."
-            ) from None
+            )) from None
+        except TelegramBindingChanged:
+            raise  # no fallback to the local store either: the operation ends here
         except RuntimeError as exc:
+            failure = self._failed(exc)
+            if failure is not exc:
+                raise failure from None  # nor after a replaced token's late failure
             if not self.files_dir:
                 raise
             # Off the shared event loop: the store may be a slow or network disk.
@@ -790,6 +840,8 @@ class TelegramClient:
         try:
             await self.call("editMessageText", data=data, timeout=20)
             return True
+        except TelegramBindingChanged:
+            raise  # never a failed edit to fall back from: nothing more goes out through this token
         except Exception as exc:
             # "message is not modified" means the bubble already shows this exact
             # text — treat it as success so the caller does NOT post a duplicate.
@@ -906,6 +958,8 @@ class TelegramClient:
         try:
             await self.call("editMessageText", data=data, timeout=20)
             return True
+        except TelegramBindingChanged:
+            raise
         except Exception as exc:
             return str(exc) == "Telegram API editMessageText: message is not modified."
 

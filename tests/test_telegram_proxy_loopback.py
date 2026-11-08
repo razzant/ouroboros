@@ -261,7 +261,7 @@ def test_all_telegram_consumers_succeed_through_real_transport(tmp_path, monkeyp
             assert await companion.run() == 0
             assert reached == [42]
             assert bot.button == {"type": "commands"}
-            assert not (state / "menu_button_snapshot.json").exists()
+            assert not list(state.glob("menu_button_snapshot*.json"))  # every ledger restored and removed
             assert options and all(option["proxy"] == proxy_url for option in options)
             assert all(option["follow_redirects"] is False for option in options)
             assert all(option["trust_env"] is False for option in options)

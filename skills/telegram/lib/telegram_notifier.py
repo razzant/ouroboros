@@ -10,13 +10,16 @@ from typing import Any, Dict, Optional, Tuple
 
 from .telegram_api import (
     TELEGRAM_RETRY_INITIAL_SEC,
+    TelegramBindingChanged,
     TelegramClient,
     TelegramRequestRejected,
+    TelegramTokenMissing,
     TelegramTransportError,
     next_telegram_retry_delay,
     _LOCALIZED_TEXTS,
 )
 from .telegram_poll_binding import bot_id
+from .telegram_token import accepted_token, binding_for
 from .telegram_state import (
     _data_dir,
     _jsonl_tail,
@@ -73,18 +76,29 @@ async def _push_notification(
     recovered transition warning (which carries the exception) is the one
     owner-visible line per episode.
     """
-    token = api.get_settings(["TELEGRAM_BOT_TOKEN"]).get("TELEGRAM_BOT_TOKEN", "")
+    binding = binding_for(api)
+    accepted_token(api)
+    token, generation = binding.snapshot()  # one identity: its references and its requests are one bot's
     state_dir = Path(api.get_state_dir())
-    client = TelegramClient(
-        token, trust_env=trust_env,
-        proxy=telegram_proxy(state_dir),
-        **(_mirror_options(api, bot_id(token), event, chat_id) if event is not None else {}),
-        api_base_url=telegram_api_base(state_dir),
-        files_dir=telegram_files_dir(state_dir),
-    )
     try:
+        client = TelegramClient(
+            token, trust_env=trust_env,
+            proxy=telegram_proxy(state_dir),
+            **(_mirror_options(api, bot_id(token), event, chat_id) if event is not None else {}),
+            api_base_url=telegram_api_base(state_dir),
+            files_dir=telegram_files_dir(state_dir),
+            binding=binding, generation=generation,
+        )
         await client.send_message(int(chat_id), text, parse_mode="")
         return "sent", None
+    except TelegramTokenMissing as exc:
+        # The token was cleared after the loop looked: this notification waits unsent, like a transient
+        # one, so the batch keeps what was already delivered and nothing is sent twice.
+        return "transient", exc
+    except TelegramBindingChanged as exc:
+        # Before a part, or a part's failure answered after the change: parts the old bot already took stay
+        # there and are not resent through the new one; a notification it never took is sent next cycle by the new token's client.
+        return ("skipped" if exc.accepted else "transient"), exc
     except TelegramTransportError as exc:
         api.log("debug", f"Telegram notify failed: {exc}")
         return "transient", exc
@@ -403,7 +417,8 @@ def _make_notifier(api, *, trust_env: bool = False):
         degraded_cause = ""
         while True:
             settings = _load_settings(api)
-            chat_id = _pinned_chat_id(settings)
+            # No accepted token: wait without sending or spending restart budget; nothing is marked seen.
+            chat_id = _pinned_chat_id(settings) if accepted_token(api) else 0
             transient: Optional[BaseException] = None
             delivered = False
             # Both lanes self-gate. Keep observing task IDs while OFF so enabling
@@ -424,6 +439,11 @@ def _make_notifier(api, *, trust_env: bool = False):
                     )
                     delivered = delivered or tasks_delivered
                 _save_notif_state(api, state)
+            if isinstance(transient, (TelegramTokenMissing, TelegramBindingChanged)):
+                # The token was cleared or replaced mid-batch: a wait, not a degraded transport. The next
+                # cycle sends what is left with the accepted token, or waits quietly for one.
+                await asyncio.sleep(TELEGRAM_RETRY_INITIAL_SEC)
+                continue
             if transient is not None:
                 # Transition logging: one warning entering degraded, one info
                 # on recovery; per-attempt failures stay at debug while the

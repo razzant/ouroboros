@@ -32,7 +32,9 @@ from ouroboros.skill_token import SkillToken
 # 2.1: target memory reader and branch realtime registration (independent additions).
 # 2.2: conversation frames declare their initial ordinary tool schemas.
 # 2.3: additive union of memory reading and realtime/conversation registration.
-PLUGIN_API_VERSION = "2.3"
+# 2.4: settings state (value/missing/unknown) and a settings refresh of a declared companion; every declared
+#      2.x minimum negotiates them, a field-less legacy payload is refused them.
+PLUGIN_API_VERSION = "2.4"
 # The generation an extension WITHOUT the manifest field binds against —
 # "absent ≡ 1.3 by construction" (owner-ratified §6.1-Δ; deliberately NOT 1.4).
 LEGACY_PLUGIN_API_GENERATION = "1.3"
@@ -79,13 +81,14 @@ MATRIX_CAPABILITIES: frozenset[str] = frozenset({
     "register_tool", "register_route", "register_ws_handler", "register_ui_tab",
     "register_settings_section", "send_ws_message", "register_companion_process",
     "register_supervised_task", "subscribe_event", "on_unload", "register_realtime_provider", "register_live_conversation",
+    "refresh_companion_process",
 })
 
 # Runtime-access/introspection methods always available in every execution mode
 # (the complement of MATRIX_CAPABILITIES over the PluginAPI surface).
 ALWAYS_AVAILABLE_CAPABILITIES: frozenset[str] = frozenset({
     "log", "get_settings", "get_state_dir", "skill_job_dir",
-    "get_skill_token", "get_runtime_info", "read_memory",
+    "get_skill_token", "get_runtime_info", "read_memory", "get_settings_state",
 })
 
 # Capabilities a short-lived OUT_OF_PROCESS child cannot use directly: a persistent
@@ -96,6 +99,7 @@ OUT_OF_PROCESS_UNAVAILABLE_CAPABILITIES: frozenset[str] = frozenset({
     "subscribe_event",
     "register_supervised_task",
     "register_realtime_provider", "register_live_conversation",
+    "refresh_companion_process",
 })
 
 
@@ -204,6 +208,7 @@ def plugin_api_surface_fingerprint() -> str:
 # change without a version bump) refuses negotiation until the version is
 # bumped and the new fingerprint recorded here.
 PLUGIN_API_SURFACE_FINGERPRINTS: Dict[str, str] = {
+    "2.4": "c472950639f4467a21f4407d9416871e8f744f27392f1a8d5f711ade39579d7c",
     "2.3": "bd1062f96b99607b4651ba319e74f9620a5bae08ad1aa0d5dcb106d8ad542d12",
     "2.2": "46ee2d134ca3c3957adef9366b326b97a84abaae757e8e9d18030a7838329506",
     "2.0": "03fabdf4334e6b2bde217b4cb83a80faaebc773ddce870546dd2108b75de17ca",
@@ -489,6 +494,32 @@ class PluginAPI(Protocol):
         """Register a companion subprocess declared in the reviewed manifest."""
         ...
 
+    def refresh_companion_process(self, name: str, expected: Optional[Mapping[str, Any]] = None, *,
+                                  only_if_differs: bool = False) -> str:
+        """Apply saved settings to one companion this skill registered (2.4, server process, off the event loop).
+
+        Blocking for the old process's stop (up to about 6 s) and one spawn. Only the companion's
+        ``env_from_settings`` values decide: ``unchanged`` changes nothing, nor does ``not_running`` (a crash left
+        none running: restarting is the crash monitor's); otherwise the old process's death is observed, the
+        environment is built from the settings as they read then, and the companion starts again
+        (``restarted``/``started``). One a refresh stopped and could not replace is started by the next, even
+        when Settings read as before. ``expected`` binds those four to the caller's own read: the
+        ``env_from_settings`` values it read, named as ``get_settings_state`` names them (empty means missing;
+        another key raises ``ExtensionRegistrationError``). When the environment kept or started carries others,
+        Settings changed after that read: ``settings_changed`` (the newer values are the ones applied; read again).
+        With ``only_if_differs`` (``expected`` naming every ``env_from_settings`` key), a companion that already
+        carries those values answers ``unchanged`` or ``not_running`` from memory, with no Settings read or token
+        mint, so a skill can confirm at each of its reads that a companion started elsewhere (recovery) still
+        carries them. ``retained``/``stop_unconfirmed`` never start a second copy; ``settings_unknown``
+        (unreadable settings) starts nothing, keeping a process this refresh has not stopped yet. Disable, a
+        revoked grant, unload/reload and Panic win, also when saved during the stop: ``disabled``,
+        ``missing_grants``, ``not_desired`` (any other reason the skill may not run), ``access_closed``,
+        ``panic``. ``not_server``/``no_supervisor``: no supervisor here, nothing to apply. Worth asking again
+        later: ``not_started`` (not spawned yet), ``retained``, ``stop_unconfirmed``, ``settings_unknown``,
+        ``settings_changed``. A spawn the system refuses raises ``OSError``. Restart budgets are not reset.
+        """
+        ...
+
     def subscribe_event(
         self,
         topic: str,
@@ -513,6 +544,17 @@ class PluginAPI(Protocol):
 
     def get_settings(self, keys: Sequence[str]) -> Dict[str, Any]:
         """Return allowlisted settings; core keys require owner grants."""
+        ...
+
+    def get_settings_state(self, keys: Sequence[str]) -> Dict[str, Any]:
+        """Strict form of ``get_settings`` (2.4): ``{"status", "values", "missing"}``.
+
+        ``status`` is ``ok`` (``values`` holds the non-empty readable keys, ``missing`` the empty or absent
+        ones), ``unknown`` (the saved settings document exists but cannot be read; neither list says
+        anything) or ``access_closed`` (unloading, or no ``read_settings``). Keys the skill may not read
+        appear in neither list. With nothing readable asked (``[]``) no settings are read and only the access
+        answers (``ok`` or ``access_closed``): cheap enough to check before each outbound request.
+        """
         ...
 
     def get_state_dir(self) -> str:

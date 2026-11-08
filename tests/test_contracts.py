@@ -1332,6 +1332,7 @@ def test_plugin_api_surface_is_frozen():
         "register_companion_process",
         "subscribe_event",
         "get_skill_token", "register_realtime_provider", "register_live_conversation",  # 2.1: additive, in-process only
+        "get_settings_state", "refresh_companion_process",  # 2.4: served to every 2.x declaration, refused to legacy 1.3
     }
     members = {
         m for m in dir(PluginAPI)
@@ -1345,7 +1346,7 @@ def test_plugin_api_surface_is_frozen():
 def test_plugin_api_version_matches_documented_surface():
     from ouroboros.contracts.plugin_api import PLUGIN_API_VERSION, VALID_EXTENSION_PERMISSIONS
 
-    assert PLUGIN_API_VERSION == "2.3"
+    assert PLUGIN_API_VERSION == "2.4"
     assert "presence" in VALID_EXTENSION_PERMISSIONS
     # Additive (owner A4=A, 2026-10-03): a granted skill may leave the owner a signed System row.
     assert "notify_owner" in VALID_EXTENSION_PERMISSIONS

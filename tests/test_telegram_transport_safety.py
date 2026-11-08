@@ -430,7 +430,8 @@ def test_plugin_honours_env_proxies_only_in_a_proxy_routed_server_process(
 
     monkeypatch.setattr(plugin, "TelegramClient", _Recorder)
     (tmp_path / "settings.json").write_text(json.dumps({"TELEGRAM_CHAT_ID": "42"}), encoding="utf-8")
-    quiz = plugin._make_quiz(_Api(tmp_path))
+    api = _Api(tmp_path)
+    quiz = plugin._make_quiz(api)
     asyncio.run(quiz({"question": "q?", "options": [{"label": "a"}, {"label": "b"}]}))
 
     # A mirrored row also carries its message-id observer and native-reply anchor
@@ -439,6 +440,8 @@ def test_plugin_honours_env_proxies_only_in_a_proxy_routed_server_process(
     options = dict(built[0])
     assert callable(options.pop("on_message"))
     assert options.pop("reply_to_message_id") == 0
+    assert options.pop("binding") is plugin.binding_for(api)  # the accepted token, checked before each request
+    assert options.pop("generation") == plugin.binding_for(api).snapshot()[1]  # one snapshot per client
     assert options == {"trust_env": expected, "proxy": None,
                        "api_base_url": "https://api.telegram.org",
                        "files_dir": None}

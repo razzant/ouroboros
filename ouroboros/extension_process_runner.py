@@ -954,14 +954,15 @@ def _load_child_extension(skill_name: str, drive_root: pathlib.Path, repo_dir: p
     from ouroboros.settings_integrity import settings_read_environ
     from ouroboros.skill_loader import discover_skill_identity
 
-    def settings_reader():
+    def settings_reader(*, strict: bool = False):
         # Opted-in catalogs run against the exact declared inputs named by their
         # cache key. Ordinary dispatch continues reading current settings.
         if catalog_settings is not None:
             return catalog_settings
         # The document as it reads now; the dispatching task's operator variables stand in where it is unset.
+        # ``strict`` (``get_settings_state``): a present document that cannot be read is unknown, never defaults.
         with settings_read_environ({**os.environ, **(operator_settings or {})}):
-            return load_settings()
+            return load_settings(strict=True) if strict else load_settings()
 
     skills = discover_skill_identity(drive_root, skill_name, repo_path=str(skills_repo_path))
     skill = next((item for item in skills if item.name == skill_name), None)

@@ -1096,6 +1096,18 @@ select.ui-control {
     background-position: right var(--space-3) center;
 }
 textarea.ui-control { resize: vertical; }
+/* A read-only multiline value (renderSafeField's output): whole and wrapped in the field's box, selectable, in the value's
+   ink; only a very long one scrolls inside, and its focus reaches that by keyboard. */
+.ui-control-readonly {
+    display: block;
+    max-height: 18em;
+    overflow-y: auto;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+    -webkit-user-select: text;
+    user-select: text;
+    cursor: text;
+}
 .ui-checkbox {
     box-sizing: border-box;
     width: 14px;

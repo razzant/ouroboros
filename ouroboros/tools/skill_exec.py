@@ -129,6 +129,7 @@ def _scrub_env(
     skill_state_dir_path: pathlib.Path,
     skill_name: str,
     granted_keys: List[str] | None = None,
+    settings: Dict[str, Any] | None = None,
 ) -> Dict[str, str]:
     env: Dict[str, str] = {}
     for key in _ALWAYS_FORWARDED_ENV:
@@ -138,10 +139,12 @@ def _scrub_env(
     if manifest_env_keys:
         # What the skill's PluginAPI reads now: a key saved or cleared mid-task reaches the next
         # script or companion; grants still filter it.
-        settings = skill_settings(load_settings)
+        # ``settings``: one strict read a caller already holds (a companion refresh compares and spawns from it).
+        # The values and the custom secrets among them both come from this one read.
+        settings = skill_settings(load_settings) if settings is None else settings
         from ouroboros.skill_loader import requested_core_setting_keys
         protected_upper = {k.upper() for k in _FORBIDDEN_ENV_FORWARD_KEYS}
-        protected_upper.update(requested_core_setting_keys(list(manifest_env_keys or [])))
+        protected_upper.update(requested_core_setting_keys(list(manifest_env_keys or []), settings))
         granted_upper = {str(k).strip().upper() for k in (granted_keys or []) if str(k).strip()}
         allow = {str(k).strip() for k in manifest_env_keys if str(k).strip()}
         for key in allow:
