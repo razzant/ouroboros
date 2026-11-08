@@ -3,8 +3,10 @@
 A tool may post as an account a connector also reads: an MCP server signed in as my human posts into a channel the
 connector hears, and that post comes back as an arrival from my human's confirmed account. A message I sent is never
 my human's words, whatever its actor (BIBLE P1, provenance). ``record_result`` keeps the provider identity
-(conversation id, message id) that a successful MCP call's result names as the one message it posted, unless the
-server declares the tool read-only. ``places.place_owner_accounts`` carries the kept identities into every owner
+(conversation id, message id) that a successful MCP call's result names as the one message it posted, when the
+server declares the tool a write (``readOnlyHint: false``). A tool without that declaration keeps nothing: a read
+naming one message (a thread holding only my human's post) must never turn their words into mine, so an undeclared
+send stays a disclosed gap. ``places.place_owner_accounts`` carries the kept identities into every owner
 decision (``places.owner_author``), which compares identities only, never words: my human repeating my words in their
 own message is still my human.
 
@@ -96,10 +98,11 @@ def named_messages(text: Any) -> set[tuple[str, str]]:
 
 
 def record_result(drive_root: Any, metadata: Any, text: Any, *, via: str) -> bool:
-    """Keep the one message a successful MCP call's result names as posted; a tool its server declares read-only, a
-    result naming no message or several, and a store that cannot be written keep nothing (logged). True when kept."""
+    """Keep the one message a successful MCP call's result names as posted, for a tool its server declares a write
+    (``readOnlyHint: false``); any other tool, a result naming no message or several, and a store that cannot be
+    written keep nothing (logged). True when kept."""
     annotations = (metadata or {}).get("annotations") if isinstance(metadata, Mapping) else None
-    if drive_root is None or (isinstance(annotations, Mapping) and annotations.get("readOnlyHint") is True):
+    if drive_root is None or not isinstance(annotations, Mapping) or annotations.get("readOnlyHint") is not False:
         return False
     try:
         pairs = named_messages(text)

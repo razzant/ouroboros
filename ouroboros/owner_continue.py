@@ -107,8 +107,10 @@ CARRIED_DOOR_SOURCES = frozenset({"origin_message", "initial_user"})
 CORPUS_TASK_SOURCES = frozenset({"principal_task_message", "relayed_peer_message"})
 CORPUS_PLACE_SOURCES = frozenset({"place_confirmed"})  # my human's confirmed account in a place: provenance, whole
 # The typed ids an owner-source row may carry, each a string when present: its message, a task message's sender and
-# relaying sibling, an owner answer's card, the chat row it is and that id's room; its ``reply_to`` rides beside them.
-ROW_IDS = ("msg_id", "source_task_id", "relayed_from_task_id", "quiz_id", "client_message_id", "chat_id")
+# relaying sibling, an owner answer's card, the chat row it is and that id's room, a place message's provider
+# identity (``owner_words.place_row_facts``); its ``reply_to`` rides beside them.
+ROW_IDS = ("msg_id", "source_task_id", "relayed_from_task_id", "quiz_id", "client_message_id", "chat_id",
+           "conversation_id", "message_id")
 
 
 def row_identity(row: Dict[str, Any]) -> str:

@@ -93,18 +93,29 @@ def test_one_confirmation_counts_in_every_room_of_its_bot_or_app_and_nowhere_els
 def test_my_post_through_my_humans_account_is_never_their_words_and_their_same_words_still_are(tmp_path, place):
     """A message I posted through a tool signed in as my human (an MCP send whose result named its conversation and
     message id) comes back through the connector from their confirmed account: by its provider identity it is mine,
-    on the row, on its stored facts and at an admission; my human's own message in the very same words stays theirs."""
+    on the row, on its stored facts, at an admission and at a cite of words a turn captured before the receipt
+    landed; my human's own message in the very same words stays theirs."""
     from types import SimpleNamespace
 
     from ouroboros import own_sends
+    from ouroboros.loop_messages import _record_owner_directive
+    from ouroboros.owner_words import PLACE_CONFIRMED, cited_owner_basis, place_row_facts
     from ouroboros.presence_context import focus_metadata
     from ouroboros.presence_runner import PresenceTurnEvent
 
     words = "Ship the long answer, the end changes its meaning."
     receipt = ("MsgID,UserID,UserName,RealName,Channel,ThreadTs,Text,Time\n"
                f'1793991732.265319,anton,anton,Anton,design,,"{words}",2026-11-07T10:00:00Z\n')
+    turn = SimpleNamespace(drive_root=tmp_path, task_metadata={})  # its echo opened a turn before the receipt
+    _record_owner_directive(turn, source=PLACE_CONFIRMED, content=words, carried=True, msg_id="chat 7 / echo",
+                            **place_row_facts("design", {"message_id": "1793991732.265319"}))
+    assert cited_owner_basis(turn, words)[0]["source"] == "place_owner", "before the receipt nothing says it is mine"
     assert own_sends.record_result(tmp_path, {"annotations": {"readOnlyHint": False}}, receipt,
                                    via="mcp:slack/conversations_add_message")
+    assert cited_owner_basis(turn, words)[0] is None, "the receipt now names it: my echo is no order of theirs"
+    _record_owner_directive(turn, source=PLACE_CONFIRMED, content=words, carried=True, msg_id="chat 7 / theirs",
+                            **place_row_facts("design", {"message_id": "1793991800.000100"}))
+    assert cited_owner_basis(turn, words)[0]["source"] == "place_owner", "their own message in the same words"
     accounts = place_owner_accounts(tmp_path)
     echo = _place_row(place.place_id, text=words, message={"message_id": "1793991732.265319"})
     theirs = _place_row(place.place_id, text=words, message={"message_id": "1793991800.000100"})
