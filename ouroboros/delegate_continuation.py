@@ -471,17 +471,20 @@ def with_run_binding(start: ContinuationStart, authority: Any, binding: str, wor
     same renderers after provisioning, or, where none applies, the directory it starts
     in, plus this run's own selected ``input_files`` note, if any.
     A plan-thread turn (no ``workspace`` fact) keeps its own contract, plus my human's rows its line
-    lacks (``words``) and that note, even when the caller's text is empty; with neither to add it is
-    returned untouched, as a fresh start (``NO_CONTINUATION``, no facts) always is.
+    lacks (``words``) and that note, even when the caller's text is empty. A turn owing either, or a
+    promotion (whose access the thread's first instructions do not hold), restates this turn's typed
+    access, without inventing a new binding or cwd; one owing none is returned untouched, as a fresh
+    start (``NO_CONTINUATION``, no facts) always is.
     """
     from ouroboros.delegate_start_instructions import access_instruction, no_copy_binding_instruction
 
     if not start.facts:
         return start
     if "workspace" not in start.facts:
-        if not (start.words or inputs):
+        if not (start.words or inputs or start.facts.get("promotion")):
             return start
-        return start._replace(prompt="\n\n".join(part for part in (start.prompt, start.words, inputs) if part))
+        current = access_instruction(authority.access, investigation=authority.investigation).strip() if authority else ""
+        return start._replace(prompt="\n\n".join(part for part in (start.prompt, start.words, current, inputs) if part))
     current = (access_instruction(authority.access, investigation=authority.investigation)
                + (binding or no_copy_binding_instruction(workdir)) + inputs)
     return start._replace(prompt=continuation_prompt(start.facts, start.note, current, start.words))

@@ -1,4 +1,4 @@
-"""Materialize native lineage read authority for a folderless session request.
+"""Materialize selected or automatic native inputs for a folderless session request.
 
 The engine accepts one readonly project scope, not additional read roots. Give
 each invocation its own scratch with verified input copies (``_lineage_copies``:
@@ -15,7 +15,8 @@ exact bytes are retained in the selecting task's canonical artifact store
 (``source_handles/delegated_readonly_inputs/<invocation|scheduled-<child>>/``, named by
 content, ``inputs/selected/<sha256[:16]>/<name>``): the existing snapshot home that is no
 deliverable, outlives the task drive, and whose name the lineage walker prunes.
-A folderless start restages them once into its scope; a start in a repository or folder
+A nonempty selection replaces the automatic lineage copies; a folderless start restages
+it once into its scope; a start in a repository or folder
 keeps it as scope and cwd and names the retained copies by absolute path:
 the engine has no readable-root field, so reaching them is the harness's native read
 reach, not a host guarantee. A scheduled API child's first input names its copies for
@@ -44,9 +45,12 @@ INPUT_FILES_CONTRACT = (
     "else active_workspace. Every entry is mandatory: each is checked as read_file checks it and its exact bytes are "
     "retained in your task's artifact store before the run starts, and one that cannot be prepared refuses the whole "
     "start typed, unrun. The receipt covers exactly these entries (not the automatic inputs); prepared is not read. A "
+    "nonempty selection replaces automatic folderless task/artifact lineage copies; omitted, null or [] keeps them. A "
     "folderless run also finds the copies inside its folder; a run in a repository or folder keeps it and gets the "
-    "retained copies' absolute paths outside it, reached by its harness's own native read reach. A path named only "
-    "in the prompt is never copied. Omit (or []) for today's inputs. Not engine documents: those are attachment_paths.")
+    "retained copies' absolute paths outside it, reached by its harness's own native read reach. A plan-thread "
+    "turn keeps its original folder and names new copies outside it. A path named only "
+    "in the prompt is never copied. Omit (or use null or []) for the existing automatic inputs. "
+    "Not engine documents: those are attachment_paths.")
 
 
 class InputSelectionError(ValueError):
@@ -239,7 +243,7 @@ def schedule_selected_inputs(ctx: Any, entries: List[Dict[str, str]], child_task
 
 def start_inputs(ctx: Any, authority: Any, invocation_id: str, input_files: Any, prepared: Any,
                  thread_folder: Optional[str] = None):
-    """``(inputs, refusal)`` for one new start: lineage staging plus the explicit selection.
+    """``(inputs, refusal)`` for one new start: the explicit selection, else the default lineage staging.
 
     Only a read-only run (readonly access or an evidence-only investigation) stages inputs; a
     nonempty selection for a writable run refuses typed, while omission and [] never gate it.
@@ -267,11 +271,12 @@ def start_inputs(ctx: Any, authority: Any, invocation_id: str, input_files: Any,
 def prepare_readonly_inputs(ctx: Any, invocation_id: str, entries: Optional[List[Dict[str, str]]] = None,
                             prepared: Optional[List[Dict[str, Any]]] = None, *,
                             thread_folder: Optional[str] = None) -> ReadonlyInputs:
-    """This invocation's inputs: folderless lineage copies and the explicit selection.
+    """This invocation's inputs: the explicit selection, which replaces folderless lineage copies, else those copies.
 
     ``entries`` are this call's ``input_files``; ``prepared`` a scheduled child's
-    schedule-time receipt for its first start. Without either the result equals the
-    pre-selection behavior exactly. A plan-thread turn (``thread_folder`` given) runs in the folder
+    schedule-time receipt for its first start; either one, nonempty, is the whole set (no lineage
+    file is enumerated or copied). Without either the result equals the pre-selection behavior
+    exactly. A plan-thread turn (``thread_folder`` given) runs in the folder
     its thread was created on, whose copies that start staged: the engine drops a turn's scope and
     no other field reaches a new folder, so the turn stages nothing, keeps that folder (as the
     engine's thread record names it) as its scope and registration identity, and names its
@@ -306,13 +311,13 @@ def prepare_readonly_inputs(ctx: Any, invocation_id: str, entries: Optional[List
         return ReadonlyInputs(thread_folder, "\n" + note if note else "", outside, note)
     root = container / invocation_id
     root.mkdir(parents=True, exist_ok=False)
-    lineage = _lineage_copies(ctx, root)
+    lineage = [] if rows else _lineage_copies(ctx, root)  # a nonempty selection is the whole set
     receipt = [{**row, "carrier": "scope"} for row in copy_selection(rows, root)]
     _write_manifest(root, lineage, receipt)
     note = note or (_selection_note(root / "inputs.json", receipt, inside_scope=True, scope=root) if receipt else "")
     return ReadonlyInputs(str(root), (
         "\nREADONLY INPUTS: This invocation has its own scratch scope, not a workspace grant. "
-        "inputs.json maps permitted native lineage sources to byte-identical verified local copies. "
+        "inputs.json maps the selected files, or default native lineage sources, to verified local copies. "
         "Read those local paths when the work order names the original sources. "
         "The manifest describes staged copies, not an additional filesystem-read boundary.\n"
     ) + note, receipt, note)

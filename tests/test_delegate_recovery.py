@@ -204,6 +204,46 @@ def test_startup_pre_adoption_retains_local_checks_without_engine_observation(
             assert recovery._read(tmp_path, "nanny")["veto_reason"] == "startup_work_stopped"
 
 
+@pytest.mark.parametrize("changed_words", [False, True], ids=["same-work", "different-work"])
+def test_prior_body_selected_files_keep_the_planned_handoff_fingerprint(
+        tmp_path, monkeypatch, stub_delegate_engines, changed_words):
+    from ouroboros import subagent_work_order as orders
+
+    # This is the canonical disclosure written before PR2922, not a new rule
+    # about the current run's preparation. Recovery must retain its byte identity.
+    selected = [{"root": "task_drive", "path": "brief.md", "sha256": "a" * 64, "size": 12}]
+    old_disclosure = (
+        "The parent selected these files (input_files); the host retained each one's exact bytes before queueing "
+        "this task. The first start of this work order verifies those copies against these digests and its "
+        "instructions name where this run reads them; a later start copies only what its own request selects.\n"
+        + f"- task_drive:brief.md (sha256 {'a' * 64}, 12 bytes)"
+    )
+    with monkeypatch.context() as previous_body:
+        previous_body.setattr(orders, "_selected_input_files", lambda _task: old_disclosure)
+        custody, recovery, task, _, _, fingerprint, _ = _pending_handoff(
+            tmp_path, "selected-child", input_files=selected)
+    task["_working_recovery"] = {}
+    row = recovery._read(tmp_path, task["id"])
+    assert row["work_order_fingerprint"] == fingerprint
+    assert row.get("actor_binding_source", "task_snapshot") == "task_snapshot"
+    row.update(cause=recovery.CAUSE_PLANNED_SELF_RESTART, restart_transaction_id="tx", supervisor_pid=123)
+    recovery._write(tmp_path, row)
+    recovery._write_restart_transaction(tmp_path, {
+        "transaction_id": "tx", "supervisor_pid": 123, "status": "normal_exit_acknowledged",
+        "exit_code": 42, "task_ids": [task["id"]],
+    })
+    monkeypatch.delenv(recovery.PLANNED_RESTART_TRANSACTION_ENV, raising=False)
+    monkeypatch.setattr(recovery, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(custody, "reconcile_task_runs", lambda *_a, **_k: None)
+    if changed_words:
+        task["objective"] = "A different assignment"
+    assert recovery._successor_binding_mismatch(row, task) == ("work_order_mismatch" if changed_words else "")
+    adopted = recovery.pre_adopt_planned_handoffs(tmp_path, [task])
+    assert adopted == (set() if changed_words else {task["id"]})
+    assert recovery._read(tmp_path, task["id"])["status"] == ("vetoed" if changed_words else "pre_adopted")
+    assert not stub_delegate_engines
+
+
 @pytest.mark.parametrize("prepared", [(False, False, "saved"), (True, False, "saved")],
                          indirect=True, ids=["unscoped", "project"])
 @pytest.mark.parametrize("adopt_before_restore", [False, True], ids=["startup-order", "pre-adopted-snapshot"])

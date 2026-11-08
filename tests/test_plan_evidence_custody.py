@@ -214,6 +214,8 @@ def test_a_whole_source_that_could_not_be_kept_is_named_and_never_claimed(harnes
     packet = _user_text(sub.calls[0]["request"].slot_messages["s1"][-1]["content"])
     assert raw[:EVIDENCE_PER_ITEM_BYTES].decode() in packet
     assert f"| {locator} | source_unretained:OSError |" in packet and "plan-evidence-" not in packet
-    assert f"{locator} (source_unretained:OSError)" in text
+    # The part attached; its cut and the unkept whole source stay beside it, never as "not attached".
+    assert (f"evidence attached (prepared for the participants): {locator} (in part; source {len(raw)} bytes; "
+            f"truncated_to_{EVIDENCE_PER_ITEM_BYTES}; source_unretained:OSError)") in text and "evidence not attached" not in text
     held = task_artifact_dir_path(harness.drive, "task-1") / "source_handles" / "context_checkpoints"
     assert not list(held.glob("plan-evidence-*"))
