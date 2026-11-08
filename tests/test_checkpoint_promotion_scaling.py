@@ -96,8 +96,9 @@ def test_exact_checkpoint_keeps_old_manifest_identity_beside_derived_version(tmp
     assert new["sha256"] != old["sha256"]
     shutil.rmtree(child)
     assert artifacts.read_actor_source_bytes(parent, task, later) == exact
-    from ouroboros.source_retention import read_manifest_version
-    assert read_manifest_version(parent, old["sha256"]) == old_bytes
+    from ouroboros.evidence_packs import blob_bytes
+    from ouroboros.source_retention import manifest_version_ref
+    assert blob_bytes(parent, manifest_version_ref(parent, old["sha256"])) == old_bytes
     for ref in (old, new):
         manifest = observability.read_call_manifest_ref(parent, ref, task_id=task)
         assert observability.read_blob_ref(parent, manifest["full_payload_ref"])["result"] == "original physical result"
@@ -278,3 +279,101 @@ def test_exact_local_blob_wins_old_locator_and_own_retained_copy_repairs_corrupt
     assert state["status"] == "complete" and not state["unavailable_refs"]
     shutil.rmtree(child)
     assert observability.read_blob_ref(parent, original) == {"text": "exact retained payload"}
+
+
+def _checkpoint_chain(child, task, count):
+    capsule, refs = None, []
+    for index in range(count):
+        messages = ([capsule] if capsule else []) + _unit(f"read-{index}", "x")
+        request = _request(messages, 10)
+        unit = cc._atomic_units(messages)[-1]
+        ref = cc._persist_reclaim_checkpoint(messages, request,
+            SimpleNamespace(fingerprint=f"chain-{index}", units=[]), drive_root=child, task_id=task)
+        capsule, _ = cc._capsule_message(unit, "summary", [cc._part(unit.unit_id, unit.source_text)], ref, request)
+        refs.append(ref)
+    return refs
+
+
+def test_a_child_checkpoint_held_only_in_its_pack_is_copied_without_a_second_decode(tmp_path, monkeypatch):
+    """The link before a copy compares the child's own loose file: a checkpoint the child holds only as a pack
+    member, or beside a damaged loose name, has no inode to share, so its verified bytes are copied without
+    decoding the member again and nothing damaged is linked into the parent."""
+    from ouroboros import evidence_packer, source_retention
+    from ouroboros import evidence_packs as packs
+    from tests._packed_read_probe import count_packed_reads
+
+    parent, task = tmp_path / "canonical", "packed-child"
+    parent.mkdir()
+    child = headless.prepare_task_drive(parent, task, "empty")
+    refs = _checkpoint_chain(child, task, 6)
+    originals = {ref["path"]: artifacts.read_actor_source_bytes(child, task, ref) for ref in refs}
+    body = {"review_evidence": {"source_refs": [refs[-1]]}}
+    write_task_result(child, task, "completed", result="saved answer", artifact_status="ready", **body)
+    assert evidence_packer.run_pass(child)["packed"] == 1  # the child's own root holds its checkpoints packed
+    damaged = artifacts.task_artifact_dir_path(child, task) / refs[0]["path"]
+    assert not damaged.exists()
+    damaged.write_bytes(b"a damaged loose name beside the healthy pack member")
+    links, link = [], source_retention.os.link
+
+    def recorded(source, destination, *args, **kwargs):
+        links.append(Path(source))
+        return link(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(source_retention.os, "link", recorded)
+    reads = count_packed_reads(monkeypatch)
+    _rewritten, state = observability.promote_child_task_refs(parent, child, task, body)
+    assert state["status"] == "complete" and not state["unavailable_refs"] and not state["pending_refs"], state
+    checkpoints = {(packs.pack_name(sidecar["task_id"], sidecar["generation"]), member["offset"])
+                   for _path, sidecar in packs.list_sidecars(child) for member in sidecar["members"]
+                   if member["kind"] == packs.CHECKPOINT}
+    assert len(checkpoints) == len(refs) and {reads[member] for member in checkpoints} == {1}, reads
+    assert damaged not in links, "a damaged loose file is never linked into the parent"
+    remove_store_tree(child)
+    for ref in refs:
+        assert artifacts.read_actor_source_bytes(parent, task, ref) == originals[ref["path"]]
+
+
+def test_a_loose_child_checkpoint_is_still_linked_once_its_own_bytes_compare_equal(tmp_path):
+    parent, task = tmp_path / "canonical", "loose-child"
+    parent.mkdir()
+    child = headless.prepare_task_drive(parent, task, "empty")
+    refs = _checkpoint_chain(child, task, 3)
+    _rewritten, state = observability.promote_child_task_refs(
+        parent, child, task, {"review_evidence": {"source_refs": [refs[-1]]}})
+    assert state["status"] == "complete" and state["promoted_source_handle_count"] == len(refs), state
+    for ref in refs:
+        source = artifacts.task_artifact_dir_path(child, task) / ref["path"]
+        assert (artifacts.task_artifact_dir_path(parent, task) / ref["path"]).stat().st_ino == source.stat().st_ino
+
+
+def test_historical_manifest_keeps_exact_bytes_without_a_second_packed_read(tmp_path, monkeypatch):
+    from ouroboros import evidence_packer, source_retention
+    from ouroboros import evidence_packs as packs
+    from tests._packed_read_probe import count_packed_reads
+
+    parent, task = tmp_path / "canonical", "packed-manifest"
+    child = headless.prepare_task_drive(parent, task, "empty")
+    call = observability.persist_call(child, task_id=task, call_id="original", call_type="tool_call",
+                                     payload={"result": "exact original"})
+    # An exact historical version need not have the current writer's JSON spacing.
+    raw = Path(call["manifest_ref"]["path"]).read_bytes() + b"\n" * (24 * 1024)
+    version = observability.write_blob(child, raw.decode("utf-8"), kind="txt")
+    old = {**call["manifest_ref"], "sha256": version["sha256"]}
+    observability.update_call_manifest_metadata(child, task_id=task, call_id="original",
+                                               metadata={"previous_version": version})
+    write_task_result(child, task, "completed", result="answer", artifact_status="ready")
+    assert evidence_packer.run_pass(child)["packed"] == 1
+    assert not Path(version["path"]).exists()
+    member = next((packs.pack_name(sidecar["task_id"], sidecar["generation"]), item["offset"])
+                  for _path, sidecar in packs.list_sidecars(child) for item in sidecar["members"]
+                  if item["kind"] == "txt" and item["sha256"] == old["sha256"])
+    reads = count_packed_reads(monkeypatch)
+    body = {"trace_refs": {"tool_call_refs": [{"manifest_ref": old}]}}
+    _rewritten, state = observability.promote_child_task_refs(parent, child, task, body)
+    assert state["status"] == "complete", state
+    # The historical manifest is decoded once; its exact version is then available in the parent's CAS.
+    assert reads[member] == 1, reads
+    remove_store_tree(child)
+    assert packs.blob_bytes(parent, source_retention.manifest_version_ref(parent, old["sha256"])) == raw
+    manifest = observability.read_call_manifest_ref(parent, old, task_id=task)
+    assert observability.read_blob_ref(parent, manifest["full_payload_ref"]) == {"result": "exact original"}
