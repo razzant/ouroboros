@@ -52,7 +52,9 @@ def counts(row: Any, child=lambda _row: False) -> bool:
 
 def classified(rows: Iterable[Any], rooms: Any) -> List[Any]:
     """Count with history's recovered lineage, using only indexed task facts, before any writer lock.
-    An unavailable lineage read leaves the caller's coverage owed; it never certifies a guessed root."""
+    An unavailable lineage read leaves the caller's coverage owed; it never certifies a guessed root.
+    A speaker without a typed role may be a child an older body wrote with its role only in ``metadata``:
+    dating alone reads that scalar (``_legacy_roles``); the room rule's lineage stays body-free."""
     from ouroboros.store import StoreError
 
     candidates = [row for row in rows if counts(row)]
@@ -67,8 +69,42 @@ def classified(rows: Iterable[Any], rooms: Any) -> List[Any]:
         counts(row, collect)  # asks only for the speaker of possible card content, never an owner or delivery
     if wanted and not rooms.warm(wanted):
         raise StoreError("message lineage unavailable")
+    untyped = {tid for tid in wanted if not rooms.lineage(tid).get("delegation_role")}
+    legacy = _legacy_roles(rooms, untyped) if untyped else {}
+    if legacy is None:
+        raise StoreError("message lineage unavailable")
     return [row for row in candidates if counts(row, lambda entry: (
-        str(entry.get("task_id") or "") in wanted and is_task_card_message(rooms.lineage(entry["task_id"]))))]
+        str(entry.get("task_id") or "") in wanted
+        and is_task_card_message({**rooms.lineage(entry["task_id"]), **legacy.get(str(entry["task_id"]), {})})))]
+
+
+# A role an older body kept only in the task's ``metadata``, for tasks without a typed one: one statement, and
+# only the scalar leaves SQLite, never the task document.
+_LEGACY_ROLE = ("SELECT task_id, json_extract(body, '$.metadata.delegation_role') AS delegation_role "
+                "FROM task_bodies WHERE task_id IN (SELECT value FROM json_each(?))")
+
+
+def _legacy_roles(rooms: Any, task_ids: Iterable[str]) -> Optional[Dict[str, Dict[str, str]]]:
+    """``{task id: {"delegation_role": role}}`` for those that keep one in ``metadata``; ``None`` when the store
+    cannot answer now (a body that is not JSON among them, too), except that a strict reader keeps contention typed,
+    as the lineage read does (``projects_registry._read_lineage``)."""
+    from ouroboros.store import StoreBusy, open_store
+    from ouroboros.store_capture import capture
+
+    try:
+        with open_store(rooms.root, write=False) as txn:
+            captured = capture(txn.conn, _LEGACY_ROLE, (json.dumps(sorted(task_ids)),),
+                               ("task_id", "delegation_role"))
+        records = captured.tuples()
+    except StoreBusy as exc:
+        if rooms.strict and exc.reason == "contention":
+            raise
+        log.debug("legacy task role read failed", exc_info=True)
+        return None
+    except Exception:
+        log.debug("legacy task role read failed", exc_info=True)
+        return None
+    return {str(tid): {"delegation_role": str(role)} for tid, role in records if role}
 
 
 def note(conn: Any, times: Iterable[Tuple[Any, str]]) -> None:

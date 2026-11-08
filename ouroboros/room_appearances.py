@@ -337,13 +337,15 @@ def _set_pass(conn: Any, first: int, last: int) -> None:
 
 
 def owe_restored_targets(conn: Any) -> None:
-    """New archive coverage in either stream can restore a target previously proven absent.
+    """New archive coverage in either stream can restore a target previously proven absent: a plan after the
+    store's cutover fact. Before it every target not found reads as importing (``dialogue_store.require_imported``),
+    never absent, so the first cutover's plan owes nothing here.
     Reuse the resumable Reply pass over the existing chat prefix; imports retire only their own
     interval, leaving these older dependants owed. Ordinary appends never restart this pass."""
     from ouroboros import dialogue_store as ds
 
     state = ds._meta(conn, ds.APPEARANCES_CONTACT_REPLIES)
-    if isinstance(state, dict):
+    if isinstance(state, dict) and ds._meta(conn, "cutover") is not None:
         end = int(conn.execute("SELECT next_seq FROM streams WHERE stream='chat'").fetchone()[0])
         _set_pass(conn, 0, max(end, state["upper"]))
 

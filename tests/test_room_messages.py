@@ -443,6 +443,36 @@ def test_legacy_child_words_are_card_content_but_deliveries_and_root_finals_coun
     assert not room_messages.due(tmp_path, {}, {}, False)
 
 
+def test_legacy_role_classification_decodes_after_releasing_the_store(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from ouroboros import store, store_capture
+    from tests._store_shared import seed_result
+
+    seed_result(tmp_path, "legacy-speaker", {"chat_id": 7, "metadata": {"delegation_role": "subagent"}})
+    real_open, real_decode = store.open_store, store_capture.Captured.tuples
+    active, at_decode = [], []
+
+    @contextmanager
+    def observed_store(*args, **kwargs):
+        with real_open(*args, **kwargs) as txn:
+            active.append(txn)
+            try:
+                yield txn
+            finally:
+                active.pop()
+
+    def decoded(captured):
+        at_decode.append(len(active))
+        return real_decode(captured)
+
+    monkeypatch.setattr(store, "open_store", observed_store)
+    monkeypatch.setattr(store_capture.Captured, "tuples", decoded)
+    answer = {"direction": "out", "text": "Root answer", "chat_id": 7}
+    child = {**answer, "text": "Child card", "task_id": "legacy-speaker"}
+    assert room_messages.classified([answer, child], registry.RoomResolver(tmp_path, strict=True)) == [answer]
+    assert at_decode and not any(at_decode)
+
+
 def test_retained_origins_date_binding_and_history_without_a_dialogue_copy(bus):
     from ouroboros.gateway.history import _origin_fallback_rows
     from ouroboros.project_dialogue import build_owner_message_ref
