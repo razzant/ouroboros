@@ -299,28 +299,32 @@ def bind_task_to_project(
         with _file_write_lock(_bindings_path(drive_root)):
             data = _load_bindings(drive_root, fresh=True)
             existing = data["bindings"].get(tid)
-            if isinstance(existing, dict):
+            enriching = isinstance(existing, dict)
+            if enriching:
                 existing_pid = str(existing.get("project_id") or "")
-                if existing_pid == pid:
-                    if not isinstance(existing.get("source_ref"), dict) and "source_ref" in origin_fields:
-                        enriched = {
-                            key: value for key, value in existing.items() if key != "origin_absent"
-                        }
-                        enriched.update(origin_fields)
-                        data["bindings"][tid] = enriched
-                        _save_bindings(drive_root, data)
-                        return dict(enriched)
+                if existing_pid != pid:
+                    raise ValueError(
+                        f"task {tid!r} is already bound to project {existing_pid!r}; "
+                        "project binding is immutable"
+                    )
+                if isinstance(existing.get("source_ref"), dict) or "source_ref" not in origin_fields:
                     return dict(existing)
-                raise ValueError(
-                    f"task {tid!r} is already bound to project {existing_pid!r}; "
-                    "project binding is immutable"
-                )
+                # The ref-less row gains its origin and keeps its binding time and room.
+                row = {key: value for key, value in existing.items() if key != "origin_absent"}
+                row.update(origin_fields)
+            from ouroboros.room_messages import bindings_identity, bound
+
             data["bindings"][tid] = row
+            start = bindings_identity(drive_root)  # under the lock: this save's own step of the file
             _save_bindings(drive_root, data)
-            if "closed" in project:
+            end = bindings_identity(drive_root)
+            if not enriching and "closed" in project:
                 apply_closed(project, None)
                 _save(drive_root, registry_data)
-    touch_project(drive_root, pid)
+    if not enriching:
+        touch_project(drive_root, pid)
+    # Its task's rows and origin now show there (never raises).
+    bound(drive_root, row, start, end)
     return dict(row)
 
 
@@ -595,10 +599,13 @@ _TASK_LINEAGE_LIMIT = 50_000  # a memory bound, not a policy: the facts are re-r
 _ROOM_ANSWERS: Dict[str, tuple] = {}
 # One capture (``store_capture``). ``chat_id`` is the column its writer derived (``store_hot_facts.admitted_chat``);
 # only a row an older writer left underived, and every row of a store before that column, reads its body for it:
-# text or, from a JSON real, its integer part (what ``int()`` gave). A derived row's body is never read.
+# text or, from a JSON real, its integer part (what ``int()`` gave). The role also recovers legacy metadata
+# when the typed fact is absent; both fallbacks return scalars, never the task document.
 _BODY_CHAT = ("(SELECT CASE json_type(b.body, '$.chat_id') WHEN 'real' THEN CAST(json_extract(b.body, '$.chat_id') "
               "AS INTEGER) ELSE '' || json_extract(b.body, '$.chat_id') END FROM task_bodies b WHERE b.task_id = t.task_id)")
-_LINEAGE_SELECT = ("SELECT t.task_id, t.parent_task_id, t.root_task_id, t.delegation_role, {chat} AS chat_id "
+_LINEAGE_SELECT = ("SELECT t.task_id, t.parent_task_id, t.root_task_id, coalesce(t.delegation_role, "
+                   "(SELECT json_extract(body, '$.metadata.delegation_role') FROM task_bodies WHERE task_id=t.task_id)) "
+                   "AS delegation_role, {chat} AS chat_id "
                    "FROM tasks t WHERE t.task_id IN (SELECT value FROM json_each(?))")
 
 
@@ -735,7 +742,7 @@ class RoomResolver:
         while wanted:
             seen |= wanted
             unseen = {tid for tid in wanted if (str(self.root), tid) not in _TASK_LINEAGE} - self.misses
-            read = _read_lineage(self.root, unseen) if unseen else {}
+            read = _read_lineage(self.root, unseen, strict=self.strict) if unseen else {}
             if read is None:
                 return False
             self.misses.update(unseen - read.keys())
@@ -1385,24 +1392,31 @@ def ensure_project_workspace(drive_root: Any, project_id: str, repo_dir: Any,
     return str((entry or {}).get("working_dir") or "")
 
 
-def _with_dialogue_facts(project: Dict[str, Any], room: Optional[dict]) -> Dict[str, Any]:
+def _with_dialogue_facts(project: Dict[str, Any], room: Optional[dict],
+                         messages: Optional[Dict[int, str]] = None) -> Dict[str, Any]:
+    """Room facts over the registry row; with dated ``messages`` (``room_messages.read``) also its newest
+    message's time, or its creation while it has none (a registry row made again today keeps its old time)."""
     facts = room or {}
-    return {**project, "visible_revision": int(facts.get("revision") or 0),
+    dated = {} if messages is None else {"last_message_at": messages.get(int(project.get("chat_id") or 0))
+                                         or str(project.get("created_at") or "")}
+    return {**project, "visible_revision": int(facts.get("revision") or 0), **dated,
             "last_active_at": max(str(project.get("last_active_at") or ""), str(facts.get("activity_at") or ""))}
 
 
 def projects_summary(drive_root: Any, *, limit: Optional[int] = 50, chat_id: Any = None,
                      project_id: Any = None, include_pinned: bool = False, closed: Optional[bool] = None,
                      oldest_first: bool = False, start: int = 0,
-                     sidebar_rows: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+                     sidebar_rows: Optional[List[Dict[str, Any]]] = None, by_message: bool = False) -> List[Dict[str, Any]]:
     """Sidebar, its whole list (``limit=None``) or a strict addressed room, with unread/activity from room facts.
 
     ``chat_id`` addresses an active room, ``project_id`` an active or deleting one; registry reads retain lifecycle
     and binding authority. An unproved inactive room requires complete import; a pending, failed or invalid
     interval is never inactivity. ``sidebar_rows``, for the unaddressed list only, is the caller's own
     ``list_sidebar_projects`` read: this list and what the caller counts of it are then one registry observation.
+    ``by_message`` (the owner's clients) orders and selects by ``last_message_at`` once the history is dated
+    (``room_messages``); until then the rows carry none and keep the activity order.
     """
-    from ouroboros import dialogue_store as ds
+    from ouroboros import dialogue_store as ds, room_messages
 
     out: List[Dict[str, Any]] = []
     cognition = main_cognition()
@@ -1425,8 +1439,10 @@ def projects_summary(drive_root: Any, *, limit: Optional[int] = 50, chat_id: Any
         projects = [p for p in (list_sidebar_projects(drive_root) if sidebar_rows is None else sidebar_rows)
                     if closed is None or p.get("lifecycle") == PROJECT_ACTIVE]
         facts = {room["chat_id"]: room for room in ds.rooms(drive_root)} if projects else {}
-    projects = [_with_dialogue_facts(project, facts.get(project["chat_id"])) for project in projects]
-    projects = select_projects(projects, closed=closed, oldest_first=oldest_first)
+    messages = room_messages.read(drive_root)[0] if by_message and projects else None
+    projects = [_with_dialogue_facts(project, facts.get(project["chat_id"]), messages) for project in projects]
+    projects = select_projects(projects, closed=closed, oldest_first=oldest_first,
+                               by="last_active_at" if messages is None else "last_message_at")
     if not addressed and limit is not None and include_pinned:
         # Pins remain reachable without starving the ordinary recent-room slice.
         projects = ([p for p in projects if p.get("pinned") is True]
@@ -1466,6 +1482,7 @@ def projects_summary(drive_root: Any, *, limit: Optional[int] = 50, chat_id: Any
             "cognition": project_cognition(project, cognition),
             "provenance": project.get("provenance") or "",
             "last_active_at": project.get("last_active_at") or "",
+            **({"last_message_at": project["last_message_at"]} if "last_message_at" in project else {}),
             **({"closed": dict(project["closed"])} if "closed" in project else {}),
             "lifecycle": project.get("lifecycle") or PROJECT_ACTIVE,
             "routing_generation": int(project.get("routing_generation") or 0),

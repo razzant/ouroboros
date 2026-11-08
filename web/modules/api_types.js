@@ -44,7 +44,8 @@
  * @property {boolean} skills_repo_configured
  * @property {boolean} github_token_configured
  * @property {Object} accounting  // physical-attempt ledger projection
- * @property {Array<ProjectEntry>} projects  // active/deleting sidebar projection
+ * @property {Array<ProjectEntry>} projects  // the pins and the 50 newest others by last_message_at
+ * @property {?string} project_messages_revision  // moves with any Project's last_message_at; null until history is dated
  * @property {?number} project_listable_count
  * @property {Array<number>} project_chat_ids  // complete (uncapped) project chat_ids — WS fan-out isolation SSOT (v6.32.0)
  * @property {?number=} main_visible_revision  // Main's room revision (its standalone messages, as a Project's visible_revision counts); null while unreadable
@@ -787,7 +788,8 @@
  * @property {string=} trusted_at
  * @property {string=} origin
  * @property {string=} created_at
- * @property {string=} last_active_at
+ * @property {string=} last_active_at  // technical activity (the agent's list order)
+ * @property {string=} last_message_at  // the list order: newest message, else created_at; absent while undated
  * @property {"active"|"deleting"|"tombstoned"=} lifecycle
  * @property {ProjectClosure=} closed  // absent means open; independent of routing lifecycle
  * @property {number=} routing_generation

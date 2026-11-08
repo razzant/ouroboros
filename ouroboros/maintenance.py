@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib
 import json
 import logging
 import os
@@ -35,7 +36,8 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 
 from ouroboros import (delegate_capture_job, delegate_pending, maintenance_jobs, maintenance_retirement,
-                       plan_collection_job, record_compression, room_appearances, store, subagent_metrics)
+                       plan_collection_job, record_compression, room_appearances, room_messages, store,
+                       subagent_metrics)
 from ouroboros.startup_historical_audit import _REPORT_BYTES, finish_maintenance_job, spawn_maintenance_job
 
 log = logging.getLogger(__name__)
@@ -324,32 +326,20 @@ def _tail_due(root: pathlib.Path, row: Dict[str, Any], facts: Dict[str, Any], ch
         return False
 
 
-def _tail_run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[str, Any]:
-    """``memory_inventory.fill_tail``, resumable at its stored prefix; this row keeps only its state."""
-    from ouroboros.memory_inventory import fill_tail
-
-    try:
-        report = fill_tail(root, should_stop)
-    except Exception as exc:
-        if not _contention(exc):
-            maintenance_jobs.record(root, "memory_tail", state="failed")
-        raise
-    if (maintenance_jobs.job(root, "memory_tail") or {}).get("state") != report["state"]:
-        maintenance_jobs.record(root, "memory_tail", state=report["state"])
-    return report
-
-
-def _appearances_run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[str, Any]:
-    """``room_appearances.run``, resumable at the store's mark; this row keeps only its state."""
-    try:
-        report = room_appearances.run(root, should_stop)
-    except Exception as exc:
-        if not _contention(exc):
-            maintenance_jobs.record(root, "room_appearances", state="failed")
-        raise
-    if (maintenance_jobs.job(root, "room_appearances") or {}).get("state") != report["state"]:
-        maintenance_jobs.record(root, "room_appearances", state=report["state"])
-    return report
+def _resumable(name: str, module: str, function: str = "run") -> Callable[..., Dict[str, Any]]:
+    """``module.function(root, should_stop)``, resumable at its own stored facts; the job's row keeps its state,
+    ``failed`` on a fault other than contention (its ``due`` then waits for the child to run for another reason)."""
+    def run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[str, Any]:
+        try:
+            report = getattr(importlib.import_module(module), function)(root, should_stop)
+        except Exception as exc:
+            if not _contention(exc):
+                maintenance_jobs.record(root, name, state="failed")
+            raise
+        if (maintenance_jobs.job(root, name) or {}).get("state") != report["state"]:
+            maintenance_jobs.record(root, name, state=report["state"])
+        return report
+    return run
 
 
 def _hot_facts_due(root: pathlib.Path, row: Dict[str, Any], facts: Dict[str, Any], child: bool) -> bool:
@@ -380,8 +370,9 @@ JOBS: Dict[str, tuple] = {
     # then finishes in the same pass (the next pass rests; tests/test_cost_contract.py B6).
     "legacy_reconcile": (_legacy_due, _legacy_run),
     "dialogue_import": (_dialogue_due, _dialogue_run),  # the owner's history: newest segments first
-    "memory_tail": (_tail_due, _tail_run),  # after the import: the tail's positions are settled
-    "room_appearances": (room_appearances.due, _appearances_run),  # after the import, like the tail
+    "memory_tail": (_tail_due, _resumable("memory_tail", "ouroboros.memory_inventory", "fill_tail")),  # after the import
+    "room_appearances": (room_appearances.due, _resumable("room_appearances", "ouroboros.room_appearances")),  # likewise
+    "room_messages": (room_messages.due, _resumable("room_messages", "ouroboros.room_messages")),  # dates the history
     "hot_facts": (_hot_facts_due, _hot_facts_run),
     "ended_plan_asks": (plan_collection_job.due, plan_collection_job.run),
     "custody_trash": (_trash_due, _trash_run),  # before retirement: a removed drive's bytecode goes in the same pass

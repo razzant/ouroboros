@@ -402,6 +402,12 @@ def _setup_job(name, data, monkeypatch):
         # An older body's notice: no appearance keys, the derivation mark left behind it.
         dialogue_store.append(data, "chat", {"chat_id": 1, "direction": "out", "type": "main_notice", "task_id": "t",
                                              "text": "an older body's notice"}, feed=True, appearances=None)
+    elif name == "room_messages":
+        from ouroboros import dialogue_store, projects_registry
+
+        # A message stored before this generation dated the history: the pass dates every Project once.
+        room = projects_registry.create_project(data, "dated", name="Dated")["chat_id"]
+        dialogue_store.append(data, "chat", {"chat_id": room, "direction": "in", "text": "before the pass"})
     elif name == "hot_facts":
         from ouroboros import store
 

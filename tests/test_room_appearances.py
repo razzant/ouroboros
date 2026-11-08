@@ -595,28 +595,36 @@ class TestSavedTargetRecovery:
         assert "Owner words torn" in _texts(tmp_path, nova)
         assert ds.row_at(tmp_path, "chat", stored.seq).row == stored.row  # the owner's row is unchanged
 
-    def test_an_absent_target_imported_later_joins_its_project_in_the_same_process(self, tmp_path):
+    @pytest.mark.parametrize("target_stream", ["chat", "progress"])
+    @pytest.mark.parametrize("elsewhere", [False, True], ids=["reply-in-main", "reply-in-project"])
+    def test_an_absent_target_imported_later_joins_its_project_in_the_same_process(self, tmp_path, target_stream, elsewhere):
         """Proven absent is no gap; a backup segment restored into the archive and imported brings the target,
         and the same process shows the Reply in its Project, in history, room reads and memory."""
-        from ouroboros import memory_inventory as mi, room_appearances
+        from ouroboros import memory_inventory as mi, room_appearances, room_messages
         from tests._dialogue import import_all, seed
 
         nova = _project(tmp_path, "nova")
         _born_in(tmp_path, "nova-root", nova)
-        _legacy, reply = _legacy_reply(_SUMMARY, "2026-10-02T06:00:00Z", "restored")
+        written = _project(tmp_path, "other") if elsewhere else 1
+        _legacy, reply = _legacy_reply(_SUMMARY, "2026-10-02T06:00:00Z", "restored", chat_id=written)
         seed(tmp_path, archives={"chat_20261002T000000.jsonl": [reply]})
         import_all(tmp_path)
         assert room_appearances.run(tmp_path, lambda: False)["state"] == "done"
-        stored = ds.rows_by_identity(tmp_path, 1, reply["ts"])[0]
+        assert room_messages.run(tmp_path, lambda: False)["state"] == "done"
+        assert not room_messages.read(tmp_path)[0].get(nova)
+        stored = ds.rows_by_identity(tmp_path, written, reply["ts"])[0]
         assert "Owner words restored" not in _texts(tmp_path, nova)
         assert "chat_reply_target_unreadable" not in _read(tmp_path, nova)[1]["window"]["truncated_by"]
-        assert mi.rooms_of_row(mi.row_meta(stored.row), mi.membership_facts(tmp_path)) == {"1"}
-        seed(tmp_path, archives={"chat_20261001T000000.jsonl": [dict(_SUMMARY)]})
+        assert mi.rooms_of_row(mi.row_meta(stored.row), mi.membership_facts(tmp_path)) == {str(written)}
+        seed(tmp_path, archives={f"{target_stream}_20261001T000000.jsonl": [dict(_SUMMARY)]})
         import_all(tmp_path)  # the replan finds the restored segment and imports it
-        assert ds.rows_by_identity(tmp_path, 1, _SUMMARY["ts"])
+        assert ds.rows_by_identity(tmp_path, 1, _SUMMARY["ts"], stream=target_stream)
+        assert room_appearances.due(tmp_path, {}, {}, False)
+        assert room_appearances.run(tmp_path, lambda: False)["state"] == "done"
+        assert room_messages.read(tmp_path)[0][nova] == reply["ts"]
         assert "Owner words restored" in _texts(tmp_path, nova)
         assert "Owner words restored" in _room_rows(tmp_path, nova)
-        assert mi.rooms_of_row(mi.row_meta(stored.row), mi.membership_facts(tmp_path)) == {"1", str(nova)}
+        assert mi.rooms_of_row(mi.row_meta(stored.row), mi.membership_facts(tmp_path)) == {str(written), str(nova)}
         assert ds.row_at(tmp_path, "chat", stored.seq).row == stored.row
 
     def test_a_target_in_a_planned_segment_is_never_cached_absent_and_is_found_once_imported(self, tmp_path):

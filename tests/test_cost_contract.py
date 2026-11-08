@@ -390,6 +390,49 @@ def test_b10_main_s_turn_carries_the_newest_open_row(measured):
 
 # ---- B6: the rest law of the named maintenance jobs ---------------------------------------------
 
+
+@pytest.mark.parametrize("growth", ["other-rooms", "destination"])
+def test_message_dating_reads_indexed_candidates_and_only_the_binding_delta(tmp_path, growth):
+    """No ANALYZE statistics: unrelated dialogue cannot grow a room probe, and previously admitted
+    conversation cannot grow a new binding's dating. Count the real boundary, including its SQL VM work."""
+    from ouroboros import dialogue_store as ds, projects_registry as registry, room_messages, store
+    from tests._dialogue import import_all, seed
+
+    measured = {}
+    for count in (20, 4000):
+        root = tmp_path / str(count)
+        room = registry.create_project(root, "cost", name="Cost")["chat_id"]
+        # Fixture bindings: real saves, but before the dialogue exists, so setup does no dating.
+        for index in range(12 if count == 20 or growth == "other-rooms" else 100):
+            registry.bind_task_to_project(root, f"old-{index}", "cost", room, origin={"absent": "system"})
+        rows = [{"chat_id": room, "ts": "2020-01-01T06:00:00Z", "direction": "in", "text": "Room question"}]
+        rows += [{"chat_id": room if growth == "destination" else 1, "ts": "2020-01-01T05:00:00Z",
+                  "direction": "out", "task_id": "old-0" if growth == "destination" else "unrelated",
+                  "text": f"Old row {index}"} for index in range(count)]
+        rows += [{"chat_id": 1, "ts": "2020-01-01T09:00:00Z", "direction": "out",
+                  "task_id": "incoming", "text": "Work before binding"}]
+        seed(root, archives={"chat_20200101T000000.jsonl": rows})
+        import_all(root)
+        room_messages.run(root, lambda: False)
+        with ds.transaction(root, write=False) as conn:
+            assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='sqlite_stat1'").fetchone()
+        store.close_connections_under(root)  # the meter installs callbacks on freshly opened handles
+        with CostMeter(root) as meter:
+            if growth == "other-rooms":
+                assert tagged("newest", lambda: room_messages.newest(root, room)) == "2020-01-01T06:00:00Z"
+            tagged("binding", lambda: registry.bind_task_to_project(
+                root, "incoming", "cost", room, origin={"absent": "system"}))
+        assert room_messages.read(root)[0][room] == "2020-01-01T09:00:00Z"
+        tags = ["newest", "binding"] if growth == "other-rooms" else ["binding"]
+        measured[count] = {tag: meter.snapshot(tag)["counts"] for tag in tags}
+    for tag in measured[20]:
+        small, large = measured[20][tag], measured[4000][tag]
+        assert small.get("vm_steps", 0) > 0 and large.get("vm_steps", 0) > 0, measured
+        assert large.get("vm_steps", 0) <= small.get("vm_steps", 0) + vm_allowance(200), measured
+        assert large.get("rows_decoded", 0) <= small.get("rows_decoded", 0), measured
+        assert large.get("statements:dialog", 0) <= small.get("statements:dialog", 0) + 2, measured
+    print("MESSAGE_DATING_COST " + json.dumps({"growth": growth, "counts": measured}, sort_keys=True))
+
 def second_run(run: Callable[[pathlib.Path], Any], root: pathlib.Path) -> Dict[str, int]:
     """The counters of a job's second run over the inputs its first run left. Each run returns its report, read
     outside the count: a refused run did nothing, so no count of it is a rest (``refused``; #2465)."""

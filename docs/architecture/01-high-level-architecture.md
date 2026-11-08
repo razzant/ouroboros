@@ -224,7 +224,7 @@ ouroboros/ — agent core and shared runtime (§6)
   projects_registry.py, project_admission.py, project_closure.py — registry lifecycle, admission and reversible closure (§6 Project registry and lease)
   project_handoff.py — the Main transfer receipt owed through the terminal outbox after a durable bind (§3 Project handoff receipts)
   project_dialogue.py — read-only chat lens; append-only `logs/chat_annotations.jsonl` (`ROUTING_RECEIPT_FIELDS`) routes only `needs_manual_target` cards; `routing_refusal_cause` (§3 Chat and Projects)
-  room_membership.py, room_appearances.py — canonical stored-row membership and its derived appearance index (§3)
+  room_membership.py, room_appearances.py, room_messages.py — stored-row membership and its derived facts (§3)
   owner_words.py — the owner's words for a work: one set, by value, verbatim and dated, for roots, helpers, sessions and reviewers
   project_lease.py — one-writer-per-project lease in `assign_tasks`; same-project swarms exempt (§6 Project registry and lease)
   context.py, context_timing.py — Main context, timing, subagent catalog (§6)
