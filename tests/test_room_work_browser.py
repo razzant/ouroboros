@@ -33,7 +33,8 @@ pytestmark = [pytest.mark.ui_browser]
 # The facts one room's control and list expose to the owner, read in one frame.
 ROOM_FACTS = """(scope) => {
     const root = scope === 'main' ? document.querySelector('#page-chat') : document.querySelector('#project-panel');
-    const trigger = root?.querySelector('.rw-trigger');
+    // A room left stays whole with its own hidden control; the shown room's control is the visible one.
+    const trigger = root?.querySelector('.rw-trigger:not([hidden])') || root?.querySelector('.rw-trigger');
     const surface = trigger ? document.getElementById(trigger.getAttribute('aria-controls')) : null;  // the room's work Shade, never the chip's
     const text = (el) => (el?.textContent || '').replace(/\\s+/g, ' ').trim();
     const shown = (el) => Boolean(el) && !el.hidden, markOf = (el) => (shown(el) ? `${el.dataset.shape} ${el.dataset.hue}` : '');
@@ -392,7 +393,7 @@ def open_project(page, project):
 
 
 def trigger(page, scope="main"):
-    return page.locator("#page-chat .rw-trigger" if scope == "main" else "#project-panel .project-panel-bar .rw-trigger")
+    return page.locator("#page-chat .rw-trigger" if scope == "main" else "#project-panel .project-panel-bar .rw-trigger:not([hidden])")
 
 
 def row_main(page, task_id, scope="main"):
@@ -1049,15 +1050,17 @@ def test_project_shade_hold_outside_press_switch_and_latest_root(room_ui):
     open_project(page, OTHER_PROJECT)
     switched = wait_facts(page, "project", lambda f: f["exists"], "the other Project's control")
     assert switched["rows"] == [], switched
-    assert page.locator("#panel-pchat-rw-proj").count() == 0
-    assert page.locator("#project-panel .rw-trigger").count() == 1
+    # The room left is kept whole and hidden with its own control (DESIGN: every visited room is retained).
+    assert page.locator("#panel-pchat-rw-proj").count() == 1 and page.locator("#panel-pchat-rw-proj").is_hidden()
+    assert page.locator("#project-panel .rw-trigger:not([hidden])").count() == 1
     # With nothing listed the title still opens the list: the room's whole name heads it and it says so (DESIGN
     # "Room work status"; the name's one line in the bar may be cut).
     assert not switched["disabled"], switched
     page.locator("#project-panel .app-page-title").click()
     empty = wait_facts(page, "project", lambda f: not f["surfaceHidden"], "the empty Project's list")
     assert empty["rows"] == [] and empty["note"] == "Nothing running or queued.", empty
-    assert page.locator("#project-panel .rw-shade:not(.cx-shade) .rw-title").inner_text() == OTHER_PROJECT["name"]
+    # The room left folds its own list away (inert until its motion ends); the list shown is the new room's.
+    assert page.locator("#project-panel .rw-shade:not(.cx-shade):not([hidden]):not([inert]) .rw-title").inner_text() == OTHER_PROJECT["name"]
     assert page.locator("#project-panel .app-page-title").get_attribute("title") == OTHER_PROJECT["name"]
     page.keyboard.press("Escape")
     wait_facts(page, "project", lambda f: f["surfaceHidden"], "the empty list closed")

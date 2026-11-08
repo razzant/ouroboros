@@ -241,7 +241,7 @@ def source_refs_for_project(drive_root: Any, project_chat_id: int, *, bindings=N
     return refs
 
 
-def project_origin_rows(drive_root: Any, project_chat_id: int) -> List[Dict[str, Any]]:
+def project_origin_rows(drive_root: Any, project_chat_id: int, *, bindings=None) -> List[Dict[str, Any]]:
     """Origin rows a Project lens can SYNTHESIZE when the canonical row is gone.
 
     Only bindings that carry ``source_text`` qualify (cross-thread origins — the
@@ -253,7 +253,7 @@ def project_origin_rows(drive_root: Any, project_chat_id: int) -> List[Dict[str,
 
     rows: List[Dict[str, Any]] = []
     seen: set = set()
-    for row in project_task_bindings(drive_root).values():
+    for row in project_task_bindings(drive_root).values() if bindings is None else bindings:
         try:
             same_chat = int(row.get("project_chat_id") or 0) == int(project_chat_id or 0)
         except (TypeError, ValueError):

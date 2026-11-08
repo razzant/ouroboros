@@ -1483,6 +1483,10 @@ class MCPManager:
             return ToolResult(status="error", code="MCP_ERROR", text=_model_facing_result(cfg, tool.raw_name, body),
                               meta={"dynamic_provider": True, "mcp_call_not_sent": not_sent})
         # The remote call is complete here; projecting it never turns it into a failure.
+        if result.status == "ok" and getattr(ctx, "drive_root", None):  # a post I made as an account: never my human's
+            from ouroboros.own_sends import record_result
+            from ouroboros.tool_access import canonical_data_root
+            record_result(canonical_data_root(ctx), tool.metadata, result.text, via=f"mcp:{cfg.id}/{tool.raw_name}")
         from ouroboros.mcp_result_images import project_returned
         projected = project_returned(result, getattr(result, "returned", None), ctx, cfg, tool.raw_name)
         if projected is None:

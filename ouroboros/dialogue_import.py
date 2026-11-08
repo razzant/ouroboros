@@ -52,7 +52,7 @@ import time
 from typing import Any, Callable, Dict, Iterator, List, NamedTuple, Optional, Tuple
 
 from ouroboros import dialogue_store as ds
-from ouroboros import store, store_journal
+from ouroboros import room_messages, store, store_journal
 from ouroboros.store import StoreBusy
 from ouroboros.utils import jsonl_append_lock_path, utc_now_iso
 
@@ -377,6 +377,10 @@ def _plan(root: pathlib.Path, stream: str, plan: List[Dict[str, Any]]) -> Dict[s
             # All live files were rotated before planning. Entries past their actual end
             # belong to an unwritten/torn batch, not to a future file at that offset.
             ds._set_meta(conn, f"export:{stream}", {**export, "coordinates": []})
+        if planned:
+            from ouroboros.room_appearances import owe_restored_targets
+
+            owe_restored_targets(conn)  # either stream may restore a saved Reply target
         if planned and stream == "chat":  # this body derives them as it imports; an older body would not
             ds._set_meta(conn, ds.APPEARANCES_AWAITING, sorted({*(ds._meta(conn, ds.APPEARANCES_AWAITING) or []), *planned}))
             # Planned segments are tracked by awaiting, including on first cutover. Cross only a
@@ -457,6 +461,8 @@ def import_segment(root: Any, stream: str, name: str) -> Dict[str, Any]:
     when this segment completes the archive. A segment already imported (by this process or
     another) is left alone; one whose size is not the ledger's is recorded ``mismatch`` and
     skipped."""
+    from ouroboros.room_appearances import write_facts
+
     root = pathlib.Path(root)
     with ds.transaction(root, write=False) as conn:
         ledger = conn.execute("SELECT * FROM import_ledger WHERE stream=? AND name=?", (stream, name)).fetchone()
@@ -475,6 +481,7 @@ def import_segment(root: Any, stream: str, name: str) -> Dict[str, Any]:
     gen = _gen(data)
     parsed, addresses, skipped = [], [], []
     touched: Dict[int, Tuple[Optional[int], str]] = {}
+    dated: List[Tuple[Any, str]] = []
     objects = stream_rows = 0
     mapped = {entry[0]: entry for entry in coordinates or []}
     exported = set()
@@ -508,6 +515,18 @@ def import_segment(root: Any, stream: str, name: str) -> Dict[str, Any]:
             last_seq, last_ts = touched.get(columns["chat_id"], (None, ""))
             touched[columns["chat_id"]] = (max(last_seq or -1, line.seq) if stream == "chat" else last_seq,
                                            max(last_ts, columns["ts"]))
+    if stream == "chat":
+        from ouroboros.projects_registry import RoomResolver
+
+        try:
+            messages = room_messages.classified((line.row for line, *_ in parsed), RoomResolver(root, strict=True))
+        except store.StoreError:
+            # The task-store bootstrap itself can import dialogue (upgrade receipts). It cannot
+            # answer lineage yet; preserve the import and leave its message coverage to maintenance.
+            messages = []
+            log.debug("Imported message lineage left to maintenance", exc_info=True)
+        for row in messages:
+            dated.extend((chat, str(row.get("ts") or "")) for chat in (ds.facts(row)["chat_id"], *write_facts(root, row)[1]))
     # Imported rows are derived as they land (``room_appearances.import_keys``): the mark may then pass them.
     shown = import_keys(root, [line for line, *_rest in parsed]) if stream == "chat" else None
     with ds.transaction(root, write=True) as conn:
@@ -530,6 +549,7 @@ def import_segment(root: Any, stream: str, name: str) -> Dict[str, Any]:
             record_imported(conn, shown, int(ledger["base"]), int(ledger["base"]) + int(ledger["size"]), int(ledger["id"]))
         for chat_id, (last_seq, last_ts) in touched.items():
             ds.touch_room(conn, chat_id, last_seq, last_ts, 0)
+        room_messages.note(conn, dated)
         conn.execute("UPDATE import_ledger SET state='done', rows=?, stream_rows=?, bad=?, gen=?, imported_at=? "
                      "WHERE stream=? AND name=?",
                      (objects, stream_rows if stream == "chat" else None, len(skipped), gen or None, utc_now_iso(), stream, name))

@@ -90,6 +90,26 @@ const newestPage = (after = 'after:1', ids = ['chat:1']) => ({ messages: ids.map
 const arrivedRows = (ids, after) => ({ messages: ids.map((id) => ({ history_id: id })), has_more: false, next_cursor: null,
     page_cursor: null, after_cursor: after, window: { complete: false, truncated_by: ['page'] } });
 
+test('suspension cancels queued arrivals and their newest fallback while preserving the return cursor', async () => {
+    let answer;
+    const p = arrivalsPager({ fetch: () => new Promise(resolve => { answer = resolve; }) });
+    p.pager.acceptRecent(newestPage());
+    const pending = p.pager.read(), queued = p.pager.read();
+    await Promise.resolve();
+    p.pager.suspend();
+    answer(arrivedRows(['chat:2'], 'after:2'));
+    await Promise.all([pending, queued]);
+    assert.deepEqual(p.arrivals, []);
+    assert.deepEqual(p.newest, [], 'an old visit never starts a fallback read');
+    assert.deepEqual(p.calls, ['after:1']);
+    const resumed = p.pager.read();
+    await Promise.resolve();
+    answer(arrivedRows(['chat:2'], 'after:2'));
+    await resumed;
+    assert.deepEqual(p.calls, ['after:1', 'after:1']);
+    assert.deepEqual(p.arrivals.map(a => a.ids), [['chat:2']]);
+});
+
 test('the pager reads what arrived from the newest read\'s cursor, and leaves the newest page to chat otherwise', async () => {
     const answers = { 'after:1': arrivedRows(['chat:2'], 'after:2'), 'after:2': arrivedRows([], 'after:2') };
     const p = arrivalsPager({ fetch: async (cursor) => answers[cursor] });

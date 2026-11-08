@@ -1,7 +1,9 @@
 """A reconnect adds nothing to the feed in the real SPA, in Chromium and WebKit, over
 the controlled transport of ``tests/test_room_work_browser.py``.
 
-Main and an open Project room lose their socket twice while each room's saved history moves on; a reconnect whose
+Main and an open Project room lose their socket twice while each room's saved history moves on. Docked, Main shows
+beside the Project and both reconcile on reconnect; on a phone the Project covers Main, which stays quiet and reconciles
+on its return; a reconnect whose
 history read fails; and the first open of pages that a reload reason brought back. Room status, the failed read and
 the rehydrated rows are what the owner sees; only a reload onto changed code (``_ouro_reason=sha-change``) adds its
 one ephemeral ``Restart complete`` row.
@@ -77,10 +79,14 @@ def history_reads(transport):
     return sum(1 for method, path in transport.requests if method == "GET" and path == "/api/chat/history")
 
 
-def test_successive_reconnects_rehydrate_main_and_project_without_a_row(room_ui):
+@pytest.mark.parametrize("layout", ["docked", "stack"])
+def test_successive_reconnects_rehydrate_main_and_project_without_a_row(room_ui, layout):
     history = {1: rw.reading(3), 42: rw.reading(3, 0, "Project")}
     transport = Transport(room_ui["page"], history=history, projects=[rw.PROJECT])
-    page = rw.open_app(room_ui, transport, viewport={"width": 1100, "height": 722})
+    viewport = {"width": 1100, "height": 722} if layout == "docked" else {"width": 390, "height": 780}
+    page = rw.open_app(room_ui, transport, viewport=viewport)
+    assert page.evaluate("document.documentElement.dataset.layout") == layout
+    page.wait_for_function("() => document.querySelectorAll('#chat-messages > .chat-bubble').length >= 6")
     rw.open_project(page, rw.PROJECT)
     for feed in (MAIN, PROJECT):
         page.wait_for_function("(feed) => document.querySelectorAll(`${feed} > .chat-bubble`).length >= 6", arg=feed)
@@ -95,14 +101,20 @@ def test_successive_reconnects_rehydrate_main_and_project_without_a_row(room_ui)
         history[1].append(main_row)
         history[42].append(project_row)
         reads = history_reads(transport)
-        page.wait_for_function("() => document.querySelector('#chat-status')?.textContent.includes('Reconnecting')")
+        page.wait_for_function("() => document.querySelector('#project-panel .status-badge')?.textContent.includes('Reconnecting')")
         rw.capture(page, f"reconnect-feed-{n}-disconnected")
         transport.await_reconnect(count)
-        page.locator(MAIN).get_by_text(main_row["text"]).wait_for()
         page.locator(PROJECT).get_by_text(project_row["text"]).wait_for()
+        if layout == "docked":  # Main shows beside the room: live, it reconciles on the reconnect too
+            page.locator(MAIN).get_by_text(main_row["text"]).wait_for()
+        else:  # covered whole, Main is away: no hidden replay; it reconciles when it shows again
+            settle(page)
+            assert page.locator(MAIN).get_by_text(main_row["text"]).count() == 0, 'covered Main does no hidden replay'
+            page.locator('#project-panel-close').evaluate("el => el.click()")
+            page.locator(MAIN).get_by_text(main_row["text"]).wait_for()
         settle(page)
-        rw.capture(page, f"reconnect-feed-{n}-reconnected")
-        assert history_reads(transport) >= reads + 2, "each room read its history again after the reconnect"
+        rw.capture(page, f"reconnect-feed-{n}-{layout}-reconnected")
+        assert history_reads(transport) >= reads + 2, "each room read its history again: on the reconnect, or on its return"
         assert page.locator("#reconnect-overlay").count() == 0, "the shell does not cover the conversation"
         assert page.get_by_text(FAILED).count() == 0
         assert page.locator(NOTICE).count() == 0 and page.get_by_text("Reconnected").count() == 0, \
@@ -112,6 +124,8 @@ def test_successive_reconnects_rehydrate_main_and_project_without_a_row(room_ui)
             assert len(shown) == len(history[chat_id]), (feed, shown)
             assert not any(row["ephemeral"] or row["type"] for row in shown), (feed, shown)
             assert shown[-1]["text"] == history[chat_id][-1]["text"], (feed, shown[-1])
+        if layout == "stack":
+            rw.open_project(page, rw.PROJECT)
 
 
 def test_a_reconnect_whose_history_read_fails_shows_the_failure_and_no_success_row(room_ui):
@@ -194,7 +208,7 @@ def test_late_project_does_not_repeat_the_reload_notice_on_reconnect(room_ui):
     page.locator(PROJECT).get_by_text("Project answer 1.", exact=False).wait_for()
     page.evaluate(HISTORY_LANDED)
     transport.await_reconnect(transport.disconnect())
-    page.wait_for_function("() => window.historyLanded >= 2")
+    page.wait_for_function("() => window.historyLanded >= 1")
     settle(page)
     rw.capture(page, "late-project-reconnect-no-restart")
     assert page.locator(NOTICE).count() == 0, "an ordinary reconnect must not replay a captured reload reason"

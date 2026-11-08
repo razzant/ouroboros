@@ -1,13 +1,14 @@
 """The sidebar's Projects list beyond its recent feed (web/modules/projects_nav.js) through the actual SPA, the real
-gateway and registry (the `pins_ui` fixture): reads that land in either order, and a browse that keeps the row in
-view while rooms above it come or go, the rooms' real unread beyond the feed, and a reference that reads its room."""
+gateway and registry (the `pins_ui` fixture): reads that land in either order, a list ordered by the newest message
+whose browse keeps sorting and the place being read, the rooms' real unread beyond the feed, and a reference that
+reads its room."""
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from ouroboros import dialogue_store, projects_registry as registry
+from ouroboros import dialogue_store, projects_registry as registry, room_messages
 from tests.test_project_pin_browser import (
     LONG, choose, click_reference, coarse, expect, no_read_acknowledged, open_drawer, order,
     reads_of, refresh, row, seed_archive, settle, shown_ids, until,
@@ -17,6 +18,33 @@ from tests._shared import producer_evidence_dir
 pytest_plugins = ("tests.test_project_pin_browser", "tests.test_subscription_setup_browser")
 
 pytestmark = pytest.mark.ui_browser
+
+
+LATER = lambda minute: (datetime(2099, 6, 1, tzinfo=timezone.utc) + timedelta(minutes=minute)).isoformat()  # noqa: E731
+SPREAD = lambda minute: (datetime(2099, 1, 1, tzinfo=timezone.utc) + timedelta(minutes=minute)).isoformat()  # noqa: E731
+
+
+def date_history(root):
+    """The history pass the first maintenance look after an update runs (``room_messages``)."""
+    dialogue_store.ensure(root)
+    room_messages.run(root, lambda: False)
+
+
+def room_of(root, pid):
+    return registry.get_project(root, pid)["chat_id"]
+
+
+def say(root, chat, text, *, ts, **fields):
+    """A message in a room through the one writer seam (``dialogue_store.append``)."""
+    dialogue_store.append(root, "chat", {"ts": ts, "chat_id": chat, "direction": "out", "role": "assistant",
+                                         "text": text, **fields})
+
+
+def spread(root, count=498):
+    """``seed_archive``'s rooms each with a message, a minute apart in their order, after every room's creation."""
+    date_history(root)
+    for index in range(count):
+        say(root, 40000 + index, f"Message {index}", ts=SPREAD(index))
 
 
 def is_state(request):
@@ -235,7 +263,7 @@ def test_open_room_closes_when_registry_deletes_it_on_projects_changed(pins_ui):
     assert reads_of(reads, "/api/projects", id="newer")
 
 
-def test_show_more_reaches_every_room_once_read_and_keeps_its_place_through_activity(pins_ui, tmp_path):
+def test_show_more_reaches_every_room_once_read_and_keeps_its_rows(pins_ui, tmp_path):
     ui, page, root, control = pins_ui, pins_ui["page"], pins_ui["root"], pins_ui["control"]
     evidence = producer_evidence_dir(tmp_path, "project-find", env="OUROBOROS_BROWSER_EVIDENCE_OUT")
     eligible = seed_archive(root)
@@ -281,28 +309,11 @@ def test_show_more_reaches_every_room_once_read_and_keeps_its_place_through_acti
     expect()(row(page, "older").locator('.nav-project-row')).to_have_attribute("data-unread", "")
     assert abs(page.locator('#nav-projects-list').evaluate("list => list.scrollTop") - before) <= 1
     expect()(page.locator('#nav-projects-list > .nav-project-item')).to_have_count(499)
-    # Beyond the feed a row keeps its place when new activity would move it, under a pointer or not; the owner's
-    # own collapse ends the browse and the resting list orders by activity again.
-    target = row(page, "archive-250")
-    target.scroll_into_view_if_needed()
-    if not coarse(page):
-        target.locator('.nav-project-row').hover()
-    y = target.bounding_box()["y"]
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    registry.update_project(root, "archive-250", last_active_at=now)
-    control["unread"].add("newer")  # a visible fact of the same snapshot, so the test knows it has landed
-    refresh(page)
-    expect()(row(page, "newer").locator('.nav-project-row')).to_have_attribute("data-unread", "")
-    assert target.bounding_box()["y"] == pytest.approx(y, abs=1)
-    if not coarse(page):
-        page.mouse.move(2, 2)
-        page.evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
-        assert target.bounding_box()["y"] == pytest.approx(y, abs=1)
     page.locator('#primary-sidebar').screenshot(path=str(evidence / f"browse-{ui['tag']}.png"), animations="disabled")
+    # The owner's own collapse ends the browse: the list rests on the pin and the fifty newest again.
     page.locator('#nav-projects-toggle').click()
     page.locator('#nav-projects-toggle').click()
     expect()(page.locator('#nav-projects-list > .nav-project-item')).to_have_count(51)
-    assert shown_ids(page).index("archive-250") < 6
 
 
 def test_find_matches_every_name_in_any_case_or_accent_and_never_claims_a_room_is_missing(pins_ui, tmp_path):
@@ -794,24 +805,100 @@ def test_complete_list_refresh_is_not_hidden_by_a_stale_feed(pins_ui, case, tmp_
         expect()(page.locator('.nav-projects-more', has_text="Try again")).to_be_visible()
 
 
-def test_browsing_with_keyboard_keeps_the_visible_row_when_activity_changes(pins_ui):
-    ui, page, control = pins_ui, pins_ui["page"], pins_ui["control"]
-    seed_archive(ui["root"])
+def test_the_list_follows_the_newest_message_and_a_closure_or_unread_never_lifts_a_room(pins_ui):
+    """The screenshot's case (owner 2026-11-07, option 1): a cleanup's closure notices leave their rooms where their
+    last message put them, unread only as a mark; a pinned room with only such a notice stays under a pin with a newer
+    message, read or not."""
+    ui, page, root, control = pins_ui, pins_ui["page"], pins_ui["root"], pins_ui["control"]
+    for pid in ("jeff", "audit", "redline", "live", "issues"):
+        registry.create_project(root, pid, name=pid.title(), origin="owner_ui")
+    date_history(root)
+    say(root, room_of(root, "issues"), "Fifty issues triaged", ts=LATER(1))
+    say(root, room_of(root, "live"), "A fresh result", ts=LATER(2))
+    for pid in ("jeff", "audit", "redline", "issues"):  # today's memory cleanup closes them, after every message
+        say(root, room_of(root, pid), "Ouroboros closed this project.", ts=LATER(3), direction="system", role="system",
+            type="project_closure", system_type="project_closure")
+    for pid in ("issues", "live"):
+        assert ui["client"].post(f"/api/projects/{pid}/update", json={"pinned": True}).status_code == 200
+    control["unread"].update({"jeff", "audit", "redline", "issues"})
     refresh(page)
-    find = page.locator('.nav-find-input')
-    find.fill("no such name")
+    expect()(row(page, "jeff").locator('.nav-project-row')).to_have_attribute("data-unread", "")
+    ids = shown_ids(page)
+    assert ids[:2] == ["live", "issues"]  # pins: the newer message first, the unread closure no lift
+    assert ids[2:] == ["redline", "audit", "jeff", "newer", "older"]  # no message since: their creation
+    expect()(row(page, "issues").locator('.nav-project-row')).to_have_attribute("data-unread", "")
+
+
+def test_a_focused_row_a_message_moves_keeps_the_keyboard_and_the_place_being_read_stays(pins_ui):
+    ui, page, root = pins_ui, pins_ui["page"], pins_ui["root"]
+    seed_archive(root)
+    spread(root)
+    refresh(page)
+    page.locator('.nav-find-input').fill("no such name")
     page.locator('.nav-projects-more', has_text="Show all projects").click()
     expect()(page.locator('#nav-projects-list > .nav-project-item')).to_have_count(499)
     page.mouse.move(ui["width"] - 1, 1)  # No hover hold: the keyboard owns this place.
-    target = row(page, "archive-250").locator('.nav-project-row')
+    row(page, "archive-250").evaluate("el => el.scrollIntoView({block: 'start'})")
+    first, y = page.evaluate(FIRST_IN_VIEW)
+    target = row(page, "archive-248").locator('.nav-project-row')
     target.focus()
-    before = target.bounding_box()["y"]
-    registry.update_project(ui["root"], "archive-250", last_active_at="2099-01-01T00:00:00Z")
-    control["unread"].add("newer")
+    say(root, 40248, "News for the focused room", ts=LATER(1))
     refresh(page)
-    expect()(row(page, "newer").locator('.nav-project-row')).to_have_attribute("data-unread", "")
+    until(page, lambda: shown_ids(page)[1] == "archive-248", rounds=3000)  # after the pin: the newest message
     expect()(target).to_be_focused()
-    assert target.bounding_box()["y"] == pytest.approx(before, abs=1)
+    assert page.evaluate(FIRST_IN_VIEW) == [first, pytest.approx(y, abs=1)]
+
+
+def test_show_more_keeps_sorting_and_holds_the_place_and_reads_again_when_an_older_room_moves(pins_ui):
+    """Owner 2026-11-07, Show more option 1: the browse keeps every row it showed and keeps sorting; the first row in
+    view whose place holds keeps the place being read, also when the row in view is the one a message moves; and a
+    loaded room beyond the feed that a late message moves among the older rows is placed by the complete list read
+    again on the moved revision (Astra), never on a timer."""
+    ui, page, root = pins_ui, pins_ui["page"], pins_ui["root"]
+    seed_archive(root)
+    spread(root)
+    reads = []
+    page.on("request", lambda request: reads.append(request.url))
+    refresh(page)
+    items = page.locator('#nav-projects-list > .nav-project-item')
+    expect()(items).to_have_count(51)
+    page.locator('#nav-projects-list > .nav-projects-more').click()
+    expect()(items).to_have_count(101)
+    assert shown_ids(page)[:3] == ["archive-100", "archive-497", "archive-496"]
+    page.mouse.move(ui["width"] - 1, 1)
+    row(page, "archive-430").evaluate("el => el.scrollIntoView({block: 'start'})")
+    first, y = page.evaluate(FIRST_IN_VIEW)
+    assert first.startswith("archive-4") and first != "archive-420", (first, shown_ids(page)[:4])
+    # A room further down gets a message and goes to the top; the place being read stays.
+    say(root, 40420, "News further down", ts=LATER(1))
+    refresh(page)
+    until(page, lambda: shown_ids(page)[1] == "archive-420", rounds=3000)  # behind a complete list being read again
+    assert page.evaluate(FIRST_IN_VIEW) == [first, pytest.approx(y, abs=1)]
+    # The row holding the place moves itself: the next one keeps the place, the view does not follow it up.
+    after = shown_ids(page)[shown_ids(page).index(first) + 1]
+    after_y = row(page, after).bounding_box()["y"]
+    say(root, 40000 + int(first.split("-")[1]), "News in view", ts=LATER(2))
+    refresh(page)
+    until(page, lambda: shown_ids(page)[1] == first, rounds=3000)
+    assert row(page, after).bounding_box()["y"] == pytest.approx(after_y, abs=1)
+    assert len(shown_ids(page)) == 101  # every row the browse showed stays
+    # A loaded room's late message, older than the feed's fifty: the browse reads the complete list again for it
+    # (as it did for each message above: a moved revision, never progress or a timer).
+    lists = len(reads_of(reads, "/api/projects", all="1"))
+    say(root, 40410, "A late answer", ts=SPREAD(415.5))
+    refresh(page)
+    until(page, lambda: len(reads_of(reads, "/api/projects", all="1")) > lists)
+    until(page, lambda: shown_ids(page).index("archive-416") < shown_ids(page).index("archive-410")
+          < shown_ids(page).index("archive-415"), rounds=5000)  # the complete list's answer, however slow
+    lists, sockets = len(reads_of(reads, "/api/projects", all="1")), len(ui["control"]["sockets"])
+    for _ in range(2):  # an unchanged revision reads nothing more (a reopened socket reads once, as it always did)
+        with page.expect_response(lambda response: urlparse(response.url).path == '/api/state'):
+            refresh(page)
+    assert len(reads_of(reads, "/api/projects", all="1")) == lists + len(ui["control"]["sockets"]) - sockets
+    page.locator('#nav-projects-toggle').click()
+    page.locator('#nav-projects-toggle').click()
+    expect()(items).to_have_count(51)
+    assert shown_ids(page)[:3] == ["archive-100", first, "archive-420"]
 
 
 @pytest.mark.parametrize("action", ["show-all", "failed-more"])

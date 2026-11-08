@@ -602,7 +602,8 @@ class ProjectEntry(TypedDict, total=False):
     trusted_at: str
     origin: str
     created_at: str
-    last_active_at: str
+    last_active_at: str  # technical activity: any row, journal, binding (the agent's list order)
+    last_message_at: str  # the order a client lists by: newest message, else created_at; absent while undated
     lifecycle: Literal["active", "deleting", "tombstoned"]
     closed: ProjectClosure  # independent of lifecycle; room, history and routing stay available
     routing_generation: int
@@ -795,8 +796,9 @@ class StateResponse(WorkStateFields):
     skills_repo_configured: bool
     github_token_configured: bool
     accounting: Dict[str, Any]
-    # Multi-project sidebar feed: compact registered projects [{id, name, chat_id, working_dir, last_active_at, ...}].
+    # Multi-project sidebar feed: the pins and the 50 newest others by last_message_at (ProjectEntry rows).
     projects: list
+    project_messages_revision: Optional[str]  # moves with any Project's last_message_at; null until history is dated
     project_listable_count: Optional[int]  # active/deleting Projects the sidebar can list; null when unavailable
     project_chat_ids: list  # COMPLETE (uncapped) registered chat_ids; the live WS fan-out isolation SSOT
     # Main's room revision (its standalone messages, the kind a Project's visible_revision counts); null while unreadable.

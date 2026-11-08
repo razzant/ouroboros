@@ -7,7 +7,8 @@ from pathlib import Path
 
 from ouroboros import presence_admission
 from ouroboros.dialogue_provenance import reaction_fact, reaction_words
-from ouroboros.places import FACT_FROM_BOT, PlaceError, get_place, observed_facts, own_account_event, wake_matches
+from ouroboros.places import (FACT_FROM_BOT, PlaceError, get_place, observed_facts, own_account_event,
+                              place_owner_accounts, wake_matches)
 
 # What ``offer_arrival`` did: the reason its settlement records, or the mind's choice to make.
 HANDED_TO_AUTHOR, HANDED_TO_WORK, ROUTE_TO_MIND = "current_author", "conversation_work", "route"
@@ -121,7 +122,7 @@ def decide_attention(root: Path, admission, event) -> tuple[str, dict]:
         return "silent", {"reason": "paused"}
     if not presence_admission.focus_enabled(root):
         return "silent", {"reason": "off"}
-    if own_account_event(place, event):
+    if own_account_event(place, event, place_owner_accounts(root).get(place.place_id)):
         # My own post (through the connector or any tool acting as that account) is heard and kept, never a reason
         # to wake me or to mail my live author.
         return "silent", {"reason": "own_account"}
@@ -226,13 +227,13 @@ def _arrival_append(root, drive, recipient: str, task: dict, event, wake: bool, 
     from ouroboros.owner_mailbox import write_task_message
     from ouroboros.place_arrivals import pin_recipient
     from ouroboros.owner_words import place_confirmed_words
-    from ouroboros.places import confirmed_author
+    from ouroboros.places import owner_event_now
     source = _arrival_source(root, task, event) if isinstance(event.conversation.get("transport_queue"), dict) else None
     reaction = reaction_fact(event.message)
-    # Provenance from the arrival's own author (an account its place confirms), never a verdict about whom it is
-    # for: a hand-off carries the stamp its admission gave it (a stranger's line handed on by a focus stays context).
-    confirmed_words = "" if reaction else str(task.get("confirmed_words") or "") if task.get("handed") else place_confirmed_words(
-        confirmed_author(task["metadata"].get("presence", {}).get("place") or {}, event.actor, event.account_id), event.text, event.message)
+    place_id = task["metadata"]["focus"]["place_id"]
+    # Provenance from the arrival's own author as the places confirm it now, never from the focus that hands it on
+    # (a stranger's line handed on stays context) and never a verdict about whom it is for; the drain reads it again.
+    confirmed_words = "" if reaction else place_confirmed_words(owner_event_now(root, place_id, event), event.text, event.message)
     text = json.dumps({"actor": dict(event.actor), "event": event.text,
                        **({"non_speech": f"Reaction, not speech: {reaction_words(reaction)}"} if reaction else {}),
                        "source_event_id": event.source_event_id, "conversation_key": event.conversation_key,
@@ -250,10 +251,10 @@ def _arrival_append(root, drive, recipient: str, task: dict, event, wake: bool, 
 
         if write_task_message(drive, text, recipient, source_task_id=task["id"], provenance="place_event",
                               msg_id=_arrival_msg_id(task),
-                              sender_origin={"place_id": task["metadata"]["focus"]["place_id"],
-                                             "conversation_key": event.conversation_key},
+                              sender_origin={"place_id": place_id, "conversation_key": event.conversation_key},
                               place_arrival={"source_event_id": event.source_event_id,
                                              "message": dict(event.message), "wake": bool(wake),
+                                             "account_id": event.account_id, "conversation_id": event.conversation_id,
                                              **({"confirmed_words": confirmed_words} if confirmed_words else {})},
                               admit=inside_lock):
             return True
@@ -262,6 +263,30 @@ def _arrival_append(root, drive, recipient: str, task: dict, event, wake: bool, 
         # False also covers a torn append, an admission that could not be read and a lock never taken: effect unknown.
         raise OSError("The recipient could not retain this place arrival; retry.")
     return append
+
+
+def arrival_owner_words(ctx, drive_root, entry: dict) -> str:
+    """A drained place arrival's words as my human's, read when its reader takes it (``places.owner_event_now`` over
+    the arrival's own author, on the canonical data root): a confirmation made after its offer counts, a withdrawn
+    one no longer does. An entry written before those facts rode with it keeps the stamp its offer gave it."""
+    arrival = entry.get("place_arrival") if isinstance(entry.get("place_arrival"), dict) else {}
+    if "account_id" not in arrival:
+        return str(arrival.get("confirmed_words") or arrival.get("owner_words") or "")
+    try:
+        words = json.loads(entry.get("text") or "{}")
+    except ValueError:
+        return ""
+    message = arrival.get("message") if isinstance(arrival.get("message"), dict) else {}
+    if not isinstance(words, dict) or reaction_fact(message):
+        return ""
+    from ouroboros.owner_words import place_confirmed_words
+    from ouroboros.places import owner_event_now
+    from ouroboros.tool_access import canonical_data_root
+    root = canonical_data_root(ctx) if getattr(ctx, "drive_root", None) else drive_root
+    facts = {"actor": words.get("actor") or {}, "account_id": arrival["account_id"],
+             "conversation_id": arrival.get("conversation_id"), "message": message}
+    place_id = str((entry.get("sender_origin") or {}).get("place_id") or "")
+    return place_confirmed_words(owner_event_now(root, place_id, facts), words.get("event"), message)
 
 
 def _author_pin(root, author: str) -> dict:
@@ -411,9 +436,9 @@ def offer_arrival(root, task: dict, event, *, wake: bool) -> tuple[str, str]:
     return (ROUTE_TO_MIND, "") if held.get("to") == "mind" else offer_arrival(root, task, event, wake=wake)
 
 
-def _captured_arrival(root, metadata: dict, captured: str, identity: str, facts, confirmed_words: str = ""):
+def _captured_arrival(root, metadata: dict, captured: str, identity: str, facts):
     """``(task, event)`` of one captured arrival rebuilt from its immutable room row, as the Host offered it
-    (its provider thread whole: ``dialogue_store.whole_body``)."""
+    (its provider thread whole: ``dialogue_store.whole_body``), its own author among its facts."""
     from ouroboros import dialogue_store
     from ouroboros.place_arrivals import _record
     from ouroboros.presence_runner import PresenceTurnEvent
@@ -431,8 +456,7 @@ def _captured_arrival(root, metadata: dict, captured: str, identity: str, facts,
         actor=dict(transport.get("actor") or {}), conversation=dict(transport.get("conversation") or {}),
         message=dict(transport.get("message") or {}), text=str(body.get("text") or ""),
         facts=None if facts == ["legacy_addressed"] or not isinstance(facts, list) else tuple(facts))
-    task = {"id": captured, "metadata": {**metadata, "presence_event_identity": identity}, "handed": True,
-            "confirmed_words": confirmed_words,
+    task = {"id": captured, "metadata": {**metadata, "presence_event_identity": identity},
             **{key: body[key] for key in ("attachment_manifest", "attachment_manifest_ref") if key in body}}
     return task, event
 
@@ -442,7 +466,6 @@ def focus_arrival(root, metadata, selector, focus_task_id: str = ""):
     host-bound metadata. A string: the ``source_event_id`` of a later message of the SAME conversation that the Host
     wrote into this focus's own mailbox. Never the latest text, a model's words, a quote or another room."""
     from ouroboros.owner_mailbox import drain_owner_entries
-    from ouroboros.owner_words import place_confirmed_words
     from ouroboros.presence_runner import presence_turn_task_id
 
     presence = metadata.get("presence") if isinstance(metadata, dict) else None
@@ -452,9 +475,7 @@ def focus_arrival(root, metadata, selector, focus_task_id: str = ""):
         return None
     if selector is True:
         captured = presence_turn_task_id(str(presence.get("binding_id") or ""), str(stored.get("source_event_id") or ""))
-        own = _captured_arrival(root, metadata, captured, metadata["presence_event_identity"], stored.get("facts"),
-                                place_confirmed_words((metadata["focus"].get("actor") or {}).get("owner_confirmed"),
-                                                      presence.get("observed_text"), stored.get("message")))
+        own = _captured_arrival(root, metadata, captured, metadata["presence_event_identity"], stored.get("facts"))
         return (*own, True) if own else None
     key = str(stored.get("conversation_key") or "")
     for row in drain_owner_entries(root, focus_task_id, set(), include_acknowledged=True):
@@ -467,8 +488,7 @@ def focus_arrival(root, metadata, selector, focus_task_id: str = ""):
         except ValueError:
             return None
         identity = str(row.get("msg_id") or "").removeprefix("place-event:")
-        later = _captured_arrival(root, metadata, str(row.get("source_task_id") or ""), identity, words.get("facts"),
-                                  str(arrival.get("confirmed_words") or arrival.get("owner_words") or ""))  # its offer's stamp
+        later = _captured_arrival(root, metadata, str(row.get("source_task_id") or ""), identity, words.get("facts"))
         if later and later[1].conversation_key == key and later[1].source_event_id == selector:
             return (*later, arrival.get("wake") is not False)
     return None

@@ -28,12 +28,14 @@ archives were left unopened — the fact a continuity disclosure needs.
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import os
 import pathlib
 import threading
 import time
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 from ouroboros import utils
 from ouroboros.utils import JsonlChainUnreadable, iter_jsonl_objects, jsonl_chain_handles
@@ -70,6 +72,26 @@ TAIL_WINDOW_START_BYTES = 512 * 1024
 ARCHIVE_BACKFILL_MAX = 3
 
 
+def parse_jsonl_source(raw: bytes) -> dict:
+    """One complete object line without duplicate members that JSON would erase.
+
+    Byte-exact HTTP delivery must not expose an overwritten object's unprojected
+    fields. Ordinary best-effort JSONL readers keep their existing parser policy.
+    """
+    def unique(pairs):
+        result = dict(pairs)
+        if len(result) != len(pairs):
+            raise ValueError("duplicate JSON source member")
+        return result
+
+    if not raw.endswith(b"\n") or b"\n" in raw[:-1]:
+        raise ValueError("source is not one complete JSONL row")
+    row = json.loads(raw, object_pairs_hook=unique)
+    if not isinstance(row, dict):
+        raise ValueError("source is not a JSON object")
+    return row
+
+
 class JsonlChainSnapshot:
     """One captured byte horizon shared by history pages, wake observations and receipt evidence.
 
@@ -82,9 +104,11 @@ class JsonlChainSnapshot:
     disclose that degraded capture itself.
     """
 
-    def __init__(self, path: pathlib.Path, *, upper: Optional[int] = None, strict: bool = True):
+    def __init__(self, path: pathlib.Path, *, upper: Optional[int] = None, strict: bool = True,
+                 anchor: Optional[pathlib.Path] = None):
         self.path, self.snapshot = path, {}
-        with jsonl_chain_handles(path, strict=strict, start_offset=0, snapshot=self.snapshot):
+        self.io = {} if anchor is None else _confined_chain_io(anchor)
+        with jsonl_chain_handles(path, strict=strict, start_offset=0, snapshot=self.snapshot, **self.io):
             pass
         self.entries, self.ends = self.snapshot["entries"], self.snapshot["ends"]
         self.upper = self.snapshot["total"] if upper is None else upper
@@ -98,7 +122,7 @@ class JsonlChainSnapshot:
             raise JsonlChainUnreadable("read is outside the captured boundary")
         parts = []
         while start < end:
-            with jsonl_chain_handles(self.path, strict=True, start_offset=start, snapshot=self.snapshot) as handles:
+            with jsonl_chain_handles(self.path, strict=True, start_offset=start, snapshot=self.snapshot, **self.io) as handles:
                 if not handles:
                     raise JsonlChainUnreadable("source ended before its captured boundary")
                 size = min(end, self.ends[bisect_left(self.ends, start + 1)]) - start
@@ -112,32 +136,137 @@ class JsonlChainSnapshot:
     def segment(self, index: int) -> tuple[int, int]:
         return (self.ends[index - 1] if index else 0), min(self.ends[index], self.upper)
 
-    def rows(self, index: int, lower: int, gaps: set) -> Tuple[List[Tuple[int, Dict[str, Any]]], int]:
+    def rows(self, index: int, lower: int, gaps: set, *, located: bool = False,
+             coverage: Optional[dict] = None) -> tuple[list, int]:
         """``([(offset, row)], end of the last complete line)`` of one segment from ``lower``.
 
         An unfinished live line stops the segment (its writer owns it; the next
-        pass reads it whole); a torn archive line is named in ``gaps``.
+        pass reads it whole); a torn archive line is named in ``gaps``. Located
+        reads also disclose an unfinished live row. ``coverage`` counts nonblank
+        skipped records in this segment window, excluding a partial left edge.
         """
+        skipped = 0
+        if coverage is not None:
+            coverage["skipped_rows"] = 0
         base, end = self.segment(index)
         start = max(base, lower)
         if start >= end:
             return [], start
         data, rows, position = self._read(start, end), [], start
-        for raw in data.splitlines(keepends=True):
+        if located and start > base and self._read(start - 1, start) != b"\n":
+            # A byte tail begins inside a row. Never publish that suffix as a source.
+            cut = data.find(b"\n") + 1 or len(data)
+            data, position = data[cut:], position + cut
+        # JSONL records end at LF; a bare CR inside damaged bytes is not another
+        # row. Preserve the existing non-located reader's parsing policy.
+        for raw in (io.BytesIO(data) if located else data.splitlines(keepends=True)):
             if not raw.endswith(b"\n"):
                 if self.entries[index][2]:
+                    if located and raw.strip():
+                        gaps.add("incomplete_live_line")
+                        skipped += 1
                     break  # an unfinished live line: the next pass reads it whole
                 gaps.add("torn_archive_line")
             position += len(raw)
             try:
-                row = json.loads(raw)
+                row = parse_jsonl_source(raw) if located else json.loads(raw)
             except (ValueError, UnicodeDecodeError):
                 if raw.strip():
                     gaps.add("malformed_jsonl")
+                    skipped += 1
                 continue
             if isinstance(row, dict):
-                rows.append((position - len(raw), row))
+                address = (len(raw), hashlib.sha256(raw).hexdigest()) if located else ()
+                rows.append((position - len(raw), row, *address))
+        if coverage is not None:
+            coverage["skipped_rows"] = skipped
         return rows, position
+
+
+def _confined_chain_io(anchor: pathlib.Path) -> dict:
+    """The chain reader's IO through the existing no-follow directory owner.
+
+    Only the configured canonical root may be a link. Child placement is admitted
+    by the caller; every descendant, archive listing and payload open stays below
+    that root. No name-lock files, archives or persistent cache are created.
+    """
+    from ouroboros.confined_files import confined_directory, lexical_relative, open_confined_file, relative_parts
+
+    def parts(path):
+        relative = lexical_relative(anchor, path)
+        if not relative:
+            raise JsonlChainUnreadable("log source is outside its canonical root")
+        return relative_parts(relative)
+
+    def open_file(path):
+        return open_confined_file(anchor, parts(path))[0]
+
+    def closed_segments(path, live_stat, *, strict):
+        directory = path.parent.parent / "archive"
+        try:
+            with confined_directory(anchor, parts(directory)) as held:
+                # Include links in enumeration: opening a matching link must refuse,
+                # not silently shorten the chain and shift its byte coordinates.
+                def listing(_path, *, strict):
+                    return sorted(directory / name for name, _ in held.entries(include_links=True)
+                                  if name.startswith(path.stem + "_") and name.endswith(".jsonl"))
+
+                def stat(member):
+                    try:
+                        with held.open(member.name)[0] as handle:
+                            return os.fstat(handle.fileno())
+                    except OSError as exc:
+                        raise JsonlChainUnreadable("listed log segment became unavailable") from exc
+
+                return utils._closed_segments(path, live_stat, strict=strict, listing=listing, stat=stat,
+                                              directory_revision=held.revision())
+        except FileNotFoundError:
+            return []
+        except OSError as exc:
+            raise JsonlChainUnreadable("log archive cannot be read through its canonical root") from exc
+
+    return {"open_file": open_file, "closed_segments": closed_segments}
+
+
+def read_rotated_jsonl_sources(live: pathlib.Path, want: int, matches: Callable, *,
+                               anchor: pathlib.Path) -> tuple[list, set[str], int]:
+    """The existing filtered tail policy, with exact ``(start, row, length, sha256)``
+    per stored line instead of a window-relative identity. One captured byte horizon
+    drives both selection and parsing; appended bytes belong to the next request.
+    Only a newline-terminated row is addressable, including in closed segments.
+    Returns rows, gap reasons and the measured skipped-record count in the read
+    window, before task filtering/limit. Unreadable sources still raise: their
+    skipped-record count is unknown. No claim covers unopened older history.
+    """
+    snapshot = JsonlChainSnapshot(live, anchor=anchor)
+    indices = {entry[0]: index for index, entry in enumerate(snapshot.entries)}
+    measured: dict = {}
+
+    def parse(path, *, tail_bytes=None, gap_reasons=None):
+        index = indices.get(path)
+        if index is None:
+            return []
+        base, end = snapshot.segment(index)
+        # Window doubling replaces this segment's count, never counts a skipped
+        # record twice. Only one small counter per consulted segment is retained.
+        rows, _ = snapshot.rows(index, max(base, end - tail_bytes) if tail_bytes else base, gap_reasons,
+                                located=True, coverage=measured.setdefault(index, {}))
+        return rows
+
+    def stat(path):
+        if path not in indices:
+            raise FileNotFoundError(path)
+        return snapshot.entries[indices[path]][1]
+
+    rows, gaps = read_rotated_jsonl_entries(
+        live, live.parent.parent / "archive", live.stem, want, lambda row: matches(row[1]),
+        iter_objects=parse, stat=stat,
+        include_gaps=True,
+        list_archives=lambda *_: [entry[0] for entry in reversed(snapshot.entries) if not entry[2]],
+    )
+    if "unreadable_source" in gaps:
+        raise JsonlChainUnreadable("log preview could not read its captured sources")
+    return rows, gaps, sum(item["skipped_rows"] for item in measured.values())
 
 
 def archive_segments(archive_dir: pathlib.Path, archive_prefix: str, gaps: Optional[set] = None) -> list:
@@ -258,6 +387,7 @@ def read_jsonl_segment_with_gaps(
         return [], {"unreadable_source"}
 
     gaps: set[str] = set()
+    entries: list = []
     try:
         entries = list(parse(path, tail_bytes=tail_bytes, gap_reasons=gaps))
     except OSError:

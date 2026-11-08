@@ -24,8 +24,8 @@ STATE_FIELDS = {
     "evolution_cycle", "evolution_state", "bg_consciousness_state", "spent_calls", "supervisor_ready",
     "supervisor_error", "boot", "runtime_mode", "context_mode", "subagents_mode", "subagents_availability",
     "context_mode_auto_low", "effort_range", "safety_mode", "skills_repo_configured", "github_token_configured",
-    "accounting", "projects", "project_listable_count", "project_chat_ids", "main_visible_revision", "task_bindings",
-    "task_bindings_revision", "task_bindings_unchanged", "active_direct_turns", "active_chat_activities",
+    "accounting", "projects", "project_messages_revision", "project_listable_count", "project_chat_ids",
+    "main_visible_revision", "task_bindings", "task_bindings_revision", "task_bindings_unchanged", "active_direct_turns", "active_chat_activities",
     "active_chat_activities_complete", "current_questions", "current_questions_complete", "current_questions_gaps",
     "main_attention", "main_attention_complete", "main_attention_gaps", "works", "rooms", "work_summary",
     "works_complete", "works_gaps", "served_ui",
@@ -211,6 +211,35 @@ def test_bindings_the_client_holds_are_not_sent_again(serving):
     assert again.headers[publication.GENERATION_HEADER] == "1"
     stale = _payload(_get(serving.app, b"bindings_since=other"))
     assert stale["task_bindings"] == first["task_bindings"] and stale["task_bindings_unchanged"] is False
+
+
+def test_only_project_times_move_the_public_message_revision(serving):
+    from ouroboros import dialogue_store as ds, projects_registry as registry, room_messages
+
+    root = serving.root
+    room = registry.create_project(root, "messages", name="Messages", origin="owner_ui")["chat_id"]
+    ds.ensure(root)
+    room_messages.run(root, lambda: False)
+    before = _payload(_get(serving.app))["project_messages_revision"]
+    assert before
+    for index, (chat, direction) in enumerate(((1, "in"), (1, "out"), (12345, "in"))):
+        ds.append(root, "chat", {"ts": f"2026-01-01T00:0{index}:00Z", "chat_id": chat,
+                                 "direction": direction, "text": "Outside Projects"}, feed=True, appearances=[])
+        assert _payload(_get(serving.app))["project_messages_revision"] == before
+    ds.append(root, "chat", {"ts": "2026-01-01T01:00:00Z", "chat_id": room,
+                             "direction": "in", "text": "Owner request"}, feed=True, appearances=[])
+    after = _payload(_get(serving.app))
+    assert after["project_messages_revision"] != before
+    project = next(row for row in after["projects"] if row["chat_id"] == room)
+    assert project["last_message_at"] == "2026-01-01T01:00:00Z" and project["visible_revision"] == 1
+    # An older delivery moves arrival/unread, but not the latest original event time.
+    ds.append(root, "chat", {"ts": "2026-01-01T00:00:00Z", "chat_id": room,
+                             "direction": "out", "text": "Delayed answer"}, feed=True, appearances=[])
+    assert _payload(_get(serving.app))["project_messages_revision"] == after["project_messages_revision"]
+    ds.append(root, "chat", {"ts": "2026-01-01T02:00:00Z", "chat_id": 1, "direction": "out",
+                             "type": "main_notice", "text": "Also shown in the Project"},
+              feed=True, appearances=[f"room:{room}"], shown_in=[room])
+    assert _payload(_get(serving.app))["project_messages_revision"] != after["project_messages_revision"]
 
 
 def _key(serving):

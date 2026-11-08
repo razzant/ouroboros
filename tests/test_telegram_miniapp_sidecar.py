@@ -13,6 +13,9 @@ from urllib.parse import urlencode
 
 import httpx
 import pytest
+import websockets
+from websockets.exceptions import ConnectionClosedError
+from websockets.frames import Close
 
 SIDECAR_PATH = Path(__file__).parents[1] / "skills" / "telegram" / "scripts" / "sidecar.py"
 SPEC = importlib.util.spec_from_file_location("telegram_miniapp_poc_sidecar", SIDECAR_PATH)
@@ -644,6 +647,88 @@ def test_open_websocket_stops_forwarding_after_owner_revocation() -> None:
         assert gateway.public_url is None
         assert gateway.diagnostics()["active_sessions"] == 0
         await gateway.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("error, expected_code", [
+    (ConnectionClosedError(None, Close(1009, "frame too large")), 1009),
+    (ConnectionClosedError(Close(1000, "peer close"), Close(1009, "frame too large"), False), 1009),
+    (ConnectionClosedError(Close(1011, "upstream failed"), Close(1011, "upstream failed"), True), 1011),
+    (ConnectionClosedError(Close(1005, ""), None), 1011),
+    (ConnectionClosedError(None, None), 1011),
+    (RuntimeError("private upstream detail"), 1011),
+])
+@pytest.mark.parametrize("direction", ["receive", "send"])
+def test_websocket_does_not_report_upstream_failure_as_normal(error, expected_code, direction):
+    async def scenario():
+        class FailingUpstream(_FakeUpstreamWebSocket):
+            async def __anext__(self):
+                if direction != "receive":
+                    return await super().__anext__()
+                raise error
+
+            async def send(self, value):
+                if direction != "send":
+                    return await super().send(value)
+                raise error
+
+        upstream = FailingUpstream()
+        gateway = sidecar_module.TelegramProxySidecar(
+            BOT_TOKEN, OWNER_ID, 8765,
+            seams=sidecar_module.SidecarSeams(websocket_connect=_FakeConnector(upstream)),
+        )
+        gateway.set_public_url(PUBLIC_URL)
+        token, _session = gateway._issue_session()
+        try:
+            messages = await asyncio.wait_for(_invoke_websocket(
+                gateway, cookie=token,
+                client_messages=[{"type": "websocket.receive", "text": "from-client"}] if direction == "send" else [],
+            ), 5)
+            assert messages[-1] == {"type": "websocket.close", "code": expected_code, "reason": ""}
+            assert upstream.exited
+            assert gateway.diagnostics()["active_websockets"] == 0
+        finally:
+            await gateway.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("size_delta", [0, 1])
+def test_real_upstream_size_boundary_preserves_close_cause(size_delta):
+    async def scenario():
+        payload = "x" * (sidecar_module._MAX_WS_MESSAGE_BYTES + size_delta)
+        closed = asyncio.Event()
+        observed_codes = []
+
+        async def core(upstream):
+            try:
+                await upstream.send(payload)
+                if not size_delta:
+                    await upstream.send("following event")
+                    await upstream.close()
+                else:
+                    await upstream.wait_closed()
+                observed_codes.append(upstream.close_code)
+            finally:
+                closed.set()
+
+        async with websockets.serve(core, "127.0.0.1", 0, compression=None) as server:
+            port = server.sockets[0].getsockname()[1]
+            gateway = sidecar_module.TelegramProxySidecar(BOT_TOKEN, OWNER_ID, port)
+            gateway.set_public_url(PUBLIC_URL)
+            token, _session = gateway._issue_session()
+            try:
+                messages = await asyncio.wait_for(_invoke_websocket(gateway, cookie=token), 10)
+                await asyncio.wait_for(closed.wait(), 5)
+                delivered = [row.get("text") for row in messages if row["type"] == "websocket.send"]
+                assert delivered == ([] if size_delta else [payload, "following event"])
+                expected = 1009 if size_delta else 1000
+                assert messages[-1] == {"type": "websocket.close", "code": expected, "reason": ""}
+                assert observed_codes == [expected]
+                assert gateway.diagnostics()["active_websockets"] == 0
+            finally:
+                await gateway.aclose()
 
     asyncio.run(scenario())
 

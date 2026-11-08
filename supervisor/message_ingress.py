@@ -383,15 +383,17 @@ def log_chat(direction: str, chat_id: int, user_id: int, text: str, *, feed: boo
 
 def _shown_elsewhere(root: Any, record: dict, feed: bool) -> Dict[str, Any]:
     """The append facts of a row some Project also shows (``room_appearances.write_facts``): its
-    derived index keys and, for work speech and private Presence contact (a question too), the
-    revision stamp and the other rooms it feeds, so one message is unread where it is shown."""
+    derived index keys, those rooms (a message dates them too) and, for work speech and private
+    Presence contact (a question too), the revision stamp and the other rooms it feeds, so one
+    message is unread where it is shown."""
     from ouroboros.presence_owner_contact import private_main_row
     from ouroboros.project_dialogue import WORK_SPEECH_ELSEWHERE_TYPES
     from ouroboros.room_appearances import write_facts
 
     keys, shown = write_facts(root, record)
     speech = record.get("type") in WORK_SPEECH_ELSEWHERE_TYPES or private_main_row(record)
-    return {"appearances": keys, **({"room_revisions": True, "also_feed": shown} if speech and feed else {})}
+    return {"appearances": keys, **({"shown_in": shown} if shown else {}),
+            **({"room_revisions": True, "also_feed": shown} if speech and feed else {})}
 
 
 def accept_chat(chat_id: int, user_id: int, text: str, *, dispatch: Optional[Dict[str, Any]] = None,

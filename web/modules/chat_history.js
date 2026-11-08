@@ -98,7 +98,7 @@ export function createChatHistoryPager({
     let focus = 0;
     let pending = null;
     let failure = null;
-    let destroyed = false;
+    let destroyed = false, visit = 0;
     // Where the next read of new arrivals starts, the newest read's row count and the
     // rows read since; the read in flight and at most one queued behind it.
     let after = null, windowRows = 0, arrived = 0, arrival = null, queued = null, landedArrivals = 0;
@@ -294,7 +294,7 @@ export function createChatHistoryPager({
         const promise = Promise.resolve()
             .then(() => fetchPage(cursor, { signal: abort.signal }))
             .then(data => {
-                if (!alive()) return { status: 'disposed' };
+                if (!alive() || abort.signal.aborted) return { status: 'disposed' };
                 if (after !== cursor) return startArrivals(ask);
                 const gap = data?.window?.truncated_by?.some?.(cause => /^(chat|progress)_/.test(String(cause))
                     && String(cause) !== 'progress_incomplete_live_line');
@@ -309,6 +309,7 @@ export function createChatHistoryPager({
                 return alive() ? { status: 'applied', messageCount: rowCount(data.messages) } : { status: 'disposed' };
             })
             .catch(error => {
+                if (abort.signal.aborted) return { status: 'disposed' };
                 if (after === cursor) after = null;
                 return alive() ? { status: 'reset', error } : { status: 'disposed' };
             })
@@ -329,7 +330,10 @@ export function createChatHistoryPager({
         if (queued) { queued.fromReconnect ||= fromReconnect; return queued.promise; }
         if (!arrival) return startArrivals({ fromReconnect });
         const ask = { fromReconnect };
-        ask.promise = arrival.promise.then(() => { queued = null; return startArrivals(ask); });
+        ask.promise = arrival.promise.then(() => {
+            if (queued !== ask) return { status: 'disposed' };
+            queued = null; return startArrivals(ask);
+        });
         queued = ask;
         return ask.promise;
     }
@@ -338,13 +342,15 @@ export function createChatHistoryPager({
     // window grown full, one `canArrive` declines, a refusal or a failure). When
     // arrivals cannot answer, chat's newest read starts within this very call.
     function read({ fromReconnect = false, whole = false } = {}) {
+        const started = visit;
         const inFlight = newestInFlight();
-        if (inFlight) return inFlight.then(() => read({ fromReconnect, whole }));
+        if (inFlight) return inFlight.then(() => started === visit && read({ fromReconnect, whole }));
         if (!alive()) return Promise.resolve(false);
         if (whole || !canArrive() || !(arrival || arrivable())) {
             return readNewest({ fromReconnect });
         }
-        return arrivals(fromReconnect).then(result => result.status === 'applied' || (alive() && readNewest({ fromReconnect })));
+        return arrivals(fromReconnect).then(result => started === visit && (result.status === 'applied'
+            || (result.status !== 'disposed' && alive() && readNewest({ fromReconnect }))));
     }
 
     return {
@@ -419,9 +425,19 @@ export function createChatHistoryPager({
             if (released.length) publish();
             return released;
         },
+        // A retained room stops reads without releasing its pages or the reader's chain.
+        suspend() {
+            visit += 1;
+            pending?.abort.abort();
+            arrival?.abort.abort();
+            pending = null;
+            arrival = null;
+            queued = null;
+        },
         destroy() {
             if (destroyed) return;
             destroyed = true;
+            visit += 1;
             pending?.abort.abort();
             arrival?.abort.abort();
             pending = null;

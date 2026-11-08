@@ -28,7 +28,7 @@ import sqlite3
 import uuid
 from typing import Any, Callable, Dict, Iterable, Iterator, List, NamedTuple, Optional, Tuple
 
-from ouroboros import shared_values, store, store_empty
+from ouroboros import room_messages, shared_values, store, store_empty
 from ouroboros.store import StoreBusy, StoreError, StoreLost, StoreMigrating, TIER_ENFORCED, TIER_NAME
 from ouroboros.utils import utc_now_iso
 
@@ -248,7 +248,7 @@ def create(root: Any, *, tier: Optional[str] = None) -> pathlib.Path:
                 conn.execute(APPEARANCES_DDL)
                 for key, value in (("schema_version", SCHEMA_VERSION), ("lock_tier", tier), ("created_at", utc_now_iso()),
                                    (APPEARANCES_MARK, 0), (APPEARANCES_CONTACT_REPLIES, {"next": 0, "upper": 0}),
-                                   (APPEARANCES_COVERED, 0)):
+                                   (APPEARANCES_COVERED, 0), (room_messages.THROUGH_KEY, 0)):
                     conn.execute("INSERT INTO meta (key, value) VALUES (?, ?)", (key, json.dumps(value)))
                 store.commit(conn)
             os.replace(tmp, target)
@@ -636,7 +636,7 @@ def release_shared_version(root: Any) -> int:
 def append(root: Any, stream: str, row: Dict[str, Any], *, dispatch: Optional[Dict[str, Any]] = None,
            feed: bool = False, wait_sec: float = WAIT_SEC, idempotent: bool = False,
            emit_live: bool = True, also_feed: Iterable[int] = (), room_revisions: bool = False,
-           appearances: Optional[Iterable[str]] = ()) -> Receipt:
+           appearances: Optional[Iterable[str]] = (), shown_in: Iterable[int] = ()) -> Receipt:
     """Store exact JSON, room facts and named dispatch in one transaction.
 
     Named inbound duplicates return the existing receipt (the UNIQUE index also
@@ -645,7 +645,8 @@ def append(root: Any, stream: str, row: Dict[str, Any], *, dispatch: Optional[Di
     advances the revision of each other room that shows the row (one message, unread
     where it is shown), and ``room_revisions`` stamps the row with the revision it took in
     every fed room, so one read can be recorded wherever it counted. ``appearances`` are
-    its derived index keys (``None``: unknown, left to the job). Optional idempotence
+    its derived index keys (``None``: unknown, left to the job); a message dates its room and
+    the other rooms that show it (``shown_in``, ``room_messages``). Optional idempotence
     compares content identity, stamp aside, under the existing room/time index. A provider
     thread in ``transport.conversation`` is stored once (``_by_reference``); ``length``, the
     identity and the receipt's row stay the whole row's.
@@ -662,6 +663,16 @@ def append(root: Any, stream: str, row: Dict[str, Any], *, dispatch: Optional[Di
     length = len(body.encode("utf-8")) + 1
     counted = stream_row(stream, columns)
     _plan_first(root, wait_sec)
+    message = False
+    if stream == "chat":
+        try:
+            from ouroboros.projects_registry import RoomResolver
+
+            with store.acquisition_budget(0):
+                message = bool(room_messages.classified([row], RoomResolver(root, strict=True)))
+        except Exception:
+            message = None  # the append survives; the message job still owes this row's classification
+            log.debug("Message lineage left to maintenance", exc_info=True)
     with transaction(root, write=True, wait_sec=wait_sec) as conn:
         if idempotent:
             from ouroboros.chat_chain import source_row_id
@@ -705,6 +716,8 @@ def append(root: Any, stream: str, row: Dict[str, Any], *, dispatch: Optional[Di
                 conn.execute(f"PRAGMA user_version = {SHARED_VERSION}")
         for chat in others:
             touch_room(conn, chat, None, columns["ts"], 1)
+        if message:
+            room_messages.note(conn, [(chat, columns["ts"]) for chat in (columns["chat_id"], *shown_in, *others)])
         keys = sorted(set(appearances)) if appearances is not None else []
         if keys:
             conn.execute(APPEARANCES_DDL)
@@ -714,6 +727,9 @@ def append(root: Any, stream: str, row: Dict[str, Any], *, dispatch: Optional[Di
             for key in (APPEARANCES_MARK, APPEARANCES_COVERED):
                 conn.execute("UPDATE meta SET value=? WHERE key=? AND value=?",
                              (json.dumps(seq + length), key, json.dumps(seq)))
+            if message is not None:
+                conn.execute("UPDATE meta SET value=? WHERE key=? AND value=?",
+                             (json.dumps(seq + length), room_messages.THROUGH_KEY, json.dumps(seq)))
         conn.execute("UPDATE streams SET next_seq=?, next_ordinal=next_ordinal+1, next_pos=next_pos+? WHERE stream=?",
                      (seq + length, int(counted), stream))
     if stream == "progress" and emit_live:
@@ -768,7 +784,7 @@ def append_quietly(root: Any, stream: str, row: Dict[str, Any], **kwargs: Any) -
             _stream_live(row)
         dialogue_retry.retain(root, stream, row, feed=kwargs.get("feed", False), **{
             key: list(kwargs[key]) if key != "room_revisions" and kwargs[key] is not None else kwargs[key]
-            for key in ("also_feed", "room_revisions", "appearances") if key in kwargs})
+            for key in ("also_feed", "room_revisions", "appearances", "shown_in") if key in kwargs})
         return None
 
 
@@ -997,6 +1013,21 @@ def _probe(conn: sqlite3.Connection, stream: str, keys: Iterable[Tuple[str, Any]
     matching any of its values (one JSON list), so Python receives at most columns x ``limit``
     integers however many keys a room has: a row among the union's first ``limit`` is among its own
     column's first ``limit``, so the first ``limit`` of these is the union's."""
+    found = _probe_seqs(conn, stream, keys, before=before, lower=lower, limit=limit, newest_first=newest_first)
+    chosen = heapq.nlargest(limit, found) if newest_first else heapq.nsmallest(limit, found)
+    # Python 3.10 has no getlimit; 999 is the default variable limit at our SQLite 3.24 floor.
+    variables = conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) if hasattr(conn, "getlimit") else 999
+    pages = []
+    for start in range(0, len(chosen), variables - 1):
+        batch = chosen[start:start + variables - 1]
+        pages.append(_page(conn, f"WHERE stream=? AND seq IN ({','.join('?' for _ in batch)})", (stream, *batch)))
+    return chosen, pages
+
+
+def _probe_seqs(conn: sqlite3.Connection, stream: str, keys: Iterable[Tuple[str, Any]], *, before: Optional[int],
+                lower: int = 0, limit: Optional[int] = None, newest_first: bool = False) -> set:
+    """Indexed candidate coordinates, batched per column. No limit means the complete candidate union
+    (message dating orders it by event time); otherwise each column contributes at most ``limit``."""
     values: Dict[str, list] = {}
     for column, value in dict.fromkeys(tuple(keys)):
         if column not in _PROBE_INDEX:
@@ -1004,11 +1035,15 @@ def _probe(conn: sqlite3.Connection, stream: str, keys: Iterable[Tuple[str, Any]
         if value is not None or column == "chat_id":  # the partial indexes hold only rows that carry the fact
             values.setdefault(column, []).append(value)
     found = set()
-    order, bounds = ("DESC" if newest_first else "ASC"), (_bound(before), lower, limit)
-    for column, listed in values.items() if limit > 0 else ():  # each column's coordinates in one step
+    order, bounds = ("DESC" if newest_first else "ASC"), (_bound(before), lower)
+    tail = " AND seq<? AND seq>=?"
+    if limit is not None:
+        tail += f" ORDER BY seq {order} LIMIT ?"
+        bounds += (limit,)
+    tail += ")"
+    for column, listed in values.items() if limit is None or limit > 0 else ():
         select = (f"SELECT json_group_array(seq) FROM (SELECT seq FROM dialogue INDEXED BY {_PROBE_INDEX[column]} "
                   f"WHERE stream=? AND {column} ")
-        tail = f" AND seq<? AND seq>=? ORDER BY seq {order} LIMIT ?)"
         if column == "appearance":  # one seek per key of the derived index; absent before its first row
             if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='room_appearances'").fetchone():
                 found.update(json.loads(conn.execute(
@@ -1021,14 +1056,7 @@ def _probe(conn: sqlite3.Connection, stream: str, keys: Iterable[Tuple[str, Any]
             found.update(json.loads(conn.execute(
                 select + "IN (SELECT +value FROM json_each(?))" + tail,  # unary + keeps the column's affinity
                 (stream, json.dumps([value for value in listed if value is not None]), *bounds)).fetchone()[0]))
-    chosen = heapq.nlargest(limit, found) if newest_first else heapq.nsmallest(limit, found)
-    # Python 3.10 has no getlimit; 999 is the default variable limit at our SQLite 3.24 floor.
-    variables = conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) if hasattr(conn, "getlimit") else 999
-    pages = []
-    for start in range(0, len(chosen), variables - 1):  # one binding is the stream, including for 10,000-row readers
-        batch = chosen[start:start + variables - 1]
-        pages.append(_page(conn, f"WHERE stream=? AND seq IN ({','.join('?' for _ in batch)})", (stream, *batch)))
-    return chosen, pages
+    return found
 
 
 def room_candidates(root: Any, stream: str, chat_id: int, *, tasks: Iterable[str] = (), origins: Iterable[str] = (),

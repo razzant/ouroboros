@@ -108,6 +108,9 @@ def _navigate(page, target: str):
 def _open_logs(page):
     _navigate(page, "dashboard")
     page.wait_for_selector('#page-logs', state="visible")
+    # Shown, Logs reads its recent history (logs.js): a reloaded page has no task card until that read has landed.
+    page.wait_for_function("""() => !document.querySelector('.logs-history-status')?.textContent.includes('Loading')
+        && Boolean(document.querySelector('#log-entries .log-task-card'))""")
     for details in page.locator('#log-entries .log-task-details').all():
         if details.get_attribute('open') is None:
             details.locator(':scope > summary').click()

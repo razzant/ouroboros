@@ -62,6 +62,14 @@ def test_a_settings_mapping_with_no_slots_fails_OPEN_and_discloses_it(monkeypatc
 # enforces — a new runtime code with no row here fails the suite, which is the only thing
 # that stops the vocabulary from being hand-copied beside the check again.
 _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
+    # Logs reads refuse selectors, sources or byte ranges; no task is stopped.
+    "invalid_view": (False, "gateway/logs.py unknown view (400); not a task terminal"),
+    "invalid_log_source": (False, "gateway/logs.py scope/projection refusal (400); not execution truncation"),
+    "log_source_unavailable": (False, "gateway/logs.py unreadable or unadmitted source (404/503); not a task terminal"),
+    "invalid_raw_request": (False, "gateway/logs.py invalid source selector/page bounds (400); not a task terminal"),
+    "log_source_changed": (False, "gateway/logs.py exact stored-row identity conflict (409); not execution truncation"),
+    "raw_range_invalid": (False, "gateway/logs.py out-of-range or split UTF-8 offset (416); not a task terminal"),
+    "unknown_log": (False, "gateway/logs.py unsupported Raw stream (404); not a task terminal"),
     "request_invalid": (False, "gateway/skill_publish.py: unreadable publish-preflight body; HTTP 400 before any action, not a task terminal"),
     "secret_request_form_only": (False, "protected secret-form policy refuses an ordinary quiz answer; no execution or source is truncated"),
     "project_routing_fence_lookup_failed": (False, "gateway/tasks.py: Project authority unreadable before admission; HTTP 409, no running attempt truncated"),

@@ -66,8 +66,10 @@ function wakesHtml(place, ui) {
 }
 
 function identityHtml(place, ui) {
-    // The same account-scoped match as the server's owner_account_matches: a confirmation for another account is not this one.
-    const withOwner = (entry) => ({ ...entry, owner: entry.kind === 'user' && place.ownerAccounts.some((account) =>
+    // The same account-scoped match as the server's owner_account_matches, over the accounts that count here (its own and
+    // those another place of this bot or app confirms): a confirmation for another account is not this one.
+    const counted = [...place.ownerAccounts, ...(place.sharedOwnerAccounts || [])];
+    const withOwner = (entry) => ({ ...entry, owner: entry.kind === 'user' && counted.some((account) =>
         account.actorId === entry.id && (!account.accountId || account.accountId === place.accountId)) });
     const sender = ui.identity?.sends_as && withOwner(ui.identity.sends_as);
     const authored = (label) => `<span data-i18n-authored>${escapeHtml(label)}</span>`;
@@ -85,12 +87,25 @@ function identityHtml(place, ui) {
 
 function accountsHtml(place, ui) {
     const identity = ui.removed ? '' : identityHtml(place, ui);
+    // A confirmation saved without a name shows the provider's name its senders here carry (username or display name), else the id.
+    const seen = new Map(place.accountCandidates.map((account) => [account.actorId, account.label]));
+    const named = (account) => account.label || seen.get(account.actorId) || account.actorId;
     const rows = place.ownerAccounts.map((account) => `<div class="harness-account-row place-account">
-            <div class="harness-account-main"><strong data-i18n-authored>${escapeHtml(account.label || account.actorId)}</strong></div>
-            <div class="harness-account-meta">${escapeHtml([tr('places.account.you', 'you'), account.confirmedAt ? fmt('confirmed on {date}', { date: shortDate(account.confirmedAt) }) : tr('places.account.confirmed', 'confirmed')].join(' · '))}${account.label && account.label !== account.actorId ? ` · <span data-i18n-authored>${escapeHtml(account.actorId)}</span>` : ''}</div>
-            <div class="harness-account-actions"><button type="button" class="btn btn-ghost btn-sm" data-place-act="revoke" data-actor="${escapeHtml(account.actorId)}" aria-label="Not my account: remove ${escapeHtml(account.label || account.actorId)}">Remove</button></div>
+            <div class="harness-account-main"><strong data-i18n-authored>${escapeHtml(named(account))}</strong></div>
+            <div class="harness-account-meta">${escapeHtml([tr('places.account.you', 'you'), account.confirmedAt ? fmt('confirmed on {date}', { date: shortDate(account.confirmedAt) }) : tr('places.account.confirmed', 'confirmed')].join(' · '))}${named(account) !== account.actorId ? ` · <span data-i18n-authored>${escapeHtml(account.actorId)}</span>` : ''}</div>
+            <div class="harness-account-actions"><button type="button" class="btn btn-ghost btn-sm" data-place-act="revoke" data-actor="${escapeHtml(account.actorId)}" aria-label="Not my account: remove ${escapeHtml(named(account))}">Remove</button></div>
         </div>`).join('');
-    const mine = new Set(place.ownerAccounts.map((account) => account.actorId));
+    // Confirmed in another place of this bot or app: it counts here too, and is removed where it was confirmed.
+    const own = new Set(place.ownerAccounts.map((account) => account.actorId));
+    const elsewhere = new Map();
+    for (const account of place.sharedOwnerAccounts || []) {
+        if (!own.has(account.actorId)) elsewhere.set(account.actorId, [...(elsewhere.get(account.actorId) || []), account]);
+    }
+    const shared = [...elsewhere.values()].map(([first, ...more]) => `<div class="harness-account-row place-account">
+            <div class="harness-account-main"><strong data-i18n-authored>${escapeHtml(named(first))}</strong></div>
+            <div class="harness-account-meta">${escapeHtml(tr('places.account.you', 'you'))} · ${fmt('confirmed in {place}', { place: `<span data-i18n-authored>${escapeHtml(first.placeLabel)}</span>` })}${more.length ? escapeHtml(fmt(' and {count} more', { count: more.length })) : ''}${named(first) !== first.actorId ? ` · <span data-i18n-authored>${escapeHtml(first.actorId)}</span>` : ''}</div>
+        </div>`).join('');
+    const mine = new Set([...own, ...elsewhere.keys()]);
     const candidates = place.accountCandidates.filter((account) => !mine.has(account.actorId)).map((account) => `<div class="harness-account-row place-account">
             <div class="harness-account-main"><strong data-i18n-authored>${escapeHtml(account.label || account.actorId)}</strong></div>
             <div class="harness-account-meta"${account.label ? ' data-i18n-authored' : ''}>${escapeHtml(account.label ? account.actorId : tr('places.account.seen', 'seen here'))}</div>
@@ -103,7 +118,7 @@ function accountsHtml(place, ui) {
             <label class="ui-field">${tr('places.account.name', 'Name (optional)')}<input class="ui-control" data-place-draft="actorLabel" data-i18n-authored value="${escapeHtml(ui.drafts.actorLabel || '')}" spellcheck="false" autocomplete="off"></label>
             <div class="place-sheet-actions"><button type="button" class="btn btn-default btn-sm" data-place-act="confirm-typed">This is me</button><button type="button" class="btn btn-ghost btn-sm" data-place-act="cancel-add">Cancel</button></div>
         </div>` : '<div class="place-sheet-actions"><button type="button" class="btn btn-ghost btn-sm" data-place-act="add-mine">Add mine</button></div>';
-    return `${identity || rows || candidates ? `<div class="place-accounts">${identity}${rows}${candidates}</div>` : ''}${form}
+    return `${identity || rows || shared || candidates ? `<div class="place-accounts">${identity}${rows}${shared}${candidates}</div>` : ''}${form}
         <p class="place-sheet-note">Anyone else here, whatever name they use, is talked to like anyone; their requests are theirs, not yours.</p>`;
 }
 
@@ -168,7 +183,7 @@ function footHtml(place, ui) {
 /** The sheet's body for one normalized place and the sheet's own UI state (drafts, busy, statuses). */
 export function placeSheetBodyHtml(place, ui = {}) {
     const view = { drafts: {}, status: {}, ...ui };
-    if (view.removed) place = { ...place, notes: [], ownerAccounts: [], accountCandidates: [] };
+    if (view.removed) place = { ...place, notes: [], ownerAccounts: [], sharedOwnerAccounts: [], accountCandidates: [] };
     return [
         view.conflict || view.removed || view.readiness || place.readiness ? section('readiness', '',
             (view.conflict ? statusLine({ text: tr('places.conflict', 'Changed elsewhere; your text is kept.'), tone: 'warn' }) : '')

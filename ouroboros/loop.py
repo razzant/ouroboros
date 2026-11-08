@@ -727,7 +727,6 @@ def run_llm_loop(
                         msg, cost, active_context_mode = _call_round_model(model_call)
                     active_model, active_use_local = model_call.active_model, model_call.active_use_local
                     context_fit_plan = model_call.context_fit_plan
-                tools._ctx._current_llm_call_meta = dict(accumulated_usage.get("_last_llm_call_meta") or {})
                 last_error_kind = str(accumulated_usage.get("_last_llm_error_kind") or "")
                 if msg is None and _delegate_hold_latch(
                         tools, error_kind=last_error_kind, drive_logs=drive_logs,
@@ -758,6 +757,7 @@ def run_llm_loop(
             limit_ctx.active_model = ctx.active_model = active_model
             limit_ctx.active_use_local = ctx.active_use_local = active_use_local
             ctx.context_fit_plan, ctx.active_context_mode = context_fit_plan, active_context_mode
+            ctx._current_llm_call_meta = dict(accumulated_usage.get("_last_llm_call_meta") or {})  # after a recovered route too
             from ouroboros import loop_output_exhaustion as output_recovery
             if msg is None and (output_step := output_recovery.next_step(accumulated_usage)):
                 if output_step == "finish":

@@ -604,7 +604,8 @@ export const apiClient = {
     ownerSubagentsMode: (choice) => jsonPost('/api/owner/subagents-mode', choice),
     /** @returns {Promise<import('./api_types.js').OwnerSafetyModeResponse>} */
     ownerSafetyMode: (mode) => jsonPost('/api/owner/safety-mode', { mode }),
-    logsTail: (name, limit = 2000) => fetchJson(`/api/logs/${encodeURIComponent(name)}?limit=${encodeURIComponent(limit)}`, { cache: 'no-store' }),
+    /** A log's newest rows; `view` 'compact' bounds each row and keeps its `ts` and `type` (ouroboros/gateway/logs.py). */
+    logsTail: (name, limit = 2000, view = '') => fetchJson(`/api/logs/${encodeURIComponent(name)}?limit=${encodeURIComponent(limit)}${view ? `&view=${encodeURIComponent(view)}` : ''}`, { cache: 'no-store' }),
     /** @returns {Promise<import('./model_route_types.js').ResponseLimitAckResponse|Object>} */
     ownerCapabilityAck: (payload) => jsonPost('/api/owner/capability-ack', payload),
     /** @returns {Promise<import('./api_types.js').OpenAICompatibleModelsResponse>} */

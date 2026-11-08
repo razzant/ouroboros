@@ -394,13 +394,15 @@ def observed_facts(event: Any) -> tuple[str, ...]:
     return (*facts, FACT_FROM_BOT) if event.actor.get("is_bot") is True else facts
 
 
-def writes_as_owner(place: Place, identity: Mapping[str, Any] | None, account_id: str = "") -> bool:
-    """The place writes from my human's own account (``sends_as`` confirmed as theirs): its posts are theirs."""
+def writes_as_owner(place: Place, identity: Mapping[str, Any] | None, account_id: str = "",
+                    accounts: Iterable[OwnerAccount] | None = None) -> bool:
+    """The place writes from my human's own account (``sends_as`` confirmed as theirs; ``accounts``: the ones that
+    count here, ``counted_owner_accounts``): its posts are theirs."""
     sending = (identity or {}).get("sends_as") or {}
-    return sending.get("kind") == "user" and is_owner_account(place, str(sending.get("id") or ""), account_id)
+    return sending.get("kind") == "user" and is_owner_account(place, str(sending.get("id") or ""), account_id, accounts)
 
 
-def own_account_event(place: Place, event: Any) -> bool:
+def own_account_event(place: Place, event: Any, accounts: Iterable[OwnerAccount] | None = None) -> bool:
     """Written by the account this place writes as (``identity.sends_as``): by me, through the connector or any other
     tool that acts as that account (my posts; a provider that does not name an edit's or merge's actor reports those
     without one, and its connector keeps them from reading as replies). It stays in the room and my next own wake and
@@ -410,7 +412,7 @@ def own_account_event(place: Place, event: Any) -> bool:
     sender = str((identity.get("sends_as") or {}).get("id") or "").strip()
     actor = str(event.actor.get("platform_actor_id") or event.actor.get("id") or "").strip()
     return (bool(sender) and actor == sender and event.actor.get("authenticated") is not False
-            and not writes_as_owner(place, identity, event.account_id))
+            and not writes_as_owner(place, identity, event.account_id, accounts))
 
 
 def wake_matches(place: Place, facts: Iterable[str]) -> tuple[WakeItem, ...]:
@@ -420,18 +422,10 @@ def wake_matches(place: Place, facts: Iterable[str]) -> tuple[WakeItem, ...]:
     return tuple(item for item in place.wakes if item.fact in present or item.fact == FACT_ANY_MESSAGE)
 
 
-def is_owner_account(place: Place, platform_actor_id: str, account_id: str = "") -> bool:
-    return owner_account_matches(place.owner_accounts, platform_actor_id, account_id)
-
-
-def confirmed_author(place: Mapping[str, Any], actor: Mapping[str, Any], account_id: str = "") -> bool:
-    """Whether an event's author is an account this place's stored row (``place_summary``) confirms as my human's,
-    and the connector does not report it unauthenticated: provenance of the words, never whom they are for."""
-    actor_id = str((actor or {}).get("platform_actor_id") or (actor or {}).get("id") or "").strip()
-    rows = (place or {}).get("owner_accounts") or ()
-    return bool(actor_id) and (actor or {}).get("authenticated") is not False and any(
-        isinstance(row, Mapping) and str(row.get("platform_actor_id") or "") == actor_id
-        and (not row.get("account_id") or row.get("account_id") == account_id) for row in rows)
+def is_owner_account(place: Place, platform_actor_id: str, account_id: str = "",
+                     accounts: Iterable[OwnerAccount] | None = None) -> bool:
+    """``accounts``: the ones that count in this place (``counted_owner_accounts``); None, its own rows alone."""
+    return owner_account_matches(place.owner_accounts if accounts is None else accounts, platform_actor_id, account_id)
 
 
 def owner_account_matches(owner_accounts: Iterable[OwnerAccount], platform_actor_id: str, account_id: str) -> bool:
@@ -439,6 +433,25 @@ def owner_account_matches(owner_accounts: Iterable[OwnerAccount], platform_actor
     actor = str(platform_actor_id or "").strip()
     return bool(actor) and any(a.platform_actor_id == actor and (not a.account_id or a.account_id == account_id)
                                for a in owner_accounts)
+
+
+def counted_owner_accounts(places: Iterable[Place]) -> dict[str, tuple[OwnerAccount, ...]]:
+    """Each place's owner accounts that count there now: its own rows, then every account confirmed in another place
+    of the same connector account (its connector and provider), scoped to the account that confirmation was for (its
+    own ``account_id``, else that place's; neither: every account, as inside that place). One confirmation counts on
+    the whole bot or app; a note may still say my human's words in one room are not orders, which is my reading,
+    never a host gate. Derived at every read from the stored rows: nothing is copied into a place."""
+    rows = list(places)
+    return {place.place_id: place.owner_accounts + tuple(account for _other, account in confirmed_elsewhere(rows, place))
+            for place in rows}
+
+
+def confirmed_elsewhere(places: Iterable[Place], place: Place) -> list[tuple[Place, OwnerAccount]]:
+    """``(other place, account)`` for each account another place of ``place``'s connector account confirms, scoped
+    to the account it was confirmed for (``counted_owner_accounts``); the sheet names where each was confirmed."""
+    return [(other, replace(account, account_id=account.account_id or other.account_id)) for other in places
+            if other.place_id != place.place_id and (other.connector, other.provider) == (place.connector, place.provider)
+            for account in other.owner_accounts]
 
 
 def place_rows(drive_root: Any) -> dict[str, Place]:
@@ -449,9 +462,50 @@ def place_rows(drive_root: Any) -> dict[str, Place]:
     return {key: _decode(value, connections.get(key)) for key, value in current["places"].items()}
 
 
-def place_owner_accounts(drive_root: Any) -> dict[str, tuple[OwnerAccount, ...]]:
-    """Every place's confirmed owner accounts as stored now (``place_rows``): unknown, never "no owner"."""
-    return {key: place.owner_accounts for key, place in place_rows(drive_root).items()}
+class OwnerAccounts(dict):
+    """One ``place_owner_accounts`` snapshot: place id -> the owner accounts that count there, and ``sent``, the
+    provider identities of messages I posted as an account (``own_sends``), which are never my human's words."""
+
+    def __init__(self, accounts: Mapping[str, tuple[OwnerAccount, ...]] | None = None, sent: Iterable = ()) -> None:
+        super().__init__(accounts or {})
+        self.sent = frozenset(sent)
+
+
+def place_owner_accounts(drive_root: Any) -> OwnerAccounts:
+    """Every place's counted owner accounts as stored now (``counted_owner_accounts`` over ``place_rows``) with my
+    recorded sends (``own_sends.sent_identities``): one read of each for a pass. Unknown, never "no owner"."""
+    from ouroboros.own_sends import sent_identities
+
+    return OwnerAccounts(counted_owner_accounts(place_rows(drive_root).values()), sent_identities(drive_root))
+
+
+def owner_author(accounts: Mapping[str, Iterable[OwnerAccount]], place_id: str, actor: Any, account_id: str,
+                 conversation_id: str = "", message: Any = None) -> bool:
+    """A place message as my human's own words now: its actor is an account its place's connector account confirms
+    (``accounts``, one ``place_owner_accounts`` snapshot), the connector does not report it unauthenticated, and it is
+    not a message I posted as an account (its provider identity among ``accounts.sent``; never compared by its words,
+    so my human repeating my words is still my human). Provenance of the words, never whom they are for."""
+    from ouroboros.own_sends import message_identity
+
+    actor = actor if isinstance(actor, Mapping) else {}
+    actor_id = str(actor.get("platform_actor_id") or actor.get("id") or "").strip()
+    return (actor.get("authenticated") is not False
+            and owner_account_matches(accounts.get(place_id, ()), actor_id, str(account_id or ""))
+            and message_identity(conversation_id, message) not in getattr(accounts, "sent", frozenset()))
+
+
+def owner_event_now(drive_root: Any, place_id: str, event: Any) -> bool:
+    """``owner_author`` for one place event (a captured event, or the facts its record keeps) over the stores as they
+    stand now, so a confirmation made after a turn began counts for what that turn reads later and a message I posted
+    there never does; without readable places nobody is confirmed."""
+    facts = event if isinstance(event, Mapping) else {
+        key: getattr(event, key, None) for key in ("actor", "account_id", "conversation_id", "message")}
+    try:
+        accounts = place_owner_accounts(drive_root) if drive_root is not None else OwnerAccounts()
+    except PlaceError:
+        return False
+    return owner_author(accounts, str(place_id or ""), facts.get("actor"), str(facts.get("account_id") or ""),
+                        str(facts.get("conversation_id") or ""), facts.get("message"))
 
 
 def _fields(value: Any, key: str) -> Mapping[str, Any]:
@@ -465,24 +519,21 @@ def row_place_id(row: Mapping[str, Any]) -> str:
 
 
 def owner_confirmed_row(row: Mapping[str, Any], accounts: Mapping[str, Iterable[OwnerAccount]]) -> bool:
-    """A place row as my human's own words: its actor is an account its place confirms now.
+    """A place row as my human's own words now (``owner_author`` over one ``place_owner_accounts`` read per pass).
 
-    ``accounts`` is one ``place_owner_accounts`` read per pass. The answer is the current confirmation,
-    as the room's history shows it (``gateway.place_history``): confirming an account names its earlier
-    rows too, and withdrawing a mistaken confirmation unnames them; what caused a work is the admission's
-    own snapshot instead (``focus.actor.owner_confirmed``), with the same rule. Only facts a stored row keeps
-    beside its text are read (``memory_inventory._META_FIELDS``). An actor the connector reports
-    unauthenticated and an imported earlier message (``presence_history``) are never confirmed. A place where
-    I write from my human's own account (``sends_as`` confirmed, CREATING_SKILLS "Who the connector writes as")
-    confirms their rows as theirs, as admission does; returning my own sends as arrivals is the connector's to
-    filter, never inferred here.
+    The answer is the current confirmation, as the room's history shows it (``gateway.place_history``): confirming
+    an account names its earlier rows too, and withdrawing a mistaken confirmation unnames them; what caused a work
+    is the admission's own snapshot instead (``focus.actor.owner_confirmed``), with the same rule. Only facts a
+    stored row keeps beside its text are read (``memory_inventory._META_FIELDS``). An imported earlier message
+    (``presence_history``) is never confirmed. A place where I write from my human's own account (``sends_as``
+    confirmed, CREATING_SKILLS "Who the connector writes as") confirms their rows as theirs, as admission does; the
+    connector filters its own sends, and a message I posted through another tool acting as that account is known by
+    its provider identity (``own_sends``), never by its words.
     """
     transport = _fields(row, "transport")
-    actor = _fields(transport, "actor")
-    actor_id = str(actor.get("platform_actor_id") or actor.get("id") or "")
-    return (actor.get("authenticated") is not False and not isinstance(row.get("historical_import"), Mapping)
-            and owner_account_matches(accounts.get(row_place_id(row), ()), actor_id,
-                                      str(transport.get("account_id") or "")))
+    return not isinstance(row.get("historical_import"), Mapping) and owner_author(
+        accounts, row_place_id(row), _fields(transport, "actor"), str(transport.get("account_id") or ""),
+        str(transport.get("conversation_id") or ""), _fields(transport, "message"))
 
 
 def note_identity(place_id: str, index: int, note: NoteEntry) -> str:
