@@ -16,6 +16,7 @@ from ouroboros.skill_loader import SkillReviewState, find_skill, load_enabled, s
 from ouroboros.skill_review import SkillReviewOutcome
 from ouroboros.skill_review_runner import run_skill_review_lifecycle_blocking
 from ouroboros.skill_source_catalog import tree_release_digest
+from tests._extension_loader_shared import extension_tool_answer, version_plugin
 from tests.test_skill_install_checks import registry_release, release  # noqa: F401  (fixtures)
 
 
@@ -674,3 +675,59 @@ def test_failed_landing_restores_links_and_the_live_extension(request, tmp_path,
     assert (read_install_record(drive, "demo").get("update_rejected") or {}).get("reason") == (
         "landing_failed" if basis == "review" else None)
     assert not (skill_state_dir(drive, "demo") / "update_backup.json").exists()
+
+
+# --- A landing that succeeds returns the runtime as well: the built-in and registry landings ---
+
+@pytest.mark.parametrize("kind", ["builtin", "registry"])
+def test_an_accepted_update_reloads_an_extension_the_owner_turned_on(request, tmp_path, monkeypatch, extension_runtime,
+                                                                      kind):
+    """The install never asked to turn on (a registry install's default); the owner's own Enable did."""
+    from ouroboros.skill_lifecycle_actions import run_skill_action
+    from ouroboros.tools.registry import ToolContext
+
+    def extension(folder, version):  # PluginAPI 2.0: a trusted acceptance admits no other extension
+        (folder / "SKILL.md").write_text(_EXTENSION.replace("1.0.0", version).replace(
+            "entry: plugin.py\n", 'entry: plugin.py\nplugin_api: "2.0"\n'), encoding="utf-8")
+        (folder / "plugin.py").write_text(version_plugin(version), encoding="utf-8")
+        return folder
+
+    if kind == "registry":
+        drive, storage, registry = request.getfixturevalue("registry_release")
+        monkeypatch.setenv("OUROBOROS_SKILL_SOURCES", json.dumps([{
+            "id": "clawhub", "name": "ClawHub", "kind": "registry", "trust": "trusted", "confirmed": True}]))
+        stage = storage._stage_archive
+
+        def stage_extension(*args, **kwargs):
+            staged = stage(*args, **kwargs)
+            extension(staged.staging_dir, kwargs["version"])
+            return staged
+
+        monkeypatch.setattr(storage, "_stage_archive", stage_extension)
+
+        def update(version):
+            registry["latest"] = version
+            return installer.update_installed(drive, "demo", mode="replace")
+
+        update("1.5.0")  # the first extension release replaces the fixture's instruction install
+    else:
+        drive, folder, row, item = request.getfixturevalue("release")
+        row.update(kind="builtin", trust="trusted")
+        folder.parent.rename(tmp_path / "skills")  # the app checkout's skills/ is the built-in source
+        folder = tmp_path / "skills" / "demo"
+        monkeypatch.setattr("ouroboros.config.REPO_DIR", tmp_path)
+
+        def update(version):
+            item.update(version=version, digest=tree_release_digest(extension(folder, version)))
+            return installer.update_installed(drive, "demo", mode="replace", rows=[row])
+
+        item.update(version="1.5.0", digest=tree_release_digest(extension(folder, "1.5.0")))
+        installer.install_item(drive, item["id"], turn_on_when_ready=False)
+    assert read_install_record(drive, "demo")["turn_on_when_ready"] is False
+    assert run_skill_action(ToolContext(repo_dir=drive, drive_root=drive), "demo", "enable",
+                            _owner_actor="owner_ui")["enabled"]
+    assert extension_tool_answer(drive, "demo") == "1.5.0"
+    acceptance = update("2.0.0")["acceptance"]
+    assert extension_tool_answer(drive, "demo") == "2.0.0", acceptance
+    assert acceptance["turn_on"] == "not_requested" and acceptance["extension_action"] == "extension_loaded"
+    assert load_enabled(drive, "demo") and read_install_record(drive, "demo")["turn_on_when_ready"] is False
