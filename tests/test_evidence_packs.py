@@ -158,8 +158,8 @@ def test_readers_resolve_loose_then_pack_and_blob_shared_with_active_task_stays_
         json.dumps({"call_id": "llm_8", "manifest_version_ref": txt}), encoding="utf-8")
     _run(root)
     assert not _loose(txt)
-    from ouroboros.source_retention import read_manifest_version
-    assert read_manifest_version(root, txt["sha256"]) == b"manifest version bytes"
+    from ouroboros.source_retention import manifest_version_ref
+    assert packs.blob_bytes(root, manifest_version_ref(root, txt["sha256"])) == b"manifest version bytes"
     # directory listing and read_file see the packed handle beside loose ones
     from ouroboros.tools.core_file_tools import _list_dir, _read_source_text
     store_dir = task_artifact_dir_path(root, "task-a", create=False) / CHECKPOINTS

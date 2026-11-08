@@ -467,14 +467,16 @@ def read_call_manifest_ref(
     admit: Callable[[pathlib.Path], None] | None = None,
     max_bytes: int | None = None,
     call_types: Tuple[str, ...] | None = None,
-) -> dict:
+    with_raw: bool = False,
+) -> dict | tuple[bytes, dict]:
     """Read one exact task/call manifest, including a retired store alias.
 
     Existing callers retain the historical unbounded/no-admission default.
     Source-facing readers can additionally bound every physical read, apply
     their own resource admission before a loose file or pack is opened, and
     constrain the decoded call family.  An admission refusal propagates and is
-    never reinterpreted as a missing placement.
+    never reinterpreted as a missing placement. Retention can also take the exact
+    verified bytes with the decoded value, without a second read or reserialization.
     """
     call_id = str(ref.get("call_id") or "")
     # System scopes (system:ui_translation, system:update_letter) use the
@@ -524,7 +526,7 @@ def read_call_manifest_ref(
         raise ValueError("observability call manifest task/call identity mismatch")
     if call_types is not None and str(manifest.get("call_type") or "") not in frozenset(call_types):
         raise ValueError("observability call manifest family mismatch")
-    return manifest
+    return (raw, manifest) if with_raw else manifest
 
 
 class ObservabilityPromotionSourceError(ValueError):
