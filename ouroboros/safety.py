@@ -24,7 +24,7 @@ from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
 from ouroboros.llm import LLMClient
 from ouroboros.loop_llm_call import classify_llm_exception, is_rate_limit_text
 from ouroboros.pricing import emit_llm_usage_event, normalize_usage_cost, infer_provider_from_model
-from ouroboros.utils import sanitize_tool_result_for_log, utc_now_iso
+from ouroboros.utils import sanitize_tool_result_for_log
 from ouroboros.config import runtime_setting
 from ouroboros.safety_config import OWNER_RULES_KEY
 
