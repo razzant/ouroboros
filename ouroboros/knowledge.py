@@ -725,9 +725,11 @@ def write_knowledge_note(
     cannot name one leaves the honest ``unknown``, which is also how rows written
     before the stamp existed read.
 
-    ``summary`` (mode=edit) revises that one field in the same locked write
-    through the ordinary metadata merge, beside one ``old_str`` replacement or
-    alone with no ``old_str``/``content``. History retains the authored
+    ``summary`` (mode=edit or append) revises that one field in the same locked
+    write through the ordinary metadata merge, beside one ``old_str``
+    replacement, alone with no ``old_str``/``content``, or after the appended
+    text; replacing an existing note's summary needs its current revision, as
+    every replacement does. History retains the authored
     ``summary`` only when supplied; the delta carries
     ``old_chars``/``new_chars``/``change_chars``, the
     ``removed_headings`` and ``body_changed``/``summary_changed`` (heading and
@@ -753,11 +755,11 @@ def write_knowledge_note(
         raise ValueError("reason is required for archive and used only with archive")
     if mode != "edit" and old_str is not None:
         raise ValueError("old_str is used only with mode=edit")
-    if mode != "edit" and summary is not None:
-        raise ValueError("summary is used only with mode=edit")
+    if mode not in {"edit", "append"} and summary is not None:
+        raise ValueError("summary is used only with mode=edit or mode=append")
     if summary is not None and (not isinstance(summary, str) or not summary.strip()):
         raise ValueError("summary must be non-empty text")
-    if summary is not None and old_str is None and content:
+    if mode == "edit" and summary is not None and old_str is None and content:
         raise ValueError("content replaces old_str; a summary-only edit passes neither")
     with knowledge_write_lock(address.shelf):
         # Re-resolve inside the lock; a changed symlink cannot redirect a write.
@@ -773,13 +775,16 @@ def write_knowledge_note(
         revision = current.revision if current else None
         if (mode == "edit" or lifecycle) and current is None:
             return KnowledgeWriteResult(False, "lifecycle_source_missing" if lifecycle else "edit_source_missing", current, revision)
-        if current is not None and mode != "append" and expected_revision is None:
+        # Only adding text is blind; a summary replaced beside it is a replacement.
+        if current is not None and (mode != "append" or summary is not None) and expected_revision is None:
             return KnowledgeWriteResult(False, "revision_required", current, revision)
         if expected_revision is not None and expected_revision != revision:
             return KnowledgeWriteResult(False, "revision_conflict", current, revision)
         try:
             raw = (_lifecycle_content(current, mode, reason) if lifecycle
                    else _write_content(current, content, mode, old_str, summary))
+            if mode == "append" and summary is not None:  # the appended note's summary-only edit
+                raw = _write_content(_note(address, raw), "", "edit", None, summary)
         except (ValueError, yaml.YAMLError) as exc:
             return KnowledgeWriteResult(False, f"invalid_note: {exc}", current, revision)
         updated = _note(address, raw)
@@ -799,16 +804,16 @@ def write_knowledge_note(
                                          "old_body_chars": body_chars(current), "new_body_chars": body_chars(current),
                                          "change_chars": 0, "removed_headings": [],
                                          "body_changed": False, "summary_changed": False})
-        # A body edit keeps the preamble bytes; a revised summary may re-render
-        # them only if every other field keeps its value (``type`` defaults, in
-        # the merge's key order), compared by exact YAML spelling.
-        if mode == "edit" and (updated.parse_error or (
+        # A body edit keeps the preamble bytes; a revised summary (edit or append)
+        # may re-render them only if every other field keeps its value (``type``
+        # defaults, in the merge's key order), compared by exact YAML spelling.
+        if current is not None and (mode == "edit" or summary is not None) and (updated.parse_error or (
                 bool(updated.source.frontmatter_span) != bool(current.source.frontmatter_span) or
                 updated.raw[:current.source.body_span.start_byte] !=
                 current.raw[:current.source.body_span.start_byte]) and (
                 summary is None or _yaml_form(updated.metadata) != _yaml_form(
                     {**current.metadata, "summary": summary, "type": current.metadata.get("type", "note")}))):
-            return KnowledgeWriteResult(False, "invalid_note: edit cannot change frontmatter", current, revision)
+            return KnowledgeWriteResult(False, f"invalid_note: {mode} cannot change frontmatter", current, revision)
         old_text = current.text if current else ""
         before = (Counter((heading.level, heading.title) for heading in current.source.headings)
                   if current and current.source else Counter())

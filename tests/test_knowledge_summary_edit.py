@@ -1,8 +1,9 @@
 """An authored summary is revised where the index reads it, never as body text.
 
 ``knowledge_write(mode="edit", summary=...)`` revises the resident summary alone or
-together with one exact ``old_str`` replacement, through the same revision-checked
-note writer, history and index as every other write. The receipt states whether the
+together with one exact ``old_str`` replacement, and ``mode="append"`` together with
+the appended text, through the same revision-checked note writer, history and index
+as every other write. The receipt states whether the
 body bytes and the resident summary changed; it says nothing about what was learned.
 Every test writes only a synthetic data root.
 """
@@ -115,6 +116,28 @@ def test_one_body_replacement_and_its_summary_land_in_one_revision(tmp_path):
     assert "  Line one.\n  Line two." in (address.shelf / store.INDEX_FILE).read_text(encoding="utf-8")
 
 
+def test_an_append_and_its_summary_land_in_one_revision(tmp_path):
+    ctx, address, original = _setup(tmp_path)
+    plain = _receipt(tools._knowledge_write(ctx, "people/ada", "First fact.", mode="append", scope="global"))
+    kept = store.read_knowledge_note(address)  # adding text alone stays blind and keeps the summary
+    assert kept.summary == OLD and plain["knowledge_delta"]["summary_changed"] is False
+    before = _files(tmp_path)  # replacing the summary beside it needs the current revision
+    reply = tools._knowledge_write(ctx, "people/ada", "Second fact.", mode="append", scope="global", summary=NEW)
+    assert "not completed: revision_required" in reply and _files(tmp_path) == before
+    receipt = _receipt(tools._knowledge_write(ctx, "people/ada", "Second fact.", mode="append", scope="global",
+                                              summary=NEW, expected_revision=kept.revision))
+    current = store.read_knowledge_note(address)
+    assert current.metadata == {**original.metadata, "summary": NEW}
+    assert _body(current) == _body(kept) + b"\nSecond fact."
+    assert (receipt["knowledge_delta"]["body_changed"], receipt["knowledge_delta"]["summary_changed"]) == (True, True)
+    rows = _history(address)
+    assert len(rows) == 3 and (rows[-1]["mode"], rows[-1]["summary"]) == ("append", NEW)
+    index = (address.shelf / store.INDEX_FILE).read_text(encoding="utf-8")
+    assert f"  {NEW}" in index and OLD not in index
+    _receipt(tools._knowledge_write(ctx, "people/new", "Met today.", mode="append", scope="global", summary=NEW))
+    assert store.read_knowledge_note(store.resolve_knowledge_address(tmp_path, "people/new", "global")).summary == NEW
+
+
 def test_summary_text_written_into_the_body_is_reported_as_an_unchanged_summary(tmp_path):
     ctx, address, _original = _setup(tmp_path)
     receipt = _receipt(tools._knowledge_write(ctx, "people/ada", f"\nsummary: {NEW}\n", mode="append", scope="global"))
@@ -141,8 +164,7 @@ def test_legacy_calls_and_an_empty_summary_publish_identical_bytes(tmp_path, mod
 
 
 REFUSALS = [
-    ({"mode": "overwrite", "content": "Body.", "summary": NEW}, "summary is used only with mode=edit"),
-    ({"mode": "append", "content": "Body.", "summary": NEW}, "summary is used only with mode=edit"),
+    ({"mode": "overwrite", "content": "Body.", "summary": NEW}, "used only with mode=edit or mode=append, not mode=overwrite"),
     ({"mode": "edit", "summary": "   "}, "is not summary text"),
     ({"mode": "edit", "summary": 7}, "is not summary text"),
     ({"mode": "edit", "summary": NEW, "content": "Orphan replacement."}, "has no old_str to replace"),
@@ -300,7 +322,7 @@ def test_schema_adds_summary_without_breaking_older_calls(tmp_path):
     schema = next(entry.schema for entry in tools.get_tools() if entry.name == "knowledge_write")
     props = schema["parameters"]["properties"]
     assert schema["parameters"]["required"] == ["topic"]
-    assert props["summary"]["type"] == "string" and "mode=edit only" in props["summary"]["description"]
+    assert props["summary"]["type"] == "string" and "mode=edit or append" in props["summary"]["description"]
     assert {"topic", "scope", "content", "mode", "old_str", "expected_revision"} < set(props)
     assert props["mode"]["enum"] == ["overwrite", "append", "edit", "archive", "restore"]
     assert set(props) == set(inspect.signature(tools._knowledge_write).parameters) - {"ctx"}
