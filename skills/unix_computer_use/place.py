@@ -462,7 +462,20 @@ class PlaceMixin:
         if untyped or dropped:
             payload.pop("observed_effect", None)
             payload["ok"] = False
-            if untyped:
+            chord = payload.get("method") == "command_chord"
+            if chord:
+                # The Command chord program refuses before it makes an event: nothing was posted, a known fact.
+                payload["dispatched"] = False
+                if isinstance(payload.get("delivered_to"), dict):
+                    payload["front"] = payload.pop("delivered_to")
+                else:
+                    payload.pop("delivered_to", None)
+            if untyped and chord:
+                error = (f"no key of the active keyboard layout gives {untyped[0]} under Command alone, so the shortcut "
+                         "was not sent: a character that needs Shift is named with it (cmd+shift+/, not cmd+?); "
+                         "otherwise switch the layout or use the app's own commands")
+                payload.update({"reason": "untypable_characters", "untyped": untyped[:20], "error": error})
+            elif untyped:
                 # cliclick types through key codes of the ACTIVE keyboard layout and exits 0 when it cannot find
                 # one (measured 27.10.2026: Latin text under a Cyrillic layout typed nothing). Partial typing is unknown.
                 # The paste chord program says the same when no key of the layout gives V under Command: it sent nothing.
@@ -478,8 +491,9 @@ class PlaceMixin:
             else:  # the paste chord program refuses to post rather than have macOS drop it
                 payload.update({"reason": "permission_denied",
                                 "permission": {"accessibility": "untrusted", "source": "helper stderr"},
-                                "error": ("this process may not post input events (the Accessibility grant), so the paste "
-                                          "chord was not sent" if payload.get("method") == "paste" else
+                                "error": ("this process may not post input events (the Accessibility grant), so the "
+                                          + ("shortcut was not sent" if chord else "paste chord was not sent")
+                                          if payload.get("method") in ("paste", "command_chord") else
                                           "macOS drops synthetic input from a process without the Accessibility grant: "
                                           "the helper exited 0 but nothing reached the screen")})
             effects = []
@@ -493,6 +507,8 @@ class PlaceMixin:
                 effects.append("the clipboard write")
             if payload.get("method") == "paste":
                 dropped_text = "the paste chord was not sent (see error)"
+            elif chord:
+                dropped_text = "the shortcut was not sent (see error)"
             elif untyped:
                 dropped_text = "the characters without a key code were dropped (see error); those with one may have been typed"
             else:
@@ -580,7 +596,7 @@ class PlaceMixin:
         return self._backend_unavailable("window listing")
 
     def ax_tree(self, *, app: str = "", max_nodes: int = 150, timeout_ms: int = 3000, root: str = "window",
-                include_web: bool = False, text_limit: int = 200, window: Any = "") -> str:
+                include_web: bool = False, text_limit: int = 200, window: Any = "", until_text: str = "") -> str:
         """Bounded accessibility read of one window (the frontmost app's, or ``app``'s, without bringing it forward):
         the application is resolved and read in ONE helper process (``macos_native.py observe``)."""
         plat = self._plat()
@@ -593,25 +609,33 @@ class PlaceMixin:
             _name, conn = self._active_connection()
             if conn.get("disabled"):
                 return self._disabled_connection_error(_name, conn)
-            if text_limit != 200 or window not in (None, ""):
+            if text_limit != 200 or window not in (None, "") or until_text:
                 return self._json_text({"ok": False, "backend": str(conn.get("backend") or ""), "reason": "unsupported_option",
-                                        "error": "text_limit and window apply to the local macOS reader only; a remote answers its own tree"})
+                                        "error": "text_limit, window and until_text apply to the local macOS reader only; a remote answers its own tree"})
             return self._remote_ax_tree(conn)
         if plat == "macos":
             spec = {"app": app, "max_nodes": max_nodes, "timeout_ms": timeout_ms, "root": root, "include_web": bool(include_web),
                     "text_limit": text_limit, "window": window if window is not None else ""}
+            if until_text:
+                spec["until_text"] = until_text
             tree = self._native("observe", json.dumps(spec, ensure_ascii=False), timeout=timeout_ms // 1000 + 15)
             target = tree.pop("target", None)
             if tree.get("stage") == "resolve":
                 error = self._target_error(app, tree) if app else (tree.get("error") or "the frontmost application could not be read")
                 return self._json_text({"ok": False, "platform": plat, "reason": tree.get("reason") or "unresolved",
-                                        "error": error, "candidates": tree.get("candidates") or []})
+                                        "error": error, "candidates": tree.get("candidates") or [],
+                                        **({"until_text": tree.get("until_text") or {"status": "unknown", "reason": "resolve_failed", "reads": 0}}
+                                           if until_text else {})})
             if not tree.get("ok"):
-                failed = {"ok": False, "platform": plat, "app": target, "reason": tree.get("reason") or "ax_unavailable",
+                failed = {**(tree if until_text else {}), "ok": False, "platform": plat, "app": target,
+                          "reason": tree.get("reason") or "ax_unavailable",
                           "error": tree.get("error") or f"the accessibility read failed ({tree.get('reason')})"}
-                for key in ("errors", "windows", "ax_exposure"):
-                    if tree.get(key):
-                        failed[key] = tree[key]
+                if not until_text:
+                    for key in ("errors", "windows", "ax_exposure"):
+                        if tree.get(key):
+                            failed[key] = tree[key]
+                if until_text and "until_text" not in failed:
+                    failed["until_text"] = {"status": "unknown", "reason": failed["reason"], "reads": 0}
                 return self._json_text(failed)
             tree.update({"platform": plat, "app": target, "coordinate_note": "node and mark coordinates are INPUT-space "
                          "(macOS logical points): click them with raw=true; a mark is a position, not proof the element reacts"})
@@ -625,7 +649,7 @@ class PlaceMixin:
 
     def element_act(self, *, app: str, do: str, select: dict[str, Any] | None = None, text: str | None = None,
                     window: Any = "", max_nodes: int = 600, timeout_ms: int = 3000, include_web: bool = False,
-                    observe: bool = False, text_limit: int = 200) -> str:
+                    observe: bool = False, text_limit: int = 200, until_text: str = "") -> str:
         """Act on ONE element of ``app`` through the element's own Accessibility action (macOS): ``press`` or
         ``set_value``. The element is named by identity (the window as ``window_list`` prints it, role, exact label,
         AXIdentifier, nth), never by a mark or node id of an earlier read; the application is resolved, the element
@@ -658,6 +682,9 @@ class PlaceMixin:
         if text_limit != 200 and not observe:
             return self._json_text({"ok": False, "platform": plat, "reason": "bad_option", "dispatched": False, **asked,
                                     "error": "text_limit shapes the read after the action: pass observe=true or leave text_limit out"})
+        if until_text and not observe:
+            return self._json_text({"ok": False, "platform": plat, "reason": "bad_option", "dispatched": False, **asked,
+                                    "error": "until_text needs observe=true"})
         selector: dict[str, Any] = {**asked["select"], "include_web": bool(include_web)}
         if window is not None and window != "":
             selector["window"] = window
@@ -668,6 +695,8 @@ class PlaceMixin:
         spec = {"app": app, "do": do, "select": selector, "max_nodes": max_nodes, "timeout_ms": timeout_ms, "observe": bool(observe)}
         if observe:
             spec["text_limit"] = text_limit
+        if until_text:
+            spec["until_text"] = until_text
         res = self._native("element", json.dumps(spec, ensure_ascii=False), timeout=timeout_ms // 1000 + 10)
         target = res.pop("target", None)
         if res.get("stage") == "resolve":
@@ -678,6 +707,9 @@ class PlaceMixin:
             res["observation"] = {"ok": False, "reason": "helper_stopped",
                                   "error": "the helper stopped before the window read finished (its time ran out or it crashed); "
                                            "the saved receipt above stands: read the window with ax_tree before acting again"}
+        if until_text and "observation" in res and "until_text" not in res["observation"]:
+            res["observation"]["until_text"] = {"status": "unknown", "reason": res["observation"].get("reason") or "read_failed",
+                                                "reads": 0}
         out: dict[str, Any] = {"platform": plat, "app": target if target is not None else app, "do": do, **res}
         if "dispatched" not in res:
             # Every answer of ``act`` says whether the action call was made; one without that fact is a helper that
@@ -686,4 +718,7 @@ class PlaceMixin:
                         "action_outcome": "unknown", "select": asked["select"],
                         "note": "the helper that carried the action did not answer, so whether it found the element and acted "
                                 "is unknown (do not assume it did not): read the window with ax_tree before acting again"})
+        if until_text and "observation" not in out:
+            out["observation"] = {"ok": False, "reason": "no_read",
+                                  "until_text": {"status": "unknown", "reason": "no_read", "reads": 0}}
         return self._json_text(out)

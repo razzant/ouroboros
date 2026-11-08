@@ -174,9 +174,13 @@ def test_negative_coordinates_are_absolute_points_on_macos(tmp_path, monkeypatch
 def test_macos_key_combo_uses_modifier_down_up(tmp_path, monkeypatch):
     captured: list = []
     impl = _macos_impl(tmp_path, monkeypatch, captured)
-    json.loads(impl.key(keys="command+s"))
-    # kd:cmd t:s ku:cmd (modifier held, key tapped, modifier released).
-    assert _inputs(captured)[-1] == ["cliclick", "kd:cmd", "t:s", "ku:cmd"]
+    json.loads(impl.key(keys="command+shift+s"))
+    # kd:cmd,shift t:s ku:cmd,shift (modifiers held, key tapped, modifiers released).
+    assert _inputs(captured)[-1] == ["cliclick", "kd:cmd,shift", "t:s", "ku:cmd,shift"]
+    # Command and one character is the Command chord program's (osascript), checked before anything is sent.
+    captured.clear()
+    refused = json.loads(impl.key(keys="command+s"))
+    assert refused["dispatched"] is False and "osascript is not installed" in refused["error"] and captured == []
 
 
 def test_capabilities_reports_permission_state_unverified(tmp_path, monkeypatch):

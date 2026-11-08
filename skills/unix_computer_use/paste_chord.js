@@ -5,12 +5,21 @@
    Measured (#2589, macOS 26.4 guest, AppKit Edit menu): the menu matched the Command-plane characters of the event,
    so typing the "v" of the layout itself missed Paste on Russian - PC (Option added) and Dvorak - QWERTY Command ("." under
    Command), and a fixed US-V key missed it on Dvorak ("k"); this key pasted on ABC, the three Russian layouts and
-   both Dvorak ones. Its refusals use the words the receipt composer (place._finish) reads: no such key ->
-   "Unable to get key code for v" (untypable_characters), no right to post -> "Accessibility privileges not enabled"
-   (permission_denied); nothing is posted either way. A posted chord names its key on stderr;
-   shlex quoting preserves this source as one shell word. */
+   both Dvorak ones. key() sends a Command shortcut of one character the same way (8.11.2026, desktop Slack
+   under a Cyrillic layout: cliclick, typing the layout's own "g" under Command, refused cmd+g with "Unable to
+   get key code for g"): the character arrives as the program's own argument (osascript hands the words after
+   the program to run), never written into this source; without one it is "v" and the words are the paste
+   chord's. Its refusals use the words the receipt composer (place._finish) reads: no such key -> "Unable to get
+   key code for <character>" (untypable_characters), no right to post -> "Accessibility privileges not enabled"
+   (permission_denied); nothing is posted either way. A posted chord names its key on stderr; shlex quoting
+   preserves this source as one shell word. */
 ObjC.import("Foundation"); ObjC.import("Carbon"); ObjC.import("CoreServices"); ObjC.import("CoreGraphics");
-function run() {
+function run(argv) {
+  var named = Boolean(argv && argv.length), wanted = named ? String(argv[0]) : "v";
+  var what = named ? "Command chord" : "paste chord";
+  if (named && (argv.length !== 1 || !/^[^\s\p{C}]$/u.test(wanted))) { /* one code point, neither space nor control */
+    throw new Error("the Command chord takes one printable character, not " + JSON.stringify(argv) + "; nothing was sent");
+  }
   [["TISCopyCurrentKeyboardLayoutInputSource", ["void*", []]], ["TISGetInputSourceProperty", ["void*", ["void*", "id"]]],
    ["CFDataGetBytePtr", ["void*", ["void*"]]], ["CFRelease", ["void", ["void*"]]], ["LMGetKbdType", ["unsigned char", []]],
    ["UCKeyTranslate", ["int", ["void*", "unsigned short", "unsigned short", "unsigned int", "unsigned int", "unsigned int",
@@ -30,18 +39,18 @@ function run() {
     var dead = $.NSMutableData.dataWithLength(4), count = $.NSMutableData.dataWithLength(8), text = $.NSMutableData.dataWithLength(8);
     /* kUCKeyActionDown 0, modifier state cmdKey >> 8 = 1 (Command alone), kUCKeyTranslateNoDeadKeysMask 1 */
     if ($.UCKeyTranslate(layout, code, 0, 1, $.LMGetKbdType(), 1, dead.mutableBytes, 4, count.mutableBytes, text.mutableBytes) === 0 &&
-        ObjC.unwrap($.NSString.alloc.initWithDataEncoding(text, $.NSUTF16LittleEndianStringEncoding)).replace(/\u0000+$/, "") === "v") {
+        ObjC.unwrap($.NSString.alloc.initWithDataEncoding(text, $.NSUTF16LittleEndianStringEncoding)).replace(/\u0000+$/, "") === wanted) {
       key = code;
     }
   }
   if (source) { $.CFRelease(source); }
   if (key < 0) {
-    console.log("Unable to get key code for v (" + (layout ? "no key of " + id + " gives v under Command"
-                                                           : "the active keyboard layout could not be read") + "); the paste chord was not sent");
+    console.log("Unable to get key code for " + wanted + " (" + (layout ? "no key of " + id + " gives " + wanted + " under Command"
+                                                                    : "the active keyboard layout could not be read") + "); the " + what + " was not sent");
     return "";
   }
   if (!$.CGPreflightPostEventAccess()) {
-    console.log("WARNING: Accessibility privileges not enabled (no right to post input events); the paste chord was not sent");
+    console.log("WARNING: Accessibility privileges not enabled (no right to post input events); the " + what + " was not sent");
     return "";
   }
   /* All four events exist before the first is posted: one the system cannot make fails the chord with nothing sent.
@@ -52,7 +61,7 @@ function run() {
     [[55, true, 0x100000], [key, true, 0x100000], [key, false, 0x100000], [55, false, 0]].forEach(function (step) {
       var event = $.CGEventCreateKeyboardEvent(events, step[0], step[1]); /* 55: the Command key */
       if (!event) {
-        throw new Error("CGEventCreateKeyboardEvent made no event for key code " + step[0] + "; the paste chord was not sent");
+        throw new Error("CGEventCreateKeyboardEvent made no event for key code " + step[0] + "; the " + what + " was not sent");
       }
       chord.push(event);
       $.CGEventSetFlags(event, step[2]); /* exactly Command */
@@ -69,6 +78,6 @@ function run() {
     chord.forEach(function (event) { $.CFRelease(event); });
     if (events) { $.CFRelease(events); }
   }
-  console.log("paste chord: Command + key code " + key + " (v under Command in " + id + ")");
+  console.log(what + ": Command + key code " + key + " (" + wanted + " under Command in " + id + ")");
   return "";
 }
