@@ -122,6 +122,12 @@ def runs(root, where: str = "", params: tuple = ()):
     return _decode_all({rid: json_loads(text) for rid, text in raw.items()})
 
 
+def has_runs(root) -> bool:
+    """Whether custody holds any run at all: one row probed, nothing decoded."""
+    with store.open_store(root, write=False) as txn:
+        return txn.conn.execute("SELECT 1 FROM custody_runs LIMIT 1").fetchone() is not None
+
+
 # The held rows are a few current runs among every closed one. Under the planner statistics the maintenance
 # child's ANALYZE writes, SQLite would rather walk every run in run_id order than sort these few (always before
 # 3.46: tests/test_cost_contract.py B7); ``unlikely`` states the selection is rare, so the read stays on its index.

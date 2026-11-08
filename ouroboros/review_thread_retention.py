@@ -50,7 +50,7 @@ while either still does. Why the engine could not be asked at all
 (``engine_hold``) stands on the job row beside the tasks it leaves waiting, written when it changes. A pass reports what
 it newly saved of the engine's answers as ``observed``, which its caller logs. Each candidate also owes the engine one
 ``taken`` decision per finished delegated result it holds whole, under the same tree proof (``delegate_result_taken``);
-the task waits while either duty does.
+the task waits while either duty does. Every other settled task gets it once from the ``walk``; leftovers wait here.
 """
 from __future__ import annotations
 
@@ -937,9 +937,9 @@ def retire_finished_review_threads(root: Any, *, engine: Any = None, live: Optio
     attached engine, the queue snapshot's liveness probe and its running/pending census (tests, a caller
     that already holds them). ``should_stop`` is asked between tasks and between a task's operations; a pass it ends
     keeps the rest waiting (reported ``stopped``), which the maintenance child's next run takes up (``owed``). A pass
-    that changed neither the cursor, the waiting tasks nor the engine's hold writes nothing."""
+    that changed neither the cursor, the waiting tasks, the engine's hold nor the walk's record writes nothing."""
     from ouroboros import maintenance_jobs, store
-    from ouroboros.delegate_result_taken import tell_engine
+    from ouroboros.delegate_result_taken import empty_walk, tell_engine, walk
     from ouroboros.maintenance_retirement import JOB
     from ouroboros.task_status import task_has_live_queue_ownership
     from ouroboros.task_store import terminal_writes_since
@@ -954,10 +954,11 @@ def retire_finished_review_threads(root: Any, *, engine: Any = None, live: Optio
         floor = state.get("floor")  # a managed document import owed since (``maintenance_retirement.release_opened``)
         pin = min(counter, floor) if type(floor) is int else counter
         state = {"activated_at": utc_now_iso(), "counter": pin, "waiting": state.get("waiting") or []}
-        maintenance_jobs.record(root, JOB, **{JOB_FIELD: state})
-        if pin == counter and not state["waiting"]:
+        over = empty_walk(root)  # nothing delegated yet: the one-time ``taken`` walk is over before it begins
+        maintenance_jobs.record(root, JOB, **{JOB_FIELD: state}, **over)
+        if pin == counter and not state["waiting"] and over:
             return {"activated": True}
-        # Process the preserved import interval now: pinning a cursor is not scheduling a second pass.
+        # Process the preserved import interval, or walk, now: pinning a cursor is not scheduling a second pass.
     written = terminal_writes_since(root, int(state.get("counter") or 0))
     tasks = list(dict.fromkeys([*(state.get("waiting") or []), *(owner for task in written for owner in retry_line(root, task))]))
     run = _Pass(root, str(state["activated_at"]), engine=engine,
@@ -982,6 +983,7 @@ def retire_finished_review_threads(root: Any, *, engine: Any = None, live: Optio
                     log.warning("Runtime retirement failed for task %s", task_id, exc_info=True)
             if wait:
                 waiting.append(task_id)
+        walked = walk(run, tasks, row, waiting)  # the one-time ``taken`` walk; what it cannot decide joins ``waiting``
     finally:
         run.close()
     after = {"activated_at": state["activated_at"], "counter": counter, "waiting": sorted(set(waiting))}
@@ -991,6 +993,7 @@ def retire_finished_review_threads(root: Any, *, engine: Any = None, live: Optio
         after["engine_hold"] = hold
     if hold != str(state.get("engine_hold") or ""):
         run.report["observed"].append({"engine_hold": hold})
-    if after != state:  # an unchanged pass commits nothing: the child's next look over the same facts stays at rest
-        maintenance_jobs.record(root, JOB, **{JOB_FIELD: after})
-    return {**run.report, "waiting": len(after["waiting"]), **({"stopped": True} if run.stopped else {})}
+    if after != state or walked:  # an unchanged pass commits nothing: the child's next look over the same facts rests
+        maintenance_jobs.record(root, JOB, **{JOB_FIELD: after}, **walked)  # the walk's record lands with ``waiting``
+    first = {} if isinstance(row.get(JOB_FIELD), dict) and row[JOB_FIELD].get("activated_at") else {"activated": True}
+    return {**run.report, "waiting": len(after["waiting"]), **first, **({"stopped": True} if run.stopped else {})}
