@@ -927,9 +927,12 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # its holder keeps while it writes (``ouroboros/mcp_oauth.py``); their own row.
 # 457 -> 458 (safety retro, self-echo): the bounded record of words this install sent through an identity
 # that is also a confirmed owner account, ``state/own_sends.json`` (``ouroboros/own_sends.py``); its own row.
-# 458 -> 459 (owner A, 07.11): the open Low episode of memory-lowered starts, ``state/low_start_episode.json``
+# 458 -> 456 (#2946): #2921 builds the directory artifact names in ``_pair_names``
+# (``ouroboros/artifact_directories.py``), so the scan no longer sees ``task_results/artifacts/*/*.*.manifest.json``
+# and ``task_results/artifacts/*/*.*.zip``; both are still written, under their artifacts row.
+# 456 -> 457 (owner A, 07.11): the open Low episode of memory-lowered starts, ``state/low_start_episode.json``
 # (``ouroboros/context_view_facts.py``); its own row.
-EXPECTED_SCAN_PATHS = 459
+EXPECTED_SCAN_PATHS = 457
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
