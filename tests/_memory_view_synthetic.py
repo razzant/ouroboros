@@ -134,6 +134,14 @@ def snapshot(*, role: str = "integrator", room_facts: Optional[Dict[str, Any]] =
                                  marks=tuple(marks(mark_count)), legacy_blocks=status, owner_words=owner_words)
 
 
+def live_scale(groups: int = 520, words: int = 33, word_chars: int = 40) -> mv.MemoryViewSnapshot:
+    """Main's memory at a start of 07.11.2026 (68d1a491: 521 other conversations holding ~17,000 words of people,
+    a story of 80 long pages), without any of my human's words; ``word_chars`` sizes a word (live ones held ~1,000)."""
+    lane = [spoken(i, "ouroboros", 2_000) for i in range(6)]
+    return snapshot(room_facts=room("1", lane1=lane, lane2=3), story=pages(80, 6_000), mark_count=12,
+                    conversations=[conversation(i, words=words, word_chars=word_chars) for i in range(groups)])
+
+
 OWNER_WORDS = "## Owner words that caused this work\n\nHost fact, carried by value from task root.\n" + "w" * 800
 
 

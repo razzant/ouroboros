@@ -1567,10 +1567,10 @@ def call_llm_with_retry(
             _emit_main_llm_call_state(event_queue, call_identity, "failed")
             raise  # Monetary/ledger rails are not provider failures.
         except Exception as e:
-            if isinstance(getattr(e, "route", None), dict):
-                accumulated_usage["_model_route"] = dict(e.route)
             host_route = getattr(e, "model_role_route", {}) or {}
             model, use_local = host_route.get("model", model), host_route.get("use_local", use_local)
+            if isinstance(getattr(e, "route", None), dict):  # a failed operation's route may name no model: the one it asked
+                accumulated_usage["_model_route"] = {**e.route, "model": e.route.get("model") or str(model).partition("=")[2]}
             if REBOUND_PHYSICAL_CONTEXT_KEY in accumulated_usage:  # a wait's reprepare bound a new route inside this attempt
                 physical_context = accumulated_usage.pop(REBOUND_PHYSICAL_CONTEXT_KEY)
                 context_fit_event_fields = _context_fit_event_fields(accumulated_usage)

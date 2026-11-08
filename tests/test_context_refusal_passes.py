@@ -13,6 +13,11 @@ import pytest
 
 from ouroboros import loop_model_call as lmc
 from ouroboros.context_anchor import REFUSED_INPUTS_KEY
+from tests.test_context_economy_window import live_wait as wait_fixture
+from tests.test_context_economy_window import main_call as main_fixture
+from tests.test_context_economy_window import setup as gateway_fixture
+
+setup, live_wait, main_call = gateway_fixture, wait_fixture, main_fixture  # the real Main call fixtures
 
 
 def _fit(estimate, *, anchor=874_829, accepted=921_840, reply=65_536):
@@ -101,6 +106,111 @@ def test_a_providers_requested_total_holds_the_reply_once():
     bare = _ctx("This endpoint's maximum context length is 400000 tokens. However, you requested about 410000 tokens")
     assert _target(bare, _fit(300_000, anchor=None, accepted=None, reply=20_000)) == 10_000 + 50_000
     assert _refused_size(bare) == 390_000
+
+
+def test_a_refusal_is_measured_on_the_bytes_it_refused_and_a_rebound_view_is_not_asked_twice():
+    """Astra 11(ii) and R4 A4: the refused size is the last physical attempt's own (its capture's estimate of the bytes
+    it sent), not the candidate a rebind narrowed since: 950k refused stays recorded as 950k beside a 600k view. Beside
+    an unchanged view the measured excess holds; beside a rebound one, what that view already dropped is not asked."""
+    fit = SimpleNamespace(measurement=SimpleNamespace(**vars(_fit(600_000, accepted=900_000).measurement),
+                                                      measurement_density=1.0))
+    sent = SimpleNamespace(prompt_tokens_bounded_estimate=950_000, physical_context=SimpleNamespace(route_fp="r"))
+    for rebound, target in ((False, 50_000 + 112_500), (True, 112_500)):  # E - A = 950k - 900k; slack ceil(A/8)
+        ctx = _ctx()
+        assert lmc._refusal_target(ctx, fit, sent, rebound=rebound) == (target, 112_500)
+        assert _refused_size(ctx) == 950_000
+
+
+def test_a_numberless_first_refusal_drops_the_slack_and_a_further_one_the_rest(tmp_path, monkeypatch):
+    """R4 A2: a first-step refusal with no number and no anchor beside a known window, the view unchanged and the
+    host's own estimate fitting (no deficit), measures no excess. The first pass asks memory for the owner's
+    return-after-fold slack, ceil(W/8): a strictly smaller retry that keeps most of memory's detail, never the
+    shortest view at once; after a further refusal memory's rest takes everything it can give."""
+    import ouroboros.loop as loop
+    from ouroboros import context_fit as cf, memory_view as mv
+    from tests import _memory_view_synthetic as syn
+
+    words = [syn.conversation(i, words=40, word_chars=2_000) for i in range(30)]
+    core = cf.ContextCore("Core", "", "", "", "", "", '"Continue."', False,
+                          memory_view_json=mv.snapshot_json(syn.snapshot(room_facts=syn.room("1"), conversations=words)))
+    monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
+    evidence = SimpleNamespace(route_fp="probe", status="confirmed", stale=False, window_tokens=1_000_000, source="fixture")
+    plan = cf.build_context_fit_plan(SimpleNamespace(drive_root=tmp_path), core, {"id": "a2", "_is_direct_chat": True},
+        preferred_mode="max", route_resolver=lambda *_a, **_kw: ({"provider": "test", "model": "synthetic"}, evidence))
+    ctx = SimpleNamespace(context_fit_plan=plan, active_context_mode=plan.initial_mode, tool_schemas=[], task_id="a2",
+        tools=SimpleNamespace(_ctx=SimpleNamespace()), messages=plan.messages_for(plan.initial_mode),
+        event_queue=None, drive_logs=tmp_path, round_idx=1)
+
+    def facts():
+        shown = ctx.context_fit_plan.projection(ctx.active_context_mode)
+        return shown.memory_facts["floor"]["steps"].get("F6w", 0), shown.memory_facts["blocks"]["room_tokens"]
+
+    fit = SimpleNamespace(measurement=SimpleNamespace(capacity_total_tokens=1_000_000, measurement_density=1.0,
+        reprojection_input_tokens=None, estimated_input_tokens=0, capacity_deficit_tokens=0, route_fp="probe"))
+    monkeypatch.setattr(loop, "_measure_round_main_fit", lambda *_a, **_kw: fit)
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: None)
+    folded, room = facts()
+    assert folded == 0 and room > 500_000  # the start held every word
+    slack = lmc._refusal_target(_ctx(), SimpleNamespace(measurement=SimpleNamespace(**{
+        **vars(_fit(0, anchor=None).measurement), "capacity_total_tokens": 1_000_000, "measurement_density": 1.0})))[1]
+    assert slack == 125_000
+    lmc._apply_refusal_step(ctx, "floor", fit, None, slack)
+    first, after_first = facts()
+    assert 0 < first < 1_200 and slack <= room - after_first < 2 * slack  # about the slack, most words still whole
+    lmc._apply_refusal_step(ctx, "memory_rest", fit, None, slack)
+    assert facts()[0] == 1_200 and facts()[1] < after_first - slack  # the rest: every word by address
+
+
+def test_a_refused_first_send_retries_the_view_its_route_rebind_narrowed(main_call, monkeypatch, tmp_path):
+    """The path of 07.11 at once (window C, A and 1.8): an Auto start with no known window sends its whole memory and
+    Codex refuses one input string's length, its route naming the refusing account but no model. The receipt names the
+    requested model, so the rebind binds that account and its known window narrows the view; that view is retried
+    first on the same route. The configured chain never starts, no refusal pass folds memory, and memory keeps every
+    word the narrowed view kept instead of its shortest forms."""
+    import json
+
+    from ouroboros import capability_evidence as ce, context, memory_view as mv
+    from ouroboros.model_slots import MODEL_ACCOUNTS_KEY
+    from tests import _memory_view_synthetic as syn
+    from tests.test_context_economy_window import MODEL, ROUTE, _answer, _drained, _native, _run
+    from tests.test_llm_claudexor import result
+
+    words = syn.live_scale(groups=60, word_chars=1_000)
+    ctx, gateway, tools, events, plan, windows = _native(main_call, monkeypatch, tmp_path, owner_mode="max",
+                                                          view=mv.snapshot_json(words))
+    monkeypatch.setenv(MODEL_ACCOUNTS_KEY, json.dumps({"main": "", "fallback": ["account-b"]}))  # Main runs Auto
+    windows.update({"account-a": 0, "account-b": 400_000})
+
+    def route(task, **_kw):  # the account an operation's receipt binds (``model_account_options``), else Auto
+        options = ce.model_account_options(MODEL, role=task["model_role"], model_route=task.get("model_route"))
+        account = options["credential_profile_id"] if options.get("account_fingerprint") else "account-a"
+        bound = {"source_id": "codex", "credential_profile_id": account, "account_fingerprint": f"fingerprint-{account[-1]}"}
+        return {"model": MODEL, "provider": "claudexor", "options": bound}, SimpleNamespace(
+            route_fp=ce.route_fingerprint(provider="claudexor", model=MODEL, base_url="", options=bound), stale=False,
+            status="confirmed" if windows[account] else "unprobeable", window_tokens=windows[account], source="advertised",
+            source_id="codex", credential_profile_id=account, account_fingerprint=bound["account_fingerprint"])
+    monkeypatch.setattr(context, "_context_fit_route", route)
+    built = plan(0)
+    ctx.messages[:] = built.messages_for(built.initial_mode)
+    refusing = {"source": "codex", "credentialProfileId": "account-b", "accountFingerprint": "fingerprint-b", "model": None}
+    gateway.results = [
+        result(outcome="failed", route=refusing, problem={"code": "invalid_request", "message": "Codex model request was "
+               "refused (HTTP 400).", "context": {"httpStatus": 400, "vendorCode": "string_above_max_length",
+                                                  "parameter": "input[3].content[0].text"}}),
+        _answer({**ROUTE, "credentialProfileId": "account-b", "accountFingerprint": "fingerprint-b"},
+                {"role": "assistant", "content": "Done."})]
+    gateway.dispatch = ["response_received"] * 2
+    text, _usage, _trace = _run(ctx, tools, events, built)
+    assert text == "Done." and len(gateway.creates) == 2  # the narrowed view answered
+    first, retry = (payload for payload, _key in gateway.uploads)
+    assert retry["account"] == first["account"] != {"mode": "pin", "profileId": "account-b"}  # Auto again: no chain
+    assert len(json.dumps(retry["messages"])) < len(json.dumps(first["messages"]))  # strictly smaller, same route
+    rebound = tools._ctx.context_fit_plan
+    assert rebound.model_route["accountFingerprint"] == "fingerprint-b" and rebound.window_record.usable is not None
+    kinds = [row.get("checkpoint_kind") for row in _drained(events)]
+    assert "context_fit_route_rebound" in kinds and "context_memory_coarsened" not in kinds  # no pass folded memory
+    folded = rebound.projection(rebound.initial_mode).memory_facts["floor"]["steps"].get("F6w", 0)
+    assert 0 < folded < 60 * 33  # narrowed for the account's window, never every word
 
 
 def test_the_size_parser_reads_input_reply_and_total_apart():

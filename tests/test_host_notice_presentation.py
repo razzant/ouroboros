@@ -331,7 +331,7 @@ def test_a_claudexor_refusal_never_reads_as_the_providers_sentence(tmp_path, mon
     else:
         assert usage["_last_llm_provider_fields"] == {"code": "string_above_max_length", "parameter": "instructions"}
         assert hint == (' The provider reported error code "string_above_max_length" and parameter "instructions" '
-                        "but no sentence the host can quote; the host classified the failure as a rejected request. "
+                        "but no sentence the host can quote; the host classified the failure as a context overflow. "
                         "The task's Logs keep the host's record of this failure.")
     rows = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
     assert all(row["error"] == error.display_message for row in rows if row["type"] == "llm_api_error"), \

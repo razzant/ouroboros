@@ -524,20 +524,20 @@ def _load_working_recovery(ctx: Any, messages: List[Dict[str, Any]]) -> Dict[str
 
 
 def _note_low_start(ctx: Any, plan: Any, mode: str, task_id: str, event_queue: Any) -> None:
-    """The owner's one Main line for a fresh start that memory lowered to Low (owner 1B, 29.10: ``low_start_line``),
-    owed through the terminal outbox under one id per task attempt; no line when Max returns. Never raises."""
-    from ouroboros.context_view_facts import low_start_line
+    """The owner's one Main line per Low episode (``context_view_facts.low_start_episode``), owed through the terminal
+    outbox under one id per task attempt; none while Low holds or when Max returns. Never raises."""
+    from ouroboros.context_view_facts import low_start_episode
 
     try:
-        root, text = canonical_data_root(ctx), low_start_line(plan, mode, task_id)
-        if root is not None and text:
+        if (root := canonical_data_root(ctx)) is not None:
             from supervisor.schedule_notes import owner_chat_id
-            from supervisor.terminal_delivery import enqueue_terminal_delivery_outcome
+            from supervisor.terminal_delivery import ENQUEUE_UNAVAILABLE, enqueue_terminal_delivery_outcome
 
             attempt = getattr(ctx, "task_attempt", None) or 1
-            enqueue_terminal_delivery_outcome(root, {
+            low_start_episode(root, plan, mode, task_id, lambda text: enqueue_terminal_delivery_outcome(root, {
                 "type": "send_message", "chat_id": owner_chat_id(root), "task_id": "", "text": text, "role": "system",
-                "system_type": "low_start_notice", "delivery_id": f"low_start:{task_id}:{attempt}"}, event_queue=event_queue)
+                "system_type": "low_start_notice", "delivery_id": f"low_start:{task_id}:{attempt}"},
+                event_queue=event_queue) != ENQUEUE_UNAVAILABLE)
     except Exception:
         log.warning("The Low-start line of task %s was not queued", task_id, exc_info=True)
 

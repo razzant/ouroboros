@@ -146,7 +146,7 @@ def record_response_ack(drive_root, *, provider, model, base_url="", options=Non
 
 
 def resolve_response_limit(drive_root, *, provider, model, base_url="", options=None,
-                           allow_fetch=False, api_key=None) -> ResponseLimit:
+                           allow_fetch=False, api_key=None, read_failed=False) -> ResponseLimit:
     from ouroboros.capability_evidence import (_read, _age_seconds,
         _CONFIRMED_TTL_SEC, _FAILED_TTL_SEC, _openai_compatible_metadata_window, _claudexor_metadata_evidence)
 
@@ -164,7 +164,9 @@ def resolve_response_limit(drive_root, *, provider, model, base_url="", options=
     if allow_fetch and _age_seconds(failed_refresh.get("observed_at", "")) > _FAILED_TTL_SEC:
         read = "no maximum observed for this route"
         try:
-            if provider in {"openai-compatible", "minimax"}:
+            if read_failed:  # this probe's own catalog read failed: it answers here too, never read a second time
+                read = "metadata read failed"
+            elif provider in {"openai-compatible", "minimax"}:
                 _openai_compatible_metadata_window(model, base_url, True, api_key, provider=provider,
                                                   evidence_root=drive_root)
             elif provider == "openrouter":
@@ -241,15 +243,16 @@ def _dispatch_route(route: dict) -> tuple:
     return provider, base_url, key if key is not None else target.get("api_key")
 
 
-def probe_response_limit(drive_root, evidence, route: dict) -> ResponseLimit:
-    """The output fact beside a window probe, bound to the endpoint its send reaches."""
+def probe_response_limit(drive_root, evidence, route: dict, *, read_failed: bool = False) -> ResponseLimit:
+    """The output fact beside a window probe, bound to the endpoint its send reaches; when that probe's catalog
+    read failed (``read_failed``), the output limit names that read as its source instead of reading again."""
     provider, base_url, api_key = _dispatch_route(route)
     options = dict(route.get("options") or {})
     if provider == "claudexor" and evidence.account_fingerprint:
         options.update(source_id=evidence.source_id, credential_profile_id=evidence.credential_profile_id,
                        account_fingerprint=evidence.account_fingerprint)
     return resolve_response_limit(drive_root, provider=provider, model=route["model"], base_url=base_url,
-        options=options or None, allow_fetch=route.get("allow_fetch", True), api_key=api_key)
+        options=options or None, allow_fetch=route.get("allow_fetch", True), api_key=api_key, read_failed=read_failed)
 
 
 def response_limit_preview(drive_root, route: dict, *, account="", settings=None, role="main", window=None) -> dict:

@@ -806,8 +806,9 @@ def test_provider_failure_hint_empty_without_error():
 
 
 @pytest.mark.parametrize(("vendor", "parameter", "kind", "code"), [
-    ("string_above_max_length", "instructions", "bad_request", "provider_failed"),
-    ("string_above_max_length", "max_tokens", "bad_request", "invalid_request"),
+    ("string_above_max_length", "instructions", "context_overflow", "provider_failed"),  # a smaller input cures it
+    # The disclosed residual (CONSENSUS 1.4): no `parameter` check, so the code on a non-input field reads alike.
+    ("string_above_max_length", "max_tokens", "context_overflow", "invalid_request"),
     ("context_length_exceeded", "input", "context_overflow", "provider_failed"),
 ])
 def test_claudexor_display_reaches_error_and_terminal_without_retry(tmp_path, monkeypatch, code, vendor, parameter, kind):

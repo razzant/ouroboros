@@ -203,17 +203,20 @@ def request_context_budget(
             "target_deficit_tokens": (max(0, measured + reserve - target_tokens) if target_tokens else None),
             "capacity_deficit_tokens": (max(0, measured + reserve - window_tokens) if window_tokens else None)}
 
-# One overflow vocabulary for every seam that must recognize a CONTEXT-WINDOW
-# overflow (Main provider-code precedence and the local transport). A provider
-# code or message shape added here reaches both seams at once; per-module copies
-# drifted independently before.
+# One vocabulary of refusals a smaller input cures, for every seam that must
+# recognize them (Main provider-code precedence and the local transport): the
+# context window, or one input string's length. A provider code or message shape
+# added here reaches both seams at once; per-module copies drifted independently.
 CONTEXT_OVERFLOW_CODES = frozenset({
     "context_length_exceeded",
     "context_window_exceeded",
     "model_context_window_exceeded",
     "prompt_too_long",
     "input_too_long",
+    "string_above_max_length",
 })
+#: A refusal of one input string's length (OpenAI's 10 MiB text limit, 07.11.2026) teaches no token window.
+INPUT_STRING_LENGTH_CODES = frozenset({"string_above_max_length"})
 CONTEXT_OVERFLOW_MESSAGE_MARKERS = (
     "context_length_exceeded",
     "context length",

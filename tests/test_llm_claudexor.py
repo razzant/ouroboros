@@ -71,7 +71,9 @@ def test_display_redacts_typed_details_without_mutating_custody():
 @pytest.mark.parametrize("code,status,unknown,kind,retry,wait,vendor", [
     ("provider_failed", 400, False, "context_overflow", False, "", "context_length_exceeded"),
     ("invalid_request", 400, False, "context_overflow", False, "", " context_length_exceeded "),
-    ("invalid_request", 400, False, "bad_request", False, "", "string_above_max_length"),
+    # One input string over its length (OpenAI's 10 MiB text, 07.11.2026): a smaller input cures it, as the window.
+    ("invalid_request", 400, False, "context_overflow", False, "", "string_above_max_length"),
+    ("invalid_request", 400, False, "bad_request", False, "", "invalid_value"),
 ])
 def test_vendor_facts_reach_shared_readers_without_changing_wrapper_custody(code, status, unknown, kind, retry, wait, vendor):
     from ouroboros.llm_attempt import _is_structured_context_overflow_exception
@@ -1246,6 +1248,35 @@ def test_daemon_read_timeout_repeats_only_before_create(setup, monkeypatch, phas
         assert rows[0]["state"] == "unresolved"
         assert usage["_last_llm_error_kind"] == "provider_outcome_unknown"
         assert 4.0 not in slept and 8.0 not in slept
+
+
+@pytest.mark.parametrize("served", [None, "other-model"])
+def test_a_failed_operation_route_names_the_model_it_requested(setup, monkeypatch, served):
+    """The engine's route of a failed operation may name no model (every Codex size refusal of 07.11 did). The loop's
+    receipt then names the model this operation requested, so the refusing account binds and a measured numberless
+    refusal bounds its window; a model the engine did name stays as named and binds nothing for this one. The error
+    event keeps the engine's raw route."""
+    from dataclasses import replace
+    from ouroboros import capability_evidence as ce
+    from ouroboros.context_anchor import record_refused_input
+    from ouroboros.loop_llm_call import call_llm_with_retry
+    from tests.test_context_fit_integration import _plan
+
+    root, gateway, client = setup
+    route = {**ROUTE, "model": served}
+    gateway.results = [result(outcome="failed", route=route, problem={
+        "code": "invalid_request", "message": "Codex model request was refused (HTTP 400).", "retryable": False,
+        "context": {"httpStatus": 400, "vendorCode": "context_length_exceeded", "parameter": "input"}})]
+    usage = {}
+    answer, _ = call_llm_with_retry(client, [{"role": "user", "content": "hello"}], MODEL, None, "high", 3,
+                                    root / "logs", "task-one", 1, None, usage)
+    assert answer is None and usage["_model_route"] == {**ROUTE, "model": served or "exact-model"}
+    events = [json.loads(line) for line in (root / "logs/events.jsonl").read_text().splitlines()]
+    assert [event["observed_route"] for event in events if event.get("type") == "llm_api_error"] == [route]
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: root)
+    auto = replace(_plan(), model=MODEL, provider="claudexor", route_fp="auto", window_witness_bound=False)
+    record_refused_input(usage, auto, 900_000, measured=True)
+    assert bool(ce._read(root).get("main_windows")) is (served is None)
 
 
 def test_caller_control_before_create_proves_no_dispatch(setup):
