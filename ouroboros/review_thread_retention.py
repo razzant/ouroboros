@@ -50,7 +50,7 @@ while either still does. Why the engine could not be asked at all
 (``engine_hold``) stands on the job row beside the tasks it leaves waiting, written when it changes. A pass reports what
 it newly saved of the engine's answers as ``observed``, which its caller logs. Each candidate also owes the engine one
 ``taken`` decision per finished delegated result it holds whole, under the same tree proof (``delegate_result_taken``);
-the task waits while either duty does.
+the task waits while either duty does, and every other settled task gets that duty alone, once, from its ``walk``.
 """
 from __future__ import annotations
 
@@ -937,9 +937,9 @@ def retire_finished_review_threads(root: Any, *, engine: Any = None, live: Optio
     attached engine, the queue snapshot's liveness probe and its running/pending census (tests, a caller
     that already holds them). ``should_stop`` is asked between tasks and between a task's operations; a pass it ends
     keeps the rest waiting (reported ``stopped``), which the maintenance child's next run takes up (``owed``). A pass
-    that changed neither the cursor, the waiting tasks nor the engine's hold writes nothing."""
+    that changed neither the cursor, the waiting tasks, the engine's hold nor the walk's counts writes nothing."""
     from ouroboros import maintenance_jobs, store
-    from ouroboros.delegate_result_taken import tell_engine
+    from ouroboros.delegate_result_taken import tell_engine, walk
     from ouroboros.maintenance_retirement import JOB
     from ouroboros.task_status import task_has_live_queue_ownership
     from ouroboros.task_store import terminal_writes_since
@@ -982,6 +982,7 @@ def retire_finished_review_threads(root: Any, *, engine: Any = None, live: Optio
                     log.warning("Runtime retirement failed for task %s", task_id, exc_info=True)
             if wait:
                 waiting.append(task_id)
+        walk(run, tasks, row)  # the one-time ``taken`` walk over every other settled task (``delegate_result_taken``)
     finally:
         run.close()
     after = {"activated_at": state["activated_at"], "counter": counter, "waiting": sorted(set(waiting))}
