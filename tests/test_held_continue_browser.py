@@ -38,7 +38,13 @@ ROW_GEOMETRY = """(row) => {
         under_control: lines.some((r) => r.right > ctl.left && r.left < ctl.right
             && r.bottom > ctl.top && r.top < ctl.bottom),
         control_on_screen: ctl.left >= 0 && ctl.right <= innerWidth && ctl.width > 0,
+        beside: lines.every((r) => r.right <= ctl.left + 0.5),
         lines: new Set(lines.map((r) => Math.round(r.top))).size,
+        // Wrapping only for want of room: the widest line runs on toward the control (within a word and the gap);
+        // the other lines may break raggedly, as a platform's font measures its words.
+        filled: lines.length > 0 && Math.max(...lines.map((r) => r.right)) >= ctl.left - 120,
+        room: Math.round(ctl.left - Math.min(...lines.map((r) => r.left))),
+        widest: Math.round(Math.max(...lines.map((r) => r.right)) - Math.min(...lines.map((r) => r.left))),
         selectable: getComputedStyle(sub).userSelect !== 'none',
         theme: document.documentElement.dataset.theme,
     };
@@ -120,7 +126,11 @@ def test_held_continue_toast_activity_reason_and_no_resume(direct_server_with_da
                     if width < 700:
                         assert geometry["lines"] > 1, "the phone row wraps the cause instead of cutting it"
                     else:
-                        assert geometry["lines"] == 1, "a desktop row keeps its one compact line"
+                        # A wide row keeps its control beside the cause, which wraps only for want of room: the line
+                        # count and the ragged ends follow the platform's font (two lines on macOS, three on Linux).
+                        assert geometry["beside"] and geometry["filled"], ("a desktop row keeps its compact shape",
+                                                                           geometry["room"], geometry["widest"],
+                                                                           geometry["lines"])
                     row.screenshot(path=str(evidence / f"{engine}-2-activity-held-row-{theme}-{width}.png"))
                     page.screenshot(path=str(evidence / f"{engine}-2-activity-page-{theme}-{width}.png"),
                                     full_page=True)

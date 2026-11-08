@@ -8,11 +8,13 @@ service is its own group leader (``start_new_session``), recorded at spawn with 
 leader's measured birth (zombie-visible: the shell may have exited before its row is
 written), so a ``cmd &`` or ``nohup`` child stays reachable after its shell exits; a
 recorded group is signalled MEMBER BY MEMBER, never ``killpg`` on a bare number, and only
-while the recorded leader's measured birth still matches a live or zombie row.
-A leaderless number cannot prove continuity: it may name a replacement group whose
-leader also exited. Such a group stays unverified; marker and captured identities
-remain independent authority. Tracked commands retain their waitable leader until
-whole-tree retirement, preventing reuse while their custodian lives; and
+under the pgid-reuse rule (every candidate born at or after the recorded leader, a live
+``pid == G`` carrying the recorded leader birth; otherwise the id was reused and the group
+is skipped entirely; disclosed residual: a group that emptied and whose id was recycled as
+a new, leaderless group born after the recorded leader passes both rules; a recorded leader
+the table omits is read by name, and an unreadable one keeps its group owed, never gone).
+Tracked commands retain their waitable leader until whole-tree retirement, preventing reuse
+while their custodian lives; and
 individually recorded descendants — the engine's captured pids, and every KNOWN member an
 earlier pass left unverified or surviving, each checked by pid AND birth.
 
@@ -255,8 +257,8 @@ def scope_members(rows: Mapping[int, _Row], *, marker: str = "", markers: Iterab
         candidates = [row for row in rows.values() if row.pgid == pgid]
         leader = rows.get(pgid)
         if pgid in omitted:
-            # Read the omitted leader by identity. Absence cannot authorize
-            # nonempty group candidates; a live/zombie answer can vouch for them.
+            # The answer stands in for the omitted row: absence leaves the group to its members
+            # and floor; a live or dead pid == G is judged as its row would be.
             answer = identities.get(pgid) or _Identity(IDENTITY_UNREADABLE)
             if answer.state == IDENTITY_UNREADABLE:
                 unverified.append(tag({"pid": pgid, "birth": leader_birth, "reason": UNVERIFIED_IDENTITY}, target))
@@ -293,12 +295,6 @@ def scope_members(rows: Mapping[int, _Row], *, marker: str = "", markers: Iterab
         if (leader is not None and (not leader_birth or leader.birth != leader_birth)) or any(
                 row.epoch and row.epoch < floor for row in candidates):
             reused.append(pgid)  # the id names another group now: skipped entirely
-            continue
-        if leader is None or not leader_birth:
-            # A replacement group can lose its leader too. Its newer members
-            # and the absence of pid == G prove neither continuity nor ownership.
-            # Markers/captured births still name individual members independently.
-            unverified.append(tag({"pid": pgid, "birth": leader_birth, "reason": UNVERIFIED_IDENTITY}, target))
             continue
         for row in candidates:
             if row.pid not in excluded:

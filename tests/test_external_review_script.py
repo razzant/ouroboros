@@ -38,6 +38,14 @@ from tests import _contributor_packet_shared as shared
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True)
+def _own_tracked_registry(monkeypatch):
+    """The wrapper's real Git commands are tracked children (#2841) that only an idle probe retires; a private
+    registry keeps them out of later tests in the same worker (tests/test_extension_ws_stream_diagnostics.py)."""
+    from ouroboros.tools import shell_process
+    monkeypatch.setattr(shell_process, "_active_subprocesses", set())
+
+
 @pytest.mark.parametrize('delivery,refused', [('native', False), ('packet', True), ('', False)])
 def test_contributor_config_roundtrip_keeps_direct_api_delivery(monkeypatch, delivery, refused):
     from scripts.run_external_review import _diff_size_refusal, _frozen_pool_catalog

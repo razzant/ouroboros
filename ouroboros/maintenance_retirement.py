@@ -119,9 +119,10 @@ def task_written(txn, task_id, columns):
 
 def _owed(row, inputs):
     """The history-sized steps' own facts: a stopped pass, other inputs (``inputs()``, read only then), or a deadline
-    reached."""
+    reached. Reached includes its own instant: a step that stops at its budget owes the rest at ``time.time()``, and on a
+    coarse clock (Windows, Python 3.10: 15.6 ms) the next read can return that same value."""
     return (row.get("state") == "pending" or row.get("inputs") != inputs()
-            or row.get("next_due") is not None and time.time() > row["next_due"])
+            or row.get("next_due") is not None and time.time() >= row["next_due"])
 
 
 def due(root, row, facts, child):

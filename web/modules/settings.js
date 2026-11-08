@@ -463,6 +463,8 @@ function collectSecretValue(id, body) {
 // (#1122): the next-task bucket states both once, whichever keys the save carried.
 const SKILL_KEYS_READ = 'skills pick up granted keys on their next read';
 
+const DRAFT_KEPT = 'Settings were not reloaded because your draft changed while loading. Your edits are kept.';
+
 export function settingsSaveEffectText(data = {}) {
     if (data.no_changes) return 'No changes detected';
     if (data.restart_required) return 'Settings saved. Some changes require a restart to take effect';
@@ -882,7 +884,9 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             await Promise.all(enrichment);
             if (!isCurrent()) {
                 updateSettingsDirtyState();
-                return false;
+                // The same answer as the document stage: a newer load took over (null, it reports), or an owner edit
+                // kept the draft (false). A page-show refresh says "Your edits are kept" only for the second.
+                return sequence !== loadSequence ? null : false;
             }
             // Optional enrichment belongs in a still-clean baseline, never in an
             // owner edit made while one of those reads was pending.
@@ -905,7 +909,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         try {
             const applied = await loadSettings();
             if (applied === false && byId('settings-status').dataset.owner === 'load') {
-                setStatus('Settings were not reloaded because your draft changed while loading. Your edits are kept.', 'warn', 'load');
+                setStatus(DRAFT_KEPT, 'warn', 'load');
             }
             try {
                 await refreshModelCatalog({ button: byId('btn-refresh-model-catalog') });
@@ -938,7 +942,10 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         }
         extensionRefreshPending = true;
         try {
-            if (!(await loadSettings())) return;
+            const applied = await loadSettings();
+            // A load this one superseded left its line to it; an owner edit made meanwhile kept the draft.
+            if (applied === false && byId('settings-status').dataset.owner === 'load') setStatus(DRAFT_KEPT, 'warn', 'load');
+            if (!applied) return;
             setStatus('Settings refreshed', 'ok', '', '', '', { ends: true });
         } catch (error) {
             const words = errorWords(error);

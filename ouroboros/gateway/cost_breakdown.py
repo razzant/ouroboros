@@ -11,13 +11,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import pathlib
-from typing import Any, Callable, Dict, List, Literal, Optional, TypedDict
-
-from starlette.requests import Request
-from starlette.responses import JSONResponse
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, TypedDict
 
 from ouroboros.cost_projection import CostPresentation
 from ouroboros.delegate_custody_usage import CostCustody
+
+if TYPE_CHECKING:  # type-only: ``gateway.contracts`` re-exports this module's TypedDicts and stays transport-free
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse
 
 log = logging.getLogger(__name__)
 
@@ -133,6 +134,8 @@ def _compat_cost_groups(
     return dict(sorted(result.items(), key=lambda item: item[1]["cost"], reverse=True))
 
 def make_cost_breakdown_endpoint(data_dir: pathlib.Path):
+    from starlette.responses import JSONResponse
+
     def _cost_breakdown_response() -> JSONResponse:
         try:
             from ouroboros.pricing import infer_model_category

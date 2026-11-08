@@ -73,17 +73,21 @@ class _Substrate:
 
 @pytest.fixture
 def harness(tmp_path, monkeypatch):
+    # LF on every host, as a checkout keeps them (.gitattributes): attachments carry a file's own bytes, and a Windows
+    # text-mode write would make them CRLF.
     system = tmp_path / "repo"
     (system / "docs").mkdir(parents=True)
-    (system / "BIBLE.md").write_text("# BIBLE.md\n\n## Principle 0: Agency\n\nbe.\n", encoding="utf-8")
-    (system / "docs" / "ARCHITECTURE.md").write_text("# Ouroboros vX — Architecture\n\n## 1. Runtime\n\nthe loop.\n", encoding="utf-8")
+    (system / "BIBLE.md").write_text("# BIBLE.md\n\n## Principle 0: Agency\n\nbe.\n", encoding="utf-8", newline="\n")
+    (system / "docs" / "ARCHITECTURE.md").write_text("# Ouroboros vX — Architecture\n\n## 1. Runtime\n\nthe loop.\n",
+                                                     encoding="utf-8", newline="\n")
     (system / "docs" / "CHECKLISTS.md").write_text(
-        "## Plan Review Checklist\n\nFIXTURE CHECKLIST ROW: the bar.\n\n## Coupling questions\n\nx\n", encoding="utf-8")
+        "## Plan Review Checklist\n\nFIXTURE CHECKLIST ROW: the bar.\n\n## Coupling questions\n\nx\n", encoding="utf-8",
+        newline="\n")
     (system / "ouroboros").mkdir()
-    (system / "ouroboros" / "loop.py").write_text("x = 1\n", encoding="utf-8")
+    (system / "ouroboros" / "loop.py").write_text("x = 1\n", encoding="utf-8", newline="\n")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    (workspace / "notes.md").write_text("deck notes\n", encoding="utf-8")
+    (workspace / "notes.md").write_text("deck notes\n", encoding="utf-8", newline="\n")
     drive = tmp_path / "data"
     (drive / "logs").mkdir(parents=True)
     events: queue.Queue = queue.Queue()
@@ -829,8 +833,8 @@ def test_a_presence_ceiling_decides_attachments_as_it_decides_their_reads(harnes
                                         (PresenceResourceGrant("artifact_store", ("read",), "."),), "0" * 64)
     ctx.task_contract["capability_ceiling"] = presence_ceiling_payload(ceiling)
     art, drv = _own_store(ctx, "artifact_store"), _own_store(ctx, "task_drive")
-    (art / "granted.md").write_text("granted\n", encoding="utf-8")
-    (drv / "ungranted.md").write_text("ungranted\n", encoding="utf-8")
+    (art / "granted.md").write_text("granted\n", encoding="utf-8", newline="\n")  # the attached text is its own bytes
+    (drv / "ungranted.md").write_text("ungranted\n", encoding="utf-8", newline="\n")
     manifest = plan_ask.attachment_manifest(ctx, [str(art / "granted.md"), str(drv / "ungranted.md"), "notes.md"],
                                             state_root=harness.drive, task_id="task-1", system_root=harness.system,
                                             active_root=harness.workspace)

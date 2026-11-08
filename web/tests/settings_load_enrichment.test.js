@@ -104,7 +104,7 @@ test('a newer load supersedes an older held list read; a hidden page reads no li
     assert.equal(await newer, true);
     assert.deepEqual(view.calls.rows, [SKILLS]);
     olderRead.resolve({ skills: [{ name: 'stale' }], live: {} });
-    assert.equal(await older, false, 'the superseded load reports itself superseded');
+    assert.equal(await older, null, 'the superseded load reports itself superseded, never an owner edit');
     assert.deepEqual(view.calls.rows, [SKILLS], 'the superseded load wrote nothing');
     assert.equal(view.calls.baselines, 3, 'older document, newer document, newer enrichment');
 

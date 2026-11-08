@@ -217,10 +217,13 @@ def test_evolution_chip_and_sentence_are_amber_only_for_the_owner(subscription_u
         chip.filter(has_text=labels[0]).wait_for()
         sentence.filter(has_text=labels[1]).wait_for()
         assert (chip.get_attribute("data-tone"), sentence.get_attribute("data-tone")) == chip_tones, labels
-        # The chip IS the status (the full triple); the sentence states it in its foreground only.
+        # The chip IS the status (the full triple); the sentence states it in its foreground only. The sentence is a
+        # quiet button, so a new tone lands after the shared colour motion (--motion-tone); it is read once landed.
         painted = chip.evaluate("el => [getComputedStyle(el).color, getComputedStyle(el).backgroundColor]")
         assert tuple(painted) == tones[chip_tones[0]], (labels, painted)
-        assert sentence.evaluate("el => getComputedStyle(el).color") == tones[chip_tones[1]][0], labels
+        landed = sentence.evaluate("""async (el) => { await Promise.all(el.getAnimations().map((a) => a.finished));
+            return getComputedStyle(el).color; }""")
+        assert landed == tones[chip_tones[1]][0], labels
     # Loading… goes on by itself: the meta ink, not amber.
     loading = page.evaluate("""() => { const el = document.createElement('span'); el.className = 'status-badge starting';
         el.textContent = 'Loading...'; document.body.append(el); const color = getComputedStyle(el).color; el.remove();

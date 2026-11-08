@@ -115,6 +115,9 @@ def test_a_phone_lays_the_page_out_at_another_width(subscription_ui, monkeypatch
         page.wait_for_function("document.documentElement.clientWidth === 488")
         _expect_room_fills_screen(page)
         assert page.evaluate(FACTS)['meta'].startswith('width=488, initial-scale=0.79918'), page.evaluate(FACTS)
+        # The size is stored only once the screen has laid it out (two frames on, web/theme.js): a reload before that
+        # starts at the size stored before it.
+        page.wait_for_function("localStorage.getItem('ouroboros.interface-size') === '80'")
         subscription_ui['errors'].watch(page)  # the reload may cut off this page's own reads; other pages stay strict
         page.reload()
         page.wait_for_function("document.documentElement.clientWidth === 488")  # the stored size is the first layout

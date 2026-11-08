@@ -164,7 +164,8 @@ def test_unread_extension_values_stay_locked_until_edit_anyway_in_chromium_and_w
                                     sameRow: Math.abs(a.top - b.top) < 1, height: Math.min(a.height, b.height)};
                         }""")
                         assert geometry["overflow"] <= 1, geometry
-                        assert geometry["sameRow"] is (width > 600), geometry
+                        # Capsules on the one action row at every width, not bars that stretch and wrap.
+                        assert geometry["sameRow"], geometry
                         assert geometry["height"] >= 24, geometry
                         legacy.locator("xpath=ancestor::article[1]").scroll_into_view_if_needed()
                         page.wait_for_timeout(200)

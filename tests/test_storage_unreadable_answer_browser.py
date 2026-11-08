@@ -215,10 +215,12 @@ def test_cut(direct_server_with_data, cut):
                 page.wait_for_selector("#page-chat")
                 page.click('[data-nav-page="dashboard"]')
                 page.click('[data-dashboard-tab="storage"]')
-                page.wait_for_selector("[data-storage-panel]:not([hidden])")
+                # The Cleanup door shows once the page holds its first answer; the Folders panel stays hidden
+                # until a measurement, which this fresh server has not made.
+                page.wait_for_selector("[data-storage-door]", state="visible")
                 page.click("[data-storage-door]")
                 page.wait_for_selector('[data-storage-tray] [data-free-go]:not([aria-disabled="true"])', timeout=120_000)
-                assert f"Remove {FOLDERS} items" in page.locator("[data-storage-tray]").inner_text()
+                assert f"Remove {FOLDERS} selected items" in page.locator("[data-storage-tray]").inner_text()
                 page.click("[data-storage-tray] [data-free-go]")
                 if cut:
                     page.wait_for_selector(f"text={LOST}", timeout=30_000)
@@ -249,7 +251,7 @@ def test_cut(direct_server_with_data, cut):
         expected = {f"direct:w-{index:03d}" for index in range(FOLDERS)}
         assert previewed == expected and set(posts[0]["items"]) == previewed and len(posts[0]["items"]) == FOLDERS, (previewed, posts[0])
         assert outcomes == ["removed"] * FOLDERS, outcomes
-        assert "Remove 3 items" not in tray and "Nothing was removed" not in tray, tray
+        assert f"Remove {FOLDERS} selected items" not in tray and "Nothing was removed" not in tray, tray
         assert not any(path.exists() for path in paths)
         if cut:
             assert relay.cuts == 1

@@ -23,6 +23,13 @@ def test_a_quiet_install_renders_facts_without_ok_lines_or_cost_verdicts(tmp_pat
     (tmp_path / "memory" / "identity.md").write_text("I am Ouroboros.", encoding="utf-8")
     text = context_health.build_health_invariants(env)
     assert "identity.md last updated 0.0 h ago" in text
+    # Windows' coarse clock can read before the write's own timestamp (run 42412859782: "-0.0 h ago").
+    import os
+    import time
+
+    ahead = time.time() + 1
+    os.utime(tmp_path / "memory" / "identity.md", (ahead, ahead))
+    assert "identity.md last updated 0.0 h ago" in context_health.build_health_invariants(env)
     for gone in ("OK:", "HIGH-COST", "high-cost", "STALE IDENTITY", "THIN IDENTITY", "SCRATCHPAD", "version sync",
                  "budget drift within", "COST ACCOUNTING UNAVAILABLE"):
         assert gone not in text, gone

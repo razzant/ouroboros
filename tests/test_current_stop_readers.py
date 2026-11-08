@@ -8,6 +8,7 @@ run, so the census's reading of the row (``work_stop.task_current_stop``) rides 
 """
 from __future__ import annotations
 
+import datetime as _dt
 import json
 from types import SimpleNamespace
 
@@ -32,10 +33,13 @@ def _held_tree(tmp_path, monkeypatch):
     queue, state, workers = _install_queue(tmp_path, monkeypatch)
     monkeypatch.setattr(state, "budget_remaining", lambda *a, **k: 5.0)
     _live_tree(tmp_path, workers)
-    for task_id, status in (("child-run", STATUS_RUNNING), ("child-new", STATUS_SCHEDULED)):
-        # A scheduled child's own row names its lineage, as schedule_subagent writes it.
+    born = _dt.datetime.now(tz=_dt.timezone.utc) - _dt.timedelta(seconds=2)
+    for offset, (task_id, status) in enumerate((("child-run", STATUS_RUNNING), ("child-new", STATUS_SCHEDULED))):
+        # A scheduled child's own row names its lineage, as schedule_subagent writes it. Each is born at its own
+        # instant, as a mind's scheduled children are: readers order children by (ts, task_id), and two rows
+        # written in one clock tick (about 15.6 ms on Windows before Python 3.13) would tie and read by task_id.
         write_task_result(tmp_path, task_id, status, chat_id=0, parent_task_id="root-1", root_task_id="root-1",
-                          delegation_role="subagent")
+                          delegation_role="subagent", ts=(born + _dt.timedelta(seconds=offset)).isoformat())
     assert request_owner_pause("root-1", request_id="tree-pause")["ok"]
     sup = SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING=workers.RUNNING, PENDING=workers.PENDING,
                           WORKERS=workers.WORKERS, sort_pending=queue.sort_pending,

@@ -457,7 +457,8 @@ def test_every_completed_check_shows_the_open_reds_to_an_up_to_date_install(tmp_
     status = _status(available=False, latest_sha="", official_repo_url="https://github.com/razzant/ouroboros")
     record = letter.refresh_after_check(status, drive_root=tmp_path)
     assert [row["number"] for row in record["post_merge_reds"]["issues"]] == [2390]
-    cache = {"managed_update_cache": {"latest_sha": "", "available": False, "behind": 0, "ahead": 0, "checked_at": "t0"}}
+    cache = {"managed_update_cache": {"latest_sha": "", "available": False, "behind": 0, "ahead": 0, "checked_at": "t0",
+                                      "checked_head_sha": status["current_sha"]}}
     fact = letter.official_update_projection("a" * 40, drive_root=tmp_path, state=cache)
     assert fact["status"] == "up_to_date" and fact["letter"] is None
     assert fact["post_merge_reds"]["read"] == "observed" and fact["post_merge_reds"]["issues"][0]["number"] == 2390

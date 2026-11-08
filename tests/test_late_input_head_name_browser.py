@@ -31,9 +31,19 @@ QUESTION = ("Which database should the new billing service use for its write-hea
 NAME = "Which database should the new billing service use for its write-heavy event log…"  # 80 characters
 CARD = "Flights to Lisbon for the team offsite"
 ACTION = {"type": "action", "label": "Book it", "submit": {"id": "book"}}
+# `fits`: the whole line fits its bubble at that bubble's widest (its max-width share of the feed, within its margins),
+# in whatever font this platform sets it.
 LINE = """cmid => {
     const note = document.querySelector(`.chat-bubble.user[data-client-message-id="${cmid}"] .msg-routing-annotation`);
-    return note ? {text: note.textContent, cut: note.scrollWidth > note.clientWidth + 1} : null;
+    if (!note) return null;
+    const bubble = note.closest('.chat-bubble'), feed = bubble.parentElement;
+    const [fs, bs, ns] = [feed, bubble, note].map((node) => getComputedStyle(node));
+    const px = (style, ...sides) => sides.reduce((sum, side) => sum + (parseFloat(style[side]) || 0), 0);
+    const column = feed.clientWidth - px(fs, 'paddingLeft', 'paddingRight');
+    const max = bs.maxWidth.endsWith('%') ? column * parseFloat(bs.maxWidth) / 100 : parseFloat(bs.maxWidth) || column;
+    const room = Math.min(max, column - px(bs, 'marginLeft', 'marginRight'))
+        - px(bs, 'paddingLeft', 'paddingRight', 'borderLeftWidth', 'borderRightWidth') - px(ns, 'marginLeft', 'marginRight');
+    return {text: note.textContent, cut: note.scrollWidth > note.clientWidth + 1, fits: note.scrollWidth <= room + 1};
 }"""
 TITLE = """id => {
     const title = document.querySelector(`.chat-live-card[data-task-id="${id}"] [data-live-title]`);
@@ -265,8 +275,11 @@ def test_frames(direct_server_with_data, monkeypatch):
         release.set()
     for label, shown in facts.items():
         if isinstance(shown, dict) and "receipts" in shown:
-            # The receipt is one line: whole at the desktop width, ellipsized at a phone's (its words stay in it).
-            assert "-390x" in label or not any(row["cut"] for row in shown["receipts"].values()), (label, shown)
+            # The receipt is one line (its words stay in it): at the desktop width whole when the line fits its bubble
+            # at that bubble's widest and ellipsized only when it does not (Linux's DejaVu Sans sets the long name
+            # wider than macOS's font), ellipsized at a phone's.
+            lines = shown["receipts"].values()
+            assert "-390x" in label or all(row["cut"] != row["fits"] for row in lines), (label, shown)
             assert all(row["visible"] and not row["cut"] for row in shown["titles"].values()), (label, shown)
         if isinstance(shown, dict) and "rows" in shown:
             assert all(row and row["visible"] for row in shown["rows"].values()), (label, shown)

@@ -201,10 +201,12 @@ def test_decision_route_relays_to_the_one_decision_ingress(tmp_path, monkeypatch
 
     captured = {}
 
-    async def fake_answer(drive_root, body, *, source="web"):
+    async def fake_answer(drive_root, body, *, source="web", request=None):
         captured["drive_root"] = drive_root
         captured["body"] = body
         captured["source"] = source  # the relaying skill is the answer's transport, never "web"
+        # the relay hands the ingress its own request: a model-wait card's saved choice records its origin
+        captured["path"] = request.url.path if request is not None else None
         return 200, {"ok": True, "decision_id": body["decision_id"], "state": "answered", "answered_index": 1}
 
     monkeypatch.setattr(td, "answer_decision", fake_answer)
@@ -214,7 +216,7 @@ def test_decision_route_relays_to_the_one_decision_ingress(tmp_path, monkeypatch
 
     assert response.status_code == 200
     assert response.json() == {"ok": True, "decision_id": "quiz:task-1:q1", "state": "answered", "answered_index": 1}
-    assert captured == {"drive_root": tmp_path, "body": body, "source": "skill:telegram"}
+    assert captured == {"drive_root": tmp_path, "body": body, "source": "skill:telegram", "path": "/chat/decision"}
 
 
 def test_decision_route_returns_the_ingress_refusals_verbatim(tmp_path):
@@ -233,7 +235,7 @@ def test_decision_route_returns_the_ingress_refusals_verbatim(tmp_path):
 def test_decision_route_is_rate_limited_per_skill(tmp_path, monkeypatch):
     import ouroboros.gateway.task_decision as td
 
-    async def fake_answer(drive_root, body, *, source="web"):
+    async def fake_answer(drive_root, body, *, source="web", request=None):
         return 200, {"ok": True}
 
     monkeypatch.setattr(td, "answer_decision", fake_answer)

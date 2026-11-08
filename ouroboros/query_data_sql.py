@@ -255,6 +255,20 @@ def _communicate(proc, scratch, seconds, *, source_seconds=None):
             pass
 
 
+def _interpreter(env):
+    """The interpreter the child runs as ITSELF, so the deadline's kill and reap reach the reader.
+
+    A Windows venv's ``python.exe`` is a redirector that runs the base interpreter as its child: reaped,
+    it would leave the reader to die on its own after ``run_sql`` returned, still holding its source (a
+    WAL store's shared memory, which the next opener then cannot reset). As ``multiprocessing`` does
+    (bpo-35797), start the base interpreter and name the venv in ``__PYVENV_LAUNCHER__``."""
+    base = getattr(sys, "_base_executable", None) or sys.executable
+    if os.name == "nt" and os.path.normcase(base) != os.path.normcase(sys.executable):
+        env["__PYVENV_LAUNCHER__"] = sys.executable
+        return base
+    return sys.executable
+
+
 def run_sql(ctx, root, *, db, query, max_rows, max_bytes, snapshot, timeout_sec):
     """Only host-resolved sources cross the process boundary, never an SQL path."""
     from ouroboros.process_containment import CONTAINMENT_ENV_PREFIX
@@ -267,6 +281,7 @@ def run_sql(ctx, root, *, db, query, max_rows, max_bytes, snapshot, timeout_sec)
            or key.startswith(CONTAINMENT_ENV_PREFIX)}
     env.update(PYTHONDONTWRITEBYTECODE="1", PYTHONPATH=str(repo),
                OUROBOROS_DATA_DIR=str(root), OUROBOROS_REPO_DIR=str(repo), **lifeline_parent_env())
+    python = _interpreter(env)
     with tempfile.TemporaryDirectory(prefix="query-data-") as scratch:
         request = dict(root=str(root), db=db, query=query, max_rows=max_rows, max_bytes=max_bytes,
                        snapshot=snapshot, timeout_sec=timeout_sec, scratch=scratch, supervised=True)
@@ -275,7 +290,7 @@ def run_sql(ctx, root, *, db, query, max_rows, max_bytes, snapshot, timeout_sec)
         request_path = Path(scratch, "request.json")
         request_path.write_text(json.dumps(request), encoding="utf-8")
         proc = spawn_supervised(
-            [sys.executable, "-m", "ouroboros.query_data_sql", current_custody_session_id(), str(request_path)],
+            [python, "-m", "ouroboros.query_data_sql", current_custody_session_id(), str(request_path)],
             drive_root=Path(ctx.drive_root), purpose="query_data", scope="task",
             owner_task_id=str(ctx.task_id or ""), cwd=str(repo), env=env,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
