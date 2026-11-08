@@ -66,6 +66,27 @@ def test_speech_follows_the_second_stage_and_keeps_both_opinions(supervisor, sec
     assert sent or ("first reason" in msg and "second reason" in msg and "Message not sent" in msg)
 
 
+def test_the_speech_mark_follows_the_final_stage(supervisor, monkeypatch):
+    """Words only a verdict saw follow its final stage: a first stage's mark the second drops leaves a Cyber Pro write
+    as advice; a mark only the second stage gives refuses it once and sends the later identical re-issue."""
+    h = supervisor
+    monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")
+    h.values["OUROBOROS_SUBAGENTS"] = catalog()
+    dropped = {"cmd": "post the status"}
+    h.replies.extend([{"status": "DANGEROUS", "reason": "first", "speech": True},
+                      {"status": "DANGEROUS", "reason": "second", "speech": False}])
+    ok, message = h.module.check_safety("write_remote", dropped, ctx=h.ctx)
+    assert ok and "Cyber Pro leaves the decision to Ouroboros" in message
+    kept = {"cmd": "post the other status"}
+    h.replies.extend([{"status": "DANGEROUS", "reason": "first", "speech": False},
+                      {"status": "DANGEROUS", "reason": "second", "speech": True}])
+    ok, message = h.module.check_safety("write_remote", kept, ctx=h.ctx)
+    assert not ok and "Message not sent" in message
+    h.later()
+    ok, message = h.module.check_safety("write_remote", kept, ctx=h.ctx)
+    assert ok and "despite the check" in message and len(h.calls) == 4
+
+
 @pytest.mark.parametrize("second,allowed", [("SAFE", True), ("DANGEROUS", False)])
 def test_second_check_reads_an_answer_envelope(supervisor, second, allowed):
     h = supervisor

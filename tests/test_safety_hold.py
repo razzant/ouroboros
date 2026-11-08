@@ -10,6 +10,8 @@ from tests._safety_fixtures import supervisor as supervisor_fixture
 from tests.test_tool_effects import published_tool as _published_tool
 supervisor, published_tool = supervisor_fixture, _published_tool
 REAL_EFFECT_OF = _tool_effects.effect_of  # bound before the fixture stubs it
+from ouroboros import place_guard as _place_guard  # noqa: E402
+REAL_CALL_PLACE_FACTS = _place_guard.call_place_facts
 
 
 @pytest.mark.parametrize(("required", "mode"), [("explicit", "advanced"), ("consciousness", "cyber_pro")])
@@ -53,7 +55,7 @@ def test_held_words_wait_in_cyber_pro_whatever_tool_carries_them(supervisor, mon
         assert not ok and held in message, words[0]
         # Held words say so; an MCP call, which declares no words or destination, names its exact call for the card.
         assert ("These words wait" in message) is held_words
-        assert ("This call waits" in message and "exact call on the card" in message) is not held_words
+        assert ("This call waits" in message and "exact call on its own line" in message) is not held_words
     for other in ((name, {"path": "pins.add", "body": {"channel": "C1"}}), ("github_write", {"method": "comment"})):
         ok, message = h.module.check_safety(*other, ctx=h.ctx)
         assert ok and "SAFETY_ADVICE" in message and held in message, other[0]
@@ -63,7 +65,7 @@ def test_held_words_wait_in_cyber_pro_whatever_tool_carries_them(supervisor, mon
 
 
 @pytest.mark.parametrize("card,sent", [("exact", True), ("other words", False), ("no destination", False),
-                                       ("answered before", False)])
+                                       ("answered before", False), ("inside a line", False)])
 def test_my_humans_yes_on_the_exact_held_words_sends_them_on_a_later_decision(supervisor, monkeypatch, card, sent):
     """Held words wait in every mode and the hold names its exits. An owner quiz answered after the hold whose card
     holds the exact text and the destination lets an identical re-issue from a later model call send it, recorded
@@ -80,7 +82,7 @@ def test_my_humans_yes_on_the_exact_held_words_sends_them_on_a_later_decision(su
     h.replies.append(RuntimeError("provider_failed"))
     ok, message = h.module.check_safety("place_reply", reply, ctx=h.ctx)
     assert not ok and "SAFETY_UNAVAILABLE" in message and "no verdict" in message
-    assert "these exact words, unprefixed, and the destination Telegram · FusionBrain on the card" in message
+    assert "these exact words on their own lines, unprefixed, and the destination Telegram · FusionBrain" in message
     assert "Never route these words through another tool" in message
     held_at = datetime.fromisoformat(h.module._PRIOR_VERDICTS["work"][h.module._subject_digest("place_reply", reply)]["held_at"])
     words = "Status: all good." if card == "other words" else text
@@ -89,7 +91,8 @@ def test_my_humans_yes_on_the_exact_held_words_sends_them_on_a_later_decision(su
     h.ctx._owner_directives = [{"source": "owner_quiz_answer", "content": "1. Send it", "quiz_id": "q9",
                                 "ts": answered.isoformat(), "reply_to": {
                                     "address": "quiz q9 of task work", "author": "Ouroboros, task work",
-                                    "text": f"Send exactly this{place}?\n> {words}\n1. Send it\n2. Not now\n"
+                                    "text": (f"Send exactly this{place}: {words} — fine?\n" if card == "inside a line"
+                                             else f"Send exactly this{place}?\n{words}\n") + "1. Send it\n2. Not now\n"
                                             "(host record: my human pressed option 1)"}}]
     h.replies.append(RuntimeError("provider_failed"))
     assert not h.module.check_safety("place_reply", reply, ctx=h.ctx)[0]  # the same model call decides nothing new
@@ -116,7 +119,7 @@ def test_my_humans_yes_on_an_exact_held_mcp_call_runs_it_on_a_later_decision(sup
     for card, sent in ((exact.replace("Friday", "Monday"), False), (exact, True)):
         h.replies.append(RuntimeError("provider_failed"))
         ok, message = h.module.check_safety(name, call, ctx=h.ctx)
-        assert not ok and f"on the card: {exact}." in message
+        assert not ok and f"on its own line of the card: {exact}\n" in message
         held = datetime.fromisoformat(h.module._PRIOR_VERDICTS["work"][h.module._subject_digest(name, call)]["held_at"])
         h.ctx._owner_directives = [{"source": "owner_quiz_answer", "content": "1. Run it", "quiz_id": "q7",
                                     "ts": (held + timedelta(seconds=5)).isoformat(),
@@ -127,6 +130,32 @@ def test_my_humans_yes_on_an_exact_held_mcp_call_runs_it_on_a_later_decision(sup
         assert ok is sent and ("quiz q7" in message) is sent
         h.later()
     assert [event["quiz_id"] for event in h.events if event["type"] == "safety_sent_without_assessment"] == ["q7"]
+
+
+def test_my_humans_yes_reaches_a_declared_send_whose_room_is_no_place(supervisor, monkeypatch, published_tool):
+    """A connector's declared send into a room that is no place of it is held with its declared target named for the
+    card: my human's answer naming that target sends it on a later decision, one naming another target does not."""
+    from datetime import datetime, timedelta
+    from ouroboros import place_guard
+    h = supervisor
+    monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")
+    monkeypatch.setattr(_tool_effects, "effect_of", REAL_EFFECT_OF)
+    monkeypatch.setattr(place_guard, "call_place_facts", REAL_CALL_PLACE_FACTS)
+    name, _tool = published_tool("write", target=[], sends={"when": {"path": "chat.postMessage"},
+                                                             "target": "body.channel", "text": "body.text"})
+    call = {"path": "chat.postMessage", "body": {"channel": "C1", "text": "Ship it on Friday."}}
+    for room, sent in (("C2", False), ("C1", True)):
+        h.replies.append(RuntimeError("provider_failed"))
+        ok, message = h.module.check_safety(name, call, ctx=h.ctx)
+        assert not ok and "the destination C1 on the card" in message
+        held = datetime.fromisoformat(h.module._PRIOR_VERDICTS["work"][h.module._subject_digest(name, call)]["held_at"])
+        h.ctx._owner_directives = [{"source": "owner_quiz_answer", "content": "1. Send it", "quiz_id": "q8",
+                                    "ts": (held + timedelta(seconds=5)).isoformat(),
+                                    "reply_to": {"text": f"Send this to {room}?\nShip it on Friday.\n1. Send it"}}]
+        h.later()
+        h.replies.append(RuntimeError("provider_failed"))
+        assert h.module.check_safety(name, call, ctx=h.ctx)[0] is sent
+        h.later()
 
 
 def test_legacy_owner_backend_absence_still_warns(supervisor, monkeypatch):

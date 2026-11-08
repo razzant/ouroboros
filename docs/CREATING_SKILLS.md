@@ -986,8 +986,9 @@ contributes:
   about a write runs it unchecked, and Advises may call the tools a server marks read-only.
 - `target`/`conversation`/`thread` attribute each destination; a dotted name (`body.channel`) selects a nested
   argument (`args["body"]["channel"]`). `text` (default: the argument named `text`) names the words: when no check
-  could judge a message, your human's answer on a card holding those exact words and the destination lets the
-  mind's identical re-issue send it (an MCP call, declaring neither, is held with its exact call for that card).
+  could judge a message, your human's answer on a card holding those exact words as whole lines and the destination
+  (the place's label, else the declared targets) lets the mind's identical re-issue send it (an MCP call, declaring
+  neither, is held with its exact call for that card).
   Declare `account_id` for multi-account writes:
   an exact account outside all applicable Place scopes remains an ordinary tool target, including in Acts.
   Unresolved targets inside applicable scopes retain the Silent/Paused hold. Use the same canonical account key

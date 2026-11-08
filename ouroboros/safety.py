@@ -538,12 +538,12 @@ def _held_exits(ctx, tool_name, arguments, effect):
     words, destinations = _exit_subject(ctx, tool_name, arguments, effect)
     if effect.source == "mcp":
         return ("This call waits until a check judges it: its server does not mark it read-only, so it may deliver "
-                "words. Retry it in a later step, or ask your human privately with this exact call on the card: "
-                f"{words}. Their answer lets an identical re-issue from a later step run it unjudged. Never route it "
-                "through another tool.")
-    exit_line = (" Or ask your human privately with these exact words, unprefixed, and the destination "
-                 f"{', '.join(destinations)} on the card: their answer lets an identical re-issue from a later step "
-                 "send it unjudged." if words else " Retry in a later step.")
+                "words. Retry it in a later step, or ask your human privately with this exact call on its own line of "
+                f"the card: {words}\nTheir answer lets an identical re-issue from a later step run it unjudged. Never "
+                "route it through another tool.")
+    exit_line = (" Or ask your human privately with these exact words on their own lines, unprefixed, and the "
+                 f"destination {', '.join(destinations)} on the card: their answer lets an identical re-issue from a "
+                 "later step send it unjudged." if words else " Retry in a later step.")
     return f"These words wait until a check judges them.{exit_line} Never route these words through another tool."
 
 
@@ -556,14 +556,15 @@ def _exit_subject(ctx, tool_name, arguments, effect):
     """What my human's card must hold for a held call: its exact words and every destination (an MCP call, which
     declares neither: the exact call, ``_exact_call``); ``("", [])`` when the host cannot tell either."""
     from ouroboros.place_guard import call_place_facts
-    from ouroboros.tool_effects import argument_value
+    from ouroboros.tool_effects import argument_value, target_values
 
     if effect.source == "mcp":
         return _exact_call(tool_name, arguments), [tool_name]
     words = argument_value(arguments, effect.text or "text")
-    facts = call_place_facts(ctx, tool_name, arguments) or {}
+    facts = call_place_facts(ctx, tool_name, arguments) or {}  # a resolved place by its label, else the call's targets
     destinations = ([row["place_label"] for row in facts.get("places") or [] if row.get("place_label")]
-                    or [value for values in (facts.get("targets") or {}).values() for value in values])
+                    or [value for values in (facts.get("targets") or target_values(effect, arguments)).values()
+                        for value in values])
     return (words, destinations) if isinstance(words, str) and words.strip() and destinations else ("", [])
 
 
@@ -588,7 +589,8 @@ def _owner_yes(ctx, tool_name, arguments, effect, prior):
             later = answered is not None and answered > held
         except TypeError:  # an answer time without an offset is not comparable: not a fact this exit can use
             later = False
-        if row.get("source") == "owner_quiz_answer" and later and words in card and all(d in card for d in destinations):
+        if (row.get("source") == "owner_quiz_answer" and later and f"\n{words.strip()}\n" in f"\n{card}\n"
+                and all(d in card for d in destinations)):  # the words as whole lines of the card, never part of one
             return str(row.get("quiz_id") or row.get("msg_id") or "")
     return ""
 
@@ -1414,8 +1416,9 @@ def check_safety(
     only an identical re-issue (request_id included) from a later model call sends it; words only the verdict saw get
     that re-issue in Cyber Pro alone, and an ordinary mode checks each of their issues again. A hold on speech, or on
     an MCP call without a verdict, binds in every mode and names its exits; my human's answered card holding the exact
-    words and destination (an MCP call: the exact call) lets a later identical re-issue send it (``_owner_yes``); a
-    re-issue of words only the verdict saw meets the one-author guard first."""
+    words as whole lines and the destination (an MCP call: the exact call) lets a later identical re-issue send it
+    (``_owner_yes``). The speech mark is the final stage's, and a re-issue of words only the verdict saw meets the
+    one-author guard first."""
     # Arguments can be None for no-parameter tool calls.
     tool_name = str(tool_name or "").strip()
     arguments = arguments or {}
@@ -1506,7 +1509,7 @@ def check_safety(
     verdicts = getattr(assessment, "verdicts", ())
     if verdicts:
         # Speech follows the final assessment (a second check included): SUSPICIOUS sends with its warning.
-        marked = not speech and any(verdict.get("speech") is True for verdict in verdicts)  # words only the verdict saw
+        marked = not speech and verdicts[-1].get("speech") is True  # words only the final verdict saw
         speech = speech or marked
         flagged_speech = speech and getattr(assessment, "status", "") == "DANGEROUS"
         # Declared speech may be sent by a later decision in every mode; words only the verdict saw keep an ordinary
