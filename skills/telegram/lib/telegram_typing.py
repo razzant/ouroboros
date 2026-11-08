@@ -27,9 +27,13 @@ own mirror policy (``_target_chat``) to Telegram chats. ``chat.typing`` and
 Fail-soft, from Timik232's original refresher: transient failures (transport,
 429, 5xx) back off per chat on the bridge's shared pacing and recover on the
 first success; a permanent rejection mutes that chat with one warning until a
-message reaches it again. No ``asyncio.wait_for``: on Python 3.10 it can swallow
-a concurrent cancel. Unloading the skill cancels the task and its in-flight
-sends; a late wake is then a no-op.
+message reaches it again. That pacing and suppression belong to the accepted
+token's generation: after a change (the token observer wakes the cue) every chat
+starts over, and a request of the replaced token records nothing when it ends,
+success or failure. The message ordering above holds whatever the token. No
+``asyncio.wait_for``: on Python 3.10 it can swallow a concurrent cancel.
+Unloading the skill cancels the task and its in-flight sends; a late wake is
+then a no-op.
 """
 
 from __future__ import annotations
@@ -42,6 +46,7 @@ from typing import Any, AsyncIterator, Callable, Dict, Optional, Set
 
 from .telegram_api import (
     TELEGRAM_RETRY_INITIAL_SEC,
+    TelegramBindingChanged,
     TelegramRequestRejected,
     is_transient_telegram_error,
     next_telegram_retry_delay,
@@ -63,22 +68,28 @@ def host_reply_preparation(data_dir: Any) -> Dict[str, Any]:
 
 
 class TypingCue:
-    """One supervised refresher for every Telegram chat the bridge mirrors replies to."""
+    """One supervised refresher for every Telegram chat the bridge mirrors replies to.
+
+    ``generation()`` names the accepted token its clients are built from (the bridge's binding generation). It is
+    required because the per-chat pacing and suppression below belong to that token."""
 
     def __init__(self, *, read_state: Callable[[], Dict[str, Any]],
                  targets: Callable[[Dict[str, Any]], Set[int]],
-                 client_factory: Callable[[], Any], warn: Callable[[str], None]) -> None:
+                 client_factory: Callable[[], Any], warn: Callable[[str], None],
+                 generation: Callable[[], Any]) -> None:
         self._read_state, self._targets = read_state, targets
-        self._client_factory, self._warn = client_factory, warn
+        self._client_factory, self._warn, self._generation = client_factory, warn, generation
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._event: Optional[asyncio.Event] = None
         self._inflight: Dict[int, "asyncio.Future[None]"] = {}
         self._fence: Dict[int, int] = {}  # per chat: messages begun, the read fence
         self._sending: Dict[int, int] = {}  # per chat: messages still on their way
-        self._renewed: Dict[int, float] = {}  # per chat: when the last action started
+        # Per chat, for the token generation ``_scope`` only:
+        self._renewed: Dict[int, float] = {}  # when the last action started
         self._retry_at: Dict[int, float] = {}
         self._delay: Dict[int, float] = {}
         self._muted: Set[int] = set()
+        self._scope: Any = None
         self._last_read = float("-inf")
 
     def wake(self) -> None:
@@ -134,6 +145,7 @@ class TypingCue:
                 fence, self._last_read = dict(self._fence), time.monotonic()
                 try:
                     state = await asyncio.to_thread(self._read_state)
+                    self._rescope()
                     chats = self._targets(state) - self._muted  # a muted chat waits for a message, not a read
                 except asyncio.CancelledError:
                     raise
@@ -181,12 +193,31 @@ class TypingCue:
             self._inflight[chat] = asyncio.ensure_future(self._send(chat))
         return max(due, _MIN_READ_GAP_SEC)
 
+    def _rescope(self) -> None:
+        """A replaced token's refusal, backoff and spacing say nothing about its replacement: each chat starts over."""
+        generation = self._generation()
+        if generation != self._scope:
+            self._scope = generation
+            for state in (self._renewed, self._retry_at, self._delay, self._muted):
+                state.clear()
+
+    def _replaced(self, scope: Any) -> bool:
+        """The request begun in ``scope`` ended after its token was replaced: it records nothing, and the
+        replacement's action there need not wait out a spacing for it."""
+        if scope == self._scope == self._generation():
+            return False
+        self.wake()
+        return True
+
     async def _send(self, chat: int) -> None:
+        scope = self._scope
         try:
             await self._client_factory().send_chat_action(chat, "typing")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if self._replaced(scope) or isinstance(exc, TelegramBindingChanged):
+                return  # the token changed under it: a wait, never a failure of either token
             if isinstance(exc, TelegramRequestRejected) and not is_transient_telegram_error(exc):
                 # Bad token, blocked bot, wrong chat: stop this chat once, loudly enough to be seen.
                 self._muted.add(chat)
@@ -197,5 +228,7 @@ class TypingCue:
             self._retry_at[chat] = time.monotonic() + self._delay[chat]
             log.debug("Telegram typing renewal deferred: %s", exc)
         else:
+            if self._replaced(scope):
+                return  # the replaced token's success clears nothing of its replacement's
             self._delay.pop(chat, None)
             self._retry_at.pop(chat, None)

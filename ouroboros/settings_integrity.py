@@ -412,7 +412,7 @@ def skill_environ() -> dict:
     return {key: value for key, value in source.items() if key not in ours or ours[key] != _value_digest(value)}
 
 
-def skill_settings(settings_reader=None) -> dict:
+def skill_settings(settings_reader=None, *, strict: bool = False) -> dict:
     """What a skill reads: the settings document as it reads now, in a task or not (owner choice A, #1122).
 
     The one reader behind a skill's ``PluginAPI.get_settings``, its scripts' and companions' environment, the
@@ -423,11 +423,27 @@ def skill_settings(settings_reader=None) -> dict:
     environment stand in for a key the document leaves unset, and a long-lived process still holds what earlier
     projections mirrored there — this task's start, an earlier task's, the server's it inherited — so a key the owner
     cleared or deleted since would come back. The read overlays ``skill_environ`` instead: our mirrored values never
-    stand in, an operator's own variable still does. Nothing here touches the process environment."""
+    stand in, an operator's own variable still does. Nothing here touches the process environment.
+
+    ``strict`` keeps these semantics but raises ``SettingsDocumentUnknown`` for a present document that cannot be
+    read as one object, where the default read falls back to defaults. A reader that reads the document says so by
+    accepting ``strict`` as ``config.load_settings`` does (an out-of-process child's reader, with its operator
+    overlay, does too); one that does not (a fixed snapshot: a catalog's declared inputs, a test) has no document
+    to be unknown and reads as given."""
     from ouroboros import config
 
+    reader = settings_reader or config.load_settings
     with settings_read_environ(skill_environ()):
-        return dict((settings_reader or config.load_settings)() or {})
+        return dict((reader(strict=True) if strict and _reads_strictly(reader) else reader()) or {})
+
+
+def _reads_strictly(reader) -> bool:
+    import inspect
+
+    try:
+        return "strict" in inspect.signature(reader).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 def selection_settings(*, settings_reader=None) -> dict:
@@ -547,6 +563,50 @@ def read_settings_json_verified(settings_path: Path, *, behind_writer: bool = Fa
         if expected_settings_sha256():
             raise SettingsIntegrityError("settings snapshot is unreadable") from exc
         return _read_behind_the_writer(settings_path) if behind_writer else None
+
+
+class SettingsDocumentUnknown(RuntimeError):
+    """A present settings document could not be read as one JSON object: its values are unknown, not absent."""
+
+
+def read_settings_json_strict(settings_path: Path, *, behind_writer: bool = False) -> dict | None:
+    """``read_settings_json_verified`` that tells absent from unknown: ``None`` only for a file that does not exist;
+    an unreadable, undecodable or non-object document (JSON ``null`` included) raises ``SettingsDocumentUnknown``
+    after the same single read behind the writer's lock. A pin keeps its typed ``SettingsIntegrityError``."""
+    pinned = bool(expected_settings_sha256())
+    if pinned:
+        value = read_settings_json_verified(settings_path)  # under a pin an absent file is already typed
+    else:
+        try:
+            with settings_path.open("rb") as handle:
+                raw = handle.read()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            if behind_writer:
+                return _strict_behind_the_writer(settings_path)
+            raise SettingsDocumentUnknown("settings document is unreadable") from exc
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            if behind_writer:
+                return _strict_behind_the_writer(settings_path)
+            raise SettingsDocumentUnknown("settings document is not valid JSON") from exc
+    if not isinstance(value, dict):
+        if behind_writer and not pinned:
+            return _strict_behind_the_writer(settings_path)
+        raise SettingsDocumentUnknown("settings document is not an object")
+    return value
+
+
+def _strict_behind_the_writer(settings_path: Path) -> dict | None:
+    from ouroboros import config
+
+    fd = config._acquire_settings_lock()
+    try:
+        return read_settings_json_strict(settings_path)
+    finally:
+        config._release_settings_lock(fd)
 
 
 def _read_behind_the_writer(settings_path: Path):

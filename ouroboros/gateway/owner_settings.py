@@ -58,7 +58,9 @@ from ouroboros.config import defaults_for_settings_document as _defaults_for_set
 from ouroboros.context_mode_compat import normalize_context_mode_compat
 from ouroboros.control_actor import PAUSE_AUTHORS
 from ouroboros.gateway._helpers import json_error, request_drive_root
-from ouroboros.settings_integrity import SettingsIntegrityError, read_settings_json_verified
+from ouroboros.settings_integrity import (
+    SettingsDocumentUnknown, SettingsIntegrityError, read_settings_json_strict, read_settings_json_verified,
+)
 from ouroboros.utils import append_jsonl, utc_now_iso, write_text_atomic
 
 log = logging.getLogger(__name__)
@@ -115,10 +117,11 @@ class SettingsPreconditionFailed(RuntimeError):
     """A locked-in precondition refused the write; nothing was persisted."""
 
 
-class SettingsDocumentUnreadable(SettingsPreconditionFailed):
+class SettingsDocumentUnreadable(SettingsPreconditionFailed, SettingsDocumentUnknown):
     """The settings document exists but does not read as a JSON object (an open the OS refuses, broken
     JSON, another JSON type). Only an absent document is new: this one is never merged into or written
-    over as if it were empty, and its bytes stay exactly as they are."""
+    over as if it were empty, and its bytes stay exactly as they are. The owner endpoints' form of the
+    one strict read's ``SettingsDocumentUnknown`` (``settings_integrity.read_settings_json_strict``)."""
 
 
 UNREADABLE_SETTINGS_REFUSAL = (
@@ -360,7 +363,8 @@ def settings_document_digest() -> str:
         return f"unreadable:{type(exc).__name__}:{uuid4()}"
 
 
-def _owner_read_settings_raw(document_out: Optional[Dict[str, Any]] = None, *, strict: bool = False) -> Dict[str, Any]:
+def _owner_read_settings_raw(document_out: Optional[Dict[str, Any]] = None, *, strict: bool = False,
+                             behind_writer: bool = False) -> Dict[str, Any]:
     """Read settings for owner endpoints without applying runtime-mode ratchets.
 
     "Raw" is about the RATCHETS, never about the migrations: the document is normalized
@@ -377,21 +381,28 @@ def _owner_read_settings_raw(document_out: Optional[Dict[str, Any]] = None, *, s
 
     ``strict`` (every write, and a form that judges a key against the document) tells an absent
     document, which is new and empty, from a present one that cannot be read as an object, which
-    raises ``SettingsDocumentUnreadable`` instead of reading as defaults."""
+    raises ``SettingsDocumentUnreadable`` instead of reading as defaults. It is the one strict read
+    the skills' settings use (``read_settings_json_strict``). ``behind_writer`` (a reader outside
+    the settings lock) reads a torn document once more behind that lock, as a skill's read does; a
+    writer already holds the lock, which is not re-entrant, so it never asks for it."""
     from ouroboros import config as _config
 
     # An existing (even unreadable) document keeps the optional bounds it ran under.
     merged = _defaults_for_settings_document(_config.SETTINGS_PATH.exists())
     document: Dict[str, Any] = {}
     try:
-        raw = read_settings_json_verified(_config.SETTINGS_PATH)
+        if strict:
+            try:
+                raw = read_settings_json_strict(_config.SETTINGS_PATH, behind_writer=behind_writer)
+            except SettingsDocumentUnknown as exc:
+                raise SettingsDocumentUnreadable(UNREADABLE_SETTINGS_REFUSAL) from exc
+        else:
+            raw = read_settings_json_verified(_config.SETTINGS_PATH)
         if isinstance(raw, dict):
             raw = normalize_context_mode_compat(
                 raw, settings_path=_config.SETTINGS_PATH, warn_ambiguous=True,
             )
             document = _config.normalize_settings_raw(raw)
-        elif strict and (raw is not None or _settings_document_present()):
-            raise SettingsDocumentUnreadable(UNREADABLE_SETTINGS_REFUSAL)
     except (SettingsIntegrityError, SettingsDocumentUnreadable):
         raise
     except Exception as exc:
@@ -415,9 +426,10 @@ def _settings_document_present() -> bool:
 
 def _owner_settings_document(*, strict: bool = False) -> Dict[str, Any]:
     """The normalized settings document alone (what the owner authored, no defaults); ``strict`` as
-    in ``_owner_read_settings_raw``."""
+    in ``_owner_read_settings_raw``, read outside the settings lock (never by a writer holding it), so
+    a document a writer is replacing is read once more behind that lock instead of called unreadable."""
     document: Dict[str, Any] = {}
-    _owner_read_settings_raw(document_out=document, strict=strict)
+    _owner_read_settings_raw(document_out=document, strict=strict, behind_writer=strict)
     return document
 
 

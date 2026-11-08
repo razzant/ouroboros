@@ -563,10 +563,9 @@ Out-of-process extensions have near full PluginAPI parity. They proxy tools, HTT
 routes, WS handlers, UI tabs, and settings sections; `on_unload` runs at child
 teardown; `send_ws_message` relays to the browser through the Host Service
 `POST /ui/ws-message` bridge; and `register_companion_process` is cataloged so the
-host spawns and supervises a long-lived companion for background work. Only two
-capabilities have no meaning in a short-lived per-call child and stay unavailable
-there: `subscribe_event` and `register_supervised_task` (an in-process asyncio
-task). For long-running work, host-event subscription, or live progress that must
+host spawns and supervises a long-lived companion for background work. What has no
+meaning in a per-call child stays unavailable there (`OUT_OF_PROCESS_UNAVAILABLE_CAPABILITIES`):
+event subscriptions, supervised tasks, realtime registration and a companion refresh. For long-running work, host-event subscription, or live progress that must
 outlast a single call, declare a `companion_process` — a host-supervised
 subprocess that already receives `HOST_SERVICE_URL`/`HOST_SERVICE_TOKEN` and can
 call `POST /ui/ws-message` and connect to `WS /events`. A skill can read
@@ -673,15 +672,13 @@ and currently produces no warning from the parser, `validate()`, or
 `skill_preflight`. The eventual error names only the plural key.
 
 There is no `on_enable` trigger and no `once` flag. After a skill is enabled, the
-host starts a companion whose name `register()` has registered; for an
-out-of-process extension, this handoff can be asynchronous. The companion is
+host starts a companion whose name `register()` has registered (asynchronously out of
+process). The companion is
 supervised from there; `restart_policy: on_failure`
 restarts it only on a non-zero exit, so a one-shot script that exits 0 runs
 once, and `max_restarts` (default 5, counted within a 300-second window) bounds
-the loop before `companion_restart_exhausted` is recorded. For work that must
-happen before the first tool call, remember that an out-of-process extension
-already runs `register()` in every per-call child — see the out-of-process
-caveats above — so cheap idempotent setup belongs there, not in a companion.
+the loop before `companion_restart_exhausted` is recorded. Cheap idempotent setup
+needed before the first tool call belongs in `register()` (caveat 1 above), not a companion.
 
 `env` and `ports` may also be declared on the descriptor. Neither passes as
 written: the host drops `HOST_SERVICE_TOKEN`, `HOST_SERVICE_URL`,
@@ -885,16 +882,25 @@ to the same keys.
 Saving is not a connection and grants nothing. The outcome names what each skill that reads the key can read now:
 a newly saved key needs the owner's grant in Skills. Replacing a key while a skill that reads it is enabled is
 allowed; the skill may read the new value on its next call, while code that copied the value at start (a poller,
-a companion's environment) keeps the old one until it restarts, so say in your SKILL.md what your skill needs
-(Telegram: disable and re-enable it). Chat transports receive such a request as a note saying where to enter it;
-a transport must not offer a reply as an answer to it.
+a companion's environment) keeps the old one until it restarts. A skill can apply saves itself with PluginAPI 2.4:
+`get_settings_state(keys)` tells `ok` values and missing keys from an `unknown` (unreadable) document, and
+`refresh_companion_process(name, expected)`, off the event loop, respawns that companion only when its
+`env_from_settings` values changed; `expected` holds the values you read (empty for missing). It answers
+`unchanged` or `not_running` (nothing to do; a crash's absence is the crash monitor's), `restarted` or `started`
+(also for one a refresh stopped and could not replace), a lifecycle control that wins (`access_closed`, `panic`,
+`disabled`, `missing_grants`, else `not_desired`), no supervisor here (`not_server`, `no_supervisor`), or a state
+to ask about again: `not_started`, `retained`/`stop_unconfirmed` (the old process is not observed dead),
+`settings_unknown` and `settings_changed` (the companion carries a save made after your read: read again). With
+`only_if_differs=True` and `expected` naming every `env_from_settings` key, a companion already carrying your read
+answers from memory, reading no Settings, so you can confirm at each read that one started elsewhere (recovery
+after exhausted restarts) still carries it. A refused spawn raises `OSError`. Say in your SKILL.md which your
+skill does (Telegram applies saves itself). Chat transports receive such a request as a note saying where to
+enter it; a transport must not offer a reply as an answer to it.
 
 ## Grants for protected keys and host permissions
 
-Some settings keys are protected: `OPENROUTER_API_KEY`,
-`OPENAI_API_KEY`, `OPENAI_COMPATIBLE_API_KEY`, `ANTHROPIC_API_KEY`, `MINIMAX_API_KEY`, `DEEPSEEK_API_KEY`, `ZAI_API_KEY`,
-`CLOUDRU_FOUNDATION_MODELS_API_KEY`, `GIGACHAT_CREDENTIALS`, `GIGACHAT_PASSWORD`, `TELEGRAM_BOT_TOKEN`,
-`GITHUB_TOKEN`, `OUROBOROS_NETWORK_PASSWORD`. These keys are NEVER
+Some settings keys are protected: the provider, GitHub and network keys of `FORBIDDEN_SKILL_SETTINGS`
+(`ouroboros/contracts/plugin_api.py`) and `TELEGRAM_BOT_TOKEN`. These keys are NEVER
 forwarded to a skill by default, even when listed in
 `env_from_settings`. Custom secret keys stored in Settings → Secrets
 are treated the same way; such a key joins a skill's request once it is saved, so a newly saved key is missing
@@ -902,7 +908,7 @@ until the owner grants it, while the skill keeps its other approvals for the sam
 `api.get_settings` call, script run, out-of-process call and companion start sees a
 value the owner saved, rotated or deleted during a running task, while that task keeps
 its own model, account and review settings; a value your code already copied or cached,
-a running companion's environment included, is not refreshed for you. Host permissions such as `inject_chat`, `presence`,
+a running companion's environment included, is not refreshed for you ("Asking the owner for a secret"). Host permissions such as `inject_chat`, `presence`,
 `notify_owner` and chat event subscriptions also require explicit, content-hash-bound owner
 consent. The desktop launcher's owner-grant bridge records these grants.
 
@@ -1759,18 +1765,18 @@ The frozen ABI is documented in
 This section shows the practical shape.
 
 Extensions declare the PluginAPI generation they bind against in the manifest
-(PluginAPI 2.3; declarations of 2.0, 2.1 and 2.2 remain supported):
+(PluginAPI 2.4; a payload declaring any 2.x minimum negotiates the host's 2.4, methods included):
 
 ```yaml
-plugin_api: "2.3"            # major strict; minor = required minimum
+plugin_api: "2.4"            # major strict; minor = required minimum
 # or, with required capabilities (closed set, validated per execution mode):
 # plugin_api:
-#   version: "2.3"
+#   version: "2.4"
 #   capabilities: [register_tool, subscribe_event]
 ```
 
 A payload without the field binds the legacy "1.3" generation by
-construction: an already-reviewed payload keeps loading on its existing
+construction (2.4's `get_settings_state` and `refresh_companion_process` refuse it): an already-reviewed payload keeps loading on its existing
 hash-bound review PASS, but a NEW review PASS (LLM review, owner attestation,
 or an install-basis acceptance) is refused until the field is declared.
 
@@ -1896,7 +1902,7 @@ def register(api):
     # Settings sections use a narrow declarative subset: form/action for
     # configuration writes and markdown/json for explanatory diagnostics.
     # Rich widget-only components (media, stream, map, kanban, module JS)
-    # belong on the Widgets page, not Settings.
+    # belong on the Widgets page.
     # Hydration: before rendering a form/action that has fields the host issues
     # GET on the component's own route. Answer 2xx with a JSON object
     # {field_name: current_value} (strings) to pre-fill those fields; omit a
@@ -1909,6 +1915,9 @@ def register(api):
     # failed read disables Save and tells the owner to reload. Password
     # fields are never pre-filled, so treat an empty password on save as
     # "unchanged". Reference: skills/telegram/plugin.py, GET+POST settings/save.
+    # A form whose fields are all disabled is a status (Telegram's Connection):
+    # its neutral button checks again (busy_label) and refills them from the
+    # POST answer, announcing no save; a disabled textarea is shown whole.
     api.register_settings_section(
         "config",
         title="Search settings",

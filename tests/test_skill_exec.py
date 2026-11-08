@@ -2029,6 +2029,7 @@ def test_env_denylist_blocks_secret_forwarding(tmp_path, monkeypatch):
             "GITHUB_TOKEN": "ghp_leak",
             "TIMEZONE": "UTC",
             "SOME_OK_KEY": "visible-value",
+            "TOTAL_BUDGET": 7,
         },
     ):
         env = se._scrub_env(
@@ -2037,6 +2038,7 @@ def test_env_denylist_blocks_secret_forwarding(tmp_path, monkeypatch):
                 "GITHUB_TOKEN",
                 "OUROBOROS_NETWORK_PASSWORD",
                 "SOME_OK_KEY",
+                "TOTAL_BUDGET",
             ],
             skill_state_dir_path=skill_state_dir_path,
             skill_name="ok",
@@ -2048,8 +2050,10 @@ def test_env_denylist_blocks_secret_forwarding(tmp_path, monkeypatch):
     assert "GITHUB_TOKEN" not in env
     assert "OUROBOROS_NETWORK_PASSWORD" not in env
     # Non-protected manifest-requested keys still flow without grants; custom
-    # secrets become grant-bound after the owner stores them in Settings.
-    assert env["SOME_OK_KEY"] == "visible-value"
+    # secrets become grant-bound after the owner stores them in Settings, as
+    # the very document the values come from shows them (never a second read).
+    assert env["TOTAL_BUDGET"] == "7"
+    assert "SOME_OK_KEY" not in env
 
     with patch.object(se, "load_settings", return_value={"OPENROUTER_API_KEY": "sk-or-v1-GRANTED"}):
         granted_env = se._scrub_env(

@@ -39,6 +39,9 @@ const LIFECYCLE_VISIBLE_STATUSES = new Set(['queued', 'running', 'failed']);
 const INSTALLED_FILTERS = [
     ['all', 'All'], ['needs', 'Needs you'], ['updates', 'Updates'], ['off', 'Off'], ['made', 'Made here'],
 ];
+// The line under an Installed filter that shows no card: an empty Needs you is good news, not a search that missed.
+const FILTER_EMPTY = 'No installed skill matches.';
+const NOTHING_NEEDS_YOU = 'Nothing needs you now.';
 const WORK_POLL_MS = 3000;
 const REVIEW_POLL_MS = 15000;
 
@@ -62,7 +65,7 @@ function skillsPageTemplate() {
                 <div class="skills-tab-panel" id="skills-pane-installed" data-pane="installed" role="tabpanel" aria-labelledby="skills-tab-installed">
                     <div id="skills-status" class="ui-status skills-list-status" role="status" aria-live="polite"></div>
                     <div id="skills-list" class="skills-list"></div>
-                    <p id="skills-filter-empty" class="skills-empty" hidden>No installed skill matches.</p>
+                    <p id="skills-filter-empty" class="skills-empty" hidden>${FILTER_EMPTY}</p>
                     <div id="skills-empty" class="skills-empty" hidden>
                         <p>No skills yet. Pick one in Browse, or ask Ouroboros: “find a skill for …”.</p>
                         <button type="button" class="btn btn-primary btn-sm" data-skills-goto="browse">Browse skills</button>
@@ -298,6 +301,7 @@ export function initSkills(ctx = {}) {
     let destroyed = false;
     let renderGeneration = 0;
     let filter = 'all';
+    let filterEmptySentence = FILTER_EMPTY;  // the English last written, so a translated line is not rewritten each paint
     let snapshot = null;   // { rawSkills, live, queue, githubTokenConfigured }
     let activeMenu = null;
     let sheet = null;
@@ -363,14 +367,19 @@ export function initSkills(ctx = {}) {
         const byName = installedByName() || new Map();
         const pageModules = pageModuleFacts();
         let shown = 0;
+        let members = 0;
         for (const card of container.querySelectorAll(':scope > .skills-card')) {
             const skill = byName.get(card.dataset.skill);
-            const ok = !skill || (matchesInstalledFilter(skill, filter, installedSkillModel(skill, { pageModules }))
-                && (!query || [skill.name, skill.description].some((text) => String(text || '').toLowerCase().includes(query))));
+            const member = !skill || matchesInstalledFilter(skill, filter, installedSkillModel(skill, { pageModules }));
+            const ok = member && (!skill || !query
+                || [skill.name, skill.description].some((text) => String(text || '').toLowerCase().includes(query)));
             card.hidden = !ok;
+            if (member) members += 1;
             if (ok) shown += 1;
         }
         const total = container.querySelectorAll(':scope > .skills-card').length;
+        const sentence = filter === 'needs' && !members ? NOTHING_NEEDS_YOU : FILTER_EMPTY;
+        if (sentence !== filterEmptySentence) filterEmpty.textContent = filterEmptySentence = sentence;
         filterEmpty.hidden = !(total && !shown);
     }
 
@@ -790,6 +799,7 @@ export function initSkills(ctx = {}) {
     async function runInstalledAction(name, action, options = {}) {
         if (action === 'open_detail') { openInstalledSheet(name, options.node); return false; }
         if (action === 'open_widgets') { document.querySelector('[data-nav-page="widgets"]')?.click(); return false; }
+        if (action === 'open_secrets') { if (typeof ctx.openSettingsTab === 'function') ctx.openSettingsTab('secrets'); return false; }
         if (action === 'read_findings') { openFindings(name); return false; }
         if (action === 'find_in_browse') { selectTab('browse'); browse?.searchFor(name); return false; }
         if (action === 'review' || action === 'rereview') {

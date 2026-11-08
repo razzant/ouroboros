@@ -71,11 +71,13 @@ def test_catalog_reload_counts_and_declared_input_invalidation(tmp_path, monkeyp
         "    label = api.get_settings(['LABEL']).get('LABEL', 'unset')\n"
         "    api.register_tool('ping', lambda ctx: 'ok', description=label + os.environ.get('LANG', ''), schema={})\n"
     )
+    # Each label is an ordinary setting the skill reads without a grant (a custom key would be a custom secret).
+    label_keys = {"first": "OUROBOROS_UPDATE_CHANNEL", "second": "OUROBOROS_UI_LANGUAGE"}
     for name in ("first", "second"):
         skill, repo, drive = _prepare_extension(
-            tmp_path, name, plugin.replace("LABEL", name.upper() + "_LABEL"),
-            ["tool", "read_settings"], env_from_settings=[name.upper() + "_LABEL"],
-            extra_frontmatter=f"dependencies: [dummy_pkg]\ncatalog_inputs:\n  settings: [{name.upper()}_LABEL]\n  environment: [LANG]\n",
+            tmp_path, name, plugin.replace("LABEL", label_keys[name]),
+            ["tool", "read_settings"], env_from_settings=[label_keys[name]],
+            extra_frontmatter=f"dependencies: [dummy_pkg]\ncatalog_inputs:\n  settings: [{label_keys[name]}]\n  environment: [LANG]\n",
         )
         _mark_isolated_deps_installed(drive, skill)
     children = []
@@ -88,7 +90,7 @@ def test_catalog_reload_counts_and_declared_input_invalidation(tmp_path, monkeyp
         return popen(cmd, *args, **kwargs)
 
     monkeypatch.setattr(subprocess, "Popen", counted)
-    settings = {"FIRST_LABEL": "one", "SECOND_LABEL": "one"}
+    settings = {label_keys["first"]: "one", label_keys["second"]: "one"}
 
     def reload():
         assert loader.reload_all(drive, lambda: settings, repo_path=str(repo)) == {"first": None, "second": None}
@@ -109,13 +111,13 @@ def test_catalog_reload_counts_and_declared_input_invalidation(tmp_path, monkeyp
 
     # Change just one payload, keeping version constant; only its child runs.
     source = repo / "first" / "plugin.py"
-    source.write_text(plugin.replace("LABEL", "FIRST_LABEL") + "# revised payload\n", encoding="utf-8")
+    source.write_text(plugin.replace("LABEL", label_keys["first"]) + "# revised payload\n", encoding="utf-8")
     skill = find_skill(drive, "first", repo_path=str(repo))
     save_review_state(drive, "first", SkillReviewState(status="pass", content_hash=skill.content_hash))
     reload()
     assert children == ["first"]
     children.clear()
-    settings["FIRST_LABEL"] = "two"
+    settings[label_keys["first"]] = "two"
     reload()
     assert children == ["first"]
     for name, label in (("first", "two"), ("second", "one")):

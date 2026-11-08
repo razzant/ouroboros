@@ -91,10 +91,10 @@ def test_open_pins_the_reprepared_account_despite_another_settings_edit(host_wor
 def test_capture_is_private_per_api_and_still_obeys_the_grant(tmp_path):
     from ouroboros.realtime_credentials import SessionCredentials
 
-    settings = {'OPENAI_API_KEY': 'synthetic-current', 'theme': 'dark'}
+    settings = {'OPENAI_API_KEY': 'synthetic-current', 'TOTAL_BUDGET': 5}  # and an ordinary, ungranted setting
     def make():
         return PluginAPIImpl(_PluginAPIConfig(skill_name='fixture', permissions=['read_settings'],
-            env_allowlist=['OPENAI_API_KEY', 'theme'], granted_keys=['OPENAI_API_KEY'],
+            env_allowlist=['OPENAI_API_KEY', 'TOTAL_BUDGET'], granted_keys=['OPENAI_API_KEY'],
             state_dir=tmp_path, settings_reader=lambda: dict(settings)))
     api, other = make(), make()
     capture = SessionCredentials(api, {'OPENAI_API_KEY': 'synthetic-captured'}, 'synthetic-scope')
@@ -103,5 +103,5 @@ def test_capture_is_private_per_api_and_still_obeys_the_grant(tmp_path):
         assert api.get_settings(settings) == {**settings, 'OPENAI_API_KEY': 'synthetic-captured'}
         assert other.get_settings(settings) == settings
         api._granted_upper = frozenset()
-        assert api.get_settings(settings) == {'theme': 'dark'}
+        assert api.get_settings(settings) == {'TOTAL_BUDGET': 5}
     assert other.get_settings(settings) == settings

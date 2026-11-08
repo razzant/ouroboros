@@ -75,6 +75,24 @@ function statusBadge(status, gate = null, profile = '') {
     return chipHtml(status || 'pending', tone);
 }
 
+// Declared secret fields as the listing projects them (configured / missing / unknown; never a value), on an enabled
+// skill whose grant covers them. A missing one asks the owner to save it, so the same condition puts the card in Needs
+// you; an unreadable one asks nothing. When the skill applies a saved value is its own status.
+function secretConfigTray(skill) {
+    const fields = Array.isArray(skill?.secret_config?.fields) ? skill.secret_config.fields : [];
+    const keys = (state) => fields.filter((field) => field?.state === state).map((field) => String(field.key || ''));
+    const missing = keys('missing');
+    const unknown = keys('unknown');
+    if (!skill.enabled || !grantReady(skill) || (!missing.length && !unknown.length)) return { tray: '', needs: false };
+    const sentence = missing.length
+        ? `${escapeHtml(missing.join(', '))} ${missing.length > 1 ? 'are' : 'is'} not set.`
+        : `Saved settings can’t be read now, so whether ${escapeHtml(unknown.join(', '))} ${unknown.length > 1 ? 'are' : 'is'} set is unknown.`;
+    // An unknown value is not a reason to save again.
+    const note = missing.length ? `Save ${missing.length > 1 ? 'them' : 'it'} in Settings → Secrets.` : '';
+    const tray = trayHtml({ sentence, note, actions: smallButton('Open Secrets', String(skill.name || ''), 'open_secrets') });
+    return { tray, needs: missing.length > 0 };
+}
+
 function missingGrantLoadError(skill) {
     return !grantReady(skill) && String(skill.load_error || '').includes('missing owner grants');
 }
@@ -320,6 +338,10 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
         trays.push(trayHtml({ sentence: parts.join(' ') || 'Wants access you haven’t given yet.',
             actions: smallButton('Grant access', name, 'grant', `data-keys="${escapeHtml([...keys, ...permissions].join(','))}"`) }));
     }
+
+    const secrets = secretConfigTray(skill);
+    if (secrets.tray) trays.push(secrets.tray);
+    if (secrets.needs) needs = true;
 
     const updateAction = update && !install?.pending_update
         ? smallButton(modified || install?.base_known === false ? 'Update…' : 'Update', name, 'update') : '';

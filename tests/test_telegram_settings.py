@@ -281,23 +281,30 @@ def test_bridge_status_reports_deferred_validation_as_degraded(tmp_path: Path) -
     instead of `ready`/absent, in the SAME two-section body the UI renders."""
     plugin = _load_plugin()
     merge_settings(tmp_path, {"TELEGRAM_CHAT_ID": "42", "TELEGRAM_COMMAND_MODE": "full_access"})
-    (tmp_path / "bridge_status.json").write_text(
-        json.dumps({"state": "degraded", "reason_code": "telegram_startup_deferred"}), encoding="utf-8",
-    )
-    response = asyncio.run(plugin._make_status(_RouteApi(tmp_path))(None))
+    api = _RouteApi(tmp_path)
+    # The poller records the deferral for this load's token; the same file read by another load proves nothing.
+    plugin._save_bridge_status(api, "degraded", "telegram_startup_deferred")
+    assert json.loads((tmp_path / "bridge_status.json").read_text(encoding="utf-8"))["state"] == "degraded"
+    assert json.loads(asyncio.run(plugin._make_status(_RouteApi(tmp_path))(None)).body)["bridge"]["state"] == "connecting"
+    response = asyncio.run(plugin._make_status(api)(None))
     body = json.loads(response.body)
     assert set(body) == {"bridge", "mini_app"}
     assert body["bridge"] == {
         "state": "degraded",
+        "token": "configured",
         "owner_bound": True,
         "poller": "degraded",
         "command_mode": "full_access",
         "mirror_mode": "all",
         "reason_code": "telegram_startup_deferred",
     }
-    # Validation later succeeds → the poller writes `ready` and the overlay lifts.
-    plugin._save_bridge_status(_RouteApi(tmp_path), "ready")
-    body = json.loads(asyncio.run(plugin._make_status(_RouteApi(tmp_path))(None)).body)
+    # Validation later succeeds → the poller proves this binding and writes `ready`, and the overlay lifts.
+    # A record alone, before this binding's getMe proved it, is configuration: it reads as connecting.
+    plugin._save_bridge_status(api, "ready")
+    body = json.loads(asyncio.run(plugin._make_status(api)(None)).body)
+    assert body["bridge"]["state"] == "connecting"
+    plugin.binding_for(api).mark_validated(plugin.binding_for(api).snapshot()[1])
+    body = json.loads(asyncio.run(plugin._make_status(api)(None)).body)
     assert body["bridge"]["state"] == "ready" and "reason_code" not in body["bridge"]
 
 
@@ -311,10 +318,12 @@ def test_combined_status_has_only_bounded_bridge_and_mini_app_sections(tmp_path:
     response = asyncio.run(plugin._make_status(_RouteApi(tmp_path))(None))
     body = json.loads(response.body)
     assert set(body) == {"bridge", "mini_app"}
+    # A saved token is configuration, not a connection: the bridge is ready only once its poller validated it.
     assert body["bridge"] == {
-        "state": "ready",
+        "state": "connecting",
+        "token": "configured",
         "owner_bound": True,
-        "poller": "configured",
+        "poller": "connecting",
         "command_mode": "full_access",
         "mirror_mode": "all",
     }

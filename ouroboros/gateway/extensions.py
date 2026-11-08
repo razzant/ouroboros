@@ -268,6 +268,37 @@ def _build_extensions_index(drive_root, repo_path):
     from ouroboros.extension_health import read_extension_health
     from ouroboros.skill_review_runner import skill_review_ui_projection
     from ouroboros.tools.github import github_token_from_env_or_settings
+
+    secret_view: dict[str, Any] = {}
+
+    def _secret_config(skill) -> dict[str, Any] | None:
+        """Whether each declared secret field holds a value: ``configured``, ``missing`` or ``unknown``.
+
+        A derived fact for the card, never a value, prefix or length, and no requirement: whether a
+        skill needs the field, and when it applies a saved one, is the skill's own. The secret form's
+        rule (``configured_fields``) judges one strict read of what skills read (``skill_settings``),
+        shared by the whole index."""
+        from ouroboros.secret_requests import SecretRequestError, configured_fields, declared_secret_fields
+        from ouroboros.settings_integrity import SettingsDocumentUnknown, skill_settings
+
+        try:
+            fields = declared_secret_fields(skill.manifest)
+        except SecretRequestError:
+            return None
+        if not fields:
+            return None
+        if not secret_view:
+            try:
+                secret_view["settings"] = skill_settings(strict=True)
+            except SettingsDocumentUnknown:
+                secret_view["settings"] = None
+        rows = [{"id": field_id, "setting_key": key} for field_id, key in fields.items()]
+        settings = secret_view["settings"]
+        configured = None if settings is None else configured_fields(settings, {"fields": rows})
+        return {"fields": [
+            {"id": row["id"], "key": row["setting_key"],
+             "state": "unknown" if configured is None else "configured" if configured[str(row["id"])] else "missing"}
+            for row in rows]}
     # Request-invariant: resolve the github-token state ONCE for the whole index, not
     # once per skill (FR1 — avoids N settings.json reads per GET /api/extensions).
     _gh_token_configured = (
@@ -359,6 +390,7 @@ def _build_extensions_index(drive_root, repo_path):
             ),
             "review_findings": list(s.review.findings or []),
             "skill_review": skill_review_ui_projection(drive_root, s.name),
+            "secret_config": _secret_config(s),
             # An extension row reuses the grant status its runtime state computed
             # above (same function, same drive_root and skill): one settings
             # read per skill, not two.

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import sys
 import threading
 import time
@@ -20,6 +21,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from starlette.applications import Starlette
+from starlette.routing import Route
+from starlette.testclient import TestClient
+
+from ouroboros.extension_plugin_api import PluginAPIImpl
+from ouroboros.extension_registry_state import _PluginAPIConfig
 from ouroboros.gateway.host_service import create_host_service_app
 from tests._dialogue import chat_rows
 from tests.test_chat_attachments import _web_bridge
@@ -120,7 +127,9 @@ class _World:
         self.bots: _BotApi | None = None
 
     def use(self, token: str) -> None:
+        """A Save of ``token``, as the bridge's token observer applies it (lib/telegram_token.py)."""
         self.api.granted["TELEGRAM_BOT_TOKEN"] = token
+        self.plugin.binding_for(self.api).read_now(self.api)
 
     def serve(self, server: _BotServer) -> None:
         self.plugin.merge_settings(self.state, {"TELEGRAM_API_BASE": server.origin})
@@ -525,17 +534,21 @@ def test_a_reply_answer_is_named_by_its_bot_chat_and_message(quiz_world):
     assert _quiz_block(world)["request_id"] == f"tg:{A_ID}:m:42:31"
 
 
-def test_settings_already_naming_another_bot_do_not_move_the_running_pollers_ids(world):
+def test_a_token_saved_while_polling_moves_polling_to_its_bot_and_keeps_each_bots_ids(world):
+    """The applied token reaches the running poller at its next cycle: the old token asks nothing more,
+    the new bot is polled from its own oldest update, and every id stays the bot's that polled or sent it."""
     async def steps():
         world.use(A)
-        bot_a = world.bots.bot(A)
+        bot_a, bot_b = world.bots.bot(A), world.bots.bot(B)
         poller = asyncio.create_task(world.plugin._poller(world.api))
         try:
             await _until(lambda: bot_a.methods("getUpdates"))
-            world.use(B)  # saved while it polls; it keeps polling with the token it started with
-            seen = len(bot_a.methods("getUpdates"))
-            bot_a.push(_owner(50, "polled by the first bot"))
-            await _until(lambda: len(bot_a.methods("getUpdates")) >= seen + 2)
+            world.use(B)
+            bot_b.push(_owner(50, "polled by the new bot"))
+            await _until(lambda: len(bot_b.methods("getUpdates")) >= 2)
+            asked_old = len(bot_a.methods("getUpdates"))
+            await _until(lambda: len(bot_b.methods("getUpdates")) >= 4)
+            assert len(bot_a.methods("getUpdates")) == asked_old, "the old token was asked again"
         finally:
             poller.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -543,14 +556,16 @@ def test_settings_already_naming_another_bot_do_not_move_the_running_pollers_ids
         await world.outbound({"chat_id": 1, "text": "sent by the new token", "row_address": "row-b"})
 
     world.run(steps)
-    assert world.ids() == [f"tg:{A_ID}:42:50"]
+    assert world.ids() == [f"tg:{B_ID}:42:50"]
     refs = world.refs()["bots"]
-    assert refs["messages"][f"{A_ID}:42:50"]["client_message_id"] == f"tg:{A_ID}:42:50"
+    assert refs["messages"][f"{B_ID}:42:50"]["client_message_id"] == f"tg:{B_ID}:42:50"
     assert refs["messages"][f"{B_ID}:42:200"]["row_address"] == "row-b"
-    assert refs["latest_owner"] == {f"{A_ID}:42": 50}
+    assert refs["latest_owner"] == {f"{B_ID}:42": 50}
 
 
-def test_a_token_saved_during_a_long_send_never_moves_its_parts(world):
+def test_a_token_saved_during_a_long_send_stops_it_and_never_moves_its_parts(world):
+    """The applied token ends the old token's requests at the next part: the part Telegram already
+    took stays with its bot and is remembered as that bot's; the rest goes through neither token."""
     async def steps():
         world.use(A)
         world.bots.after_send = lambda: world.use(B)
@@ -559,7 +574,8 @@ def test_a_token_saved_during_a_long_send_never_moves_its_parts(world):
 
     world.run(steps)
     parts = world.bots.bot(A).methods("sendMessage")
-    assert len(parts) > 2 and not world.bots.bot(B).methods("sendMessage")
+    assert len(parts) == 1 and not world.bots.bot(B).methods("sendMessage")
+    assert any(level == "info" and "token changed" in message for level, message in world.api.logs)
     refs = world.refs()["bots"]["messages"]
     assert len(refs) == len(parts) and all(key.startswith(f"{A_ID}:42:") for key in refs)
     assert {record["row_address"] for record in refs.values()} == {"long-row"}
@@ -956,3 +972,820 @@ def test_references_of_all_bots_share_the_newest_thousand_in_one_order(maps):
     assert json.dumps(stored["messages"]) == json.dumps(legacy["messages"]), "the old map keeps its bytes"
     assert stored["latest_owner"] == legacy["latest_owner"]
     assert list(state._message_refs(maps.api, "")) == ["42:1"], "a token naming no bot still reads only the old map"
+
+
+# --- a saved, replaced or cleared token reaches every part (owner choice 7 Nov 2026) -------------------
+# Both owner Save paths write the real Settings document; the host's PluginAPI reads it through the strict,
+# grant-bound settings state (2.4); the token observer applies it; after an applied change the old token asks
+# Telegram nothing new. Nothing is enabled or granted by a save.
+
+KEY = "TELEGRAM_BOT_TOKEN"
+
+
+class _CoreApi(PluginAPIImpl):
+    """The host's PluginAPI for this skill; only the Host Service credential is the loopback host's."""
+
+    def get_skill_token(self):
+        return SimpleNamespace(use_in_request=lambda: "skill-token")
+
+    def get_runtime_info(self):
+        return {"data_dir": str(self._drive_root)}
+
+
+def _core(world, granted=(KEY,)) -> _CoreApi:
+    from ouroboros.config import load_settings
+
+    api = _CoreApi(_PluginAPIConfig(
+        skill_name="telegram", permissions=["read_settings"], env_allowlist=[KEY], state_dir=world.state,
+        settings_reader=load_settings, drive_root=world.data, granted_keys=list(granted),
+        plugin_api_generation="2.4"))
+    world.api = api
+    return api
+
+
+@pytest.fixture
+def core_settings(tmp_path, monkeypatch):
+    from ouroboros import config as cfg
+
+    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "SETTINGS_PATH", tmp_path / "settings.json")
+    monkeypatch.setattr(cfg, "get_skills_repo_path", lambda: "")
+    cfg.reset_runtime_mode_baseline_for_tests()
+    yield cfg
+    cfg.reset_runtime_mode_baseline_for_tests()
+
+
+_FORM_TASK = "setup-task"
+
+
+def _secret_form(world, monkeypatch):
+    """The protected secret form as the owner uses it: a recorded secret question of a running task and the
+    real ``POST /api/decisions/secret`` (status, then Save or Replace with what the status showed)."""
+    import uuid
+
+    import supervisor.queue as queue_mod
+    from ouroboros import owner_quiz
+    from ouroboros import secret_requests as sr
+    from ouroboros.gateway import secret_decision as sd
+    from ouroboros.gateway import task_decision as td
+    from ouroboros.task_results import write_task_result
+
+    skill = world.data / "skills" / "external" / "tgform"
+    (skill / "scripts").mkdir(parents=True, exist_ok=True)
+    (skill / "scripts" / "run.py").write_text("print('ok')\n", encoding="utf-8")
+    (skill / "SKILL.md").write_text(
+        f"---\nname: tgform\ndescription: d\nversion: 0.1.0\ntype: script\nruntime: python3\n"
+        f"env_from_settings: [{KEY}]\nsecret_fields:\n  botToken: {KEY}\nscripts:\n  - name: run.py\n---\n# f\n",
+        encoding="utf-8")
+    write_task_result(world.data, _FORM_TASK, "running", chat_id=1)
+    monkeypatch.setattr(td, "_live_root_task", lambda task_id, *, holds_mail=False: ({"id": task_id}, ""))
+    monkeypatch.setattr(queue_mod, "_task_drive_for_task", lambda task, task_id: world.data, raising=False)
+    app = Starlette(routes=[Route("/api/decisions/secret", endpoint=sd.api_secret_decision, methods=["POST"])])
+    app.state.drive_root = world.data
+    client = TestClient(app)
+
+    def save(value: str) -> dict:
+        request = sr.resolve_secret_request(world.data, "tgform", ["botToken"])
+        quiz_id = uuid.uuid4().hex
+        owner_quiz.record_asked(world.data, _FORM_TASK, quiz_id=quiz_id, question=sr.question_text(request),
+                                options=[], wait_for_answer=True, chat_id=1, secret_request=request)
+        owner_quiz.record_publication(world.data, _FORM_TASK, quiz_id, 1)
+        decision = f"quiz:{_FORM_TASK}:{quiz_id}"
+        status = client.post("/api/decisions/secret", json={"decision_id": decision, "action": "status"}).json()
+        response = client.post("/api/decisions/secret", json={
+            "request_id": uuid.uuid4().hex, "decision_id": decision, "values": {"botToken": value},
+            "observed": {row["id"]: row["configured"] for row in status["keys"]}})
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    return save
+
+
+def _settings_post(monkeypatch, value: str) -> None:
+    """The Settings › Secrets Save: the owner's settings route, without its restart side effects."""
+    from ouroboros import config as cfg
+    from ouroboros.gateway import settings as settings_mod
+
+    monkeypatch.setattr(settings_mod, "_start_supervisor_if_needed_for_request", lambda *_a, **_k: False)
+    monkeypatch.setattr(settings_mod, "_apply_settings_save_side_effects", lambda *_a, **_k: None)
+    app = Starlette(routes=[Route("/api/settings", endpoint=settings_mod.api_settings_post, methods=["POST"])])
+    app.state.drive_root = app.state.repo_dir = cfg.DATA_DIR
+    response = TestClient(app).post("/api/settings", json={KEY: value})
+    assert response.status_code == 200, response.text
+    assert json.loads(cfg.SETTINGS_PATH.read_text(encoding="utf-8")).get(KEY, "") == value
+
+
+@contextlib.asynccontextmanager
+async def _running(world, *factories):
+    tasks = [asyncio.create_task(factory()) for factory in factories]
+    try:
+        yield tasks
+    finally:
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+
+@pytest.fixture
+def fast(monkeypatch, world):
+    token_mod = sys.modules[world.plugin.__package__ + ".lib.telegram_token"]
+    monkeypatch.setattr(token_mod, "WATCH_SEC", 0.05)
+    return token_mod
+
+
+def test_both_owner_saves_reach_every_consumer_through_the_strict_grant_reader(core_settings, world, fast, monkeypatch):
+    """No token: the poller waits (no request, no failure); the secret form's Save starts it on bot A,
+    the Settings Save of B moves polling, outbound and the notifier to B, and clearing stops them all."""
+    api = _core(world)
+    form_save = _secret_form(world, monkeypatch)
+    notifier = sys.modules[world.plugin.__package__ + ".lib.telegram_notifier"]
+
+    async def scenario():
+        poller = world.plugin._make_poller(api)
+        async with _running(world, poller, fast.make_token_observer(api)) as (polling, _observer):
+            await asyncio.sleep(0.4)
+            assert not world.bots.bots and not polling.done(), "no token: nothing asked, nothing failed"
+            assert world.plugin._bridge_status(api)["state"] == "missing_token"
+
+            form_save(A)
+            await _until(lambda: fast.binding_for(api).snapshot()[0] == A)
+            bot_a = world.bots.bot(A)
+            bot_a.push(_owner(50, "to the first bot"))
+            await _until(lambda: f"tg:{A_ID}:42:50" in world.ids())
+            await world.outbound({"chat_id": 1, "text": "answer one", "row_address": "row-a"})
+            assert [form["text"] for form in bot_a.methods("sendMessage")] == ["answer one"]
+
+            _settings_post(monkeypatch, B)
+            bot_b = world.bots.bot(B)
+            await _until(lambda: len(bot_b.methods("getUpdates")) >= 2)
+            asked_a = len(bot_a.methods("getUpdates")) + len(bot_a.methods("getMe"))
+            bot_b.push(_owner(60, "to the second bot"))
+            await _until(lambda: f"tg:{B_ID}:42:60" in world.ids())
+            await world.outbound({"chat_id": 1, "text": "answer two", "row_address": "row-b"})
+            assert await notifier._push_notification(api, 42, "done") == ("sent", None)
+            assert [form["text"] for form in bot_b.methods("sendMessage")] == ["answer two", "done"]
+
+            _settings_post(monkeypatch, "")
+            await _until(lambda: world.plugin._bridge_status(api)["state"] == "missing_token")
+            calls = {name: len(bot.calls) for name, bot in world.bots.bots.items()}
+            await world.outbound({"chat_id": 1, "text": "nowhere", "row_address": "row-none"})
+            await asyncio.sleep(0.3)
+            assert {name: len(bot.calls) for name, bot in world.bots.bots.items()} == calls
+            assert len(bot_a.methods("getUpdates")) + len(bot_a.methods("getMe")) == asked_a
+            assert not polling.done()
+
+    world.run(scenario)
+    assert world.ids() == [f"tg:{A_ID}:42:50", f"tg:{B_ID}:42:60"]
+
+
+def test_an_unreadable_settings_document_keeps_the_accepted_token_and_says_unknown(core_settings, world, fast):
+    api = _core(world)
+    core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: A}), encoding="utf-8")
+
+    async def scenario():
+        async with _running(world, fast.make_token_observer(api)):
+            await _until(lambda: fast.binding_for(api).snapshot()[0] == A)
+            core_settings.SETTINGS_PATH.write_text("{\"TELEGRAM_BOT_TOKEN\": ", encoding="utf-8")
+            await _until(lambda: fast.binding_for(api).state == "unknown")
+            await world.outbound({"chat_id": 1, "text": "still sent", "row_address": "row-a"})
+        status = world.plugin._connection_fields(api)
+        assert status["token_status"] == "Can't read saved settings now; the current token stays in use"
+        assert status["bridge"]["token"] == "unknown"
+
+    world.run(scenario)
+    assert [form["text"] for form in world.bots.bot(A).methods("sendMessage")] == ["still sent"]
+
+
+def test_an_unreadable_document_at_cold_start_claims_no_kept_token(core_settings, world):
+    """No token was ever accepted: unknown says so, without promising a token that would be kept."""
+    api = _core(world)
+    core_settings.SETTINGS_PATH.write_text("{\"TELEGRAM_BOT_TOKEN\": ", encoding="utf-8")
+    world.plugin.binding_for(api).read_now(api)
+    status = world.plugin._connection_fields(api)
+    assert status["bridge"]["token"] == "unknown" and status["token_status"] == "Can't read saved settings now"
+    assert status["bridge_status"] == "Waiting: saved settings can't be read"
+
+
+def test_a_cold_start_wait_says_each_change_of_reason(core_settings, world, fast, caplog, monkeypatch):
+    """No token accepted yet: an unreadable document is said as such, never as an unset token, and one that reads
+    empty as an unset token. Each change of reason is said (unreadable, unset, unreadable, unset), the same reason
+    over further checks says nothing, and a token saved in Settings ends the quiet wait."""
+    import logging
+
+    api = _core(world)
+    broken = "{\"TELEGRAM_BOT_TOKEN\": "
+    core_settings.SETTINGS_PATH.write_text(broken, encoding="utf-8")
+    unreadable = "Telegram settings could not be read; the bridge waits until it can read the saved token."
+    unset = "Telegram bot token is not set; the bridge waits for it (Settings → Secrets)."
+    caplog.set_level(logging.INFO)
+
+    def said() -> list[tuple[str, str]]:
+        return [(record.levelname, text) for record in caplog.records for text in (unreadable, unset)
+                if text in record.getMessage()]
+
+    async def scenario():
+        async with _running(world, world.plugin._make_poller(api), fast.make_token_observer(api)) as (polling, _):
+            await _until(lambda: said())
+            await asyncio.sleep(1.2)  # further checks of the same unreadable document
+            assert len(said()) == 1
+            # A partial read while a document is replaced is unreadable, which is either side of each change here.
+            for count, document in enumerate((json.dumps({KEY: ""}), broken, json.dumps({KEY: ""})), start=2):
+                core_settings.SETTINGS_PATH.write_text(document, encoding="utf-8")
+                await _until(lambda: len(said()) == count)
+            await asyncio.sleep(1.2)  # further checks of the same unset token
+            _settings_post(monkeypatch, A)  # replaced as one write, never read half-written
+            await _until(lambda: world.bots.bot(A).methods("getUpdates"))
+            assert not polling.done()
+
+    world.run(scenario)
+    assert said() == [("WARNING", unreadable), ("INFO", unset), ("WARNING", unreadable), ("INFO", unset)]
+
+
+@pytest.mark.parametrize("reason,words", [
+    ("telegram_rejected", "Telegram refused this token; save a new one in Secrets"),
+    ("telegram_startup_failed", "Telegram refused this token; save a new one in Secrets"),
+    ("connection_settings_invalid", "the proxy or Bot API server below is invalid"),
+    ("startup_error", "Stopped by an internal error; see the skill's log"),
+    ("poller_failed", "Stopped by an internal error; see the skill's log"),
+])
+def test_a_stopped_bridge_names_its_own_next_step_without_a_raw_code(core_settings, world, reason, words):
+    """A refused token, a setting below and an internal failure are told apart; no reason code is shown."""
+    api = _core(world)
+    core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: A}), encoding="utf-8")
+    world.plugin.binding_for(api).read_now(api)
+    world.plugin._save_bridge_status(api, "error", reason, bot=A_ID)
+    status = world.plugin._connection_fields(api)
+    assert words in status["bridge_status"] and reason not in json.dumps(
+        {key: status[key] for key in ("token_status", "bridge_status", "miniapp_status", "message")})
+    assert "SECRET" not in json.dumps(status)
+
+
+def _companion_states() -> set[str]:
+    import ast
+
+    source = (Path(__file__).resolve().parents[1] / "skills/telegram/scripts/runtime_status.py").read_text(encoding="utf-8")
+    assignment = next(node for node in ast.parse(source).body if isinstance(node, ast.Assign)
+                      and getattr(node.targets[0], "id", "") == "_STATES")
+    return set(ast.literal_eval(assignment.value))
+
+
+@pytest.mark.parametrize("state,message,words", [
+    ("waiting_owner", "Open the private Telegram bot chat once to pin its owner.",
+     "Waiting: send the bot a private message to bind its owner"),
+    ("verifying", "Verifying the public authentication boundary.", "Checking its public link"),
+    ("syncing_menu", "Synchronizing the private Telegram Mini App button.", "Setting the bot's menu button"),
+    ("reconnecting", "The tunnel generation ended; retrying inside the same companion.",
+     "Reconnecting; it retries by itself"),
+    ("stopping", "Stopping public exposure and reconciling owned settings.", "Stopping"),
+    ("degraded", "Local Ouroboros is not ready; the Mini App remains private and will retry.",
+     "Retrying: Local Ouroboros is not ready; the Mini App remains private and will retry."),
+    ("blocked", "Telegram menu changed outside this skill; public exposure is stopped.",
+     "Stopped: Telegram menu changed outside this skill; public exposure is stopped."),
+    ("reconciling", "Telegram API rejected getChatMenuButton.",
+     "Restoring the previous owner's menu button: Telegram API rejected getChatMenuButton."),
+    ("a_newer_state", "A sentence a newer companion wrote.", "A sentence a newer companion wrote."),
+    ("a_newer_state", "", "Unknown"),
+])
+def test_every_mini_app_state_reads_in_owner_words_never_its_code(core_settings, world, state, message, words):
+    """Each state the companion publishes has owner words; where only the companion's sentence names the cause
+    or next step, it follows a lead. A state this module does not know shows that sentence alone."""
+    from ouroboros.utils import atomic_write_json
+
+    api = _core(world)
+    atomic_write_json(world.state / "status.json", {"schema": 2, "state": state, "reason_code": "x_code",
+                                                    "message": message, "pid": os.getpid(),
+                                                    "updated_at_epoch": int(time.time())})
+    shown = world.plugin._connection_fields(api)["miniapp_status"]
+    assert shown == words and state not in shown and "x_code" not in shown
+    connection = sys.modules[world.plugin.__package__ + ".lib.telegram_connection"]
+    assert _companion_states() <= set(connection._MINIAPP_WORDS) | set(connection._MINIAPP_LEADS)
+
+
+def test_a_working_bridge_that_loses_telegram_says_so_and_recovers_without_a_probe(tmp_path, monkeypatch):
+    """getUpdates failing after a validated start records the outage once; Connection says Telegram cannot be
+    reached instead of Connected; the next successful poll records ready again. Only the poller's own
+    getUpdates are made: no request is added to find this out."""
+    plugin, telegram_api, _notifier = _load()
+    monkeypatch.setattr(plugin, "_HONOR_ENV_PROXIES", False)
+    monkeypatch.setattr(plugin, "TELEGRAM_RETRY_INITIAL_SEC", 0.01)
+    monkeypatch.setattr(plugin, "next_telegram_retry_delay", lambda delay: delay)
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "settings.json").write_text(json.dumps({"TELEGRAM_CHAT_ID": "42"}), encoding="utf-8")
+    api, calls, written = _Api(state, {KEY: A}), [], []
+    save_status = plugin._save_bridge_status
+    monkeypatch.setattr(plugin, "_save_bridge_status", lambda api_, state_, reason="", bot="", **kw: (
+        written.append((state_, reason)), save_status(api_, state_, reason, bot, **kw))[-1])
+    recover = asyncio.Event()
+
+    class Telegram(telegram_api.TelegramClient):
+        async def call(self, method, **_kwargs):
+            self.check_binding()
+            calls.append(method)
+            if method == "getUpdates" and not recover.is_set():
+                raise telegram_api.TelegramTransportError("Telegram API timed out during getUpdates.")
+            return {"ok": True, "result": [] if method == "getUpdates" else {"id": int(A_ID)}}
+
+    monkeypatch.setattr(plugin, "TelegramClient", Telegram)
+
+    async def scenario():
+        poller = asyncio.create_task(plugin._poller(api))
+        try:
+            await _until(lambda: calls.count("getUpdates") >= 3)
+            during = plugin._connection_fields(api)
+            recover.set()
+            await _until(lambda: written[-1] == ("ready", ""))
+            return during, plugin._connection_fields(api)
+        finally:
+            poller.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await poller
+
+    during, after = asyncio.run(scenario())
+    assert during["bridge"]["state"] == "degraded" and during["bridge_status"] == "Can't reach Telegram now; retrying"
+    assert after["bridge"]["state"] == "ready" and after["bridge_status"] == "Connected"
+    assert written == [("ready", ""), ("degraded", "telegram_unreachable"), ("ready", "")]
+    assert set(calls) == {"getMe", "setMyCommands", "getUpdates"} and calls.count("getMe") == 1
+
+
+def test_a_delayed_first_part_finishes_and_the_rest_reaches_no_bot(core_settings, world):
+    """The request already on the wire finishes with its observed outcome; the next boundary of the same
+    operation (the next chunk, the HTML→plain retry, the download after getFile) asks no bot anything."""
+    api = _core(world)
+    core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: A}), encoding="utf-8")
+    binding = world.plugin.binding_for(api)
+
+    def save_b():  # what the observer does once the owner saved B
+        core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: B}), encoding="utf-8")
+        binding.read_now(api)
+
+    async def scenario():
+        world.bots.after_send = save_b
+        await world.outbound({"chat_id": 1, "text": "Every word matters here. " * 700, "markdown": False,
+                              "row_address": "long"})
+        world.bots.after_send = None
+        assert len(world.bots.bot(A).methods("sendMessage")) == 1 and not world.bots.bot(B).calls
+        # The HTML form refused and B saved before the plain retry: no retry through either bot.
+        core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: A}), encoding="utf-8")
+        binding.read_now(api)
+        client = world.plugin._telegram_client(api)
+        real = world.bots.respond
+
+        def refuse_html(http_method, path, form):
+            if path.endswith("/sendMessage") and form.get("parse_mode") == "HTML":
+                save_b()
+                return 400, json.dumps({"ok": False, "error_code": 400,
+                                        "description": "Bad Request: can't parse entities"}).encode(), "application/json"
+            if path.endswith("/getFile"):
+                save_b()
+                return 200, json.dumps({"ok": True, "result": {"file_path": "documents/x.txt"}}).encode(), \
+                    "application/json"
+            return real(http_method, path, form)
+
+        world.bots.respond = refuse_html
+        sent_before = list(world.bots.bot(A).calls)  # refused and answered here, never recorded below
+        with pytest.raises(world.plugin.TelegramBindingChanged) as refused:
+            await client.send_message(42, "<b>bold</b>", parse_mode="HTML")
+        assert refused.value.accepted == 0, "a refused answer is not an accepted part"
+        assert world.bots.bot(A).calls == sent_before, "the plain retry went out"
+        assert not world.bots.bot(B).calls
+        core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: A}), encoding="utf-8")
+        binding.read_now(api)
+        client = world.plugin._telegram_client(api)
+        calls = list(world.bots.bot(A).calls)
+        with pytest.raises(world.plugin.TelegramBindingChanged):
+            await client.download_file("doc")  # getFile answered (above), the download never asked
+        assert world.bots.bot(A).calls == calls and not world.bots.bot(B).calls
+
+    world.run(scenario)
+
+
+def test_a_rotated_token_of_the_same_bot_receives_the_discarded_batch_again(core_settings, world):
+    """A batch answered after the token changed is neither confirmed nor handled: the same bot's rotated
+    token is given it again from the same offset and each update becomes exactly one row."""
+    api = _core(world)
+    core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: A}), encoding="utf-8")
+    binding = world.plugin.binding_for(api)
+
+    async def scenario():
+        bot = world.bots.bot(A)
+        bot.push(_owner(70, "first"))
+        bot.push(_owner(71, "second"))
+        real = world.bots.respond
+        rotated = []
+
+        def rotate_during_poll(http_method, path, form):
+            answer = real(http_method, path, form)
+            if path.endswith("/getUpdates") and not rotated and json.loads(answer[1])["result"]:
+                rotated.append(form.get("offset"))
+                core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: A_ROTATED}), encoding="utf-8")
+                binding.read_now(api)
+            return answer
+
+        world.bots.respond = rotate_during_poll
+        async with _running(world, world.plugin._make_poller(api)):
+            await _until(lambda: len(world.ids()) == 2)
+            await _until(lambda: len(bot.methods("getUpdates")) >= 3)
+        offsets = [form["offset"] for form in bot.methods("getUpdates")]
+        assert offsets[0] == offsets[1] == rotated[0], "the discarded batch was confirmed"
+
+    world.run(scenario)
+    assert world.ids() == [f"tg:{A_ID}:42:70", f"tg:{A_ID}:42:71"]
+    assert world.texts() == ["first", "second"]
+
+
+# --- a token change while a client is built, entered, validated, or closed ------------------------------------
+
+def test_a_client_is_one_identity_even_when_the_token_changes_while_it_is_built(core_settings, world):
+    """The references a client attaches and the token it speaks with come from one snapshot: a change while it is
+    built makes it refuse its first request; nothing of bot A goes out through bot B, and no reply id moves."""
+    api = _core(world)
+    core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: A}), encoding="utf-8")
+    binding = world.plugin.binding_for(api)
+    binding.read_now(api)
+    real_options = world.plugin._mirror_options
+
+    def options_then_save_b(*args, **kwargs):
+        chosen = real_options(*args, **kwargs)
+        core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: B}), encoding="utf-8")
+        binding.read_now(api)
+        return chosen
+
+    async def scenario():
+        world.plugin._mirror_options = options_then_save_b
+        try:
+            client = world.plugin._telegram_client(api, {"chat_id": 1, "row_address": "r"}, 42)
+        finally:
+            world.plugin._mirror_options = real_options
+        assert client.token == A
+        with pytest.raises(world.plugin.TelegramBindingChanged):
+            await client.send_message(42, "hello", parse_mode="")
+        assert not world.bots.bot(A).calls and not world.bots.bot(B).calls
+
+    world.run(scenario)
+
+
+def test_a_token_saved_while_the_transport_opens_sends_nothing(core_settings, world, monkeypatch):
+    """The check sits at the request itself: entering the HTTP client may yield, and a token applied meanwhile
+    stops the request before it starts. Nothing holds a lock across the network."""
+    api = _core(world)
+    core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: A}), encoding="utf-8")
+    binding = world.plugin.binding_for(api)
+    binding.read_now(api)
+    telegram_api = sys.modules[world.plugin.__package__ + ".lib.telegram_api"]
+    real_client = telegram_api.httpx.AsyncClient
+
+    class SlowToOpen(real_client):
+        async def __aenter__(self):
+            await asyncio.sleep(0.05)
+            core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: B}), encoding="utf-8")
+            binding.read_now(api)
+            return await super().__aenter__()
+
+    async def scenario():
+        client = world.plugin._telegram_client(api)
+        monkeypatch.setattr(telegram_api.httpx, "AsyncClient", SlowToOpen)
+        with pytest.raises(world.plugin.TelegramBindingChanged) as stopped:
+            await client.send_message(42, "x", parse_mode="")
+        assert stopped.value.accepted == 0
+        assert not world.bots.bot(A).calls and not world.bots.bot(B).calls
+
+    world.run(scenario)
+
+
+def test_a_change_while_the_poller_rebuilds_its_client_is_followed_and_never_spins(core_settings, world, monkeypatch):
+    """The poller keeps the exact generation of each client it builds: a token saved between the construction of
+    the new client and its first request (B applied, then C while B's client is built) makes B's client refuse,
+    and the next cycle builds C's. No client is ever kept with another binding's generation, which would refuse
+    every request without a rebuild."""
+    api = _core(world)
+    core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: A}), encoding="utf-8")
+    binding = world.plugin.binding_for(api)
+    binding.read_now(api)
+    real = world.plugin.TelegramClient
+    built = []
+    token_c = "333333:SECRET-C"
+
+    def save(token):
+        core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: token}), encoding="utf-8")
+        binding.read_now(api)
+
+    def build(*args, **kwargs):
+        client = real(*args, **kwargs)
+        built.append(client.token)
+        if client.token == B:
+            save(token_c)  # saved while B's client is being built, before its first request
+        return client
+
+    monkeypatch.setattr(world.plugin, "TelegramClient", build)
+
+    async def scenario():
+        async with _running(world, world.plugin._make_poller(api)):
+            await _until(lambda: world.bots.bot(A).methods("getUpdates"))
+            save(B)
+            await _until(lambda: len(world.bots.bot(token_c).methods("getUpdates")) >= 2, timeout=10.0)
+        assert not world.bots.bot(B).calls, "the stale client asked Telegram"
+        assert built == [A, B, token_c], built
+        assert binding.is_validated() and binding.snapshot()[0] == token_c
+
+    world.run(scenario)
+
+
+def test_a_command_menu_refused_by_a_token_change_is_never_ready(core_settings, world, caplog):
+    """A change after getMe stops at the menu request as the typed change it is: no command-menu failure is
+    reported for the stale client and the binding is not marked validated."""
+    api = _core(world)
+    core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: A}), encoding="utf-8")
+    binding = world.plugin.binding_for(api)
+    binding.read_now(api)
+
+    async def scenario():
+        client, generation = world.plugin._bridge_client(api)
+        real = world.bots.respond
+
+        def save_b_at_get_me(http_method, path, form):
+            answer = real(http_method, path, form)
+            if path.endswith("/getMe"):
+                core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: B}), encoding="utf-8")
+                binding.read_now(api)
+            return answer
+
+        world.bots.respond = save_b_at_get_me
+        with pytest.raises(world.plugin.TelegramBindingChanged):
+            await world.plugin._validate_bot(api, client, "full_access", "", generation)
+        assert not world.bots.bot(A).methods("setMyCommands")
+        assert "Failed to set Telegram bot commands" not in caplog.text
+        assert not binding.is_validated()
+        assert world.plugin._bridge_status(api)["state"] == "connecting"
+
+    world.run(scenario)
+
+
+def test_closing_the_binding_stops_every_client_built_before(core_settings, world):
+    """Unload, Off or a revoked grant (the API answering access closed, or the skill's unload callback) leaves no
+    token and a new generation: an outbound in flight and any client built before ask nothing more."""
+    api = _core(world)
+    core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: A}), encoding="utf-8")
+    binding = world.plugin.binding_for(api)
+    binding.read_now(api)
+
+    async def scenario():
+        client = world.plugin._telegram_client(api)
+        binding.observe({"status": "access_closed", "values": {}, "missing": []})
+        assert binding.state == "closed" and binding.snapshot()[0] == ""
+        binding.observe({"status": "ok", "values": {KEY: B}, "missing": []})
+        assert binding.state == "closed", "a closed API never reopens"
+        with pytest.raises(world.plugin.TelegramBindingChanged):
+            await client.send_message(42, "late", parse_mode="")
+        await world.outbound({"chat_id": 1, "text": "after close", "row_address": "x"})
+        assert not world.bots.bot(A).calls and not world.bots.bot(B).calls
+
+    world.run(scenario)
+
+
+def test_readiness_is_the_exact_binding_the_poller_validated_not_a_saved_record(core_settings, world):
+    """A rotated token of the same bot, or a new load, finds the earlier `ready` record: that is configuration,
+    shown as connecting until this binding's own getMe settles."""
+    api = _core(world)
+    core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: A}), encoding="utf-8")
+    binding = world.plugin.binding_for(api)
+    binding.read_now(api)
+    world.plugin._save_bridge_status(api, "ready", bot=A_ID)
+    assert world.plugin._bridge_status(api)["state"] == "connecting", "a new load inherited readiness"
+    binding.mark_validated(binding.snapshot()[1])
+    assert world.plugin._bridge_status(api)["state"] == "ready"
+    core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: A_ROTATED}), encoding="utf-8")
+    binding.read_now(api)
+    assert world.plugin._bridge_status(api)["state"] == "connecting", "a rotated token inherited readiness"
+    core_settings.SETTINGS_PATH.write_text("null", encoding="utf-8")  # present, not an object: unknown, kept
+    binding.read_now(api)
+    assert binding.state == "unknown" and binding.snapshot()[0] == A_ROTATED
+
+
+def test_a_failed_read_is_unknown_never_a_silent_configured(core_settings, world):
+    class Broken(_CoreApi):
+        def get_settings_state(self, keys):
+            raise OSError("read failed")
+
+    broken = Broken(_PluginAPIConfig(
+        skill_name="telegram", permissions=["read_settings"], env_allowlist=[KEY], state_dir=world.state,
+        settings_reader=dict, drive_root=world.data, granted_keys=[KEY], plugin_api_generation="2.4"))
+    binding = world.plugin.binding_for(broken)
+    binding.observe({"status": "ok", "values": {KEY: A}, "missing": []})
+    binding.read_now(broken)
+    assert binding.state == "unknown" and binding.snapshot()[0] == A
+
+
+_PNG = bytes.fromhex("89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+                     "1f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082")
+
+
+def test_an_update_stopped_before_the_host_took_it_is_given_again_to_the_same_bots_new_token(core_settings, world):
+    """A photo whose download meets the rotation: the update was not handled, so it is not confirmed; the same
+    bot's rotated token receives it again and the host gets exactly one row."""
+    api = _core(world)
+    core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: A}), encoding="utf-8")
+    binding = world.plugin.binding_for(api)
+    binding.read_now(api)
+
+    async def scenario():
+        bot = world.bots.bot(A)
+        bot.push({"message": {**_owner(80, "")["message"], "photo": [{"file_id": "p1"}], "caption": "the picture"}})
+        real = world.bots.respond
+        rotated = []
+
+        def respond(http_method, path, form):
+            if path.endswith("/getFile"):
+                bot.calls.append(("getFile", form))
+                if not rotated:
+                    rotated.append(1)
+                    core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: A_ROTATED}), encoding="utf-8")
+                    binding.read_now(api)
+                return 200, json.dumps({"ok": True, "result": {"file_path": "photos/p1.png"}}).encode(), \
+                    "application/json"
+            if path.startswith("/file/bot"):
+                bot.calls.append(("file", path.split("/bot", 1)[1].split("/", 1)[0]))
+                return 200, _PNG, "image/png"
+            return real(http_method, path, form)
+
+        world.bots.respond = respond
+        async with _running(world, world.plugin._make_poller(api)):
+            await _until(lambda: world.ids())
+            await _until(lambda: len(bot.methods("getUpdates")) >= 3)
+        offsets = [form["offset"] for form in bot.methods("getUpdates")]
+        assert offsets[0] == offsets[1], "the stopped update was confirmed"
+        files = [token for method, token in bot.calls if method == "file"]
+        assert files == [A_ROTATED], files  # the old token downloaded nothing
+
+    world.run(scenario)
+    assert world.ids() == [f"tg:{A_ID}:42:80"] and world.dispatched() == 1
+
+
+def test_a_toggle_applied_before_a_same_bot_rotation_is_not_toggled_back(core_settings, world):
+    """Quiet mode is flipped and then the token rotates while Telegram is told (answerCallbackQuery): the update
+    stays confirmed, so the rotated token's client is not given it again and the owner's toggle stands. Nothing
+    more of its reply goes out through the old token."""
+    api = _core(world)
+    core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: A}), encoding="utf-8")
+    binding = world.plugin.binding_for(api)
+    binding.read_now(api)
+
+    async def scenario():
+        bot = world.bots.bot(A)
+        tapped = bot.push(_tap("cb-quiet", "cmd_act:toggle_silent", 150))
+        real = world.bots.respond
+
+        def respond(http_method, path, form):
+            answer = real(http_method, path, form)
+            if path.endswith("/answerCallbackQuery") and "SECRET-A" in path:
+                core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: A_ROTATED}), encoding="utf-8")
+                binding.read_now(api)  # the observer's next read: the same bot, another token
+            return answer
+
+        world.bots.respond = respond
+        async with _running(world, world.plugin._make_poller(api)):
+            await _until(lambda: len(bot.methods("getUpdates")) >= 3)
+        offsets = [int(form.get("offset") or 0) for form in bot.methods("getUpdates")]
+        assert offsets[-1] == tapped + 1, offsets  # confirmed: never handed out again
+        assert [form["callback_query_id"] for form in bot.methods("answerCallbackQuery")] == ["cb-quiet"]
+        assert not bot.methods("editMessageText") and not bot.methods("sendMessage")  # the rest stopped
+
+    world.run(scenario)
+    saved = json.loads((world.state / "settings.json").read_text(encoding="utf-8"))
+    assert saved["TELEGRAM_SILENT_MODE"] == "on"  # toggled once; a replay would have turned it off again
+
+
+def test_an_unaccepted_tap_is_still_given_again_after_a_same_bot_rotation(core_settings, world):
+    """The other side of the toggle above: a rotation after the batch carrying the tap was answered but before
+    it was handled leaves it unconfirmed, and the rotated token applies it exactly once."""
+    api = _core(world)
+    core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: A}), encoding="utf-8")
+    binding = world.plugin.binding_for(api)
+    binding.read_now(api)
+
+    async def scenario():
+        bot = world.bots.bot(A)
+        real = world.bots.respond
+        pushed = []
+
+        def respond(http_method, path, form):
+            answer = real(http_method, path, form)
+            if path.endswith("/getUpdates") and "SECRET-A" in path and not pushed:
+                pushed.append(bot.push(_tap("cb-late", "cmd_act:toggle_silent", 151)))
+            elif path.endswith("/getUpdates") and "SECRET-A" in path and len(pushed) == 1 and json.loads(
+                    answer[1]).get("result"):
+                pushed.append(0)  # the batch carrying the tap is answered: rotate before it is handled
+                core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: A_ROTATED}), encoding="utf-8")
+                binding.read_now(api)
+            return answer
+
+        world.bots.respond = respond
+        async with _running(world, world.plugin._make_poller(api)):
+            await _until(lambda: bot.methods("answerCallbackQuery"))
+            await _until(lambda: len(bot.methods("getUpdates")) >= 5)
+        assert [form["callback_query_id"] for form in bot.methods("answerCallbackQuery")] == ["cb-late"]
+
+    world.run(scenario)
+    saved = json.loads((world.state / "settings.json").read_text(encoding="utf-8"))
+    assert saved["TELEGRAM_SILENT_MODE"] == "on"
+
+
+def test_a_notification_cut_by_a_token_change_is_never_resent_through_the_other_bot(core_settings, world):
+    """Parts the old bot accepted stay its own and the notification is consumed (skipped); one it never accepted
+    (refused or not yet sent) is transient and goes out whole through the new token's client next cycle."""
+    api = _core(world)
+    core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: A}), encoding="utf-8")
+    binding = world.plugin.binding_for(api)
+    binding.read_now(api)
+
+    def save(token):
+        core_settings.SETTINGS_PATH.write_text(json.dumps({KEY: token}), encoding="utf-8")
+        binding.read_now(api)
+
+    async def scenario():
+        world.bots.after_send = lambda: save(B)
+        outcome, exc = await world.notifier._push_notification(api, 42, "Long notice. " * 700)
+        world.bots.after_send = None
+        assert outcome == "skipped" and exc.accepted == 1
+        assert len(world.bots.bot(A).methods("sendMessage")) == 1 and not world.bots.bot(B).calls
+        save(A)
+        real = world.bots.respond
+
+        def refuse_then_save_b(http_method, path, form):
+            if path.endswith("/sendMessage") and "SECRET-A" in path:
+                save(B)
+                return 429, json.dumps({"ok": False, "error_code": 429, "description": "slow"}).encode(), \
+                    "application/json"
+            return real(http_method, path, form)
+
+        world.bots.respond = refuse_then_save_b
+        outcome, exc = await world.notifier._push_notification(api, 42, "short notice")
+        assert outcome == "transient"
+        outcome, _exc = await world.notifier._push_notification(api, 42, "short notice")
+        assert outcome == "sent" and [f["text"] for f in world.bots.bot(B).methods("sendMessage")] == ["short notice"]
+
+    world.run(scenario)
+
+
+class _ObservedApi:
+    """A loaded skill's API as the token observer sees it: a saved token, and a Mini App refresh the test scripts."""
+
+    def __init__(self, refresh):
+        self.refresh, self.closed, self.logs, self.confirmed = refresh, False, [], 0
+
+    def get_settings_state(self, keys):
+        if self.closed:
+            return {"status": "access_closed", "values": {}, "missing": []}
+        return {"status": "ok", "values": {KEY: A} if keys else {}, "missing": []}
+
+    def refresh_companion_process(self, name, expected=None, only_if_differs=False):
+        if only_if_differs:  # the host answers from memory while the companion still carries the token
+            self.confirmed += 1
+            return "unchanged"
+        return self.refresh(name)
+
+    def log(self, level, message, *_a, **_k):
+        self.logs.append((level, message))
+
+
+def test_a_refused_mini_app_start_is_retried_each_tick_without_spending_restarts(world, fast):
+    """Forking the Mini App fails three times (memory pressure): one warning, a retry at each tick, the token
+    stays applied, then it starts and one recovery line follows; Off still ends the observer."""
+    attempts = []
+
+    def refresh(name):
+        attempts.append(name)
+        if len(attempts) <= 3:
+            raise OSError(12, "Cannot allocate memory")
+        return "restarted"
+
+    api = _ObservedApi(refresh)
+    binding = fast.binding_for(api)
+
+    async def scenario():
+        observer = asyncio.create_task(fast.make_token_observer(api, "miniapp_gateway")())
+        await _until(lambda: len(attempts) >= 2)
+        assert binding.companion == "start_failed" and binding.snapshot()[0] == A and not observer.done()
+        # Started at the fourth attempt; later reads only confirm it from the host's memory.
+        await _until(lambda: len(attempts) == 4 and binding.companion in {"restarted", "unchanged"})
+        api.closed = True  # Off or a revoked grant: the API answers closed
+        await asyncio.wait_for(observer, 5)
+
+    asyncio.run(scenario())
+    assert len(attempts) == 4 and binding.state == "closed"
+    warnings = [message for level, message in api.logs if level == "warning"]
+    assert warnings == ["Telegram could not start the Mini App (OSError); retrying every 0.05 s."]
+    assert any("recovered" in message for level, message in api.logs if level == "info")
+    world.plugin.binding_for(world.api)  # the world's own API is untouched
+
+
+def test_an_unexpected_observer_failure_still_reaches_the_supervisor(world, fast):
+    """Only an operating-system refusal is a retry: a bug in a refresh still fails the task visibly."""
+    def refresh(_name):
+        raise RuntimeError("a bug, not the system")
+
+    api = _ObservedApi(refresh)
+    with pytest.raises(RuntimeError, match="a bug"):
+        asyncio.run(fast.make_token_observer(api, "miniapp_gateway")())

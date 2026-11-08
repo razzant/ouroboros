@@ -56,6 +56,20 @@ test('the filter strip counts facts of the loaded list', () => {
     assert.equal(matchesInstalledFilter({ name: 'v', lifecycle_virtual: true, enabled: false }, 'off'), false);
 });
 
+test('Needs you counts an enabled, permitted skill whose declared secret is not set, and nothing else for that secret', () => {
+    const secret = (state) => ({ secret_config: { fields: [{ id: 'botToken', key: 'TELEGRAM_BOT_TOKEN', state }] } });
+    const withTelegram = (overrides) => rows().map((skill) => (skill.name === 'telegram' ? { ...skill, ...overrides } : skill));
+    const base = installedFilterCounts(rows());
+    const missing = withTelegram(secret('missing'));
+    assert.deepEqual(installedFilterCounts(missing), { ...base, needs: base.needs + 1 });
+    assert.equal(matchesInstalledFilter(missing.find((skill) => skill.name === 'telegram'), 'needs'), true);
+    for (const state of ['unknown', 'configured']) assert.deepEqual(installedFilterCounts(withTelegram(secret(state))), base, state);
+    assert.deepEqual(installedFilterCounts(withTelegram({ ...secret('missing'), enabled: false })), { ...base, off: base.off + 1 },
+        'an off skill is under Off; its secret asks nothing');
+    const ungranted = { ...secret('missing'), grants: { all_granted: false, missing_keys: ['TELEGRAM_BOT_TOKEN'] } };
+    assert.deepEqual(installedFilterCounts(withTelegram(ungranted)), { ...base, needs: base.needs + 1 }, 'Needs access, counted once');
+});
+
 test('page-module faults participate in Installed filters and Browse state', () => {
     const telegram = byName('telegram');
     const pageModules = { faults: [{ skill: telegram.name, current: true, reason: 'fixture failed' }], held: [] };
