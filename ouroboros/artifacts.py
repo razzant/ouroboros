@@ -1185,10 +1185,15 @@ def stream_artifact_file(path: Any, sink: Any = None, *, expected: Any = None) -
     return result
 
 
-def copy_artifact_file(source: Any, destination: pathlib.Path, *, expected: Any = None) -> Dict[str, Any]:
+def copy_artifact_file(source: Any, destination: pathlib.Path, *, expected: Any = None, clone: bool = True,
+                       mode: Optional[int] = None) -> Dict[str, Any]:
     """Publish a verified file copy atomically; preserve any prior bytes on failure. Inside a
     ``task_custody.publication_fence`` a closed generation starts no copy. A block-sharing clone
-    (``artifact_storage``) is taken where the filesystem gives one, its own bytes verified; else streamed."""
+    (``artifact_storage``) is taken where the filesystem gives one, its own bytes verified; else streamed
+    in bounded chunks. ``clone=False`` always streams (a file a later compression must find unshared). An
+    int ``mode`` stands in for ``shutil.copystat``: these permission bits and the copy's own times, never the
+    source's; a clone keeps only harmless flags and extended attributes (compression included), as
+    ``clone_or_copy2``'s does, since an immutable or append-only source is never cloned."""
     source_path, destination = (pathlib.Path(source) if isinstance(source, (str, os.PathLike)) else None), pathlib.Path(destination)
     if source_path is not None and not destination.is_symlink() and source_path.resolve(strict=False) == destination.resolve(strict=False):
         return stream_artifact_file(source, expected=expected)
@@ -1198,7 +1203,7 @@ def copy_artifact_file(source: Any, destination: pathlib.Path, *, expected: Any 
     from ouroboros.store import is_sqlite_file, is_wal_index  # a store file streams: a clone opens and closes it
 
     try:
-        if (source_path is not None and not is_sqlite_file(source_path) and not is_wal_index(source_path)
+        if (clone and source_path is not None and not is_sqlite_file(source_path) and not is_wal_index(source_path)
                 and clone_file(source_path, temporary)):
             try:
                 measured = stream_artifact_file(temporary, expected=expected)
@@ -1209,7 +1214,9 @@ def copy_artifact_file(source: Any, destination: pathlib.Path, *, expected: Any 
         else:
             with temporary.open("xb") as sink:
                 measured = stream_artifact_file(source, sink, expected=expected)
-        if source_path is not None:
+        if mode is not None:
+            os.chmod(temporary, mode)  # a clone carries the source's mode; the clone seam set its own times
+        elif source_path is not None:
             shutil.copystat(source_path, temporary)
         temporary.replace(destination)
         return measured

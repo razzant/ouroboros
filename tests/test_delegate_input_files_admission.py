@@ -12,6 +12,7 @@ import hashlib
 import json
 import pathlib
 import shutil
+import sys
 
 import pytest
 
@@ -196,6 +197,14 @@ def test_a_session_childs_selection_crosses_admission_snapshot_and_bootstrap_to_
         manifest = json.loads((scope / "inputs.json").read_text(encoding="utf-8"))
         assert sum(item["sha256"] == digest for item in manifest) == 1, "one copy of the bytes, no lineage recopy"
         assert not [item for item in manifest if "delegated_readonly_inputs" in item["source"]]
+        automatic = {pathlib.Path(item["source"]).name: (scope / item["local"]).read_bytes() for item in manifest
+                     if "selected_path" not in item and pathlib.Path(item["source"]).parent.name == "parent"}
+        assert automatic == {"brief.md": b"edited after queueing\n", "fixture.bin": BINARY}, "what the start found"
+        if sys.platform == "darwin":  # #2945: a parent's drive file is cloned at the first start, not rewritten
+            from ouroboros.artifact_storage import _may_share
+
+            assert _may_share(drive / "fixture.bin") is True and _may_share(scope / next(
+                item["local"] for item in manifest if item["source"].endswith("fixture.bin"))) is True
     else:
         assert body["scope"]["root"] == str(rt.repo) and "execution" not in body, "the repository stays scope and cwd"
         assert started["carrier"] == "outside_scope_path" and started["local"] == row["local"], "no second copy"
