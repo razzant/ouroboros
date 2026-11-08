@@ -80,7 +80,7 @@ def test_my_humans_answer_on_the_exact_words_sends_them(supervisor, monkeypatch,
     text = "Status of the tracks: Atlas passed 70 and 95."
     reply = {"place_id": "p", "text": text, "destination": {"conversation_id": "-100"}}
     words = "Status: all good." if card == "other words" else text
-    place = "" if card == "no destination" else " to Telegram · FusionBrain"
+    place = "" if card == "no destination" else " to Telegram · FusionBrain (-100)"
     answer = [{"source": "owner_quiz_answer", "content": "1. Send it", "quiz_id": "q9", "reply_to": {
         "address": "quiz q9 of task work", "author": "Ouroboros, task work",
         "text": (f"Send exactly this{place}: {words} — fine?\n" if card == "inside a line"
@@ -95,7 +95,7 @@ def test_my_humans_answer_on_the_exact_words_sends_them(supervisor, monkeypatch,
     h.replies.append(RuntimeError("provider_failed"))
     ok, message = h.module.check_safety("place_reply", reply, ctx=h.ctx)
     assert not ok and "SAFETY_UNAVAILABLE" in message and "no verdict" in message
-    assert "these exact words on their own lines, unprefixed, and the destination Telegram · FusionBrain" in message
+    assert "these exact words on their own lines, unprefixed, and the destination Telegram · FusionBrain, -100" in message
     assert "Never route these words through another tool" in message
     h.ctx._owner_directives = answer
     h.replies.append(RuntimeError("provider_failed"))
@@ -108,24 +108,28 @@ def test_my_humans_answer_on_the_exact_words_sends_them(supervisor, monkeypatch,
     assert ("(q9)" in message) is sent
 
 
-@pytest.mark.parametrize("source,sent", [("initial_user", True), ("place_confirmed", False)])
-def test_my_humans_answer_that_started_a_fresh_head_sends_the_words_it_answered(supervisor, monkeypatch, source, sent):
+@pytest.mark.parametrize("source,address,sent", [("initial_user", "quiz q5 of task ended-head", True),
+                                                 ("place_confirmed", "quiz q5 of task ended-head", False),
+                                                 ("initial_user", "row:0@2026-11-08T10:00:00Z#abcdef123456", False)])
+def test_my_humans_answer_that_started_a_fresh_head_sends_the_words_it_answered(supervisor, monkeypatch, source,
+                                                                               address, sent):
     """A late answer starts a fresh head whose first owner row carries the card it answered (``reply_to``): the exact
     words and destination on that card leave without a check there, flagged or not in the ended head. The same card
-    beside words that are not my human's own (a place's confirmed words) releases nothing: those words are checked."""
+    beside words that are not my human's own (a place's confirmed words), or my human's reply to a chat message that
+    holds the words (no card of mine), releases nothing: those words are checked."""
     from ouroboros import place_guard
     h = supervisor
     monkeypatch.setattr(place_guard, "call_place_facts", lambda *a, **kw: {
         "places": [{"place_id": "p", "place_label": "Telegram · FusionBrain"}], "targets": {"chat_id": ["-100"]}})
     text = "Atlas passed 70 and 95."
     h.ctx._owner_directives = [{"source": source, "content": "Да, отправляй", "reply_to": {
-        "address": "quiz q5 of task ended-head", "author": "Ouroboros, task ended-head",
-        "text": f"Send this to Telegram · FusionBrain?\n{text}\n1. Send it\n2. Not now\n"
+        "address": address, "author": "Ouroboros, task ended-head",
+        "text": f"Send this to Telegram · FusionBrain (-100)?\n{text}\n1. Send it\n2. Not now\n"
                 "(host record: my human pressed option 1)"}}]
     h.replies.append({"status": "DANGEROUS", "reason": "the note keeps this circle apart"})
     ok, message = h.module.check_safety("place_reply", {"place_id": "p", "text": text}, ctx=h.ctx)
     assert ok is sent and len(h.calls) == (0 if sent else 1)
-    assert ("quiz q5 of task ended-head" in message) is sent
+    assert ("(quiz q5 of task ended-head)" in message) is sent
 
 
 def test_my_humans_yes_on_an_exact_held_mcp_call_runs_it_on_a_later_decision(supervisor, monkeypatch):
@@ -152,6 +156,42 @@ def test_my_humans_yes_on_an_exact_held_mcp_call_runs_it_on_a_later_decision(sup
     assert [event["quiz_id"] for event in h.events if event["type"] == "safety_sent_without_assessment"] == ["q7"]
 
 
+def test_my_humans_card_reaches_an_unjudged_mcp_call_never_a_judged_action(supervisor, monkeypatch):
+    """The card reaches words and an MCP call no verdict judged: a call the check judged an action (DANGEROUS, not
+    words) keeps its level outside Cyber Pro though a card quotes its exact call; an unjudged call runs on its card."""
+    h = supervisor
+    monkeypatch.setattr(_tool_effects, "effect_of", REAL_EFFECT_OF)
+    monkeypatch.setattr(_tool_effects, "_MCP_ANNOTATIONS", {})
+    name, call, other = "mcp_jira__delete_project", {"key": "PROD"}, {"key": "TEST"}
+    card = lambda args: [{"source": "owner_quiz_answer", "quiz_id": "q3", "content": "1. Yes", "reply_to": {
+        "address": "quiz q3 of task work", "text": f"Run exactly this?\n{h.module._exact_call(name, args)}\n1. Yes"}}]
+    h.replies.append({"status": "DANGEROUS", "reason": "deletes a project", "speech": False})
+    assert not h.module.check_safety(name, call, ctx=h.ctx)[0]
+    h.ctx._owner_directives = card(call)
+    h.later()
+    h.replies.append({"status": "DANGEROUS", "reason": "deletes a project", "speech": False})
+    assert not h.module.check_safety(name, call, ctx=h.ctx)[0] and len(h.calls) == 2
+    h.ctx._owner_directives = card(other)
+    ok, message = h.module.check_safety(name, other, ctx=h.ctx)
+    assert ok and "(q3)" in message and len(h.calls) == 2
+
+
+def test_my_humans_card_releases_an_unjudged_undeclared_call(supervisor):
+    """A built-in that declares nothing (``github_write``) is words only by a verdict. With no verdict (the checker is
+    down) an ordinary mode holds it as any call; my human's card holding its exact call releases it there."""
+    h = supervisor
+    call = {"method": "comment", "repo": "razzant/ouroboros", "number": 7, "body": "Taking it up."}
+    h.replies.append(RuntimeError("provider_failed"))
+    ok, message = h.module.check_safety("github_write", call, ctx=h.ctx)
+    assert not ok and "SAFETY_UNAVAILABLE" in message
+    h.ctx._owner_directives = [{"source": "owner_quiz_answer", "quiz_id": "q5", "content": "1. Post", "reply_to": {
+        "address": "quiz q5 of task work", "text": f"Post exactly this?\n{h.module._exact_call('github_write', call)}"}}]
+    h.later()
+    h.replies.append(RuntimeError("provider_failed"))
+    ok, message = h.module.check_safety("github_write", call, ctx=h.ctx)
+    assert ok and "(q5)" in message and h.events[-1]["type"] == "safety_sent_without_assessment"
+
+
 def test_my_humans_yes_reaches_a_declared_send_whose_room_is_no_place(supervisor, monkeypatch, published_tool):
     """A connector's declared send into a room that is no place of it is held with its declared target named for the
     card: my human's answer naming that target sends it on a later decision, one naming another target, or a longer
@@ -169,11 +209,32 @@ def test_my_humans_yes_reaches_a_declared_send_whose_room_is_no_place(supervisor
         ok, message = h.module.check_safety(name, call, ctx=h.ctx)
         assert not ok and "the destination C1 on the card" in message
         h.ctx._owner_directives = [{"source": "owner_quiz_answer", "content": "1. Send it", "quiz_id": "q8",
-                                    "reply_to": {"text": f"Send this to {room}?\nShip it on Friday.\n1. Send it"}}]
+                                    "reply_to": {"address": "quiz q8 of task work",
+                                                 "text": f"Send this to {room}?\nShip it on Friday.\n1. Send it"}}]
         h.later()
         h.replies.append(RuntimeError("provider_failed"))
         assert h.module.check_safety(name, call, ctx=h.ctx)[0] is sent
         h.later()
+
+
+@pytest.mark.parametrize("named,sent", [(["Internal team", "team@example.test"], False),
+                                         (["Internal team", "team@example.test", "outsider@example.test"], True)])
+def test_my_humans_card_must_name_every_recipient(supervisor, monkeypatch, named, sent):
+    """A send to a place's recipient and to another one beside it leaves on my human's card only when the card names
+    every recipient: one naming the place alone never covers a Cc outside it, whose words are then checked."""
+    from ouroboros import place_guard, tool_effects
+    h = supervisor
+    monkeypatch.setattr(tool_effects, "effect_of", lambda *a, **kw: tool_effects.ToolEffect("message", declared=True))
+    monkeypatch.setattr(place_guard, "call_place_facts", lambda *a, **kw: {
+        "places": [{"place_id": "p", "place_label": "Internal team"}],
+        "targets": {"to": ["team@example.test"], "cc": ["outsider@example.test"]}})
+    call = {"to": "team@example.test", "cc": "outsider@example.test", "text": "The release moves to Friday."}
+    h.ctx._owner_directives = [{"source": "owner_quiz_answer", "quiz_id": "q2", "content": "1. Send", "reply_to": {
+        "address": "quiz q2 of task work", "text": f"Send to {', '.join(named)}?\nThe release moves to Friday.\n1. Send"}}]
+    h.replies.append({"status": "DANGEROUS", "reason": "an outsider on the Cc"})
+    ok, message = h.module.check_safety("connector_send", call, ctx=h.ctx)
+    assert ok is sent and len(h.calls) == (0 if sent else 1)
+    assert "outsider@example.test" in message or sent
 
 
 def test_legacy_owner_backend_absence_still_warns(supervisor, monkeypatch):

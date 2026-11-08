@@ -86,11 +86,18 @@ def test_dangerous_words_wait_for_my_human_outside_cyber_pro(supervisor, monkeyp
     assert len(h.calls) == 1 and not any(event["type"] == "safety_sent_despite_check" for event in h.events)
     assert h.module.check_safety("place_reply", {**reply, "text": "Atlas is on track."}, ctx=h.ctx) == (True, "")
     assert len(h.calls) == 2
+    # The same words to the same destination through another declared door wait too, unchecked.
+    from ouroboros import tool_effects
+    monkeypatch.setattr(tool_effects, "effect_of", lambda name, **kw: tool_effects.ToolEffect("message", declared=True)
+                        if name == "connector_send" else tool_effects.BUILTIN)
+    ok, message = h.module.check_safety("connector_send", {"text": text, "chat_id": "-100"}, ctx=h.ctx)
+    assert not ok and "flagged DANGEROUS in this work" in message and len(h.calls) == 2
     h.ctx._owner_directives = [{"source": "owner_quiz_answer", "content": "1. Send it", "quiz_id": "q9", "reply_to": {
-        "text": f"Send this to Telegram · FusionBrain?\n{text}\n1. Send it\n2. Not now"}}]
+        "address": "quiz q9 of task work", "text": f"Send this to Telegram · FusionBrain (-100)?\n{text}\n1. Send it"}}]
     ok, message = h.module.check_safety("place_reply", reply, ctx=h.ctx)
     assert ok and "(q9)" in message and len(h.calls) == 2
     assert (h.events[-1]["type"], h.events[-1]["quiz_id"]) == ("safety_sent_despite_check", "q9")
+    assert h.events[-1]["verdicts"][0]["status"] == "DANGEROUS"  # the release keeps the verdict it overrode
     h.ctx._owner_directives = []
     eva = {**reply, "text": "Eva starts on Monday.", "request_id": "r-4"}
     h.replies.append({"status": "DANGEROUS", "reason": "the note keeps this circle apart"})
@@ -107,6 +114,24 @@ def test_dangerous_words_wait_for_my_human_outside_cyber_pro(supervisor, monkeyp
     h.later()
     ok, message = h.module.check_safety("place_reply", joi, ctx=h.ctx)
     assert not ok and "wait for your human" in message and len(h.calls) == 4
+
+
+def test_an_unchecked_mode_meets_no_flag_wait_or_card(supervisor, monkeypatch):
+    """Safety off for this work kind means unchecked: a DANGEROUS wait recorded before the switch and a matching card
+    both give way to the disclosed skip, so nothing waits and no Safety note rides on the words; switched back on,
+    the wait binds again."""
+    h = supervisor
+    reply = {"text": "Atlas passed 70 and 95.", "request_id": "r-1"}
+    h.replies.append({"status": "DANGEROUS", "reason": "the note keeps this circle apart"})
+    assert not h.module.check_safety("place_reply", reply, ctx=h.ctx)[0]
+    h.ctx._owner_directives = [{"source": "owner_quiz_answer", "quiz_id": "q1", "content": "1. Send", "reply_to": {
+        "address": "quiz q1 of task work", "text": f"Send exactly this?\n{h.module._exact_call('place_reply', reply)}"}}]
+    h.modes["owner"] = "off"
+    h.later()
+    assert h.module.check_safety("place_reply", reply, ctx=h.ctx) == (True, "") and h.events[-1]["type"] == "skip"
+    h.modes["owner"], h.ctx._owner_directives = "full", []
+    ok, message = h.module.check_safety("place_reply", reply, ctx=h.ctx)
+    assert not ok and "wait for your human" in message and len(h.calls) == 1
 
 
 def test_a_verdict_marks_speech_on_any_checked_call(supervisor, monkeypatch):
@@ -128,8 +153,8 @@ def test_a_verdict_marks_speech_on_any_checked_call(supervisor, monkeypatch):
         h.later()
     assert len(h.calls) == 1, "the identical re-issue waited without a new check"
     assert h.module.check_safety("github_write", {**secret, "number": 3}, ctx=h.ctx)[0] and len(h.calls) == 2
-    h.ctx._owner_directives = [{"source": "owner_quiz_answer", "content": "1. Post it", "quiz_id": "q4",
-                                "reply_to": {"text": f"Post exactly this?\n{exact}\n1. Post it"}}]
+    h.ctx._owner_directives = [{"source": "owner_quiz_answer", "content": "1. Post it", "quiz_id": "q4", "reply_to": {
+        "address": "quiz q4 of task work", "text": f"Post exactly this?\n{exact}\n1. Post it"}}]
     ok, message = h.module.check_safety("github_write", secret, ctx=h.ctx)
     assert ok and "(q4)" in message and h.events[-1]["quiz_id"] == "q4"
     h.ctx._owner_directives = []
@@ -145,6 +170,14 @@ def test_a_verdict_marks_speech_on_any_checked_call(supervisor, monkeypatch):
     h.replies.append({"status": "DANGEROUS", "reason": "the place note asks for a quiz first", "speech": False})
     ok, message = h.module.check_safety("github_write", {**comment, "body": "Other words."}, ctx=h.ctx)
     assert ok and "Cyber Pro leaves the decision to Ouroboros" in message
+    # A comment my human approved on a card before its first send leaves at its first flag, whatever the mode.
+    monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "advanced")
+    approved = {**comment, "body": "Taking it up after the owner's yes."}
+    h.ctx._owner_directives = [{"source": "owner_quiz_answer", "content": "1. Post it", "quiz_id": "q6", "reply_to": {
+        "address": "quiz q6 of task work", "text": f"Post exactly this?\n{h.module._exact_call('github_write', approved)}"}}]
+    h.replies.append({"status": "DANGEROUS", "reason": "the place note asks for a quiz first", "speech": True})
+    ok, message = h.module.check_safety("github_write", approved, ctx=h.ctx)
+    assert ok and "(q6)" in message and "The check had said" in message and len(h.calls) == 5
 
 
 def test_writes_keep_binding_and_effective_mode(supervisor, monkeypatch):
