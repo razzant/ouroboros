@@ -4,9 +4,12 @@ import json
 import pytest
 
 from ouroboros import place_guard as _place_guard
+from ouroboros import tool_effects as _tool_effects
 from tests._safety_fixtures import supervisor as supervisor_fixture
-supervisor = supervisor_fixture
+from tests.test_tool_effects import published_tool as _published_tool
+supervisor, published_tool = supervisor_fixture, _published_tool
 REAL_CALL_PLACE_FACTS = _place_guard.call_place_facts  # bound before the fixture stubs it
+REAL_EFFECT_OF = _tool_effects.effect_of
 
 
 def bundle(h, name, arguments):
@@ -131,3 +134,25 @@ def test_a_speech_refusal_names_the_words_the_rule_and_the_destinations_notes(su
     assert ('[DESTINATION] Telegram · FusionBrain: your human\'s notes for this place: "Do not disclose Joi/Eva/SDG here."'
             in message) and "They like brevity" not in message
     assert h.module.check_safety("connector_send", {"chat_id": "-100", "text": "Atlas passed 70 and 95."}, ctx=h.ctx) == (True, "")
+
+
+def test_a_sending_identity_is_my_humans_where_their_bot_or_app_confirms_them(supervisor, monkeypatch, published_tool):
+    """A destination I write to from a user account counts my human's confirmation from another room of the same
+    connector account, as every other reader does; a room of another account does not."""
+    from ouroboros import place_arrivals, places
+    h = supervisor
+    monkeypatch.setattr(_place_guard, "call_place_facts", REAL_CALL_PLACE_FACTS)
+    monkeypatch.setattr(_tool_effects, "effect_of", REAL_EFFECT_OF)
+    root = h.ctx.drive_root
+    first = places.connect_place(root, connector="connector", provider="service", account_id="account", conversation_id="C1")
+    places.connect_place(root, connector="connector", provider="service", account_id="account", conversation_id="C2")
+    places.connect_place(root, connector="connector", provider="service", account_id="other", conversation_id="C3")
+    places.edit_place(root, first.place_id, "confirm_owner_account", author="owner",
+                      platform_actor_id="U-owner", account_id="account")
+    monkeypatch.setattr(place_arrivals, "recent_identity",
+                        lambda *args: {"sends_as": {"id": "U-owner", "label": "Owner", "kind": "user"}})
+    name, _tool = published_tool("message", target="room", conversation="room", account_id="account_id")
+    sibling = _place_guard.call_place_facts(h.ctx, name, {"room": "C2", "account_id": "account", "text": "Hello"})
+    elsewhere = _place_guard.call_place_facts(h.ctx, name, {"room": "C3", "account_id": "other", "text": "Hello"})
+    assert sibling["places"][0]["sends_as_owner"] is True
+    assert elsewhere["places"][0]["sends_as_owner"] is False

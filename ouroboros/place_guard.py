@@ -41,6 +41,15 @@ def _drive_root(ctx: Any) -> Any:
             or getattr(ctx, "drive_root", None))
 
 
+def _counted_accounts(ctx: Any) -> Mapping[str, Any]:
+    """The owner accounts each place counts now (``places.place_owner_accounts``): a sending identity reads as my
+    human's wherever their bot or app confirms them; {} when the places cannot be read (each place's own rows)."""
+    try:
+        return places.place_owner_accounts(_drive_root(ctx)) if _drive_root(ctx) else {}
+    except places.PlaceError:
+        return {}
+
+
 class _PlacesUnreadable(RuntimeError):
     """The place store needs repair; a connector's writes cannot be attributed."""
 
@@ -272,7 +281,9 @@ def call_place_facts(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
         keys = _conversation_keys(place, effect, targets, account_id=account)
         rows.append({"place_id": place.place_id, "place_label": place.label, "place_state": place.state,
                      **({"sends_as": dict(sending), "sends_as_owner": (sending.get("kind") == "user" and bool(focus.get("identity_owner")))
-                         if same_focus else places.writes_as_owner(place, identity, account)} if sending else {}),
+                         if same_focus else places.writes_as_owner(place, identity, account,
+                                                                   _counted_accounts(ctx).get(place.place_id))}
+                        if sending else {}),
                      "conversation_key": keys[0] if len(keys) == 1 else "", "conversation_keys": keys})
     facts = {"effect": effect.effect, "declared": effect.declared, "targets": targets,
              "attributable": attributable, "places": rows}
