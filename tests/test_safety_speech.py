@@ -89,7 +89,7 @@ def test_dangerous_words_wait_for_my_human_outside_cyber_pro(supervisor, monkeyp
     h.ctx._owner_directives = [{"source": "owner_quiz_answer", "content": "1. Send it", "quiz_id": "q9", "reply_to": {
         "text": f"Send this to Telegram · FusionBrain?\n{text}\n1. Send it\n2. Not now"}}]
     ok, message = h.module.check_safety("place_reply", reply, ctx=h.ctx)
-    assert ok and "quiz q9" in message and len(h.calls) == 2
+    assert ok and "(q9)" in message and len(h.calls) == 2
     assert (h.events[-1]["type"], h.events[-1]["quiz_id"]) == ("safety_sent_despite_check", "q9")
     h.ctx._owner_directives = []
     eva = {**reply, "text": "Eva starts on Monday.", "request_id": "r-4"}
@@ -131,7 +131,7 @@ def test_a_verdict_marks_speech_on_any_checked_call(supervisor, monkeypatch):
     h.ctx._owner_directives = [{"source": "owner_quiz_answer", "content": "1. Post it", "quiz_id": "q4",
                                 "reply_to": {"text": f"Post exactly this?\n{exact}\n1. Post it"}}]
     ok, message = h.module.check_safety("github_write", secret, ctx=h.ctx)
-    assert ok and "quiz q4" in message and h.events[-1]["quiz_id"] == "q4"
+    assert ok and "(q4)" in message and h.events[-1]["quiz_id"] == "q4"
     h.ctx._owner_directives = []
     monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")
     comment = {"method": "comment", "repo": "razzant/ouroboros", "number": 2805, "body": "Taking it up."}

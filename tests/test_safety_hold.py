@@ -90,7 +90,7 @@ def test_my_humans_answer_on_the_exact_words_sends_them(supervisor, monkeypatch,
     if card == "answered before":
         h.ctx._owner_directives = answer
         ok, message = h.module.check_safety("place_reply", reply, ctx=h.ctx)
-        assert ok and "quiz q9" in message and not h.calls and exits() == [("q9", None)]
+        assert ok and "(q9)" in message and not h.calls and exits() == [("q9", None)]
         return
     h.replies.append(RuntimeError("provider_failed"))
     ok, message = h.module.check_safety("place_reply", reply, ctx=h.ctx)
@@ -105,7 +105,27 @@ def test_my_humans_answer_on_the_exact_words_sends_them(supervisor, monkeypatch,
     ok, message = h.module.check_safety("place_reply", reply, ctx=h.ctx)
     assert ok is sent and len(h.calls) == (2 if sent else 3)
     assert exits() == ([("q9", "UNAVAILABLE")] if sent else [])
-    assert ("quiz q9" in message) is sent
+    assert ("(q9)" in message) is sent
+
+
+@pytest.mark.parametrize("source,sent", [("initial_user", True), ("place_confirmed", False)])
+def test_my_humans_answer_that_started_a_fresh_head_sends_the_words_it_answered(supervisor, monkeypatch, source, sent):
+    """A late answer starts a fresh head whose first owner row carries the card it answered (``reply_to``): the exact
+    words and destination on that card leave without a check there, flagged or not in the ended head. The same card
+    beside words that are not my human's own (a place's confirmed words) releases nothing: those words are checked."""
+    from ouroboros import place_guard
+    h = supervisor
+    monkeypatch.setattr(place_guard, "call_place_facts", lambda *a, **kw: {
+        "places": [{"place_id": "p", "place_label": "Telegram · FusionBrain"}], "targets": {"chat_id": ["-100"]}})
+    text = "Atlas passed 70 and 95."
+    h.ctx._owner_directives = [{"source": source, "content": "Да, отправляй", "reply_to": {
+        "address": "quiz q5 of task ended-head", "author": "Ouroboros, task ended-head",
+        "text": f"Send this to Telegram · FusionBrain?\n{text}\n1. Send it\n2. Not now\n"
+                "(host record: my human pressed option 1)"}}]
+    h.replies.append({"status": "DANGEROUS", "reason": "the note keeps this circle apart"})
+    ok, message = h.module.check_safety("place_reply", {"place_id": "p", "text": text}, ctx=h.ctx)
+    assert ok is sent and len(h.calls) == (0 if sent else 1)
+    assert ("quiz q5 of task ended-head" in message) is sent
 
 
 def test_my_humans_yes_on_an_exact_held_mcp_call_runs_it_on_a_later_decision(supervisor, monkeypatch):
@@ -127,7 +147,7 @@ def test_my_humans_yes_on_an_exact_held_mcp_call_runs_it_on_a_later_decision(sup
         h.later()
         h.replies.append(RuntimeError("provider_failed"))
         ok, message = h.module.check_safety(name, call, ctx=h.ctx)
-        assert ok is sent and ("quiz q7" in message) is sent
+        assert ok is sent and ("(q7)" in message) is sent
         h.later()
     assert [event["quiz_id"] for event in h.events if event["type"] == "safety_sent_without_assessment"] == ["q7"]
 

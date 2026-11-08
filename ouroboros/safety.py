@@ -593,19 +593,22 @@ def _exit_subject(ctx, tool_name, arguments, effect, ext_tool=None):
 
 
 def _owner_yes(ctx, tool_name, arguments, effect, ext_tool=None):
-    """The quiz my human answered in this work whose card holds these exact words and every destination (a call
-    that declares neither: the exact call, ``_exact_call``); "" if none. A draft shown and answered before the send
-    counts, and so does an answer that started a fresh head (its card rides in the head's owner rows). The host checks
-    facts only (bytes and destination): the mind's call after reading the answer is its judgment that it approves."""
+    """The id of my human's answer in this work whose card (the quiz or message it replies to) holds these exact words
+    and every destination (a call that declares neither: the exact call, ``_exact_call``); "" if none. A draft shown
+    and answered before the send counts, and so does an answer that started a fresh head (its card rides in the head's
+    owner rows). The host checks facts only (bytes and destination): the mind's call after reading the answer is its
+    judgment that it approves."""
+    from ouroboros.owner_words import OWNER_SOURCES
+
     cards = [(row, str(row["reply_to"]["text"])) for row in getattr(ctx, "_owner_directives", None) or []
-             if isinstance(row, dict) and row.get("source") == "owner_quiz_answer"
+             if isinstance(row, dict) and row.get("source") in OWNER_SOURCES
              and isinstance(row.get("reply_to"), dict) and row["reply_to"].get("text")]
     words, destinations, _ = _exit_subject(ctx, tool_name, arguments, effect, ext_tool) if cards else ("", [], True)
     for row, card in cards:
         # The words as whole lines of the card and each destination as a whole token, never a part of a longer one.
         if (f"\n{words.strip()}\n" in f"\n{card}\n"
                 and all(re.search(rf"(?<!\w){re.escape(d)}(?!\w)", card) for d in destinations)):
-            return str(row.get("quiz_id") or row.get("msg_id") or "")
+            return str(row.get("quiz_id") or row.get("msg_id") or row["reply_to"].get("address") or "an answer")
     return ""
 
 
@@ -1445,10 +1448,10 @@ def check_safety(
     assessment: SUSPICIOUS or DANGEROUS returns it unsent once, with the reason, the verdict's ``quote`` and the
     destination's notes. An identical re-issue (request_id included) from a later model call sends SUSPICIOUS words in
     every mode and DANGEROUS words in Cyber Pro, the mode read when they are sent; elsewhere DANGEROUS words wait for
-    my human, keyed on the declared words and destination, so a new request_id buys no fresh check. My human's
-    answered card holding the exact words as whole lines and the destination (a call declaring neither: the exact
-    call) sends them in every mode, a card answered before the send included (``_owner_yes``): the host checks that the
-    card was answered, never what the answer says. A hold on speech, or on an MCP call without a verdict, binds in
+    my human, keyed on the declared words and destination, so a new request_id buys no fresh check. My human's answer
+    whose card holds the exact words as whole lines and the destination (a call declaring neither: the exact call)
+    sends them in every mode, one given before the send included (``_owner_yes``): the host checks that the card was
+    answered, never what the answer says. A hold on speech, or on an MCP call without a verdict, binds in
     every mode and names the same exit. The speech mark is the final stage's, and words only the verdict saw meet the
     one-author guard before they leave. ``ext_tool`` is the extension descriptor being dispatched: its effect and the
     brief's place facts are the publication it was read with (``tool_effects.bound_declaration``)."""
@@ -1524,8 +1527,8 @@ def check_safety(
         if prior.get("marked") and (refusal := one_author()):
             return False, refusal
         return sent("safety_sent_despite_check" if flag else "safety_sent_without_assessment",
-                    f"Sent on your human's answer to quiz {quiz}, without a new check. The host checked that they "
-                    "answered a card with these exact words, not what they answered.", quiz_id=quiz,
+                    f"Sent on your human's answer ({quiz}), without a new check. The host checked that they answered "
+                    "a card with these exact words, not what they answered.", quiz_id=quiz,
                     **({"hold": prior["held"]} if prior.get("held") else {}))
     if flag:
         if not mind_may:  # it waits for my human: no fresh check re-rolls it
