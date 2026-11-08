@@ -73,6 +73,7 @@
       {
         "inputId": "main-model",
         "label": "Main Model",
+        "managed": false,
         "note": "Primary reasoning and long-form work.",
         "settingKey": "OUROBOROS_MODEL",
         "settingsInputId": "s-model",
@@ -83,6 +84,7 @@
       {
         "inputId": "light-model",
         "label": "Light Model",
+        "managed": false,
         "note": "Fast summaries, lightweight internal work and the default Fast scout. Empty uses Main.",
         "settingKey": "OUROBOROS_MODEL_LIGHT",
         "settingsInputId": "s-model-light",
@@ -93,6 +95,7 @@
       {
         "inputId": "safety-model",
         "label": "Safety Supervisor",
+        "managed": false,
         "note": "Empty uses the Light model.",
         "settingKey": "OUROBOROS_MODEL_SAFETY",
         "settingsInputId": "s-model-safety",
@@ -103,6 +106,7 @@
       {
         "inputId": "vision-model",
         "label": "Vision Model",
+        "managed": false,
         "note": "Caption and VLM lane. Empty uses Main.",
         "settingKey": "OUROBOROS_MODEL_VISION",
         "settingsInputId": "s-model-vision",
@@ -113,6 +117,7 @@
       {
         "inputId": "consciousness-model",
         "label": "Consciousness Model",
+        "managed": false,
         "note": "High-horizon background consciousness. Empty uses Main.",
         "settingKey": "OUROBOROS_MODEL_CONSCIOUSNESS",
         "settingsInputId": "s-model-consciousness",
@@ -123,6 +128,7 @@
       {
         "inputId": "fallback-model",
         "label": "Fallback Model",
+        "managed": false,
         "note": "Fallback and resilience path.",
         "settingKey": "OUROBOROS_MODEL_FALLBACKS",
         "settingsInputId": "s-model-fallback",
@@ -405,6 +411,7 @@
     ],
     "version": 1
   },
+  "deployment": null,
   "freshInstall": false,
   "hostMode": "desktop",
   "initialState": {

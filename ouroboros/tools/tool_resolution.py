@@ -624,6 +624,25 @@ def _binding_set_targets_system_repo(ctx: Any, binding: Any) -> bool:
     return bool(items) and any(_registry().binding_targets_system_repo(ctx, item) for item in items)
 
 
+def serving_body_refusal(ctx: Any, binding: Any, *, intrinsic: bool) -> str:
+    """A managed deployment's refusal of a repository mutation that lands in the serving checkout itself
+    (``deployment_policy.body_replacement_refusal``): an edit there or a moved HEAD reaches the program at its next
+    restart. A bound body candidate, an isolated child's worktree and every other workspace answer "", as does an
+    unmanaged install. ``intrinsic`` tools act on the context's own body root (the candidate, when one is bound)."""
+    from ouroboros.body_candidate import serving_repo_dir_for
+    from ouroboros.deployment_policy import body_replacement_refusal
+    from ouroboros.tool_access import path_is_relative_to
+
+    refusal = body_replacement_refusal()
+    if not refusal:
+        return ""
+    serving = serving_repo_dir_for(ctx).resolve(strict=False)
+    items = () if intrinsic else _binding_items(binding)
+    targets = [item.repository_path or item.target_path for item in items] or [system_repo_dir_for(ctx)]
+    return refusal if any(path_is_relative_to(pathlib.Path(target).resolve(strict=False), serving)
+                          for target in targets) else ""
+
+
 def _user_files_binding_reaches_repo(ctx: Any, binding: Any) -> bool:
     """Whether a ``user_files`` target physically lands inside the Ouroboros repo.
 

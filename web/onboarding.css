@@ -431,6 +431,15 @@ textarea::placeholder {
   font-weight: 600;
 }
 
+.wizard-choice-grid.one {
+  /* A deployment's ceiling can leave the access picker one or two choices. */
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.wizard-choice-grid.two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .wizard-choice-grid.three {
   /* Runtime-mode picker for contracts with three choices. */
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1386,6 +1395,8 @@ textarea::placeholder {
   .grid.two,
   .grid.three,
   .wizard-choice-grid,
+  .wizard-choice-grid.two,
+  .wizard-choice-grid.three,
   .wizard-choice-grid.four,
   .agent-ladder-layout {
     grid-template-columns: 1fr;

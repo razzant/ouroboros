@@ -158,17 +158,19 @@ def runtime_setting(key: str, default=None):
     """Environment-shaped runtime read; absence in the snapshot stays absent.
 
     A route key (``route_choice.ROUTE_SETTING_KEYS``: model slots, accounts, provider keys) reads the
-    settings document as it is now, in a task or not; every other next-task key keeps the task's snapshot."""
+    settings document as it is now, in a task or not; every other next-task key keeps the task's snapshot.
+    A deployment policy's managed key reads as the policy lets it, whatever the view held."""
+    from ouroboros.deployment_policy import effective_value
     from ouroboros.route_choice import ROUTE_SETTING_KEYS, live_setting
 
     if key in ROUTE_SETTING_KEYS:
         served, value = live_setting(key, default)
         if served:
-            return value
+            return effective_value(key, value)
     snapshot = _TASK_SETTINGS.get()
     if snapshot is not None and _next_task_setting(key):
-        return snapshot.environ.get(key, default)
-    return os.environ.get(key, default)
+        return effective_value(key, snapshot.environ.get(key, default))
+    return effective_value(key, os.environ.get(key, default))
 
 
 def runtime_environ() -> dict[str, str]:
@@ -189,9 +191,11 @@ def runtime_environ() -> dict[str, str]:
                     env.pop(key, None)
                 else:
                     env[key] = snapshot.environ[key]
+    from ouroboros.deployment_policy import effective_environ
     from ouroboros.route_choice import live_environ_overlay
 
     live_environ_overlay(env)  # a model call in a child (vision) uses the current model and key, never a cleared one
+    effective_environ(env)
     return env
 
 
@@ -437,11 +441,12 @@ def selection_settings(*, settings_reader=None) -> dict:
     restoring task values. Defaults and operator variables keep their precedence;
     missing effective keys stay missing. Selection authority belongs to the caller.
     """
+    from ouroboros.deployment_policy import effective_settings
     from ouroboros.route_choice import live_settings_overlay
 
     settings = skill_settings(settings_reader)
     live_settings_overlay(settings)
-    return settings
+    return effective_settings(settings)
 
 
 def runtime_settings(*, settings_reader=None) -> dict:
@@ -458,10 +463,11 @@ def runtime_settings(*, settings_reader=None) -> dict:
                 settings.pop(key, None)
             else:
                 settings[key] = copy.deepcopy(snapshot.settings[key])
+    from ouroboros.deployment_policy import effective_settings
     from ouroboros.route_choice import live_settings_overlay
 
     live_settings_overlay(settings)  # route keys read the document as it is now (route_choice)
-    return settings
+    return effective_settings(settings)  # an old snapshot never widens what the deployment manages
 
 
 def task_settings_snapshot(settings: dict, environ: dict) -> TaskSettingsSnapshot:

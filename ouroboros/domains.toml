@@ -206,6 +206,7 @@ D20 = "Presence"
 "ouroboros/colab_bootstrap.py" = "D12"
 "ouroboros/commit_admission.py" = "D06"
 "ouroboros/config.py" = "D12"
+"ouroboros/deployment_policy.py" = "D12"  # administrator constraints over effective settings
 "ouroboros/launch_roots.py" = "D12"  # the stdlib launch tuple and work-root basis config derives from
 "ouroboros/composer_cognition.py" = "D12"
 "ouroboros/confined_files.py" = "D18"

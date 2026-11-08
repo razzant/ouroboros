@@ -818,7 +818,10 @@ async def api_onboarding_complete(request: Request) -> JSONResponse:
 
     subscriptions_connected, skip_presets = parse_subscription_intent(body)
     eligible = preset_eligible(old_settings)
-    safety_light = _fresh_settings_file()
+    from ouroboros.deployment_policy import choice_refusal
+
+    # The new-install Light default is a proposal: under a deployment's coverage floor it is never authored.
+    safety_light = _fresh_settings_file() and not choice_refusal("OUROBOROS_SAFETY_MODE", "light")
     if safety_light:
         current["OUROBOROS_CONSCIOUSNESS_SAFETY_MODE"] = "full"
         # Rev.3-2 desktop-wizard parity: a genuinely FRESH install authors the new-install ``light``
@@ -910,7 +913,11 @@ async def api_onboarding_complete(request: Request) -> JSONResponse:
                 # defaults genuinely bypasses the thing that failed.
                 return unsaved_error(str(exc), 503, code="settings_locked")
             if isinstance(exc, PermissionError):
-                return unsaved_error(str(exc), 403)
+                from ouroboros.deployment_policy import DeploymentPolicyRefusal
+                from ouroboros.gateway.owner_settings import MANAGED_BY_DEPLOYMENT
+
+                typed = {"code": MANAGED_BY_DEPLOYMENT} if isinstance(exc, DeploymentPolicyRefusal) else {}
+                return unsaved_error(str(exc), 403, **typed)
             log.exception("onboarding completion failed")
             return unsaved_error(f"{type(exc).__name__}: {exc}", 500)
 

@@ -1,7 +1,75 @@
 // The Settings policy-state lines: what Access, supervisor and review enforcement are in
 // the current process and will be for the next task, and what Cyber Pro Access does to a
 // Blocking choice. Facts come from the gateway's `policy_state`; the draft selects are read
-// only to say what a selection would mean before Save.
+// only to say what a selection would mean before Save. A managed deployment's part
+// (`policy_state.deployment`, also the wizard's `bootstrap.deployment`) is read here once:
+// a control offers only what its policy file allows, and what it fixes is said, not edited.
+
+/** What a managed deployment's policy file fixes, or null outside one. */
+export const deploymentOf = (meta) => meta?.policy_state?.deployment || null;
+
+const RANKS = { access: ['light', 'advanced', 'pro', 'cyber_pro'], coverage: ['off', 'light', 'full'] };
+
+/** The options of Access (a ceiling) or a Supervisor level (a floor) the deployment allows, in their order. */
+export function allowedOptions(options, deployment, axis) {
+    const ranks = RANKS[axis];
+    const bound = ranks.indexOf(axis === 'access' ? deployment?.access_max : deployment?.min_coverage);
+    if (bound < 0) return options;
+    return options.filter(({ value }) => (axis === 'access' ? ranks.indexOf(value) <= bound : ranks.indexOf(value) >= bound));
+}
+
+/** The one sentence a fixed or bounded choice carries; '' where the deployment leaves it free. */
+export function deploymentNote(deployment, axis) {
+    const bound = axis === 'access' ? deployment?.access_max : deployment?.min_coverage;
+    if (!bound) return '';
+    const level = policyValueLabel(bound);
+    if (allowedOptions(RANKS[axis].map((value) => ({ value })), deployment, axis).length === 1) {
+        return `Set by your organization: ${level}`;
+    }
+    return axis === 'access' ? `Your organization allows up to ${level}` : `Your organization requires at least ${level}`;
+}
+
+/**
+ * Offer a segmented choice (`target`, its hidden input) with only the options the deployment allows: drawn again by
+ * the one renderer (`render`, so its column count is what it drew) and bound by `bind` on its parent, which holds
+ * its input and no other choice. A choice left with one option is no choice: its row is hidden and its policy line
+ * says the fixed value. Unmanaged, the full choice stays as drawn.
+ */
+export function offerAllowedChoices(root, { target, options, axis, modifier = '' }, deployment, { render, bind }) {
+    const group = root?.querySelector(`[data-effort-target="${target}"]`);
+    if (!group) return;
+    const allowed = allowedOptions(options, deployment, axis);
+    const drawn = Array.from(group.querySelectorAll('[data-effort-value]'), (button) => button.dataset.effortValue);
+    let current = group;
+    if (drawn.join(' ') !== allowed.map(({ value }) => value).join(' ')) {
+        const holder = group.parentElement;
+        group.outerHTML = render({ target, options: allowed, modifier, title: group.title });
+        current = holder.querySelector(`[data-effort-target="${target}"]`);
+        bind(holder);
+    }
+    current.hidden = allowed.length === 1;
+    return allowed.length === 1;
+}
+
+/** Whether the organization's Supervisor answers through this connection (`kind` or `kind@name`) or the local server. */
+export const checkerUses = (deployment, connectionId) => (connectionId === 'local'
+    ? Boolean(deployment?.checker?.local) : (deployment?.checker?.connections || []).includes(connectionId));
+
+/** Whether the checker's built-in routes read this flat setting now (`checker.fields`: a built-in key's field, the
+ * compatible lane's dedicated or legacy pair): that one field is shown, never edited; its row stays the employee's. */
+export const checkerReads = (deployment, settingKey) => (deployment?.checker?.fields || []).includes(settingKey);
+
+/** The sentence beside fields the checker reads, by their labels; '' for none. */
+export const checkerFieldsNote = (labels) => (labels.length
+    ? `${labels.join(' and ')}: set by your organization, its Safety Supervisor uses ${labels.length > 1 ? 'them' : 'it'}.` : '');
+
+/** Show `input` (one flat setting outside an API-key row) as the checker reads it: read-only with `note`, or as it was. */
+export function fixCheckerField(input, note, deployment, settingKey, label) {
+    if (!input) return;
+    const fixed = checkerReads(deployment, settingKey);
+    input.readOnly = fixed;
+    if (note) Object.assign(note, { hidden: !fixed, textContent: fixed ? checkerFieldsNote([label]) : '' });
+}
 
 export function policyValueLabel(value) {
     const labels = {
@@ -41,12 +109,18 @@ export function syncPolicyState(root, meta) {
         if (node) node.textContent = text;
     };
     // One value said once ("Advisory now and for new tasks"); the facts are spelled out only where they differ.
+    // A value the deployment fixes is said as its; a bound it sets follows the facts.
+    const deployment = state.deployment || null;
+    const bounded = (axis, text) => {
+        const note = deploymentNote(deployment, axis);
+        return note.startsWith('Set by') ? note : [text, note].filter(Boolean).join(' · ');
+    };
     const access = state.access || {};
     const now = policyValueLabel(access.current_process || access.effective);
     const later = policyValueLabel(access.configured);
-    render('access', access.restart_required
+    render('access', bounded('access', access.restart_required
         ? `Saved: ${later} · Current process: ${now} · After restart: ${later} · Restart required`
-        : now === later ? `${now} now and after restart` : `Current process: ${now} · After restart: ${later}`);
+        : now === later ? `${now} now and after restart` : `Current process: ${now} · After restart: ${later}`));
     const suffix = (item) => {
         const saved = policyValueLabel(item.configured);
         const current = policyValueLabel(item.current_process || item.effective);
@@ -57,9 +131,12 @@ export function syncPolicyState(root, meta) {
             ? `Saved: ${saved} · Current process: ${current} · Next task: ${next} · Current task keeps its start snapshot`
             : `Current process: ${current} · Next task: ${next}`;
     };
-    render('supervisor', suffix(state.supervisor || {}));
-    // The consciousness level's line, only where the server reports it (an older one has one level).
-    if (state.supervisor_consciousness) render('supervisor_consciousness', suffix(state.supervisor_consciousness));
+    render('supervisor', bounded('coverage', suffix(state.supervisor || {})));
+    // The consciousness level's line, only where the server reports it (an older one has one level); a floor
+    // the deployment sets binds it too.
+    if (state.supervisor_consciousness || deployment?.min_coverage) {
+        render('supervisor_consciousness', bounded('coverage', state.supervisor_consciousness ? suffix(state.supervisor_consciousness) : ''));
+    }
     const cyber = cyberReviewNote(state, { enforcement: root?.querySelector('#s-review-enforcement')?.value,
         access: root?.querySelector('#s-runtime-mode')?.value });
     render('review', suffix(state.review || {}) + (cyber ? ` · ${cyber}` : ''));

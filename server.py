@@ -1453,12 +1453,12 @@ def main() -> int:
         process_scope.initialize_installation_scope(DATA_DIR)
     if not automatic_launch_allowed(os.environ.get("OUROBOROS_LAUNCH_INTENT", "owner"), DATA_DIR, log):
         return 0
-    # Verify a benchmark parent's exact integrity pin before resolving the saved bind host;
-    # a malformed/replaced snapshot must never become product defaults.
+    # Verify the settings trust roots before resolving the saved bind host: a benchmark parent's exact integrity
+    # pin and a named deployment policy; a malformed/replaced one never becomes product defaults or unmanaged.
     try:
         verify_settings_integrity()
-    except SettingsIntegrityError:
-        log.error("isolated settings integrity verification failed")
+    except SettingsIntegrityError as refusal:
+        log.error("Server not started: settings verification failed: %s", refusal)
         return 2
     try:
         saved_host = str(load_settings().get("OUROBOROS_SERVER_HOST") or "").strip()

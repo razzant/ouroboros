@@ -83,6 +83,7 @@
  * @property {string} note
  * @property {string} settingsInputId
  * @property {string} settingsToggleId
+ * @property {boolean} managed  // a deployment policy fixes it: shown, never edited or written
  */
 
 /**
@@ -198,6 +199,7 @@
  * @property {SetupContract} contract
  * @property {SetupInitialState} initialState
  * @property {SetupConsciousnessOffer} consciousnessOffer  // display; a ticked row sends the ordinary Start after the save
+ * @property {?SettingsDeploymentPolicy} deployment  // Settings' `_meta.policy_state.deployment`; null unmanaged
  */
 
 /**
@@ -211,6 +213,40 @@
  * `GET /api/settings`: every effective setting with its (masked) value, plus `_meta`.
  * @typedef {Object} SettingsReadResponse
  * @property {import('./api_types.js').SettingsMeta=} _meta
+ */
+
+/**
+ * `_meta.policy_state`: configured versus effective Access, Supervisor and Review, plus what a managed
+ * deployment's policy file fixes.
+ * @typedef {Object} SettingsPolicyState
+ * @property {{configured:string,effective:string,current_process:string,next_task:string,restart_required:boolean,applies:string}} access
+ * @property {{configured:string,effective:string,current_process:string,next_task:string,pending:boolean,applies:string,active_task_snapshot:boolean}} supervisor
+ * @property {{configured:string,effective:string,current_process:string,next_task:string,pending:boolean,applies:string,active_task_snapshot:boolean}} review
+ * @property {boolean} running_task_snapshot
+ * @property {SettingsDeploymentPolicy=} deployment  // absent outside a managed deployment
+ */
+
+/**
+ * The organization's Safety Supervisor route; no connection value or secret.
+ * @typedef {Object} SettingsDeploymentChecker
+ * @property {string} model
+ * @property {string} account
+ * @property {string[]} fallbacks
+ * @property {string[]} connections  // the connections its routes use, by picker id (`kind` or `kind@name`)
+ * @property {string[]} fields  // the flat settings its built-in routes read now (a compatible lane's pair included)
+ * @property {boolean} local  // a route answers from the local model server
+ */
+
+/**
+ * What a managed deployment's policy file fixes.
+ * @typedef {Object} SettingsDeploymentPolicy
+ * @property {"deployment_policy"} source
+ * @property {number} version
+ * @property {string} digest  // the first 16 hex digits of the file's SHA-256 this server generation read
+ * @property {?string} access_max
+ * @property {?string} min_coverage
+ * @property {?SettingsDeploymentChecker} checker
+ * @property {boolean} organization_rules
  */
 
 /**

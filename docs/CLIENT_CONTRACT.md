@@ -137,12 +137,13 @@ Nobody tells an unmarked page to reload. A new choice reaches it when someone ne
 
 - **`contract`**, the setup vocabulary:
   - `providerFields`: credential and endpoint inputs; `settingKey` is the settings key to send.
-  - `modelSlots`: model roles; `settingKey`.
-  - `reviewModes` and `runtimeModes`: `value` is what the setting stores.
+  - `modelSlots`: model roles; `settingKey`. A `managed` slot is fixed by a deployment policy: show it, send nothing for it.
+  - `reviewModes` and `runtimeModes`: `value` is what the setting stores; under a deployment policy `runtimeModes` lists only the Access levels it allows.
   - `localRoutingModes`.
   - `budgetFields`: with defaults and minimums.
   - `subscriptionFields`: declarations the setup call accepts, not settings.
   - the step texts.
+- **`deployment`**: what a deployment policy fixes (`_meta.policy_state.deployment` of `GET /api/settings`), `null` without one.
 - **`initialState`**, the starting values:
   - one key per row `stateKey`;
   - some fixed keys, such as `providerProfile`.
@@ -838,6 +839,7 @@ Connected coding subscriptions use Claudexor. Its API v2 objects (`job`, mainten
 - `POST /api/update/preflight` returns a `merge_plan` with `base_sha` and the target, plus additive target-bound `effects`: merge and replacement engine transitions (`action`, `direction`, serving/target pins), observed `active_work` (unknown/null when unreadable), and installed interpreter/SQLite versus the target README’s bundle claim (unknown when absent). Engine data is forward-only; in-app Update changes neither interpreter nor SQLite. Preflight only attaches to a provisioned engine; it never starts or stops one. The pure pin rule also governs restart; a lower pin keeps a newer serving engine, but cannot make its data cold-startable by the older engine. Optional `letter` and `qualification` read saved facts for those pins; preflight never authors a letter. Other-range prose is discarded. Absence means unknown.
 
 **Applying an update.** Send `POST /api/update/apply` (`UpdateApplyRequest`) with `strategy`, `expected_base_sha` and `expected_target_sha` from the preflight:
+- **Managed deployment:** 403 `code: managed_by_deployment` before anything starts; the status then carries `managed_by_deployment` (why). Restore (`/api/git/rollback`), recovery points (`/api/git/promote`) and `/api/local-model/install-runtime` refuse the same way; only the administrator replaces the serving program.
 - **Index locked:** smart, replace and Restore return 409 `reason:index_lock_present`, `outcome:not_applied`, with the observed `index_lock` (`path`, `exists`, `inode`, `size`) before stopping work. The effective index honors linked worktrees and `GIT_INDEX_FILE`; its lock is untouched.
 - **Release moved:** 409 `release_moved` means the release changed since the preflight. Run the preflight again.
 - **Replacement not applied:** 409 `reason: replace_not_applied`, `abandoned: true` means Git refused the first tree-changing command because its index lock was held. The transaction is disarmed without rollback; `rescue` and `keep_branch` disclose retained preparation artifacts. The lock is untouched. Diagnose it before another deliberate attempt; age alone never authorizes removal. Later smart-update refusals retain fenced recovery and Git’s stderr in the durable rollback row; `before_tree_effects` plus verified unchanged checkout means `outcome:not_applied`, not restored. Partial or unknown effects keep fenced recovery.

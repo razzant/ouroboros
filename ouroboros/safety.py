@@ -26,6 +26,7 @@ from ouroboros.loop_llm_call import classify_llm_exception, is_rate_limit_text
 from ouroboros.pricing import emit_llm_usage_event, normalize_usage_cost, infer_provider_from_model
 from ouroboros.utils import sanitize_tool_result_for_log
 from ouroboros.config import runtime_setting
+from ouroboros.deployment_policy import checker, organization_rules
 from ouroboros.safety_config import OWNER_RULES_KEY
 
 from ouroboros.safety_records import (
@@ -603,8 +604,10 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
                      "origin_wake_task_id": metadata.get("origin_wake_task_id"), "focus": focus,
                      "sources": sources, "retained_host_sources": isinstance(directives, list)},
         "subject": {"tool": tool_name, "physical_target": target, "place": place},
-        # The acting mind's context reads the same key through the same snapshot (``owner_rules_section``).
-        "standing_delegation": {"owner_rules": runtime_setting(OWNER_RULES_KEY, ""), "place_notes": notes},
+        # The acting mind's context reads the same key through the same snapshot (``owner_rules_section``);
+        # a deployment's rules keep their own author, the policy file (``organization_rules_section``).
+        "standing_delegation": {"owner_rules": runtime_setting(OWNER_RULES_KEY, ""), "place_notes": notes,
+                                **({"organization_rules": rules} if (rules := organization_rules()) else {})},
         "earlier_verdicts": earlier,
         "earlier_safe_verdicts_omitted": omitted_safe,
     }
@@ -741,6 +744,14 @@ def _safety_deadline_epoch(ctx: Optional[Any]) -> Optional[float]:
         return dl.timestamp() if dl is not None else None
     except Exception:
         return None
+
+
+def _route_has_access(model: str, use_local: bool) -> bool:
+    """Whether a deployment's Supervisor route may be asked: local and subscription routes may; an API route
+    needs its connection's credential, the test ``_resolve_safety_routing`` applies to the Supervisor's own route."""
+    from ouroboros.provider_models import provider_for_model
+
+    return use_local or provider_for_model(model) == "claudexor" or _light_model_has_reachable_provider(model)
 
 
 def _resolve_safety_routing() -> Tuple[bool, bool, Optional[str]]:
@@ -1072,10 +1083,13 @@ def _safety_model_call(
 def _safety_routes(model: str, use_local: bool, overrides: Optional[dict] = None) -> List[Tuple[str, bool, str, tuple]]:
     """The Supervisor's route, then the owner's resilience chain (``OUROBOROS_MODEL_FALLBACKS`` on the
     ``USE_LOCAL_FALLBACK`` lane, as the main loop walks it), each complete binding once: the effective model and
-    locality a live wait-card switch gives the role (what is sent, recorded and charged), its role, its binding."""
+    locality a live wait-card switch gives the role (what is sent, recorded and charged), its role, its binding.
+    A deployment's checker walks only its own routes, with their own accounts, and no switch moves them."""
     from ouroboros.model_slots import route_binding
     from ouroboros.provider_models import fallback_candidate_targets
 
+    if (managed := checker()) is not None:
+        return [(model, local, "safety", (model, local, account)) for model, local, account in managed.routes()]
     chain_local = str(runtime_setting("USE_LOCAL_FALLBACK", "") or "").lower() in ("true", "1")
     rows = [(model, use_local, "safety")] + [(target.model_id, chain_local, f"fallback:{index}") for index, target
                                              in enumerate(fallback_candidate_targets(preserve_slots=True))]
@@ -1128,7 +1142,9 @@ def _run_llm_check(
                                  ctx=ctx, resolved_binding=resolved_binding, ext_tool=ext_tool)
     if len(prompt.encode("utf-8")) > _SAFETY_BUNDLE_BYTE_BUDGET:
         return _hold(ctx, tool_name, "The complete mandatory evidence bundle is too large", status="TOO_LARGE")
-    _use_local_light, _is_local_fallback, _skip_reason = _resolve_safety_routing()
+    # A deployment's walk judges each of its own routes (below): its primary's access never stops the others.
+    managed = checker()
+    _use_local_light, _is_local_fallback, _skip_reason = (False, False, None) if managed else _resolve_safety_routing()
     if _skip_reason is not None:
         if _needs_checker(ctx):
             return _hold(ctx, tool_name, _skip_reason)
@@ -1168,11 +1184,23 @@ def _run_llm_check(
     fail_open = _use_local_light and _is_local_fallback and not _needs_checker(ctx)
     waiter = current_model_wait()
     routes = _safety_routes(light_model, _use_local_light, waiter.overrides if waiter else None)
-    alone, skipped, own_failure, own_reply = len(routes) == 1, [], None, None
+    skipped: List[Dict[str, str]] = []  # routes that answered nothing, then the one that answered
+
+    def pinned(binding: tuple) -> Dict[str, Any]:  # a deployment's route: its own account, no inherited preference
+        return {"account": binding[2], "processing": ""} if managed is not None else {}
 
     def record_skips(answered: Optional[Dict[str, str]]) -> None:  # None: no route of the walk answered
         _emit_durable_safety_event(ctx, {"type": "safety_route_fallback", "tool": tool_name,
                                          "unavailable": skipped, "answered": answered})
+
+    if managed is not None:  # a route this process cannot ask answers nothing and is never sent
+        skipped = [{"model": row[0], "role": row[2], "error": "its connection has no credential"}
+                   for row in routes if not _route_has_access(row[0], row[1])]
+        routes = [row for row in routes if _route_has_access(row[0], row[1])]
+        if not routes:
+            record_skips(None)
+            return _hold(ctx, tool_name, "No route of the deployment's Safety Supervisor has its connection's credential")
+    alone, own_failure, own_reply = len(routes) == 1, None, None
 
     for index, (light_model, _use_local_light, role, binding) in enumerate(routes):
         try:
@@ -1182,7 +1210,7 @@ def _run_llm_check(
                 client=client, ctx=ctx, tool_name=tool_name, light_model=light_model, use_local=_use_local_light,
                 call_type="safety_supervisor", user_prompt=prompt, on_usage=_emit_safety_usage,
                 system_prompt=system_prompt, model_role=role, latch=not index,
-                wait_for_resources=None if alone else False,
+                wait_for_resources=None if alone else False, **pinned(binding),
             )
             failure = "" if alone else _answered_nothing(msg, usage)
             own_reply = (msg, usage) if failure and not index else own_reply
@@ -1199,6 +1227,8 @@ def _run_llm_check(
                     return _unanswered(ctx, tool_name, error, fail_open=fail_open and not index)
             _mark_storm(error, binding, own=not index, fail_open=fail_open)  # later checks skip it in its window
             if alone:
+                if skipped:
+                    record_skips(None)
                 return _unanswered(ctx, tool_name, error, fail_open=fail_open)
             own_failure = own_failure if index else error
             failure = f"{type(error).__name__}: {error}"
@@ -1220,7 +1250,7 @@ def _run_llm_check(
                 msg, usage = _safety_model_call(
                     client=client, ctx=ctx, tool_name=tool_name, light_model=light_model, use_local=_use_local_light,
                     call_type="safety_supervisor", user_prompt=prompt, on_usage=_emit_safety_usage,
-                    system_prompt=system_prompt)
+                    system_prompt=system_prompt, **pinned(binding))
             except Exception as error:
                 _mark_storm(error, binding, own=True, fail_open=fail_open)
                 return _unanswered(ctx, tool_name, error, fail_open=fail_open)
@@ -1238,6 +1268,7 @@ def _run_llm_check(
             "tool": tool_name,
             "failure_class": failure_class,
         })
+        own = binding == routes[0][3]  # only the walk's first route consults and arms the process latch
         try:
             repair_prompt = (
                 "Your previous Safety Supervisor response was not parseable as the required JSON object.\n"
@@ -1250,14 +1281,14 @@ def _run_llm_check(
                 client=client, ctx=ctx, tool_name=tool_name, light_model=light_model,
                 use_local=_use_local_light, call_type="safety_supervisor_repair",
                 user_prompt=repair_prompt, on_usage=_emit_safety_usage, system_prompt=system_prompt,
-                model_role=role, latch=role == "safety",
+                model_role=role, latch=own, **pinned(binding),
             )
             result = _parse_safety_response(repair_msg.get("content") or "")
             if result is None:
                 failure_class = _classify_safety_parse_failure(repair_msg, repair_usage)
         except _SafetyRateLimited as e:  # a chain route's storm closes that route; it never takes the local warning
-            _mark_storm(e, binding, own=role == "safety", fail_open=fail_open)
-            return _unanswered(ctx, tool_name, e, fail_open=fail_open and role == "safety")
+            _mark_storm(e, binding, own=own, fail_open=fail_open)
+            return _unanswered(ctx, tool_name, e, fail_open=fail_open and own)
         except Exception as exc:
             propagate_model_error(exc)
             log.warning("Safety repair retry failed for %s: %s", tool_name, exc, exc_info=True)
@@ -1272,7 +1303,7 @@ def _run_llm_check(
 
     verdicts = [{"stage": "first", **result}]
     row = None
-    if result["status"] != "SAFE":
+    if result["status"] != "SAFE" and managed is None:  # a deployment's Supervisor decides alone
         from ouroboros.configured_subagents import normalize_configured_subagents
         try:
             catalog, _ = normalize_configured_subagents(runtime_setting("OUROBOROS_SUBAGENTS", "") or {"enabled": False, "items": []})

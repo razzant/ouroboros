@@ -157,15 +157,9 @@
  * @property {string[]=} custom_secret_keys
  * @property {Object=} setup_contract
  * @property {AvailableSubagentsSettingsMeta=} available_subagents
- * @property {SettingsPolicyState=} policy_state
+ * @property {import('./client_contract_types.js').SettingsPolicyState=} policy_state
  * @property {{restart_required:boolean,restart_keys:string[],restart_source_unknown_keys:string[],unknown_keys:string[],local_model:Object,summary:string}=} restart_state Component application and source uncertainty.
  * @property {{kind:string,name:string,label:string,builtin:boolean,enabled:boolean,configured:boolean,source:string,id:string,display:string}[]=} connections Every API connection as the picker shows it.
- */
-/** @typedef {Object} SettingsPolicyState
- * @property {{configured:string,effective:string,current_process:string,next_task:string,restart_required:boolean,applies:string}} access
- * @property {{configured:string,effective:string,current_process:string,next_task:string,pending:boolean,applies:string,active_task_snapshot:boolean}} supervisor
- * @property {{configured:string,effective:string,current_process:string,next_task:string,pending:boolean,applies:string,active_task_snapshot:boolean}} review
- * @property {boolean} running_task_snapshot
  */
 /**
  * The wizard payload plus two DECLARATIONS about the onboarding run. Settings

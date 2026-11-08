@@ -315,6 +315,88 @@ capability probes. Everything else keeps its own trust store: `git`, `uv`,
 `pip`, the Claudexor engine and its runtime downloads, the Telegram skill, MCP
 servers, the web-search scraper and the browsers.
 
+## Deployment Policy File
+
+A deployment can fix choices its employees and their Ouroboros may not change. Its launch
+(compose, systemd, the container runtime) names one strict JSON file in
+`OUROBOROS_DEPLOYMENT_POLICY`: an absolute path outside the data root and the checkout,
+which are refused. Without the variable nothing changes. A named file that is missing,
+unreadable, malformed or of another version stops `server.py` with exit 2 before it serves,
+and any other process that reads settings under it refuses: a bad file never reads as
+unmanaged.
+
+```json
+{
+  "version": 1,
+  "access": {"max": "advanced"},
+  "safety": {
+    "min_coverage": "full",
+    "checker": {"model": "anthropic@safety::<model>", "fallbacks": ["openai@safety::<model>"]}
+  },
+  "rules": "Customer records stay inside the corporate network."
+}
+```
+
+`version` (1) is required; every other field is optional and constrains only what it names.
+An unknown or repeated field or a wrong type refuses the whole file. Safety is mandatory, at
+full coverage, on the organization's checker only when the file names all three of
+`access.max` at most `pro`, `safety.min_coverage: full` and `safety.checker`: without the cap an
+employee may still choose Cyber Pro, where Safety findings are advice; without the floor
+coverage may be lowered to Light or Off; without `safety.checker` the employee's own
+Supervisor route checks.
+
+- `access.max` (`light`, `advanced` or `pro`) caps effective Access; below it Cyber Pro, which
+  makes Safety findings advice, is out of reach.
+- `safety.min_coverage` (`light` or `full`) floors both Supervisor coverage levels; the
+  new-install Light default yields to it.
+- `safety.checker` is the Supervisor's route: `model` (any model route), `account` (a
+  subscription profile, for `claudexor::` routes only; empty rotates) and up to eight
+  `fallbacks`, the only routes its walk tries, in order; a route whose connection lacks its
+  credential is skipped unsent. Settings slots, role options, wait-card switches and
+  second-check rows never move it. When none of its routes answers, the action that needs
+  the check is held, typed `SAFETY_UNAVAILABLE`, until a check answers or the work is
+  cancelled; reads, Stop and Panic stay available. A save after which a checker route would
+  reach another endpoint, key or local model server, judged as a send reads settings (defaults,
+  the legacy compatible pair and launch variables included), is refused, so give the checker
+  connections of its own; such a field carried back as shown keeps the document's own value. A
+  local checker's server starts only with the model, template and port its saved settings name;
+  Stop stays available.
+- `rules` (at most 64,000 UTF-8 bytes) reach every acting mind, delegated session and Safety
+  check as the organization's rules, beside the employee's own, which cannot relax them.
+
+The policy is a view over settings, never their content. `settings.json` keeps the
+employee's own choices. Readers apply the policy last, over task snapshots, rooms, live route
+views and the environment. A save that carries a managed value back as Settings showed it
+keeps the employee's saved choice; any other change to a managed choice is refused before
+anything is written (HTTP 403, typed `managed_by_deployment`), on every Settings, owner, wizard
+and launcher path, and the rest of Settings stays editable. `GET /api/settings` names what
+the file fixes in `_meta.policy_state.deployment`, without secrets; Settings, the setup wizard
+and model-wait cards offer only what it allows and show what it fixes (a level, the checker, its
+connections or the fields its built-in routes read, a local checker's server, the update channel)
+as set by the organization.
+
+The serving program enforces the file, so within a managed deployment only its administrator
+replaces it and its packages, outside Ouroboros (a new image, package or checkout). In-app Update
+and its channel, Restore, recovery points, body adoption (evolution's included), agent edits that
+resolve to the serving checkout and package installs into the serving interpreter (the local
+runtime, the browser tools' Playwright package) refuse with `managed_by_deployment` before any
+effect. Restart starts the same program: no checkout, reset, clean, dependency sync (server or
+launcher) or recovery-point fallback runs, and a failed import is reported, not repaired. Update
+and switch records from before wait untouched (one left mid-merge defers Restart); an adoption
+armed before closes at the next start with the tree untouched, its candidate kept and the owner
+told, while an interrupted one stops the start (exit 3) until the administrator decides the
+tree. A first boot still prepares the seed's runtime venv. Body candidates, other workspaces,
+installed or downloaded browsers, Stop and Panic stay.
+
+A server reads the file once at its start and pins the digest of those bytes
+(`OUROBOROS_DEPLOYMENT_POLICY_SHA256`) for every process it starts. A changed file applies at
+the next start; until then a process started under the old pin refuses. Nothing polls the
+file or copies it.
+
+The file protects neither itself nor the code and credentials that enforce it: a workspace
+that can write the file, the checkout, the data root or the server's environment can change
+what it means. Keep them where employee and agent processes cannot write.
+
 ## Logs and External Monitoring
 
 Ouroboros sends no telemetry; nothing below leaves the machine until the

@@ -681,8 +681,12 @@ class TaskModelWait:
         separately (#1196) and is subtracted by every finite-lifetime read.
         ``None`` keeps whatever the task row already supplied.
         """
+        from ouroboros.deployment_policy import managed_model_roles
+
         with self.lock:
-            self.overrides = copy.deepcopy(saved.get("overrides") or {})
+            # A deployment's checker route is its policy's: a switch saved before it was managed never returns.
+            self.overrides = {role: override for role, override in copy.deepcopy(saved.get("overrides") or {}).items()
+                              if role not in managed_model_roles()}
             self.auto_continue = dict(saved.get("auto_continue") or {})
             clock = saved.get("quota_clock") or {}
             self.revision = int(clock.get("revision") or 0)

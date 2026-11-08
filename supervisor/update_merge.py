@@ -1427,6 +1427,10 @@ def _finalize_managed_update_locked(supervisor_ready: bool) -> Dict[str, Any]:
     status, tx = read_update_tx_strict()
     if status == "absent":
         return {"finalized": False, "reason": "no pending update"}
+    from ouroboros.deployment_policy import body_replacement_refusal
+
+    if refusal := body_replacement_refusal():  # neither finalized nor rolled back here: the administrator's tree
+        return {"finalized": False, "reason": "managed_by_deployment", "message": refusal}
     if status == "corrupt":
         # Quarantined aside byte-intact (evidence survives, the admission
         # latch does not) unless MERGE_HEAD shows a live merge (#447);

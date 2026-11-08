@@ -405,15 +405,21 @@ def model_defaults_for_profile(profile: str) -> dict:
 
 
 def build_setup_contract(host_mode: str = "desktop") -> dict:
+    """The choices Settings and the wizard offer: under a deployment policy only the Access levels it allows,
+    and a Supervisor slot its checker fixes is ``managed`` (shown, never edited or written)."""
+    from ouroboros.deployment_policy import CHECKER_KEY, checker, choice_refusal
+
+    managed_checker = checker() is not None
     return {
         "version": 1,
         "hostMode": "web" if host_mode == "web" else "desktop",
         "steps": [dict(item) for item in _STEPS],
         "providerFields": [dict(item) for item in _PROVIDER_FIELDS],
         "providerProfiles": {key: {"label": spec[0], "providerCopy": spec[1], "modelCopy": spec[2]} for key, spec in _PROFILE_SPECS.items()},
-        "modelSlots": [dict(item) for item in _MODEL_SLOTS],
+        "modelSlots": [{**item, "managed": managed_checker and item["settingKey"] == CHECKER_KEY} for item in _MODEL_SLOTS],
         "reviewModes": [dict(item) for item in _REVIEW_MODES],
-        "runtimeModes": [dict(item) for item in _RUNTIME_MODES],
+        "runtimeModes": [dict(item) for item in _RUNTIME_MODES
+                         if not choice_refusal("OUROBOROS_RUNTIME_MODE", item["value"])],
         "localRoutingModes": [dict(item) for item in _LOCAL_ROUTING_MODES],
         "budgetFields": [dict(item) for item in _BUDGET_FIELDS],
         "subscriptionFields": [dict(item) for item in _SUBSCRIPTION_FIELDS],
@@ -531,6 +537,8 @@ def consciousness_offer(settings: dict, *, enabled: Optional[bool] = None) -> di
 
 def build_setup_bootstrap(settings: dict, host_mode: str = "desktop", *, fresh_install: bool = False,
                           consciousness_enabled: Optional[bool] = None) -> dict:
+    from ouroboros.deployment_policy import policy_state
+
     normalized_host = "web" if host_mode == "web" else "desktop"
     return {
         "hostMode": normalized_host,
@@ -548,6 +556,7 @@ def build_setup_bootstrap(settings: dict, host_mode: str = "desktop", *, fresh_i
         "contract": build_setup_contract(normalized_host),
         "initialState": build_initial_setup_state(settings, normalized_host),
         "consciousnessOffer": consciousness_offer(settings, enabled=consciousness_enabled),
+        "deployment": policy_state(),
     }
 
 

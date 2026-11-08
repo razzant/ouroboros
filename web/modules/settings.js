@@ -6,7 +6,7 @@ import { getNotifier } from './notifications.js';
 import { mountDesktopShell } from './desktop_shell.js';
 import { bindEffortSegments, syncEffortSegments, readCustomSecretDraft, collectCustomSecretDraft, paintSettingsFieldErrors, setButtonBusy, settingsWriteFailure,
     webSearchPreviewWords } from './settings_controls.js';
-import { bindLocalModelControls } from './settings_local_model.js';
+import { applyLocalModelPolicy, bindLocalModelControls } from './settings_local_model.js';
 import { bindAutostartControl } from './settings_autostart.js';
 import { applyMcpSettings, collectMcpSettings, initMcpSettings, mcpDraftSnapshot, validateMcpSettings } from './mcp_settings.js';
 import {
@@ -25,7 +25,8 @@ import {
 import { initHarnessAccounts } from './harness_accounts.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { confirmAndSendRestart } from './chat_activity.js';
-import { SECRET_KEYS, bindSettingsTabs, renderSettingsPage } from './settings_ui.js';
+import { RUNTIME_MODE_OPTIONS, SECRET_KEYS, bindSettingsTabs, renderSettingsPage } from './settings_ui.js';
+import { renderSegmentedField } from './page_header.js';
 import { connectionReferencesText, createConnectionsEditor } from './settings_connections.js';
 import { showToast } from './toast.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
@@ -40,7 +41,7 @@ import { extensionActionStatus } from './extension_status_text.js';
 import { bindLanguageSettings } from './settings_language.js';
 import { mountInterfaceSize } from './interface_size.js';
 import { resetSecretReveals } from './settings_secrets.js';
-import { syncPolicyState } from './settings_policy.js';
+import { checkerUses, deploymentOf, fixCheckerField, offerAllowedChoices, syncPolicyState } from './settings_policy.js';
 import { applySafetySettings, bindSafetySettings, checkerSaveEffect, checkerTabsText, safetyOwnerDraft, saveSafetyChecker, saveSafetyOwnerChanges } from './settings_safety.js';
 import { applyConsciousnessSettings, bindConsciousnessSettings } from './settings_consciousness.js';
 
@@ -790,6 +791,14 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         resetSecretClearFlags(page);
         // After the flat inputs and transient flags: snapshot only the applied document.
         connections.load(s, { modelSlots: setupModelSlots() });
+        offerAllowedChoices(page, { target: 's-runtime-mode', options: RUNTIME_MODE_OPTIONS, axis: 'access',  // a deployment's ceiling
+            modifier: 'data-runtime-mode-group' }, deploymentOf(s?._meta), { render: renderSegmentedField, bind: bindEffortSegments });
+        applyLocalModelPolicy(page, checkerUses(deploymentOf(s?._meta), 'local'));
+        fixCheckerField(byId('s-openai-base-url'), page.querySelector('[data-legacy-base-url-fixed]'), deploymentOf(s?._meta),
+            'OPENAI_BASE_URL', 'Legacy OpenAI Base URL');  // the legacy compatible pair a built-in checker reads
+        // A managed deployment's program, and so its update feed, is its administrator's (deployment_policy).
+        page.querySelector('[data-effort-target="s-update-channel"]').hidden = Boolean(deploymentOf(s?._meta));
+        page.querySelector('[data-update-channel-fixed]').hidden = !deploymentOf(s?._meta);
         syncEffortSegments(page);
         syncRuntimeModeBridgeState();
         syncPolicyState(page, s?._meta);

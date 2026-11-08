@@ -68,6 +68,7 @@ class SetupModelSlot(TypedDict):
     note: str
     settingsInputId: str
     settingsToggleId: str
+    managed: bool  # a deployment policy fixes it: shown, never edited or written
 
 
 class SetupModeChoice(TypedDict):
@@ -180,6 +181,7 @@ class SetupBootstrap(TypedDict):
     contract: SetupContract
     initialState: SetupInitialState
     consciousnessOffer: SetupConsciousnessOffer  # display; a ticked row sends the ordinary Start after the save
+    deployment: Optional["SettingsDeploymentPolicy"]  # Settings' ``_meta.policy_state.deployment``; null unmanaged
 
 
 class OnboardingBootstrapResponse(TypedDict):
@@ -196,6 +198,40 @@ class SettingsReadResponse(TypedDict, total=False):
     ``...``) and ``_meta``. Sending a masked value back means "unchanged"; ``""`` clears."""
 
     _meta: SettingsMeta
+
+
+class SettingsPolicyState(TypedDict):
+    """``_meta.policy_state`` of ``GET /api/settings``: configured versus effective Access, Supervisor and
+    Review (``gateway.settings._build_policy_state``), plus what a managed deployment's policy fixes."""
+
+    access: SettingsPolicyAxis
+    supervisor: SettingsPolicyAxis
+    review: SettingsPolicyAxis
+    running_task_snapshot: bool
+    deployment: NotRequired[SettingsDeploymentPolicy]  # absent outside a managed deployment
+
+
+class SettingsDeploymentChecker(TypedDict):
+    """The organization's Safety Supervisor route; no connection value or secret."""
+
+    model: str
+    account: str
+    fallbacks: List[str]
+    connections: List[str]  # the connections its routes use, by picker id (``kind`` or ``kind@name``)
+    fields: List[str]  # the flat settings its built-in routes read now (a compatible lane's pair included)
+    local: bool  # a route answers from the local model server
+
+
+class SettingsDeploymentPolicy(TypedDict):
+    """What a managed deployment's policy file fixes (``deployment_policy.policy_state``)."""
+
+    source: Literal["deployment_policy"]
+    version: int
+    digest: str  # the first 16 hex digits of the file's SHA-256, as this server generation read it
+    access_max: Optional[str]
+    min_coverage: Optional[str]
+    checker: Optional[SettingsDeploymentChecker]
+    organization_rules: bool
 
 
 class SettingsWriteRefusal(TypedDict):
@@ -762,14 +798,14 @@ class TaskResumeResponse(TypedDict, total=False):
 
 # Last, not first: ``contracts.py`` imports ServedUiState from this module, so the shared
 # SettingsMeta is bound after this module's own envelopes exist, whichever module loads first.
-from ouroboros.gateway.contracts import ProjectEntry, SettingsMeta  # noqa: E402
+from ouroboros.gateway.contracts import ProjectEntry, SettingsMeta, SettingsPolicyAxis  # noqa: E402
 
 __all__ = [
     "ServedUiState",
     "SetupStep", "SetupProviderField", "SetupProviderProfile", "SetupModelSlot", "SetupModeChoice",
     "SetupLocalRoutingMode", "SetupBudgetField", "SetupSubscriptionField", "SetupContract",
     "SetupLocalPreset", "SetupInitialState", "SetupConsciousnessOffer", "SetupBootstrap", "OnboardingBootstrapResponse",
-    "SettingsReadResponse", "SettingsWriteRefusal",
+    "SettingsReadResponse", "SettingsPolicyState", "SettingsDeploymentChecker", "SettingsDeploymentPolicy", "SettingsWriteRefusal",
     "AuthLoginRequest", "AuthLoginResponse",
     "ContractBody", "ContractHttpEntry", "ContractWsEntry", "ContractWs", "GatewayContractResponse",
     "OwnerRuntimeModeRequest", "OwnerContextModeRequest", "OwnerEffortRangeRequest", "OwnerSubagentsModeRequest", "OwnerSafetyModeRequest", "OwnerSafetyRulesRequest", "OwnerSafetyRulesResponse", "OwnerSafetyModelRequest", "OwnerSafetyModelResponse", "OwnerEnabledRequest",

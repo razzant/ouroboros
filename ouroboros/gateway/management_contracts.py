@@ -1085,6 +1085,7 @@ class UpdateStatusResponse(TypedDict, total=False):
     checked_at: str
     checked_target_sha: str
     from_cache: bool
+    managed_by_deployment: str  # its administrator replaces the serving program: why in-app updates refuse
 
 
 class CommandRequest(TypedDict):

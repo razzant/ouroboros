@@ -795,6 +795,7 @@
  * @property {string=} checked_at
  * @property {string=} checked_target_sha
  * @property {boolean=} from_cache
+ * @property {string=} managed_by_deployment - its administrator replaces the serving program: why in-app updates refuse
  */
 
 /**
