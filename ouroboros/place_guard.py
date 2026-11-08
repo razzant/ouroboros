@@ -255,7 +255,8 @@ def call_place_facts(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
     """Host facts about where a call lands, for the Supervisor's bundle.
 
     ``{"effect", "declared", "targets": {arg: [values]}, "attributable", "places": [{"place_id",
-    "place_label", "place_state", "conversation_key", ...}]}``; ``{}`` when no place is involved.
+    "place_label", "place_state", "conversation_id" (its own, if any), "conversation_key", ...}]}``; ``{}`` when no
+    place is involved.
     A place's notes are standing delegation: the bundle carries them once, beside the owner's rules.
     """
     try:
