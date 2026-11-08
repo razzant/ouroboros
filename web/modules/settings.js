@@ -1015,6 +1015,17 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         return body;
     }
 
+    // Main, Light and Fallbacks as loaded are no choice (server_runtime.unedited_unauthored_slots): Save sends neither
+    // write an echo, so a lane the document does not author keeps following the access, also past a Main the owner
+    // transaction saves first (#2969). A changed, saved or blank lane is posted or kept as it is.
+    function omitUnchangedModelLanes(body) {
+        const lane = (value) => String(value ?? '').split(',').map((entry) => entry.trim()).filter(Boolean).join(',');
+        for (const key of ['OUROBOROS_MODEL', 'OUROBOROS_MODEL_LIGHT', 'OUROBOROS_MODEL_FALLBACKS']) {
+            if (key in body && lane(body[key]) === lane(currentSettings?.[key])) delete body[key];
+        }
+        return body;
+    }
+
     function collectCustomSecrets() {
         const customKeys = new Set(currentSettings?._meta?.custom_secret_keys || []);
         return collectCustomSecretDraft(readCustomSecretDraft(page),
@@ -1303,7 +1314,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             setStatus(validationSummary(errors), 'warn', 'validation', subject);
             return;
         }
-        const body = collectBody();
+        const body = omitUnchangedModelLanes(collectBody());
         loadSequence += 1;
         const sentRevision = draftRevision;
         const subagentsChanged = subagentSettingsFingerprint(body.OUROBOROS_SUBAGENTS)

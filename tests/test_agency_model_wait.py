@@ -71,6 +71,8 @@ def test_resource_refusal_does_not_suspend_cyber_execution(live_wait, tmp_path, 
 
 
 def test_explicit_local_safety_keeps_precedence_over_subscription_name(monkeypatch):
+    # A Light of its own on the local lane: the real slot label routes it local before the subscription branch.
+    monkeypatch.setenv("OUROBOROS_MODEL_SAFETY", "")
+    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", MODEL)
     monkeypatch.setenv("USE_LOCAL_LIGHT", "true")
-    monkeypatch.setattr(safety, "get_safety_model", lambda: MODEL)
     assert safety._resolve_safety_routing() == (True, False, None)

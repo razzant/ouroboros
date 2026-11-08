@@ -784,7 +784,7 @@ test('Summary says what an exhausted subscription quota does, with and without a
     // Walk from Accounts (where the connected subscription is observed) to Summary.
     const summary = async (query, fallbackModel, mainModel = 'claudexor::codex=gpt-test', openrouterKey = '') => {
         let html = '', budget = '';
-        const bootstrap = { ...BOOTSTRAP, initialState: { ...BOOTSTRAP.initialState, openrouterKey, mainModel, fallbackModel } };
+        const bootstrap = { ...BOOTSTRAP, initialState: { ...BOOTSTRAP.initialState, openrouterKey, mainModel, fallbackModel, automaticModels: [] } };
         await withWizard(bootstrap, query, async ({ doc }) => {
             await settle();
             for (let step = 0; step < 4; step += 1) {
@@ -817,7 +817,7 @@ test('Summary names a model the local runtime serves as Local, and a cloud one b
         let html = '';
         const bootstrap = { ...BOOTSTRAP, stepOrder: ['summary', ...BOOTSTRAP.stepOrder.filter((step) => step !== 'summary')],
             initialState: { ...BOOTSTRAP.initialState, localSource: '/models/local-test.gguf', localRoutingMode,
-                mainModel: 'google/gemini-3.8-flash', fallbackModel: 'openai/gpt-5.6-luna' } };
+                mainModel: 'google/gemini-3.8-flash', fallbackModel: 'openai/gpt-5.6-luna', automaticModels: [] } };
         await withWizard(bootstrap, query, ({ doc }) => { html = doc.getElementById('root').innerHTML; });
         return html;
     };
@@ -917,7 +917,7 @@ test('an owner who clears or replaces the recommended Vision keeps that choice a
 test('a reopened wizard saves an existing install\'s Vision as it was, blank or custom', async () => {
     for (const saved of ['', 'zai::glm-ocr']) {
         const initialState = { ...BOOTSTRAP.initialState, zaiKey: BOOTSTRAP.secretPlaceholder, mainModel: 'zai::glm-5.3',
-            lightModel: 'zai::glm-5.3-flash', fallbackModel: 'zai::glm-5.3-flash', visionModel: saved };
+            lightModel: 'zai::glm-5.3-flash', fallbackModel: 'zai::glm-5.3-flash', visionModel: saved, automaticModels: [] };
         const body = await finishFromAccounts({ ...BOOTSTRAP, freshInstall: false, initialState }, `zai-existing-${saved || 'blank'}`);
         assert.equal(body.OUROBOROS_MODEL_VISION, saved);
     }
@@ -1006,7 +1006,7 @@ test('a fresh local-only setup saves Light and Fallbacks that follow the local M
         models: { 'light-model': 'owner-light' } });
     assert.deepEqual([edited.OUROBOROS_MODEL_LIGHT, edited.OUROBOROS_MODEL_FALLBACKS], ['owner-light', '']);
     const initialState = { ...BOOTSTRAP.initialState, localSource: '/models/local-test.gguf', localRoutingMode: 'all',
-        mainModel: 'owner-main', lightModel: 'owner-light', fallbackModel: 'owner-fallback' };
+        mainModel: 'owner-main', lightModel: 'owner-light', fallbackModel: 'owner-fallback', automaticModels: [] };
     const reopened = await finishFromAccounts({ ...BOOTSTRAP, freshInstall: false, initialState }, 'local-only-saved');
     assert.deepEqual([reopened.OUROBOROS_MODEL, reopened.OUROBOROS_MODEL_LIGHT, reopened.OUROBOROS_MODEL_FALLBACKS],
         ['owner-main', 'owner-light', 'owner-fallback']);

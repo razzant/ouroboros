@@ -167,6 +167,39 @@
       },
       {
         "group": "more",
+        "id": "gigachat-credentials",
+        "inputType": "password",
+        "label": "GigaChat Authorization Key",
+        "note": "Optional. If this is the only remote key, the next step prefills GigaChat's own model ids.",
+        "placeholder": "Base64 client_id:secret",
+        "settingKey": "GIGACHAT_CREDENTIALS",
+        "settingsInputId": "s-gigachat-credentials",
+        "stateKey": "gigachatCredentials"
+      },
+      {
+        "group": "more",
+        "id": "gigachat-user",
+        "inputType": "text",
+        "label": "GigaChat User",
+        "note": "Basic auth instead of an authorization key, with the password below.",
+        "placeholder": "username",
+        "settingKey": "GIGACHAT_USER",
+        "settingsInputId": "s-gigachat-user",
+        "stateKey": "gigachatUser"
+      },
+      {
+        "group": "more",
+        "id": "gigachat-password",
+        "inputType": "password",
+        "label": "GigaChat Password",
+        "note": "Basic auth, with the user above.",
+        "placeholder": "password",
+        "settingKey": "GIGACHAT_PASSWORD",
+        "settingsInputId": "s-gigachat-password",
+        "stateKey": "gigachatPassword"
+      },
+      {
+        "group": "more",
         "id": "minimax-key",
         "inputType": "password",
         "label": "MiniMax API Key",
@@ -274,6 +307,11 @@
         "label": "Direct multi-provider",
         "modelCopy": "Multiple direct providers are configured. Start here, then split model slots across them if you want.",
         "providerCopy": "Multiple direct providers are present, so the next step keeps your model values editable without forcing one provider family."
+      },
+      "gigachat": {
+        "label": "GigaChat",
+        "modelCopy": "GigaChat-only setup detected. These defaults use GigaChat's own model ids.",
+        "providerCopy": "GigaChat is present, so the next step prefills GigaChat's own model ids."
       },
       "local": {
         "label": "Local-first",
@@ -409,6 +447,14 @@
   "hostMode": "desktop",
   "initialState": {
     "anthropicKey": "",
+    "automaticModels": [
+      "mainModel",
+      "lightModel",
+      "safetyModel",
+      "visionModel",
+      "consciousnessModel",
+      "fallbackModel"
+    ],
     "cloudruKey": "",
     "compatibleApiKey": "",
     "compatibleBaseUrl": "",
@@ -416,6 +462,9 @@
     "consciousnessModel": "",
     "deepseekKey": "",
     "fallbackModel": "openai/gpt-5.6-luna",
+    "gigachatCredentials": "",
+    "gigachatPassword": "",
+    "gigachatUser": "",
     "legacyCompatibleBaseUrl": "",
     "lightModel": "openai/gpt-6-luna",
     "localChatFormat": "",
@@ -500,6 +549,14 @@
       "fallback": "",
       "light": "",
       "main": "",
+      "safety": "",
+      "vision": ""
+    },
+    "gigachat": {
+      "consciousness": "",
+      "fallback": "gigachat::GigaChat-2-Max",
+      "light": "gigachat::GigaChat-2-Max",
+      "main": "gigachat::GigaChat-2-Max",
       "safety": "",
       "vision": ""
     },

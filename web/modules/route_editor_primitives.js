@@ -192,6 +192,30 @@ export function configuredApiProviders(settings = {}, providerProfiles = {}) {
         .map(({ id, label }) => ({ id, label }));
 }
 
+/**
+ * The setup wizard's `profile` defaults (`modelDefaults[profile]`, slot → model) on the key a proposal names in the
+ * draft `settings`, by the server's rule (provider_models.proposal_connection, server_runtime._proposal_connection;
+ * #2969): the built-in key when it serves or no key of that provider does, else the only named one, else the named
+ * key `main` already runs on. Before that choice they keep the shipped spelling, and `choice` lists the keys a Main
+ * still on it waits for (Settings' `main_connection_choice`).
+ */
+export function connectionDefaults(modelDefaults, profile, settings = {}, providerProfiles = {}, main = '') {
+    const keys = configuredApiProviders(settings, providerProfiles).map(({ id }) => id)
+        .filter((id) => connectionParts(id).kind === profile);
+    const names = keys.map((id) => connectionParts(id).name);
+    const own = parseModelSource(main).source;
+    const name = !names.length || names.includes('') ? '' : names.length === 1 ? names[0]
+        : keys.includes(own) ? connectionParts(own).name : null;
+    // Each entry of a list spelled on that key, as provider_models.route_on_connection spells one route.
+    const onKey = (value) => String(value || '').split(',').map((entry) => entry.trim()).filter(Boolean).map((entry) => {
+        const { source, model } = parseModelSource(entry);
+        return name && source === profile ? `${profile}@${name}::${model}` : entry;
+    }).join(', ');
+    const defaults = modelDefaults[profile] || modelDefaults.openrouter || {};
+    return { defaults: Object.fromEntries(Object.entries(defaults).map(([slot, value]) => [slot, onKey(value)])),
+        choice: name === null && own === profile ? keys : [] };
+}
+
 /** Why a saved API source is not offered: its key is turned off, was removed, or holds no credential. */
 export function unavailableConnectionState(id, connections = []) {
     const known = (connections || []).find((entry) => entry?.id === id);

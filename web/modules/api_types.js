@@ -161,6 +161,7 @@
  * @property {SettingsPolicyState=} policy_state
  * @property {{restart_required:boolean,restart_keys:string[],restart_source_unknown_keys:string[],unknown_keys:string[],local_model:Object,summary:string}=} restart_state Component application and source uncertainty.
  * @property {{kind:string,name:string,label:string,builtin:boolean,enabled:boolean,configured:boolean,source:string,id:string,display:string}[]=} connections Every API connection as the picker shows it.
+ * @property {string[]=} main_connection_choice The connections an unauthored Main waits to be chosen among.
  */
 /** @typedef {Object} SettingsPolicyState
  * @property {{configured:string,effective:string,current_process:string,next_task:string,restart_required:boolean,applies:string}} access

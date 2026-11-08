@@ -748,6 +748,27 @@ def exclusive_direct_kind(settings: Mapping[str, Any] | None = None) -> str:
     return direct[0] if len(direct) == 1 else ""
 
 
+def proposal_connection(kind: str, settings: Mapping[str, Any] | None = None) -> str | None:
+    """The connection of ``kind`` an automatic proposal names (#2969): '' — the built-in one —
+    when it serves or none of the kind does, else the only named one that serves; None when
+    several named ones serve and the built-in does not: the owner chooses, nothing is guessed."""
+    from ouroboros.provider_connections import configured_connections
+
+    names = [name for served, name in configured_connections(settings) if served == kind]
+    if not names or "" in names:
+        return ""
+    return names[0] if len(names) == 1 else None
+
+
+def route_on_connection(model: str, kind: str, name: str) -> str:
+    """A route of ``kind``'s built-in connection (``openai::m``, a bare OpenRouter id) spelled on
+    its named connection ``name`` (``openai@name::m``); any other route, or ``name`` '', as written."""
+    route = parse_model_route(model)
+    if not name or route.kind != kind or route.connection or not route.valid:
+        return model
+    return f"{connection_id(kind, name)}::{route.model}"
+
+
 # The settings whose presence decides whether a built-in connection is configured (and
 # the named connections): credentials by presence only, never their values.
 READINESS_SETTING_KEYS: frozenset[str] = frozenset({
@@ -839,16 +860,21 @@ def compute_direct_review_seats(
 ) -> list[tuple[str, str]]:
     """The same panel as ``(role, model)`` seats, one per declared role: ``role`` is the owner slot a
     seat runs (``main``, or ``light`` for a Light of this provider), '' where the provider's shipped
-    Light stands in."""
+    Light stands in, on Main's connection (a named Main's key pays for its whole panel)."""
     if provider not in DIRECT_PROVIDER_DEFAULTS:
         return []
-    provider_prefix = f"{provider}::"
+
+    def of_provider(model: str) -> bool:
+        route = parse_model_route(model)
+        return route.valid and route.kind == provider
+
     main = migrate_model_value(provider, main_model)
-    if not main.startswith(provider_prefix):
+    if not of_provider(main):
         return []
     light = migrate_model_value(provider, light_model) if light_model else ""
-    default_light = migrate_model_value(provider, DIRECT_PROVIDER_DEFAULTS[provider].get("light", ""))
-    seats = {"main": ("main", main), "light": ("light", light) if light.startswith(provider_prefix)
+    default_light = route_on_connection(migrate_model_value(provider, DIRECT_PROVIDER_DEFAULTS[provider].get(
+        "light", "")), provider, parse_model_route(main).connection)
+    seats = {"main": ("main", main), "light": ("light", light) if of_provider(light)
              else ("", default_light) if default_light else ("main", main)}
     roles = DIRECT_PROVIDER_REVIEW_ROLES.get(provider, ("main", "light", "light"))
     return [seats.get(role, seats["main"]) for role in roles]

@@ -172,6 +172,7 @@
  * @property {Object} modelContextWindows
  * @property {string} processingPreference
  * @property {Object} modelProcessingPreferences
+ * @property {string[]} automaticModels Model-slot stateKeys neither the document nor an operator's variable sets.
  */
 
 /**

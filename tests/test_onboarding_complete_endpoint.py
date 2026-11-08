@@ -1568,3 +1568,159 @@ def test_an_unavailable_harness_row_with_a_verified_named_profile_is_routable():
     routable, refused = subscription_routable_harnesses(snapshot)
     assert "agy" not in routable
     assert refused["agy"] == "the engine reports it unavailable"
+
+
+# --- the preview judges a draft against the keys the runtime resolves (#2969) ---
+
+_WORK_ROW = {"kind": "openai", "name": "work", "api_key": "row-work-key-0001"}
+
+
+def _bootstrap_draft(onboarding, monkeypatch, **environ) -> dict:
+    """The API-only draft the wizard posts, from the real bootstrap of an install whose environment holds ``environ``."""
+    from ouroboros.gateway import onboarding_host
+    from ouroboros.provider_models import CONNECTIONS_KEY
+
+    for key in (CONNECTIONS_KEY, "OUROBOROS_MODEL", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_FALLBACKS"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in environ.items():
+        monkeypatch.setenv(key, value)
+    app = Starlette(routes=[Route("/api/onboarding/bootstrap", endpoint=onboarding_host.api_onboarding_bootstrap)])
+    app.state.drive_root = onboarding.settings_path.parent
+    with TestClient(app) as client:
+        state = client.get("/api/onboarding/bootstrap").json()["bootstrap"]["initialState"]
+    return {CONNECTIONS_KEY: state["connections"], "OPENAI_API_KEY": state["openaiKey"],
+            "OUROBOROS_MODEL": state["mainModel"], "OUROBOROS_MODEL_LIGHT": state["lightModel"],
+            "OUROBOROS_MODEL_FALLBACKS": state["fallbackModel"], "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
+            "OUROBOROS_RUNTIME_MODE": "advanced", "TOTAL_BUDGET": 25.0, "OUROBOROS_PER_TASK_COST_USD": 5.0,
+            "subscriptionsConnected": False}
+
+
+@pytest.mark.parametrize(("environ", "key"), [
+    ({"OUROBOROS_CONNECTIONS": json.dumps([_WORK_ROW])}, "openai@work"),
+    ({"OPENAI_API_KEY": "env-built-in-key-0001"}, "openai"),
+], ids=["named", "built-in"])
+def test_an_environment_only_key_previews_and_completes_as_the_runtime_reads_it(onboarding, monkeypatch, environ, key):
+    """The wizard shows an operator's key masked (or as the configured placeholder); preview and completion read it
+    where the runtime does, so the reviewers the preview shows are the ones the install then runs."""
+    import ouroboros.config as config
+    from ouroboros.llm_routing import resolve_target
+
+    draft = _bootstrap_draft(onboarding, monkeypatch, **environ)
+    assert draft["OUROBOROS_MODEL"].startswith(f"{key}::")
+    preview = onboarding.client.post("/api/onboarding/subagents/preview", json=draft)
+    assert preview.status_code == 200, preview.text
+    reviewers = [row["route"]["target_id"] for row in preview.json()["available_subagents"]["items"]
+                 if row.get("review_eligible")]
+    assert reviewers and all(target.startswith(f"{key}::") for target in reviewers)
+    assert not onboarding.settings_path.exists()  # previewing writes nothing
+    done = onboarding.client.post("/api/onboarding/complete", json={
+        **draft, SUBAGENTS_SETTING: preview.json()["available_subagents"], "attempt_id": "env-only-key-0000001"})
+    assert done.status_code == 200, done.text
+    loaded = config.load_settings()
+    assert loaded["OUROBOROS_MODEL"] == draft["OUROBOROS_MODEL"]
+    marked = [row["route"]["target_id"] for row in json.loads(loaded[SUBAGENTS_SETTING])["items"]
+              if row.get("review_eligible")]
+    assert marked == reviewers and all(resolve_target(target, loaded).get("api_key") for target in marked)
+
+
+@pytest.mark.parametrize("case", ["disabled-row", "masked-row-of-another-key", "placeholder-without-a-key"])
+def test_a_draft_without_a_key_the_runtime_resolves_is_refused_by_both(onboarding, monkeypatch, case):
+    """No other key stands in: a disabled row, a masked row naming a key the install lacks (the operator's other key
+    is not borrowed) and the configured-key placeholder with no key anywhere all leave the draft without access."""
+    from ouroboros.secret_masking import CONFIGURED_SECRET_PLACEHOLDER
+
+    environ = {"disabled-row": {"OUROBOROS_CONNECTIONS": json.dumps([{**_WORK_ROW, "enabled": False}])},
+               "masked-row-of-another-key": {"OUROBOROS_CONNECTIONS": json.dumps([_WORK_ROW])},
+               "placeholder-without-a-key": {}}[case]
+    draft = _bootstrap_draft(onboarding, monkeypatch, **environ)
+    if case == "masked-row-of-another-key":
+        draft["OUROBOROS_CONNECTIONS"] = [{**row, "name": "home"} for row in draft["OUROBOROS_CONNECTIONS"]]
+        draft["OUROBOROS_MODEL"] = "openai@home::gpt-5.6-terra"
+    if case == "placeholder-without-a-key":
+        draft["OPENAI_API_KEY"] = CONFIGURED_SECRET_PLACEHOLDER
+    preview = onboarding.client.post("/api/onboarding/subagents/preview", json=draft)
+    assert preview.status_code == 400 and "before continuing" in preview.json()["error"], preview.text
+    done = onboarding.client.post("/api/onboarding/complete", json={**draft, "attempt_id": f"refused-{case}"})
+    assert done.status_code == 400, done.text
+    assert not onboarding.settings_path.exists()
+
+
+@pytest.mark.parametrize("environ", [
+    {"GIGACHAT_CREDENTIALS": "env-gigachat-authorization-key"},
+    {"GIGACHAT_USER": "env-gigachat-user", "GIGACHAT_PASSWORD": "short"},  # a password is no API key: any length
+], ids=["authorization-key", "user-and-password"])
+def test_a_built_in_gigachat_key_previews_and_completes_on_the_built_in_route(onboarding, monkeypatch, environ):
+    """Either of GigaChat's declared ways to be ready, from the environment: the bootstrap shows a secret only as the
+    configured placeholder, and the draft built from it previews and completes on ``gigachat::``."""
+    import ouroboros.config as config
+    from ouroboros.gateway import onboarding_host
+    from ouroboros.secret_masking import CONFIGURED_SECRET_PLACEHOLDER
+
+    for key in ("GIGACHAT_CREDENTIALS", "GIGACHAT_USER", "GIGACHAT_PASSWORD"):
+        monkeypatch.delenv(key, raising=False)
+    draft = _bootstrap_draft(onboarding, monkeypatch, **environ)
+    app = Starlette(routes=[Route("/api/onboarding/bootstrap", endpoint=onboarding_host.api_onboarding_bootstrap)])
+    app.state.drive_root = onboarding.settings_path.parent
+    with TestClient(app) as client:
+        state = client.get("/api/onboarding/bootstrap").json()["bootstrap"]["initialState"]
+    secrets = {"GIGACHAT_CREDENTIALS": "gigachatCredentials", "GIGACHAT_PASSWORD": "gigachatPassword"}
+    for key, state_key in secrets.items():
+        assert state[state_key] == (CONFIGURED_SECRET_PLACEHOLDER if key in environ else "")
+        draft[key] = state[state_key]
+    draft["GIGACHAT_USER"] = state["gigachatUser"]
+    assert state["mainModel"].startswith("gigachat::")
+    draft.update(OUROBOROS_MODEL=state["mainModel"], OUROBOROS_MODEL_LIGHT=state["lightModel"],
+                 OUROBOROS_MODEL_FALLBACKS=state["fallbackModel"])
+    preview = onboarding.client.post("/api/onboarding/subagents/preview", json=draft)
+    assert preview.status_code == 200, preview.text
+    reviewers = [row["route"]["target_id"] for row in preview.json()["available_subagents"]["items"]
+                 if row.get("review_eligible")]
+    assert reviewers and all(target.startswith("gigachat::") for target in reviewers)
+    done = onboarding.client.post("/api/onboarding/complete", json={
+        **draft, SUBAGENTS_SETTING: preview.json()["available_subagents"], "attempt_id": "built-in-gigachat-0001"})
+    assert done.status_code == 200, done.text
+    assert config.load_settings()["OUROBOROS_MODEL"] == state["mainModel"]
+
+
+_OWN_ROW = {"subagent_id": "owner-helper", "recommended_use": "The owner's own helper, no reviewer marked.",
+            "route": {"kind": "api_model", "target_id": "openai/gpt-5.6-sol"}}
+
+
+@pytest.mark.parametrize("catalog", [
+    {"enabled": True, "items": []},  # explicitly empty
+    {"enabled": False, "items": []},  # Off
+    {"enabled": True, "items": [_OWN_ROW]},  # rows, none marked Reviewer
+    None,  # control: never configured, the wizard's to generate
+], ids=["empty", "off", "unmarked", "automatic"])
+@pytest.mark.parametrize("where", ["saved", "operator"])
+def test_connected_subscriptions_keep_the_installs_own_catalog_and_generate_only_an_automatic_one(
+        onboarding, monkeypatch, catalog, where):
+    """#2969: reopening setup with subscriptions connected shows and saves a catalog the install has (saved, or an
+    operator's variable) as it is, empty, Off and unmarked included; only an automatic one gains the reviewers."""
+    from ouroboros.configured_subagents import configured_subagents_dict, normalize_configured_subagents
+
+    def canonical(value):
+        return configured_subagents_dict(normalize_configured_subagents(value)[0])
+
+    if catalog is not None and where == "saved":
+        onboarding.settings_path.write_text(json.dumps({**WIZARD_PAYLOAD, SUBAGENTS_SETTING: json.dumps(catalog)}),
+                                            encoding="utf-8")
+    elif catalog is not None:  # no document: the install-time preset applies, over the operator's catalog
+        monkeypatch.setenv(SUBAGENTS_SETTING, json.dumps(catalog))
+    draft = {**WIZARD_PAYLOAD, "subscriptionsConnected": True}
+    first = onboarding.client.post("/api/onboarding/subagents/preview", json=draft)  # the wizard's first: no catalog
+    assert first.status_code == 200, first.text
+    shown = first.json()["available_subagents"]
+    again = onboarding.client.post("/api/onboarding/subagents/preview", json={**draft, SUBAGENTS_SETTING: shown})
+    assert again.status_code == 200, again.text
+    assert again.json()["available_subagents"] == shown  # the visible catalog previews as itself
+    done = onboarding.client.post("/api/onboarding/complete", json={
+        **draft, SUBAGENTS_SETTING: shown, "attempt_id": f"own-catalog-{where}-0001"})
+    assert done.status_code == 200, done.text
+    after = canonical(onboarding.saved()[SUBAGENTS_SETTING])
+    if catalog is None:
+        assert [(row["route"]["target_id"], row.get("review_eligible", False)) for row in shown["items"]
+                if row.get("review_eligible")] == [("claude=claude-opus-5-5", True), ("codex=gpt-5.6-sol", True)]
+        assert after == shown
+    else:
+        assert shown == canonical(catalog) == after, (shown, after)

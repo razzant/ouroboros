@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import {
-    apiConnections, apiProviderLabel, changeRouteChoice, composeModelSource, configuredApiProviders,
+    apiConnections, apiProviderLabel, changeRouteChoice, composeModelSource, configuredApiProviders, connectionDefaults,
     decodeRouteChoice, encodeRouteChoice, parseModelSource, routeChoiceGroups, routeModelFields,
     routeModelInputHtml, routeModelSuggestions, routeSupportsAccount, routeTargetFromModel, sourceIdentityLabel,
 } from '../modules/route_editor_primitives.js';
@@ -299,4 +299,25 @@ test('a wizard draft lists named endpoints without saved metadata, keeping ident
     assert.equal(apiConnections({ OPENAI_COMPATIBLE_BASE_URL: 'http://127.0.0.1:41001/v1',
         OUROBOROS_CONNECTIONS: [{ kind: 'openai-compatible', name: 'default', enabled: false }] })
         .find((entry) => entry.id === 'openai-compatible').enabled, false);
+});
+
+// #2969: the wizard proposes on the key a draft has — every direct provider's own defaults (none falls back to
+// OpenRouter), on its only named key, or its built-in key first; several named keys wait for Main's choice.
+test('every direct provider the wizard knows proposes on the key a draft has', () => {
+    const { modelDefaults } = JSON.parse(readFileSync(new URL('./fixtures/onboarding_bootstrap.json', import.meta.url)));
+    const direct = ['openai', 'anthropic', 'cloudru', 'gigachat', 'minimax', 'deepseek', 'zai'];
+    for (const kind of direct) {
+        assert.ok(modelDefaults[kind]?.main?.startsWith(`${kind}::`), `${kind} has wizard defaults of its own`);
+        const named = { _meta: { connections: [entry(kind, 'corp')] } };
+        const { defaults, choice } = connectionDefaults(modelDefaults, kind, named, contract.providerProfiles);
+        assert.equal(defaults.main, modelDefaults[kind].main.replace(`${kind}::`, `${kind}@corp::`), kind);
+        assert.deepEqual(choice, []);
+        const both = { _meta: { connections: [entry(kind, ''), entry(kind, 'corp')] } };
+        assert.equal(connectionDefaults(modelDefaults, kind, both, contract.providerProfiles).defaults.main, modelDefaults[kind].main);
+        const two = { _meta: { connections: [entry(kind, 'corp'), entry(kind, 'home')] } };
+        assert.deepEqual(connectionDefaults(modelDefaults, kind, two, contract.providerProfiles, modelDefaults[kind].main).choice,
+            [`${kind}@corp`, `${kind}@home`]);
+        assert.equal(connectionDefaults(modelDefaults, kind, two, contract.providerProfiles, `${kind}@home::x`).defaults.main,
+            modelDefaults[kind].main.replace(`${kind}::`, `${kind}@home::`));
+    }
 });

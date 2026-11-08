@@ -154,6 +154,7 @@ class SetupInitialState(TypedDict):
     modelContextWindows: Dict[str, Any]
     processingPreference: str
     modelProcessingPreferences: Dict[str, Any]
+    automaticModels: List[str]  # model-slot stateKeys neither the document nor an operator's variable sets
 
 
 class SetupConsciousnessOffer(TypedDict):

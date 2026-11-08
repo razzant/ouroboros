@@ -1,7 +1,7 @@
 # Ouroboros — Docker images for the web UI runtime
 # Usage (recipes: packaging/docker/compose.yaml, explained in docs/DEPLOYMENT.md):
 #   docker build -t ouroboros-web .
-#   docker run --rm -p 8765:8765 ouroboros-web
+#   docker run --rm -p 127.0.0.1:8765:8765 ouroboros-web
 #   docker build --target managed --build-context ouroboros-seed=<seed dir> -t ouroboros-managed .
 # The RUN --mount caches and --build-context need BuildKit, Docker's default builder.
 
