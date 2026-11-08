@@ -24,7 +24,7 @@ from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
 from ouroboros.llm import LLMClient
 from ouroboros.loop_llm_call import classify_llm_exception, is_rate_limit_text
 from ouroboros.pricing import emit_llm_usage_event, normalize_usage_cost, infer_provider_from_model
-from ouroboros.utils import sanitize_tool_result_for_log, utc_now_iso
+from ouroboros.utils import sanitize_tool_result_for_log
 from ouroboros.config import runtime_setting
 from ouroboros.safety_config import OWNER_RULES_KEY
 
@@ -473,7 +473,11 @@ def _subject_digest(tool_name, arguments):
 
 # A flag is overridden by a decision, never by bytes re-presented: the re-issue must come from a later model call.
 _SEND_DESPITE = ("To send despite this flag, repeat the identical call (its request_id too, if it has one) in a "
-                 "later step; any changed argument is checked again.")
+                 "later step; any changed argument is checked again. ")
+
+
+# How returned words open: their level, and that nothing was sent.
+_NOT_SENT = {"SUSPICIOUS": "⚠️ SAFETY_WARNING: Message not sent", "DANGEROUS": "⚠️ SAFETY_VIOLATION: Message not sent"}
 
 
 def _authoring_call(ctx):
@@ -482,24 +486,24 @@ def _authoring_call(ctx):
     return str(meta.get("llm_call_id") or "") if isinstance(meta, dict) else ""
 
 
-def _remember(ctx, digest, tool_name, assessment, *, speech_refused=False, held=False):
-    """Retain a verdict, or a hold of words (when and by which model call: the owner's exit reads it)."""
+def _remember(ctx, digest, tool_name, assessment, *, flagged="", marked=False, gate="", held=""):
+    """Retain a verdict. Flagged words keep their level, authoring model call, whether only the verdict saw them as
+    words and, if DANGEROUS, their words-and-destination key (``gate``); a hold keeps its cause and authoring call."""
     root = _root_id(ctx)
     if not root:
         return True  # rootless calls never earn a reusable speech flag
     with _PRIOR_LOCK:
         previous = _PRIOR_VERDICTS.get(root, {})
         before = previous.get(digest, {})
-        row = {"digest": digest, "tool": tool_name, "speech_refused": speech_refused,
+        row = {"digest": digest, "tool": tool_name,
                "verdicts": coalesce_verdicts(before.get("verdicts", ()), assessment.verdicts),
-               **({"llm_call_id": _authoring_call(ctx)} if speech_refused or held else {}),
-               # the first hold is when the mind was told to ask; a retry held again keeps that time
-               **({"held_at": before.get("held_at") or utc_now_iso(), "hold": getattr(assessment, "status", "")}
-                  if held else {})}
+               **({"flagged": flagged} if flagged else {"held": held} if held else {}),
+               **({"llm_call_id": _authoring_call(ctx)} if flagged or held else {}),
+               **({"marked": True} if flagged and marked else {}), **({"gate": gate} if gate else {})}
         history = _VerdictHistory({**previous, digest: row})
         history.omitted_safe = getattr(previous, "omitted_safe", 0)
         safe_rows = iter([key for key, value in history.items()
-                         if not value.get("speech_refused") and value.get("verdicts")
+                         if not value.get("flagged") and value.get("verdicts")
                          and all(verdict["status"] == "SAFE" for verdict in value["verdicts"])])
         while verdict_history_bytes(history) > _SAFETY_PRIOR_BYTE_BUDGET:
             key = next(safe_rows, None)
@@ -531,69 +535,74 @@ def _hold(ctx, tool_name, reason, *, status="UNAVAILABLE"):
                        status=status)
 
 
-def _held_exits(ctx, tool_name, arguments, effect, ext_tool=None):
-    """What a hold on words, or on an MCP call without a verdict, tells the mind: it waits in every mode, never a
-    route around it, and my human's exit names exactly what their card must hold (``_exit_subject``), or no exit
-    where the host could not check one."""
-    words, destinations = _exit_subject(ctx, tool_name, arguments, effect, ext_tool)
-    if effect.source == "mcp":
-        return ("This call waits until a check judges it: its server does not mark it read-only, so it may deliver "
-                "words. Retry it in a later step, or ask your human privately with this exact call on its own line of "
-                f"the card: {words}\nTheir answer lets an identical re-issue from a later step run it unjudged. Never "
-                "route it through another tool.")
-    exit_line = (" Or ask your human privately with these exact words on their own lines, unprefixed, and the "
-                 f"destination {', '.join(destinations)} on the card: their answer lets an identical re-issue from a "
-                 "later step send it unjudged." if words else " Retry in a later step.")
-    return f"These words wait until a check judges them.{exit_line} Never route these words through another tool."
+_WAIT = ("In this mode words flagged DANGEROUS wait for your human: never route them through another tool; changed words "
+         "are checked again. ")  # outside Cyber Pro, as a dangerous action stops there
+
+
+def _owner_line(subject, head=""):
+    """How my human releases a waiting call: the exact card its ``_exit_subject`` needs (answered, whatever it says)."""
+    words, destinations, exact, _ = subject
+    card = (f"with this exact call on its own line of the card: {words}\n" if exact
+            else f"with these exact words on their own lines, unprefixed, and the destination {', '.join(destinations)} "
+                 "on the card; ")
+    return (f"{head}Or ask your human privately {card}their answer lets your identical call send it. The host checks "
+            "that they answered that card, not what they answered: send only on their approval.")
+
+
+def _declared_speech(tool_name, effect):
+    """Words the host knows before any verdict, from declarations only: the automatic reply or a ``message`` effect
+    (a connector's ``sends.when`` included); never an argument name."""
+    return tool_name == "place_reply" or effect.effect == "message"
 
 
 def _exact_call(tool_name, arguments):
-    """An MCP call as my human's card quotes it: it declares no words or destination of its own, so the whole call."""
+    """A call as my human's card quotes it when it declares no words or destination of its own: the whole call."""
     return f"{tool_name} {json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)}"
 
 
 def _exit_subject(ctx, tool_name, arguments, effect, ext_tool=None):
-    """What my human's card must hold for a held call: its exact words and every destination (an MCP call, which
-    declares neither: the exact call, ``_exact_call``); ``("", [])`` when the host cannot tell either."""
+    """What my human's card must hold, as ``(words, destinations, exact, labels)``: declared words with each place's
+    label and every recipient outside a place's own conversation (one place never covers another recipient), else the
+    exact call (``_exact_call``): an MCP tool, words only the verdict saw, or words or recipients the host cannot tell."""
     from ouroboros.place_guard import call_place_facts
     from ouroboros.tool_effects import argument_value, target_values
 
-    if effect.source == "mcp":
-        return _exact_call(tool_name, arguments), [tool_name]
-    words = argument_value(arguments, effect.text or "text")
-    facts = call_place_facts(ctx, tool_name, arguments, ext_tool=ext_tool) or {}  # a place by its label, else targets
-    destinations = ([row["place_label"] for row in facts.get("places") or [] if row.get("place_label")]
-                    or [value for values in (facts.get("targets") or target_values(effect, arguments)).values()
-                        for value in values])
-    return (words, destinations) if isinstance(words, str) and words.strip() and destinations else ("", [])
+    if _declared_speech(tool_name, effect):
+        words = argument_value(arguments, effect.text or "text")
+        facts = call_place_facts(ctx, tool_name, arguments, ext_tool=ext_tool) or {}
+        rows = [row for row in facts.get("places") or [] if row.get("place_label")]
+        labels, own = list(dict.fromkeys(row["place_label"] for row in rows)), {row.get("conversation_id") for row in rows}
+        targets = facts.get("targets") or target_values(effect, arguments)
+        destinations = list(dict.fromkeys(labels + [value for key, values in targets.items() for value in values
+                                                    if key not in {"account_id", "thread_id", effect.thread} and value not in own]))
+        if isinstance(words, str) and words.strip() and destinations:
+            return words, destinations, False, labels
+    return _exact_call(tool_name, arguments), [tool_name], True, []
 
 
-def _owner_yes(ctx, tool_name, arguments, effect, prior, ext_tool=None):
-    """The quiz my human answered after these words were held, its card holding their exact text and every
-    destination (an MCP call: the exact call, ``_exact_call``); "" if none. The host checks facts only (bytes,
-    destination, time): the mind's re-issue after reading the answer is its judgment that the answer approves."""
-    from datetime import datetime
+def _owner_yes(ctx, subject):
+    """The id of my human's answer in this work whose card (the quiz it answers, never a chat message) holds the words
+    and every destination ``subject()`` resolves; "" if none. A draft answered before the send counts, as does an
+    answer that started a fresh head (its card rides in the head's owner rows). The host checks bytes and destination
+    only: the mind's call after reading the answer is its judgment that it approves."""
+    from ouroboros.owner_words import OWNER_SOURCES, is_answered_card
 
-    def when(stamp):
-        try:
-            return datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
-        except ValueError:
-            return None
-    (words, destinations), held = _exit_subject(ctx, tool_name, arguments, effect, ext_tool), when(prior.get("held_at"))
-    if not words or held is None:
-        return ""
-    for row in getattr(ctx, "_owner_directives", None) or []:
-        card = str(((row.get("reply_to") if isinstance(row, dict) else None) or {}).get("text") or "")
-        answered = when(row.get("ts") or row.get("received")) if card else None
-        try:
-            later = answered is not None and answered > held
-        except TypeError:  # an answer time without an offset is not comparable: not a fact this exit can use
-            later = False
+    cards = [(row, str(row["reply_to"]["text"])) for row in getattr(ctx, "_owner_directives", None) or []
+             if isinstance(row, dict) and row.get("source") in OWNER_SOURCES and is_answered_card(row.get("reply_to"))
+             and row["reply_to"].get("text")]
+    words, destinations, _, _ = subject() if cards else ("", [], True, [])
+    for row, card in cards:
         # The words as whole lines of the card and each destination as a whole token, never a part of a longer one.
-        if (row.get("source") == "owner_quiz_answer" and later and f"\n{words.strip()}\n" in f"\n{card}\n"
+        if (f"\n{words.strip()}\n" in f"\n{card}\n"
                 and all(re.search(rf"(?<!\w){re.escape(d)}(?!\w)", card) for d in destinations)):
-            return str(row.get("quiz_id") or row.get("msg_id") or "")
+            return str(row.get("quiz_id") or row.get("msg_id") or row["reply_to"].get("address") or "an answer")
     return ""
+
+
+def _words_key(subject):
+    """Declared words and their place (else recipients) apart from the tool and other arguments, so a wait for my human
+    is never re-rolled through another door or request_id; "" when the host cannot tell them."""
+    return "" if subject[2] else _subject_digest("words", [subject[0], sorted(subject[3] or subject[1])])
 
 
 def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, ctx=None, resolved_binding=None,
@@ -656,7 +665,7 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
         history = _PRIOR_VERDICTS.get(root, {})
         if root in _PRIOR_VERDICTS:
             _PRIOR_VERDICTS.move_to_end(root)
-        earlier = list(history.values())
+        earlier = [{key: value for key, value in row.items() if key != "gate"} for row in history.values()]
         omitted_safe = getattr(history, "omitted_safe", 0)
     bundle = {
         "work": {"kind": kind, "label": "your work" if kind == "owner" else "consciousness",
@@ -1379,15 +1388,21 @@ def _run_llm_check(
         result = second
         verdicts.append({"stage": "second", "row_id": row.subagent_id, **result})
     status = result["status"]
-    reasons = "\n".join(f"{v['stage']}: {v['status']} — {v.get('reason', '')}" for v in verdicts)
+    reasons = _reasons(verdicts)
     if status == "SAFE":
         return _Assessment(True, "", status=status, verdicts=verdicts)
     if status == "SUSPICIOUS":
         return _Assessment(True, "⚠️ SAFETY_WARNING: The Safety Supervisor flagged this action as suspicious.\n"
-                           + reasons + "\nThe command was allowed, but consider whether this is the right approach.", status=status, verdicts=verdicts)
+                           + reasons + "\nThe command was allowed, but consider whether this is the right approach.",
+                           status=status, verdicts=verdicts, destination="\n".join(_destination_lines(evidence)))
     return _Assessment(False, "⚠️ SAFETY_VIOLATION: The Safety Supervisor blocked this command.\n"
                        + reasons + "\nReconsider whether and how to proceed.", status=status, verdicts=verdicts,
                        destination="\n".join(_destination_lines(evidence)))
+
+
+def _reasons(verdicts):
+    """Each stage's level and reason, one per line, as the mind and the room's record read them."""
+    return "\n".join(f"{v['stage']}: {v['status']} — {v.get('reason', '')}" for v in verdicts)
 
 
 def _destination_lines(evidence):
@@ -1416,14 +1431,16 @@ def check_safety(
     ``declared_policy`` is a first-party ``ToolEntry``'s own declaration; a
     ``TOOL_POLICY`` entry outranks it and an invalid value is ``DEFAULT_POLICY``.
     Speech, known before a verdict from declarations or marked by the verdict's ``speech``, follows the final
-    assessment: DANGEROUS returns it unsent with the reason, the verdict's ``quote`` and the destination's notes, and
-    only an identical re-issue (request_id included) from a later model call sends it; words only the verdict saw get
-    that re-issue in Cyber Pro alone, and an ordinary mode checks each of their issues again. A hold on speech, or on
-    an MCP call without a verdict, binds in every mode and names its exits; my human's answered card holding the exact
-    words as whole lines and the destination (an MCP call: the exact call) lets a later identical re-issue send it
-    (``_owner_yes``). The speech mark is the final stage's, and a re-issue of words only the verdict saw meets the
-    one-author guard first. ``ext_tool`` is the extension descriptor being dispatched: its effect and the brief's
-    place facts are the publication it was read with (``tool_effects.bound_declaration``)."""
+    assessment: SUSPICIOUS or DANGEROUS returns it unsent once, with the reason, the verdict's ``quote`` and the
+    destination's notes. An identical re-issue (request_id included) from a later model call sends SUSPICIOUS words in
+    every mode and DANGEROUS words in Cyber Pro, the mode read when they are sent; elsewhere DANGEROUS words wait for
+    my human, keyed on the declared words and destination, so a new request_id buys no fresh check. My human's answer
+    whose card holds the exact words as whole lines and the destination (a call declaring neither: the exact call)
+    sends them in every mode, one given before the send included (``_owner_yes``): the host checks that the card was
+    answered, never what the answer says. A hold on speech, or on an MCP call without a verdict, binds in every mode
+    and names the same exit. The speech mark is the final stage's; words only it saw meet the one-author guard first.
+    ``ext_tool`` is the extension descriptor being dispatched: its effect and the brief's place facts are the
+    publication it was read with (``tool_effects.bound_declaration``)."""
     # Arguments can be None for no-parameter tool calls.
     tool_name = str(tool_name or "").strip()
     arguments = arguments or {}
@@ -1433,10 +1450,7 @@ def check_safety(
     from ouroboros.tool_effects import effect_of
     is_mcp = tool_name.startswith("mcp_")
     effect = effect_of(tool_name, ext_tool=ext_tool, ctx=ctx, is_mcp=is_mcp, args=arguments)
-    # Speech the host knows before any verdict, from declarations only: a ``message`` effect, a connector-declared
-    # send of a generic tool (``sends.when``), or the automatic reply. A verdict may add the mark (below), never
-    # an argument name. An MCP call that is no declared read waits like speech when no verdict exists.
-    speech = tool_name == "place_reply" or effect.effect == "message"
+    speech = _declared_speech(tool_name, effect)  # a verdict may add the mark (below); an unjudged MCP call waits too
     if tool_name == "manage_schedules" and arguments.get("action") in {"create", "update", "restore"}:
         policy = POLICY_CHECK
     if effect.declared and effect.effect == "read":
@@ -1466,42 +1480,69 @@ def check_safety(
             # (adversarial review r1 #19: audit only real deltas vs full mode).
             return True, ""
 
-    cyber = mode_has_unrestricted_agency(_runtime_mode(ctx))
-    digest = _subject_digest(tool_name, arguments)
-    with _PRIOR_LOCK:
-        root = _root_id(ctx)
-        prior = _PRIOR_VERDICTS.get(root, {}).get(digest, {})
-        if root in _PRIOR_VERDICTS:
-            _PRIOR_VERDICTS.move_to_end(root)
-    call = _authoring_call(ctx)
-    if prior.get("speech_refused"):  # host- or verdict-marked speech, flagged before
-        if not call or call == prior.get("llm_call_id"):  # the flagged decision re-presented, not a later one
-            return False, "⚠️ SAFETY_VIOLATION: Message not sent: this exact call was flagged in this same step. " + _SEND_DESPITE
-        if not speech:  # words only the verdict saw still meet the one-author guard a message meets at dispatch
-            from ouroboros.place_guard import verdict_speech_refusal
-            if refusal := verdict_speech_refusal(ctx, tool_name, arguments, is_mcp=is_mcp, ext_tool=ext_tool):
-                return False, refusal
-        _emit_durable_safety_event(ctx, {"type": "safety_sent_despite_check", "tool": tool_name,
-                                       "subject_digest": digest, "verdicts": prior["verdicts"],
-                                       "flagged_in": prior.get("llm_call_id", ""), "sent_by": call,
-                                       "detail": "sent despite the check by a later model call"})
-        return True, "⚠️ SAFETY_ADVICE: Identical re-issue from a later step; sent despite the check."
-    if (speech or is_mcp) and prior.get("held_at") and call and call != prior.get("llm_call_id") and (
-            quiz := _owner_yes(ctx, tool_name, arguments, effect, prior, ext_tool)):
-        _emit_durable_safety_event(ctx, {"type": "safety_sent_without_assessment", "tool": tool_name,
-                                       "subject_digest": digest, "quiz_id": quiz, "hold": prior.get("hold", ""),
-                                       "held_at": prior["held_at"], "sent_by": call})
-        return True, f"⚠️ SAFETY_ADVICE: Sent without a Safety assessment, on your human's answer to quiz {quiz}."
-
     # Preserve the selected assessment coverage independently of resource
     # admission. Cyber changes the authority of an assessment, never its verdict.
-    # Non-full modes retain their existing disclosed skips.
+    # Non-full modes retain their existing disclosed skips: an unchecked call meets no flag, wait or card.
     safety_mode = get_safety_mode(work_kind(getattr(ctx, "task_metadata", None)))
     if safety_mode != "full":
         skip_llm = safety_mode == "off" or (safety_mode == "light" and policy == POLICY_CHECK_CONDITIONAL)
         if skip_llm:
             _emit_safety_mode_skip(ctx, tool_name, safety_mode, policy)
             return True, ""
+
+    cyber = mode_has_unrestricted_agency(_runtime_mode(ctx))
+    digest = _subject_digest(tool_name, arguments)
+    with _PRIOR_LOCK:
+        root = _root_id(ctx)
+        rows = _PRIOR_VERDICTS.get(root, {})
+        prior, gates = rows.get(digest, {}), {row["gate"]: row for row in rows.values() if row.get("gate")}
+        if root in _PRIOR_VERDICTS:
+            _PRIOR_VERDICTS.move_to_end(root)
+    call, flag, resolved = _authoring_call(ctx), prior.get("flagged", ""), []
+
+    def subject():  # what my human's card must hold, resolved at most once per check (``_exit_subject``)
+        resolved or resolved.append(_exit_subject(ctx, tool_name, arguments, effect, ext_tool))
+        return resolved[0]
+
+    def one_author():  # the place guard a message meets at dispatch, for words only a verdict saw
+        from ouroboros.place_guard import verdict_speech_refusal
+        return verdict_speech_refusal(ctx, tool_name, arguments, is_mcp=is_mcp, ext_tool=ext_tool)
+
+    def released(quiz, words_by_verdict):  # my human's answered card holds these exact words: no new check
+        if words_by_verdict and (refusal := one_author()):
+            return False, refusal
+        said = "\nThe check had said:\n" + _reasons(basis) if any(v["status"] != "SAFE" for v in basis or ()) else ""
+        return sent("safety_sent_despite_check" if flag or gated else "safety_sent_without_assessment",
+                    f"Sent on your human's answer ({quiz}), without a new check. The host checked that they answered "
+                    "a card with these exact words, not what they answered." + said,
+                    quiz_id=quiz, **({"hold": prior["held"]} if prior.get("held") else {}))
+
+    def sent(event, advice, **facts):
+        _emit_durable_safety_event(ctx, {"type": event, "tool": tool_name, "subject_digest": digest, "sent_by": call,
+                                         **({"verdicts": basis} if basis else {}),
+                                         **({"flagged_in": prior.get("llm_call_id", "")} if flag else {}), **facts})
+        return True, "⚠️ SAFETY_ADVICE: " + advice
+    # Who sends flagged words, read when they are sent: the mind for SUSPICIOUS, and for DANGEROUS in Cyber Pro;
+    # else my human's card. ``gated``: these declared words to this destination were flagged DANGEROUS elsewhere.
+    mind_may, gated = flag == "SUSPICIOUS" or cyber, gates.get(_words_key(subject())) if gates and speech else None
+    basis = prior.get("verdicts") or (gated or {}).get("verdicts")  # the verdicts a release overrides
+    exits = _owner_line(subject(), _SEND_DESPITE if mind_may else _WAIT) if flag or gated else ""
+    if flag and (not call or call == prior.get("llm_call_id")):  # the flagged decision re-presented, not a later one
+        return False, _NOT_SENT[flag] + ": this exact call was flagged in this same step. " + exits
+    # My human's card reaches words (declared, or marked by a verdict) and an MCP call no verdict judged an action.
+    if (speech or prior.get("marked") or (is_mcp and not prior.get("verdicts"))) and call and (
+            call != prior.get("llm_call_id")) and (quiz := _owner_yes(ctx, subject)):
+        return released(quiz, prior.get("marked"))
+    if flag:
+        if not mind_may:  # it waits for my human: no fresh check re-rolls it
+            return False, _NOT_SENT[flag] + ". " + exits
+        if prior.get("marked") and (refusal := one_author()):
+            return False, refusal
+        return sent("safety_sent_despite_check", "Identical re-issue from a later step; sent despite the check:\n"
+                    + _reasons(prior["verdicts"]), detail="sent despite the check by a later model call")
+    if gated and not cyber:
+        return False, (f"{_NOT_SENT['DANGEROUS']}: these words were flagged DANGEROUS in this work for this place or "
+                       f"recipient. {exits}")
 
     try:
         assessment = _run_llm_check(tool_name, arguments, messages, ctx, resolved_binding, ext_tool)
@@ -1513,36 +1554,42 @@ def check_safety(
     allowed, message = assessment
     verdicts = getattr(assessment, "verdicts", ())
     if verdicts:
-        # Speech follows the final assessment (a second check included): SUSPICIOUS sends with its warning.
+        # Words follow the final assessment (a second check included): any flag returns them unsent once.
         marked = not speech and verdicts[-1].get("speech") is True  # words only the final verdict saw
         speech = speech or marked
-        flagged_speech = speech and getattr(assessment, "status", "") == "DANGEROUS"
-        # Declared speech may be sent by a later decision in every mode; words only the verdict saw keep an ordinary
-        # mode's refusal (each issue is checked again) and are refused once only in Cyber Pro, where the call would run.
-        reissue = flagged_speech and (cyber or not marked)
-        if not _remember(ctx, digest, tool_name, assessment, speech_refused=reissue):
+        status = getattr(assessment, "status", "")
+        flag = status if speech and status in ("SUSPICIOUS", "DANGEROUS") else ""
+        if not _remember(ctx, digest, tool_name, assessment, flagged=flag, marked=marked,
+                         gate=_words_key(subject()) if flag == "DANGEROUS" else ""):
             assessment = _hold(ctx, tool_name, "This work's mandatory prior-verdict history is too large", status="TOO_LARGE")
             allowed, message = assessment
         else:
             _emit_durable_safety_event(ctx, {"type": "safety_verdict", "tool": tool_name,
                                            "subject_digest": digest, "verdicts": verdicts})
-            if flagged_speech:  # private to the mind: the words, the rule and where they would land
-                reasons = "\n".join(f"{v['stage']}: {v['status']} — {v.get('reason', '')}" for v in verdicts)
+            if flag and marked and call and (quiz := _owner_yes(ctx, subject)):  # a card answered before the send
+                prior = {"verdicts": list(verdicts), "llm_call_id": call}
+                basis = prior["verdicts"]
+                return released(quiz, True)
+            if flag:  # private to the mind: the words, the rule and where they would land
                 quote = next((v["quote"] for v in reversed(verdicts) if v.get("quote")), "")
-                return False, ("⚠️ SAFETY_VIOLATION: Message not sent.\n" + reasons
+                return False, (_NOT_SENT[flag] + ".\n" + _reasons(verdicts)
                                + (f"\nFlagged words: {json.dumps(quote, ensure_ascii=False)}" if quote else "")
                                + (f"\n{assessment.destination}" if getattr(assessment, "destination", "") else "")
-                               + ("\n" + _SEND_DESPITE if reissue else ""))
-            if marked and allowed:  # the place guard a message meets at dispatch, before any verdict existed
-                from ouroboros.place_guard import verdict_speech_refusal
-                if refusal := verdict_speech_refusal(ctx, tool_name, arguments, is_mcp=is_mcp, ext_tool=ext_tool):
-                    return False, refusal
-    # Holds cannot earn retry authority. Speech holds bind in every runtime mode, and so does an MCP call's hold:
-    # without a verdict nothing says it is not words to people (built-in undeclared tools' holds stay advice).
+                               + "\n" + _owner_line(subject(), _SEND_DESPITE if flag == "SUSPICIOUS" or cyber else _WAIT))
+            if marked and allowed and (refusal := one_author()):  # the guard a message meets at dispatch
+                return False, refusal
+    # A call never judged a non-SAFE action leaves on my human's card for its exact form (a pre-approved github_write).
+    # Speech holds bind in every mode, as does an MCP call's (built-in undeclared tools' holds stay advice).
+    if not allowed and not verdicts and all(v["status"] == "SAFE" for v in prior.get("verdicts", ())) and call and (
+            call != prior.get("llm_call_id")) and (quiz := _owner_yes(ctx, subject)):
+        return released(quiz, False)
     if not allowed and (speech or (is_mcp and not getattr(assessment, "verdicts", ()))):
         if not getattr(assessment, "verdicts", ()):
-            _remember(ctx, digest, tool_name, assessment, held=True)
-        return False, message + "\n" + _held_exits(ctx, tool_name, arguments, effect, ext_tool)
+            _remember(ctx, digest, tool_name, assessment, held=getattr(assessment, "status", "") or "UNAVAILABLE")
+        head = ("This call waits until a check judges it: its server does not mark it read-only, so it may deliver "
+                "words." if effect.source == "mcp" else "These words wait until a check judges them.")
+        return False, (message + "\n" + _owner_line(subject(), head + " Retry in a later step. ")
+                       + " Never route these words through another tool.")
     if cyber and not allowed:
         _emit_durable_safety_event(ctx, {"type": "safety_advisory", "tool": tool_name,
             "assessment_allowed": False, "assessment": message, "runtime_mode": _runtime_mode(ctx), "execution_allowed": True})

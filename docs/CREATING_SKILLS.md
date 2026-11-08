@@ -977,26 +977,27 @@ contributes:
 
 - `effect` is one fact with three consumers: Advises (autonomy) refuses everything but a declared read; a Silent or
   Paused place refuses all but reads aimed at it; the Safety Supervisor skips declared reads at Light/Full and
-  gives `message` its speech semantics (a flagged message returns to the mind; an identical re-issue from a later
-  step is sent and recorded; with no verdict it waits). A tool that reads or writes depending on its arguments is
+  gives `message` its speech semantics (a flagged message returns to the mind once; an identical re-issue from a
+  later step sends a SUSPICIOUS one, and a DANGEROUS one in Cyber Pro, recorded; elsewhere a DANGEROUS one waits
+  for your human, and with no verdict it waits). A tool that reads or writes depending on its arguments is
   `write`, unless its `sends:` block declares which calls deliver words: a call whose every `when` selector holds
   one of its listed values is `message`, attributed by that block's `target`/`conversation`/`thread`; any other call
   keeps the row's `effect`. A `write` into a conversation (a pin, a bookmark) or a `gesture` is not words by itself.
   This is the connector's fact: core lists no provider method and never reads speech from argument names. The
   Supervisor's verdict may still mark a call speech, which then meets the one-author guard where its targets resolve
-  a place; a built-in tool without declarations, such as `github_write`, is speech only by that mark: in Cyber Pro
-  a flag returns it once and its hold stays advice, while an ordinary mode refuses it at every flagged issue (no
-  re-issue sends it). An MCP tool is a declared read when
+  a place; a built-in tool without declarations, such as `github_write`, is speech only by that mark, with the
+  same levels and its exact call on your human's card; in Cyber Pro its hold stays advice. An MCP tool is a
+  declared read when
   its configured server marks it `readOnlyHint: true`, otherwise `write`; that hint is trusted, so a server lying
   about a write runs it unchecked, and Advises may call the tools a server marks read-only.
 - `gesture` adds or removes a reaction-like response on one message, never speech, a pin or an edit. A focus sees its
   door beside the send doors, `message` prefilled only from `event.message.message_id`. With no send door a non-silent
   finish is still posted, so a reaction alone finishes `silent=true`.
 - `target`/`conversation`/`thread` attribute each destination; a dotted name (`body.channel`) selects a nested
-  argument (`args["body"]["channel"]`). `text` (default: the argument named `text`) names the words: when no check
-  could judge a message, your human's answer on a card holding those exact words as whole lines and the destination
-  (the place's label, else the declared targets) lets the mind's identical re-issue send it (an MCP call, declaring
-  neither, is held with its exact call for that card).
+  argument (`args["body"]["channel"]`). `text` (default: the argument named `text`) names the words: your human's
+  answer on a card holding those exact words as whole lines and every destination (the place's label and each declared
+  recipient outside that place's own conversation) sends the message in every mode, held, flagged or before any check (a call declaring neither,
+  such as an MCP tool, uses its exact call for that card); the host checks the card was answered, not the answer.
   Declare `account_id` for multi-account writes:
   an exact account outside all applicable Place scopes remains an ordinary tool target, including in Acts.
   Unresolved targets inside applicable scopes retain the Silent/Paused hold. Use the same canonical account key

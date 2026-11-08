@@ -444,7 +444,8 @@ def _speaker_call(tmp_path, monkeypatch, *, replacement="message", then=None, ou
     return results[0], place
 
 
-@pytest.mark.parametrize("runtime,verdict,refusal", [  # SUSPICIOUS speech sends with its warning (the final assessment)
+@pytest.mark.parametrize("runtime,verdict,refusal", [  # a flag at either level returns words unsent (the final assessment)
+    ("advanced", "SUSPICIOUS", "Message not sent"),
     ("advanced", "DANGEROUS", "Message not sent"),
     ("cyber_pro", "DANGEROUS", "Message not sent"),
     ("cyber_pro", RuntimeError("checker route down"), "SAFETY_UNAVAILABLE"),
