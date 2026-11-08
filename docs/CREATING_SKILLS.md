@@ -1077,7 +1077,7 @@ A name or alias the owner wants to be called by is a connector signal: declare
 (one entry per line), match whole words case-insensitively in the connector, and report the fact on
 the event. Core stores the owner's choice as a wake item and matches membership only. The reference
 implementation is [email-presence 0.7.0](https://github.com/razzant/OuroborosHub/tree/main/skills/email-presence);
-[telegram-bot 0.6.3](https://github.com/razzant/OuroborosHub/tree/main/skills/telegram-bot) is the second (lane F1T, in flight).
+[telegram-bot](https://github.com/razzant/OuroborosHub/tree/main/skills/telegram-bot) is the second.
 
 A place connector reports observations; the host decides attention. While running and
 authenticated, report every supported event within the connected place's granted
@@ -1204,8 +1204,8 @@ Use the connector's ordinary content-hash-bound skill token for:
   provider marks the message as mentioning, with the name the connector resolved (null when it could not) and
   whether the id is the account the connector writes as. Without it the host reads
   `message.provider_facts.mentioned_user_ids` with `is_self` from `provider_facts.self_user_id` and names
-  unknown; a connector that reports neither renders no mention line. `provider_facts.self_user_id` also
-  names the focus's own account when the event carries no credential identity.
+  unknown; a connector that reports neither renders no mention line. `provider_facts.self_user_id` also names the
+  focus's own account when the event carries no credential identity.
 - Optional thread snapshot `event.conversation.thread_history`: `{status, observed_at?, authors?, data:
   {messages: [...], complete?}}`, the conversation as the provider served it at capture. Optional `authors`
   is the connector's directory of the snapshot's authors, `[{"id": str, "name": str|null, "is_self": bool}]`,
@@ -1213,17 +1213,32 @@ Use the connector's ordinary content-hash-bound skill token for:
   mentioned ids through it when `message.mentions` is absent). The frame renders each
   message as author, a `[you]` mark, a `[this message]` mark on the waking message, its time and text;
   per message the host reads an author id (`user`, `actor_id`, `author_id`, `platform_actor_id`, or a nested
-  `actor`/`author` mapping), a name (`user_profile`/`bot_profile` `real_name`/`display_name`/`name`,
-  `author_name`, `display_name`, `username`), a time (`sent_at`, else a numeric `ts`/`timestamp` epoch), the
-  `text` and an id (`message_id`, `id`, `ts`). The snapshot renders whole: the connector's capture is
-  already bounded, and the frame never cuts it.
-- Optional `event.message.forward_origin` (any non-empty value): the message carries words another author wrote
-  (a forward, or another person's text the event copies under the sender). The host never records such an event as
-  its sender's own words. A message from an account the place confirms as the owner's is their words by provenance
-  (said where others can hear) at a turn's opening, mid-turn and when a focus hands it on, and a Continue of that work
-  carries them to the successor whole (citable there, an order only by a cite); a forward of it is not.
-  Provenance is never a verdict: whom the words are for, and whether they ask for work, is the mind's reading. An
-  order exists only where the mind cites their exact words (`owner_words` of `start_task`, `schedule_followup`,
+  `actor`/`author` mapping's `platform_actor_id`/`id`), a name (`user_profile`/`bot_profile`
+  `real_name`/`display_name`/`name`, `author_name`, `display_name`, `username`, or the nested mapping's
+  `display_name`/`username`), a time (`sent_at`, else a numeric `ts`/`timestamp` epoch), the `text` and an id
+  (`message_id`, `id`, `ts`). The snapshot renders whole: the connector's capture is already bounded, and the
+  frame never cuts it.
+- Optional `event.message.attachments[]`, one record per declared file (name `file_name`/`name`/`filename`, type
+  `mime_type`/`content_type`/`mimetype`/`kind`, positive `file_size`/`size`): `status` `staged` (also when absent;
+  only these go in `staged_files`), `too_large`, `failed`, `unsupported` or another word, with a factual
+  `note`/`reason`/`stage_error` (else email's `attachment_stage_note`). Without `status`, `content_available: false`
+  reads as `failed` (`unsupported` for `stage_error: unsupported_mime_type`). Optional `event.message.non_text`:
+  `[{"kind": str, "description": str}]` (sticker, poll, location: neither words nor a file); past 4000 characters a
+  description is cut and counted, naming where it stays whole. The focus (in its own block) and history state these
+  as connector facts beside exact words, never quotable as speech. An event of only these facts is never empty.
+- Optional message facts: `reply_to_message` (`message_id`; author `from`/`sender_chat` with
+  `first_name`/`last_name`/`title`/`display_name`/`name`, `username`, `id`; `text`/`caption`; `forward_origin`;
+  `attachments[].file_name`), `reply_to_message_id`, `quote.text` (alone: author not recorded), `media_group_id`
+  with integer `media_group_position`, and `entities`/`caption_entities` `text_link` entries (UTF-16
+  `offset`/`length` into `event.text`, `url`), rendered without changing `event.text`.
+- Optional `event.message.forward_origin` (any non-empty value; a string as given, or a mapping naming `sender_user`,
+  `sender_user_name`, `sender_chat`/`chat`, `author_signature`, epoch `date`): another author's words (a forward, or
+  another person's text the event copies under the sender), never recorded as the sender's own;
+  `is_automatic_forward: true` marks a channel post opening its comment thread. A confirmed owner account's message
+  is their words by provenance (said where others can hear) at a turn's opening, mid-turn and when a focus hands it
+  on, whole and citable after a Continue; a forward of it is not, though its sender stays their confirmed account
+  (history, the Safety occasion). Whom words address and whether they ask for work is the mind's reading: an order
+  exists only where the mind cites their exact words (`owner_words` of `start_task`, `schedule_followup`,
   `manage_schedules` update) and the host verifies the bytes inside a message of theirs that reached that run.
 - Optional `event.message.reaction` (object with `schema_version: 1`; `text` and files empty; an object
   without that key is not this fact): `change` `add`/`remove`/`replace`/`count`; `old`/`new` lists hold provider

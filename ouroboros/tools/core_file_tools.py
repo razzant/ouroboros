@@ -772,6 +772,26 @@ def _root_display_path(root: str, path: str) -> str:
     return f"{root}:{safe_relpath(str(path or '.')).removeprefix('./') or '.'}"
 
 
+def _not_text_error(root: str, path: str, target: Any, exc: UnicodeDecodeError, selectors: str = "") -> ToolResult:
+    """A file that is not UTF-8 text stays a read error, naming what its first bytes say it is and the
+    reader that opens that kind (``read_archive`` loads on demand; ``selectors``: a skill payload's own)."""
+    from ouroboros.archive_reader import file_kind
+
+    try:
+        with open(target, "rb") as handle:
+            kind = file_kind(handle.read(8))
+    except OSError:
+        kind = ""
+    where = json.dumps(str(target))
+    reader = {"a ZIP archive": f"read_archive(root={json.dumps(root)}, path={json.dumps(path)}{selectors}) lists it "
+                               "and reads one member's text (enable_tools(tools=\"read_archive\") loads it)",
+              "a PDF": f"extract_pdf_text(path={where}) reads its text layer",
+              **dict.fromkeys(("a PNG image", "a JPEG image", "a GIF image"), f"view_image(path={where}) shows it")}
+    return ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=(
+        f"⚠️ READ_FILE_ERROR: {_root_display_path(root, path)} is not UTF-8 text"
+        + (f" (it is {kind}); {reader[kind]}." if kind in reader else f" ({type(exc).__name__}: {exc}).")))
+
+
 def _stamp_read_view(ctx: ToolContext, target: Any, opened: str, opened_root: str,
                      extent: Dict[str, Any], rendered: str) -> str:
     """Stamp this read's resolved target, root-relative opened_path, normalized
@@ -853,10 +873,10 @@ def _read_file(
     except ValueError:
         opened = str(target)
     opened_root = str(binding.root)  # the NORMALIZED root the binding used, not the model's spelling
+    selectors = (f", bucket={json.dumps(bucket or binding.source)}, skill_name={json.dumps(skill_name or binding.skill_name)}"
+                 if normalized == "skill_payload" else "")  # a hint's call keeps the canonical/physical identity
     if target.is_dir():  # admitted, but no file here: the read becomes the listing call to make
-        call = f"list_files(root={json.dumps(normalized)}, path={json.dumps(str(target))}" + (  # preserve canonical/physical identity
-            f", bucket={json.dumps(bucket or binding.source)}, skill_name={json.dumps(skill_name or binding.skill_name)}"
-            if normalized == "skill_payload" else "")
+        call = f"list_files(root={json.dumps(normalized)}, path={json.dumps(str(target))}" + selectors
         return _publish_tool_result(ctx, ToolResult(status="ok", code="LEGACY_WARNING", text=(
             f"⚠️ NOT_FOUND: {_root_display_path(normalized, opened)} is a directory, not a file. List it:\n"
             f"  {call})")))
@@ -864,10 +884,12 @@ def _read_file(
         reader, display_path = ((_data_read, _root_display_path(normalized, path)) if normalized == "runtime_data" else
                                 (_repo_read, f"{target} (project room)" if binding.source == "project_room"
                                  else _root_display_path(normalized, opened)))
-        return _stamp_read_view(ctx, target, opened, opened_root, extent, reader(
-            ctx, path, max_lines=max_lines, start_line=start_line, start_char=start_char, display_path=display_path,
-            _resolved_binding=binding, extent=extent, max_chars=max_chars,
-        ))
+        try:
+            rendered = reader(ctx, path, max_lines=max_lines, start_line=start_line, start_char=start_char,
+                              display_path=display_path, _resolved_binding=binding, extent=extent, max_chars=max_chars)
+        except UnicodeDecodeError as exc:
+            return _publish_tool_result(ctx, _not_text_error(normalized, path, target, exc, selectors))
+        return _stamp_read_view(ctx, target, opened, opened_root, extent, rendered)
     try:
         content = _read_source_text(target, extent)
         rendered = _render_line_slice(_root_display_path(normalized, path), content,
@@ -877,6 +899,8 @@ def _read_file(
     except FileNotFoundError:
         return _publish_tool_result(ctx, ToolResult(
             status="ok", code="LEGACY_WARNING", text=f"⚠️ NOT_FOUND: {_root_display_path(normalized, path)} (resolved: {target})"))
+    except UnicodeDecodeError as exc:
+        return _publish_tool_result(ctx, _not_text_error(normalized, path, target, exc, selectors))
     except UserFilesPathBlockedError as exc:
         # Typed POLICY refusal, not an executor failure: the runtime said "no"
         # to this read. The distinct prefix routes it into the v6.57.0

@@ -479,12 +479,20 @@ def place_owner_accounts(drive_root: Any) -> OwnerAccounts:
     return OwnerAccounts(counted_owner_accounts(place_rows(drive_root).values()), sent_identities(drive_root))
 
 
+def forwarded_message(message: Any) -> bool:
+    """A connector's recorded forward carries another author's words, even when my human sent it: the account stays
+    theirs (``owner_author``), the words never become theirs (``owner_words.owner_row``, ``place_confirmed_words``,
+    ``dialogue_provenance.owner_speech``)."""
+    return bool(_fields({"message": message}, "message").get("forward_origin"))
+
+
 def owner_author(accounts: Mapping[str, Iterable[OwnerAccount]], place_id: str, actor: Any, account_id: str,
                  conversation_id: str = "", message: Any = None) -> bool:
     """A place message as my human's own words now: its actor is an account its place's connector account confirms
     (``accounts``, one ``place_owner_accounts`` snapshot), the connector does not report it unauthenticated, and it is
     not a message I posted as an account (its provider identity among ``accounts.sent``; never compared by its words,
-    so my human repeating my words is still my human). Provenance of the words, never whom they are for."""
+    so my human repeating my words is still my human). Provenance of the words, never whom they are for; who sent a
+    forward, never whose words it carries (``forwarded_message``)."""
     from ouroboros.own_sends import message_identity
 
     actor = actor if isinstance(actor, Mapping) else {}

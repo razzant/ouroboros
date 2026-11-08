@@ -613,6 +613,8 @@ def dialogue_text(entry: Mapping[str, Any]) -> str:
     message = _mapping(transport.get("message"))
     if entry.get("type") == "presence_delivery" and message:
         text += "\n[Delivery details: " + json.dumps(dict(message), ensure_ascii=False, sort_keys=True) + "]"
+    elif facts := place_message_facts(entry):
+        text += ("\n\n" if text else "") + facts
     evidence = entry.get("late_evidence")  # an old task-acceptance late-settlement row; nothing writes one now
     if entry.get("type") == "acceptance_late_settlement" and isinstance(evidence, Mapping):
         text += "\n[Late review evidence: " + json.dumps(dict(evidence), ensure_ascii=False, sort_keys=True) + "]"
@@ -623,6 +625,25 @@ def dialogue_text(entry: Mapping[str, Any]) -> str:
                  "memory_read(source_ref=" + json.dumps(locator, ensure_ascii=False, sort_keys=True,
                                                       separators=(",", ":")) + ")]")
     return text + relation_text(entry) + private_contact_text(entry)
+
+
+def place_message_facts(entry: Mapping[str, Any]) -> str:
+    """What the connector reported about an inbound place row's message (``presence_message_facts``), as its own
+    labelled block for a reader to set beside the row's words, never inside them; ``""`` for any other row. A cut
+    names the row's recorded context (``chat_chain.context_address``), which holds its message whole."""
+    if not (entry.get("direction") == "in" and row_provenance(entry) == "place"):
+        return ""
+    from ouroboros.presence_message_facts import connector_facts, cut
+
+    message = _mapping(_mapping(entry.get("transport")).get("message"))
+    source = ""
+    if cut(message):
+        from ouroboros.chat_chain import context_address
+
+        address = context_address(entry if isinstance(entry, dict) else dict(entry))  # a projection keeps its body
+        source = "memory_read(source_ref=" + json.dumps(address, ensure_ascii=False, sort_keys=True,
+                                                        separators=(",", ":")) + ")"
+    return connector_facts(message, text=str(entry.get("text") or ""), sender=dialogue_speaker(entry), source=source)
 
 
 def private_contact(row: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -793,16 +814,23 @@ def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch:
         return {"kind": "human", "label": "Owner", "via": "quiz"}
     direction = _direction(row)
     if direction == "in":
+        from ouroboros.places import forwarded_message  # D15->D20 is lazy-only
+
         if wordless_reaction(row):  # the actor's act, in the host's words: never quotable as theirs
             return {"kind": "place_fact", "label": dialogue_author(row),
                     "actor_kind": _text(_mapping(_mapping(row.get("transport")).get("actor")).get("kind"))}
-        fact = _place_speaker(row, owner_accounts) if row_provenance(row) == "place" else ""
+        place = row_provenance(row) == "place"
+        # A forward keeps who sent it (my human's account stays confirmed); its words are another author's.
+        forward = {"forwarded": True} if place and forwarded_message(_mapping(row.get("transport")).get("message")) else {}
+        lead = "Forwarded by " if forward else ""
+        fact = _place_speaker(row, owner_accounts) if place else ""
         if fact == "the account I send as" and owner_accounts is not None:  # my own account's event, no recorded
-            return {"kind": "ouroboros", "label": f"{fact}: {dialogue_author(row)}", "via": "own_account"}  # sender work
+            return {"kind": "ouroboros", "label": f"{lead}{fact}: {dialogue_author(row)}", "via": "own_account",
+                    **forward}  # sender work
         label = dialogue_author(row)
-        return {"kind": "human", "label": f"{fact}: {label}" if fact else label,
+        return {"kind": "human", "label": lead + (f"{fact}: {label}" if fact else label),
                 **({"owner_confirmed": True} if fact == "my human" else {}),  # no speaker recorded: no person either
-                **({"unattributed": True} if row_provenance(row) == "place" and not recorded_speaker(row) else {})}
+                **({"unattributed": True} if place and not recorded_speaker(row) else {}), **forward}
     if direction == "system":
         if row.get("summary_kind") == LEGACY_RETELLING_SUMMARY_KIND:
             return {"kind": "helper", "label": "Light (legacy retelling)"}
@@ -824,16 +852,19 @@ def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch:
 
 
 def recorded_person(author: Mapping[str, Any]) -> bool:
-    """A person's words, from ``row_author``'s answer: ``human`` with a recorded speaker. A connector event without
-    an actor (``unattributed``: GitHub's later revision of a description) shows whole but is nobody's."""
+    """A person's row, from ``row_author``'s answer: ``human`` with a recorded speaker. A connector event without
+    an actor (``unattributed``: GitHub's later revision of a description) shows whole but is nobody's; a forward
+    (``forwarded``) is still its sender's row, though its words are another author's."""
     return author.get("kind") == "human" and not author.get("unattributed")
 
 
 def owner_speech(row: Mapping[str, Any], author: Mapping[str, Any]) -> bool:
     """My human's own words, from ``row_author``'s answer for ``row``: a person's row outside places (Main, a
-    Project; a quiz answer), or a place row from an account its place confirms now (``owner_confirmed``). The
-    one definition of my human's words every view of my conversations reads."""
-    return author.get("kind") == "human" and (row_provenance(row) != "place" or author.get("owner_confirmed") is True)
+    Project; a quiz answer), or a place row from an account its place confirms now (``owner_confirmed``) that
+    does not forward another author's words. The one definition of my human's words every view of my
+    conversations reads."""
+    return (recorded_person(author) and not author.get("forwarded")
+            and (row_provenance(row) != "place" or author.get("owner_confirmed") is True))
 
 
 def row_class(row: Mapping[str, Any], **lineage: Any) -> dict[str, Any]:
@@ -930,9 +961,10 @@ def render_row_text(row: Mapping[str, Any]) -> str:
 
 def quote_words(row: Mapping[str, Any]) -> str:
     """The words an exact quote may take from one chat row (``chronicle_quotes``, ``memory_mark``): its
-    ``render_row_text``, except that a typed reaction carrier offers only its own ``text``. The reaction
-    fact and delivery details shown beside those words are the host's labels, never the speaker's."""
-    if reaction_fact(_mapping(row.get("transport")).get("message")):
+    ``render_row_text``, except inbound place rows and reaction carriers offer only their own ``text``.
+    Connector facts and delivery details shown beside those words are the host's labels, never the speaker's."""
+    if (row.get("direction") == "in" and row_provenance(row) == "place"
+            or reaction_fact(_mapping(row.get("transport")).get("message"))):
         return str(row.get("text") or "")
     return render_row_text(row)
 

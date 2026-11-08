@@ -358,6 +358,11 @@ def _golden() -> dict[str, dict]:
 # unavailable. Keep the historical corpus intact and assert the new observed
 # outcome explicitly rather than manufacture old evidence (04-AGENCY S1/S3).
 CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's size notice rides a successful update_world
+    # read_archive: a file that is no ZIP, a folder, an encrypted member or a compression the reader does not decode is
+    # named without reading anything, as the PDF reader's own UNAVAILABLE notices are; a damaged member fails the read.
+    "ARCHIVE_UNAVAILABLE": (True, "unavailable"),
+    "ARCHIVE_MEMBER_UNAVAILABLE": (True, "unavailable"),
+    "ARCHIVE_READ_FAILED": (True, "error"),
     # mcp_oauth: a remote MCP server that needs the owner's sign-in ran nothing; the substrate cannot serve the call yet.
     "MCP_AUTH_REQUIRED": (True, "unavailable"),
     # start_task / schedule_followup / manage_schedules: owner_words not found verbatim in my human's words that reached

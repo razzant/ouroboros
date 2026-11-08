@@ -45,6 +45,7 @@ Nothing here publishes a record or calls a model.
 """
 from __future__ import annotations
 
+import hashlib
 import pathlib
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, FrozenSet, Iterable, Iterator, List, Mapping, NamedTuple, Optional, Tuple
@@ -52,8 +53,8 @@ from typing import Any, Callable, Dict, FrozenSet, Iterable, Iterator, List, Map
 from ouroboros import chat_chain
 from ouroboros.chronicle_import import legacy_frontier
 from ouroboros.chronicle_store import ChronicleStore, capture, capture_memo, source_time_span
-from ouroboros.dialogue_provenance import (in_reading_order, recorded_person, rooms_read_by_time, row_class,
-                                           row_provenance)
+from ouroboros.dialogue_provenance import (in_reading_order, place_message_facts, recorded_person, rooms_read_by_time,
+                                           row_class, row_provenance)
 
 # The key of the memory view's last-capture fact in a task's ``llm_trace``.
 VIEW_TRACE_KEY = "memory_view"
@@ -88,7 +89,7 @@ _TRANSPORT_NESTED = {
     "delivery": ("state",  # ``dialogue_provenance``, ``reaction_note``, the view's typed fact, ``place_activity``
                  "presence_provenance"),  # an older receipt's place facts (``place_row_facts``)
     "message": ("reaction",  # the typed reaction (``reaction_fact``): its words, or a row that is that act alone
-                "message_id"),  # its provider identity: a post of mine is never my human's (``places.owner_author``)
+                "message_id", "forward_origin"),  # provider identity and word authorship (``places.owner_author``)
     "origin": ("kind", "task_id"),  # the work that sent my delivered message (``memory_view``'s own-row head)
     "conversation": ("title", "name", "full_name", "username", "topic_id",  # its own name (``RoomLabelResolver``)
                      "chat_type", "channel_type", "is_im", "is_mpim", "is_private", "visibility",  # who reads it
@@ -96,9 +97,9 @@ _TRANSPORT_NESTED = {
 }
 # Bumped when ``row_meta``'s facts change (5: a transport keeps only what its readers read; 6: and the author
 # fact's; 7: the sending work, the conversation's name and audience, a finish's sentence and its fold, a project
-# closure notice's delivery; 8: a message's provider id, for the author fact): a stored prefix of another version
+# closure notice's delivery; 8: provider id; 9: forwarded authorship and connector-facts digest): a prefix of another version
 # is another source, read live until the maintenance job ``memory_tail`` refills it.
-_META_VERSION = 8
+_META_VERSION = 9
 
 Entry = Tuple[Dict[str, Any], Dict[str, Any], int]
 
@@ -136,6 +137,8 @@ def row_meta(row: Mapping[str, Any]) -> Dict[str, Any]:
         from ouroboros.project_dialogue import _entry_source_identities, _text_sha256  # D15->D17 is lazy-only
 
         meta["text_sha256"] = _text_sha256(row.get("text"))
+        if facts := place_message_facts(row):  # same words alone do not make different forwards/files a repeat
+            meta["message_facts_sha256"] = hashlib.sha256(facts.encode("utf-8")).hexdigest()
         meta["source_keys"] = tuple(sorted(_entry_source_identities(row)))
     return meta
 

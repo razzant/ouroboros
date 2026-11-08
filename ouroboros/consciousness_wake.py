@@ -35,8 +35,9 @@ from ouroboros.consciousness_authority import (CONSCIOUSNESS_CATEGORY, CONSCIOUS
 from ouroboros.chat_chain import row_address, source_row_id
 from ouroboros.context_health import safe_read
 from ouroboros.deadline_utils import ago_text
-from ouroboros.dialogue_provenance import (dialogue_speaker, is_presence_task, memory_row_header, reaction_note,
-                                           render_memory_row, render_row_text, row_author, wordless_reaction)
+from ouroboros.dialogue_provenance import (dialogue_speaker, is_presence_task, memory_row_header, owner_speech,
+                                           reaction_note, render_memory_row, render_row_text, row_author,
+                                           wordless_reaction)
 
 log = logging.getLogger(__name__)
 
@@ -373,9 +374,9 @@ def _row_kind(row: Dict[str, Any], accounts: Any = None) -> str:
 
     Human input is classified by what its producer stamped, never by ``direction`` alone: A2A traffic is machine
     traffic, a place row is my human's only from an account its place confirms now (``accounts``, as ``row_author``
-    reads it), an Ouroboros-initiated Presence row is not a human, a late card answer rides its ``quiz_answer`` row,
-    an imported earlier message (``presence_history``) is counted, never listed as new, and a wordless typed
-    reaction is context, never a correspondent's message.
+    reads it) and not forwarding another author's words (``owner_speech``), an Ouroboros-initiated Presence row is
+    not a human, a late card answer rides its ``quiz_answer`` row, an imported earlier message (``presence_history``)
+    is counted, never listed as new, and a wordless typed reaction is context, never a correspondent's message.
     """
     from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
 
@@ -397,8 +398,8 @@ def _row_kind(row: Dict[str, Any], accounts: Any = None) -> str:
             return ""
         if wordless_reaction(row):
             return "correspondent_reaction"
-        confirmed = row_author(row, owner_accounts=accounts).get("owner_confirmed")
-        return "owner_message" if confirmed else "correspondent_message"
+        # My human's own words (a forward from their account carries another author's: listed, never counted away)
+        return "owner_message" if owner_speech(row, row_author(row, owner_accounts=accounts)) else "correspondent_message"
     return "owner_message"
 
 

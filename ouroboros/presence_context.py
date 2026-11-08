@@ -48,8 +48,12 @@ def frame_presence_user_content(task: Mapping[str, Any], content: Any) -> Any:
         source = "The event includes text; the assembled input below also carries any host attachment context."
     else:
         source = "The event supplied no text. Any placeholder or attachment declaration below is host context."
+    from ouroboros.presence_message_facts import connector_facts, event_reader
+    reported = connector_facts(message, text=str(presence.get("observed_text") or ""), sender=str(
+        actor.get("display_name") or actor.get("username") or actor.get("platform_actor_id") or ""),
+        source=event_reader(task.get("id"), "message.non_text"))  # its own labelled block, before the words
     prefix = (framing + "\nSource facts: " + json.dumps(facts, ensure_ascii=False, sort_keys=True)
-              + "\n" + source + "\n\n")
+              + "\n" + source + "\n\n" + (f"{reported}\n\n" if reported else ""))
     if isinstance(content, str):
         return prefix + content
     return [{**content[0], "text": prefix + content[0]["text"]}, *content[1:]]
@@ -642,7 +646,7 @@ def confirmed_delivery_receipts(ctx: Any) -> frozenset[tuple[str, str]]:
 
 
 PLACEHOLDERS = ("who", "place", "when", "facts_line", "event", "speak_line", "place_state", "notes",
-                "wake_item", "actor_facts", "work_here", "spent_line", "working_folder", "voice_line")
+                "wake_item", "actor_facts", "work_here", "spent_line", "working_folder", "voice_line", "reported")
 
 # The connector's observed provider facts (CREATING_SKILLS ``event.facts``) in plain words. Each is what the
 # provider recorded about this event, never a reading of its text or a verdict about whom it is for.
@@ -910,12 +914,17 @@ def frame_focus_content(task: Mapping[str, Any], content: Any) -> Any:
         work = _previous_turn_line(previous) + ("\n" + work if work else "")
     voice = _voice_line(focus, event)
     snapshot = _thread_snapshot(focus, event)
+    who = actor.get("display_name") or actor.get("platform_actor_id") or "A person"
+    from ouroboros.presence_message_facts import connector_facts, event_reader  # the event record: the frame re-renders
+    reported = connector_facts(event.get("message"), text=str(presence.get("observed_text") or ""), sender=who,
+                               source=event_reader(task.get("id"), "message.non_text"))
     fields = {
         "voice_line": voice + "\n" if voice else "",
-        "who": actor.get("display_name") or actor.get("platform_actor_id") or "A person",
+        "who": who,
         "place": place.get("label") or place.get("provider") or place.get("place_id"),
         "when": _when(event.get("message") or {}),
         "facts_line": _facts_line(focus, event),
+        "reported": f"{reported}\n\n" if reported else "",  # its own labelled block, outside their message
         "event": (content if isinstance(content, str) else "\n".join(item.get("text", "") for item in content if isinstance(item, dict)))
                  + (f"\n\n{snapshot}" if snapshot else ""),
         "place_state": state + (". " + SILENT_DISCLOSURE if state == "silent" else ""),

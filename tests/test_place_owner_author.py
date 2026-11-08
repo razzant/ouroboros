@@ -166,12 +166,49 @@ def test_a_stored_row_says_the_same_author_as_its_whole_row(tmp_path, place):
     bot = _place_row(place.place_id, "ci-bot")
     bot["transport"]["actor"]["is_bot"] = True
     rows = [bot, _place_row(place.place_id, "ouro-bot", sends_as="ouro-bot", sends_kind="bot"),
-            _place_row(place.place_id, authenticated=False), _place_row(place.place_id)]
+            _place_row(place.place_id, authenticated=False), _place_row(place.place_id),
+            _place_row(place.place_id, message={"forward_origin": {"sender_user_name": "Someone else"}})]
     for row in rows:
         assert row_author(row_meta(row), owner_accounts=accounts) == row_author(row, owner_accounts=accounts)
     labels = [row_author(row_meta(row), owner_accounts=accounts)["label"] for row in rows]
     assert labels[0].startswith("a bot: ") and labels[1].startswith("the account I send as: ")  # my own account
     assert not labels[2].startswith("my human") and labels[3].startswith("my human: ")
+
+
+def test_a_forward_from_my_humans_account_stays_theirs_as_an_account_and_never_as_words(tmp_path, place):
+    """The account stays confirmed wherever identity is read (the row's author, the admitted focus, the Safety
+    occasion); the forwarded words are never my human's wherever words or authority are read (owner_speech,
+    owner_row, the quotable row, confirmed place words, the wake's owner count)."""
+    from types import SimpleNamespace
+    from ouroboros.consciousness_wake import _row_kind
+    from ouroboros.dialogue_provenance import owner_speech, recorded_person
+    from ouroboros.owner_relay import quotable_owner_row
+    from ouroboros.owner_words import place_confirmed_words
+    from ouroboros.presence_context import focus_metadata, focus_owner_now
+    from ouroboros.presence_runner import PresenceTurnEvent
+
+    accounts = place_owner_accounts(tmp_path)
+    message = {"message_id": 41, "forward_origin": {"sender_user_name": "Someone else"}}
+    row = _place_row(place.place_id, message=message)
+    for source in (row, row_meta(row)):
+        assert owner_confirmed_row(source, accounts), "the account is still my human's"
+        author = row_author(source, owner_accounts=accounts)
+        assert author["label"].startswith("Forwarded by my human: Anton") and author["owner_confirmed"] is True
+        assert author["forwarded"] is True and recorded_person(author) and not owner_speech(source, author)
+        assert not owner_row(source, accounts=accounts), "its words are another author's"
+    assert not quotable_owner_row(row, accounts=accounts)
+    assert _row_kind(row, accounts) == "correspondent_message" and _row_kind(_place_row(place.place_id), accounts) == "owner_message"
+    event = PresenceTurnEvent("ev-1", "chat", "qa", "design", "", "chat:qa:design:0",
+                              {"platform_actor_id": "anton"}, {}, message, row["text"])
+    admission = SimpleNamespace(place=places.get_place(tmp_path, place.place_id), binding_id=place.place_id, allowance={})
+    metadata = focus_metadata(admission, event, "presence-1", 7, tmp_path)
+    assert metadata["focus"]["actor"]["owner_confirmed"] is True
+    turn = SimpleNamespace(drive_root=tmp_path, task_metadata={**metadata, "presence": {"event": {
+        "actor": {"platform_actor_id": "anton"}, "account_id": "qa", "conversation_id": "design", "message": message}}})
+    assert focus_owner_now(turn) is True, "the Safety occasion still names my human's confirmed account"
+    assert place_confirmed_words(focus_owner_now(turn), row["text"], message) == "", "never their words"
+    plain = _place_row(place.place_id)
+    assert owner_speech(plain, row_author(plain, owner_accounts=accounts)) and owner_row(plain, accounts=accounts)
 
 
 @pytest.mark.parametrize("authenticated,mine", [(False, False), (True, True), (None, True)],
@@ -298,14 +335,17 @@ def test_room_history_reads_the_same_fact_for_a_shared_account(tmp_path, monkeyp
     for source_id, actor, identity in (
             ("own-sent", "owner", {"sends_as": {"id": "owner", "label": "Anton", "kind": "user"}}),
             ("owner-typed", "owner", None),
-            ("bot-sent", "ouro-bot", {"sends_as": {"id": "ouro-bot", "label": "Ouroboros", "kind": "bot"}})):
+            ("bot-sent", "ouro-bot", {"sends_as": {"id": "ouro-bot", "label": "Ouroboros", "kind": "bot"}}),
+            ("owner-forwarded", "owner", None)):  # a forward keeps its sender: the account reads (you) too
+        message = {"forward_origin": {"sender_user_name": "Someone else"}} if source_id == "owner-forwarded" else {}
         capture_presence_event(admission, replace(event, source_event_id=source_id, identity=identity, text=source_id,
-                                                  actor={"platform_actor_id": actor, "display_name": actor}),
-                               drive_root=tmp_path)
+                                                  actor={"platform_actor_id": actor, "display_name": actor},
+                                                  message=message), drive_root=tmp_path)
     page = client.get("/api/chat/history", params={"chat_id": task["chat_id"]}).json()
     confirmed = {row["text"]: row["place_history"].get("owner_confirmed") for row in page["messages"]
-                 if row["text"] in {"own-sent", "owner-typed", "bot-sent"}}
-    assert confirmed == {"own-sent": True, "owner-typed": True, "bot-sent": False}, "the owner's account reads (you)"
+                 if row["text"] in {"own-sent", "owner-typed", "bot-sent", "owner-forwarded"}}
+    assert confirmed == {"own-sent": True, "owner-typed": True, "bot-sent": False, "owner-forwarded": True}, (
+        "the owner's account reads (you)")
     client.close()
 
 
