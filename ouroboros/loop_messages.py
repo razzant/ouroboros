@@ -177,12 +177,13 @@ def _record_owner_directive(
     origin: Optional[Dict[str, str]] = None,
     reply_to: Optional[Dict[str, str]] = None,
     carried: bool = False,
+    words: Any = None,
 ) -> None:
     """Retain the task-local owner corpus across transcript compaction.
 
     This is deliberately a provenance-preserving list, not a semantic decision
     parser: reviewers interpret the owner's verbatim words.  Structural control
-    messages never call this helper.
+    messages never call this helper. ``words``: the exact text a rendered ``content`` was delivered as (#2941).
 
     ``origin`` carries the typed ids the caller already holds (a task message's
     ``source_task_id``, and ``relayed_from_task_id`` when a parent relayed a
@@ -218,7 +219,8 @@ def _record_owner_directive(
         frozen_content = json.loads(json.dumps(content, ensure_ascii=False, default=str))
     except (TypeError, ValueError):
         frozen_content = str(content)
-    row = {"source": str(source or "owner"), "content": frozen_content}
+    row = {"source": str(source or "owner"), "content": frozen_content,
+           **({"words": words} if words is not None and words != frozen_content else {})}
     if stable_id:
         row["msg_id"] = stable_id
     row.update({key: str(value) for key, value in (origin or {}).items() if value})
@@ -246,6 +248,7 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
         return
     metadata = getattr(ctx, "task_metadata", None)
     metadata = metadata if isinstance(metadata, dict) else {}
+    from ouroboros.dialogue_provenance import run_origin
     from ouroboros.owner_quiz import late_answer_ref, late_answer_owner_text
     from ouroboros.owner_words import OWNER_SOURCES, PLACE_CONFIRMED, answered_card_reply, place_confirmed_words, place_reply_target, reply_target
     late = late_answer_ref(metadata.get("late_answer"))
@@ -264,7 +267,7 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
         for row in metadata.get("owner_corpus") or []:  # the owner's rows, and confirmed place words as provenance (citable, owed nothing)
             if isinstance(row, dict) and (row.get("source") in OWNER_SOURCES or row.get("source") == PLACE_CONFIRMED):
                 _loop()._record_owner_directive(
-                    ctx, source=str(row["source"]), content=row.get("content"),
+                    ctx, source=str(row["source"]), content=row.get("content"), words=row.get("words"),
                     msg_id=str(row.get("msg_id") or ""),
                     origin={key: row[key] for key in ("source_task_id", "relayed_from_task_id", "quiz_id",
                                                       "client_message_id", "chat_id", "ts", "received") if row.get(key)},
@@ -280,8 +283,6 @@ def _initialize_owner_directives(ctx: Any, messages: List[Dict[str, Any]]) -> No
             event.get("message")), msg_id=f"chat {focus.get('room_chat_id')} / {event.get('source_event_id') or ''}")
     for message in messages:
         if isinstance(message, dict) and str(message.get("role") or "") == "user":
-            from ouroboros.dialogue_provenance import run_origin
-
             stamped = run_origin({"metadata": metadata})["owner_ingress"]
             target = reply_target(getattr(ctx, "drive_root", None), metadata.get("reply_reference")) if stamped else {}
             # A late answer's head: my human's words with the card they answered, never the host's frame.
