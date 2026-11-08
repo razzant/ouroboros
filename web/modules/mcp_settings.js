@@ -177,9 +177,9 @@ function refusedFieldsMessage(server) {
 function lifetimeNote(server) {
     if (server.transport !== 'stdio') return '';
     return (lifetimeFlagOn(server.task_session)
-        ? 'task_session: a task’s calls share one running server process until its tool loop ends.'
-        : 'Off: each tool call starts a new server process.')
-        + ' Test draft and Refresh catalog still use separate processes.'
+        ? 'One server process serves every call in a task. It ends with the task, a Settings change or a call timeout.'
+        : 'Each tool call starts a new server process.')
+        + ' Test draft and Refresh catalog still start separate processes.'
         + (lifetimeFlagOn(server.browser_policy)
             ? ' browser_policy: that process may ask Ouroboros’s browser rules about its requests. '
                 + 'It requires a task session; use Import to change that policy explicitly before switching this off.' : '');
@@ -490,13 +490,13 @@ function renderServerCard(server, index) {
                 <input class="ui-checkbox" type="checkbox" aria-label="MCP server ${index + 1}: Call schemas from task start" data-mcp-field="schemas_at_start" ${isPinned(server) ? 'checked' : ''}>
                 <span>Schemas from task start</span>
             </label>
-            ${isStdio ? `<div class="form-row"><div class="form-field ui-field">
+            ${isStdio ? `<div>
                 <label class="mcp-server-enabled">
                     <input class="ui-checkbox" type="checkbox" aria-label="MCP server ${index + 1}: Keep one server session per task" aria-describedby="mcp-${index}-lifetime" data-mcp-field="task_session" ${lifetimeFlagOn(server.task_session) ? 'checked' : ''} ${lifetimeFlagOn(server.browser_policy) ? 'disabled' : ''}>
                     <span>Keep one server session per task</span>
                 </label>
                 <span class="ui-field-help" id="mcp-${index}-lifetime" data-mcp-lifetime>${escapeHtml(lifetime)}</span>
-            </div></div>` : ''}
+            </div>` : ''}
             ${unsupported.length ? `<div class="ui-action-row"><span class="muted">Fields retained but not applied: ${escapeHtml(unsupported.join(', '))}</span>
                 <button type="button" class="btn btn-default" data-mcp-clear-unsupported>Remove unsupported fields</button></div>` : ''}
             </div>

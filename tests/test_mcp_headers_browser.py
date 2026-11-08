@@ -616,7 +616,7 @@ def test_stdio_task_session_choice(direct_server_with_data):  # noqa: F811
             _capture(page, 'mcp-task-session-off')
             choice.check()
             expect(choice).to_be_focused()
-            expect(cards.nth(0).locator('[data-mcp-lifetime]')).to_contain_text('share one running server process')
+            expect(cards.nth(0).locator('[data-mcp-lifetime]')).to_contain_text('One server process serves every call in a task')
             _capture(page, 'mcp-task-session-on')
             _save(page)
             assert _disk(data_dir)['local_browser']['task_session'] is True

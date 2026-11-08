@@ -83,8 +83,13 @@ def _header(server: str, facts: Dict[str, Any], count: int, tokens: int, *, on_d
     name = _clean(facts.get("name"))
     label = f"mcp_{server}" + (f" ({name})" if name and name != server else "")
     residency = "on demand" if on_demand else "loaded from task start"
+    # A stdio server's process lifetime is its configured task_session (mcp_task_session); a remote server owns its own.
+    lifetime = "" if facts.get("transport") != "stdio" else (
+        "calls in a task share one process; a call timeout, a Settings change or a server exit starts a new one; "
+        if facts.get("task_session")
+        else "a new process per call, so in-memory state such as open pages does not carry over; ")
     return (f"{label}: {count} tool{'' if count == 1 else 's'}, call schemas ≈{tokens} tokens, {residency}; "
-            f"callable as mcp_{server}__<name>")
+            f"{lifetime}callable as mcp_{server}__<name>")
 
 
 def _listed(server: str, facts: Dict[str, Any], names: str, tokens: int, count: int, *, on_demand: bool) -> List[str]:

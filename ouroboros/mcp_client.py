@@ -1113,9 +1113,11 @@ class MCPManager:
                     and not rt.catalog["latest_attempt"].get("partial")]
 
     def server_facts(self) -> Dict[str, Dict[str, Any]]:
-        """Each enabled server's display name, pin and redacted ``initialize`` instructions (the map's headers)."""
+        """Each enabled server's display name, pin, transport and ``task_session`` lifetime, and redacted
+        ``initialize`` instructions (the map's headers)."""
         with self._lock:
             return {rt.config.id: {"name": rt.config.name, "schemas_at_start": rt.config.schemas_at_start,
+                                   "transport": rt.config.transport, "task_session": rt.config.task_session,
                                    "instructions": _redact_error_text((rt.catalog or {}).get("instructions", ""), rt.config)}
                     for rt in self._servers.values() if self._enabled and rt.config.enabled}
 

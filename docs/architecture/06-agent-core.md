@@ -691,7 +691,7 @@ Owner lifecycle actions share `skill_lifecycle_actions.run_skill_action`: grant/
 
 Calls recheck allowlist/Cyber, grants, Presence, contract, `network=false` (`web=false` permits them). Resolve before Safety/transport; misses never list: disabled `MCP_UNAVAILABLE`, disallowed `ACCESS_BLOCKED`, uncertain `MCP_CATALOG_UNAVAILABLE`, complete `UNKNOWN_TOOL` with listing time. Server text uses one untrusted frame per map and loaded tool (secret-bearing listings: DEVELOPMENT §12). Credentials are origin-bound (`mcp_headers.py`, `MCP_REDIRECT_REFUSED`); without them a Bearer `401` asks for the owner's sign-in (`mcp_oauth.py`). Masks restore identities/headers; legacy token pairs stay; nested secrets never migrate; transport headers override literals; imported headers replace all (legacy pair included). Stdio keeps exact argv/cwd/env; invalid fields yield `MCP_CONFIG_ERROR`, unknown ones warn; Import/Test never publish.
 
-`mcp_task_session.py` owns stdio `task_session` (lifetime: its docstring); cards opt in, default calls stay per-call. Import sets both flags; `browser_policy` keeps task sessions on and adds `mcp_browser_guard.py` callbacks off the SDK loop.
+`mcp_task_session.py` owns stdio `task_session` (lifetime: its docstring), set by a card or Import, else calls stay per-call; the map says which. Import's `browser_policy` needs it and adds `mcp_browser_guard.py` callbacks off the SDK loop.
 
 `mcp_result_images.py` keeps protocol images as task sources and attaches them as same-round pixels (custody, stamp, fallback: its docstring).
 
