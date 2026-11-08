@@ -34,7 +34,7 @@ def test_inspected_safety_event_window_zero_and_nonzero(direct_server_with_data,
                 ])
                 route.fulfill(json={"entries": entries})
 
-            page.route("**/api/logs/events?limit=2000", tail)
+            page.route("**/api/logs/events?limit=2000&view=compact", tail)
             for count in (0, 1):
                 sample["count"] = count
                 page.goto(direct_server_with_data["url"], wait_until="domcontentloaded")
@@ -47,7 +47,7 @@ def test_inspected_safety_event_window_zero_and_nonzero(direct_server_with_data,
                 expect(counter).to_have_text(expected + " in the last 24 h.")
                 counter.scroll_into_view_if_needed()
                 assert counter.is_visible()
-                assert all("limit=2000" in url for url in requests)
+                assert all("limit=2000" in url and "view=compact" in url for url in requests)
                 evidence = os.environ.get("OUROBOROS_UI_EVIDENCE_OUT")
                 if evidence:
                     out = Path(evidence)

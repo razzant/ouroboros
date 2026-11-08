@@ -386,7 +386,7 @@ test('chat.js wires the replay flag around the replay and keeps live callsites i
     assert.equal((chatSource.match(/scheduleHistorySync\(\);/g) || []).length, 4);
     assert.match(
         chatSource,
-        /if \(!destroyed && lastHistorySyncSucceeded && liveCardBound\.isArmed\(\)\) scheduleHistorySync\(\);/,
+        /if \(!destroyed && !leaving && lastHistorySyncSucceeded && liveCardBound\.isArmed\(\)\) scheduleHistorySync\(\);/,
     );
     assert.doesNotMatch(chatSource, /_historyReplayActive[^\n]*scheduleHistorySync/);
 });
@@ -592,6 +592,29 @@ test('a restore that finds its node in place writes nothing to the feed', () => 
     bubble.bounds = { top: 70, width: 600, height: 80 }; // a card above grew 30 px
     assert.equal(restoreVisibleTimelineAnchor({ node: bubble, offset: 40 }), true);
     assert.deepEqual({ writes, scrollTop }, { writes: 1, scrollTop: 530 }, 'a moved node is put back');
+});
+
+test('scaled drawer restoration uses scroll pixels and ignores subpixel rounding noise', () => {
+    let scale = .96, top = 3458, writes = 0;
+    const feed = layoutNode({ height: 780, scroll: 6000 });
+    feed.offsetHeight = 780;
+    const row = layoutNode({ classes: ['chat-bubble'], data: {'data-history-id':'row'}, y:3401, height:150, parent:feed });
+    // Model WebKit's integer scroll offset while CSS scales its entire room.
+    const box = (y,h) => ({top:y*scale,bottom:(y+h)*scale,height:h*scale,width:390*scale});
+    feed.getBoundingClientRect = () => box(0,780);
+    row.getBoundingClientRect = () => box(3401-top,150);
+    const messages = Object.create(feed);
+    Object.defineProperty(messages,'scrollTop',{get:()=>top,set:v=>{writes++;top=Math.floor(v);}});
+    messages.contains = n => n === row;
+    const anchors=createTimelineAnchors({messagesDiv:messages,liveCardRecords:new Map()});
+    const saved=anchors.captureVisibleTimelineAnchor();
+    assert.ok(Math.abs(saved.offset+57)<.001);
+    top=0;
+    anchors.restoreVisibleTimelineAnchor(saved);
+    assert.equal(top,3458);
+    for (let i=0;i<30;i++) {scale=.96+i*.04/29; anchors.restoreVisibleTimelineAnchor(saved);}
+    assert.equal(top,3458);
+    assert.equal(writes,1);
 });
 
 // A small layout model: a child's top follows its parent's top, the parent's own

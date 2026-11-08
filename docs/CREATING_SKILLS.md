@@ -943,13 +943,27 @@ manifest; core reads them from the reviewed, published release:
 icon: ui/icon.svg              # required author asset for provides: place; geometry in currentColor
 tools:
   - name: slack_send
-    effect: message            # read | message | write; absent or unknown = write
+    effect: message            # read | message | gesture | write; absent or unknown = write
     target: channel_or_user    # the argument(s) naming where the effect lands; a list for to/cc/bcc
     conversation: channel_or_user
     thread: thread_ts
+  - name: slack_reaction
+    effect: gesture            # a nonverbal response (a reaction) on one message
+    target: channel
+    conversation: channel
+    message: timestamp         # required for gesture: the message id argument
   - name: slack_history
     effect: read
     target: channel_id
+  - name: slack_api            # a generic tool: its own effect, and the calls that deliver words
+    effect: write
+    target: []
+    sends:
+      when: {path: [chat.postMessage, chat.update]}   # each (dotted) selector holds one of its values
+      target: body.channel
+      conversation: body.channel
+      thread: body.thread_ts
+      text: body.text          # the words (default: the argument named text)
 contributes:
   - id: place
     provides: place
@@ -962,10 +976,28 @@ contributes:
 ```
 
 - `effect` is one fact with three consumers: Advises (autonomy) refuses everything but a declared read; a Silent or
-  Paused place refuses `message` and `write` aimed at it; the Safety Supervisor skips declared reads at Light/Full and
-  gives `message` its speech semantics (a flagged message returns to the mind; the identical re-issue is sent and
-  recorded). A tool that reads or writes depending on its arguments is `write`. MCP tools are always `write`.
-- `target`/`conversation`/`thread` attribute each destination. Declare `account_id` for multi-account writes:
+  Paused place refuses all but reads aimed at it; the Safety Supervisor skips declared reads at Light/Full and
+  gives `message` its speech semantics (a flagged message returns to the mind; an identical re-issue from a later
+  step is sent and recorded; with no verdict it waits). A tool that reads or writes depending on its arguments is
+  `write`, unless its `sends:` block declares which calls deliver words: a call whose every `when` selector holds
+  one of its listed values is `message`, attributed by that block's `target`/`conversation`/`thread`; any other call
+  keeps the row's `effect`. A `write` into a conversation (a pin, a bookmark) or a `gesture` is not words by itself.
+  This is the connector's fact: core lists no provider method and never reads speech from argument names. The
+  Supervisor's verdict may still mark a call speech, which then meets the one-author guard where its targets resolve
+  a place; a built-in tool without declarations, such as `github_write`, is speech only by that mark: in Cyber Pro
+  a flag returns it once and its hold stays advice, while an ordinary mode refuses it at every flagged issue (no
+  re-issue sends it). An MCP tool is a declared read when
+  its configured server marks it `readOnlyHint: true`, otherwise `write`; that hint is trusted, so a server lying
+  about a write runs it unchecked, and Advises may call the tools a server marks read-only.
+- `gesture` adds or removes a reaction-like response on one message, never speech, a pin or an edit. A focus sees its
+  door beside the send doors, `message` prefilled only from `event.message.message_id`. With no send door a non-silent
+  finish is still posted, so a reaction alone finishes `silent=true`.
+- `target`/`conversation`/`thread` attribute each destination; a dotted name (`body.channel`) selects a nested
+  argument (`args["body"]["channel"]`). `text` (default: the argument named `text`) names the words: when no check
+  could judge a message, your human's answer on a card holding those exact words as whole lines and the destination
+  (the place's label, else the declared targets) lets the mind's identical re-issue send it (an MCP call, declaring
+  neither, is held with its exact call for that card).
+  Declare `account_id` for multi-account writes:
   an exact account outside all applicable Place scopes remains an ordinary tool target, including in Acts.
   Unresolved targets inside applicable scopes retain the Silent/Paused hold. Use the same canonical account key
   in credentials, targets and Places; sender aliases are separate. Never resolve an unknown key to another account after dispatch.
@@ -1082,9 +1114,14 @@ must match the query; older responses without it remain supported. The server ne
 Neither carrier adds fields to `places.json`.
 
 The owner's “This is my account” confirms `sends_as.id` using the existing `owner_accounts` writer.
-For `kind: user` only, a matching `platform_actor_id` in the same `account_id` scope derives `owner: true`; revocation removes it.
+For `kind: user` only, a matching `platform_actor_id` in the same `account_id` scope derives `owner: true`, whichever place of
+the same connector and provider holds the confirmation (one confirmation per bot or app, read when used); revoking it
+in every place that holds it removes it.
 This says whose credential writes or reads, independently of who sent an incoming message. Never return your own
-sends as incoming events: from the owner's confirmed account they would read as the owner's words. Where the
+sends as incoming events: from the owner's confirmed account they would read as the owner's words. A post Ouroboros
+makes as that account through another tool (an MCP server signed in as the owner) does come back through you: the
+host knows it by the event's `conversation_id` and `message.message_id`, so report the provider's own ids there
+(the Slack `ts`, the Telegram `message_id`). Where the
 provider lets you tell them apart (GitHub does), do report the account's other activity (its edits, merges and posts
 made by other tools acting as it): the host settles an event whose actor is `sends_as.id`, not reported
 unauthenticated, as heard with reason `own_account`; it stays in the room and the next own wake and never wakes a
@@ -1226,7 +1263,7 @@ Use the connector's ordinary content-hash-bound skill token for:
 
 The host captures an event once into its room before deciding whether to wake.
 Silent remains eligible for a matching wake, subject to consciousness, allowance and
-capacity; it holds `message` and `write` aimed there and automatic replies. Paused
+capacity; it holds every non-read call aimed there and automatic replies. Paused
 keeps accepted new events heard without starting a new focus. Neither state withdraws
 an external request already accepted by the provider.
 Paused, consciousness Off/Panic, or no matching wake returns `silent` (heard).

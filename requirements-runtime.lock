@@ -55,7 +55,7 @@ pydantic-settings==2.15.0
 pyee==13.0.1
 pygments==2.20.0
 pyjwt==2.13.0
-pypdf==6.15.0
+pypdf==7.0.0
 pytest==9.1.1
 pytest-timeout==2.4.0
 pytest-xdist==3.8.0

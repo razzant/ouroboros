@@ -232,9 +232,19 @@ def _send(connection: socket.socket, answer: Dict[str, Any], timeout: float) -> 
 
 
 def _refuse(connection: socket.socket, reason: str) -> None:
-    """Answer a question that was never read (the guard is full or retiring) with a block, and close it."""
+    """Answer a question that was never read (the guard is full or retiring) with a block, and close it.
+
+    The block goes out at once; the close then waits, within the same bound, for the asker's one line,
+    which may still be on its way: a line landing on a closed socket resets the connection, and a reset
+    discards the delivered block on some stacks (Windows)."""
+    deadline = time.monotonic() + 1.0
     with connection:
-        _send(connection, {"block": reason}, 1.0)
+        try:
+            connection.settimeout(1.0)
+            connection.sendall(json.dumps({"block": reason}).encode("utf-8") + b"\n")
+            _read_line(connection, deadline)
+        except (OSError, ValueError):
+            pass  # an asker cut off reads that as a block, like any answer but the exact allowance
 
 
 def _read_line(connection: socket.socket, deadline: float) -> bytes:

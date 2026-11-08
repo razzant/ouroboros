@@ -104,7 +104,7 @@ test('a newer load supersedes an older held list read; a hidden page reads no li
     assert.equal(await newer, true);
     assert.deepEqual(view.calls.rows, [SKILLS]);
     olderRead.resolve({ skills: [{ name: 'stale' }], live: {} });
-    assert.equal(await older, false, 'the superseded load reports itself superseded');
+    assert.equal(await older, null, 'the superseded load reports itself superseded, never an owner edit');
     assert.deepEqual(view.calls.rows, [SKILLS], 'the superseded load wrote nothing');
     assert.equal(view.calls.baselines, 3, 'older document, newer document, newer enrichment');
 
@@ -117,20 +117,26 @@ test('a newer load supersedes an older held list read; a hidden page reads no li
 });
 
 test('skill lifecycle listeners reload only a visible Settings page', () => {
-    const listeners = {}, refreshes = [];
-    for (const activePage of ['chat', 'settings']) {
+    const listeners = {}, refreshes = [], noted = {};
+    for (const [activePage, settingsDirty] of [['chat', false], ['settings', false], ['chat', true]]) {
+        const page = `${activePage}${settingsDirty ? ' (draft)' : ''}`;
         const context = vm.createContext({
             window: { addEventListener: (name, handler) => { listeners[name] = handler; } },
             ws: { on: (name, handler) => { listeners[name] = handler; } },
             settingsPageActive: () => activePage === 'settings',
-            refreshSettingsAfterExtensionChange: (reason) => { refreshes.push(`${activePage}:${reason}`); },
+            settingsDirty, draftOutdatedBy: '',
+            refreshSettingsAfterExtensionChange: (reason) => { refreshes.push(`${page}:${reason}`); },
         });
         vm.runInContext(source("    window.addEventListener('ouro:skill-lifecycle'", '\n    // A confirmed Accounts facet'), context);
         listeners['ouro:skill-lifecycle']({ detail: { action: 'review' } });
         listeners.extension_lifecycle({ action: 'loaded' });
+        noted[page] = context.draftOutdatedBy;
         listeners['ouro:settings-updated']({ detail: { reason: 'budget saved', source: 'costs' } });
     }
-    assert.deepEqual(refreshes, ['chat:budget saved', 'settings:review', 'settings:loaded', 'settings:budget saved']);
+    assert.deepEqual(refreshes, ['chat:budget saved', 'settings:review', 'settings:loaded', 'settings:budget saved',
+        'chat (draft):budget saved']);
+    // A hidden page reads nothing; a draft kept there only notes the change, said on its return.
+    assert.deepEqual(noted, { chat: '', settings: '', 'chat (draft)': 'loaded' });
 });
 
 // The LAN hint is rebuilt by every settings read, so its Copy link button carries the address that read drew and one

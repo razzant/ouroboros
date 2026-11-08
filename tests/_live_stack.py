@@ -46,6 +46,22 @@ def install(root):
     return loaded_feature('live_conversation:call')
 
 
+def owed_state(call):
+    """What the call still owes, for a failure message: each owed answer (call ids or room words, delivered, the
+    responses answering it), the responses begun since the owner's newest words, and the queued offers."""
+    if call is None:
+        return None
+
+    def owed(due):
+        return None if due is None else {'ids': list(due.ids), 'room': due.room, 'delivered': due.delivered,
+                                         'answering': sorted(map(str, due.answering))}
+    answers = getattr(call, 'spoken_answers', None)
+    return {'answer_due': owed(getattr(call, 'answer_due', None)), 'room_due': owed(getattr(call, 'room_due', None)),
+            'spoken_answers': None if answers is None else sorted(map(str, answers)),
+            'pending_offers': len(getattr(call, 'pending_offers', ())),
+            'deferred_outputs': len(getattr(call, 'deferred_tool_outputs', ()))}
+
+
 class Stack:
     def __init__(self, state, engine):
         self.state, self.engine, self.root = state, engine, state.env.drive_root
@@ -67,6 +83,7 @@ class Stack:
             await asyncio.wait_for(pending(), timeout)
         except asyncio.TimeoutError:
             raise AssertionError({'boundary': 'timed out', 'blockers': self.call.quiet_blockers() if self.call else None,
+                'owed': owed_state(self.call),
                 'connections': len(self.provider.connections), 'renewing': self.call.renewing if self.call else None,
                 'refit': self.host.state.get('refit') if self.host else None,
                 'last_native': [list(v) if self.engine == 'gemini' else v.get('type')

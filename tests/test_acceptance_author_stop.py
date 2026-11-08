@@ -55,10 +55,12 @@ def _fail_result_wave(monkeypatch, reviews: list) -> None:
     monkeypatch.setattr(review_change, "run_review_change", wave)
 
 
-def _run_stop_loop(tmp_path, monkeypatch, responses, *, stop_services, produced=False, mode="required"):
+def _run_stop_loop(tmp_path, monkeypatch, responses, *, stop_services, produced=False, mode="required",
+                   before_loop=None):
     """A real loop: real tool round, real delivery step, real result review at delivery.
 
-    Only the model, the reviewers' paid wave and the service teardown are substituted.
+    Only the model, the reviewers' paid wave and the service teardown are substituted. ``before_loop(data)``
+    runs on the seeded root before round one (owner mail its first drain reads).
     """
     import ouroboros.loop as loop
     from ouroboros.tools import services as services_mod
@@ -117,6 +119,8 @@ def _run_stop_loop(tmp_path, monkeypatch, responses, *, stop_services, produced=
     ctx.is_direct_chat = False
     ctx.task_attempt = 1
     ctx.current_chat_id = 1
+    if before_loop is not None:
+        before_loop(data)
     result, usage, trace = loop.run_llm_loop(
         messages=[{"role": "user", "content": "Ship the export endpoint."}],
         tools=registry, llm=SimpleNamespace(default_model=lambda: "test-model"),

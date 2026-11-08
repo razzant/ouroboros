@@ -752,13 +752,15 @@ def test_a_link_is_compared_as_the_link_git_records(shared, kind):
             (s.tree / "other").symlink_to("link")
     except (OSError, NotImplementedError) as exc:
         pytest.skip(str(exc))
+    # The link text as the OS reads it back: Windows names an absolute target by its \\?\ substitute path.
+    written = os.readlink(s.tree / "link")
     manifest = s.finish("A")
     assert manifest["status"] == "ready_with_changes", manifest
     before = tree_state(s.tree)
     out = s.integrate("A")
     assert "Verified external_workspace child A" in out and "reverse check still passes" not in out, out
     assert set(s.states("A").values()) == {"unchanged"}, out
-    assert os.readlink(s.tree / "link") == target and tree_state(s.tree) == before
+    assert os.readlink(s.tree / "link") == written and tree_state(s.tree) == before
     assert outside.read_bytes() == b"outside B\n"
 
 

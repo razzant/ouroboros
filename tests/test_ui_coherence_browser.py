@@ -310,6 +310,8 @@ def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_their_tables_ins
 
 
 def test_mcp_transport_fields_use_named_shared_controls_without_changing_drafts(subscription_ui):
+    from playwright.sync_api import expect
+
     page = open_app(subscription_ui, '/#settings')
     page.locator('[data-settings-tab="advanced"]').click()
     servers = [dict(id='web', name='HTTP server', transport='streamable_http', url='https://example.test/mcp',
@@ -327,6 +329,10 @@ def test_mcp_transport_fields_use_named_shared_controls_without_changing_drafts(
         assert 'ui-control' in control.get_attribute('class')
         assert control.get_attribute('aria-label').startswith('MCP server ')
         assert control.evaluate('el=>Array.from(el.labels||[]).length') == 1
+    for edit in cards.locator('[data-mcp-edit]').all():  # a saved server is a row; its form opens behind Edit
+        assert not edit.evaluate('details=>details.open')
+        edit.locator(':scope > summary').click()
+        expect(edit).to_have_attribute('open', '')
     page.get_by_label('MCP server 1: Server URL', exact=True).fill('https://edited.test/mcp')
     draft=page.evaluate('mcpProof.collectMcpSettings()')
     assert draft['MCP_SERVERS'][0]['url']=='https://edited.test/mcp'
@@ -1008,7 +1014,10 @@ def test_quiz_dot_and_evolution_facts_keep_their_shape_in_narrow_columns(subscri
                 .filter(c => c.getBoundingClientRect().right > card.right + 0.5).length};
     }""")
     assert metrics == {'scroll': 0, 'outside': 0}, metrics
-    fact.scroll_into_view_if_needed()
+    # The card redraws on every state answer, so a held element handle can detach between Playwright's stability wait and
+    # its scroll (Linux CI, both attempts); the capture's scroll finds the current node in one step.
+    page.evaluate("""text => [...document.querySelectorAll('.evo-campaign-lines p')]
+        .find(p => p.textContent.includes(text)).scrollIntoView({block: 'nearest'})""", 'measure-every-tagged-commit-once')
     setup_browser.capture(page, 'evolution-facts-390')
 
 

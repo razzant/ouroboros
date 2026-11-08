@@ -313,6 +313,11 @@ def test_continuation_copies_only_its_own_new_selection(tmp_path, monkeypatch):
     assert row["local"] in request["instructions"] and first["input_files"][0]["local"] not in request["instructions"]
     assert row["local"] in request["prompt"], "a resumed session reads its own selection in the prompt"
     assert pathlib.Path(request["scope"]["root"]) != pathlib.Path(engine.starts[0]["scope"]["root"])
+    scope = pathlib.Path(request["scope"]["root"])  # an ordinary continuation restages the whole lineage, fresh
+    lineage = {pathlib.Path(item["source"]).name: (scope / item["local"]).read_bytes()
+               for item in json.loads((scope / "inputs.json").read_text(encoding="utf-8")) if "selected_path" not in item}
+    assert lineage == {"brief.md": b"parent brief\n", "notes.txt": b"own notes\n", "first.md": b"first\n",
+                       "second.md": b"second\n"}
     custody._CUSTODY.clear()
 
 
@@ -813,6 +818,79 @@ def test_an_empty_plan_continuation_restates_its_new_selection_outside_the_threa
     assert pathlib.Path(row["local"]).read_bytes() == b"second input\n"
     assert "SELECTED INPUT FILES" in request["prompt"] and row["local"] in request["prompt"]
     assert "outside this run's folder" in request["prompt"] and "in this folder" not in request["prompt"]
+
+
+def _readonly_plan_thread(p, monkeypatch):
+    """A folderless read-only plan made a thread on its first start's staged folder; recorded: staging, registration."""
+    from ouroboros import delegate_readonly_inputs
+
+    p.snapshot["access"] = "readonly"
+    p.ctx.workspace_root, p.ctx.task_constraint = "", {"mode": "local_readonly_subagent"}
+    p.ctx.task_metadata = {**(p.ctx.task_metadata or {}), "resource_intent": {"kind": "explicit_none"}}
+    p.engine.questions = {"parse": "found", "questions": []}
+    drive = pathlib.Path(p.ctx.drive_root) / "task_drives" / p.ctx.task_id
+    drive.mkdir(parents=True, exist_ok=True)
+    (drive / "lineage.bin").write_bytes(b"\x00lineage bytes\n" * 4096)
+    staged, asked, real = [], [], delegate_readonly_inputs._lineage_copies
+    monkeypatch.setattr(delegate_readonly_inputs, "_lineage_copies",
+                        lambda ctx, root: staged.append(pathlib.Path(root)) or real(ctx, root))
+    monkeypatch.setattr(type(p.engine), "find_project_id", lambda self, root: asked.append(str(root)) or "existing-project")
+    first = p.start(mode="plan")
+    assert first["status"] == "started", first
+    [(_path, thread, _key)] = [call for call in p.engine.calls if call[0] == "/v2/threads"]
+    prior, _payload = p.finish(first["run_id"])
+    asked.clear()
+    return prior, thread["scope"]["root"], drive / "delegated_readonly_inputs", staged, asked
+
+
+@pytest.mark.parametrize("version", ["4.5.0", "5.1.0"], ids=["engine-registers-threads", "ephemeral-threads"])
+def test_plan_turns_stage_nothing_and_keep_their_threads_folder_and_registration(plan_setup, monkeypatch, version):
+    """A thread turn has no reader for a new automatic tree: the engine drops the turn's scope
+    (``start_review_thread_turn``) and nothing else names one. So each turn stages nothing, says nothing of a scope
+    of its own, and records and registers the folder the engine's thread record names (``repoRoot``): adopted where
+    the engine registers threads, nothing registered where it does not; never the live scratch. Two empty turns in
+    a row, each with its own selection: every turn's prompt still names its copy by absolute path."""
+    p = plan_setup
+    p.engine.engine_version = version
+    prior, folder, container, staged, asked = _readonly_plan_thread(p, monkeypatch)
+    drive = container.parent
+    for number, name in enumerate(("second.md", "third.md"), 2):
+        (drive / name).write_bytes(f"input for turn {number}\n".encode())
+        turn = p.start("", continue_from=prior.run_id, mode="plan", input_files=[{"root": "task_drive", "path": name}])
+        assert turn["status"] == "started", turn
+        path, request, _key = p.engine.calls[-1]
+        assert path == f"/v2/threads/{prior.thread_id}/turns" and "scope" not in request
+        [row] = turn["input_files"]
+        assert row["carrier"] == "outside_scope_path" and row["local"] in request["prompt"]
+        assert pathlib.Path(row["local"]).read_bytes() == f"input for turn {number}\n".encode()
+        assert staged == [pathlib.Path(folder)] and [item.name for item in container.iterdir()] == [pathlib.Path(folder).name]
+        assert "READONLY INPUTS" not in request["instructions"] and "scratch scope" not in json.dumps(request)
+        assert custody.invocation_record(p.root, turn["invocation_id"])["request"]["scope"]["root"] == folder == turn["root"]
+        assert asked == ([] if version == "5.1.0" else [folder] * (number - 1))
+        assert custody.replay(p.root)[turn["run_id"]].continuation_of == prior.run_id
+        prior, _payload = p.finish(turn["run_id"])
+
+
+def test_a_folderless_turn_whose_thread_record_names_no_folder_is_refused_before_anything(plan_setup, monkeypatch):
+    """No root stands in for an unknown one: not an empty folder, not the live scratch. The turn is refused typed and
+    unrun before its selection is retained, anything is staged or registered, or a request row exists."""
+    from ouroboros.artifacts import task_artifact_dir_path
+
+    p = plan_setup
+    prior, folder, container, staged, asked = _readonly_plan_thread(p, monkeypatch)
+    (container.parent / "second.md").write_bytes(b"input for the refused turn\n")
+    p.engine.threads[prior.thread_id]["thread"]["repoRoot"] = None  # the engine's record names no folder
+    retained = task_artifact_dir_path(p.ctx.drive_root, p.ctx.task_id) / "source_handles" / "delegated_readonly_inputs"
+    calls, kept = len(p.engine.calls), sorted(path.name for path in retained.iterdir()) if retained.is_dir() else []
+    requested = len([row for row in custody._iter_rows(custody.event_log_path(p.root)) if row.get("type") == custody.START_REQUESTED])
+    turn = p.start("", continue_from=prior.run_id, mode="plan", input_files=[{"root": "task_drive", "path": "second.md"}])
+    assert (turn["status"], turn["reason"], turn["definitely_unrun"]) == ("refused", "readonly_inputs_unavailable", True)
+    assert "names no folder (repoRoot)" in turn["detail"] and "input_files" not in turn
+    assert len(p.engine.calls) == calls and asked == [] and staged == [pathlib.Path(folder)]
+    assert [item.name for item in container.iterdir()] == [pathlib.Path(folder).name]
+    assert (sorted(path.name for path in retained.iterdir()) if retained.is_dir() else []) == kept
+    assert len([row for row in custody._iter_rows(custody.event_log_path(p.root))
+                if row.get("type") == custody.START_REQUESTED]) == requested and not custody.pending_invocations(p.root)
 
 
 @pytest.mark.parametrize("prompt", ["", "answers"])

@@ -79,6 +79,11 @@ export function normalizePlace(raw) {
             actorId: text(account?.platform_actor_id), label: text(account?.label), confirmedAt: text(account?.confirmed_at),
             accountId: text(account?.account_id),
         })).filter((account) => account.actorId),
+        // Confirmed in another place of the same bot or app: they count here too, removed where they were confirmed.
+        sharedOwnerAccounts: list(place.shared_owner_accounts).map((account) => ({
+            actorId: text(account?.platform_actor_id), label: text(account?.label), confirmedAt: text(account?.confirmed_at),
+            accountId: text(account?.account_id), placeLabel: text(account?.place_label),
+        })).filter((account) => account.actorId),
         // People the place has seen, offered for «This is me» when the server lists them (not in contract v1).
         accountCandidates: list(place.account_candidates).map((account) => ({
             actorId: text(account?.platform_actor_id), label: text(account?.label || account?.display_name),

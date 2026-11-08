@@ -91,7 +91,7 @@ def collect_routes(
         file_browser_routes,
     )
     from ouroboros.gateway.history import make_chat_history_endpoint, make_cost_breakdown_endpoint
-    from ouroboros.gateway.logs import api_logs_tail
+    from ouroboros.gateway.logs import api_logs_raw, api_logs_tail
     from ouroboros.gateway.storage import storage_routes
     from ouroboros.gateway.marketplace import (
         api_hub_installed,
@@ -304,6 +304,7 @@ def collect_routes(
         Route("/api/evolution-data", endpoint=api_evolution_data),
         Route("/api/chat/history", endpoint=make_chat_history_endpoint(data_dir)),
         Route("/api/logs/{name}", endpoint=api_logs_tail, methods=["GET"]),
+        Route("/api/logs/{name}/raw", endpoint=api_logs_raw, methods=["GET"]),
         Route("/api/chat/upload", endpoint=api_chat_upload, methods=["POST"]),
         Route("/api/chat/upload", endpoint=api_chat_upload_delete, methods=["DELETE"]),
         Route("/api/openai-compatible/models", endpoint=api_openai_compatible_models, methods=["POST"]),

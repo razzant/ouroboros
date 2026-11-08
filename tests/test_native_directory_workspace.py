@@ -66,6 +66,39 @@ def test_native_directory_retains_and_verifies_binary_output(tmp_path, monkeypat
     assert verdict["outcome"] == "verified_registered_outputs" and not verdict["applied"]
 
 
+@pytest.mark.parametrize("directory", [False, True])
+def test_store_conversion_is_not_a_false_workspace_postimage(tmp_path, monkeypatch, directory):
+    from pathlib import Path
+    from ouroboros.tools.registry import ToolRegistry
+    import sys
+
+    workspace, drive, task, parent, output_ctx = _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    source = workspace / "result"
+    if directory:
+        source.mkdir()
+        (source / "page.txt").write_text("original")
+        record = copy_directory_to_task_artifacts(output_ctx, source)[1]
+    else:
+        source.write_text("original")
+        record = copy_file_to_task_artifacts(output_ctx, source)
+    registry = ToolRegistry(repo_dir=parent.repo_dir, drive_root=drive)
+    registry.set_context(output_ctx)
+    converted = registry.execute_result("run_command", {
+        "cmd": [sys.executable, "-c", f"open({record['name']!r}, 'ab').write(b'converted')"],
+        "cwd": "artifact_store", "outputs": [record["name"]],
+    })
+    assert converted.code == "OK" and converted.meta.get("artifact_registered") is True, converted.text
+    finalize_task_artifacts(drive, task)
+    manifest = json.loads((task_artifacts_dir(drive, "child") / "workspace_patch.json").read_text())
+    message = _integrate_subagent_patch(parent, task_id="child")
+    assert "INTEGRATE_DIRECTORY_OUTPUT_MISMATCH" not in message, message
+    assert all(item["path"] != record["path"] for item in manifest["registered_outputs"])
+    assert Path(record["path"]).read_bytes().endswith(b"converted")
+    assert (source / "page.txt" if directory else source).read_text() == "original"
+
+
 def test_native_directory_preserves_nonfile_result_extent(tmp_path, monkeypatch):
     workspace, drive, task, parent, _ = _setup(tmp_path, monkeypatch)
     # Opaque shell/GUI effects are real but have no registered output evidence.

@@ -98,13 +98,15 @@ _SQL_ONLY = "db, query, max_rows, snapshot and timeout_sec are op=sql only"
 # query_data: + kind "update_material" (the offered update range); before it f790f964764d75b7.
 # wait_tasks: + view, sleep_mode, wake_after_sec, wake_at and no timeout_sec default (an omitted
 # window stays distinguishable, PR1696 native task wait); before it c806a86311a0a965.
+# schedule_subagent: + memory_view (the fields a parent may widen a child's view by), #2924; its lead pays the
+# custom-tool budget again; before it 3d5b8e7b8e317503 / 2e04edea50ceb1b6.
 _STRUCTURE = {
     "query_data": {"full": "afe57ddd5ee0c17c", "readonly": "afe57ddd5ee0c17c", "acting": "afe57ddd5ee0c17c"},
     "delegate_start": {"full": "a2f6fdb7a8bf6822", "readonly": "e7dcf92431326bc5", "acting": "e7dcf92431326bc5"},
     "delegate_wait": {"full": "60ab2c0f421da812", "readonly": "60ab2c0f421da812", "acting": "60ab2c0f421da812"},
     "wait_tasks": {"full": "50667317e4bef21f", "readonly": "50667317e4bef21f", "acting": "50667317e4bef21f"},
     # readonly prunes write_surface, write_root, protected_paths_grant and external_tool_grants.
-    "schedule_subagent": {"full": "3d5b8e7b8e317503", "readonly": "2e04edea50ceb1b6", "acting": "3d5b8e7b8e317503"},
+    "schedule_subagent": {"full": "f04afa9698352e6a", "readonly": "69f811a4b8ca2ba2", "acting": "f04afa9698352e6a"},
 }
 
 
@@ -220,7 +222,7 @@ def test_nano_selected_schedule_lead_stands_without_other_delegation_leads(subte
                           if tool["custom"]["name"] == "schedule_subagent")
             assert custom.startswith(" ".join(function["description"].split()) + "\n")
             for condition in (*_SCHEDULE_TAIL, "write_root, else the selected/inherited workspace_root, else one new Git tree",
-                              "Runtime data, including installed skill payloads, is never a write_surface",
+                              "Runtime data (installed skill payloads too) is never a write_surface",
                               "access='readonly' selects read-only session execution", "evidence-only private checking copy"):
                 assert condition in custom, condition
             system = " ".join((pathlib.Path(__file__).resolve().parents[1] / "prompts" / "SYSTEM.md")

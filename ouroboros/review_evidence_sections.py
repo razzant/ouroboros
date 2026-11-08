@@ -307,13 +307,43 @@ def _owner_content_projection(content: Any) -> str:
     return "\n".join(parts)
 
 
+def renders_exactly(entry: Any, content: Any, drive_roots: Any, task_id: str) -> bool:
+    """Whether ``content``, a corpus row recorded before ``words`` (#2941), is byte for byte the projection an earlier
+    drain recorded for this exact mailbox ``entry``: its own text, then every image it rendered as a caption beside a
+    block of verified pixels, composed again here by the drain's own composer from the task's own store. The text is
+    never parsed. A moved store, changed or missing bytes, a manifest without captured identities, an error line or a
+    failed composition proves nothing, so a mismatch stays a conflict. Composing a mailbox row writes nothing: only an
+    inline image (``image_base64``/``image_source_ref``, never on such a row) would retain a copy, and is refused."""
+    if not (isinstance(entry, dict) and isinstance(entry.get("text"), str) and isinstance(content, str)) or any(
+            key in entry for key in ("image_base64", "image_source_ref")):
+        return False
+    from ouroboros.artifacts import resolve_attachment_manifest
+    from ouroboros.context import build_incoming_user_content
+
+    for drive in drive_roots:
+        try:
+            rows = resolve_attachment_manifest(drive, task_id, entry)
+            rendered = build_incoming_user_content(entry, drive, task_id)
+        except Exception:  # noqa: BLE001 - a source this store cannot compose proves nothing
+            continue
+        images = rendered[1:] if isinstance(rendered, list) else []
+        paired = len(images) >= 2 and len(images) % 2 == 0 and all(
+            text.get("type") == "text" and image.get("type") == "image_url" and image.get("_caption") == text.get("text")
+            for text, image in zip(images[::2], images[1::2]))
+        verified = all(row.get("sha256") for row in rows if row.get("is_image") and row.get("status") == "staged")
+        if paired and verified and _owner_content_projection(rendered) == content:
+            return True
+    return False
+
+
 def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Dict[str, Any]]:
     """Collect the task-local canonical owner corpus without semantic inference."""
     rows: List[Dict[str, Any]] = []
     seen_ids: set[tuple[str, ...]] = set()
     seen_texts: set[str] = set()
 
-    def add(source: str, content: Any, msg_id: str = "", origin: Any = None, reply_to: Any = None) -> None:
+    def add(source: str, content: Any, msg_id: str = "", origin: Any = None, reply_to: Any = None,
+            exact: Any = ()) -> None:
         text = _owner_content_projection(content)
         if not text.strip():
             return
@@ -335,6 +365,7 @@ def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Di
         row.update({key: str(value) for key, value in (origin or {}).items() if value})
         if isinstance(reply_to, dict) and reply_to:  # the message these words reply to, never counted as them
             row["reply_to"] = dict(reply_to)
+        row.update(exact)  # ``words``: the exact text a rendered row was delivered as, kept as its recorder wrote it
         rows.append(row)
 
     recorded = getattr(ctx, "_owner_directives", None)
@@ -347,7 +378,7 @@ def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Di
                     str(item.get("msg_id") or ""),
                     {key: item.get(key) for key in ("source_task_id", "relayed_from_task_id", "quiz_id",
                                                     "client_message_id", "chat_id")},
-                    item.get("reply_to"),
+                    item.get("reply_to"), {key: item[key] for key in ("words",) if key in item},
                 )
 
     messages = getattr(ctx, "messages", None)

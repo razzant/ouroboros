@@ -76,7 +76,9 @@ def test_stale_eviction_never_removes_a_lock_re_created_under_it(tmp_path, monke
 
     Between the staleness judgement and the unlink the real owner may release
     and a third writer take the lock; removing THAT file would put two writers
-    on one authority.
+    on one authority. A file replaced under the judgement earns no retry past
+    the deadline (each replacement would otherwise loop forever); an eviction
+    this call made does, even under a zero wait (``body_adoption.arm``).
     """
     lock_path = tmp_path / "state.lock"
     lock_path.write_text("pid=424242 ts=0\n", encoding="utf-8")
@@ -94,6 +96,10 @@ def test_stale_eviction_never_removes_a_lock_re_created_under_it(tmp_path, monke
 
     assert fd is None  # the lock was not ours to take
     assert lock_path.read_text(encoding="utf-8") == "pid=999 ts=fresh\n"
+    monkeypatch.setattr(platform_layer, "pid_is_alive", lambda pid: False)  # nobody replaces it now
+    fd = acquire_exclusive_file_lock(lock_path, timeout_sec=0.0, stale_sec=1.0, owner_aware_stale=True)
+    assert fd is not None  # our own eviction is retried past the zero deadline
+    release_exclusive_file_lock(lock_path, fd)
 
 
 def test_stale_eviction_still_reclaims_a_genuinely_abandoned_lock(tmp_path, monkeypatch):

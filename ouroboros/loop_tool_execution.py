@@ -662,6 +662,8 @@ def _execute_single_tool(
         if tc.get("via"):  # a gateway call's typed error carries its MCP tool's catalog schema
             from ouroboros.tools.tool_discovery import with_gateway_schema
             tool_result = with_gateway_schema(tools, fn_name, tool_result)
+        from ouroboros.place_guard import with_destination_facts  # a send into another place: its notes beside the act
+        tool_result = tool_result if host_refusal else with_destination_facts(getattr(tools, "_ctx", None), fn_name, args, tool_result)
         result = tool_result.text
     except (UsageAccountingError, ModelWaitInterrupted):
         raise
@@ -1258,19 +1260,11 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
                 "result_meta": _extract_result_metadata(fn_name, result, True),
             }
         from ouroboros.presence_context import confirmed_delivery_receipts
+        from ouroboros.tools.extension_dispatch import extension_call_scope
         before = confirmed_delivery_receipts(tools._ctx)
-        result = _execute_with_timeout(
-            tools,
-            tc,
-            drive_logs,
-            _get_tool_timeout(
-                tools,
-                str(tc["function"]["name"] or "").strip(),
-                _tc_args(tc),
-            ),
-            task_id,
-            stateful_executor,
-        )
+        with extension_call_scope():  # the descriptor the timeout was chosen from is the one dispatched
+            timeout = _get_tool_timeout(tools, str(tc["function"]["name"] or "").strip(), _tc_args(tc))
+            result = _execute_with_timeout(tools, tc, drive_logs, timeout, task_id, stateful_executor)
         confirmed = confirmed_delivery_receipts(tools._ctx) - before
         if confirmed and not result.get("is_error"):
             result.setdefault("result_meta", {})["presence_delivery_confirmed"] = sorted(confirmed)

@@ -62,6 +62,14 @@ def test_a_settings_mapping_with_no_slots_fails_OPEN_and_discloses_it(monkeypatc
 # enforces — a new runtime code with no row here fails the suite, which is the only thing
 # that stops the vocabulary from being hand-copied beside the check again.
 _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
+    # Logs reads refuse selectors, sources or byte ranges; no task is stopped.
+    "invalid_view": (False, "gateway/logs.py unknown view (400); not a task terminal"),
+    "invalid_log_source": (False, "gateway/logs.py scope/projection refusal (400); not execution truncation"),
+    "log_source_unavailable": (False, "gateway/logs.py unreadable or unadmitted source (404/503); not a task terminal"),
+    "invalid_raw_request": (False, "gateway/logs.py invalid source selector/page bounds (400); not a task terminal"),
+    "log_source_changed": (False, "gateway/logs.py exact stored-row identity conflict (409); not execution truncation"),
+    "raw_range_invalid": (False, "gateway/logs.py out-of-range or split UTF-8 offset (416); not a task terminal"),
+    "unknown_log": (False, "gateway/logs.py unsupported Raw stream (404); not a task terminal"),
     "request_invalid": (False, "gateway/skill_publish.py: unreadable publish-preflight body; HTTP 400 before any action, not a task terminal"),
     "secret_request_form_only": (False, "protected secret-form policy refuses an ordinary quiz answer; no execution or source is truncated"),
     "project_routing_fence_lookup_failed": (False, "gateway/tasks.py: Project authority unreadable before admission; HTTP 409, no running attempt truncated"),
@@ -94,6 +102,7 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     "asker_not_reading": (False, "question_answers.py: no living asker or successor holds the answer, so it goes to named ingress in its room (the asker's live late-answer head, else a fresh head); a delivery fact, never a task terminal"),
     "promotion_not_started": (False, "promotion_intent.py: boot reconciliation of a start_task intent proven never admitted; that separate work never ran (explicit retry), so nothing was truncated and it is never a trial root's code"),
     "migrating": (False, "gateway/_helpers.py: a write door (create, Cancel, Pause, Presence) answered 503 inside the boot import window of state/current.sqlite (retry); no task attempt was truncated"),
+    "boot_changed": (False, "gateway/control.py: a command whose if_boot names an earlier boot.since reached a restarted server; HTTP 409 with accepted=false before anything was queued, never a task terminal"),
     "budget_pausing_no_extraction": (False, "review_verdict_extraction.py: Light verdict extraction refused while the task's exact budget pause is closing dispatch (#1196); the review row stays undispatched and the attempt is paused, not truncated"),
     "owner_pause": (False, "tools/skill_publish.py: publication tool returns its completed stages after owner Pause interrupts the formatter; the task is retained for Resume, not terminalized or scored"),
     "action_not_found": (False, "gateway/card_decision.py: a press names a control the card does not have now; HTTP 404 on the card ingress, never a task terminal"),

@@ -678,8 +678,9 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     let letterRequestError = null;
     let letterDisposer = null;
     let letterKey = null;
-    // "Read all" offers the rest only when the clamped body hides some. A body in a hidden tab measures 0 x 0, which
-    // says nothing, so that measure stays owed until the body has a height (the tab shown, or the next render).
+    // "Read all" offers the rest only when the clamped body hides some. A body in a hidden tab or page measures 0 x 0,
+    // which says nothing, so that measure stays owed until the body has a height (its tab or the Dashboard shown, or
+    // the next render). A new width refolds a folded text, so it owes the measure again.
     let letterMeasureOwed = false;
     let letterDoor = '';
     let latestStatus = null;
@@ -1261,5 +1262,15 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         requestAnimationFrame(measureLetter);
         loadStatus({ fetchRemote: false });
         versions.load();
+    });
+    // The sidebar's return to the Dashboard announces only the page (app.js showPage); its selected tab stays.
+    window.addEventListener('ouro:page-shown', (event) => {
+        if (event.detail?.page === 'dashboard') requestAnimationFrame(measureLetter);
+    });
+    // A narrower window or interface size folds more of a text that fitted; an open text keeps its Show less.
+    window.addEventListener('resize', () => {
+        if (letterBody.classList.contains('is-open')) return;
+        letterMeasureOwed = true;
+        requestAnimationFrame(measureLetter);
     });
 }

@@ -356,3 +356,68 @@ def test_a_view_named_outside_a_manifest_brings_its_parts_and_the_child_can_go(t
     assert promoted["trace_refs"]["timeout_repeat"]["first"]["path"].startswith(str(parent))
     shutil.rmtree(child)
     assert packs.blob_bytes(parent, {**ref, "path": ""}) == _json_bytes(payload)
+
+
+def test_a_child_view_beside_a_packed_task_proves_each_shared_part_once_then_checks_each_new_whole(root, monkeypatch):
+    """The parts a child's views share with an already packed task are each proven once by their own node; every
+    NEW skeleton is then checked as the whole it splices to, reading each part it names once (a token repeated
+    in ``send_messages`` included), never again only to learn the parent already holds it."""
+    from ouroboros import headless
+    from tests._packed_read_probe import count_packed_reads
+
+    settled = _transcript(2)
+    _persist(root, "llm_1_request", _view(settled), task_id="settled")
+    _task_row(root, "settled")
+    assert packer.run_pass(root)["packed"] == 1  # the shared parts are pack members only now
+    task = "promoted"
+    child = headless.prepare_task_drive(root, task, "empty")
+    views = [_view(settled[:2] + [{"role": "user", "content": f"Question {index}"}]) for index in range(3)]
+    for index, view in enumerate(views):
+        obs.persist_call(child, task_id=task, call_id=f"llm_{index}_request", call_type="llm_request", payload=view)
+    reads = count_packed_reads(monkeypatch)
+    _rewritten, state = obs.promote_child_task_refs(root, child, task, {})
+    assert (state["status"], state["pending_refs"]) == ("complete", []), state
+    assert reads and set(reads.values()) == {1 + len(views)}, reads
+    shutil.rmtree(child)
+    for index, view in enumerate(views):
+        _manifest, restored, _ = obs.read_call_payload(root, task_id=task, call_id=f"llm_{index}_request")
+        assert restored == json.loads(_json_bytes(obs.redact_projection(view).value))
+
+
+def test_a_damaged_child_loose_whole_beside_its_healthy_skeleton_keeps_the_child(tmp_path):
+    """The verified bytes come from the child's skeleton, but the loose name the walk links is damaged: the
+    read-back after that write refuses the copy, so the promotion stays pending and the child is kept."""
+    from ouroboros import headless
+
+    parent, task = tmp_path / "canonical", "damaged"
+    child = headless.prepare_task_drive(parent, task, "empty")
+    payload = _view(_transcript(2))
+    ref = obs.write_shared_blob(child, payload, {})
+    with gzip.open(ref["path"], "wb") as handle:
+        handle.write(b'{"damaged": true}')
+    _promoted, state = obs.promote_child_task_refs(parent, child, task, {"trace_refs": {"timeout_repeat": {"first": ref}}})
+    assert state["status"] == "incomplete", state
+    assert any("failed verification" in str(row.get("reason")) for row in state["pending_refs"]), state
+    assert packs.blob_bytes(child, {**ref, "path": ""}) == _json_bytes(payload)
+
+
+def test_a_parent_skeleton_missing_a_part_regains_it_from_the_child(tmp_path):
+    """The parent holds a view's skeleton but lost one part: the walk carries the part, checks the whole again
+    after that write and completes without rewriting the skeleton."""
+    from ouroboros import headless
+
+    parent, task = tmp_path / "canonical", "regained"
+    child = headless.prepare_task_drive(parent, task, "empty")
+    payload = _view(_transcript(2))
+    ref = obs.write_shared_blob(child, payload, {})
+    row = {"trace_refs": {"timeout_repeat": {"first": ref}}}
+    assert obs.promote_child_task_refs(parent, child, task, row)[1]["status"] == "complete"
+    skeleton = packs.shared_placement_path(parent, ref["sha256"])
+    inode = skeleton.stat().st_ino
+    lost = parent / "observability" / "blobs" / f"{token_digests(_skeleton(parent, ref))[-1]}.json.gz"
+    lost.unlink()
+    _promoted, state = obs.promote_child_task_refs(parent, child, task, row)
+    assert (state["status"], state["pending_refs"]) == ("complete", []), state
+    assert lost.is_file() and skeleton.stat().st_ino == inode, "the part is carried; the parent's skeleton stays"
+    shutil.rmtree(child)
+    assert packs.blob_bytes(parent, {**ref, "path": ""}) == _json_bytes(payload)

@@ -379,6 +379,11 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     # #2889: a target another git step holds is no conflict: nothing applied, no verdict recorded, the result kept; an
     # INTEGRATE_ refusal like its family, which the retired pair never saw.
     "INTEGRATE_NOT_STARTED": (True, "integration_blocked"),
+    # #2795 schedule_followup destination refusals and #2889 commit_reviewed author-continuation refusals: bare
+    # warnings the retired pair never saw (nothing was scheduled, staged or committed; the text says so).
+    "FOLLOWUP_DESTINATION_OWNER": (False, "ok"),
+    "FOLLOWUP_DESTINATION_REQUIRED": (False, "ok"),
+    "REVIEW_AUTHOR_CONTINUATION_INVALID": (False, "ok"),
     # integrate_subagent_patch decision='accept' on a non-shared result: refused before any
     # effect, an INTEGRATE_ refusal like its family; the retired pair never saw the decision.
     "INTEGRATE_ACCEPT_UNSUPPORTED": (True, "integration_blocked"),

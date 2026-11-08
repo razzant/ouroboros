@@ -252,7 +252,7 @@ html[data-layout="stack"] .shell-icon-control {
    (app.js: --drag-width while dragged, the stored width when the drag ends); absent in the stack layout (layout.js). */
 /* CW10 (v6.34.0): suppress text selection while dragging via a class, not a JS
    inline style (DEVELOPMENT.md: no element.style.* property mutations in UI JS). */
-body.resizing-panels { user-select: none; }
+body.resizing-panels { -webkit-user-select: none; user-select: none; }
 .resize-handle {
     position: absolute;
     top: 0;
@@ -1261,7 +1261,11 @@ html[data-layout="docked"] .app-page-header[data-narrow] { grid-template-columns
 html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-leading { display: none; }
 html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-title-block { position: absolute; }
 html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-toolbar { flex-wrap: wrap; }
-html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-toolbar > button { flex: none; }
+/* A narrow header's actions wrap a long label instead of leaving the column (a translation, or a wider platform font:
+   "Update 2 trusted" in a 160 px column on Linux); like the Evolution verbs, the box comes from the tokens; a fixed
+   16 px line keeps one line at the small capsule's 28 px (1 + 5 + 16 + 5 + 1) on every platform font. */
+html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-toolbar > button { flex: none; max-width: 100%;
+    white-space: normal; overflow-wrap: anywhere; line-height: 16px; --control-h: auto; --control-pad-y: 5px; }
 html[data-layout="docked"] .app-page-header[data-lead] {
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas: "title toolbar";
@@ -2125,6 +2129,7 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     transition: opacity 0.3s ease;
     font-variant-numeric: tabular-nums;
     letter-spacing: 0.02em;
+    -webkit-user-select: none;
     user-select: none;
 }
 /* A completion row's one compact time line shows the short form; the full instants stay its title and spoken text. */
@@ -5370,7 +5375,10 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
    monospace keeps only the time and the raw record. */
 /* The body's top inset rides on the bar, so the bar sticks flush at the scroller's edge (a sticky box keeps clear of
    its scroller's padding, which let rows show above it). */
-#page-logs { padding-top: 0; }
+#page-logs {
+    padding-top: 0;
+    overflow-anchor: none; /* logs.js owns the entry anchor while chunks are inserted or moved */
+}
 .logs-filters {
     --control-h: var(--control-h-sm);
     position: sticky;
@@ -5502,7 +5510,14 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
     font-size: var(--type-meta);
     line-height: var(--line-meta);
+    /* One Raw page (64 KiB, logs_raw.js) scrolls in its own box. */
+    max-height: 24rem;
+    overflow-y: auto;
 }
+
+.log-raw-tools { margin-top: var(--space-2); }
+.log-raw-status { overflow-wrap: anywhere; }
+.log-raw-pages { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 
 .log-type.tools { color: var(--status-info-fg); }
 .log-type.llm { color: var(--accent); }
@@ -5598,8 +5613,10 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .evo-campaign-chip { height: 20px; padding: 0 8px; font-size: var(--type-meta); font-weight: 500; }
 .evo-campaign-side { flex: 1 1 17rem; }
 .evo-campaign-side .ui-status { margin: 0; }
-/* The pointer to the Consciousness tab is a quiet link with its state's dot (U071). */
-.evo-consciousness { justify-self: start; max-width: 100%; }
+/* The pointer to the Consciousness tab is a quiet link with its state's dot (U071). Its state wraps on a narrow card
+   ("sleeping until 4 Nov at 15:41"), so like the verbs it takes its box from its tokens and grows a line instead of
+   spilling out of the lock's one-line box; one line stays the small capsule's 28 px. */
+.evo-consciousness { justify-self: start; max-width: 100%; --control-h: auto; --control-pad-y: 5px; }
 /* A campaign verb grows a line when a translation is long: the row's box comes from its tokens (the lock owns the
    property), one line staying the control's height. */
 .evo-campaign-actions { --control-h: auto; --control-pad-y: var(--space-2);
@@ -6213,6 +6230,7 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 
 .activity-history > summary {
     cursor: pointer;
+    -webkit-user-select: none;
     user-select: none;
     color: var(--text-meta);
     font-size: 12px;
@@ -6310,9 +6328,11 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 /* A notice's one way back (host_modules.js recovery) follows its words on the same line when they fit. */
 .toast .toast-action { display: inline-flex; flex-shrink: 0; margin-left: var(--space-2); vertical-align: middle; }
 .toast:has(> .toast-dismiss) { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-2); }
-.toast:has(> .toast-dismiss) .toast-words { min-width: 0; grid-column: 1; }
-.toast:has(> .toast-dismiss) .toast-action { grid-column: 1; margin-left: 0; justify-self: start; }
-.toast:has(> .toast-dismiss) .toast-dismiss { grid-column: 2; grid-row: 1 / span 2; }
+/* Each part asks for the close button among its own following siblings (toast.js appends words, action, close), so
+   :has() stays in the subject compound. */
+.toast > .toast-words:has(~ .toast-dismiss) { min-width: 0; grid-column: 1; }
+.toast > .toast-action:has(~ .toast-dismiss) { grid-column: 1; margin-left: 0; justify-self: start; }
+.toast > .toast-dismiss { grid-column: 2; grid-row: 1 / span 2; }
 /* The page's stack ends 18 px above the screen's bottom, as it keeps from its right, and the notices it keeps scroll
    there as one column: every word and close button is reached by wheel, touch or keyboard (toast.js names it a region
    once cut). A scrolling box clips what it holds, so its padding is the toasts' shadow room (0 18px 42px): left and
@@ -6523,6 +6543,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     display: inline-flex;
     align-items: center;
     cursor: pointer;
+    -webkit-user-select: none;
     user-select: none;
     padding: 11px 4px;
     margin: -11px -4px;
@@ -6939,6 +6960,7 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
    the drag keeps its events over them. */
 .widgets-list.resizing {
     cursor: col-resize;
+    -webkit-user-select: none;
     user-select: none;
 }
 
@@ -7882,9 +7904,8 @@ body.keyboard-open .chat-instance-panel .chat-input-area {
     white-space: nowrap;
 }
 
-/* Beyond the feed (a find or a browse) the list keeps the row in view in place itself (projects_nav.js), so the
-   engine's own scroll anchoring, which WebKit lacks, never adds a second correction. */
-.nav-projects-list[data-beyond] { overflow-anchor: none; }
+/* projects_nav.js anchors the resting list and the browse; native anchoring must not add a second correction. */
+.nav-projects-list { overflow-anchor: none; }
 
 /* While finding, a found name may take three lines, so the words that matched are not cut off behind the ellipsis
    (the resting list keeps one line). The row grows; its mark keeps its column, centred on the row. */
@@ -8451,9 +8472,11 @@ body.keyboard-open .chat-instance-panel .chat-input-area {
         outline-offset: -2px;
     }
 }
-/* The note already reserves the floating bar. With a keyboard both are in flow. The room asks and its feed inherits
-   the answer: :has() stays in its subject compound (DEVELOPMENT "Design System"). */
-.project-panel .chat-instance-panel:has(> .chat-panel-statusbar > :not([hidden])) {
+/* The note already reserves the floating bar. With a keyboard both are in flow. The bar holds only that note, and only
+   with text (chat_render_batch.js), so `:empty` answers. Never a :has() on the room: in WebKit, beside the rows' own
+   :has() rules, it made each live card's log frame cost 3 times as much, and more with each room kept away (measured;
+   tests/test_design_system_css_static.py guards it). */
+.project-panel .chat-panel-statusbar:not(:empty) ~ .chat-messages {
     --chat-feed-reserve: 8px;
 }
 body.keyboard-open .project-panel .chat-panel-statusbar { padding-top: 8px; }
@@ -9075,14 +9098,15 @@ body.keyboard-open .project-panel {
 .updates-letter-details p {
     margin: var(--space-2) 0 0;
 }
-/* The letter opens at its first part (about eight lines); "Read all" opens the rest in place. */
+/* The panel's letter opens at its first part (about eight lines); "Read all" opens the rest in place. The Apply
+   confirmation's copy has no such control: it reads whole in that dialog's own scrolling region. */
 .updates-letter-body {
     font-size: var(--type-body);
     line-height: var(--line-body);
     color: var(--text-primary);
     margin-top: var(--space-2);
 }
-.updates-letter-body:not(.is-open) { max-height: calc(8 * var(--line-body) * 1em); overflow: hidden; }
+.updates-letter .updates-letter-body:not(.is-open) { max-height: calc(8 * var(--line-body) * 1em); overflow: hidden; }
 /* A long reading text keeps its structure: the title one size up, a section as a label with room above it, a
    subsection in the secondary ink — declared after the global .md-h* block it narrows. */
 .updates-letter-body :is(.md-h1, .md-h2, .md-h3) {
@@ -9614,6 +9638,7 @@ body.keyboard-open .project-panel {
     max-height: 100%;
     margin: auto;
     object-fit: contain;
+    -webkit-user-select: none;
     user-select: none;
     -webkit-user-drag: none;
 }
@@ -9651,6 +9676,7 @@ body.keyboard-open .project-panel {
     height: 100%;
     overflow: hidden;
     touch-action: none;
+    -webkit-user-select: none;
     user-select: none;
 }
 
@@ -9968,7 +9994,7 @@ body.keyboard-open .project-panel {
     justify-content: flex-end;
     gap: var(--space-2);
     padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3);
-    border: 1px solid transparent;
+    border: 1px solid var(--field-border);
     border-radius: var(--radius-inner);
     background: var(--surface-tray);
     transition: border-color 0.12s ease, box-shadow 0.12s ease;

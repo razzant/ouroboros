@@ -148,7 +148,9 @@ def test_a_turn_execution_moves_forward_only_and_ends_with_its_entry(monkeypatch
     for activity in ({"phase": "preparing"}, {"phase": "queued", "blockers": [{"kind": "thread_busy"}]}):
         execution.observe("main_llm_call_state", {**call, "phase": "observed", "model_activity": activity})
     assert execution.phase == "requested" and dispatches == [], "no dispatch fact before the request goes out"
-    time.sleep(0.01)
+    requested_at = execution.marks[-1][1]
+    while time.monotonic() - requested_at < 0.01:  # a coarse monotonic clock (Windows: 15.6 ms ticks) must move first
+        time.sleep(0.005)
     execution.observe("main_llm_call_state", {**call, "phase": "observed", "model_activity": {"phase": "dispatching"}})
     assert registry.snapshot()[0]["turn_phase"] == "dispatched"
     assert [(d["task_id"], d["accepted_at"] <= d["dispatched_at"]) for d in dispatches] == [("act-4", True)]

@@ -364,6 +364,12 @@ def _restart_dialog(page, opener):
             dialog.locator(".marketplace-modal-body p").inner_text())
 
 
+def _restart_policy(dialog):
+    """The policy the confirmation's one line leaves to its Details, read the way the owner opens it."""
+    dialog.locator(".confirm-dialog-details > summary").click()
+    return dialog.locator(".confirm-dialog-detail-list").inner_text()
+
+
 def _open_chat(page, url):
     page.goto(url, wait_until="domcontentloaded", timeout=30_000)
     page.wait_for_selector("#page-chat", timeout=30_000)
@@ -461,8 +467,11 @@ def test_pause_restart_retention_and_resume(direct_server_with_data, monkeypatch
                 # 3) The ONE shared Restart confirmation, from both surfaces.
                 dialog, title, body = _restart_dialog(page, page.locator('[data-chat-command="restart"]'))
                 assert title == "Restart agent"
-                assert "Tasks already paused stay paused" in body
-                assert "Runnable queued tasks return to the queue" in body
+                # One line says what happens; the retention policy is behind the dialog's Details.
+                assert body == "Running tasks stop and continue after the restart."
+                policy = _restart_policy(dialog)
+                assert "Tasks already paused stay paused" in policy
+                assert "Runnable ones return to the queue" in policy
                 assert "still pausing" not in body and "could not be read" not in body
                 shot("02-header-restart-confirm")
                 dialog.locator(".marketplace-modal-actions [data-confirm-cancel]").click()
@@ -474,7 +483,8 @@ def test_pause_restart_retention_and_resume(direct_server_with_data, monkeypatch
                 page.locator("#btn-save-settings").click()
                 expect(page.locator("#btn-restart-now")).to_be_visible(timeout=30_000)
                 dialog, s_title, s_body = _restart_dialog(page, page.locator("#btn-restart-now"))
-                assert (s_title, s_body) == (title, body), "header and Settings must open the SAME confirmation"
+                assert (s_title, s_body, _restart_policy(dialog)) == (title, body, policy), \
+                    "header and Settings must open the SAME confirmation"
                 shot("03-settings-restart-confirm")
                 dialog.locator(".marketplace-modal-actions [data-confirm-cancel]").click()
                 expect(dialog).to_be_hidden()
@@ -672,8 +682,9 @@ def test_continue_after_a_crash_rejoins_a_lost_answer_and_survives_reload(direct
                 _wait(lambda: model.main_calls("DELTA") == 2, 90, "DELTA resumed under its own id")
                 assert _task(page, url, DELTA)["status"] == "running"
 
-                # Its worker process dies (SIGKILL) while the application stays up: the
-                # existing policy keeps a signal death terminal, so Continue is its manual path.
+                # Its worker process dies (SIGKILL) while the application stays up. A signal death takes
+                # the task's one retry, and this resumed run already is DELTA's retry (its first attempt
+                # died with the application), so the death is terminal and Continue is its manual path.
                 # The pool's other live worker is the conversation lane's ready spare (#2654):
                 # the kill names DELTA's own carrier, never "the" worker of the pool.
                 from tests._shared import live_worker_pids
@@ -690,7 +701,7 @@ def test_continue_after_a_crash_rejoins_a_lost_answer_and_survives_reload(direct
                               120, "DELTA settled by its worker's death")
                 record["delta"] = {key: delta.get(key) for key in ("status", "reason_code", "cancel_origin",
                                                                    "continuation_offer")}
-                assert delta["reason_code"] == "worker_crash_signal", record["delta"]
+                assert delta["reason_code"] == "worker_crash_retry_exhausted", record["delta"]
                 assert (delta.get("continuation_offer") or {}).get("eligible") is True
                 # Opened afresh, as after a reboot: the settled card is rebuilt from its
                 # history rows, which carry the offer.

@@ -2,11 +2,12 @@
  * The sidebar's Projects list (docs/DESIGN.md "Shell"): its keyed rows, their marks and names, the collapse, and the
  * way to every Project older than the recent feed.
  *
- * `/api/state` carries a compact feed, the pins and the most recent other Projects; app.js decides what it says
+ * `/api/state` carries a compact feed, the pins and the Projects with the newest messages; app.js decides what it says
  * (unread, the open room, the read cursors) and hands its rows over with that read's request order. Older
  * Projects are reached by name in Find a project or by Show more, from the registry's complete list
  * (`GET /api/projects?all=1`): read as a find or a browse starts and again, while one is open, when the registry
- * announces a change (`refresh`); never on a timer. Nothing here acknowledges a read. A row opens through app.js: one
+ * announces a change (`refresh`) or, for a browse, when a room's newest message moved (`messagesRevision`, also beyond
+ * the feed); never on a timer. Nothing here acknowledges a read. A row opens through app.js: one
  * the feed carries at once, as it shows; one older than the feed names its id and app.js reads its room first. The
  * unread app.js shows for the Projects is what this list shows: the feed's rooms, hidden or not, and the older rooms
  * an open find or browse lists, never one only a held list names (`unreadRows`; `onShown` and `onListRead` say when it
@@ -19,10 +20,11 @@
  * row with its request order: a feed row replaces an older one and stays after it leaves the feed, a complete
  * list drops what it omits unless something newer named it, and a feed older than that list adds nothing back (a
  * capped feed proves no absence). A failed read keeps the list, says so with its time and offers to try again; while
- * a read is unanswered or failed, nothing is said to be missing. The list owns its order: pins, then unread, then
- * recency at rest; beyond the feed the order the owner's last action gave, pins still leading, so activity changes
- * rows in place and rooms that come or go never move the row in view (the focused one, else the first visible).
- * Collapsing the Projects ends the find or the browse.
+ * a read is unanswered or failed, nothing is said to be missing. The list owns its order, at rest and in a browse
+ * alike: pins, then the newest message (`last_message_at`; unread is a mark, never a rank); a browse keeps every row
+ * it showed. A repaint away from the list's top keeps the first row in view whose place did not change where it was,
+ * and the keyboard on its row wherever it moved; a find keeps its rows where they stand while words are in the
+ * field. Collapsing the Projects ends the find or the browse.
  */
 import { fmt, fmtInto, tr } from './i18n.js';
 import { SHELL_ICONS, controlIcon } from './page_icons.js';
@@ -51,21 +53,27 @@ export function setActivityOwnerName(owner, baseName, words) {
     owner.title = name;
 }
 
-const recency = (row) => String(row.last_active_at || row.updated_at || row.created_at || '');
-// The registry's own order (project_closure.select_projects): latest activity, then id, newest first.
+// The server's order (projects_summary): the newest message, else the activity of a store still dating its history.
+const recency = (row) => String(row.last_message_at || row.last_active_at || row.updated_at || row.created_at || '');
+// The registry's own order (project_closure.select_projects): that time, then id, newest first.
 const newestFirst = (a, b) => {
     const [x, y] = [recency(a), recency(b)];
     if (x !== y) return x < y ? 1 : -1;
     return String(a.id) < String(b.id) ? 1 : String(a.id) > String(b.id) ? -1 : 0;
 };
+// The list's order: pins first, then the server's (equal times, empty ones too, by id, newest first).
+export const listOrder = (a, b) => ((a.pinned === true) !== (b.pinned === true) ? (a.pinned === true ? -1 : 1)
+    : newestFirst(a, b));
+// A row keeps its place while this key does.
+const placeKey = (row) => `${row?.pinned === true}|${row ? recency(row) : ''}`;
 
 export function createProjectsNav({ section, header, list, toggle, feed, feedOrder, nextOrder, reserved, listableCount, activeId,
-    expanded, isUnread, readList, onListRead, onShown, open, openMenu }) {
-    // `browse`: the ids a browse shows and the rows Show more still owes; `found`: the ids a find shows (null: the
-    // owner's new words, laid out anew) and how many rows besides the pins it may show.
+    expanded, isUnread, readList, onListRead, onShown, open, openMenu, messagesRevision = () => null }) {
+    // `browse`: the ids a browse shows (sorted with the list) and the rows Show more still owes; `found`: the ids a
+    // find shows (null: the owner's new words, laid out anew) and how many rows besides the pins it may show.
     const state = { query: '', browse: null, found: null, budget: PAGE, resume: null, collapsed: null, handoff: null };
     // Once a complete list was read: each Project's newest observed row and its read's request order (`at`).
-    let held = null;       // { rows: Map id → { row, at }, at: the list's order, time: its clock time, folded }
+    let held = null;       // { rows: Map id → { row, at }, at: the list's order, time: its clock time, folded, revision }
     let reading = null;    // the read in flight: { controller }
     let failure = '';      // why the last read failed; '' once one answered
     let listed = new Set();  // the rooms an open find or browse showed at the last paint; none at rest
@@ -79,11 +87,6 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
     const failed = () => Boolean(failure) && !reading;
     // A feed row carries its unread from app.js; a listed row's is read from the shared cursors the same way.
     const unreadOf = (row) => (typeof row._unread === 'boolean' ? row._unread : !isDeleting(row) && isUnread(row));
-    const listOrder = (a, b) => {
-        if ((a.pinned === true) !== (b.pinned === true)) return a.pinned === true ? -1 : 1;
-        if (unreadOf(a) !== unreadOf(b)) return unreadOf(a) ? -1 : 1;  // unread to the top
-        return recency(b).localeCompare(recency(a));
-    };
     const foldOf = (row) => {
         const name = String(row.name || row.id || '');
         if (!folded.has(name)) folded.set(name, foldName(name));
@@ -111,14 +114,14 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
             }
         }
     }
-    function observeList(rows, at, time) {
+    function observeList(rows, at, time, revision) {
         const next = new Map();
         for (const row of rows) {
             const seen = held?.rows.get(row.id);
             next.set(row.id, seen && seen.at > at ? seen : { row, at });
         }
         for (const [id, seen] of held?.rows || []) if (!next.has(id) && seen.at > at) next.set(id, seen);
-        held = { rows: next, at, time, folded: held?.folded || 0 };
+        held = { rows: next, at, time, folded: held?.folded || 0, revision };
     }
     // Every Project's newest row: the held list's, or the feed's before one is read.
     function facts() {
@@ -133,7 +136,7 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
         return [...new Set([...feedRows().map((row) => row.id), ...listed])].map((id) => rows.get(id))
             .filter((row) => listable(row) && unreadOf(row));
     };
-    // The resting list: the feed's rooms, each as its newest observation tells it, pins, unread, then recency.
+    // The resting list: the feed's rooms, each as its newest observation tells it, in the list's order.
     const resting = (rows) => feedRows().map((row) => rows.get(row.id)).filter(listable).sort(listOrder);
     // Pins lead any order: a row pinned meanwhile ends the pins, one unpinned starts the rest.
     const pinsFirst = (ids, rows) => [...ids.filter((id) => rows.get(id).pinned === true),
@@ -224,19 +227,17 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
         return { shown: rest, after: left ? [moreOf(left)] : !held && roomsBeyond() ? [labelled(more, 'Show more')] : [] };
     }
 
-    // A browse keeps its rows where they stand: a room the feed brings (a new one) joins after the leading pins, the
-    // rows Show more owes join at the end once the complete list is read, and a room the registry no longer lists goes.
+    // A browse shows every room it has shown, sorted with the list: the feed's rooms (a new one too), the rows Show more
+    // brought and, once the complete list is read, the next ones it owes; a room the registry no longer lists goes.
     function browsed(rows, rest, all) {
-        const kept = state.browse.order.filter((id) => listable(rows.get(id)));
-        const known = new Set(kept);
-        const order = pinsFirst([...rest.map((row) => row.id).filter((id) => !known.has(id)), ...kept], rows);
-        const shownIds = new Set(order);
-        const beyond = held ? all.filter((row) => !shownIds.has(row.id)).sort(newestFirst) : [];
+        const shown = new Set([...state.browse.shown, ...rest.map((row) => row.id)].filter((id) => listable(rows.get(id))));
         if (held && state.browse.owed) {
-            order.push(...beyond.splice(0, state.browse.owed).map((row) => row.id));
+            for (const row of all.filter((item) => !shown.has(item.id)).sort(newestFirst).slice(0, state.browse.owed)) {
+                shown.add(row.id);
+            }
             state.browse.owed = 0;
         }
-        state.browse.order = order;
+        state.browse.shown = shown;
         const after = [];
         if (!held) {
             after.push(...(failed() ? [said(fmt('Could not load more projects: {error}', { error: failure })),
@@ -246,9 +247,11 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
                 after.push(said(fmt('Could not read all projects again: {error}. Older rows are as read at {time}.',
                     { error: failure, time: readTime() })), labelled(retry, 'Try again'));
             }
-            if (beyond.length) after.push(moreOf(beyond.length));
+            const left = all.length - shown.size;
+            if (left > 0) after.push(moreOf(left));
         }
-        return { shown: order.map((id) => rows.get(id)), after, waiting: Boolean(state.browse.owed) && !failed() };
+        return { shown: [...shown].map((id) => rows.get(id)).sort(listOrder), after,
+            waiting: Boolean(state.browse.owed) && !failed() };
     }
 
     // A find keeps the rows it shows where they stand while their names still match; a match it does not show yet
@@ -330,6 +333,7 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
             }
         }
         item.project = project;
+        item.paintedPlaceKey = placeKey(project);  // the shared project may change before the next repaint
         item.toggleAttribute('data-pinned', project.pinned === true);
         const btn = item.querySelector('.nav-project-row');
         btn.disabled = deleting;
@@ -345,14 +349,24 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
         return item;
     }
 
-    // The row a repaint keeps in place on screen beyond the feed: the focused one, else the first one in view.
     const firstInView = () => {
         const top = Math.max(list.getBoundingClientRect().top, 0);
         return [...list.children].find((el) => el.dataset.navProjectId && el.getBoundingClientRect().bottom > top) || null;
     };
-    function anchorRow() {
-        const item = document.activeElement?.closest?.('.nav-project-item');
-        return item?.parentElement === list ? item : firstInView();
+    // The rows in view and their tops, measured before a repaint moves anything; none while the list's first row is
+    // in view, so what a new message brings to the top shows there.
+    function rowsInView() {
+        const top = Math.max(list.getBoundingClientRect().top, 0);
+        const rows = [...list.children].filter((el) => el.dataset.navProjectId && !el.hidden);
+        if (!rows.length || rows[0].getBoundingClientRect().top >= top - 0.5) return [];
+        const bottom = Math.min(list.getBoundingClientRect().bottom, window.innerHeight);
+        const seen = [];
+        for (const el of rows) {
+            const box = el.getBoundingClientRect();
+            if (box.top >= bottom) break;
+            if (box.bottom > top) seen.push([el, box.top]);
+        }
+        return seen;
     }
     // Scroll whatever scrolls (the list, or the whole column in a short window) by what the anchor moved.
     function keepOnScreen(anchor, top) {
@@ -384,10 +398,13 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
         state.collapsed = collapsed;
         more.removeAttribute('aria-busy');
         const beyond = beyondFeed() && !collapsed;
-        list.toggleAttribute('data-beyond', beyond);  // its own anchoring below, never the engine's
-        const anchor = beyond ? anchorRow() : null;
-        const anchorTop = anchor?.getBoundingClientRect().top;
+        const measured = rowsInView();
         const { shown, after, waiting } = view();
+        // The place being read is held by the first row in view whose place in the order holds (its pin and time):
+        // a row a new message moves never takes the view with it (style.css turns the engine's anchoring off).
+        const next = new Map(shown.map((row) => [row.id, row]));
+        const [anchor, anchorTop] = measured.find(([el]) => next.has(el.dataset.navProjectId)
+            && el.paintedPlaceKey === placeKey(next.get(el.dataset.navProjectId))) || [];
         // The rooms an open find or browse lists count toward the unread app.js shows, so a change of them is said.
         const showing = new Set(beyond ? shown.map((row) => row.id) : []);
         const relisted = showing.size !== listed.size || [...showing].some((id) => !listed.has(id));
@@ -403,11 +420,16 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
         for (const el of [...list.children]) if (!keep.has(el)) el.remove();
         list.toggleAttribute('data-finding', searching() && !collapsed);
         if (!searching() && status.textContent) status.textContent = '';
+        syncCollapse();  // visibility and the pin group's gap belong to the geometry we restore
         if (anchor?.isConnected) keepOnScreen(anchor, anchorTop);
         // Moving an existing node can blur it even though its identity survives.
         if (focused?.isConnected && list.contains(focused) && focused !== document.activeElement) focused.focus({ preventScroll: true });
         if (state.handoff && !waiting) handOff(state.handoff, nodes);
+        repositionProjectRowMenu();  // anchoring may have scrolled its row after visibility settled
         if (relisted) onShown();  // app.js says its number, header and ☰ again, marks in place: no read, no render
+        // A browse reads the complete list again once a room's newest message moved since that list was asked for,
+        // beyond the feed too; a read in flight or a failed one waits (its answer, or Try again, repaints).
+        if (state.browse && !collapsed && held && !reading && !failure && messagesRevision() !== held.revision) load();
     }
 
     // A key's Show more or Show all hands the keyboard on once, when its rows have settled (read, or the read
@@ -475,7 +497,6 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
         if (destroyed) return;
         paintRows();
         patch();
-        syncCollapse();
     }
 
     // ---- the registry's complete list ---------------------------------------------------------------------------
@@ -489,11 +510,12 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
         }, PROJECT_LIST_TIMEOUT_MS);
         const at = nextOrder();  // after every state read requested so far, before every later one
         const time = Date.now();  // only for saying when the list shown was read
+        const revision = messagesRevision();  // the rooms' message times this read answers at least
         reading = { controller };
         Promise.resolve().then(() => readList({ signal: controller.signal })).then((data) => {
             if (!Array.isArray(data?.projects)) throw new Error(fmt('the answer could not be read'));
             if (reading?.controller !== controller) return;
-            observeList(data.projects.filter(listable), at, time);
+            observeList(data.projects.filter(listable), at, time, revision);
             failure = '';
         }).catch((err) => {
             // The last complete list stays and the failure is said beside it; without one, never "no match".
@@ -558,7 +580,7 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
     }
 
     // A browse starts from the resting rows as they stand; Show all projects owes every other room.
-    const browseFrom = (owed) => ({ order: resting(facts()).map((row) => row.id), owed });
+    const browseFrom = (owed) => ({ shown: new Set(resting(facts()).map((row) => row.id)), owed });
 
     // ---- the owner's keys and presses ---------------------------------------------------------------------------
     const rowStops = () => [...list.querySelectorAll(':scope > .nav-project-item:not([hidden]) > .nav-project-row:not(:disabled), :scope > .nav-projects-more')];

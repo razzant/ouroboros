@@ -463,6 +463,8 @@ function collectSecretValue(id, body) {
 // (#1122): the next-task bucket states both once, whichever keys the save carried.
 const SKILL_KEYS_READ = 'skills pick up granted keys on their next read';
 
+const DRAFT_KEPT = 'Settings were not reloaded because your draft changed while loading. Your edits are kept.';
+
 export function settingsSaveEffectText(data = {}) {
     if (data.no_changes) return 'No changes detected';
     if (data.restart_required) return 'Settings saved. Some changes require a restart to take effect';
@@ -515,6 +517,8 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     const disposeLocalModel = bindLocalModelControls({ state,
         onApplication: (local) => syncRestartState({ ...restartState, local_model: local }) });
     let currentSettings = {};
+    // A change signalled while a draft is open (its reason): said, never applied over the draft; a new baseline ends it.
+    let draftOutdatedBy = '';
     let searchSelectionEdited = false;
     let extensionRefreshPending = false;
     let settingsLoaded = false;
@@ -647,6 +651,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     function setSettingsCleanBaseline() {
         settingsBaseline = snapshotSettingsDraft();
         settingsDirty = false;
+        draftOutdatedBy = '';
         paintDirtyWord();
     }
 
@@ -690,15 +695,6 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         baselineSettleDisposer = claudexorStatus.subscribe(() => {
             if (revision === draftRevision && !settingsDirty && settingsLoaded) setSettingsCleanBaseline();
         });
-    }
-
-    function discardUnsavedSettingsDraft() {
-        applySettings(currentSettings || {});
-        renderCustomSecrets(page, currentSettings || {});
-        validationAttempted = false;
-        paintSettingsFieldErrors(page, []);
-        setSettingsCleanBaseline();
-        setStatus('', 'ok');
     }
 
     function syncAutoGrantBridgeState() {
@@ -882,7 +878,9 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             await Promise.all(enrichment);
             if (!isCurrent()) {
                 updateSettingsDirtyState();
-                return false;
+                // The same answer as the document stage: a newer load took over (null, it reports), or an owner edit
+                // kept the draft (false). A page-show refresh says "Your edits are kept" only for the second.
+                return sequence !== loadSequence ? null : false;
             }
             // Optional enrichment belongs in a still-clean baseline, never in an
             // owner edit made while one of those reads was pending.
@@ -905,7 +903,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         try {
             const applied = await loadSettings();
             if (applied === false && byId('settings-status').dataset.owner === 'load') {
-                setStatus('Settings were not reloaded because your draft changed while loading. Your edits are kept.', 'warn', 'load');
+                setStatus(DRAFT_KEPT, 'warn', 'load');
             }
             try {
                 await refreshModelCatalog({ button: byId('btn-refresh-model-catalog') });
@@ -932,13 +930,17 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     async function refreshSettingsAfterExtensionChange(reason = 'skills changed') {
         if (extensionRefreshPending || settingsSaving || saveOutcomeUnknown) return;
         if (settingsDirty) {
+            draftOutdatedBy = reason;
             await refreshRestartState();
             setStatus(`Settings changed externally (${reason}). Reload after saving or discarding your draft.`, 'warn');
             return;
         }
         extensionRefreshPending = true;
         try {
-            if (!(await loadSettings())) return;
+            const applied = await loadSettings();
+            // A load this one superseded left its line to it; an owner edit made meanwhile kept the draft.
+            if (applied === false && byId('settings-status').dataset.owner === 'load') setStatus(DRAFT_KEPT, 'warn', 'load');
+            if (!applied) return;
             setStatus('Settings refreshed', 'ok', '', '', '', { ends: true });
         } catch (error) {
             const words = errorWords(error);
@@ -1130,17 +1132,15 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     reloadSettingsWithFeedback();
 
     if (typeof setBeforePageLeave === 'function') {
-        // app.js showPage() awaits every beforePageLeave handler, so the async
-        // dialog is legal here. Rapid double-navigation cannot double-fire the
-        // discard: opening a second dialog resolves the first as false (stay),
-        // so at most one confirmed leave runs discardUnsavedSettingsDraft().
+        // Leaving Settings keeps the draft for the return, unsaved and marked so
+        // (owner 2026-11-03: a page left keeps its unsaved input); a revealed
+        // secret is masked again. A Save in flight holds the page until it
+        // answers. Reload, which replaces the draft, still asks first.
         setBeforePageLeave(async ({ from }) => {
             if (from !== 'settings') return true;
             if (settingsSaving) return false;
-            if (!settingsDirty) { resetSecretReveals(page); return true; }
-            const leave = await confirmDiscardSettings('leave Settings');
-            if (leave) { resetSecretReveals(page); discardUnsavedSettingsDraft(); }
-            return leave;
+            resetSecretReveals(page);
+            return true;
         });
     }
 
@@ -1195,9 +1195,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     // Skill lifecycle events reload only a visible page; the page-show
     // handler below reloads on entry, so a hidden page reads nothing.
     window.addEventListener('ouro:skill-lifecycle', (event) => {
-        if (!settingsPageActive()) return;
-        const action = String(event.detail?.action || 'skills changed');
-        refreshSettingsAfterExtensionChange(action);
+        extensionChanged(String(event.detail?.action || 'skills changed'));
     });
     window.addEventListener('ouro:settings-updated', (event) => {
         if (event.detail?.source === 'settings') return;
@@ -1206,10 +1204,13 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     });
     if (ws && typeof ws.on === 'function') {
         ws.on('extension_lifecycle', (event) => {
-            if (!settingsPageActive()) return;
-            const action = String(event?.action || 'extension lifecycle');
-            refreshSettingsAfterExtensionChange(action);
+            extensionChanged(String(event?.action || 'extension lifecycle'));
         });
+    }
+    // A hidden page's kept draft only notes the change, said on its return.
+    function extensionChanged(reason) {
+        if (settingsPageActive()) refreshSettingsAfterExtensionChange(reason);
+        else if (settingsDirty) draftOutdatedBy = reason;
     }
     // A confirmed Accounts facet is the existing status-store seam for login
     // completion. It refreshes the catalog only on a changed/rehydrated account
@@ -1221,9 +1222,28 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         if (settingsLoaded) void refreshModelCatalog();
     });
 
+    // The saved values a draft began from, without the read's own metadata (`_meta`: restart state, catalogs).
+    const savedValues = (doc) => JSON.stringify(Object.keys(doc).filter((key) => key !== '_meta').sort().map((key) => [key, doc[key]]));
+    // A kept draft began from `currentSettings`; another client, Telegram or the agent may have saved since without a
+    // signal this page hears. Its return reads the document again and says so when it differs, applying nothing.
+    async function noticeSavedElsewhere() {
+        const base = currentSettings;
+        const data = await apiClient.settings().catch(() => null);
+        if (!data || typeof data !== 'object' || Array.isArray(data) || data.error || base !== currentSettings) return;
+        if (settingsDirty && !draftOutdatedBy && savedValues(data) !== savedValues(base)) {
+            void refreshSettingsAfterExtensionChange('saved elsewhere');
+        }
+    }
+
     window.addEventListener('ouro:page-shown', (event) => {
         if (event.detail?.page === 'settings') {
-            refreshSettingsAfterExtensionChange('settings page shown');
+            // A draft kept from the last visit is said as kept, not as changed elsewhere: only a change signalled
+            // meanwhile (`draftOutdatedBy`) or found by reading again says so; a clean page reloads.
+            if (settingsDirty && !draftOutdatedBy && !settingsSaving && !saveOutcomeUnknown) {
+                void refreshRestartState();
+                setStatus('Your unsaved draft is kept.', 'muted', 'draft');  // the draft's word: a clean draft takes it away
+                void noticeSavedElsewhere();
+            } else refreshSettingsAfterExtensionChange(draftOutdatedBy || 'settings page shown');
             if (settingsLoaded) void refreshModelCatalog();
         }
     });

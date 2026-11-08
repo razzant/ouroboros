@@ -210,6 +210,7 @@ HOST_ROW_CLASSES = {
     "task_reaper_notice": ("card_row", 2),  # wedged hold and stop; the two idle-retry notices are gone
     "task_scheduled": ("card_row", 1),
     "task_start_unconfirmed": ("not_started", 1),
+    "taken_walk_notice": ("runtime_state", 1),  # what the engine was told of earlier delegated results, once
     "terminal_incident": ("no_mind", 2),
     "ui_hold": ("runtime_state", 1),
     "worker_failure": ("no_mind", 2),  # the exhausted crash retry + the degraded executor's disclosure (inline_carrier._disclose); the crash-storm toast is gone

@@ -162,19 +162,19 @@ _START_CHOICE_PARAMS = {
 _SCHEDULE_SUBAGENT_DESCRIPTION = (
     # SYSTEM also says start_task is separate work, an evidence-only copy owes no apply, and shared-tree work is
     # verified, not reapplied (integrate_subagent_patch's lead too): this lead pays the typed input_files schema.
-    "Start a child on one objective; it reports back to you and returns task_id. Children may write knowledge "
+    "Start a child on one objective; it reports back and returns task_id. Children may write knowledge "
     "notes, memory marks and chronicle drafts in their own name (the integrating mind accepts or rejects drafts: "
     "chronicle_write kind=decision); no child commits, grants itself tools or writes identity/scratchpad. Default "
-    "native READ-ONLY children inspect local repo/data/history and web/browser and return findings, writing no other "
-    "local state and running no shell/review/runtime/skills. workspace_root: start folder, else yours. write_surface "
-    "selects a MUTATIVE (acting) child: self_worktree isolates its Git source's current eligible files (uncommitted "
+    "native READ-ONLY children inspect local repo/data/history and web/browser and return findings; no other local "
+    "writes or shell/review/runtime/skills. workspace_root: start folder, else yours. write_surface "
+    "picks a MUTATIVE (acting) child: self_worktree isolates its Git source's current eligible files (uncommitted "
     "too) for integrate_subagent_patch; native external_workspace writes in the SHARED directory (write_root, else "
     "the selected/inherited workspace_root, else one new Git tree for such descendants); genesis gives EACH an empty "
     "Git repo in the durable projects root that IS the deliverable; acting harness work uses a private snapshot and "
     "integrate_delegated_patch. "
     # Custom-tool projection strips parameter prose; this choice must survive in the tool lead.
     "A non-acting Agent session keeps configured access in an evidence-only private checking copy; "
-    "access='readonly' selects read-only session execution. Runtime data, including installed skill payloads, is "
+    "access='readonly' selects read-only session execution. Runtime data (installed skill payloads too) is "
     "never a write_surface. Cyber-effective children inherit "
     "selected review/skill/runtime tools within explicit task restrictions. Nesting obeys configured "
     "depth/cap limits. Children scheduled in one round run concurrently; on cache-write-priced routes each "

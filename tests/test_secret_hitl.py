@@ -65,11 +65,14 @@ def env(tmp_path, monkeypatch, caplog):
     from ouroboros import config as cfg
     from ouroboros.gateway import secret_decision as sd
     from ouroboros.gateway import task_decision as td
+    from ouroboros.tools import skill_exec
 
     root = tmp_path
     monkeypatch.setattr(cfg, "DATA_DIR", root)
     monkeypatch.setattr(cfg, "SETTINGS_PATH", root / "settings.json")
+    # Import the consumer before patching config: its from-import must not retain this fixture's lambda.
     monkeypatch.setattr(cfg, "get_skills_repo_path", lambda: "")
+    monkeypatch.setattr(skill_exec, "get_skills_repo_path", lambda: "")
     cfg.reset_runtime_mode_baseline_for_tests()
     _write_skill(root)
     write_task_result(root, TASK, "running", chat_id=1)

@@ -14,7 +14,14 @@ def supervisor(monkeypatch, tmp_path):
     modes = {"owner": "full", "consciousness": "full"}
     calls, events, replies = [], [], []
     ctx = SimpleNamespace(task_id="work", task_metadata={"work_kind": "owner"}, drive_root=tmp_path,
-                          task_contract={"unbounded": "MUST NOT BE INCLUDED"})
+                          task_contract={"unbounded": "MUST NOT BE INCLUDED"},
+                          _current_llm_call_meta={"llm_call_id": "llm-round-1"})
+    rounds = [1]
+
+    def later():
+        """The mind's next model call: the loop's authoring-call fact a re-issue's decision is read from."""
+        rounds[0] += 1
+        ctx._current_llm_call_meta = {"llm_call_id": f"llm-round-{rounds[0]}"}
     safety._PRIOR_VERDICTS.clear()
     monkeypatch.setattr(safety, "_SAFETY_STORM_UNTIL", 0)
     monkeypatch.setattr(safety, "_CHAIN_STORMS", {})
@@ -34,7 +41,8 @@ def supervisor(monkeypatch, tmp_path):
             raise reply
         return {"content": reply if isinstance(reply, str) else json.dumps(reply)}, {}
     monkeypatch.setattr(safety, "_safety_model_call", call)
-    yield SimpleNamespace(module=safety, ctx=ctx, calls=calls, events=events, replies=replies, values=values, modes=modes)
+    yield SimpleNamespace(module=safety, ctx=ctx, calls=calls, events=events, replies=replies, values=values, modes=modes,
+                          later=later)
     safety._PRIOR_VERDICTS.clear()
 
 

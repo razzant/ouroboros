@@ -241,8 +241,16 @@ def test_a_late_measure_leaves_the_successors_response_state(silent):
     async def scenario():
         async with withheld(silent=silent) as world:
             await asyncio.wait_for(world.entered.wait(), 2)
-            second = await successor(world, world.first)
+            # The peer's fact is in the room before the successor opens, so its first quiet offer carries it beside the
+            # answer it owes. Appended after the successor reported ready, it raced that offer: where asyncio runs
+            # every timer due within one clock resolution at once (Windows: 1/64 s) the owed answer went alone, and
+            # the fact rightly waited for the next quiet moment.
+            world.opening = asyncio.Event()
+            reconnect = asyncio.create_task(successor(world, world.first))
+            await until(lambda: world.call.session is None)
             world.host.hub.events.append(cp.PeerControl('peer', cp.PEER_OWNER, {'type': 'context', 'text': 'Peer fact.'}))
+            world.opening.set()
+            second = await reconnect
             await until(lambda: world.call.response_open and 'Peer fact.' in str(second.sent))
             world.release.set()
             await settled(world)

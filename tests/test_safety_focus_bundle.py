@@ -44,14 +44,14 @@ def checker(monkeypatch):
     safety._PRIOR_VERDICTS.clear()
 
 
-def _focus_task(root, *, text="hello there", thread="", staged=()):
+def _focus_task(root, *, text="hello there", thread="", staged=(), conversation=None, message=None):
     """One admitted event's focus task from the presence producer, and the first user content it frames."""
     from ouroboros.context import build_user_content
 
     key = conversation_key("chat", "a", "r", thread)
     event = PresenceTurnEvent("event-" + hashlib.sha256(f"{thread}:{text}".encode()).hexdigest()[:8], "chat", "a",
-                              "r", thread, key, {"platform_actor_id": "person", "display_name": "Person"}, {}, {},
-                              text, facts=("mention",))
+                              "r", thread, key, {"platform_actor_id": "person", "display_name": "Person"},
+                              conversation or {}, message or {}, text, facts=("mention",))
     admission = admit_presence_turn(drive_root=root, authenticated_transport_skill="bridge", provider="chat",
                                     account_id="a", conversation_id="r", thread_id=thread)
     task = _build_task(replace(admission, allowance={"status": "available", "remaining_usd": 2,
@@ -62,12 +62,12 @@ def _focus_task(root, *, text="hello there", thread="", staged=()):
 
 
 def _reply_bundle(root, monkeypatch, prompts, *, thread="", before_reply=None, typed=True, staged=(), extra_rows=(),
-                  text="hello there"):
+                  text="hello there", conversation=None, message=None):
     """Admit an event, build its focus task, record its first row, then check the reply."""
     from ouroboros.loop_messages import _initialize_owner_directives
     from ouroboros.place_reply import prepare_focus_reply
 
-    task, content = _focus_task(root, text=text, thread=thread, staged=staged)
+    task, content = _focus_task(root, text=text, thread=thread, staged=staged, conversation=conversation, message=message)
     if not typed:  # a task retained before the typed event existed
         task["metadata"]["presence"].pop("observed_text")
     ctx = SimpleNamespace(task_metadata=task["metadata"], task_id=task["id"], drive_root=root)
@@ -81,6 +81,27 @@ def _reply_bundle(root, monkeypatch, prompts, *, thread="", before_reply=None, t
     bundle = json.loads(prompt.split("Host evidence (provenance is not consent):\n", 1)[1]
                         .split("\nProposed tool call:", 1)[0])
     return ctx, bundle, prompt
+
+
+@pytest.mark.parametrize("status", ["SUSPICIOUS", "SAFE"])
+def test_a_reply_sent_with_a_warning_leaves_it_in_the_room(focus, monkeypatch, checker, status):
+    """A SUSPICIOUS reply is posted with its warning, which stays in the room's record beside it, where the next
+    round in this place reads it; a SAFE reply leaves no note."""
+    from ouroboros import dialogue_store, safety
+    from ouroboros.place_reply import _reply_digest, reply_carrier
+    from ouroboros.places import conversation_chat_id
+
+    def call(**kwargs):
+        checker.append(kwargs["user_prompt"])
+        return {"content": json.dumps({"status": status, "reason": "names a colleague the note keeps out"})}, {}
+    monkeypatch.setattr(safety, "_safety_model_call", call)
+    root, _place, _admission, _event = focus
+    ctx, _bundle, _prompt = _reply_bundle(root, monkeypatch, checker)
+    carrier = reply_carrier(ctx.task_metadata)
+    client_id = f"place-notice:{ctx.task_id}:{_reply_digest(carrier, 'A short reply')}:safety-note"
+    rows = dialogue_store.rows_by_client_id(root, client_id, chat_id=conversation_chat_id(carrier["conversation_key"]))
+    assert [(r.row["direction"], "names a colleague the note keeps out" in r.row["text"]) for r in rows] == (
+        [("system", True)] if status == "SUSPICIOUS" else [])
 
 
 def test_an_owner_answer_reaches_the_supervisor_with_the_card_it_answers(focus, monkeypatch, checker, tmp_path):
@@ -223,8 +244,10 @@ def test_reply_route_names_the_thread_it_answers(focus, monkeypatch, checker, th
 
 
 @pytest.mark.parametrize("kind", ["file", "unreadable_image", "image"])
-def test_a_frame_the_records_cannot_reproduce_stays_whole(focus, monkeypatch, checker, tmp_path, kind):
-    """The producer adds an attachment manifest, image notes or blocks; the typed records hold none of them."""
+def test_a_frame_with_attachments_rerenders_from_its_records(focus, monkeypatch, checker, tmp_path, kind):
+    """The producer adds an attachment manifest and image blocks to the frame: re-rendered with them byte for byte,
+    the frame becomes its typed records, the manifest kept and each image as facts whose pixels are not assessed.
+    A frame the records cannot reproduce (a pixels-unavailable note) stays whole."""
     root, place, _admission, _event = focus
     if kind == "file":
         source = tmp_path / "brief.txt"
@@ -240,13 +263,49 @@ def test_a_frame_the_records_cannot_reproduce_stays_whole(focus, monkeypatch, ch
     retained = ctx._owner_directives[0]
     frame = retained["content"] if isinstance(retained["content"], str) else retained["content"][0]["text"]
     assert "[ATTACHMENTS]" in frame and source.name in frame
-    assert bundle["occasion"]["sources"] == ctx._owner_directives  # the recorded row, whole
-    assert "[ATTACHMENTS]" in prompt
+    shown = bundle["occasion"]["sources"][0]
     if kind == "unreadable_image":
+        assert bundle["occasion"]["sources"] == ctx._owner_directives  # the recorded row, whole
         assert "Pixels unavailable" in frame and "Pixels unavailable" in prompt
+        return
+    assert "content" not in shown and shown["message_text"] == "hello there"
+    assert shown["attachments"].startswith("[ATTACHMENTS]") and source.name in shown["attachments"]
+    assert prompt.count("[ATTACHMENTS]") == 1 and "base64," not in prompt
     if kind == "image":
-        assert [block["type"] for block in retained["content"]] == ["text", "image_url"]
-        assert bundle["occasion"]["sources"][0]["content"][1]["image_url"] == retained["content"][1]["image_url"]
+        [facts] = shown["images"]
+        assert facts["pixels"] == "not assessed" and facts["media_type"].startswith("image/")
+        assert len(facts["sha256"]) == 64 and facts["bytes"] > 0
+    else:
+        assert "images" not in shown
+
+
+def test_a_large_image_raw_payload_and_thread_fit_with_the_text_once(focus, monkeypatch, checker, tmp_path):
+    """A 2 MB screenshot, the provider's raw message and the thread history (the 04.11 TOO_LARGE class): the bundle
+    carries no base64, the correspondent's text once (the thread points at it) and fits the budget."""
+    import os
+    from ouroboros import safety
+    image = pytest.importorskip("PIL.Image")
+    source = tmp_path / "screen.png"
+    image.frombytes("RGB", (1000, 700), os.urandom(1000 * 700 * 3)).save(source)
+    assert source.stat().st_size > 2_000_000
+    root, _place, _admission, _event = focus
+    text = "On the two screenshots the banner texts differ; which one ships? " * 30
+    conversation = {"thread_history": {"status": "available", "data": {"complete": True, "messages": [
+        {"user": "U2", "ts": "1700000000.0", "text": "Banner review thread"},
+        {"user": "person", "ts": "1700000001.0", "text": text}]}}}
+    message = {"message_id": "1700000001.0", "raw": {"type": "message", "text": text, "blocks": [{"type": "rich_text",
+                                                                                                 "text": text}]}}
+    ctx, bundle, prompt = _reply_bundle(root, monkeypatch, checker, staged=[source], text=text,
+                                        conversation=conversation, message=message)
+    assert len(json.dumps(ctx._owner_directives).encode()) > 2_000_000  # the mind saw the pixels
+    assert "base64," not in prompt and len(prompt.encode("utf-8")) < safety._SAFETY_BUNDLE_BYTE_BUDGET
+    assert prompt.count(text.strip()) == 1
+    shown = bundle["occasion"]["sources"][0]
+    assert "raw" not in shown["event"]["message"]
+    assert shown["event"]["conversation"]["thread_history"]["lines"] == [
+        'U2 at 2023-11-14T22:13:20Z: "Banner review thread"',
+        "person at 2023-11-14T22:13:21Z: [this message: its text is message_text]"]
+    assert shown["images"][0]["pixels"] == "not assessed" and shown["images"][0]["bytes"] > 0
 
 
 def test_each_retained_row_is_matched_to_its_own_event(focus, monkeypatch, checker):

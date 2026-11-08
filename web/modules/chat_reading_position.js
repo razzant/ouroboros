@@ -13,7 +13,7 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
     let generation = 0, scheduled = false;
     let mutationDepth = 0;
     let viewportAnchor = null, width = feed.clientWidth;
-    // Every room opens following its newest message (owner decision 2026-10-05).
+    // Every room first opens following its newest message (owner decision 2026-10-05).
     let intent = null;
     // dragging: 'held'/'released' feed scrollbar, or 'owed' to a downward gesture's animation.
     let approximate = false, dragging = '', claimed = null, scrolls = 0, arriving = null, relayout = false;
@@ -212,7 +212,7 @@ export function createChatReadingPosition({ visible, alive, ready, feed, anchors
                 if (event.type === 'keydown' && (event.defaultPrevented
                         || event.target?.closest?.('input, textarea, select, [contenteditable="true"]')
                         || !['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)
-                        || !origin)) return;
+                        || !origin || !visible())) return;  // a key pressed elsewhere is no reading of a room left
                 const y = event.touches?.[0]?.clientY;
                 const direction = event.type === 'wheel' ? Math.sign(event.deltaY)
                     : event.type === 'keydown' ? (['ArrowUp', 'PageUp', 'Home'].includes(event.key) || (event.key === ' ' && event.shiftKey) ? -1 : 1)

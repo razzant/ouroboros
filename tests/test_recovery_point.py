@@ -25,6 +25,7 @@ STORES = ("ouroboros/store.py", "ouroboros/usage_store.py", "ouroboros/evidence_
 def managed(bootstrap, monkeypatch):  # noqa: F811
     repo, drive, calls = bootstrap
     monkeypatch.setenv("OUROBOROS_MANAGED_BY_LAUNCHER", "1")
+    monkeypatch.setenv("OUROBOROS_MANAGED_REPO_DIR", str(repo))  # what the launcher passes (git_ops.launcher_managed_repo_matches)
     monkeypatch.setattr(git_ops_reset, "_SMOKED", {})  # one process: one generation
     first = _git(repo, "rev-list", "--max-parents=0", "HEAD")
     _git(repo, "branch", "ouroboros-stable", first)

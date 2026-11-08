@@ -20,15 +20,15 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D10 | Git, update & release machinery | 40 | 0 |
 | D11 | Gateway, server & Web UI | 115 | 0 |
 | D12 | Settings & configuration | 27 | 0 |
-| D13 | Safety, guards & runtime mode | 11 | 0 |
+| D13 | Safety, guards & runtime mode | 12 | 0 |
 | D14 | Skills & extensions | 72 | 0 |
 | D15 | Memory, knowledge, consciousness & self-evolution | 35 | 0 |
 | D16 | Observability, usage accounting & cost | 31 | 0 |
-| D17 | Projects, workspaces & task results | 55 | 0 |
+| D17 | Projects, workspaces & task results | 56 | 0 |
 | D18 | Launcher, packaging, platform & shared substrate | 40 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
-| D20 | Presence | 24 | 0 |
-| **total** | | **1003** | **0** |
+| D20 | Presence | 25 | 0 |
+| **total** | | **1006** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -964,6 +964,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/place_guard.py`
 - `ouroboros/runtime_mode_policy.py`
 - `ouroboros/safety.py`
+- `ouroboros/safety_evidence.py`
 - `ouroboros/safety_records.py`
 - `ouroboros/shell_parse.py`
 - `ouroboros/tools/deliverables_shell.py`
@@ -1147,6 +1148,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/retention.py`
 - `ouroboros/room_appearances.py`
 - `ouroboros/room_membership.py`
+- `ouroboros/room_messages.py`
 - `ouroboros/routing_wait.py`
 - `ouroboros/session_scratch.py`
 - `ouroboros/store.py`
@@ -1240,6 +1242,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 ### D20 — Presence
 
 - `ouroboros/conversation_lease.py`
+- `ouroboros/own_sends.py`
 - `ouroboros/place_arrivals.py`
 - `ouroboros/place_intake.py`
 - `ouroboros/place_projection.py`

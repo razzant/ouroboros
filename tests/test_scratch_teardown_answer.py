@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import preflight_runner as pr, process_containment, process_lifeline, safe_test_supervisor
-from ouroboros import test_environment, test_evidence, workspace_preflight
+from ouroboros import session_scratch, test_environment, test_evidence
 from ouroboros.process_containment import ProcessContainer
 from ouroboros.process_lifeline import ProcessLifeline
 from ouroboros.process_overload import OverloadWatch
@@ -341,9 +341,9 @@ def test_a_marker_beneath_a_proven_gate_root_keeps_its_folder_and_is_held_by_its
         assert row["containment_tokens"] == result["containment_tokens"] == tokens
         assert (data / "state" / "session_scratch" / ctx.task_id / f"{root.name}.json").is_file()
         # The reader every task's scratch has: the marker holds the tree, and once it is gone the tree goes.
-        assert workspace_preflight.release_session_scratch(drive) and held.is_dir()
+        assert session_scratch.release_session_scratch(drive) and held.is_dir()
         assert retire_synthetic_retention(held / "deep", reason)
-        assert not workspace_preflight.release_session_scratch(drive) and not root.exists()
+        assert not session_scratch.release_session_scratch(drive) and not root.exists()
     finally:
         retire_synthetic_retention(held / "deep", reason)
 

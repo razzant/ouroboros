@@ -344,6 +344,48 @@ def test_questions_beyond_the_pending_bound_are_refused_at_once(tmp_path, monkey
     assert refused_in < 1.0 and decided == ["http://127.0.0.1:9/1", "http://127.0.0.1:9/2"]  # never decided
 
 
+def _line(conn, timeout):
+    conn.settimeout(timeout)
+    data = b""
+    while not data.endswith(b"\n"):
+        chunk = conn.recv(65536)
+        assert chunk, data
+        data += chunk
+    return json.loads(data)
+
+
+def test_a_refused_asker_whose_line_is_still_on_its_way_keeps_its_block(tmp_path, monkeypatch):
+    """The refusal above, with the asker's line arriving after its block. A line landing on a closed
+    socket resets the connection, and Windows then discards the delivered block (WinError 10053), so the
+    block goes out at once while the close waits for the line, but only within the refusal's bound."""
+    monkeypatch.setattr(mcp_browser_guard, "MCP_BROWSER_GUARD_WORKERS", 1)
+    monkeypatch.setattr(mcp_browser_guard, "MCP_BROWSER_GUARD_PENDING", 1, raising=False)
+    with _guard(ToolContext(repo_dir=tmp_path, drive_root=tmp_path)) as guard:
+        entered, release, decided = _held(guard, monkeypatch)
+        try:
+            first = _send(guard, _question(guard, 1))
+            assert entered.wait(5)
+            late = _send(guard, b"")  # connected; its line is not sent yet
+            assert _line(late, 2)["block"].startswith("BROWSER_POLICY_UNAVAILABLE")  # the block does not wait
+            late.settimeout(0.3)
+            with pytest.raises(socket.timeout):
+                late.recv(65536)  # the connection stays open for the promised line
+            late.sendall(_question(guard, 2))
+            late.settimeout(2)
+            assert late.recv(65536) == b""  # the line is taken, then a clean close: no reset
+            late.close()
+            silent = _send(guard, b"")  # never sends its line
+            assert _line(silent, 2)["block"].startswith("BROWSER_POLICY_UNAVAILABLE")
+            silent.settimeout(3)
+            waited = time.monotonic()
+            assert silent.recv(65536) == b"" and time.monotonic() - waited < 1.5  # closed at the bound
+            silent.close()
+        finally:
+            release.set()
+        assert _reply(first, 5) == {"block": ""}
+    assert decided == ["http://127.0.0.1:9/1"]
+
+
 def test_retiring_the_guard_answers_its_queued_questions_and_runs_none_of_them(tmp_path, monkeypatch):
     monkeypatch.setattr(mcp_browser_guard, "MCP_BROWSER_GUARD_WORKERS", 1)
     guard = mcp_browser_guard.BrowserGuard(ToolContext(repo_dir=tmp_path, drive_root=tmp_path))

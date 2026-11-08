@@ -65,6 +65,18 @@ class ExtensionProcessError(RuntimeError):
         self.failure_kind = failure_kind
 
 
+# A tool call's child found another payload than the one its host bound (descriptor ``content_hash``); no handler ran.
+PAYLOAD_REPLACED = "payload_replaced"
+
+
+def _require_bound_payload(skill_name: str, expected: str, found: Any) -> None:
+    if expected and str(found or "") != expected:
+        raise ExtensionProcessError(
+            f"extension {skill_name!r} payload changed after this call was bound "
+            f"(bound {expected[:12]}, found {str(found or '')[:12] or 'none'}); call it again",
+            failure_kind=PAYLOAD_REPLACED)
+
+
 def _format_child_returncode(returncode: int) -> str:
     """Render child deaths in operator-readable form without trusting stderr."""
 
@@ -600,7 +612,8 @@ def _run_child(
         _publish_child_facts(proc, child_started_ts, ws_relay_failures=result.get("ws_relay_failures"),
                              skill_name=str(payload.get("skill_name") or ""))
         if result.get("ok") is not True:
-            raise ExtensionProcessError(str(result.get("error") or "extension child failed"))
+            kind = PAYLOAD_REPLACED if result.get("failure_kind") == PAYLOAD_REPLACED else "error"
+            raise ExtensionProcessError(str(result.get("error") or "extension child failed"), failure_kind=kind)
         return dict(result)
 
 
@@ -830,6 +843,7 @@ def dispatch_extension_tool_subprocess(ext_tool: Dict[str, Any], ctx: ToolContex
             "drive_root": str(dispatch_drive_root),
             "repo_dir": str(repo_dir),
             "skills_repo_path": str(ext_tool.get("skills_repo_path") or repo_dir),
+            "content_hash": str(ext_tool.get("content_hash") or ""),
         },
         skill_dir=skill.skill_dir,
         drive_root=dispatch_drive_root,
@@ -933,7 +947,8 @@ def _skill_for_dispatch(skill_name: str, drive_root: pathlib.Path, skills_repo_p
     return skill
 
 
-def _load_child_extension(skill_name: str, drive_root: pathlib.Path, repo_dir: pathlib.Path, skills_repo_path: pathlib.Path, *, operator_settings: dict | None = None, catalog_settings: dict | None = None) -> Any:
+def _load_child_extension(skill_name: str, drive_root: pathlib.Path, repo_dir: pathlib.Path, skills_repo_path: pathlib.Path, *, operator_settings: dict | None = None, catalog_settings: dict | None = None, expected_content_hash: str = "") -> Any:
+    """Load the skill in this child; a bound tool call (``expected_content_hash``) loads only that payload."""
     from ouroboros.config import load_settings
     from ouroboros.extension_loader import load_extension
     from ouroboros.settings_integrity import settings_read_environ
@@ -952,6 +967,7 @@ def _load_child_extension(skill_name: str, drive_root: pathlib.Path, repo_dir: p
     skill = next((item for item in skills if item.name == skill_name), None)
     if skill is None:
         raise ExtensionProcessError(f"extension skill {skill_name!r} is missing")
+    _require_bound_payload(skill_name, expected_content_hash, skill.content_hash)  # nothing of a replacement imported
     err = load_extension(
         skill,
         settings_reader,
@@ -961,6 +977,13 @@ def _load_child_extension(skill_name: str, drive_root: pathlib.Path, repo_dir: p
     )
     if err:
         raise ExtensionProcessError(err)
+    if expected_content_hash:  # the hash the load itself computed, review-gated and published, before any handler
+        from ouroboros.extension_registry_state import _extensions, _lock
+
+        with _lock:
+            bundle = _extensions.get(skill_name)
+            loaded = bundle.content_hash if bundle is not None else ""
+        _require_bound_payload(skill_name, expected_content_hash, loaded)
     return skill
 
 
@@ -1133,7 +1156,8 @@ def _child_main(input_path: str) -> None:
     try:
         skill = _load_child_extension(skill_name, drive_root, repo_dir, skills_repo_path,
                                       operator_settings=payload.get("operator_settings"),
-                                      catalog_settings=payload.get("catalog_settings") if mode == "catalog" else None)
+                                      catalog_settings=payload.get("catalog_settings") if mode == "catalog" else None,
+                                      expected_content_hash=str(payload.get("content_hash") or "") if mode == "tool" else "")
         if mode == "catalog":
             result = _surface_catalog()
         elif mode == "tool":
@@ -1153,7 +1177,8 @@ def _child_main(input_path: str) -> None:
             except OSError:
                 pass
         else:
-            outcome = {"ok": False, "error": sanitize_tool_result_for_log(f"{type(exc).__name__}: {exc}")}
+            outcome = {"ok": False, "error": sanitize_tool_result_for_log(f"{type(exc).__name__}: {exc}"),
+                       **({"failure_kind": exc.failure_kind} if isinstance(exc, ExtensionProcessError) else {})}
     finally:
         try:
             from ouroboros.extension_loader import unload_extension

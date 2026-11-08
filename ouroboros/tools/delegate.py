@@ -526,7 +526,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                 if refusal:
                     return refusal
             inputs, refusal = start_inputs(ctx, authority, invocation_id, input_files, _prepared_inputs,  # read-only runs
-                                           thread_turn=bool(continuation.request.get("_thread_id")))
+                                           thread_folder=continuation.folder if continuation.request.get("_thread_id") else None)
             if refusal:
                 return refusal
             readonly_root, root, instructions = inputs.scope_root, inputs.scope_root or root, instructions + inputs.instruction

@@ -10,7 +10,8 @@ after its export is retained here (``review_thread_retention``), and over the sa
 managed document imports a finished work can no longer name (``delegate_documents``); an import that
 opens its obligation before the step's first pass sets where that pass starts reading
 (``release_opened``). A managed import owner's terminal write schedules this step even without local files.
-Otherwise waiting tasks run it only in a child running for another job; it yields between operations
+Otherwise waiting tasks, and the one-time ``taken`` walk while it is open (``delegate_result_taken``), run it
+only in a child running for another job; it yields between operations
 to a delegate capture that child's capture pass never had, the rest waiting for the next run.
 What the step newly saved of the engine's answers (``observed``) reaches ``logs/events.jsonl`` once.
 """
@@ -119,20 +120,23 @@ def task_written(txn, task_id, columns):
 
 def _owed(row, inputs):
     """The history-sized steps' own facts: a stopped pass, other inputs (``inputs()``, read only then), or a deadline
-    reached."""
+    reached. Reached includes its own instant: a step that stops at its budget owes the rest at ``time.time()``, and on a
+    coarse clock (Windows, Python 3.10: 15.6 ms) the next read can return that same value."""
     return (row.get("state") == "pending" or row.get("inputs") != inputs()
-            or row.get("next_due") is not None and time.time() > row["next_due"])
+            or row.get("next_due") is not None and time.time() >= row["next_due"])
 
 
 def due(root, row, facts, child):
     """The history-sized steps are owed; or, in a child already running for another job, the ``review_threads``
-    step left tasks waiting (``review_thread_retention.owed``), never by itself a reason to spawn one."""
+    step left tasks waiting (``review_thread_retention.owed``) or its one-time ``taken`` walk is open
+    (``delegate_result_taken.walk_open``), never by itself a reason to spawn one."""
     history_sized = _owed(row, lambda: _inputs(root))
     if history_sized or not child:
         return history_sized
+    from ouroboros.delegate_result_taken import walk_open
     from ouroboros.review_thread_retention import owed
 
-    return owed(row)
+    return owed(row) or walk_open(row)
 
 
 def _capture_arrived(root):

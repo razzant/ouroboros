@@ -4,12 +4,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import place_guard as guard
+from ouroboros import place_guard as guard, tool_effects as _tool_effects
 from ouroboros.places import Place, NoteEntry
 from ouroboros.tools.registry_guards import _capability_resource_guard_result
+from tests._safety_fixtures import supervisor as _supervisor
 from tests.test_tool_effects import published_tool as _published_tool
 
-published_tool = _published_tool
+published_tool, supervisor = _published_tool, _supervisor
+REAL_EFFECT_OF, REAL_CALL_PLACE_FACTS = _tool_effects.effect_of, guard.call_place_facts  # bound before stubs
 
 
 def _only(facts):
@@ -37,7 +39,8 @@ def places(monkeypatch, tmp_path):
     return rows, ctx
 
 
-def test_advises_extension_and_mcp_both_directions(published_tool, places):
+def test_advises_extension_and_mcp_both_directions(published_tool, places, monkeypatch):
+    from ouroboros import tool_effects
     _, ctx = places
     ctx.task_metadata = {"initiator": "consciousness", "consciousness_autonomy": "observe"}
     for effect in ("write", "message", None):
@@ -46,6 +49,10 @@ def test_advises_extension_and_mcp_both_directions(published_tool, places):
     name, tool = published_tool("read")
     assert guard.dispatch_refusal(ctx, name, {}, ext_tool=tool) == ""
     assert "Advises" in guard.dispatch_refusal(ctx, "mcp_demo__read", {}, is_mcp=True)
+    # The server's own readOnlyHint is a declared read, so Advises may call it (disclosed widening).
+    monkeypatch.setattr(tool_effects, "_MCP_ANNOTATIONS", {})
+    tool_effects.record_mcp_annotations("demo", [{"name": "read", "annotations": {"readOnlyHint": True}}])
+    assert guard.dispatch_refusal(ctx, "mcp_demo__read", {}, is_mcp=True) == ""
     ctx.task_metadata["consciousness_autonomy"] = "act"
     assert guard.dispatch_refusal(ctx, "mcp_demo__read", {}, is_mcp=True) == ""
     assert guard.dispatch_refusal(ctx, "read_file", {}) == ""
@@ -100,6 +107,53 @@ def test_one_author_names_task_and_allows_current_or_idle(published_tool, places
     assert guard.dispatch_refusal(ctx, name, {"room": "C2", "thread": "T"}, ext_tool=tool) == ""
 
 
+def test_a_declared_generic_send_meets_the_place_guards_as_a_message(published_tool, places, monkeypatch):
+    """A generic tool's call its connector declares as words is a message here: a Silent place refuses it through
+    its nested target and another turn's conversation names its author; the tool's other calls keep its write."""
+    rows, ctx = places
+    name, tool = published_tool("write", target=[], sends={"when": {"path": "chat.postMessage"}, "text": "body.text",
+                                                              "target": "body.channel", "conversation": "body.channel"})
+    def send(room):
+        return {"path": "chat.postMessage", "body": {"channel": room, "text": "hi"}}
+    assert "Quiet is Silent" in guard.dispatch_refusal(ctx, name, send("C1"), ext_tool=tool)
+    authors = {"service:account:C2:0": "other"}
+    monkeypatch.setattr(guard.conversation_lease, "live_author", lambda key, **kw: authors.get(key, ""))
+    assert "tell_task(task_id='other'" in guard.dispatch_refusal(ctx, name, send("C2"), ext_tool=tool)
+    rows[0] = replace(rows[0], state="active")
+    assert guard.dispatch_refusal(ctx, name, {"path": "pins.add", "body": {"channel": "C2"}}, ext_tool=tool) == ""
+    authors.clear()  # the send now passes and the turn's record keeps the declared words
+    assert guard.dispatch_refusal(ctx, name, send("C2"), ext_tool=tool) == ""
+    assert ctx._place_message_calls[-1]["text"] == "hi"
+
+
+def test_a_verdict_marked_conversation_write_meets_the_one_author_guard(supervisor, published_tool, places, monkeypatch):
+    """A write into a conversation (a reaction, a pin) is not words by itself: the dispatch guard gives it no author
+    lease. When the verdict marks such a call as speech, the guard a message meets at dispatch applies where its
+    targets resolve a place: another turn authoring that conversation refuses it; without the mark it runs."""
+    h = supervisor
+    monkeypatch.setattr(_tool_effects, "effect_of", REAL_EFFECT_OF)
+    monkeypatch.setattr(guard, "call_place_facts", REAL_CALL_PLACE_FACTS)
+    monkeypatch.setattr(guard.conversation_lease, "live_author", lambda key, **kw: "other" if key == "service:account:C2:0" else "")
+    name, tool = published_tool("write", target="room", conversation="room")
+    assert guard.dispatch_refusal(h.ctx, name, {"room": "C2", "emoji": "eyes"}, ext_tool=tool) == ""
+    h.replies.append({"status": "SAFE", "reason": "words to the room", "speech": True})
+    ok, message = h.module.check_safety(name, {"room": "C2", "text": "We will ship Friday."}, ctx=h.ctx)
+    assert not ok and "tell_task(task_id='other'" in message
+    h.replies.append({"status": "SAFE", "reason": "a reaction", "speech": False})
+    assert h.module.check_safety(name, {"room": "C2", "emoji": "eyes"}, ctx=h.ctx) == (True, "")
+    # A flagged one's later re-issue (Cyber Pro) meets the same guard before it is sent despite the check.
+    monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")
+    words = {"room": "C2", "text": "Ship it."}
+    h.replies.append({"status": "DANGEROUS", "reason": "the note asks for a draft first", "speech": True})
+    assert not h.module.check_safety(name, words, ctx=h.ctx)[0]
+    h.later()
+    ok, message = h.module.check_safety(name, words, ctx=h.ctx)
+    assert not ok and "tell_task(task_id='other'" in message
+    monkeypatch.setattr(guard.conversation_lease, "live_author", lambda key, **kw: "")
+    ok, message = h.module.check_safety(name, words, ctx=h.ctx)
+    assert ok and "despite the check" in message
+
+
 @pytest.mark.parametrize(("account_source", "broad_account"), [("focus", "*"), ("call", "")])
 def test_broad_place_uses_resolved_account_for_author_lease(published_tool, tmp_path, broad_account, account_source):
     from ouroboros.conversation_lease import PresenceTurnGate
@@ -145,6 +199,30 @@ def test_supervisor_facts_keep_every_place_once(published_tool, places):
     assert _only(reply)["conversation_key"] == "service:account:C1:0"
 
 
+def test_a_send_into_another_place_carries_its_notes_beside_the_result(published_tool, places, monkeypatch, tmp_path):
+    """Through the real tool-execution seam, in every mode: a send into a place other than the turn's focus carries
+    that place's label and my human's notes beside its result; a send into the focus place and a write carry none."""
+    import json
+    from ouroboros import loop_tool_execution as execution
+    from ouroboros.tools.tool_result import ToolResult
+    _, ctx = places
+    registry = SimpleNamespace(_ctx=ctx, CODE_TOOLS=frozenset(),
+                               execute_result=lambda *a: ToolResult(status="ok", code="OK", text="queued"))
+    monkeypatch.setattr(execution, "persist_call", lambda *a, **k: {})
+
+    def run(name, args):
+        call = {"id": "c1", "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+        return execution._execute_single_tool(registry, call, tmp_path / "logs", "caller")["result"]
+    name, _tool = published_tool("message", target="room", conversation="room")
+    assert run(name, {"room": "C1", "text": "hi"}) == (
+        'queued\n\n[DESTINATION] Quiet: your human\'s notes for this place: "Owner instruction"')
+    ctx.task_metadata = {"focus": {"place_id": "quiet"}}  # the turn's own place: its notes are already in its frame
+    assert run(name, {"room": "C1", "text": "hi"}) == "queued"
+    ctx.task_metadata = {}
+    name, _tool = published_tool("write", target="room", conversation="room")
+    assert run(name, {"room": "C1"}) == "queued"
+
+
 def test_actual_registry_callsite_blocks_and_allows(published_tool, places):
     _, ctx = places
     name, tool = published_tool("message", target="room")
@@ -178,6 +256,24 @@ def test_unreadable_place_store_holds_only_connector_writes(published_tool, plac
     assert guard.call_place_facts(ctx, name, {"channel": "C1"}, ext_tool=tool).get("places_unreadable", "") == (
         "Place records need repair" if declares_place else "")
 
+
+
+def test_unreadable_place_store_judges_a_bound_call_by_its_own_publication(published_tool, places, monkeypatch):
+    """A replacement that no longer provides a place cannot lift the hold from a call bound to the connector."""
+    from ouroboros import extension_registry_state as registry
+    from ouroboros.places import PlaceError
+
+    _, ctx = places
+
+    def broken(root, connector):
+        raise PlaceError("places_unreadable", "places.json", "Place records need repair")
+
+    monkeypatch.setattr(guard.places, "places_of_connector", broken)
+    published_tool.bundle.contributions = [{"provides": "place", "id": "place"}]
+    name, _raw = published_tool("write", target="channel")
+    bound = registry.get_tool_stamped(name)
+    monkeypatch.setattr(registry, "live_contribution_projection", lambda: [])
+    assert "need repair" in guard.dispatch_refusal(ctx, name, {"channel": "C1"}, ext_tool=bound)
 
 @pytest.mark.parametrize("kind,account,owner", [("user", "account", True), ("bot", "account", False), (None, "account", False)])
 def test_call_facts_use_captured_identity_and_user_owner_match(published_tool, places, kind, account, owner):

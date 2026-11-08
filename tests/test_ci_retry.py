@@ -160,8 +160,10 @@ def _rows(node, outcome):
             {"nodeid": node, "phase": "teardown", "outcome": "passed", "error_type": ""}]
 
 
-def _session(outcomes, *, exit, assigned=None, collected=None, collection=(), export=True, journal=()):
-    """A session that writes its projection into the command's --ci-evidence-dir."""
+def _session(outcomes, *, exit, assigned=None, collected=None, collection=(), export=True, journal=(), full=None,
+             block="default_parallel"):
+    """A session that writes its projection into the command's --ci-evidence-dir; its lane is `assigned`
+    unless `full` names a lane that other shards share."""
     def play(directory):
         directory.mkdir(parents=True, exist_ok=True)
         if journal:
@@ -174,8 +176,8 @@ def _session(outcomes, *, exit, assigned=None, collected=None, collection=(), ex
                     "reports": [row for node, outcome in outcomes.items() for row in _rows(node, outcome)],
                     "github": {"sha": SHA, "run_id": RUN, "run_attempt": "1"}}
             if assigned is not None:
-                data["default_parallel"] = {"full": assigned, "file_weights": [["tests/x.py", 1]], "pass": "parallel",
-                                            "shard": [1, 2], "assigned": assigned}
+                data[block] = {"full": assigned if full is None else full, "file_weights": [["tests/x.py", 1]],
+                               "pass": "parallel", "shard": [1, 2], "assigned": assigned}
             (directory / "results.json").write_text(json.dumps(data), encoding="utf-8")
         return exit
     return play
@@ -284,6 +286,26 @@ def test_a_continuation_asks_for_unrun_files_by_path_and_everything_else_by_id(c
     assert code == 0 and requested == [[], [A, x2, "tests/test_y.py"]]
     assert verdict["verdict"] == "flaky" and verdict["not_run"] == [] and verdict["continued"] == 3
     assert ci_retry.round_arguments([y2, y1, x2], {x1: []}) == ["tests/test_y.py", x2]
+
+
+def test_a_lane_that_packs_single_tests_continues_a_shared_file_by_id(ci_retry, monkeypatch, tmp_path):
+    """The UI lane packs single tests into shards, so a file's other tests belong to other shards. The round drops
+    the shard option: asked by its path, the file ran them all here and reconcile-shards refused the shard for
+    executing outside its assignment (run 42395824706, UI shard 3: 7 unrun tests after the session timeout, 69
+    collected). A file the lane shares goes by id; one whose every lane test is pending still goes by path."""
+    x1, x2, y1, y2 = ("tests/test_x.py::test_one", "tests/test_x.py::test_two",
+                      "tests/test_y.py::test_one", "tests/test_y.py::test_two")
+    lane = [A, x1, x2, y1, y2]  # x2 is another shard's.
+    code, verdict, requested = _wrapped(
+        ci_retry, monkeypatch, tmp_path,
+        _session({A: "passed"}, exit=1, assigned=[A, x1, y1, y2], full=lane, block="ui_browser", collected=4),
+        _session({x1: "passed", y1: "passed", y2: "passed"}, exit=0))
+    assert code == 0 and requested == [[], [x1, "tests/test_y.py"]]
+    assert verdict["verdict"] == "green" and verdict["not_run"] == [] and verdict["continued"] == 3
+    assert ci_retry.round_arguments([x1, y1, y2], {A: []}, lane) == [x1, "tests/test_y.py"]
+    # A lane that keeps files whole (or none named) asks for both files by path, as before.
+    assert ci_retry.round_arguments([x1, y1, y2], {A: []}, [A, x1, y1, y2]) == ["tests/test_x.py", "tests/test_y.py"]
+    assert ci_retry.round_arguments([x1, y1, y2], {A: []}) == ["tests/test_x.py", "tests/test_y.py"]
 
 
 def test_a_test_that_never_runs_blocks(ci_retry, monkeypatch, tmp_path):
@@ -531,6 +553,32 @@ def _wrapper(tmp_path, evidence, command, env=None):
 
 def _json(path):
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("last", [True, False], ids=["in-the-last-test", "with-more-to-run"])
+def test_a_session_timeout_stops_only_what_is_left(tmp_path, last):
+    """pytest-timeout asks the session to stop after any test that ends past its deadline, the last one too, and
+    the request alone made the exit status 1: a UI shard whose 313 tests all passed went red, crossing its
+    deadline in the last one (run 42395824706, shard 2). tests/conftest.py ends such a loop as a complete one;
+    with tests left, the session still stops before them."""
+    suite = tmp_path / "suite"
+    (suite / "tests").mkdir(parents=True)
+    expires = textwrap.dedent("""
+        def test_expires(request):
+            import pytest_timeout
+            request.config.stash[pytest_timeout.SESSION_EXPIRE_KEY] = 1.0  # The deadline passes in this test.
+        """)
+    other = "def test_other():\n    pass\n"
+    (suite / "tests" / "test_specimen.py").write_text(other + expires if last else expires + other, encoding="utf-8")
+    completed = subprocess.run(_command(tmp_path, suite, "--session-timeout=600"),
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+    output = completed.stdout + completed.stderr
+    if last:
+        assert completed.returncode == 0, output
+        assert "2 passed" in output and "session-timeout: 600.0 sec exceeded in the last test" in output
+    else:
+        assert completed.returncode == 1, output
+        assert "1 passed" in output and "session-timeout: 600.0 sec exceeded" in output
 
 
 @pytest.mark.parametrize("always", [False, True], ids=["fails-once", "fails-twice"])

@@ -174,3 +174,78 @@ def test_a_pre_send_refusal_carrying_a_sent_capture_keeps_the_no_call_rail(tmp_p
     assert usage["reason_code"] == REASON_OWNER_REQUESTED_FINALIZATION
     assert usage.get("terminal_origin") != "model_final" and trace["forced_finalization"]["source"] != "model"
     assert "a recovery send that must never leave" not in text
+
+
+def test_a_wrap_up_after_the_attempt_reservation_still_runs_one_final_turn(tmp_path, monkeypatch):
+    """The same Wrap up can land after the round's first attempt is reserved but before any bytes (E10 on a
+    fast runner). The production send seam (``llm_attempt._execute_candidate`` under ``llm_fallback._send``'s
+    clause) refuses at its dispatch window, ``_pre_dispatch_failure`` releases the row, and the refusal carries
+    that RELEASED capture. Released is no sent capture: the bounded finalizer runs one tool-less turn,
+    answered by the model, and the first send never leaves (the sent-capture case above keeps its rail)."""
+    from ouroboros import model_wait
+    from ouroboros import usage_accounting as ua
+    from ouroboros.llm_attempt import _execute_candidate, preserve_prior_dispatch
+    from ouroboros.task_results import STATUS_RUNNING, write_task_result
+    from ouroboros.usage_ledger import UsageAccountingError
+    from tests._shared import saved_settings
+    from tests.test_transport_death_retry import _ledger, _loop_kwargs, _no_chain
+
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    saved_settings(monkeypatch, tmp_path, OUROBOROS_MODEL_FALLBACKS="")  # a saved blank: no chain
+    monkeypatch.setattr(loop, "_run_cross_model_fallback_chain", _no_chain)
+    write_task_result(tmp_path, "t-death", STATUS_RUNNING, root_task_id="t-death")
+    final_text = "Verified work summarized after the Wrap up"
+
+    class ReservedLLM:
+        def __init__(self):
+            self.chats, self.sends, self.refusals = 0, 0, []
+
+        def default_model(self):
+            return "test-model"
+
+        @model_wait.model_waitable
+        def chat(self, **_kwargs):
+            self.chats += 1
+            if self.chats > 1:  # the promised final turn
+                return {"role": "assistant", "content": final_text}, {"prompt_tokens": 1, "completion_tokens": 1}
+
+            def wrap_up_while_reserved(_reservation):
+                # The owner's Wrap up, recorded after this attempt's row exists and before its send.
+                intent = cancel_intents.request_cancel(tmp_path, "t-death",
+                    requested_stop_policy=cancel_intents.STOP_POLICY_FINALIZE)
+                assert owner_mailbox.write_owner_message(tmp_path, REASON_OWNER_REQUESTED_FINALIZATION, "t-death",
+                    msg_id=owner_stop_control_id(intent), kind=owner_mailbox.KIND_FINALIZE_NOW)
+
+            def send():
+                self.sends += 1
+                return {"content": "a first send that must never leave"}
+
+            request = ua.AttemptRequest(model="test-model", provider="openrouter", reservation_usd=1.0,
+                                        drive_root=tmp_path, task_id="t-death", root_task_id="t-death",
+                                        source="test.reserved")
+            try:
+                _execute_candidate(request, send, wrap_up_while_reserved)
+            except UsageAccountingError as exc:  # llm_fallback._send's own clause
+                self.refusals.append(exc)
+                preserve_prior_dispatch(exc, None)
+                raise
+            raise AssertionError("the first send passed the owner's Wrap up")
+
+    llm = ReservedLLM()
+    kwargs = _loop_kwargs(tmp_path, llm, [])
+    with model_wait.task_model_wait_scope(task={"id": "t-death"}, drive_root=tmp_path, event_queue=None,
+                                          worker_slot_held=True) as owner:
+        owner.tool_context = kwargs["tools"]._ctx
+        text, usage, trace = loop.run_llm_loop(**kwargs)
+
+    # The premise, as the real producers built it: refused at the dispatch window after the reservation,
+    # nothing sent, and the refusal carries the RELEASED row it reserved.
+    (refusal,) = llm.refusals
+    assert isinstance(refusal, PhysicalDispatchInterrupted) and refusal.control_reason == "finalize_requested"
+    assert refusal.physical_attempt_capture.state == "released" and llm.sends == 0
+    assert [row["state"] for row in _ledger(tmp_path)] == ["released"]
+    # The contract: exactly ONE final turn after the refused call, answered by the model.
+    assert llm.chats == 2 and text == final_text
+    assert usage["reason_code"] == REASON_OWNER_REQUESTED_FINALIZATION
+    assert usage["terminal_origin"] == "model_final"
+    assert trace["forced_finalization"]["source"] == "model"

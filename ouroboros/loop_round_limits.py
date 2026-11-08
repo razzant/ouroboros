@@ -239,15 +239,19 @@ def _drain_incoming_messages(
                 provenance = str(entry.get("provenance") or "ancestor_task")
                 arrival = entry.get("place_arrival") if isinstance(entry.get("place_arrival"), dict) else {}
                 if provenance == "place_event":
+                    from ouroboros.place_intake import arrival_owner_words
                     from ouroboros.presence_continuation import note_place_delivery
                     note_place_delivery(owner_ctx, entry, controls)  # the event is context; my human's words are theirs
-                    if confirmed := arrival.get("confirmed_words") or arrival.get("owner_words"):  # provenance, as at the opening
-                        from ouroboros.owner_words import PLACE_CONFIRMED, place_reply_target
+                    arrival = {**arrival, "confirmed_words": arrival_owner_words(owner_ctx, drive_root, entry)}  # now
+                    entry = {**entry, "place_arrival": arrival}  # its delivered prefix reads the same fact
+                    if confirmed := arrival["confirmed_words"]:  # provenance, as at the opening
+                        from ouroboros.owner_words import PLACE_CONFIRMED, place_row_facts
                         from ouroboros.presence_runner import presence_chat_id
                         room = presence_chat_id(str((entry.get("sender_origin") or {}).get("conversation_key") or ""))
                         _loop()._record_owner_directive(owner_ctx, source=PLACE_CONFIRMED, carried=True,
                             content=confirmed, msg_id=f"chat {room} / {arrival.get('source_event_id') or ''}",
-                            reply_to=place_reply_target(arrival.get("message")), origin=_arrival(received=entry.get("ts")))
+                            **place_row_facts(arrival.get("conversation_id"), arrival.get("message"),
+                                              _arrival(received=entry.get("ts"))))
                 if provenance not in CONTEXT_ONLY_TASK_PROVENANCES:
                     _loop()._record_owner_directive(
                         owner_ctx, content=dmsg, msg_id=str(entry.get("msg_id") or ""),
@@ -332,7 +336,7 @@ def _drain_incoming_messages(
             _loop()._record_owner_directive(
                 owner_ctx,
                 source="owner_mailbox",
-                content=_owner_content(entry, drive_root, task_id),
+                content=_owner_content(entry, drive_root, task_id), words=dmsg,  # the rendering, its exact text beside
                 msg_id=str(entry.get("msg_id") or ""),
                 # The same message relayed, or read from its room, is one row: its room and client id name it.
                 origin={**_arrival(held, entry.get("ts")), "client_message_id": entry.get("client_message_id")},
@@ -997,17 +1001,19 @@ def _handle_model_wait_control(
         # already interrupted in flight keeps the ordinary unknown no-resend rail.
         return _handle_provider_unavailable(ctx, error_kind="provider_outcome_unknown") if unknown else None
     from ouroboros.llm_attempt import PhysicalDispatchInterrupted
+    from ouroboros.usage_accounting import POSITIVE_PHYSICAL_ATTEMPT_STATES
 
     previous = getattr(error, "previous_error", None)
-    if (reason == "finalize_requested" and first_line == REASON_OWNER_REQUESTED_FINALIZATION and capture is None
+    sent = getattr(capture, "state", None) in POSITIVE_PHYSICAL_ATTEMPT_STATES
+    if (reason == "finalize_requested" and first_line == REASON_OWNER_REQUESTED_FINALIZATION and not sent
             and (previous is None or isinstance(previous, PhysicalDispatchInterrupted))):
         # A fresh Wrap up can arrive after this round's mailbox drain but before
         # the model call. Rejoin its existing bounded finalizer; no provider wait
         # was interrupted, and the real drain above consumed this control. So does
         # a refusal at an admission before any request bytes (a tool the Wrap up
-        # kept from starting, an unsent call), unless it carries a sent capture
-        # (``preserve_prior_dispatch``). Older transport episodes and unresolved
-        # wire attempts keep their no-call rails.
+        # kept from starting, an unsent call, an attempt reserved and released
+        # unsent), unless it carries a sent capture (``preserve_prior_dispatch``).
+        # Older transport episodes and unresolved wire attempts keep their no-call rails.
         no_call_source, _ = _loop().provider_no_call_source(ctx.accumulated_usage, False)
         if (no_call_source == "provider_outcome_unknown_no_resend"
                 and not isinstance(ctx.accumulated_usage.get(TRANSPORT_DEATHS_KEY), dict)):

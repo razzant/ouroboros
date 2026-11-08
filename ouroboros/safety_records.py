@@ -52,7 +52,8 @@ def _record_task_checks(ctx: Optional[Any], event: Dict[str, Any]) -> None:
         return
     kind = event.get("type")
     chips = {"safety_sent_despite_check": ("sent_despite",), "safety_hold": ("held",),
-             "safety_mode_skip": ("not_checked",), "safety_declared_read_skip": ("not_checked",)}.get(kind, ())
+             "safety_mode_skip": ("not_checked",), "safety_declared_read_skip": ("not_checked",),
+             "safety_sent_without_assessment": ("not_checked",)}.get(kind, ())
     if kind == "safety_verdict":
         chips = tuple(dict.fromkeys("checked" if verdict["status"] == "SAFE" else "warned"
                                    for verdict in event.get("verdicts", ()) if verdict.get("status")))
@@ -125,6 +126,20 @@ def _record_safety_usage(ctx: Optional[Any], usage_payload: Dict[str, Any]) -> N
     update_budget_from_usage(usage_payload)
 
 
+def _canonical_logs(ctx: Optional[Any], logs: pathlib.Path) -> Optional[pathlib.Path]:
+    """The canonical shared ``logs`` directory when ``logs`` belongs to a per-task drive, else None.
+
+    A per-task drive is pruned two days after its task; the shared log keeps the audit. When the
+    drive is the canonical root the one row already landed there, so nothing is written twice."""
+    from ouroboros.preflight_receipts import canonical_data_root
+
+    root = canonical_data_root(ctx)
+    if root is None:
+        return None
+    canonical = (pathlib.Path(root) / "logs").resolve(strict=False)
+    return None if canonical == pathlib.Path(logs).resolve(strict=False) else canonical
+
+
 def _emit_durable_safety_event(ctx: Optional[Any], event: Dict[str, Any]) -> None:
     """Emit a safety audit event durably AT THE MOMENT of the decision (v6.54.3).
 
@@ -132,8 +147,9 @@ def _emit_durable_safety_event(ctx: Optional[Any], event: Dict[str, Any]) -> Non
     append into the drive's events.jsonl — the per-worker log sink forwards
     appended lines to the live dashboard, so no separate queue put is needed and
     a queued-but-undrained event can never be lost to a worker death (review
-    round 9, P3). The event_queue is only the last resort for contexts with no
-    drive_logs at all."""
+    round 9, P3). A per-task drive's row is also appended to the canonical shared
+    log (``_canonical_logs``), which outlives the drive's pruning. The event_queue
+    is only the last resort for contexts with no drive_logs at all."""
     payload = {
         "task_id": str(getattr(ctx, "task_id", "") or "") if ctx is not None else "",
         "ts": utc_now_iso(),
@@ -148,7 +164,10 @@ def _emit_durable_safety_event(ctx: Optional[Any], event: Dict[str, Any]) -> Non
         if callable(drive_logs):
             from ouroboros.utils import append_jsonl
 
-            if append_jsonl(drive_logs() / "events.jsonl", payload):
+            logs = drive_logs()
+            if append_jsonl(logs / "events.jsonl", payload):
+                if (shared := _canonical_logs(ctx, logs)) is not None and not append_jsonl(shared / "events.jsonl", payload):
+                    log.error("durable safety event %s not copied to the shared log", event.get("type") or "?")
                 return
             # append_jsonl answers whether the row landed (its documented contract for
             # important events); a False here means the durable half of the disclosure

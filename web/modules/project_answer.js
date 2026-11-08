@@ -87,9 +87,10 @@ function refreshFoldsSoon() {
         queued = false;
         // A sleeping row ([data-laid], chat_row_sleep.js) keeps the fold it was measured with at this width: a row that
         // changes wakes, a new width wakes every row, and a feed that is not shown puts none to sleep. Measuring it
-        // would lay it out alone. The rest are measured together, then marked together: one layout serves them all.
+        // would lay it out alone. A room kept away has no size to measure and keeps its folds until it is back. The rest
+        // are measured together, then marked together: one layout serves them all.
         const due = [...document.querySelectorAll('.chat-bubble.project-answer')]
-            .filter((bubble) => !bubble.closest('[data-resizing], [data-laid]'));
+            .filter((bubble) => !bubble.closest('[data-resizing], [data-laid], .chat-instance-panel[hidden]'));
         batch(() => due.forEach(refreshProjectAnswerFold));
     }));
 }

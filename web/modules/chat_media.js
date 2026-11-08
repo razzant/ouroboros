@@ -976,10 +976,12 @@ export function createChatMedia({
         }
     }
 
-    // The chat left the screen: the reader or file dialog a card opened closes, nothing else.
-    function closeTransient() {
+    // The chat left the screen: the reader or file dialog a card opened closes, nothing else; a room another place
+    // replaces (`pause`) also pauses what plays, each player keeping its place.
+    function closeTransient(pause = false) {
         reader.close({ restoreFocus: false });
         closeFileDialog();
+        if (pause) for (const player of playerRegistry) { try { player.pause(); } catch {} }
     }
 
     // Release only the evicted page's subtree; other media and copy controls

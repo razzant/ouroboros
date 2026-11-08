@@ -383,13 +383,13 @@ def _assisted_head_state(tx: Dict[str, Any]) -> str:
     return "unknown"
 
 
-def acquire_update_lock():
+def acquire_update_lock(*, restart: bool = False):
     """Acquire the managed-update lock while serializing the ownership decision.
 
-    The short bootstrap lock is released after the durable update lock is held;
-    adoption authorization then probes the managed lock and cannot claim the
-    checkout after this admission point. The long update operation keeps only
-    ``managed_update.lock``.
+    The short bootstrap lock is released after the durable update lock is held; adoption authorization then
+    probes the managed lock and cannot claim the checkout after this admission point. The long update operation
+    keeps only ``managed_update.lock``. An ``authorized`` handoff holds nothing (``holds_checkout``): it refuses
+    an update, never the ``restart`` that binds it or leaves it to the next boot (``_safe_restart_serialized``).
     """
     from ouroboros.platform_layer import file_lock_exclusive_nb
     from supervisor.git_ops import bootstrap_transition_lock
@@ -398,9 +398,8 @@ def acquire_update_lock():
     transition.__enter__()
     try:
         from ouroboros import body_adoption
-
-        handoff = body_adoption.read(_g.DRIVE_ROOT)
-        if handoff.get("phase") in {"authorized", "armed", "switching", "switched", "stuck"}:
+        phase = body_adoption.read(_g.DRIVE_ROOT).get("phase")
+        if phase in {"armed", "switching", "switched", "stuck"} or (phase == "authorized" and not restart):
             raise RuntimeError("body adoption owns the checkout")
         lock_dir = _g.DRIVE_ROOT / "locks"
         lock_dir.mkdir(parents=True, exist_ok=True)

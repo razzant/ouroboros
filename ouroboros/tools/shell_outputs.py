@@ -2,11 +2,13 @@
 
 Owns the protected and credential-like refusals that keep a control-plane or
 secret path out of the deliverable store, the complete file/directory
-fingerprints that decide whether a declared output actually changed, and the
-copy into the task artifact store. The allowed artifact roots and the lexical
-audit that notices an undeclared user_files deliverable live with the upstream
-extraction in ``tools/shell_audit.py``; the handlers that call this surface
-stay with ``tools/shell.py``.
+fingerprints that decide whether a declared output actually changed, and its
+capture in the task artifact store: an output this run left unchanged reuses
+its proven current canonical capture, and otherwise is copied like any other.
+The allowed artifact roots and the lexical audit that notices an undeclared
+user_files deliverable live with the upstream extraction in
+``tools/shell_audit.py``; the handlers that call this surface stay with
+``tools/shell.py``.
 """
 
 from __future__ import annotations
@@ -19,8 +21,12 @@ import pathlib
 import stat
 from typing import Dict, List
 
-from ouroboros.artifacts import copy_directory_to_task_artifacts, copy_file_to_task_artifacts, iter_artifact_tree, stream_artifact_file
-from ouroboros.artifact_directories import iter_artifact_entries
+from ouroboros.artifacts import (
+    artifact_store_path_block_reason, copy_directory_to_task_artifacts, copy_file_to_task_artifacts,
+    iter_artifact_tree, registered_source_capture,
+    stream_artifact_file,
+)
+from ouroboros.artifact_directories import current_directory_capture, iter_artifact_entries
 from ouroboros.runtime_mode_policy import (
     is_protected_runtime_path,
 )
@@ -123,6 +129,8 @@ def _protected_output_source_reason(
                 return ""
             task_drive = resource_root_path(ctx, "task_drive")
             artifact_store = resource_root_path(ctx, "artifact_store")
+            if path_is_relative_to(source, artifact_store):
+                return artifact_store_path_block_reason(source, base_path=artifact_store)
             if not (path_is_relative_to(source, task_drive) or path_is_relative_to(source, artifact_store)):
                 return "runtime data output is not a user deliverable; use task_drive or artifact_store"
     except Exception:
@@ -518,6 +526,18 @@ def _scan_directory_output_members(
     return sorted(members), dir_size, "", skipped
 
 
+def _current_file_capture(ctx: ToolContext, source: pathlib.Path, fingerprint: tuple[bool, int, str]) -> dict | None:
+    """The source's registered capture (a store file's own row, else its mutable copy) when its row and its
+    retained bytes both hold the fingerprinted source bytes, else None: an absent, stale, corrupt or
+    unreadable capture is no proof."""
+    try:
+        row = registered_source_capture(ctx, source)
+        measured = stream_artifact_file(row["path"], expected=row) if row and row.get("sha256") else None
+    except (OSError, ValueError, RuntimeError):
+        return None
+    return row if measured == {"size": fingerprint[1], "sha256": fingerprint[2]} else None
+
+
 def _record_skipped_members(ctx: ToolContext, output: str, members: List[str]) -> None:
     """The COMPLETE skip list as one durable row in the task's ``events.jsonl`` (the rendered
     note is bounded); a context without a log root falls back to the process log."""
@@ -544,13 +564,14 @@ def _register_process_outputs(
     binding: ResolvedResourceBinding | None = None,
     output_context: DockerOutputContext | None = None,
 ) -> tuple[str, bool, bool]:
-    """Copy declared command outputs into the task artifact store."""
+    """Capture declared command outputs in the task artifact store; the third value is True only
+    when this call created or repaired a canonical record (``artifact_registered``)."""
 
     if not outputs:
         return "", False, False
     notes: list[str] = []
     failed = False
-    registered = False  # at least one canonical artifact record was actually created
+    registered = False  # at least one canonical artifact record was actually created or repaired
     for raw_item in outputs:
         text = str(raw_item or "").strip()
         try:
@@ -586,15 +607,20 @@ def _register_process_outputs(
             continue
         before = (before_outputs or {}).get(str(source), (False, -1, ""))
         after = _fingerprint_output(source, resolved_output=resolved)
-        if before[0] and before == after:
-            # Present-but-unchanged is NOT a failure (a deterministic re-run, or a
-            # command that re-verifies an existing artifact): note it cosmetically
-            # and skip re-registration. "Did it actually work?" lives on the
-            # objective/review axis, not the tool-execution axis (Bible P5). A
-            # genuinely MISSING declared output above stays a blocking failure.
-            notes.append(f"unchanged output (cosmetic): {text}")
-            continue
+        # Present-but-unchanged is NOT a failure (a deterministic re-run, or a command that re-verifies
+        # an existing artifact), and it is still a declared deliverable: only a proven current canonical
+        # capture, or a directory with nothing exportable, makes it a cosmetic note; an absent, stale or
+        # corrupt capture is registered as usual. "Did it actually work?" lives on the objective/review
+        # axis, not the tool-execution axis (Bible P5). A genuinely MISSING declared output above stays
+        # a blocking failure.
+        unchanged = before[0] and before == after
         if source.is_file():
+            capture = _current_file_capture(ctx, source, after) if unchanged else None
+            if capture:
+                notes.append(f"unchanged output (cosmetic): {text}; current capture artifact_store:{capture['name']} "
+                             f"sha256={capture['sha256'][:12]}")
+                continue
+            since = " (existing output, captured as found)" if unchanged else ""  # equal digests before and after
             try:
                 record = copy_file_to_task_artifacts(ctx, source, kind="process_output")
             except OSError as exc:
@@ -605,7 +631,7 @@ def _register_process_outputs(
                 registered = True
                 notes.append(
                     f"registered output {source} -> artifact_store:{record.get('name')} "
-                    f"sha256={str(record.get('sha256') or '')[:12]}"
+                    f"sha256={str(record.get('sha256') or '')[:12]}{since}"
                 )
             else:
                 notes.append(f"failed output copy {text}: source is not a regular file")
@@ -638,17 +664,23 @@ def _register_process_outputs(
                 notes.append(f"blocked directory output: {blocked_member}")
                 failed = True
                 continue
+            if not dir_members and unchanged:  # nothing to capture, and nothing this run changed
+                notes.append(f"unchanged output (cosmetic): {text}; no exportable members")
+                continue
             if not dir_members:
                 notes.append(f"failed directory output copy {text}: no exportable members")
                 failed = True
                 continue
+            members = {"member_sources": dir_members} if resolved else {"member_paths": dir_members}
+            # The stat baseline is no byte identity: the admitted members' digests decide reuse, and the
+            # registration note claims no pre-run content.
+            capture = current_directory_capture(ctx, source, kind="process_output_directory", **members) if unchanged else []
+            if capture:
+                notes.append(f"unchanged output (cosmetic): {text}; current capture artifact_store:"
+                             + ", ".join(str(record.get("name") or "") for record in capture))
+                continue
             try:
-                records = copy_directory_to_task_artifacts(
-                    ctx,
-                    source,
-                    kind="process_output_directory",
-                    **({"member_sources": dir_members} if resolved else {"member_paths": dir_members}),
-                )
+                records = copy_directory_to_task_artifacts(ctx, source, kind="process_output_directory", **members)
             except OSError as exc:
                 notes.append(f"failed directory output copy {text}: {type(exc).__name__}: {exc}")
                 failed = True
