@@ -100,12 +100,12 @@ def project_output(root, metadata, task_id, output):
     return dict(output)
 
 
-def conversation_send_tools(connector: str) -> list:
-    """The connector's declared ``effect: message`` tools whose targets all lie within one conversation identity
-    (account, conversation, thread) and that name a conversation argument: the doors through which words reach the
-    place a focus speaks in. Read from the published declarations the dispatcher uses; no connector is named here."""
+def _conversation_effect_tools(connector: str, effect_name: str) -> list:
+    """The connector's declared tools of one effect whose targets all lie within one conversation identity (account,
+    conversation, thread; a gesture's message too) and that name a conversation argument. Read from the published
+    declarations the dispatcher uses; no connector is named here."""
     from ouroboros import extension_registry_state as registry
-    from ouroboros.tool_effects import EFFECT_MESSAGE, effect_of
+    from ouroboros.tool_effects import EFFECT_GESTURE, effect_of
 
     if not connector:
         return []
@@ -115,10 +115,26 @@ def conversation_send_tools(connector: str) -> list:
     found = []
     for name, tool in tools:
         effect = effect_of(name, ext_tool=tool)
-        if (effect.declared and effect.effect == EFFECT_MESSAGE and effect.conversation
-                and set(effect.targets) <= {"account_id", effect.conversation, effect.thread}):
+        # A gesture acts on one message, so its door must name the argument carrying that message's id.
+        gesture = effect.effect == EFFECT_GESTURE
+        if (effect.declared and effect.effect == effect_name and effect.conversation
+                and (effect.message or not gesture)
+                and set(effect.targets) <= {"account_id", effect.conversation, effect.thread,
+                                            *((effect.message,) if gesture else ())}):
             found.append((name, effect))
     return found
+
+
+def conversation_send_tools(connector: str) -> list:
+    """The declared ``effect: message`` doors through which words reach the place a focus speaks in."""
+    from ouroboros.tool_effects import EFFECT_MESSAGE
+    return _conversation_effect_tools(connector, EFFECT_MESSAGE)
+
+
+def conversation_gesture_tools(connector: str) -> list:
+    """Declared ``gesture`` doors: a nonverbal response (a reaction) on one message of a place, not speech."""
+    from ouroboros.tool_effects import EFFECT_GESTURE
+    return _conversation_effect_tools(connector, EFFECT_GESTURE)
 
 
 def records_only(metadata) -> bool:
@@ -147,17 +163,19 @@ def records_only_now(ctx) -> bool:
 
 
 def riding_sends(ctx, calls) -> list:
-    """This response's successful sends into the turn's own conversation: words that reach people beside the finish
-    they ride with. Two proofs: a ``tool_delivered`` finish beside a call whose delivery receipts the host matched to
-    this conversation (``presence_delivery_confirmed``, re-checked against ``confirmed_delivery_receipts``; the #2538
-    contract, kept; today only the frozen legacy completion fixture produces that outcome), or the event's own
-    connector's declared send tool addressing this conversation (the records form, whatever the finish says). A
-    refused or failed send is ``is_error`` and stays a result to read."""
+    """This response's successful sends and gestures into the turn's own conversation: what reaches people beside the
+    finish it rides with. Three proofs: a ``tool_delivered`` finish beside a call whose delivery receipts the host
+    matched to this conversation (``presence_delivery_confirmed``, re-checked against ``confirmed_delivery_receipts``;
+    the #2538 contract, kept; today only the frozen legacy completion fixture produces that outcome), the event's own
+    connector's declared send or gesture tool addressing this conversation, or its gesture tool naming the waking
+    message exactly (``_gesture_on_waking_message``). A refused or failed call is ``is_error`` and stays a result."""
     from ouroboros.place_guard import call_place_facts
 
     metadata = getattr(ctx, "task_metadata", {}) or {}
     carrier = reply_carrier(metadata)
-    tools = {name for name, _effect in conversation_send_tools(str((metadata.get("presence") or {}).get("transport_skill") or ""))}
+    connector = str((metadata.get("presence") or {}).get("transport_skill") or "")
+    gestures = dict(conversation_gesture_tools(connector))
+    tools = {name for name, _effect in conversation_send_tools(connector)} | set(gestures)
     delivered = (getattr(ctx, "_presence_completion", None) or {}).get("outcome") == "tool_delivered"
     riding = []
     for call in calls or []:
@@ -171,41 +189,103 @@ def riding_sends(ctx, calls) -> list:
             continue
         if not carrier or call.get("tool") not in tools:
             continue
-        facts = call_place_facts(ctx, str(call["tool"]), call.get("args") if isinstance(call.get("args"), dict) else {})
-        if any(carrier["conversation_key"] in (row.get("conversation_keys") or ()) for row in facts.get("places") or []):
+        args = call.get("args") if isinstance(call.get("args"), dict) else {}
+        facts = call_place_facts(ctx, str(call["tool"]), args)
+        rows = facts.get("places") or []
+        if (any(carrier["conversation_key"] in (row.get("conversation_keys") or ()) for row in rows)
+                or (call["tool"] in gestures and _gesture_on_waking_message(metadata, gestures[call["tool"]], args)
+                    and _waking_event_place(ctx, metadata, connector) == carrier["place_id"])):
             riding.append(call)
     return riding
 
 
+def _gesture_on_waking_message(metadata, effect, args) -> bool:
+    """A gesture door that need not name a thread lands in this turn's conversation only by its exact message:
+    the waking message's id, conversation and (where targeted) account. Any other message stays a result to read."""
+    event = (metadata.get("presence") or {}).get("event") or {}
+    message_id = waking_message_id(event)
+    return bool(message_id and str(args.get(effect.message) or "") == message_id
+                and str(args.get(effect.conversation) or "") == str(event.get("conversation_id") or "")
+                and ("account_id" not in effect.targets or "account_id" not in args
+                     or str(args["account_id"]) == str(event.get("account_id") or "")))
+
+
+def _waking_event_place(ctx, metadata, connector) -> str:
+    """The current Place the waking message's retained account, conversation and thread resolve to, or ``""``.
+    A threadless call naming that exact message resolves no row of a thread-scoped Place (a migrated legacy binding);
+    the message's own thread does, through the same matcher dispatch uses."""
+    from ouroboros.place_guard import _drive_root
+    from ouroboros.places import PlaceError, place_for_target
+
+    event = (metadata.get("presence") or {}).get("event") or {}
+    root = _drive_root(ctx)
+    targets = {key: [str(event[key])] for key in ("account_id", "conversation_id", "thread_id") if event.get(key)}
+    if not root or not connector or not targets.get("conversation_id"):
+        return ""
+    try:
+        place, _known = place_for_target(root, connector=connector, targets=targets, conversation="conversation_id",
+                                         thread="thread_id", provider=str(event.get("provider") or ""))
+    except PlaceError:
+        return ""
+    return place.place_id if place is not None else ""
+
+
+def waking_message_id(event) -> str:
+    """The waking message's provider id, only as the connector normalized it (``event.message.message_id``)."""
+    message = event.get("message") if isinstance(event, dict) and isinstance(event.get("message"), dict) else {}
+    value = message.get("message_id")
+    return str(value).strip() if isinstance(value, (str, int)) and not isinstance(value, bool) else ""
+
+
 def speak_line(metadata) -> str:
-    """How words reach this place, from the connector's declarations and the event's own ids: every send tool the
-    connector declares for this conversation, each with its own arguments (the host picks none: a pick would be a
-    verdict), that the finish is a record (or held), or posted where no such tool exists."""
+    """How words and declared gestures reach this place: every declared door with its own arguments, ids prefilled
+    from the event (the host picks none: a pick would be a verdict), and the finish's fate. A connector with a send
+    door makes the finish a record; one with only gesture doors keeps posting a non-silent finish as words."""
     from ouroboros.consciousness_authority import is_observe_origin
 
     metadata = metadata if isinstance(metadata, dict) else {}
     presence = metadata.get("presence") or {}
     event, place = presence.get("event") or {}, presence.get("place") or {}
     label = place.get("label") or place.get("provider") or presence.get("place_id") or "this place"
-    tools = conversation_send_tools(str(presence.get("transport_skill") or "")) if metadata.get("wake_cause") == "focus" else []
-    if not tools:
+    connector = str(presence.get("transport_skill") or "")
+    focus = metadata.get("wake_cause") == "focus"
+    tools = conversation_send_tools(connector) if focus else []
+    gestures = conversation_gesture_tools(connector) if focus else []
+    if not tools and not gestures:
         return f"Your non-silent finish is posted in {label} as your words."
-    doors = []
-    for name, effect in tools:
+    message_id = waking_message_id(event)
+
+    def door(name, effect, kind):
         args = [f"{effect.conversation}={event.get('conversation_id') or '…'}"]
         if effect.thread and event.get("thread_id"):
             args.append(f"{effect.thread}={event['thread_id']}")
         if "account_id" in effect.targets and event.get("account_id"):
             args.append(f"account_id={event['account_id']}")
-        doors.append(f"{name} ({', '.join(args)})")
+        if kind == "gesture":
+            args.append(f"{effect.message}={message_id or '…'}")
+        return f"{kind + ': ' if gestures else ''}{name} ({', '.join(args)})"
+
+    doors = [door(name, effect, "words") for name, effect in tools] + [door(name, effect, "gesture") for name, effect in gestures]
     through = ("one of " if len(doors) > 1 else "") + "; ".join(doors)
+    act = "send or gesture" if gestures else "send"
     state = str(place.get("state") or "")
-    held = (f" ({label} is {state.title()}: a send is refused and your finish is held for your human, not posted)"
+    held = (f" ({label} is {state.title()}: a {act} is refused and your finish is held for your human, not posted)"
             if state in {"silent", "paused"} else
-            " (autonomy is Advises: a send is refused and your finish is held for your human, not posted)"
+            f" (autonomy is Advises: a {act} is refused and your finish is held for your human, not posted)"
             if is_observe_origin(metadata) else "")
-    return (f"Words reach {label} only when you send them, through {through}; a send may ride in the same "
-            f"response as your finish. Your finish is your record, never posted{held}.")
+    target = ("" if not gestures else
+              " A gesture is a response, not speech. Its prefilled message id is the waking message; another message's "
+              "exact id from this conversation is valid too." if message_id else
+              " A gesture is a response, not speech. This event carries no id for the waking message: name an exact "
+              "message id you know from this conversation.")
+    if not tools:
+        return (f"Your non-silent finish is posted in {label} as your words{held}. A gesture reaches it only when you "
+                f"call it, through {through}; to answer with the gesture alone, finish with silent=true.{target}")
+    if not gestures:
+        return (f"Words reach {label} only when you send them, through {through}; a send may ride in the same "
+                f"response as your finish. Your finish is your record, never posted{held}.")
+    return (f"Words or a gesture reach {label} only when you call its door, through {through}; either may ride in "
+            f"the same response as your finish. Your finish is your record, never posted{held}.{target}")
 
 
 def record_note(ctx) -> str:

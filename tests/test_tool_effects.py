@@ -32,7 +32,7 @@ def test_published_manifest_only_and_generation_match(published_tool, tmp_path, 
     fact = effects.effect_of(name, ext_tool=descriptor)
     assert (fact.effect, fact.declared, fact.targets, fact.conversation, fact.thread) == (
         "message", True, ("to", "cc", "bcc"), "room", "thread")
-    assert effects.effect_of(name) == fact  # Safety has no descriptor argument.
+    assert effects.effect_of(name) == fact  # Unbound lookup agrees while the generation is current.
     published_tool.bundle.generation_digest = "generation-two"
     published_tool.bundle.loaded_skill.manifest.raw_extra["tools"][0]["effect"] = "read"
     assert effects.effect_of(name, ext_tool=descriptor).effect == "write"
@@ -41,8 +41,42 @@ def test_published_manifest_only_and_generation_match(published_tool, tmp_path, 
     assert effects.effect_of(name, ext_tool=descriptor).effect == "read"
 
 
+def test_published_gesture_declares_message_argument(published_tool):
+    name, descriptor = published_tool("gesture", target="channel", conversation="room", message="ts")
+    fact = effects.effect_of(name, ext_tool=descriptor)
+    assert (fact.effect, fact.declared, fact.targets, fact.conversation, fact.message) == (
+        "gesture", True, ("channel",), "room", "ts")
+
+
+
+def test_a_loader_descriptor_keeps_its_own_publications_declaration(published_tool):
+    """``get_tool`` captures the declaration with the handler: a replacement changes only later reads."""
+    name, raw = published_tool("message", target="channel", conversation="channel", message="ts")
+    published_tool.bundle.contributions = [{"provides": "place", "id": "place"}]
+    bound = registry.get_tool_stamped(name)
+    published_tool.bundle.generation_digest = raw["extension_generation"] = "generation-two"
+    published_tool.bundle.loaded_skill.manifest.raw_extra["tools"] = [{"name": "operate", "effect": "read"}]
+    published_tool.bundle.contributions = []
+    fact = effects.effect_of(name, ext_tool=bound)
+    assert (fact.effect, fact.declared, fact.targets, fact.conversation, fact.message) == (
+        "message", True, ("channel",), "channel", "ts")
+    assert effects.bound_declaration(bound)["provides_place"] is True
+    later = registry.get_tool_stamped(name)
+    assert effects.effect_of(name, ext_tool=later).effect == "read"
+    assert effects.bound_declaration(later)["provides_place"] is False
+
+
+def test_a_declaration_naming_another_generation_is_never_trusted(published_tool):
+    """A raw or child-catalog descriptor can carry another process's capture; only the host's own read counts."""
+    name, raw = published_tool("write")
+    raw[registry.REVIEWED_DECLARATION] = {"extension_generation": "child-generation", "provides_place": False,
+                                          "tool": {"name": "operate", "effect": "read"}}
+    assert effects.bound_declaration(dict(raw)) is None
+    assert effects.effect_of(name, ext_tool=dict(raw)).effect == "write"
+    assert effects.effect_of(name, ext_tool=registry.get_tool_stamped(name)).effect == "write"
+
 @pytest.mark.parametrize("value,expected,declared", [
-    ("read", "read", True), ("message", "message", True), ("write", "write", True),
+    ("read", "read", True), ("message", "message", True), ("gesture", "gesture", True), ("write", "write", True),
     (None, "write", False), ("mixed", "write", False), (["read", "write"], "write", False),
 ])
 def test_effect_defaults_and_mixed_tools(published_tool, value, expected, declared):

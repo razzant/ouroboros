@@ -943,10 +943,15 @@ manifest; core reads them from the reviewed, published release:
 icon: ui/icon.svg              # required author asset for provides: place; geometry in currentColor
 tools:
   - name: slack_send
-    effect: message            # read | message | write; absent or unknown = write
+    effect: message            # read | message | gesture | write; absent or unknown = write
     target: channel_or_user    # the argument(s) naming where the effect lands; a list for to/cc/bcc
     conversation: channel_or_user
     thread: thread_ts
+  - name: slack_reaction
+    effect: gesture            # a nonverbal response (a reaction) on one message
+    target: channel
+    conversation: channel
+    message: timestamp         # required for gesture: the message id argument
   - name: slack_history
     effect: read
     target: channel_id
@@ -971,12 +976,12 @@ contributes:
 ```
 
 - `effect` is one fact with three consumers: Advises (autonomy) refuses everything but a declared read; a Silent or
-  Paused place refuses `message` and `write` aimed at it; the Safety Supervisor skips declared reads at Light/Full and
+  Paused place refuses all but reads aimed at it; the Safety Supervisor skips declared reads at Light/Full and
   gives `message` its speech semantics (a flagged message returns to the mind; an identical re-issue from a later
   step is sent and recorded; with no verdict it waits). A tool that reads or writes depending on its arguments is
   `write`, unless its `sends:` block declares which calls deliver words: a call whose every `when` selector holds
   one of its listed values is `message`, attributed by that block's `target`/`conversation`/`thread`; any other call
-  keeps the row's `effect`. A `write` into a conversation (a reaction, a pin, a bookmark) is not words by itself.
+  keeps the row's `effect`. A `write` into a conversation (a pin, a bookmark) or a `gesture` is not words by itself.
   This is the connector's fact: core lists no provider method and never reads speech from argument names. The
   Supervisor's verdict may still mark a call speech, which then meets the one-author guard where its targets resolve
   a place; a built-in tool without declarations, such as `github_write`, is speech only by that mark: in Cyber Pro
@@ -984,6 +989,9 @@ contributes:
   re-issue sends it). An MCP tool is a declared read when
   its configured server marks it `readOnlyHint: true`, otherwise `write`; that hint is trusted, so a server lying
   about a write runs it unchecked, and Advises may call the tools a server marks read-only.
+- `gesture` adds or removes a reaction-like response on one message, never speech, a pin or an edit. A focus sees its
+  door beside the send doors, `message` prefilled only from `event.message.message_id`. With no send door a non-silent
+  finish is still posted, so a reaction alone finishes `silent=true`.
 - `target`/`conversation`/`thread` attribute each destination; a dotted name (`body.channel`) selects a nested
   argument (`args["body"]["channel"]`). `text` (default: the argument named `text`) names the words: when no check
   could judge a message, your human's answer on a card holding those exact words as whole lines and the destination
@@ -1255,7 +1263,7 @@ Use the connector's ordinary content-hash-bound skill token for:
 
 The host captures an event once into its room before deciding whether to wake.
 Silent remains eligible for a matching wake, subject to consciousness, allowance and
-capacity; it holds `message` and `write` aimed there and automatic replies. Paused
+capacity; it holds every non-read call aimed there and automatic replies. Paused
 keeps accepted new events heard without starting a new focus. Neither state withdraws
 an external request already accepted by the provider.
 Paused, consciousness Off/Panic, or no matching wake returns `silent` (heard).

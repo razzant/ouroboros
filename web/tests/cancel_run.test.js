@@ -9,7 +9,7 @@ import {
     taskOutcomeSeverity,
     taskTerminalPhase,
 } from '../modules/log_events.js';
-import { isTerminalTaskPhase } from '../modules/chat.js';
+import { isTerminalTaskPhase } from '../modules/chat_activity.js';
 import { cancelRunEligibility } from '../modules/task_control_menu.js';
 
 // --- cancelled severity reducer (added ONCE, consumed everywhere) ---

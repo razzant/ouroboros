@@ -15,7 +15,7 @@ const projectedWork = (id, activity = 'working', extra = {}) => ({ work_id: id, 
     controls: activity === 'paused' ? [{ action: 'resume', target: id }] : [], ...extra });
 const backgroundUrl = '/api/state';
 const schedulesUrl = '/api/schedules';
-const logUrl = (name) => `/api/logs/${name}?limit=150`;
+const logUrl = (name) => `/api/logs/${name}?view=compact&limit=150`;
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 const section = (mount, name) => mount.querySelector(`[data-activity-section="${name}"]`);
 const message = (node) => node.querySelector('.ui-status').textContent;
@@ -550,8 +550,9 @@ test('Logs reads oldest to newest, says why it is empty, and keeps one quiet ton
     const raw = main.querySelector('.log-raw-toggle');
     assert.equal(raw.className, 'btn btn-ghost btn-sm log-raw-toggle');
     assert.equal(entries.children[0].querySelector('.log-actions'), null);
-    await raw.fire('click');
-    assert.equal(entries.children[0].querySelector('.log-raw').hasAttribute('hidden'), false);
+    // Raw is one delegated component (logs_raw.js): the browser's click reaches the list, which opens the record.
+    entries.dispatchEvent({ type: 'click', target: raw });
+    assert.equal(entries.children[0].querySelector('.log-raw').hidden, false);
     assert.equal(raw.getAttribute('aria-expanded'), 'true');
     // Every filter on narrows nothing: no chip takes the chosen tone; one off, the ones still on do (U031).
     const chips = mount.querySelectorAll('.filter-chip');
@@ -592,6 +593,10 @@ test('Logs prints an event\'s name once and names a task card by its short id wi
     assert.equal(card.querySelector('[data-task-kind]').textContent, 'task 55d18078', 'eight characters, as every row');
     const pills = card.querySelector('[data-task-summary]').querySelectorAll('.log-pill').map((pill) => pill.textContent);
     assert.ok(!pills.some((pill) => pill.startsWith('task=') || pill === 'task'), `no repeated id: ${pills}`);
+    // A Timeline's rows exist while it is open (logs.js): opened the way the browser does, its `toggle` reaching the list.
+    const details = card.querySelector('details');
+    details.open = true;
+    entries.dispatchEvent({ type: 'toggle', target: details });
     const timeline = card.querySelector('[data-task-timeline]').querySelectorAll('.log-pill').map((pill) => pill.textContent);
     assert.ok(timeline.includes('task=55d180783850458f'), 'the timeline keeps the full id');
     // An older frame delivered later (history after the live stream) neither dates the card back nor moves it.
@@ -607,7 +612,7 @@ test('Logs catches unavailable and malformed sources while retaining later live 
     routes.set(logUrl('tools'), new Error('offline'));
     routes.set(logUrl('progress'), response({}, 503));
     routes.set(logUrl('supervisor'), { ok: true, json: async () => { throw new Error('not JSON'); } });
-    initLogs({ mount, ws, state: {} });
+    initLogs({ mount, ws, state: { activePage: 'dashboard', dashboardActiveSubtab: 'logs' } });
     await settle();
     assert.match(mount.querySelector('.logs-history-status').textContent, /events, tools, progress, supervisor/);
     ws.emit('log', { data: { type: 'test_after_failure', ts: '2026-09-09T13:00:00Z' } });
@@ -619,7 +624,7 @@ test('an older failed backfill cannot overwrite a newer complete reconnect resul
     const pending = [];
     routes.set(logUrl('events'), () => new Promise((resolve) => pending.push(resolve)));
     for (const name of ['tools', 'progress', 'supervisor']) routes.set(logUrl(name), response({ entries: [] }));
-    initLogs({ mount, ws, state: {} });
+    initLogs({ mount, ws, state: { activePage: 'dashboard', dashboardActiveSubtab: 'logs' } });
     ws.emit('open');
     pending[1](response({ entries: [{ type: 'new_backfill', ts: '2026-09-09T14:00:00Z' }] }));
     await settle();

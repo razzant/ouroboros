@@ -89,6 +89,16 @@ test('only the client facts overlay the room, each with its mark: socket closed,
         { kind: 'offline', text: 'Reconnecting…', tone: 'offline', mark: 'ring', owner: false, amber: '' });
     assert.equal(roomStatusView(stateOf('spending_limit'), { connected: false }).owner, false,
         'a closed socket proves nothing current, the owner\'s move included');
+    // Shown again or reconnected, a room still reading what it missed says so over its last known state.
+    assert.deepEqual(roomStatusView(working, { catchingUp: true }),
+        { kind: 'starting', text: 'Updating…', tone: 'updating', mark: 'ring', owner: false, amber: '' });
+    const catchingUp = roomStatusView(stateOf('spending_limit'), { catchingUp: true });
+    assert.deepEqual([catchingUp.text, catchingUp.owner, catchingUp.amber], ['Updating…', true, 'action']);
+    const question = roomStatusView({ room: room('working', { turn: [{ kind: 'question', task_id: 'x', quiz_id: 'q' }] }) },
+        { catchingUp: true });
+    assert.deepEqual([question.text, question.owner, question.amber], ['Updating…', true, 'question']);
+    assert.deepEqual(markView(question), { shape: 'dot', hue: 'owner' });
+    assert.equal(roomStatusView(working, { connected: false, catchingUp: true }).text, 'Reconnecting…', 'an outage outranks it');
     const idle = emptyWorkState();
     assert.deepEqual(roomStatusView(idle),
         { kind: 'online', text: 'Online', tone: 'online', mark: 'none', owner: false, amber: '' });

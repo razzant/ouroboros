@@ -147,6 +147,13 @@ class ConfinedDirectory:
     def child(self, name: str) -> "ConfinedDirectory":
         return ConfinedDirectory(_parent=self, _name=name)
 
+    def revision(self) -> tuple:
+        """Held directory identity/mtime for read caches; never stat its pathname again."""
+        if self.api:
+            return self.api.directory_revision(self.handle)
+        observed = os.fstat(self.handle)
+        return observed.st_dev, observed.st_ino, observed.st_mtime_ns
+
     def open(self, name: str) -> Tuple[BinaryIO, os.stat_result]:
         if not native_name(name):
             raise OSError(errno.EINVAL, "not a plain file component")
@@ -476,6 +483,13 @@ class _Win32Files:
             return info.volume, info.index_high, info.index_low
         finally:
             self.close(handle)
+
+    def directory_revision(self, handle: int) -> tuple:
+        info = self._info_type()
+        if not self._info(handle, self._ctypes.byref(info)):
+            raise self._error("GetFileInformationByHandle")
+        return (info.volume, (info.index_high << 32) | info.index_low,
+                ((info.times[5] << 32) | info.times[4]) * 100)
 
     def entries(self, handle: int, *, include_links: bool = False) -> list[tuple[str, bool]]:
         """FileDirectoryInformation through the held handle; never FindFirstFile(path)."""

@@ -182,6 +182,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | GET | `/api/fs/dirs` | |
 | GET | `/api/chat/history` | |
 | GET | `/api/logs/{name}` | |
+| GET | `/api/logs/{name}/raw` | |
 | POST | `/api/chat/upload` | |
 | DELETE | `/api/chat/upload` | pending uploads only, else 409 |
 | POST | `/api/local-model/start` | |

@@ -460,6 +460,6 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         },
     };
     const contributed = [bindComposerPlus({ composer }), bindComposerChips({ composer, menu: createPlusMenu }),
-        bindVoiceControls({ composer }), bindConversationControls({ composer, page, chatId, ws })];
+        bindVoiceControls({ composer }), bindConversationControls({ composer, page, chatId, ws: ws.socket || ws })];  // a call keeps its frames in a room away
     return composer;
 }

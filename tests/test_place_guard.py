@@ -257,6 +257,24 @@ def test_unreadable_place_store_holds_only_connector_writes(published_tool, plac
         "Place records need repair" if declares_place else "")
 
 
+
+def test_unreadable_place_store_judges_a_bound_call_by_its_own_publication(published_tool, places, monkeypatch):
+    """A replacement that no longer provides a place cannot lift the hold from a call bound to the connector."""
+    from ouroboros import extension_registry_state as registry
+    from ouroboros.places import PlaceError
+
+    _, ctx = places
+
+    def broken(root, connector):
+        raise PlaceError("places_unreadable", "places.json", "Place records need repair")
+
+    monkeypatch.setattr(guard.places, "places_of_connector", broken)
+    published_tool.bundle.contributions = [{"provides": "place", "id": "place"}]
+    name, _raw = published_tool("write", target="channel")
+    bound = registry.get_tool_stamped(name)
+    monkeypatch.setattr(registry, "live_contribution_projection", lambda: [])
+    assert "need repair" in guard.dispatch_refusal(ctx, name, {"channel": "C1"}, ext_tool=bound)
+
 @pytest.mark.parametrize("kind,account,owner", [("user", "account", True), ("bot", "account", False), (None, "account", False)])
 def test_call_facts_use_captured_identity_and_user_owner_match(published_tool, places, kind, account, owner):
     from ouroboros.places import OwnerAccount

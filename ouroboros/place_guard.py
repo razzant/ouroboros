@@ -6,7 +6,7 @@ asks ``dispatch_refusal`` once per call, the way it asks
 
 * Advises (stored ``observe``): an extension or MCP call whose effect is not a
   declared read is refused, declared or not.
-* Silent / Paused: a ``message`` or ``write`` aimed at such a place is refused
+* Silent / Paused: every non-read effect aimed at such a place is refused
   from every focus (Main, tasks, schedules, wakes). A connector write whose
   target cannot be attributed is refused while any of that connector's places
   is Silent or Paused, and the reason says so. An explicit account outside all
@@ -23,8 +23,8 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from ouroboros import places, conversation_lease
-from ouroboros.tool_effects import (EFFECT_MESSAGE, EFFECT_READ, EFFECT_WRITE, ToolEffect, argument_value, connector_of,
-                                    effect_of, target_values)
+from ouroboros.tool_effects import (EFFECT_MESSAGE, EFFECT_READ, EFFECT_WRITE, ToolEffect, argument_value,
+                                    bound_declaration, connector_of, effect_of, target_values)
 
 _PREFIX = "⚠️ RESOURCE_CONSTRAINT_BLOCKED: "
 PLACE_BINDING_VERSION = 1
@@ -54,10 +54,12 @@ class _PlacesUnreadable(RuntimeError):
     """The place store needs repair; a connector's writes cannot be attributed."""
 
 
-def _declares_place(connector: str) -> bool:
-    """Whether the live publication of this skill declares a place (it is a connector)."""
+def _declares_place(connector: str, ext_tool: Any = None) -> bool:
+    """Whether this skill's publication declares a place (it is a connector): the one a bound call was read with."""
     from ouroboros.extension_registry_state import live_contribution_projection
 
+    if (bound := bound_declaration(ext_tool)) is not None:
+        return bool(bound.get("provides_place"))
     return any(row.get("provides") == "place" and row.get("skill") == connector
                for row in live_contribution_projection())
 
@@ -75,7 +77,7 @@ def _call_destinations(ctx: Any, name: str, args: Mapping[str, Any], ext_tool: A
     except places.PlaceError as exc:
         # An unreadable place store never blocks skills that connect no place; a
         # connector's writes wait for the repair (``dispatch_refusal`` names it).
-        if not _declares_place(connector):
+        if not _declares_place(connector, ext_tool):
             return effect, targets, [], [], True
         raise _PlacesUnreadable(str(exc)) from exc
     routing = {key: targets[key] for key in ("account_id", effect.conversation, effect.thread) if key in targets}
@@ -158,12 +160,13 @@ def _author_refusal(ctx: Any, name: str, args: Mapping[str, Any], effect: ToolEf
     return ""
 
 
-def verdict_speech_refusal(ctx: Any, name: str, args: Mapping[str, Any], *, is_mcp: bool = False) -> str:
+def verdict_speech_refusal(ctx: Any, name: str, args: Mapping[str, Any], *, is_mcp: bool = False,
+                           ext_tool: Any = None) -> str:
     """The place guard a verdict's speech mark adds to a connector write the host did not know as words: one author
     per conversation where its declared targets resolve a place (Silent/Paused and Advises met it as a write at
     dispatch, before any verdict). A write into a conversation (a reaction, a pin) is not words by itself."""
     try:
-        effect, targets, resolved, _siblings, _known = _call_destinations(ctx, name, args, None, is_mcp)
+        effect, targets, resolved, _siblings, _known = _call_destinations(ctx, name, args, ext_tool, is_mcp)
     except _PlacesUnreadable:
         return ""  # the dispatch guard already held this connector's writes while its places need repair
     return _author_refusal(ctx, name, args, effect, targets, resolved) if effect.effect == EFFECT_WRITE else ""

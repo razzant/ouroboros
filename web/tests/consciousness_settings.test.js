@@ -219,9 +219,10 @@ test('Save writes only what changed: the checker first, the levels and rules aft
 test('the let-through counter says 24 h only when the events it read cover a day', async () => {
     const now = Date.parse('2026-11-06T12:00:00Z');
     const at = (hoursAgo) => new Date(now - hoursAgo * 3600 * 1000).toISOString();
+    const reads = [];
     const counter = async (entries) => {
         const el = { textContent: '' };
-        await refreshSafetySkipCounter({ querySelector: () => el }, { now, logsTail: async () => ({ entries }) });
+        await refreshSafetySkipCounter({ querySelector: () => el }, { now, logsTail: async (...read) => { reads.push(read); return { entries }; } });
         return el.textContent;
     };
     // A short log reaches past the day: it is the whole day.
@@ -232,6 +233,8 @@ test('the let-through counter says 24 h only when the events it read cover a day
     const said = await counter(busy);
     assert.match(said, /^1 safety check let through since \d\d:\d\d \(the latest 2,000 events\)\.$/);
     assert.doesNotMatch(said, /24 h/);
+    // It reads only each event's type and time: the compact view, never 2,000 whole rows.
+    assert.deepEqual(reads, [['events', 2000, 'compact'], ['events', 2000, 'compact']]);
 });
 
 test('the shared safety helpers declare no origin unless their caller does', async () => {

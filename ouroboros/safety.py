@@ -531,11 +531,11 @@ def _hold(ctx, tool_name, reason, *, status="UNAVAILABLE"):
                        status=status)
 
 
-def _held_exits(ctx, tool_name, arguments, effect):
+def _held_exits(ctx, tool_name, arguments, effect, ext_tool=None):
     """What a hold on words, or on an MCP call without a verdict, tells the mind: it waits in every mode, never a
     route around it, and my human's exit names exactly what their card must hold (``_exit_subject``), or no exit
     where the host could not check one."""
-    words, destinations = _exit_subject(ctx, tool_name, arguments, effect)
+    words, destinations = _exit_subject(ctx, tool_name, arguments, effect, ext_tool)
     if effect.source == "mcp":
         return ("This call waits until a check judges it: its server does not mark it read-only, so it may deliver "
                 "words. Retry it in a later step, or ask your human privately with this exact call on its own line of "
@@ -552,7 +552,7 @@ def _exact_call(tool_name, arguments):
     return f"{tool_name} {json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)}"
 
 
-def _exit_subject(ctx, tool_name, arguments, effect):
+def _exit_subject(ctx, tool_name, arguments, effect, ext_tool=None):
     """What my human's card must hold for a held call: its exact words and every destination (an MCP call, which
     declares neither: the exact call, ``_exact_call``); ``("", [])`` when the host cannot tell either."""
     from ouroboros.place_guard import call_place_facts
@@ -561,14 +561,14 @@ def _exit_subject(ctx, tool_name, arguments, effect):
     if effect.source == "mcp":
         return _exact_call(tool_name, arguments), [tool_name]
     words = argument_value(arguments, effect.text or "text")
-    facts = call_place_facts(ctx, tool_name, arguments) or {}  # a resolved place by its label, else the call's targets
+    facts = call_place_facts(ctx, tool_name, arguments, ext_tool=ext_tool) or {}  # a place by its label, else targets
     destinations = ([row["place_label"] for row in facts.get("places") or [] if row.get("place_label")]
                     or [value for values in (facts.get("targets") or target_values(effect, arguments)).values()
                         for value in values])
     return (words, destinations) if isinstance(words, str) and words.strip() and destinations else ("", [])
 
 
-def _owner_yes(ctx, tool_name, arguments, effect, prior):
+def _owner_yes(ctx, tool_name, arguments, effect, prior, ext_tool=None):
     """The quiz my human answered after these words were held, its card holding their exact text and every
     destination (an MCP call: the exact call, ``_exact_call``); "" if none. The host checks facts only (bytes,
     destination, time): the mind's re-issue after reading the answer is its judgment that the answer approves."""
@@ -579,7 +579,7 @@ def _owner_yes(ctx, tool_name, arguments, effect, prior):
             return datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
         except ValueError:
             return None
-    (words, destinations), held = _exit_subject(ctx, tool_name, arguments, effect), when(prior.get("held_at"))
+    (words, destinations), held = _exit_subject(ctx, tool_name, arguments, effect, ext_tool), when(prior.get("held_at"))
     if not words or held is None:
         return ""
     for row in getattr(ctx, "_owner_directives", None) or []:
@@ -597,9 +597,10 @@ def _owner_yes(ctx, tool_name, arguments, effect, prior):
 
 
 def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, ctx=None, resolved_binding=None,
-                        evidence=None):
+                        evidence=None, ext_tool=None):
     """Fixed host evidence, with authorship separate from semantic authorization. ``evidence`` (a dict) receives
-    the destinations and notes resolved here, so a refusal names them without resolving them again."""
+    the destinations and notes resolved here, so a refusal names them without resolving them again; an extension
+    call's place facts come from the descriptor being dispatched (``ext_tool``), never a later publication."""
     from dataclasses import asdict, is_dataclass
     from ouroboros import owner_words
     from ouroboros.place_guard import call_place_facts
@@ -611,7 +612,7 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
     metadata = getattr(ctx, "task_metadata", None) or {}
     kind = work_kind(metadata)
     focus = metadata.get("focus") or {}
-    place = dict(call_place_facts(ctx, tool_name, arguments) or {})
+    place = dict(call_place_facts(ctx, tool_name, arguments, ext_tool=ext_tool) or {})
     place_ids = {row["place_id"] for row in place.get("places", []) if row.get("place_id")}
     # A focus occasions the work; it does not establish where this call lands.
     # Only these two built-ins take an actual place reference as their subject.
@@ -1192,6 +1193,7 @@ def _run_llm_check(
     messages: Optional[List[Dict[str, Any]]],
     ctx: Optional[Any],
     resolved_binding: Optional[Any] = None,
+    ext_tool: Optional[Any] = None,
 ) -> Tuple[bool, str]:
     """Run a single light-model safety check and classify the verdict."""
     args_json = _render_subject_json(arguments)
@@ -1199,7 +1201,7 @@ def _run_llm_check(
         return _Assessment(*_subject_too_large_blocked(ctx, tool_name, len(args_json)), status="TOO_LARGE")
     evidence = {}
     prompt = _build_check_prompt(tool_name, arguments, messages, args_json=args_json,
-                                 ctx=ctx, resolved_binding=resolved_binding, evidence=evidence)
+                                 ctx=ctx, resolved_binding=resolved_binding, evidence=evidence, ext_tool=ext_tool)
     if len(prompt.encode("utf-8")) > _SAFETY_BUNDLE_BYTE_BUDGET:
         return _hold(ctx, tool_name, "The complete mandatory evidence bundle is too large", status="TOO_LARGE")
     _use_local_light, _is_local_fallback, _skip_reason = _resolve_safety_routing()
@@ -1407,6 +1409,7 @@ def check_safety(
     python_resolution: Optional[Any] = None,
     resolved_binding: Optional[Any] = None,
     declared_policy: str = "",
+    ext_tool: Optional[Any] = None,
 ) -> Tuple[bool, str]:
     """Return ``(allowed, warning_or_error)`` for one tool call.
 
@@ -1419,7 +1422,8 @@ def check_safety(
     an MCP call without a verdict, binds in every mode and names its exits; my human's answered card holding the exact
     words as whole lines and the destination (an MCP call: the exact call) lets a later identical re-issue send it
     (``_owner_yes``). The speech mark is the final stage's, and a re-issue of words only the verdict saw meets the
-    one-author guard first."""
+    one-author guard first. ``ext_tool`` is the extension descriptor being dispatched: its effect and the brief's
+    place facts are the publication it was read with (``tool_effects.bound_declaration``)."""
     # Arguments can be None for no-parameter tool calls.
     tool_name = str(tool_name or "").strip()
     arguments = arguments or {}
@@ -1428,7 +1432,7 @@ def check_safety(
 
     from ouroboros.tool_effects import effect_of
     is_mcp = tool_name.startswith("mcp_")
-    effect = effect_of(tool_name, ctx=ctx, is_mcp=is_mcp, args=arguments)
+    effect = effect_of(tool_name, ext_tool=ext_tool, ctx=ctx, is_mcp=is_mcp, args=arguments)
     # Speech the host knows before any verdict, from declarations only: a ``message`` effect, a connector-declared
     # send of a generic tool (``sends.when``), or the automatic reply. A verdict may add the mark (below), never
     # an argument name. An MCP call that is no declared read waits like speech when no verdict exists.
@@ -1475,7 +1479,7 @@ def check_safety(
             return False, "⚠️ SAFETY_VIOLATION: Message not sent: this exact call was flagged in this same step. " + _SEND_DESPITE
         if not speech:  # words only the verdict saw still meet the one-author guard a message meets at dispatch
             from ouroboros.place_guard import verdict_speech_refusal
-            if refusal := verdict_speech_refusal(ctx, tool_name, arguments, is_mcp=is_mcp):
+            if refusal := verdict_speech_refusal(ctx, tool_name, arguments, is_mcp=is_mcp, ext_tool=ext_tool):
                 return False, refusal
         _emit_durable_safety_event(ctx, {"type": "safety_sent_despite_check", "tool": tool_name,
                                        "subject_digest": digest, "verdicts": prior["verdicts"],
@@ -1483,7 +1487,7 @@ def check_safety(
                                        "detail": "sent despite the check by a later model call"})
         return True, "⚠️ SAFETY_ADVICE: Identical re-issue from a later step; sent despite the check."
     if (speech or is_mcp) and prior.get("held_at") and call and call != prior.get("llm_call_id") and (
-            quiz := _owner_yes(ctx, tool_name, arguments, effect, prior)):
+            quiz := _owner_yes(ctx, tool_name, arguments, effect, prior, ext_tool)):
         _emit_durable_safety_event(ctx, {"type": "safety_sent_without_assessment", "tool": tool_name,
                                        "subject_digest": digest, "quiz_id": quiz, "hold": prior.get("hold", ""),
                                        "held_at": prior["held_at"], "sent_by": call})
@@ -1500,7 +1504,7 @@ def check_safety(
             return True, ""
 
     try:
-        assessment = _run_llm_check(tool_name, arguments, messages, ctx, resolved_binding)
+        assessment = _run_llm_check(tool_name, arguments, messages, ctx, resolved_binding, ext_tool)
     except Exception as exc:
         from ouroboros.llm_claudexor import propagate_model_error
         from ouroboros.model_wait import propagate_model_control
@@ -1531,14 +1535,14 @@ def check_safety(
                                + ("\n" + _SEND_DESPITE if reissue else ""))
             if marked and allowed:  # the place guard a message meets at dispatch, before any verdict existed
                 from ouroboros.place_guard import verdict_speech_refusal
-                if refusal := verdict_speech_refusal(ctx, tool_name, arguments, is_mcp=is_mcp):
+                if refusal := verdict_speech_refusal(ctx, tool_name, arguments, is_mcp=is_mcp, ext_tool=ext_tool):
                     return False, refusal
     # Holds cannot earn retry authority. Speech holds bind in every runtime mode, and so does an MCP call's hold:
     # without a verdict nothing says it is not words to people (built-in undeclared tools' holds stay advice).
     if not allowed and (speech or (is_mcp and not getattr(assessment, "verdicts", ()))):
         if not getattr(assessment, "verdicts", ()):
             _remember(ctx, digest, tool_name, assessment, held=True)
-        return False, message + "\n" + _held_exits(ctx, tool_name, arguments, effect)
+        return False, message + "\n" + _held_exits(ctx, tool_name, arguments, effect, ext_tool)
     if cyber and not allowed:
         _emit_durable_safety_event(ctx, {"type": "safety_advisory", "tool": tool_name,
             "assessment_allowed": False, "assessment": message, "runtime_mode": _runtime_mode(ctx), "execution_allowed": True})

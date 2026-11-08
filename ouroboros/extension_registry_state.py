@@ -378,6 +378,25 @@ def list_companion_names() -> List[str]:
         return names
 
 
+REVIEWED_DECLARATION = "reviewed_declaration"
+
+
+def reviewed_declaration_locked(name: str, bundle: Optional[_ExtensionRegistrations]) -> Dict[str, Any]:
+    """What ``bundle``'s reviewed manifest declares for tool surface ``name``, detached; the caller holds ``_lock``.
+
+    ``tool`` is the manifest's unique ``tools:`` row for it (``{}`` when none or no bundle);
+    ``provides_place`` says whether that publication contributes a place."""
+    from ouroboros.extension_surface_names import parse_extension_surface_name
+
+    parsed = parse_extension_surface_name(name)
+    extra = getattr(getattr(getattr(bundle, "loaded_skill", None), "manifest", None), "raw_extra", None)
+    rows = extra.get("tools", []) if parsed and isinstance(extra, dict) else []
+    matches = [row for row in rows if isinstance(row, dict) and row.get("name") == parsed[1]] if isinstance(rows, list) else []
+    return {"tool": copy.deepcopy(matches[0]) if len(matches) == 1 else {},
+            "provides_place": any(isinstance(entry, dict) and entry.get("provides") == "place"
+                                  for entry in (bundle.contributions if bundle is not None else ()))}
+
+
 def get_tool_with_generation(name: str) -> tuple[Optional[Dict[str, Any]], str]:
     """Detached tool descriptor plus the generation digest it dispatches
     against, read under ONE ``_lock`` hold (ABI-9).
@@ -385,8 +404,11 @@ def get_tool_with_generation(name: str) -> tuple[Optional[Dict[str, Any]], str]:
     A legacy descriptor that predates the per-surface ``extension_generation``
     stamp gets the owner bundle's live digest from the SAME registry snapshot
     — a republish between two separate lock acquisitions could otherwise pair
-    an old unstamped handler with the NEW generation's digest. Returns
-    ``(None, "")`` for an unknown surface."""
+    an old unstamped handler with the NEW generation's digest. The same hold
+    captures that publication's ``REVIEWED_DECLARATION`` keyed by the digest:
+    the call's effect, routing and place facts travel with its handler, so a
+    later publication changes only later reads. Returns ``(None, "")`` for an
+    unknown surface."""
     with _lock:
         raw = _tools.get(str(name or ""))
         if not raw:
@@ -396,8 +418,12 @@ def get_tool_with_generation(name: str) -> tuple[Optional[Dict[str, Any]], str]:
         digest = str(tool.get("extension_generation") or "")
         if not digest:
             digest = str(bundle.generation_digest or "") if bundle is not None else ""
-        if bundle is not None and digest == bundle.generation_digest and not tool.get("content_hash"):
-            tool["content_hash"] = str(bundle.content_hash or "")
+        tool.pop(REVIEWED_DECLARATION, None)  # another process's capture (a child catalog) is never this host's
+        if bundle is not None and digest == bundle.generation_digest:
+            if not tool.get("content_hash"):
+                tool["content_hash"] = str(bundle.content_hash or "")
+            tool[REVIEWED_DECLARATION] = {"extension_generation": digest,
+                                          **reviewed_declaration_locked(str(name), bundle)}
         return tool, digest
 
 

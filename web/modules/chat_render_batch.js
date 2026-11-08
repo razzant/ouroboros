@@ -506,8 +506,13 @@ export function createLiveCardTimelineRenderer({ withStableViewport, buildTimeli
         if (!node || !patchNode(current, node)) return false;
         return Boolean(record.timelineEl.isConnected);
     };
+    // A room away draws nothing (room_retire.js): a timeline that a late read changed meanwhile is owed, and drawn once
+    // on the room's return from what that read kept.
+    const owedAway = new Set();
     return {
         renderLiveCardTimeline: render,
+        oweTimeline: (record) => { owedAway.add(record); },
+        drawOwedTimelines: () => { const owed = [...owedAway]; owedAway.clear(); owed.forEach((record) => render(record)); },
         appendTimelineItem: append,
         patchLastTimelineItem: (item, record) => replace(
             item, record, record.timelineEl.lastElementChild,
@@ -568,6 +573,8 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
                 && !node.classList.contains('chat-load-older')
         );
         const messagesRect = messagesDiv.getBoundingClientRect();
+        // The phone drawer scales the room card. Anchors are in scroll pixels, not transformed screen pixels.
+        const scale = messagesRect.height / messagesDiv.offsetHeight || 1;
         let topNode = nodes.find((item) => {
             const rect = item.getBoundingClientRect();
             return rect.bottom > messagesRect.top && rect.top < messagesRect.bottom;
@@ -685,7 +692,7 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
             cardChain.push({
                 node: card,
                 taskId: card.dataset?.taskId || '',
-                offset: card.getBoundingClientRect().top - messagesRect.top,
+                offset: (card.getBoundingClientRect().top - messagesRect.top) / scale,
             });
             card = card.parentElement?.closest?.('.chat-live-card') || null;
         }
@@ -720,8 +727,8 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
             clientMessageId: topNode.dataset?.clientMessageId || '',
             ts,
             ordinal: ts ? nodes.filter((item) => item.dataset?.ts === ts).indexOf(topNode) : -1,
-            offset: node.getBoundingClientRect().top - messagesRect.top,
-            topOffset: topNode.getBoundingClientRect().top - messagesRect.top,
+            offset: (node.getBoundingClientRect().top - messagesRect.top) / scale,
+            topOffset: (topNode.getBoundingClientRect().top - messagesRect.top) / scale,
         };
     }
 
@@ -734,11 +741,12 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
         };
         const restoreNode = (node, offset) => {
             if (!isRendered(node)) return false;
-            const currentOffset = node.getBoundingClientRect().top
-                - messagesDiv.getBoundingClientRect().top;
+            const rect = messagesDiv.getBoundingClientRect(), scale = rect.height / messagesDiv.offsetHeight || 1;
+            const currentOffset = (node.getBoundingClientRect().top - rect.top) / scale;
             // A node still in place leaves the feed alone: even a write of the
             // same scrollTop stops a scroll the engine animates (WebKit's End).
-            if (currentOffset !== offset) messagesDiv.scrollTop += currentOffset - offset;
+            // Subpixel transform noise rounds down in WebKit's scrollTop setter; writing it every frame drifts.
+            if (Math.abs(currentOffset - offset) > 0.5) messagesDiv.scrollTop += currentOffset - offset;
             return true;
         };
 

@@ -390,7 +390,7 @@ ouroboros/ — agent core and shared runtime (§6)
   tool_access.py — ToolProfile × ResourceRoot × Operation matrix, affordance map, closed-enum `required_capabilities` check
   tool_access_types.py, tool_access_roots.py, tool_access_paths.py, tool_access_user_files.py, tool_access_reads.py — Matrix types and physical roots; inherited reads, separate action authority (§6 Resource roots and physical file identity)
   tool_policy.py — Round-one tool visibility (the sets live in tool_capabilities.py)
-  tool_effects.py, place_guard.py — per-tool effect facts (read · message · write) declared by connectors, and the dispatch refusals they drive: Advises, Silent/Paused places, one author per conversation; another place's notes beside a send
+  tool_effects.py, place_guard.py — connector-declared effects (read · message · gesture · write), the dispatch refusals they drive: Advises, Silent/Paused places, one author per conversation; another place's notes beside a send
   icon_geometry.py — connector icons reduced to bounded geometry and drawn by the host in currentColor
   browser_policy.py — Browser targets, scripts and control requests: grants and service identity (§6 MCP)
   chromium_runtime.py — Pinned Chromium supply and sandbox selection (§6)

@@ -1260,19 +1260,11 @@ def execute_tool_batch(tool_calls: List[Dict[str, Any]], tools: ToolRegistry, dr
                 "result_meta": _extract_result_metadata(fn_name, result, True),
             }
         from ouroboros.presence_context import confirmed_delivery_receipts
+        from ouroboros.tools.extension_dispatch import extension_call_scope
         before = confirmed_delivery_receipts(tools._ctx)
-        result = _execute_with_timeout(
-            tools,
-            tc,
-            drive_logs,
-            _get_tool_timeout(
-                tools,
-                str(tc["function"]["name"] or "").strip(),
-                _tc_args(tc),
-            ),
-            task_id,
-            stateful_executor,
-        )
+        with extension_call_scope():  # the descriptor the timeout was chosen from is the one dispatched
+            timeout = _get_tool_timeout(tools, str(tc["function"]["name"] or "").strip(), _tc_args(tc))
+            result = _execute_with_timeout(tools, tc, drive_logs, timeout, task_id, stateful_executor)
         confirmed = confirmed_delivery_receipts(tools._ctx) - before
         if confirmed and not result.get("is_error"):
             result.setdefault("result_meta", {})["presence_delivery_confirmed"] = sorted(confirmed)

@@ -203,6 +203,8 @@ test('a reconnect burst admits one new read per logical request, never one for t
 
 const APP_SOURCE = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
 const BOOT = 'refreshProjectsNav(false).finally(() => ws.connect());';
+// The page's own state poll while a room is on screen (app.js owns it; no room keeps a timer).
+const POLL = APP_SOURCE.match(/\nsetInterval\(function pollShownRoomState\(\) \{[^\n]*\}, 3000\);\n/g);
 
 /** app.js cannot load in Node: its refreshProjectsNav runs from the current source text, so a change there is tested. */
 function appRefreshProjectsNav(stateSnapshots) {
@@ -244,7 +246,10 @@ for (const hang of ['fetch', 'body']) {
         const tr = transport([{ hang }, { body: FRESH }], chatHistory);
         const main = mountMain(t, tr);
         assert.equal(APP_SOURCE.split(BOOT).length, 2, 'app.js boots with exactly this statement');
-        new Function('refreshProjectsNav', 'ws', BOOT)(appRefreshProjectsNav(main.stateSnapshots), main.socket);
+        assert.equal(POLL?.length, 1, 'app.js polls the state with exactly this statement');
+        const refreshProjectsNav = appRefreshProjectsNav(main.stateSnapshots);
+        new Function('refreshProjectsNav', 'ws', BOOT)(refreshProjectsNav, main.socket);
+        new Function('refreshProjectsNav', 'state', 'document', POLL[0])(refreshProjectsNav, main.state, globalThis.document);
         await advance(LIFETIME - 1000);
         assert.deepEqual([tr.calls.length, main.socket.connects], [1, 0], 'the prefetch joined Main\'s read and waits on it');
         await advance(1000);
@@ -258,7 +263,7 @@ for (const hang of ['fetch', 'body']) {
         assert.match(assistantText(), /Main words/);
         assert.doesNotMatch(assistantText(), /Project-only words/, 'the server stamp keeps an unlearned Project\'s frame out of Main');
         await advance(3000);
-        assert.equal(main.stateSnapshots.latest()?.marker, 'fresh', 'Main\'s own poll then reads and applies a newer state');
+        assert.equal(main.stateSnapshots.latest()?.marker, 'fresh', 'the page\'s poll then reads and applies a newer state');
     });
 }
 

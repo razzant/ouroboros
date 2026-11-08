@@ -336,7 +336,7 @@ def _drain_incoming_messages(
             _loop()._record_owner_directive(
                 owner_ctx,
                 source="owner_mailbox",
-                content=_owner_content(entry, drive_root, task_id),
+                content=_owner_content(entry, drive_root, task_id), words=dmsg,  # the rendering, its exact text beside
                 msg_id=str(entry.get("msg_id") or ""),
                 # The same message relayed, or read from its room, is one row: its room and client id name it.
                 origin={**_arrival(held, entry.get("ts")), "client_message_id": entry.get("client_message_id")},

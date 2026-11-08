@@ -33,8 +33,8 @@ def test_one_process_effect_under_selected_supervisor(tmp_path, monkeypatch, mod
     ctx, registry, work = context(tmp_path, monkeypatch, mode, coverage)
     checks = []
 
-    def assessment(name, arguments, messages, actor, binding=None):
-        checks.append((name, arguments, binding))
+    def assessment(name, arguments, messages, actor, binding=None, ext_tool=None):
+        checks.append((name, arguments, binding, ext_tool))
         return False, "Independent DANGEROUS finding: fixture criticism"
 
     monkeypatch.setattr(safety, "_run_llm_check", assessment)
@@ -43,6 +43,8 @@ def test_one_process_effect_under_selected_supervisor(tmp_path, monkeypatch, mod
         "cmd": [sys.executable, "-c", script], "cwd": str(work), "outputs": ["once.txt"],
     })
     assert len(checks) == (1 if coverage == "full" else 0)
+    if checks:
+        assert checks[0][3] is None  # run_command is a builtin, not a bound extension handler
     permitted = coverage != "full" or mode == "cyber_pro"
     assert (work / "once.txt").exists() is permitted
     if permitted:
