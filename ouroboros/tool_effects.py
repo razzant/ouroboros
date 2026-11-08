@@ -1,11 +1,13 @@
 """What a tool call does to the world outside Ouroboros: one fact, three consumers.
 
 A connector declares each of its tools in the manifest's ``tools:`` list with
-``effect: read | message | write`` (absent = ``write``) and, where it has one,
+``effect: read | message | gesture | write`` (absent = ``write``) and, where it has one,
 ``target:`` — the argument(s) naming where the effect lands. ``message`` means
-words to people at the target; ``write`` is any other change outside. The
+words to people at the target; ``gesture`` is an outward act on one message, not speech; ``write`` is any other change outside. The
 declaration is read from the reviewed, published generation the dispatcher
-uses, never from the mutable skill folder. MCP tools carry no declaration:
+uses, never from the mutable skill folder; the loader's descriptor carries it
+from its handler's own registry read (``bound_declaration``), so a later
+publication never redescribes a bound call. MCP tools carry no declaration:
 they are ``write`` with ``declared=False``, and their annotations can only
 make a call stricter. A mixed tool (one tool that reads or writes depending on
 its arguments) is ``write``.
@@ -25,8 +27,9 @@ from typing import Any, Mapping
 
 EFFECT_READ = "read"
 EFFECT_MESSAGE = "message"
+EFFECT_GESTURE = "gesture"
 EFFECT_WRITE = "write"
-EFFECTS = (EFFECT_READ, EFFECT_MESSAGE, EFFECT_WRITE)
+EFFECTS = (EFFECT_READ, EFFECT_MESSAGE, EFFECT_GESTURE, EFFECT_WRITE)
 
 
 @dataclass(frozen=True)
@@ -36,14 +39,16 @@ class ToolEffect:
     ``effect`` is ``""`` for a built-in tool (not governed here). ``targets``
     names the arguments that carry the destination(s): a list covers e.g.
     to/cc/bcc. ``conversation``/``thread`` name the arguments that address a
-    conversation, when the connector declared them. ``declared`` is False when
-    the effect is the default (no declaration, MCP, unreadable manifest).
+    conversation, when the connector declared them. ``message`` names the argument
+    carrying a gesture's target message id. ``declared`` is False when the effect
+    is the default (no declaration, MCP, unreadable manifest).
     """
 
     effect: str
     targets: tuple[str, ...] = ()
     conversation: str = ""
     thread: str = ""
+    message: str = ""
     declared: bool = False
     source: str = ""
     annotations: Mapping[str, Any] = field(default_factory=dict)
@@ -87,13 +92,28 @@ def connector_of(name: str, ext_tool: Any = None) -> str:
         return str((tool or {}).get("skill") or "")
 
 
+def bound_declaration(ext_tool: Any) -> Mapping[str, Any] | None:
+    """The reviewed declaration the loader read with this descriptor's handler, if it names the descriptor's own
+    generation; ``None`` for a raw, hand-made or child-catalog descriptor (``get_tool_with_generation``)."""
+    from ouroboros.extension_registry_state import REVIEWED_DECLARATION
+
+    facts = ext_tool.get(REVIEWED_DECLARATION) if isinstance(ext_tool, Mapping) else None
+    generation = str(ext_tool.get("extension_generation") or "") if isinstance(ext_tool, Mapping) else ""
+    if (isinstance(facts, Mapping) and generation and facts.get("extension_generation") == generation
+            and isinstance(facts.get("tool"), Mapping)):
+        return facts
+    return None
+
+
 def _published_declaration(name: str, ext_tool: Any) -> dict[str, Any]:
     from ouroboros import extension_registry_state as registry
     from ouroboros.extension_surface_names import parse_extension_surface_name
 
-    parsed = parse_extension_surface_name(name)
-    if not parsed:
+    if not parse_extension_surface_name(name):
         return {}
+    bound = bound_declaration(ext_tool)
+    if bound is not None:  # a bound call keeps its own publication's facts across any later replacement
+        return deepcopy(dict(bound["tool"]))
     with registry._lock:
         tool = ext_tool if isinstance(ext_tool, Mapping) else registry._tools.get(name)
         if not tool:
@@ -104,12 +124,7 @@ def _published_declaration(name: str, ext_tool: Any) -> dict[str, Any]:
         generation = tool.get("extension_generation")
         if generation and generation != bundle.generation_digest:
             return {}  # Never pair an old handler with a new declaration.
-        manifest = getattr(bundle.loaded_skill, "manifest", None)
-        rows = getattr(manifest, "raw_extra", {}).get("tools", [])
-        if not isinstance(rows, list):
-            return {}
-        matches = [row for row in rows if isinstance(row, Mapping) and row.get("name") == parsed[1]]
-        return deepcopy(matches[0]) if len(matches) == 1 else {}
+        return registry.reviewed_declaration_locked(name, bundle)["tool"]
 
 
 def _argument_names(value: Any) -> tuple[str, ...]:
@@ -137,6 +152,7 @@ def effect_of(name: str, *, ext_tool: Any = None, is_mcp: bool = False, ctx: Any
         targets=_argument_names(row.get("target")),
         conversation=row.get("conversation") if isinstance(row.get("conversation"), str) else "",
         thread=row.get("thread") if isinstance(row.get("thread"), str) else "",
+        message=row.get("message") if isinstance(row.get("message"), str) else "",
     )
 
 

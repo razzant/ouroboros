@@ -538,8 +538,10 @@ def _focus_event_source(row, metadata, notes):
             **typed}
 
 
-def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, ctx=None, resolved_binding=None):
-    """Fixed host evidence, with authorship separate from semantic authorization."""
+def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, ctx=None, resolved_binding=None,
+                        ext_tool=None):
+    """Fixed host evidence, with authorship separate from semantic authorization; an extension call's place facts
+    come from the descriptor being dispatched (``ext_tool``), never from a later publication of its name."""
     from dataclasses import asdict, is_dataclass
     from ouroboros import owner_words
     from ouroboros.place_guard import call_place_facts
@@ -549,7 +551,7 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
     metadata = getattr(ctx, "task_metadata", None) or {}
     kind = work_kind(metadata)
     focus = metadata.get("focus") or {}
-    place = dict(call_place_facts(ctx, tool_name, arguments) or {})
+    place = dict(call_place_facts(ctx, tool_name, arguments, ext_tool=ext_tool) or {})
     place_ids = {row["place_id"] for row in place.get("places", []) if row.get("place_id")}
     # A focus occasions the work; it does not establish where this call lands.
     # Only these two built-ins take an actual place reference as their subject.
@@ -1116,13 +1118,14 @@ def _run_llm_check(
     messages: Optional[List[Dict[str, Any]]],
     ctx: Optional[Any],
     resolved_binding: Optional[Any] = None,
+    ext_tool: Optional[Any] = None,
 ) -> Tuple[bool, str]:
     """Run a single light-model safety check and classify the verdict."""
     args_json = _render_subject_json(arguments)
     if len(args_json) > _SAFETY_SUBJECT_CHAR_BUDGET:
         return _Assessment(*_subject_too_large_blocked(ctx, tool_name, len(args_json)), status="TOO_LARGE")
     prompt = _build_check_prompt(tool_name, arguments, messages, args_json=args_json,
-                                 ctx=ctx, resolved_binding=resolved_binding)
+                                 ctx=ctx, resolved_binding=resolved_binding, ext_tool=ext_tool)
     if len(prompt.encode("utf-8")) > _SAFETY_BUNDLE_BYTE_BUDGET:
         return _hold(ctx, tool_name, "The complete mandatory evidence bundle is too large", status="TOO_LARGE")
     _use_local_light, _is_local_fallback, _skip_reason = _resolve_safety_routing()
@@ -1318,11 +1321,14 @@ def check_safety(
     python_resolution: Optional[Any] = None,
     resolved_binding: Optional[Any] = None,
     declared_policy: str = "",
+    ext_tool: Optional[Any] = None,
 ) -> Tuple[bool, str]:
     """Return ``(allowed, warning_or_error)`` for one tool call.
 
     ``declared_policy`` is a first-party ``ToolEntry``'s own declaration; a
-    ``TOOL_POLICY`` entry outranks it and an invalid value is ``DEFAULT_POLICY``."""
+    ``TOOL_POLICY`` entry outranks it and an invalid value is ``DEFAULT_POLICY``.
+    ``ext_tool`` is the extension descriptor being dispatched: its effect and the brief's place facts are the
+    publication it was read with (``tool_effects.bound_declaration``)."""
     # Arguments can be None for no-parameter tool calls.
     tool_name = str(tool_name or "").strip()
     arguments = arguments or {}
@@ -1330,7 +1336,7 @@ def check_safety(
     policy = TOOL_POLICY.get(tool_name) or (declared if declared in POLICY_VALUES else DEFAULT_POLICY)
 
     from ouroboros.tool_effects import effect_of
-    effect = effect_of(tool_name, ctx=ctx, is_mcp=tool_name.startswith("mcp_"))
+    effect = effect_of(tool_name, ext_tool=ext_tool, ctx=ctx, is_mcp=tool_name.startswith("mcp_"))
     speech = tool_name == "place_reply" or effect.effect == "message"
     if tool_name == "manage_schedules" and arguments.get("action") in {"create", "update", "restore"}:
         policy = POLICY_CHECK
@@ -1384,7 +1390,7 @@ def check_safety(
             return True, ""
 
     try:
-        assessment = _run_llm_check(tool_name, arguments, messages, ctx, resolved_binding)
+        assessment = _run_llm_check(tool_name, arguments, messages, ctx, resolved_binding, ext_tool)
     except Exception as exc:
         from ouroboros.llm_claudexor import propagate_model_error
         from ouroboros.model_wait import propagate_model_control

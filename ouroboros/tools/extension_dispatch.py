@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import pathlib
 import threading
@@ -19,11 +20,53 @@ from ouroboros.tools.tool_result import (
 )
 
 
+def _extension_capability_root(ctx: ToolContext) -> pathlib.Path:
+    meta = getattr(ctx, "task_metadata", {})
+    budget_root = meta.get("budget_drive_root") if isinstance(meta, dict) else ""
+    return pathlib.Path(
+        budget_root
+        or getattr(ctx, "budget_drive_root", "")
+        or getattr(ctx, "drive_root", "")
+        or "."
+    ).resolve(strict=False)
+
+
+def _adopt_extension_generation(ctx: ToolContext) -> Dict[str, Any]:
+    """Adopt the published extension generation from the same task data root."""
+    from ouroboros.config import get_skills_repo_path, load_settings
+    from ouroboros.extension_reconcile_queue import adopt_published_extension_generation
+
+    root = _extension_capability_root(ctx)
+    return adopt_published_extension_generation(
+        root, load_settings, repo_path=get_skills_repo_path() or None
+    )
+
+
+def _descriptor_generation(tool: Dict[str, Any]) -> str:
+    """The publication a registered descriptor belongs to: its own stamp, else its owner bundle's live digest.
+
+    Call it inside the registry lock hold that read ``tool`` (``get_tool`` stamps
+    the same way), so the value is that observation's. A reload mints a fresh
+    digest for every bundle it loads: equal values saw the same registration.
+    """
+    from ouroboros.extension_registry_state import extension_generation_digest
+
+    return str(tool.get("extension_generation") or "") or extension_generation_digest(str(tool.get("skill") or ""))
+
+
 def _extension_dispatch_candidate(
     ctx: ToolContext,
     name: str,
 ) -> tuple[Optional[Dict[str, Any]], bool]:
-    """Return a live descriptor or a host-attested unavailable marker."""
+    """Return a live descriptor or a host-attested unavailable marker.
+
+    One liveness observation answers an already-live surface. A dispatch miss
+    or a descriptor that is no longer live runs the bounded worker adoption
+    (one ``reload_all`` per distinct published generation). A stale
+    descriptor is observed again only when the registry now holds another
+    generation of it, whichever caller adopted, so a skill that is simply
+    disabled keeps its single observation and its refusal.
+    """
     try:
         from ouroboros.extension_loader import (
             get_tool as _ext_get_tool,
@@ -34,44 +77,89 @@ def _extension_dispatch_candidate(
         return None, False
     if not _ext_parse_name(name):
         return None, False
+    capability_root = _extension_capability_root(ctx)
+
+    def live(tool: Dict[str, Any]) -> bool:
+        return bool(_ext_is_live(
+            str(tool.get("skill") or ""),
+            capability_root,
+            repo_path=str(tool.get("skills_repo_path") or "") or None,
+        ))
+
     try:
         # ABI-9 atomic legacy fallback: get_tool pre-stamps an unstamped
         # descriptor with the generation digest read in the SAME lock hold
         # (registry_state.get_tool_stamped), so the dispatch stamp can never
         # name a generation published between two separate registry reads.
         ext_tool = _ext_get_tool(name)
-        meta = getattr(ctx, "task_metadata", {})
-        budget_root = meta.get("budget_drive_root") if isinstance(meta, dict) else ""
-        capability_root = pathlib.Path(
-            budget_root
-            or getattr(ctx, "budget_drive_root", "")
-            or getattr(ctx, "drive_root", "")
-            or "."
-        ).resolve(strict=False)
-        if ext_tool is None:
-            # The SECOND natural staleness point (W3B-F1): the name is a
-            # well-formed extension surface and this process has none — exactly
-            # the "Unknown tool" a worker answered with for a skill enabled
-            # after its own spawn. The per-task probe cannot see an enable that
-            # lands MID-task; this one can, and it is the same bounded adopt, so
-            # a surface no publication can explain (a hallucinated name) costs
-            # one small read here and never a reload.
-            from ouroboros.config import get_skills_repo_path, load_settings
-            from ouroboros.extension_reconcile_queue import adopt_published_extension_generation
-
-            adopt_published_extension_generation(
-                capability_root, load_settings, repo_path=get_skills_repo_path() or None
-            )
-            ext_tool = _ext_get_tool(name)
-        if ext_tool and not _ext_is_live(
-            str(ext_tool.get("skill") or ""),
-            capability_root,
-            repo_path=str(ext_tool.get("skills_repo_path") or "") or None,
-        ):
+        if ext_tool is not None and live(ext_tool):
+            return ext_tool, False
+        stale = ext_tool is not None
+        # The natural staleness points (W3B-F1, #2933): no surface here (a
+        # skill enabled after this worker spawned) or a descriptor retained
+        # from a previous published generation (an update hid every connector
+        # tool). Both take the same bounded adopt, so a surface no publication
+        # explains (a hallucinated name) costs one small read, never a reload.
+        try:
+            _adopt_extension_generation(ctx)
+        except Exception:
+            pass
+        fresh = _ext_get_tool(name)
+        # ``get_tool`` stamped both reads in their own lock holds: equal stamps mean no caller replaced it.
+        if stale and fresh is not None and str(fresh.get("extension_generation") or "") == str(
+                ext_tool.get("extension_generation") or ""):
             return None, True
-        return ext_tool, False
+        if fresh is not None and not live(fresh):
+            return None, True
+        return fresh, False
     except Exception:
         return None, False
+
+
+# One model tool call's extension resolution, bound by the caller that chose
+# the call's outer timeout (``extension_call_scope``). The slot lives in the
+# call's own context, which the loop copies into the call's worker thread, so
+# parallel calls of the same surface never see each other's binding and a
+# binding never outlives its call.
+_CALL_RESOLUTION: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.ContextVar(
+    "extension_call_resolution", default=None)
+
+
+@contextlib.contextmanager
+def extension_call_scope():
+    """Scope one tool call: the descriptor whose timeout was chosen is the one dispatched."""
+    token = _CALL_RESOLUTION.set({})
+    try:
+        yield
+    finally:
+        _CALL_RESOLUTION.reset(token)
+
+
+def timeout_dispatch_candidate(
+    ctx: ToolContext, name: str,
+) -> tuple[Optional[Dict[str, Any]], bool]:
+    """Resolve before the outer timeout is chosen, binding the result to this call."""
+    resolution = _extension_dispatch_candidate(ctx, name)
+    slot = _CALL_RESOLUTION.get()
+    if slot is not None:
+        slot["bound"] = (ctx, name, resolution)
+    return resolution
+
+
+def bound_dispatch_candidate(
+    ctx: ToolContext, name: str,
+) -> tuple[Optional[Dict[str, Any]], bool]:
+    """Consume this call's timeout-time resolution, or resolve fresh without one.
+
+    The binding is taken once and only for the same tool context and name. The
+    physical dispatcher still observes liveness itself, so a revocation that
+    lands after the timeout was chosen refuses before the handler runs.
+    """
+    slot = _CALL_RESOLUTION.get()
+    bound = slot.pop("bound", None) if slot is not None else None
+    if bound is not None and bound[0] is ctx and bound[1] == name:
+        return bound[2]
+    return _extension_dispatch_candidate(ctx, name)
 
 
 def _dispatch_mcp_tool_result(
@@ -225,6 +313,21 @@ def _dispatch_extension_tool_result(
     )
 
 
+def _replaced_since_bound(name: str, ext_tool: Dict[str, Any]) -> bool:
+    """Whether an out-of-process descriptor's payload is no longer the live one.
+
+    Its child loads the live payload, which the liveness read just matched to the live publication, so the bound
+    descriptor's declaration describes that code only while both name one payload. In process, the bound handler
+    itself runs and needs no such check."""
+    try:
+        from ouroboros.extension_loader import get_tool as _ext_get_tool
+
+        live = _ext_get_tool(name) or {}
+    except Exception:
+        return True
+    return str(live.get("content_hash") or "") != str(ext_tool.get("content_hash") or "")
+
+
 def _dispatch_extension_tool_untagged(
     ctx: Any,
     name: str,
@@ -247,17 +350,16 @@ def _dispatch_extension_tool_untagged(
     call_args = args or {}
     skill_name = str(ext_tool.get("skill") or "")
     repo_path = str(ext_tool.get("skills_repo_path") or "") or None
-    meta = getattr(ctx, "task_metadata", {})
-    capability_root = pathlib.Path(
-        (meta.get("budget_drive_root") if isinstance(meta, dict) else "")
-        or getattr(ctx, "budget_drive_root", "")
-        or getattr(ctx, "drive_root", "")
-        or "."
-    ).resolve(strict=False)
+    capability_root = _extension_capability_root(ctx)
+    # Fresh at the physical dispatch: a revocation after resolution refuses here.
     if skill_name and callable(_ext_is_live) and not _ext_is_live(skill_name, capability_root, repo_path=repo_path):
         if callable(_ext_unload):
             _ext_unload(skill_name)
         text = f"⚠️ TOOL_ERROR ({name}): extension {skill_name!r} is not allowed to dispatch right now."
+        return _extension_result("unavailable", "EXTENSION_UNAVAILABLE", text)
+    if ext_tool.get("out_of_process") and _replaced_since_bound(name, ext_tool):
+        text = (f"⚠️ TOOL_ERROR ({name}): extension {skill_name!r} was replaced after this call was bound; "
+                "its child would run the replacement, not the code its declaration describes. Call it again.")
         return _extension_result("unavailable", "EXTENSION_UNAVAILABLE", text)
 
     from ouroboros.safety import check_safety as _ext_check_safety
@@ -266,6 +368,7 @@ def _dispatch_extension_tool_untagged(
         call_args,
         messages=getattr(ctx, "messages", None),
         ctx=ctx,
+        ext_tool=ext_tool,
     )
     if not _ext_safe:
         return _extension_result("blocked", "SAFETY_VIOLATION", _ext_safety_msg)
@@ -279,6 +382,7 @@ def _dispatch_extension_tool_untagged(
     if ext_tool.get("out_of_process"):
         try:
             from ouroboros.extension_process_runner import (
+                PAYLOAD_REPLACED,
                 ExtensionProcessError,
                 dispatch_extension_tool_subprocess,
                 extension_child_was_spawned,
@@ -293,13 +397,14 @@ def _dispatch_extension_tool_untagged(
             raise
         except Exception as exc:
             text = f"⚠️ TOOL_ERROR ({name}): extension child process failed: {type(exc).__name__}: {exc}"
-            timed_out = (
-                isinstance(exc, ExtensionProcessError)
-                and exc.failure_kind == "timeout"
-            )
+            kind = exc.failure_kind if isinstance(exc, ExtensionProcessError) else "error"
+            timed_out = kind == "timeout"
+            # The child refused a payload other than the bound one before any handler ran (typed, retryable).
+            status, code = {"timeout": ("timeout", "EXTENSION_TIMEOUT"),
+                            PAYLOAD_REPLACED: ("unavailable", "EXTENSION_UNAVAILABLE")}.get(kind, ("error", "EXTENSION_ERROR"))
             return _extension_result(
-                "timeout" if timed_out else "error",
-                "EXTENSION_TIMEOUT" if timed_out else "EXTENSION_ERROR",
+                status,
+                code,
                 text,
                 timeout_sec=max(1, int(ext_tool.get("timeout_sec") or 60)) if timed_out else None,
                 # POSITIVE spawn fact from the process runner (ABI-9): a
