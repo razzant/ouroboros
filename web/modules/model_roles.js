@@ -103,6 +103,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     let providerProfiles = {};
     let apiProviders = [];
     let connections = [];
+    let mainChoice = [];  // `_meta.main_connection_choice`: an unauthored Main waits for the owner's key
     let catalog = { items: [], model_sources: [], read_state: 'not_read' };
     let loaded = false;
     let destroyed = false;
@@ -205,9 +206,14 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     function keyNote(row) {
         if (row.local || !row.model || row.source === 'inherit' || sourceId(row)
             || apiProviders.some((provider) => provider.id === row.source)) return '';
-        return { off: 'This key is turned off in Accounts; nothing is sent through it.',
+        return choiceNote(row) || { off: 'This key is turned off in Accounts; nothing is sent through it.',
             removed: 'This key was removed in Accounts; nothing is sent through it.',
             'no key': 'This source has no key in Accounts.' }[unavailableConnectionState(row.source, connections)];
+    }
+    // Several keys of Main's provider and no built-in one: the owner picks Main's, nothing is guessed (#2969).
+    function choiceNote(row) {
+        const keys = row.slot.slot === 'main' ? mainChoice.map((id) => connections.find((entry) => entry.id === id)?.label || id) : [];
+        return keys.length > 1 ? `Main is not set yet. Choose the key it uses: ${keys.slice(0, -1).join(', ')} or ${keys.at(-1)}.` : '';
     }
     function itemsFor(row) {
         return sourceId(row) ? (catalogs.get(catalogKey(row))?.items || [])
@@ -336,6 +342,9 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             // sits under the section banner, so it keeps to the compact form.
             const own = Boolean(sourceId(row) && rowCatalog);
             const note = catalogReadNote(own ? rowCatalog : catalog, { compact: !own });
+            const choosing = !row.local && Boolean(choiceNote(row)) && keyNote(row) === choiceNote(row);
+            status.classList.toggle('ui-status', choosing);
+            if (choosing) status.dataset.tone = 'warn'; else delete status.dataset.tone;
             status.textContent = row.local ? 'Uses the local runtime.'
                 : keyNote(row) || note || (!row.model ? (row.slot.slot === 'main' ? 'Choose a model to continue.' : `Uses ${inheritName(row)}.`)
                     : sourceId(row) ? (rowCatalog?.read_state === 'ok' && !rowCatalog.items.length
@@ -510,6 +519,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             processingPreference = String(settings[PROCESSING_PREFERENCE_KEY] || ''); processingTouched = false;
             providerProfiles = contract.providerProfiles || providerProfiles;
             connections = apiConnections(settings, providerProfiles);
+            mainChoice = Array.isArray(settings._meta?.main_connection_choice) ? settings._meta.main_connection_choice : [];
             apiProviders = configuredApiProviders(settings, providerProfiles);
             rows = [];
             for (const slot of slots) {

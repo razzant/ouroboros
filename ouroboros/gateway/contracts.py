@@ -875,6 +875,7 @@ class SettingsMeta(SettingsNetworkMeta, total=False):
     policy_state: SettingsPolicyState
     restart_state: Dict[str, Any]
     connections: list[Dict[str, Any]]  # every API connection as the picker shows it (provider_connections.connections_meta)
+    main_connection_choice: list[str]  # the connections an unauthored Main waits to be chosen among (server_runtime)
 
 
 class SettingsSaveResponse(TypedDict, total=False):

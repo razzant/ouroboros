@@ -303,7 +303,7 @@ a path that cannot be read fails the call loudly instead of silently falling
 back to the defaults. In Docker, mount the file and pass the setting:
 
 ```bash
-docker run --rm -p 8765:8765 \
+docker run --rm -p 127.0.0.1:8765:8765 \
   -v "$PWD/extra-ca.pem:/certs/extra-ca.pem:ro" \
   -e OUROBOROS_EXTRA_CA_BUNDLE=/certs/extra-ca.pem \
   ouroboros-web

@@ -645,6 +645,8 @@ def test_accounts_catalog_failure_is_visible_and_retry_keeps_the_draft(subscript
 def test_declared_source_with_failed_inventory_preserves_stored_or_owner_authored_defaults(subscription_ui, fresh_install):
     ui, page = subscription_ui, subscription_ui['page']
     ui['bootstrap']['freshInstall'] = fresh_install
+    if not fresh_install:  # a stored install's bootstrap: its document sets every slot, none is the wizard's (#2969)
+        ui['bootstrap']['initialState']['automaticModels'] = []
     initial = ui['bootstrap']['initialState']['mainModel']
     ui['backend'].update(preview_error='Agent inventory unavailable.', catalog_response={
         'items': [], 'model_sources': ui['fixture']['catalog']['model_sources'],

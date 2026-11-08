@@ -53,7 +53,7 @@ from ouroboros.gateway.secret_rows import (
 from ouroboros.secret_masking import is_custom_secret_setting_key, looks_masked_settings_secret, mask_settings_secret
 from ouroboros.server_runtime import (
     apply_runtime_provider_defaults, automatic_catalog, classify_runtime_provider_change, has_startup_ready_provider,
-    repropose_unedited_catalog, repropose_unedited_slots, settings_read_catalog,
+    main_connection_choice, repropose_unedited_catalog, repropose_unedited_slots, settings_read_catalog,
 )
 from ouroboros.settings_setup_contract import (
     BUDGET_SETTING_KEYS,
@@ -890,6 +890,7 @@ async def api_settings_get(request: Request) -> JSONResponse:
         "automatic": automatic_catalog(document := _owner_settings_document()),
     }
     meta["connections"] = connections_meta(settings, document)
+    meta["main_connection_choice"] = main_connection_choice(settings, document)  # Main waits for the owner's pick
     safe["_meta"] = meta
     return JSONResponse(safe)
 

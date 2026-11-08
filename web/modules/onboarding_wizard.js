@@ -18,7 +18,7 @@ import { installAltMenuSuppression, installDesktopShellLinkInterceptor } from '.
 import { createModelRolesEditor, inheritTargetOf, modelRolesHost, modelRoleMap, parseModelSource } from './model_roles.js';
 import { ALLOW_EMPTY_REVIEW_POOL, PACKET_ONLY_POOL_WARNING, availableSubagentsEditorHost, packetOnlyReviewPool, reviewPoolRows, reviewerTickCaption } from './subagents_settings.js';
 import { PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, processingIntentLabel,
-    configuredApiProviders, apiProviderLabel, compatibleEndpoint } from './route_editor_primitives.js';
+    configuredApiProviders, apiProviderLabel, compatibleEndpoint, connectionDefaults } from './route_editor_primitives.js';
 import { MODEL_CATALOG_TIMEOUT_MS, mergeModelCatalog, catalogReadState, summarizeReadErrors } from './settings_catalog.js';
 import { accountRows } from './claudexor_status_store.js';
 import { accountRowFacts } from './harness_accounts.js';
@@ -77,8 +77,8 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         apiBudgetOpen: false,
         subagentsOpen: false,
         localSourceOpen: Boolean(INITIAL_STATE.localSource),
-        moreProvidersOpen: Boolean(INITIAL_STATE.cloudruKey || INITIAL_STATE.minimaxKey || INITIAL_STATE.deepseekKey
-            || INITIAL_STATE.zaiKey),
+        moreProvidersOpen: PROVIDER_FIELDS.some((field) => field.group === 'more' && field.inputType === 'password'
+            && !field.settingKey.startsWith('OPENAI_COMPATIBLE_') && Boolean(INITIAL_STATE[field.stateKey])),
         localStatusText: 'Status: Offline',
         localStatusTone: 'muted',
         localTestResult: '',
@@ -114,7 +114,10 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
     let disposeLanguage = null;
     let catalogGeneration = 0;
     const stepScrollPositions = new Map();
-    let suggestedVisionModel = null;
+    // What we proposed, per slot: seeded with the slots no document or operator variable sets (#2969); a slot the
+    // owner edits leaves it, and only one still holding it takes a later proposal: saved values and blanks stay.
+    const proposedModels = Object.fromEntries((INITIAL_STATE.automaticModels || []).map((key) => [key, INITIAL_STATE[key]]));
+    const ours = (key) => key in proposedModels && state[key] === proposedModels[key];
     let connectionsEditor = null;
     let footerObserver = null;
     let compatibleCatalogs = {};
@@ -122,7 +125,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
     const starterSkills = createStarterSkillsRow(); // the Summary's Starter skills row keeps its ticks across renders
     const consciousness = createConsciousnessOffer(bootstrap.consciousnessOffer, { onChange: () => render() }); // its one Start waits for the confirmed save
     const modelRoles = createModelRolesEditor({ hostId: 'onboarding-model-roles', onChange: (settings, { slot } = {}) => {
-        if (slot === 'vision') suggestedVisionModel = null;
+        delete proposedModels[MODEL_SLOTS.find((entry) => entry.slot === slot)?.stateKey];  // edited: the owner's now
         adoptModelSettings(settings);
         state.modelsDirty = true;
         markStepEdited();
@@ -153,10 +156,10 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
     }
 
     function clearFreshSubscriptionDefaults() {
-        if (bootstrap.freshInstall !== true || state.modelsDirty || !hasModelSubscription() || hasApiAccess() || hasLocalModel()) return;
+        if (!hasModelSubscription() || hasApiAccess() || hasLocalModel()) return;
         const defaults = MODEL_DEFAULTS.openrouter || {};
         for (const [key, name] of [['mainModel', 'main'], ['lightModel', 'light'], ['fallbackModel', 'fallback']]) {
-            if (state[key] === defaults[name]) state[key] = '';
+            if (ours(key) && state[key] === defaults[name]) state[key] = proposedModels[key] = '';
         }
     }
 
@@ -191,12 +194,16 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
     }
 
     // The reviewers arrive inside the previewed catalog (rows marked Reviewer),
-    // which the Available subagents editor itself adopts.
+    // which the Available subagents editor itself adopts. A proposed model lands only
+    // in a slot still ours, and stays ours: a saved or edited slot, blank included, is kept (#2969).
     function applySetupPreview(response) {
         if (!state.skipSubscriptionPresets) state.presetFailure = null;
         if (!state.modelsDirty && response.model_settings) {
             const previous = JSON.stringify(draftSettings());
-            adoptModelSettings(response.model_settings);
+            MODEL_SLOTS.filter((slot) => slot.settingKey in response.model_settings && ours(slot.stateKey))
+                .forEach((slot) => {
+                    state[slot.stateKey] = proposedModels[slot.stateKey] = response.model_settings[slot.settingKey];
+                });
             if (JSON.stringify(draftSettings()) !== previous) loadModelRoles();
         }
         if (Array.isArray(response.items)) adoptModelCatalog(response);
@@ -204,8 +211,9 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         refreshSummary();
     }
 
-    function loadModelRoles() {
-        modelRoles.load(draftSettings(), { ...SETUP_CONTRACT,
+    function loadModelRoles() {  // a Main still on a key that does not serve, among several named ones, asks which (#2969)
+        const { choice } = connectionDefaults(MODEL_DEFAULTS, activeProviderProfile(), draftSettings(), PROVIDER_PROFILES, state.mainModel);
+        modelRoles.load({ ...draftSettings(), _meta: { main_connection_choice: ours('mainModel') ? choice : null } }, { ...SETUP_CONTRACT,
             modelSlots: MODEL_SLOTS.map((slot) => ({ ...slot, settingsToggleId: '' })) });
     }
 
@@ -377,23 +385,16 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         return 'custom';
     }
 
-    function applyModelDefaults(force) {
+    // Our slots take the profile's defaults on the key the draft's proposals name, Main's own once the owner set it.
+    function applyModelDefaults() {
         const localMain = hasLocalModel() && LOCAL_ROUTING_MODES.find((mode) => mode.value === state.localRoutingMode)?.flags?.[0];
-        // Withdraw only our suggestion when Main moves local, even if another
-        // model was edited. A deliberate Vision choice remains the owner's.
-        if (localMain && suggestedVisionModel !== null && state.visionModel === suggestedVisionModel) {
-            state.visionModel = '';
-            suggestedVisionModel = null;
-        }
-        if (state.modelsDirty && !force) return;
-        if (!force && bootstrap.freshInstall !== true && MODEL_SLOTS.some((slot) => trim(INITIAL_STATE[slot.stateKey]))) return;
+        if (localMain && ours('visionModel')) state.visionModel = proposedModels.visionModel = '';  // Vision follows a local Main
         if (hasModelSubscription()) return;
-        const defaults = MODEL_DEFAULTS[activeProviderProfile()] || MODEL_DEFAULTS.openrouter || {};
+        const main = ours('mainModel') ? '' : state.mainModel;
+        const { defaults } = connectionDefaults(MODEL_DEFAULTS, activeProviderProfile(), draftSettings(), PROVIDER_PROFILES, main);
         for (const [key, name] of [['mainModel', 'main'], ['lightModel', 'light'], ['visionModel', 'vision'], ['fallbackModel', 'fallback']]) {
-            state[key] = name === 'vision' && localMain ? '' : defaults[name] || '';
+            if (ours(key)) state[key] = proposedModels[key] = name === 'vision' && localMain ? '' : defaults[name] || '';
         }
-        suggestedVisionModel = state.visionModel;
-        state.modelsDirty = false;
     }
 
         function validateProvidersStep() {
@@ -408,7 +409,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
             // the owner never touched arrives here unchanged; rejecting it blocks
             // Next/Save on the providers step and the offending value becomes the
             // one value the wizard can never replace.
-            const shortKey = keyValues.find(([field, value]) => field.settingKey !== 'OPENAI_COMPATIBLE_API_KEY' && value && (field.inputType || 'password') === 'password' && value.length < 10 && value !== trim(INITIAL_STATE[field.stateKey]));
+            const shortKey = keyValues.find(([field, value]) => !['OPENAI_COMPATIBLE_API_KEY', 'GIGACHAT_PASSWORD'].includes(field.settingKey) && value && (field.inputType || 'password') === 'password' && value.length < 10 && value !== trim(INITIAL_STATE[field.stateKey]));
             if (shortKey) return `${shortKey[0].label.replace(' API Key', '')} API key looks too short.`;
             const hasRemote = hasApiAccess();
             if (!hasRemote && !localSource && !hasModelSubscription()) {
@@ -469,7 +470,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         const error = validateCurrentStep();
         state.error = error;
         if (error) return syncCurrentStepActionState();
-        if (state.currentStep === 'accounts') applyModelDefaults(false);
+        if (state.currentStep === 'accounts' || state.currentStep === 'models') applyModelDefaults();
         // Preview is enrichment, never a navigation or model-discovery gate. Refresh (also Retry) in the background
         // after a valid draft; it replaces generated rows only and keeps owner-edited models, reviewers and subagents.
         // Finish checks the receipt only if generated rows still own the editor.
@@ -802,7 +803,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
     async function reviewAndStart() {
         if (validateProvidersStep()) return;
         state.error = '';
-        applyModelDefaults(false);
+        applyModelDefaults();
         const originStep = state.currentStep;
         const ready = await agentsStep.refreshSubagentsPreview({ force: true });
         if (state.currentStep !== originStep) return;
@@ -1576,7 +1577,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         syncCurrentStepActionState();
     }
 
-    applyModelDefaults(false);
+    applyModelDefaults();
     root.addEventListener('focusin', clearFooterOnFocus);
     window.addEventListener('pagehide', (event) => {
         consciousness.leave();  // every departure retires a Start not sent yet; the form itself survives the back/forward cache

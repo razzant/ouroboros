@@ -9,15 +9,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from ouroboros.config import SETTINGS_DEFAULTS, VALID_RUNTIME_MODES
 from ouroboros.review_run_isolation import run_cap_from_env
-from ouroboros.provider_models import (
-    ANTHROPIC_DIRECT_DEFAULTS,
-    CLOUDRU_DIRECT_DEFAULTS,
-    DEEPSEEK_DIRECT_DEFAULTS,
-    ZAI_DIRECT_DEFAULTS,
-    MINIMAX_DIRECT_DEFAULTS,
-    MINIMAX_REGION_ENDPOINTS,
-    OPENAI_DIRECT_DEFAULTS,
-)
+from ouroboros.provider_models import DIRECT_PROVIDER_DEFAULTS, MINIMAX_REGION_ENDPOINTS
 from ouroboros.secret_masking import (
     CONFIGURED_SECRET_PLACEHOLDER,
     MASKED_SECRET_SETTING_KEYS as SECRET_SETTING_KEYS,
@@ -29,6 +21,7 @@ from ouroboros.model_slots import (
 from ouroboros.provider_models import compatible_endpoint_configured, parse_claudexor_model, provider_for_model
 from ouroboros.provider_connections import configured_connections, connection_rows, normalize_connections
 from ouroboros.gateway.secret_rows import mask_connections, rehydrate_connections
+from ouroboros.settings_integrity import operator_variables, skill_environ
 
 
 
@@ -131,12 +124,9 @@ _MODEL_DEFAULTS = {
         "consciousness": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_CONSCIOUSNESS"]),
         "fallback": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_FALLBACKS"]),
     },
-    "openai": {key: value for key, value in OPENAI_DIRECT_DEFAULTS.items() if key != "heavy"},
-    "cloudru": {key: value for key, value in CLOUDRU_DIRECT_DEFAULTS.items() if key != "heavy"},
-    "minimax": {key: value for key, value in MINIMAX_DIRECT_DEFAULTS.items() if key != "heavy"},
-    "deepseek": {key: value for key, value in DEEPSEEK_DIRECT_DEFAULTS.items() if key != "heavy"},
-    "zai": {key: value for key, value in ZAI_DIRECT_DEFAULTS.items() if key != "heavy"},
-    "anthropic": {key: value for key, value in ANTHROPIC_DIRECT_DEFAULTS.items() if key != "heavy"},
+    # Every direct provider's own defaults (provider_models.DIRECT_PROVIDER_DEFAULTS), never a second list.
+    **{kind: {key: value for key, value in defaults.items() if key != "heavy"}
+       for kind, defaults in DIRECT_PROVIDER_DEFAULTS.items()},
     # No defaults: model names are server-specific; user must fill all slots.
     "openai-compatible": {"main": "", "light": "", "vision": "", "fallback": ""},
     # Several direct providers and no router: the owner chooses Main; no provider is guessed.
@@ -166,6 +156,10 @@ _PROVIDER_FIELDS = _rows(("id", "stateKey", "settingKey", "settingsInputId", "la
     ("openrouter-key", "openrouterKey", "OPENROUTER_API_KEY", "s-openrouter", "OpenRouter API Key", "sk-or-v1-...", "Optional. Best when you want one router for OpenAI, Anthropic, Google, and more.", "password", "primary"),
     ("openai-key", "openaiKey", "OPENAI_API_KEY", "s-openai", "OpenAI API Key", "sk-...", "Optional. If this is the only remote key, the next step prefills OpenAI's own model ids.", "password", "primary"),
     ("cloudru-key", "cloudruKey", "CLOUDRU_FOUNDATION_MODELS_API_KEY", "s-cloudru-key", "Cloud.ru Foundation Models API Key", "Cloud.ru API key", "Optional. If this is the only remote key, the next step prefills Cloud.ru's own model ids.", "password", "more"),
+    # GigaChat is ready with an authorization key, or a user and password (provider_models.PROVIDER_KINDS).
+    ("gigachat-credentials", "gigachatCredentials", "GIGACHAT_CREDENTIALS", "s-gigachat-credentials", "GigaChat Authorization Key", "Base64 client_id:secret", "Optional. If this is the only remote key, the next step prefills GigaChat's own model ids.", "password", "more"),
+    ("gigachat-user", "gigachatUser", "GIGACHAT_USER", "s-gigachat-user", "GigaChat User", "username", "Basic auth instead of an authorization key, with the password below.", "text", "more"),
+    ("gigachat-password", "gigachatPassword", "GIGACHAT_PASSWORD", "s-gigachat-password", "GigaChat Password", "password", "Basic auth, with the user above.", "password", "more"),
     ("minimax-key", "minimaxKey", "MINIMAX_API_KEY", "s-minimax-key", "MiniMax API Key", "MiniMax API key", "Optional. If this is the only remote key, the next step prefills MiniMax's own model ids.", "password", "more"),
     ("minimax-region", "minimaxRegion", "MINIMAX_REGION", "s-minimax-region", "MiniMax Region", "global_en or cn_zh", "Choose global_en for the global endpoint or cn_zh for the China endpoint.", "text", "more"),
     ("deepseek-key", "deepseekKey", "DEEPSEEK_API_KEY", "s-deepseek-key", "DeepSeek API Key", "sk-...", "Optional. If this is the only remote key, the next step prefills DeepSeek's own model ids.", "password", "more"),
@@ -182,6 +176,7 @@ _PROVIDER_FIELDS = _rows(("id", "stateKey", "settingKey", "settingsInputId", "la
 _PROFILE_SPECS = {
     "openrouter": ("OpenRouter", "OpenRouter is present, so the next step keeps router-style defaults while still saving any extra direct keys you paste here.", "OpenRouter-style routing remains active. OpenRouter stays the source for ids such as openai/gpt-5.6-terra or anthropic/claude-sonnet-5."),
     "openai": ("OpenAI", "OpenAI is present, so the next step prefills OpenAI's own model ids.", "OpenAI-only setup detected. These defaults are explicit and official."),
+    "gigachat": ("GigaChat", "GigaChat is present, so the next step prefills GigaChat's own model ids.", "GigaChat-only setup detected. These defaults use GigaChat's own model ids."),
     "cloudru": ("Cloud.ru Foundation Models", "Cloud.ru is present, so the next step prefills Cloud.ru's own model ids.", "Cloud.ru-only setup detected. These defaults use Cloud.ru's own model ids."),
     "minimax": ("MiniMax", "MiniMax is present, so the next step prefills MiniMax's own model ids.", "MiniMax-only setup detected. These defaults include MiniMax-M3 and MiniMax-M3.1-Flash."),
     "deepseek": ("DeepSeek", "DeepSeek is present, so the next step prefills DeepSeek's own model ids.", "DeepSeek-only setup detected. These defaults use deepseek-v4-pro for main work and deepseek-v4-flash for the light lane."),
@@ -445,7 +440,7 @@ def parse_completion_attempt(data: Any) -> Tuple[str, str]:
     return "", "attempt_id must be 16-128 letters, digits, '-' or '_'."
 
 
-def build_initial_setup_state(settings: dict, host_mode: str = "desktop") -> dict:
+def build_initial_setup_state(settings: dict, host_mode: str = "desktop", document: Optional[dict] = None) -> dict:
     profile = derive_provider_profile(settings)
     defaults = model_defaults_for_profile(profile)
     local_source = _string(settings.get("LOCAL_MODEL_SOURCE"))
@@ -510,6 +505,12 @@ def build_initial_setup_state(settings: dict, host_mode: str = "desktop") -> dic
     # takes the profile default. A fresh install's wizard proposes its defaults itself.
     state.update({slot["stateKey"]: _string(settings[slot["settingKey"]]) if slot["settingKey"] in settings
                   else defaults[slot["slot"]] for slot in _MODEL_SLOTS})
+    # The model slots the wizard proposes and may move to another key or a subscription's model (#2969): set by
+    # neither the stored ``document`` (``settings`` when none is given) nor an operator's own variable. Any other
+    # value, blank included, is kept.
+    chosen = set(settings if document is None else document) | set(
+        operator_variables(skill_environ(), [slot["settingKey"] for slot in _MODEL_SLOTS]))
+    state["automaticModels"] = [slot["stateKey"] for slot in _MODEL_SLOTS if slot["settingKey"] not in chosen]
     return state
 
 
@@ -530,7 +531,7 @@ def consciousness_offer(settings: dict, *, enabled: Optional[bool] = None) -> di
 
 
 def build_setup_bootstrap(settings: dict, host_mode: str = "desktop", *, fresh_install: bool = False,
-                          consciousness_enabled: Optional[bool] = None) -> dict:
+                          consciousness_enabled: Optional[bool] = None, document: Optional[dict] = None) -> dict:
     normalized_host = "web" if host_mode == "web" else "desktop"
     return {
         "hostMode": normalized_host,
@@ -546,7 +547,7 @@ def build_setup_bootstrap(settings: dict, host_mode: str = "desktop", *, fresh_i
         # hardcoding it: a prefilled credential field holds this string, not a key.
         "secretPlaceholder": CONFIGURED_SECRET_PLACEHOLDER,
         "contract": build_setup_contract(normalized_host),
-        "initialState": build_initial_setup_state(settings, normalized_host),
+        "initialState": build_initial_setup_state(settings, normalized_host, document),
         "consciousnessOffer": consciousness_offer(settings, enabled=consciousness_enabled),
     }
 
@@ -639,7 +640,7 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
             continue
         if (
             value
-            and setting_key != "OPENAI_COMPATIBLE_API_KEY"
+            and setting_key not in {"OPENAI_COMPATIBLE_API_KEY", "GIGACHAT_PASSWORD"}  # API keys only
             and (field.get("inputType") or "password") == "password"
             and len(value) < 10
         ):
@@ -648,7 +649,7 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
     has_remote = any(
         value
         for setting_key, value in keys.items()
-        if setting_key not in {"OPENAI_COMPATIBLE_API_KEY", "MINIMAX_REGION", "ZAI_PLAN"}
+        if setting_key not in {"OPENAI_COMPATIBLE_API_KEY", "MINIMAX_REGION", "ZAI_PLAN", "GIGACHAT_USER", "GIGACHAT_PASSWORD"}
     )
     has_remote = has_remote or bool(configured_connections({**keys, "OUROBOROS_CONNECTIONS": connections}))
     has_local = bool(local_source)
