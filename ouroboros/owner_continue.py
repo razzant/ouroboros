@@ -312,17 +312,27 @@ def valid_start(start: Any) -> bool:
 def _wake_opening(metadata: Dict[str, Any], task_id: str, gaps: List[str]) -> Optional[Dict[str, Any]]:
     """The opening a consciousness wake's own row recorded, copied by value, or a named gap: own clock, its
     ``wake_task_metadata`` reason; place focus, ``focus_metadata``'s facts (sender, ``owner_confirmed`` as the place
-    recorded it) and the event's exact words (``metadata.presence.observed_text``), the room's context. None is owner
-    text here: an addressed event from my human's confirmed account is its own ``place_owner`` corpus row."""
+    recorded it), the event's exact words (``metadata.presence.observed_text``), the room's context, and what the
+    connector reported about that message (``reported``, its labelled block; a cut names this task's record). None is
+    owner text here: an addressed event from my human's confirmed account is its own ``place_owner`` corpus row."""
     from ouroboros.consciousness_authority import (
         WAKE_CAUSE_FOCUS, WORK_KIND_CONSCIOUSNESS, is_consciousness_origin, wake_cause, work_kind,
     )
+    from ouroboros.presence_message_facts import connector_facts, event_reader
 
     cause = wake_cause(metadata)
     presence = metadata.get("presence") if isinstance(metadata.get("presence"), dict) else {}
     opening = {"source": WAKE_OPENING, "task_id": task_id, "wake_cause": cause}
     if cause == WAKE_CAUSE_FOCUS:
         opening.update(focus=copy.deepcopy(metadata.get("focus")), observed_text=presence.get("observed_text"))
+        focus = opening["focus"] if isinstance(opening["focus"], dict) else {}
+        actor = focus.get("actor") if isinstance(focus.get("actor"), dict) else {}
+        event = presence.get("event") if isinstance(presence.get("event"), dict) else {}
+        reported = connector_facts(event.get("message"), text=str(presence.get("observed_text") or ""), sender=str(
+            actor.get("display_name") or actor.get("platform_actor_id") or ""),
+            source=event_reader(task_id, "message.non_text"))
+        if reported:
+            opening["reported"] = reported
     else:
         opening["wake_reason"] = metadata.get("wake_reason")
     if not (is_consciousness_origin(metadata) and work_kind(metadata) == WORK_KIND_CONSCIOUSNESS
@@ -343,6 +353,7 @@ def valid_wake(wake: Any) -> bool:
         return isinstance(wake.get("wake_reason"), str) and bool(wake["wake_reason"].strip())
     focus = wake.get("focus")
     return (wake.get("wake_cause") == WAKE_CAUSE_FOCUS and isinstance(wake.get("observed_text"), str)
+            and isinstance(wake.get("reported", ""), str)
             and isinstance(focus, dict) and isinstance(focus.get("actor"), dict)
             and all(isinstance(focus.get(key), str) and focus[key].strip() for key in ("place_id", "conversation_key")))
 
@@ -880,7 +891,10 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
     if wake:
         lines += ["", "That task was a wake of your consciousness; no owner message opened it. Its recorded "
                       "opening (host facts, not owner words):",
-                  json.dumps({key: value for key, value in wake.items() if key != "observed_text"}, ensure_ascii=False)]
+                  json.dumps({key: value for key, value in wake.items() if key not in ("observed_text", "reported")},
+                             ensure_ascii=False)]
+        if isinstance(wake.get("reported"), str) and wake["reported"]:
+            lines.append(wake["reported"])  # the connector's facts about that message, labelled, beside its words
         # Once, below, only when my human's confirmed account opened the wake and a ``place_owner`` row (cited, or an
         # older record's) or their confirmed place words hold these words; a participant's same words stay theirs.
         focus = wake.get("focus") if isinstance(wake.get("focus"), dict) else {}

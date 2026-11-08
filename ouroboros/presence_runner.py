@@ -1058,8 +1058,10 @@ def _build_task(
         rendered = _render_attachment_lines(authority)
         if rendered:
             task["text"] = f"{task['text']}\n\n[ATTACHMENTS]\n{rendered}\n[END_ATTACHMENTS]".strip()
-    if not task["text"]:
-        task["text"] = "(attachments received)" if manifest else "(empty presence event)"
+    if not task["text"]:  # a file that did not arrive or content without words is never an empty event
+        from ouroboros.presence_message_facts import carries_content
+        task["text"] = ("(attachments received)" if manifest else
+                        "(no text)" if carries_content(event.message) else "(empty presence event)")
     return attach_task_contract(task)
 
 

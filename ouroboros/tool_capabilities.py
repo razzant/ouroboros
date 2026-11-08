@@ -143,7 +143,7 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "delegate_message",
     "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query", "view_image",
     # Bounded media projection: writes derived frames only under artifact_store/video_frames.
-    "ocr_pdf", "extract_pdf_text", "youtube_transcript", "extract_video_frames",
+    "ocr_pdf", "extract_pdf_text", "youtube_transcript", "extract_video_frames", "read_archive",
     # This child's own callable catalog (the name-miss answer points here) and the loader
     # of a permitted schema a route's ceiling or Nano left out; neither grants a tool.
     "list_available_tools", "enable_tools", "list_image_models",
@@ -207,7 +207,7 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "delegate_message",
     "integrate_delegated_patch",
     "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query", "view_image",
-    "ocr_pdf", "extract_pdf_text", "youtube_transcript", "extract_video_frames",
+    "ocr_pdf", "extract_pdf_text", "youtube_transcript", "extract_video_frames", "read_archive",
     "list_available_tools", "enable_tools", "list_image_models", "generate_image", "recover_image",
 })
 
@@ -232,7 +232,7 @@ def acting_tool_names_for_context(ctx: object, registered_names: Iterable[str]) 
 READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
     "inspect_harness",
     "inspect_subagent",
-    "read_file", "list_files",
+    "read_file", "list_files", "read_archive",
     "search_code", "query_code", "query_data", "recent_tasks",
     "web_search", "chat_history",
     "vcs_read", "service_status", "service_logs",

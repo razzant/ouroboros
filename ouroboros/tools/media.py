@@ -7,7 +7,8 @@ dep degrades gracefully rather than burning rounds. The PDF readers (one handler
 boundary; `youtube_transcript` is web-gated like web_search
 (`registry._WEB_TOOLS`). `extract_video_frames` optionally uses `ffmpeg` from PATH
 when available, writes each call's frames into a new directory, and returns typed
-`EXTRACT_VIDEO_FRAMES_UNAVAILABLE` otherwise.
+`EXTRACT_VIDEO_FRAMES_UNAVAILABLE` otherwise. `read_archive` lists a ZIP or reads one member's
+text through read_file's own admission (``archive_reader``: nothing is extracted).
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ import tempfile
 from typing import Dict, List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
 
 _OCR_PDF_MAX_BYTES = 25 * 1024 * 1024
 _OCR_PDF_MAX_PAGES = 50
@@ -428,6 +430,70 @@ def _pdf_text_schema(name: str, lead: str) -> dict:
     }
 
 
+@completed_local_read
+def _read_archive(ctx: ToolContext, path: str = "", root: str = "", entry: int = 0, member: str = "",
+                  offset: int = 0, start_byte: int = 0, encoding: str = "utf-8", bucket: str = "",
+                  skill_name: str = "") -> str:
+    """List a ZIP archive, or read one member's text, after read_file's own admission of the file (its
+    roots and skill_payload selectors, Presence ceiling, runtime-data and protected-path rules);
+    ``archive_reader`` extracts nothing. A member read publishes its own ``archive_member_view`` identity,
+    never read_file's ``read_view``."""
+    from ouroboros.archive_reader import listing, member_text
+    from ouroboros.tools.core_file_tools import read_admission
+    from ouroboros.tools.tool_resolution import _root_containing_absolute_path
+
+    text = str(path or "").strip()
+    if not text:
+        return "⚠️ TOOL_ARG_ERROR: `path` is required."
+    if any(type(value) is not int or value < 0 for value in (entry, offset, start_byte)):
+        return "⚠️ TOOL_ARG_ERROR: entry, offset and start_byte must be nonnegative integers."
+    chosen = str(root or "").strip() or _root_containing_absolute_path(ctx, "read_file", text) or "active_workspace"
+    normalized, binding, refusal = read_admission(ctx, chosen, text, bucket=str(bucket or ""),
+                                                  skill_name=str(skill_name or ""))
+    if refusal is not None:
+        return _publish_tool_result(ctx, refusal) if isinstance(refusal, ToolResult) else refusal
+    target, label = pathlib.Path(binding.target_path), f"{normalized}:{text}"
+    if not target.is_file():
+        return f"⚠️ FILE_NOT_FOUND: {label} (resolved: {target})"
+    if not entry and not member:
+        return listing(target, label, offset=offset)
+    rendered, identity = member_text(target, label, entry=entry, member=str(member or ""),
+                                     start_byte=start_byte, encoding=str(encoding or "utf-8"))
+    if identity is None:
+        return rendered
+    return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=rendered,
+                                                meta={"archive_member_view": identity}))
+
+
+_READ_ARCHIVE_SCHEMA = {
+    "name": "read_archive",
+    "description": (
+        "List a ZIP archive's entries, or read one member's text, without extracting anything to disk: names "
+        "inside (absolute, '..', symlinks) stay text. The listing pages 200 entries and names folders, "
+        "archives inside (listed, not opened), encrypted members and compression it does not decode; a member "
+        "read returns up to 200,000 decompressed bytes and the start_byte that continues it. ZIP only for now."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "The ZIP file, as read_file's path."},
+            "root": {"type": "string", "description": (
+                "As read_file's root (default active_workspace; an absolute path selects the root holding it). "
+                "A staged attachment is root='artifact_store', path='attachments/<name>'.")},
+            "entry": {"type": "integer", "minimum": 0, "description": "Read this member, by its number in the listing."},
+            "member": {"type": "string", "description": "Or read the member with exactly this name as listed."},
+            "offset": {"type": "integer", "minimum": 0, "description": "Listing: start after this many entries."},
+            "start_byte": {"type": "integer", "minimum": 0,
+                           "description": "Member read: resume at this byte of the member, as a cut read names."},
+            "encoding": {"type": "string", "description": "Member read: its text encoding (default utf-8, e.g. cp1251)."},
+            "bucket": {"type": "string", "description": "As read_file's: required only for root=skill_payload."},
+            "skill_name": {"type": "string", "description": "As read_file's: required only for root=skill_payload."},
+        },
+        "required": ["path"],
+    },
+}
+
+
 def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry(name="ocr_pdf", schema=_pdf_text_schema("ocr_pdf", (
@@ -437,6 +503,8 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry(name="extract_pdf_text", schema=_pdf_text_schema(
             "extract_pdf_text", "Extract the embedded text layer of a local PDF."),
             handler=_ocr_pdf, timeout_sec=120, safety_policy="skip"),
+        ToolEntry(name="read_archive", schema=_READ_ARCHIVE_SCHEMA, handler=_read_archive, timeout_sec=120,
+                  safety_policy="skip"),
         ToolEntry(
             name="youtube_transcript",
             schema={

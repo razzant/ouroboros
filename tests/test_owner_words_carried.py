@@ -23,10 +23,10 @@ LONG = ("Sasha's estimate is fine, but before you start: keep the old export pat
         "write the migration as a reversible step, and only then switch the default. ") * 3 + "Do NOT ship on Friday."
 
 
-def _place_turn(tmp_path, *, confirmed=True, reply_to_message_id="", forwarded=False):
+def _place_turn(tmp_path, *, confirmed=True, reply_to_message_id="", forwarded=False, message=None):
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, current_task_type="presence")
     ctx.task_id = "place-turn"
-    message = {"reply_to_message_id": reply_to_message_id} if reply_to_message_id else {}
+    message = {**(message or {}), **({"reply_to_message_id": reply_to_message_id} if reply_to_message_id else {})}
     message.update({"forward_origin": {"sender_user_name": "Andrew"}} if forwarded else {})
     ctx.task_metadata = {
         "focus": {"place_id": "p1", "room_chat_id": 2 ** 41 + 3,
@@ -74,6 +74,22 @@ def test_a_place_reply_names_its_target_by_address_when_the_connector_gave_no_wo
     assert "author not recorded: the message my human replied to, not my human's words" in text
     assert "(its words are not carried: the connector named only its platform message id, no host address)" in text
     assert "this address reads them" not in text, "no host address reads a platform message id"
+
+
+def test_a_place_reply_carries_its_known_words_and_their_author_as_context_not_an_order(tmp_path):
+    from ouroboros.owner_words import cited_owner_basis, owner_words_contain
+
+    words = "  A proposal from someone else.\n"
+    ctx = _place_turn(tmp_path, message={"reply_to_message": {"message_id": 41,
+        "from": {"id": 8, "first_name": "Sasha"}, "text": words}, "quote": {"text": "proposal"}})
+    basis, error = cited_owner_basis(ctx, LONG)
+    assert not error and basis["reply_to"]["text"] == words
+    assert "Sasha" in basis["reply_to"]["author"] and "41" in basis["reply_to"]["address"]
+    seeded = SimpleNamespace(task_id="new-work", task_metadata={"owner_corpus": [basis],
+        "objective_author": {"kind": "task", "task_id": "place-turn"}})
+    _initialize_owner_directives(seeded, [{"role": "user", "content": "drafted"}])
+    assert "not my human's words" in render_owner_words(governing_words_for_schedule(seeded)[FIELD], audience="child")
+    assert not owner_words_contain(seeded, words), "a reply target is context, never the owner's order"
 
 
 def _owner_root(tmp_path, metadata=None):

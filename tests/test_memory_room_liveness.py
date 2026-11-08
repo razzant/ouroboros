@@ -194,6 +194,74 @@ def test_a_room_where_neither_my_human_nor_i_spoke_is_one_line_and_a_room_where_
     assert [room["room_id"] for room in group["rooms"]] == [str(rooms["i1"]), str(rooms["i2"])]
 
 
+def test_a_forward_from_my_humans_account_engages_the_room_and_still_waits_as_anothers_words(tmp_path):
+    """A forward keeps its sender: a room where my human forwarded is one where they acted, so it keeps its words (a
+    stranger's forward does not engage one); the forwarded words are not my human's, so they rank as unconsidered."""
+    from ouroboros import places
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_runner import presence_chat_id
+
+    _install(tmp_path)
+    place = places.connect_place(tmp_path, connector="bridge", provider="github", account_id="me", label="Repo")
+    places.edit_place(tmp_path, place.place_id, "confirm_owner_account", author="owner", platform_actor_id="anton",
+                      account_id="me")
+    base = {"provider": "github", "account_id": "me", "conversation_id": "repo.1"}
+    rooms = {thread: presence_chat_id(conversation_key("github", "me", "repo.1", thread)) for thread in ("f1", "f2")}
+
+    def forwarded(thread, minute, actor):
+        return shared.msg(_ts(minute), f"words {actor} forwarded", chat_id=rooms[thread], source="presence:github",
+                          presence_provenance={"place_id": place.place_id},
+                          transport={**base, "thread_id": thread, "actor": {"platform_actor_id": actor},
+                                     "message": {"forward_origin": {"sender_user_name": "Other"}}})
+
+    mine, theirs = forwarded("f1", 40, "anton"), forwarded("f2", 41, "u7")
+    shared.append(tmp_path / "logs" / "chat.jsonl", mine, theirs)
+    snapshot, text = _view(tmp_path, MAIN_TASK)
+    engaged, stranger = _room(snapshot, str(rooms["f1"])), _room(snapshot, str(rooms["f2"]))
+    assert engaged["engaged"] and "words anton forwarded" in text, "my human acted in this room"
+    assert [word["owner_side"] for word in engaged["words"]] == [False], "the words are another author's"
+    assert _rank(snapshot, str(rooms["f1"]), mine) == 2, "they wait unconsidered, as a person's words do"
+    assert not stranger["engaged"] and "1 words nobody considered" in stranger["silent"]
+
+
+@pytest.mark.parametrize("owner", [False, True])
+@pytest.mark.parametrize("origins,names", [(("First Writer", "Second Writer"), ("first.zip", "second.zip")),
+    (("Same Writer", "Same Writer"), ("report final.zip", "report  final.zip"))])
+def test_repeated_words_keep_each_distinct_connectors_facts(tmp_path, owner, origins, names):
+    """The same words with different origins or failed files are different observations; an actual repeat
+    still points to the matching observation, without reading its body again."""
+    from ouroboros import places
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_runner import presence_chat_id
+
+    _install(tmp_path)
+    place = places.connect_place(tmp_path, connector="bridge", provider="github", account_id="me", label="Repo")
+    if owner:
+        places.edit_place(tmp_path, place.place_id, "confirm_owner_account", author="owner",
+                          platform_actor_id="u7", account_id="me")
+    room = presence_chat_id(conversation_key("github", "me", "repo.1", "i1"))
+    flow = {"provider": "github", "account_id": "me", "conversation_id": "repo.1", "thread_id": "i1"}
+    def sent(minute, origin, file_name):
+        return shared.msg(_ts(minute), "Please inspect this archive", chat_id=room, source="presence:github",
+                          presence_provenance={"place_id": place.place_id},
+                          transport={**flow, "actor": {"platform_actor_id": "u7"}, "message": {
+                              "forward_origin": {"sender_user_name": origin},
+                              "attachments": [{"file_name": file_name, "status": "too_large", "file_size": 40000000}]}})
+    first = sent(40, origins[0], names[0])
+    second = sent(41, origins[1], names[1])
+    third = sent(42, origins[1], names[1])
+    answer = shared.msg(_ts(39), "Looking.", chat_id=room, direction="out", type="presence_delivery",
+                        task_id="p1", source="presence:github", transport={**flow, "delivery": {"state": "delivered"}})
+    shared.append(tmp_path / "logs" / "chat.jsonl", answer, first, second, third)
+    snapshot, _text = _view(tmp_path, MAIN_TASK)
+    words = {word["address"]: word["line"] for word in _room(snapshot, str(room))["words"]}
+    assert f'"{origins[0]}"' in words[_addr(first)] and f'"{names[0]}"' in words[_addr(first)]
+    assert f'"{origins[1]}"' in words[_addr(second)] and f'"{names[1]}"' in words[_addr(second)]
+    assert "delivered again" not in words[_addr(second)]
+    assert "delivered again" in words[_addr(third)] and _addr(second) in words[_addr(third)]
+    assert _addr(first) not in words[_addr(third)]
+
+
 def test_a_gap_holds_a_room_in_the_block_without_words_or_notes(tmp_path):
     _install(tmp_path)
     spec = mv.ViewSpec("integrator", room_id="1")

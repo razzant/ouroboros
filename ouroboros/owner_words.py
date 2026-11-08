@@ -357,19 +357,23 @@ def place_confirmed_words(confirmed: bool, text: Any, message: Any) -> str:
     """A place event's words as provenance when its author is an account the place confirms as my human's (and the
     connector does not report it unauthenticated), the same at a turn's opening and mid-turn. A forwarded message
     carries another author's words: context. Never a verdict about whom the words are for."""
+    from ouroboros.places import forwarded_message
+
     words = str(text or "")
-    return words if confirmed is True and words.strip() and not _mapping(message).get("forward_origin") else ""
+    return words if confirmed is True and words.strip() and not forwarded_message(message) else ""
 
 
-def place_row_facts(conversation_id: Any, message: Any, origin: Mapping[str, Any] | None = None) -> Dict[str, Any]:
-    """A confirmed place event's corpus-row facts beside its words: the message it replies to (by address) and its
-    provider identity (``own_sends.message_identity``), so a later reader tells my own post through my human's
-    account once that post's receipt is known; ``origin``: the row's other typed ids."""
+def place_row_facts(conversation_id: Any, message: Any, origin: Mapping[str, Any] | None = None, *,
+                    source: str = "") -> Dict[str, Any]:
+    """A confirmed place event's corpus-row facts beside its words: the message it replies to (by address; with
+    ``source``, the exact reader of the event record that carried its words) and its provider identity
+    (``own_sends.message_identity``), so a later reader tells my own post through my human's account once that
+    post's receipt is known; ``origin``: the row's other typed ids."""
     from ouroboros.own_sends import message_identity
 
     found = message_identity(conversation_id, message)
     identity = {"conversation_id": found[0], "message_id": found[1]} if found else {}
-    return {"reply_to": place_reply_target(message), "origin": {**(origin or {}), **identity}}
+    return {"reply_to": place_reply_target(message, source), "origin": {**(origin or {}), **identity}}
 
 
 def _my_post(ctx: Any, item: Mapping[str, Any]) -> bool:
@@ -414,10 +418,11 @@ def cited_owner_basis(ctx: Any, owner_words: Any) -> Tuple[Dict[str, Any] | None
                   "to start the work as your own.")
 
 
-def place_reply_target(message: Any) -> Dict[str, str] | None:
-    """The platform message a place event replies to, by address (a connector gives no words for it), else None."""
-    replied = str(_mapping(message).get("reply_to_message_id") or "")
-    return {"address": f"platform message {replied} in this room", "author": "", "text": ""} if replied else None
+def place_reply_target(message: Any, source: str = "") -> Dict[str, str] | None:
+    """The replied message's provider address and any words the connector carried, as context under its author."""
+    from ouroboros.presence_message_facts import reply_target
+
+    return reply_target(message, source=source)
 
 
 def owner_words_contain(ctx: Any, text: Any) -> bool:
@@ -802,15 +807,18 @@ def owner_place_accounts(drive_root: Any) -> Mapping[str, Any]:
 def owner_row(row: Mapping[str, Any] | None, drive_root: Any = None, *, accounts: Any = None) -> bool:
     """The owner-source cut: inbound, non-empty, not a system or skill-repair injection, and a place row only
     from an account its place confirms as my human's now (``places.owner_confirmed_row`` over ``accounts``, the
-    operation's one snapshot, else one read of ``drive_root``'s; unreadable: not)."""
+    operation's one snapshot, else one read of ``drive_root``'s; unreadable: not) whose words are not another
+    author's (``places.forwarded_message``: the account is still theirs, the words are not)."""
     if not (row and row.get("direction") == "in" and str(row.get("text") or "").strip()
             and not (row.get("system_type") or row.get("source") == "skill_repair")):
         return False
     from ouroboros.dialogue_provenance import row_provenance
-    from ouroboros.places import owner_confirmed_row  # D17->D20 is lazy-only
+    from ouroboros.places import forwarded_message, owner_confirmed_row  # D17->D20 is lazy-only
 
     if row_provenance(row) != "place":
         return True
+    if forwarded_message(_mapping(row.get("transport")).get("message")):
+        return False
     return owner_confirmed_row(row, owner_place_accounts(drive_root) if accounts is None else accounts)
 
 

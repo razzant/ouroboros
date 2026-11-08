@@ -550,8 +550,11 @@ def _gap_line(gap: Mapping[str, Any]) -> str:
 def _row_fact(binding: ReviewWaitBinding, row: Mapping[str, Any]) -> str:
     owner = str(row.get("task_id") or "")
     turn = "this turn" if owner == binding.task_id else f"turn {owner}" if owner else "an unattributed turn"
-    text = json.dumps(str(row.get("text") or ""), ensure_ascii=False)
-    from ouroboros.dialogue_provenance import dialogue_text, reaction_action_words, reaction_fact, wordless_reaction
+    from ouroboros.dialogue_provenance import (dialogue_text, place_message_facts, reaction_action_words,
+                                               reaction_fact, wordless_reaction)
+    text = json.dumps(str(row.get("text") or ""), ensure_ascii=False)  # their exact words, and only those
+    facts = place_message_facts(row)  # the connector's, beside the quoted words in their own labelled block
+    text += "".join(f"\n  {line}" for line in facts.splitlines())
     reaction = reaction_fact((row.get("transport") or {}).get("message"))
     if row.get("type") == "presence_delivery":
         state = str(((row.get("transport") or {}).get("delivery") or {}).get("state") or "unknown")
