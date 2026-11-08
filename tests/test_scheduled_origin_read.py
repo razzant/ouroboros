@@ -101,12 +101,18 @@ def test_scheduled_work_reads_its_direct_origin_and_nothing_else(host, origin, m
 
 
 def test_a_folderless_helper_start_stages_the_origin_materials_as_copies(host, origin, monkeypatch):  # noqa: F811
-    """The disclosed cost of the read grant: a folderless readonly helper gets byte-identical
-    copies of every permitted lineage file, the origin's whole drive and artifacts included."""
+    """The disclosed cost of the read grant: a folderless readonly helper gets byte-identical copies of every
+    permitted lineage file, the origin's whole drive and artifacts included. Where the volume clones (APFS) they
+    share blocks with their sources, except a record a compression pass may want (its test evidence), which streams."""
     import json
+    import sys
 
+    from ouroboros import artifact_storage
     from ouroboros.delegate_readonly_inputs import prepare_readonly_inputs
 
+    evidence = task_artifact_dir_path(host.root, ORIGIN) / "source_handles" / "test-evidence" / "run-1" / "qa.log"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text("ORIGIN_QA\n")
     task = _fire(host, origin, "independent")
     _registry, ctx = _started_registry(host, task, monkeypatch)
     ctx.task_metadata["resource_intent"] = {"kind": "explicit_none"}  # folderless: no workspace
@@ -114,8 +120,11 @@ def test_a_folderless_helper_start_stages_the_origin_materials_as_copies(host, o
     manifest = json.loads((pathlib.Path(staged) / "inputs.json").read_text(encoding="utf-8"))
     copied = {pathlib.Path(row["source"]).name: (pathlib.Path(staged) / row["local"]).read_text()
               for row in manifest}
-    assert copied == {"report.md": "ORIGIN_DRIVE\n", "report.txt": "ORIGIN_ARTIFACT\n"}, manifest
+    assert copied == {"report.md": "ORIGIN_DRIVE\n", "report.txt": "ORIGIN_ARTIFACT\n", "qa.log": "ORIGIN_QA\n"}, manifest
     assert all(row["sha256"] == row["source_sha256"] for row in manifest)
+    if sys.platform == "darwin":
+        sources = {pathlib.Path(row["source"]).name: pathlib.Path(row["source"]) for row in manifest}
+        assert {name for name, path in sources.items() if artifact_storage._may_share(path)} == {"report.md", "report.txt"}
 
 
 def test_folderless_origin_fifo_is_refused_before_open_and_regular_reads_survive(host, origin, monkeypatch):  # noqa: F811
