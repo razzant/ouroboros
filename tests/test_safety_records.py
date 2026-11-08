@@ -73,7 +73,7 @@ def test_actual_safety_decisions_produce_panel_chips(supervisor, monkeypatch):
     assert view.recent_wakes(h.ctx.drive_root, [])[0]["checks"] == []
     assert h.module.check_safety("place_reply", {"text": "hello"}, ctx=h.ctx)[0]
     assert view.recent_wakes(h.ctx.drive_root, [])[0]["checks"] == [{"chip": "checked", "tool": "place_reply"}]
-    h.replies.append({"status": "DANGEROUS", "reason": "not delegated"})
+    h.replies.append({"status": "SUSPICIOUS", "reason": "not delegated"})
     assert not h.module.check_safety("place_reply", {"text": "flagged"}, ctx=h.ctx)[0]
     h.later()
     assert h.module.check_safety("place_reply", {"text": "flagged"}, ctx=h.ctx)[0]

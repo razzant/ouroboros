@@ -26,7 +26,8 @@ def test_no_checker_hold_and_no_retry_grant(supervisor, monkeypatch, mode, requi
     for _ in range(2):
         ok, msg = h.module.check_safety("place_reply", {"text": "hello"}, ctx=h.ctx)
         assert not ok and "SAFETY_UNAVAILABLE" in msg
-    assert not any(row.get("speech_refused") for row in h.module._PRIOR_VERDICTS.get("work", {}).values())
+    rows = h.module._PRIOR_VERDICTS.get("work", {}).values()
+    assert rows and not any(row.get("flagged") for row in rows) and all(row.get("held") for row in rows)
     assert h.module.check_safety("write_remote", {}, ctx=h.ctx)[0] == (mode == "cyber_pro")
     # Restored checker can approve the exact same speech; it did not consume an earlier flag.
     monkeypatch.setattr(h.module, "_resolve_safety_routing", lambda: (False, False, None))
@@ -65,13 +66,12 @@ def test_held_words_wait_in_cyber_pro_whatever_tool_carries_them(supervisor, mon
 
 
 @pytest.mark.parametrize("card,sent", [("exact", True), ("other words", False), ("no destination", False),
-                                       ("answered before", False), ("inside a line", False)])
-def test_my_humans_yes_on_the_exact_held_words_sends_them_on_a_later_decision(supervisor, monkeypatch, card, sent):
-    """Held words wait in every mode and the hold names its exits. An owner quiz answered after the hold whose card
-    holds the exact text and the destination lets an identical re-issue from a later model call send it, recorded
-    as sent without assessment; the host checks only bytes, destination and time, and the same call re-presenting
-    the words decides nothing."""
-    from datetime import datetime, timedelta
+                                       ("inside a line", False), ("answered before", True)])
+def test_my_humans_answer_on_the_exact_words_sends_them(supervisor, monkeypatch, card, sent):
+    """Held words wait in every mode and the hold names its exits. My human's answered card holding the exact text as
+    whole lines and the destination sends them without a check, recorded as sent without assessment: a card answered
+    after the hold, on a later decision (the same model call re-presenting the words decides nothing), or one answered
+    before the first send, as a draft shown first. The host checks bytes and destination only."""
     from ouroboros import place_guard
     h = supervisor
     monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")
@@ -79,37 +79,39 @@ def test_my_humans_yes_on_the_exact_held_words_sends_them_on_a_later_decision(su
         "places": [{"place_id": "p", "place_label": "Telegram · FusionBrain"}], "targets": {"chat_id": ["-100"]}})
     text = "Status of the tracks: Atlas passed 70 and 95."
     reply = {"place_id": "p", "text": text, "destination": {"conversation_id": "-100"}}
+    words = "Status: all good." if card == "other words" else text
+    place = "" if card == "no destination" else " to Telegram · FusionBrain"
+    answer = [{"source": "owner_quiz_answer", "content": "1. Send it", "quiz_id": "q9", "reply_to": {
+        "address": "quiz q9 of task work", "author": "Ouroboros, task work",
+        "text": (f"Send exactly this{place}: {words} — fine?\n" if card == "inside a line"
+                 else f"Send exactly this{place}?\n{words}\n") + "1. Send it\n2. Not now\n"
+                "(host record: my human pressed option 1)"}}]
+    exits = lambda: [(e["quiz_id"], e.get("hold")) for e in h.events if e["type"] == "safety_sent_without_assessment"]
+    if card == "answered before":
+        h.ctx._owner_directives = answer
+        ok, message = h.module.check_safety("place_reply", reply, ctx=h.ctx)
+        assert ok and "quiz q9" in message and not h.calls and exits() == [("q9", None)]
+        return
     h.replies.append(RuntimeError("provider_failed"))
     ok, message = h.module.check_safety("place_reply", reply, ctx=h.ctx)
     assert not ok and "SAFETY_UNAVAILABLE" in message and "no verdict" in message
     assert "these exact words on their own lines, unprefixed, and the destination Telegram · FusionBrain" in message
     assert "Never route these words through another tool" in message
-    held_at = datetime.fromisoformat(h.module._PRIOR_VERDICTS["work"][h.module._subject_digest("place_reply", reply)]["held_at"])
-    words = "Status: all good." if card == "other words" else text
-    place = "" if card == "no destination" else " to Telegram · FusionBrain"
-    answered = held_at + timedelta(seconds=-5 if card == "answered before" else 5)
-    h.ctx._owner_directives = [{"source": "owner_quiz_answer", "content": "1. Send it", "quiz_id": "q9",
-                                "ts": answered.isoformat(), "reply_to": {
-                                    "address": "quiz q9 of task work", "author": "Ouroboros, task work",
-                                    "text": (f"Send exactly this{place}: {words} — fine?\n" if card == "inside a line"
-                                             else f"Send exactly this{place}?\n{words}\n") + "1. Send it\n2. Not now\n"
-                                            "(host record: my human pressed option 1)"}}]
+    h.ctx._owner_directives = answer
     h.replies.append(RuntimeError("provider_failed"))
     assert not h.module.check_safety("place_reply", reply, ctx=h.ctx)[0]  # the same model call decides nothing new
     h.later()
     h.replies.append(RuntimeError("provider_failed"))
     ok, message = h.module.check_safety("place_reply", reply, ctx=h.ctx)
     assert ok is sent and len(h.calls) == (2 if sent else 3)
-    exits = [event for event in h.events if event["type"] == "safety_sent_without_assessment"]
-    assert [(event["quiz_id"], event["hold"]) for event in exits] == ([("q9", "UNAVAILABLE")] if sent else [])
+    assert exits() == ([("q9", "UNAVAILABLE")] if sent else [])
     assert ("quiz q9" in message) is sent
 
 
 def test_my_humans_yes_on_an_exact_held_mcp_call_runs_it_on_a_later_decision(supervisor, monkeypatch):
     """An MCP call declares no words or destination, so its hold names the exact call for my human's card: an answer
-    after the hold whose card holds that exact call lets an identical re-issue from a later model call run it
-    unjudged; a card holding the call with any other argument decides nothing."""
-    from datetime import datetime, timedelta
+    whose card holds that exact call lets an identical re-issue from a later model call run it unjudged; a card
+    holding the call with any other argument decides nothing."""
     h = supervisor
     monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")
     monkeypatch.setattr(_tool_effects, "effect_of", REAL_EFFECT_OF)
@@ -120,9 +122,7 @@ def test_my_humans_yes_on_an_exact_held_mcp_call_runs_it_on_a_later_decision(sup
         h.replies.append(RuntimeError("provider_failed"))
         ok, message = h.module.check_safety(name, call, ctx=h.ctx)
         assert not ok and f"on its own line of the card: {exact}\n" in message
-        held = datetime.fromisoformat(h.module._PRIOR_VERDICTS["work"][h.module._subject_digest(name, call)]["held_at"])
         h.ctx._owner_directives = [{"source": "owner_quiz_answer", "content": "1. Run it", "quiz_id": "q7",
-                                    "ts": (held + timedelta(seconds=5)).isoformat(),
                                     "reply_to": {"address": "quiz q7 of task work", "text": f"Run exactly this?\n{card}"}}]
         h.later()
         h.replies.append(RuntimeError("provider_failed"))
@@ -136,7 +136,6 @@ def test_my_humans_yes_reaches_a_declared_send_whose_room_is_no_place(supervisor
     """A connector's declared send into a room that is no place of it is held with its declared target named for the
     card: my human's answer naming that target sends it on a later decision, one naming another target, or a longer
     one it is a part of, does not."""
-    from datetime import datetime, timedelta
     from ouroboros import place_guard
     h = supervisor
     monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")
@@ -149,9 +148,7 @@ def test_my_humans_yes_reaches_a_declared_send_whose_room_is_no_place(supervisor
         h.replies.append(RuntimeError("provider_failed"))
         ok, message = h.module.check_safety(name, call, ctx=h.ctx)
         assert not ok and "the destination C1 on the card" in message
-        held = datetime.fromisoformat(h.module._PRIOR_VERDICTS["work"][h.module._subject_digest(name, call)]["held_at"])
         h.ctx._owner_directives = [{"source": "owner_quiz_answer", "content": "1. Send it", "quiz_id": "q8",
-                                    "ts": (held + timedelta(seconds=5)).isoformat(),
                                     "reply_to": {"text": f"Send this to {room}?\nShip it on Friday.\n1. Send it"}}]
         h.later()
         h.replies.append(RuntimeError("provider_failed"))
@@ -179,7 +176,7 @@ def test_mandatory_bundle_never_truncated(supervisor, monkeypatch, source):
     elif source == "directives":
         h.ctx._owner_directives = [{"role": "user", "content": "exact" * 1000}]
     else:
-        h.module._PRIOR_VERDICTS["work"] = {"x": {"digest": "x", "tool": "remote_write", "speech_refused": False,
+        h.module._PRIOR_VERDICTS["work"] = {"x": {"digest": "x", "tool": "remote_write",
                                                   "verdicts": [{"stage": "first", "status": "SUSPICIOUS",
                                                                 "reason": "earlier" * 1000}]}}
     for _ in range(2):

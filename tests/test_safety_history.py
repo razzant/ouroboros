@@ -48,7 +48,7 @@ def test_compacting_safe_repeats_counts_every_omitted_verdict(supervisor, monkey
 def test_safe_history_compacts_but_flagged_speech_stays_mandatory(supervisor, monkeypatch):
     h = supervisor
     monkeypatch.setattr(h.module, "_SAFETY_PRIOR_BYTE_BUDGET", 1000)
-    h.replies.append({"status": "DANGEROUS", "reason": "Keep this flagged reason"})
+    h.replies.append({"status": "SUSPICIOUS", "reason": "Keep this flagged reason"})  # the mind may re-issue it
     assert not h.module.check_safety("place_reply", {"text": "flagged"}, ctx=h.ctx)[0]
     for n in range(12):
         h.replies.append({"status": "SAFE", "reason": "An ordinary checked action" * 3})
@@ -80,7 +80,7 @@ def test_safe_history_compacts_but_flagged_speech_stays_mandatory(supervisor, mo
 def test_root_limit_evicts_retry_authority_without_holding_new_work(supervisor):
     h = supervisor
     h.ctx.task_id = "old-flag"
-    h.replies.append({"status": "DANGEROUS", "reason": "Flagged"})
+    h.replies.append({"status": "SUSPICIOUS", "reason": "Flagged"})
     assert not h.module.check_safety("place_reply", {"text": "same"}, ctx=h.ctx)[0]
     for n in range(512):
         h.ctx.task_id = f"root-{n}"
@@ -89,7 +89,7 @@ def test_root_limit_evicts_retry_authority_without_holding_new_work(supervisor):
     h.ctx.task_id = "root-0"
     assert h.module.check_safety("write_remote", {"step": "touch"}, ctx=h.ctx)[0]
     h.ctx.task_id = "old-flag"
-    h.replies.append({"status": "DANGEROUS", "reason": "Flagged again"})
+    h.replies.append({"status": "SUSPICIOUS", "reason": "Flagged again"})
     assert not h.module.check_safety("place_reply", {"text": "same"}, ctx=h.ctx)[0]
     assert "root-0" in h.module._PRIOR_VERDICTS and "root-1" not in h.module._PRIOR_VERDICTS
     h.later()
