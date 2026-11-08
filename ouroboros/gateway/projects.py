@@ -293,15 +293,15 @@ async def api_projects_list(request: Request) -> JSONResponse:
         drive_root = request_drive_root(request)
         query = request.query_params
         if "chat_id" in query:
-            projects = await run_in_threadpool(projects_summary, drive_root, chat_id=query["chat_id"])
+            projects = await run_in_threadpool(projects_summary, drive_root, chat_id=query["chat_id"], by_message=True)
             return JSONResponse({"projects": projects})
         if "id" in query:
             if not explicit_project_id_ok(query["id"]):
                 return JSONResponse({"projects": []})
-            projects = await run_in_threadpool(projects_summary, drive_root, project_id=query["id"])
+            projects = await run_in_threadpool(projects_summary, drive_root, project_id=query["id"], by_message=True)
             return JSONResponse({"projects": projects})
         # The plain list stays capped; `all=1` names the complete list (every active and deleting Project).
-        projects = await run_in_threadpool(projects_summary, drive_root,
+        projects = await run_in_threadpool(projects_summary, drive_root, by_message=True,
                                            limit=None if query.get("all") == "1" else 200)
         return JSONResponse({"projects": projects})
     except Exception as exc:

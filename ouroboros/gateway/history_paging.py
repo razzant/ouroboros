@@ -31,11 +31,12 @@ from ouroboros import dialogue_store as ds
 from ouroboros.checkpoint_waits import wait_episode
 from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, is_a2a_chat_id
 from ouroboros.dialogue_positions import skipped_between
+from ouroboros.subagent_messages import DELIVERY_KINDS, is_conversation_card_content as _card_content
 from ouroboros.project_dialogue import (
     _ANNOTATIONS_NAME, MAIN_PINNED_ROW_TYPES, ORIGIN_ADDRESSED_NOTICE_TYPES, WORK_SPEECH_ELSEWHERE_TYPES, entry_matches_source_ref,
 )
 from ouroboros.store import StoreError, StoreMigrating
-from ouroboros.subagent_messages import CARD_ROW_PLACEMENTS, is_task_card_message, subagent_message_meta
+from ouroboros.subagent_messages import subagent_message_meta
 
 _SOURCES = ("chat", "progress")
 # One probe page: each indexed column of the room's facts reads at most this many coordinates, never its history.
@@ -77,7 +78,7 @@ _GAP_NAMES = {"invalid": "malformed_jsonl", "non_object": "invalid_jsonl_row"}
 # Stored kinds chat.js shows as a bubble of their own whoever sent them: it
 # renders them before a child's words are routed to its card, and their
 # producers (message_bus ``send_photo`` ...) count every one.
-_STANDALONE_KINDS = ("document", "links", "photo", "video", "quiz", "card")
+_STANDALONE_KINDS = DELIVERY_KINDS
 # A read around one task (``around=task:<id>``, DESIGN "Room work status") holds a quarter of
 # each stream's quota before the task's earliest row in the room and the rest from it on.
 _AROUND_OLDER_SHARE = 4
@@ -786,15 +787,6 @@ def deferred_before(source, entries, candidates, messages, before):
     return max([before, *(entry["_history_end"] for entry in entries
                           if entry.get("history_id") in deferred
                           and entry["history_position"]["source"] == source)])
-
-
-def _card_content(row, kind, child=lambda _row: False):
-    """Task-card content: a host placement, or a child's own words (``child``: by the
-    lineage its task result recovers). What a child delivers stands alone, and so does
-    a routing notice: its task_id names the task it refused, never its speaker."""
-    return row.get("card_row") in CARD_ROW_PLACEMENTS or (
-        kind not in _STANDALONE_KINDS and kind not in ORIGIN_ADDRESSED_NOTICE_TYPES
-        and (is_task_card_message(row) or child(row)))
 
 
 def _feed_message(row):

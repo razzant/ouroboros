@@ -7904,9 +7904,8 @@ body.keyboard-open .chat-instance-panel .chat-input-area {
     white-space: nowrap;
 }
 
-/* Beyond the feed (a find or a browse) the list keeps the row in view in place itself (projects_nav.js), so the
-   engine's own scroll anchoring, which WebKit lacks, never adds a second correction. */
-.nav-projects-list[data-beyond] { overflow-anchor: none; }
+/* projects_nav.js anchors the resting list and the browse; native anchoring must not add a second correction. */
+.nav-projects-list { overflow-anchor: none; }
 
 /* While finding, a found name may take three lines, so the words that matched are not cut off behind the ellipsis
    (the resting list keeps one line). The row grows; its mark keeps its column, centred on the row. */

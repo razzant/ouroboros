@@ -571,6 +571,7 @@ D20 = "Presence"
 "ouroboros/tool_error_words.py" = "D17"
 "ouroboros/room_membership.py" = "D17"
 "ouroboros/room_appearances.py" = "D17"  # the dialogue store's derived appearance index: writer facts and catch-up job
+"ouroboros/room_messages.py" = "D17"  # each room's newest-message time: writer facts, binding and history job
 "ouroboros/project_completion_facts.py" = "D17"
 "ouroboros/project_handoff.py" = "D17"
 "ouroboros/project_facts.py" = "D15"

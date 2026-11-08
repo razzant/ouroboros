@@ -145,7 +145,7 @@ const projectsNav = createProjectsNav({ section: navProjects, header: navProject
     toggle: navProjectsToggle, feed: () => lastProjectRows, feedOrder: () => projectsFeedOrder,
     nextOrder: () => stateSnapshots.begin().generation,
     reserved: () => state.projectChatIds, listableCount: () => state.projectListableCount,
-    activeId: () => navState.activeProjectId,
+    activeId: () => navState.activeProjectId, messagesRevision: () => state.projectMessagesRevision,
     expanded: () => navState.projectsExpanded, readList: (options) => apiClient.projectList(options),
     isUnread: (row) => unreadCount(row.visible_revision, state.projectSeenRevision?.[row.id], readAheadFor(row.chat_id)) > 0,
     onListRead: () => { mergeProjectSeenRevisions(); if (projectsNav.unreadRows().length) refreshSharedProjectSeen(); },
@@ -567,6 +567,7 @@ const stateSnapshots = createStateSnapshotSequencer((data, requestedAt, generati
     const projectListableCount = data.project_listable_count;
     state.projectListableCount = Number.isSafeInteger(projectListableCount) && projectListableCount >= 0
         ? projectListableCount : null;
+    if (Array.isArray(data.projects)) state.projectMessagesRevision = data.project_messages_revision ?? null;
     projectActivityIndex = buildProjectActivityIndex(projectRooms, data.project_chat_ids
         ?? (data.projects || lastProjectRows).map((project) => project?.chat_id));
     renderProjectsNav(data.projects || lastProjectRows,
@@ -963,9 +964,8 @@ function renderProjectsNav(projects, projectChatIds, activityIndex = projectActi
         ? projectChatIds
         : all.map(p => Number(p && p.chat_id) || 0);
     state.projectChatIds = new Set(completeChatIds.map(Number).filter(Boolean));
-    // Every active Project is visible, including a newly-created empty room. Unread
-    // is a monotonic revision comparison, never a timestamp race. The list's order is
-    // its owner's (projects_nav.js: pins, unread, recency); these rows keep the feed's.
+    // Every active Project is visible, including a newly-created empty room. Unread is a monotonic revision
+    // comparison, never a timestamp race. The list's order is projects_nav.js's (pins, then the newest message).
     const seenRevision = state.projectSeenRevision || {};
     const isUnread = (p) => unreadCount(p.visible_revision, seenRevision[p.id], readAheadFor(p.chat_id)) > 0;
     const rows = all
@@ -980,9 +980,8 @@ function renderProjectsNav(projects, projectChatIds, activityIndex = projectActi
     // The registry's own word retires a room kept away (also one leaving now, or holding work until it ends: every read
     // asks again); absence from this bounded list never does.
     rooms.forget(...rows.filter(p => p.lifecycle === 'deleting').map(p => p.id));
-    const json = JSON.stringify(rows.map(p => [
-        p.id, p.name, p.chat_id, p.lifecycle, p.visible_revision, p._unread, p.delete_error, p.pinned === true,
-    ]));
+    const json = JSON.stringify([state.projectMessagesRevision, ...rows.map(p => [p.id, p.name, p.chat_id, p.lifecycle,
+        p.visible_revision, p._unread, p.delete_error, p.pinned === true, p.last_message_at])]);  // a moved time repaints
     if (readOrder) projectsFeedOrder = readOrder;  // with its rows: nothing reads the one under the other's order
     // Activity is a projection over the existing census and must not rebuild
     // the keyed menu: replacing rows here would steal focus from an open menu,

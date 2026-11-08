@@ -136,14 +136,17 @@ def _usage_revision(root: str) -> Any:
 
 
 def _dialogue_revision(root: str) -> Any:
-    """Every room's revision, read revision, last row and activity, folded: each only grows."""
-    from ouroboros import dialogue_store
+    """Every room's revision, read revision, last row and activity, folded: each only grows; and the generation
+    and revision of the rooms' message times (``room_messages``), which dating the history moves alone."""
+    from ouroboros import dialogue_store, room_messages
 
     try:
         with dialogue_store.transaction(root, write=False) as conn:
             record = conn.execute("SELECT count(*), total(revision), total(read_revision), max(last_seq), "
                                   "max(activity_at) FROM rooms").fetchone()
-        return tuple(record)
+            dated = tuple(dialogue_store._meta(conn, key) for key in (room_messages.GENERATION_KEY,
+                                                                      room_messages.REVISION_KEY))
+        return tuple(record) + dated
     except Exception as exc:
         return _failure(exc)
 
@@ -430,6 +433,7 @@ def produced_fields(snap: Dict[str, Any]) -> Dict[str, Any]:
         "github_token_configured": snap["github_token_configured"],
         "accounting": _accounting_block(snap["accounting"], available, limit),
         "projects": snap["projects"],
+        "project_messages_revision": snap.get("project_messages_revision"),
         "project_listable_count": snap.get("project_listable_count"),
         "project_chat_ids": snap["project_chat_ids"],
         "main_visible_revision": snap.get("main_visible_revision"),

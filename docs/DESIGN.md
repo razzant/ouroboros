@@ -2967,20 +2967,20 @@ never between the list and the tools (owner 18.10); a wrapping update grows the
 foot upward. Main's row carries its room's status mark at the Project rows' x. A Project's
 menu opens from its ⋯ (a fine pointer), a right-click, Shift+F10 or a long press; it
 first says the row's state as its mark and words, then offers Pin or Unpin; pinning
-neither opens nor reads it. Pinned Projects lead the one list, and one `--space-2` of air before the next
-shown row is their only boundary: no caption, glyph, tint, rule or column, so
-nothing reads as one more Project; the row's tooltip and accessible name say
-Pinned. Within each group unread leads, then recency; the column's places follow §5.
-The list rests on the pins and the most recent other Projects. Every other one is one step away by the owner's
-choice A1: Find a project under the header and Show more at the end of the list. As built, the field is a
-capsule a row high in the header pills' material, made like the composer's field; it matches every Project's
-name, older and closed ones included, by its letters (any case or accent, each word anywhere in it), and a found
-name may take three lines. Show more ends a list the state knows more rooms for and adds the next fifty by
-recency; a find with no match says no project name contains those words and offers Clear search and Show all
-projects. A list that could not be read again says so, with the time of the one shown and Try again; until a
-read answers, nothing is said to be missing. Neither reads a room's history or marks anything read. Beyond the
-recent rows the order is the one the owner's last action gave, pins still leading: activity changes rows in
-place, and a room that comes or goes never moves the row in view. A Project outside the list opens by its own
+neither opens nor reads it. Pins lead the one list, one `--space-2` of air before the next shown row their only
+boundary: no caption, glyph, tint, rule or column, so nothing reads as one more Project; their tooltip and
+accessible name say Pinned. Within each group the newest message leads: what Unread (§4) counts,
+the owner's own, of System rows only a work's end or a reminder; unread only marks. The column's places follow
+§5. The list rests on the pins and the fifty newest others, the rest a step away (owner's choice A1):
+Find a project under the header, Show more at its end. The field, a capsule a row high in the header
+pills' material, made like the composer's, matches every Project's name, older and closed ones too, by
+its letters (any case or accent, each word anywhere), and a found name may take three lines. Show more ends a
+list the state knows more rooms for and adds the next fifty; a find with no match says no project
+name contains those words and offers Clear search and Show all projects. A list that could not be read again
+says so, with the time of the one shown and Try again; until a read answers, nothing is called missing.
+Neither reads a room's history or marks anything read. A browse keeps its rows, sorting on: off the top the
+first row in view that kept its place holds the reading place, focus its row; a find's rows stand while
+it has words. A Project outside the list opens by its own
 id; a missing or deleting one leaves the room on screen and says so. The Projects header collapses the whole
 list or opens it: collapsed, only the pinned Projects stay, in their order and with their air; every
 other row hides whatever it is doing, the open one included, a find or a browse ends, and the
