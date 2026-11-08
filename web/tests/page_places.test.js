@@ -69,3 +69,16 @@ test('disposal releases a room\'s places even before another page restore', () =
     w.restore(room);
     assert.equal(box.scrollTop, 0);
 });
+
+test('Logs owns its actual scroller; generic page restoration still restores other boxes', () => {
+    const w = world(), tab = w.page('dashboard-panel-logs');
+    // Match the real IDs against the production selector rather than pre-answering `matches` as owned.
+    const byId = (id) => ({ nodeType: 1, isConnected: true, scrollTop: 0, scrollLeft: 0,
+        matches: (selector) => selector.split(',').some(part => part.trim() === `#${id}`) });
+    const logs = byId('page-logs'), other = byId('activity-list');
+    tab.boxes.add(logs); tab.boxes.add(other);
+    w.scrolled(logs, 900); w.scrolled(other, 40);
+    logs.scrollTop = 0; other.scrollTop = 0;
+    w.listeners.win.get('ouro:dashboard-subtab-shown')({ detail: { tab: 'logs' } });
+    assert.deepEqual([logs.scrollTop, other.scrollTop], [0, 40], 'only logs.js restores #page-logs');
+});
