@@ -599,13 +599,11 @@ _TASK_LINEAGE_LIMIT = 50_000  # a memory bound, not a policy: the facts are re-r
 _ROOM_ANSWERS: Dict[str, tuple] = {}
 # One capture (``store_capture``). ``chat_id`` is the column its writer derived (``store_hot_facts.admitted_chat``);
 # only a row an older writer left underived, and every row of a store before that column, reads its body for it:
-# text or, from a JSON real, its integer part (what ``int()`` gave). The role also recovers legacy metadata
-# when the typed fact is absent; both fallbacks return scalars, never the task document.
+# text or, from a JSON real, its integer part (what ``int()`` gave). A derived row's body is never read
+# (a legacy metadata role is message dating's own read: ``room_messages.classified``).
 _BODY_CHAT = ("(SELECT CASE json_type(b.body, '$.chat_id') WHEN 'real' THEN CAST(json_extract(b.body, '$.chat_id') "
               "AS INTEGER) ELSE '' || json_extract(b.body, '$.chat_id') END FROM task_bodies b WHERE b.task_id = t.task_id)")
-_LINEAGE_SELECT = ("SELECT t.task_id, t.parent_task_id, t.root_task_id, coalesce(t.delegation_role, "
-                   "(SELECT json_extract(body, '$.metadata.delegation_role') FROM task_bodies WHERE task_id=t.task_id)) "
-                   "AS delegation_role, {chat} AS chat_id "
+_LINEAGE_SELECT = ("SELECT t.task_id, t.parent_task_id, t.root_task_id, t.delegation_role, {chat} AS chat_id "
                    "FROM tasks t WHERE t.task_id IN (SELECT value FROM json_each(?))")
 
 
