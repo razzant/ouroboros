@@ -1155,14 +1155,13 @@ def test_ui_smoke_project_pointer_is_a_main_root_affordance(direct_server_with_d
 
 @pytest.mark.ui_browser
 def test_ui_smoke_project_panel_lifecycle_does_not_leak(direct_server_with_data):  # noqa: F811
-    """Open/close cycles keep one live panel, flat ws listeners, and flat DOM.
+    """Rooms left are kept away, quiet, and the same rooms when shown again (owner 2026-11-03; parent decision
+    2026-11-04: every room visited in this page session stays, no eviction).
 
-    P3 lifecycle concrete: after its exit, closing or switching a project DESTROYS its chat
-    instance (disposing every ws.on subscription, the ResizeObserver, the
-    window/document listeners, and all timers), so repeated open/close cycles
-    cannot accumulate hidden panels, listeners, or DOM nodes. Panels marked
-    data-pending-work (staged attachments / in-flight upload) are the one
-    sanctioned exception and are excluded from the live-panel count.
+    A room away is hidden (room_retire.js); its socket subscriptions are released but for its sends' custody, and its
+    DOM stays for the return. Memory grows with the rooms visited, never with returns: each room left adds the same few
+    custody listeners, and a second pass through the same rooms adds no room, no listener and no DOM beyond noise, every
+    room shown again being the same node. Panels marked data-pending-work are excluded from the counts.
     """
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError
@@ -1172,7 +1171,7 @@ def test_ui_smoke_project_panel_lifecycle_does_not_leak(direct_server_with_data)
 
     url = direct_server_with_data["url"]
     data_dir = direct_server_with_data["data_dir"]
-    project_ids = [f"leak-{idx}" for idx in range(1, 4)]
+    project_ids = [f"leak-{idx}" for idx in range(1, 10)]
     for idx, project_id in enumerate(project_ids, start=1):
         create_project(data_dir, project_id, name=f"Leak project {idx}")
 
@@ -1182,8 +1181,9 @@ def test_ui_smoke_project_panel_lifecycle_does_not_leak(direct_server_with_data)
         const ws = window.__ouroWs;
         return Object.values(ws.listeners).reduce((total, set) => total + set.size, 0);
     }"""
-    live_panels = """() => [...document.querySelectorAll('.chat-instance-panel')]
-        .filter((panel) => panel.dataset.pendingWork !== '1').length"""
+    panels = """() => [...document.querySelectorAll('.chat-instance-panel')]
+        .filter((panel) => panel.dataset.pendingWork !== '1')
+        .map((panel) => ({ id: panel.id, hidden: panel.hidden }))"""
     dom_count = "() => document.getElementsByTagName('*').length"
 
     try:
@@ -1215,51 +1215,42 @@ def test_ui_smoke_project_panel_lifecycle_does_not_leak(direct_server_with_data)
                     page.wait_for_function("() => !document.querySelector('.chat-instance-panel[data-leaving]')")
 
                 # Baseline AFTER one full open/close cycle so one-time lazy
-                # registrations cannot masquerade as leaks.
+                # registrations cannot masquerade as leaks; that room stays away.
                 open_project(project_ids[0])
                 close_project()
                 # The server's readiness response precedes its worker/startup
-                # log paint. These legitimate rows add 37 nodes outside the
-                # project panel; observe them before measuring flat DOM. A line
-                # says its type once: its type pill, or its headline when that
-                # already says it (#2886 3d81bcb22, U027).
-                page.wait_for_function(
-                    """() => {
-                        const painted = new Set([...document.querySelectorAll(
-                            '#log-entries .log-type, #log-entries .log-headline')].map(node => node.textContent));
-                        return ['worker_sha_verify', 'startup_verification', 'worker_ready']
-                            .every(type => painted.has(type));
-                    }""",
-                    timeout=30_000,
-                )
-                listeners_baseline = page.evaluate(count_listeners)
-                dom_baseline = page.evaluate(dom_count)
-                assert listeners_baseline > 0
+                # log paint (Logs draws it once the Dashboard is shown; it is
+                # hidden here). Wait for the room to be away.
+                page.wait_for_function("() => document.querySelector('.chat-instance-panel')?.hidden === true")
+                listeners_one = page.evaluate(count_listeners)
+                assert listeners_one > 0
 
-                # Small slack for churn outside the panel (badges, toasts);
-                # a leaked panel or card timeline is hundreds of nodes.
-                dom_slack = 30
+                listener_counts, dom_counts = [], []
                 for project_id in project_ids:
                     open_project(project_id)
-                    assert page.evaluate(live_panels) <= 1
+                    shown = page.evaluate(panels)
+                    assert [panel["id"] for panel in shown if not panel["hidden"]] == [f"panel-pchat-{project_id}"]
                     close_project()
-                    assert page.evaluate(live_panels) == 0
-                    # Every cycle returns to the baseline: no monotonic growth.
-                    cycle_dom = page.evaluate(dom_count)
-                    assert cycle_dom <= dom_baseline + dom_slack, (dom_baseline, cycle_dom)
-                    assert page.evaluate(count_listeners) == listeners_baseline
+                    away = page.evaluate(panels)
+                    assert all(panel["hidden"] for panel in away), away
+                    listener_counts.append(page.evaluate(count_listeners))
+                    dom_counts.append(page.evaluate(dom_count))
+                assert len(page.evaluate(panels)) == len(project_ids), "every visited room is kept"
+                # A room away holds only its sends' custody on the socket: the same few listeners for each room left.
+                added = [later - earlier for earlier, later in zip(listener_counts, listener_counts[1:])]
+                assert listener_counts[0] == listeners_one, "a room shown again adds nothing"
+                assert len(set(added)) == 1 and 0 < added[0] <= 4, (listeners_one, listener_counts)
 
-                # Direct project-to-project switch (no explicit close) also
-                # destroys the previous instance: one live panel, ever.
-                open_project(project_ids[0])
-                open_project(project_ids[1])
-                assert page.evaluate(live_panels) == 1
-                close_project()
-                assert page.evaluate(live_panels) == 0
-
-                assert page.evaluate(count_listeners) == listeners_baseline
-                final_dom = page.evaluate(dom_count)
-                assert final_dom <= dom_baseline + dom_slack, (dom_baseline, final_dom)
+                # A second pass returns to the same rooms: same nodes, no listener and no DOM growth.
+                for project_id in project_ids:
+                    page.evaluate(f"""() => {{ document.getElementById('panel-pchat-{project_id}').__kept = 1; }}""")
+                for project_id in project_ids:
+                    open_project(project_id)
+                    assert page.evaluate(f"""() => document.getElementById('panel-pchat-{project_id}').__kept === 1""")
+                    close_project()
+                assert len(page.evaluate(panels)) == len(project_ids)
+                assert page.evaluate(count_listeners) == listener_counts[-1]
+                assert abs(page.evaluate(dom_count) - dom_counts[-1]) <= 200, (dom_counts[-1], page.evaluate(dom_count))
             finally:
                 browser.close()
     except PlaywrightError as exc:

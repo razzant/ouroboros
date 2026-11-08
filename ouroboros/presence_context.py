@@ -782,15 +782,25 @@ def _thread_snapshot(focus: Mapping[str, Any], event: Mapping[str, Any]) -> str:
     return "\n".join([f"The thread as the connector captured it ({len(messages)} message(s){coverage}{observed}):", *lines])
 
 
-def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int) -> dict:
+def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int, drive_root: Any = None) -> dict:
+    """The focus's host facts at admission; ``actor.owner_confirmed`` is what the admission saw, from the accounts
+    its connector account confirms (``places.place_owner_accounts``), and readers that decide later read it again
+    (``focus_owner_now``)."""
     from copy import deepcopy
     from ouroboros.config import get_consciousness_autonomy, runtime_setting
     from ouroboros.presence_runner import presence_event_identity
-    from ouroboros.places import is_owner_account, observed_facts, wake_matches, writes_as_owner
+    from ouroboros.places import (PlaceError, is_owner_account, observed_facts, owner_author, place_owner_accounts,
+                                  wake_matches, writes_as_owner)
     place = admission.place
+    try:
+        accounts = place_owner_accounts(drive_root) if drive_root is not None else {}
+    except PlaceError:
+        accounts = {}
+    if place.place_id not in accounts:  # the places cannot be read now: the admitted row's own accounts
+        accounts = {place.place_id: place.owner_accounts}
     facts = observed_facts(event)
     actor = str(event.actor.get("platform_actor_id") or event.actor.get("id") or "")
-    owner_address = is_owner_account(place, actor, event.account_id)
+    owner_address = is_owner_account(place, actor, event.account_id, accounts[place.place_id])
     identity = deepcopy(event.identity)
     allowance = dict(admission.allowance or {})
     metadata = {
@@ -798,12 +808,14 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int) -> di
         "consciousness_autonomy": get_consciousness_autonomy(), "wake_cause": "focus",
         "consciousness_cause": "place:" + place.place_id, "work_kind": "consciousness",
         "focus": {"place_id": place.place_id, "conversation_key": event.conversation_key,
-                  "identity": identity, "identity_owner": writes_as_owner(place, identity, event.account_id),
+                  "identity": identity,
+                  "identity_owner": writes_as_owner(place, identity, event.account_id, accounts[place.place_id]),
                   "room_chat_id": chat_id, "event_identity": presence_event_identity(admission.binding_id, event),
                   "actor": {"platform_actor_id": actor,
                             "display_name": str(event.actor.get("display_name") or event.actor.get("username") or ""),
                             **({"owner_address_unverified": True} if owner_address and event.actor.get("authenticated") is False else {}),
-                            "owner_confirmed": owner_address and event.actor.get("authenticated") is not False,
+                            "owner_confirmed": owner_author(accounts, place.place_id, event.actor, event.account_id,
+                                                            event.conversation_id, event.message),
                             **({"authenticated": event.actor["authenticated"]} if "authenticated" in event.actor else {}),
                             "is_bot": "from_bot" in facts},
                   "matched_wakes": [w.fact for w in wake_matches(place, facts)]},
@@ -820,6 +832,23 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int) -> di
         if place.model == "light":
             metadata["use_local_model"] = runtime_setting("USE_LOCAL_LIGHT", "").lower() in {"true", "1"}
     return metadata
+
+
+def focus_owner_now(ctx: Any) -> bool:
+    """Whether a place focus's own waking message is my human's words now: its recorded event read against the places
+    as they stand (``places.owner_event_now``, canonical data root), so a confirmation made after the admission counts
+    for the turn's later reads (its opening row, a Safety check). A record without its event's author, or a context
+    naming no data root, keeps the admission's snapshot (``focus.actor.owner_confirmed``): it cannot be read again."""
+    from ouroboros.places import owner_event_now
+    from ouroboros.tool_access import canonical_data_root
+
+    metadata = getattr(ctx, "task_metadata", None) or {}
+    focus = metadata.get("focus") if isinstance(metadata.get("focus"), Mapping) else {}
+    presence = metadata.get("presence") if isinstance(metadata.get("presence"), Mapping) else {}
+    event = presence.get("event") if isinstance(presence.get("event"), Mapping) else {}
+    if not isinstance(event.get("actor"), Mapping) or not getattr(ctx, "drive_root", None):
+        return (focus.get("actor") or {}).get("owner_confirmed") is True
+    return owner_event_now(canonical_data_root(ctx), str(focus.get("place_id") or presence.get("place_id") or ""), event)
 
 
 def _voice_line(focus: Mapping[str, Any], event: Mapping[str, Any] | None = None) -> str:
@@ -905,15 +934,16 @@ def frame_focus_content(task: Mapping[str, Any], content: Any) -> Any:
     return text if isinstance(content, str) else [{"type": "text", "text": text}, *[item for item in content if item.get("type") != "text"]]
 
 
-def focus_frame_sources(metadata: Mapping[str, Any], recorded: Any) -> dict | None:
-    """The typed records behind one recorded FOCUS frame; ``None`` unless they render it exactly.
+def focus_frame_sources(metadata: Mapping[str, Any], recorded: Any, content: Any = None) -> dict | None:
+    """The typed records behind one recorded FOCUS frame (its text); ``None`` unless they render it exactly.
 
     A reader outside the turn (the Safety Supervisor) may take these instead of the frame: the
     correspondent's exact text, the connector's event, what was already said and started here and the
     place's notes as they stood at the event. Only a frame this renderer reproduces byte for byte from
-    those records and the bare event text qualifies; anything else the recorded frame carries (an
-    attachment manifest, image notes or blocks, an empty-text placeholder, another turn's inputs) is
-    absent from the records, so the caller keeps that row whole. The allowance line is the mind's
+    those records and ``content`` (default: the bare event text; a caller may pass the producer's
+    attachment manifest and image blocks, which it then carries itself) qualifies; anything else the
+    recorded frame carries (an empty-text placeholder, another turn's inputs) is absent from the records,
+    so the caller keeps that row whole. The allowance line is the mind's
     budget, not the event; its reader names this task by the id the producer derives from the binding and
     the event (``presence_turn_task_id``), so the frame re-renders from the records alone."""
     from ouroboros.presence_runner import presence_turn_task_id
@@ -924,10 +954,11 @@ def focus_frame_sources(metadata: Mapping[str, Any], recorded: Any) -> dict | No
     event_id = str(presence["event"].get("source_event_id") or "")
     task_id = presence_turn_task_id(str(presence.get("binding_id") or ""), event_id) if presence.get("binding_id") and event_id else ""
     try:
-        rendered = frame_focus_content({"id": task_id, "metadata": metadata}, str(presence["observed_text"]).strip())
+        rendered = frame_focus_content({"id": task_id, "metadata": metadata},
+                                       str(presence["observed_text"]).strip() if content is None else content)
     except Exception:  # records this renderer cannot read prove nothing; the row stays whole
         return None
-    if rendered != recorded:
+    if (rendered[0].get("text") if isinstance(rendered, list) else rendered) != recorded:
         return None
     place = presence.get("place") if isinstance(presence.get("place"), Mapping) else {}
     optional = {"previous_turn": presence.get("previous_turn"), "open_turns": presence.get("open_turns"),

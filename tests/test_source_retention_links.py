@@ -1,12 +1,15 @@
 """Immutable promotion shares storage without sharing a mutable publication."""
 
 import errno
+import json
 import shutil
+from collections import Counter
 from pathlib import Path
 
 import pytest
 
 from ouroboros import headless, observability, source_retention
+from tests._packed_read_probe import count_packed_reads
 
 
 @pytest.fixture(params=[None, errno.EXDEV, errno.EPERM, errno.EACCES, errno.EOPNOTSUPP])
@@ -75,3 +78,44 @@ def test_failed_blob_publication_retains_child_until_retry(tmp_path, monkeypatch
     assert headless.remove_subagent_task_drive(parent, task, live=lambda _task: False) is True
     assert not child.exists()
     assert observability.read_call_payload(parent, task_id=task, call_id="call")[1] == payload
+
+
+def test_a_retry_after_the_parent_packed_its_copies_reads_each_member_once(tmp_path, monkeypatch):
+    """The maintenance retry re-walks a child whose bytes the parent's packer already holds: each member is
+    decoded once, as its node's destination proof or a view's own read, never again by the same node."""
+    from ouroboros import evidence_packer, utils
+    from ouroboros import evidence_packs as packs
+    from ouroboros.task_results import write_task_result
+
+    parent, task = tmp_path / "canonical", "packed-retry"
+    child = headless.prepare_task_drive(parent, task, "empty")
+    messages = [{"role": "system", "content": "SYSTEM Ω " * 16_000}, {"role": "user", "content": "Inspect it."}]
+    payloads = {"request": ("llm_request", {"messages": messages, "send_messages": messages, "model": "m"}),
+                "response": ("llm_response", {"message": {"role": "assistant", "content": "reading"}}),
+                "tool": ("tool_call", {"tool": "read_file", "result": "x" * (160 * 1024)})}  # above any LZMAFile buffer
+    for call_id, (call_type, payload) in payloads.items():
+        observability.persist_call(child, task_id=task, call_id=call_id, call_type=call_type, payload=payload)
+    write_task_result(child, task, "completed", result="answer", artifact_status="ready")
+    headless.copy_child_task_result(parent, {"id": task, "drive_root": str(child)})
+    manifest = json.loads(observability.call_manifest_path(child, task, "response").read_text(encoding="utf-8"))
+    failing, replace = Path(manifest["full_payload_ref"]["path"]).name, utils.replace_atomic
+
+    def fail_once(source, destination, *args, **kwargs):  # one transient publication keeps the row pending
+        if Path(destination).name == failing:
+            raise OSError("transient publication failure")
+        return replace(source, destination, *args, **kwargs)
+
+    with monkeypatch.context() as failure:
+        failure.setattr(utils, "replace_atomic", fail_once)
+        assert headless.retry_child_task_refs(parent, child, task)["child_ref_promotion"]["status"] == "incomplete"
+    assert evidence_packer.run_pass(parent)["packed"] == 1  # the parent's copies are pack members only now
+    members = {(packs.pack_name(sidecar["task_id"], sidecar["generation"]), member["offset"])
+               for _path, sidecar in packs.list_sidecars(parent) for member in sidecar["members"]}
+    reads = count_packed_reads(monkeypatch)
+    assert headless.retry_child_task_refs(parent, child, task)["child_ref_promotion"]["status"] == "complete"
+    # Each member once: a second read rewinds its xz stream; a missing read would be an unverified skip.
+    assert reads == Counter(dict.fromkeys(members, 1)), sorted(reads.items())
+    shutil.rmtree(child)
+    for call_id, (_call_type, payload) in payloads.items():
+        restored = observability.read_call_payload(parent, task_id=task, call_id=call_id)[1]
+        assert restored == json.loads(observability._json_bytes(observability.redact_projection(payload).value))

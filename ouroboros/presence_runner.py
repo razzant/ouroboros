@@ -1008,7 +1008,7 @@ def _build_task(
         from ouroboros.presence_context import focus_metadata
         from ouroboros.consciousness_authority import apply_consciousness_authority
         metadata.pop("inline_max_rounds", None)
-        metadata.update(focus_metadata(admission, event, task_id, chat_id))
+        metadata.update(focus_metadata(admission, event, task_id, chat_id, drive_root))
         from ouroboros.presence_context import _own_work_section
         from ouroboros.place_intake import conversation_work_section
         metadata["focus_work_here"] = "\n\n".join(part for part in (

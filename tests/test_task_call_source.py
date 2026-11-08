@@ -167,7 +167,8 @@ def test_read_call_verifies_decoded_task_call_and_family_before_serving_projecti
         assert forbidden not in json.dumps(failed)
 
 
-def test_existing_manifest_reader_adds_optional_physical_admission_and_size_without_changing_default(tmp_path):
+@pytest.mark.parametrize("with_raw", [False, True])
+def test_existing_manifest_reader_adds_optional_physical_admission_and_size_without_changing_default(tmp_path, with_raw):
     from ouroboros.observability import read_call_manifest_ref
 
     retained = persist_call(
@@ -179,16 +180,24 @@ def test_existing_manifest_reader_adds_optional_physical_admission_and_size_with
     admitted = []
     bounded = read_call_manifest_ref(
         tmp_path, ref, task_id="reader-options", max_bytes=16 * 1024,
-        admit=lambda path: admitted.append(Path(path)), call_types=("tool_call",),
+        admit=lambda path: admitted.append(Path(path)), call_types=("tool_call",), with_raw=with_raw,
     )
+    if with_raw:
+        raw, bounded = bounded
+        assert raw == Path(ref["path"]).read_bytes() and json.loads(raw) == bounded
     assert bounded["call_type"] == "tool_call" and admitted == [Path(ref["path"])]
     with pytest.raises(PermissionError, match="controlled admission refusal"):
         read_call_manifest_ref(
             tmp_path, ref, task_id="reader-options", max_bytes=16 * 1024,
             admit=lambda _path: (_ for _ in ()).throw(PermissionError("controlled admission refusal")),
+            with_raw=with_raw,
         )
     with pytest.raises(ValueError, match="byte limit"):
-        read_call_manifest_ref(tmp_path, ref, task_id="reader-options", max_bytes=8)
+        read_call_manifest_ref(tmp_path, ref, task_id="reader-options", max_bytes=8, with_raw=with_raw)
+    with pytest.raises(ValueError, match="family mismatch"):
+        read_call_manifest_ref(tmp_path, ref, task_id="reader-options", call_types=("llm_response",), with_raw=with_raw)
+    with pytest.raises(ValueError, match="identity mismatch"):
+        read_call_manifest_ref(tmp_path, ref, task_id="different-task", with_raw=with_raw)
 
 
 def test_source_range_errors_are_typed_and_raw_only_legacy_manifest_is_unavailable(tmp_path):

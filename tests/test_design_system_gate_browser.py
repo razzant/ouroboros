@@ -24,8 +24,9 @@ VIEWPORTS = [
     (719, 844, False), (720, 844, False), (721, 844, False),
     (1280, 860, False), (1280, 600, False), (844, 320, False),
 ]
-PROJECTS = [dict(id=f'gate-{i}', name=f'Project {i}: a descriptive project name',
-                 chat_id=100+i, lifecycle='active', visible_revision=0) for i in range(30)]
+# Each row carries the time the list orders by, as the server's always does: gate-0 newest, so the list is this order.
+PROJECTS = [dict(id=f'gate-{i}', name=f'Project {i}: a descriptive project name', chat_id=100+i, lifecycle='active',
+                 visible_revision=0, last_message_at=f'2026-11-01T00:{59 - i:02d}:00+00:00') for i in range(30)]
 TG_STUB = """(() => {
     const listeners = new Map();
     const button = () => ({isVisible:false, show(){this.isVisible=true}, hide(){this.isVisible=false},

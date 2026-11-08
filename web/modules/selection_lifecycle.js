@@ -61,18 +61,25 @@ function pointInSelection(selection, event) {
     return false;
 }
 
-/** Dismiss stale selection before shell controls cancel native mousedown behavior. */
-export function bindDocumentSelectionDismissal(doc = globalThis.document) {
+/** A plain main-button press outside a scrollbar. Touch scrolling and handles remain native, so a touch or a coarse
+ * pen is never one: this seam is mouse/pen only. */
+export function ordinaryPress(event, doc = globalThis.document) {
+    if (event?.isPrimary === false || (event?.button != null && event.button !== 0)) return false;
+    if (event?.pointerType === 'touch'
+        || (event?.pointerType === 'pen' && doc?.documentElement?.dataset?.pointer === 'coarse')) return false;
+    if (event?.shiftKey || event?.ctrlKey || event?.metaKey || event?.altKey) return false;
+    return !scrollbarPress(event?.target, event);
+}
+
+/** Dismiss stale selection before shell controls cancel native mousedown behavior. `onPress` hears every ordinary
+ * press, also one the browser collapses natively: after it no selection kept from before may come back. */
+export function bindDocumentSelectionDismissal(doc = globalThis.document, { onPress } = {}) {
     if (!doc?.addEventListener || !doc?.getSelection) return () => {};
     const handler = (event) => {
+        if (!ordinaryPress(event, doc)) return;
+        onPress?.();
         const selection = doc.getSelection?.();
         if (!selection || selection.isCollapsed || !selection.rangeCount) return;
-        if (event?.isPrimary === false || (event?.button != null && event.button !== 0)) return;
-        // Touch scrolling and handles remain native; this seam is mouse/pen only.
-        if (event?.pointerType === 'touch'
-            || (event?.pointerType === 'pen' && doc.documentElement?.dataset?.pointer === 'coarse')) return;
-        if (event?.shiftKey || event?.ctrlKey || event?.metaKey || event?.altKey) return;
-        if (scrollbarPress(event?.target, event)) return;
         if (editable(doc.activeElement) && selectedEditable(selection, doc.activeElement)) return;
         // Selectable prose keeps native collapse/drag; chrome inside a spanning range clears.
         if (pointInSelection(selection, event) && !chromeTarget(doc, event?.target)

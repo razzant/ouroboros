@@ -93,13 +93,13 @@
     "id": "test_chat_progress_updates_route_into_live_card",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "return roomStatusView(workState, { connected: ws.isConnected ? ws.isConnected() : true, ready: hostStart.ready(),"
+    "value": "return roomStatusView(workState, { connected: ws.isConnected ? ws.isConnected() : true, catchingUp: catchUp.active,\n            ready: hostStart.ready(),"
   },
   {
     "id": "test_chat_progress_updates_route_into_live_card",
-    "path": "web/modules/chat.js",
+    "path": "web/app.js",
     "kind": "contains",
-    "value": "state.activePage !== 'chat'"
+    "value": "if (state.activePage === 'chat' && !document.hidden) refreshProjectsNav(false);"
   },
   {
     "id": "test_chat_progress_updates_route_into_live_card",
@@ -439,9 +439,9 @@
   },
   {
     "id": "test_chat_only_polls_state_when_active",
-    "path": "web/modules/chat.js",
+    "path": "web/app.js",
     "kind": "contains",
-    "value": "state.activePage !== 'chat'"
+    "value": "if (state.activePage === 'chat' && !document.hidden) refreshProjectsNav(false);"
   },
   {
     "id": "test_live_card_chip_draws_the_shared_status_mark",
@@ -1203,19 +1203,19 @@
     "id": "test_logs_autoscroll_sticks_only_when_pinned",
     "path": "web/modules/logs.js",
     "kind": "contains",
-    "value": "const pinned = isPinnedToLatest();"
+    "value": "pinned = isPinnedToLatest();"
   },
   {
     "id": "test_logs_autoscroll_sticks_only_when_pinned",
     "path": "web/modules/logs.js",
     "kind": "contains",
-    "value": "if (state.activeFilters[cat] && pinned) scrollToLatest();"
+    "value": "page.scrollTop = pinned ? page.scrollHeight : anchorTop();"
   },
   {
     "id": "test_logs_autoscroll_sticks_only_when_pinned",
     "path": "web/modules/logs.js",
     "kind": "contains",
-    "value": "if (state.activeFilters[category] && pinned) scrollToLatest();"
+    "value": "if (!isLogsVisible() || (ownTop !== null && page.scrollTop === ownTop)) return;"
   },
   {
     "id": "test_logs_autoscroll_sticks_only_when_pinned",
@@ -1233,7 +1233,7 @@
     "id": "test_logs_autoscroll_sticks_only_when_pinned",
     "path": "web/modules/logs.js",
     "kind": "contains",
-    "value": "window.addEventListener('ouro:page-shown', (event) => {"
+    "value": "window.addEventListener('ouro:page-shown', show);"
   },
   {
     "id": "tool-call-signal-death-renders-error",

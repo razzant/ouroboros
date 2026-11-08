@@ -95,13 +95,18 @@ def test_absent_duplicate_and_builtin(published_tool):
     assert effects.effect_of("read_file") is effects.BUILTIN
 
 
-def test_mcp_annotations_are_retained_without_authority(monkeypatch):
+def test_only_an_mcp_read_only_hint_declares_a_read(monkeypatch):
+    """The configured server's ``readOnlyHint: true`` is a declared read; false, absent or non-boolean stays write."""
     monkeypatch.setattr(effects, "_MCP_ANNOTATIONS", {})
-    effects.record_mcp_annotations("example", [{"name": "read", "annotations": {
-        "readOnlyHint": True, "destructiveHint": False, "title": "not retained"}}])
+    effects.record_mcp_annotations("example", [
+        {"name": "read", "annotations": {"readOnlyHint": True, "destructiveHint": False, "title": "not retained"}},
+        {"name": "send", "annotations": {"readOnlyHint": False}},
+        {"name": "vague", "annotations": {"readOnlyHint": "true"}}, {"name": "bare"}])
     fact = effects.effect_of("mcp_example__read")
-    assert fact.effect == "write" and not fact.declared
+    assert (fact.effect, fact.declared, fact.source) == ("read", True, "mcp")
     assert fact.annotations == {"readOnlyHint": True, "destructiveHint": False}
+    for name in ("mcp_example__send", "mcp_example__vague", "mcp_example__bare", "mcp_example__unlisted"):
+        assert (effects.effect_of(name).effect, effects.effect_of(name).declared) == ("write", False), name
     effects.record_mcp_annotations("example", [])
     assert effects.effect_of("mcp_example__read", is_mcp=True).annotations == {}
     assert effects.effect_of("mcp_example__read").effect == "write"
@@ -112,3 +117,20 @@ def test_target_values_are_flat_declared_arguments_only():
     assert effects.target_values(fact, {"to": ["a", " b "], "cc": 123, "bcc": {"nested": "c"},
                                        "room": False, "thread": "T", "undeclared": "d"}) == {
         "to": ["a", "b"], "cc": ["123"], "thread": ["T"]}
+
+
+def test_a_generic_tool_declares_which_calls_deliver_words(published_tool):
+    """A connector names the calls of its generic tool that deliver words (``sends.when``) and where they land
+    (dotted selectors); every other call keeps the tool's own declaration, and a malformed one selects nothing."""
+    name, descriptor = published_tool("write", target=[], sends={
+        "when": {"path": ["chat.postMessage", "chat.update"]},
+        "target": "body.channel", "conversation": "body.channel", "thread": "body.thread_ts"})
+    send = {"path": "chat.postMessage", "body": {"channel": "C1", "thread_ts": "1.2", "text": "hi"}}
+    fact = effects.effect_of(name, ext_tool=descriptor, args=send)
+    assert (fact.effect, fact.declared, fact.targets, fact.conversation, fact.thread) == (
+        "message", True, ("body.channel",), "body.channel", "body.thread_ts")
+    assert effects.target_values(fact, send) == {"body.channel": ["C1"], "body.thread_ts": ["1.2"]}
+    for args in ({"path": "reactions.add", "body": {"channel": "C1"}}, {"body": {"channel": "C1"}}, None):
+        assert effects.effect_of(name, ext_tool=descriptor, args=args).effect == "write"
+    name, descriptor = published_tool("write", sends={"when": {"path": 5}, "target": "channel"})
+    assert effects.effect_of(name, ext_tool=descriptor, args={"path": 5, "channel": "C1"}).effect == "write"

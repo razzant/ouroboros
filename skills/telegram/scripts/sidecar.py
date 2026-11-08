@@ -29,6 +29,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 import httpx
 import websockets
+from websockets.exceptions import ConnectionClosed
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, Response
 from starlette.websockets import WebSocket
@@ -1026,8 +1027,23 @@ class TelegramProxySidecar:
                 for task in pending:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
+                close_code = 4401 if expired else 1000
+                if not expired:
+                    for task in (from_upstream, from_client):
+                        if task not in done or task.cancelled() or task.exception() is None:
+                            continue
+                        error = task.exception()
+                        close_code = 1011
+                        if isinstance(error, ConnectionClosed):
+                            # A local rejection (e.g. max_size) may have no peer close.
+                            close = (error.sent if error.sent and error.sent.code not in (1000, 1001)
+                                     else error.rcvd or error.sent)
+                            if close and close.code not in (1005, 1006, 1015):
+                                close_code = close.code
+                        break
                 try:
-                    await client.close(code=4401 if expired else 1000)
+                    # Relay the protocol cause, never private exception/reason text.
+                    await client.close(code=close_code)
                 except Exception:
                     pass
         except Exception:

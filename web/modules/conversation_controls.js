@@ -105,7 +105,7 @@ export function bindConversationControls({ composer, page, chatId, ws, contribut
 
 // The room facts a call surface takes from the shell. A directly opened Project need not be in the
 // bounded sidebar census, so an unknown chat id names the active project panel.
-export function projectRoomOptions({ rows, nav, state, title, freshProjectRow, openProjectPanel, showPage, destroyProjectInstance }) {
+export function projectRoomOptions({ rows, nav, state, title, freshProjectRow, openProjectPanel, showPage, putAway }) {
     return ({ page, chatId }) => {
         const project = chatId === 1 ? null : rows().find(row => Number(row.chat_id) === chatId)
             || { id: nav.activeProjectId, chat_id: chatId, name: title.textContent };
@@ -114,7 +114,8 @@ export function projectRoomOptions({ rows, nav, state, title, freshProjectRow, o
             label: () => project ? freshProjectRow(project).name || project.id : 'Main',
             onScreen: () => state.activePage === 'chat' && !page.hidden && current(),
             reveal: () => project ? openProjectPanel({ id: project.id, name: project.name }, { openOnly: true }) : showPage('chat'),
-            onSettled: () => queueMicrotask(() => { if (project && !current()) destroyProjectInstance(project.id); }),
+            // A call that ended in a Project room not on screen lets the room go away as any room left does.
+            onSettled: () => queueMicrotask(() => { if (project && !current()) putAway(project.id); }),
         };
     };
 }

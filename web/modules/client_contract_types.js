@@ -712,7 +712,7 @@
  */
 
 /**
- * `GET /api/projects`: active and deleting projects, at most 200, most recently active first; `?all=1` lists
+ * `GET /api/projects`: active and deleting projects, at most 200, newest message first (`last_message_at`); `?all=1` lists
  * every one of them. `?id=<project_id>` answers that project while active or deleting, `?chat_id=<n>` the active
  * project of that room; either answers none otherwise.
  * @typedef {Object} ProjectListResponse

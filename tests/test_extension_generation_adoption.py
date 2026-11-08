@@ -444,8 +444,8 @@ def _speaker_call(tmp_path, monkeypatch, *, replacement="message", then=None, ou
     return results[0], place
 
 
-@pytest.mark.parametrize("runtime,verdict,refusal", [
-    ("advanced", "SUSPICIOUS", "Message not sent"),
+@pytest.mark.parametrize("runtime,verdict,refusal", [  # SUSPICIOUS speech sends with its warning (the final assessment)
+    ("advanced", "DANGEROUS", "Message not sent"),
     ("cyber_pro", "DANGEROUS", "Message not sent"),
     ("cyber_pro", RuntimeError("checker route down"), "SAFETY_UNAVAILABLE"),
 ])
@@ -535,7 +535,9 @@ def test_an_out_of_process_call_never_runs_a_replacement_under_its_bound_declara
         assert result["is_error"] is True and "replaced" in result["result"], result
         assert children == [] and prompts == []
     else:
-        assert result["result"] == "child ran" and len(children) == 1 and len(prompts) == 1, result
+        # The child's own result, then the host's facts for the place it spoke into (another place than the focus).
+        assert result["result"].split("\n\n[DESTINATION] ")[0] == "child ran", result
+        assert len(children) == 1 and len(prompts) == 1, result
 
 
 def _another_caller_adopts_first(monkeypatch):

@@ -7,7 +7,7 @@ import {
     mergeStickyCostMeta,
     taskCostMeta,
     taskCostProjection,
-} from '../modules/chat.js';
+} from '../modules/chat_activity.js';
 import { costPresentationDetail, costPresentationMeta, renderLiveCardMeta } from '../modules/chat_activity.js';
 import { costBucketPresentation, costDashboardPresentation } from '../modules/costs.js';
 import { summarizeLogEvent } from '../modules/log_events.js';

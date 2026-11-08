@@ -153,7 +153,8 @@ export function applySafetySettings(root, settings = {}) {
     syncEffortSegments(root);
     paintLines(root, settings);
     syncCheckFully(root);
-    void refreshSafetySkipCounter(root);
+    owedSkipCounters.add(root);
+    showSkipCounter(root);
 }
 
 const MODEL_ROLE_MAPS = new Set(['OUROBOROS_MODEL_ACCOUNTS', 'OUROBOROS_MODEL_CONTEXT_WINDOWS', 'OUROBOROS_MODEL_PROCESSING_PREFERENCES']);
@@ -292,13 +293,22 @@ export async function saveSafetyOwnerChanges(draft, current = {}, { askOwner = o
 
 const SKIP_TAIL = 2000;
 
+// The counter's read is an event tail in the compact view (each row's `type` and `ts` are all it needs): each settings
+// load owes one, paid only once the counter is on screen.
+const owedSkipCounters = new WeakSet();
+function showSkipCounter(root) {
+    if (!owedSkipCounters.has(root) || !root.querySelector?.('#s-safety-skip-counter')?.getClientRects?.().length) return;
+    owedSkipCounters.delete(root);
+    void refreshSafetySkipCounter(root);
+}
+
 /** Waved-through checks among the inspected recent events (the Light/Off audit), counted within 24 h; a full tail
  * younger than a day says the span it read, never a day it did not inspect. */
 export async function refreshSafetySkipCounter(root, { logsTail = apiClient.logsTail, now = Date.now() } = {}) {
     const el = root?.querySelector?.('#s-safety-skip-counter');
     if (!el) return;
     try {
-        const data = await logsTail('events', SKIP_TAIL);
+        const data = await logsTail('events', SKIP_TAIL, 'compact');
         const entries = data?.entries || [];
         const cutoff = now - 24 * 3600 * 1000;
         const times = entries.map((entry) => Date.parse(String(entry?.ts || ''))).filter(Number.isFinite);
@@ -352,5 +362,12 @@ export function bindSafetySettings(root, { save = saveSafetyLevel } = {}) {
     };
     section.addEventListener('click', onClick);
     const disposeMarks = bindRecheckMarks(root);
-    return () => { section.removeEventListener('click', onClick); disposeMarks(); };
+    const onShown = () => showSkipCounter(root);
+    const win = globalThis.window;
+    for (const shown of ['ouro:page-shown', 'ouro:settings-subtab-shown']) win?.addEventListener?.(shown, onShown);
+    return () => {
+        section.removeEventListener('click', onClick);
+        disposeMarks();
+        for (const shown of ['ouro:page-shown', 'ouro:settings-subtab-shown']) win?.removeEventListener?.(shown, onShown);
+    };
 }

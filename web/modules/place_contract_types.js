@@ -86,6 +86,7 @@
  * @property {string} activity_coverage
  * @property {number|null} spent_24h_usd
  * @property {Array<Object>} account_candidates
+ * @property {Array<Object<string,string>>} shared_owner_accounts Confirmed in another place of this bot or app; they count here.
  */
 
 /**

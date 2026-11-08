@@ -925,7 +925,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # that admitted it, ``state/core_loss_recovery.json`` (``ouroboros/server_process.py``); its own row.
 # 455 -> 457 (#2896): a remote MCP server's sign-in record ``state/mcp/oauth/server-*.json`` and the ``.lock``
 # its holder keeps while it writes (``ouroboros/mcp_oauth.py``); their own row.
-EXPECTED_SCAN_PATHS = 457
+# 457 -> 458 (safety retro, self-echo): the bounded record of words this install sent through an identity
+# that is also a confirmed owner account, ``state/own_sends.json`` (``ouroboros/own_sends.py``); its own row.
+EXPECTED_SCAN_PATHS = 458
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

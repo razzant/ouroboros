@@ -23,9 +23,11 @@ def test_ui_logs_error_group_survives_later_heartbeat(direct_server):
                 const mount = document.createElement('div');
                 document.body.appendChild(mount);
                 const handlers = new Map();
+                // The panel on screen: a hidden one keeps its entries as data and draws nothing.
                 initLogs({
                     mount, ws: { on: (name, callback) => handlers.set(name, callback) },
-                    state: { activeFilters: Object.fromEntries(Object.keys(LOG_CATEGORIES)
+                    state: { activePage: 'dashboard', dashboardActiveSubtab: 'logs',
+                        activeFilters: Object.fromEntries(Object.keys(LOG_CATEGORIES)
                         .map((name) => [name, name === 'errors'])) },
                 });
                 const emit = (data) => handlers.get('log')({ data });
@@ -39,6 +41,8 @@ def test_ui_logs_error_group_survives_later_heartbeat(direct_server):
                 emit({ ...heartbeat, task_id: 'quiet-task' });
                 const failed = mount.querySelector('[data-task-group="error-task"]');
                 const quiet = mount.querySelector('[data-task-group="quiet-task"]');
+                // A Timeline's rows exist while it is open: its summary draws them as it opens.
+                failed.querySelector('summary').click();
                 return {
                     category: failed.dataset.category, visible: !failed.hidden,
                     timeline: failed.querySelectorAll('.log-task-event').length,

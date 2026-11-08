@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import logging
 from typing import Any
-from ouroboros.places import STATE_SILENT, PlaceError, connect_place, load_places, place_summary, note_identity, migration_problems
+from ouroboros.places import (STATE_SILENT, PlaceError, confirmed_elsewhere, connect_place, load_places, place_summary,
+                              note_identity, migration_problems)
 
 log = logging.getLogger(__name__)
 
@@ -66,7 +67,7 @@ def said_once(label: str) -> str:
 
 
 def place_view(root, place, *, declarations: list[dict] | None = None, allowance: dict | None = None,
-               brief: bool = False) -> dict[str, Any]:
+               brief: bool = False, places: list | None = None) -> dict[str, Any]:
     """Stored facts for status/launch; the owner surface also resolves connector capabilities."""
     from ouroboros.consciousness_allowance import allowance_window
     from ouroboros.place_arrivals import account_candidates
@@ -110,6 +111,13 @@ def place_view(root, place, *, declarations: list[dict] | None = None, allowance
     result.update(safety_mode=get_safety_mode("consciousness"), labels=row.get("labels") or {})
     result.update({key: row[key] for key in ("facts", "source", "settings") if key in row})
     result["account_candidates"] = account_candidates(root, place.place_id)
+    # Accounts another place of this bot or app confirms count here too (``places.counted_owner_accounts``): named
+    # with where they were confirmed, removed there.
+    result["shared_owner_accounts"] = [
+        {**{key: getattr(account, key) for key in ("platform_actor_id", "label", "confirmed_at", "account_id")},
+         "place_id": other.place_id, "place_label": said_once(other.label or other.provider)}
+        for other, account in confirmed_elsewhere(load_places(root) if places is None else places, place)
+        if not account.account_id or place.account_id in ("", "*", account.account_id)]
     return result
 
 
@@ -118,7 +126,7 @@ def places_view(root) -> dict:
     places = load_places(root)
     from ouroboros.consciousness_allowance import allowance_window
     allowance = allowance_window(root, allow_stale=True) or {}
-    return {"migration_problems": migration_problems(root), "places": [place_view(root, p, declarations=declarations, allowance=allowance) for p in places],
+    return {"migration_problems": migration_problems(root), "places": [place_view(root, p, declarations=declarations, allowance=allowance, places=places) for p in places],
             "connectors": [{"connector": r["skill"],
                             "label": r["label"], "icon": r.get("icon_spec") or {}, "destination": r["destination"],
                             "readiness": r.get("readiness") or {"text": "Connector unavailable", "tone": "warn"},

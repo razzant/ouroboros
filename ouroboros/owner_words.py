@@ -361,6 +361,28 @@ def place_confirmed_words(confirmed: bool, text: Any, message: Any) -> str:
     return words if confirmed is True and words.strip() and not _mapping(message).get("forward_origin") else ""
 
 
+def place_row_facts(conversation_id: Any, message: Any, origin: Mapping[str, Any] | None = None) -> Dict[str, Any]:
+    """A confirmed place event's corpus-row facts beside its words: the message it replies to (by address) and its
+    provider identity (``own_sends.message_identity``), so a later reader tells my own post through my human's
+    account once that post's receipt is known; ``origin``: the row's other typed ids."""
+    from ouroboros.own_sends import message_identity
+
+    found = message_identity(conversation_id, message)
+    identity = {"conversation_id": found[0], "message_id": found[1]} if found else {}
+    return {"reply_to": place_reply_target(message), "origin": {**(origin or {}), **identity}}
+
+
+def _my_post(ctx: Any, item: Mapping[str, Any]) -> bool:
+    """A confirmed place row whose provider identity my send receipts now name: my own echo, never my human's."""
+    identity = (str(item.get("conversation_id") or ""), str(item.get("message_id") or ""))
+    if not all(identity) or not getattr(ctx, "drive_root", None):
+        return False
+    from ouroboros.own_sends import sent_identities
+    from ouroboros.tool_access import canonical_data_root
+
+    return identity in sent_identities(canonical_data_root(ctx))
+
+
 def cited_owner_basis(ctx: Any, owner_words: Any) -> Tuple[Dict[str, Any] | None, str]:
     """``(basis, error)`` for words a run cites as my human's order for the work it starts.
 
@@ -370,7 +392,8 @@ def cited_owner_basis(ctx: Any, owner_words: Any) -> Tuple[Dict[str, Any] | None
     not unauthenticated, not forwarded). Absent words: ``(None, "")``, the work is my own. Words found: the row
     the new root carries (``basis: cited``) holds the whole verified message as ``content`` (never a host cut of my
     human's words) with the cited span as ``cited``, labelled by its real source: the owner door it came through,
-    or ``place_owner`` for a confirmed account's place words. Words not found: a typed refusal, nothing started.
+    or ``place_owner`` for a confirmed account's place words, read again at the cite: a row my send receipt now names
+    is my own echo (``_my_post``). Words not found: a typed refusal, nothing started.
     Whether the words ask for this work is the citing mind's reading, visible on the card."""
     from ouroboros.chronicle_quotes import quote_in
 
@@ -382,7 +405,8 @@ def cited_owner_basis(ctx: Any, owner_words: Any) -> Tuple[Dict[str, Any] | None
             return {"source": row["source"], "content": row["text"], "cited": wanted, "basis": CITED, "carried": True,
                     **({"msg_id": row["ref"]} if row.get("ref") else {})}, ""
     for item in getattr(ctx, "_owner_directives", None) or []:  # confirmed place events, with what they replied to
-        if isinstance(item, dict) and item.get("source") == PLACE_CONFIRMED and quote_in(wanted, str(item.get("content") or "")):
+        if (isinstance(item, dict) and item.get("source") == PLACE_CONFIRMED
+                and quote_in(wanted, str(item.get("content") or "")) and not _my_post(ctx, item)):
             return {"source": "place_owner", "content": str(item.get("content") or ""), "cited": wanted, "basis": CITED,
                     "carried": True, **{key: item[key] for key in ("msg_id", "reply_to") if item.get(key)}}, ""
     return None, ("owner_words were not found verbatim in any message of your human that reached this run (their "

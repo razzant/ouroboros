@@ -23,8 +23,8 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from ouroboros import places, conversation_lease
-from ouroboros.tool_effects import (EFFECT_MESSAGE, EFFECT_READ, ToolEffect, bound_declaration, connector_of,
-                                    effect_of, target_values)
+from ouroboros.tool_effects import (EFFECT_MESSAGE, EFFECT_READ, EFFECT_WRITE, ToolEffect, argument_value,
+                                    bound_declaration, connector_of, effect_of, target_values)
 
 _PREFIX = "⚠️ RESOURCE_CONSTRAINT_BLOCKED: "
 PLACE_BINDING_VERSION = 1
@@ -39,6 +39,15 @@ def _metadata(ctx: Any) -> Mapping[str, Any]:
 def _drive_root(ctx: Any) -> Any:
     return (_metadata(ctx).get("budget_drive_root") or getattr(ctx, "budget_drive_root", "")
             or getattr(ctx, "drive_root", None))
+
+
+def _counted_accounts(ctx: Any) -> Mapping[str, Any]:
+    """The owner accounts each place counts now (``places.place_owner_accounts``): a sending identity reads as my
+    human's wherever their bot or app confirms them; {} when the places cannot be read (each place's own rows)."""
+    try:
+        return places.place_owner_accounts(_drive_root(ctx)) if _drive_root(ctx) else {}
+    except places.PlaceError:
+        return {}
 
 
 class _PlacesUnreadable(RuntimeError):
@@ -56,8 +65,9 @@ def _declares_place(connector: str, ext_tool: Any = None) -> bool:
 
 
 def _call_destinations(ctx: Any, name: str, args: Mapping[str, Any], ext_tool: Any, is_mcp: bool):
-    """Resolve each recipient separately so an Active To never hides a Silent Cc."""
-    effect = effect_of(name, ext_tool=ext_tool, is_mcp=is_mcp, ctx=ctx)
+    """Resolve each recipient separately so an Active To never hides a Silent Cc. A call its connector declares as
+    one that delivers words (``sends.when``) is a ``message`` here, routed by that declaration's selectors."""
+    effect = effect_of(name, ext_tool=ext_tool, is_mcp=is_mcp, ctx=ctx, args=args)
     targets = target_values(effect, args)
     connector, root = connector_of(name, ext_tool), _drive_root(ctx)
     if not connector or root is None:
@@ -109,7 +119,7 @@ def dispatch_refusal(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
     try:
         effect, targets, resolved, siblings, attributable = _call_destinations(ctx, name, args, ext_tool, is_mcp)
     except _PlacesUnreadable as exc:
-        effect = effect_of(name, ext_tool=ext_tool, is_mcp=is_mcp, ctx=ctx)
+        effect = effect_of(name, ext_tool=ext_tool, is_mcp=is_mcp, ctx=ctx, args=args)
         if effect.effect == EFFECT_READ and not is_observe_origin(_metadata(ctx)):
             return ""
         return (_PREFIX + f"The place records need repair, so {name!r} cannot be attributed to a place: {exc}. "
@@ -131,22 +141,73 @@ def dispatch_refusal(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
         return (_PREFIX + f"The destination of {name!r} cannot be attributed while {labels} is Silent or Paused. "
                 "Use a tool with declared, attributable targets or change the state in Consciousness › Places "
                 "or with configure_presence.")
-    if effect.effect == EFFECT_MESSAGE:
-        keys = []
-        for place in resolved:
-            for key in _conversation_keys(place, effect, targets, account_id=_call_account(ctx, place, targets)):
-                author = conversation_lease.live_author(key, drive_root=_drive_root(ctx))
-                if author and author != getattr(ctx, "task_id", None):
-                    return (_PREFIX + f"Task {author} is authoring this conversation in {place.label or place.place_id}. "
-                            f"Hand the intent to it with tell_task(task_id={author!r}, note=...).")
-                keys.append(key)
-        _note_message_call(ctx, name, args, keys)
+    return _author_refusal(ctx, name, args, effect, targets, resolved) if effect.effect == EFFECT_MESSAGE else ""
+
+
+def _author_refusal(ctx: Any, name: str, args: Mapping[str, Any], effect: ToolEffect, targets: Mapping[str, list[str]],
+                    resolved: list) -> str:
+    """One author per conversation for words: another live turn's conversation names its author; this run's own
+    sends there are noted (``_note_message_call``)."""
+    keys = []
+    for place in resolved:
+        for key in _conversation_keys(place, effect, targets, account_id=_call_account(ctx, place, targets)):
+            author = conversation_lease.live_author(key, drive_root=_drive_root(ctx))
+            if author and author != getattr(ctx, "task_id", None):
+                return (_PREFIX + f"Task {author} is authoring this conversation in {place.label or place.place_id}. "
+                        f"Hand the intent to it with tell_task(task_id={author!r}, note=...).")
+            keys.append(key)
+    _note_message_call(ctx, name, args, keys, effect)
     return ""
 
 
-def _note_message_call(ctx: Any, name: str, args: Mapping[str, Any], keys: list[str]) -> None:
+def verdict_speech_refusal(ctx: Any, name: str, args: Mapping[str, Any], *, is_mcp: bool = False,
+                           ext_tool: Any = None) -> str:
+    """The place guard a verdict's speech mark adds to a connector write the host did not know as words: one author
+    per conversation where its declared targets resolve a place (Silent/Paused and Advises met it as a write at
+    dispatch, before any verdict). A write into a conversation (a reaction, a pin) is not words by itself."""
+    try:
+        effect, targets, resolved, _siblings, _known = _call_destinations(ctx, name, args, ext_tool, is_mcp)
+    except _PlacesUnreadable:
+        return ""  # the dispatch guard already held this connector's writes while its places need repair
+    return _author_refusal(ctx, name, args, effect, targets, resolved) if effect.effect == EFFECT_WRITE else ""
+
+
+def destination_line(label: str, notes: list[str]) -> str:
+    """One destination as the mind reads it beside an act or a refusal: its label and my human's notes for it."""
+    import json
+
+    return f"[DESTINATION] {label}: your human's notes for this place: " + (
+        "; ".join(json.dumps(text, ensure_ascii=False) for text in notes) or "none")
+
+
+def with_destination_facts(ctx: Any, name: str, args: Mapping[str, Any], result: Any) -> Any:
+    """A send into a place other than this turn's focus carries that place's label and my human's notes beside its
+    result, in every mode (my human's own work with Safety off included): the facts sit next to the act. ``result``
+    is a ``ToolResult``; the note trails its text as a host annotation, the producer's text kept apart. A blocked
+    call carries its own facts (a place refusal names the place, a Safety refusal its destination)."""
+    try:
+        if (not isinstance(args, Mapping) or getattr(result, "status", "") == "blocked"
+                or effect_of(name, ctx=ctx, args=args).effect != EFFECT_MESSAGE):
+            return result
+        _effect, _targets, resolved, _siblings, _known = _call_destinations(ctx, name, args, None, False)
+    except Exception:  # the call already ran: a missing note never turns its result into a failure
+        import logging
+        logging.getLogger(__name__).warning("destination facts for %s unavailable", name, exc_info=True)
+        return result
+    focus = (_metadata(ctx).get("focus") or {}).get("place_id")
+    note = "\n".join(destination_line(place.label or place.place_id,
+                                      [entry.text for entry in place.notes if entry.author in {"owner", "migration"}])
+                     for place in resolved if place.place_id != focus)
+    if not note:
+        return result
+    from dataclasses import replace
+    return replace(result, text=f"{result.text}\n\n{note}", host_annotations=(*result.host_annotations, note),
+                   producer_text=result.text if result.producer_text is None else result.producer_text)
+
+
+def _note_message_call(ctx: Any, name: str, args: Mapping[str, Any], keys: list[str], effect: ToolEffect) -> None:
     """Keep on the context that this run dispatched a ``message`` call into these conversations (``_place_message_calls``):
-    the words proposed (the call's ``text`` argument, when it has one) and when. A dispatched call is not a delivery:
+    the words proposed (its declared ``text`` argument, default ``text``, when it has one) and when. A dispatched call is not a delivery:
     Safety may still refuse it and the handler may fail; the connector's receipt, when it comes, says what landed.
     ``this_turn_sends`` reads it beside the receipts, so a finish seconds after a send is judged with the send in view."""
     from ouroboros.utils import utc_now_iso
@@ -160,8 +221,9 @@ def _note_message_call(ctx: Any, name: str, args: Mapping[str, Any], keys: list[
             ctx._place_message_calls = calls
         except AttributeError:  # a context that takes no attributes keeps no record
             return
+    words = argument_value(args, effect.text or "text")
     calls.append({"tool": name, "at": utc_now_iso(), "conversation_keys": list(dict.fromkeys(keys)),
-                  **({"text": args["text"]} if isinstance(args.get("text"), str) else {})})
+                  **({"text": words} if isinstance(words, str) else {})})
 
 
 def this_turn_sends(ctx: Any, conversation_key: str) -> dict[str, Any]:
@@ -222,7 +284,9 @@ def call_place_facts(ctx: Any, name: str, args: Mapping[str, Any], *, ext_tool: 
         keys = _conversation_keys(place, effect, targets, account_id=account)
         rows.append({"place_id": place.place_id, "place_label": place.label, "place_state": place.state,
                      **({"sends_as": dict(sending), "sends_as_owner": (sending.get("kind") == "user" and bool(focus.get("identity_owner")))
-                         if same_focus else places.writes_as_owner(place, identity, account)} if sending else {}),
+                         if same_focus else places.writes_as_owner(place, identity, account,
+                                                                   _counted_accounts(ctx).get(place.place_id))}
+                        if sending else {}),
                      "conversation_key": keys[0] if len(keys) == 1 else "", "conversation_keys": keys})
     facts = {"effect": effect.effect, "declared": effect.declared, "targets": targets,
              "attributable": attributable, "places": rows}

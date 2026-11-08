@@ -285,12 +285,14 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
     # isolation never lapses for projects beyond the summary limit or hidden rows.
     try:
         from ouroboros.projects_registry import list_sidebar_projects, projects_summary
+        from ouroboros.room_messages import project_revision
 
         listable = list_sidebar_projects(root := request_drive_root(request))  # one read: the feed and its count
-        projects = projects_summary(root, include_pinned=True, sidebar_rows=listable)
+        messages_revision = project_revision(root, listable)  # read before the feed: a later move reads the list again
+        projects = projects_summary(root, include_pinned=True, sidebar_rows=listable, by_message=True)
         project_listable_count = len(listable)
     except Exception:
-        projects = []
+        projects, messages_revision = [], None
         project_listable_count = None
     try:
         from ouroboros.projects_registry import reserved_project_chat_ids
@@ -324,6 +326,7 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         "subagents_mode": main_cognition(settings)["subagents_mode"],
         "subagents_availability": subagents_availability(settings),
         "projects": projects,
+        "project_messages_revision": messages_revision,
         "project_listable_count": project_listable_count,
         "project_chat_ids": project_chat_ids,
         "main_visible_revision": main_visible_revision,

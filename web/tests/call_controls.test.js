@@ -40,7 +40,7 @@ test('project room options name Main and a Project, reveal the right page and re
         rows: () => rows, nav, state, title: { textContent: 'Panel title' },
         freshProjectRow: (project) => rows.find(row => row.id === project.id) || project,
         openProjectPanel: (project) => opened.push(project.id), showPage: (name) => shown.push(name),
-        destroyProjectInstance: (id) => destroyed.push(id),
+        putAway: (id) => destroyed.push(id),
     });
     const main = options({ page: { hidden: false }, chatId: 1 });
     assert.equal(main.label(), 'Main');

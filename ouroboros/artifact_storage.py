@@ -3,8 +3,9 @@ can give one (macOS APFS ``clonefile(2)``, Linux ``FICLONE`` on Btrfs and reflin
 other platform, filesystem or volume boundary answers ``False`` and the caller streams a copy as before.
 Never a hard link: an in-place write to the source would change the stored result, while a clone
 diverges at the first write to either side. ``clone_or_copy2`` is ``shutil.copy2`` over it, for a folder
-that is read rather than kept: APFS leaves a clone's may-share mark after its peer is gone, so a file meant
-to be compressed later stays a stream. Transparent compression keeps the one floor its callers share
+that is read rather than kept: APFS leaves a clone's may-share mark on the source too, even after its peer
+is gone. Where compression is supported, read-only lineage staging streams in-scope records until compressed;
+other copy callers keep their own policy. Transparent compression keeps the one floor its callers share
 (``compression_outcome``: the patch writers and the ``record_compression`` maintenance job). The platform
 calls are function-local under ``sys.platform`` guards (docs/development/10-platform-abstraction-rule.md
 names this module's exception)."""
@@ -36,12 +37,15 @@ def clone_file(source: pathlib.Path, destination: pathlib.Path) -> bool:
     """Make DESTINATION (which must not exist) a block-sharing clone of SOURCE; ``False`` when this
     platform or filesystem cannot, with nothing left at DESTINATION, so the caller copies instead.
     Only a regular file is cloned: a directory would be cloned whole and a FIFO's open would block,
-    so anything else is left to the streamed copy's own typed refusal. The clone's times are its
+    so anything else is left to the streamed copy's own typed refusal. Nor is one whose flags refuse
+    new times (immutable, append-only): ``clonefile`` carries them, and such a clone also refuses its
+    mode, its rename and its own removal. The clone's times are its
     own: ``clonefile`` copies the source's, and a temporary that looks as old as the result it copies
     would be reaped as a hard kill's orphan by the temp sweep's age guard while the copy is in flight."""
     source, destination = pathlib.Path(source), pathlib.Path(destination)
     try:
-        if not stat.S_ISREG(os.stat(source).st_mode):
+        info = os.stat(source)
+        if not stat.S_ISREG(info.st_mode) or getattr(info, "st_flags", 0) & _REFUSES_TIMES:
             return False
         if sys.platform == "darwin":
             cloned = _clonefile(source, destination)
@@ -61,9 +65,9 @@ def clone_or_copy2(source: Any, destination: Any) -> Any:
     """``shutil.copy2`` (bytes, mode, times; a ``copytree`` copy function) as a clone where ``clone_file`` can
     make one, ``copy2`` itself otherwise, its refusals included. Its ACL is the destination's inherited one,
     as with ``copy2`` (the clone passes no ``CLONE_ACL``). Unlike macOS ``copy2`` it keeps the source's
-    compression and extended attributes, which no reader here looks at. A flag that refuses new times
-    (immutable, append-only) would travel too, so that source is left to ``copy2``."""
-    if not getattr(os.stat(source), "st_flags", 0) & _REFUSES_TIMES and clone_file(source, destination):
+    compression and extended attributes, which no reader here looks at. A source whose flags refuse new
+    times (immutable, append-only) gets no clone (``clone_file``), so ``copy2`` answers for it."""
+    if clone_file(source, destination):
         shutil.copystat(source, destination)
         return destination
     return shutil.copy2(source, destination)
@@ -163,6 +167,12 @@ def compression_outcome(path: pathlib.Path, *, owned: Optional[Callable[[], bool
         return "failed"
 
 
+def is_compressed(info: os.stat_result) -> bool:
+    """The file's current transparent-compression flag, from one already obtained stat result."""
+    return bool(getattr(info, "st_flags", 0) & stat.UF_COMPRESSED
+                or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_COMPRESSED)
+
+
 def _floor(path: pathlib.Path, info: os.stat_result) -> str:
     """Why PATH stays as it is before any rewrite, or ``""``."""
     if not stat.S_ISREG(info.st_mode):
@@ -174,7 +184,7 @@ def _floor(path: pathlib.Path, info: os.stat_result) -> str:
     if info.st_nlink != 1:
         return "linked"
     attributes = getattr(info, "st_file_attributes", 0)
-    if getattr(info, "st_flags", 0) & stat.UF_COMPRESSED or attributes & stat.FILE_ATTRIBUTE_COMPRESSED:
+    if is_compressed(info):
         return "compressed_already"
     if sys.platform == "darwin":
         shared = _may_share(path)

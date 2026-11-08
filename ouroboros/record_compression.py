@@ -21,6 +21,7 @@ Never ``area``/``area.noindex`` or a ``.git`` path; every file passes the one fl
 (``artifact_storage.is_compression_sibling``) in the folders it walks (under the seat lock in a home;
 ``temp_sweep`` never enters ``state/review_checkouts``); any other atomic-signature name is neither a
 candidate nor reaped. A folder it cannot list is counted (``unreadable``), never taken for empty.
+``in_scope`` names these places to read-only lineage staging, which streams uncompressed records where compression is supported.
 
 Pacing: at most ``FILES_PER_RUN`` files past the stat floor a run, a stop check between files, the cursor
 durable in the job row; a run reads and rewrites at the utility disk tier (its own thread, its ``ditto``).
@@ -110,6 +111,27 @@ def _has_evidence(base: pathlib.Path) -> bool:
 def _seat_part(parts: Tuple[str, ...], directory: bool) -> bool:
     """A home's ``evidence``, ``evidence-<capture>`` and ``.test-evidence`` folders (never its copy)."""
     return (parts[0].startswith("evidence") or parts[0] == ".test-evidence") and (directory or len(parts) > 1)
+
+
+def in_scope(root: Any, path: Any) -> bool:
+    """Whether a pass may one day ask the floor about the file at PATH: a task folder's evidence or a seat
+    home's evidence folders under ROOT (the data root), never through ``.git``. By place alone, whatever its
+    size, name, task state or today's floor, so a small live record that grows is one. Read-only lineage staging
+    streams one not yet compressed: an APFS clone would leave it ``shared`` for good (``artifact_storage``). A path that cannot be
+    resolved answers True: not knowing is no licence to share blocks, and a stream costs only time."""
+    try:
+        path, root = pathlib.Path(path).resolve(), pathlib.Path(root).resolve()
+    except (OSError, RuntimeError):
+        return True
+    try:
+        parts = path.relative_to(root).parts
+    except ValueError:
+        return False
+    if ".git" in parts:
+        return False
+    if parts[:2] == ("task_results", "artifacts") and len(parts) > 3:
+        return _evidence_part(parts[3:], False)
+    return parts[:3] == _SEATS.parts and len(parts) > 4 and _seat_part(parts[4:], False)
 
 
 def _linked(entry: os.DirEntry) -> bool:
