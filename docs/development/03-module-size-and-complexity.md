@@ -218,14 +218,13 @@ owns a `destroy()` that releases everything it acquired: WS subscriptions
 `MutationObserver`, `IntersectionObserver`), timers, `requestAnimationFrame` loops and
 `EventSource`/streaming connections.
 
-An instance that can be closed, hidden or replaced (canonically, project chat
-panels) is destroyable without leaving an acquisition behind. It may survive
-being hidden only under an explicit, owner-visible retention reason (a project chat
-with pending work, a widget card set to Keep running); even then it owns its disposer,
-and Stop, unload, reload and shutdown stay force-destroy boundaries. "Hide the DOM
-node, keep the handlers" is the leak this invariant forbids; late async continuations
-check a `destroyed` flag before touching state or re-arming loops. A module widget's
-disposer is the ordered dispose with acknowledgement (`WIDGET_DISPOSE_ACK_TIMEOUT_MS`;
+Closed, hidden or replaced instances release acquisitions unless retained for a visible
+purpose: immediate room return with reading, forms and unsent work, or a Keep running
+widget. Retained rooms suspend polling/rendering, keep send custody and still own
+their disposer; Stop, unload, reload and shutdown remain force-destroy boundaries.
+Late async results defer hidden painting and check `destroyed` before touching state
+or re-arming loops. Merely hiding a node while all its handlers keep working is a leak.
+A module widget uses ordered dispose with acknowledgement (`WIDGET_DISPOSE_ACK_TIMEOUT_MS`;
 ARCHITECTURE §3 "Skills and Widgets").
 
 Enforcement: the deterministic leak test runs in the release-tier `ui_browser` lane;

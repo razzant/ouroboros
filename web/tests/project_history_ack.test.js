@@ -255,20 +255,21 @@ test('no acknowledgement decides while a question reveal is in progress; the rev
     assert.deepEqual(h.acked, [['p1', 5]], 'a reader at the newest messages after the reveal has read them');
 });
 
-// A panel closed with pending work (staged files, an upload) is hidden, not
-// destroyed, and its paint is cancelled. Reopening it must start a read of its
-// own: the cancelled request can only land unpainted, so joining it would leave
-// the dot until the next revision or scroll.
-test('a reopened pending-work survivor never joins the paint cancelled when it was hidden', async () => {
+// A room left is kept away (room_retire.js), hidden, and its paint is cancelled. Back on screen it must start a
+// read of its own: the cancelled request can only land unpainted, so joining it would leave the dot until the next
+// revision or scroll.
+test('a room back from away never joins the paint cancelled when it left', async () => {
     const h = revealHarness();
     h.inst.hasPendingWork = () => true;
     h.inst.page.dataset = {};
-    vm.runInContext(`${lift('cancelProjectPaint')}\n${lift('destroyProjectInstance')}
-        globalThis.api.close = (pid) => { navState.activeProjectId = null; destroyProjectInstance(pid); };`, h.context);
+    h.context.createRoomRetirement = createRoomRetirement;
+    vm.runInContext(`${lift('cancelProjectPaint')}
+        const rooms = createRoomRetirement({ instances: projectInstances, cancelPaint: cancelProjectPaint });
+        globalThis.api.close = (pid) => { navState.activeProjectId = null; rooms.putAway(pid); };`, h.context);
     const before = h.api.ack(h.project, h.inst);
     await flush();
     h.api.close('p1');
-    assert.equal(h.inst.page.hidden, true, 'the survivor is hidden, not destroyed');
+    assert.equal(h.inst.page.hidden, true, 'the room is away: hidden, not destroyed');
     h.context.navState.activeProjectId = 'p1';
     h.inst.page.hidden = false;
     const reopened = h.api.ack(h.project, h.inst);
@@ -296,7 +297,7 @@ function pollHarness({ read = true, hidden = false, failures = 1 } = {}) {
         ...readAhead,  // app.js imports these (DESIGN "Unread": a message read in another room)
         state: { projectSeenRevision: {} }, navState: { activeProjectId: 'p1' },
         projectInstances: new Map([['p1', inst]]), projectPaintRequests: new Map(), projectReveals: new Map(),
-        projectActivityIndex: null, knownProjectsJson: '', lastProjectRows: [], projectsNav: { unreadRows: () => [] },
+        projectActivityIndex: null, knownProjectsJson: '', lastProjectRows: [], projectsNav: { unreadRows: () => [] }, rooms: { forget() {} },
         closeProjectPanel() {}, paintProjectsNav() {}, syncNavigationState() {}, patchProjectActivityMarkers() {},
         refreshSharedProjectSeen() {},
         fetchJson: async (_url, init = {}) => {
@@ -343,15 +344,18 @@ for (const [name, options, refreshes] of [
 // its detail read is held, then reopening it ordinarily, is a new navigation: the old
 // reveal neither blocks nor decides that showing's read, whether the reopen reuses a
 // hidden pending-work survivor (its draft and staged files) or builds a new instance.
-function navigationHarness({ pendingWork, exitAtOnce = true }) {
+function navigationHarness({ pendingWork, exitAtOnce = true, stack = false, covers = stack }) {
     const acked = [], built = [], held = [];
     const instance = () => {
         const inst = {
             page: { hidden: false, isConnected: true, dataset: {} }, generation: 0, draft: 'Yes, after the tag', leaving: false,
+            // chat.js `leave`: its reads stop (a room leaving the screen); `closeTransient` closes the document it opened.
             leave() { this.leaving = true; this.generation += 1; }, stay() { this.leaving = false; },
             refreshes: 0, destroyed: false, latestShown: 0, transientCloses: 0, arrivals: [],
             hasPendingWork: () => pendingWork, hasPaintedHistory: () => true,
-            showLatest(options) { this.latestShown += 1; this.arrivals.push(options?.arrive === true); },
+            // A return (chat.js `resume`): this room was left following its newest message.
+            resume(arrive) { this.latestShown += 1; this.arrivals.push(arrive === true); },
+            ws: { paused: false, pause() { this.paused = inst.away = true; }, resume() { this.paused = inst.away = false; } }, away: false,
             closeTransient() { this.transientCloses += 1; },
             cancelHistoryPaint() { this.generation += 1; },
             destroy() { this.destroyed = true; this.page.isConnected = false; },
@@ -375,18 +379,22 @@ function navigationHarness({ pendingWork, exitAtOnce = true }) {
         lastProjectRows: [project], state: { projectSeenRevision: {} }, mainChat: null,
         projectPanelTitle: {}, projectPanelBody: {}, ctx: {},
         // The panel's exit has run by the next sync here (as under reduced motion): a retired room is put away.
-        showPage: async () => true, isStackLayout: () => false, createChatInstance: instance,
-        syncNavigationState() { if (exitAtOnce) for (const [pid, inst] of [...context.rooms.retiring]) context.rooms.settle(pid, inst); },
+        showPage: async () => true, isStackLayout: () => stack, roomCoversMain: () => covers, createChatInstance: instance,
+        document: { hidden: false },
+        syncNavigationState() {
+            if (context.mainChat) context.syncMainLifetime();
+            if (exitAtOnce) for (const [pid, inst] of [...context.rooms.retiring]) context.rooms.settle(pid, inst);
+        },
         markProjectViewed: async (id, revision) => { acked.push([id, revision]); },
         mainReads: 0, acknowledgeMainAfterPaint() { context.mainReads += 1; },  // Main's read decision (its own tests)
         mainUnread: 0, mainUnreadCount: () => context.mainUnread,
-        console: { error() {} }, createRoomRetirement,
+        console: { error() {} }, createRoomRetirement, roomSocket: (socket) => socket, ws: {},
     });
     vm.runInContext(`let projectNavigationGeneration = 0, projectPanelOpeningSince = 0;
-        ${['cancelProjectPaint', 'destroyProjectInstance',
+        ${['mainOnScreen', 'enterMain', 'syncMainLifetime', 'cancelProjectPaint',
         'closeProjectPanel', 'openProjectPanel', 'resolveProjectRoom', 'freshProjectRow', 'revealProjectQuestion'].map(lift).join('\n')}\n${ackSource}
-        const rooms = createRoomRetirement({ instances: projectInstances, cancelPaint: cancelProjectPaint, destroy: destroyProjectInstance });
-        Object.assign(globalThis, { rooms });
+        const rooms = createRoomRetirement({ instances: projectInstances, cancelPaint: cancelProjectPaint });
+        Object.assign(globalThis, { rooms, openProjectPanel });
         globalThis.api = { open: (options) => openProjectPanel(lastProjectRows[0], options), close: () => closeProjectPanel(),
             openAs: (project, options) => openProjectPanel(project, options) };`,
     context);
@@ -394,29 +402,35 @@ function navigationHarness({ pendingWork, exitAtOnce = true }) {
 }
 
 // A document a chat opened (the reader, the file dialog) is a modal over the whole
-// app: when its room leaves the screen without being destroyed it closes, and only it.
-for (const pendingWork of [true, false]) {
-    test(`a ${pendingWork ? 'kept pending-work' : 'destroyed'} room leaving the screen leaves no document open over the next view`, async () => {
-        const h = navigationHarness({ pendingWork });
-        const main = { transientCloses: 0, closeTransient() { this.transientCloses += 1; }, showLatest() {} };
+// app: when its room leaves the screen it closes, and only it; the room is kept for its return.
+// A room shown closes the document Main had open in either layout. Main itself leaves only where the room
+// covers it (the stack layout); docked beside a Project it stays on screen and live (the owner's rule: Main is
+// live while any of it is visible).
+for (const stack of [true, false]) for (const pendingWork of [true, false]) {
+    test(`a room ${pendingWork ? 'with' : 'without'} pending work leaving the screen leaves no document open over the next view (${stack ? 'stack' : 'docked'})`, async () => {
+        const h = navigationHarness({ pendingWork, stack });
+        // chat.js `leave` stops the room's reads and draws; `closeTransient` closes only the document it opened.
+        const main = { page: { hidden: false, dataset: {} }, transientCloses: 0, leaves: 0,
+            leave() { this.leaves += 1; }, closeTransient() { this.transientCloses += 1; }, resume() {},
+            ws: { paused: false, pause() { this.paused = true; }, resume() { this.paused = false; } } };
         Object.assign(h.context, { mainChat: main });
         h.context.state.activePage = 'chat';
         await h.api.open();
         assert.equal(main.transientCloses, 1, 'a room shown over Main closes the document Main had open');
+        assert.deepEqual([main.leaves, main.ws.paused], stack ? [1, true] : [0, false],
+            stack ? 'covered, Main leaves and stops hearing its frames' : 'docked beside the room, Main stays live');
         const room = h.built[0];
         assert.equal(room.transientCloses, 0, 'the room shown keeps its own');
         h.api.close();
-        if (pendingWork) {
-            assert.ok(room.transientCloses > 0, 'the kept room closes its document before it is hidden');
-            assert.deepEqual([room.destroyed, room.page.hidden, room.page.dataset.pendingWork], [false, true, '1'],
-                'and is kept with its staged files');
-            assert.equal(room.draft, 'Yes, after the tag');
-        } else {
-            assert.equal(room.destroyed, true, 'a room without pending work is destroyed, its document with it');
-        }
+        assert.ok(room.transientCloses > 0, 'the kept room closes its document before it is hidden');
+        assert.deepEqual([room.destroyed, room.page.hidden, room.away, room.page.dataset.pendingWork],
+            [false, true, true, pendingWork ? '1' : undefined], 'and is kept away, marked when it holds staged files');
+        assert.equal(room.draft, 'Yes, after the tag');
         await h.api.open();
-        assert.equal(h.built.at(-1) === room, pendingWork, pendingWork ? 'the kept room is reused' : 'a new room is built');
+        assert.equal(h.built.at(-1), room, 'the kept room is the one shown again');
+        assert.deepEqual([room.page.hidden, room.away, room.page.dataset.pendingWork], [false, false, undefined]);
         assert.equal(main.transientCloses, 2);
+        assert.equal(main.leaves, stack ? 2 : 0);
     });
 }
 
@@ -460,33 +474,43 @@ test('a reference opens what the registry answers for its id, a superseded read 
     assert.equal(h.built.length, 1);
 });
 
-test('leaving a Project for Main returns Main to its newest message', async () => {
-    const h = navigationHarness({ pendingWork: false });
-    const main = { latestShown: 0, arrivals: [],
-        showLatest(options) { this.latestShown += 1; this.arrivals.push(options?.arrive === true); } };
-    Object.assign(h.context, { mainChat: main });
-    h.context.state.activePage = 'chat';
-    h.context.mainUnread = 2;  // Main's news came while the Project covered it
-    await h.api.open();
-    h.api.close();
-    assert.equal(main.latestShown, 1, 'the panel closed over Main: Main opens at its newest message');
-    assert.deepEqual(main.arrivals, [true], 'unread: it lands on what came, wherever later rows put it (DESIGN "Unread")');
-    assert.equal(h.context.mainReads, 1, 'and what came while it was covered is offered its read (owner 06.11)');
-    h.api.close();
-    assert.equal(main.latestShown, 1, 'closing with no Project open moves nothing');
-    assert.equal(h.context.mainReads, 1);
-    h.context.mainUnread = 0;
-    await h.api.open();
-    h.api.close();
-    assert.deepEqual(main.arrivals, [true, false], 'a read Main opens at the bottom');
-    h.context.state.activePage = 'settings';
-    await h.api.open();
-    h.api.close();
-    assert.equal(main.latestShown, 2, 'on another page Main moves when Chat is shown again, not before');
-});
+// Leaving a Project for Main is a return to Main (app.js `enterMain`, chat.js `resume`, which keeps a place left in
+// older history; this Main was left following its newest message). Covered (a phone, a finger's docked column) Main
+// comes back from away; docked beside the room it stayed live. Either way what came meanwhile is offered its read and
+// lands (owner 06.11).
+for (const [stack, covers, layout] of [[true, true, 'stack'], [false, true, 'docked under a finger'], [false, false, 'docked']]) {
+    test(`leaving a Project for Main is a return to Main (${layout})`, async () => {
+        const h = navigationHarness({ pendingWork: false, stack, covers });
+        const main = { page: { hidden: false, dataset: {} }, returns: 0, arrivals: [],
+            resume(arrive) { this.returns += 1; this.arrivals.push(arrive === true); },
+            ws: { paused: false, pause() { this.paused = true; }, resume() { this.paused = false; } } };
+        Object.assign(h.context, { mainChat: main });
+        h.context.state.activePage = 'chat';
+        h.context.mainUnread = 2;  // Main's news came while the Project was open
+        await h.api.open();
+        assert.equal(main.ws.paused, covers, covers ? 'covered, Main is away' : 'beside the room, Main stays live');
+        h.api.close();
+        assert.equal(main.returns, 1, 'the panel closed over Main: Main returns (chat.js `resume`)');
+        assert.deepEqual(main.arrivals, [true], 'unread: it lands on what came, wherever later rows put it (DESIGN "Unread")');
+        assert.equal(main.ws.paused, false);
+        assert.equal(h.context.mainReads, 1, 'and what came while the Project was open is offered its read (owner 06.11)');
+        h.api.close();
+        assert.equal(main.returns, 1, 'closing with no Project open moves nothing');
+        assert.equal(h.context.mainReads, 1);
+        h.context.mainUnread = 0;
+        await h.api.open();
+        h.api.close();
+        assert.deepEqual(main.arrivals, [true, false], 'a read Main opens at the bottom');
+        h.context.state.activePage = 'settings';
+        await h.api.open();
+        assert.equal(main.ws.paused, true, 'on another page Main is away in either layout');
+        h.api.close();
+        assert.equal(main.returns, 2, 'on another page Main returns when Chat is shown again, not before');
+    });
+}
 
 for (const pendingWork of [true, false]) {
-    test(`an ordinary reopen of a ${pendingWork ? 'retained pending-work' : 'rebuilt'} room decides its own read while an old question reveal is held`, async () => {
+    test(`an ordinary reopen of a kept room ${pendingWork ? 'with' : 'without'} pending work decides its own read while an old question reveal is held`, async () => {
         const h = navigationHarness({ pendingWork });
         const revealed = h.api.open({ openOnly: true, taskId: 't1', quizId: 'q1' });
         await flush();
@@ -496,9 +520,9 @@ for (const pendingWork of [true, false]) {
         h.api.close();
         await h.api.open();
         const [first, reopened] = [h.built[0], h.built.at(-1)];
-        assert.equal(reopened.latestShown, 1, 'an ordinary reopen lands at the newest message (owner decision 2026-10-05)');
-        assert.equal(reopened === first, pendingWork, pendingWork ? 'the survivor is reused' : 'a new room is built');
-        assert.equal(first.destroyed, !pendingWork);
+        assert.equal(reopened.latestShown, 1, 'an ordinary reopen is a return (left following: the newest message)');
+        assert.equal(reopened, first, 'the kept room is reused');
+        assert.equal(first.destroyed, false);
         assert.deepEqual(h.acked, [['p1', 5]], 'the reader at the newest message has read, the reveal still held');
         const refreshes = first.refreshes;
         h.held[0](true);
@@ -529,6 +553,17 @@ test('only an unread room opened from its row lands on what arrived last', async
     await revealed;
 });
 
+test('a return follows the place the room was left at; a notification outranks it and lands on what arrived', async () => {
+    const h = navigationHarness({ pendingWork: false });
+    await h.api.open();
+    const room = h.built[0];
+    room.showLatest = (options) => { room.latest = options; };
+    h.api.close();
+    await h.context.openProjectPanel(h.context.lastProjectRows[0], { openOnly: true, latest: true });
+    assert.equal(room.arrivals.length, 1, 'no return decides the place');
+    assert.equal(room.latest?.arrive, true, 'unread: the notification lands on what arrived last');
+});
+
 test('a question reveal still in progress keeps withholding the read of its own showing', async () => {
     const h = navigationHarness({ pendingWork: false });
     const revealed = h.api.open({ openOnly: true, taskId: 't1', quizId: 'q1' });
@@ -557,16 +592,15 @@ test('a closed room is retired for its exit, reopened as the same room, and a la
     assert.equal(h.built.length, 1, 'reopened during its exit, it is the same room');
     assert.deepEqual([room.leaving, room.page.inert, 'leaving' in room.page.dataset], [false, false, false]);
     assert.ok(room.refreshes >= reads, 'and it reads its history as any reopen does');
-    // Closed again and put away when the exit has run.
+    // Closed again and put away when the exit has run: kept away, the same room for the next return.
     h.api.close();
     h.context.rooms.settle('p1', room);
-    assert.equal(room.destroyed, true);
+    assert.deepEqual([room.destroyed, room.page.hidden, room.away], [false, true, true]);
     assert.equal(h.context.rooms.retiring.size, 0);
-    // A late put-away of a room another one replaced destroys only itself.
     await h.api.open();
-    const next = h.built[1];
+    assert.equal(h.built.length, 1, 'the return shows the room kept away');
     h.context.rooms.settle('p1', room);
-    assert.equal(next.destroyed, false, 'the new room is untouched by the old one\'s put-away');
+    assert.equal(room.destroyed, false, 'a late settle of an exit already ended changes nothing');
 });
 
 test('the acknowledgement owner refuses a paint from a room that is no longer the live one', async () => {

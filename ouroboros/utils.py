@@ -790,37 +790,46 @@ def jsonl_archive_segments(
     return sorted(found)
 
 
-_CLOSED_SEGMENTS: Dict[str, tuple] = {}  # chain path -> (live identity, archive/ mtime, closed segments)
+_CLOSED_SEGMENTS: Dict[Any, tuple] = {}  # chain path + IO policy -> (live/directory identity, closed segments)
 
 
-def _closed_segments(path: pathlib.Path, live_stat: Any, *, strict: bool) -> List[Tuple[pathlib.Path, Any]]:
+def _closed_segments(path: pathlib.Path, live_stat: Any, *, strict: bool,
+                     listing: Optional[Callable] = None, stat: Optional[Callable] = None,
+                     directory_revision: Optional[tuple] = None) -> List[Tuple[pathlib.Path, Any]]:
     """A chain's rotated segments with their stats, oldest first, without the live file's alias; a complete
-    listing is reused while the live inode and ``archive/``'s mtime hold, the newest archive re-stat'ed."""
-    try:
-        key = (live_stat.st_dev, live_stat.st_ino, os.stat(path.parent.parent / "archive").st_mtime_ns)
+    listing is reused while the live inode and ``archive/``'s mtime hold, the newest archive re-stat'ed.
+    Confined readers supply the held directory's revision and IO seams; their cache key cannot reuse
+    an ordinary path-based capture. Both use this existing per-chain metadata cache, never a body cache."""
+    inspect = stat or pathlib.Path.stat
+    cache_name = str(path) if directory_revision is None else (str(path), "confined")
+    try:  # the live identity first: without a live file the archive is not stat'ed (the boot's cost contract)
+        live = (live_stat.st_dev, live_stat.st_ino)
+        revision = (os.stat(path.parent.parent / "archive").st_mtime_ns if directory_revision is None
+                    else ("confined", *directory_revision))
+        key = (*live, revision)
     except (AttributeError, OSError):
         key = None
-    if key is not None and (cached := _CLOSED_SEGMENTS.get(str(path))) is not None and cached[0] == key:
+    if key is not None and (cached := _CLOSED_SEGMENTS.get(cache_name)) is not None and cached[0] == key:
         with contextlib.suppress(OSError):
-            return [*cached[1][:-1], *((segment, segment.stat()) for segment, _stat in cached[1][-1:])]
+            return [*cached[1][:-1], *((segment, inspect(segment)) for segment, _stat in cached[1][-1:])]
     try:  # a listing that skipped anything is never reused
-        segments, complete, closed = jsonl_archive_segments(path, strict=True), True, []
+        segments, complete, closed = (listing or jsonl_archive_segments)(path, strict=True), True, []
     except JsonlChainUnreadable:
         if strict:
             raise
         segments, complete, closed = [], False, []
     for segment in segments:
         try:
-            stat = segment.stat()
+            observed = inspect(segment)
         except OSError as exc:
             if strict and not isinstance(exc, FileNotFoundError):
                 raise JsonlChainUnreadable(f"cannot stat {segment}: {exc}") from exc
             complete = False
             continue
-        if key is None or (stat.st_dev, stat.st_ino) != key[:2]:
-            closed.append((segment, stat))
+        if key is None or (observed.st_dev, observed.st_ino) != key[:2]:
+            closed.append((segment, observed))
     if key is not None and complete:
-        _CLOSED_SEGMENTS[str(path)] = (key, tuple(closed))
+        _CLOSED_SEGMENTS[cache_name] = (key, tuple(closed))
     return closed
 
 
@@ -830,6 +839,8 @@ def jsonl_chain_handles(
     start_offset: Optional[int] = None,
     snapshot: Optional[Dict[str, Any]] = None,
     sequential: bool = False,
+    open_file: Optional[Callable] = None,
+    closed_segments: Optional[Callable] = None,
 ) -> Iterator[Iterable[Tuple[pathlib.Path, Any]]]:
     """Open binary handles for a rotated JSONL chain; the context owns closing.
 
@@ -860,6 +871,10 @@ def jsonl_chain_handles(
     If the captured live generation rotated between calls, locate its inode
     in the archive and retain that path in the same snapshot.
 
+    ``open_file`` and ``closed_segments`` are server-owned confined IO seams
+    (binary handle; oldest-first path/stat pairs). They must be supplied together
+    on every read of that snapshot; neither accepts client paths as authority.
+
     Snapshot metadata does NOT cap the returned handle's reads: an appending
     file can expose bytes beyond the captured total. The caller must limit
     reads to that total and start a fresh snapshot for the next pass; the
@@ -876,19 +891,21 @@ def jsonl_chain_handles(
     from bisect import bisect_right
 
     path = pathlib.Path(path)
+    opener = open_file or (lambda member: member.open("rb"))
+    segments = closed_segments or _closed_segments
     state = snapshot if snapshot is not None else {}
     with contextlib.ExitStack() as stack:
         live_handle = None
         if not state:
             try:
-                live_handle = stack.enter_context(path.open("rb"))
+                live_handle = stack.enter_context(opener(path))
                 live_stat = os.fstat(live_handle.fileno())
             except OSError as exc:
                 if strict and not isinstance(exc, FileNotFoundError):
                     raise JsonlChainUnreadable(f"cannot open or stat {path}: {exc}") from exc
                 live_stat = None
             entries, ends, total = [], [], 0
-            for segment, stat in [*_closed_segments(path, live_stat, strict=strict), (path, live_stat)]:
+            for segment, stat in [*segments(path, live_stat, strict=strict), (path, live_stat)]:
                 if stat is None:
                     continue
                 total += stat.st_size
@@ -910,23 +927,25 @@ def jsonl_chain_handles(
                     handle = live_handle
                     if handle is None:
                         with contextlib.suppress(FileNotFoundError):
-                            handle = owner.enter_context(segment.open("rb"))
+                            handle = owner.enter_context(opener(segment))
                     identity = (expected.st_dev, expected.st_ino)
                     actual = os.fstat(handle.fileno()) if handle is not None else None
                     if actual is None or (actual.st_dev, actual.st_ino) != identity:
                         if handle is not None:
                             handle.close()
-                        for candidate in jsonl_archive_segments(path, strict=strict):
+                        candidates = (segments(path, None, strict=strict) if closed_segments else
+                                      ((candidate, None) for candidate in jsonl_archive_segments(path, strict=strict)))
+                        for candidate, stat in candidates:
                             with contextlib.suppress(FileNotFoundError):
-                                stat = candidate.stat()
+                                stat = stat or candidate.stat()
                                 if (stat.st_dev, stat.st_ino) == identity:
                                     segment = entries[index][0] = candidate
                                     break
                         else:
                             raise JsonlChainUnreadable(f"original live generation missing at {path}")
-                        handle = owner.enter_context(segment.open("rb"))
+                        handle = owner.enter_context(opener(segment))
                 else:
-                    handle = owner.enter_context(segment.open("rb"))
+                    handle = owner.enter_context(opener(segment))
                 if start_offset is not None:
                     if os.fstat(handle.fileno()).st_size < expected.st_size:
                         raise JsonlChainUnreadable(f"shortened chain segment {segment}")

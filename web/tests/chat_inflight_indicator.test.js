@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { computeHydratedDirectActivities } from '../modules/chat.js';
 import {
+    computeHydratedDirectActivities,
     createStateSnapshotSequencer,
     isForegroundLiveCard,
     unkeyedFrameEndsTurn,

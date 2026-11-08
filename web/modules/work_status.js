@@ -5,10 +5,10 @@
  * (`mark`: moving | still | pause | ring | none); this module says those facts in the product's short words (a work's
  * word, and beside it its line: the episode's own reason, then what still runs beside it), keeps what an incomplete
  * body did not list again (unconfirmed: a ring), and lays a work's controls on the shared task-control doors. It
- * derives no word, mark or control of its own. Four facts only this client knows stay
- * overlays, each with its mark: the socket closed (Reconnecting…, a ring), the owner's own unconfirmed send (Sending,
- * moving), the supervisor not ready yet (Starting…, no mark) and the owner's own Stop press on a card (Cancelling… /
- * Finalizing…, moving). Whether something waits for the owner (`owner`: the server's `turn`) is a separate fact;
+ * derives no word, mark or control of its own. Five facts only this client knows stay
+ * overlays, each with its mark: the socket closed (Reconnecting…, a ring), a room back on screen or reconnected still
+ * reading what it missed (Updating…, a ring), the owner's own unconfirmed send (Sending, moving), the supervisor not
+ * ready yet (Starting…, no mark) and the owner's own Stop press on a card (Cancelling… / Finalizing…, moving). Whether something waits for the owner (`owner`: the server's `turn`) is a separate fact;
  * status_mark.js draws the two together.
  */
 import { fmt, tr, tx } from './i18n.js';
@@ -242,12 +242,16 @@ export const amberNote = (kind) => (kind === 'question' ? tr('work.amber.questio
  * stands at (a direct turn's start step), said beside the word and dropped before it on a short bar, so nothing in
  * the bar reads as a model call before one is sent.
  */
-export function roomStatusView(state, { connected = true, ready = true, boot = null, sending = false, stopping = '' } = {}) {
+export function roomStatusView(state, {
+    connected = true, catchingUp = false, ready = true, boot = null, sending = false, stopping = '',
+} = {}) {
     const view = (kind, text, tone, mark, extra = {}) => ({ kind, text, tone, mark, owner: false, amber: '', ...extra });
     if (!connected) return view('offline', 'Reconnecting…', 'offline', 'ring');
     const room = state?.room || IDLE_ROOM;
     const mark = String(room.mark || 'none');
     const turn = { owner: list(room.turn).length > 0, amber: roomAmber(room) };
+    // Catch-up is visible without hiding an unanswered question the room already knows about.
+    if (catchingUp) return view('starting', 'Updating…', 'updating', 'ring', turn);
     if (room.activity !== 'working' && sending) return view('thinking', chipWord('sending'), 'live', 'moving', turn);
     switch (room.activity) {
     case 'working': {  // a Pause still settling keeps the neutral ink; its mark moves while work stops

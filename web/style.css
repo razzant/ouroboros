@@ -5375,7 +5375,10 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
    monospace keeps only the time and the raw record. */
 /* The body's top inset rides on the bar, so the bar sticks flush at the scroller's edge (a sticky box keeps clear of
    its scroller's padding, which let rows show above it). */
-#page-logs { padding-top: 0; }
+#page-logs {
+    padding-top: 0;
+    overflow-anchor: none; /* logs.js owns the entry anchor while chunks are inserted or moved */
+}
 .logs-filters {
     --control-h: var(--control-h-sm);
     position: sticky;
@@ -5507,7 +5510,14 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
     font-size: var(--type-meta);
     line-height: var(--line-meta);
+    /* One Raw page (64 KiB, logs_raw.js) scrolls in its own box. */
+    max-height: 24rem;
+    overflow-y: auto;
 }
+
+.log-raw-tools { margin-top: var(--space-2); }
+.log-raw-status { overflow-wrap: anywhere; }
+.log-raw-pages { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 
 .log-type.tools { color: var(--status-info-fg); }
 .log-type.llm { color: var(--accent); }
@@ -8463,9 +8473,11 @@ body.keyboard-open .chat-instance-panel .chat-input-area {
         outline-offset: -2px;
     }
 }
-/* The note already reserves the floating bar. With a keyboard both are in flow. The room asks and its feed inherits
-   the answer: :has() stays in its subject compound (DEVELOPMENT "Design System"). */
-.project-panel .chat-instance-panel:has(> .chat-panel-statusbar > :not([hidden])) {
+/* The note already reserves the floating bar. With a keyboard both are in flow. The bar holds only that note, and only
+   with text (chat_render_batch.js), so `:empty` answers. Never a :has() on the room: in WebKit, beside the rows' own
+   :has() rules, it made each live card's log frame cost 3 times as much, and more with each room kept away (measured;
+   tests/test_design_system_css_static.py guards it). */
+.project-panel .chat-panel-statusbar:not(:empty) ~ .chat-messages {
     --chat-feed-reserve: 8px;
 }
 body.keyboard-open .project-panel .chat-panel-statusbar { padding-top: 8px; }
