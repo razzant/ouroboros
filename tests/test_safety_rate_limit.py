@@ -354,7 +354,7 @@ def test_structured_insufficient_quota_with_429_still_blocks(monkeypatch, tmp_pa
     assert ok is False
     assert msg == (
         "⚠️ SAFETY_UNAVAILABLE: Safety check failed with error: "
-        "_QuotaError: Rate limit exceeded (insufficient_quota). This call was not checked. Retry when review is available."
+        "_QuotaError: Rate limit exceeded (insufficient_quota). This call was not checked: that is no verdict. Retry later."
     )
     assert len(stub.calls) == 1, "a permanent class must not buy a retry"
     assert _read_events(ctx, "safety_check_rate_limited") == []
@@ -372,7 +372,7 @@ def test_non_rate_limit_exception_is_an_unavailable_hold(monkeypatch, tmp_path, 
 
     assert ok is False
     assert msg == (
-        "⚠️ SAFETY_UNAVAILABLE: Safety check failed with error: RuntimeError: network down. This call was not checked. Retry when review is available."
+        "⚠️ SAFETY_UNAVAILABLE: Safety check failed with error: RuntimeError: network down. This call was not checked: that is no verdict. Retry later."
     )
     assert len(stub.calls) == 1
     assert _read_events(ctx, "safety_check_rate_limited") == []
@@ -465,7 +465,7 @@ def test_server_outage_is_not_a_rate_limit_and_still_blocks(monkeypatch, tmp_pat
     assert ok is False
     assert msg == (
         "⚠️ SAFETY_UNAVAILABLE: Safety check failed with error: "
-        "_ServerError: Service Unavailable. This call was not checked. Retry when review is available."
+        "_ServerError: Service Unavailable. This call was not checked: that is no verdict. Retry later."
     )
     assert len(stub.calls) == 1, "an outage must not buy the rate-limit retry"
     assert _read_events(ctx, "safety_check_rate_limited") == []

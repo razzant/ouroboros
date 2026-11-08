@@ -319,6 +319,20 @@ def test_llm_embedded_safe_before_dangerous_uses_stricter_verdict(monkeypatch):
     assert "would leak secrets" in msg and "restated flag" not in msg  # the first of equals
 
 
+def test_verdict_keeps_the_speech_mark_and_quote_only_in_their_shapes():
+    """The checker's ``speech`` (a boolean) and ``quote`` (the exact flagged words) ride with its verdict; any
+    other shape is not the claim and is dropped, never coerced."""
+    from ouroboros.safety import _parse_safety_response
+
+    assert _parse_safety_response(json.dumps({"status": "DANGEROUS", "reason": "owner rule 1", "speech": True,
+                                              "quote": "App bullet"})) == {
+        "status": "DANGEROUS", "reason": "owner rule 1", "speech": True, "quote": "App bullet"}
+    assert _parse_safety_response(json.dumps({"status": "SAFE", "reason": "fine", "speech": False, "quote": ""})) == {
+        "status": "SAFE", "reason": "fine", "speech": False}
+    assert _parse_safety_response(json.dumps({"status": "SUSPICIOUS", "reason": "x", "speech": "yes", "quote": 5})) == {
+        "status": "SUSPICIOUS", "reason": "x"}
+
+
 def test_llm_unparseable_response_retries_once(monkeypatch):
     from ouroboros.safety import check_safety
 

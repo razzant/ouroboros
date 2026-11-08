@@ -474,7 +474,9 @@ def test_continue_carries_my_humans_confirmed_place_words_citable_without_promot
     """Astra finding 3 (R1 MINOR-3): the words a focus heard from my human's confirmed account are provenance rows in
     its corpus. Continue carries them to the successor whole, with their id and reply target, shows them verbatim in
     its start text and seeds them so a cite verifies there; they owe no reply and are no order. A peer task's words
-    and a forwarded line stay what they were: context, uncitable."""
+    and a forwarded line stay what they were: context, uncitable. The row keeps its provider identity through the
+    Continue, so once my send receipt names it (my own post through my human's account), the successor's cite is
+    refused, while my human's own message in the same words stays citable."""
     from types import SimpleNamespace
 
     from ouroboros.loop_messages import _initialize_owner_directives, owner_input_revision
@@ -489,12 +491,14 @@ def test_continue_carries_my_humans_confirmed_place_words_citable_without_promot
     _settled_with_corpus(  # a forward reaches a focus only inside its frame text, never as a provenance row
         tmp_path,
         {"source": "initial_text", "content": f"[FOCUS] frame\n\n{forwarded}"},
-        {"source": "place_confirmed", "content": words, "carried": True, "msg_id": "chat 7 / e1", "reply_to": target},
+        {"source": "place_confirmed", "content": words, "carried": True, "msg_id": "chat 7 / e1", "reply_to": target,
+         "conversation_id": "C7", "message_id": "1793991999.000001"},
         {"source": "principal_task_message", "content": peer, "msg_id": "t-1", "source_task_id": "parent-x"},
     )
     sources = owner_sources(tmp_path, load_task_result(tmp_path, "pred-1"), "pred-1")
     assert sources["gaps"] == []
-    assert sources["confirmed_place"] == [{"source": "place_confirmed", "content": words, "msg_id": "chat 7 / e1", "reply_to": target}]
+    assert sources["confirmed_place"] == [{"source": "place_confirmed", "content": words, "msg_id": "chat 7 / e1",
+                                           "conversation_id": "C7", "message_id": "1793991999.000001", "reply_to": target}]
     assert [row["text"] for row in sources["peer_context"]] == ["peer says hi", peer]
     text = work_order_text("pred-1", "cancelled", sources, successor_task_id="succ-1")
     assert f"- chat 7 / e1: {words} (in reply to platform message m-1 in this room)" in text
@@ -503,7 +507,7 @@ def test_continue_carries_my_humans_confirmed_place_words_citable_without_promot
     assert admitted["ok"], admitted
     task = next(t for t in workers.PENDING if t["id"] == admitted["successor_task_id"])
     assert words in task["text"] and task["metadata"]["continuation"]["owner_sources"]["confirmed_place"] == sources["confirmed_place"]
-    ctx = SimpleNamespace(task_metadata=task["metadata"], _owner_directives=[])
+    ctx = SimpleNamespace(task_metadata=task["metadata"], _owner_directives=[], drive_root=tmp_path)
     _initialize_owner_directives(ctx, [{"role": "user", "content": task["text"]}])
     assert owner_input_revision(ctx) == 0, "carried provenance owes no reply and is no order"
     basis, error = cited_owner_basis(ctx, words)
@@ -511,6 +515,17 @@ def test_continue_carries_my_humans_confirmed_place_words_citable_without_promot
                                      "msg_id": "chat 7 / e1", "reply_to": target}
     for other in (peer, forwarded):
         assert cited_owner_basis(ctx, other)[0] is None, other
+    from ouroboros import own_sends
+    from ouroboros.loop_messages import _record_owner_directive
+    from ouroboros.owner_words import PLACE_CONFIRMED, place_row_facts
+    seeded = next(row for row in ctx._owner_directives if row.get("source") == PLACE_CONFIRMED)
+    assert (seeded["conversation_id"], seeded["message_id"]) == ("C7", "1793991999.000001"), "a next Continue reads it"
+    receipt = f'MsgID,Channel,Text\n1793991999.000001,C7,"{words}"\n'
+    assert own_sends.record_result(tmp_path, {"annotations": {"readOnlyHint": False}}, receipt, via="mcp:slack/post")
+    assert cited_owner_basis(ctx, words)[0] is None, "the receipt names it: my own post, no order of theirs"
+    _record_owner_directive(ctx, source=PLACE_CONFIRMED, content=words, carried=True, msg_id="chat 7 / e2",
+                            **place_row_facts("C7", {"message_id": "1793992000.000002"}))
+    assert cited_owner_basis(ctx, words)[0]["msg_id"] == "chat 7 / e2", "their own message in the same words"
 
 
 @pytest.mark.parametrize("row,gap", [

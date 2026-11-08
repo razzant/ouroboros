@@ -313,8 +313,9 @@ def test_each_delivery_gate_names_itself_in_its_hold(turn, monkeypatch, reason):
         monkeypatch.setattr(loop, "_maybe_enforce_child_absorption_gate", once("continue", None))
     elif reason == "focus_reply_refused":
         monkeypatch.setattr("ouroboros.place_reply.prepare_focus_reply", once((False, "[SYSTEM NOTICE] Not here."), (True, "")))
-    elif reason == "admission_seal":
-        answer, origin, script = "Partial", "selection", [finish("Partial", action="stop", rationale="Unfinished")]
+    elif reason == "admission_seal":  # a held stop is selected again only by a later model round
+        answer, origin = "Partial", "selection"
+        script = [finish("Partial", action="stop", rationale="Unfinished")] * 2
         monkeypatch.setattr("ouroboros.loop_delivery._seal_admission_before_delivery", once(False, True))
     else:
         turn.registry._ctx.owner_message_admission_lock = threading.Lock()
@@ -331,6 +332,23 @@ def test_each_delivery_gate_names_itself_in_its_hold(turn, monkeypatch, reason):
 
     assert text == answer and len(turn.calls) == len(script)
     assert [facts(row) for row in holds(turn.root)] == [(1, origin, reason, None, sha(answer))]
+
+
+def test_a_refused_stop_reply_waits_for_a_later_model_round(turn, monkeypatch):
+    """A stop whose reply the place's check refuses is held, never republished by the host (CAD group, 04.11
+    20:57:04 → 20:57:34): nothing is offered again until the next model round selects the stop, and that round's
+    identical stop is delivered."""
+    offered = []
+
+    def prepare(_ctx, _text, quiet=False):
+        offered.append(len(turn.calls))  # how many model rounds had run when the reply was offered
+        return (False, "[SYSTEM NOTICE] Not here.") if len(offered) == 1 else (True, "")
+
+    monkeypatch.setattr("ouroboros.place_reply.prepare_focus_reply", prepare)
+    text, _usage, _trace = turn.run([finish("Partial", action="stop", rationale="Unfinished")] * 2)
+    assert text == "Partial" and len(turn.calls) == 2
+    assert offered == [1, 2]
+    assert [facts(row) for row in holds(turn.root)] == [(1, "selection", "focus_reply_refused", None, sha("Partial"))]
 
 
 @pytest.mark.parametrize("standing", ["addressed", "context"])

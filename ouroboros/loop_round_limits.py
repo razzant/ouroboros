@@ -239,15 +239,19 @@ def _drain_incoming_messages(
                 provenance = str(entry.get("provenance") or "ancestor_task")
                 arrival = entry.get("place_arrival") if isinstance(entry.get("place_arrival"), dict) else {}
                 if provenance == "place_event":
+                    from ouroboros.place_intake import arrival_owner_words
                     from ouroboros.presence_continuation import note_place_delivery
                     note_place_delivery(owner_ctx, entry, controls)  # the event is context; my human's words are theirs
-                    if confirmed := arrival.get("confirmed_words") or arrival.get("owner_words"):  # provenance, as at the opening
-                        from ouroboros.owner_words import PLACE_CONFIRMED, place_reply_target
+                    arrival = {**arrival, "confirmed_words": arrival_owner_words(owner_ctx, drive_root, entry)}  # now
+                    entry = {**entry, "place_arrival": arrival}  # its delivered prefix reads the same fact
+                    if confirmed := arrival["confirmed_words"]:  # provenance, as at the opening
+                        from ouroboros.owner_words import PLACE_CONFIRMED, place_row_facts
                         from ouroboros.presence_runner import presence_chat_id
                         room = presence_chat_id(str((entry.get("sender_origin") or {}).get("conversation_key") or ""))
                         _loop()._record_owner_directive(owner_ctx, source=PLACE_CONFIRMED, carried=True,
                             content=confirmed, msg_id=f"chat {room} / {arrival.get('source_event_id') or ''}",
-                            reply_to=place_reply_target(arrival.get("message")), origin=_arrival(received=entry.get("ts")))
+                            **place_row_facts(arrival.get("conversation_id"), arrival.get("message"),
+                                              _arrival(received=entry.get("ts"))))
                 if provenance not in CONTEXT_ONLY_TASK_PROVENANCES:
                     _loop()._record_owner_directive(
                         owner_ctx, content=dmsg, msg_id=str(entry.get("msg_id") or ""),

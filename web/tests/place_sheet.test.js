@@ -47,6 +47,36 @@ test('readiness on and off use the projection; notes and account names stay auth
     assert.match(placeSheetBodyHtml(slack), /data-i18n-authored>U01ANTON</);
 });
 
+test('a confirmation saved without a name shows the provider name its senders here carry, else the id; a saved name stays', () => {
+    const confirmed = (label) => ({ actorId: '144346271', label, confirmedAt: '2026-11-07T13:09:35Z', accountId: '9143838397' });
+    const seen = [{ actorId: '144346271', label: 'razzant' }];
+    const named = strip(placeSheetBodyHtml({ ...slack, ownerAccounts: [confirmed('')], accountCandidates: seen }));
+    assert.match(named, /razzant you · confirmed on [^·]+ · 144346271 Remove/);
+    assert.doesNotMatch(named, /This is me/, 'the confirmed sender is not offered again');
+    const bare = strip(placeSheetBodyHtml({ ...slack, ownerAccounts: [confirmed('')], accountCandidates: [] }));
+    assert.match(bare, /144346271 you · confirmed on [^·]+ Remove/);
+    assert.doesNotMatch(bare, /razzant|· 144346271/, 'no name known: the id alone, once');
+    const saved = strip(placeSheetBodyHtml({ ...slack, ownerAccounts: [confirmed('Anton R.')], accountCandidates: seen }));
+    assert.match(saved, /Anton R\. you · confirmed on [^·]+ · 144346271/);
+    assert.doesNotMatch(saved, /razzant/, 'the name the owner saved is never replaced');
+});
+
+test('an account another place of this bot confirms counts here: named with that place, removed there, never offered again', () => {
+    const shared = (placeLabel) => ({ actorId: '144346271', label: '', confirmedAt: '2026-11-04T10:39:34Z',
+        accountId: '9143838397', placeLabel });
+    const place = { ...slack, accountId: '9143838397', ownerAccounts: [], accountCandidates: [{ actorId: '144346271', label: 'razzant' }],
+        sharedOwnerAccounts: [shared('Household'), shared('FusionBrain')] };
+    const html = strip(placeSheetBodyHtml(place));
+    assert.match(html, /razzant you · confirmed in Household and 1 more · 144346271/);
+    assert.doesNotMatch(html, /This is me|Remove Add mine/, 'counted already: no confirm offer and no Remove here');
+    const without = strip(placeSheetBodyHtml({ ...place, sharedOwnerAccounts: [] }));
+    assert.match(without, /razzant 144346271 This is me/, 'confirmed nowhere on this bot: offered as before');
+    const sender = { id: '144346271', label: 'razzant', kind: 'user' };
+    assert.match(strip(placeSheetBodyHtml(place, { identity: { sends_as: sender } })), /It writes here as you \(\s*razzant\s*\)/);
+    assert.doesNotMatch(strip(placeSheetBodyHtml({ ...place, sharedOwnerAccounts: [] }, { identity: { sends_as: sender } })),
+        /It writes here as you/, 'confirmed nowhere on this bot: not you');
+});
+
 // The shared DOM fixture parses HTML and dispatches handlers; these additions supply only the
 // window disposal and descendant selector operations used by the production sheet/picker.
 function sheetDom(t) {
